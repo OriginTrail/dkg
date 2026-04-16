@@ -1,8 +1,11 @@
-import React, { useEffect, useState, useRef } from 'react';
-import { type Notification } from '../../api.js';
+import React, { useEffect, useState, useRef, useCallback } from 'react';
+import { type Notification, fetchCurrentAgent, type AgentIdentity } from '../../api.js';
 import { api } from '../../api-wrapper.js';
 import { useLayoutStore } from '../../stores/layout.js';
 import { useAgentsStore } from '../../stores/agents.js';
+import { useProjectsStore } from '../../stores/projects.js';
+import { useTabsStore } from '../../stores/tabs.js';
+import { useNodeEvents } from '../../hooks/useNodeEvents.js';
 
 const DKG_LOGO = (
   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
@@ -56,20 +59,28 @@ export function Header() {
   const [unread, setUnread] = useState(0);
   const [showNotifs, setShowNotifs] = useState(false);
   const notifRef = useRef<HTMLDivElement>(null);
+  const [currentAgent, setCurrentAgent] = useState<AgentIdentity | null>(null);
+  const setActiveProject = useProjectsStore((s) => s.setActiveProject);
+  const { openTab } = useTabsStore();
+
+  const loadNotifs = useCallback(() => {
+    api.fetchNotifications().then(({ notifications: n, unreadCount }: any) => {
+      setNotifications(n);
+      setUnread(unreadCount);
+    }).catch(() => {});
+  }, []);
 
   useEffect(() => {
-    let mounted = true;
-    const load = () => {
-      api.fetchNotifications().then(({ notifications: n, unreadCount }: any) => {
-        if (!mounted) return;
-        setNotifications(n);
-        setUnread(unreadCount);
-      }).catch(() => {});
-    };
-    load();
-    const iv = setInterval(load, 30_000);
-    return () => { mounted = false; clearInterval(iv); };
-  }, []);
+    loadNotifs();
+    const iv = setInterval(loadNotifs, 60_000);
+    return () => clearInterval(iv);
+  }, [loadNotifs]);
+
+  useNodeEvents(useCallback((event) => {
+    if (event.type === 'join_request' || event.type === 'join_approved') {
+      loadNotifs();
+    }
+  }, [loadNotifs]));
 
   useEffect(() => {
     const handler = (e: MouseEvent) => {
@@ -77,6 +88,10 @@ export function Header() {
     };
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  useEffect(() => {
+    fetchCurrentAgent().then(setCurrentAgent).catch(() => {});
   }, []);
 
   const connectedPeers = nodeStatus?.connectedPeers ?? nodeStatus?.peerCount ?? 0;
@@ -100,9 +115,16 @@ export function Header() {
 
       <div className="v10-header-sep" />
 
-      <div className="v10-header-agent-switcher">
+      <div className="v10-header-agent-switcher" title={currentAgent ? `${currentAgent.agentDid}\n${currentAgent.agentAddress}` : undefined}>
         <span className="v10-header-agent-dot" />
-        <span className="v10-header-agent-name">{nodeStatus?.name || 'Node Agent'}</span>
+        <span className="v10-header-agent-name">
+          {currentAgent?.name || nodeStatus?.name || 'Agent'}
+        </span>
+        {currentAgent?.agentAddress && (
+          <span className="v10-header-agent-addr">
+            {currentAgent.agentAddress.slice(0, 6)}…{currentAgent.agentAddress.slice(-4)}
+          </span>
+        )}
       </div>
 
       <div className="v10-header-spacer" />
@@ -131,12 +153,29 @@ export function Header() {
               <div className="v10-header-notif-title">Notifications</div>
               {notifications.length === 0 ? (
                 <div className="v10-header-notif-empty">No notifications</div>
-              ) : notifications.slice(0, 8).map((n, i) => (
-                <div key={i} className="v10-header-notif-item">
-                  <div className="v10-header-notif-item-text">{n.message ?? n.title ?? 'Notification'}</div>
-                  {n.ts && <div className="v10-header-notif-item-time">{new Date(n.ts).toLocaleTimeString()}</div>}
-                </div>
-              ))}
+              ) : notifications.slice(0, 12).map((n, i) => {
+                const meta = n.meta ? (() => { try { return JSON.parse(n.meta); } catch { return null; } })() : null;
+                const isJoinReq = n.type === 'join_request';
+                const isJoinApproved = n.type === 'join_approved';
+                const clickable = (isJoinReq || isJoinApproved) && meta?.contextGraphId;
+                return (
+                  <div
+                    key={i}
+                    className={`v10-header-notif-item ${isJoinReq ? 'v10-notif-join' : ''} ${isJoinApproved ? 'v10-notif-approved' : ''} ${clickable ? 'v10-notif-clickable' : ''}`}
+                    onClick={clickable ? () => {
+                      setActiveProject(meta.contextGraphId);
+                      openTab({ id: `project:${meta.contextGraphId}`, label: meta.contextGraphId.slice(0, 16), closable: true });
+                      setShowNotifs(false);
+                    } : undefined}
+                    title={clickable ? 'Click to open project' : undefined}
+                  >
+                    {isJoinReq && <span className="v10-notif-join-icon">🔑</span>}
+                    {isJoinApproved && <span className="v10-notif-join-icon">✓</span>}
+                    <div className="v10-header-notif-item-text">{n.message ?? n.title ?? 'Notification'}</div>
+                    {n.ts && <div className="v10-header-notif-item-time">{new Date(n.ts).toLocaleTimeString()}</div>}
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>

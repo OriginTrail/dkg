@@ -155,14 +155,35 @@ export async function fetchContextGraphs(): Promise<{ contextGraphs: any[] }> {
   return { contextGraphs: list.filter((p: any) => !p.isSystem) };
 }
 
-export async function createContextGraph(id: string, name: string, description?: string): Promise<{ created: string; uri: string }> {
+// --- Agent Identity ---
+export interface AgentIdentity {
+  agentAddress: string;
+  agentDid: string;
+  name: string;
+  framework?: string;
+  peerId: string;
+  nodeIdentityId: string;
+}
+
+export const fetchCurrentAgent = () => get<AgentIdentity>('/api/agent/identity');
+
+export async function createContextGraph(
+  id: string,
+  name: string,
+  description?: string,
+  opts?: { allowedAgents?: string[]; accessPolicy?: number },
+): Promise<{ created: string; uri: string }> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 30_000);
   try {
     const res = await fetch(`${BASE}/api/paranet/create`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeaders() },
-      body: JSON.stringify({ id, name, description }),
+      body: JSON.stringify({
+        id, name, description,
+        ...(opts?.allowedAgents ? { allowedAgents: opts.allowedAgents } : {}),
+        ...(opts?.accessPolicy !== undefined ? { accessPolicy: opts.accessPolicy } : {}),
+      }),
       signal: controller.signal,
     });
     if (!res.ok) {
@@ -179,6 +200,47 @@ export async function createContextGraph(id: string, name: string, description?:
     clearTimeout(timeout);
   }
 }
+
+// --- Context Graph Participant Management ---
+export const addParticipant = (contextGraphId: string, agentAddress: string) =>
+  post<{ ok: boolean }>(`/api/context-graph/${encodeURIComponent(contextGraphId)}/add-participant`, { agentAddress });
+
+export const removeParticipant = (contextGraphId: string, agentAddress: string) =>
+  post<{ ok: boolean }>(`/api/context-graph/${encodeURIComponent(contextGraphId)}/remove-participant`, { agentAddress });
+
+export const listParticipants = (contextGraphId: string) =>
+  get<{ contextGraphId: string; allowedAgents: string[] }>(`/api/context-graph/${encodeURIComponent(contextGraphId)}/participants`);
+
+// --- Join Request flow (Phase 2: signed requests + approval) ---
+export interface SignedJoinRequest {
+  contextGraphId: string;
+  agentAddress: string;
+  timestamp: number;
+  signature: string;
+}
+
+export interface PendingJoinRequest {
+  agentAddress: string;
+  name?: string;
+  signature: string;
+  timestamp: number;
+  status: string;
+}
+
+export const signJoinRequest = (contextGraphId: string) =>
+  post<SignedJoinRequest>(`/api/context-graph/${encodeURIComponent(contextGraphId)}/sign-join`, {});
+
+export const submitJoinRequest = (contextGraphId: string, req: SignedJoinRequest & { agentName?: string }) =>
+  post<{ ok: boolean; status: string }>(`/api/context-graph/${encodeURIComponent(contextGraphId)}/request-join`, req);
+
+export const listJoinRequests = (contextGraphId: string) =>
+  get<{ contextGraphId: string; requests: PendingJoinRequest[] }>(`/api/context-graph/${encodeURIComponent(contextGraphId)}/join-requests`);
+
+export const approveJoinRequest = (contextGraphId: string, agentAddress: string) =>
+  post<{ ok: boolean; status: string; agentAddress: string }>(`/api/context-graph/${encodeURIComponent(contextGraphId)}/approve-join`, { agentAddress });
+
+export const rejectJoinRequest = (contextGraphId: string, agentAddress: string) =>
+  post<{ ok: boolean; status: string; agentAddress: string }>(`/api/context-graph/${encodeURIComponent(contextGraphId)}/reject-join`, { agentAddress });
 
 // --- Catch-up sync jobs ---
 export interface CatchupStatusResponse {
@@ -1126,7 +1188,7 @@ export const shutdownNode = () =>
 export const fetchIntegrations = () =>
   get<{ adapters: Array<{ id: string; name: string; enabled: boolean; description?: string }>; skills: any[]; contextGraphs: any[] }>('/api/integrations');
 export const subscribeToContextGraph = (contextGraphId: string) =>
-  post<{ subscribed: string }>('/api/subscribe', { contextGraphId });
+  post<{ subscribed: string; catchup?: { status: string; jobId: string } }>('/api/subscribe', { contextGraphId });
 
 // --- Notifications ---
 

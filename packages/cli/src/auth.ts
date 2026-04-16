@@ -145,6 +145,14 @@ export function httpAuthGuard(
   const token = extractBearerToken(req.headers.authorization);
   if (verifyToken(token, validTokens)) return true;
 
+  // EventSource can't set headers — accept token as query param, but ONLY
+  // for the SSE endpoint to avoid leaking credentials in URLs/logs/referrers.
+  if (pathname === '/api/events') {
+    const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
+    const qsToken = url.searchParams.get('token');
+    if (qsToken && verifyToken(qsToken, validTokens)) return true;
+  }
+
   res.writeHead(401, {
     'Content-Type': 'application/json',
     'WWW-Authenticate': 'Bearer realm="dkg-node"',

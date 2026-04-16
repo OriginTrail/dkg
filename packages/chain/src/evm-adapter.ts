@@ -937,15 +937,15 @@ export class EVMChainAdapter implements ChainAdapter {
       throw new Error('ContextGraphs contract not deployed. Deploy ContextGraphs and ContextGraphStorage first.');
     }
 
-    const identityIds = params.participantIdentityIds.map((id) => id);
+    const hostingNodes = params.participantIdentityIds.map((id) => id);
     const tx = await this.contracts.contextGraphs.createContextGraph(
-      identityIds,
-      params.participantAgents ?? [],
+      hostingNodes,
+      [],
       params.requiredSignatures,
       params.metadataBatchId ?? 0n,
       params.publishPolicy ?? 0,
       params.publishAuthority ?? ethers.ZeroAddress,
-      params.publishAuthorityAccountId ?? 0n,
+      0n,
     );
     const receipt = await tx.wait();
 

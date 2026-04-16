@@ -1692,6 +1692,9 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         participantIdentityIds: [1n],
       });
       (agent as any).isPrivateContextGraph = async () => true;
+      (agent as any).getPrivateContextGraphParticipants = async () => [
+        wallet.address, '1',
+      ];
       let syncIdentityCalled = false;
       let ackIdentityCalled = false;
       (chain as any).verifySyncIdentity = async () => { syncIdentityCalled = true; return true; };
@@ -1740,6 +1743,9 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     });
     try {
       await agent.start();
+      (agent as any).subscribedContextGraphs.set('public-cg', {
+        name: 'public-cg', subscribed: true, synced: true,
+      });
       const bytes = await (agent as any).buildSyncRequest('public-cg', 5, 100, false, 'peer-remote', 'meta');
       const text = new TextDecoder().decode(bytes);
       expect(text).toBe('public-cg|5|100|meta');

@@ -1,6 +1,7 @@
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import { GraphManager } from '@origintrail-official/dkg-storage';
-import { validateSubGraphName, isSafeIri } from '@origintrail-official/dkg-core';
+import { validateSubGraphName, isSafeIri, assertionLifecycleUri, contextGraphAssertionUri, MemoryLayer, ASSERTION_STATE_TO_LAYER } from '@origintrail-official/dkg-core';
+import type { AssertionState } from '@origintrail-official/dkg-core';
 
 const RDF = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#';
 const SCHEMA = 'http://schema.org/';
@@ -521,4 +522,188 @@ export function subGraphWritersSparql(contextGraphId: string, subGraphName: stri
     <${subGraphUri}> <${DKG}authorizedWriter> ?writer
   }
 }`;
+}
+
+// ── Assertion Lifecycle Metadata (Event-Sourced, PROV-O) ────────────────
+//
+// Persistent records in `_meta` that track an assertion's identity and
+// provenance across all three memory layers (WM → SWM → VM).
+//
+// Uses W3C PROV-O (http://www.w3.org/ns/prov#) as the backbone:
+//   - Assertion entity = prov:Entity + dkg:Assertion
+//   - Transition event = prov:Activity + dkg:Assertion{Created,Promoted,...}
+//   - prov:wasAttributedTo links entity → agent
+//   - prov:wasGeneratedBy links entity → creation activity
+//   - prov:wasAssociatedWith links activity → agent
+//   - prov:startedAtTime records when the activity happened
+//   - prov:generated links activity → entity it produced/modified
+//
+// DKG-specific extensions (no PROV equivalent):
+//   - dkg:state, dkg:memoryLayer — current mutable position
+//   - dkg:fromLayer, dkg:toLayer — layer transition on each event
+//   - dkg:assertionGraph, dkg:assertionName — DKG identity
+//   - dkg:shareOperationId, dkg:kcUal, dkg:rootEntity — operation metadata
+
+let eventCounter = 0;
+function nextEventId(): string {
+  return `${Date.now().toString(36)}-${(++eventCounter).toString(36)}`;
+}
+
+export interface AssertionCreatedMeta {
+  contextGraphId: string;
+  agentAddress: string;
+  assertionName: string;
+  subGraphName?: string;
+  timestamp: Date;
+}
+
+export function generateAssertionCreatedMetadata(meta: AssertionCreatedMeta): Quad[] {
+  const metaGraph = `did:dkg:context-graph:${meta.contextGraphId}/_meta`;
+  const subject = assertionLifecycleUri(meta.contextGraphId, meta.agentAddress, meta.assertionName, meta.subGraphName);
+  const graphUri = contextGraphAssertionUri(meta.contextGraphId, meta.agentAddress, meta.assertionName, meta.subGraphName);
+  const agentUri = `did:dkg:agent:${meta.agentAddress}`;
+  const eventUri = `${subject}/event/${nextEventId()}`;
+
+  return [
+    // Assertion entity (prov:Entity + DKG identity)
+    mq(subject, `${RDF}type`, `${PROV}Entity`, metaGraph),
+    mq(subject, `${RDF}type`, `${DKG}Assertion`, metaGraph),
+    mq(subject, `${PROV}wasAttributedTo`, agentUri, metaGraph),
+    mq(subject, `${PROV}wasGeneratedBy`, eventUri, metaGraph),
+    mq(subject, `${DKG}contextGraph`, `did:dkg:context-graph:${meta.contextGraphId}`, metaGraph),
+    mq(subject, `${DKG}assertionName`, lit(meta.assertionName), metaGraph),
+    mq(subject, `${DKG}assertionGraph`, graphUri, metaGraph),
+    mq(subject, `${DKG}state`, lit('created'), metaGraph),
+    mq(subject, `${DKG}memoryLayer`, lit(MemoryLayer.WorkingMemory), metaGraph),
+    // Event entity (prov:Activity + DKG layer transition)
+    mq(eventUri, `${RDF}type`, `${PROV}Activity`, metaGraph),
+    mq(eventUri, `${RDF}type`, `${DKG}AssertionCreated`, metaGraph),
+    mq(eventUri, `${PROV}startedAtTime`, dateLit(meta.timestamp), metaGraph),
+    mq(eventUri, `${PROV}wasAssociatedWith`, agentUri, metaGraph),
+    mq(eventUri, `${PROV}generated`, subject, metaGraph),
+    mq(eventUri, `${DKG}fromLayer`, lit('none'), metaGraph),
+    mq(eventUri, `${DKG}toLayer`, lit(MemoryLayer.WorkingMemory), metaGraph),
+  ];
+}
+
+export interface AssertionPromotedMeta {
+  contextGraphId: string;
+  agentAddress: string;
+  assertionName: string;
+  subGraphName?: string;
+  shareOperationId: string;
+  rootEntities: string[];
+  timestamp: Date;
+}
+
+export function generateAssertionPromotedMetadata(meta: AssertionPromotedMeta): { insert: Quad[]; delete: Quad[] } {
+  const metaGraph = `did:dkg:context-graph:${meta.contextGraphId}/_meta`;
+  const subject = assertionLifecycleUri(meta.contextGraphId, meta.agentAddress, meta.assertionName, meta.subGraphName);
+  const agentUri = `did:dkg:agent:${meta.agentAddress}`;
+  const eventUri = `${subject}/event/${nextEventId()}`;
+
+  const del = [
+    assertionStateQuad(subject, 'created', metaGraph),
+    assertionLayerQuad(subject, MemoryLayer.WorkingMemory, metaGraph),
+  ];
+  const ins: Quad[] = [
+    // Update assertion entity (mutable fields)
+    mq(subject, `${DKG}state`, lit('promoted'), metaGraph),
+    mq(subject, `${DKG}memoryLayer`, lit(MemoryLayer.SharedWorkingMemory), metaGraph),
+    // Event entity (prov:Activity + DKG layer transition)
+    mq(eventUri, `${RDF}type`, `${PROV}Activity`, metaGraph),
+    mq(eventUri, `${RDF}type`, `${DKG}AssertionPromoted`, metaGraph),
+    mq(eventUri, `${PROV}startedAtTime`, dateLit(meta.timestamp), metaGraph),
+    mq(eventUri, `${PROV}wasAssociatedWith`, agentUri, metaGraph),
+    mq(eventUri, `${PROV}used`, subject, metaGraph),
+    mq(eventUri, `${DKG}fromLayer`, lit(MemoryLayer.WorkingMemory), metaGraph),
+    mq(eventUri, `${DKG}toLayer`, lit(MemoryLayer.SharedWorkingMemory), metaGraph),
+    mq(eventUri, `${DKG}shareOperationId`, lit(meta.shareOperationId), metaGraph),
+  ];
+  for (const entity of meta.rootEntities) {
+    ins.push(mq(eventUri, `${DKG}rootEntity`, entity, metaGraph));
+  }
+  return { insert: ins, delete: del };
+}
+
+export interface AssertionPublishedMeta {
+  contextGraphId: string;
+  agentAddress: string;
+  assertionName: string;
+  subGraphName?: string;
+  kcUal: string;
+  timestamp: Date;
+}
+
+export function generateAssertionPublishedMetadata(meta: AssertionPublishedMeta): { insert: Quad[]; delete: Quad[] } {
+  const metaGraph = `did:dkg:context-graph:${meta.contextGraphId}/_meta`;
+  const subject = assertionLifecycleUri(meta.contextGraphId, meta.agentAddress, meta.assertionName, meta.subGraphName);
+  const agentUri = `did:dkg:agent:${meta.agentAddress}`;
+  const eventUri = `${subject}/event/${nextEventId()}`;
+  return {
+    insert: [
+      mq(subject, `${DKG}state`, lit('published'), metaGraph),
+      mq(subject, `${DKG}memoryLayer`, lit(MemoryLayer.VerifiedMemory), metaGraph),
+      mq(eventUri, `${RDF}type`, `${PROV}Activity`, metaGraph),
+      mq(eventUri, `${RDF}type`, `${DKG}AssertionPublished`, metaGraph),
+      mq(eventUri, `${PROV}startedAtTime`, dateLit(meta.timestamp), metaGraph),
+      mq(eventUri, `${PROV}wasAssociatedWith`, agentUri, metaGraph),
+      mq(eventUri, `${PROV}used`, subject, metaGraph),
+      mq(eventUri, `${DKG}fromLayer`, lit(MemoryLayer.SharedWorkingMemory), metaGraph),
+      mq(eventUri, `${DKG}toLayer`, lit(MemoryLayer.VerifiedMemory), metaGraph),
+      mq(eventUri, `${DKG}kcUal`, meta.kcUal, metaGraph),
+    ],
+    delete: [
+      assertionStateQuad(subject, 'promoted', metaGraph),
+      assertionLayerQuad(subject, MemoryLayer.SharedWorkingMemory, metaGraph),
+    ],
+  };
+}
+
+export interface AssertionDiscardedMeta {
+  contextGraphId: string;
+  agentAddress: string;
+  assertionName: string;
+  subGraphName?: string;
+  timestamp: Date;
+}
+
+export function generateAssertionDiscardedMetadata(meta: AssertionDiscardedMeta): { insert: Quad[]; delete: Quad[] } {
+  const metaGraph = `did:dkg:context-graph:${meta.contextGraphId}/_meta`;
+  const subject = assertionLifecycleUri(meta.contextGraphId, meta.agentAddress, meta.assertionName, meta.subGraphName);
+  const agentUri = `did:dkg:agent:${meta.agentAddress}`;
+  const eventUri = `${subject}/event/${nextEventId()}`;
+  return {
+    insert: [
+      mq(subject, `${DKG}state`, lit('discarded'), metaGraph),
+      mq(subject, `${PROV}wasInvalidatedBy`, eventUri, metaGraph),
+      mq(eventUri, `${RDF}type`, `${PROV}Activity`, metaGraph),
+      mq(eventUri, `${RDF}type`, `${DKG}AssertionDiscarded`, metaGraph),
+      mq(eventUri, `${PROV}startedAtTime`, dateLit(meta.timestamp), metaGraph),
+      mq(eventUri, `${PROV}wasAssociatedWith`, agentUri, metaGraph),
+      mq(eventUri, `${PROV}used`, subject, metaGraph),
+      mq(eventUri, `${DKG}fromLayer`, lit(MemoryLayer.WorkingMemory), metaGraph),
+      mq(eventUri, `${DKG}toLayer`, lit('none'), metaGraph),
+    ],
+    delete: [
+      assertionStateQuad(subject, 'created', metaGraph),
+      assertionLayerQuad(subject, MemoryLayer.WorkingMemory, metaGraph),
+    ],
+  };
+}
+
+/**
+ * Build the quad for a specific assertion state value.
+ * Used as the target of DELETE operations when transitioning states.
+ */
+export function assertionStateQuad(lifecycleUri: string, state: AssertionState, metaGraph: string): Quad {
+  return mq(lifecycleUri, `${DKG}state`, lit(state), metaGraph);
+}
+
+/**
+ * Build the quad for a specific memory layer value.
+ * Used as the target of DELETE operations when transitioning layers.
+ */
+export function assertionLayerQuad(lifecycleUri: string, layer: MemoryLayer, metaGraph: string): Quad {
+  return mq(lifecycleUri, `${DKG}memoryLayer`, lit(layer), metaGraph);
 }

@@ -80,7 +80,7 @@ the private data. The policy is per-KC or per-paranet:
 | Policy | Description |
 |--------|-------------|
 | `public` | Any peer can access (private data with public access — useful for data that is integrity-verified but not confidential) |
-| `allowList` | Only specific peer IDs can access |
+| `allowList` | Only specific agent addresses (or legacy peer IDs) can access |
 | `tokenGated` | Requester must prove they hold a specific token (checked on-chain) |
 | `ownerOnly` | Only the original publisher can re-access (default) |
 

@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { createContextGraph, fetchContextGraphs } from '../../api.js';
+import React, { useState, useEffect } from 'react';
+import { createContextGraph, fetchContextGraphs, fetchCurrentAgent } from '../../api.js';
 import { useProjectsStore } from '../../stores/projects.js';
 import { useTabsStore } from '../../stores/tabs.js';
 import { useJourneyStore } from '../../stores/journey.js';
@@ -29,12 +29,26 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
   const [creating, setCreating] = useState(false);
   const [progress, setProgress] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [agentAddress, setAgentAddress] = useState<string | null>(null);
 
   const { setContextGraphs, contextGraphs, setActiveProject } = useProjectsStore();
   const { openTab } = useTabsStore();
   const { setStage, stage } = useJourneyStore();
 
+  useEffect(() => {
+    if (open) {
+      fetchCurrentAgent()
+        .then((a) => setAgentAddress(a.agentAddress))
+        .catch(() => setAgentAddress(null));
+    }
+  }, [open]);
+
   if (!open) return null;
+
+  const slug = slugify(name);
+  const cgIdPreview = agentAddress && slug
+    ? `${agentAddress}/${slug}`
+    : slug ? `<agent-address>/${slug}` : '';
 
   const handleCreate = async () => {
     const trimmedName = name.trim();
@@ -44,12 +58,18 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
     setError(null);
     setProgress('Registering project on the network…');
 
-    const cgId = `cg:${slugify(trimmedName)}-${Date.now().toString(36)}`;
+    const finalSlug = slugify(trimmedName);
+    const resolvedAddr = agentAddress ?? '0x0000000000000000000000000000000000000000';
+    const cgId = `${resolvedAddr}/${finalSlug}`;
 
     try {
       const slowTimer = setTimeout(() => setProgress('On-chain registration in progress — this can take up to 30s…'), 5000);
 
-      const result = await createContextGraph(cgId, trimmedName, description.trim() || undefined);
+      const opts = access === 'curated'
+        ? { accessPolicy: 1, allowedAgents: agentAddress ? [agentAddress] : [] }
+        : { accessPolicy: 0 };
+
+      const result = await createContextGraph(cgId, trimmedName, description.trim() || undefined, opts);
       clearTimeout(slowTimer);
 
       setProgress('Refreshing project list…');
@@ -116,6 +136,11 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
               onChange={(e) => setName(e.target.value)}
               autoFocus
             />
+            {cgIdPreview && (
+              <div style={{ marginTop: 4, fontSize: 11, color: 'var(--text-tertiary)', fontFamily: 'var(--font-mono)' }}>
+                ID: did:dkg:context-graph:{cgIdPreview}
+              </div>
+            )}
           </div>
 
           <div className="v10-form-group">
@@ -130,16 +155,16 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
 
           <div className="v10-form-divider" />
 
-          <div className="v10-form-group" style={{ opacity: 0.5, pointerEvents: 'none' }}>
-            <label className="v10-form-label">Access <span style={{ fontSize: 10, fontWeight: 400, color: 'var(--text-tertiary)' }}>(coming soon)</span></label>
+          <div className="v10-form-group">
+            <label className="v10-form-label">Access</label>
             <div className="v10-form-radio-group">
               <label className="v10-form-radio">
-                <input type="radio" checked={access === 'curated'} readOnly disabled />
-                Curated — only invited collaborators can view
+                <input type="radio" checked={access === 'curated'} onChange={() => setAccess('curated')} />
+                Curated — only invited agents can participate
               </label>
               <label className="v10-form-radio">
-                <input type="radio" checked={access === 'public'} readOnly disabled />
-                Public — anyone can view
+                <input type="radio" checked={access === 'public'} onChange={() => setAccess('public')} />
+                Public — anyone can view and join
               </label>
             </div>
           </div>

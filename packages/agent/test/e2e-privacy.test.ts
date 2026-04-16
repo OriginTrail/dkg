@@ -620,10 +620,10 @@ describe('Participant IDs stored in meta graph (not ontology)', () => {
     const metaParticipants = metaResult.type === 'bindings' ? metaResult.bindings : [];
     expect(metaParticipants.length).toBeGreaterThanOrEqual(2);
 
-    // Verify getPrivateContextGraphParticipants still works
+    // Verify getPrivateContextGraphParticipants still works (returns string IDs)
     const participants = await (nodeA as any).getPrivateContextGraphParticipants('private-meta-test');
-    expect(participants).toContain(idA);
-    expect(participants).toContain(42n);
+    expect(participants).toContain(String(idA));
+    expect(participants).toContain('42');
   }, 30000);
 });
 
@@ -663,6 +663,15 @@ describe('Private context graph late join sync (3 nodes)', () => {
       return { r: ethers.getBytes(sig.r), vs: ethers.getBytes(sig.yParityAndS) };
     };
 
+    const idA = 11n;
+    const idB = 12n;
+    const idC = 13n;
+    (chainA as any).identities.set(walletA.address, idA);
+    (chainA as any).identities.set(walletB.address, idB);
+    (chainA as any).identities.set(walletC.address, idC);
+    (chainB as any).identities.set(walletB.address, idB);
+    (chainC as any).identities.set(walletC.address, idC);
+
     curator = await DKGAgent.create({ name: 'GuardianCurator', listenPort: 0, chainAdapter: chainA });
     syncerA = await DKGAgent.create({ name: 'GuardianSyncerA', listenPort: 0, chainAdapter: chainB });
     syncerB = await DKGAgent.create({ name: 'GuardianSyncerB', listenPort: 0, chainAdapter: chainC });
@@ -675,15 +684,6 @@ describe('Private context graph late join sync (3 nodes)', () => {
     const addrCurator = curator.multiaddrs.find((a) => a.includes('/tcp/') && !a.includes('/p2p-circuit'))!;
     await syncerA.connectTo(addrCurator);
     await sleep(500);
-
-    const idA = 11n;
-    const idB = 12n;
-    const idC = 13n;
-    (chainA as any).identities.set(walletA.address, idA);
-    (chainA as any).identities.set(walletB.address, idB);
-    (chainA as any).identities.set(walletC.address, idC);
-    (chainB as any).identities.set(walletB.address, idB);
-    (chainC as any).identities.set(walletC.address, idC);
 
     await curator.createContextGraph({
       id: GUARDIAN_PARANET,

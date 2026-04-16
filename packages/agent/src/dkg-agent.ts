@@ -1,17 +1,19 @@
 import {
-  DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus,
-  PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_QUERY_REMOTE, PROTOCOL_STORAGE_ACK, PROTOCOL_VERIFY_PROPOSAL,
+  DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
+  PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_QUERY_REMOTE, PROTOCOL_STORAGE_ACK, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST,
   paranetPublishTopic, paranetWorkspaceTopic, paranetAppTopic, paranetUpdateTopic, paranetFinalizationTopic,
   paranetDataGraphUri, paranetMetaGraphUri, paranetWorkspaceGraphUri, paranetWorkspaceMetaGraphUri,
   contextGraphSharedMemoryUri,
   contextGraphVerifiedMemoryUri, contextGraphVerifiedMemoryMetaUri,
+  contextGraphMetaUri, assertionLifecycleUri, contextGraphAssertionUri,
+  MemoryLayer,
   computeACKDigest,
   encodePublishRequest,
   encodeKAUpdateRequest,
   encodeFinalizationMessage, type FinalizationMessageMsg,
   getGenesisQuads, computeNetworkId, SYSTEM_PARANETS, DKG_ONTOLOGY,
   Logger, createOperationContext, withRetry, sparqlString, escapeSparqlLiteral,
-  type DKGNodeConfig, type OperationContext, type GetView,
+  type DKGNodeConfig, type OperationContext, type GetView, type AssertionDescriptor, type AssertionEvent, type AssertionState,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult } from '@origintrail-official/dkg-chain';
@@ -35,6 +37,11 @@ import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type Di
 import { MessageHandler, type SkillHandler, type SkillRequest, type SkillResponse, type ChatHandler } from './messaging.js';
 import { ed25519ToX25519Private, ed25519ToX25519Public } from './encryption.js';
 import { AGENT_REGISTRY_CONTEXT_GRAPH, type AgentProfileConfig } from './profile.js';
+import {
+  generateCustodialAgent, registerSelfSovereignAgent, agentFromPrivateKey,
+  hashAgentToken,
+  type AgentKeyRecord,
+} from './agent-keystore.js';
 import { GossipPublishHandler } from './gossip-publish-handler.js';
 import { FinalizationHandler } from './finalization-handler.js';
 import { multiaddr } from '@multiformats/multiaddr';
@@ -119,10 +126,19 @@ export interface ContextGraphSub {
   subscribed: boolean;
   /** Definition triples exist in the local triple store. */
   synced: boolean;
+  /**
+   * Whether the `_meta` graph (allowlist, registration status) has been
+   * fetched via authenticated sync or is known from local creation.
+   * When false, the gossip handler denies writes to prevent unauthorized
+   * access during the window before _meta arrives.
+   */
+  metaSynced?: boolean;
   /** On-chain context graph ID (keccak256 hash), if known. */
   onChainId?: string;
   /** Local participant identities used for private SWM authorization before anchoring. */
   participantIdentityIds?: bigint[];
+  /** Participant agent addresses (V10 agent identity model). */
+  participantAgents?: string[];
 }
 
 /** @deprecated Use ContextGraphSub */
@@ -220,6 +236,13 @@ export class DKGAgent {
   private readonly knownCorePeerIds = new Set<string>();
   private readonly syncingPeers = new Set<string>();
   private readonly seenPrivateSyncRequestIds = new Map<string, number>();
+
+  /** Registered agents on this node: agentAddress → AgentKeyRecord */
+  private readonly localAgents = new Map<string, AgentKeyRecord>();
+  /** Agent token → agentAddress lookup for Bearer-based agent resolution */
+  private readonly agentTokenIndex = new Map<string, string>();
+  /** The default "owner" agent address (first operational wallet, auto-registered on boot) */
+  private defaultAgentAddress: string | undefined;
 
   private constructor(
     config: DKGAgentConfig,
@@ -353,6 +376,20 @@ export class DKGAgent {
     this.started = true;
     this.log.info(ctx, `Node started, peer ID: ${this.node.peerId.toString()}`);
 
+    // Load registered agents from triple store; auto-register default if none exist.
+    // loadAgentsFromStore restores defaultAgentAddress from the persisted
+    // isDefaultAgent marker, avoiding reliance on SPARQL result ordering.
+    await this.loadAgentsFromStore();
+    if (this.localAgents.size === 0) {
+      await this.autoRegisterDefaultAgent();
+    }
+    if (!this.defaultAgentAddress && this.localAgents.size > 0) {
+      // Fallback: no persisted marker — pick first and persist for next boot
+      const first = this.localAgents.values().next().value!;
+      this.defaultAgentAddress = first.agentAddress;
+      await this.markDefaultAgent(first.agentAddress).catch(() => {});
+    }
+
     this.router = new ProtocolRouter(this.node);
     this.gossip = new GossipSubManager(this.node, this.eventBus);
 
@@ -381,17 +418,22 @@ export class DKGAgent {
     const queryRemoteHandler = new QueryHandler(this.queryEngine, queryAccessConfig);
     this.router.register(PROTOCOL_QUERY_REMOTE, queryRemoteHandler.handler);
 
-    // Auto-detect or register on-chain identity
+    const effectiveRole = this.config.nodeRole ?? 'edge';
+
+    // Auto-detect or register on-chain identity.
+    // Edge nodes skip profile creation — they operate with agent identity only.
     if (this.chain.chainId !== 'none') {
       let identityId = 0n;
       try {
         identityId = await this.chain.getIdentityId();
-        if (identityId === 0n) {
+        if (identityId === 0n && effectiveRole === 'core') {
           this.log.info(ctx, `No on-chain identity found, creating profile and staking...`);
           identityId = await this.chain.ensureProfile({
             nodeName: this.config.name,
           });
           this.log.info(ctx, `On-chain profile created, identityId=${identityId}`);
+        } else if (identityId === 0n) {
+          this.log.info(ctx, `Edge node — skipping on-chain profile creation (agent identity only)`);
         } else {
           this.log.info(ctx, `On-chain identity found: identityId=${identityId}`);
         }
@@ -407,16 +449,12 @@ export class DKGAgent {
       if (identityId > 0n) {
         this.publisher.setIdentityId(identityId);
         this.log.info(ctx, `Publisher using identityId=${identityId}`);
-      } else {
+      } else if (effectiveRole === 'core') {
         this.log.warn(ctx, `No valid on-chain identity — on-chain publishes will be skipped`);
       }
     }
 
     // Register V10 StorageACK handler AFTER ensureProfile so identity is resolved.
-    // Priority: explicit ackSignerKey > adapter.signACKDigest > adapter.getACKSignerKey (deprecated).
-    // chainConfig.operationalKeys is NOT consulted — when a prebuilt chainAdapter is
-    // supplied, chainConfig is conceptually ignored per the config contract.
-    const effectiveRole = this.config.nodeRole ?? 'edge';
     // Only core nodes register the StorageACK handler — edge nodes cannot
     // sign ACKs (the handler would reject immediately) and advertising the
     // protocol confuses peer-role detection based on protocol support.
@@ -642,8 +680,59 @@ export class DKGAgent {
         const metaGraph = paranetMetaGraphUri(contextGraphId);
 
         if (phase === 'meta') {
+          // Whitelist approach: only sync _meta triples that are either
+          // CG-level metadata (always safe) or assertion metadata for
+          // assertions that have been promoted out of WM.
+          //
+          // CG-level subjects (always included):
+          //  - did:dkg:context-graph:{id}  (CG definition)
+          //  - did:dkg:activity:*           (CG creation provenance)
+          //  - did:dkg:join-request:*       (access control)
+          //
+          // Assertion-level subjects (only if memoryLayer != WM):
+          //  - urn:dkg:assertion:*          (lifecycle entities)
+          //  - urn:dkg:assertion:*/event/*  (event entities)
+          //  - */assertion/*                (import metadata)
+          //
+          // Everything else is excluded by default.
+          const DKG_NS = 'http://dkg.io/ontology/';
+          const cgEntity = `did:dkg:context-graph:${contextGraphId}`;
           const metaResult = await this.store.query(
-            `SELECT ?s ?p ?o WHERE { GRAPH <${metaGraph}> { ?s ?p ?o } } ORDER BY ?s ?p ?o OFFSET ${offset} LIMIT ${limit}`,
+            `SELECT ?s ?p ?o WHERE {
+              GRAPH <${metaGraph}> { ?s ?p ?o }
+              FILTER(
+                STR(?s) = "${cgEntity}" ||
+                STRSTARTS(STR(?s), "did:dkg:activity:") ||
+                STRSTARTS(STR(?s), "did:dkg:join-request:") ||
+                EXISTS {
+                  GRAPH <${metaGraph}> {
+                    ?lc <${DKG_NS}memoryLayer> ?layer .
+                    FILTER(?layer != "${MemoryLayer.WorkingMemory}")
+                    {
+                      FILTER(?lc = ?s)
+                    } UNION {
+                      ?lc <${DKG_NS}assertionGraph> ?s .
+                    } UNION {
+                      ?lc <${DKG_NS}assertionName> ?aname .
+                      FILTER(
+                        CONTAINS(STR(?s), "/assertion/") &&
+                        STRENDS(STR(?s), CONCAT("/", STR(?aname)))
+                      )
+                    }
+                  }
+                } ||
+                EXISTS {
+                  GRAPH <${metaGraph}> {
+                    { ?evt_src <http://www.w3.org/ns/prov#generated> ?parent }
+                    UNION
+                    { ?evt_src <http://www.w3.org/ns/prov#used> ?parent }
+                    FILTER(?evt_src = ?s)
+                    ?parent <${DKG_NS}memoryLayer> ?elayer .
+                    FILTER(?elayer != "${MemoryLayer.WorkingMemory}")
+                  }
+                }
+              )
+            } ORDER BY ?s ?p ?o OFFSET ${offset} LIMIT ${limit}`,
           );
           if (metaResult.type === 'bindings') {
             for (const b of metaResult.bindings) {
@@ -652,20 +741,109 @@ export class DKGAgent {
             }
           }
         } else {
+          // Sync all graphs under the CG prefix EXCEPT:
+          //  - _meta graphs (bookkeeping, synced in the meta phase)
+          //  - _private graphs (never shared)
+          //  - assertion graphs still in Working Memory (WM)
+          //
+          // Assertions promoted to SWM or VM ARE included. The lifecycle
+          // entity links to the graph via dkg:assertionGraph and tracks
+          // the current layer via dkg:memoryLayer. Assertion graphs with
+          // no lifecycle record are treated as WM (safe default).
+          const cgUriPrefix = `did:dkg:context-graph:${contextGraphId}`;
+          const metaGraph = `${cgUriPrefix}/_meta`;
+          const DKG_NS = 'http://dkg.io/ontology/';
           const dataResult = await this.store.query(
-            `SELECT ?s ?p ?o WHERE { GRAPH <${dataGraph}> { ?s ?p ?o } } ORDER BY ?s ?p ?o OFFSET ${offset} LIMIT ${limit}`,
+            `SELECT ?s ?p ?o ?g WHERE {
+              GRAPH ?g { ?s ?p ?o }
+              FILTER(
+                (STR(?g) = "${cgUriPrefix}" || STRSTARTS(STR(?g), "${cgUriPrefix}/")) &&
+                !STRENDS(STR(?g), "/_meta") &&
+                !CONTAINS(STR(?g), "/_private")
+              )
+              FILTER(
+                !CONTAINS(STR(?g), "/assertion/") ||
+                EXISTS {
+                  GRAPH <${metaGraph}> {
+                    ?lifecycle <${DKG_NS}assertionGraph> ?g .
+                    ?lifecycle <${DKG_NS}memoryLayer> ?layer .
+                    FILTER(?layer != "${MemoryLayer.WorkingMemory}")
+                  }
+                }
+              )
+            } ORDER BY ?g ?s ?p ?o OFFSET ${offset} LIMIT ${limit}`,
           );
           if (dataResult.type !== 'bindings' || dataResult.bindings.length === 0) {
             return new TextEncoder().encode('');
           }
           for (const b of dataResult.bindings) {
             const obj = b['o'].startsWith('"') ? b['o'] : `<${b['o']}>`;
-            nquads.push(`<${b['s']}> <${b['p']}> ${obj} <${dataGraph}> .`);
+            const graph = b['g'] ?? dataGraph;
+            nquads.push(`<${b['s']}> <${b['p']}> ${obj} <${graph}> .`);
           }
         }
       }
 
       return new TextEncoder().encode(nquads.join('\n'));
+    });
+
+    // Join-request protocol: receives signed join requests forwarded by peers.
+    // Stores them locally if this node is the curator; ACKs with "ok" or "error".
+    this.router.register(PROTOCOL_JOIN_REQUEST, async (data) => {
+      try {
+        const payload = JSON.parse(new TextDecoder().decode(data));
+
+        // Handle "join-approved" notifications from curator → requester.
+        // Only process if this node owns the target agentAddress.
+        if (payload.type === 'join-approved') {
+          const { contextGraphId, agentAddress: approvedAddr } = payload;
+          if (contextGraphId) {
+            const isLocalAgent = approvedAddr && [...this.localAgents.keys()].some(
+              (addr) => addr.toLowerCase() === approvedAddr.toLowerCase(),
+            );
+            if (approvedAddr && !isLocalAgent) {
+              return new TextEncoder().encode(JSON.stringify({ ok: true, skipped: true }));
+            }
+            this.log.info(createOperationContext('system'), `Join request approved for "${contextGraphId}" — auto-subscribing`);
+            this.subscribeToContextGraph(contextGraphId);
+            this.syncContextGraphFromConnectedPeers(contextGraphId).catch(() => {});
+            this.eventBus.emit(DKGEvent.JOIN_APPROVED, {
+              contextGraphId,
+              agentAddress: approvedAddr,
+            });
+          }
+          return new TextEncoder().encode(JSON.stringify({ ok: true }));
+        }
+
+        const { contextGraphId, agentAddress, signature, timestamp, agentName } = payload;
+        if (!contextGraphId || !agentAddress || !signature || !timestamp) {
+          return new TextEncoder().encode(JSON.stringify({ ok: false, error: 'missing fields' }));
+        }
+        // Only store if this node is the curator (creator) of the CG
+        const owner = await this.getContextGraphOwner(contextGraphId);
+        if (!owner) {
+          return new TextEncoder().encode(JSON.stringify({ ok: false, error: 'unknown CG' }));
+        }
+        const selfDid = `did:dkg:agent:${this.peerId}`;
+        const selfAgentDid = this.defaultAgentAddress ? `did:dkg:agent:${this.defaultAgentAddress}` : null;
+        const isCurator = owner === selfDid ||
+          (selfAgentDid && owner === selfAgentDid) ||
+          [...this.localAgents.keys()].some((addr) => owner === `did:dkg:agent:${addr}`);
+        if (!isCurator) {
+          return new TextEncoder().encode(JSON.stringify({ ok: false, error: 'not curator' }));
+        }
+        this.verifyJoinRequest(contextGraphId, agentAddress, timestamp, signature);
+        await this.storePendingJoinRequest(contextGraphId, agentAddress, signature, timestamp, agentName);
+        this.eventBus.emit(DKGEvent.JOIN_REQUEST_RECEIVED, {
+          contextGraphId,
+          agentAddress,
+          agentName,
+        });
+        return new TextEncoder().encode(JSON.stringify({ ok: true }));
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return new TextEncoder().encode(JSON.stringify({ ok: false, error: msg }));
+      }
     });
 
     // Subscribe to both system context graph GossipSub topics
@@ -761,6 +939,21 @@ export class DKGAgent {
       this.log.info(ctx, `Syncing from peer ${shortPeer}...`);
       const synced = await this.syncFromPeer(remotePeer);
       this.log.info(ctx, `Synced ${synced} data triples from peer ${shortPeer}`);
+
+      // Only flip metaSynced for CGs whose _meta was actually fetched
+      // during this sync (i.e., those in the sync scope). Chain-discovered
+      // CGs added with trackSyncScope: false are NOT in scope and their
+      // _meta hasn't arrived yet.
+      const syncScope = new Set<string>([
+        SYSTEM_PARANETS.AGENTS,
+        SYSTEM_PARANETS.ONTOLOGY,
+        ...(this.config.syncContextGraphs ?? []),
+      ]);
+      for (const [id, sub] of this.subscribedContextGraphs) {
+        if (sub.metaSynced === false && syncScope.has(id)) {
+          sub.metaSynced = true;
+        }
+      }
 
       // After syncing ONTOLOGY, discover and auto-subscribe to any new context graphs
       await this.discoverContextGraphsFromStore();
@@ -900,11 +1093,16 @@ export class DKGAgent {
       const quads = parseNQuads(nquadsText);
       if (quads.length === 0) break;
 
-      const validQuads = quads.filter(q => q.graph === graphUri);
+      // Accept quads from the expected graph OR from any sub-graph of the CG
+      // (e.g. assertion sub-graphs like did:dkg:context-graph:{id}/assertion/...).
+      const cgUriPrefix = `did:dkg:context-graph:${contextGraphId}/`;
+      const validQuads = quads.filter(q =>
+        q.graph === graphUri || q.graph.startsWith(cgUriPrefix)
+      );
       allQuads.push(...validQuads);
 
-      offset += validQuads.length;
-      if (validQuads.length < SYNC_PAGE_SIZE) break;
+      offset += quads.length;
+      if (quads.length < SYNC_PAGE_SIZE) break;
     }
     return allQuads;
   }
@@ -1048,6 +1246,33 @@ export class DKGAgent {
 
     this.trackSyncContextGraph(contextGraphId);
 
+    // Attempt to connect to all known peers from the agent registry so that
+    // curated CGs hosted by non-relay nodes are reachable (e.g. Node 3 needs
+    // to connect to Node 2 even if only Node 1/relay is in libp2p connections).
+    try {
+      const agents = await this.discovery.findAgents();
+      const { peerIdFromString } = await import('@libp2p/peer-id');
+      const { multiaddr } = await import('@multiformats/multiaddr');
+      for (const a of agents) {
+        if (a.peerId === this.peerId) continue;
+        const existingConns = this.node.libp2p.getConnections()
+          .filter((c) => c.remotePeer.toString() === a.peerId);
+        if (existingConns.length > 0) continue;
+        if (a.relayAddress) {
+          try {
+            const circuitAddr = multiaddr(`${a.relayAddress}/p2p-circuit/p2p/${a.peerId}`);
+            const pid = peerIdFromString(a.peerId);
+            await this.node.libp2p.peerStore.merge(pid, { multiaddrs: [circuitAddr] });
+            await this.node.libp2p.dial(pid);
+          } catch {
+            // Non-fatal — peer may be unreachable
+          }
+        }
+      }
+    } catch {
+      // Discovery unavailable or dial failures are non-fatal
+    }
+
     const peers = [...new Map(
       this.node.libp2p.getConnections().map((conn) => [conn.remotePeer.toString(), conn.remotePeer]),
     ).values()];
@@ -1079,6 +1304,14 @@ export class DKGAgent {
       ctx,
       `Catch-up sync for "${contextGraphId}": peers=${peersTried}/${syncCapablePeers} data=${dataSynced} sharedMemory=${sharedMemorySynced}`,
     );
+
+    if (dataSynced > 0 || sharedMemorySynced > 0) {
+      this.eventBus.emit(DKGEvent.PROJECT_SYNCED, {
+        contextGraphId,
+        dataSynced,
+        sharedMemorySynced,
+      });
+    }
 
     return {
       connectedPeers: peers.length,
@@ -1215,6 +1448,7 @@ export class DKGAgent {
       nodeRole: this.config.nodeRole ?? 'edge',
       publicKey: pubKeyBase64,
       relayAddress: relayAddrs?.[0],
+      agentAddress: this.defaultAgentAddress,
       skills: (this.config.skills ?? []).map(s => ({
         skillType: s.skillType,
         pricePerCall: s.pricePerCall,
@@ -1242,6 +1476,352 @@ export class DKGAgent {
   async findAgentByPeerId(peerId: string): Promise<DiscoveredAgent | null> {
     return this.discovery.findAgentByPeerId(peerId);
   }
+
+  // ---------------------------------------------------------------------------
+  // Agent Registry — multi-agent identity management
+  // ---------------------------------------------------------------------------
+
+  private static readonly AGENT_SYSTEM_GRAPH = 'did:dkg:system/agents';
+
+  /**
+   * Register a new agent on this node.
+   * - Custodial (publicKey omitted): node generates secp256k1 keypair
+   * - Self-sovereign (publicKey provided): agent holds its own key
+   */
+  async registerAgent(
+    name: string,
+    opts?: { publicKey?: string; framework?: string },
+  ): Promise<AgentKeyRecord> {
+    for (const existing of this.localAgents.values()) {
+      if (existing.name === name) {
+        throw new Error(`Agent name "${name}" already registered on this node`);
+      }
+    }
+
+    const record = opts?.publicKey
+      ? registerSelfSovereignAgent(name, opts.publicKey, opts.framework)
+      : generateCustodialAgent(name, opts?.framework);
+
+    this.localAgents.set(record.agentAddress, record);
+    this.agentTokenIndex.set(record.authToken, record.agentAddress);
+    await this.persistAgentToStore(record);
+    await this.saveToKeystore(record);
+
+    const ctx = createOperationContext('system');
+    this.log.info(ctx, `Registered agent "${name}" (${record.mode}) → ${record.agentAddress}`);
+    return record;
+  }
+
+  /**
+   * List all agents registered on this node.
+   * Private keys are NOT included in the response.
+   */
+  listLocalAgents(): Array<Omit<AgentKeyRecord, 'privateKey'>> {
+    return [...this.localAgents.values()].map(({ privateKey: _, ...rest }) => rest);
+  }
+
+  /**
+   * Resolve an agent address from a Bearer token.
+   * Returns undefined if the token is not an agent token (could be a node-level token).
+   */
+  resolveAgentByToken(token: string): string | undefined {
+    return this.agentTokenIndex.get(token);
+  }
+
+  /**
+   * Get the default agent address for this node.
+   * Used when requests come in with a node-level token.
+   */
+  getDefaultAgentAddress(): string | undefined {
+    return this.defaultAgentAddress;
+  }
+
+  /**
+   * Resolve the agent address for a request: first try agent token, then fall
+   * back to the default agent (for node-level tokens / backward compatibility).
+   */
+  resolveAgentAddress(token: string | undefined): string {
+    if (token) {
+      const addr = this.agentTokenIndex.get(token);
+      if (addr) return addr;
+    }
+    if (this.defaultAgentAddress) return this.defaultAgentAddress;
+    return this.peerId;
+  }
+
+  private async persistAgentToStore(record: AgentKeyRecord): Promise<void> {
+    const graph = DKGAgent.AGENT_SYSTEM_GRAPH;
+    const agentUri = `did:dkg:agent:${record.agentAddress}`;
+    const DKG = 'https://dkg.network/ontology#';
+    const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+    const SCHEMA_NAME = 'https://schema.org/name';
+
+    const quads: Quad[] = [
+      { subject: agentUri, predicate: RDF_TYPE, object: `${DKG}Agent`, graph },
+      { subject: agentUri, predicate: SCHEMA_NAME, object: `"${escapeSparqlLiteral(record.name)}"`, graph },
+      { subject: agentUri, predicate: `${DKG}agentAddress`, object: `"${record.agentAddress}"`, graph },
+      { subject: agentUri, predicate: `${DKG}agentMode`, object: `"${record.mode}"`, graph },
+      { subject: agentUri, predicate: `${DKG}agentAuthTokenHash`, object: `"${hashAgentToken(record.authToken)}"`, graph },
+      { subject: agentUri, predicate: `${DKG}createdAt`, object: `"${record.createdAt}"`, graph },
+    ];
+    if (record.publicKey) {
+      quads.push({ subject: agentUri, predicate: `${DKG}publicKey`, object: `"${record.publicKey}"`, graph });
+    }
+    if (record.framework) {
+      quads.push({ subject: agentUri, predicate: 'https://dkg.origintrail.io/skill#framework', object: `"${record.framework}"`, graph });
+    }
+
+    await this.store.insert(quads);
+  }
+
+  /**
+   * Load previously registered agents from the triple store on startup.
+   */
+  private async loadAgentsFromStore(): Promise<void> {
+    const graph = DKGAgent.AGENT_SYSTEM_GRAPH;
+    const DKG = 'https://dkg.network/ontology#';
+
+    // Load raw tokens and custodial keys from the on-disk keystore
+    const keystore = await this.loadKeystore();
+
+    const sparql = `
+      SELECT ?agent ?name ?address ?mode ?tokenHash ?legacyToken ?publicKey ?framework ?createdAt ?isDefault WHERE {
+        GRAPH <${graph}> {
+          ?agent a <${DKG}Agent> ;
+                 <https://schema.org/name> ?name ;
+                 <${DKG}agentAddress> ?address ;
+                 <${DKG}agentMode> ?mode .
+          OPTIONAL { ?agent <${DKG}agentAuthTokenHash> ?tokenHash }
+          OPTIONAL { ?agent <${DKG}agentAuthToken> ?legacyToken }
+          OPTIONAL { ?agent <${DKG}publicKey> ?publicKey }
+          OPTIONAL { ?agent <https://dkg.origintrail.io/skill#framework> ?framework }
+          OPTIONAL { ?agent <${DKG}createdAt> ?createdAt }
+          OPTIONAL { ?agent <${DKG}isDefaultAgent> ?isDefault }
+        }
+      }
+    `;
+    let markedDefaultAddr: string | undefined;
+    const needsMigration: AgentKeyRecord[] = [];
+    try {
+      const result = await this.store.query(sparql);
+      if (result.type !== 'bindings') return;
+      const strip = (v?: string) => v?.replace(/^"|"$/g, '').replace(/"?\^\^.*$/, '') ?? '';
+      for (const row of result.bindings) {
+        const addr = strip(row['address']);
+        const ksEntry = keystore[addr.toLowerCase()];
+        const legacyToken = strip(row['legacyToken']);
+
+        // Token resolution: prefer keystore file → legacy plaintext → empty
+        let authToken = ksEntry?.authToken ?? '';
+        if (!authToken && legacyToken) {
+          authToken = legacyToken;
+        }
+
+        const record: AgentKeyRecord = {
+          agentAddress: addr,
+          publicKey: strip(row['publicKey']) || '',
+          name: strip(row['name']),
+          framework: strip(row['framework']) || undefined,
+          mode: strip(row['mode']) as 'custodial' | 'self-sovereign',
+          authToken,
+          createdAt: strip(row['createdAt']) || '',
+        };
+
+        // Restore private key: prefer keystore file, fall back to operational keys
+        if (record.mode === 'custodial' && !record.privateKey) {
+          if (ksEntry?.privateKey) {
+            record.privateKey = ksEntry.privateKey;
+          } else {
+            const opKeys = this.config.chainConfig?.operationalKeys;
+            if (opKeys?.length) {
+              for (const key of opKeys) {
+                try {
+                  const w = new ethers.Wallet(key);
+                  if (w.address.toLowerCase() === record.agentAddress.toLowerCase()) {
+                    record.privateKey = key;
+                    break;
+                  }
+                } catch { /* skip invalid keys */ }
+              }
+            }
+          }
+        }
+
+        this.localAgents.set(record.agentAddress, record);
+        if (record.authToken) {
+          this.agentTokenIndex.set(record.authToken, record.agentAddress);
+        }
+
+        if (strip(row['isDefault']) === 'true') {
+          markedDefaultAddr = record.agentAddress;
+        }
+
+        // Schedule migration: plaintext token in RDF but no keystore entry yet
+        if (legacyToken && !ksEntry?.authToken) {
+          needsMigration.push(record);
+        }
+      }
+      if (markedDefaultAddr) {
+        this.defaultAgentAddress = markedDefaultAddr;
+      }
+      if (this.localAgents.size > 0) {
+        const ctx = createOperationContext('system');
+        this.log.info(ctx, `Loaded ${this.localAgents.size} registered agent(s) from store`);
+      }
+      // Migrate legacy plaintext tokens: save to keystore, replace RDF with hash
+      for (const rec of needsMigration) {
+        await this.saveToKeystore(rec);
+        await this.migrateTokenToHash(rec);
+      }
+    } catch {
+      // Graph may not exist yet on first boot
+    }
+  }
+
+  /**
+   * Auto-register the default "owner" agent from the first operational wallet.
+   * Called on boot when no agents have been previously registered.
+   */
+  private async autoRegisterDefaultAgent(): Promise<void> {
+    const opKeys = this.config.chainConfig?.operationalKeys;
+    if (!opKeys?.length) return;
+
+    const record = agentFromPrivateKey(
+      opKeys[0],
+      this.config.name ?? 'owner',
+      this.config.framework,
+    );
+
+    this.localAgents.set(record.agentAddress, record);
+    this.agentTokenIndex.set(record.authToken, record.agentAddress);
+    this.defaultAgentAddress = record.agentAddress;
+    await this.persistAgentToStore(record);
+    await this.markDefaultAgent(record.agentAddress);
+    await this.saveToKeystore(record);
+
+    const ctx = createOperationContext('system');
+    this.log.info(ctx, `Auto-registered default agent "${record.name}" → ${record.agentAddress}`);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Agent keystore — secrets kept out of queryable RDF
+  // ---------------------------------------------------------------------------
+
+  private keystorePath(): string | null {
+    if (!this.config.dataDir) return null;
+    return `${this.config.dataDir}/agent-keystore.json`;
+  }
+
+  private async loadKeystore(): Promise<Record<string, { authToken?: string; privateKey?: string }>> {
+    const ksPath = this.keystorePath();
+    if (!ksPath) return {};
+    try {
+      const { readFile } = await import('node:fs/promises');
+      const raw = await readFile(ksPath, 'utf-8');
+      return JSON.parse(raw);
+    } catch {
+      return {};
+    }
+  }
+
+  private async saveToKeystore(record: AgentKeyRecord): Promise<void> {
+    const ksPath = this.keystorePath();
+    if (!ksPath) return;
+    try {
+      const { readFile, writeFile, mkdir, chmod } = await import('node:fs/promises');
+      const { dirname } = await import('node:path');
+      let existing: Record<string, { authToken?: string; privateKey?: string }> = {};
+      try {
+        const raw = await readFile(ksPath, 'utf-8');
+        existing = JSON.parse(raw);
+      } catch { /* first write */ }
+      existing[record.agentAddress.toLowerCase()] = {
+        authToken: record.authToken,
+        ...(record.privateKey ? { privateKey: record.privateKey } : {}),
+      };
+      await mkdir(dirname(ksPath), { recursive: true });
+      await writeFile(ksPath, JSON.stringify(existing, null, 2), { mode: 0o600 });
+      await chmod(ksPath, 0o600);
+    } catch {
+      // Non-fatal — agent still works, just won't survive restart
+    }
+  }
+
+  /**
+   * One-time migration: replace a legacy plaintext agentAuthToken triple
+   * with an agentAuthTokenHash triple so future SPARQL queries never
+   * reveal the raw token.
+   */
+  private async migrateTokenToHash(record: AgentKeyRecord): Promise<void> {
+    const graph = DKGAgent.AGENT_SYSTEM_GRAPH;
+    const DKG = 'https://dkg.network/ontology#';
+    const agentUri = `did:dkg:agent:${record.agentAddress}`;
+    try {
+      await this.store.delete([{
+        subject: agentUri,
+        predicate: `${DKG}agentAuthToken`,
+        object: `"${record.authToken}"`,
+        graph,
+      }]);
+      await this.store.insert([{
+        subject: agentUri,
+        predicate: `${DKG}agentAuthTokenHash`,
+        object: `"${hashAgentToken(record.authToken)}"`,
+        graph,
+      }]);
+      const ctx = createOperationContext('system');
+      this.log.info(ctx, `Migrated plaintext auth token to hash for agent ${record.agentAddress}`);
+    } catch {
+      // Non-fatal — old token remains readable until next migration attempt
+    }
+  }
+
+  /**
+   * Persist an explicit default-agent marker in the triple store so the
+   * default agent is deterministic across restarts (independent of SPARQL
+   * result ordering).
+   */
+  private async markDefaultAgent(agentAddress: string): Promise<void> {
+    const graph = DKGAgent.AGENT_SYSTEM_GRAPH;
+    const DKG = 'https://dkg.network/ontology#';
+    // Clear any existing default marker
+    try {
+      const existing = await this.store.query(
+        `SELECT ?agent WHERE { GRAPH <${graph}> { ?agent <${DKG}isDefaultAgent> "true" } }`,
+      );
+      if (existing.type === 'bindings') {
+        for (const row of existing.bindings) {
+          const agentUri = row['agent'];
+          if (agentUri) {
+            await this.store.delete([{
+              subject: agentUri, predicate: `${DKG}isDefaultAgent`, object: `"true"`, graph,
+            }]);
+          }
+        }
+      }
+    } catch { /* ignore */ }
+    const agentUri = `did:dkg:agent:${agentAddress}`;
+    await this.store.insert([{
+      subject: agentUri, predicate: `${DKG}isDefaultAgent`, object: `"true"`, graph,
+    }]);
+  }
+
+  /**
+   * Check whether any locally registered agent is the curator/creator
+   * of the given context graph.
+   */
+  async isCuratorOf(contextGraphId: string): Promise<boolean> {
+    const owner = await this.getContextGraphOwner(contextGraphId);
+    if (!owner) return false;
+    const selfDid = `did:dkg:agent:${this.peerId}`;
+    if (owner === selfDid) return true;
+    for (const addr of this.localAgents.keys()) {
+      if (owner === `did:dkg:agent:${addr}`) return true;
+    }
+    return false;
+  }
+
+  // ---------------------------------------------------------------------------
 
   async sendChat(recipientPeerId: string, text: string): Promise<{ delivered: boolean; error?: string }> {
     if (!this.messageHandler) throw new Error('Agent not started');
@@ -1613,14 +2193,17 @@ export class DKGAgent {
    */
   async ensureIdentity(): Promise<bigint> {
     if (this.chain.chainId === 'none') return 0n;
+    const effectiveRole = this.config.nodeRole ?? 'edge';
     const ctx = createOperationContext('system');
     let identityId = 0n;
     try {
       identityId = await this.chain.getIdentityId();
-      if (identityId === 0n) {
+      if (identityId === 0n && effectiveRole === 'core') {
         this.log.info(ctx, 'ensureIdentity: no on-chain identity, creating profile...');
         identityId = await this.chain.ensureProfile({ nodeName: this.config.name });
         this.log.info(ctx, `ensureIdentity: profile created, identityId=${identityId}`);
+      } else if (identityId === 0n) {
+        return 0n;
       }
     } catch (err) {
       this.log.warn(ctx, `ensureIdentity error: ${err instanceof Error ? err.message : String(err)}`);
@@ -1704,19 +2287,36 @@ export class DKGAgent {
     }
 
     const participants = await this.getPrivateContextGraphParticipants(contextGraphId);
-    if (!participants || participants.length === 0) {
-      return false;
-    }
 
-    const identityId = await this.chain.getIdentityId();
-    // NoChainAdapter returns 0n — allow reads for locally subscribed private
-    // CGs so the creating node can still query its own data.
-    if (identityId === 0n) {
+    // No participant list at all → allow creator / locally-subscribed nodes
+    if (!participants || participants.length === 0) {
       return this.subscribedContextGraphs.has(contextGraphId)
         || (this.config.syncContextGraphs ?? []).includes(contextGraphId);
     }
 
-    return participants.some((id) => id === identityId);
+    // Check if any local agent address is in the participants list
+    const myAgentAddress = this.defaultAgentAddress;
+    if (myAgentAddress && participants.some((p) => p.toLowerCase() === myAgentAddress.toLowerCase())) {
+      return true;
+    }
+
+    // Check if the local identity ID is in the participants list
+    let myIdentityId = 0n;
+    try {
+      myIdentityId = await this.chain.getIdentityId();
+      if (myIdentityId > 0n && participants.includes(String(myIdentityId))) {
+        return true;
+      }
+    } catch { /* identity lookup failed — continue to deny */ }
+
+    // Edge nodes without an on-chain identity (identityId 0n) fall back to
+    // subscription-based access — the subscription itself is an authorization
+    // (the node was invited or created this CG).
+    if (myIdentityId === 0n) {
+      return this.subscribedContextGraphs.has(contextGraphId);
+    }
+
+    return false;
   }
 
   /**
@@ -1840,9 +2440,14 @@ export class DKGAgent {
       this.trackSyncContextGraph(contextGraphId);
     }
 
-    // Idempotent: skip if gossip handlers already installed for this context graph
+    // Idempotent: skip if gossip handlers already installed for this context graph.
+    // Re-subscribing upgrades metaSynced → true: the caller is explicitly
+    // trusting this CG, so the deny-until-meta-synced gate can open.
     if (this.gossipRegistered.has(contextGraphId)) {
       const existing = this.subscribedContextGraphs.get(contextGraphId);
+      if (existing && existing.metaSynced === false) {
+        existing.metaSynced = true;
+      }
       if (!existing?.subscribed) {
         this.subscribedContextGraphs.set(contextGraphId, { ...existing, subscribed: true, synced: existing?.synced ?? false });
       }
@@ -1961,17 +2566,26 @@ export class DKGAgent {
     description?: string;
     replicationPolicy?: string;
     accessPolicy?: number;
-    /** Peer allowlist for curated CGs. Omit for open CGs. */
+    /** @deprecated Use allowedAgents. Peer allowlist for curated CGs. */
     allowedPeers?: string[];
+    /** Agent address allowlist for curated CGs. Omit for open CGs. */
+    allowedAgents?: string[];
     /** Identity IDs for private CG access control (chain-based). */
     participantIdentityIds?: bigint[];
+    /** Required signatures threshold for participant-based CGs. */
+    requiredSignatures?: number;
+    /** Participant agent addresses for on-chain context graphs. */
+    participantAgents?: string[];
     /** When true, skips gossip subscription and broadcast. Data stays local-only. */
     private?: boolean;
+    /** Caller's agent address (resolved from token). Used for curator/creator triples. */
+    callerAgentAddress?: string;
   }): Promise<void> {
     const ctx = createOperationContext('system');
     const gm = new GraphManager(this.store);
-    const paranetUri = paranetDataGraphUri(opts.id);
+    const paranetUri = `did:dkg:context-graph:${opts.id}`;
     const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
+    const cgMetaGraph = paranetMetaGraphUri(opts.id);
     const now = new Date().toISOString();
 
     const exists = await this.contextGraphExists(opts.id);
@@ -1979,28 +2593,35 @@ export class DKGAgent {
       throw new Error(`Context graph "${opts.id}" already exists`);
     }
 
+    const isCurated = opts.accessPolicy === 1 || (opts.allowedAgents && opts.allowedAgents.length > 0);
+
     if (opts.private) {
       this.log.info(ctx, `Creating private context graph "${opts.id}" (local-only, no gossip)`);
+    } else if (isCurated) {
+      this.log.info(ctx, `Creating curated context graph "${opts.id}" (invite-only, definition hidden from ONTOLOGY)`);
     } else {
       this.log.info(ctx, `Creating context graph "${opts.id}" (P2P, no chain)`);
     }
 
-    const quads: Quad[] = [
-      { subject: paranetUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_PARANET, graph: ontologyGraph },
-      { subject: paranetUri, predicate: DKG_ONTOLOGY.SCHEMA_NAME, object: `"${opts.name}"`, graph: ontologyGraph },
-      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CREATOR, object: `did:dkg:agent:${this.peerId}`, graph: ontologyGraph },
-      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CREATED_AT, object: `"${now}"`, graph: ontologyGraph },
-      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_GOSSIP_TOPIC, object: `"${paranetPublishTopic(opts.id)}"`, graph: ontologyGraph },
-      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_REPLICATION_POLICY, object: `"${opts.replicationPolicy ?? 'full'}"`, graph: ontologyGraph },
-      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY, object: `"${opts.accessPolicy === 1 || opts.private ? 'private' : 'public'}"`, graph: ontologyGraph },
-    ];
+    // Curated CGs store definition triples in their own _meta graph so they
+    // are NOT discoverable via ONTOLOGY sync. Only invited/subscribed nodes
+    // will see them. Open CGs go to ONTOLOGY for network-wide discovery.
+    const defGraph = isCurated ? cgMetaGraph : ontologyGraph;
 
-    const cgMetaGraph = paranetMetaGraphUri(opts.id);
+    const quads: Quad[] = [
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_PARANET, graph: defGraph },
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.SCHEMA_NAME, object: `"${opts.name}"`, graph: defGraph },
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CREATOR, object: `did:dkg:agent:${this.peerId}`, graph: defGraph },
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CREATED_AT, object: `"${now}"`, graph: defGraph },
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_GOSSIP_TOPIC, object: `"${paranetPublishTopic(opts.id)}"`, graph: defGraph },
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_REPLICATION_POLICY, object: `"${opts.replicationPolicy ?? 'full'}"`, graph: defGraph },
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY, object: `"${isCurated || opts.private ? 'private' : 'public'}"`, graph: defGraph },
+    ];
 
     // Store registration status and curator in _meta
     quads.push(
       { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_REGISTRATION_STATUS, object: `"unregistered"`, graph: cgMetaGraph },
-      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CURATOR, object: `did:dkg:agent:${this.peerId}`, graph: cgMetaGraph },
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CURATOR, object: `did:dkg:agent:${opts.callerAgentAddress ?? this.defaultAgentAddress ?? this.peerId}`, graph: cgMetaGraph },
     );
 
     // Store peer allowlist for curated CGs (with validation)
@@ -2025,7 +2646,35 @@ export class DKGAgent {
       });
     }
 
-    // Store participant identity IDs for private CG access control (chain-based)
+    // Store agent allowlist (V10 agent identity model)
+    if (opts.allowedAgents && opts.allowedAgents.length > 0) {
+      const ethAddrRe = /^0x[0-9a-fA-F]{40}$/;
+      for (const addr of opts.allowedAgents) {
+        if (!ethAddrRe.test(addr)) {
+          throw new Error(`Invalid Ethereum address in allowedAgents: "${addr}".`);
+        }
+        quads.push({
+          subject: paranetUri,
+          predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
+          object: `"${addr}"`,
+          graph: cgMetaGraph,
+        });
+      }
+    }
+    // Auto-include creator in allowlist for curated/private CGs
+    if (isCurated || opts.private) {
+      const creatorAddr = opts.callerAgentAddress ?? this.defaultAgentAddress;
+      if (creatorAddr) {
+        quads.push({
+          subject: paranetUri,
+          predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
+          object: `"${creatorAddr}"`,
+          graph: cgMetaGraph,
+        });
+      }
+    }
+
+    // Store participant identity IDs for private CG access control (chain-based, legacy)
     const creatorIdentityId = await this.chain.getIdentityId();
     const participantIdentityIds = new Set<bigint>(opts.participantIdentityIds ?? []);
     if (creatorIdentityId > 0n) {
@@ -2039,23 +2688,38 @@ export class DKGAgent {
         graph: cgMetaGraph,
       });
     }
+    if (participantIdentityIds.size > 0 && typeof opts.requiredSignatures === 'number' && opts.requiredSignatures > 0) {
+      const reqSig = Math.floor(opts.requiredSignatures);
+      if (reqSig < 1) {
+        throw new Error(`requiredSignatures must be >= 1, got ${opts.requiredSignatures}`);
+      }
+      if (reqSig > participantIdentityIds.size) {
+        throw new Error(`requiredSignatures (${reqSig}) exceeds participant count (${participantIdentityIds.size})`);
+      }
+      quads.push({
+        subject: paranetUri,
+        predicate: `${DKG_ONTOLOGY.DKG_PARANET}RequiredSignatures`,
+        object: `"${reqSig}"`,
+        graph: cgMetaGraph,
+      });
+    }
 
     if (opts.description) {
       quads.push({
         subject: paranetUri,
         predicate: DKG_ONTOLOGY.SCHEMA_DESCRIPTION,
         object: `"${opts.description}"`,
-        graph: ontologyGraph,
+        graph: defGraph,
       });
     }
 
     // Provenance activity
     const activityUri = `did:dkg:activity:create-context-graph:${opts.id}:${Date.now()}`;
     quads.push(
-      { subject: paranetUri, predicate: DKG_ONTOLOGY.PROV_GENERATED_BY, object: activityUri, graph: ontologyGraph },
-      { subject: activityUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.PROV_ACTIVITY, graph: ontologyGraph },
-      { subject: activityUri, predicate: DKG_ONTOLOGY.PROV_ASSOCIATED_WITH, object: `did:dkg:agent:${this.peerId}`, graph: ontologyGraph },
-      { subject: activityUri, predicate: DKG_ONTOLOGY.PROV_ENDED_AT_TIME, object: `"${now}"`, graph: ontologyGraph },
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.PROV_GENERATED_BY, object: activityUri, graph: defGraph },
+      { subject: activityUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.PROV_ACTIVITY, graph: defGraph },
+      { subject: activityUri, predicate: DKG_ONTOLOGY.PROV_ASSOCIATED_WITH, object: `did:dkg:agent:${this.peerId}`, graph: defGraph },
+      { subject: activityUri, predicate: DKG_ONTOLOGY.PROV_ENDED_AT_TIME, object: `"${now}"`, graph: defGraph },
     );
 
     await this.store.insert(quads);
@@ -2065,39 +2729,42 @@ export class DKGAgent {
       name: opts.name,
       subscribed: !opts.private,
       synced: true,
+      metaSynced: true,
     });
 
     if (!opts.private) {
       this.subscribeToContextGraph(opts.id);
 
-      // Broadcast only ontology quads via gossip. Security-critical _meta state
-      // (allowlist, registration status, curator) propagates via the authenticated
-      // sync protocol — discovered CGs now enter sync scope automatically.
-      const ontologyTopic = paranetPublishTopic(SYSTEM_PARANETS.ONTOLOGY);
-      const broadcastQuads = quads.filter(q => q.graph === ontologyGraph);
-      const nquads = broadcastQuads.map(q => {
-        const obj = q.object.startsWith('"') ? q.object : `<${q.object}>`;
-        return `<${q.subject}> <${q.predicate}> ${obj} <${q.graph}> .`;
-      }).join('\n');
+      // Curated CGs: definition lives in _meta, NOT in ONTOLOGY. Do not
+      // broadcast to the network — only invited nodes will discover it via
+      // the explicit subscribe→sync flow.
+      if (!isCurated) {
+        const ontologyTopic = paranetPublishTopic(SYSTEM_PARANETS.ONTOLOGY);
+        const broadcastQuads = quads.filter(q => q.graph === ontologyGraph);
+        const nquads = broadcastQuads.map(q => {
+          const obj = q.object.startsWith('"') ? q.object : `<${q.object}>`;
+          return `<${q.subject}> <${q.predicate}> ${obj} <${q.graph}> .`;
+        }).join('\n');
 
-      const msg = encodePublishRequest({
-        ual: `did:dkg:context-graph:${opts.id}`,
-        nquads: new TextEncoder().encode(nquads),
-        paranetId: SYSTEM_PARANETS.ONTOLOGY,
-        kas: [],
-        publisherIdentity: this.wallet.keypair.publicKey,
-        publisherAddress: '',
-        startKAId: 0,
-        endKAId: 0,
-        chainId: '',
-        publisherSignatureR: new Uint8Array(0),
-        publisherSignatureVs: new Uint8Array(0),
-      });
+        const msg = encodePublishRequest({
+          ual: `did:dkg:context-graph:${opts.id}`,
+          nquads: new TextEncoder().encode(nquads),
+          paranetId: SYSTEM_PARANETS.ONTOLOGY,
+          kas: [],
+          publisherIdentity: this.wallet.keypair.publicKey,
+          publisherAddress: '',
+          startKAId: 0,
+          endKAId: 0,
+          chainId: '',
+          publisherSignatureR: new Uint8Array(0),
+          publisherSignatureVs: new Uint8Array(0),
+        });
 
-      try {
-        await this.gossip.publish(ontologyTopic, msg);
-      } catch {
-        // No peers subscribed — ok for now
+        try {
+          await this.gossip.publish(ontologyTopic, msg);
+        } catch {
+          // No peers subscribed — ok for now
+        }
       }
     }
   }
@@ -2140,7 +2807,7 @@ export class DKGAgent {
 
     // Check if already registered
     const cgMetaGraph = paranetMetaGraphUri(id);
-    const paranetUri = paranetDataGraphUri(id);
+    const paranetUri = `did:dkg:context-graph:${id}`;
     const statusResult = await this.store.query(
       `SELECT ?status WHERE { GRAPH <${cgMetaGraph}> { <${paranetUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> ?status } } LIMIT 1`,
     );
@@ -2149,40 +2816,106 @@ export class DKGAgent {
       throw new Error(`Context graph "${id}" is already registered on-chain${existingOnChainId ? ` (${existingOnChainId})` : ''}`);
     }
 
-    // Read existing description and access policy from ontology so we
-    // preserve locally-configured values on registration.
+    // Read existing description and access policy. Curated CGs store
+    // definition in _meta rather than ONTOLOGY, so check both locations.
     const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
     const descResult = await this.store.query(
-      `SELECT ?desc WHERE { GRAPH <${ontologyGraph}> { <${paranetUri}> <${DKG_ONTOLOGY.SCHEMA_DESCRIPTION}> ?desc } } LIMIT 1`,
+      `SELECT ?desc WHERE {
+        { GRAPH <${ontologyGraph}> { <${paranetUri}> <${DKG_ONTOLOGY.SCHEMA_DESCRIPTION}> ?desc } }
+        UNION
+        { GRAPH <${cgMetaGraph}> { <${paranetUri}> <${DKG_ONTOLOGY.SCHEMA_DESCRIPTION}> ?desc } }
+      } LIMIT 1`,
     );
     const description = descResult.type === 'bindings' ? descResult.bindings[0]?.['desc']?.replace(/^"|"$/g, '') : undefined;
 
     let resolvedAccessPolicy = opts?.accessPolicy;
     if (resolvedAccessPolicy === undefined) {
       const apResult = await this.store.query(
-        `SELECT ?ap WHERE { GRAPH <${ontologyGraph}> { <${paranetUri}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?ap } } LIMIT 1`,
+        `SELECT ?ap WHERE {
+          { GRAPH <${ontologyGraph}> { <${paranetUri}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?ap } }
+          UNION
+          { GRAPH <${cgMetaGraph}> { <${paranetUri}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?ap } }
+        } LIMIT 1`,
       );
       const apValue = apResult.type === 'bindings' ? apResult.bindings[0]?.['ap']?.replace(/^"|"$/g, '') : undefined;
       resolvedAccessPolicy = apValue === 'private' ? 1 : 0;
+
+      // A CG created with allowedPeers but no explicit accessPolicy stores
+      // "public" in the ontology graph. Detect the allowlist and promote to
+      // private so the on-chain policy matches the curator's intent.
+      if (resolvedAccessPolicy === 0) {
+        const peers = await this.getContextGraphAllowedPeers(id);
+        if (peers !== null && peers.length > 0) {
+          resolvedAccessPolicy = 1;
+        }
+      }
     }
 
-    let onChainId: string;
-    try {
-      const result = await this.chain.createContextGraph({
-        name: id,
-        description,
-        accessPolicy: resolvedAccessPolicy,
-        revealOnChain: opts?.revealOnChain,
+    const participantsResult = await this.store.query(
+      `SELECT ?identityId WHERE { GRAPH <${cgMetaGraph}> { <${paranetUri}> <${DKG_ONTOLOGY.DKG_PARTICIPANT_IDENTITY_ID}> ?identityId } }`,
+    );
+    const participantIdentityIds = participantsResult.type === 'bindings'
+      ? participantsResult.bindings
+          .map((binding) => binding['identityId']?.replace(/^"|"$/g, ''))
+          .filter((value): value is string => !!value)
+          .map((value) => BigInt(value))
+          .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+          .filter((value, index, arr) => index === 0 || value !== arr[index - 1])
+      : [];
+
+    const requiredSignaturesResult = await this.store.query(
+      `SELECT ?required WHERE { GRAPH <${cgMetaGraph}> { <${paranetUri}> <${DKG_ONTOLOGY.DKG_PARANET}RequiredSignatures> ?required } } LIMIT 1`,
+    );
+    const storedRequiredSignatures = requiredSignaturesResult.type === 'bindings'
+      ? Number(requiredSignaturesResult.bindings[0]?.['required']?.replace(/^"|"$/g, ''))
+      : NaN;
+
+    // Check if already registered on-chain (prevents duplicate minting)
+    const existingOnChainId = await this.getContextGraphOnChainId(id);
+    if (existingOnChainId) {
+      this.log.info(ctx, `Context graph "${id}" already has on-chain ID ${existingOnChainId} — skipping chain call`);
+      await this.store.deleteByPattern({
+        graph: cgMetaGraph,
+        subject: paranetUri,
+        predicate: DKG_ONTOLOGY.DKG_REGISTRATION_STATUS,
       });
-      onChainId = result.contextGraphId ?? ethers.keccak256(ethers.toUtf8Bytes(id));
-    } catch (err) {
-      const errorName = enrichEvmError(err);
-      const msg = err instanceof Error ? err.message : String(err);
-      if (errorName === 'ContextGraphAlreadyExists' || errorName === 'ParanetAlreadyExists' || msg.includes('already exists')) {
-        onChainId = ethers.keccak256(ethers.toUtf8Bytes(id));
-        this.log.info(ctx, `Context graph "${id}" already on-chain (${onChainId.slice(0, 16)}…) — updating local status`);
-      } else {
-        throw err;
+      await this.store.insert([
+        { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_REGISTRATION_STATUS, object: `"registered"`, graph: cgMetaGraph },
+      ]);
+      return { onChainId: existingOnChainId, txHash: undefined };
+    }
+
+    // Use V10 participant-based registration only when explicitly configured
+    // with a RequiredSignatures threshold or multiple participants beyond the
+    // creator. A single creator identity is NOT sufficient — that's the
+    // default for every CG and should use legacy registration.
+    const useV10MultiSig = Number.isInteger(storedRequiredSignatures) && storedRequiredSignatures > 0;
+
+    let onChainId: string;
+    if (useV10MultiSig && participantIdentityIds.length > 0) {
+      const result = await this.registerContextGraphOnChain({
+        participantIdentityIds,
+        requiredSignatures: storedRequiredSignatures,
+      });
+      onChainId = result.contextGraphId.toString();
+    } else {
+      try {
+        const result = await this.chain.createContextGraph({
+          name: id,
+          description,
+          accessPolicy: resolvedAccessPolicy,
+          revealOnChain: opts?.revealOnChain,
+        });
+        onChainId = result.contextGraphId ?? ethers.keccak256(ethers.toUtf8Bytes(id));
+      } catch (err) {
+        const errorName = enrichEvmError(err);
+        const msg = err instanceof Error ? err.message : String(err);
+        if (errorName === 'ContextGraphAlreadyExists' || errorName === 'ParanetAlreadyExists' || msg.includes('already exists')) {
+          onChainId = ethers.keccak256(ethers.toUtf8Bytes(id));
+          this.log.info(ctx, `Context graph "${id}" already on-chain (${onChainId.slice(0, 16)}…) — updating local status`);
+        } else {
+          throw err;
+        }
       }
     }
 
@@ -2230,8 +2963,8 @@ export class DKGAgent {
         publisherSignatureVs: new Uint8Array(0),
       });
       await this.gossip.publish(ontologyTopic, regMsg);
-    } catch {
-      // Peers may not be subscribed yet
+    } catch (err) {
+      this.log.debug(ctx, `Registration gossip broadcast failed (peers may not be subscribed yet): ${err instanceof Error ? err.message : String(err)}`);
     }
 
     return { onChainId };
@@ -2274,14 +3007,14 @@ export class DKGAgent {
     }
 
     const cgMetaGraph = paranetMetaGraphUri(contextGraphId);
-    const paranetUri = paranetDataGraphUri(contextGraphId);
+    const paranetUri = `did:dkg:context-graph:${contextGraphId}`;
     const escapedPeerId = escapeSparqlLiteral(peerId);
 
-    // If this is the first allowlist entry (CG was open), also add our own
-    // peer ID so the curator doesn't lock themselves out.
     const existingAllowlist = await this.getContextGraphAllowedPeers(contextGraphId);
     const quadsToInsert: Quad[] = [];
 
+    // If this is the first allowlist entry (CG was open), also add our own
+    // peer ID so the curator doesn't lock themselves out.
     if (existingAllowlist === null || existingAllowlist.length === 0) {
       const curatorPeerId = escapeSparqlLiteral(this.peerId);
       quadsToInsert.push({
@@ -2290,6 +3023,12 @@ export class DKGAgent {
         object: `"${curatorPeerId}"`,
         graph: cgMetaGraph,
       });
+    }
+
+    // Skip if already in the allowlist (idempotent)
+    if (existingAllowlist?.includes(peerId)) {
+      this.log.info(ctx, `Peer ${peerId} already in allowlist for "${contextGraphId}" — skipping`);
+      return;
     }
 
     quadsToInsert.push({
@@ -2308,15 +3047,420 @@ export class DKGAgent {
   }
 
   /**
+   * Invite an agent (by Ethereum address) to join an existing context graph.
+   * Adds the agent to the local allowlist in `_meta`.
+   */
+  async inviteAgentToContextGraph(contextGraphId: string, agentAddress: string, callerAgentAddress?: string): Promise<void> {
+    const ctx = createOperationContext('system');
+    const ethAddrRe = /^0x[0-9a-fA-F]{40}$/;
+    if (!ethAddrRe.test(agentAddress)) {
+      throw new Error(`Invalid Ethereum address: "${agentAddress}".`);
+    }
+
+    const exists = await this.contextGraphExists(contextGraphId);
+    if (!exists) {
+      throw new Error(`Context graph "${contextGraphId}" does not exist`);
+    }
+
+    const owner = await this.getContextGraphOwner(contextGraphId);
+    if (!owner) {
+      throw new Error(
+        `Context graph "${contextGraphId}" has no known creator. ` +
+        `Wait for sync to complete or create it locally first.`,
+      );
+    }
+    this.assertCallerIsOwner(owner, callerAgentAddress, 'manage invitations');
+
+    const cgMetaGraph = paranetMetaGraphUri(contextGraphId);
+    const paranetUri = paranetDataGraphUri(contextGraphId);
+    const quadsToInsert: Quad[] = [];
+
+    // If first allowlist entry, also add our own agent so the curator doesn't lock themselves out
+    const existingParticipants = await this.getPrivateContextGraphParticipants(contextGraphId);
+    if ((!existingParticipants || existingParticipants.length === 0) && this.defaultAgentAddress) {
+      quadsToInsert.push({
+        subject: paranetUri,
+        predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
+        object: `"${this.defaultAgentAddress}"`,
+        graph: cgMetaGraph,
+      });
+    }
+
+    quadsToInsert.push({
+      subject: paranetUri,
+      predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
+      object: `"${agentAddress}"`,
+      graph: cgMetaGraph,
+    });
+
+    await this.store.insert(quadsToInsert);
+
+    this.log.info(ctx, `Invited agent ${agentAddress} to context graph "${contextGraphId}"`);
+  }
+
+  /**
+   * Remove an agent from a context graph's allowlist.
+   */
+  async removeAgentFromContextGraph(contextGraphId: string, agentAddress: string, callerAgentAddress?: string): Promise<void> {
+    const ctx = createOperationContext('system');
+    const ethAddrRe = /^0x[0-9a-fA-F]{40}$/;
+    if (!ethAddrRe.test(agentAddress)) {
+      throw new Error(`Invalid Ethereum address: "${agentAddress}".`);
+    }
+
+    const exists = await this.contextGraphExists(contextGraphId);
+    if (!exists) {
+      throw new Error(`Context graph "${contextGraphId}" does not exist`);
+    }
+
+    const owner = await this.getContextGraphOwner(contextGraphId);
+    if (!owner) {
+      throw new Error(
+        `Context graph "${contextGraphId}" has no known creator. ` +
+        `Wait for sync to complete or create it locally first.`,
+      );
+    }
+    this.assertCallerIsOwner(owner, callerAgentAddress, 'manage participants');
+
+    const cgMetaGraph = paranetMetaGraphUri(contextGraphId);
+    const paranetUri = paranetDataGraphUri(contextGraphId);
+
+    await this.store.deleteByPattern({
+      graph: cgMetaGraph,
+      subject: paranetUri,
+      predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
+      object: `"${agentAddress}"`,
+    });
+
+    this.log.info(ctx, `Removed agent ${agentAddress} from context graph "${contextGraphId}"`);
+  }
+
+  /**
+   * List allowed agents for a context graph.
+   */
+  async getContextGraphAllowedAgents(contextGraphId: string): Promise<string[]> {
+    const cgMetaGraph = paranetMetaGraphUri(contextGraphId);
+    const paranetUri = paranetDataGraphUri(contextGraphId);
+    const result = await this.store.query(
+      `SELECT ?agent WHERE {
+        GRAPH <${cgMetaGraph}> {
+          <${paranetUri}> <${DKG_ONTOLOGY.DKG_ALLOWED_AGENT}> ?agent
+        }
+      }`,
+    );
+    if (result.type !== 'bindings') return [];
+    return result.bindings
+      .map((row) => (row as Record<string, string>)['agent'])
+      .filter((v): v is string => typeof v === 'string')
+      .map((v) => v.replace(/^"|"$/g, ''));
+  }
+
+  // ---------------------------------------------------------------------------
+  // Join Request — signed request / approval flow for curated CGs
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Create a signed join request for a curated context graph.
+   * The requesting agent signs `keccak256(contextGraphId ‖ agentAddress ‖ timestamp)`
+   * with its custodial wallet, producing a verifiable proof of identity.
+   */
+  async signJoinRequest(
+    contextGraphId: string,
+    agentAddress?: string,
+  ): Promise<{ contextGraphId: string; agentAddress: string; timestamp: number; signature: string }> {
+    const addr = agentAddress ?? this.defaultAgentAddress;
+    if (!addr) throw new Error('No agent address available');
+
+    const agent = this.localAgents.get(addr);
+    if (!agent?.privateKey) {
+      throw new Error(`No private key for agent ${addr} — self-sovereign agents must sign externally`);
+    }
+
+    const timestamp = Date.now();
+    const digest = ethers.solidityPackedKeccak256(
+      ['string', 'string', 'uint256'],
+      [contextGraphId, addr.toLowerCase(), timestamp],
+    );
+    const wallet = new ethers.Wallet(agent.privateKey);
+    const signature = await wallet.signMessage(ethers.getBytes(digest));
+    return { contextGraphId, agentAddress: addr, timestamp, signature };
+  }
+
+  /**
+   * Verify a signed join request by recovering the signer address.
+   * Returns the recovered Ethereum address if valid, throws on failure.
+   */
+  verifyJoinRequest(
+    contextGraphId: string,
+    agentAddress: string,
+    timestamp: number,
+    signature: string,
+  ): string {
+    const MAX_AGE_MS = 30 * 60 * 1000; // 30 minutes
+    if (Date.now() - timestamp > MAX_AGE_MS) {
+      throw new Error('Join request expired');
+    }
+    const digest = ethers.solidityPackedKeccak256(
+      ['string', 'string', 'uint256'],
+      [contextGraphId, agentAddress.toLowerCase(), timestamp],
+    );
+    const recovered = ethers.verifyMessage(ethers.getBytes(digest), signature);
+    if (recovered.toLowerCase() !== agentAddress.toLowerCase()) {
+      throw new Error(`Signature mismatch: expected ${agentAddress}, recovered ${recovered}`);
+    }
+    return recovered;
+  }
+
+  /**
+   * Store a pending join request in the CG's _meta graph.
+   * The curator can later approve or reject it.
+   */
+  async storePendingJoinRequest(
+    contextGraphId: string,
+    agentAddress: string,
+    signature: string,
+    timestamp: number,
+    agentName?: string,
+  ): Promise<void> {
+    const cgMetaGraph = paranetMetaGraphUri(contextGraphId);
+    const requestUri = `did:dkg:join-request:${contextGraphId}:${agentAddress.toLowerCase()}`;
+    const DKG = 'https://dkg.network/ontology#';
+    const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+    const SCHEMA_NAME = 'https://schema.org/name';
+
+    // Remove any prior pending request from this agent
+    await this.store.deleteByPattern({ graph: cgMetaGraph, subject: requestUri });
+
+    const quads: Quad[] = [
+      { subject: requestUri, predicate: RDF_TYPE, object: `${DKG}JoinRequest`, graph: cgMetaGraph },
+      { subject: requestUri, predicate: `${DKG}agentAddress`, object: `"${agentAddress}"`, graph: cgMetaGraph },
+      { subject: requestUri, predicate: `${DKG}contextGraphId`, object: `"${contextGraphId}"`, graph: cgMetaGraph },
+      { subject: requestUri, predicate: `${DKG}signature`, object: `"${signature}"`, graph: cgMetaGraph },
+      { subject: requestUri, predicate: `${DKG}requestTimestamp`, object: `"${timestamp}"`, graph: cgMetaGraph },
+      { subject: requestUri, predicate: `${DKG}requestStatus`, object: `"pending"`, graph: cgMetaGraph },
+    ];
+    if (agentName) {
+      quads.push({ subject: requestUri, predicate: SCHEMA_NAME, object: `"${agentName}"`, graph: cgMetaGraph });
+    }
+    await this.store.insert(quads);
+    const ctx = createOperationContext('system');
+    this.log.info(ctx, `Stored pending join request from ${agentAddress} for "${contextGraphId}"`);
+  }
+
+  /**
+   * List pending join requests for a context graph.
+   */
+  async listPendingJoinRequests(
+    contextGraphId: string,
+  ): Promise<Array<{ agentAddress: string; name?: string; signature: string; timestamp: number; status: string }>> {
+    const cgMetaGraph = paranetMetaGraphUri(contextGraphId);
+    const DKG = 'https://dkg.network/ontology#';
+    const result = await this.store.query(
+      `SELECT ?addr ?name ?sig ?ts ?status WHERE {
+        GRAPH <${cgMetaGraph}> {
+          ?req a <${DKG}JoinRequest> ;
+               <${DKG}agentAddress> ?addr ;
+               <${DKG}signature> ?sig ;
+               <${DKG}requestTimestamp> ?ts ;
+               <${DKG}requestStatus> ?status .
+          OPTIONAL { ?req <https://schema.org/name> ?name }
+        }
+      }`,
+    );
+    if (result.type !== 'bindings') return [];
+    const strip = (v?: string) => v?.replace(/^"|"$/g, '').replace(/"?\^\^.*$/, '') ?? '';
+    return result.bindings.map((row) => ({
+      agentAddress: strip(row['addr']),
+      name: row['name'] ? strip(row['name']) : undefined,
+      signature: strip(row['sig']),
+      timestamp: parseInt(strip(row['ts']), 10) || 0,
+      status: strip(row['status']),
+    })).filter((r) => r.status === 'pending');
+  }
+
+  /**
+   * Approve a pending join request: verify the signature, add the agent
+   * to the allowlist, and mark the request as approved.
+   */
+  async approveJoinRequest(contextGraphId: string, agentAddress: string, callerAgentAddress?: string): Promise<void> {
+    const cgMetaGraph = paranetMetaGraphUri(contextGraphId);
+    const requestUri = `did:dkg:join-request:${contextGraphId}:${agentAddress.toLowerCase()}`;
+    const DKG = 'https://dkg.network/ontology#';
+
+    // Fetch the stored request to verify the signature
+    const result = await this.store.query(
+      `SELECT ?sig ?ts WHERE {
+        GRAPH <${cgMetaGraph}> {
+          <${requestUri}> <${DKG}signature> ?sig ;
+                          <${DKG}requestTimestamp> ?ts ;
+                          <${DKG}requestStatus> "pending" .
+        }
+      } LIMIT 1`,
+    );
+    if (result.type !== 'bindings' || result.bindings.length === 0) {
+      throw new Error(`No pending join request found from ${agentAddress}`);
+    }
+    const strip = (v?: string) => v?.replace(/^"|"$/g, '').replace(/"?\^\^.*$/, '') ?? '';
+    const signature = strip(result.bindings[0]['sig']);
+    const timestamp = parseInt(strip(result.bindings[0]['ts']), 10) || 0;
+
+    // Verify the signature (30-minute expiry is relaxed for approvals — curator may take time)
+    const digest = ethers.solidityPackedKeccak256(
+      ['string', 'string', 'uint256'],
+      [contextGraphId, agentAddress.toLowerCase(), timestamp],
+    );
+    const recovered = ethers.verifyMessage(ethers.getBytes(digest), signature);
+    if (recovered.toLowerCase() !== agentAddress.toLowerCase()) {
+      throw new Error(`Signature verification failed: expected ${agentAddress}, recovered ${recovered}`);
+    }
+
+    // Add agent to allowlist
+    await this.inviteAgentToContextGraph(contextGraphId, agentAddress, callerAgentAddress);
+
+    // Mark request as approved
+    await this.store.deleteByPattern({
+      graph: cgMetaGraph,
+      subject: requestUri,
+      predicate: `${DKG}requestStatus`,
+    });
+    await this.store.insert([{
+      subject: requestUri,
+      predicate: `${DKG}requestStatus`,
+      object: `"approved"`,
+      graph: cgMetaGraph,
+    }]);
+
+    const ctx = createOperationContext('system');
+    this.log.info(ctx, `Approved join request from ${agentAddress} for "${contextGraphId}"`);
+
+    // Notify the requester via P2P so they can auto-subscribe
+    this.notifyJoinApproval(contextGraphId, agentAddress).catch((err) => {
+      this.log.warn(ctx, `Failed to notify ${agentAddress} of approval: ${err instanceof Error ? err.message : err}`);
+    });
+  }
+
+  /**
+   * Send a P2P notification to the approved agent so their node
+   * automatically retries the subscription.
+   */
+  private async notifyJoinApproval(contextGraphId: string, agentAddress: string): Promise<void> {
+    const payload = JSON.stringify({
+      type: 'join-approved',
+      contextGraphId,
+      agentAddress,
+    });
+    const payloadBytes = new TextEncoder().encode(payload);
+    const ctx = createOperationContext('system');
+
+    // Broadcast to all connected peers — each peer's handler checks the
+    // agentAddress and only the matching node auto-subscribes. This avoids
+    // relying on the agent registry which may be incomplete.
+    const peers = this.node.libp2p.getPeers();
+    let delivered = 0;
+    for (const pid of peers) {
+      const remotePeerId = pid.toString();
+      if (remotePeerId === this.peerId) continue;
+      try {
+        await this.router.send(remotePeerId, PROTOCOL_JOIN_REQUEST, payloadBytes, 5000);
+        delivered++;
+      } catch {
+        // Peer doesn't support protocol or timeout — skip
+      }
+    }
+    if (delivered === 0) {
+      this.log.warn(ctx, `Could not deliver join-approval notification for "${contextGraphId}" to ${agentAddress} — no reachable peers`);
+    } else {
+      this.log.info(ctx, `Broadcasted join-approval for "${contextGraphId}" (${agentAddress}) to ${delivered} peer(s)`);
+    }
+  }
+
+  /**
+   * Reject a pending join request.
+   */
+  async rejectJoinRequest(contextGraphId: string, agentAddress: string): Promise<void> {
+    const cgMetaGraph = paranetMetaGraphUri(contextGraphId);
+    const requestUri = `did:dkg:join-request:${contextGraphId}:${agentAddress.toLowerCase()}`;
+    const DKG = 'https://dkg.network/ontology#';
+
+    await this.store.deleteByPattern({
+      graph: cgMetaGraph,
+      subject: requestUri,
+      predicate: `${DKG}requestStatus`,
+    });
+    await this.store.insert([{
+      subject: requestUri,
+      predicate: `${DKG}requestStatus`,
+      object: `"rejected"`,
+      graph: cgMetaGraph,
+    }]);
+
+    const ctx = createOperationContext('system');
+    this.log.info(ctx, `Rejected join request from ${agentAddress} for "${contextGraphId}"`);
+  }
+
+  /**
+   * Forward a signed join request to all connected peers via P2P.
+   * Used by the requesting node to deliver the request to the curator.
+   * Returns the number of peers that accepted the request.
+   */
+  async forwardJoinRequest(
+    contextGraphId: string,
+    agentAddress: string,
+    signature: string,
+    timestamp: number,
+    agentName?: string,
+  ): Promise<{ delivered: number; errors: string[] }> {
+    const payload = JSON.stringify({ contextGraphId, agentAddress, signature, timestamp, agentName });
+    const payloadBytes = new TextEncoder().encode(payload);
+    const peers = this.node.libp2p.getPeers();
+    let delivered = 0;
+    const errors: string[] = [];
+
+    for (const pid of peers) {
+      const remotePeerId = pid.toString();
+      if (remotePeerId === this.peerId) continue;
+      try {
+        const responseBytes = await this.router.send(remotePeerId, PROTOCOL_JOIN_REQUEST, payloadBytes, 5000);
+        const response = JSON.parse(new TextDecoder().decode(responseBytes));
+        if (response.ok) {
+          delivered++;
+        } else if (response.error !== 'unknown CG') {
+          errors.push(`${remotePeerId.slice(-8)}: ${response.error}`);
+        }
+      } catch {
+        // Peer doesn't support protocol or timeout — skip
+      }
+    }
+
+    const ctx = createOperationContext('system');
+    this.log.info(ctx, `Forwarded join request for "${contextGraphId}" from ${agentAddress}: ${delivered} curator(s) received`);
+    return { delivered, errors };
+  }
+
+  /**
    * Check whether a context graph has been registered on-chain.
    */
   async isContextGraphRegistered(contextGraphId: string): Promise<boolean> {
     const cgMetaGraph = paranetMetaGraphUri(contextGraphId);
-    const paranetUri = paranetDataGraphUri(contextGraphId);
+    const paranetUri = `did:dkg:context-graph:${contextGraphId}`;
     const result = await this.store.query(
       `SELECT ?status WHERE { GRAPH <${cgMetaGraph}> { <${paranetUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> ?status } } LIMIT 1`,
     );
     return result.type === 'bindings' && result.bindings[0]?.['status']?.replace(/^"|"$/g, '') === 'registered';
+  }
+
+  async getContextGraphOnChainId(contextGraphId: string): Promise<string | null> {
+    const subscribed = this.subscribedContextGraphs.get(contextGraphId)?.onChainId;
+    if (subscribed) return subscribed;
+
+    const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
+    const paranetUri = `did:dkg:context-graph:${contextGraphId}`;
+    const result = await this.store.query(
+      `SELECT ?id WHERE { GRAPH <${ontologyGraph}> { <${paranetUri}> <${DKG_ONTOLOGY.DKG_PARANET}OnChainId> ?id } } LIMIT 1`,
+    );
+    if (result.type !== 'bindings' || result.bindings.length === 0) return null;
+    const value = result.bindings[0]?.['id'];
+    return typeof value === 'string' ? value.replace(/^"|"$/g, '') : null;
   }
 
   /**
@@ -2478,11 +3622,16 @@ export class DKGAgent {
    * If the context graph already exists locally, just ensures GossipSub subscription
    * and registry entry. If not, inserts definition triples. No on-chain registration
    * — use {@link registerContextGraph} for that.
+   *
+   * For curated CGs (detected by access policy in existing triples, or by the
+   * caller passing `curated: true`), definition triples are written to the CG's
+   * own `_meta` graph — never to ONTOLOGY — so they don't leak to the network.
    */
   async ensureContextGraphLocal(opts: {
     id: string;
     name: string;
     description?: string;
+    curated?: boolean;
   }): Promise<void> {
     const ctx = createOperationContext('system');
 
@@ -2493,6 +3642,7 @@ export class DKGAgent {
         name: opts.name,
         subscribed: true,
         synced: true,
+        metaSynced: true,
         onChainId: this.subscribedContextGraphs.get(opts.id)?.onChainId,
       });
       return;
@@ -2504,24 +3654,34 @@ export class DKGAgent {
     const cgMetaGraph = paranetMetaGraphUri(opts.id);
     const now = new Date().toISOString();
 
-    // Bootstrap the minimal ontology definition. Do NOT write dkg:creator
-    // here — this is a local helper for both owned and subscribed CGs. The
-    // authoritative creator triple is written by createContextGraph() for
-    // CGs we own, and arrives via sync for CGs we subscribe to.
+    // Curated CGs write definition triples to _meta so they stay invisible
+    // to other nodes that sync ONTOLOGY. Open CGs go to ONTOLOGY for
+    // network-wide discovery.
+    const defGraph = opts.curated ? cgMetaGraph : ontologyGraph;
+
     const quads: Quad[] = [
-      { subject: paranetUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_PARANET, graph: ontologyGraph },
-      { subject: paranetUri, predicate: DKG_ONTOLOGY.SCHEMA_NAME, object: `"${opts.name}"`, graph: ontologyGraph },
-      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CREATED_AT, object: `"${now}"`, graph: ontologyGraph },
-      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_GOSSIP_TOPIC, object: `"${paranetPublishTopic(opts.id)}"`, graph: ontologyGraph },
-      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_REPLICATION_POLICY, object: `"full"`, graph: ontologyGraph },
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_PARANET, graph: defGraph },
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.SCHEMA_NAME, object: `"${opts.name}"`, graph: defGraph },
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CREATED_AT, object: `"${now}"`, graph: defGraph },
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_GOSSIP_TOPIC, object: `"${paranetPublishTopic(opts.id)}"`, graph: defGraph },
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_REPLICATION_POLICY, object: `"full"`, graph: defGraph },
     ];
+
+    if (opts.curated) {
+      quads.push({
+        subject: paranetUri,
+        predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+        object: `"private"`,
+        graph: defGraph,
+      });
+    }
 
     if (opts.description) {
       quads.push({
         subject: paranetUri,
         predicate: DKG_ONTOLOGY.SCHEMA_DESCRIPTION,
         object: `"${opts.description}"`,
-        graph: ontologyGraph,
+        graph: defGraph,
       });
     }
 
@@ -2533,14 +3693,10 @@ export class DKGAgent {
       name: opts.name,
       subscribed: true,
       synced: true,
+      metaSynced: true,
     });
 
-    this.log.info(ctx, `Ensured context graph "${opts.id}" locally`);
-
-    // Do NOT broadcast ontology quads from ensureContextGraphLocal —
-    // this is a local bootstrapping helper. The real creator broadcasts
-    // via createContextGraph(). Broadcasting here would falsely claim
-    // dkg:creator = self for CGs we're merely subscribing to.
+    this.log.info(ctx, `Ensured context graph "${opts.id}" locally (${opts.curated ? 'curated' : 'open'})`);
   }
 
   // ── ENDORSE ─���────────────────────────────────────────────────────────
@@ -2681,8 +3837,6 @@ export class DKGAgent {
     }
 
     // 6. Resolve identity IDs for each approver before on-chain submission.
-    // Each signature must be paired with its signer's own identityId.
-    // Start with the proposer's own signature (already signed at step 4).
     const resolvedSignatures: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }> = [
       {
         identityId: this.identityId,
@@ -2694,10 +3848,6 @@ export class DKGAgent {
       let id = a.identityId;
       if ((!id || id === 0n) && typeof (this.chain as any).getIdentityIdForAddress === 'function') {
         try { id = await (this.chain as any).getIdentityIdForAddress(a.approverAddress); } catch { /* use 0n */ }
-      }
-      if (!id || id === 0n) {
-        this.log.warn(ctx, `Cannot resolve identityId for approver ${a.approverAddress} — skipping`);
-        continue;
       }
       resolvedSignatures.push({ identityId: id, r: a.signatureR, vs: a.signatureVS });
     }
@@ -3287,9 +4437,9 @@ export class DKGAgent {
    * in-memory state that may not have been persisted yet.
    */
   async contextGraphExists(contextGraphId: string): Promise<boolean> {
-    const contextGraphUri = paranetDataGraphUri(contextGraphId);
+    const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
     const result = await this.store.query(
-      `SELECT ?p WHERE {
+      `SELECT ?g WHERE {
         GRAPH ?g { <${contextGraphUri}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_PARANET}> }
       } LIMIT 1`,
     );
@@ -3347,7 +4497,16 @@ export class DKGAgent {
     responderPeerId: string,
     phase: 'data' | 'meta' = 'data',
   ): Promise<Uint8Array> {
-    if (!(await this.isPrivateContextGraph(contextGraphId))) {
+    const isPrivate = await this.isPrivateContextGraph(contextGraphId);
+
+    // If we don't have any local data for this CG yet (e.g. just subscribed
+    // via invite), we can't determine the access policy. Send an
+    // authenticated request so the remote peer can verify our identity
+    // against its allowlist.
+    const hasLocalData = this.subscribedContextGraphs.get(contextGraphId)?.synced === true;
+    const needsAuth = isPrivate || !hasLocalData;
+
+    if (!needsAuth) {
       const prefix = includeSharedMemory ? `workspace:${contextGraphId}` : contextGraphId;
       const phaseSuffix = phase === 'meta' ? '|meta' : '';
       return new TextEncoder().encode(`${prefix}|${offset}|${limit}${phaseSuffix}`);
@@ -3478,7 +4637,11 @@ export class DKGAgent {
     }
 
     const participants = await this.getPrivateContextGraphParticipants(request.contextGraphId);
-    const allowed = participants?.some((id) => id === requesterIdentityId) ?? false;
+    // Check against both agent address (V10) and identity ID (legacy)
+    const allowed = participants?.some((p) =>
+      p.toLowerCase() === recoveredAddress.toLowerCase() ||
+      p === String(requesterIdentityId),
+    ) ?? false;
     if (allowed) {
       this.seenPrivateSyncRequestIds.set(request.requestId, now);
     }
@@ -3496,28 +4659,69 @@ export class DKGAgent {
     }
 
     const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
-    const contextGraphUri = paranetDataGraphUri(contextGraphId);
+    const cgMetaGraph = paranetMetaGraphUri(contextGraphId);
+    const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
     const result = await this.store.query(
       `SELECT ?policy WHERE {
-        GRAPH <${ontologyGraph}> {
-          <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?policy
+        {
+          GRAPH <${ontologyGraph}> {
+            <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?policy
+          }
+        } UNION {
+          GRAPH <${cgMetaGraph}> {
+            <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?policy
+          }
         }
       } LIMIT 1`,
     );
 
-    return result.type === 'bindings' && result.bindings[0]?.['policy'] === '"private"';
-  }
-
-  private async getPrivateContextGraphParticipants(contextGraphId: string): Promise<bigint[] | null> {
-    const localParticipants = this.subscribedContextGraphs.get(contextGraphId)?.participantIdentityIds;
-    if (localParticipants && localParticipants.length > 0) {
-      return localParticipants;
+    if (result.type === 'bindings' && result.bindings[0]?.['policy'] === '"private"') {
+      return true;
     }
 
-    const contextGraphUri = paranetDataGraphUri(contextGraphId);
+    // Also treat CGs with an allowlist as private, even if no explicit
+    // access_policy triple exists (e.g. allowedAgents were set without
+    // accessPolicy=1).
+    const allowlistResult = await this.store.query(
+      `ASK WHERE {
+        GRAPH <${cgMetaGraph}> {
+          <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_ALLOWED_AGENT}> ?agent
+        }
+      }`,
+    );
+    if (allowlistResult.type === 'boolean' && allowlistResult.value === true) {
+      return true;
+    }
+
+    return false;
+  }
+
+  private async getPrivateContextGraphParticipants(contextGraphId: string): Promise<string[] | null> {
+    // V10 model: check allowedAgents first (agent addresses)
+    const localAgentParticipants = this.subscribedContextGraphs.get(contextGraphId)?.participantAgents;
+    if (localAgentParticipants && localAgentParticipants.length > 0) {
+      return localAgentParticipants;
+    }
+
+    const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
     const cgMetaGraph = paranetMetaGraphUri(contextGraphId);
 
-    // Look in the CG's meta graph first (where createContextGraph now writes them)
+    // Check _meta for dkg:allowedAgent triples (V10 agent model)
+    const agentResult = await this.store.query(
+      `SELECT ?agent WHERE {
+        GRAPH <${cgMetaGraph}> {
+          <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_ALLOWED_AGENT}> ?agent
+        }
+      }`,
+    );
+    if (agentResult.type === 'bindings' && agentResult.bindings.length > 0) {
+      return agentResult.bindings
+        .map((row) => row['agent'])
+        .filter((value): value is string => typeof value === 'string')
+        .map((value) => value.replace(/^"|"$/g, ''));
+    }
+
+    // Legacy: check for participantIdentityIds (backward compat, returns as strings)
     const metaResult = await this.store.query(
       `SELECT ?identityId WHERE {
         GRAPH <${cgMetaGraph}> {
@@ -3529,31 +4733,18 @@ export class DKGAgent {
       return metaResult.bindings
         .map((row) => row['identityId'])
         .filter((value): value is string => typeof value === 'string')
-        .map((value) => BigInt(value.replace(/^"|"$/g, '')));
+        .map((value) => value.replace(/^"|"$/g, ''));
     }
 
-    // Backward compat: check ontology graph for data created before this change
-    const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
-    const ontResult = await this.store.query(
-      `SELECT ?identityId WHERE {
-        GRAPH <${ontologyGraph}> {
-          <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_PARTICIPANT_IDENTITY_ID}> ?identityId
-        }
-      }`,
-    );
-    if (ontResult.type === 'bindings' && ontResult.bindings.length > 0) {
-      return ontResult.bindings
-        .map((row) => row['identityId'])
-        .filter((value): value is string => typeof value === 'string')
-        .map((value) => BigInt(value.replace(/^"|"$/g, '')));
-    }
-
+    // Check on-chain participants (identity IDs as strings for uniform comparison)
     const onChainId = this.subscribedContextGraphs.get(contextGraphId)?.onChainId;
     if (!onChainId || typeof this.chain.getContextGraphParticipants !== 'function') {
       return null;
     }
 
-    return this.chain.getContextGraphParticipants(BigInt(onChainId));
+    const onChainParticipants = await this.chain.getContextGraphParticipants(BigInt(onChainId));
+    if (!onChainParticipants) return null;
+    return onChainParticipants.map((id) => String(id));
   }
 
   /**
@@ -3625,19 +4816,50 @@ export class DKGAgent {
       }
     }
 
-    // Add registry entries that don't have triples yet (subscribed but not synced)
+    // Curated CGs store their definition in their own _meta graph, not in
+    // ONTOLOGY. Check _meta for any subscribed CGs not yet found above.
     for (const [id, sub] of this.subscribedContextGraphs) {
       const uri = `${prefix}${id}`;
       if (seen.has(uri)) continue;
       if (id === SYSTEM_PARANETS.AGENTS || id === SYSTEM_PARANETS.ONTOLOGY) continue;
-      seen.set(uri, {
-        id,
-        uri,
-        name: sub.name ?? id,
-        isSystem: false,
-        subscribed: sub.subscribed,
-        synced: sub.synced,
-      });
+
+      const metaGraph = paranetMetaGraphUri(id);
+      const pUri = paranetDataGraphUri(id);
+      const metaResult = await this.store.query(`
+        SELECT ?name ?desc ?creator ?created WHERE {
+          GRAPH <${metaGraph}> {
+            <${pUri}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_PARANET}> .
+            OPTIONAL { <${pUri}> <${DKG_ONTOLOGY.SCHEMA_NAME}> ?name }
+            OPTIONAL { <${pUri}> <${DKG_ONTOLOGY.SCHEMA_DESCRIPTION}> ?desc }
+            OPTIONAL { <${pUri}> <${DKG_ONTOLOGY.DKG_CREATOR}> ?creator }
+            OPTIONAL { <${pUri}> <${DKG_ONTOLOGY.DKG_CREATED_AT}> ?created }
+          }
+        } LIMIT 1
+      `);
+
+      if (metaResult.type === 'bindings' && metaResult.bindings.length > 0) {
+        const row = metaResult.bindings[0] as Record<string, string>;
+        seen.set(uri, {
+          id,
+          uri,
+          name: stripLiteral(row['name'] ?? sub.name ?? id),
+          description: row['desc'] ? stripLiteral(row['desc']) : undefined,
+          creator: row['creator'],
+          createdAt: row['created'] ? stripLiteral(row['created']) : undefined,
+          isSystem: false,
+          subscribed: sub.subscribed,
+          synced: sub.synced,
+        });
+      } else {
+        seen.set(uri, {
+          id,
+          uri,
+          name: sub.name ?? id,
+          isSystem: false,
+          subscribed: sub.subscribed,
+          synced: sub.synced,
+        });
+      }
     }
 
     return Array.from(seen.values());
@@ -3651,9 +4873,51 @@ export class DKGAgent {
     return this.node.peerId;
   }
 
+  get nodeName(): string {
+    return this.config.name;
+  }
+
+  get nodeFramework(): string | undefined {
+    return this.config.framework;
+  }
+
   private async getCclPolicyByUri(policyUri: string, opts: { includeBody?: boolean } = {}): Promise<CclPolicyRecord | null> {
     const records = await this.listCclPolicies({ includeBody: opts.includeBody });
     return records.find(record => record.policyUri === policyUri) ?? null;
+  }
+
+  /**
+   * Verify that the caller is the owner of a context graph. When an explicit
+   * callerAgentAddress is provided (agent-level token), only that identity is
+   * checked — no fallback to node-level identities. This prevents non-owner
+   * agents on the same node from piggybacking on the node's default agent.
+   *
+   * Legacy fallback (peerId / defaultAgentAddress) only applies when no
+   * explicit caller is known (node-level token / backward compat).
+   */
+  private assertCallerIsOwner(owner: string, callerAgentAddress: string | undefined, action: string): void {
+    const callerDid = callerAgentAddress ? `did:dkg:agent:${callerAgentAddress}` : null;
+    const selfDid = `did:dkg:agent:${this.peerId}`;
+
+    let authorized: boolean;
+    if (callerDid) {
+      // Explicit caller: check only their DID.
+      // Also allow through if the caller is the default agent and the owner
+      // is stored under the legacy peerId-based DID (pre-agent-model CGs).
+      authorized = owner === callerDid ||
+        (callerAgentAddress === this.defaultAgentAddress && owner === selfDid);
+    } else {
+      // No explicit caller (node-level token): allow any local identity
+      authorized = owner === selfDid ||
+        [...this.localAgents.keys()].some(addr => owner === `did:dkg:agent:${addr}`);
+    }
+
+    if (!authorized) {
+      throw new Error(
+        `Only the context graph creator can ${action}. ` +
+        `Creator=${owner}, caller=${callerDid ?? selfDid}`,
+      );
+    }
   }
 
   private async assertParanetOwner(paranetId: string): Promise<void> {
@@ -3669,11 +4933,18 @@ export class DKGAgent {
 
   private async getContextGraphOwner(paranetId: string): Promise<string | null> {
     const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
+    const cgMetaGraph = paranetMetaGraphUri(paranetId);
     const paranetUri = `did:dkg:context-graph:${paranetId}`;
     const result = await this.store.query(`
       SELECT ?owner WHERE {
-        GRAPH <${ontologyGraph}> {
-          <${paranetUri}> <${DKG_ONTOLOGY.DKG_CREATOR}> ?owner .
+        {
+          GRAPH <${ontologyGraph}> {
+            <${paranetUri}> <${DKG_ONTOLOGY.DKG_CREATOR}> ?owner .
+          }
+        } UNION {
+          GRAPH <${cgMetaGraph}> {
+            <${paranetUri}> <${DKG_ONTOLOGY.DKG_CREATOR}> ?owner .
+          }
         }
       }
       LIMIT 1
@@ -3966,6 +5237,7 @@ export class DKGAgent {
         name,
         subscribed: true,
         synced: true,
+        metaSynced: false,
         onChainId: existing?.onChainId,
       });
 
@@ -3973,7 +5245,7 @@ export class DKGAgent {
         this.subscribeToContextGraph(id, { trackSyncScope: true });
       }
 
-      this.log.info(ctx, `Discovered context graph "${name}" (${id}) from store — auto-subscribed`);
+      this.log.info(ctx, `Discovered context graph "${name}" (${id}) from store — auto-subscribed (metaSynced pending)`);
       discovered++;
     }
 
@@ -4027,6 +5299,7 @@ export class DKGAgent {
         name: p.name,
         subscribed: true,
         synced: false,
+        metaSynced: false,
         onChainId: p.contextGraphId,
       });
       this.subscribeToContextGraph(p.name, { trackSyncScope: false });
@@ -4275,7 +5548,7 @@ export class DKGAgent {
 
   get assertion() {
     const agent = this;
-    const agentAddress = this.peerId;
+    const agentAddress = this.defaultAgentAddress ?? this.peerId;
     return {
       async create(contextGraphId: string, name: string, opts?: { subGraphName?: string }): Promise<string> {
         return agent.publisher.assertionCreate(contextGraphId, name, agentAddress, opts?.subGraphName);
@@ -4326,6 +5599,91 @@ export class DKGAgent {
       },
       async discard(contextGraphId: string, name: string, opts?: { subGraphName?: string }): Promise<void> {
         return agent.publisher.assertionDiscard(contextGraphId, name, agentAddress, opts?.subGraphName);
+      },
+
+      async history(contextGraphId: string, name: string, opts?: { agentAddress?: string; subGraphName?: string }): Promise<AssertionDescriptor | null> {
+        const addr = opts?.agentAddress ?? agentAddress;
+        const lifecycleUri = assertionLifecycleUri(contextGraphId, addr, name, opts?.subGraphName);
+        const metaGraph = contextGraphMetaUri(contextGraphId);
+        const DKG_NS = 'http://dkg.io/ontology/';
+        const PROV_NS = 'http://www.w3.org/ns/prov#';
+
+        const strip = (v?: string) => v?.replace(/^"|"$/g, '').replace(/"\^\^<.*>$/, '') ?? undefined;
+
+        // Query assertion entity (current state + layer)
+        const entityResult = await agent.store.query(
+          `SELECT ?state ?memoryLayer ?assertionGraph WHERE {
+            GRAPH <${metaGraph}> {
+              <${lifecycleUri}> <${DKG_NS}state> ?state .
+              OPTIONAL { <${lifecycleUri}> <${DKG_NS}memoryLayer> ?memoryLayer }
+              OPTIONAL { <${lifecycleUri}> <${DKG_NS}assertionGraph> ?assertionGraph }
+            }
+          } LIMIT 1`,
+        );
+        if (entityResult.type !== 'bindings' || entityResult.bindings.length === 0) return null;
+
+        const row = entityResult.bindings[0];
+        const stateStr = strip(row['state']) as AssertionState;
+        const layerStr = strip(row['memoryLayer']);
+        const graphUri = row['assertionGraph'] ?? contextGraphAssertionUri(contextGraphId, addr, name);
+
+        // Query all prov:Activity events that acted on this assertion
+        // (linked via prov:used or prov:generated)
+        const eventsResult = await agent.store.query(
+          `SELECT ?event ?type ?timestamp ?fromLayer ?toLayer ?shareOpId ?kcUal ?rootEntity WHERE {
+            GRAPH <${metaGraph}> {
+              { ?event <${PROV_NS}generated> <${lifecycleUri}> }
+              UNION
+              { ?event <${PROV_NS}used> <${lifecycleUri}> }
+              ?event a <${PROV_NS}Activity> .
+              ?event a ?type .
+              FILTER(STRSTARTS(STR(?type), "${DKG_NS}"))
+              ?event <${PROV_NS}startedAtTime> ?timestamp .
+              ?event <${DKG_NS}fromLayer> ?fromLayer .
+              ?event <${DKG_NS}toLayer> ?toLayer .
+              OPTIONAL { ?event <${DKG_NS}shareOperationId> ?shareOpId }
+              OPTIONAL { ?event <${DKG_NS}kcUal> ?kcUal }
+              OPTIONAL { ?event <${DKG_NS}rootEntity> ?rootEntity }
+            }
+          } ORDER BY ?timestamp`,
+        );
+
+        // Group event rows by event URI (rootEntity may produce multiple rows)
+        const eventMap = new Map<string, AssertionEvent>();
+        if (eventsResult.type === 'bindings') {
+          for (const b of eventsResult.bindings) {
+            const eventUri = b['event'];
+            if (!eventUri) continue;
+            if (!eventMap.has(eventUri)) {
+              const typeSuffix = (b['type'] ?? '').replace(DKG_NS, '').replace('Assertion', '').toLowerCase();
+              eventMap.set(eventUri, {
+                type: (typeSuffix || stateStr) as AssertionState,
+                timestamp: strip(b['timestamp']) ?? '',
+                fromLayer: strip(b['fromLayer']) ?? '',
+                toLayer: strip(b['toLayer']) ?? '',
+                shareOperationId: strip(b['shareOpId']),
+                kcUal: strip(b['kcUal']),
+                rootEntities: b['rootEntity'] ? [b['rootEntity']] : undefined,
+              });
+            } else if (b['rootEntity']) {
+              const existing = eventMap.get(eventUri)!;
+              if (!existing.rootEntities) existing.rootEntities = [];
+              if (!existing.rootEntities.includes(b['rootEntity'])) {
+                existing.rootEntities.push(b['rootEntity']);
+              }
+            }
+          }
+        }
+
+        return {
+          contextGraphId,
+          agentAddress: addr,
+          name,
+          state: stateStr,
+          memoryLayer: (layerStr as MemoryLayer) ?? null,
+          assertionGraph: graphUri,
+          events: [...eventMap.values()],
+        };
       },
     };
   }

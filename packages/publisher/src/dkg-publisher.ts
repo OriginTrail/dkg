@@ -2,7 +2,7 @@ import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams } from '@origintrail-official/dkg-chain';
 import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, OperationContext } from '@origintrail-official/dkg-core';
-import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, contextGraphDataUri, contextGraphMetaUri, contextGraphAssertionUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, type Ed25519Keypair, computePublishACKDigest, computePublishPublisherDigest } from '@origintrail-official/dkg-core';
+import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, contextGraphDataUri, contextGraphMetaUri, contextGraphAssertionUri, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, type Ed25519Keypair, computePublishACKDigest, computePublishPublisherDigest } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import type { Publisher, PublishOptions, PublishResult, KAManifestEntry, PhaseCallback } from './publisher.js';
 import { autoPartition } from './auto-partition.js';
@@ -17,6 +17,10 @@ import {
   generateOwnershipQuads,
   generateAuthorshipProof,
   generateShareTransitionMetadata,
+  generateAssertionCreatedMetadata,
+  generateAssertionPromotedMetadata,
+  generateAssertionPublishedMetadata,
+  generateAssertionDiscardedMetadata,
   toHex,
   updateMetaMerkleRoot,
   type KAMetadata,
@@ -806,6 +810,44 @@ export class DKGPublisher implements Publisher {
           this.log.info(ctx, `Cleared remaining SWM content: ${remainingCount} triples, ${remainingMetaCount} meta`);
         }
         this.sharedMemoryOwnedEntities.delete(swmOwnershipKey);
+      }
+    }
+
+    // Update assertion lifecycle records: promoted → published.
+    // Runs for both confirmed and tentative publishes since data has
+    // already moved to VM in either case.
+    if (publishResult.ual) {
+      const cgMetaGraph = contextGraphMetaUri(contextGraphId);
+      const publishedRoots = publishResult.kaManifest.map((ka: any) => ka.rootEntity);
+      const rootValues = publishedRoots.map((r) => `<${r}>`).join(' ');
+      const findAssertions = await this.store.query(
+        `SELECT DISTINCT ?assertion ?agent ?name WHERE {
+          GRAPH <${cgMetaGraph}> {
+            VALUES ?root { ${rootValues} }
+            ?assertion a <http://dkg.io/ontology/Assertion> ;
+                       <http://dkg.io/ontology/state> "promoted" ;
+                       <http://dkg.io/ontology/rootEntity> ?root ;
+                       <http://dkg.io/ontology/agent> ?agent ;
+                       <http://dkg.io/ontology/assertionName> ?name .
+          }
+        }`,
+      );
+      if (findAssertions.type === 'bindings') {
+        for (const row of findAssertions.bindings) {
+          const agentUri = row['agent'];
+          const assertionName = row['name']?.replace(/^"|"$/g, '');
+          if (!agentUri || !assertionName) continue;
+          const agentAddr = agentUri.replace('did:dkg:agent:', '');
+          const published = generateAssertionPublishedMetadata({
+            contextGraphId,
+            agentAddress: agentAddr,
+            assertionName,
+            kcUal: publishResult.ual,
+            timestamp: new Date(),
+          });
+          await this.store.delete(published.delete);
+          await this.store.insert(published.insert);
+        }
       }
     }
 
@@ -1823,6 +1865,39 @@ export class DKGPublisher implements Publisher {
     await this.ensureSubGraphRegistered(contextGraphId, subGraphName);
     const graphUri = contextGraphAssertionUri(contextGraphId, agentAddress, name, subGraphName);
     await this.store.createGraph(graphUri);
+
+    // Clear any stale lifecycle data from a previous create/discard cycle
+    // so re-using the same assertion name doesn't leave orphaned triples.
+    // This removes the assertion entity AND its prov:Activity event
+    // sub-entities (whose URIs are prefixed with the lifecycle URI).
+    const lifecycleSubject = assertionLifecycleUri(contextGraphId, agentAddress, name, subGraphName);
+    const metaGraph = contextGraphMetaUri(contextGraphId);
+    const staleEvents = await this.store.query(
+      `SELECT DISTINCT ?s WHERE { GRAPH <${metaGraph}> { ?s ?p ?o . FILTER(STR(?s) = "${lifecycleSubject}" || STRSTARTS(STR(?s), "${lifecycleSubject}/")) } }`,
+    );
+    if (staleEvents.type === 'bindings') {
+      for (const row of staleEvents.bindings) {
+        const subj = row['s'];
+        if (subj) await this.store.deleteByPattern({ graph: metaGraph, subject: subj });
+      }
+    }
+
+    const lifecycleQuads = generateAssertionCreatedMetadata({
+      contextGraphId,
+      agentAddress,
+      assertionName: name,
+      subGraphName,
+      timestamp: new Date(),
+    });
+    await this.store.insert(lifecycleQuads);
+
+    await this.store.insert([{
+      subject: graphUri,
+      predicate: 'http://dkg.io/ontology/memoryLayer',
+      object: '"WM"',
+      graph: metaGraph,
+    }]);
+
     return graphUri;
   }
 
@@ -2051,6 +2126,21 @@ export class DKGPublisher implements Publisher {
       : quadsToPromote;
     await this.store.delete(effectivePromoteQuads.map((q) => ({ ...q, graph: graphUri })));
 
+    // Update the assertion's memory layer from WM → SWM in _meta
+    const assertionMetaGraph = contextGraphMetaUri(contextGraphId);
+    const DKG_MEMORY_LAYER = 'http://dkg.io/ontology/memoryLayer';
+    await this.store.deleteByPattern({
+      graph: assertionMetaGraph,
+      subject: graphUri,
+      predicate: DKG_MEMORY_LAYER,
+    });
+    await this.store.insert([{
+      subject: graphUri,
+      predicate: DKG_MEMORY_LAYER,
+      object: '"SWM"',
+      graph: assertionMetaGraph,
+    }]);
+
     // Record ShareTransition metadata in _shared_memory_meta (spec §8)
     const entities = [...new Set(effectiveQuads.map((q) => q.subject))];
     const shareTransition = generateShareTransitionMetadata({
@@ -2062,6 +2152,19 @@ export class DKGPublisher implements Publisher {
       timestamp: new Date(),
     });
     await this.store.insert(shareTransition);
+
+    // Update assertion lifecycle record in _meta: created → promoted
+    const promoted = generateAssertionPromotedMetadata({
+      contextGraphId,
+      agentAddress,
+      assertionName: name,
+      subGraphName: opts?.subGraphName,
+      shareOperationId: operationId,
+      rootEntities: effectiveRoots,
+      timestamp: new Date(),
+    });
+    await this.store.delete(promoted.delete);
+    await this.store.insert(promoted.insert);
 
     // Write WorkspaceOperation metadata + ownership quads, mirroring what
     // _shareImpl and the remote SharedMemoryHandler both produce, so the
@@ -2128,6 +2231,17 @@ export class DKGPublisher implements Publisher {
     // catastrophic. An atomic combined DELETE+DROP via a single SPARQL
     // UPDATE is tracked as a follow-up on the storage layer (needs a
     // new method on the `TripleStore` public interface).
+    // Update assertion lifecycle record: created → discarded (before destructive ops)
+    const discarded = generateAssertionDiscardedMetadata({
+      contextGraphId,
+      agentAddress,
+      assertionName: name,
+      subGraphName,
+      timestamp: new Date(),
+    });
+    await this.store.delete(discarded.delete);
+    await this.store.insert(discarded.insert);
+
     const metaGraph = contextGraphMetaUri(contextGraphId);
     await this.store.deleteByPattern({ subject: graphUri, graph: metaGraph });
     await this.store.dropGraph(graphUri);

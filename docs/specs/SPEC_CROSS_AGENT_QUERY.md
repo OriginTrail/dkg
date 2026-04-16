@@ -210,7 +210,7 @@ When a `QueryRequest` arrives:
 
 2. Does the policy allow this peer?
    - public: yes
-   - allowList: check if peer ID is in allowedPeers
+   - allowList: check if agent address (or legacy peer ID) is in allowedAgents/allowedPeers
    - deny: no
    NO → return ACCESS_DENIED
 

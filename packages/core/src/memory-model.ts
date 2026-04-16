@@ -41,11 +41,53 @@ export interface MemoryTransition {
   timestamp: string;
 }
 
+/**
+ * Assertion lifecycle states. Forward-only progression mirrors the memory
+ * layer chain: created (WM) → promoted (SWM) → published (VM) → finalized.
+ * `discarded` is a terminal state reachable only from `created`.
+ */
+export type AssertionState = 'created' | 'promoted' | 'published' | 'finalized' | 'discarded';
+
+export const ASSERTION_STATES: readonly AssertionState[] = [
+  'created', 'promoted', 'published', 'finalized', 'discarded',
+] as const;
+
+export const VALID_ASSERTION_TRANSITIONS: ReadonlyMap<AssertionState, readonly AssertionState[]> = new Map([
+  ['created', ['promoted', 'discarded'] as const],
+  ['promoted', ['published'] as const],
+  ['published', ['finalized'] as const],
+]);
+
+/**
+ * Maps each assertion lifecycle state to the memory layer where the
+ * assertion's data resides.
+ */
+export const ASSERTION_STATE_TO_LAYER: ReadonlyMap<AssertionState, MemoryLayer | null> = new Map([
+  ['created', MemoryLayer.WorkingMemory],
+  ['promoted', MemoryLayer.SharedWorkingMemory],
+  ['published', MemoryLayer.VerifiedMemory],
+  ['finalized', MemoryLayer.VerifiedMemory],
+  ['discarded', null],
+]);
+
+export interface AssertionEvent {
+  type: AssertionState;
+  timestamp: string;
+  fromLayer: string;
+  toLayer: string;
+  shareOperationId?: string;
+  rootEntities?: string[];
+  kcUal?: string;
+}
+
 export interface AssertionDescriptor {
   contextGraphId: string;
   agentAddress: string;
   name: string;
-  createdAt: string;
+  state: AssertionState;
+  memoryLayer: MemoryLayer | null;
+  assertionGraph: string;
+  events: AssertionEvent[];
 }
 
 

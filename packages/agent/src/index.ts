@@ -1,6 +1,10 @@
 export { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 export { loadOpWallets, generateWallets, type OpWalletsConfig } from './op-wallets.js';
 export {
+  generateCustodialAgent, registerSelfSovereignAgent, agentFromPrivateKey,
+  generateAgentToken, hashAgentToken, type AgentKeyRecord,
+} from './agent-keystore.js';
+export {
   buildAgentProfile,
   AGENT_REGISTRY_CONTEXT_GRAPH,
   AGENT_REGISTRY_PARANET,

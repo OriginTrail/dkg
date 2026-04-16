@@ -65,7 +65,17 @@ function shortPredicate(uri: string): string {
 
 function wmSparql(cgId: string) {
   const cgUri = `did:dkg:context-graph:${cgId}`;
-  return `SELECT ?s ?p ?o WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), "${cgUri}")) } } LIMIT 1500`;
+  return `SELECT ?s ?p ?o WHERE {
+    GRAPH ?g { ?s ?p ?o }
+    FILTER(
+      STRSTARTS(STR(?g), "${cgUri}/") &&
+      !STRENDS(STR(?g), "/_meta") &&
+      !CONTAINS(STR(?g), "/_private") &&
+      !CONTAINS(STR(?g), "/_shared_memory") &&
+      !CONTAINS(STR(?g), "/_verified_memory") &&
+      !CONTAINS(STR(?g), "/_rules")
+    )
+  } LIMIT 1500`;
 }
 const SPARQL_SWM = `SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 500`;
 const SPARQL_VM = `SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 500`;

@@ -308,6 +308,8 @@ export class ApiClient {
 
   async createContextGraph(id: string, name: string, description?: string, options?: {
     private?: boolean;
+    accessPolicy?: number;
+    allowedAgents?: string[];
     participantIdentityIds?: Array<string | number | bigint>;
     requiredSignatures?: number;
   }, allowedPeers?: string[]): Promise<{
@@ -319,6 +321,8 @@ export class ApiClient {
       name,
       description,
       ...(allowedPeers?.length ? { allowedPeers } : {}),
+      ...(options?.accessPolicy != null ? { accessPolicy: options.accessPolicy } : {}),
+      ...(options?.allowedAgents?.length ? { allowedAgents: options.allowedAgents } : {}),
       ...(options?.private ? { private: true } : {}),
       ...(options?.participantIdentityIds?.length
         ? { participantIdentityIds: options.participantIdentityIds.map((id) => id.toString()) }
@@ -335,11 +339,80 @@ export class ApiClient {
     return this.post('/api/context-graph/register', { id, ...opts });
   }
 
+  /** @deprecated Use addAgent instead. */
   async inviteToContextGraph(contextGraphId: string, peerId: string): Promise<{
     invited: string;
     contextGraphId: string;
   }> {
     return this.post('/api/context-graph/invite', { contextGraphId, peerId });
+  }
+
+  async addAgent(contextGraphId: string, agentAddress: string): Promise<{
+    ok: boolean;
+    contextGraphId: string;
+    agentAddress: string;
+  }> {
+    return this.post(`/api/context-graph/${encodeURIComponent(contextGraphId)}/add-participant`, { agentAddress });
+  }
+
+  async removeAgent(contextGraphId: string, agentAddress: string): Promise<{
+    ok: boolean;
+    contextGraphId: string;
+    agentAddress: string;
+  }> {
+    return this.post(`/api/context-graph/${encodeURIComponent(contextGraphId)}/remove-participant`, { agentAddress });
+  }
+
+  async listAgents(contextGraphId: string): Promise<{
+    contextGraphId: string;
+    allowedAgents: string[];
+  }> {
+    return this.get(`/api/context-graph/${encodeURIComponent(contextGraphId)}/participants`);
+  }
+
+  async signJoinRequest(contextGraphId: string): Promise<{
+    ok: boolean;
+    status?: string;
+    contextGraphId?: string;
+  }> {
+    return this.post(`/api/context-graph/${encodeURIComponent(contextGraphId)}/sign-join`, {});
+  }
+
+  async approveJoin(contextGraphId: string, agentAddress: string): Promise<{
+    ok: boolean;
+    status: string;
+    agentAddress: string;
+  }> {
+    return this.post(`/api/context-graph/${encodeURIComponent(contextGraphId)}/approve-join`, { agentAddress });
+  }
+
+  async rejectJoin(contextGraphId: string, agentAddress: string): Promise<{
+    ok: boolean;
+    status: string;
+    agentAddress: string;
+  }> {
+    return this.post(`/api/context-graph/${encodeURIComponent(contextGraphId)}/reject-join`, { agentAddress });
+  }
+
+  async listJoinRequests(contextGraphId: string): Promise<{
+    contextGraphId: string;
+    requests: Array<{
+      agentAddress: string;
+      status: string;
+      timestamp?: string;
+      agentName?: string;
+    }>;
+  }> {
+    return this.get(`/api/context-graph/${encodeURIComponent(contextGraphId)}/join-requests`);
+  }
+
+  async getAgentIdentity(): Promise<{
+    agentAddress: string;
+    agentDid: string;
+    name: string;
+    peerId: string;
+  }> {
+    return this.get('/api/agent/identity');
   }
 
   /** @deprecated Use createContextGraph */

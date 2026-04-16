@@ -34,6 +34,7 @@ export interface AgentProfileConfig {
   nodeRole?: 'core' | 'edge';
   publicKey?: string;
   relayAddress?: string;
+  agentAddress?: string;
 }
 
 /**
@@ -71,6 +72,9 @@ export function buildAgentProfile(config: AgentProfileConfig): {
   }
   if (config.relayAddress) {
     q(entity, `${DKG}relayAddress`, `"${config.relayAddress}"`);
+  }
+  if (config.agentAddress) {
+    q(entity, `${DKG}agentAddress`, `"${config.agentAddress}"`);
   }
   if (config.framework) {
     q(entity, `${SKILL}framework`, `"${config.framework}"`);

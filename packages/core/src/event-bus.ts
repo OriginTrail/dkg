@@ -26,6 +26,9 @@ export const DKGEvent = {
   AKA_ROUND_TIMEOUT: 'aka:round:timeout',
   PUBLISH_FAILED: 'publish:failed',
   CONTEXT_GRAPH_REGISTRATION_FAILED: 'context-graph:registration:failed',
+  JOIN_REQUEST_RECEIVED: 'join-request:received',
+  JOIN_APPROVED: 'join:approved',
+  PROJECT_SYNCED: 'project:synced',
 } as const;
 
 export type DKGEventType = (typeof DKGEvent)[keyof typeof DKGEvent];
