@@ -24,6 +24,7 @@ import {
   probeOpenClawChannelHealth,
   verifyOpenClawAttachmentRefsProvenance,
   normalizeExplicitLocalAgentDisconnectBody,
+  readSemanticTripleCountForEvent,
   shouldBypassRateLimitForLoopbackTraffic,
   updateLocalAgentIntegration,
 } from '../src/daemon.js';
@@ -674,6 +675,38 @@ describe('file import semantic source identity matching', () => {
       fileHash: 'sha256:file-1',
       mdIntermediateHash: 'sha256:md-2',
     })).toBe(false);
+  });
+});
+
+describe('semantic enrichment triple count readers', () => {
+  it('reuses semantic provenance counts for replayed chat-turn events', async () => {
+    const agent = {
+      store: {
+        query: vi.fn().mockResolvedValue({
+          bindings: [{ count: '"4"^^<http://www.w3.org/2001/XMLSchema#integer>' }],
+        }),
+      },
+    };
+
+    await expect(readSemanticTripleCountForEvent(
+      agent as any,
+      {
+        kind: 'chat_turn',
+        sessionId: 'openclaw:dkg-ui',
+        turnId: 'turn-1',
+        contextGraphId: 'agent-context',
+        assertionName: 'chat-turns',
+        assertionUri: 'did:dkg:context-graph:agent-context/assertion/peer/chat-turns',
+        sessionUri: 'urn:dkg:chat:session:openclaw:dkg-ui',
+        turnUri: 'urn:dkg:chat:turn:turn-1',
+        userMessage: 'hello',
+        assistantReply: 'hi',
+        persistenceState: 'stored',
+      },
+      'evt-chat-replay',
+    )).resolves.toBe(4);
+
+    expect(agent.store.query).toHaveBeenCalledWith(expect.stringContaining('urn:dkg:semantic-enrichment:evt-chat-replay'));
   });
 });
 

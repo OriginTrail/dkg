@@ -3607,6 +3607,17 @@ async function readSemanticProvenanceTripleCount(
   return parseOpenClawAttachmentTripleCount(result?.bindings?.[0]?.count) ?? 0;
 }
 
+export async function readSemanticTripleCountForEvent(
+  agent: Pick<DKGAgent, 'store'>,
+  eventPayload: SemanticEnrichmentEventPayload,
+  eventId: string,
+): Promise<number> {
+  if (eventPayload.kind === 'file_import') {
+    return readCurrentSemanticTripleCount(agent, eventPayload.contextGraphId, eventPayload.assertionUri);
+  }
+  return readSemanticProvenanceTripleCount(agent, eventPayload.assertionUri, eventId);
+}
+
 function buildSemanticAppendQuads(args: {
   agentDid: string;
   eventId: string;
@@ -4747,9 +4758,7 @@ async function handleRequest(
     }
     if (row.status !== 'leased' || row.lease_owner !== leaseOwner) {
       if (row.status === 'completed') {
-        const semanticTripleCount = eventPayload.kind === 'file_import'
-          ? await readCurrentSemanticTripleCount(agent, eventPayload.contextGraphId, eventPayload.assertionUri)
-          : await readSemanticProvenanceTripleCount(agent, eventPayload.assertionUri, eventId);
+        const semanticTripleCount = await readSemanticTripleCountForEvent(agent, eventPayload, eventId);
         return jsonResponse(res, 200, {
           applied: false,
           alreadyApplied: true,
@@ -4800,9 +4809,7 @@ async function handleRequest(
       }
     }
     const alreadyApplied = await semanticEnrichmentAlreadyApplied(agent, targetGraph, eventId);
-    let semanticTripleCount = eventPayload.kind === 'file_import'
-      ? await readCurrentSemanticTripleCount(agent, eventPayload.contextGraphId, eventPayload.assertionUri)
-      : 0;
+    let semanticTripleCount = await readSemanticTripleCountForEvent(agent, eventPayload, eventId);
 
     if (!alreadyApplied && triples.length > 0) {
       const semanticAgentDid = eventPayload.kind === 'file_import' && eventPayload.sourceAgentAddress
