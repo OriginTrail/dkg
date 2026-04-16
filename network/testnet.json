@@ -19,7 +19,7 @@
   "chain": {
     "type": "evm",
     "rpcUrl": "https://sepolia.base.org",
-    "hubAddress": "0xC056e67Da4F51377Ad1B01f50F655fFdcCD809F6",
+    "hubAddress": "0xf21CE8f8b01548D97DCFb36869f1ccB0814a4e05",
     "chainId": "base:84532"
   },
   "faucet": {
