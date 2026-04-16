@@ -205,6 +205,19 @@
   },
   {
     "inputs": [],
+    "name": "convictionStakingStorage",
+    "outputs": [
+      {
+        "internalType": "contract ConvictionStakingStorage",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
     "name": "createChallenge",
     "outputs": [],
     "stateMutability": "nonpayable",

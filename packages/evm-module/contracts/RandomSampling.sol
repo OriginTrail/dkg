@@ -21,6 +21,7 @@ import {ParametersStorage} from "./storage/ParametersStorage.sol";
 import {ShardingTableStorage} from "./storage/ShardingTableStorage.sol";
 import {ContextGraphStorage} from "./storage/ContextGraphStorage.sol";
 import {ContextGraphValueStorage} from "./storage/ContextGraphValueStorage.sol";
+import {ConvictionStakingStorage} from "./storage/ConvictionStakingStorage.sol";
 import {ICustodian} from "./interfaces/ICustodian.sol";
 import {HubLib} from "./libraries/HubLib.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
@@ -50,6 +51,7 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
     ShardingTableStorage public shardingTableStorage;
     ContextGraphStorage public contextGraphStorage;
     ContextGraphValueStorage public contextGraphValueStorage;
+    ConvictionStakingStorage public convictionStakingStorage;
 
     error MerkleRootMismatchError(bytes32 computedMerkleRoot, bytes32 expectedMerkleRoot);
     /// @notice Thrown by `_generateChallenge` when no public, active CG holds
@@ -129,6 +131,7 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
         // regular hub contract.
         contextGraphStorage = ContextGraphStorage(hub.getAssetStorageAddress("ContextGraphStorage"));
         contextGraphValueStorage = ContextGraphValueStorage(hub.getContractAddress("ContextGraphValueStorage"));
+        convictionStakingStorage = ConvictionStakingStorage(hub.getContractAddress("ConvictionStakingStorage"));
     }
 
     /**
@@ -268,9 +271,16 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
             randomSamplingStorage.addToAllNodesEpochScore(epoch, score18);
 
             // Calculate and add to nodeEpochScorePerStake
-            uint96 totalNodeStake = stakingStorage.getNodeStake(identityId);
-            if (totalNodeStake > 0) {
-                uint256 nodeScorePerStake36 = (score18 * SCALE18) / totalNodeStake;
+            // Phase 11: use effective node stake = V8_raw + V10_effective
+            // = nodeStake + (nodeEffective_V10 - nodeV10BaseStake)
+            uint256 rawNodeStake = uint256(stakingStorage.getNodeStake(identityId));
+            uint256 nodeEffV10 = convictionStakingStorage.getNodeEffectiveStakeAtEpoch(
+                identityId, epoch
+            );
+            uint256 nodeV10Base = convictionStakingStorage.getNodeV10BaseStake(identityId);
+            uint256 effectiveNodeStake = rawNodeStake + nodeEffV10 - nodeV10Base;
+            if (effectiveNodeStake > 0) {
+                uint256 nodeScorePerStake36 = (score18 * SCALE18) / effectiveNodeStake;
                 randomSamplingStorage.addToNodeEpochScorePerStake(epoch, identityId, nodeScorePerStake36);
             }
         } else {
