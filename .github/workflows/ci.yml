@@ -11,118 +11,306 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  tornado-tests:
-    name: "Tornado: Protocol Core Tests"
+  # ------------------------------------------------------------------
+  # Detect which surface changed so we can gate the heavy Solidity
+  # coverage+ratchet run to contract-touching PRs. On `push` events (merges
+  # into v10-rc / main) the safety net always runs regardless of filters.
+  # ------------------------------------------------------------------
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      contracts: ${{ steps.filter.outputs.contracts }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            contracts:
+              - 'packages/evm-module/contracts/**'
+              - 'packages/evm-module/test/**'
+              - 'packages/evm-module/deploy/**'
+              - 'packages/evm-module/scripts/**'
+              - 'packages/evm-module/hardhat.*'
+              - 'packages/evm-module/package.json'
+              - '.github/workflows/ci.yml'
+
+  # ------------------------------------------------------------------
+  # One canonical build. Every test job downloads this artifact instead
+  # of rebuilding from scratch (saves ~3-4 min per job).
+  #
+  # Turbo remote cache is opt-in: if TURBO_TOKEN / TURBO_TEAM secrets
+  # are set the build step will pull previously-cached outputs; with no
+  # secrets the env vars are empty and turbo transparently no-ops.
+  # We also cache .turbo/ via actions/cache so even without a remote
+  # cache repeated builds on the same branch are fast.
+  # ------------------------------------------------------------------
+  build:
+    name: Build packages
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Restore Turbo cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            .turbo
+            packages/*/.turbo
+          key: turbo-${{ runner.os }}-${{ github.ref }}-${{ github.sha }}
+          restore-keys: |
+            turbo-${{ runner.os }}-${{ github.ref }}-
+            turbo-${{ runner.os }}-refs/heads/v10-rc-
+            turbo-${{ runner.os }}-
+
+      - name: Build all packages
+        run: pnpm build
+        env:
+          TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}
+          TURBO_TEAM: ${{ secrets.TURBO_TEAM }}
+
+      - name: Package build outputs
+        run: |
+          set -euo pipefail
+          # Collect every emitted output: tsc dist/, Vite dist-ui/, and
+          # the generated network/ dir the CLI copies during build.
+          mapfile -t PATHS < <(
+            find packages -maxdepth 2 -type d \
+              \( -name dist -o -name dist-ui -o -name network \) \
+              2>/dev/null | sort -u
+          )
+          echo "Packing ${#PATHS[@]} output dirs…"
+          tar -czf /tmp/build-outputs.tgz "${PATHS[@]}"
+          ls -lh /tmp/build-outputs.tgz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-outputs
+          path: /tmp/build-outputs.tgz
+          retention-days: 1
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------
+  # Tornado core lane: core + storage + chain unit tests. These are all
+  # sub-minute suites so we keep them bundled on one runner.
+  # ------------------------------------------------------------------
+  tornado-core:
+    name: "Tornado: core + storage + chain"
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: build-outputs
+          path: /tmp
+      - name: Restore build outputs
+        run: tar -xzf /tmp/build-outputs.tgz
+
+      - name: "Core (442 tests)"
+        run: pnpm --filter @origintrail-official/dkg-core test
+      - name: "Storage (78 tests)"
+        run: pnpm --filter @origintrail-official/dkg-storage test
+      - name: "Chain unit (46 tests)"
+        run: pnpm --filter @origintrail-official/dkg-chain test
+
+  # ------------------------------------------------------------------
+  # Tornado publisher lane — sharded across 2 parallel runners.
+  # ------------------------------------------------------------------
+  tornado-publisher:
+    name: "Tornado: publisher [${{ matrix.shard }}/2]"
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: build-outputs
+          path: /tmp
+      - name: Restore build outputs
+        run: tar -xzf /tmp/build-outputs.tgz
+      - name: "Publisher tests (shard ${{ matrix.shard }}/2)"
+        run: pnpm --filter @origintrail-official/dkg-publisher exec vitest run --shard=${{ matrix.shard }}/2
+
+  # ------------------------------------------------------------------
+  # Tornado agent lane — the slowest Node suite, sharded across 3 runners.
+  # ------------------------------------------------------------------
+  tornado-agent:
+    name: "Tornado: agent [${{ matrix.shard }}/3]"
+    needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 15
-
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@v4
-
       - uses: pnpm/action-setup@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version-file: .nvmrc
           cache: pnpm
-
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: build-outputs
+          path: /tmp
+      - name: Restore build outputs
+        run: tar -xzf /tmp/build-outputs.tgz
+      - name: "Agent tests (shard ${{ matrix.shard }}/3)"
+        run: pnpm --filter @origintrail-official/dkg-agent exec vitest run --shard=${{ matrix.shard }}/3
 
-      - name: Build all packages
-        run: pnpm build
-
-      - name: "Core — crypto, protocol wire, genesis (442 tests)"
-        run: pnpm --filter @origintrail-official/dkg-core test:coverage
-
-      - name: "Storage — triple store operations (78 tests)"
-        run: pnpm --filter @origintrail-official/dkg-storage test:coverage
-
-      - name: "Chain — chain adapters, staking (102 tests)"
-        run: pnpm --filter @origintrail-official/dkg-chain test:coverage
-
-      - name: "Publisher — merkle, ACK, V10 publish (666 tests)"
-        run: pnpm --filter @origintrail-official/dkg-publisher test:coverage
-
-      - name: "Agent — gossip, workspace, integration (277 tests)"
-        run: pnpm --filter @origintrail-official/dkg-agent test:coverage
-
-  product-tests:
-    name: "Product Surface Tests"
+  # ------------------------------------------------------------------
+  # Product primary — cli and node-ui run on dedicated runners.
+  # ------------------------------------------------------------------
+  product-primary:
+    name: "Product: ${{ matrix.label }}"
+    needs: build
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: cli
+            pkg: "@origintrail-official/dkg"
+          - label: node-ui
+            pkg: "@origintrail-official/dkg-node-ui"
     steps:
       - uses: actions/checkout@v4
-
       - uses: pnpm/action-setup@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version-file: .nvmrc
           cache: pnpm
-
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: build-outputs
+          path: /tmp
+      - name: Restore build outputs
+        run: tar -xzf /tmp/build-outputs.tgz
+      - name: "Tests: ${{ matrix.label }}"
+        run: pnpm --filter ${{ matrix.pkg }} test
 
-      - name: Build all packages
-        run: pnpm build
+  # ------------------------------------------------------------------
+  # Product secondary — smaller packages grouped on a single runner.
+  # ------------------------------------------------------------------
+  product-secondary:
+    name: "Product: remaining packages"
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: build-outputs
+          path: /tmp
+      - name: Restore build outputs
+        run: tar -xzf /tmp/build-outputs.tgz
+      - name: "Attested assets, EPCIS, query, MCP, net-sim, graph-viz, adapters"
+        run: |
+          pnpm \
+            --filter @origintrail-official/dkg-attested-assets \
+            --filter @origintrail-official/dkg-epcis \
+            --filter @origintrail-official/dkg-query \
+            --filter @origintrail-official/dkg-mcp-server \
+            --filter @origintrail-official/dkg-network-sim \
+            --filter @origintrail-official/dkg-graph-viz \
+            --filter @origintrail-official/dkg-adapter-autoresearch \
+            --filter @origintrail-official/dkg-adapter-elizaos \
+            --filter @origintrail-official/dkg-adapter-hermes \
+            --filter @origintrail-official/dkg-adapter-openclaw \
+            run test
 
-      - name: "CLI — daemon, wallet, blue/green, importers"
-        run: pnpm --filter @origintrail-official/dkg test
-
-      - name: "Node UI — API routes, components, panels"
-        run: pnpm --filter @origintrail-official/dkg-node-ui test
-
-      - name: "Attested assets — quorum, sessions, canonical"
-        run: pnpm --filter @origintrail-official/dkg-attested-assets test
-
-      - name: "EPCIS — events, query, validation"
-        run: pnpm --filter @origintrail-official/dkg-epcis test
-
-      - name: "Query — handler, security, sub-graph"
-        run: pnpm --filter @origintrail-official/dkg-query test
-
-      - name: "MCP server — tools, connection"
-        run: pnpm --filter @origintrail-official/dkg-mcp-server test
-
-      - name: "Network simulation"
-        run: pnpm --filter @origintrail-official/dkg-network-sim test
-
-      - name: "Graph viz — RDF rendering helpers"
-        run: pnpm --filter @origintrail-official/dkg-graph-viz test
-
-      - name: "Adapter: autoresearch"
-        run: pnpm --filter @origintrail-official/dkg-adapter-autoresearch test
-
-      - name: "Adapter: ElizaOS"
-        run: pnpm --filter @origintrail-official/dkg-adapter-elizaos test
-
-      - name: "Adapter: Hermes"
-        run: pnpm --filter @origintrail-official/dkg-adapter-hermes test
-
-      - name: "Adapter: OpenClaw"
-        run: pnpm --filter @origintrail-official/dkg-adapter-openclaw test
-
+  # ------------------------------------------------------------------
+  # Solidity lane:
+  #   - PR + no contract changes : no-op fast pass (keeps the required
+  #     check green without spinning up Hardhat).
+  #   - PR + contract changes    : hardhat test only, no coverage (~5-7m).
+  #   - push (main / v10-rc / …) : full coverage + ratchet safety net.
+  # ------------------------------------------------------------------
   solidity:
-    name: Solidity (Compile & Test)
+    name: "Solidity"
+    needs: changes
     runs-on: ubuntu-latest
     timeout-minutes: 45
-
     steps:
       - uses: actions/checkout@v4
 
+      - name: Skip — no contract changes on this PR
+        if: |
+          github.event_name == 'pull_request' &&
+          needs.changes.outputs.contracts != 'true'
+        run: echo "::notice::No contracts/*/test/hardhat changes detected — skipping Solidity. Full coverage still runs on push to main/v10-rc."
+
       - uses: pnpm/action-setup@v4
+        if: |
+          github.event_name != 'pull_request' ||
+          needs.changes.outputs.contracts == 'true'
 
       - uses: actions/setup-node@v4
+        if: |
+          github.event_name != 'pull_request' ||
+          needs.changes.outputs.contracts == 'true'
         with:
           node-version-file: .nvmrc
           cache: pnpm
 
       - name: Install dependencies
+        if: |
+          github.event_name != 'pull_request' ||
+          needs.changes.outputs.contracts == 'true'
         run: pnpm install --frozen-lockfile
 
       - name: Cache Hardhat artifacts
+        if: |
+          github.event_name != 'pull_request' ||
+          needs.changes.outputs.contracts == 'true'
         uses: actions/cache@v4
         with:
           path: |
@@ -134,10 +322,23 @@ jobs:
             hardhat-${{ runner.os }}-
 
       - name: Compile contracts
+        if: |
+          github.event_name != 'pull_request' ||
+          needs.changes.outputs.contracts == 'true'
         run: npx hardhat compile --config hardhat.node.config.ts
         working-directory: packages/evm-module
 
-      - name: Hardhat tests + Solidity coverage + ratchet check
+      - name: Hardhat tests (PR — fast, no coverage)
+        if: |
+          github.event_name == 'pull_request' &&
+          needs.changes.outputs.contracts == 'true'
+        run: pnpm test
+        working-directory: packages/evm-module
+        env:
+          NODE_OPTIONS: --max-old-space-size=8192
+
+      - name: Hardhat tests + Solidity coverage + ratchet check (push — safety net)
+        if: github.event_name != 'pull_request'
         run: pnpm test:coverage
         working-directory: packages/evm-module
         env:
