@@ -29,33 +29,17 @@
   {
     "inputs": [
       {
-        "internalType": "uint72",
-        "name": "identityId",
-        "type": "uint72"
-      },
-      {
-        "internalType": "uint40",
-        "name": "expiresAtEpoch",
-        "type": "uint40"
-      }
-    ],
-    "name": "ConvictionLockActive",
-    "type": "error"
-  },
-  {
-    "inputs": [],
-    "name": "InvalidLockEpochs",
-    "type": "error"
-  },
-  {
-    "inputs": [
-      {
         "internalType": "uint256",
         "name": "amount",
         "type": "uint256"
       }
     ],
     "name": "MaximumStakeExceeded",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "OnlyConvictionNFT",
     "type": "error"
   },
   {
@@ -83,6 +67,22 @@
   {
     "inputs": [],
     "name": "ShardingTableIsFull",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      }
+    ],
+    "name": "TokenIdAlreadyRecorded",
     "type": "error"
   },
   {
@@ -186,6 +186,43 @@
     "type": "error"
   },
   {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "amount",
+        "type": "uint96"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint40",
+        "name": "lockEpochs",
+        "type": "uint40"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "caller",
+        "type": "address"
+      }
+    ],
+    "name": "StakeRecorded",
+    "type": "event"
+  },
+  {
     "inputs": [],
     "name": "SCALE18",
     "outputs": [
@@ -196,6 +233,34 @@
       }
     ],
     "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      },
+      {
+        "internalType": "uint96",
+        "name": "amount",
+        "type": "uint96"
+      },
+      {
+        "internalType": "uint40",
+        "name": "lockEpochs",
+        "type": "uint40"
+      }
+    ],
+    "name": "_recordStake",
+    "outputs": [],
+    "stateMutability": "nonpayable",
     "type": "function"
   },
   {
@@ -297,25 +362,6 @@
     "type": "function"
   },
   {
-    "inputs": [
-      {
-        "internalType": "uint40",
-        "name": "lockEpochs",
-        "type": "uint40"
-      }
-    ],
-    "name": "convictionMultiplier",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "multiplier18",
-        "type": "uint256"
-      }
-    ],
-    "stateMutability": "pure",
-    "type": "function"
-  },
-  {
     "inputs": [],
     "name": "delegatorsInfo",
     "outputs": [
@@ -365,30 +411,6 @@
     "name": "finalizeWithdrawal",
     "outputs": [],
     "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint72",
-        "name": "identityId",
-        "type": "uint72"
-      },
-      {
-        "internalType": "address",
-        "name": "delegator",
-        "type": "address"
-      }
-    ],
-    "name": "getDelegatorConvictionMultiplier",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "multiplier18",
-        "type": "uint256"
-      }
-    ],
-    "stateMutability": "view",
     "type": "function"
   },
   {
@@ -635,29 +657,6 @@
       }
     ],
     "name": "stake",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint72",
-        "name": "identityId",
-        "type": "uint72"
-      },
-      {
-        "internalType": "uint96",
-        "name": "addedStake",
-        "type": "uint96"
-      },
-      {
-        "internalType": "uint40",
-        "name": "lockEpochs",
-        "type": "uint40"
-      }
-    ],
-    "name": "stakeWithLock",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"

@@ -10,6 +10,7 @@ import {
   ConvictionStakingStorage,
   DelegatorsInfo,
   DKGStakingConvictionNFT,
+  EpochStorage,
   Hub,
   ParametersStorage,
   Profile,
@@ -1657,25 +1658,25 @@ describe('@unit DKGStakingConvictionNFT', () => {
   });
 
   // =====================================================================
-  // claim (→ StakingV10.claim) — Phase 5 auto-compound
+  // claim (→ StakingV10.claim) — Phase 11 TRAC-denominated rewards
   // =====================================================================
   //
   // StakingV10.claim walks `[pos.lastClaimedEpoch + 1 .. currentEpoch - 1]`,
   // computes per-epoch effective stake (multiplier pre-expiry, flat post-
-  // expiry, plus rewardsSnapshot always at 1x), multiplies by the
-  // per-epoch `nodeEpochScorePerStake` (stored by `RandomSamplingStorage`
-  // at 1e36 scale), divides by 1e18 to match the V8 `_prepareForStakeChange`
-  // dimensional output (`scoreEarned18 = stakeBase * scorePerStakeDiff36 /
-  // SCALE18`), and banks the sum into `pos.rewards` via
-  // `ConvictionStakingStorage.increaseRewards`.
+  // expiry, plus rewardsSnapshot always at 1x), then converts the
+  // delegator's score fraction into TRAC via the epoch reward pool:
   //
-  // **Stub semantics:** Phase 5 treats the score-weighted stake product as
-  // the reward TRAC amount. Phase 11 replaces the formula with the actual
-  // Paymaster-sourced `epochPool * nodeScore18 / allNodesScore18` flow.
-  // Tests inject `nodeEpochScorePerStake` via the hub-owner-privileged
-  // setter (`onlyContracts` admits `hub.owner()`) and pre-fund the
-  // StakingStorage vault with TRAC matching the expected reward so the
-  // node-stake bookkeeping stays sound across a downstream withdrawal.
+  //   delegatorScore18 = effStake * scorePerStake36 / 1e18
+  //   grossNodeRewards = epochPool * nodeScore18 / allNodesScore18
+  //   operatorFee = grossNodeRewards * opFeePercentage / maxOperatorFee
+  //   netNodeRewards = grossNodeRewards - operatorFee
+  //   reward = delegatorScore18 * netNodeRewards / nodeScore18
+  //
+  // Tests inject per-epoch state via hub-owner-privileged setters on
+  // RandomSamplingStorage (scorePerStake, nodeScore, allNodesScore) and
+  // EpochStorage (epoch pool), then pre-fund the StakingStorage vault with
+  // TRAC matching the expected reward so the node-stake bookkeeping stays
+  // sound across a downstream withdrawal.
   //
   // No-op contract: a fresh position has `lastClaimedEpoch = currentEpoch
   // - 1`, so claim on the same epoch returns without emitting. A claim
@@ -1692,14 +1693,90 @@ describe('@unit DKGStakingConvictionNFT', () => {
       identityId: number,
       scorePerStake36: bigint,
     ) => {
-      const RandomSamplingStorageContract = await hre.ethers.getContract<RandomSamplingStorage>(
-        'RandomSamplingStorage',
-      );
-      await RandomSamplingStorageContract.connect(accounts[0]).setNodeEpochScorePerStake(
-        epoch,
-        identityId,
-        scorePerStake36,
-      );
+      const rss = await hre.ethers.getContract<RandomSamplingStorage>('RandomSamplingStorage');
+      await rss.connect(accounts[0]).setNodeEpochScorePerStake(epoch, identityId, scorePerStake36);
+    };
+
+    // Helper — inject nodeEpochScore for a node at a specific epoch.
+    const injectNodeEpochScore = async (
+      epoch: number | bigint,
+      identityId: number,
+      score18: bigint,
+    ) => {
+      const rss = await hre.ethers.getContract<RandomSamplingStorage>('RandomSamplingStorage');
+      await rss.connect(accounts[0]).setNodeEpochScore(epoch, identityId, score18);
+    };
+
+    // Helper — inject allNodesEpochScore for a specific epoch.
+    const injectAllNodesEpochScore = async (epoch: number | bigint, score18: bigint) => {
+      const rss = await hre.ethers.getContract<RandomSamplingStorage>('RandomSamplingStorage');
+      await rss.connect(accounts[0]).setAllNodesEpochScore(epoch, score18);
+    };
+
+    // Helper — fund a contiguous range of epoch pools via EpochStorage.
+    // Each epoch in [startEpoch .. endEpoch] receives `amountPerEpoch`.
+    // IMPORTANT: EpochStorage.addTokensToEpochRange triggers epoch
+    // finalization on every call, which locks in the cumulative sums from
+    // diffs set up so far. Calling it multiple times for overlapping
+    // epoch windows would finalize partial state. Always fund the full
+    // epoch range in a single call when possible.
+    const fundEpochPoolRange = async (
+      startEpoch: number | bigint,
+      endEpoch: number | bigint,
+      amountPerEpoch: bigint,
+    ) => {
+      const es = await hre.ethers.getContract<EpochStorage>('EpochStorageV8');
+      const numEpochs = BigInt(endEpoch) - BigInt(startEpoch) + 1n;
+      const totalAmount = amountPerEpoch * numEpochs;
+      await es.connect(accounts[0]).addTokensToEpochRange(1, startEpoch, endEpoch, totalAmount);
+    };
+
+    // Helper — fund a single epoch pool (convenience wrapper).
+    const fundEpochPool = async (epoch: number | bigint, amount: bigint) => {
+      await fundEpochPoolRange(epoch, epoch, amount);
+    };
+
+    // Helper — inject all epoch-level reward state in one call (single epoch).
+    // Sets scorePerStake, nodeScore, allNodesScore, and epoch pool for
+    // a single (epoch, identityId) tuple.
+    const injectEpochRewardState = async (
+      epoch: number | bigint,
+      identityId: number,
+      scorePerStake36: bigint,
+      nodeScore18: bigint,
+      allNodesScore18: bigint,
+      epochPool: bigint,
+    ) => {
+      await injectScorePerStake(epoch, identityId, scorePerStake36);
+      await injectNodeEpochScore(epoch, identityId, nodeScore18);
+      await injectAllNodesEpochScore(epoch, allNodesScore18);
+      await fundEpochPool(epoch, epochPool);
+    };
+
+    // Helper — inject score/epoch state for multiple epochs with a UNIFORM
+    // epoch pool. Uses a single `addTokensToEpochRange` call to avoid the
+    // finalization-ordering issue where subsequent calls lock in partial
+    // cumulative sums from earlier diffs.
+    const injectMultiEpochRewardState = async (
+      startEpoch: bigint,
+      epochCount: number,
+      identityId: number,
+      scorePerStakes: bigint[],
+      nodeScore18: bigint,
+      allNodesScore18: bigint,
+      epochPool: bigint,
+    ) => {
+      // Fund the full epoch range in ONE call.
+      const endEpoch = startEpoch + BigInt(epochCount) - 1n;
+      await fundEpochPoolRange(startEpoch, endEpoch, epochPool);
+
+      // Then inject per-epoch scores (these don't trigger finalization).
+      for (let i = 0; i < epochCount; i++) {
+        const e = startEpoch + BigInt(i);
+        await injectScorePerStake(e, identityId, scorePerStakes[i]);
+        await injectNodeEpochScore(e, identityId, nodeScore18);
+        await injectAllNodesEpochScore(e, allNodesScore18);
+      }
     };
 
     // Helper — pre-fund the StakingStorage vault with `amount` TRAC so the
@@ -1710,11 +1787,36 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await Token.mint(stakingStorageAddr, amount);
     };
 
-    // Helper — compute expected reward for a single epoch using the
-    // Phase 5 stub formula. Matches `StakingV10.claim`'s inner loop
-    // exactly: `reward = effStake * scorePerStake36 / 1e18`.
-    const computeReward = (effStake: bigint, scorePerStake36: bigint): bigint => {
-      return (effStake * scorePerStake36) / SCALE18;
+    // Helper — compute expected TRAC reward for a single epoch using the
+    // Phase 11 formula. Matches `StakingV10.claim`'s inner loop exactly:
+    //   delegatorScore18 = effStake * scorePerStake36 / 1e18
+    //   grossNodeRewards = epochPool * nodeScore18 / allNodesScore18
+    //   operatorFee = grossNodeRewards * operatorFeePercentage / maxOperatorFee
+    //   netNodeRewards = grossNodeRewards - operatorFee
+    //   reward = delegatorScore18 * netNodeRewards / nodeScore18
+    const computeReward = (
+      effStake: bigint,
+      scorePerStake36: bigint,
+      epochPool: bigint,
+      nodeScore18: bigint,
+      allNodesScore18: bigint,
+      operatorFeePercentage: bigint = 0n,
+      maxOperatorFee: bigint = 10_000n,
+    ): bigint => {
+      const delegatorScore18 = (effStake * scorePerStake36) / SCALE18;
+      if (delegatorScore18 === 0n || nodeScore18 === 0n) return 0n;
+      const grossNodeRewards = (epochPool * nodeScore18) / allNodesScore18;
+      const operatorFee = (grossNodeRewards * operatorFeePercentage) / maxOperatorFee;
+      const netNodeRewards = grossNodeRewards - operatorFee;
+      return (delegatorScore18 * netNodeRewards) / nodeScore18;
+    };
+
+    // Helper — assert the vault balance invariant after every claim.
+    const assertVaultInvariant = async () => {
+      const stakingStorageAddr = await StakingStorage.getAddress();
+      const vaultBalance = await Token.balanceOf(stakingStorageAddr);
+      const totalStake = await StakingStorage.getTotalStake();
+      expect(vaultBalance).to.be.gte(totalStake);
     };
 
     // -----------------------------------------------------------------
@@ -1819,12 +1921,30 @@ describe('@unit DKGStakingConvictionNFT', () => {
 
       // Pre-expiry, 12-epoch lock, multiplier = 6x.
       //   effStake = raw * 6 (rewardsSnapshot = 0)
-      //   reward = effStake * scorePerStake36 / 1e18
-      const scorePerStake36 = hre.ethers.parseEther('0.001'); // 1e15 (a modest score rate)
-      await injectScorePerStake(walkEpoch, identityId, scorePerStake36);
-
+      // Single node (nodeScore = allNodesScore), operator fee = 0.
+      // So reward = delegatorScore18 * epochPool / nodeScore18.
       const effStake = (amount * SIX_X) / SCALE18;
-      const expectedReward = computeReward(effStake, scorePerStake36);
+      const scorePerStake36 = hre.ethers.parseEther('0.001'); // 1e15 (a modest score rate)
+      const nodeScore18 = hre.ethers.parseEther('100');
+      const allNodesScore18 = nodeScore18; // only node
+      const epochPool = hre.ethers.parseEther('1000');
+
+      await injectEpochRewardState(
+        walkEpoch,
+        identityId,
+        scorePerStake36,
+        nodeScore18,
+        allNodesScore18,
+        epochPool,
+      );
+
+      const expectedReward = computeReward(
+        effStake,
+        scorePerStake36,
+        epochPool,
+        nodeScore18,
+        allNodesScore18,
+      );
       await fundVault(expectedReward);
 
       const nodeStakeBefore = await StakingStorage.getNodeStake(identityId);
@@ -1854,6 +1974,9 @@ describe('@unit DKGStakingConvictionNFT', () => {
       // TRAC-zero invariant: neither the NFT wrapper nor StakingV10 hold funds.
       expect(await Token.balanceOf(await NFT.getAddress())).to.equal(0n);
       expect(await Token.balanceOf(await StakingV10Contract.getAddress())).to.equal(0n);
+
+      // Vault balance invariant.
+      await assertVaultInvariant();
     });
 
     it('multi-epoch happy path: three epochs of distinct scores, claim sums cumulatively', async () => {
@@ -1867,15 +1990,33 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await advanceEpochs(3);
 
       // Pre-expiry throughout (12-epoch lock), so effStake = raw*6 for all three.
+      // Single node, operator fee = 0. Uniform epoch pool across all 3 epochs.
+      const effStake = (amount * SIX_X) / SCALE18;
+      const nodeScore18 = hre.ethers.parseEther('100');
+      const allNodesScore18 = nodeScore18;
+      const epochPool = hre.ethers.parseEther('1000');
+
       const s0 = hre.ethers.parseEther('0.001'); // 1e15
       const s1 = hre.ethers.parseEther('0.002'); // 2e15
       const s2 = hre.ethers.parseEther('0.003'); // 3e15
-      await injectScorePerStake(creationEpoch, identityId, s0);
-      await injectScorePerStake(creationEpoch + 1n, identityId, s1);
-      await injectScorePerStake(creationEpoch + 2n, identityId, s2);
 
-      const effStake = (amount * SIX_X) / SCALE18;
-      const expectedReward = computeReward(effStake, s0 + s1 + s2);
+      // Fund all 3 epochs in a single call to avoid EpochStorage finalization
+      // ordering issues, then inject per-epoch scores.
+      await injectMultiEpochRewardState(
+        creationEpoch,
+        3,
+        identityId,
+        [s0, s1, s2],
+        nodeScore18,
+        allNodesScore18,
+        epochPool,
+      );
+
+      // Sum rewards per-epoch.
+      const expectedReward =
+        computeReward(effStake, s0, epochPool, nodeScore18, allNodesScore18) +
+        computeReward(effStake, s1, epochPool, nodeScore18, allNodesScore18) +
+        computeReward(effStake, s2, epochPool, nodeScore18, allNodesScore18);
       await fundVault(expectedReward);
 
       const tx = await NFT.connect(accounts[0]).claim(0);
@@ -1885,6 +2026,9 @@ describe('@unit DKGStakingConvictionNFT', () => {
 
       const pos = await ConvictionStakingStorageContract.getPosition(0);
       expect(pos.rewards).to.equal(expectedReward);
+
+      // Vault balance invariant.
+      await assertVaultInvariant();
     });
 
     it('pre-expiry multiplier applied: 6x multiplier on a 12-epoch lock', async () => {
@@ -1896,23 +2040,47 @@ describe('@unit DKGStakingConvictionNFT', () => {
       const creationEpoch = await ChronosContract.getCurrentEpoch();
       await advanceEpochs(1);
       const scorePerStake36 = hre.ethers.parseEther('0.01'); // 1e16
-      await injectScorePerStake(creationEpoch, identityId, scorePerStake36);
+      const nodeScore18 = hre.ethers.parseEther('100');
+      const allNodesScore18 = nodeScore18;
+      const epochPool = hre.ethers.parseEther('1000');
+      await injectEpochRewardState(
+        creationEpoch,
+        identityId,
+        scorePerStake36,
+        nodeScore18,
+        allNodesScore18,
+        epochPool,
+      );
 
       // effStake = raw * 6x (still pre-expiry since expiryEpoch = creation+12)
       const effStake = (amount * SIX_X) / SCALE18;
-      const expectedReward = computeReward(effStake, scorePerStake36);
+      const expectedReward = computeReward(
+        effStake,
+        scorePerStake36,
+        epochPool,
+        nodeScore18,
+        allNodesScore18,
+      );
       await fundVault(expectedReward);
 
-      // Compare against a hypothetical 1x position: same scorePerStake should
-      // produce 6x the reward of a rest-tier position. Rather than deploy two
-      // positions, we verify the computeReward shape directly: expectedReward
-      // should equal 6 * (raw * score / 1e18).
-      const baselineReward = computeReward(amount, scorePerStake36); // 1x effective
+      // Compare against a hypothetical 1x position: same epoch pool means the
+      // 6x effective should produce 6x the delegator-score fraction and thus
+      // 6x the reward of a 1x position.
+      const baselineReward = computeReward(
+        amount,
+        scorePerStake36,
+        epochPool,
+        nodeScore18,
+        allNodesScore18,
+      );
       expect(expectedReward).to.equal(baselineReward * 6n);
 
       await NFT.connect(accounts[0]).claim(0);
       const pos = await ConvictionStakingStorageContract.getPosition(0);
       expect(pos.rewards).to.equal(expectedReward);
+
+      // Vault balance invariant.
+      await assertVaultInvariant();
     });
 
     it('post-expiry 1x downgrade: claim across an epoch where lock has already expired', async () => {
@@ -1922,7 +2090,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
 
       const creationEpoch = await ChronosContract.getCurrentEpoch();
-      // 1-epoch lock → expiryEpoch = creationEpoch + 1. Advance 3 epochs so the
+      // 1-epoch lock -> expiryEpoch = creationEpoch + 1. Advance 3 epochs so the
       // claim window covers creationEpoch (pre-expiry) AND creationEpoch+1,+2
       // (post-expiry). Inject distinct scores to verify per-epoch math.
       await advanceEpochs(3);
@@ -1931,15 +2099,34 @@ describe('@unit DKGStakingConvictionNFT', () => {
       // unambiguously the 1x rate.
       const postExpiryEpoch = creationEpoch + 2n; // strictly > expiryEpoch=creation+1
       const scorePerStake36 = hre.ethers.parseEther('0.01');
-      await injectScorePerStake(postExpiryEpoch, identityId, scorePerStake36);
+      const nodeScore18 = hre.ethers.parseEther('100');
+      const allNodesScore18 = nodeScore18;
+      const epochPool = hre.ethers.parseEther('1000');
+      await injectEpochRewardState(
+        postExpiryEpoch,
+        identityId,
+        scorePerStake36,
+        nodeScore18,
+        allNodesScore18,
+        epochPool,
+      );
 
       // effStake_post = raw (no multiplier after expiry)
-      const expectedReward = computeReward(amount, scorePerStake36);
+      const expectedReward = computeReward(
+        amount,
+        scorePerStake36,
+        epochPool,
+        nodeScore18,
+        allNodesScore18,
+      );
       await fundVault(expectedReward);
 
       await NFT.connect(accounts[0]).claim(0);
       const pos = await ConvictionStakingStorageContract.getPosition(0);
       expect(pos.rewards).to.equal(expectedReward);
+
+      // Vault balance invariant.
+      await assertVaultInvariant();
     });
 
     it('multiplier + post-expiry split: two epochs, first boosted, second flat', async () => {
@@ -1949,21 +2136,32 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await NFT.connect(accounts[0]).createConviction(identityId, amount, 1);
 
       const creationEpoch = await ChronosContract.getCurrentEpoch();
-      // 1-epoch lock → expiryEpoch = creationEpoch + 1. With advanceEpochs(3):
+      // 1-epoch lock -> expiryEpoch = creationEpoch + 1. With advanceEpochs(3):
       //   - claim window = [creationEpoch .. creationEpoch + 2]
       //   - pre-expiry: epoch == creationEpoch (strict < expiryEpoch)
       //   - post-expiry: creationEpoch + 1, creationEpoch + 2 (>= expiryEpoch)
       await advanceEpochs(3);
       const scorePre = hre.ethers.parseEther('0.01');
       const scorePost = hre.ethers.parseEther('0.02');
-      await injectScorePerStake(creationEpoch, identityId, scorePre); // pre-expiry
-      await injectScorePerStake(creationEpoch + 2n, identityId, scorePost); // post-expiry
+      const nodeScore18 = hre.ethers.parseEther('100');
+      const allNodesScore18 = nodeScore18;
+      const epochPool = hre.ethers.parseEther('1000');
+
+      // Fund all 3 epochs in one call, then inject per-epoch scores.
+      await fundEpochPoolRange(creationEpoch, creationEpoch + 2n, epochPool);
+      await injectScorePerStake(creationEpoch, identityId, scorePre);
+      await injectNodeEpochScore(creationEpoch, identityId, nodeScore18);
+      await injectAllNodesEpochScore(creationEpoch, allNodesScore18);
+      await injectScorePerStake(creationEpoch + 2n, identityId, scorePost);
+      await injectNodeEpochScore(creationEpoch + 2n, identityId, nodeScore18);
+      await injectAllNodesEpochScore(creationEpoch + 2n, allNodesScore18);
 
       // Pre-expiry epoch earns at 1.5x; post-expiry epoch at 1x.
       const effStakePre = (amount * ONE_AND_HALF_X) / SCALE18;
       const effStakePost = amount;
       const expectedReward =
-        computeReward(effStakePre, scorePre) + computeReward(effStakePost, scorePost);
+        computeReward(effStakePre, scorePre, epochPool, nodeScore18, allNodesScore18) +
+        computeReward(effStakePost, scorePost, epochPool, nodeScore18, allNodesScore18);
       await fundVault(expectedReward);
 
       const tx = await NFT.connect(accounts[0]).claim(0);
@@ -1973,6 +2171,9 @@ describe('@unit DKGStakingConvictionNFT', () => {
 
       const pos = await ConvictionStakingStorageContract.getPosition(0);
       expect(pos.rewards).to.equal(expectedReward);
+
+      // Vault balance invariant.
+      await assertVaultInvariant();
     });
 
     // -----------------------------------------------------------------
@@ -1988,10 +2189,26 @@ describe('@unit DKGStakingConvictionNFT', () => {
       const creationEpoch = await ChronosContract.getCurrentEpoch();
       await advanceEpochs(1);
       const scorePerStake36 = hre.ethers.parseEther('0.001');
-      await injectScorePerStake(creationEpoch, identityId, scorePerStake36);
+      const nodeScore18 = hre.ethers.parseEther('100');
+      const allNodesScore18 = nodeScore18;
+      const epochPool = hre.ethers.parseEther('1000');
+      await injectEpochRewardState(
+        creationEpoch,
+        identityId,
+        scorePerStake36,
+        nodeScore18,
+        allNodesScore18,
+        epochPool,
+      );
 
       const effStake = (amount * SIX_X) / SCALE18;
-      const expectedReward = computeReward(effStake, scorePerStake36);
+      const expectedReward = computeReward(
+        effStake,
+        scorePerStake36,
+        epochPool,
+        nodeScore18,
+        allNodesScore18,
+      );
       await fundVault(expectedReward);
 
       // First claim — pays out expected reward.
@@ -2014,15 +2231,18 @@ describe('@unit DKGStakingConvictionNFT', () => {
     it('reverts RewardOverflow when accumulated reward exceeds uint96 max', async () => {
       const { identityId } = await createProfile();
       // We need to push `rewardTotal` past `type(uint96).max` (~7.92e28)
-      // through the Phase 5 stub formula:
-      //    rewardTotal = effStake * scorePerStake36 / 1e18
-      // Pre-expiry effStake at 6x for `amount` raw is `amount * 6`. To
-      // hit ~8e28, set amount large and crank scorePerStake36.
-      // amount * 6 * scorePerStake36 / 1e18 > 2^96
-      //   amount = 1e22 (10000 TRAC)
-      //   effStake = 6e22
-      //   need scorePerStake36 > 2^96 * 1e18 / 6e22 ≈ 1.32e15
-      // Round up generously to make the overshoot unambiguous: 1e21.
+      // through the TRAC formula. With a massive epoch pool and the
+      // delegator being the only staker on the only node, the full pool
+      // flows to the delegator. We need epochPool > 2^96.
+      //
+      // amount = 1e22 (10000 TRAC), effStake = 6e22 at 6x
+      // nodeScore = allNodesScore = 100e18
+      // scorePerStake36 chosen so delegatorScore18 = nodeScore18
+      //   => delegatorScore18 = effStake * scorePerStake36 / 1e18 = 100e18
+      //   => scorePerStake36 = 100e18 * 1e18 / 6e22 = 1e18 * 100 / 6e4
+      //      = 1e18 / 600 ~ 1.666e15 (but doesn't need to be exact)
+      // With delegatorScore = nodeScore, reward = netNodeRewards = epochPool.
+      // Set epochPool = 1e29 > 2^96 (~7.92e28) — overflow.
       const amount = hre.ethers.parseEther('10000'); // 1e22
       await mintAndApprove(accounts[0], amount);
       await NFT.connect(accounts[0]).createConviction(identityId, amount, 12);
@@ -2030,12 +2250,26 @@ describe('@unit DKGStakingConvictionNFT', () => {
       const creationEpoch = await ChronosContract.getCurrentEpoch();
       await advanceEpochs(1);
 
-      // Inject a huge per-epoch score-per-stake. The Phase 5 stub formula
-      // yields rewardTotal = 6e22 * 1e21 / 1e18 = 6e25. Still under 2^96
-      // (~7.92e28), so nudge it higher.
-      // 6e22 * 1e25 / 1e18 = 6e29 > 2^96 — that overflows.
+      const nodeScore18 = hre.ethers.parseEther('100'); // 1e20
+      const allNodesScore18 = nodeScore18;
+      // Make delegatorScore18 = nodeScore18 so reward = epochPool exactly.
+      // delegatorScore18 = effStake * scorePerStake36 / 1e18
+      // effStake = 6e22. We need scorePerStake36 = nodeScore18 * 1e18 / effStake
+      //   = 1e20 * 1e18 / 6e22 = 1e38 / 6e22 = 1e16 / 6 ~ 1.666e15
+      // Use a round value that gets close enough to overflow.
       const scorePerStake36 = 10n ** 25n;
-      await injectScorePerStake(creationEpoch, identityId, scorePerStake36);
+      // epochPool must be huge to force overflow. The epoch pool is uint96,
+      // but addTokensToEpochRange takes uint96. So we need to set it near
+      // the uint96 max. 2^96 - 1 ~ 7.92e28.
+      const hugePool = (1n << 96n) - 1n; // max uint96
+      await injectEpochRewardState(
+        creationEpoch,
+        identityId,
+        scorePerStake36,
+        nodeScore18,
+        allNodesScore18,
+        hugePool,
+      );
 
       await expect(
         NFT.connect(accounts[0]).claim(0),
@@ -2055,10 +2289,26 @@ describe('@unit DKGStakingConvictionNFT', () => {
       const creationEpoch = await ChronosContract.getCurrentEpoch();
       await advanceEpochs(1);
       const scorePerStake36 = hre.ethers.parseEther('0.001');
-      await injectScorePerStake(creationEpoch, identityId, scorePerStake36);
+      const nodeScore18 = hre.ethers.parseEther('100');
+      const allNodesScore18 = nodeScore18;
+      const epochPool = hre.ethers.parseEther('1000');
+      await injectEpochRewardState(
+        creationEpoch,
+        identityId,
+        scorePerStake36,
+        nodeScore18,
+        allNodesScore18,
+        epochPool,
+      );
 
       const effStake = (amount * SIX_X) / SCALE18;
-      const expectedReward = computeReward(effStake, scorePerStake36);
+      const expectedReward = computeReward(
+        effStake,
+        scorePerStake36,
+        epochPool,
+        nodeScore18,
+        allNodesScore18,
+      );
       await fundVault(expectedReward);
 
       // 1. Claim — banks reward into pos.rewards + delegator/node/total.
@@ -2097,6 +2347,192 @@ describe('@unit DKGStakingConvictionNFT', () => {
       expect(posFinal.raw).to.equal(amount);
       expect(posFinal.rewards).to.equal(0n);
       expect(await NFT.ownerOf(0)).to.equal(accounts[0].address);
+    });
+
+    // -----------------------------------------------------------------
+    // Reward distribution proportionality
+    // -----------------------------------------------------------------
+
+    it('6x staker gets 6/7, 1x staker gets 1/7 of net node rewards', async () => {
+      const { identityId } = await createProfile();
+      const aliceAmount = hre.ethers.parseEther('1000');
+      const bobAmount = hre.ethers.parseEther('1000');
+
+      // Alice: 12-epoch lock (6x), Bob: 0 lock via post-expiry (1x).
+      // We create both at different tiers on the same node.
+      // Alice — 12-epoch lock, 6x
+      await mintAndApprove(accounts[0], aliceAmount);
+      await NFT.connect(accounts[0]).createConviction(identityId, aliceAmount, 12);
+
+      // Bob — 1-epoch lock, 1.5x pre-expiry but we'll claim only post-expiry.
+      // Actually, to get a clean 1x we use the same epoch for both but
+      // let Bob use 1-epoch lock and claim the creation epoch (pre-expiry
+      // at 1.5x). To get a true 6:1 ratio we need Bob to be at 1x.
+      //
+      // Simplification: advance past Bob's expiry so Bob is at 1x.
+      await mintAndApprove(accounts[2], bobAmount);
+      await Token.connect(accounts[2]).approve(await StakingV10Contract.getAddress(), bobAmount);
+      await NFT.connect(accounts[2]).createConviction(identityId, bobAmount, 1);
+
+      const creationEpoch = await ChronosContract.getCurrentEpoch();
+      // Advance 2 epochs so Bob's 1-epoch lock is expired on the claim epoch.
+      // Bob's expiryEpoch = creationEpoch + 1, so epoch creationEpoch+1 is
+      // post-expiry for Bob but still pre-expiry for Alice (expiry at +12).
+      await advanceEpochs(2);
+      const claimEpoch = creationEpoch + 1n;
+
+      // Effective stakes: Alice = 1000 * 6 = 6000, Bob = 1000 * 1 = 1000
+      // Total effective = 7000
+      const aliceEff = (aliceAmount * SIX_X) / SCALE18; // 6000e18
+      const bobEff = bobAmount; // 1000e18 (post-expiry, 1x)
+
+      // nodeScore = sum of proofs. We set it directly.
+      // scorePerStake36 = nodeScore18 * 1e18 / effectiveNodeStake is the
+      // relationship from proof submission. We pick clean round numbers:
+      const nodeScore18 = hre.ethers.parseEther('700'); // 700e18
+      const allNodesScore18 = nodeScore18;
+      const epochPool = hre.ethers.parseEther('7000'); // 7000 TRAC
+
+      // scorePerStake36 such that the sum of delegator scores = nodeScore.
+      // delegatorScore_alice = aliceEff * sps / 1e18, bob same.
+      // sum = (aliceEff + bobEff) * sps / 1e18 = nodeScore
+      // sps = nodeScore * 1e18 / (aliceEff + bobEff)
+      //     = 700e18 * 1e18 / 7000e18 = 1e17
+      const totalEffective = aliceEff + bobEff;
+      const scorePerStake36 = (nodeScore18 * SCALE18) / totalEffective;
+
+      await injectEpochRewardState(
+        claimEpoch,
+        identityId,
+        scorePerStake36,
+        nodeScore18,
+        allNodesScore18,
+        epochPool,
+      );
+
+      // Also inject creation epoch with 0 score (already default, but
+      // we inject the first-epoch score for both). Both positions walk
+      // [creationEpoch .. creationEpoch+1]; only claimEpoch has score.
+
+      // netNodeRewards = epochPool (single node, opFee=0) = 7000 TRAC
+      // Alice reward = aliceEff * sps / 1e18 * 7000e18 / nodeScore18
+      //              = 6000e18 * 1e17 / 1e18 * 7000e18 / 700e18
+      //              = 600e18 * 10 = 6000e18
+      // Bob reward   = 1000e18 * 1e17 / 1e18 * 7000e18 / 700e18
+      //              = 100e18 * 10 = 1000e18
+      const aliceExpected = computeReward(
+        aliceEff,
+        scorePerStake36,
+        epochPool,
+        nodeScore18,
+        allNodesScore18,
+      );
+      const bobExpected = computeReward(
+        bobEff,
+        scorePerStake36,
+        epochPool,
+        nodeScore18,
+        allNodesScore18,
+      );
+
+      // Fund vault with total rewards.
+      await fundVault(aliceExpected + bobExpected);
+
+      // Alice claims first (tokenId 0).
+      await NFT.connect(accounts[0]).claim(0);
+      const alicePos = await ConvictionStakingStorageContract.getPosition(0);
+      expect(alicePos.rewards).to.equal(aliceExpected);
+
+      // Bob claims second (tokenId 1).
+      await NFT.connect(accounts[2]).claim(1);
+      const bobPos = await ConvictionStakingStorageContract.getPosition(1);
+      expect(bobPos.rewards).to.equal(bobExpected);
+
+      // Proportionality: Alice gets 6/7, Bob gets 1/7 of netNodeRewards.
+      const netNodeRewards = epochPool; // single node, no op fee
+      expect(aliceExpected).to.equal((netNodeRewards * 6n) / 7n);
+      expect(bobExpected).to.equal(netNodeRewards / 7n);
+      // Total within 1 wei of netNodeRewards (integer division rounding).
+      expect(netNodeRewards - (aliceExpected + bobExpected)).to.be.lte(1n);
+
+      // Vault balance invariant.
+      await assertVaultInvariant();
+    });
+
+    // -----------------------------------------------------------------
+    // Expiry boundary — multiplier transitions at expiryEpoch
+    // -----------------------------------------------------------------
+
+    it('expiry boundary: pre-expiry epochs use 6x, expiryEpoch onward uses 1x', async () => {
+      const { identityId } = await createProfile();
+      const amount = hre.ethers.parseEther('1000');
+      await mintAndApprove(accounts[0], amount);
+      await NFT.connect(accounts[0]).createConviction(identityId, amount, 12);
+
+      const creationEpoch = await ChronosContract.getCurrentEpoch();
+      // expiryEpoch = creationEpoch + 12. Advance 14 epochs to cover
+      // [creationEpoch .. creationEpoch+13]. Epochs 0..11 are pre-expiry
+      // (6x), epoch 12+ are post-expiry (1x).
+      await advanceEpochs(14);
+
+      const nodeScore18 = hre.ethers.parseEther('100');
+      const allNodesScore18 = nodeScore18;
+      const epochPool = hre.ethers.parseEther('100');
+      const scorePerStake36 = hre.ethers.parseEther('0.001'); // 1e15
+
+      // Inject score for exactly two epochs: one pre-expiry and one
+      // post-expiry (the boundary epoch). This isolates the multiplier
+      // transition.
+      const lastPreExpiryEpoch = creationEpoch + 11n; // epoch index 11, still < expiryEpoch=creation+12
+      const firstPostExpiryEpoch = creationEpoch + 12n; // expiryEpoch itself
+
+      // Fund the full 14-epoch range in one call to avoid finalization issues.
+      await fundEpochPoolRange(creationEpoch, creationEpoch + 13n, epochPool);
+
+      // Inject per-epoch score data for just the two epochs we care about.
+      await injectScorePerStake(lastPreExpiryEpoch, identityId, scorePerStake36);
+      await injectNodeEpochScore(lastPreExpiryEpoch, identityId, nodeScore18);
+      await injectAllNodesEpochScore(lastPreExpiryEpoch, allNodesScore18);
+      await injectScorePerStake(firstPostExpiryEpoch, identityId, scorePerStake36);
+      await injectNodeEpochScore(firstPostExpiryEpoch, identityId, nodeScore18);
+      await injectAllNodesEpochScore(firstPostExpiryEpoch, allNodesScore18);
+
+      // Pre-expiry: effStake = 1000 * 6 = 6000
+      const effStakePre = (amount * SIX_X) / SCALE18;
+      // Post-expiry: effStake = 1000 (1x)
+      const effStakePost = amount;
+
+      const rewardPre = computeReward(
+        effStakePre,
+        scorePerStake36,
+        epochPool,
+        nodeScore18,
+        allNodesScore18,
+      );
+      const rewardPost = computeReward(
+        effStakePost,
+        scorePerStake36,
+        epochPool,
+        nodeScore18,
+        allNodesScore18,
+      );
+
+      // Verify the multiplier difference is exactly 6:1.
+      expect(rewardPre).to.equal(rewardPost * 6n);
+
+      const expectedTotal = rewardPre + rewardPost;
+      await fundVault(expectedTotal);
+
+      const tx = await NFT.connect(accounts[0]).claim(0);
+      await expect(tx)
+        .to.emit(StakingV10Contract, 'RewardsClaimed')
+        .withArgs(0n, expectedTotal);
+
+      const pos = await ConvictionStakingStorageContract.getPosition(0);
+      expect(pos.rewards).to.equal(expectedTotal);
+
+      // Vault balance invariant.
+      await assertVaultInvariant();
     });
   });
 
@@ -2464,21 +2900,82 @@ describe('@unit DKGStakingConvictionNFT', () => {
   describe('transfer (accrued-interest model)', () => {
     // Helper — inject `nodeEpochScorePerStake36` at a specific epoch via the
     // hub-owner-privileged setter. Mirrors the helper in the claim describe
-    // block — duplicated locally so this block stays self-contained. The
-    // `claim` helper cannot be referenced across describe boundaries.
+    // block — duplicated locally so this block stays self-contained.
     const injectScorePerStake = async (
       epoch: number | bigint,
       identityId: number,
       scorePerStake36: bigint,
     ) => {
-      const RandomSamplingStorageContract = await hre.ethers.getContract<RandomSamplingStorage>(
-        'RandomSamplingStorage',
-      );
-      await RandomSamplingStorageContract.connect(accounts[0]).setNodeEpochScorePerStake(
-        epoch,
-        identityId,
-        scorePerStake36,
-      );
+      const rss = await hre.ethers.getContract<RandomSamplingStorage>('RandomSamplingStorage');
+      await rss.connect(accounts[0]).setNodeEpochScorePerStake(epoch, identityId, scorePerStake36);
+    };
+
+    // Helper — inject nodeEpochScore for a node at a specific epoch.
+    const injectNodeEpochScore = async (
+      epoch: number | bigint,
+      identityId: number,
+      score18: bigint,
+    ) => {
+      const rss = await hre.ethers.getContract<RandomSamplingStorage>('RandomSamplingStorage');
+      await rss.connect(accounts[0]).setNodeEpochScore(epoch, identityId, score18);
+    };
+
+    // Helper — inject allNodesEpochScore for a specific epoch.
+    const injectAllNodesEpochScore = async (epoch: number | bigint, score18: bigint) => {
+      const rss = await hre.ethers.getContract<RandomSamplingStorage>('RandomSamplingStorage');
+      await rss.connect(accounts[0]).setAllNodesEpochScore(epoch, score18);
+    };
+
+    // Helper — fund a contiguous range of epoch pools via EpochStorage.
+    const fundEpochPoolRange = async (
+      startEpoch: number | bigint,
+      endEpoch: number | bigint,
+      amountPerEpoch: bigint,
+    ) => {
+      const es = await hre.ethers.getContract<EpochStorage>('EpochStorageV8');
+      const numEpochs = BigInt(endEpoch) - BigInt(startEpoch) + 1n;
+      const totalAmount = amountPerEpoch * numEpochs;
+      await es.connect(accounts[0]).addTokensToEpochRange(1, startEpoch, endEpoch, totalAmount);
+    };
+
+    // Helper — fund a single epoch pool (convenience wrapper).
+    const fundEpochPool = async (epoch: number | bigint, amount: bigint) => {
+      await fundEpochPoolRange(epoch, epoch, amount);
+    };
+
+    // Helper — inject all epoch-level reward state in one call (single epoch).
+    const injectEpochRewardState = async (
+      epoch: number | bigint,
+      identityId: number,
+      scorePerStake36: bigint,
+      nodeScore18: bigint,
+      allNodesScore18: bigint,
+      epochPool: bigint,
+    ) => {
+      await injectScorePerStake(epoch, identityId, scorePerStake36);
+      await injectNodeEpochScore(epoch, identityId, nodeScore18);
+      await injectAllNodesEpochScore(epoch, allNodesScore18);
+      await fundEpochPool(epoch, epochPool);
+    };
+
+    // Helper — inject score/epoch state for multiple epochs with a UNIFORM pool.
+    const injectMultiEpochRewardState = async (
+      startEpoch: bigint,
+      epochCount: number,
+      identityId: number,
+      scorePerStakes: bigint[],
+      nodeScore18: bigint,
+      allNodesScore18: bigint,
+      epochPool: bigint,
+    ) => {
+      const endEpoch = startEpoch + BigInt(epochCount) - 1n;
+      await fundEpochPoolRange(startEpoch, endEpoch, epochPool);
+      for (let i = 0; i < epochCount; i++) {
+        const e = startEpoch + BigInt(i);
+        await injectScorePerStake(e, identityId, scorePerStakes[i]);
+        await injectNodeEpochScore(e, identityId, nodeScore18);
+        await injectAllNodesEpochScore(e, allNodesScore18);
+      }
     };
 
     // Helper — pre-fund the StakingStorage vault so the claim's
@@ -2488,10 +2985,22 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await Token.mint(stakingStorageAddr, amount);
     };
 
-    // Single-epoch reward formula — mirrors StakingV10.claim's inner loop
-    // exactly: `reward = effStake * scorePerStake36 / 1e18`.
-    const computeReward = (effStake: bigint, scorePerStake36: bigint): bigint => {
-      return (effStake * scorePerStake36) / SCALE18;
+    // TRAC reward formula — mirrors StakingV10.claim's inner loop.
+    const computeReward = (
+      effStake: bigint,
+      scorePerStake36: bigint,
+      epochPool: bigint,
+      nodeScore18: bigint,
+      allNodesScore18: bigint,
+      operatorFeePercentage: bigint = 0n,
+      maxOperatorFee: bigint = 10_000n,
+    ): bigint => {
+      const delegatorScore18 = (effStake * scorePerStake36) / SCALE18;
+      if (delegatorScore18 === 0n || nodeScore18 === 0n) return 0n;
+      const grossNodeRewards = (epochPool * nodeScore18) / allNodesScore18;
+      const operatorFee = (grossNodeRewards * operatorFeePercentage) / maxOperatorFee;
+      const netNodeRewards = grossNodeRewards - operatorFee;
+      return (delegatorScore18 * netNodeRewards) / nodeScore18;
     };
 
     it('ERC-721 transfer does not mutate Position state', async () => {
@@ -2543,16 +3052,30 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await advanceEpochs(3);
 
       // Inject score for 3 epochs — pre-expiry throughout (12-epoch lock),
-      // so effStake = raw * 6x for all three.
+      // so effStake = raw * 6x for all three. Single node, opFee=0.
+      const effStake = (amount * SIX_X) / SCALE18;
+      const nodeScore18 = hre.ethers.parseEther('100');
+      const allNodesScore18 = nodeScore18;
+
       const s0 = hre.ethers.parseEther('0.001'); // 1e15
       const s1 = hre.ethers.parseEther('0.002'); // 2e15
       const s2 = hre.ethers.parseEther('0.003'); // 3e15
-      await injectScorePerStake(creationEpoch, identityId, s0);
-      await injectScorePerStake(creationEpoch + 1n, identityId, s1);
-      await injectScorePerStake(creationEpoch + 2n, identityId, s2);
+      const pool = hre.ethers.parseEther('1000');
 
-      const effStake = (amount * SIX_X) / SCALE18;
-      const expectedReward = computeReward(effStake, s0 + s1 + s2);
+      await injectMultiEpochRewardState(
+        creationEpoch,
+        3,
+        identityId,
+        [s0, s1, s2],
+        nodeScore18,
+        allNodesScore18,
+        pool,
+      );
+
+      const expectedReward =
+        computeReward(effStake, s0, pool, nodeScore18, allNodesScore18) +
+        computeReward(effStake, s1, pool, nodeScore18, allNodesScore18) +
+        computeReward(effStake, s2, pool, nodeScore18, allNodesScore18);
       await fundVault(expectedReward);
 
       // Alice transfers to Bob WITHOUT claiming first. The accrued coupon
@@ -2590,7 +3113,15 @@ describe('@unit DKGStakingConvictionNFT', () => {
       const creationEpoch = await ChronosContract.getCurrentEpoch();
       await advanceEpochs(1);
       const scorePerStake36 = hre.ethers.parseEther('0.001');
-      await injectScorePerStake(creationEpoch, identityId, scorePerStake36);
+      const nodeScore18 = hre.ethers.parseEther('100');
+      await injectEpochRewardState(
+        creationEpoch,
+        identityId,
+        scorePerStake36,
+        nodeScore18,
+        nodeScore18,
+        hre.ethers.parseEther('1000'),
+      );
 
       await NFT.connect(accounts[0]).transferFrom(
         accounts[0].address,
@@ -2650,11 +3181,24 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await advanceEpochs(2);
       const s0 = hre.ethers.parseEther('0.001');
       const s1 = hre.ethers.parseEther('0.002');
-      await injectScorePerStake(creationEpoch, identityId, s0);
-      await injectScorePerStake(creationEpoch + 1n, identityId, s1);
+      const nodeScore18 = hre.ethers.parseEther('100');
+      const allNodesScore18 = nodeScore18;
+      const pool = hre.ethers.parseEther('1000');
+
+      await injectMultiEpochRewardState(
+        creationEpoch,
+        2,
+        identityId,
+        [s0, s1],
+        nodeScore18,
+        allNodesScore18,
+        pool,
+      );
 
       const effStake = (amount * SIX_X) / SCALE18;
-      const expectedReward = computeReward(effStake, s0 + s1);
+      const expectedReward =
+        computeReward(effStake, s0, pool, nodeScore18, allNodesScore18) +
+        computeReward(effStake, s1, pool, nodeScore18, allNodesScore18);
       await fundVault(expectedReward);
 
       await NFT.connect(accounts[0]).transferFrom(

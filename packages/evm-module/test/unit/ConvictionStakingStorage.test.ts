@@ -15,9 +15,9 @@ const ALICE_ID = 100n;
 const BOB_ID = 200n;
 const OTHER_ID = 999n;
 
-// Multiplier scale: matches Staking.convictionMultiplier and
-// DKGStakingConvictionNFT._convictionMultiplier (both 1e18-scaled). Fractional
-// tiers 1.5x and 3.5x are representable as 1.5e18 / 3.5e18.
+// Multiplier scale: matches DKGStakingConvictionNFT._convictionMultiplier
+// (1e18-scaled). Fractional tiers 1.5x and 3.5x are representable as
+// 1.5e18 / 3.5e18.
 const SCALE18 = 10n ** 18n;
 const ONE_X = SCALE18;
 const ONE_AND_HALF_X = (15n * SCALE18) / 10n;
@@ -72,7 +72,7 @@ describe('@unit ConvictionStakingStorage', () => {
   });
 
   // ------------------------------------------------------------
-  // Tier ladder (mirrors Staking.convictionMultiplier)
+  // Tier ladder (mirrors DKGStakingConvictionNFT._convictionMultiplier)
   // ------------------------------------------------------------
 
   describe('expectedMultiplier18 tier ladder', () => {

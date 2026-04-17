@@ -67,9 +67,8 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
     // Constants
     // ========================================================================
 
-    /// @notice 1e18 fixed-point scale shared with `ConvictionStakingStorage`
-    ///         and `Staking.convictionMultiplier`. Tier table and reward
-    ///         math all use this scale.
+    /// @notice 1e18 fixed-point scale shared with `ConvictionStakingStorage`.
+    ///         Tier table and reward math all use this scale.
     uint256 public constant SCALE18 = 1e18;
 
     /// @notice Time between `requestWithdrawal` and `processWithdrawal`.
@@ -225,14 +224,12 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
     // tier on both sides.
     //
     // Discrete, exact-match tier table — no snap-down semantics. Values
-    // that don't land on one of the tiers revert. This is stricter than
-    // `Staking.convictionMultiplier` (which uses snap-down `>=` branches):
-    // `createConviction` / `convertToNFT` are the only entry points that
-    // invoke this function with a user-supplied `lockEpochs`, and any
-    // value outside the valid set is an API error that must not round
-    // down silently to a lower tier (a user passing 4 silently snapping
-    // to tier 3 would commit the user to a different lock than they
-    // intended).
+    // that don't land on one of the tiers revert. `createConviction` /
+    // `convertToNFT` are the only entry points that invoke this function
+    // with a user-supplied `lockEpochs`, and any value outside the valid
+    // set is an API error that must not round down silently to a lower
+    // tier (a user passing 4 silently snapping to tier 3 would commit
+    // the user to a different lock than they intended).
     //
     // Why `0 → SCALE18` rather than a revert at the helper level:
     //   The post-expiry rest state in `ConvictionStakingStorage` is
