@@ -2440,6 +2440,14 @@ export class DKGAgent {
       }
     } catch { /* identity lookup failed — continue to deny */ }
 
+    // Legacy peer-ID allowlist: `inviteToContextGraph` writes `DKG_ALLOWED_PEER`
+    // quads. Honor them for local reads so a peer-ID-invited node can query
+    // the data it just synced.
+    const allowedPeers = await this.getContextGraphAllowedPeers(contextGraphId);
+    if (allowedPeers?.includes(this.peerId)) {
+      return true;
+    }
+
     // Edge nodes without an on-chain identity (identityId 0n) fall back to
     // subscription-based access — the subscription itself is an authorization
     // (the node was invited or created this CG).
@@ -4909,6 +4917,19 @@ export class DKGAgent {
       (requesterIdentityId > 0n && p === String(requesterIdentityId)),
     ) ?? false;
 
+    // Legacy peer-ID allowlist: `inviteToContextGraph` (the path behind
+    // `POST /api/context-graph/invite`) writes `DKG_ALLOWED_PEER` quads.
+    // Honor them here so peer-ID invites actually unblock sync. The
+    // libp2p transport has already authenticated `remotePeerId`, and we
+    // validated `request.requesterPeerId === remotePeerId` above, so
+    // matching the peer ID against the allowlist is a trusted comparison.
+    if (!allowed) {
+      const allowedPeers = await this.getContextGraphAllowedPeers(request.contextGraphId);
+      if (allowedPeers?.includes(remotePeerId)) {
+        allowed = true;
+      }
+    }
+
     // Requester has valid on-chain identity but is not in our local participant
     // list. The curator may have invited them after our last meta sync — try
     // refreshing the meta graph from the curator before denying.
@@ -4920,6 +4941,13 @@ export class DKGAgent {
           p.toLowerCase() === recoveredAddress.toLowerCase() ||
           p === String(requesterIdentityId),
         ) ?? false;
+
+        if (!allowed) {
+          const freshPeers = await this.getContextGraphAllowedPeers(request.contextGraphId);
+          if (freshPeers?.includes(remotePeerId)) {
+            allowed = true;
+          }
+        }
       }
     }
 
