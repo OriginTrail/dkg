@@ -6187,14 +6187,24 @@ async function handleRequest(
         job.status = "done";
 
         // If catchup synced zero data from all peers, the remote nodes
-        // likely denied access (curated CG, not on allowlist). Remove the
-        // subscription so the project doesn't appear in the UI as a ghost.
+        // likely denied access (curated CG, not on allowlist). Use
+        // "has local content" (any triple in the paranet's data graph) as
+        // the evidence-of-access predicate — a paranet declaration triple
+        // from auto-discovery (chain registry or ontology sync) is NOT
+        // proof of access, so `contextGraphExists` alone can't tell us
+        // whether this is a "caught up, nothing new" re-sync or an
+        // outright denial.
         if (result.dataSynced === 0 && result.syncCapablePeers > 0) {
-          const exists = await agent.contextGraphExists(paranetId);
-          if (!exists) {
-            (agent as any).subscribedContextGraphs?.delete(paranetId);
+          const hasContent = await agent.contextGraphHasLocalContent(paranetId).catch(() => false);
+          if (!hasContent) {
             job.status = "denied";
             job.error = "Sync denied by all peers — you may not be on the allowlist for this curated project.";
+            // Only unsubscribe if the CG was only known via auto-discovery,
+            // not via explicit creation or a prior legit subscription.
+            const exists = await agent.contextGraphExists(paranetId);
+            if (!exists) {
+              (agent as any).subscribedContextGraphs?.delete(paranetId);
+            }
           }
         }
       } catch (err) {

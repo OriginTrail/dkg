@@ -1309,6 +1309,8 @@ export class DKGAgent {
     let dataSynced = 0;
     let sharedMemorySynced = 0;
 
+    // Resolve sync-capable peers first (sequential metadata lookup is cheap)
+    const syncCapable: string[] = [];
     for (const pid of peers) {
       let hasSync = false;
       try {
@@ -1317,15 +1319,25 @@ export class DKGAgent {
       } catch {
         // Peer metadata might not be available yet; skip silently.
       }
-      if (!hasSync) continue;
+      if (hasSync) syncCapable.push(pid.toString());
+    }
+    syncCapablePeers = syncCapable.length;
+    peersTried = syncCapable.length;
 
-      syncCapablePeers++;
-      peersTried++;
-      const remotePeerId = pid.toString();
-      dataSynced += await this.syncFromPeer(remotePeerId, [contextGraphId]);
-      if (includeSharedMemory) {
-        sharedMemorySynced += await this.syncSharedMemoryFromPeer(remotePeerId, [contextGraphId]);
-      }
+    // Run per-peer syncs in parallel. `syncFromPeer` has its own per-peer
+    // timeout; without parallelism a curated CG denial walks the whole peer
+    // set sequentially with 30s+ timeouts each, causing the /api/subscribe
+    // catchup job to take minutes to report denial and the UI to give up.
+    const results = await Promise.all(syncCapable.map(async (remotePeerId) => {
+      const data = await this.syncFromPeer(remotePeerId, [contextGraphId]).catch(() => 0);
+      const shared = includeSharedMemory
+        ? await this.syncSharedMemoryFromPeer(remotePeerId, [contextGraphId]).catch(() => 0)
+        : 0;
+      return { data, shared };
+    }));
+    for (const r of results) {
+      dataSynced += r.data;
+      sharedMemorySynced += r.shared;
     }
 
     this.log.info(
@@ -4463,6 +4475,24 @@ export class DKGAgent {
     return result.type === 'bindings' && result.bindings.length > 0;
   }
 
+  /**
+   * Check whether the context graph has any actual content locally — i.e.,
+   * at least one triple in the paranet's own data graph. A paranet declaration
+   * triple in the ontology graph (from auto-discovery via chain registry or
+   * ontology sync) does NOT count as content; it only indicates the paranet
+   * was announced, not that we have access to its data. This predicate is
+   * used to distinguish "genuinely synced / has access" from "declaration
+   * only / probably denied".
+   */
+  async contextGraphHasLocalContent(contextGraphId: string): Promise<boolean> {
+    const dataGraph = paranetDataGraphUri(contextGraphId);
+    const result = await this.store.query(
+      `ASK WHERE { GRAPH <${dataGraph}> { ?s ?p ?o } }`,
+    );
+    if (result.type === 'boolean') return result.value;
+    return result.type === 'bindings' && result.bindings.length > 0;
+  }
+
   private parseSyncRequest(data: Uint8Array): SyncRequestEnvelope {
     const text = new TextDecoder().decode(data).trim();
     if (text.startsWith('{')) {
@@ -5047,16 +5077,38 @@ export class DKGAgent {
           subscribed: sub.subscribed,
           synced: sub.synced,
         });
-      } else {
-        seen.set(uri, {
-          id,
-          uri,
-          name: sub.name ?? id,
-          isSystem: false,
-          subscribed: sub.subscribed,
-          synced: sub.synced,
-        });
+        continue;
       }
+
+      // No declaration in ontology, agents, or _meta graphs. This is a
+      // phantom subscription — most commonly a curated context graph that
+      // was auto-discovered via the on-chain registry (see
+      // discoverContextGraphsFromChain) but we have no actual access to
+      // its metadata, so we cannot prove it's a legitimate project for
+      // this agent. Hide it from the project list to avoid polluting the
+      // user's UI with CGs they can't access. Any explicit subscribe (via
+      // invite) will drive a real meta+data sync that writes to _meta and
+      // causes the CG to appear here on the next refresh.
+      const dataGraph = paranetDataGraphUri(id);
+      const hasAnyContent = await this.store.query(
+        `ASK WHERE { GRAPH <${dataGraph}> { ?s ?p ?o } }`,
+      );
+      const hasContent = hasAnyContent.type === 'boolean' && hasAnyContent.value;
+      if (!hasContent) {
+        // Skip entirely — don't surface this to the UI as a project.
+        continue;
+      }
+
+      // Data exists but no declaration — treat as an unsynced project we
+      // actually hold some content for (e.g. meta hasn't been persisted yet).
+      seen.set(uri, {
+        id,
+        uri,
+        name: sub.name ?? id,
+        isSystem: false,
+        subscribed: sub.subscribed,
+        synced: sub.synced,
+      });
     }
 
     return Array.from(seen.values());

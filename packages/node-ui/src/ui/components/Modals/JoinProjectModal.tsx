@@ -19,9 +19,20 @@ function parseInviteCode(raw: string): { cgId: string; multiaddr: string | null 
   return { cgId, multiaddr };
 }
 
-async function pollCatchupStatus(cgId: string, maxAttempts = 10, intervalMs = 1500): Promise<{ status: string; error?: string }> {
+// Catchup iterates connected peers with a ~30s per-peer sync timeout. Even
+// with parallel per-peer sync on the backend, the slowest peer gates the
+// whole job, so we need a generous total wait to reliably observe denials
+// for curated projects before giving up. Timeout path is deliberately not
+// treated as success by the caller.
+async function pollCatchupStatus(
+  cgId: string,
+  maxAttempts = 60,
+  intervalMs = 1500,
+  onProgress?: (attempt: number, total: number) => void,
+): Promise<{ status: string; error?: string }> {
   for (let i = 0; i < maxAttempts; i++) {
     await new Promise(r => setTimeout(r, intervalMs));
+    onProgress?.(i + 1, maxAttempts);
     try {
       const result = await fetchCatchupStatus(cgId);
       if (result.status === 'done' || result.status === 'denied' || result.status === 'failed') {
@@ -94,8 +105,13 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
 
       setProgress('Syncing knowledge from peers…');
 
-      // Poll catchup status to detect denials
-      const catchup = await pollCatchupStatus(cgId);
+      // Poll catchup status to detect denials — the background job may take
+      // up to ~90s on curated projects because each peer's sync request is
+      // subject to the remote-side ACL timeout before we can conclude the
+      // CG is denied. Don't treat the poll timeout as success.
+      const catchup = await pollCatchupStatus(cgId, 60, 1500, (attempt, total) => {
+        setProgress(`Syncing knowledge from peers… (${attempt}/${total})`);
+      });
 
       if (catchup.status === 'denied') {
         setAccessDenied(true);
@@ -105,6 +121,13 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
 
       if (catchup.status === 'failed') {
         setError(catchup.error || 'Sync failed');
+        setProgress('');
+        return;
+      }
+
+      if (catchup.status === 'timeout') {
+        setError('Timed out waiting for peers to respond. The project may be private and pending curator approval — you can try sending a join request.');
+        setAccessDenied(true);
         setProgress('');
         return;
       }
