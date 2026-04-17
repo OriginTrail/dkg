@@ -1029,7 +1029,7 @@ program
       if (catchup) {
         if ('peersTried' in catchup) {
           console.log(
-            `Catch-up sync: peers ${catchup.peersTried}/${catchup.syncCapablePeers} (connected ${catchup.connectedPeers}), data ${catchup.dataSynced}, shared memory ${catchup.workspaceSynced}`,
+            `Catch-up sync: peers ${catchup.peersTried}/${catchup.syncCapablePeers} (connected ${catchup.connectedPeers}), data ${catchup.dataSynced}, shared memory ${catchup.sharedMemorySynced}`,
           );
         } else {
           console.log(
@@ -1076,8 +1076,19 @@ syncCmd
       if (status.finishedAt) console.log(`Finished:      ${new Date(status.finishedAt).toISOString()}`);
       if (status.result) {
         console.log(
-          `Result:        peers ${status.result.peersTried}/${status.result.syncCapablePeers} (connected ${status.result.connectedPeers}), data ${status.result.dataSynced}, shared memory ${status.result.workspaceSynced}`,
+          `Result:        peers ${status.result.peersTried}/${status.result.syncCapablePeers} (connected ${status.result.connectedPeers}), data ${status.result.dataSynced}, shared memory ${status.result.sharedMemorySynced}`,
         );
+        if (status.result.diagnostics) {
+          console.log(
+            `Diagnostics:   no-protocol ${status.result.diagnostics.noProtocolPeers}, durable fetched meta/data ${status.result.diagnostics.durable.fetchedMetaTriples}/${status.result.diagnostics.durable.fetchedDataTriples}, inserted meta/data ${status.result.diagnostics.durable.insertedMetaTriples}/${status.result.diagnostics.durable.insertedDataTriples}`,
+          );
+          console.log(
+            `               durable empty ${status.result.diagnostics.durable.emptyResponses}, meta-only ${status.result.diagnostics.durable.metaOnlyResponses}, no-meta rejects ${status.result.diagnostics.durable.dataRejectedMissingMeta}, rejected KCs ${status.result.diagnostics.durable.rejectedKcs}, failures ${status.result.diagnostics.durable.failedPeers}`,
+          );
+          console.log(
+            `               swm fetched meta/data ${status.result.diagnostics.sharedMemory.fetchedMetaTriples}/${status.result.diagnostics.sharedMemory.fetchedDataTriples}, inserted meta/data ${status.result.diagnostics.sharedMemory.insertedMetaTriples}/${status.result.diagnostics.sharedMemory.insertedDataTriples}, empty ${status.result.diagnostics.sharedMemory.emptyResponses}, dropped ${status.result.diagnostics.sharedMemory.droppedDataTriples}, failures ${status.result.diagnostics.sharedMemory.failedPeers}`,
+          );
+        }
       }
       if (status.error) {
         console.log(`Error:         ${status.error}`);

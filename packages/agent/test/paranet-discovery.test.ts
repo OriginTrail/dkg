@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach, beforeAll, afterAll } from 'vitest';
 import { DKGAgent, type ContextGraphSub } from '../src/index.js';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
-import { SYSTEM_PARANETS, DKG_ONTOLOGY, paranetDataGraphUri } from '@origintrail-official/dkg-core';
+import { SYSTEM_PARANETS, DKG_ONTOLOGY, paranetDataGraphUri, contextGraphSharedMemoryUri, paranetMetaGraphUri } from '@origintrail-official/dkg-core';
 import { type ChainAdapter, type ContextGraphOnChain } from '@origintrail-official/dkg-chain';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
@@ -120,6 +120,24 @@ describe('ensureContextGraphLocal', () => {
     const entry = paranets.find(p => p.id === 'special-chars');
     expect(entry?.description).toBe('Default paranet: special-chars (test)');
   }, 15000);
+
+  it('treats storage-backed shared-memory-only graphs as existing', async () => {
+    const store = new OxigraphStore();
+    const result = await createTestAgent({ store });
+    agent = result.agent;
+    await agent.start();
+
+    await store.insert([
+      {
+        subject: 'urn:workspace-only:test',
+        predicate: 'http://schema.org/name',
+        object: '"Workspace Only"',
+        graph: contextGraphSharedMemoryUri('workspace-only'),
+      },
+    ]);
+
+    await expect(agent.contextGraphExists('workspace-only')).resolves.toBe(true);
+  }, 15000);
 });
 
 describe('discoverContextGraphsFromStore', () => {
@@ -237,6 +255,29 @@ describe('listContextGraphs merge', () => {
     expect(entry!.subscribed).toBe(false);
     expect(entry!.synced).toBe(true);
   }, 15000);
+
+  it('includes storage-only context graphs when shared memory graphs exist', async () => {
+    const store = new OxigraphStore();
+    const result = await createTestAgent({ store });
+    agent = result.agent;
+    await agent.start();
+
+    await store.insert([
+      {
+        subject: 'urn:workspace-only:test',
+        predicate: 'http://schema.org/name',
+        object: '"Workspace Only"',
+        graph: contextGraphSharedMemoryUri('workspace-only'),
+      },
+    ]);
+
+    const paranets = await agent.listContextGraphs();
+    const entry = paranets.find(p => p.id === 'workspace-only');
+    expect(entry).toBeDefined();
+    expect(entry!.name).toBe('workspace-only');
+    expect(entry!.subscribed).toBe(false);
+    expect(entry!.synced).toBe(false);
+  }, 15000);
 });
 
 describe('discoverContextGraphsFromChain', () => {
@@ -335,6 +376,38 @@ describe('discoverContextGraphsFromChain', () => {
 
     const discovered = await agent.discoverContextGraphsFromChain();
     expect(discovered).toBe(0);
+  }, 15000);
+});
+
+describe('discoverContextGraphsFromStore', () => {
+  let agent: DKGAgent | undefined;
+
+  afterEach(async () => {
+    await agent?.stop().catch(() => {});
+  });
+
+  it('discovers curated context graphs from _meta definitions', async () => {
+    const store = new OxigraphStore();
+    const result = await createTestAgent({ store });
+    agent = result.agent;
+    await agent.start();
+
+    const curatedId = 'curated-meta-only';
+    const paranetUri = paranetDataGraphUri(curatedId);
+    await store.insert([
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_PARANET, graph: paranetMetaGraphUri(curatedId) },
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.SCHEMA_NAME, object: '"Curated Meta Only"', graph: paranetMetaGraphUri(curatedId) },
+    ]);
+
+    const discovered = await agent.discoverContextGraphsFromStore();
+    expect(discovered).toBe(1);
+
+    const entry = agent.getSubscribedContextGraphs().get(curatedId);
+    expect(entry).toBeDefined();
+    expect(entry!.name).toBe('Curated Meta Only');
+    expect(entry!.subscribed).toBe(true);
+    expect(entry!.synced).toBe(true);
+    expect(entry!.metaSynced).toBe(true);
   }, 15000);
 });
 

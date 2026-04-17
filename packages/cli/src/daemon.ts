@@ -367,6 +367,29 @@ interface CatchupJobResult {
   peersTried: number;
   dataSynced: number;
   sharedMemorySynced: number;
+  diagnostics?: {
+    noProtocolPeers: number;
+    durable: {
+      fetchedMetaTriples: number;
+      fetchedDataTriples: number;
+      insertedMetaTriples: number;
+      insertedDataTriples: number;
+      emptyResponses: number;
+      metaOnlyResponses: number;
+      dataRejectedMissingMeta: number;
+      rejectedKcs: number;
+      failedPeers: number;
+    };
+    sharedMemory: {
+      fetchedMetaTriples: number;
+      fetchedDataTriples: number;
+      insertedMetaTriples: number;
+      insertedDataTriples: number;
+      emptyResponses: number;
+      droppedDataTriples: number;
+      failedPeers: number;
+    };
+  };
 }
 
 interface CatchupJob {
@@ -6215,18 +6238,6 @@ async function handleRequest(
         );
         job.result = result;
         job.status = "done";
-
-        // If catchup synced zero data from all peers, the remote nodes
-        // likely denied access (curated CG, not on allowlist). Remove the
-        // subscription so the project doesn't appear in the UI as a ghost.
-        if (result.dataSynced === 0 && result.syncCapablePeers > 0) {
-          const exists = await agent.contextGraphExists(paranetId);
-          if (!exists) {
-            (agent as any).subscribedContextGraphs?.delete(paranetId);
-            job.status = "denied";
-            job.error = "Sync denied by all peers — you may not be on the allowlist for this curated project.";
-          }
-        }
       } catch (err) {
         job.error = err instanceof Error ? err.message : String(err);
         job.status = "failed";

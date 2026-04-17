@@ -439,6 +439,8 @@ function MemoryStrip({ memory, onSwitchLayer, onSelectEntity, contextGraphId }: 
                   layer={layer.key as 'wm' | 'swm' | 'vm'}
                   entities={layer.entities}
                   tripleCount={layerTripleCounts[layer.key as 'wm' | 'swm' | 'vm']}
+                  contextGraphId={contextGraphId}
+                  onComplete={memory.refresh}
                 />
 
                 {/* Right: Content tabs */}
@@ -635,7 +637,6 @@ function LayerActionsWidget({ layer, count, contextGraphId, onComplete }: {
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  if (count === 0) return null;
   const isWm = layer === 'wm';
   const color = isWm ? '#f59e0b' : '#22c55e';
   const target = isWm ? 'Shared Memory' : 'Verified Memory';
@@ -664,6 +665,8 @@ function LayerActionsWidget({ layer, count, contextGraphId, onComplete }: {
       setBusy(false);
     }
   }, [isWm, contextGraphId, onComplete]);
+
+  if (count === 0) return null;
 
   return (
     <GenWidget title={isWm ? 'Promote' : 'Publish'} footnote={`Moves assets from this layer to ${target}.`}>

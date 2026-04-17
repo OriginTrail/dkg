@@ -91,8 +91,11 @@ const SYNC_TOTAL_TIMEOUT_MS = 120_000;
 const SYNC_PAGE_TIMEOUT_MS = 30_000;
 /** ProtocolRouter.send retries internally 3 times with the same timeout; cap so 3× fits in remaining budget. */
 const SYNC_ROUTER_ATTEMPTS = 3;
+const SYNC_PROTOCOL_CHECK_ATTEMPTS = 3;
+const SYNC_PROTOCOL_CHECK_DELAY_MS = 500;
 const SYNC_AUTH_MAX_AGE_MS = 30_000;
 const META_REFRESH_COOLDOWN_MS = 30_000;
+const SYNC_MIN_GRAPH_BUDGET_MS = 10_000;
 const DEFAULT_SWM_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 const SWM_CLEANUP_INTERVAL_MS = 15 * 60 * 1000; // run cleanup every 15 minutes
 
@@ -145,6 +148,42 @@ export interface ContextGraphSub {
 
 /** @deprecated Use ContextGraphSub */
 export type ParanetSub = ContextGraphSub;
+
+export interface DurableSyncDiagnostics {
+  fetchedMetaTriples: number;
+  fetchedDataTriples: number;
+  insertedMetaTriples: number;
+  insertedDataTriples: number;
+  emptyResponses: number;
+  metaOnlyResponses: number;
+  dataRejectedMissingMeta: number;
+  rejectedKcs: number;
+  failedPeers: number;
+}
+
+export interface SharedMemorySyncDiagnostics {
+  fetchedMetaTriples: number;
+  fetchedDataTriples: number;
+  insertedMetaTriples: number;
+  insertedDataTriples: number;
+  emptyResponses: number;
+  droppedDataTriples: number;
+  failedPeers: number;
+}
+
+export interface CatchupSyncDiagnostics {
+  noProtocolPeers: number;
+  durable: DurableSyncDiagnostics;
+  sharedMemory: SharedMemorySyncDiagnostics;
+}
+
+interface DurableSyncResult extends DurableSyncDiagnostics {
+  insertedTriples: number;
+}
+
+interface SharedMemorySyncResult extends SharedMemorySyncDiagnostics {
+  insertedTriples: number;
+}
 
 export interface DKGAgentConfig {
   name: string;
@@ -947,20 +986,12 @@ export class DKGAgent {
       const synced = await this.syncFromPeer(remotePeer);
       this.log.info(ctx, `Synced ${synced} data triples from peer ${shortPeer}`);
 
-      // Only flip metaSynced for CGs whose _meta was actually fetched
-      // during this sync (i.e., those in the sync scope). Chain-discovered
-      // CGs added with trackSyncScope: false are NOT in scope and their
-      // _meta hasn't arrived yet.
       const syncScope = new Set<string>([
         SYSTEM_PARANETS.AGENTS,
         SYSTEM_PARANETS.ONTOLOGY,
         ...(this.config.syncContextGraphs ?? []),
       ]);
-      for (const [id, sub] of this.subscribedContextGraphs) {
-        if (sub.metaSynced === false && syncScope.has(id)) {
-          sub.metaSynced = true;
-        }
-      }
+      await this.refreshMetaSyncedFlags(syncScope);
 
       // After syncing ONTOLOGY, discover and auto-subscribe to any new context graphs
       await this.discoverContextGraphsFromStore();
@@ -975,18 +1006,7 @@ export class DKGAgent {
         this.log.info(ctx, `Discovered ${newlyDiscovered.length} new CG(s) — syncing durable data from ${shortPeer}`);
         const discoverSynced = await this.syncFromPeer(remotePeer, newlyDiscovered);
         this.log.info(ctx, `Synced ${discoverSynced} durable triples for newly discovered CG(s) from ${shortPeer}`);
-        for (const id of newlyDiscovered) {
-          const sub = this.subscribedContextGraphs.get(id);
-          if (sub && sub.metaSynced === false) {
-            const metaGraph = paranetMetaGraphUri(id);
-            const check = await this.store.query(
-              `ASK WHERE { GRAPH <${metaGraph}> { ?s ?p ?o } }`,
-            );
-            if (check.type === 'boolean' && check.value === true) {
-              sub.metaSynced = true;
-            }
-          }
-        }
+        await this.refreshMetaSyncedFlags(newlyDiscovered);
       }
 
       const wsContextGraphIds = this.config.syncContextGraphs ?? [];
@@ -1012,14 +1032,34 @@ export class DKGAgent {
     contextGraphIds: string[] = [SYSTEM_PARANETS.AGENTS, SYSTEM_PARANETS.ONTOLOGY, ...(this.config.syncContextGraphs ?? [])],
     onPhase?: PhaseCallback,
   ): Promise<number> {
+    const result = await this.syncFromPeerDetailed(remotePeerId, contextGraphIds, onPhase);
+    return result.insertedTriples;
+  }
+
+  private async syncFromPeerDetailed(
+    remotePeerId: string,
+    contextGraphIds: string[],
+    onPhase?: PhaseCallback,
+  ): Promise<DurableSyncResult> {
     const ctx = createOperationContext('sync');
-    const deadline = Date.now() + SYNC_TOTAL_TIMEOUT_MS;
-    let totalSynced = 0;
+    const summary: DurableSyncResult = {
+      insertedTriples: 0,
+      fetchedMetaTriples: 0,
+      fetchedDataTriples: 0,
+      insertedMetaTriples: 0,
+      insertedDataTriples: 0,
+      emptyResponses: 0,
+      metaOnlyResponses: 0,
+      dataRejectedMissingMeta: 0,
+      rejectedKcs: 0,
+      failedPeers: 0,
+    };
 
     try {
-      for (const pid of contextGraphIds) {
+      for (const [index, pid] of contextGraphIds.entries()) {
         const dataGraph = paranetDataGraphUri(pid);
         const metaGraph = paranetMetaGraphUri(pid);
+        const deadline = this.createContextGraphSyncDeadline(contextGraphIds.length - index);
 
         this.log.info(ctx, `Syncing context graph "${pid}" from ${remotePeerId}`);
 
@@ -1027,21 +1067,28 @@ export class DKGAgent {
 
         const metaQuads = await this.fetchSyncPages(ctx, remotePeerId, pid, false, 'meta', metaGraph, deadline);
         this.log.info(ctx, `  meta: ${metaQuads.length} triples fetched`);
+        summary.fetchedMetaTriples += metaQuads.length;
 
         const dataQuads = await this.fetchSyncPages(ctx, remotePeerId, pid, false, 'data', dataGraph, deadline);
         this.log.info(ctx, `  data: ${dataQuads.length} triples fetched`);
+        summary.fetchedDataTriples += dataQuads.length;
 
         onPhase?.('fetch', 'end');
 
-        if (dataQuads.length === 0 && metaQuads.length === 0) continue;
+        if (dataQuads.length === 0 && metaQuads.length === 0) {
+          summary.emptyResponses += 1;
+          continue;
+        }
 
         const isSystemContextGraph = (Object.values(SYSTEM_PARANETS) as string[]).includes(pid);
         if (!isSystemContextGraph && dataQuads.length > 0 && metaQuads.length === 0) {
           this.log.warn(ctx, `Rejecting sync for "${pid}": received ${dataQuads.length} data triples but no meta — cannot verify merkle roots`);
+          summary.dataRejectedMissingMeta += 1;
           continue;
         }
         if (!isSystemContextGraph && metaQuads.length > 0 && dataQuads.length === 0) {
           this.log.warn(ctx, `Sync for "${pid}": received ${metaQuads.length} meta triples but no data — peer may have empty or pruned data graph`);
+          summary.metaOnlyResponses += 1;
         }
 
         onPhase?.('verify', 'start');
@@ -1051,25 +1098,29 @@ export class DKGAgent {
         onPhase?.('store', 'start');
         if (verified.data.length > 0) {
           await this.store.insert(verified.data);
-          totalSynced += verified.data.length;
+          summary.insertedTriples += verified.data.length;
+          summary.insertedDataTriples += verified.data.length;
         }
         if (verified.meta.length > 0) {
           await this.store.insert(verified.meta);
-          totalSynced += verified.meta.length;
+          summary.insertedTriples += verified.meta.length;
+          summary.insertedMetaTriples += verified.meta.length;
         }
         onPhase?.('store', 'end');
 
         if (verified.rejected > 0) {
           this.log.warn(ctx, `Rejected ${verified.rejected} KCs with invalid merkle roots from ${remotePeerId}`);
+          summary.rejectedKcs += verified.rejected;
         }
       }
-      if (totalSynced > 0) {
-        this.log.info(ctx, `Sync complete: ${totalSynced} verified triples from ${remotePeerId}`);
+      if (summary.insertedTriples > 0) {
+        this.log.info(ctx, `Sync complete: ${summary.insertedTriples} verified triples from ${remotePeerId}`);
       }
     } catch (err) {
       this.log.warn(ctx, `Sync from ${remotePeerId} failed: ${err instanceof Error ? err.message : String(err)}`);
+      summary.failedPeers += 1;
     }
-    return totalSynced;
+    return summary;
   }
 
   /**
@@ -1087,11 +1138,12 @@ export class DKGAgent {
   ): Promise<Quad[]> {
     const allQuads: Quad[] = [];
     let offset = 0;
+    let timedOut = false;
 
     // eslint-disable-next-line no-constant-condition
     while (true) {
       if (Date.now() > deadline) {
-        this.log.warn(ctx, `Sync timeout (${allQuads.length} triples received so far for ${graphUri})`);
+        timedOut = true;
         break;
       }
 
@@ -1135,6 +1187,13 @@ export class DKGAgent {
       offset += quads.length;
       if (quads.length < SYNC_PAGE_SIZE) break;
     }
+    if (timedOut) {
+      const scope = includeSharedMemory ? 'shared-memory' : 'durable';
+      this.log.warn(
+        ctx,
+        `Sync timeout for ${scope} ${phase} phase of "${contextGraphId}" (${allQuads.length} triples received so far for ${graphUri})`,
+      );
+    }
     return allQuads;
   }
 
@@ -1148,22 +1207,44 @@ export class DKGAgent {
     remotePeerId: string,
     contextGraphIds: string[] = [...(this.config.syncContextGraphs ?? [])],
   ): Promise<number> {
+    const result = await this.syncSharedMemoryFromPeerDetailed(remotePeerId, contextGraphIds);
+    return result.insertedTriples;
+  }
+
+  private async syncSharedMemoryFromPeerDetailed(
+    remotePeerId: string,
+    contextGraphIds: string[],
+  ): Promise<SharedMemorySyncResult> {
     const ctx = createOperationContext('sync');
-    const deadline = Date.now() + SYNC_TOTAL_TIMEOUT_MS;
-    let totalSynced = 0;
+    const summary: SharedMemorySyncResult = {
+      insertedTriples: 0,
+      fetchedMetaTriples: 0,
+      fetchedDataTriples: 0,
+      insertedMetaTriples: 0,
+      insertedDataTriples: 0,
+      emptyResponses: 0,
+      droppedDataTriples: 0,
+      failedPeers: 0,
+    };
 
     try {
-      for (const pid of contextGraphIds) {
+      for (const [index, pid] of contextGraphIds.entries()) {
         const wsGraph = paranetWorkspaceGraphUri(pid);
         const wsMetaGraph = paranetWorkspaceMetaGraphUri(pid);
+        const deadline = this.createContextGraphSyncDeadline(contextGraphIds.length - index);
 
         this.log.info(ctx, `Syncing shared memory for context graph "${pid}" from ${remotePeerId}`);
 
         const wsMetaQuads = await this.fetchSyncPages(ctx, remotePeerId, pid, true, 'meta', wsMetaGraph, deadline);
         const wsDataQuads = await this.fetchSyncPages(ctx, remotePeerId, pid, true, 'data', wsGraph, deadline);
         this.log.info(ctx, `  shared memory: ${wsDataQuads.length} data + ${wsMetaQuads.length} meta triples fetched`);
+        summary.fetchedMetaTriples += wsMetaQuads.length;
+        summary.fetchedDataTriples += wsDataQuads.length;
 
-        if (wsDataQuads.length === 0 && wsMetaQuads.length === 0) continue;
+        if (wsDataQuads.length === 0 && wsMetaQuads.length === 0) {
+          summary.emptyResponses += 1;
+          continue;
+        }
 
         const wsQuads = wsDataQuads;
 
@@ -1203,6 +1284,7 @@ export class DKGAgent {
         const dropped = wsQuads.length - validWsQuads.length;
         if (dropped > 0) {
           this.log.warn(ctx, `SWM sync dropped ${dropped} triples with invalid subjects (not in meta rootEntity or skolemized child)`);
+          summary.droppedDataTriples += dropped;
         }
 
         const graphManager = new GraphManager(this.store);
@@ -1210,11 +1292,13 @@ export class DKGAgent {
 
         if (validWsQuads.length > 0) {
           await this.store.insert(validWsQuads);
-          totalSynced += validWsQuads.length;
+          summary.insertedTriples += validWsQuads.length;
+          summary.insertedDataTriples += validWsQuads.length;
         }
         if (wsMetaQuads.length > 0) {
           await this.store.insert(wsMetaQuads);
-          totalSynced += wsMetaQuads.length;
+          summary.insertedTriples += wsMetaQuads.length;
+          summary.insertedMetaTriples += wsMetaQuads.length;
         }
 
         // Update workspaceOwnedEntities only from validated meta (rootEntity + creator peerId).
@@ -1248,13 +1332,20 @@ export class DKGAgent {
 
         this.log.info(ctx, `SWM sync for "${pid}": ${validWsQuads.length} data + ${wsMetaQuads.length} meta triples`);
       }
-      if (totalSynced > 0) {
-        this.log.info(ctx, `SWM sync complete: ${totalSynced} triples from ${remotePeerId}`);
+      if (summary.insertedTriples > 0) {
+        this.log.info(ctx, `SWM sync complete: ${summary.insertedTriples} triples from ${remotePeerId}`);
       }
     } catch (err) {
       this.log.warn(ctx, `SWM sync from ${remotePeerId} failed: ${err instanceof Error ? err.message : String(err)}`);
+      summary.failedPeers += 1;
     }
-    return totalSynced;
+    return summary;
+  }
+
+  private createContextGraphSyncDeadline(remainingContextGraphs: number): number {
+    const divisor = Math.max(1, remainingContextGraphs);
+    const budgetMs = Math.max(SYNC_MIN_GRAPH_BUDGET_MS, Math.floor(SYNC_TOTAL_TIMEOUT_MS / divisor));
+    return Date.now() + budgetMs;
   }
 
   /**
@@ -1271,6 +1362,7 @@ export class DKGAgent {
     peersTried: number;
     dataSynced: number;
     sharedMemorySynced: number;
+    diagnostics: CatchupSyncDiagnostics;
   }> {
     const ctx = createOperationContext('sync');
     const includeSharedMemory = options?.includeSharedMemory ?? false;
@@ -1311,30 +1403,72 @@ export class DKGAgent {
     let peersTried = 0;
     let dataSynced = 0;
     let sharedMemorySynced = 0;
+    let noProtocolPeers = 0;
+    const diagnostics: CatchupSyncDiagnostics = {
+      noProtocolPeers: 0,
+      durable: {
+        fetchedMetaTriples: 0,
+        fetchedDataTriples: 0,
+        insertedMetaTriples: 0,
+        insertedDataTriples: 0,
+        emptyResponses: 0,
+        metaOnlyResponses: 0,
+        dataRejectedMissingMeta: 0,
+        rejectedKcs: 0,
+        failedPeers: 0,
+      },
+      sharedMemory: {
+        fetchedMetaTriples: 0,
+        fetchedDataTriples: 0,
+        insertedMetaTriples: 0,
+        insertedDataTriples: 0,
+        emptyResponses: 0,
+        droppedDataTriples: 0,
+        failedPeers: 0,
+      },
+    };
 
     for (const pid of peers) {
-      let hasSync = false;
-      try {
-        const peer = await this.node.libp2p.peerStore.get(pid);
-        hasSync = peer.protocols.includes(PROTOCOL_SYNC);
-      } catch {
-        // Peer metadata might not be available yet; skip silently.
+      const hasSync = await this.waitForSyncProtocol(pid);
+      if (!hasSync) {
+        noProtocolPeers++;
+        continue;
       }
-      if (!hasSync) continue;
 
       syncCapablePeers++;
       peersTried++;
       const remotePeerId = pid.toString();
-      dataSynced += await this.syncFromPeer(remotePeerId, [contextGraphId]);
+      const durableResult = await this.syncFromPeerDetailed(remotePeerId, [contextGraphId]);
+      dataSynced += durableResult.insertedTriples;
+      diagnostics.durable.fetchedMetaTriples += durableResult.fetchedMetaTriples;
+      diagnostics.durable.fetchedDataTriples += durableResult.fetchedDataTriples;
+      diagnostics.durable.insertedMetaTriples += durableResult.insertedMetaTriples;
+      diagnostics.durable.insertedDataTriples += durableResult.insertedDataTriples;
+      diagnostics.durable.emptyResponses += durableResult.emptyResponses;
+      diagnostics.durable.metaOnlyResponses += durableResult.metaOnlyResponses;
+      diagnostics.durable.dataRejectedMissingMeta += durableResult.dataRejectedMissingMeta;
+      diagnostics.durable.rejectedKcs += durableResult.rejectedKcs;
+      diagnostics.durable.failedPeers += durableResult.failedPeers;
       if (includeSharedMemory) {
-        sharedMemorySynced += await this.syncSharedMemoryFromPeer(remotePeerId, [contextGraphId]);
+        const sharedResult = await this.syncSharedMemoryFromPeerDetailed(remotePeerId, [contextGraphId]);
+        sharedMemorySynced += sharedResult.insertedTriples;
+        diagnostics.sharedMemory.fetchedMetaTriples += sharedResult.fetchedMetaTriples;
+        diagnostics.sharedMemory.fetchedDataTriples += sharedResult.fetchedDataTriples;
+        diagnostics.sharedMemory.insertedMetaTriples += sharedResult.insertedMetaTriples;
+        diagnostics.sharedMemory.insertedDataTriples += sharedResult.insertedDataTriples;
+        diagnostics.sharedMemory.emptyResponses += sharedResult.emptyResponses;
+        diagnostics.sharedMemory.droppedDataTriples += sharedResult.droppedDataTriples;
+        diagnostics.sharedMemory.failedPeers += sharedResult.failedPeers;
       }
     }
+    diagnostics.noProtocolPeers = noProtocolPeers;
 
     this.log.info(
       ctx,
       `Catch-up sync for "${contextGraphId}": peers=${peersTried}/${syncCapablePeers} data=${dataSynced} sharedMemory=${sharedMemorySynced}`,
     );
+
+    await this.refreshMetaSyncedFlags([contextGraphId]);
 
     if (dataSynced > 0 || sharedMemorySynced > 0) {
       this.eventBus.emit(DKGEvent.PROJECT_SYNCED, {
@@ -1350,7 +1484,62 @@ export class DKGAgent {
       peersTried,
       dataSynced,
       sharedMemorySynced,
+      diagnostics,
     };
+  }
+
+  private async waitForSyncProtocol(pid: { toString(): string }): Promise<boolean> {
+    for (let attempt = 0; attempt < SYNC_PROTOCOL_CHECK_ATTEMPTS; attempt++) {
+      try {
+        const peer = await this.node.libp2p.peerStore.get(pid as any);
+        if (peer.protocols.includes(PROTOCOL_SYNC)) {
+          return true;
+        }
+      } catch {
+        // Peer metadata might not be available yet.
+      }
+
+      if (attempt < SYNC_PROTOCOL_CHECK_ATTEMPTS - 1) {
+        await new Promise((resolve) => setTimeout(resolve, SYNC_PROTOCOL_CHECK_DELAY_MS));
+      }
+    }
+
+    return false;
+  }
+
+  private async refreshMetaSyncedFlags(contextGraphIds: Iterable<string>): Promise<void> {
+    for (const contextGraphId of contextGraphIds) {
+      const sub = this.subscribedContextGraphs.get(contextGraphId);
+      if (!sub || sub.metaSynced === true) continue;
+      if (await this.hasConfirmedMetaState(contextGraphId)) {
+        sub.metaSynced = true;
+      }
+    }
+  }
+
+  private async hasConfirmedMetaState(contextGraphId: string): Promise<boolean> {
+    if ((Object.values(SYSTEM_PARANETS) as string[]).includes(contextGraphId)) {
+      return true;
+    }
+
+    const metaGraph = paranetMetaGraphUri(contextGraphId);
+    const metaResult = await this.store.query(
+      `ASK WHERE { GRAPH <${metaGraph}> { ?s ?p ?o } }`,
+    );
+    if (metaResult.type === 'boolean' && metaResult.value === true) {
+      return true;
+    }
+
+    const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
+    const contextGraphUri = paranetDataGraphUri(contextGraphId);
+    const ontologyResult = await this.store.query(
+      `ASK WHERE {
+        GRAPH <${ontologyGraph}> {
+          <${contextGraphUri}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_PARANET}> .
+        }
+      }`,
+    );
+    return ontologyResult.type === 'boolean' && ontologyResult.value === true;
   }
 
   /**
@@ -2475,13 +2664,8 @@ export class DKGAgent {
     }
 
     // Idempotent: skip if gossip handlers already installed for this context graph.
-    // Re-subscribing upgrades metaSynced → true: the caller is explicitly
-    // trusting this CG, so the deny-until-meta-synced gate can open.
     if (this.gossipRegistered.has(contextGraphId)) {
       const existing = this.subscribedContextGraphs.get(contextGraphId);
-      if (existing && existing.metaSynced === false) {
-        existing.metaSynced = true;
-      }
       if (!existing?.subscribed) {
         this.subscribedContextGraphs.set(contextGraphId, { ...existing, subscribed: true, synced: existing?.synced ?? false });
       }
@@ -4493,9 +4677,9 @@ export class DKGAgent {
   }
 
   /**
-   * Check whether a context graph is registered (definition triples exist in the
-   * ontology graph). Always store-backed to avoid false positives from
-   * in-memory state that may not have been persisted yet.
+   * Check whether a context graph exists in local storage. Definition triples in
+   * ONTOLOGY/_meta count, and storage-backed graph presence also counts so local
+   * shared-memory-only survivors are not treated as nonexistent.
    */
   async contextGraphExists(contextGraphId: string): Promise<boolean> {
     const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
@@ -4504,7 +4688,13 @@ export class DKGAgent {
         GRAPH ?g { <${contextGraphUri}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_PARANET}> }
       } LIMIT 1`,
     );
-    return result.type === 'bindings' && result.bindings.length > 0;
+    if (result.type === 'bindings' && result.bindings.length > 0) {
+      return true;
+    }
+
+    const graphManager = new GraphManager(this.store);
+    const storedContextGraphs = await graphManager.listContextGraphs();
+    return storedContextGraphs.includes(contextGraphId);
   }
 
   private parseSyncRequest(data: Uint8Array): SyncRequestEnvelope {
@@ -5113,6 +5303,24 @@ export class DKGAgent {
       }
     }
 
+    const graphManager = new GraphManager(this.store);
+    const storedContextGraphs = await graphManager.listParanets();
+    for (const id of storedContextGraphs) {
+      const uri = `${prefix}${id}`;
+      if (seen.has(uri)) continue;
+      if (id === SYSTEM_PARANETS.AGENTS || id === SYSTEM_PARANETS.ONTOLOGY) continue;
+
+      const sub = this.subscribedContextGraphs.get(id);
+      seen.set(uri, {
+        id,
+        uri,
+        name: sub?.name ?? id,
+        isSystem: false,
+        subscribed: sub?.subscribed ?? false,
+        synced: sub?.synced ?? false,
+      });
+    }
+
     return Array.from(seen.values());
   }
 
@@ -5452,9 +5660,10 @@ export class DKGAgent {
   }
 
   /**
-   * Scan the local ONTOLOGY graph for context graph definitions and auto-subscribe
-   * to any that aren't yet in the subscription registry. Called after
-   * syncFromPeer to catch context graphs discovered via ONTOLOGY sync.
+   * Scan the local ONTOLOGY graph and curated/private _meta graphs for context
+   * graph definitions and auto-subscribe to any that aren't yet in the
+   * subscription registry. Called after syncFromPeer to catch context graphs
+   * discovered via ONTOLOGY sync or authenticated _meta sync.
    */
   async discoverContextGraphsFromStore(): Promise<number> {
     const ctx = createOperationContext('system');
@@ -5462,7 +5671,28 @@ export class DKGAgent {
     const prefix = 'did:dkg:context-graph:';
     let discovered = 0;
 
-    const result = await this.store.query(`
+    const discoveredEntries = new Map<string, { id: string; name: string; source: 'ontology' | 'meta' }>();
+
+    const collectEntries = (
+      rows: Record<string, string>[],
+      source: 'ontology' | 'meta',
+    ) => {
+      for (const row of rows) {
+        const uri = row['ctxGraph'] ?? '';
+        const id = uri.startsWith(prefix) ? uri.slice(prefix.length) : null;
+        if (!id) continue;
+        if (id === SYSTEM_PARANETS.AGENTS || id === SYSTEM_PARANETS.ONTOLOGY) continue;
+
+        const existing = discoveredEntries.get(id);
+        const name = row['name'] ? stripLiteral(row['name']) : existing?.name ?? id;
+
+        if (!existing || (existing.source === 'meta' && source === 'ontology')) {
+          discoveredEntries.set(id, { id, name, source });
+        }
+      }
+    };
+
+    const ontologyResult = await this.store.query(`
       SELECT ?ctxGraph ?name WHERE {
         GRAPH <${ontologyGraph}> {
           ?ctxGraph <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_PARANET}> .
@@ -5470,25 +5700,32 @@ export class DKGAgent {
         }
       }
     `);
+    if (ontologyResult.type === 'bindings') {
+      collectEntries(ontologyResult.bindings as Record<string, string>[], 'ontology');
+    }
 
-    if (result.type !== 'bindings') return 0;
+    const metaResult = await this.store.query(`
+      SELECT ?ctxGraph ?name WHERE {
+        GRAPH ?metaGraph {
+          ?ctxGraph <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_PARANET}> .
+          OPTIONAL { ?ctxGraph <${DKG_ONTOLOGY.SCHEMA_NAME}> ?name }
+          FILTER(STRENDS(STR(?metaGraph), "/_meta"))
+        }
+      }
+    `);
+    if (metaResult.type === 'bindings') {
+      collectEntries(metaResult.bindings as Record<string, string>[], 'meta');
+    }
 
-    for (const row of result.bindings as Record<string, string>[]) {
-      const uri = row['ctxGraph'] ?? '';
-      const id = uri.startsWith(prefix) ? uri.slice(prefix.length) : null;
-      if (!id) continue;
-
-      if (id === SYSTEM_PARANETS.AGENTS || id === SYSTEM_PARANETS.ONTOLOGY) continue;
-
+    for (const { id, name, source } of discoveredEntries.values()) {
       const existing = this.subscribedContextGraphs.get(id);
       if (existing?.subscribed && existing?.synced) continue;
 
-      const name = row['name'] ? stripLiteral(row['name']) : id;
       this.subscribedContextGraphs.set(id, {
         name,
         subscribed: true,
         synced: true,
-        metaSynced: false,
+        metaSynced: source === 'meta' ? true : existing?.metaSynced ?? false,
         onChainId: existing?.onChainId,
       });
 
@@ -5496,7 +5733,7 @@ export class DKGAgent {
         this.subscribeToContextGraph(id, { trackSyncScope: true });
       }
 
-      this.log.info(ctx, `Discovered context graph "${name}" (${id}) from store — auto-subscribed (metaSynced pending)`);
+      this.log.info(ctx, `Discovered context graph "${name}" (${id}) from ${source} store — auto-subscribed`);
       discovered++;
     }
 
