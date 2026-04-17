@@ -6207,6 +6207,25 @@ async function handleRequest(
             }
           }
         }
+
+        // If catch-up ended in "done", flip the subscription's synced flag.
+        // syncContextGraphFromConnectedPeers only emits an event; without
+        // this update the UI never leaves the "syncing" state for curated
+        // CGs we've just legitimately joined.
+        if (job.status === "done") {
+          const subMap = (agent as any).subscribedContextGraphs as
+            | Map<string, { subscribed: boolean; synced: boolean; metaSynced?: boolean; name?: string; [k: string]: unknown }>
+            | undefined;
+          const sub = subMap?.get(paranetId);
+          if (sub) {
+            sub.synced = true;
+            // Meta is considered synced iff we have _any_ local content;
+            // otherwise we might have talked to peers that hold the CG's
+            // declaration but couldn't give us the _meta graph yet.
+            const hasContent = await agent.contextGraphHasLocalContent(paranetId).catch(() => false);
+            if (hasContent) sub.metaSynced = true;
+          }
+        }
       } catch (err) {
         job.error = err instanceof Error ? err.message : String(err);
         job.status = "failed";
