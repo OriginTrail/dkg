@@ -1029,7 +1029,7 @@ program
       if (catchup) {
         if ('peersTried' in catchup) {
           console.log(
-            `Catch-up sync: peers ${catchup.peersTried}/${catchup.syncCapablePeers} (connected ${catchup.connectedPeers}), data ${catchup.dataSynced}, shared memory ${catchup.workspaceSynced}`,
+            `Catch-up sync: peers ${catchup.peersTried}/${catchup.syncCapablePeers} (connected ${catchup.connectedPeers}), data ${catchup.dataSynced}, shared memory ${catchup.sharedMemorySynced}`,
           );
         } else {
           console.log(
@@ -1076,7 +1076,7 @@ syncCmd
       if (status.finishedAt) console.log(`Finished:      ${new Date(status.finishedAt).toISOString()}`);
       if (status.result) {
         console.log(
-          `Result:        peers ${status.result.peersTried}/${status.result.syncCapablePeers} (connected ${status.result.connectedPeers}), data ${status.result.dataSynced}, shared memory ${status.result.workspaceSynced}`,
+          `Result:        peers ${status.result.peersTried}/${status.result.syncCapablePeers} (connected ${status.result.connectedPeers}), data ${status.result.dataSynced}, shared memory ${status.result.sharedMemorySynced}`,
         );
       }
       if (status.error) {

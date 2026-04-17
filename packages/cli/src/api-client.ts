@@ -251,7 +251,7 @@ export class ApiClient {
         syncCapablePeers: number;
         peersTried: number;
         dataSynced: number;
-        workspaceSynced: number;
+        sharedMemorySynced: number;
       }
       | {
         status: 'queued';
@@ -271,7 +271,7 @@ export class ApiClient {
         syncCapablePeers: number;
         peersTried: number;
         dataSynced: number;
-        workspaceSynced: number;
+        sharedMemorySynced: number;
       }
       | {
         status: 'queued';
@@ -286,7 +286,7 @@ export class ApiClient {
     jobId: string;
     contextGraphId: string;
     includeWorkspace: boolean;
-    status: 'queued' | 'running' | 'done' | 'failed';
+    status: 'queued' | 'running' | 'done' | 'denied' | 'failed';
     queuedAt: number;
     startedAt?: number;
     finishedAt?: number;
@@ -295,7 +295,7 @@ export class ApiClient {
       syncCapablePeers: number;
       peersTried: number;
       dataSynced: number;
-      workspaceSynced: number;
+      sharedMemorySynced: number;
     };
     error?: string;
   }> {
