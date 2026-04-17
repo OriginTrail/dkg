@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import {
   DKGAgentWallet,
   buildAgentProfile,
@@ -18,7 +18,7 @@ import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { getGenesisQuads, computeNetworkId, PROTOCOL_SYNC, SYSTEM_PARANETS, DKG_ONTOLOGY, paranetDataGraphUri, paranetWorkspaceGraphUri, sparqlString } from '@origintrail-official/dkg-core';
 import { DKGQueryEngine } from '@origintrail-official/dkg-query';
 import { sha256 } from '@noble/hashes/sha2.js';
-import { EVMChainAdapter } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import { ethers } from 'ethers';
@@ -1380,16 +1380,42 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         return { protocols: [PROTOCOL_SYNC] } as any;
       });
 
-      const syncFromPeer = vi.spyOn(agent, 'syncFromPeer').mockResolvedValue(5);
-      const syncSharedMemoryFromPeer = vi.spyOn(agent, 'syncSharedMemoryFromPeer').mockResolvedValue(2);
+      // `syncContextGraphFromConnectedPeers` dispatches through the private
+      // `*Detailed` variants (see packages/agent/src/dkg-agent.ts #1441/1453)
+      // because it consumes the per-phase diagnostics, not just the plain
+      // `insertedTriples` count exposed by `syncFromPeer` / `syncSharedMemoryFromPeer`.
+      // Mock those so we can assert both the call shape and the reported totals
+      // without spinning up a remote peer.
+      const syncFromPeerDetailed = vi.spyOn(agent as any, 'syncFromPeerDetailed').mockResolvedValue({
+        insertedTriples: 5,
+        fetchedMetaTriples: 0,
+        fetchedDataTriples: 0,
+        insertedMetaTriples: 0,
+        insertedDataTriples: 5,
+        emptyResponses: 0,
+        metaOnlyResponses: 0,
+        dataRejectedMissingMeta: 0,
+        rejectedKcs: 0,
+        failedPeers: 0,
+      });
+      const syncSharedMemoryFromPeerDetailed = vi.spyOn(agent as any, 'syncSharedMemoryFromPeerDetailed').mockResolvedValue({
+        insertedTriples: 2,
+        fetchedMetaTriples: 0,
+        fetchedDataTriples: 0,
+        insertedMetaTriples: 0,
+        insertedDataTriples: 2,
+        emptyResponses: 0,
+        droppedDataTriples: 0,
+        failedPeers: 0,
+      });
 
       const result = await agent.syncContextGraphFromConnectedPeers('runtime-paranet', {
         includeSharedMemory: true,
       });
 
       expect(peerStoreReads).toBe(3);
-      expect(syncFromPeer).toHaveBeenCalledWith(remotePeer.toString(), ['runtime-paranet']);
-      expect(syncSharedMemoryFromPeer).toHaveBeenCalledWith(remotePeer.toString(), ['runtime-paranet']);
+      expect(syncFromPeerDetailed).toHaveBeenCalledWith(remotePeer.toString(), ['runtime-paranet']);
+      expect(syncSharedMemoryFromPeerDetailed).toHaveBeenCalledWith(remotePeer.toString(), ['runtime-paranet']);
       expect(result.connectedPeers).toBe(1);
       expect(result.syncCapablePeers).toBe(1);
       expect(result.peersTried).toBe(1);

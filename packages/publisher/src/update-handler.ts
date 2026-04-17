@@ -130,13 +130,26 @@ export class UpdateHandler {
         }
       }
 
-      // Merkle root integrity: recompute from the received payload (flat mode)
+      // Merkle root integrity: recompute from the received payload (flat mode).
+      //
+      // Issue #31: the KC root on-chain is computed over public triple hashes
+      // *plus* each KA's privateMerkleRoot as a synthetic leaf (matches
+      // publisher/dkg-publisher.ts#computeUpdateAndPublish and publish-handler
+      // on ingest). Passing `[]` here would only match updates that carry zero
+      // private quads — any legitimate update with private commitments would be
+      // silently rejected for "merkle root mismatch". The manifest carries each
+      // root's privateMerkleRoot in the same order the publisher used to build
+      // the KC root, so we just forward them.
       await this.graphManager.ensureContextGraph(contextGraphId);
       const dataGraph = this.graphManager.dataGraphUri(contextGraphId);
       const nquadsStr = new TextDecoder().decode(nquads);
       const quads = parseSimpleNQuads(nquadsStr);
 
-      const computedRoot = computeFlatKCRoot(quads, []);
+      const privateRoots = manifest
+        .map((m) => m.privateMerkleRoot)
+        .filter((r): r is Uint8Array => r != null && r.length > 0)
+        .map((r) => new Uint8Array(r));
+      const computedRoot = computeFlatKCRoot(quads, privateRoots);
 
       const partitioned = autoPartition(quads);
       const manifestRoots = new Set(manifest.map((m) => m.rootEntity));
