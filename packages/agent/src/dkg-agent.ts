@@ -5289,27 +5289,30 @@ export class DKGAgent {
         continue;
       }
 
-      // No declaration in ontology, agents, or _meta graphs. This is a
-      // phantom subscription — most commonly a curated context graph that
-      // was auto-discovered via the on-chain registry (see
-      // discoverContextGraphsFromChain) but we have no actual access to
-      // its metadata, so we cannot prove it's a legitimate project for
-      // this agent. Hide it from the project list to avoid polluting the
-      // user's UI with CGs they can't access. Any explicit subscribe (via
-      // invite) will drive a real meta+data sync that writes to _meta and
-      // causes the CG to appear here on the next refresh.
-      const dataGraph = paranetDataGraphUri(id);
-      const hasAnyContent = await this.store.query(
-        `ASK WHERE { GRAPH <${dataGraph}> { ?s ?p ?o } }`,
-      );
-      const hasContent = hasAnyContent.type === 'boolean' && hasAnyContent.value;
-      if (!hasContent) {
-        // Skip entirely — don't surface this to the UI as a project.
-        continue;
+      // No declaration in ontology, agents, or _meta graphs. Two cases:
+      //
+      //  1. Chain-attested but not-yet-synced (sub.onChainId set):
+      //     auto-discovery from the on-chain registry found this CG and
+      //     subscribed us. Surface it as subscribed+synced=false so the
+      //     UI can show a legitimate "waiting for sync" state. Any
+      //     genuinely inaccessible curated CG will be removed from
+      //     `subscribedContextGraphs` by the daemon's authoritative
+      //     denial path (accessDeniedPeers > 0) before we get here.
+      //
+      //  2. Not chain-attested AND no local content: a truly phantom
+      //     entry (pre-discovery subscribe that never resolved). Hide
+      //     it to avoid polluting the UI. If the user legitimately
+      //     subscribes later, the next catch-up writes _meta or data
+      //     and the entry will appear on the next refresh.
+      if (!sub.onChainId) {
+        const dataGraph = paranetDataGraphUri(id);
+        const hasAnyContent = await this.store.query(
+          `ASK WHERE { GRAPH <${dataGraph}> { ?s ?p ?o } }`,
+        );
+        const hasContent = hasAnyContent.type === 'boolean' && hasAnyContent.value;
+        if (!hasContent) continue;
       }
 
-      // Data exists but no declaration — treat as an unsynced project we
-      // actually hold some content for (e.g. meta hasn't been persisted yet).
       seen.set(uri, {
         id,
         uri,
