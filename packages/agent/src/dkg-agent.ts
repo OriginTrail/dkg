@@ -91,6 +91,8 @@ const SYNC_TOTAL_TIMEOUT_MS = 120_000;
 const SYNC_PAGE_TIMEOUT_MS = 30_000;
 /** ProtocolRouter.send retries internally 3 times with the same timeout; cap so 3× fits in remaining budget. */
 const SYNC_ROUTER_ATTEMPTS = 3;
+const SYNC_PROTOCOL_CHECK_ATTEMPTS = 3;
+const SYNC_PROTOCOL_CHECK_DELAY_MS = 500;
 const SYNC_AUTH_MAX_AGE_MS = 30_000;
 const META_REFRESH_COOLDOWN_MS = 30_000;
 const DEFAULT_SWM_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
@@ -1310,13 +1312,7 @@ export class DKGAgent {
     let sharedMemorySynced = 0;
 
     for (const pid of peers) {
-      let hasSync = false;
-      try {
-        const peer = await this.node.libp2p.peerStore.get(pid);
-        hasSync = peer.protocols.includes(PROTOCOL_SYNC);
-      } catch {
-        // Peer metadata might not be available yet; skip silently.
-      }
+      const hasSync = await this.waitForSyncProtocol(pid);
       if (!hasSync) continue;
 
       syncCapablePeers++;
@@ -1348,6 +1344,25 @@ export class DKGAgent {
       dataSynced,
       sharedMemorySynced,
     };
+  }
+
+  private async waitForSyncProtocol(pid: { toString(): string }): Promise<boolean> {
+    for (let attempt = 0; attempt < SYNC_PROTOCOL_CHECK_ATTEMPTS; attempt++) {
+      try {
+        const peer = await this.node.libp2p.peerStore.get(pid as any);
+        if (peer.protocols.includes(PROTOCOL_SYNC)) {
+          return true;
+        }
+      } catch {
+        // Peer metadata might not be available yet.
+      }
+
+      if (attempt < SYNC_PROTOCOL_CHECK_ATTEMPTS - 1) {
+        await new Promise((resolve) => setTimeout(resolve, SYNC_PROTOCOL_CHECK_DELAY_MS));
+      }
+    }
+
+    return false;
   }
 
   /**

@@ -1346,6 +1346,51 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     }
   });
 
+  it('syncContextGraphFromConnectedPeers retries until sync protocol is visible', async () => {
+    const agent = await DKGAgent.create({
+      name: 'RuntimeCatchupProtocolRetry',
+      listenHost: '127.0.0.1',
+      chainAdapter: new MockChainAdapter(),
+    });
+
+    try {
+      await agent.start();
+      agent.subscribeToContextGraph('runtime-paranet');
+
+      const remotePeer = agent.node.peerId;
+      vi.spyOn(agent.node.libp2p, 'getConnections').mockReturnValue([
+        { remotePeer } as any,
+      ]);
+
+      let peerStoreReads = 0;
+      vi.spyOn(agent.node.libp2p.peerStore, 'get').mockImplementation(async () => {
+        peerStoreReads += 1;
+        if (peerStoreReads < 3) {
+          return { protocols: [] } as any;
+        }
+        return { protocols: [PROTOCOL_SYNC] } as any;
+      });
+
+      const syncFromPeer = vi.spyOn(agent, 'syncFromPeer').mockResolvedValue(5);
+      const syncSharedMemoryFromPeer = vi.spyOn(agent, 'syncSharedMemoryFromPeer').mockResolvedValue(2);
+
+      const result = await agent.syncContextGraphFromConnectedPeers('runtime-paranet', {
+        includeSharedMemory: true,
+      });
+
+      expect(peerStoreReads).toBe(3);
+      expect(syncFromPeer).toHaveBeenCalledWith(remotePeer.toString(), ['runtime-paranet']);
+      expect(syncSharedMemoryFromPeer).toHaveBeenCalledWith(remotePeer.toString(), ['runtime-paranet']);
+      expect(result.connectedPeers).toBe(1);
+      expect(result.syncCapablePeers).toBe(1);
+      expect(result.peersTried).toBe(1);
+      expect(result.dataSynced).toBe(5);
+      expect(result.sharedMemorySynced).toBe(2);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
   it('deduplicates concurrent sync-on-connect attempts per peer', async () => {
     const agent = await DKGAgent.create({
       name: 'SyncDedupTest',
