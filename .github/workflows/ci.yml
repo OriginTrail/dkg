@@ -1,13 +1,24 @@
 name: CI
 
+# Trigger rules — chosen so the same SHA is never tested twice:
+#   * push to main/v10-rc : always runs (merge-gate safety net, full
+#     Solidity coverage, required status checks for protected branches).
+#   * pull_request         : runs on every open/synchronize/reopen event.
+#   * No `push` trigger on feature branches (e.g. `test/**`). When a PR
+#     is open, the `pull_request` event already covers every new commit;
+#     when a PR is not open yet, developers can either open a draft PR
+#     or trigger the workflow manually via `workflow_dispatch`.
 on:
   push:
-    branches: [main, v10-rc, 'test/**']
+    branches: [main, v10-rc]
   pull_request:
     branches: [main, v10-rc]
+  workflow_dispatch:
 
 concurrency:
-  group: ci-${{ github.ref }}
+  # Per-PR / per-branch lock: cancels any earlier in-flight run for the
+  # same ref as soon as a newer commit arrives.
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
