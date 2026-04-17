@@ -1397,6 +1397,82 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     }
   });
 
+  it('does not mark metaSynced true from sync scope alone', async () => {
+    const agent = await DKGAgent.create({
+      name: 'MetaSyncedScopeOnly',
+      listenHost: '127.0.0.1',
+      chainAdapter: new MockChainAdapter(),
+    });
+
+    try {
+      await agent.start();
+      (agent as any).subscribedContextGraphs.set('runtime-paranet', {
+        name: 'Runtime Paranet',
+        subscribed: true,
+        synced: false,
+        metaSynced: false,
+      });
+      agent.subscribeToContextGraph('runtime-paranet');
+      agent.subscribeToContextGraph('runtime-paranet');
+
+      const remotePeer = agent.node.peerId;
+      vi.spyOn(agent.node.libp2p.peerStore, 'get').mockResolvedValue({
+        protocols: [PROTOCOL_SYNC],
+      } as any);
+      vi.spyOn(agent, 'syncFromPeer').mockResolvedValue(0);
+      vi.spyOn(agent, 'discoverContextGraphsFromStore').mockResolvedValue(0);
+      vi.spyOn(agent, 'syncSharedMemoryFromPeer').mockResolvedValue(0);
+
+      await (agent as any).trySyncFromPeer(remotePeer.toString());
+
+      expect((agent as any).subscribedContextGraphs.get('runtime-paranet')?.metaSynced).toBe(false);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('marks metaSynced true when ontology confirms the context graph', async () => {
+    const agent = await DKGAgent.create({
+      name: 'MetaSyncedOntologyConfirmed',
+      listenHost: '127.0.0.1',
+      chainAdapter: new MockChainAdapter(),
+    });
+
+    try {
+      await agent.start();
+      (agent as any).subscribedContextGraphs.set('runtime-paranet', {
+        name: 'Runtime Paranet',
+        subscribed: true,
+        synced: false,
+        metaSynced: false,
+      });
+      agent.subscribeToContextGraph('runtime-paranet');
+
+      await (agent as any).store.insert([
+        {
+          subject: paranetDataGraphUri('runtime-paranet'),
+          predicate: DKG_ONTOLOGY.RDF_TYPE,
+          object: DKG_ONTOLOGY.DKG_PARANET,
+          graph: paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY),
+        },
+      ]);
+
+      const remotePeer = agent.node.peerId;
+      vi.spyOn(agent.node.libp2p.peerStore, 'get').mockResolvedValue({
+        protocols: [PROTOCOL_SYNC],
+      } as any);
+      vi.spyOn(agent, 'syncFromPeer').mockResolvedValue(0);
+      vi.spyOn(agent, 'discoverContextGraphsFromStore').mockResolvedValue(0);
+      vi.spyOn(agent, 'syncSharedMemoryFromPeer').mockResolvedValue(0);
+
+      await (agent as any).trySyncFromPeer(remotePeer.toString());
+
+      expect((agent as any).subscribedContextGraphs.get('runtime-paranet')?.metaSynced).toBe(true);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
   it('deduplicates concurrent sync-on-connect attempts per peer', async () => {
     const agent = await DKGAgent.create({
       name: 'SyncDedupTest',
