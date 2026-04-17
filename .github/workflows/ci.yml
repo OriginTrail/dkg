@@ -147,20 +147,22 @@ jobs:
         run: pnpm --filter @origintrail-official/dkg-chain test
 
   # ------------------------------------------------------------------
-  # Tornado publisher lane — sharded across 3 parallel runners.
-  # Raised from 2→3 after the 5.12-min warm run showed publisher shards
-  # at ~3.5-3.9 min each; dividing by 3 lands each shard around ~2.5 min,
-  # comfortably under the agent tail that gates wall-clock.
+  # Tornado publisher lane — sharded across 2 parallel runners.
+  # Briefly tried 3 shards and saw a ~15s regression: the publisher suite
+  # is dominated by a small number of long files, so an extra runner
+  # just paid fixed setup overhead without shrinking the tail. 2 shards
+  # is the sweet spot; the publisher job never gates wall-clock anyway
+  # (agent [1/4] is the tail at ~4.5 min).
   # ------------------------------------------------------------------
   tornado-publisher:
-    name: "Tornado: publisher [${{ matrix.shard }}/3]"
+    name: "Tornado: publisher [${{ matrix.shard }}/2]"
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
+        shard: [1, 2]
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -176,8 +178,8 @@ jobs:
           path: /tmp
       - name: Restore build outputs
         run: tar -xzf /tmp/build-outputs.tgz
-      - name: "Publisher tests (shard ${{ matrix.shard }}/3)"
-        run: pnpm --filter @origintrail-official/dkg-publisher exec vitest run --shard=${{ matrix.shard }}/3
+      - name: "Publisher tests (shard ${{ matrix.shard }}/2)"
+        run: pnpm --filter @origintrail-official/dkg-publisher exec vitest run --shard=${{ matrix.shard }}/2
 
   # ------------------------------------------------------------------
   # Tornado agent lane — the slowest Node suite, sharded across 4 runners.
