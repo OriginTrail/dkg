@@ -147,7 +147,7 @@ describe('discoverContextGraphsFromStore', () => {
     await agent?.stop().catch(() => {});
   });
 
-  it('discovers paranets from ONTOLOGY graph and auto-subscribes', async () => {
+  it('discovers paranets from ONTOLOGY graph without auto-subscribing', async () => {
     const store = new OxigraphStore();
     const result = await createTestAgent({ store });
     agent = result.agent;
@@ -165,7 +165,7 @@ describe('discoverContextGraphsFromStore', () => {
 
     const sub = agent.getSubscribedContextGraphs().get('discovered-paranet');
     expect(sub).toBeDefined();
-    expect(sub!.subscribed).toBe(true);
+    expect(sub!.subscribed).toBe(false);
     expect(sub!.synced).toBe(true);
     expect(sub!.name).toBe('Discovered Paranet');
   }, 15000);
@@ -386,7 +386,7 @@ describe('discoverContextGraphsFromStore', () => {
     await agent?.stop().catch(() => {});
   });
 
-  it('discovers curated context graphs from _meta definitions', async () => {
+  it('discovers curated context graphs from _meta definitions without auto-subscribing', async () => {
     const store = new OxigraphStore();
     const result = await createTestAgent({ store });
     agent = result.agent;
@@ -405,7 +405,7 @@ describe('discoverContextGraphsFromStore', () => {
     const entry = agent.getSubscribedContextGraphs().get(curatedId);
     expect(entry).toBeDefined();
     expect(entry!.name).toBe('Curated Meta Only');
-    expect(entry!.subscribed).toBe(true);
+    expect(entry!.subscribed).toBe(false);
     expect(entry!.synced).toBe(true);
     expect(entry!.metaSynced).toBe(true);
   }, 15000);

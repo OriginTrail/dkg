@@ -1459,6 +1459,53 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     }
   });
 
+  it('prioritizes the preferred sync peer during catchup', async () => {
+    const agent = await DKGAgent.create({
+      name: 'RuntimeCatchupPreferredPeer',
+      listenHost: '127.0.0.1',
+      chainAdapter: new MockChainAdapter(),
+    });
+
+    try {
+      await agent.start();
+      agent.subscribeToContextGraph('runtime-paranet');
+      (agent as any).preferredSyncPeers.set('runtime-paranet', 'peer-preferred');
+
+      const peerOther = { toString: () => 'peer-other' };
+      const peerPreferred = { toString: () => 'peer-preferred' };
+      vi.spyOn(agent.node.libp2p, 'getConnections').mockReturnValue([
+        { remotePeer: peerOther } as any,
+        { remotePeer: peerPreferred } as any,
+      ]);
+      vi.spyOn((agent as any).discovery, 'findAgents').mockResolvedValue([]);
+      vi.spyOn(agent as any, 'ensurePeerConnected').mockResolvedValue(undefined);
+      vi.spyOn(agent as any, 'waitForSyncProtocol').mockResolvedValue(true);
+
+      const triedPeers: string[] = [];
+      vi.spyOn(agent as any, 'syncFromPeerDetailed').mockImplementation(async (...args: unknown[]) => {
+        triedPeers.push(String(args[0]));
+        return {
+          insertedTriples: 0,
+          fetchedMetaTriples: 0,
+          fetchedDataTriples: 0,
+          insertedMetaTriples: 0,
+          insertedDataTriples: 0,
+          emptyResponses: 1,
+          metaOnlyResponses: 0,
+          dataRejectedMissingMeta: 0,
+          rejectedKcs: 0,
+          failedPeers: 0,
+        };
+      });
+
+      await agent.syncContextGraphFromConnectedPeers('runtime-paranet');
+
+      expect(triedPeers).toEqual(['peer-preferred', 'peer-other']);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
   it('allocates a fresh sync deadline per context graph', async () => {
     const agent = await DKGAgent.create({
       name: 'PerContextGraphDeadline',
@@ -1653,6 +1700,37 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       expect(parsed.requesterIdentityId).toBe(identityId.toString());
       expect(parsed.requesterSignatureR).toBeDefined();
       expect(parsed.requesterSignatureVS).toBeDefined();
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('fails loudly when auth-required sync cannot be signed by the default agent', async () => {
+    const agent = await DKGAgent.create({
+      name: 'PrivateSyncAuthMissingKey',
+      listenHost: '127.0.0.1',
+      chainAdapter: new MockChainAdapter(),
+    });
+    try {
+      await agent.start();
+      (agent as any).subscribedContextGraphs.set('private-cg', {
+        name: 'private-cg',
+        subscribed: false,
+        synced: false,
+        onChainId: '1',
+      });
+
+      const defaultAgentAddress = agent.getDefaultAgentAddress();
+      expect(defaultAgentAddress).toBeDefined();
+      const defaultAgent = (agent as any).localAgents.get(defaultAgentAddress);
+      expect(defaultAgent).toBeDefined();
+      delete defaultAgent.privateKey;
+
+      await expect(
+        (agent as any).buildSyncRequest('private-cg', 0, 50, false, 'peer-remote'),
+      ).rejects.toThrow(
+        `Cannot build authenticated sync request for "private-cg": missing signing key for default agent ${defaultAgentAddress}`,
+      );
     } finally {
       await agent.stop().catch(() => {});
     }

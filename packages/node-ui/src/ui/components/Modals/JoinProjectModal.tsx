@@ -13,9 +13,13 @@ interface JoinProjectModalProps {
 }
 
 function parseInviteCode(raw: string): { cgId: string; multiaddr: string | null } {
-  const lines = raw.trim().split('\n').map(l => l.trim()).filter(Boolean);
-  const cgId = lines[0] ?? '';
-  const multiaddr = lines.find(l => l.startsWith('/ip4/') || l.startsWith('/ip6/') || l.startsWith('/dns')) ?? null;
+  const normalized = raw.trim().replace(/\\n/g, '\n');
+  const multiaddrMatch = normalized.match(/(?:^|\s)(\/(?:ip4|ip6|dns|dns4|dns6)\/\S+)/);
+  const multiaddr = multiaddrMatch?.[1] ?? null;
+  const cgId = (multiaddr
+    ? normalized.replace(multiaddr, '')
+    : normalized
+  ).split('\n').map(l => l.trim()).filter(Boolean)[0] ?? '';
   return { cgId, multiaddr };
 }
 

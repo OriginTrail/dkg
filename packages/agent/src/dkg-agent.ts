@@ -278,6 +278,7 @@ export class DKGAgent {
   private readonly syncingPeers = new Set<string>();
   private readonly seenPrivateSyncRequestIds = new Map<string, number>();
   private readonly metaRefreshTimestamps = new Map<string, number>();
+  private readonly preferredSyncPeers = new Map<string, string>();
 
   /** Registered agents on this node: agentAddress → AgentKeyRecord */
   private readonly localAgents = new Map<string, AgentKeyRecord>();
@@ -834,7 +835,7 @@ export class DKGAgent {
 
     // Join-request protocol: receives signed join requests forwarded by peers.
     // Stores them locally if this node is the curator; ACKs with "ok" or "error".
-    this.router.register(PROTOCOL_JOIN_REQUEST, async (data) => {
+    this.router.register(PROTOCOL_JOIN_REQUEST, async (data, peerId) => {
       try {
         const payload = JSON.parse(new TextDecoder().decode(data));
 
@@ -849,6 +850,7 @@ export class DKGAgent {
             if (approvedAddr && !isLocalAgent) {
               return new TextEncoder().encode(JSON.stringify({ ok: true, skipped: true }));
             }
+            this.preferredSyncPeers.set(contextGraphId, peerId.toString());
             this.log.info(createOperationContext('system'), `Join request approved for "${contextGraphId}" — auto-subscribing`);
             this.subscribeToContextGraph(contextGraphId);
             this.syncContextGraphFromConnectedPeers(contextGraphId, { includeSharedMemory: true }).catch(() => {});
@@ -1369,6 +1371,11 @@ export class DKGAgent {
 
     this.trackSyncContextGraph(contextGraphId);
 
+    const preferredPeerId = await this.resolvePreferredSyncPeerId(contextGraphId);
+    if (preferredPeerId) {
+      await this.ensurePeerConnected(preferredPeerId);
+    }
+
     // Attempt to connect to all known peers from the agent registry so that
     // curated CGs hosted by non-relay nodes are reachable (e.g. Node 3 needs
     // to connect to Node 2 even if only Node 1/relay is in libp2p connections).
@@ -1396,9 +1403,12 @@ export class DKGAgent {
       // Discovery unavailable or dial failures are non-fatal
     }
 
-    const peers = [...new Map(
-      this.node.libp2p.getConnections().map((conn) => [conn.remotePeer.toString(), conn.remotePeer]),
-    ).values()];
+    const peers = this.orderCatchupPeers(
+      [...new Map(
+        this.node.libp2p.getConnections().map((conn) => [conn.remotePeer.toString(), conn.remotePeer]),
+      ).values()],
+      preferredPeerId,
+    );
     let syncCapablePeers = 0;
     let peersTried = 0;
     let dataSynced = 0;
@@ -1486,6 +1496,58 @@ export class DKGAgent {
       sharedMemorySynced,
       diagnostics,
     };
+  }
+
+  private orderCatchupPeers(
+    peers: Array<{ toString(): string }>,
+    preferredPeerId?: string,
+  ): Array<{ toString(): string }> {
+    if (!preferredPeerId) return peers;
+
+    return [...peers].sort((a, b) => {
+      if (a.toString() === preferredPeerId) return -1;
+      if (b.toString() === preferredPeerId) return 1;
+      return 0;
+    });
+  }
+
+  private async resolvePreferredSyncPeerId(contextGraphId: string): Promise<string | undefined> {
+    const preferredPeerId = this.preferredSyncPeers.get(contextGraphId);
+    if (preferredPeerId) return preferredPeerId;
+
+    const curatorPeerId = await this.resolveCuratorPeerId(contextGraphId);
+    if (curatorPeerId) {
+      this.preferredSyncPeers.set(contextGraphId, curatorPeerId);
+    }
+    return curatorPeerId;
+  }
+
+  private async ensurePeerConnected(peerId: string): Promise<void> {
+    const existingConnections = this.node.libp2p.getConnections()
+      .filter((conn) => conn.remotePeer.toString() === peerId);
+    if (existingConnections.length > 0) {
+      return;
+    }
+
+    try {
+      const { peerIdFromString } = await import('@libp2p/peer-id');
+      const pid = peerIdFromString(peerId);
+
+      try {
+        await this.node.libp2p.dial(pid);
+        return;
+      } catch {
+        const agent = await this.discovery.findAgentByPeerId(peerId);
+        if (!agent?.relayAddress) return;
+
+        const { multiaddr } = await import('@multiformats/multiaddr');
+        const circuitAddr = multiaddr(`${agent.relayAddress}/p2p-circuit/p2p/${peerId}`);
+        await this.node.libp2p.peerStore.merge(pid, { multiaddrs: [circuitAddr] });
+        await this.node.libp2p.dial(pid);
+      }
+    } catch {
+      // Non-fatal — peer may be unreachable.
+    }
   }
 
   private async waitForSyncProtocol(pid: { toString(): string }): Promise<boolean> {
@@ -4815,6 +4877,15 @@ export class DKGAgent {
       }
     }
 
+    if (needsAuth && (!request.requesterSignatureR || !request.requesterSignatureVS)) {
+      const signingTarget = this.defaultAgentAddress
+        ? `default agent ${this.defaultAgentAddress}`
+        : 'node identity';
+      throw new Error(
+        `Cannot build authenticated sync request for "${contextGraphId}": missing signing key for ${signingTarget}`,
+      );
+    }
+
     return new TextEncoder().encode(JSON.stringify(request));
   }
 
@@ -5077,14 +5148,7 @@ export class DKGAgent {
    * newly added participants. Rate-limited to avoid abuse.
    * Returns true if meta was refreshed, false if skipped or failed.
    */
-  private async refreshMetaFromCurator(contextGraphId: string): Promise<boolean> {
-    const now = Date.now();
-    const lastRefresh = this.metaRefreshTimestamps.get(contextGraphId) ?? 0;
-    if (now - lastRefresh < META_REFRESH_COOLDOWN_MS) {
-      return false;
-    }
-
-    const ctx = createOperationContext('sync');
+  private async resolveCuratorPeerId(contextGraphId: string): Promise<string | undefined> {
     const cgMetaGraph = paranetMetaGraphUri(contextGraphId);
     const contextGraphUri = paranetDataGraphUri(contextGraphId);
 
@@ -5096,12 +5160,12 @@ export class DKGAgent {
       } LIMIT 1`,
     );
     if (curatorResult.type !== 'bindings' || curatorResult.bindings.length === 0) {
-      return false;
+      return undefined;
     }
     const curatorDid = (curatorResult.bindings[0] as Record<string, string>)['curator'] ?? '';
     const didPrefix = 'did:dkg:agent:';
     if (!curatorDid.startsWith(didPrefix)) {
-      return false;
+      return undefined;
     }
     const curatorIdentifier = curatorDid.slice(didPrefix.length);
 
@@ -5157,7 +5221,24 @@ export class DKGAgent {
         } catch { /* registry unavailable */ }
       }
 
-      if (!resolved) return false;
+      if (!resolved) return undefined;
+    }
+
+    return curatorPeerId;
+  }
+
+  private async refreshMetaFromCurator(contextGraphId: string): Promise<boolean> {
+    const now = Date.now();
+    const lastRefresh = this.metaRefreshTimestamps.get(contextGraphId) ?? 0;
+    if (now - lastRefresh < META_REFRESH_COOLDOWN_MS) {
+      return false;
+    }
+
+    const ctx = createOperationContext('sync');
+    const cgMetaGraph = paranetMetaGraphUri(contextGraphId);
+    const curatorPeerId = await this.resolveCuratorPeerId(contextGraphId);
+    if (!curatorPeerId) {
+      return false;
     }
 
     if (curatorPeerId === this.peerId) {
@@ -5748,26 +5829,22 @@ export class DKGAgent {
 
     for (const { id, name, source } of discoveredEntries.values()) {
       const existing = this.subscribedContextGraphs.get(id);
-      if (existing?.subscribed && existing?.synced) continue;
+      if (existing) continue;
 
       this.subscribedContextGraphs.set(id, {
         name,
-        subscribed: true,
+        subscribed: false,
         synced: true,
-        metaSynced: source === 'meta' ? true : existing?.metaSynced ?? false,
-        onChainId: existing?.onChainId,
+        metaSynced: source === 'meta',
+        onChainId: undefined,
       });
 
-      if (!existing?.subscribed) {
-        this.subscribeToContextGraph(id, { trackSyncScope: true });
-      }
-
-      this.log.info(ctx, `Discovered context graph "${name}" (${id}) from ${source} store — auto-subscribed`);
+      this.log.info(ctx, `Discovered context graph "${name}" (${id}) from ${source} store — added as discoverable only`);
       discovered++;
     }
 
     if (discovered > 0) {
-      this.log.info(ctx, `Auto-subscribed to ${discovered} new context graph(s) from store`);
+      this.log.info(ctx, `Added ${discovered} new context graph(s) from store without subscribing`);
     }
     return discovered;
   }
