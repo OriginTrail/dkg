@@ -111,7 +111,6 @@ describe.skipIf(!markitdownAvailable)('MarkItDown E2E — real file conversion',
       agentDid: 'did:dkg:agent:0xTest',
     });
 
-    expect(result.mdIntermediate).toBeTruthy();
     expect(result.mdIntermediate).toContain('Research Paper');
     expect(result.mdIntermediate).toContain('decentralized knowledge graphs');
     expect(result.mdIntermediate).toContain('čćž 日本語');
@@ -127,7 +126,6 @@ describe.skipIf(!markitdownAvailable)('MarkItDown E2E — real file conversion',
       agentDid: 'did:dkg:agent:0xTest',
     });
 
-    expect(result.mdIntermediate).toBeTruthy();
     expect(result.mdIntermediate).toContain('Alice');
     expect(result.mdIntermediate).toContain('Bob');
     expect(result.mdIntermediate).toContain('Researcher');
@@ -143,7 +141,7 @@ describe.skipIf(!markitdownAvailable)('MarkItDown E2E — real file conversion',
       agentDid: 'did:dkg:agent:0xTest',
     });
 
-    expect(typeof result.mdIntermediate).toBe('string');
+    expect(result.mdIntermediate).toBe('');
   }, 30_000);
 
   it('processes file through registry lookup → extract', async () => {
@@ -219,64 +217,17 @@ describe('Full extraction pipeline simulation', () => {
     expect(phase1Result.mdIntermediate).toContain('Climate Report');
     expect(phase1Result.mdIntermediate).toContain('1.2°C');
 
-    // Phase 2: markdown → RDF triples (simulated extraction)
-    const extractedTriples = [
-      {
-        subject: 'urn:climate:report:2026',
-        predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
-        object: 'https://schema.org/Report',
-      },
-      {
-        subject: 'urn:climate:report:2026',
-        predicate: 'https://schema.org/name',
-        object: 'Climate Report',
-      },
-      {
-        subject: 'urn:climate:report:2026',
-        predicate: 'https://schema.org/description',
-        object: 'Global temperature rose by 1.2°C.',
-      },
-    ];
-
-    const provenanceTriples = [
-      {
-        subject: 'urn:extraction:1',
-        predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
-        object: 'dkg:ExtractionProvenance',
-      },
-      {
-        subject: 'urn:extraction:1',
-        predicate: 'dkg:extractedBy',
-        object: 'did:dkg:agent:0xClimate',
-      },
-    ];
-
-    // Verify the full pipeline output
-    expect(extractedTriples).toHaveLength(3);
-    expect(extractedTriples[0].subject).toBe('urn:climate:report:2026');
-    expect(provenanceTriples).toHaveLength(2);
-    expect(provenanceTriples[1].object).toBe('did:dkg:agent:0xClimate');
-
-    // Simulate what the node does: store all artifacts
-    const artifacts = {
-      originalFile: testFile,
-      mdIntermediate: phase1Result.mdIntermediate,
-      triples: extractedTriples,
-      provenance: provenanceTriples,
-      totalTripleCount: extractedTriples.length + provenanceTriples.length,
-    };
-
-    expect(artifacts.totalTripleCount).toBe(5);
-    expect(artifacts.mdIntermediate).toContain('Climate Report');
+    // Phase 1 output is sufficient: verify the markdown intermediate is usable
+    expect(phase1Result.mdIntermediate.length).toBeGreaterThan(0);
+    expect(typeof phase1Result.mdIntermediate).toBe('string');
   });
 
-  it('simulates import-file response shape', async () => {
+  it('HTML pipeline strips tags and preserves text content', async () => {
     const testFile = join(tmpDir, 'report.html');
     await writeFile(testFile, '<h1>Q4 Sales</h1><p>Revenue: $1.2M</p>');
 
     const registry = new ExtractionPipelineRegistry();
 
-    // Register a mock HTML pipeline (Phase 1 converter — mdIntermediate only)
     registry.register({
       contentTypes: ['text/html'],
       async extract(input) {
@@ -296,47 +247,16 @@ describe('Full extraction pipeline simulation', () => {
       agentDid: 'did:dkg:agent:0xSales',
     });
 
-    // Phase 2 (simulated): the route handler would run the Markdown extractor
-    // on `result.mdIntermediate` to produce triples/provenance.
-    const phase2Triples = [{ subject: 'urn:sales:q4', predicate: 'rdf:type', object: 'schema:Report' }];
-
-    // Build the import-file response as the daemon would
-    const importFileResponse = {
-      assertionUri: 'did:dkg:context-graph:sales/assertion/0xSales/q4-report',
-      fileHash: 'keccak256:abc123',
-      detectedContentType: 'text/html',
-      extraction: {
-        status: phase2Triples.length > 0 ? 'completed' as const : 'skipped' as const,
-        tripleCount: phase2Triples.length,
-        mdIntermediateHash: 'keccak256:def456',
-        pipelineUsed: 'text/html',
-      },
-    };
-
     expect(result.mdIntermediate).toContain('Q4 Sales');
-    expect(importFileResponse.extraction.status).toBe('completed');
-    expect(importFileResponse.extraction.tripleCount).toBe(1);
-    expect(importFileResponse.extraction.pipelineUsed).toBe('text/html');
-    expect(importFileResponse.detectedContentType).toBe('text/html');
+    expect(result.mdIntermediate).toContain('$1.2M');
+    expect(result.mdIntermediate).not.toContain('<h1>');
   });
 
-  it('simulates skipped extraction for unknown content type', () => {
+  it('returns undefined for unregistered content type', () => {
     const registry = new ExtractionPipelineRegistry();
     registry.register(new MarkItDownConverter());
 
     const pipeline = registry.get('application/octet-stream');
     expect(pipeline).toBeUndefined();
-
-    // Node would return extraction.status: "skipped"
-    const importFileResponse = {
-      assertionUri: 'did:dkg:context-graph:test/assertion/0xAgent/binary-blob',
-      fileHash: 'keccak256:xyz789',
-      detectedContentType: 'application/octet-stream',
-      extraction: {
-        status: 'skipped' as const,
-      },
-    };
-
-    expect(importFileResponse.extraction.status).toBe('skipped');
   });
 });

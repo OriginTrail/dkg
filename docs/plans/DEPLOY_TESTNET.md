@@ -8,10 +8,10 @@ Actionable checklist to get the V9 testnet live. Covers contract deployment, rel
 |-----------|--------|
 | P2P networking (libp2p) | Working — tested locally |
 | GossipSub replication | Working — tested locally |
-| Publish flow (P2P + chain) | Working — tested with MockChainAdapter and Hardhat |
-| Update flow | Working — tested with MockChainAdapter |
+| Publish flow (P2P + chain) | Working — tested with EVMChainAdapter + Hardhat |
+| Update flow | Working — tested with EVMChainAdapter + Hardhat |
 | Query engine + SPARQL guard | Working — unit + e2e tests pass |
-| ChainEventPoller (dual confirmation) | Working — tested with MockChainAdapter |
+| ChainEventPoller (dual confirmation) | Working — tested with EVMChainAdapter + Hardhat |
 | Two-level Merkle (flat + entityProofs) | Working — tested |
 | Tentative → confirmed lifecycle | Working — tested |
 | CLI | Working — all commands implemented |

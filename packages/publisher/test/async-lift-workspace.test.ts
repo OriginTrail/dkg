@@ -1,11 +1,12 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { GraphManager } from '@origintrail-official/dkg-storage';
-import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter } from '@origintrail-official/dkg-chain';
 import { TypedEventBus, generateEd25519Keypair } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
 import { DKGPublisher } from '../src/index.js';
 import { resolveLiftWorkspaceSlice, resolveWorkspaceSelection } from '../src/workspace-resolution.js';
+import { createEVMAdapter, getSharedContext, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 
 const PARANET = 'test-workspace';
 const ENTITY = 'urn:test:entity:1';
@@ -15,20 +16,18 @@ describe('async lift workspace resolution', () => {
   let store: OxigraphStore;
   let graphManager: GraphManager;
   let publisher: DKGPublisher;
-  const wallet = ethers.Wallet.createRandom();
-
   beforeEach(async () => {
     store = new OxigraphStore();
     graphManager = new GraphManager(store);
-    const chain = new MockChainAdapter('mock:31337', wallet.address);
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const keypair = await generateEd25519Keypair();
     publisher = new DKGPublisher({
       store,
       chain,
       eventBus: new TypedEventBus(),
       keypair,
-      publisherPrivateKey: wallet.privateKey,
-      publisherNodeIdentityId: 1n,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
   });
 

@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter } from '@origintrail-official/dkg-chain';
 import {
   TypedEventBus,
   generateEd25519Keypair,
@@ -10,6 +10,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import { DKGPublisher } from '../src/index.js';
 import { ethers } from 'ethers';
+import { createEVMAdapter, getSharedContext, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 
 const CG_ID = 'test-assertion-cg';
 const SWM_GRAPH = `did:dkg:context-graph:${CG_ID}/_shared_memory`;
@@ -29,16 +30,15 @@ describe('Working Memory Assertion Lifecycle', () => {
 
   beforeEach(async () => {
     store = new OxigraphStore();
-    const wallet = ethers.Wallet.createRandom();
-    const chain = new MockChainAdapter('mock:31337', wallet.address);
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const keypair = await generateEd25519Keypair();
     publisher = new DKGPublisher({
       store,
       chain,
       eventBus: new TypedEventBus(),
       keypair,
-      publisherPrivateKey: wallet.privateKey,
-      publisherNodeIdentityId: 1n,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
   });
 
@@ -208,16 +208,15 @@ describe('Working Memory Assertion sub-graph registration check', () => {
 
   beforeEach(async () => {
     store = new OxigraphStore();
-    const wallet = ethers.Wallet.createRandom();
-    const chain = new MockChainAdapter('mock:31337', wallet.address);
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const keypair = await generateEd25519Keypair();
     publisher = new DKGPublisher({
       store,
       chain,
       eventBus: new TypedEventBus(),
       keypair,
-      publisherPrivateKey: wallet.privateKey,
-      publisherNodeIdentityId: 1n,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
   });
 
@@ -355,16 +354,15 @@ describe('Assertion Lifecycle Provenance (Event-Sourced, PROV-O)', () => {
 
   beforeEach(async () => {
     store = new OxigraphStore();
-    const wallet = ethers.Wallet.createRandom();
-    const chain = new MockChainAdapter('mock:31337', wallet.address);
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const keypair = await generateEd25519Keypair();
     publisher = new DKGPublisher({
       store,
       chain,
       eventBus: new TypedEventBus(),
       keypair,
-      publisherPrivateKey: wallet.privateKey,
-      publisherNodeIdentityId: 1n,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
   });
 

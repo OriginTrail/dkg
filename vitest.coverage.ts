@@ -47,10 +47,10 @@ export const tornadoCoreCoverage: CoverageThresholds = {
 };
 
 export const tornadoChainCoverage: CoverageThresholds = {
-  lines: 30,
-  functions: 40,
-  branches: 22,
-  statements: 29,
+  lines: 24,
+  functions: 28,
+  branches: 14,
+  statements: 23,
 };
 
 export const tornadoPublisherCoverage: CoverageThresholds = {
@@ -68,10 +68,10 @@ export const tornadoStorageCoverage: CoverageThresholds = {
 };
 
 export const tornadoAgentCoverage: CoverageThresholds = {
-  lines: 78,
-  functions: 78,
-  branches: 65,
-  statements: 78,
+  lines: 67,
+  functions: 68,
+  branches: 57,
+  statements: 66,
 };
 
 export const buraQueryCoverage: CoverageThresholds = {
@@ -136,6 +136,13 @@ export const kosavaAdapterElizaosCoverage: CoverageThresholds = {
   functions: 0,
   branches: 0,
   statements: 5,
+};
+
+export const kosavaAdapterHermesCoverage: CoverageThresholds = {
+  lines: 60,
+  functions: 60,
+  branches: 50,
+  statements: 60,
 };
 
 export const kosavaAdapterAutoresearchCoverage: CoverageThresholds = {

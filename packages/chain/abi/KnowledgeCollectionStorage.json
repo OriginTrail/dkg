@@ -957,70 +957,6 @@
     "type": "function"
   },
   {
-    "inputs": [
-      {
-        "internalType": "address",
-        "name": "publisher",
-        "type": "address"
-      },
-      {
-        "internalType": "string",
-        "name": "publishOperationId",
-        "type": "string"
-      },
-      {
-        "internalType": "bytes32",
-        "name": "merkleRoot",
-        "type": "bytes32"
-      },
-      {
-        "internalType": "uint256",
-        "name": "knowledgeAssetsAmount",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint88",
-        "name": "byteSize",
-        "type": "uint88"
-      },
-      {
-        "internalType": "uint40",
-        "name": "startEpoch",
-        "type": "uint40"
-      },
-      {
-        "internalType": "uint40",
-        "name": "endEpoch",
-        "type": "uint40"
-      },
-      {
-        "internalType": "uint96",
-        "name": "tokenAmount",
-        "type": "uint96"
-      },
-      {
-        "internalType": "bool",
-        "name": "isImmutable",
-        "type": "bool"
-      },
-      {
-        "internalType": "bytes32",
-        "name": "selectiveDisclosureMerkleRoot",
-        "type": "bytes32"
-      }
-    ],
-    "name": "createKnowledgeCollectionWithDisclosureRoot",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "",
-        "type": "uint256"
-      }
-    ],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
     "inputs": [],
     "name": "currentTotalSupply",
     "outputs": [
@@ -1225,11 +1161,6 @@
             "internalType": "bool",
             "name": "isImmutable",
             "type": "bool"
-          },
-          {
-            "internalType": "bytes32",
-            "name": "selectiveDisclosureMerkleRoot",
-            "type": "bytes32"
           }
         ],
         "internalType": "struct KnowledgeCollectionLib.KnowledgeCollection",
@@ -1324,6 +1255,50 @@
       {
         "internalType": "bool",
         "name": "",
+        "type": "bool"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "id",
+        "type": "uint256"
+      }
+    ],
+    "name": "getKnowledgeCollectionUpdateContext",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "merkleRootsCount",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "minted",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint88",
+        "name": "byteSize",
+        "type": "uint88"
+      },
+      {
+        "internalType": "uint40",
+        "name": "endEpoch",
+        "type": "uint40"
+      },
+      {
+        "internalType": "uint96",
+        "name": "tokenAmount",
+        "type": "uint96"
+      },
+      {
+        "internalType": "bool",
+        "name": "isImmutable",
         "type": "bool"
       }
     ],
@@ -1612,25 +1587,6 @@
         "type": "uint256"
       }
     ],
-    "name": "getSelectiveDisclosureMerkleRoot",
-    "outputs": [
-      {
-        "internalType": "bytes32",
-        "name": "",
-        "type": "bytes32"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "id",
-        "type": "uint256"
-      }
-    ],
     "name": "getStartEpoch",
     "outputs": [
       {
@@ -1861,11 +1817,6 @@
         "internalType": "bool",
         "name": "isImmutable",
         "type": "bool"
-      },
-      {
-        "internalType": "bytes32",
-        "name": "selectiveDisclosureMerkleRoot",
-        "type": "bytes32"
       }
     ],
     "stateMutability": "view",
@@ -2130,24 +2081,6 @@
       }
     ],
     "name": "setMinted",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "id",
-        "type": "uint256"
-      },
-      {
-        "internalType": "bytes32",
-        "name": "root",
-        "type": "bytes32"
-      }
-    ],
-    "name": "setSelectiveDisclosureMerkleRoot",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"

@@ -1,15 +1,17 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, beforeAll, afterAll, afterEach } from 'vitest';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { GraphManager } from '@origintrail-official/dkg-storage';
-import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter } from '@origintrail-official/dkg-chain';
 import { TypedEventBus, encodeKAUpdateRequest, decodeKAUpdateRequest } from '@origintrail-official/dkg-core';
 import { generateEd25519Keypair } from '@origintrail-official/dkg-core';
 import { DKGPublisher, UpdateHandler, autoPartition, computePublicRootV10 as computePublicRoot, computeKARootV10 as computeKARoot, computeKCRootV10 as computeKCRoot, computeFlatKCRootV10 as computeFlatKCRoot, toHex, resolveUalByBatchId, updateMetaMerkleRoot } from '../src/index.js';
 import { parseSimpleNQuads } from '../src/publish-handler.js';
 import { ethers } from 'ethers';
+import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, createTestContextGraph, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
+import { mintTokens } from '../../chain/test/hardhat-harness.js';
 
-const PARANET = 'test-update';
-const DATA_GRAPH = `did:dkg:context-graph:${PARANET}`;
+let PARANET: string = 'test-update';
+let DATA_GRAPH: string;
 const ENTITY_A = 'urn:test:entity:a';
 const ENTITY_B = 'urn:test:entity:b';
 
@@ -115,14 +117,32 @@ describe('KAUpdateRequest encode/decode', () => {
 
 describe('UpdateHandler', () => {
   let store: OxigraphStore;
-  let chain: MockChainAdapter;
+  let chain: EVMChainAdapter;
   let publisher: DKGPublisher;
   let handler: UpdateHandler;
-  const wallet = ethers.Wallet.createRandom();
+  const wallet = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
 
+  let _fileSnapshot: string;
+  beforeAll(async () => {
+    _fileSnapshot = await takeSnapshot();
+    const { hubAddress } = getSharedContext();
+    const provider = createProvider();
+    const coreOp = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+    await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, coreOp.address, ethers.parseEther('50000000'));
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const cgId = await createTestContextGraph(chain);
+    PARANET = String(cgId);
+    DATA_GRAPH = `did:dkg:context-graph:${PARANET}`;
+  });
+  afterAll(async () => {
+    await revertSnapshot(_fileSnapshot);
+  });
+
+  let _testSnapshot: string;
   beforeEach(async () => {
+    _testSnapshot = await takeSnapshot();
     store = new OxigraphStore();
-    chain = new MockChainAdapter('mock:31337', wallet.address);
+    chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const keypair = await generateEd25519Keypair();
     const eventBus = new TypedEventBus();
     publisher = new DKGPublisher({
@@ -130,10 +150,13 @@ describe('UpdateHandler', () => {
       chain,
       eventBus,
       keypair,
-      publisherPrivateKey: wallet.privateKey,
-      publisherNodeIdentityId: 1n,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
     handler = new UpdateHandler(store, chain, eventBus);
+  });
+  afterEach(async () => {
+    await revertSnapshot(_testSnapshot);
   });
 
   it('applies a verified KA update: deletes old triples, inserts new ones', async () => {
@@ -182,6 +205,137 @@ describe('UpdateHandler', () => {
     expect(descResult.type).toBe('boolean');
     if (descResult.type === 'boolean') {
       expect(descResult.value).toBe(false);
+    }
+  });
+
+  // Regression test for https://github.com/OriginTrail/dkg-v9/issues/31
+  //
+  // Summary: the `update` protocol does not carry `privateMerkleRoot`
+  // through the receive-side root reconstruction. Specifically,
+  // `packages/publisher/src/update-handler.ts` computes:
+  //
+  //     const computedRoot = computeFlatKCRoot(quads, []);   // ← empty!
+  //
+  // while `packages/publisher/src/dkg-publisher.ts#update()` signs and
+  // submits:
+  //
+  //     const kcMerkleRoot = computeFlatKCRoot(allSkolemizedQuads, updatePrivateRoots);
+  //
+  // When `updatePrivateRoots` is non-empty (i.e. the update touches a KA
+  // with private quads), the two roots diverge. The on-chain tx stores
+  // the root that includes private commitments, so chain verification
+  // returns *that* root as `verifiedMerkleRoot`. The handler then
+  // compares `computedRoot` (no private) against `verifiedMerkleRoot`
+  // (with private) and silently rejects the update with
+  // `"merkle root mismatch for batchId=... (tampered payload)"`.
+  //
+  // Observable symptom: peers silently miss updates to KAs that have
+  // private commitments. The publisher succeeds, but every other node's
+  // data graph stays stale forever.
+  //
+  // This test reproduces the exact scenario the issue describes:
+  //   1. publish a KC with private quads (so privateMerkleRoot ≠ undefined)
+  //   2. update that KC with new public + new private quads
+  //   3. hand the update's gossip message to UpdateHandler on a fresh store
+  //   4. assert the update actually took effect on the receiver
+  //
+  // If the bug is still present, step 4 fails because the receiver's
+  // data graph still holds the original quads, not the updated ones.
+  it('issue #31 — a valid update carrying privateMerkleRoot must apply on the receiver', async () => {
+    // Step 1. Publish with private quads. The manifest will have a
+    // non-undefined privateMerkleRoot, so the on-chain root factors in
+    // the private commitment.
+    const original = await publisher.publish({
+      contextGraphId: PARANET,
+      quads: [q(ENTITY_A, 'http://schema.org/name', '"Original-pub"')],
+      privateQuads: [q(ENTITY_A, 'http://schema.org/ssn', '"before-update-private"')],
+      publisherPeerId: '12D3KooWPeerA',
+    });
+    expect(original.status).toBe('confirmed');
+    expect(
+      original.kaManifest[0]?.privateMerkleRoot,
+      'precondition: publish with privateQuads must produce a privateMerkleRoot in the manifest',
+    ).toBeDefined();
+
+    // Step 2. Update with new public and new private quads. The
+    // publisher's `update()` computes the new kcMerkleRoot with the
+    // private root included and signs that over to the chain.
+    const updatePublic = [q(ENTITY_A, 'http://schema.org/name', '"UPDATED-pub"')];
+    const updatePrivate = [q(ENTITY_A, 'http://schema.org/ssn', '"after-update-private"')];
+    const updateResult = await publisher.update(original.kcId, {
+      contextGraphId: PARANET,
+      quads: updatePublic,
+      privateQuads: updatePrivate,
+      publisherPeerId: '12D3KooWPeerA',
+    });
+    expect(updateResult.status).toBe('confirmed');
+    const updatedPrivateRoot = updateResult.kaManifest[0]?.privateMerkleRoot;
+    expect(
+      updatedPrivateRoot,
+      'precondition: publisher.update must retain a privateMerkleRoot in its returned manifest',
+    ).toBeDefined();
+
+    // Step 3. Simulate the gossip the publisher node broadcasts (see
+    // dkg-agent.ts `update()` which serializes `result.kaManifest`
+    // including `privateMerkleRoot` and sets `newMerkleRoot` to the
+    // publisher's computed `result.merkleRoot`). We replay that exact
+    // message shape against a freshly constructed handler+store that
+    // has NO prior knowledge of the update — the only path by which
+    // this receiver learns about the update is the gossip payload, so
+    // any bug in the receive-side root recomputation is observable
+    // here as "the update never landed".
+    const receiverStore = new OxigraphStore();
+    const receiverEventBus = new TypedEventBus();
+    const receiverHandler = new UpdateHandler(receiverStore, chain, receiverEventBus);
+
+    // The receiver must know the original quads to detect whether the
+    // update actually replaced them or was silently dropped. In the
+    // real wire protocol the receiver would have already synced the
+    // original KC via the sync protocol before the update arrived.
+    const dataGraph = DATA_GRAPH;
+    await receiverStore.insert([
+      { subject: ENTITY_A, predicate: 'http://schema.org/name', object: '"Original-pub"', graph: dataGraph },
+    ]);
+
+    const message = encodeKAUpdateRequest({
+      paranetId: PARANET,
+      batchId: original.kcId,
+      nquads: quadsToNQuads(updatePublic, dataGraph),
+      manifest: [{
+        rootEntity: ENTITY_A,
+        privateMerkleRoot: updatedPrivateRoot!,
+        privateTripleCount: updatePrivate.length,
+      }],
+      publisherPeerId: '12D3KooWPeerA',
+      publisherAddress: wallet.address,
+      txHash: updateResult.onChainResult!.txHash,
+      blockNumber: BigInt(updateResult.onChainResult!.blockNumber),
+      newMerkleRoot: updateResult.merkleRoot,
+      timestampMs: BigInt(Date.now()),
+    });
+
+    await receiverHandler.handle(message, '12D3KooWPeerA');
+
+    // Step 4. The update must be visible on the receiver. If issue #31
+    // is still open, receiverStore still contains "Original-pub", not
+    // "UPDATED-pub", because the handler recomputed the root with an
+    // empty private root list and bailed out at the merkle mismatch.
+    const nameResult = await receiverStore.query(
+      `SELECT ?o WHERE { GRAPH <${dataGraph}> { <${ENTITY_A}> <http://schema.org/name> ?o } }`,
+    );
+    expect(nameResult.type).toBe('bindings');
+    if (nameResult.type === 'bindings') {
+      expect(
+        nameResult.bindings.length,
+        'receiver should have exactly one name after update',
+      ).toBe(1);
+      expect(
+        nameResult.bindings[0]['o'],
+        'Bug https://github.com/OriginTrail/dkg-v9/issues/31: ' +
+          'update handler rejects valid updates that carry private commitments. ' +
+          'Fix in packages/publisher/src/update-handler.ts — pass the manifest private roots ' +
+          'to computeFlatKCRoot instead of `[]`.',
+      ).toBe('"UPDATED-pub"');
     }
   });
 

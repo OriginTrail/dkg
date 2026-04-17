@@ -172,6 +172,8 @@ describe('V10 E2E Conviction System', function () {
       expect(multiplier).to.equal(SCALE18);
     });
 
+
+
     it('verifies all conviction multiplier tiers', async () => {
       expect(await Staking.convictionMultiplier(1)).to.equal(SCALE18);
       expect(await Staking.convictionMultiplier(2)).to.equal(15n * SCALE18 / 10n);

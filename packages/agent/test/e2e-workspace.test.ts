@@ -2,10 +2,11 @@
  * E2E tests for the workspace graph: share → GossipSub replicate →
  * query workspace → publishFromSharedMemory → query data graph.
  */
-import { describe, it, expect, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { DKGAgent } from '../src/index.js';
-import { DKGNode } from '@origintrail-official/dkg-core';
-import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
+import { mintTokens } from '../../chain/test/hardhat-harness.js';
+import { ethers } from 'ethers';
 
 const PARANET = 'workspace-e2e';
 const ENTITY = 'urn:e2e:workspace:entity:1';
@@ -13,6 +14,18 @@ const ENTITY = 'urn:e2e:workspace:entity:1';
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
+
+let _fileSnapshot: string;
+beforeAll(async () => {
+  _fileSnapshot = await takeSnapshot();
+  const { hubAddress } = getSharedContext();
+  const provider = createProvider();
+  const coreOp = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+  await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, coreOp.address, ethers.parseEther('50000000'));
+});
+afterAll(async () => {
+  await revertSnapshot(_fileSnapshot);
+});
 
 describe('Workspace E2E (2 nodes)', () => {
   let nodeA: DKGAgent;
@@ -31,12 +44,14 @@ describe('Workspace E2E (2 nodes)', () => {
     nodeA = await DKGAgent.create({
       name: 'WorkspaceA',
       listenPort: 0,
-      chainAdapter: new MockChainAdapter('mock:31337'),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      nodeRole: 'core',
     });
     nodeB = await DKGAgent.create({
       name: 'WorkspaceB',
       listenPort: 0,
-      chainAdapter: new MockChainAdapter('mock:31337'),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      nodeRole: 'core',
     });
 
     await nodeA.start();
@@ -81,14 +96,13 @@ describe('Workspace E2E (2 nodes)', () => {
     expect(onA.bindings.length).toBe(1);
     expect(String(onA.bindings[0]['name'])).toMatch(/Workspace Draft/);
 
-    // Node B may receive via GossipSub (depends on mesh formation timing)
+    // Node B should receive via GossipSub
     const onB = await nodeB.query(
       'SELECT ?name WHERE { <urn:e2e:workspace:entity:1> <http://schema.org/name> ?name }',
       { contextGraphId: PARANET, graphSuffix: '_shared_memory' },
     );
-    if (onB.bindings.length > 0) {
-      expect(String(onB.bindings[0]['name'])).toMatch(/Workspace Draft/);
-    }
+    expect(onB.bindings.length).toBeGreaterThan(0);
+    expect(String(onB.bindings[0]['name'])).toMatch(/Workspace Draft/);
   }, 25000);
 
   it('query with includeSharedMemory returns workspace data', async () => {

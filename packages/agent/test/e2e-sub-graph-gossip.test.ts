@@ -9,7 +9,9 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { DKGAgent } from '../src/index.js';
-import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
+import { mintTokens } from '../../chain/test/hardhat-harness.js';
+import { ethers } from 'ethers';
 
 const CG_ID = 'sg-gossip-e2e';
 const SG_RESEARCH = 'research';
@@ -33,8 +35,20 @@ async function pollUntil(
   return lastResult;
 }
 
+let _fileSnapshot: string;
+beforeAll(async () => {
+  _fileSnapshot = await takeSnapshot();
+  const { hubAddress } = getSharedContext();
+  const provider = createProvider();
+  const coreOp = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+  await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, coreOp.address, ethers.parseEther('50000000'));
+});
+afterAll(async () => {
+  await revertSnapshot(_fileSnapshot);
+});
+
 describe('Sub-graph gossip replication (2 nodes)', () => {
-  const sharedChain = new MockChainAdapter('mock:31337');
+  const sharedChain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
   let nodeA: DKGAgent;
   let nodeB: DKGAgent;
 
@@ -43,11 +57,13 @@ describe('Sub-graph gossip replication (2 nodes)', () => {
       name: 'SubGossipA',
       listenPort: 0,
       chainAdapter: sharedChain,
+      nodeRole: 'core',
     });
     nodeB = await DKGAgent.create({
       name: 'SubGossipB',
       listenPort: 0,
       chainAdapter: sharedChain,
+      nodeRole: 'core',
     });
 
     await nodeA.start();
@@ -164,11 +180,11 @@ describe('Sub-graph gossip replication (2 nodes)', () => {
 });
 
 describe('Multiple sub-graphs with concurrent writes (3 nodes)', () => {
-  const sharedChain = new MockChainAdapter('mock:31337');
-  const agents: DKGAgent[] = [];
+  const sharedChain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+  const localAgents: DKGAgent[] = [];
 
   afterAll(async () => {
-    for (const a of agents) {
+    for (const a of localAgents) {
       try { await a.stop(); } catch {}
     }
   });
@@ -181,7 +197,7 @@ describe('Multiple sub-graphs with concurrent writes (3 nodes)', () => {
           listenPort: 0,
           chainAdapter: sharedChain,
         });
-        agents.push(agent);
+        localAgents.push(agent);
         await agent.start();
         return agent;
       }),

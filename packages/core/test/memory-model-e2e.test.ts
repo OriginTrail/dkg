@@ -116,10 +116,10 @@ describe('V10 memory model e2e: full lifecycle simulation', () => {
     }
 
     expect(pub.status).toBe('finalized');
-    expect(pub.claim).toBeDefined();
-    expect(pub.validation).toBeDefined();
-    expect(pub.broadcast).toBeDefined();
-    expect(pub.inclusion).toBeDefined();
+    expect(pub.claim!.walletId).toBe('0xWallet1');
+    expect(pub.validation!.tripleCount).toBe(1);
+    expect(pub.broadcast!.txHash).toBe('0xfeed');
+    expect(pub.inclusion!.blockNumber).toBe(12345);
     expect(pub.finalization).toBeDefined();
     expect(pub.failure).toBeUndefined();
   });
@@ -159,7 +159,7 @@ describe('V10 memory model e2e: full lifecycle simulation', () => {
       name: 'game-turn-42',
       createdAt: new Date().toISOString(),
     };
-    expect(assertion.name).toBeTruthy();
+    expect(assertion.name).toBe('game-turn-42');
 
     // Step 2: Agent shares to SWM
     const share: ShareRecord = {

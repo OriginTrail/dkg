@@ -1,11 +1,22 @@
 /**
- * E2E test: two simulated nodes communicating via an in-process gossip bridge.
+ * # Two-node game-notification routing test
  *
- * Node A creates a swarm → Node B receives a "swarm_created" notification.
- * Node B joins → Node A receives a "player_joined" notification.
- * Node A launches expedition → Node B receives "expedition_launched".
- * Node B votes → Node A receives "vote_cast".
- * Both nodes' API endpoints return the correct notifications and unread counts.
+ * Verifies the **game layer's** gossip-driven notification flow between
+ * two participants (swarm formation -> player_joined -> expedition_launched
+ * -> vote_cast). The two participants are connected via an in-process
+ * gossip bridge ({@link createGossipBridge}) that routes pub/sub messages
+ * by topic — modelling the libp2p gossipsub contract without requiring
+ * actual libp2p nodes. This is the same DI-seam pattern used elsewhere in
+ * the suite (`createInProcessAgent` in `handler.test.ts`,
+ * `createTestDkgClient` in `adapter-autoresearch`,
+ * `LocalSignerPeer` in `publisher`): the test exercises **game logic**, not
+ * the agent transport layer underneath.
+ *
+ * The full multi-peer libp2p gossip transport is verified end-to-end in
+ * `packages/agent/test/e2e-*.test.ts`, so the bridge here is intentionally
+ * thin — its job is to deliver topic-scoped messages so the assertions
+ * below can verify which game events produce which notifications, not to
+ * re-prove that gossipsub itself works.
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';

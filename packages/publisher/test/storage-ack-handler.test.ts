@@ -1,9 +1,11 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { StorageACKHandler, type StorageACKHandlerConfig } from '../src/storage-ack-handler.js';
 import { computeFlatKCRootV10 as computeFlatKCRoot } from '../src/merkle.js';
 import {
   encodePublishIntent, decodeStorageACK, computePublishACKDigest,
 } from '@origintrail-official/dkg-core';
+import { TypedEventBus } from '@origintrail-official/dkg-core';
+import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
 import type { Quad } from '@origintrail-official/dkg-storage';
 
@@ -16,10 +18,6 @@ const TEST_KAV10_ADDR = '0x000000000000000000000000000000000000c10a';
 
 function makeQuad(s: string, p: string, o: string, g = 'urn:test:swm'): Quad {
   return { subject: s, predicate: p, object: o, graph: g };
-}
-
-function makeEventBus() {
-  return { emit: vi.fn(), on: vi.fn(), off: vi.fn(), once: vi.fn() };
 }
 
 describe('StorageACKHandler', () => {
@@ -37,28 +35,15 @@ describe('StorageACKHandler', () => {
   const coreIdentityId = 42n;
   const fakePeerId = { toString: () => 'publisher-peer' };
 
-  function createHandler(storeQuads: Quad[]) {
-    const mockStore = {
-      insert: vi.fn(),
-      delete: vi.fn(),
-      deleteByPattern: vi.fn(),
-      hasGraph: vi.fn().mockResolvedValue(true),
-      createGraph: vi.fn(),
-      dropGraph: vi.fn(),
-      query: vi.fn().mockImplementation((sparql: string) => {
-        const entityMatch = sparql.match(/FILTER\(\?s = <([^>]+)>/);
-        if (entityMatch) {
-          const entity = entityMatch[1];
-          const genidPrefix = `${entity}/.well-known/genid/`;
-          const filtered = storeQuads.filter(q =>
-            q.subject === entity || q.subject.startsWith(genidPrefix),
-          );
-          return Promise.resolve({ type: 'quads' as const, quads: filtered });
-        }
-        return Promise.resolve({ type: 'quads' as const, quads: storeQuads });
-      }),
-      close: vi.fn(),
-    };
+  async function createHandler(storeQuads: Quad[]) {
+    const store = new OxigraphStore();
+
+    const swmGraph = `did:dkg:context-graph:${contextGraphId}/_shared_memory`;
+    if (storeQuads.length > 0) {
+      await store.insert(
+        storeQuads.map(q => ({ ...q, graph: swmGraph })),
+      );
+    }
 
     const config: StorageACKHandlerConfig = {
       nodeRole: 'core',
@@ -70,11 +55,11 @@ describe('StorageACKHandler', () => {
       kav10Address: TEST_KAV10_ADDR,
     };
 
-    return new StorageACKHandler(mockStore as any, config, makeEventBus() as any);
+    return new StorageACKHandler(store as any, config, new TypedEventBus() as any);
   }
 
   it('returns valid StorageACK for matching data', async () => {
-    const handler = createHandler(swmQuads);
+    const handler = await createHandler(swmQuads);
     const intent = encodePublishIntent({
       merkleRoot,
       contextGraphId,
@@ -96,9 +81,6 @@ describe('StorageACKHandler', () => {
       ? ack.merkleRoot : new Uint8Array(ack.merkleRoot);
     expect(Buffer.from(decodedRoot).equals(Buffer.from(merkleRoot))).toBe(true);
 
-    // Verify signature recovers to core wallet address. The handler builds
-    // this exact shape in storage-ack-handler.ts via computePublishACKDigest,
-    // and the test oracle must match byte-for-byte.
     const digest = computePublishACKDigest(
       TEST_CHAIN_ID,
       TEST_KAV10_ADDR,
@@ -120,7 +102,7 @@ describe('StorageACKHandler', () => {
   });
 
   it('rejects when SWM has no data', async () => {
-    const handler = createHandler([]);
+    const handler = await createHandler([]);
     const intent = encodePublishIntent({
       merkleRoot,
       contextGraphId,
@@ -137,7 +119,7 @@ describe('StorageACKHandler', () => {
 
   it('rejects when merkle root does not match', async () => {
     const differentQuads = [makeQuad('urn:other', 'urn:p', 'urn:val')];
-    const handler = createHandler(differentQuads);
+    const handler = await createHandler(differentQuads);
 
     const intent = encodePublishIntent({
       merkleRoot,
@@ -154,9 +136,7 @@ describe('StorageACKHandler', () => {
   });
 
   it('rejects non-core node role', async () => {
-    const mockStore = {
-      query: vi.fn(),
-    };
+    const store = new OxigraphStore();
     const config: StorageACKHandlerConfig = {
       nodeRole: 'edge',
       nodeIdentityId: 1n,
@@ -166,7 +146,7 @@ describe('StorageACKHandler', () => {
       kav10Address: TEST_KAV10_ADDR,
     };
 
-    const handler = new StorageACKHandler(mockStore as any, config, makeEventBus() as any);
+    const handler = new StorageACKHandler(store as any, config, new TypedEventBus() as any);
     const intent = encodePublishIntent({
       merkleRoot,
       contextGraphId,

@@ -1,8 +1,27 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 
-const mockStatus = {
+interface FnCall { args: unknown[] }
+
+function trackingFn<T>(defaultReturn?: T) {
+  const calls: FnCall[] = [];
+  const overrides: Array<() => Promise<unknown>> = [];
+  const fn = async (...args: unknown[]) => {
+    calls.push({ args });
+    const override = overrides.shift();
+    if (override) return override();
+    return defaultReturn;
+  };
+  return {
+    fn,
+    calls,
+    nextResolve(value: unknown) { overrides.push(() => Promise.resolve(value)); },
+    nextReject(err: Error) { overrides.push(() => Promise.reject(err)); },
+  };
+}
+
+const statusData = {
   name: 'test-node',
   peerId: '12D3KooWTest',
   uptimeMs: 60000,
@@ -11,49 +30,47 @@ const mockStatus = {
   multiaddrs: ['/ip4/127.0.0.1/tcp/9000'],
 };
 
-const mockQueryResult = {
+const queryResultData = {
   result: { bindings: [{ s: 'urn:session:1', summary: '"Fixed tests"' }] },
 };
 
-const mockPublishResult = {
+const publishResultData = {
   kcId: 'kc-123',
   status: 'confirmed',
   kas: [{ tokenId: '1', rootEntity: 'urn:session:1' }],
 };
 
-const mockClient = {
-  status: vi.fn().mockResolvedValue(mockStatus),
-  query: vi.fn().mockResolvedValue(mockQueryResult),
-  publish: vi.fn().mockResolvedValue(mockPublishResult),
-  listContextGraphs: vi.fn(),
-  createContextGraph: vi.fn(),
-  agents: vi.fn(),
-  subscribe: vi.fn(),
-};
+async function createServerAndClient() {
+  const statusFn = trackingFn(statusData);
+  const queryFn = trackingFn(queryResultData);
+  const publishFn = trackingFn(publishResultData);
+  const listParanetsFn = trackingFn();
+  const createParanetFn = trackingFn();
+  const agentsFn = trackingFn();
+  const subscribeFn = trackingFn();
 
-vi.mock('../src/connection.js', () => ({
-  DkgClient: {
-    connect: vi.fn().mockResolvedValue(mockClient),
-  },
-}));
+  const trackingClient = {
+    status: statusFn.fn,
+    query: queryFn.fn,
+    publish: publishFn.fn,
+    listParanets: listParanetsFn.fn,
+    createParanet: createParanetFn.fn,
+    agents: agentsFn.fn,
+    subscribe: subscribeFn.fn,
+  };
 
-async function createServerAndClient(): Promise<{ client: Client }> {
-  // src/index.ts calls main() at module scope (connects stdio), so we can't
-  // import the real server directly. Instead we replicate the tool registration
-  // logic here and verify integration with the mocked DkgClient.
   const { McpServer } = await import('@modelcontextprotocol/sdk/server/mcp.js');
   const { z } = await import('zod');
-  const { DkgClient } = await import('../src/connection.js');
   const { escapeSparqlLiteral } = await import('@origintrail-official/dkg-core');
 
   const server = new McpServer({ name: 'dkg-test', version: '9.0.0' });
 
-  const CONTEXT_GRAPH = 'dev-coordination';
+  const PARANET = 'dev-coordination';
   const DG = 'https://ontology.dkg.io/devgraph#';
   const esc = escapeSparqlLiteral;
 
   async function getClient() {
-    return DkgClient.connect();
+    return trackingClient;
   }
 
   function formatError(err: unknown): string {
@@ -88,7 +105,7 @@ async function createServerAndClient(): Promise<{ client: Client }> {
 
   async function sparql(query: string): Promise<Bindings> {
     const client = await getClient();
-    const result = await client.query(query, CONTEXT_GRAPH);
+    const result = await client.query(query, PARANET) as { result: unknown };
     return parseBindings(result.result);
   }
 
@@ -100,7 +117,6 @@ async function createServerAndClient(): Promise<{ client: Client }> {
     return { content: [{ type: 'text' as const, text }], isError: true as const };
   }
 
-  // Register the same tools as src/index.ts — but referencing the SAME mock client
   server.registerTool('dkg_find_modules', {
     title: 'Find Code Modules',
     description: 'Search the code graph for source files matching a keyword.',
@@ -217,7 +233,7 @@ async function createServerAndClient(): Promise<{ client: Client }> {
 
   server.registerTool('dkg_publish', {
     title: 'Publish to DKG',
-    description: 'Publish RDF quads to the dev-coordination context graph.',
+    description: 'Publish RDF quads to the dev-coordination paranet.',
     inputSchema: {
       quads: z.array(z.object({
         subject: z.string(),
@@ -229,7 +245,7 @@ async function createServerAndClient(): Promise<{ client: Client }> {
   }, async ({ quads }) => {
     try {
       const client = await getClient();
-      const result = await client.publish(CONTEXT_GRAPH, quads);
+      const result = await client.publish(PARANET, quads) as { kcId: string; status: string };
       return ok(`Published ${quads.length} quads. KC: ${result.kcId}, status: ${result.status}`);
     } catch (e) { return err(`Publish error: ${formatError(e)}`); }
   });
@@ -239,15 +255,16 @@ async function createServerAndClient(): Promise<{ client: Client }> {
   const client = new Client({ name: 'test-client', version: '1.0.0' });
   await client.connect(clientTransport);
 
-  return { client };
+  return { client, queryFn, publishFn };
 }
 
 describe('DKG MCP Server Tools', () => {
   let client: Client;
+  let queryFn: ReturnType<typeof trackingFn>;
+  let publishFn: ReturnType<typeof trackingFn>;
 
   beforeEach(async () => {
-    vi.clearAllMocks();
-    ({ client } = await createServerAndClient());
+    ({ client, queryFn, publishFn } = await createServerAndClient());
   });
 
   it('registers all expected tools', async () => {
@@ -272,10 +289,9 @@ describe('DKG MCP Server Tools', () => {
     const content = result.content as Array<{ type: string; text: string }>;
     expect(content).toHaveLength(1);
 
-    expect(mockClient.query).toHaveBeenCalledWith(
-      'SELECT ?s WHERE { ?s a devgraph:Session }',
-      'dev-coordination',
-    );
+    expect(queryFn.calls).toHaveLength(1);
+    expect(queryFn.calls[0].args[0]).toBe('SELECT ?s WHERE { ?s a devgraph:Session }');
+    expect(queryFn.calls[0].args[1]).toBe('dev-coordination');
 
     expect(content[0].text).toContain('Fixed tests');
   });
@@ -285,7 +301,7 @@ describe('DKG MCP Server Tools', () => {
       subject: '<urn:session:1>',
       predicate: '<http://www.w3.org/1999/02/22-rdf-syntax-ns#type>',
       object: '<https://ontology.dkg.io/devgraph#Session>',
-      graph: '<urn:context-graph:dev-coordination>',
+      graph: '<urn:paranet:dev-coordination>',
     }];
 
     const result = await client.callTool({
@@ -294,13 +310,15 @@ describe('DKG MCP Server Tools', () => {
     });
     const content = result.content as Array<{ type: string; text: string }>;
 
-    expect(mockClient.publish).toHaveBeenCalledWith('dev-coordination', quads);
+    expect(publishFn.calls).toHaveLength(1);
+    expect(publishFn.calls[0].args[0]).toBe('dev-coordination');
+    expect(publishFn.calls[0].args[1]).toEqual(quads);
     expect(content[0].text).toContain('kc-123');
     expect(content[0].text).toContain('confirmed');
   });
 
   it('dkg_find_modules builds correct SPARQL with escaped keyword', async () => {
-    mockClient.query.mockResolvedValueOnce({
+    queryFn.nextResolve({
       result: { bindings: [{ path: '"src/node.ts"', lines: '"200"', pkg: '"core"' }] },
     });
 
@@ -309,15 +327,15 @@ describe('DKG MCP Server Tools', () => {
       arguments: { keyword: 'node' },
     });
 
-    expect(mockClient.query).toHaveBeenCalled();
-    const calledSparql = mockClient.query.mock.calls[0][0] as string;
+    expect(queryFn.calls.length).toBeGreaterThan(0);
+    const calledSparql = queryFn.calls[0].args[0] as string;
     expect(calledSparql).toContain('CodeModule');
     expect(calledSparql).toContain('node');
     expect(calledSparql).toContain('LIMIT');
   });
 
   it('dkg_query returns error content when client.query throws', async () => {
-    mockClient.query.mockRejectedValueOnce(new Error('Connection refused'));
+    queryFn.nextReject(new Error('Connection refused'));
 
     const result = await client.callTool({
       name: 'dkg_query',
@@ -328,7 +346,7 @@ describe('DKG MCP Server Tools', () => {
   });
 
   it('dkg_publish returns error content when client.publish throws', async () => {
-    mockClient.publish.mockRejectedValueOnce(new Error('Insufficient TRAC'));
+    publishFn.nextReject(new Error('Insufficient TRAC'));
 
     const result = await client.callTool({
       name: 'dkg_publish',
@@ -341,7 +359,7 @@ describe('DKG MCP Server Tools', () => {
   });
 
   it('dkg_file_summary returns "no module found" for non-existent file', async () => {
-    mockClient.query.mockResolvedValueOnce({ result: { bindings: [] } });
+    queryFn.nextResolve({ result: { bindings: [] } });
 
     const result = await client.callTool({
       name: 'dkg_file_summary',
@@ -352,14 +370,14 @@ describe('DKG MCP Server Tools', () => {
   });
 
   it('dkg_find_functions passes module filter when provided', async () => {
-    mockClient.query.mockResolvedValueOnce({ result: { bindings: [] } });
+    queryFn.nextResolve({ result: { bindings: [] } });
 
     await client.callTool({
       name: 'dkg_find_functions',
       arguments: { keyword: 'publish', module: 'publisher' },
     });
 
-    const calledSparql = mockClient.query.mock.calls[0][0] as string;
+    const calledSparql = queryFn.calls[0].args[0] as string;
     expect(calledSparql).toContain('publisher');
     expect(calledSparql).toContain('publish');
   });

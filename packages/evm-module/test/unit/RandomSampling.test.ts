@@ -1044,8 +1044,13 @@ describe('@unit RandomSampling', () => {
     // Test 5 — Distribution regression: 3 public CGs weighted 70/20/10 should
     // be picked at those ratios over many draws. Using the read-only preview
     // helper with per-draw seeds makes this both deterministic and fast.
+    //
+    // Draw count reduced from 10,000 to 2,000 so the test reliably completes
+    // under solidity-coverage instrumentation (which slows each RPC call by
+    // an order of magnitude). 2k draws is still well over the 3σ noise floor
+    // for a 70/20/10 split (std dev A ≈ 20, B ≈ 18, C ≈ 13).
     // -----------------------------------------------------------------------
-    it('distribution converges to 70/20/10 over 10,000 draws', async () => {
+    it('distribution converges to 70/20/10 over 2,000 draws', async () => {
       const cgA = await createCG(OPEN_POLICY);
       const cgB = await createCG(OPEN_POLICY);
       const cgC = await createCG(OPEN_POLICY);
@@ -1060,7 +1065,7 @@ describe('@unit RandomSampling', () => {
       await seedCGValue(cgB, 2_000n);
       await seedCGValue(cgC, 1_000n);
 
-      const DRAWS = 10_000;
+      const DRAWS = 2_000;
       const counts: Record<string, number> = { A: 0, B: 0, C: 0 };
       const currentEpoch = await Chronos.getCurrentEpoch();
       for (let i = 0; i < DRAWS; i++) {
@@ -1074,14 +1079,12 @@ describe('@unit RandomSampling', () => {
         else throw new Error(`unexpected cgId ${preview.cgId}`);
       }
 
-      // ±5% absolute tolerance around the 70/20/10 expectation (i.e. A in
-      // [6500, 7500], B in [1500, 2500], C in [500, 1500]). The test seed
-      // space has no drift — this is tight enough to catch a broken walker
-      // without being flaky on a well-mixed hash stream.
-      expect(counts.A).to.be.greaterThan(6500).and.lessThan(7500);
-      expect(counts.B).to.be.greaterThan(1500).and.lessThan(2500);
-      expect(counts.C).to.be.greaterThan(500).and.lessThan(1500);
-    }).timeout(120_000);
+      // Expected means: A=1400, B=400, C=200. ~±10% absolute tolerance still
+      // catches a broken walker while remaining non-flaky on well-mixed seeds.
+      expect(counts.A).to.be.greaterThan(1250).and.lessThan(1550);
+      expect(counts.B).to.be.greaterThan(300).and.lessThan(500);
+      expect(counts.C).to.be.greaterThan(100).and.lessThan(300);
+    }).timeout(600_000);
 
     // -----------------------------------------------------------------------
     // Test 6 — Inactive (deactivated) CGs must be excluded even if they

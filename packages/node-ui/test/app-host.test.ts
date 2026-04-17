@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 
 const INSTALLED_APPS = [
   { id: 'oregon-trail', label: 'Oregon Trail', path: '/apps/oregon-trail' },
@@ -204,9 +204,11 @@ describe('AppHost — postMessage token handoff', () => {
   });
 
   it('sendToken function sends token with wildcard origin (behavioral)', () => {
-    const mockPostMessage = vi.fn();
+    const postMessageCalls: Array<{ data: any; origin: string }> = [];
     const mockIframe = {
-      contentWindow: { postMessage: mockPostMessage },
+      contentWindow: {
+        postMessage: (data: any, origin: string) => { postMessageCalls.push({ data, origin }); },
+      },
     };
     const token = 'test-token-abc123';
 
@@ -224,28 +226,28 @@ describe('AppHost — postMessage token handoff', () => {
 
     sendToken();
 
-    expect(mockPostMessage).toHaveBeenCalledOnce();
-    expect(mockPostMessage).toHaveBeenCalledWith(
+    expect(postMessageCalls).toHaveLength(1);
+    expect(postMessageCalls[0]?.data).toEqual(
       { type: 'dkg-token', token: 'test-token-abc123', apiOrigin: 'http://localhost:19200' },
-      '*',
     );
+    expect(postMessageCalls[0]?.origin).toBe('*');
 
     delete (globalThis as any).__DKG_TOKEN__;
   });
 
   it('does not send token when no token is set', () => {
-    const mockPostMessage = vi.fn();
+    const postMessageCalls: any[] = [];
     delete (globalThis as any).__DKG_TOKEN__;
 
     const sendToken = () => {
       const t = (globalThis as any).__DKG_TOKEN__;
       if (t) {
-        mockPostMessage({ type: 'dkg-token', token: t }, '*');
+        postMessageCalls.push({ type: 'dkg-token', token: t });
       }
     };
 
     sendToken();
-    expect(mockPostMessage).not.toHaveBeenCalled();
+    expect(postMessageCalls).toHaveLength(0);
   });
 
   it('token-request handler verifies source matches iframe contentWindow', async () => {

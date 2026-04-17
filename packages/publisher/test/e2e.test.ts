@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, beforeAll, afterAll, beforeEach } from 'vitest';
 import {
   DKGNode,
   ProtocolRouter,
@@ -11,7 +11,7 @@ import {
   decodePublishAck,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGPublisher } from '../src/dkg-publisher.js';
 import { PublishHandler } from '../src/publish-handler.js';
 import { AccessHandler } from '../src/access-handler.js';
@@ -22,12 +22,14 @@ import { ethers } from 'ethers';
 import { computePublicRootV10 as computePublicRoot, computeKARootV10 as computeKARoot, computeKCRootV10 as computeKCRoot } from '../src/merkle.js';
 import { autoPartition } from '../src/auto-partition.js';
 import { parseSimpleNQuads } from '../src/publish-handler.js';
+import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, createTestContextGraph, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
+import { mintTokens } from '../../chain/test/hardhat-harness.js';
 
-const PARANET = 'agent-skills';
-const GRAPH = `did:dkg:context-graph:${PARANET}`;
+let PARANET = 'agent-skills';
+let GRAPH = `did:dkg:context-graph:${PARANET}`;
 const ENTITY = 'did:dkg:agent:QmImageBot';
-const TEST_WALLET = ethers.Wallet.createRandom();
-const TEST_PUBLISHER_ADDRESS = TEST_WALLET.address;
+const publisherWallet = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+const TEST_PUBLISHER_ADDRESS = publisherWallet.address;
 
 function q(s: string, p: string, o: string, g = GRAPH): Quad {
   return { subject: s, predicate: p, object: o, graph: g };
@@ -35,6 +37,21 @@ function q(s: string, p: string, o: string, g = GRAPH): Quad {
 
 describe('End-to-end: Publish → Replicate → Query', () => {
   const nodes: DKGNode[] = [];
+  let snapshotId: string;
+
+  beforeAll(async () => {
+    snapshotId = await takeSnapshot();
+    const { hubAddress } = getSharedContext();
+    const provider = createProvider();
+    await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, TEST_PUBLISHER_ADDRESS, ethers.parseEther('5000000'));
+    const cgId = await createTestContextGraph();
+    PARANET = String(cgId);
+    GRAPH = `did:dkg:context-graph:${PARANET}`;
+  });
+
+  afterAll(async () => {
+    await revertSnapshot(snapshotId);
+  });
 
   afterEach(async () => {
     for (const n of nodes) {
@@ -64,7 +81,7 @@ describe('End-to-end: Publish → Replicate → Query', () => {
     // Stores
     const storeA = new OxigraphStore();
     const storeB = new OxigraphStore();
-    const chainA = new MockChainAdapter('mock:31337', TEST_PUBLISHER_ADDRESS);
+    const chainA = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const busA = new TypedEventBus();
     const busB = new TypedEventBus();
     const keypairA = await generateEd25519Keypair();
@@ -76,8 +93,8 @@ describe('End-to-end: Publish → Replicate → Query', () => {
       chain: chainA,
       eventBus: busA,
       keypair: keypairA,
-      publisherPrivateKey: TEST_WALLET.privateKey,
-      publisherNodeIdentityId: 1n,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
 
     const publishHandlerB = new PublishHandler(storeB, busB);
@@ -112,7 +129,7 @@ describe('End-to-end: Publish → Replicate → Query', () => {
 
     const onChain = publishResult.onChainResult!;
     const publishRequest = encodePublishRequest({
-      ual: `did:dkg:mock:31337/${onChain.publisherAddress}/${onChain.startKAId}`,
+      ual: `did:dkg:evm:31337/${onChain.publisherAddress}/${onChain.startKAId}`,
       nquads: new TextEncoder().encode(nquads),
       paranetId: PARANET,
       kas: publishResult.kaManifest.map((m) => ({
@@ -174,7 +191,7 @@ describe('End-to-end: Publish → Replicate → Query', () => {
     await new Promise((r) => setTimeout(r, 500));
 
     const storeA = new OxigraphStore();
-    const chainA = new MockChainAdapter('mock:31337', TEST_PUBLISHER_ADDRESS);
+    const chainA = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const busA = new TypedEventBus();
     const keypairA = await generateEd25519Keypair();
     const keypairB = await generateEd25519Keypair();
@@ -185,8 +202,8 @@ describe('End-to-end: Publish → Replicate → Query', () => {
       chain: chainA,
       eventBus: busA,
       keypair: keypairA,
-      publisherPrivateKey: TEST_WALLET.privateKey,
-      publisherNodeIdentityId: 1n,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
 
     // Publish with mixed public/private triples
@@ -215,11 +232,11 @@ describe('End-to-end: Publish → Replicate → Query', () => {
     const onChain = result.onChainResult!;
     const accessResult = await accessClient.requestAccess(
       nodeA.peerId,
-      `did:dkg:mock:31337/${onChain.publisherAddress}/${onChain.startKAId}/1`,
+      `did:dkg:evm:31337/${onChain.publisherAddress}/${onChain.startKAId}/1`,
     );
 
     expect(accessResult.granted).toBe(true);
-    expect(accessResult.quads.length).toBeGreaterThanOrEqual(2);
+    expect(accessResult.quads.length).toBe(2);
 
     const apiKeyTriple = accessResult.quads.find(
       (q) => q.predicate === 'http://ex.org/apiKey',
@@ -231,7 +248,7 @@ describe('End-to-end: Publish → Replicate → Query', () => {
 describe('Publisher wallet signature verification', () => {
   const signerWallet = ethers.Wallet.createRandom();
   const imposterWallet = ethers.Wallet.createRandom();
-  const CHAIN_ID = 'mock:31337';
+  const CHAIN_ID = 'evm:31337';
 
   function buildSignedRequest(
     quads: Quad[],

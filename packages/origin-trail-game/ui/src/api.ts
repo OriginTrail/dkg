@@ -43,7 +43,7 @@ async function request(method: string, path: string, body?: unknown) {
   return data;
 }
 
-export const api = {
+export const api: Record<string, (...args: any[]) => Promise<any>> = {
   lobby: () => request('GET', '/lobby'),
   info: () => request('GET', '/info'),
   locations: () => request('GET', '/locations'),
@@ -67,3 +67,17 @@ export const api = {
   markNotificationsRead: (ids?: string[]) =>
     request('POST', '/notifications/read', ids ? { ids } : {}),
 };
+
+/** @internal Replace api methods for testing. Returns a restore function. */
+export function _setApiForTest(overrides: Partial<typeof api>): () => void {
+  const originals: Record<string, (...args: any[]) => Promise<any>> = {};
+  for (const [key, fn] of Object.entries(overrides)) {
+    originals[key] = api[key];
+    api[key] = fn as any;
+  }
+  return () => {
+    for (const [key, fn] of Object.entries(originals)) {
+      api[key] = fn;
+    }
+  };
+}

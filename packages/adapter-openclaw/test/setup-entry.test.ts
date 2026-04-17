@@ -1,87 +1,81 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-
-const runtimeEntry = vi.fn();
-
-async function importSetupEntry(
-  runtimeFactory: () => { default: typeof runtimeEntry },
-) {
-  vi.resetModules();
-  vi.doMock('../openclaw-entry.mjs', runtimeFactory);
-  return import('../setup-entry.mjs');
-}
+import { beforeEach, describe, expect, it } from 'vitest';
+import setupEntry from '../setup-entry.mjs';
 
 describe('setup-entry', () => {
+  let runtimeEntryCalls: unknown[][];
+
   beforeEach(() => {
-    runtimeEntry.mockReset();
+    runtimeEntryCalls = [];
   });
 
-  it('skips runtime registration during setup-only phases', async () => {
-    const { default: setupEntry } = await importSetupEntry(() => ({
-      default: runtimeEntry,
-    }));
-    const registerTool = vi.fn();
-    const registerHook = vi.fn();
-    const registerChannel = vi.fn();
-    const registerHttpRoute = vi.fn();
-    const info = vi.fn();
+  function runtimeFactory() {
+    return Promise.resolve({
+      default: (...args: unknown[]) => { runtimeEntryCalls.push(args); },
+    });
+  }
 
-    await setupEntry({
+  it('skips runtime registration during setup-only phases', () => {
+    const registerToolCalls: unknown[][] = [];
+    const registerHookCalls: unknown[][] = [];
+    const registerChannelCalls: unknown[][] = [];
+    const registerHttpRouteCalls: unknown[][] = [];
+    const infoCalls: unknown[][] = [];
+
+    setupEntry({
       config: {},
       registrationMode: 'setup-only',
-      registerTool,
-      registerHook,
-      registerChannel,
-      registerHttpRoute,
-      on: vi.fn(),
-      logger: { info },
-    } as any);
+      registerTool: (...args: unknown[]) => { registerToolCalls.push(args); },
+      registerHook: (...args: unknown[]) => { registerHookCalls.push(args); },
+      registerChannel: (...args: unknown[]) => { registerChannelCalls.push(args); },
+      registerHttpRoute: (...args: unknown[]) => { registerHttpRouteCalls.push(args); },
+      on: () => {},
+      logger: { info: (...args: unknown[]) => { infoCalls.push(args); } },
+      _importRuntime: runtimeFactory,
+    });
 
-    expect(registerTool).not.toHaveBeenCalled();
-    expect(registerHook).not.toHaveBeenCalled();
-    expect(registerChannel).not.toHaveBeenCalled();
-    expect(registerHttpRoute).not.toHaveBeenCalled();
-    expect(runtimeEntry).not.toHaveBeenCalled();
-    expect(info).toHaveBeenCalledWith(expect.stringContaining('skipping runtime registration'));
+    expect(registerToolCalls).toHaveLength(0);
+    expect(registerHookCalls).toHaveLength(0);
+    expect(registerChannelCalls).toHaveLength(0);
+    expect(registerHttpRouteCalls).toHaveLength(0);
+    expect(runtimeEntryCalls).toHaveLength(0);
+    expect(infoCalls.some(args => String(args[0]).includes('skipping runtime registration'))).toBe(true);
   });
 
   it('delegates to the runtime entry outside setup-only modes', async () => {
-    const { default: setupEntry } = await importSetupEntry(() => ({
-      default: runtimeEntry,
-    }));
     const api = {
       config: {},
       registrationMode: 'full',
-      logger: { info: vi.fn() },
+      logger: { info: () => {} },
+      _importRuntime: runtimeFactory,
     } as any;
 
     await setupEntry(api);
 
-    expect(runtimeEntry).toHaveBeenCalledWith(api);
+    expect(runtimeEntryCalls).toHaveLength(1);
+    expect(runtimeEntryCalls[0][0]).toBe(api);
   });
 
   it('defaults missing registrationMode to the runtime entry', async () => {
-    const { default: setupEntry } = await importSetupEntry(() => ({
-      default: runtimeEntry,
-    }));
     const api = {
       config: {},
-      logger: { info: vi.fn() },
+      logger: { info: () => {} },
+      _importRuntime: runtimeFactory,
     } as any;
 
     await setupEntry(api);
 
-    expect(runtimeEntry).toHaveBeenCalledWith(api);
+    expect(runtimeEntryCalls).toHaveLength(1);
+    expect(runtimeEntryCalls[0][0]).toBe(api);
   });
 
-  it('does not import the runtime entry during setup-only loads', async () => {
-    const { default: setupEntry } = await importSetupEntry(() => {
-      throw new Error('runtime entry should stay lazy during setup-only loads');
-    });
-
+  it('does not import the runtime entry during setup-only loads', () => {
     expect(setupEntry({
       config: {},
       registrationMode: 'setup-only',
-      logger: { info: vi.fn() },
+      logger: { info: () => {} },
+      _importRuntime: () => {
+        throw new Error('runtime entry should stay lazy during setup-only loads');
+      },
     } as any)).toBeUndefined();
   });
 });

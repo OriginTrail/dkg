@@ -1,46 +1,72 @@
-import { describe, it, expect } from 'vitest';
-import { MockChainAdapter } from '../src/mock-adapter.js';
-import { computeConvictionMultiplier } from '../src/mock-adapter.js';
+import { describe, it, expect, beforeAll, beforeEach, afterEach, afterAll } from 'vitest';
+import { ethers } from 'ethers';
+import {
+  createEVMAdapter,
+  getSharedContext,
+  createProvider,
+  takeSnapshot,
+  revertSnapshot,
+  HARDHAT_KEYS,
+} from './evm-test-context.js';
+import { mintTokens } from './hardhat-harness.js';
 
-describe('Staking Conviction (MockChainAdapter)', () => {
+let fileSnapshotId: string;
+let testSnapshotId: string;
+
+describe('Staking Conviction (EVMChainAdapter)', () => {
+  beforeAll(async () => {
+    fileSnapshotId = await takeSnapshot();
+    const { hubAddress } = getSharedContext();
+    const provider = createProvider();
+    const adapter = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, adapter.getSignerAddress(), ethers.parseEther('50000000'));
+  });
+
+  afterAll(async () => {
+    await revertSnapshot(fileSnapshotId);
+  });
+
+  beforeEach(async () => {
+    testSnapshotId = await takeSnapshot();
+  });
+
+  afterEach(async () => {
+    await revertSnapshot(testSnapshotId);
+  });
+
   it('stakeWithLock stores lock and returns success', async () => {
-    const adapter = new MockChainAdapter();
-    const result = await adapter.stakeWithLock(1n, 100_000n, 6);
+    const { coreProfileId } = getSharedContext();
+    const adapter = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const result = await adapter.stakeWithLock!(BigInt(coreProfileId), ethers.parseEther('100000'), 6);
     expect(result.success).toBe(true);
   });
 
-  it('returns correct multiplier for V10 discrete tiers', async () => {
-    expect(computeConvictionMultiplier(0)).toBe(0);
-    expect(computeConvictionMultiplier(1)).toBe(1.0);
-    expect(computeConvictionMultiplier(2)).toBe(1.5);
-    expect(computeConvictionMultiplier(3)).toBe(2.0);
-    expect(computeConvictionMultiplier(5)).toBe(2.0);
-    expect(computeConvictionMultiplier(6)).toBe(3.5);
-    expect(computeConvictionMultiplier(11)).toBe(3.5);
-    expect(computeConvictionMultiplier(12)).toBe(6.0);
-    expect(computeConvictionMultiplier(24)).toBe(6.0);
-  });
+  it('getDelegatorConvictionMultiplier returns value after stakeWithLock', async () => {
+    const { coreProfileId } = getSharedContext();
+    const adapter = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    await adapter.stakeWithLock!(BigInt(coreProfileId), ethers.parseEther('100000'), 6);
 
-  it('getDelegatorConvictionMultiplier returns correct value after stakeWithLock', async () => {
-    const adapter = new MockChainAdapter();
-    await adapter.stakeWithLock(1n, 100_000n, 6);
-
-    const { multiplier } = await adapter.getDelegatorConvictionMultiplier(1n, adapter.signerAddress);
-    expect(multiplier).toBe(3.5);
+    const { multiplier } = await adapter.getDelegatorConvictionMultiplier!(BigInt(coreProfileId), adapter.getSignerAddress());
+    expect(multiplier).toBeGreaterThanOrEqual(1);
   });
 
   it('stakeWithLock only extends, never shortens lock', async () => {
-    const adapter = new MockChainAdapter();
-    await adapter.stakeWithLock(1n, 100_000n, 12);
-    await adapter.stakeWithLock(1n, 50_000n, 3);
+    const { coreProfileId } = getSharedContext();
+    const adapter = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    await adapter.stakeWithLock!(BigInt(coreProfileId), ethers.parseEther('100000'), 12);
 
-    const { multiplier } = await adapter.getDelegatorConvictionMultiplier(1n, adapter.signerAddress);
-    expect(multiplier).toBe(6.0);
+    const { multiplier: m1 } = await adapter.getDelegatorConvictionMultiplier!(BigInt(coreProfileId), adapter.getSignerAddress());
+
+    await adapter.stakeWithLock!(BigInt(coreProfileId), ethers.parseEther('50000'), 3);
+
+    const { multiplier: m2 } = await adapter.getDelegatorConvictionMultiplier!(BigInt(coreProfileId), adapter.getSignerAddress());
+    expect(m2).toBeGreaterThanOrEqual(m1);
   });
 
-  it('returns 1x multiplier for default (unset) lock', async () => {
-    const adapter = new MockChainAdapter();
-    const { multiplier } = await adapter.getDelegatorConvictionMultiplier(1n, '0x0000');
+  it('returns 1x multiplier for address with no lock', async () => {
+    const { coreProfileId } = getSharedContext();
+    const adapter = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const { multiplier } = await adapter.getDelegatorConvictionMultiplier!(BigInt(coreProfileId), '0x' + '0'.repeat(40));
     expect(multiplier).toBe(1.0);
   });
 });

@@ -27,13 +27,6 @@ interface MockApi extends OpenClawPluginApi {
 }
 
 function makeApi(): MockApi {
-  // By default, stamp the workspace config to name adapter-openclaw as
-  // the memory-slot owner. This represents a fully-migrated modern
-  // gateway (post setup) where the slot is elected correctly. Tests that
-  // need to simulate the pre-migration state (modern gateway API
-  // available but slot still unset / pointing elsewhere) can override
-  // this by reassigning `api.config` before calling `plugin.register`.
-  // See Codex Bug B25.
   return {
     config: {
       plugins: {
@@ -113,14 +106,6 @@ describe('DkgMemoryPlugin.register', () => {
   });
 
   it('registers only the memory slot capability, no conventional memory tools (Codex B-retire)', () => {
-    // Regression guard against accidentally re-introducing
-    // `dkg_memory_import` / `dkg_memory_search` on the modern-gateway
-    // path. Both explicit tool surfaces were retired in the
-    // openclaw-dkg-primary-memory workstream; the memory slot is the
-    // single entry point for reads and writes. This test exhaustively
-    // asserts that `plugin.register` does not call `api.registerTool`
-    // at all — if a future change adds a memory tool by accident, this
-    // fails fast instead of shipping a duplicate recall/write surface.
     const api = makeApi();
     plugin.register(api);
 
@@ -129,15 +114,6 @@ describe('DkgMemoryPlugin.register', () => {
   });
 
   it('does not fall back to a compat memory tool on legacy gateways (Codex B-retire)', () => {
-    // Complement of the modern-gateway regression guard above: on a
-    // legacy gateway where `api.registerMemoryCapability` is absent,
-    // the adapter must NOT fall back to a compat `dkg_memory_search`
-    // tool registration. The compat surface was retired alongside
-    // `dkg_memory_import`; legacy gateways get no memory surface from
-    // this adapter at all (operators must upgrade the gateway to
-    // restore recall). This locks down the legacy-gateway branch of
-    // `registerCapability` against accidental re-introduction of a
-    // fallback tool registration.
     const legacyApi = makeApi();
     (legacyApi as any).registerMemoryCapability = undefined;
     plugin.register(legacyApi);
@@ -146,10 +122,6 @@ describe('DkgMemoryPlugin.register', () => {
   });
 
   it('skips registerMemoryCapability when plugins.slots.memory points at another plugin (Codex B58)', () => {
-    // B58: register() must not silently override the operator's elected
-    // memory provider. If plugins.slots.memory points at a different
-    // plugin, this adapter must no-op the capability registration and
-    // log a diagnostic — not steal the slot by merely being loaded.
     const api = makeApi();
     (api.config as any).plugins.slots.memory = 'some-other-memory-plugin';
     plugin.register(api);
@@ -162,10 +134,6 @@ describe('DkgMemoryPlugin.register', () => {
   });
 
   it('skips registerMemoryCapability when plugins.slots.memory is unset (Codex B58)', () => {
-    // B58 second branch: an unelected slot (fresh install, no setup run
-    // yet, or partial migration) must also no-op. Operators have to
-    // explicitly elect this adapter via `dkg setup` before it claims
-    // the slot.
     const api = makeApi();
     (api.config as any).plugins.slots.memory = undefined;
     plugin.register(api);
@@ -175,11 +143,6 @@ describe('DkgMemoryPlugin.register', () => {
   });
 
   it('reads plugins.slots.memory from api.cfg when api.config is missing (Codex B58 gateway shim)', () => {
-    // Some OpenClaw gateway builds expose the merged config on `api.cfg`
-    // instead of `api.config`. The slot-ownership gate mirrors the same
-    // fallback order as DkgChannelPlugin.register so those runtimes
-    // still resolve correctly and don't get a false negative that would
-    // leave the adapter unregistered after a successful setup.
     const api = makeApi();
     (api as any).cfg = api.config;
     (api as any).config = undefined;
@@ -189,12 +152,6 @@ describe('DkgMemoryPlugin.register', () => {
   });
 
   it('DkgMemorySearchManager.search floors fractional maxResults into a valid SPARQL LIMIT (Codex B37)', async () => {
-    // B37: the clamped value is interpolated directly into the SPARQL
-    // `LIMIT` clause. A fractional input like `2.5` would produce
-    // `LIMIT 2.5`, which is invalid SPARQL and gets swallowed by the
-    // per-query `.catch` blocks as an empty result set. The fix floors
-    // the clamped value so fractional caller intent maps to the
-    // nearest valid integer.
     const querySpy = vi.spyOn(client, 'query').mockResolvedValue({
       result: { bindings: [] },
     });
@@ -204,17 +161,12 @@ describe('DkgMemoryPlugin.register', () => {
 
     expect(querySpy).toHaveBeenCalled();
     const sparql = querySpy.mock.calls[0][0] as string;
-    // The interpolated LIMIT must be an integer (no dot).
     expect(sparql).toMatch(/LIMIT \d+(\s|$)/);
-    // Specifically 2 for input 2.5 (Math.floor after clamp).
     expect(sparql).toContain('LIMIT 2');
     expect(sparql).not.toContain('LIMIT 2.5');
   });
 
   it('DkgMemorySearchManager.search clamps-then-floors extreme fractional inputs (Codex B37)', async () => {
-    // Belt-and-suspenders for the B37 clamp-then-floor interaction.
-    // Input 150.9 → clamped to 100 → floored to 100. Input 0.4 →
-    // clamped to 1 (via Math.max(1, ...)) → floored to 1.
     const querySpy = vi.spyOn(client, 'query').mockResolvedValue({
       result: { bindings: [] },
     });
@@ -230,12 +182,6 @@ describe('DkgMemoryPlugin.register', () => {
   });
 
   it('DkgMemorySearchManager.search strips the did:dkg:agent: prefix when the resolver returns a DID-form address (Codex B43)', async () => {
-    // B43 for the WM read path: the daemon's query engine uses the raw
-    // peer-ID form for assertion-graph URI scoping when `view: 'working-memory'`.
-    // A DID-form input from the resolver must be normalized to the raw
-    // form before being passed to `client.query`, otherwise the read
-    // looks in an assertion graph scoped to a literal DID string and
-    // finds nothing.
     const querySpy = vi.spyOn(client, 'query').mockResolvedValue({ result: { bindings: [] } });
     const manager = new DkgMemorySearchManager({
       client,
@@ -293,32 +239,16 @@ describe('DkgMemorySearchManager', () => {
     });
 
     it('probeVectorAvailability returns a bare boolean false (not an object)', async () => {
-      // FAIL #2 from openclaw-runtime's contract audit: upstream declares
-      // this method Promise<boolean>, and upstream's `if (available) …`
-      // check would treat any object (even {ok:false}) as truthy and
-      // silently claim a vector backend is available. The DKG provider
-      // must return a bare `false` to opt out honestly.
       const manager = new DkgMemorySearchManager({ client, resolver: makeResolver() });
       const result = await manager.probeVectorAvailability();
       expect(result).toBe(false);
       expect(typeof result).toBe('boolean');
-      // And the truthiness check must evaluate to false the way upstream
-      // uses it, not the way a {ok:false,...} object would (truthy).
       expect(result ? 'upstream-would-use-vector' : 'upstream-skips-vector').toBe('upstream-skips-vector');
     });
   });
 
   describe('search', () => {
     it('issues three parallel /api/query calls against agent-context (WM + SWM + VM) when no project CG is resolved', async () => {
-      // The fan-out was broadened during live validation: agent-context
-      // is now queried across all three memory views, not just WM. The
-      // assertionName pin was also dropped — with `view: 'working-memory'`
-      // and no assertionName, the query engine scans all assertions in
-      // the agent's WM namespace (including `chat-turns` and any other
-      // assertions the agent may have written into agent-context). SWM
-      // and VM views don't have assertion-level sub-graphing, so dropping
-      // the pin on those is a no-op that still scans the whole shared-
-      // memory / verified-memory graph for the CG.
       const querySpy = vi.spyOn(client, 'query').mockResolvedValue({ result: { bindings: [] } });
       const manager = new DkgMemorySearchManager({ client, resolver: makeResolver() });
 
@@ -328,15 +258,7 @@ describe('DkgMemorySearchManager', () => {
       const allOpts = querySpy.mock.calls.map(c => c[1]!);
       for (const opts of allOpts) {
         expect(opts.contextGraphId).toBe(AGENT_CONTEXT_GRAPH);
-        // B43: WM view routing uses the raw peer-ID form. The fixture
-        // provides a raw peer id (`peer-test`), which is passed through
-        // to the query engine as-is — consumers that pass DID-form
-        // addresses through the resolver would be normalized by
-        // `toAgentPeerId` at the consumption site.
         expect(opts.agentAddress).toBe('peer-test');
-        // No assertionName pin — the whole point of the broadened
-        // fan-out is to let all assertions in the CG view participate
-        // in recall, not just a specific "canonical" one.
         expect(opts.assertionName).toBeUndefined();
       }
       const views = allOpts.map(o => o.view).sort();
@@ -346,9 +268,6 @@ describe('DkgMemorySearchManager', () => {
     });
 
     it('issues six parallel /api/query calls (agent-context WM/SWM/VM + project WM/SWM/VM) when a project CG is resolved', async () => {
-      // With a project CG resolved, the fan-out is three agent-context
-      // views plus three project views, for six queries total. None of
-      // them pin an assertionName — all six scan the whole CG view.
       const querySpy = vi.spyOn(client, 'query').mockResolvedValue({ result: { bindings: [] } });
       const manager = new DkgMemorySearchManager({
         client,
@@ -379,12 +298,6 @@ describe('DkgMemorySearchManager', () => {
     });
 
     it('uses a permissive SPARQL shape — no rdf:type constraint, no specific predicate, literal-length floor', async () => {
-      // The SPARQL template itself should match any literal object of
-      // 20+ characters regardless of the predicate or subject type.
-      // This is the whole point of the broadened fan-out: agents can
-      // write memories in whatever RDF shape fits their domain
-      // (schema:description, rdfs:comment, custom predicates, typed or
-      // untyped subjects) and slot-backed recall still finds them.
       const querySpy = vi.spyOn(client, 'query').mockResolvedValue({ result: { bindings: [] } });
       const manager = new DkgMemorySearchManager({ client, resolver: makeResolver() });
 
@@ -392,30 +305,20 @@ describe('DkgMemorySearchManager', () => {
 
       expect(querySpy).toHaveBeenCalled();
       const sparql = querySpy.mock.calls[0][0] as string;
-      // Any predicate: `?uri ?pred ?text` instead of
-      // `?uri <schema:description> ?text` or `?uri a schema:Message`.
       expect(sparql).toMatch(/\?uri\s+\?pred\s+\?text/);
-      // Literal filter excludes IRIs and blank nodes.
       expect(sparql).toContain('isLiteral(?text)');
-      // 20-char floor on literal length to exclude tiny metadata
-      // (flags, IDs, short tags).
       expect(sparql).toContain('STRLEN(STR(?text)) >= 20');
-      // No hard-pinned predicates anywhere in the template.
       expect(sparql).not.toContain('schema:description');
       expect(sparql).not.toContain('http://schema.org/description');
       expect(sparql).not.toContain('schema:text');
       expect(sparql).not.toContain('http://schema.org/text');
       expect(sparql).not.toContain('schema:Message');
       expect(sparql).not.toContain('http://schema.org/Message');
-      // The keyword substring filter stays — that's still how we match.
       expect(sparql).toMatch(/CONTAINS\(LCASE\(STR\(\?text\)\),\s*"hello"\)/);
       expect(sparql).toMatch(/CONTAINS\(LCASE\(STR\(\?text\)\),\s*"world"\)/);
     });
 
     it('merges results from all six layers and tags them with the correct source + layer', async () => {
-      // Deterministic ordering lines up with the plan array in
-      // DkgMemorySearchManager.search: agent-context WM, SWM, VM first,
-      // then project WM, SWM, VM.
       vi.spyOn(client, 'query')
         .mockResolvedValueOnce({
           result: {
@@ -476,8 +379,6 @@ describe('DkgMemorySearchManager', () => {
         'project-vm',
         'project-wm',
       ]);
-      // source stays on the closed upstream union — sessions for every
-      // agent-context layer, memory for every project layer.
       const sources = results.map(r => r.source).sort();
       expect(sources).toEqual([
         'memory', 'memory', 'memory',
@@ -494,14 +395,6 @@ describe('DkgMemorySearchManager', () => {
     });
 
     it('ranks with trust-weighted scores: VM×1.3 > SWM×1.15 > WM×1.0 across both context graphs', async () => {
-      // All six layers return a single result with identical keyword
-      // overlap (`hello world` matches both keywords → raw score 1.0).
-      // Trust weights order the tiers VM > SWM > WM uniformly across
-      // both CGs. Within a tier, the tie is broken by raw score (all
-      // tied here) and then by deterministic Promise.all resolution
-      // order from the plans array — agent-context entries come
-      // first in that array, so on a full tie they land before their
-      // project-CG counterparts.
       vi.spyOn(client, 'query')
         .mockResolvedValueOnce({
           result: { bindings: [{ uri: { value: 'urn:m:actxwm' }, text: { value: 'hello world agent context wm' } }] },
@@ -529,26 +422,15 @@ describe('DkgMemorySearchManager', () => {
 
       const results = await manager.search('hello world');
       expect(results).toHaveLength(6);
-      // Head is VM tier (highest trust weight, VM×1.3). Both VM hits
-      // share the tier; order within the tier is deterministic via the
-      // plan array — agent-context before project in the current
-      // topology.
       const headLayers = [results[0].layer, results[1].layer].sort();
       expect(headLayers).toEqual(['agent-context-vm', 'project-vm']);
-      // Middle is SWM tier.
       const middleLayers = [results[2].layer, results[3].layer].sort();
       expect(middleLayers).toEqual(['agent-context-swm', 'project-swm']);
-      // Tail is WM tier.
       const tailLayers = [results[4].layer, results[5].layer].sort();
       expect(tailLayers).toEqual(['agent-context-wm', 'project-wm']);
     });
 
     it('dedups across layers by (cg, uri), keeping the highest-trust layer', async () => {
-      // The same memory URI surfaces in all three project-CG layers
-      // (a verified memory that is still in the WM draft buffer and
-      // the SWM view). All three should collapse to one result tagged
-      // with the VM layer. agent-context bindings are unrelated and
-      // stay as their own entries (different contextGraphId key).
       const sameUri = { value: 'urn:m:shared' };
       const sameText = { value: 'hello world canonical memory' };
       vi.spyOn(client, 'query')
@@ -571,9 +453,6 @@ describe('DkgMemorySearchManager', () => {
     });
 
     it('degrades to the succeeding layers when one view query fails, with one warn per failing (cg, view) pair', async () => {
-      // Project-VM query fails; the other five layers succeed. The
-      // failed layer emits exactly one warn identifying the (cg, view)
-      // pair, and the surviving layers contribute results.
       vi.spyOn(client, 'query')
         .mockResolvedValueOnce({
           result: { bindings: [{ uri: { value: 'urn:m:ctwm' }, text: { value: 'match agent context wm body' } }] },
@@ -618,11 +497,6 @@ describe('DkgMemorySearchManager', () => {
     });
 
     it('emits a single info-level observability log per search call showing query, project, layers, and per-layer raw hits', async () => {
-      // Live-validation follow-up: without this log, we have no runtime
-      // signal distinguishing "slot called but query missed" from "slot
-      // never called at all". The log must fire once per `search()`
-      // call with query text, resolved project CG, total layer count,
-      // and per-layer raw hit counts.
       vi.spyOn(client, 'query')
         .mockResolvedValueOnce({
           result: { bindings: [{ uri: { value: 'urn:m:actxwm' }, text: { value: 'hello world agent context wm hit' } }] },
@@ -654,9 +528,6 @@ describe('DkgMemorySearchManager', () => {
       );
       expect(searchFiredLogs).toHaveLength(1);
       const logLine = searchFiredLogs[0][0] as string;
-      // Info-level log carries counts + metadata only — no user text
-      // (the raw query is derived from user messages and may contain
-      // PII, so it is logged at debug level).
       expect(logLine).not.toContain('query=');
       expect(logLine).toContain('project=research-x');
       expect(logLine).toContain('layers=6');
@@ -667,7 +538,6 @@ describe('DkgMemorySearchManager', () => {
       expect(logLine).toContain('project-wm:2');
       expect(logLine).toContain('project-swm:0');
       expect(logLine).toContain('project-vm:0');
-      // Query text goes to debug level only.
       const debugLogs = (manager as any).deps.logger.debug.mock.calls.filter(
         (c: any[]) => typeof c[0] === 'string' && c[0].includes('[dkg-memory] search query:'),
       );
@@ -733,10 +603,6 @@ describe('buildDkgMemoryRuntime', () => {
   });
 
   it('returns { manager: null, error } when DkgMemorySearchManager construction throws', async () => {
-    // FAIL #3 from openclaw-runtime's audit: MemoryRuntimeResult.manager
-    // must be nullable so the runtime can gracefully decline to build a
-    // manager rather than propagating a construction throw. Simulate a
-    // construction failure by spying on the class prototype.
     const client = new DkgDaemonClient({ baseUrl: 'http://localhost:9200' });
     const runtime = buildDkgMemoryRuntime(client, makeResolver());
 
@@ -763,13 +629,6 @@ describe('buildDkgMemoryRuntime', () => {
   });
 
   it('returns { manager: null, error } when the node peer ID probe has not yet landed (B12)', async () => {
-    // B12: before constructing the manager, the factory must resolve an
-    // effective agent address (session-scoped or default). If neither is
-    // available — typically because the daemon /api/status probe has not
-    // yet completed — returning a live manager would turn every WM read
-    // into a silently-caught query-engine throw (`agentAddress is required
-    // for the working-memory view`). Instead surface "backend not ready"
-    // via the null-manager contract path so upstream uses its fallback.
     const client = new DkgDaemonClient({ baseUrl: 'http://localhost:9200' });
     const resolver: DkgMemorySessionResolver = {
       getSession: () => undefined,
@@ -786,10 +645,6 @@ describe('buildDkgMemoryRuntime', () => {
   });
 
   it('prefers session-scoped agentAddress over the default when constructing the manager (B12)', async () => {
-    // When the lazy re-probe hasn't landed but a session-scoped address is
-    // stamped on the dispatch, the factory must still construct a live
-    // manager using the session-scoped path rather than falling through
-    // to the null-manager branch.
     const client = new DkgDaemonClient({ baseUrl: 'http://localhost:9200' });
     const resolver: DkgMemorySessionResolver = {
       getSession: () => ({ agentAddress: 'did:dkg:agent:session-specific' }),
@@ -804,10 +659,6 @@ describe('buildDkgMemoryRuntime', () => {
   });
 
   it('constructs a live manager from the default peer ID when no session stamp exists (B12 recovery path)', async () => {
-    // After the lazy re-probe completes, subsequent dispatches should see
-    // a cached default address and get a live manager back — even when no
-    // session-scoped stamp is present. This exercises the "default only"
-    // branch of the resolvedAgentAddress fallback.
     const client = new DkgDaemonClient({ baseUrl: 'http://localhost:9200' });
     const resolver: DkgMemorySessionResolver = {
       getSession: () => undefined,

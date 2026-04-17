@@ -53,6 +53,12 @@ describe('context graph topic helpers (V10)', () => {
     const result = contextGraphFinalizationTopic('a/b');
     expect(result).toBe('dkg/context-graph/a/b/finalization');
   });
+
+  it('deprecated paranetPublishTopic delegates to contextGraphFinalizationTopic', () => {
+    expect(paranetPublishTopic('my-paranet')).toBe(contextGraphFinalizationTopic('my-paranet'));
+    expect(paranetPublishTopic('')).toBe(contextGraphFinalizationTopic(''));
+    expect(paranetPublishTopic('a/b')).toBe(contextGraphFinalizationTopic('a/b'));
+  });
 });
 
 describe('createOperationContext', () => {

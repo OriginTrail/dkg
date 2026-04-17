@@ -1,8 +1,10 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeAll, beforeEach, afterAll, describe, expect, it } from 'vitest';
 import { GraphManager, OxigraphStore } from '@origintrail-official/dkg-storage';
-import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter } from '@origintrail-official/dkg-chain';
 import { TypedEventBus, generateEd25519Keypair, sha256 } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
+import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, createTestContextGraph, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
+import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import {
   DKGPublisher,
   TripleStoreAsyncLiftPublisher,
@@ -41,6 +43,21 @@ describe('TripleStoreAsyncLiftPublisher', () => {
   let now = 1_000;
   let ids = 0;
   let store: OxigraphStore;
+  let PARANET: string;
+  let _fileSnapshot: string;
+
+  beforeAll(async () => {
+    _fileSnapshot = await takeSnapshot();
+    const { hubAddress } = getSharedContext();
+    const provider = createProvider();
+    const coreOp = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+    await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, coreOp.address, ethers.parseEther('50000000'));
+    const cgId = await createTestContextGraph();
+    PARANET = cgId.toString();
+  });
+  afterAll(async () => {
+    await revertSnapshot(_fileSnapshot);
+  });
 
   const request = (): LiftRequest => ({
     swmId: 'swm-1',
@@ -101,7 +118,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
       .slice(0, 6)
       .map((byte) => byte.toString(16).padStart(2, '0'))
       .join('');
-    return `dkg:music-social:aloha:person-profile/rihana-${suffix}`;
+    return `dkg:${PARANET}:aloha:person-profile/rihana-${suffix}`;
   }
 
   it('creates accepted jobs and returns status', async () => {
@@ -121,11 +138,11 @@ describe('TripleStoreAsyncLiftPublisher', () => {
   it('exposes the renamed shared-memory publisher contract', async () => {
     const publisherContract: Publisher = new DKGPublisher({
       store,
-      chain: new MockChainAdapter('mock:31337', '0x1111111111111111111111111111111111111111'),
+      chain: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
       eventBus: new TypedEventBus(),
       keypair: await generateEd25519Keypair(),
-      publisherPrivateKey: ethers.Wallet.createRandom().privateKey,
-      publisherNodeIdentityId: 1n,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
 
     const write = await publisherContract.share('music-social', [
@@ -577,11 +594,11 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
     const dkgPublisher = new DKGPublisher({
       store,
-      chain: new MockChainAdapter('mock:31337', '0x1111111111111111111111111111111111111111'),
+      chain: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
       eventBus: new TypedEventBus(),
       keypair: await generateEd25519Keypair(),
-      publisherPrivateKey: ethers.Wallet.createRandom().privateKey,
-      publisherNodeIdentityId: 1n,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
     const write = await dkgPublisher.share('music-social', [
       { subject: 'urn:local:/rihana', predicate: 'http://schema.org/name', object: '"Rihana"', graph: '' },
@@ -611,11 +628,11 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
     const dkgPublisher = new DKGPublisher({
       store,
-      chain: new MockChainAdapter('mock:31337', '0x1111111111111111111111111111111111111111'),
+      chain: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
       eventBus: new TypedEventBus(),
       keypair: await generateEd25519Keypair(),
-      publisherPrivateKey: ethers.Wallet.createRandom().privateKey,
-      publisherNodeIdentityId: 1n,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
     const write = await dkgPublisher.share('music-social', [
       { subject: 'urn:local:/rihana', predicate: 'http://schema.org/name', object: '"Rihana"', graph: '' },
@@ -661,11 +678,11 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     const publisher = createPublisher();
     const dkgPublisher = new DKGPublisher({
       store,
-      chain: new MockChainAdapter('mock:31337', '0x1111111111111111111111111111111111111111'),
+      chain: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
       eventBus: new TypedEventBus(),
       keypair: await generateEd25519Keypair(),
-      publisherPrivateKey: ethers.Wallet.createRandom().privateKey,
-      publisherNodeIdentityId: 1n,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
 
     const write = await dkgPublisher.share('music-social', [
@@ -693,16 +710,16 @@ describe('TripleStoreAsyncLiftPublisher', () => {
   it('stores confirmed metadata in the graph manager meta graph', async () => {
     const dkgPublisher = new DKGPublisher({
       store,
-      chain: new MockChainAdapter('mock:31337', '0x1111111111111111111111111111111111111111'),
+      chain: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
       eventBus: new TypedEventBus(),
       keypair: await generateEd25519Keypair(),
-      publisherPrivateKey: ethers.Wallet.createRandom().privateKey,
-      publisherNodeIdentityId: 1n,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
     const graphManager = new GraphManager(store);
 
     const result = await dkgPublisher.publish({
-      contextGraphId: 'music-social',
+      contextGraphId: PARANET,
       quads: [
         { subject: canonicalRoot('urn:local:/rihana'), predicate: 'http://schema.org/name', object: '"Rihana"', graph: '' },
       ],
@@ -712,7 +729,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(result.status).toBe('confirmed');
 
     const metadata = await store.query(`SELECT ?p ?o WHERE {
-      GRAPH <${graphManager.metaGraphUri('music-social')}> {
+      GRAPH <${graphManager.metaGraphUri(PARANET)}> {
         <${result.ual}> ?p ?o .
       }
     }`);
@@ -725,7 +742,9 @@ describe('TripleStoreAsyncLiftPublisher', () => {
   });
 
   it('publishes only the unmatched CREATE remainder against finalized authoritative state', async () => {
-    const publishExecutor = vi.fn(async ({ publishOptions }) => {
+    const executorCalls: Array<{ publishOptions: any }> = [];
+    const publishExecutor = async ({ walletId, publishOptions }: any) => {
+      executorCalls.push({ publishOptions });
       expect(publishOptions.quads).toHaveLength(1);
       expect(publishOptions.quads[0]?.predicate).toBe('http://schema.org/genre');
       return {
@@ -744,80 +763,84 @@ describe('TripleStoreAsyncLiftPublisher', () => {
           publisherAddress: '0x1111111111111111111111111111111111111111',
         },
       };
-    });
+    };
     const publisher = createPublisher({ config: { publishExecutor } });
 
     const dkgPublisher = new DKGPublisher({
       store,
-      chain: new MockChainAdapter('mock:31337', '0x1111111111111111111111111111111111111111'),
+      chain: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
       eventBus: new TypedEventBus(),
       keypair: await generateEd25519Keypair(),
-      publisherPrivateKey: ethers.Wallet.createRandom().privateKey,
-      publisherNodeIdentityId: 1n,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
 
     const canonical = canonicalRoot('urn:local:/rihana');
     await dkgPublisher.publish({
-      contextGraphId: 'music-social',
+      contextGraphId: PARANET,
       quads: [
         { subject: canonical, predicate: 'http://schema.org/name', object: '"Rihana"', graph: '' },
       ],
       publisherPeerId: 'peer-1',
     });
 
-    const write = await dkgPublisher.share('music-social', [
+    const write = await dkgPublisher.share(PARANET, [
       { subject: 'urn:local:/rihana', predicate: 'http://schema.org/name', object: '"Rihana"', graph: '' },
       { subject: 'urn:local:/rihana', predicate: 'http://schema.org/genre', object: '"Pop"', graph: '' },
     ], { publisherPeerId: 'peer-1' });
 
     await publisher.lift({
       ...request(),
+      contextGraphId: PARANET,
       shareOperationId: write.shareOperationId,
     });
 
     const processed = await publisher.processNext('wallet-1');
 
-    expect(publishExecutor).toHaveBeenCalledTimes(1);
+    expect(executorCalls).toHaveLength(1);
     expect(processed?.status).toBe('finalized');
   });
 
   it('finalizes CREATE as a no-op when all canonical quads are already authoritative', async () => {
-    const publishExecutor = vi.fn(async () => {
+    let executorCallCount = 0;
+    const publishExecutor = async () => {
+      executorCallCount++;
       throw new Error('should not be called');
-    });
+    };
     const publisher = createPublisher({ config: { publishExecutor } });
 
     const dkgPublisher = new DKGPublisher({
       store,
-      chain: new MockChainAdapter('mock:31337', '0x1111111111111111111111111111111111111111'),
+      chain: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
       eventBus: new TypedEventBus(),
       keypair: await generateEd25519Keypair(),
-      publisherPrivateKey: ethers.Wallet.createRandom().privateKey,
-      publisherNodeIdentityId: 1n,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
 
     const canonical = canonicalRoot('urn:local:/rihana');
     await dkgPublisher.publish({
-      contextGraphId: 'music-social',
+      contextGraphId: PARANET,
       quads: [
         { subject: canonical, predicate: 'http://schema.org/name', object: '"Rihana"', graph: '' },
       ],
       publisherPeerId: 'peer-1',
     });
 
-    const write = await dkgPublisher.share('music-social', [
+    const write = await dkgPublisher.share(PARANET, [
       { subject: 'urn:local:/rihana', predicate: 'http://schema.org/name', object: '"Rihana"', graph: '' },
     ], { publisherPeerId: 'peer-1' });
 
     await publisher.lift({
       ...request(),
+      contextGraphId: PARANET,
       shareOperationId: write.shareOperationId,
     });
 
     const processed = await publisher.processNext('wallet-1');
     const reloaded = await publisher.getStatus(processed!.jobId);
 
-    expect(publishExecutor).not.toHaveBeenCalled();
+    expect(executorCallCount).toBe(0);
     expect(processed?.status).toBe('finalized');
     expect(processed?.finalization?.mode).toBe('noop');
     expect(reloaded?.status).toBe('finalized');
@@ -839,11 +862,11 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
     const dkgPublisher = new DKGPublisher({
       store,
-      chain: new MockChainAdapter('mock:31337', '0x1111111111111111111111111111111111111111'),
+      chain: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
       eventBus: new TypedEventBus(),
       keypair: await generateEd25519Keypair(),
-      publisherPrivateKey: ethers.Wallet.createRandom().privateKey,
-      publisherNodeIdentityId: 1n,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
     const write = await dkgPublisher.share('music-social', [
       { subject: 'urn:local:/rihana', predicate: 'http://schema.org/name', object: '"Rihana"', graph: '' },

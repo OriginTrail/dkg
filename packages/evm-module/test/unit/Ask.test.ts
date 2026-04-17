@@ -1,7 +1,7 @@
 import { randomBytes } from 'crypto';
 
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
-import { loadFixture } from '@nomicfoundation/hardhat-network-helpers';
+import { loadFixture, time } from '@nomicfoundation/hardhat-network-helpers';
 import { expect } from 'chai';
 import hre from 'hardhat';
 
@@ -13,7 +13,6 @@ import {
   Hub,
   Token,
   StakingStorage,
-  DelegatorsInfo,
 } from '../../typechain';
 
 type FullIntegrationFixture = {
@@ -24,7 +23,6 @@ type FullIntegrationFixture = {
   Staking: Staking;
   StakingStorage: StakingStorage;
   Token: Token;
-  DelegatorsInfo: DelegatorsInfo;
 };
 
 describe('@unit Ask', () => {
@@ -35,7 +33,6 @@ describe('@unit Ask', () => {
   let Staking: Staking;
   let StakingStorage: StakingStorage;
   let Token: Token;
-  let DelegatorsInfo: DelegatorsInfo;
 
   async function deployAll(): Promise<FullIntegrationFixture> {
     await hre.deployments.fixture([
@@ -53,8 +50,6 @@ describe('@unit Ask', () => {
     StakingStorage =
       await hre.ethers.getContract<StakingStorage>('StakingStorage');
     Token = await hre.ethers.getContract<Token>('Token');
-    const DelegatorsInfoContract =
-      await hre.ethers.getContract<DelegatorsInfo>('DelegatorsInfo');
 
     accounts = await hre.ethers.getSigners();
 
@@ -69,7 +64,6 @@ describe('@unit Ask', () => {
       Staking,
       StakingStorage,
       Token,
-      DelegatorsInfo: DelegatorsInfoContract,
     };
   }
 
@@ -77,7 +71,7 @@ describe('@unit Ask', () => {
 
   beforeEach(async () => {
     hre.helpers.resetDeploymentsJson();
-    ({ accounts, Profile, Ask, Staking, Token, DelegatorsInfo } =
+    ({ accounts, Profile, Ask, Staking, Token } =
       await loadFixture(deployAll));
     profileCounter = 0;
   });
@@ -134,6 +128,40 @@ describe('@unit Ask', () => {
     expect(await AskStorage.totalActiveStake()).to.be.equal(remainingStake);
   });
 
+  it('Multiple profiles: set different asks and stakes, verify weighted sums are exact', async () => {
+    const profiles: Array<{ identityId: number; ask: bigint; stake: bigint }> = [];
+    // Asks must stay within the IQR-based active set bounds
+    // (askLowerBoundFactor=0.533, askUpperBoundFactor=1.467)
+    const asks = [100n, 120n, 130n];
+    const stakes = [
+      hre.ethers.parseUnits('50000', 18),
+      hre.ethers.parseUnits('60000', 18),
+      hre.ethers.parseUnits('70000', 18),
+    ];
+
+    for (let i = 0; i < 3; i++) {
+      const { identityId } = await createProfile(
+        accounts[0],
+        accounts[i + 1],
+        i * 10 + 10,
+      );
+
+      await Profile.connect(accounts[0]).updateAsk(identityId, asks[i]);
+
+      await Token.mint(accounts[4].address, stakes[i]);
+      await Token.connect(accounts[4]).approve(Staking.getAddress(), stakes[i]);
+      await Staking.connect(accounts[4]).stake(identityId, stakes[i]);
+
+      profiles.push({ identityId, ask: asks[i], stake: stakes[i] });
+    }
+
+    const expectedTotalStake = stakes.reduce((a, b) => a + b, 0n);
+    const expectedWeightedSum = profiles.reduce((acc, p) => acc + p.stake * p.ask, 0n);
+
+    expect(await AskStorage.totalActiveStake()).to.equal(expectedTotalStake);
+    expect(await AskStorage.weightedActiveAskSum()).to.equal(expectedWeightedSum);
+  });
+
   it('Edge case: set ask=0 => expect revert from Profile.updateAsk(...)', async () => {
     const { identityId } = await createProfile(accounts[0], accounts[1], 10);
     await expect(
@@ -169,6 +197,75 @@ describe('@unit Ask', () => {
     expect(finalNodeStake).to.equal(stake70k + restake);
   });
 
+  it('Stake/withdraw/updateAsk cycle maintains exact sums', async () => {
+    const { identityId } = await createProfile(accounts[0], accounts[1], 10);
+    const largeStake = hre.ethers.parseUnits('90000', 18);
+    await Token.mint(accounts[2].address, largeStake);
+    await Token.connect(accounts[2]).approve(Staking.getAddress(), largeStake);
+    await Staking.connect(accounts[2]).stake(identityId, largeStake);
+    await Profile.connect(accounts[0]).updateAsk(identityId, 300n);
+
+    expect(await AskStorage.weightedActiveAskSum()).to.equal(largeStake * 300n);
+    expect(await AskStorage.totalActiveStake()).to.equal(largeStake);
+
+    const partial1 = hre.ethers.parseUnits('40000', 18);
+    await Staking.connect(accounts[2]).requestWithdrawal(identityId, partial1);
+
+    const remainingAfterPartial = largeStake - partial1;
+    expect(await AskStorage.weightedActiveAskSum()).to.equal(remainingAfterPartial * 300n);
+    expect(await AskStorage.totalActiveStake()).to.equal(remainingAfterPartial);
+
+    // Ask values must stay within IQR-based active set bounds
+    // (askLowerBoundFactor=0.533, askUpperBoundFactor=1.467)
+    const askChanges = [280n, 250n, 320n, 300n];
+    for (const newAsk of askChanges) {
+      await time.increase(61);
+      await Profile.connect(accounts[0]).updateAsk(identityId, newAsk);
+      expect(await AskStorage.weightedActiveAskSum()).to.equal(remainingAfterPartial * newAsk);
+      expect(await AskStorage.totalActiveStake()).to.equal(remainingAfterPartial);
+    }
+
+    await Staking.connect(accounts[2]).cancelWithdrawal(identityId);
+    const lastAsk = askChanges[askChanges.length - 1];
+    expect(await AskStorage.weightedActiveAskSum()).to.equal(largeStake * lastAsk);
+    expect(await AskStorage.totalActiveStake()).to.equal(largeStake);
+  });
+
+  it('Partial withdraw near min stake: verify node exclusion from sums', async () => {
+    const { identityId } = await createProfile(accounts[0], accounts[1], 20);
+    const stAmount = hre.ethers.parseUnits('80000', 18);
+    await Token.mint(accounts[2].address, stAmount);
+    await Token.connect(accounts[2]).approve(Staking.getAddress(), stAmount);
+    await Staking.connect(accounts[2]).stake(identityId, stAmount);
+    await Profile.connect(accounts[0]).updateAsk(identityId, 400n);
+
+    expect(await AskStorage.weightedActiveAskSum()).to.equal(stAmount * 400n);
+    expect(await AskStorage.totalActiveStake()).to.equal(stAmount);
+
+    await time.increase(61);
+
+    const partialWithdraw = hre.ethers.parseUnits('79999', 18);
+    await Staking.connect(accounts[2]).requestWithdrawal(
+      identityId,
+      partialWithdraw,
+    );
+    // Remaining stake (1e18) is below minimumStake (50000e18), so the
+    // node is excluded from the active set entirely.
+    expect(await AskStorage.totalActiveStake()).to.equal(0n);
+    expect(await AskStorage.weightedActiveAskSum()).to.equal(0n);
+
+    // Cancelling withdrawal restores full stake → node re-enters active set
+    await Staking.connect(accounts[2]).cancelWithdrawal(identityId);
+    expect(await AskStorage.weightedActiveAskSum()).to.equal(stAmount * 400n);
+    expect(await AskStorage.totalActiveStake()).to.equal(stAmount);
+
+    await time.increase(61);
+
+    await expect(
+      Profile.connect(accounts[0]).updateAsk(identityId, 0n),
+    ).to.be.revertedWithCustomError(Profile, 'ZeroAsk');
+  });
+
   it('Restake operator fees then partial withdraw: sums remain consistent', async () => {
     const { identityId } = await createProfile(accounts[0], accounts[1], 30);
     const askVal = 1000n;
@@ -198,4 +295,65 @@ describe('@unit Ask', () => {
     expect(await AskStorage.weightedActiveAskSum()).to.equal(stakeAfterRestake2 * askVal);
   });
 
+  it('Multiple nodes with deterministic stakes: verify exact weighted sums after each operation', async () => {
+    // Asks must stay within the IQR-based active set bounds
+    // (askLowerBoundFactor=0.533, askUpperBoundFactor=1.467)
+    const nodeData = [
+      { ask: 100n, stakes: [55000n, 60000n] },
+      { ask: 110n, stakes: [70000n, 75000n] },
+      { ask: 120n, stakes: [80000n] },
+      { ask: 130n, stakes: [65000n, 50000n, 90000n] },
+      { ask: 140n, stakes: [52000n] },
+    ];
+
+    const identityIds: number[] = [];
+    for (let i = 0; i < nodeData.length; i++) {
+      const { identityId } = await createProfile(
+        accounts[0],
+        accounts[i + 1],
+        (i + 1) * 5,
+      );
+      await Profile.connect(accounts[0]).updateAsk(identityId, nodeData[i].ask);
+      identityIds.push(identityId);
+    }
+
+    let expectedTotalStake = 0n;
+    let expectedWeightedSum = 0n;
+
+    for (let i = 0; i < nodeData.length; i++) {
+      for (const rawStake of nodeData[i].stakes) {
+        const stakeWei = hre.ethers.parseUnits(rawStake.toString(), 18);
+        await Token.mint(accounts[8].address, stakeWei);
+        await Token.connect(accounts[8]).approve(Staking.getAddress(), stakeWei);
+        await Staking.connect(accounts[8]).stake(identityIds[i], stakeWei);
+        expectedTotalStake += stakeWei;
+        expectedWeightedSum += stakeWei * nodeData[i].ask;
+      }
+    }
+
+    expect(await AskStorage.totalActiveStake()).to.equal(expectedTotalStake);
+    expect(await AskStorage.weightedActiveAskSum()).to.equal(expectedWeightedSum);
+  });
+
+  it('Ask changes correctly update weighted sum without changing total stake', async () => {
+    const { identityId } = await createProfile(accounts[0], accounts[1], 50);
+    await Profile.connect(accounts[0]).updateAsk(identityId, 100n);
+    const stVal = hre.ethers.parseUnits('90000', 18);
+    await Token.mint(accounts[2].address, stVal);
+    await Token.connect(accounts[2]).approve(Staking.getAddress(), stVal);
+    await Staking.connect(accounts[2]).stake(identityId, stVal);
+
+    expect(await AskStorage.weightedActiveAskSum()).to.equal(stVal * 100n);
+    expect(await AskStorage.totalActiveStake()).to.equal(stVal);
+
+    // Ask values must stay within IQR-based active set bounds
+    // (askLowerBoundFactor=0.533, askUpperBoundFactor=1.467)
+    const askChanges = [90n, 80n, 110n];
+    for (const newAsk of askChanges) {
+      await time.increase(61);
+      await Profile.connect(accounts[0]).updateAsk(identityId, newAsk);
+      expect(await AskStorage.weightedActiveAskSum()).to.equal(stVal * newAsk);
+      expect(await AskStorage.totalActiveStake()).to.equal(stVal);
+    }
+  });
 });

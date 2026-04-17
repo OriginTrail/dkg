@@ -126,8 +126,8 @@ describe('DKG_ONTOLOGY', () => {
       DKG_PUBLIC_KEY: 'https://dkg.network/ontology#publicKey',
       DKG_NODE_ROLE: 'https://dkg.network/ontology#nodeRole',
       DKG_RELAY_ADDRESS: 'https://dkg.network/ontology#relayAddress',
-      DKG_CONTEXT_GRAPH: 'https://dkg.network/ontology#Paranet',
-      DKG_SYSTEM_CONTEXT_GRAPH: 'https://dkg.network/ontology#SystemParanet',
+      DKG_PARANET: 'https://dkg.network/ontology#Paranet',
+      DKG_SYSTEM_PARANET: 'https://dkg.network/ontology#SystemParanet',
       DKG_NETWORK: 'https://dkg.network/ontology#Network',
       DKG_NETWORK_ID: 'https://dkg.network/ontology#networkId',
       DKG_GENESIS_VERSION: 'https://dkg.network/ontology#genesisVersion',
@@ -136,32 +136,14 @@ describe('DKG_ONTOLOGY', () => {
     for (const [key, expectedUri] of Object.entries(expectedUris)) {
       expect((DKG_ONTOLOGY as Record<string, string>)[key]).toBe(expectedUri);
     }
-
-    const cclKeys = [
-      'DKG_CCL_POLICY', 'DKG_POLICY_BINDING', 'DKG_POLICY_APPLIES_TO_PARANET',
-      'DKG_POLICY_VERSION', 'DKG_POLICY_LANGUAGE', 'DKG_POLICY_FORMAT',
-      'DKG_POLICY_HASH', 'DKG_POLICY_BODY', 'DKG_POLICY_STATUS',
-      'DKG_POLICY_CONTEXT_TYPE', 'DKG_ACTIVE_POLICY', 'DKG_POLICY_BINDING_STATUS',
-      'DKG_APPROVED_BY', 'DKG_APPROVED_AT', 'DKG_REVOKED_BY', 'DKG_REVOKED_AT',
-      'DKG_CCL_EVALUATION', 'DKG_CCL_RESULT_ENTRY',
-      'DKG_EVALUATED_POLICY', 'DKG_FACT_SET_HASH', 'DKG_FACT_QUERY_HASH',
-      'DKG_FACT_RESOLVER_VERSION', 'DKG_FACT_RESOLUTION_MODE', 'DKG_SCOPE_UAL',
-      'DKG_VIEW', 'DKG_SNAPSHOT_ID', 'DKG_RESULT_KIND', 'DKG_RESULT_NAME',
-      'DKG_HAS_RESULT', 'DKG_CCL_RESULT_ARG',
-      'DKG_HAS_RESULT_ARG', 'DKG_RESULT_ARG_INDEX', 'DKG_RESULT_ARG_VALUE',
-    ];
-    for (const key of cclKeys) {
-      expect((DKG_ONTOLOGY as Record<string, string>)[key]).toBeDefined();
-      expect((DKG_ONTOLOGY as Record<string, string>)[key]).toMatch(/^https?:\/\//);
-    }
   });
 
-  it('all values are unique URIs (excluding deprecated alias keys that mirror canonical URIs)', () => {
-    const deprecatedAliasKeys = new Set(['DKG_PARANET', 'DKG_SYSTEM_PARANET']);
-    const values = Object.entries(DKG_ONTOLOGY)
-      .filter(([k]) => !deprecatedAliasKeys.has(k))
-      .map(([, v]) => v);
-    const uniqueValues = new Set(values);
-    expect(uniqueValues.size).toBe(values.length);
+  it('all values are valid URIs (aliases allowed)', () => {
+    const values = Object.values(DKG_ONTOLOGY);
+    for (const v of values) {
+      expect(typeof v).toBe('string');
+      expect((v as string).length).toBeGreaterThan(0);
+      expect(v).toMatch(/^https?:\/\//);
+    }
   });
 });

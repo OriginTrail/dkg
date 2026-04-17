@@ -492,9 +492,8 @@ export class Helpers {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
-  // Returns the next nonce for the deployer on live (non-Hardhat/localhost) networks,
-  // using a single in-process counter so hardhat-deploy txs and ethers txs
-  // share the same sequence and never conflict.
+  // Returns the next nonce for the deployer, using a single in-process
+  // counter so hardhat-deploy txs and ethers txs share the same sequence.
   private async _nextNonce(deployer: string): Promise<number | undefined> {
     const isLive =
       this.hre.network.name !== 'hardhat' &&

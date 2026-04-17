@@ -1,10 +1,24 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, beforeAll, afterAll } from 'vitest';
 import { DKGAgent } from '../src/index.js';
 import { DKGNode } from '@origintrail-official/dkg-core';
-import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
+import { mintTokens } from '../../chain/test/hardhat-harness.js';
+import { ethers } from 'ethers';
 
 const agents: DKGAgent[] = [];
 const nodes: DKGNode[] = [];
+
+let _fileSnapshot: string;
+beforeAll(async () => {
+  _fileSnapshot = await takeSnapshot();
+  const { hubAddress } = getSharedContext();
+  const provider = createProvider();
+  const coreOp = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+  await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, coreOp.address, ethers.parseEther('50000000'));
+});
+afterAll(async () => {
+  await revertSnapshot(_fileSnapshot);
+});
 
 afterEach(async () => {
   for (const a of agents) {
@@ -38,7 +52,7 @@ describe('Two-Agent E2E', () => {
         pricePerCall: 1.0,
         handler: async () => ({ success: true }),
       }],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     agents.push(agentA);
     await agentA.start();
@@ -52,7 +66,7 @@ describe('Two-Agent E2E', () => {
         pricePerCall: 0.5,
         handler: async () => ({ success: true }),
       }],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     agents.push(agentB);
     await agentB.start();
@@ -86,12 +100,12 @@ describe('Two-Agent E2E', () => {
 
   it('agents exchange chat messages', async () => {
     const agentA = await DKGAgent.create({
-      name: 'ChatA', listenPort: 0, skills: [], chainAdapter: new MockChainAdapter(),
+      name: 'ChatA', listenPort: 0, skills: [], chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     agents.push(agentA);
 
     const agentB = await DKGAgent.create({
-      name: 'ChatB', listenPort: 0, skills: [], chainAdapter: new MockChainAdapter(),
+      name: 'ChatB', listenPort: 0, skills: [], chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     agents.push(agentB);
 
@@ -121,7 +135,7 @@ describe('Two-Agent E2E', () => {
 
   it('chat to unknown peer fails gracefully', async () => {
     const agent = await DKGAgent.create({
-      name: 'LonelyBot', listenPort: 0, skills: [], chainAdapter: new MockChainAdapter(),
+      name: 'LonelyBot', listenPort: 0, skills: [], chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     agents.push(agent);
     await agent.start();
@@ -133,7 +147,7 @@ describe('Two-Agent E2E', () => {
 
   it('agents publish and query knowledge in a custom paranet', async () => {
     const agentA = await DKGAgent.create({
-      name: 'KnowledgeA', listenPort: 0, skills: [], chainAdapter: new MockChainAdapter(),
+      name: 'KnowledgeA', listenPort: 0, skills: [], chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     agents.push(agentA);
     await agentA.start();
@@ -179,7 +193,7 @@ describe('Relay E2E', () => {
       listenPort: 0,
       skills: [],
       relayPeers: [relayAddr],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     agents.push(agentA);
 
@@ -188,7 +202,7 @@ describe('Relay E2E', () => {
       listenPort: 0,
       skills: [],
       relayPeers: [relayAddr],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     agents.push(agentB);
 
@@ -237,7 +251,7 @@ describe('Relay E2E', () => {
       listenHost: '127.0.0.1',
       skills: [],
       relayPeers: [relayAddr],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     agents.push(agentA);
 
@@ -247,7 +261,7 @@ describe('Relay E2E', () => {
       listenHost: '127.0.0.1',
       skills: [],
       relayPeers: [relayAddr],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     agents.push(agentB);
 

@@ -2,14 +2,10 @@
  * Unit tests for sim-engine: devnetAuthTokenPath, fmtError, and HTTP handler.
  * E2E test (when devnet is running) is in sim-engine.e2e.test.ts.
  */
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import { Readable } from 'node:stream';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { devnetAuthTokenPath, fmtError, handleSimRequest } from '../src/server/sim-engine.js';
-
-// ---------------------------------------------------------------------------
-// Helpers: mock req/res for handleSimRequest
-// ---------------------------------------------------------------------------
 
 function mockReq(options: { url: string; method: string; body?: string }): IncomingMessage {
   const req = Object.assign(
@@ -22,6 +18,9 @@ function mockReq(options: { url: string; method: string; body?: string }): Incom
   }
   return req;
 }
+
+const noop = (() => {}) as any;
+const noopRet = ((v?: any) => v) as any;
 
 function mockRes(): ServerResponse & { statusCode: number; headers: Record<string, string>; body: string } {
   const chunks: string[] = [];
@@ -46,24 +45,24 @@ function mockRes(): ServerResponse & { statusCode: number; headers: Record<strin
       this.body = chunks.join('');
       return this;
     },
-    setHeader: vi.fn(),
-    getHeader: vi.fn(),
-    removeHeader: vi.fn(),
-    hasHeader: vi.fn(),
-    getHeaders: vi.fn(() => ({})),
-    flushHeaders: vi.fn(),
-    getHeaderNames: vi.fn(() => []),
-    addTrailers: vi.fn(),
+    setHeader: noop,
+    getHeader: noop,
+    removeHeader: noop,
+    hasHeader: () => false,
+    getHeaders: () => ({}),
+    flushHeaders: noop,
+    getHeaderNames: () => [] as string[],
+    addTrailers: noop,
     finished: false,
     writableEnded: false,
     writable: true,
     destroyed: false,
-    on: vi.fn(),
-    once: vi.fn(),
-    emit: vi.fn(),
-    off: vi.fn(),
-    removeAllListeners: vi.fn(),
-    setTimeout: vi.fn(),
+    on: noopRet,
+    once: noopRet,
+    emit: () => false,
+    off: noopRet,
+    removeAllListeners: noopRet,
+    setTimeout: noop,
   } as unknown as ServerResponse & { statusCode: number; headers: Record<string, string>; body: string };
 }
 

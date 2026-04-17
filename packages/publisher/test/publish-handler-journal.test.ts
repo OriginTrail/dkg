@@ -1,7 +1,7 @@
 /**
  * PublishHandler journal restore / expiry paths (tentative publish persistence).
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { ethers } from 'ethers';
 import { PublishHandler } from '../src/publish-handler.js';
 import type { JournalEntry } from '../src/publish-journal.js';
@@ -10,11 +10,11 @@ const TENTATIVE_MS = 60 * 60 * 1000;
 
 function makeStore() {
   return {
-    query: vi.fn().mockResolvedValue({ type: 'bindings' as const, bindings: [] }),
-    insert: vi.fn(),
-    delete: vi.fn(),
-    deleteByPattern: vi.fn().mockResolvedValue(0),
-    deleteBySubjectPrefix: vi.fn().mockResolvedValue(0),
+    query: async () => ({ type: 'bindings' as const, bindings: [] }),
+    insert: async () => {},
+    delete: async () => {},
+    deleteByPattern: async () => 0,
+    deleteBySubjectPrefix: async () => 0,
   };
 }
 
@@ -35,7 +35,7 @@ function baseEntry(overrides: Partial<JournalEntry> = {}): JournalEntry {
 
 describe('PublishHandler.restorePendingPublishes', () => {
   let store: ReturnType<typeof makeStore>;
-  const bus = { emit: vi.fn(), on: vi.fn(), off: vi.fn(), once: vi.fn() } as any;
+  const bus = { emit: () => {}, on: () => {}, off: () => {}, once: () => {} } as any;
 
   beforeEach(() => {
     store = makeStore();
@@ -47,15 +47,18 @@ describe('PublishHandler.restorePendingPublishes', () => {
   });
 
   it('returns 0 when journal load throws', async () => {
-    const journal = { load: vi.fn().mockRejectedValue(new Error('disk')), save: vi.fn() };
+    const journal = {
+      load: async () => { throw new Error('disk'); },
+      save: async () => {},
+    };
     const h = new PublishHandler(store as any, bus, { journal: journal as any });
     expect(await h.restorePendingPublishes()).toBe(0);
   });
 
   it('restores a non-expired entry into pending state', async () => {
     const journal = {
-      load: vi.fn().mockResolvedValue([baseEntry()]),
-      save: vi.fn().mockResolvedValue(undefined),
+      load: async () => [baseEntry()],
+      save: async () => {},
     };
     const h = new PublishHandler(store as any, bus, { journal: journal as any });
     const n = await h.restorePendingPublishes();
@@ -66,8 +69,8 @@ describe('PublishHandler.restorePendingPublishes', () => {
   it('skips entries already present in pending', async () => {
     const entry = baseEntry();
     const journal = {
-      load: vi.fn().mockResolvedValue([entry]),
-      save: vi.fn().mockResolvedValue(undefined),
+      load: async () => [entry],
+      save: async () => {},
     };
     const h = new PublishHandler(store as any, bus, { journal: journal as any });
     expect(await h.restorePendingPublishes()).toBe(1);
@@ -76,27 +79,33 @@ describe('PublishHandler.restorePendingPublishes', () => {
   });
 
   it('skips expired journal entries and re-persists journal', async () => {
+    let saveCalled = false;
     const journal = {
-      load: vi.fn().mockResolvedValue([
+      load: async () => [
         baseEntry({ createdAt: Date.now() - TENTATIVE_MS - 60_000 }),
-      ]),
-      save: vi.fn().mockResolvedValue(undefined),
+      ],
+      save: async () => { saveCalled = true; },
     };
     const h = new PublishHandler(store as any, bus, { journal: journal as any });
     expect(await h.restorePendingPublishes()).toBe(0);
     expect(h.hasPendingPublishes).toBe(false);
-    await vi.waitFor(() => expect(journal.save).toHaveBeenCalled());
+    // Give async save a tick to complete
+    await new Promise(r => setTimeout(r, 50));
+    expect(saveCalled).toBe(true);
   });
 
   it('skips malformed merkle / id fields and re-persists journal', async () => {
+    let saveCalled = false;
     const journal = {
-      load: vi.fn().mockResolvedValue([
+      load: async () => [
         baseEntry({ expectedMerkleRoot: '0xnotvalid', expectedStartKAId: '1', expectedEndKAId: '2' }),
-      ]),
-      save: vi.fn().mockResolvedValue(undefined),
+      ],
+      save: async () => { saveCalled = true; },
     };
     const h = new PublishHandler(store as any, bus, { journal: journal as any });
     expect(await h.restorePendingPublishes()).toBe(0);
-    await vi.waitFor(() => expect(journal.save).toHaveBeenCalled());
+    expect(h.hasPendingPublishes).toBe(false);
+    await new Promise(r => setTimeout(r, 50));
+    expect(saveCalled).toBe(true);
   });
 });

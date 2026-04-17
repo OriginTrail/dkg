@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, beforeAll, afterAll } from 'vitest';
 import {
   DKGNode,
   ProtocolRouter,
@@ -7,17 +7,18 @@ import {
   PROTOCOL_ACCESS,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGPublisher } from '../src/dkg-publisher.js';
 import { AccessHandler } from '../src/access-handler.js';
 import { AccessClient } from '../src/access-client.js';
 import { multiaddr } from '@multiformats/multiaddr';
 import { ethers } from 'ethers';
+import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, createTestContextGraph, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
+import { mintTokens } from '../../chain/test/hardhat-harness.js';
 
-const PARANET = 'test-access';
-const GRAPH = `did:dkg:context-graph:${PARANET}`;
+let PARANET = 'test-access';
+let GRAPH = `did:dkg:context-graph:${PARANET}`;
 const ENTITY = 'did:dkg:agent:TestBot';
-const TEST_WALLET = ethers.Wallet.createRandom();
 
 function q(s: string, p: string, o: string, g = GRAPH): Quad {
   return { subject: s, predicate: p, object: o, graph: g };
@@ -25,6 +26,21 @@ function q(s: string, p: string, o: string, g = GRAPH): Quad {
 
 describe('Access Protocol', () => {
   const nodes: DKGNode[] = [];
+
+  let _fileSnapshot: string;
+  beforeAll(async () => {
+    _fileSnapshot = await takeSnapshot();
+    const { hubAddress } = getSharedContext();
+    const provider = createProvider();
+    const coreOp = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+    await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, coreOp.address, ethers.parseEther('50000000'));
+    const cgId = await createTestContextGraph();
+    PARANET = String(cgId);
+    GRAPH = `did:dkg:context-graph:${PARANET}`;
+  });
+  afterAll(async () => {
+    await revertSnapshot(_fileSnapshot);
+  });
 
   afterEach(async () => {
     for (const n of nodes) {
@@ -58,7 +74,7 @@ describe('Access Protocol', () => {
       allowedPeers?: string[];
     },
   ) {
-    const chain = new MockChainAdapter('mock:31337', TEST_WALLET.address);
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const bus = new TypedEventBus();
     const keypair = await generateEd25519Keypair();
 
@@ -67,8 +83,8 @@ describe('Access Protocol', () => {
       chain,
       eventBus: bus,
       keypair,
-      publisherPrivateKey: TEST_WALLET.privateKey,
-      publisherNodeIdentityId: 1n,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
 
     const result = await publisher.publish({
@@ -307,7 +323,7 @@ describe('Access Protocol', () => {
 
   it('rejects publish when allowList policy is set without allowed peers', async () => {
     const store = new OxigraphStore();
-    const chain = new MockChainAdapter('mock:31337', TEST_WALLET.address);
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const bus = new TypedEventBus();
     const keypair = await generateEd25519Keypair();
     const publisher = new DKGPublisher({
@@ -315,8 +331,8 @@ describe('Access Protocol', () => {
       chain,
       eventBus: bus,
       keypair,
-      publisherPrivateKey: TEST_WALLET.privateKey,
-      publisherNodeIdentityId: 1n,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
 
     await expect(

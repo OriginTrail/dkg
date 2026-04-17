@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { DkgNodePlugin } from '../src/DkgNodePlugin.js';
 import type { OpenClawPluginApi, OpenClawTool } from '../src/types.js';
 
@@ -26,16 +26,31 @@ function findTool(name: string, daemonUrl = 'http://localhost:9200') {
   return tools.find(t => t.name === name)!;
 }
 
+function setupFetchOverride() {
+  const original = globalThis.fetch;
+  const calls: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
+  const responses: Array<Response | Error> = [];
+  let idx = 0;
+
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    calls.push([input, init]);
+    const r = responses[idx++];
+    if (r instanceof Error) throw r;
+    return r;
+  }) as typeof fetch;
+
+  return {
+    calls,
+    addResponses(...resps: Array<Response | Error>) { responses.push(...resps); },
+    restore() { globalThis.fetch = original; },
+  };
+}
+
 describe('dkg_list_context_graphs tool', () => {
-  let fetchSpy: ReturnType<typeof vi.spyOn>;
+  let ft: ReturnType<typeof setupFetchOverride>;
 
-  beforeEach(() => {
-    fetchSpy = vi.spyOn(globalThis, 'fetch');
-  });
-
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
+  beforeEach(() => { ft = setupFetchOverride(); });
+  afterEach(() => { ft.restore(); });
 
   it('is present in the registered tools list', () => {
     const plugin = new DkgNodePlugin();
@@ -47,7 +62,7 @@ describe('dkg_list_context_graphs tool', () => {
   });
 
   it('returns contextGraphs array and count on success', async () => {
-    fetchSpy.mockResolvedValueOnce(
+    ft.addResponses(
       new Response(JSON.stringify({ contextGraphs: SAMPLE_CONTEXT_GRAPHS }), { status: 200 }),
     );
 
@@ -57,11 +72,11 @@ describe('dkg_list_context_graphs tool', () => {
 
     expect(parsed.contextGraphs).toEqual(SAMPLE_CONTEXT_GRAPHS);
     expect(parsed.count).toBe(2);
-    expect(fetchSpy.mock.calls[0][0]).toBe('http://localhost:9200/api/context-graph/list');
+    expect(ft.calls[0][0]).toBe('http://localhost:9200/api/context-graph/list');
   });
 
   it('returns error when daemon request fails', async () => {
-    fetchSpy.mockRejectedValueOnce(new Error('network failure'));
+    ft.addResponses(new Error('network failure'));
 
     const tool = findTool('dkg_list_context_graphs');
     const result = await tool.execute('call-2', {});
@@ -71,7 +86,7 @@ describe('dkg_list_context_graphs tool', () => {
   });
 
   it('returns helpful error when daemon is not running', async () => {
-    fetchSpy.mockRejectedValueOnce(new Error('fetch failed: ECONNREFUSED'));
+    ft.addResponses(new Error('fetch failed: ECONNREFUSED'));
 
     const tool = findTool('dkg_list_context_graphs');
     const result = await tool.execute('call-3', {});
@@ -83,25 +98,16 @@ describe('dkg_list_context_graphs tool', () => {
 });
 
 describe('dkg_status tool', () => {
-  let fetchSpy: ReturnType<typeof vi.spyOn>;
+  let ft: ReturnType<typeof setupFetchOverride>;
 
-  beforeEach(() => {
-    fetchSpy = vi.spyOn(globalThis, 'fetch');
-  });
-
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
+  beforeEach(() => { ft = setupFetchOverride(); });
+  afterEach(() => { ft.restore(); });
 
   it('merges daemon status and wallet addresses', async () => {
-    // getFullStatus + getWallets are called in parallel
-    fetchSpy
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify({ peerId: '12D3KooW...', uptime: 42 }), { status: 200 }),
-      )
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify({ wallets: ['0xABC', '0xDEF'] }), { status: 200 }),
-      );
+    ft.addResponses(
+      new Response(JSON.stringify({ peerId: '12D3KooW...', uptime: 42 }), { status: 200 }),
+      new Response(JSON.stringify({ wallets: ['0xABC', '0xDEF'] }), { status: 200 }),
+    );
 
     const tool = findTool('dkg_status');
     const result = await tool.execute('call-1', {});
@@ -113,11 +119,10 @@ describe('dkg_status tool', () => {
   });
 
   it('returns empty wallets when wallet endpoint fails', async () => {
-    fetchSpy
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify({ peerId: '12D3KooW...' }), { status: 200 }),
-      )
-      .mockRejectedValueOnce(new Error('wallets endpoint down'));
+    ft.addResponses(
+      new Response(JSON.stringify({ peerId: '12D3KooW...' }), { status: 200 }),
+      new Error('wallets endpoint down'),
+    );
 
     const tool = findTool('dkg_status');
     const result = await tool.execute('call-2', {});
@@ -128,7 +133,7 @@ describe('dkg_status tool', () => {
   });
 
   it('returns daemon error when status endpoint fails', async () => {
-    fetchSpy.mockRejectedValueOnce(new Error('fetch failed: ECONNREFUSED'));
+    ft.addResponses(new Error('fetch failed: ECONNREFUSED'));
 
     const tool = findTool('dkg_status');
     const result = await tool.execute('call-3', {});
@@ -139,20 +144,16 @@ describe('dkg_status tool', () => {
 });
 
 describe('dkg_publish tool', () => {
-  let fetchSpy: ReturnType<typeof vi.spyOn>;
+  let ft: ReturnType<typeof setupFetchOverride>;
 
-  beforeEach(() => {
-    fetchSpy = vi.spyOn(globalThis, 'fetch');
-  });
-
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
+  beforeEach(() => { ft = setupFetchOverride(); });
+  afterEach(() => { ft.restore(); });
 
   it('publishes quads array with literal objects', async () => {
-    fetchSpy
-      .mockResolvedValueOnce(new Response(JSON.stringify({ triplesWritten: 2 }), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ kcId: 'kc-123', kas: [{ tokenId: '1', rootEntity: 'urn:x' }] }), { status: 200 }));
+    ft.addResponses(
+      new Response(JSON.stringify({ triplesWritten: 2 }), { status: 200 }),
+      new Response(JSON.stringify({ kcId: 'kc-123', kas: [{ tokenId: '1', rootEntity: 'urn:x' }] }), { status: 200 }),
+    );
 
     const tool = findTool('dkg_publish');
     const quads = [
@@ -166,7 +167,7 @@ describe('dkg_publish tool', () => {
     expect(parsed.kaCount).toBe(1);
     expect(parsed.quadsPublished).toBe(2);
 
-    const writeBody = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
+    const writeBody = JSON.parse(ft.calls[0][1]?.body as string);
     expect(writeBody.contextGraphId).toBe('testing');
     expect(writeBody.quads).toHaveLength(2);
     expect(writeBody.quads[0].subject).toBe('https://example.org/wine');
@@ -174,9 +175,10 @@ describe('dkg_publish tool', () => {
   });
 
   it('publishes quads array with URI objects (auto-detected)', async () => {
-    fetchSpy
-      .mockResolvedValueOnce(new Response(JSON.stringify({ triplesWritten: 1 }), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ kcId: 'kc-uri', kas: [] }), { status: 200 }));
+    ft.addResponses(
+      new Response(JSON.stringify({ triplesWritten: 1 }), { status: 200 }),
+      new Response(JSON.stringify({ kcId: 'kc-uri', kas: [] }), { status: 200 }),
+    );
 
     const tool = findTool('dkg_publish');
     const quads = [
@@ -184,14 +186,15 @@ describe('dkg_publish tool', () => {
     ];
     const result = await tool.execute('call-uri', { context_graph_id: 'testing', quads });
 
-    const writeBody = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
+    const writeBody = JSON.parse(ft.calls[0][1]?.body as string);
     expect(writeBody.quads[0].object).toBe('https://schema.org/Product');
   });
 
   it('handles mixed URI and literal objects', async () => {
-    fetchSpy
-      .mockResolvedValueOnce(new Response(JSON.stringify({ triplesWritten: 3 }), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ kcId: 'kc-mix', kas: [] }), { status: 200 }));
+    ft.addResponses(
+      new Response(JSON.stringify({ triplesWritten: 3 }), { status: 200 }),
+      new Response(JSON.stringify({ kcId: 'kc-mix', kas: [] }), { status: 200 }),
+    );
 
     const tool = findTool('dkg_publish');
     const quads = [
@@ -204,7 +207,7 @@ describe('dkg_publish tool', () => {
 
     expect(parsed.quadsPublished).toBe(3);
 
-    const writeBody = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
+    const writeBody = JSON.parse(ft.calls[0][1]?.body as string);
     expect(writeBody.quads[0].object).toBe('https://schema.org/Product');
     expect(writeBody.quads[1].object).toBe('"Cabernet"');
     expect(writeBody.quads[2].object).toBe('urn:winemaker:alice');
@@ -216,7 +219,7 @@ describe('dkg_publish tool', () => {
     const parsed = JSON.parse(result.content[0].text);
 
     expect(parsed.error).toContain('non-empty array');
-    expect(fetchSpy).toHaveBeenCalledTimes(0);
+    expect(ft.calls).toHaveLength(0);
   });
 
   it('returns error for missing quads', async () => {
@@ -228,9 +231,10 @@ describe('dkg_publish tool', () => {
   });
 
   it('escapes quotes in literal object values', async () => {
-    fetchSpy
-      .mockResolvedValueOnce(new Response(JSON.stringify({ triplesWritten: 1 }), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ kcId: 'kc-esc', kas: [] }), { status: 200 }));
+    ft.addResponses(
+      new Response(JSON.stringify({ triplesWritten: 1 }), { status: 200 }),
+      new Response(JSON.stringify({ kcId: 'kc-esc', kas: [] }), { status: 200 }),
+    );
 
     const tool = findTool('dkg_publish');
     const quads = [
@@ -238,14 +242,15 @@ describe('dkg_publish tool', () => {
     ];
     const result = await tool.execute('call-esc', { context_graph_id: 'testing', quads });
 
-    const writeBody = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
+    const writeBody = JSON.parse(ft.calls[0][1]?.body as string);
     expect(writeBody.quads[0].object).toBe('"She said \\"hello\\""');
   });
 
   it('passes optional graph field', async () => {
-    fetchSpy
-      .mockResolvedValueOnce(new Response(JSON.stringify({ triplesWritten: 1 }), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ kcId: 'kc-graph', kas: [] }), { status: 200 }));
+    ft.addResponses(
+      new Response(JSON.stringify({ triplesWritten: 1 }), { status: 200 }),
+      new Response(JSON.stringify({ kcId: 'kc-graph', kas: [] }), { status: 200 }),
+    );
 
     const tool = findTool('dkg_publish');
     const quads = [
@@ -253,24 +258,19 @@ describe('dkg_publish tool', () => {
     ];
     const result = await tool.execute('call-graph', { context_graph_id: 'testing', quads });
 
-    const writeBody = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
+    const writeBody = JSON.parse(ft.calls[0][1]?.body as string);
     expect(writeBody.quads[0].graph).toBe('urn:my-graph');
   });
 });
 
 describe('dkg_query tool', () => {
-  let fetchSpy: ReturnType<typeof vi.spyOn>;
+  let ft: ReturnType<typeof setupFetchOverride>;
 
-  beforeEach(() => {
-    fetchSpy = vi.spyOn(globalThis, 'fetch');
-  });
-
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
+  beforeEach(() => { ft = setupFetchOverride(); });
+  afterEach(() => { ft.restore(); });
 
   it('sends SPARQL query with optional context_graph_id', async () => {
-    fetchSpy.mockResolvedValueOnce(
+    ft.addResponses(
       new Response(JSON.stringify({ result: { bindings: [{ s: 'urn:x' }] } }), { status: 200 }),
     );
 
@@ -280,58 +280,53 @@ describe('dkg_query tool', () => {
 
     expect(parsed.result.bindings).toHaveLength(1);
 
-    const body = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
+    const body = JSON.parse(ft.calls[0][1]?.body as string);
     expect(body.sparql).toContain('SELECT');
     expect(body.contextGraphId).toBe('testing');
   });
 
   it('omits contextGraphId when not provided', async () => {
-    fetchSpy.mockResolvedValueOnce(
+    ft.addResponses(
       new Response(JSON.stringify({ result: { bindings: [] } }), { status: 200 }),
     );
 
     const tool = findTool('dkg_query');
     await tool.execute('call-2', { sparql: 'SELECT * WHERE { ?s ?p ?o }' });
 
-    const body = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
+    const body = JSON.parse(ft.calls[0][1]?.body as string);
     expect(body.contextGraphId).toBeUndefined();
   });
 
   it('passes includeSharedMemory when include_shared_memory is "true"', async () => {
-    fetchSpy.mockResolvedValueOnce(
+    ft.addResponses(
       new Response(JSON.stringify({ result: { bindings: [] } }), { status: 200 }),
     );
 
     const tool = findTool('dkg_query');
     await tool.execute('call-3', { sparql: 'SELECT * WHERE { ?s ?p ?o }', include_shared_memory: 'true' });
 
-    const body = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
+    const body = JSON.parse(ft.calls[0][1]?.body as string);
     expect(body.includeSharedMemory).toBe(true);
   });
 
   it('omits includeSharedMemory when include_shared_memory is not set', async () => {
-    fetchSpy.mockResolvedValueOnce(
+    ft.addResponses(
       new Response(JSON.stringify({ result: { bindings: [] } }), { status: 200 }),
     );
 
     const tool = findTool('dkg_query');
     await tool.execute('call-4', { sparql: 'SELECT * WHERE { ?s ?p ?o }' });
 
-    const body = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
+    const body = JSON.parse(ft.calls[0][1]?.body as string);
     expect(body.includeSharedMemory).toBeUndefined();
   });
 });
 
 describe('dkg_context_graph_create tool', () => {
-  let fetchSpy: ReturnType<typeof vi.spyOn>;
+  let ft: ReturnType<typeof setupFetchOverride>;
 
-  beforeEach(() => {
-    fetchSpy = vi.spyOn(globalThis, 'fetch');
-  });
-
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
+  beforeEach(() => { ft = setupFetchOverride(); });
+  afterEach(() => { ft.restore(); });
 
   it('is present with required param name only', () => {
     const plugin = new DkgNodePlugin();
@@ -342,7 +337,7 @@ describe('dkg_context_graph_create tool', () => {
   });
 
   it('creates a context graph with explicit id', async () => {
-    fetchSpy.mockResolvedValueOnce(
+    ft.addResponses(
       new Response(JSON.stringify({ created: 'my-research', uri: 'did:dkg:context-graph:my-research' }), { status: 200 }),
     );
 
@@ -353,14 +348,14 @@ describe('dkg_context_graph_create tool', () => {
     expect(parsed.created).toBe('my-research');
     expect(parsed.uri).toBe('did:dkg:context-graph:my-research');
 
-    const body = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
+    const body = JSON.parse(ft.calls[0][1]?.body as string);
     expect(body.id).toBe('my-research');
     expect(body.name).toBe('My Research');
     expect(body.description).toBe('A context graph');
   });
 
   it('auto-generates id from name when id is omitted', async () => {
-    fetchSpy.mockResolvedValueOnce(
+    ft.addResponses(
       new Response(JSON.stringify({ created: 'my-research-paranet', uri: 'did:dkg:context-graph:my-research-paranet' }), { status: 200 }),
     );
 
@@ -370,20 +365,20 @@ describe('dkg_context_graph_create tool', () => {
 
     expect(parsed.created).toBe('my-research-paranet');
 
-    const body = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
+    const body = JSON.parse(ft.calls[0][1]?.body as string);
     expect(body.id).toBe('my-research-paranet');
     expect(body.name).toBe('My Research Paranet');
   });
 
   it('strips special characters when auto-generating id', async () => {
-    fetchSpy.mockResolvedValueOnce(
+    ft.addResponses(
       new Response(JSON.stringify({ created: 'alice-s-data-2024', uri: 'did:dkg:context-graph:alice-s-data-2024' }), { status: 200 }),
     );
 
     const tool = findTool('dkg_context_graph_create');
     await tool.execute('call-special', { name: "Alice's Data (2024)" });
 
-    const body = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
+    const body = JSON.parse(ft.calls[0][1]?.body as string);
     expect(body.id).toBe('alice-s-data-2024');
   });
 
@@ -404,7 +399,7 @@ describe('dkg_context_graph_create tool', () => {
   });
 
   it('falls back to auto-generate when explicit id is whitespace-only', async () => {
-    fetchSpy.mockResolvedValueOnce(
+    ft.addResponses(
       new Response(JSON.stringify({ created: 'test', uri: 'did:dkg:context-graph:test' }), { status: 200 }),
     );
 
@@ -413,7 +408,7 @@ describe('dkg_context_graph_create tool', () => {
     const parsed = JSON.parse(result.content[0].text);
 
     expect(parsed.created).toBe('test');
-    const body = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
+    const body = JSON.parse(ft.calls[0][1]?.body as string);
     expect(body.id).toBe('test');
   });
 
@@ -434,7 +429,7 @@ describe('dkg_context_graph_create tool', () => {
   });
 
   it('accepts single-character explicit ID', async () => {
-    fetchSpy.mockResolvedValueOnce(
+    ft.addResponses(
       new Response(JSON.stringify({ created: 'x', uri: 'did:dkg:context-graph:x' }), { status: 200 }),
     );
 
@@ -446,7 +441,7 @@ describe('dkg_context_graph_create tool', () => {
   });
 
   it('returns daemon error on failure', async () => {
-    fetchSpy.mockRejectedValueOnce(new Error('fetch failed: ECONNREFUSED'));
+    ft.addResponses(new Error('fetch failed: ECONNREFUSED'));
 
     const tool = findTool('dkg_context_graph_create');
     const result = await tool.execute('call-8', { name: 'Test' });
@@ -457,15 +452,10 @@ describe('dkg_context_graph_create tool', () => {
 });
 
 describe('dkg_subscribe tool', () => {
-  let fetchSpy: ReturnType<typeof vi.spyOn>;
+  let ft: ReturnType<typeof setupFetchOverride>;
 
-  beforeEach(() => {
-    fetchSpy = vi.spyOn(globalThis, 'fetch');
-  });
-
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
+  beforeEach(() => { ft = setupFetchOverride(); });
+  afterEach(() => { ft.restore(); });
 
   it('is present with required param context_graph_id', () => {
     const plugin = new DkgNodePlugin();
@@ -476,7 +466,7 @@ describe('dkg_subscribe tool', () => {
   });
 
   it('subscribes and returns catchup job info', async () => {
-    fetchSpy.mockResolvedValueOnce(
+    ft.addResponses(
       new Response(JSON.stringify({
         subscribed: 'my-paranet',
         catchup: { jobId: 'job-1', status: 'queued', includeSharedMemory: true },
@@ -500,28 +490,23 @@ describe('dkg_subscribe tool', () => {
   });
 
   it('passes includeSharedMemory false when specified', async () => {
-    fetchSpy.mockResolvedValueOnce(
+    ft.addResponses(
       new Response(JSON.stringify({ subscribed: 'p1', catchup: { jobId: 'j', status: 'queued', includeSharedMemory: false } }), { status: 200 }),
     );
 
     const tool = findTool('dkg_subscribe');
     await tool.execute('call-3', { context_graph_id: 'p1', include_shared_memory: 'false' });
 
-    const body = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
+    const body = JSON.parse(ft.calls[0][1]?.body as string);
     expect(body.includeSharedMemory).toBe(false);
   });
 });
 
 describe('dkg_wallet_balances tool', () => {
-  let fetchSpy: ReturnType<typeof vi.spyOn>;
+  let ft: ReturnType<typeof setupFetchOverride>;
 
-  beforeEach(() => {
-    fetchSpy = vi.spyOn(globalThis, 'fetch');
-  });
-
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
+  beforeEach(() => { ft = setupFetchOverride(); });
+  afterEach(() => { ft.restore(); });
 
   it('is present with no required params', () => {
     const plugin = new DkgNodePlugin();
@@ -532,7 +517,7 @@ describe('dkg_wallet_balances tool', () => {
   });
 
   it('returns wallet balances from daemon', async () => {
-    fetchSpy.mockResolvedValueOnce(
+    ft.addResponses(
       new Response(JSON.stringify({
         wallets: ['0xabc'],
         balances: [{ address: '0xabc', eth: '1.5', trac: '1000.0', symbol: 'TRAC' }],
@@ -550,7 +535,7 @@ describe('dkg_wallet_balances tool', () => {
   });
 
   it('returns daemon error gracefully', async () => {
-    fetchSpy.mockRejectedValueOnce(new Error('fetch failed: ECONNREFUSED'));
+    ft.addResponses(new Error('fetch failed: ECONNREFUSED'));
 
     const tool = findTool('dkg_wallet_balances');
     const result = await tool.execute('call-2', {});
@@ -561,22 +546,18 @@ describe('dkg_wallet_balances tool', () => {
 });
 
 describe('dkg_publish SWM-first flow', () => {
-  let fetchSpy: ReturnType<typeof vi.spyOn>;
+  let ft: ReturnType<typeof setupFetchOverride>;
 
-  beforeEach(() => {
-    fetchSpy = vi.spyOn(globalThis, 'fetch');
-  });
-
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
+  beforeEach(() => { ft = setupFetchOverride(); });
+  afterEach(() => { ft.restore(); });
 
   const VALID_QUADS = [{ subject: 'urn:a', predicate: 'urn:b', object: 'c' }];
 
   it('writes to SWM then publishes from SWM', async () => {
-    fetchSpy
-      .mockResolvedValueOnce(new Response(JSON.stringify({ triplesWritten: 1 }), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ kcId: 'kc-1', kas: [] }), { status: 200 }));
+    ft.addResponses(
+      new Response(JSON.stringify({ triplesWritten: 1 }), { status: 200 }),
+      new Response(JSON.stringify({ kcId: 'kc-1', kas: [] }), { status: 200 }),
+    );
 
     const tool = findTool('dkg_publish');
     const result = await tool.execute('call-1', { context_graph_id: 'testing', quads: VALID_QUADS });
@@ -585,17 +566,18 @@ describe('dkg_publish SWM-first flow', () => {
     expect(parsed.kcId).toBe('kc-1');
     expect(parsed.quadsPublished).toBe(1);
 
-    expect(fetchSpy).toHaveBeenCalledTimes(2);
-    const writeUrl = fetchSpy.mock.calls[0][0] as string;
+    expect(ft.calls).toHaveLength(2);
+    const writeUrl = ft.calls[0][0] as string;
     expect(writeUrl).toContain('/api/shared-memory/write');
-    const pubUrl = fetchSpy.mock.calls[1][0] as string;
+    const pubUrl = ft.calls[1][0] as string;
     expect(pubUrl).toContain('/api/shared-memory/publish');
   });
 
   it('ignores unknown access_policy parameter gracefully', async () => {
-    fetchSpy
-      .mockResolvedValueOnce(new Response(JSON.stringify({ triplesWritten: 1 }), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ kcId: 'kc-2', kas: [] }), { status: 200 }));
+    ft.addResponses(
+      new Response(JSON.stringify({ triplesWritten: 1 }), { status: 200 }),
+      new Response(JSON.stringify({ kcId: 'kc-2', kas: [] }), { status: 200 }),
+    );
 
     const tool = findTool('dkg_publish');
     const result = await tool.execute('call-2', { context_graph_id: 'testing', quads: VALID_QUADS, access_policy: 'public' });
@@ -606,40 +588,34 @@ describe('dkg_publish SWM-first flow', () => {
 });
 
 describe('dkg_read_messages tool', () => {
-  let fetchSpy: ReturnType<typeof vi.spyOn>;
+  let ft: ReturnType<typeof setupFetchOverride>;
 
-  beforeEach(() => {
-    fetchSpy = vi.spyOn(globalThis, 'fetch');
-  });
-
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
+  beforeEach(() => { ft = setupFetchOverride(); });
+  afterEach(() => { ft.restore(); });
 
   it('passes peer, limit, and since filters', async () => {
-    fetchSpy.mockResolvedValueOnce(
+    ft.addResponses(
       new Response(JSON.stringify({ messages: [] }), { status: 200 }),
     );
 
     const tool = findTool('dkg_read_messages');
     await tool.execute('call-1', { peer: 'agent-bob', limit: '10', since: '1710000000000' });
 
-    const url = fetchSpy.mock.calls[0][0] as string;
+    const url = ft.calls[0][0] as string;
     expect(url).toContain('peer=agent-bob');
     expect(url).toContain('limit=10');
     expect(url).toContain('since=1710000000000');
   });
 
   it('ignores non-numeric limit and since values', async () => {
-    fetchSpy.mockResolvedValueOnce(
+    ft.addResponses(
       new Response(JSON.stringify({ messages: [] }), { status: 200 }),
     );
 
     const tool = findTool('dkg_read_messages');
     await tool.execute('call-2', { limit: 'abc', since: '' });
 
-    // Non-numeric values should not appear in URL
-    const url = fetchSpy.mock.calls[0][0] as string;
+    const url = ft.calls[0][0] as string;
     expect(url).not.toContain('limit=');
     expect(url).not.toContain('since=');
   });

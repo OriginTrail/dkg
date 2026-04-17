@@ -3137,6 +3137,59 @@ describe('Withdrawal request tests after further epochs', () => {
 
     // Initial state: current epoch is 7, last finalized is 6.
 
+    // -------------------------------------------------------------------
+    // Stabilize the RandomSampling KC pool before any `createChallenge()`
+    // -------------------------------------------------------------------
+    // `buildInitialRewardsState` leaves the CG populated with a mix of
+    // expired KCs (most have `numberOfEpochs` ∈ {1,3,5} created in epochs
+    // 2–6, so their `endEpoch` is ≤ 6) and a thin set of still-valid ones
+    // (`finalize-epoch-3` / `finalize-epoch-5` / `finalize-epoch-6`).
+    //
+    // The V10 picker in `RandomSampling._pickWeightedChallenge` draws a
+    // KC uniformly within the chosen CG and retries up to
+    // `MAX_KC_RETRIES = 10` times on expired hits. With ~3 valid out of
+    // ~8 KCs, the per-call miss probability is ~(5/8)^10 ≈ 0.93%. The
+    // `before all` below fires `createChallenge()` 8 times across
+    // epochs 7–8, so cumulative miss probability is ~7% — i.e. the run
+    // is legitimately flaky on any seed permutation. Whether the seed
+    // (`block.timestamp` / `block.difficulty`-derived) lands in the
+    // unlucky region depends on the hardhat config: the coverage lane
+    // (`pnpm test:coverage`) and the fast lane (`pnpm test` via
+    // `hardhat.node.config.ts`) produce different block-times and
+    // therefore different seeds, so v10-rc's slow lane happens to avoid
+    // the miss region while the fast PR lane does not.
+    //
+    // The contract's revert is intended behavior — it signals a
+    // genuinely empty eligible pool. The fix belongs here, in the test
+    // harness: top up the pool with several long-lived KCs so the
+    // picker's hit rate is overwhelming regardless of seed. Creating 5
+    // KCs with `numberOfEpochs = 20` during epoch 7 yields `endEpoch`
+    // = 26, keeping them valid through every proofing period this
+    // suite touches (up to epoch 10 in the later `D1 withdrawal flow`
+    // tests).
+    //
+    // This does not alter the rewards math the D1 tests assert on — the
+    // test body only checks withdrawal-sequencing semantics
+    // (`must claim all previous epoch rewards`), not per-epoch reward
+    // amounts, so extra KCs in the pool are observationally invisible
+    // to the assertions.
+    for (let i = 0; i < 5; i++) {
+      await createKnowledgeCollection(
+        accounts.kcCreator,
+        accounts.node1,
+        node1Id,
+        [accounts.node2, accounts.node3, accounts.node4],
+        [node2Id, node3Id, node4Id],
+        { KnowledgeCollection: KC, Token },
+        merkleRoot,
+        `d1-picker-stabilize-${i}`,
+        1,
+        chunkSize,
+        20,
+        toTRAC(100),
+      );
+    }
+
     // --- Epoch 7 ---
     console.log('\n⏳ Advancing through epoch 7 with proofs...');
     await advanceToNextProofingPeriod({ randomSampling: RandomSampling });

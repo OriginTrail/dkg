@@ -1,33 +1,54 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeAll, beforeEach, afterAll, afterEach, describe, expect, it } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { GraphManager } from '@origintrail-official/dkg-storage';
-import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter } from '@origintrail-official/dkg-chain';
 import { TypedEventBus, generateEd25519Keypair } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
 import { DKGPublisher } from '../src/index.js';
 import { validateLiftPublishPayload } from '../src/async-lift-validation.js';
 import { subtractFinalizedExactQuads } from '../src/async-lift-subtraction.js';
 import type { LiftValidationInput } from '../src/async-lift-validation.js';
+import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, createTestContextGraph, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
+import { mintTokens } from '../../chain/test/hardhat-harness.js';
 
 describe('subtractFinalizedExactQuads', () => {
   let store: OxigraphStore;
   let graphManager: GraphManager;
   let publisher: DKGPublisher;
-  const wallet = ethers.Wallet.createRandom();
+  let _testSnapshot: string;
+
+  let PARANET: string;
+  let _fileSnapshot: string;
+  beforeAll(async () => {
+    _fileSnapshot = await takeSnapshot();
+    const { hubAddress } = getSharedContext();
+    const provider = createProvider();
+    const coreOp = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+    await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, coreOp.address, ethers.parseEther('50000000'));
+    const cgId = await createTestContextGraph();
+    PARANET = cgId.toString();
+  });
+  afterAll(async () => {
+    await revertSnapshot(_fileSnapshot);
+  });
 
   beforeEach(async () => {
+    _testSnapshot = await takeSnapshot();
     store = new OxigraphStore();
     graphManager = new GraphManager(store);
-    const chain = new MockChainAdapter('mock:31337', wallet.address);
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const keypair = await generateEd25519Keypair();
     publisher = new DKGPublisher({
       store,
       chain,
       eventBus: new TypedEventBus(),
       keypair,
-      publisherPrivateKey: wallet.privateKey,
-      publisherNodeIdentityId: 1n,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
+  });
+  afterEach(async () => {
+    await revertSnapshot(_testSnapshot);
   });
 
   function baseInput(): LiftValidationInput {
@@ -36,7 +57,7 @@ describe('subtractFinalizedExactQuads', () => {
         swmId: 'swm-main',
         shareOperationId: 'swm-1',
         roots: ['urn:local:/rihana'],
-        contextGraphId: 'music-social',
+        contextGraphId: PARANET,
         namespace: 'aloha',
         scope: 'person-profile',
         transitionType: 'CREATE',
@@ -61,7 +82,7 @@ describe('subtractFinalizedExactQuads', () => {
     const authoritativePublic = [publishedNameQuad!];
 
     await publisher.publish({
-      contextGraphId: 'music-social',
+      contextGraphId: PARANET,
       quads: authoritativePublic,
       publisherPeerId: 'peer-1',
     });
@@ -74,15 +95,6 @@ describe('subtractFinalizedExactQuads', () => {
       resolved: validated.resolved,
     });
 
-    const removedPublic = validated.resolved.quads.filter(
-      (quad) => !result.resolved.quads.some((remaining) => JSON.stringify(remaining) === JSON.stringify(quad)),
-    );
-
-    console.log('Input public quads:', validated.resolved.quads);
-    console.log('Already finalized public quads:', authoritativePublic);
-    console.log('Removed public quads:', removedPublic);
-    console.log('Remaining public quads:', result.resolved.quads);
-
     expect(result.alreadyPublishedPublicCount).toBe(1);
     expect(result.alreadyPublishedPrivateCount).toBe(0);
     expect(result.resolved.quads).toEqual([genreQuad]);
@@ -94,7 +106,7 @@ describe('subtractFinalizedExactQuads', () => {
     const authoritativePrivate = validated.resolved.privateQuads;
 
     await publisher.publish({
-      contextGraphId: 'music-social',
+      contextGraphId: PARANET,
       quads: authoritativePublic,
       privateQuads: authoritativePrivate,
       publisherPeerId: 'peer-1',
@@ -108,15 +120,6 @@ describe('subtractFinalizedExactQuads', () => {
       resolved: validated.resolved,
     });
 
-    console.log('Input public quads:', validated.resolved.quads);
-    console.log('Input private quads:', validated.resolved.privateQuads);
-    console.log('Already finalized public quads:', authoritativePublic);
-    console.log('Already finalized private quads:', authoritativePrivate);
-    console.log('Removed public quads:', validated.resolved.quads);
-    console.log('Removed private quads:', validated.resolved.privateQuads);
-    console.log('Remaining public quads:', result.resolved.quads);
-    console.log('Remaining private quads:', result.resolved.privateQuads);
-
     expect(result.alreadyPublishedPublicCount).toBe(validated.resolved.quads.length);
     expect(result.alreadyPublishedPrivateCount).toBe(validated.resolved.privateQuads?.length ?? 0);
     expect(result.resolved.quads).toEqual([]);
@@ -125,7 +128,7 @@ describe('subtractFinalizedExactQuads', () => {
 
   it('does not subtract when the root is not confirmed even if the quad exists locally', async () => {
     const validated = validateLiftPublishPayload(baseInput());
-    const dataGraph = graphManager.dataGraphUri('music-social');
+    const dataGraph = graphManager.dataGraphUri(PARANET);
     await store.insert([
       { ...validated.resolved.quads[0]!, graph: dataGraph },
     ]);
@@ -184,7 +187,7 @@ describe('subtractFinalizedExactQuads', () => {
     const [rihanaQuad, mansonQuad] = validated.resolved.quads;
 
     await publisher.publish({
-      contextGraphId: 'music-social',
+      contextGraphId: PARANET,
       quads: [rihanaQuad!],
       publisherPeerId: 'peer-1',
     });

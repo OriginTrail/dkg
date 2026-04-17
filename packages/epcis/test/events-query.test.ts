@@ -1,14 +1,24 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { handleEventsQuery, EpcisQueryError, toEpcisEvent } from '../src/handlers.js';
 import type { QueryEngine } from '../src/types.js';
 
 const CONTEXT_GRAPH_ID = 'test-paranet';
 const BASE_PATH = '/api/epcis/events';
 
-function mockQueryEngine(bindings: Record<string, string>[] = []): QueryEngine {
-  return {
-    query: vi.fn().mockResolvedValue({ bindings }),
+interface QueryCall {
+  sparql: string;
+  opts: any;
+}
+
+function createTrackingQueryEngine(bindings: Record<string, string>[] = []): { engine: QueryEngine; calls: QueryCall[] } {
+  const calls: QueryCall[] = [];
+  const engine: QueryEngine = {
+    query: async (sparql: string, opts?: any) => {
+      calls.push({ sparql, opts });
+      return { bindings };
+    },
   };
+  return { engine, calls };
 }
 
 function makeBindings(overrides: Partial<Record<string, string>> = {}): Record<string, string> {
@@ -32,15 +42,12 @@ function makeBindings(overrides: Partial<Record<string, string>> = {}): Record<s
 }
 
 describe('handleEventsQuery', () => {
-  const defaultConfig = { contextGraphId: CONTEXT_GRAPH_ID, queryEngine: mockQueryEngine(), basePath: BASE_PATH };
-
   it('returns EPCISQueryDocument envelope with reconstructed events', async () => {
-    const engine = mockQueryEngine([makeBindings()]);
+    const { engine, calls } = createTrackingQueryEngine([makeBindings()]);
     const sp = new URLSearchParams('epc=urn:epc:id:sgtin:4012345.011111.1001');
 
-    const { body } = await handleEventsQuery(sp, { ...defaultConfig, queryEngine: engine });
+    const { body } = await handleEventsQuery(sp, { contextGraphId: CONTEXT_GRAPH_ID, queryEngine: engine, basePath: BASE_PATH });
 
-    // Envelope structure
     expect(body.type).toBe('EPCISQueryDocument');
     expect(body.schemaVersion).toBe('2.0');
     expect(body['@context']).toEqual([
@@ -48,13 +55,11 @@ describe('handleEventsQuery', () => {
       { dkg: 'http://dkg.io/ontology/' },
     ]);
 
-    // Query results body
     const queryResults = body.epcisBody.queryResults;
     expect(queryResults.queryName).toBe('SimpleEventQuery');
     const eventList = queryResults.resultsBody.eventList;
     expect(eventList).toHaveLength(1);
 
-    // First event is reconstructed
     const event = eventList[0];
     expect(event.type).toBe('ObjectEvent');
     expect(event['dkg:ual']).toBe('did:dkg:mock:31337/42');
@@ -62,15 +67,13 @@ describe('handleEventsQuery', () => {
     expect(event.readPoint).toEqual({ id: 'urn:epc:id:sgln:4012345.00001.0' });
     expect(event.bizLocation).toEqual({ id: 'urn:epc:id:sgln:4012345.00001.0' });
 
-    // Verify the query engine was called with contextGraphId
-    expect(engine.query).toHaveBeenCalledOnce();
-    const [sparql, opts] = (engine.query as ReturnType<typeof vi.fn>).mock.calls[0];
-    expect(sparql).toContain('GRAPH <did:dkg:context-graph:test-paranet>');
-    expect(opts).toEqual({ contextGraphId: CONTEXT_GRAPH_ID });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].sparql).toContain('GRAPH <did:dkg:context-graph:test-paranet>');
+    expect(calls[0].opts).toEqual({ contextGraphId: CONTEXT_GRAPH_ID });
   });
 
   it('returns multiple events in eventList', async () => {
-    const engine = mockQueryEngine([
+    const { engine } = createTrackingQueryEngine([
       makeBindings({
         event: 'urn:uuid:event-1',
         eventTime: '2024-03-01T08:00:00Z',
@@ -99,7 +102,7 @@ describe('handleEventsQuery', () => {
 
     const { body } = await handleEventsQuery(
       new URLSearchParams('bizStep=receiving'),
-      { ...defaultConfig, queryEngine: engine },
+      { contextGraphId: CONTEXT_GRAPH_ID, queryEngine: engine, basePath: BASE_PATH },
     );
 
     const eventList = body.epcisBody.queryResults.resultsBody.eventList;
@@ -124,7 +127,7 @@ describe('handleEventsQuery', () => {
   });
 
   it('allows no-filter query (returns recent events)', async () => {
-    const engine = mockQueryEngine([
+    const { engine, calls } = createTrackingQueryEngine([
       makeBindings({
         event: 'urn:uuid:event-1',
         ual: 'did:dkg:mock:no-filter-1',
@@ -142,7 +145,7 @@ describe('handleEventsQuery', () => {
 
     const { body } = await handleEventsQuery(
       new URLSearchParams(''),
-      { ...defaultConfig, queryEngine: engine },
+      { contextGraphId: CONTEXT_GRAPH_ID, queryEngine: engine, basePath: BASE_PATH },
     );
 
     expect(body.epcisBody.queryResults.resultsBody.eventList).toEqual([
@@ -158,16 +161,16 @@ describe('handleEventsQuery', () => {
         'dkg:ual': 'did:dkg:mock:no-filter-2',
       }),
     ]);
-    expect(engine.query).toHaveBeenCalledOnce();
+    expect(calls).toHaveLength(1);
   });
 
   it('throws EpcisQueryError with 400 when date range is invalid', async () => {
-    const engine = mockQueryEngine();
+    const { engine } = createTrackingQueryEngine();
 
     try {
       await handleEventsQuery(
         new URLSearchParams('epc=urn:test&from=2024-12-31T00:00:00Z&to=2024-01-01T00:00:00Z'),
-        { ...defaultConfig, queryEngine: engine },
+        { contextGraphId: CONTEXT_GRAPH_ID, queryEngine: engine, basePath: BASE_PATH },
       );
       expect.fail('should have thrown');
     } catch (err) {
@@ -178,68 +181,61 @@ describe('handleEventsQuery', () => {
   });
 
   it('passes eventType filter through to SPARQL query', async () => {
-    const engine = mockQueryEngine([makeBindings()]);
+    const { engine, calls } = createTrackingQueryEngine([makeBindings()]);
 
     await handleEventsQuery(
       new URLSearchParams('eventType=ObjectEvent'),
-      { ...defaultConfig, queryEngine: engine },
+      { contextGraphId: CONTEXT_GRAPH_ID, queryEngine: engine, basePath: BASE_PATH },
     );
 
-    const [sparql] = (engine.query as ReturnType<typeof vi.fn>).mock.calls[0];
-    expect(sparql).toContain('FILTER(?eventType = <https://gs1.github.io/EPCIS/ObjectEvent>)');
+    expect(calls[0].sparql).toContain('FILTER(?eventType = <https://gs1.github.io/EPCIS/ObjectEvent>)');
   });
 
   it('passes action filter through to SPARQL query via alias', async () => {
-    const engine = mockQueryEngine([makeBindings()]);
+    const { engine, calls } = createTrackingQueryEngine([makeBindings()]);
 
     await handleEventsQuery(
       new URLSearchParams('action=OBSERVE'),
-      { ...defaultConfig, queryEngine: engine },
+      { contextGraphId: CONTEXT_GRAPH_ID, queryEngine: engine, basePath: BASE_PATH },
     );
 
-    const [sparql] = (engine.query as ReturnType<typeof vi.fn>).mock.calls[0];
-    expect(sparql).toContain('FILTER(STR(?action) = "OBSERVE")');
+    expect(calls[0].sparql).toContain('FILTER(STR(?action) = "OBSERVE")');
   });
 
   it('passes disposition filter with shorthand normalization through to SPARQL', async () => {
-    const engine = mockQueryEngine([makeBindings()]);
+    const { engine, calls } = createTrackingQueryEngine([makeBindings()]);
 
     await handleEventsQuery(
       new URLSearchParams('disposition=in_transit'),
-      { ...defaultConfig, queryEngine: engine },
+      { contextGraphId: CONTEXT_GRAPH_ID, queryEngine: engine, basePath: BASE_PATH },
     );
 
-    const [sparql] = (engine.query as ReturnType<typeof vi.fn>).mock.calls[0];
-    expect(sparql).toContain('https://ref.gs1.org/cbv/Disp-in_transit');
+    expect(calls[0].sparql).toContain('https://ref.gs1.org/cbv/Disp-in_transit');
   });
 
   it('passes readPoint filter through to SPARQL query', async () => {
-    const engine = mockQueryEngine([makeBindings()]);
+    const { engine, calls } = createTrackingQueryEngine([makeBindings()]);
 
     await handleEventsQuery(
       new URLSearchParams('readPoint=urn:epc:id:sgln:4012345.00001.0'),
-      { ...defaultConfig, queryEngine: engine },
+      { contextGraphId: CONTEXT_GRAPH_ID, queryEngine: engine, basePath: BASE_PATH },
     );
 
-    const [sparql] = (engine.query as ReturnType<typeof vi.fn>).mock.calls[0];
-    expect(sparql).toContain('epcis:readPoint <urn:epc:id:sgln:4012345.00001.0>');
+    expect(calls[0].sparql).toContain('epcis:readPoint <urn:epc:id:sgln:4012345.00001.0>');
   });
 
   it('returns Link header when more pages exist (perPage+1 trick)', async () => {
-    // Engine returns 11 rows for perPage=10 → more pages exist
     const bindings = Array.from({ length: 11 }, (_, i) =>
       makeBindings({ event: `urn:uuid:event-${i}`, eventTime: `2024-03-${String(i + 1).padStart(2, '0')}T08:00:00Z` }),
     );
-    const engine = mockQueryEngine(bindings);
+    const { engine } = createTrackingQueryEngine(bindings);
 
     const { body, headers } = await handleEventsQuery(
       new URLSearchParams('perPage=10'),
-      { ...defaultConfig, queryEngine: engine },
+      { contextGraphId: CONTEXT_GRAPH_ID, queryEngine: engine, basePath: BASE_PATH },
     );
 
-    // Should return only 10 events (the extra row is discarded)
     expect(body.epcisBody.queryResults.resultsBody.eventList).toHaveLength(10);
-    // Link header should be present
     expect(headers?.link).toBeDefined();
     expect(headers!.link).toContain('rel="next"');
   });
@@ -248,28 +244,22 @@ describe('handleEventsQuery', () => {
     const bindings = Array.from({ length: 6 }, (_, i) =>
       makeBindings({ event: `urn:uuid:event-${i}` }),
     );
-    const engine = mockQueryEngine(bindings);
+    const { engine } = createTrackingQueryEngine(bindings);
 
     const { headers } = await handleEventsQuery(
       new URLSearchParams('epc=urn:test&bizStep=receiving&perPage=5'),
-      { ...defaultConfig, queryEngine: engine },
+      { contextGraphId: CONTEXT_GRAPH_ID, queryEngine: engine, basePath: BASE_PATH },
     );
 
     expect(headers?.link).toBeDefined();
     const link = headers!.link!;
-    // Should preserve original params
     expect(link).toContain('epc=urn');
     expect(link).toContain('bizStep=receiving');
-    // Should contain nextPageToken
     expect(link).toContain('nextPageToken=');
-    // Should use basePath
     expect(link).toContain(BASE_PATH);
-    // Should have rel="next"
     expect(link).toMatch(/^<.*>; rel="next"$/);
-    // Should NOT contain raw offset or perPage+1 internal details
     expect(link).not.toContain('offset=');
 
-    // Decode the token to verify it encodes the correct next offset
     const tokenMatch = link.match(/nextPageToken=([^&>]+)/);
     expect(tokenMatch).toBeTruthy();
     const decoded = atob(decodeURIComponent(tokenMatch![1]));
@@ -277,35 +267,31 @@ describe('handleEventsQuery', () => {
   });
 
   it('defaults to perPage=30 (requests 31 from SPARQL)', async () => {
-    const engine = mockQueryEngine([]);
+    const { engine, calls } = createTrackingQueryEngine([]);
 
     await handleEventsQuery(
       new URLSearchParams(''),
-      { ...defaultConfig, queryEngine: engine },
+      { contextGraphId: CONTEXT_GRAPH_ID, queryEngine: engine, basePath: BASE_PATH },
     );
 
-    const [sparql] = (engine.query as ReturnType<typeof vi.fn>).mock.calls[0];
-    // Default perPage=30, so the handler requests 31 (perPage+1)
-    expect(sparql).toContain('LIMIT 31');
-    expect(sparql).toContain('OFFSET 0');
+    expect(calls[0].sparql).toContain('LIMIT 31');
+    expect(calls[0].sparql).toContain('OFFSET 0');
   });
 
   it('omits Link header on last page (fewer than perPage+1 rows)', async () => {
-    // Engine returns 5 rows for perPage=10 → last page
     const bindings = Array.from({ length: 5 }, (_, i) =>
       makeBindings({ event: `urn:uuid:event-${i}` }),
     );
-    const engine = mockQueryEngine(bindings);
+    const { engine } = createTrackingQueryEngine(bindings);
 
     const { body, headers } = await handleEventsQuery(
       new URLSearchParams('perPage=10'),
-      { ...defaultConfig, queryEngine: engine },
+      { contextGraphId: CONTEXT_GRAPH_ID, queryEngine: engine, basePath: BASE_PATH },
     );
 
     expect(body.epcisBody.queryResults.resultsBody.eventList).toHaveLength(5);
     expect(headers).toBeUndefined();
   });
-
 });
 
 describe('toEpcisEvent', () => {
@@ -361,7 +347,6 @@ describe('toEpcisEvent', () => {
     });
     const event = toEpcisEvent(binding);
 
-    // Only type and eventTime should be present
     expect(event.type).toBe('ObjectEvent');
     expect(event.eventTime).toBe('2024-03-01T08:00:00.000Z');
     expect(event).not.toHaveProperty('epcList');
@@ -402,10 +387,9 @@ describe('toEpcisEvent', () => {
   });
 });
 
-// Remaining handler tests kept below
 describe('handleEventsQuery — validation', () => {
   it('does not call query engine when date range validation fails', async () => {
-    const engine = mockQueryEngine();
+    const { engine, calls } = createTrackingQueryEngine();
 
     await expect(
       handleEventsQuery(
@@ -414,6 +398,6 @@ describe('handleEventsQuery — validation', () => {
       ),
     ).rejects.toThrow();
 
-    expect(engine.query).not.toHaveBeenCalled();
+    expect(calls).toHaveLength(0);
   });
 });

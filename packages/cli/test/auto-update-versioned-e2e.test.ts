@@ -1,4 +1,5 @@
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { createServer, type Server } from 'node:http';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { mkdtemp, mkdir, writeFile, readFile, readlink, rm, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -17,6 +18,10 @@ describe.sequential('auto-update versioned e2e', { timeout: 30_000 }, () => {
   let tagPrerelease = '';
   let shaStable = '';
   let shaPrerelease = '';
+  let apiServer: Server;
+  let apiPort: number;
+  const origFetch = globalThis.fetch;
+  const origDkgHome = process.env.DKG_HOME;
 
   function git(cmd: string, cwd: string): string {
     return execSync(cmd, { cwd, encoding: 'utf-8', stdio: 'pipe' }).trim();
@@ -61,14 +66,13 @@ describe.sequential('auto-update versioned e2e', { timeout: 30_000 }, () => {
     slotA = join(releasesDirPath, 'a');
     slotB = join(releasesDirPath, 'b');
 
-    vi.stubEnv('DKG_HOME', dkgHome);
+    process.env.DKG_HOME = dkgHome;
     execSync(`git init --bare --initial-branch=main "${bareRepo}"`, { stdio: 'pipe' });
     execSync(`git clone "${bareRepo}" "${workDir}"`, { stdio: 'pipe' });
     git('git config user.email "test@example.com"', workDir);
     git('git config user.name "AutoUpdate E2E"', workDir);
     git('git checkout -B main', workDir);
 
-    // Initial baseline commit and slots setup.
     await writeFile(join(workDir, 'README.md'), 'fixture');
     git('git add -A', workDir);
     git('git commit -m "init"', workDir);
@@ -80,23 +84,45 @@ describe.sequential('auto-update versioned e2e', { timeout: 30_000 }, () => {
     await symlink('a', join(releasesDirPath, 'current'));
     await writeFile(join(releasesDirPath, 'active'), 'a');
 
-    // Create two release tags with different versions.
     tagStable = 'v9.0.5';
     tagPrerelease = 'v9.0.6-rc.1';
     shaStable = await makeCommit('9.0.5', tagStable);
     shaPrerelease = await makeCommit('9.0.6-rc.1', tagPrerelease);
 
     await writeFile(join(dkgHome, '.current-commit'), 'seed-old-sha');
+
+    await new Promise<void>((resolve) => {
+      apiServer = createServer((req, res) => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        if (req.url?.includes(tagPrerelease)) {
+          res.end(JSON.stringify({ sha: shaPrerelease }));
+        } else {
+          res.end(JSON.stringify({ sha: shaStable }));
+        }
+      });
+      apiServer.listen(0, '127.0.0.1', () => {
+        apiPort = (apiServer.address() as { port: number }).port;
+        resolve();
+      });
+    });
+
+    globalThis.fetch = async (input: string | URL | Request, init?: RequestInit) => {
+      return origFetch(`http://127.0.0.1:${apiPort}/api`, init);
+    };
   });
 
   afterAll(async () => {
-    vi.unstubAllEnvs();
-    vi.unstubAllGlobals();
+    globalThis.fetch = origFetch;
+    if (origDkgHome !== undefined) {
+      process.env.DKG_HOME = origDkgHome;
+    } else {
+      delete process.env.DKG_HOME;
+    }
+    await new Promise<void>((resolve, reject) => apiServer.close((err) => (err ? reject(err) : resolve())));
     await rm(tmpDir, { recursive: true, force: true });
   });
 
   it('updates to a specific stable version tag and writes commit/version metadata', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ sha: shaStable }) })));
     const { performUpdate } = await import('../src/daemon.js');
     const au: AutoUpdateConfig = {
       enabled: true,
@@ -116,7 +142,6 @@ describe.sequential('auto-update versioned e2e', { timeout: 30_000 }, () => {
   });
 
   it('blocks prerelease tag when allowPrerelease=false', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ sha: shaPrerelease }) })));
     const { performUpdate } = await import('../src/daemon.js');
     const au: AutoUpdateConfig = {
       enabled: true,
@@ -135,7 +160,6 @@ describe.sequential('auto-update versioned e2e', { timeout: 30_000 }, () => {
   });
 
   it('allows prerelease tag when allowPrerelease=true', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ sha: shaPrerelease }) })));
     const { performUpdate } = await import('../src/daemon.js');
     const au: AutoUpdateConfig = {
       enabled: true,

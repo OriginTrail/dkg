@@ -1,18 +1,7 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-
-vi.mock('@origintrail-official/dkg-core', () => ({
-  readDaemonPid: vi.fn(),
-  isProcessAlive: vi.fn(),
-  readDkgApiPort: vi.fn(),
-  loadAuthToken: vi.fn(),
-}));
-
-import {
-  readDaemonPid,
-  isProcessAlive,
-  readDkgApiPort,
-  loadAuthToken,
-} from '@origintrail-official/dkg-core';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { DkgClient } from '../src/connection.js';
 
 function jsonRes(data: unknown, ok = true): Response {
@@ -24,45 +13,69 @@ function jsonRes(data: unknown, ok = true): Response {
   } as Response;
 }
 
+interface FetchCall { url: string; init?: RequestInit }
+
+function createTrackingFetch(responses: Array<Response | (() => Response)>) {
+  const calls: FetchCall[] = [];
+  const queue = [...responses];
+  const fn = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const url = String(input);
+    calls.push({ url, init });
+    const next = queue.shift();
+    if (!next) throw new Error(`No more fetch responses queued for: ${url}`);
+    return typeof next === 'function' ? next() : next;
+  };
+  return { fn: fn as typeof globalThis.fetch, calls };
+}
+
 describe('DkgClient', () => {
   const originalFetch = globalThis.fetch;
+  const originalDkgHome = process.env.DKG_HOME;
+  const originalDkgApiPort = process.env.DKG_API_PORT;
+  let tempDir: string;
 
-  beforeEach(() => {
-    globalThis.fetch = vi.fn();
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), 'dkg-conn-test-'));
+    process.env.DKG_HOME = tempDir;
+    delete process.env.DKG_API_PORT;
   });
 
-  afterEach(() => {
-    vi.restoreAllMocks();
+  afterEach(async () => {
     globalThis.fetch = originalFetch;
+    if (originalDkgHome !== undefined) {
+      process.env.DKG_HOME = originalDkgHome;
+    } else {
+      delete process.env.DKG_HOME;
+    }
+    if (originalDkgApiPort !== undefined) {
+      process.env.DKG_API_PORT = originalDkgApiPort;
+    } else {
+      delete process.env.DKG_API_PORT;
+    }
+    await rm(tempDir, { recursive: true }).catch(() => {});
   });
 
   describe('connect', () => {
     it('returns client when API port is available', async () => {
-      vi.mocked(readDkgApiPort).mockResolvedValue(9201);
-      vi.mocked(loadAuthToken).mockResolvedValue('tok');
+      process.env.DKG_API_PORT = '9201';
+      await writeFile(join(tempDir, 'auth.token'), 'tok\n');
       const c = await DkgClient.connect();
       expect(c).toBeInstanceOf(DkgClient);
     });
 
     it('throws when daemon is not running', async () => {
-      vi.mocked(readDkgApiPort).mockResolvedValue(undefined as unknown as number);
-      vi.mocked(readDaemonPid).mockResolvedValue(undefined);
-      vi.mocked(isProcessAlive).mockReturnValue(false);
       await expect(DkgClient.connect()).rejects.toThrow(/not running/);
     });
 
     it('throws when port unreadable but process alive', async () => {
-      vi.mocked(readDkgApiPort).mockResolvedValue(undefined as unknown as number);
-      vi.mocked(readDaemonPid).mockResolvedValue(42);
-      vi.mocked(isProcessAlive).mockReturnValue(true);
-      vi.mocked(loadAuthToken).mockResolvedValue(undefined);
+      await writeFile(join(tempDir, 'daemon.pid'), String(process.pid));
       await expect(DkgClient.connect()).rejects.toThrow(/Cannot read API port/);
     });
   });
 
   describe('HTTP helpers', () => {
     it('status sends bearer token when set', async () => {
-      vi.mocked(globalThis.fetch).mockResolvedValue(
+      const { fn, calls } = createTrackingFetch([
         jsonRes({
           name: 'n',
           peerId: 'p',
@@ -71,68 +84,70 @@ describe('DkgClient', () => {
           relayConnected: false,
           multiaddrs: [],
         }),
-      );
+      ]);
+      globalThis.fetch = fn;
       const c = new DkgClient(9200, 'secret');
       await c.status();
-      expect(globalThis.fetch).toHaveBeenCalledWith(
-        'http://127.0.0.1:9200/api/status',
-        expect.objectContaining({
-          headers: { Authorization: 'Bearer secret' },
-        }),
-      );
+      expect(calls).toHaveLength(1);
+      expect(calls[0].url).toBe('http://127.0.0.1:9200/api/status');
+      expect((calls[0].init?.headers as Record<string, string>)?.Authorization).toBe('Bearer secret');
     });
 
     it('get surfaces non-JSON error body', async () => {
-      vi.mocked(globalThis.fetch).mockResolvedValue({
-        ok: false,
-        status: 500,
-        statusText: 'Err',
-        json: async () => {
-          throw new Error('not json');
-        },
-      } as Response);
+      const { fn } = createTrackingFetch([
+        {
+          ok: false,
+          status: 500,
+          statusText: 'Err',
+          json: async () => { throw new Error('not json'); },
+        } as Response,
+      ]);
+      globalThis.fetch = fn;
       const c = new DkgClient(9200);
       await expect(c.status()).rejects.toThrow(/Err/);
     });
 
     it('post sends JSON body', async () => {
-      vi.mocked(globalThis.fetch).mockResolvedValue(jsonRes({ result: { bindings: [] } }));
+      const { fn, calls } = createTrackingFetch([
+        jsonRes({ result: { bindings: [] } }),
+      ]);
+      globalThis.fetch = fn;
       const c = new DkgClient(9200);
       await c.query('SELECT * WHERE { ?s ?p ?o }');
-      expect(globalThis.fetch).toHaveBeenCalledWith(
-        'http://127.0.0.1:9200/api/query',
-        expect.objectContaining({
-          method: 'POST',
-          body: JSON.stringify({ sparql: 'SELECT * WHERE { ?s ?p ?o }', contextGraphId: undefined }),
-        }),
+      expect(calls).toHaveLength(1);
+      expect(calls[0].url).toBe('http://127.0.0.1:9200/api/query');
+      expect(calls[0].init?.method).toBe('POST');
+      expect(calls[0].init?.body).toBe(
+        JSON.stringify({ sparql: 'SELECT * WHERE { ?s ?p ?o }', contextGraphId: undefined }),
       );
     });
 
     it('post propagates API error string', async () => {
-      vi.mocked(globalThis.fetch).mockResolvedValue(
+      const { fn } = createTrackingFetch([
         jsonRes({ error: 'bad query' }, false),
-      );
+      ]);
+      globalThis.fetch = fn;
       const c = new DkgClient(9200);
       await expect(c.query('x')).rejects.toThrow('bad query');
     });
 
     it('covers publish, listContextGraphs, createContextGraph, agents, subscribe', async () => {
-      vi.mocked(globalThis.fetch).mockImplementation(async (url) => {
-        const u = String(url);
-        if (u.includes('/publish')) return jsonRes({ kcId: '1', status: 'ok', kas: [] });
-        if (u.includes('/context-graph/list')) return jsonRes({ contextGraphs: [] });
-        if (u.includes('/context-graph/create')) return jsonRes({ created: '1', uri: 'u' });
-        if (u.includes('/agents')) return jsonRes({ agents: [] });
-        if (u.includes('/subscribe')) return jsonRes({ subscribed: 'cg' });
-        return jsonRes({});
-      });
+      const { fn, calls } = createTrackingFetch([
+        jsonRes({}),
+        jsonRes({ kcId: '1', status: 'ok', kas: [] }),
+        jsonRes({ contextGraphs: [] }),
+        jsonRes({ created: '1', uri: 'u' }),
+        jsonRes({ agents: [] }),
+        jsonRes({ subscribed: 'cg' }),
+      ]);
+      globalThis.fetch = fn;
       const c = new DkgClient(9200);
       await c.publish('cg', []);
       await c.listContextGraphs();
       await c.createContextGraph('id', 'name', 'desc');
       await c.agents();
       await c.subscribe('cg');
-      expect(globalThis.fetch).toHaveBeenCalled();
+      expect(calls.length).toBeGreaterThan(0);
     });
   });
 });

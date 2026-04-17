@@ -3,16 +3,27 @@ import { DkgDaemonClient } from '../src/dkg-client.js';
 
 describe('DkgDaemonClient', () => {
   let client: DkgDaemonClient;
+  let originalFetch: typeof fetch;
+  let fetchCalls: Array<[RequestInfo | URL, RequestInit | undefined]>;
+  let fetchResponses: Array<Response | Error>;
+  let fetchIdx: number;
 
   beforeEach(() => {
     client = new DkgDaemonClient({ baseUrl: 'http://localhost:9200' });
+    originalFetch = globalThis.fetch;
+    fetchCalls = [];
+    fetchResponses = [];
+    fetchIdx = 0;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      fetchCalls.push([input, init]);
+      const r = fetchResponses[fetchIdx++];
+      if (r instanceof Error) throw r;
+      return r;
+    }) as typeof fetch;
   });
 
   afterEach(() => {
-    vi.doUnmock('node:fs');
-    vi.doUnmock('node:os');
-    vi.doUnmock('node:path');
-    vi.restoreAllMocks();
+    globalThis.fetch = originalFetch;
   });
 
   // ---------------------------------------------------------------------------
@@ -29,28 +40,19 @@ describe('DkgDaemonClient', () => {
     expect(c.baseUrl).toBe('http://localhost:9200');
   });
 
-  it('auto-loads the daemon auth token from ~/.dkg/auth.token', async () => {
-    const readFileSync = vi.fn().mockReturnValue('# comment\nsecret-token\n');
-    const existsSync = vi.fn().mockReturnValue(true);
-    const homedir = vi.fn().mockReturnValue('/fake-home');
-    vi.doMock('node:fs', () => ({ readFileSync, existsSync }));
-    vi.doMock('node:os', () => ({ homedir }));
-    vi.resetModules();
+  it('uses an explicit API token in authorization headers', async () => {
+    const authedClient = new DkgDaemonClient({
+      baseUrl: 'http://localhost:9200',
+      apiToken: 'secret-token',
+    });
 
-    const { DkgDaemonClient: FreshClient } = await import('../src/dkg-client.js');
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+    fetchResponses.push(
       new Response(JSON.stringify({ peerId: '12D3auto' }), { status: 200 }),
     );
 
-    const authedClient = new FreshClient({ baseUrl: 'http://localhost:9200' });
     await authedClient.getStatus();
 
-    expect(readFileSync.mock.calls[0]?.[0]).toContain('fake-home');
-    expect(readFileSync.mock.calls[0]?.[0]).toContain('.dkg');
-    expect(readFileSync.mock.calls[0]?.[0]).toContain('auth.token');
-    expect(readFileSync.mock.calls[0]?.[1]).toBe('utf-8');
-    expect(homedir).toHaveBeenCalled();
-    expect(fetchSpy.mock.calls[0]?.[1]?.headers).toMatchObject({
+    expect(fetchCalls[0]?.[1]?.headers).toMatchObject({
       Accept: 'application/json',
       Authorization: 'Bearer secret-token',
     });
@@ -61,7 +63,7 @@ describe('DkgDaemonClient', () => {
   // ---------------------------------------------------------------------------
 
   it('getStatus should return ok:true on success', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+    fetchResponses.push(
       new Response(JSON.stringify({ peerId: '12D3KooW...' }), { status: 200 }),
     );
 
@@ -71,7 +73,7 @@ describe('DkgDaemonClient', () => {
   });
 
   it('getStatus should return ok:false on failure', async () => {
-    vi.spyOn(globalThis, 'fetch').mockRejectedValueOnce(new Error('Connection refused'));
+    fetchResponses.push(new Error('Connection refused'));
 
     const status = await client.getStatus();
     expect(status.ok).toBe(false);
@@ -79,15 +81,15 @@ describe('DkgDaemonClient', () => {
   });
 
   it('getFullStatus should GET /api/status', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+    fetchResponses.push(
       new Response(JSON.stringify({ peerId: '12D3...', uptime: 1234 }), { status: 200 }),
     );
 
     const result = await client.getFullStatus();
     expect(result.peerId).toBe('12D3...');
     expect(result.uptime).toBe(1234);
-    expect(fetchSpy.mock.calls[0][0]).toBe('http://localhost:9200/api/status');
-    expect(fetchSpy.mock.calls[0][1]?.method).toBe('GET');
+    expect(fetchCalls[0][0]).toBe('http://localhost:9200/api/status');
+    expect(fetchCalls[0][1]?.method).toBe('GET');
   });
 
   // ---------------------------------------------------------------------------
@@ -95,14 +97,14 @@ describe('DkgDaemonClient', () => {
   // ---------------------------------------------------------------------------
 
   it('query should POST to /api/query', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+    fetchResponses.push(
       new Response(JSON.stringify({ results: { bindings: [] } }), { status: 200 }),
     );
 
     await client.query('SELECT ?s WHERE { ?s ?p ?o } LIMIT 1');
 
-    expect(fetchSpy).toHaveBeenCalledOnce();
-    const [url, opts] = fetchSpy.mock.calls[0];
+    expect(fetchCalls).toHaveLength(1);
+    const [url, opts] = fetchCalls[0];
     expect(url).toBe('http://localhost:9200/api/query');
     expect(opts?.method).toBe('POST');
     const body = JSON.parse(opts?.body as string);
@@ -110,13 +112,13 @@ describe('DkgDaemonClient', () => {
   });
 
   it('query should pass contextGraphId option', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+    fetchResponses.push(
       new Response(JSON.stringify({}), { status: 200 }),
     );
 
     await client.query('SELECT * WHERE { ?s ?p ?o }', { contextGraphId: 'agent-context' });
 
-    const body = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
+    const body = JSON.parse(fetchCalls[0][1]?.body as string);
     expect(body.contextGraphId).toBe('agent-context');
   });
 
@@ -145,14 +147,14 @@ describe('DkgDaemonClient', () => {
   // ---------------------------------------------------------------------------
 
   it('share should POST quads to /api/shared-memory/write with localOnly defaulted to true', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+    fetchResponses.push(
       new Response(JSON.stringify({ shareOperationId: 'op-1' }), { status: 200 }),
     );
 
     const quads = [{ subject: 'urn:a', predicate: 'urn:b', object: '"hello"' }];
     await client.share('research-x', quads);
 
-    const body = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
+    const body = JSON.parse(fetchCalls[0][1]?.body as string);
     expect(body.contextGraphId).toBe('research-x');
     expect(body.quads).toHaveLength(1);
     expect(body.localOnly).toBe(true);
@@ -246,13 +248,13 @@ describe('DkgDaemonClient', () => {
   // ---------------------------------------------------------------------------
 
   it('storeChatTurn should POST to /api/openclaw-channel/persist-turn', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+    fetchResponses.push(
       new Response(JSON.stringify({}), { status: 200 }),
     );
 
     await client.storeChatTurn('session-1', 'Hello', 'Hi there', { turnId: 'turn-1' });
 
-    const [url, opts] = fetchSpy.mock.calls[0];
+    const [url, opts] = fetchCalls[0];
     expect(url).toBe('http://localhost:9200/api/openclaw-channel/persist-turn');
     expect(opts?.method).toBe('POST');
     const body = JSON.parse(opts?.body as string);
@@ -267,14 +269,14 @@ describe('DkgDaemonClient', () => {
   // ---------------------------------------------------------------------------
 
   it('getMemoryStats should GET /api/memory/stats', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+    fetchResponses.push(
       new Response(JSON.stringify({ initialized: true, messageCount: 5, totalTriples: 100 }), { status: 200 }),
     );
 
     const stats = await client.getMemoryStats();
     expect(stats.initialized).toBe(true);
     expect(stats.messageCount).toBe(5);
-    expect(fetchSpy.mock.calls[0][0]).toBe('http://localhost:9200/api/memory/stats');
+    expect(fetchCalls[0][0]).toBe('http://localhost:9200/api/memory/stats');
   });
 
   // ---------------------------------------------------------------------------
@@ -282,43 +284,43 @@ describe('DkgDaemonClient', () => {
   // ---------------------------------------------------------------------------
 
   it('getAgents should GET /api/agents', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+    fetchResponses.push(
       new Response(JSON.stringify({ agents: [{ name: 'agent-1', peerId: '12D3...' }] }), { status: 200 }),
     );
 
     const result = await client.getAgents();
     expect(result.agents).toHaveLength(1);
-    expect(fetchSpy.mock.calls[0][0]).toBe('http://localhost:9200/api/agents');
+    expect(fetchCalls[0][0]).toBe('http://localhost:9200/api/agents');
   });
 
   it('getAgents passes framework and skill_type filters', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+    fetchResponses.push(
       new Response(JSON.stringify({ agents: [] }), { status: 200 }),
     );
 
     await client.getAgents({ framework: 'OpenClaw', skill_type: 'ImageAnalysis' });
-    const url = fetchSpy.mock.calls[0][0] as string;
+    const url = fetchCalls[0][0] as string;
     expect(url).toContain('framework=OpenClaw');
     expect(url).toContain('skill_type=ImageAnalysis');
   });
 
   it('getSkills should GET /api/skills', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+    fetchResponses.push(
       new Response(JSON.stringify({ skills: [{ uri: 'ImageAnalysis' }] }), { status: 200 }),
     );
 
     const result = await client.getSkills();
     expect(result.skills).toHaveLength(1);
-    expect(fetchSpy.mock.calls[0][0]).toBe('http://localhost:9200/api/skills');
+    expect(fetchCalls[0][0]).toBe('http://localhost:9200/api/skills');
   });
 
   it('getSkills passes skillType filter', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+    fetchResponses.push(
       new Response(JSON.stringify({ skills: [] }), { status: 200 }),
     );
 
     await client.getSkills({ skillType: 'TextSummary' });
-    const url = fetchSpy.mock.calls[0][0] as string;
+    const url = fetchCalls[0][0] as string;
     expect(url).toContain('skillType=TextSummary');
   });
 
@@ -327,14 +329,14 @@ describe('DkgDaemonClient', () => {
   // ---------------------------------------------------------------------------
 
   it('sendChat should POST to /api/chat', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+    fetchResponses.push(
       new Response(JSON.stringify({ sent: true }), { status: 200 }),
     );
 
     const result = await client.sendChat('12D3KooW...', 'Hello, agent!');
     expect(result.sent).toBe(true);
 
-    const [url, opts] = fetchSpy.mock.calls[0];
+    const [url, opts] = fetchCalls[0];
     expect(url).toBe('http://localhost:9200/api/chat');
     expect(opts?.method).toBe('POST');
     const body = JSON.parse(opts?.body as string);
@@ -343,22 +345,22 @@ describe('DkgDaemonClient', () => {
   });
 
   it('getMessages should GET /api/messages', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+    fetchResponses.push(
       new Response(JSON.stringify({ messages: [{ from: 'peer1', text: 'Hi' }] }), { status: 200 }),
     );
 
     const result = await client.getMessages();
     expect(result.messages).toHaveLength(1);
-    expect(fetchSpy.mock.calls[0][0]).toBe('http://localhost:9200/api/messages');
+    expect(fetchCalls[0][0]).toBe('http://localhost:9200/api/messages');
   });
 
   it('getMessages passes peer, limit, and since filters', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+    fetchResponses.push(
       new Response(JSON.stringify({ messages: [] }), { status: 200 }),
     );
 
     await client.getMessages({ peer: '12D3peer', limit: 10, since: 1710000000000 });
-    const url = fetchSpy.mock.calls[0][0] as string;
+    const url = fetchCalls[0][0] as string;
     expect(url).toContain('peer=12D3peer');
     expect(url).toContain('limit=10');
     expect(url).toContain('since=1710000000000');
@@ -369,23 +371,24 @@ describe('DkgDaemonClient', () => {
   // ---------------------------------------------------------------------------
 
   it('publish should write to SWM then publish from SWM', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch')
-      .mockResolvedValueOnce(new Response(JSON.stringify({ triplesWritten: 1 }), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ kcId: 'kc-1' }), { status: 200 }));
+    fetchResponses.push(
+      new Response(JSON.stringify({ triplesWritten: 1 }), { status: 200 }),
+      new Response(JSON.stringify({ kcId: 'kc-1' }), { status: 200 }),
+    );
 
     const quads = [{ subject: 'urn:a', predicate: 'urn:b', object: '"value"' }];
     const result = await client.publish('testing', quads);
     expect(result.kcId).toBe('kc-1');
 
-    expect(fetchSpy).toHaveBeenCalledTimes(2);
-    const [writeUrl, writeOpts] = fetchSpy.mock.calls[0];
+    expect(fetchCalls).toHaveLength(2);
+    const [writeUrl, writeOpts] = fetchCalls[0];
     expect(writeUrl).toBe('http://localhost:9200/api/shared-memory/write');
     expect(writeOpts?.method).toBe('POST');
     const writeBody = JSON.parse(writeOpts?.body as string);
     expect(writeBody.contextGraphId).toBe('testing');
     expect(writeBody.quads).toHaveLength(1);
 
-    const [pubUrl, pubOpts] = fetchSpy.mock.calls[1];
+    const [pubUrl, pubOpts] = fetchCalls[1];
     expect(pubUrl).toBe('http://localhost:9200/api/shared-memory/publish');
     expect(pubOpts?.method).toBe('POST');
     const pubBody = JSON.parse(pubOpts?.body as string);
@@ -416,17 +419,17 @@ describe('DkgDaemonClient', () => {
   // ---------------------------------------------------------------------------
 
   it('listContextGraphs should GET /api/context-graph/list', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+    fetchResponses.push(
       new Response(JSON.stringify({ contextGraphs: [{ id: 'p1' }, { id: 'p2' }] }), { status: 200 }),
     );
 
     const result = await client.listContextGraphs();
     expect(result.contextGraphs).toHaveLength(2);
-    expect(fetchSpy.mock.calls[0][0]).toBe('http://localhost:9200/api/context-graph/list');
+    expect(fetchCalls[0][0]).toBe('http://localhost:9200/api/context-graph/list');
   });
 
   it('createContextGraph should POST to /api/context-graph/create', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+    fetchResponses.push(
       new Response(JSON.stringify({ created: 'my-research', uri: 'did:dkg:context-graph:my-research' }), { status: 200 }),
     );
 
@@ -434,7 +437,7 @@ describe('DkgDaemonClient', () => {
     expect(result.created).toBe('my-research');
     expect(result.uri).toBe('did:dkg:context-graph:my-research');
 
-    const [url, opts] = fetchSpy.mock.calls[0];
+    const [url, opts] = fetchCalls[0];
     expect(url).toBe('http://localhost:9200/api/context-graph/create');
     expect(opts?.method).toBe('POST');
     const body = JSON.parse(opts?.body as string);
@@ -448,7 +451,7 @@ describe('DkgDaemonClient', () => {
   // ---------------------------------------------------------------------------
 
   it('subscribe should POST to /api/subscribe', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+    fetchResponses.push(
       new Response(JSON.stringify({
         subscribed: 'my-paranet',
         catchup: { jobId: 'job-1', status: 'queued', includeSharedMemory: true },
@@ -459,7 +462,7 @@ describe('DkgDaemonClient', () => {
     expect(result.subscribed).toBe('my-paranet');
     expect(result.catchup.jobId).toBe('job-1');
 
-    const [url, opts] = fetchSpy.mock.calls[0];
+    const [url, opts] = fetchCalls[0];
     expect(url).toBe('http://localhost:9200/api/subscribe');
     expect(opts?.method).toBe('POST');
     const body = JSON.parse(opts?.body as string);
@@ -467,13 +470,13 @@ describe('DkgDaemonClient', () => {
   });
 
   it('subscribe passes includeSharedMemory option', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+    fetchResponses.push(
       new Response(JSON.stringify({ subscribed: 'p1', catchup: { jobId: 'j', status: 'queued', includeSharedMemory: false } }), { status: 200 }),
     );
 
     await client.subscribe('p1', { includeSharedMemory: false });
 
-    const body = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
+    const body = JSON.parse(fetchCalls[0][1]?.body as string);
     expect(body.includeSharedMemory).toBe(false);
   });
 
@@ -482,7 +485,7 @@ describe('DkgDaemonClient', () => {
   // ---------------------------------------------------------------------------
 
   it('getWalletBalances should GET /api/wallets/balances', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+    fetchResponses.push(
       new Response(JSON.stringify({
         wallets: ['0xabc'],
         balances: [{ address: '0xabc', eth: '1.5', trac: '1000.0', symbol: 'TRAC' }],
@@ -495,8 +498,8 @@ describe('DkgDaemonClient', () => {
     expect(result.wallets).toEqual(['0xabc']);
     expect(result.balances).toHaveLength(1);
     expect(result.balances[0].trac).toBe('1000.0');
-    expect(fetchSpy.mock.calls[0][0]).toBe('http://localhost:9200/api/wallets/balances');
-    expect(fetchSpy.mock.calls[0][1]?.method).toBe('GET');
+    expect(fetchCalls[0][0]).toBe('http://localhost:9200/api/wallets/balances');
+    expect(fetchCalls[0][1]?.method).toBe('GET');
   });
 
   // ---------------------------------------------------------------------------
@@ -504,7 +507,7 @@ describe('DkgDaemonClient', () => {
   // ---------------------------------------------------------------------------
 
   it('invokeSkill should POST to /api/invoke-skill', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+    fetchResponses.push(
       new Response(JSON.stringify({ success: true, output: 'result data' }), { status: 200 }),
     );
 
@@ -512,7 +515,7 @@ describe('DkgDaemonClient', () => {
     expect(result.success).toBe(true);
     expect(result.output).toBe('result data');
 
-    const [url, opts] = fetchSpy.mock.calls[0];
+    const [url, opts] = fetchCalls[0];
     expect(url).toBe('http://localhost:9200/api/invoke-skill');
     expect(opts?.method).toBe('POST');
     const body = JSON.parse(opts?.body as string);
@@ -526,13 +529,13 @@ describe('DkgDaemonClient', () => {
   // ---------------------------------------------------------------------------
 
   it('getWallets should GET /api/wallets', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+    fetchResponses.push(
       new Response(JSON.stringify({ wallets: ['0xabc', '0xdef'] }), { status: 200 }),
     );
 
     const result = await client.getWallets();
     expect(result.wallets).toEqual(['0xabc', '0xdef']);
-    expect(fetchSpy.mock.calls[0][0]).toBe('http://localhost:9200/api/wallets');
+    expect(fetchCalls[0][0]).toBe('http://localhost:9200/api/wallets');
   });
 
   // ---------------------------------------------------------------------------
@@ -540,7 +543,7 @@ describe('DkgDaemonClient', () => {
   // ---------------------------------------------------------------------------
 
   it('should throw on non-ok response', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+    fetchResponses.push(
       new Response('Internal Server Error', { status: 500 }),
     );
 
@@ -548,7 +551,6 @@ describe('DkgDaemonClient', () => {
   });
 
   it('getAuthToken returns the loaded token or undefined', () => {
-    // May be a real token if ~/.dkg/auth.token exists on this machine
     const token = client.getAuthToken();
     expect(token === undefined || typeof token === 'string').toBe(true);
   });

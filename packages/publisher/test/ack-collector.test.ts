@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { ACKCollector, type ACKCollectorDeps } from '../src/ack-collector.js';
 import { encodeStorageACK, computePublishACKDigest } from '@origintrail-official/dkg-core';
 import { computeFlatKCRootV10 } from '../src/merkle.js';
@@ -70,7 +70,7 @@ describe('ACKCollector', () => {
         });
       },
       getConnectedCorePeers: () => ['peer-0', 'peer-1', 'peer-2', 'peer-3'],
-      log: vi.fn(),
+      log: () => {},
     };
 
     const collector = new ACKCollector(deps);
@@ -219,7 +219,7 @@ describe('ACKCollector', () => {
         });
       },
       getConnectedCorePeers: () => ['peer-0', 'peer-1', 'peer-2'],
-      log: vi.fn(),
+      log: () => {},
     };
 
     const collector = new ACKCollector(deps);

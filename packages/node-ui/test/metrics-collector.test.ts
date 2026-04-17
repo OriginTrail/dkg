@@ -114,11 +114,25 @@ describe('MetricsCollector', () => {
     collector.stop();
   });
 
-  it('start is idempotent', () => {
+  it('start is idempotent — a second start() does not allocate a second interval', () => {
     const collector = new MetricsCollector(db, mockSource(), dir);
+
+    // Peek at the private timer handle through a narrow cast. Re-entrant
+    // start() calls previously had no observable check; a regression that
+    // fires `setInterval` twice would leak the first handle and silently
+    // double the DB write rate. Comparing the timer reference before and
+    // after the second start() locks in the "no second interval" contract.
+    const internal = collector as unknown as { timer: ReturnType<typeof setInterval> | null };
+
     collector.start();
-    collector.start(); // should not create a second timer
+    const firstTimer = internal.timer;
+    expect(firstTimer).not.toBeNull();
+
+    collector.start();
+    expect(internal.timer).toBe(firstTimer);
+
     collector.stop();
+    expect(internal.timer).toBeNull();
   });
 
   it('cpu measurement returns 0 on first call (no baseline)', async () => {

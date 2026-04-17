@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { monotonicTransition, versionedWrite, DKG_STATE_VERSION, DKG_STATE_UPDATED_AT } from '../src/workspace-consistency.js';
 import type { DKGAgent } from '../src/dkg-agent.js';
 
@@ -75,15 +75,20 @@ describe('monotonicTransition', () => {
 });
 
 describe('versionedWrite', () => {
-  function mockAgent(overrides?: Partial<DKGAgent>) {
-    return {
-      conditionalShare: vi.fn().mockResolvedValue({ shareOperationId: 'ws-ver-1' }),
-      ...overrides,
+  function makeAgent(overrides?: { conditionalShareResult?: any; conditionalShareError?: Error }) {
+    const calls: any[][] = [];
+    const agent = {
+      conditionalShare: async (...args: any[]) => {
+        calls.push(args);
+        if (overrides?.conditionalShareError) throw overrides.conditionalShareError;
+        return overrides?.conditionalShareResult ?? { shareOperationId: 'ws-ver-1' };
+      },
     } as unknown as DKGAgent;
+    return { agent, calls };
   }
 
   it('first write (null version) sends absent condition and writes version 1', async () => {
-    const agent = mockAgent();
+    const { agent, calls } = makeAgent();
     const quads = [{ subject: SUBJECT, predicate: 'http://schema.org/name', object: '"Test"', graph: '' }];
 
     const result = await versionedWrite(agent, 'test-paranet', SUBJECT, null, quads);
@@ -91,7 +96,7 @@ describe('versionedWrite', () => {
     expect(result.newVersion).toBe(1);
     expect(result.shareOperationId).toBe('ws-ver-1');
 
-    const call = (agent.conditionalShare as ReturnType<typeof vi.fn>).mock.calls[0];
+    const call = calls[0];
     expect(call[0]).toBe('test-paranet');
 
     const allQuads = call[1] as Array<{ subject: string; predicate: string; object: string }>;
@@ -111,14 +116,14 @@ describe('versionedWrite', () => {
   });
 
   it('increments version and sends CAS condition on current version', async () => {
-    const agent = mockAgent();
+    const { agent, calls } = makeAgent();
     const quads = [{ subject: SUBJECT, predicate: 'http://schema.org/name', object: '"V3"', graph: '' }];
 
     const result = await versionedWrite(agent, 'test-paranet', SUBJECT, 2, quads);
 
     expect(result.newVersion).toBe(3);
 
-    const call = (agent.conditionalShare as ReturnType<typeof vi.fn>).mock.calls[0];
+    const call = calls[0];
     const conditions = call[2] as Array<{ expectedValue: string | null }>;
     expect(conditions[0].expectedValue).toBe('"2"^^<http://www.w3.org/2001/XMLSchema#integer>');
 
@@ -128,7 +133,7 @@ describe('versionedWrite', () => {
   });
 
   it('includes application quads alongside version quads', async () => {
-    const agent = mockAgent();
+    const { agent, calls } = makeAgent();
     const appQuads = [
       { subject: SUBJECT, predicate: 'http://schema.org/name', object: '"App Data"', graph: '' },
       { subject: SUBJECT, predicate: 'http://schema.org/desc', object: '"More Data"', graph: '' },
@@ -136,7 +141,7 @@ describe('versionedWrite', () => {
 
     await versionedWrite(agent, 'test-paranet', SUBJECT, 0, appQuads);
 
-    const call = (agent.conditionalShare as ReturnType<typeof vi.fn>).mock.calls[0];
+    const call = calls[0];
     const allQuads = call[1] as Array<{ predicate: string }>;
     expect(allQuads.length).toBe(4); // 2 app + version + timestamp
     expect(allQuads.some(q => q.predicate === 'http://schema.org/name')).toBe(true);
@@ -146,19 +151,17 @@ describe('versionedWrite', () => {
   });
 
   it('passes localOnly option through to agent', async () => {
-    const agent = mockAgent();
+    const { agent, calls } = makeAgent();
     await versionedWrite(agent, 'test-paranet', SUBJECT, 0, [], { localOnly: true });
 
-    const call = (agent.conditionalShare as ReturnType<typeof vi.fn>).mock.calls[0];
+    const call = calls[0];
     expect(call[3]).toEqual({ localOnly: true });
   });
 
   it('propagates StaleWriteError from agent', async () => {
     const err = new Error('CAS failed');
     err.name = 'StaleWriteError';
-    const agent = mockAgent({
-      conditionalShare: vi.fn().mockRejectedValue(err),
-    });
+    const { agent } = makeAgent({ conditionalShareError: err });
 
     await expect(versionedWrite(agent, 'test-paranet', SUBJECT, 1, []))
       .rejects.toThrow('CAS failed');

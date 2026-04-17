@@ -21,6 +21,7 @@ export { hexToBytes } from './oracle-verify.js';
 export {
   computeACKDigest,
   computePublishACKDigest,
+  computeUpdateACKDigest,
   computePublishPublisherDigest,
   eip191Hash,
   uint256ToBytes,

@@ -1,10 +1,25 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, afterAll, describe, expect, it } from 'vitest';
 import { DKGAgent } from '../src/index.js';
-import { NoChainAdapter, MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { NoChainAdapter, type ChainAdapter } from '@origintrail-official/dkg-chain';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { SYSTEM_PARANETS } from '@origintrail-official/dkg-core';
+import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
+import { mintTokens } from '../../chain/test/hardhat-harness.js';
+import { ethers } from 'ethers';
 
-async function createAgent(chainAdapter: MockChainAdapter | NoChainAdapter) {
+let _fileSnapshot: string;
+beforeAll(async () => {
+  _fileSnapshot = await takeSnapshot();
+  const { hubAddress } = getSharedContext();
+  const provider = createProvider();
+  const coreOp = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+  await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, coreOp.address, ethers.parseEther('50000000'));
+});
+afterAll(async () => {
+  await revertSnapshot(_fileSnapshot);
+});
+
+async function createAgent(chainAdapter: ChainAdapter) {
   const store = new OxigraphStore();
   const agent = await DKGAgent.create({
     name: 'AckProviderTestAgent',
@@ -12,9 +27,10 @@ async function createAgent(chainAdapter: MockChainAdapter | NoChainAdapter) {
     listenHost: '127.0.0.1',
     store,
     chainAdapter,
+    nodeRole: 'core',
   });
   await agent.start();
-  return { agent, store };
+  return { agent, store, chain: chainAdapter };
 }
 
 describe('v10 ACK provider wiring', () => {
@@ -24,49 +40,30 @@ describe('v10 ACK provider wiring', () => {
     await agent?.stop().catch(() => {});
   });
 
-  it('passes v10ACKProvider to publisher when chain supports V10 publish', async () => {
-    ({ agent } = await createAgent(new MockChainAdapter('mock:31337')));
+  it('uses V10 publish path when chain supports V10 (EVMChainAdapter)', async () => {
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    ({ agent } = await createAgent(chain));
 
-    const publishSpy = vi.spyOn((agent as any).publisher, 'publish').mockResolvedValue({
-      ual: 'did:dkg:test/ack-provider',
-      merkleRoot: new Uint8Array(32),
-      kcId: 1n,
-      kaManifest: [],
-      status: 'tentative',
-    });
-    const broadcastSpy = vi.spyOn(agent as any, 'broadcastPublish').mockResolvedValue(undefined);
+    const cgId = 'v10-ack-test-cg';
+    await agent.createContextGraph({ id: cgId, name: 'V10 ACK Test CG' });
 
-    await agent.publish(SYSTEM_PARANETS.ONTOLOGY, [
+    const result = await agent.publish(cgId, [
       { subject: 'urn:test:ack-provider', predicate: 'http://schema.org/name', object: '"ACK"', graph: '' },
     ]);
 
-    expect(publishSpy).toHaveBeenCalledTimes(1);
-    expect(publishSpy.mock.calls[0]?.[0]?.v10ACKProvider).toEqual(expect.any(Function));
-
-    publishSpy.mockRestore();
-    broadcastSpy.mockRestore();
+    expect(result.status).toBe('confirmed');
+    expect(result.onChainResult).toBeDefined();
+    expect(typeof result.onChainResult!.batchId).toBe('bigint');
   });
 
-  it('does not pass v10ACKProvider when chain does not support V10 publish', async () => {
+  it('publishes tentatively when chain does not support V10 (NoChainAdapter)', async () => {
     ({ agent } = await createAgent(new NoChainAdapter()));
 
-    const publishSpy = vi.spyOn((agent as any).publisher, 'publish').mockResolvedValue({
-      ual: 'did:dkg:test/no-ack-provider',
-      merkleRoot: new Uint8Array(32),
-      kcId: 1n,
-      kaManifest: [],
-      status: 'tentative',
-    });
-    const broadcastSpy = vi.spyOn(agent as any, 'broadcastPublish').mockResolvedValue(undefined);
-
-    await agent.publish(SYSTEM_PARANETS.ONTOLOGY, [
+    const result = await agent.publish(SYSTEM_PARANETS.ONTOLOGY, [
       { subject: 'urn:test:no-ack-provider', predicate: 'http://schema.org/name', object: '"No ACK"', graph: '' },
     ]);
 
-    expect(publishSpy).toHaveBeenCalledTimes(1);
-    expect(publishSpy.mock.calls[0]?.[0]?.v10ACKProvider).toBeUndefined();
-
-    publishSpy.mockRestore();
-    broadcastSpy.mockRestore();
+    expect(result.status).toBe('tentative');
+    expect(result.onChainResult).toBeUndefined();
   });
 });

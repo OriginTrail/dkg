@@ -402,6 +402,12 @@ describe('@unit KnowledgeCollection', () => {
       ...signaturesData.receiverVSs,
     ];
 
+    // Snapshot the counter pre-tx so the post-tx increment proves the
+    // collection actually materialised on-chain — not just "the tx didn't
+    // revert", which was the weak contract the earlier version of this
+    // test locked in (plain `await tx.wait()` with no follow-up).
+    const beforeId = await KnowledgeCollectionStorage.getLatestKnowledgeCollectionId();
+
     const tx = await KnowledgeCollection.connect(
       kcCreator,
     ).createKnowledgeCollection(
@@ -420,7 +426,13 @@ describe('@unit KnowledgeCollection', () => {
       mixedReceiverRs,
       mixedReceiverVSs,
     );
-    await tx.wait();
+    await expect(tx).to.emit(
+      KnowledgeCollectionStorage,
+      'KnowledgeCollectionCreated',
+    );
+
+    const afterId = await KnowledgeCollectionStorage.getLatestKnowledgeCollectionId();
+    expect(afterId).to.equal(beforeId + 1n);
   });
 
   it('Should create KC at ~half-epoch mark and distribute tokens correctly', async () => {
@@ -648,7 +660,8 @@ describe('@unit KnowledgeCollection', () => {
       `   provided tokenAmount    : ${ethers.formatEther(exactTokens)} TRAC  (expected to PASS)`,
     );
 
-    /* ---------- Expect NO revert ---------- */
+    /* ---------- Expect NO revert *and* a counter increment ---------- */
+    const beforeId = await KnowledgeCollectionStorage.getLatestKnowledgeCollectionId();
     const tx = await KnowledgeCollection.connect(
       kcCreator,
     ).createKnowledgeCollection(
@@ -670,5 +683,16 @@ describe('@unit KnowledgeCollection', () => {
 
     const receipt = await tx.wait();
     console.log(`   ✅  KC created – tx hash: ${receipt?.hash}`);
+
+    // Tight guard against a regression that would silently accept the
+    // exact-minimum token amount without actually persisting the KC.
+    // Checking both the event and the storage counter locks the
+    // "accepted == created" contract for the minimum-threshold path.
+    await expect(tx).to.emit(
+      KnowledgeCollectionStorage,
+      'KnowledgeCollectionCreated',
+    );
+    const afterId = await KnowledgeCollectionStorage.getLatestKnowledgeCollectionId();
+    expect(afterId).to.equal(beforeId + 1n);
   });
 });

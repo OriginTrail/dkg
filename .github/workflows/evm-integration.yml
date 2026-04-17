@@ -1,0 +1,71 @@
+name: EVM Integration Tests
+
+on:
+  push:
+    branches: [main, v10-rc]
+    paths:
+      - 'packages/chain/**'
+      - 'packages/publisher/**'
+      - 'packages/agent/**'
+      - 'packages/core/**'
+      - 'packages/evm-module/contracts/**'
+      - 'packages/evm-module/deploy/**'
+      - 'scripts/test-evm-integration.sh'
+      - '.github/workflows/evm-integration.yml'
+  pull_request:
+    branches: [main, v10-rc]
+    paths:
+      - 'packages/chain/**'
+      - 'packages/publisher/**'
+      - 'packages/agent/**'
+      - 'packages/core/**'
+      - 'packages/evm-module/contracts/**'
+      - 'packages/evm-module/deploy/**'
+      - 'scripts/test-evm-integration.sh'
+      - '.github/workflows/evm-integration.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: evm-integration-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  evm-integration:
+    name: EVM Integration (${{ matrix.scope }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    strategy:
+      fail-fast: false
+      matrix:
+        scope: [chain, publisher, agent]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Cache Hardhat artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            packages/evm-module/artifacts
+            packages/evm-module/cache
+            packages/evm-module/typechain
+          key: hardhat-${{ runner.os }}-${{ hashFiles('packages/evm-module/contracts/**/*.sol', 'packages/evm-module/hardhat.node.config.ts') }}
+          restore-keys: |
+            hardhat-${{ runner.os }}-
+
+      - name: Build packages
+        run: pnpm build
+
+      - name: Run EVM integration tests (${{ matrix.scope }})
+        run: ./scripts/test-evm-integration.sh ${{ matrix.scope }}

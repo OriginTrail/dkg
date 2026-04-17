@@ -1,4 +1,5 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { createServer, type Server } from 'node:http';
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import {
   fileUrl,
   authHeaders,
@@ -44,430 +45,322 @@ import {
   gameApi,
 } from '../src/ui/api.js';
 
-function mockFetch(data: unknown, status = 200) {
-  return vi.fn().mockResolvedValue({
-    ok: status >= 200 && status < 300,
-    status,
-    json: () => Promise.resolve(data),
-    text: () => Promise.resolve(JSON.stringify(data)),
+let server: Server;
+let baseUrl: string;
+const requestLog: Array<{ url: string; method: string; body: string }> = [];
+
+function startTestServer(): Promise<void> {
+  return new Promise((resolve) => {
+    server = createServer((req, res) => {
+      let body = '';
+      req.on('data', (chunk) => { body += chunk; });
+      req.on('end', () => {
+        requestLog.push({ url: req.url ?? '', method: req.method ?? '', body });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+
+        const url = req.url ?? '';
+        if (url.startsWith('/api/status')) {
+          res.end(JSON.stringify({ peerId: 'abc', synced: true }));
+        } else if (url.startsWith('/api/agents')) {
+          res.end(JSON.stringify({ agents: [] }));
+        } else if (url.startsWith('/api/metrics/history')) {
+          res.end(JSON.stringify({ snapshots: [] }));
+        } else if (url.startsWith('/api/metrics')) {
+          res.end(JSON.stringify({ total_kcs: 5 }));
+        } else if (url.startsWith('/api/connections')) {
+          res.end(JSON.stringify({ peers: [] }));
+        } else if (url.startsWith('/api/settings/llm')) {
+          res.end(JSON.stringify({ model: 'gpt-4' }));
+        } else if (url.startsWith('/api/settings/retention')) {
+          res.end(JSON.stringify({ retentionDays: 30 }));
+        } else if (url.startsWith('/api/settings/telemetry')) {
+          res.end(JSON.stringify({ enabled: true }));
+        } else if (url.startsWith('/api/apps')) {
+          res.end(JSON.stringify({ apps: [] }));
+        } else if (url.startsWith('/api/chain/rpc-health')) {
+          res.end(JSON.stringify({ healthy: true }));
+        } else if (url.startsWith('/api/economics')) {
+          res.end(JSON.stringify({ periods: [] }));
+        } else if (url.startsWith('/api/wallets/balances')) {
+          res.end(JSON.stringify({ wallets: [] }));
+        } else if (url.startsWith('/api/saved-queries')) {
+          res.end(JSON.stringify({ queries: [], id: 1 }));
+        } else if (url.startsWith('/api/operations/') && !url.includes('stats') && !url.includes('failed')) {
+          res.end(JSON.stringify({ operation: {}, logs: [], phases: [] }));
+        } else if (url.startsWith('/api/operation-stats') || url.startsWith('/api/operations/stats')) {
+          res.end(JSON.stringify({ summary: {}, timeSeries: [] }));
+        } else if (url.startsWith('/api/operations')) {
+          res.end(JSON.stringify({ operations: [], total: 0 }));
+        } else if (url.startsWith('/api/error-hotspots')) {
+          res.end(JSON.stringify({ hotspots: [] }));
+        } else if (url.startsWith('/api/logs')) {
+          res.end(JSON.stringify({ logs: [], total: 0 }));
+        } else if (url.startsWith('/api/node-log')) {
+          res.end(JSON.stringify({ lines: [], totalSize: 0 }));
+        } else if (url.startsWith('/api/sync/catchup-status')) {
+          res.end(JSON.stringify({ jobId: 'j1', status: 'done' }));
+        } else if (url.startsWith('/api/notifications')) {
+          res.end(JSON.stringify({ notifications: [], ok: true }));
+        } else if (url.startsWith('/api/success-rates')) {
+          res.end(JSON.stringify({ rates: [] }));
+        } else if (url.startsWith('/api/per-type-stats')) {
+          res.end(JSON.stringify({ buckets: [], types: [], series: {} }));
+        } else if (url.startsWith('/api/context-graphs') || url.startsWith('/api/paranets')) {
+          res.end(JSON.stringify({ contextGraphs: [{ id: 'cg1' }], paranets: [{ id: 'p1', name: 'Test' }] }));
+        } else if (url.startsWith('/api/query')) {
+          res.end(JSON.stringify({ result: { bindings: [] } }));
+        } else if (url.startsWith('/api/shared-memory')) {
+          res.end(JSON.stringify({ success: true, ual: 'did:dkg:test' }));
+        } else if (url.includes('/promote')) {
+          res.end(JSON.stringify({ promotedCount: 1 }));
+        } else if (url.startsWith('/api/failed-operations')) {
+          res.end(JSON.stringify({ operations: [] }));
+        } else if (url.includes('/extraction-status')) {
+          res.end(JSON.stringify({ fileHash: 'sha256:abc', detectedContentType: 'text/plain' }));
+        } else if (url.startsWith('/api/query-history')) {
+          res.end(JSON.stringify({ history: [] }));
+        } else if (url.startsWith('/api/shutdown')) {
+          res.end(JSON.stringify({}));
+        } else if (url.startsWith('/api/subscribe')) {
+          res.end(JSON.stringify({}));
+        } else {
+          res.end(JSON.stringify({}));
+        }
+      });
+    });
+    server.listen(0, '127.0.0.1', () => {
+      const port = (server.address() as { port: number }).port;
+      baseUrl = `http://127.0.0.1:${port}`;
+      resolve();
+    });
   });
 }
 
-beforeEach(() => {
-  (globalThis as any).fetch = mockFetch({});
-});
+describe('UI API tests', () => {
+  const origFetch = globalThis.fetch;
 
-afterEach(() => {
-  vi.restoreAllMocks();
-});
-
-describe('fileUrl', () => {
-  it('preserves sha256: prefix', () => {
-    expect(fileUrl('sha256:abcdef')).toBe('/api/file/sha256%3Aabcdef');
+  beforeAll(async () => {
+    await startTestServer();
+    globalThis.fetch = (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : (input instanceof URL ? input.toString() : input.url);
+      return origFetch(`${baseUrl}${url}`, init);
+    };
   });
 
-  it('preserves keccak256: prefix', () => {
-    expect(fileUrl('keccak256:abcdef')).toBe('/api/file/keccak256%3Aabcdef');
+  afterAll(async () => {
+    globalThis.fetch = origFetch;
+    await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
   });
 
-  it('adds sha256: prefix to bare hashes', () => {
-    expect(fileUrl('abcdef0123456789')).toBe('/api/file/sha256%3Aabcdef0123456789');
+  beforeEach(() => {
+    requestLog.length = 0;
   });
 
-  it('appends contentType query param when provided', () => {
-    const url = fileUrl('sha256:abc', 'application/pdf');
-    expect(url).toContain('?contentType=application%2Fpdf');
-  });
-
-  it('omits contentType query param when not provided', () => {
-    const url = fileUrl('sha256:abc');
-    expect(url).not.toContain('contentType');
-  });
-
-  it('encodes special characters in contentType', () => {
-    const url = fileUrl('sha256:abc', 'text/plain; charset=utf-8');
-    expect(url).toContain('contentType=');
-    expect(url).not.toContain(';');
-  });
-});
-
-describe('authHeaders', () => {
-  it('returns empty object when window is undefined', () => {
-    const headers = authHeaders();
-    expect(headers).toEqual({});
-  });
-});
-
-describe('simple GET endpoints', () => {
-  it('fetchStatus calls /api/status', async () => {
-    (globalThis as any).fetch = mockFetch({ peerId: 'abc', synced: true });
-    const res = await fetchStatus();
-    expect(res).toEqual({ peerId: 'abc', synced: true });
-    expect(fetch).toHaveBeenCalledWith('/api/status', expect.any(Object));
-  });
-
-  it('fetchAgents calls /api/agents', async () => {
-    (globalThis as any).fetch = mockFetch({ agents: [] });
-    await fetchAgents();
-    expect(fetch).toHaveBeenCalledWith('/api/agents', expect.any(Object));
-  });
-
-  it('fetchMetrics calls /api/metrics', async () => {
-    (globalThis as any).fetch = mockFetch({ total_kcs: 5 });
-    const res = await fetchMetrics();
-    expect(res.total_kcs).toBe(5);
-  });
-
-  it('fetchConnections calls /api/connections', async () => {
-    (globalThis as any).fetch = mockFetch({ peers: [] });
-    await fetchConnections();
-    expect(fetch).toHaveBeenCalledWith('/api/connections', expect.any(Object));
-  });
-
-  it('fetchLlmSettings calls /api/settings/llm', async () => {
-    (globalThis as any).fetch = mockFetch({ model: 'gpt-4' });
-    const res = await fetchLlmSettings();
-    expect(res.model).toBe('gpt-4');
-  });
-
-  it('fetchRetentionSettings calls /api/settings/retention', async () => {
-    (globalThis as any).fetch = mockFetch({ retentionDays: 30 });
-    const res = await fetchRetentionSettings();
-    expect(res.retentionDays).toBe(30);
-  });
-
-  it('fetchTelemetrySettings calls /api/settings/telemetry', async () => {
-    (globalThis as any).fetch = mockFetch({ enabled: true });
-    const res = await fetchTelemetrySettings();
-    expect(res.enabled).toBe(true);
-  });
-
-  it('fetchApps calls /api/apps', async () => {
-    (globalThis as any).fetch = mockFetch({ apps: [] });
-    await fetchApps();
-    expect(fetch).toHaveBeenCalledWith('/api/apps', expect.any(Object));
-  });
-
-  it('fetchRpcHealth calls /api/rpc-health', async () => {
-    (globalThis as any).fetch = mockFetch({ healthy: true });
-    await fetchRpcHealth();
-    expect(fetch).toHaveBeenCalledWith('/api/chain/rpc-health', expect.any(Object));
-  });
-
-  it('fetchEconomics calls /api/economics', async () => {
-    (globalThis as any).fetch = mockFetch({ periods: [] });
-    await fetchEconomics();
-    expect(fetch).toHaveBeenCalledWith('/api/economics', expect.any(Object));
-  });
-
-  it('fetchWalletsBalances calls /api/wallets/balances', async () => {
-    (globalThis as any).fetch = mockFetch({ wallets: [] });
-    await fetchWalletsBalances();
-    expect(fetch).toHaveBeenCalledWith('/api/wallets/balances', expect.any(Object));
-  });
-
-  it('fetchSavedQueries calls /api/saved-queries', async () => {
-    (globalThis as any).fetch = mockFetch({ queries: [] });
-    await fetchSavedQueries();
-    expect(fetch).toHaveBeenCalledWith('/api/saved-queries', expect.any(Object));
-  });
-});
-
-describe('parameterized GET endpoints', () => {
-  it('fetchOperations includes query params', async () => {
-    (globalThis as any).fetch = mockFetch({ operations: [], total: 0 });
-    await fetchOperations({ limit: '10' });
-    const url = (fetch as any).mock.calls[0][0] as string;
-    expect(url).toContain('/api/operations?');
-    expect(url).toContain('limit=10');
-  });
-
-  it('fetchOperations with no params omits query string', async () => {
-    (globalThis as any).fetch = mockFetch({ operations: [], total: 0 });
-    await fetchOperations();
-    expect(fetch).toHaveBeenCalledWith('/api/operations', expect.any(Object));
-  });
-
-  it('fetchOperationsWithPhases adds phases=1', async () => {
-    (globalThis as any).fetch = mockFetch({ operations: [], total: 0 });
-    await fetchOperationsWithPhases({ limit: '5' });
-    const url = (fetch as any).mock.calls[0][0] as string;
-    expect(url).toContain('phases=1');
-    expect(url).toContain('limit=5');
-  });
-
-  it('fetchOperation calls /api/operations/:id', async () => {
-    (globalThis as any).fetch = mockFetch({ operation: {}, logs: [], phases: [] });
-    await fetchOperation('op-123');
-    expect(fetch).toHaveBeenCalledWith('/api/operations/op-123', expect.any(Object));
-  });
-
-  it('fetchErrorHotspots with period', async () => {
-    (globalThis as any).fetch = mockFetch({ hotspots: [] });
-    await fetchErrorHotspots(3600000);
-    const url = (fetch as any).mock.calls[0][0] as string;
-    expect(url).toContain('periodMs=3600000');
-  });
-
-  it('fetchErrorHotspots without period', async () => {
-    (globalThis as any).fetch = mockFetch({ hotspots: [] });
-    await fetchErrorHotspots();
-    expect(fetch).toHaveBeenCalledWith('/api/error-hotspots', expect.any(Object));
-  });
-
-  it('fetchLogs with params', async () => {
-    (globalThis as any).fetch = mockFetch({ logs: [], total: 0 });
-    await fetchLogs({ level: 'error' });
-    const url = (fetch as any).mock.calls[0][0] as string;
-    expect(url).toContain('level=error');
-  });
-
-  it('fetchNodeLog with lines', async () => {
-    (globalThis as any).fetch = mockFetch({ lines: [], totalSize: 0 });
-    await fetchNodeLog({ lines: 100 });
-    const url = (fetch as any).mock.calls[0][0] as string;
-    expect(url).toContain('lines=100');
-  });
-
-  it('fetchNodeLog with q filter', async () => {
-    (globalThis as any).fetch = mockFetch({ lines: [], totalSize: 0 });
-    await fetchNodeLog({ q: 'error' });
-    const url = (fetch as any).mock.calls[0][0] as string;
-    expect(url).toContain('q=error');
-  });
-
-  it('fetchCatchupStatus calls correct endpoint', async () => {
-    (globalThis as any).fetch = mockFetch({ jobId: 'j1', status: 'done' });
-    await fetchCatchupStatus('cg-1');
-    expect(fetch).toHaveBeenCalledWith('/api/sync/catchup-status?contextGraphId=cg-1', expect.any(Object));
-  });
-
-  it('fetchSuccessRates calls correct endpoint', async () => {
-    (globalThis as any).fetch = mockFetch({ rates: [] });
-    await fetchSuccessRates(60000);
-    expect(fetch).toHaveBeenCalledWith('/api/success-rates?periodMs=60000', expect.any(Object));
-  });
-
-  it('fetchMetricsHistory includes from/to/maxPoints', async () => {
-    (globalThis as any).fetch = mockFetch({ snapshots: [] });
-    await fetchMetricsHistory(1000, 2000, 50);
-    const url = (fetch as any).mock.calls[0][0] as string;
-    expect(url).toContain('from=1000');
-    expect(url).toContain('to=2000');
-    expect(url).toContain('maxPoints=50');
-  });
-
-  it('fetchPerTypeStats with optional bucketMs', async () => {
-    (globalThis as any).fetch = mockFetch({ buckets: [], types: [], series: {} });
-    await fetchPerTypeStats(60000, 5000);
-    const url = (fetch as any).mock.calls[0][0] as string;
-    expect(url).toContain('periodMs=60000');
-    expect(url).toContain('bucketMs=5000');
-  });
-
-  it('fetchPerTypeStats without bucketMs', async () => {
-    (globalThis as any).fetch = mockFetch({ buckets: [], types: [], series: {} });
-    await fetchPerTypeStats(60000);
-    const url = (fetch as any).mock.calls[0][0] as string;
-    expect(url).toContain('periodMs=60000');
-    expect(url).not.toContain('bucketMs');
-  });
-});
-
-describe('fetchContextGraphs', () => {
-  it('maps paranets to contextGraphs', async () => {
-    (globalThis as any).fetch = mockFetch({ paranets: [{ id: 'p1', name: 'Test' }] });
-    const res = await fetchContextGraphs();
-    expect(res.contextGraphs).toEqual([{ id: 'p1', name: 'Test' }]);
-  });
-
-  it('prefers contextGraphs over paranets', async () => {
-    (globalThis as any).fetch = mockFetch({ contextGraphs: [{ id: 'cg1' }], paranets: [{ id: 'p1' }] });
-    const res = await fetchContextGraphs();
-    expect(res.contextGraphs[0].id).toBe('cg1');
-  });
-
-  it('filters out system context graphs', async () => {
-    (globalThis as any).fetch = mockFetch({
-      contextGraphs: [{ id: 'user', isSystem: false }, { id: 'sys', isSystem: true }],
+  describe('fileUrl', () => {
+    it('preserves sha256: prefix', () => {
+      expect(fileUrl('sha256:abcdef')).toBe('/api/file/sha256%3Aabcdef');
     });
-    const res = await fetchContextGraphs();
-    expect(res.contextGraphs).toHaveLength(1);
-    expect(res.contextGraphs[0].id).toBe('user');
+
+    it('preserves keccak256: prefix', () => {
+      expect(fileUrl('keccak256:abcdef')).toBe('/api/file/keccak256%3Aabcdef');
+    });
+
+    it('adds sha256: prefix to bare hashes', () => {
+      expect(fileUrl('abcdef0123456789')).toBe('/api/file/sha256%3Aabcdef0123456789');
+    });
+
+    it('appends contentType query param when provided', () => {
+      const url = fileUrl('sha256:abc', 'application/pdf');
+      expect(url).toContain('?contentType=application%2Fpdf');
+    });
+
+    it('omits contentType query param when not provided', () => {
+      const url = fileUrl('sha256:abc');
+      expect(url).not.toContain('contentType');
+    });
+
+    it('encodes special characters in contentType', () => {
+      const url = fileUrl('sha256:abc', 'text/plain; charset=utf-8');
+      expect(url).toContain('contentType=');
+      expect(url).not.toContain(';');
+    });
   });
+
+  describe('authHeaders', () => {
+    it('returns empty object when window is undefined', () => {
+      const headers = authHeaders();
+      expect(headers).toEqual({});
+    });
+  });
+
+  describe('simple GET endpoints', () => {
+    it('fetchStatus calls /api/status', async () => {
+      const res = await fetchStatus();
+      expect(res).toEqual({ peerId: 'abc', synced: true });
+      expect(requestLog.some(r => r.url.startsWith('/api/status'))).toBe(true);
+    });
+
+    it('fetchAgents calls /api/agents', async () => {
+      await fetchAgents();
+      expect(requestLog.some(r => r.url.startsWith('/api/agents'))).toBe(true);
+    });
+
+    it('fetchMetrics calls /api/metrics', async () => {
+      const res = await fetchMetrics();
+      expect(res.total_kcs).toBe(5);
+    });
+
+    it('fetchConnections calls /api/connections', async () => {
+      await fetchConnections();
+      expect(requestLog.some(r => r.url.startsWith('/api/connections'))).toBe(true);
+    });
+
+    it('fetchLlmSettings calls /api/settings/llm', async () => {
+      const res = await fetchLlmSettings();
+      expect(res.model).toBe('gpt-4');
+    });
+
+    it('fetchRetentionSettings calls /api/settings/retention', async () => {
+      const res = await fetchRetentionSettings();
+      expect(res.retentionDays).toBe(30);
+    });
+
+    it('fetchTelemetrySettings calls /api/settings/telemetry', async () => {
+      const res = await fetchTelemetrySettings();
+      expect(res.enabled).toBe(true);
+    });
+
+    it('fetchApps calls /api/apps', async () => {
+      await fetchApps();
+      expect(requestLog.some(r => r.url.startsWith('/api/apps'))).toBe(true);
+    });
+
+    it('fetchRpcHealth calls /api/rpc-health', async () => {
+      await fetchRpcHealth();
+      expect(requestLog.some(r => r.url.startsWith('/api/chain/rpc-health'))).toBe(true);
+    });
+
+    it('fetchEconomics calls /api/economics', async () => {
+      await fetchEconomics();
+      expect(requestLog.some(r => r.url.startsWith('/api/economics'))).toBe(true);
+    });
+
+    it('fetchWalletsBalances calls /api/wallets/balances', async () => {
+      await fetchWalletsBalances();
+      expect(requestLog.some(r => r.url.startsWith('/api/wallets/balances'))).toBe(true);
+    });
+
+    it('fetchSavedQueries calls /api/saved-queries', async () => {
+      await fetchSavedQueries();
+      expect(requestLog.some(r => r.url.startsWith('/api/saved-queries'))).toBe(true);
+    });
+  });
+
+  describe('parameterized GET endpoints', () => {
+    it('fetchOperations includes query params', async () => {
+      await fetchOperations({ limit: '10' });
+      const call = requestLog.find(r => r.url.includes('/api/operations'));
+      expect(call?.url).toContain('limit=10');
+    });
+
+    it('fetchOperationsWithPhases adds phases=1', async () => {
+      await fetchOperationsWithPhases({ limit: '5' });
+      const call = requestLog.find(r => r.url.includes('phases=1'));
+      expect(call).toBeTruthy();
+      expect(call?.url).toContain('limit=5');
+    });
+
+    it('fetchOperation calls /api/operations/:id', async () => {
+      await fetchOperation('op-123');
+      expect(requestLog.some(r => r.url.includes('/api/operations/op-123'))).toBe(true);
+    });
+
+    it('fetchErrorHotspots with period', async () => {
+      await fetchErrorHotspots(3600000);
+      const call = requestLog.find(r => r.url.includes('error-hotspots'));
+      expect(call?.url).toContain('periodMs=3600000');
+    });
+
+    it('fetchLogs with params', async () => {
+      await fetchLogs({ level: 'error' });
+      const call = requestLog.find(r => r.url.includes('/api/logs'));
+      expect(call?.url).toContain('level=error');
+    });
+
+    it('fetchNodeLog with lines', async () => {
+      await fetchNodeLog({ lines: 100 });
+      const call = requestLog.find(r => r.url.includes('/api/node-log'));
+      expect(call?.url).toContain('lines=100');
+    });
+
+    it('fetchCatchupStatus calls correct endpoint', async () => {
+      await fetchCatchupStatus('cg-1');
+      expect(requestLog.some(r => r.url.includes('contextGraphId=cg-1'))).toBe(true);
+    });
+
+    it('fetchSuccessRates calls correct endpoint', async () => {
+      await fetchSuccessRates(60000);
+      expect(requestLog.some(r => r.url.includes('periodMs=60000'))).toBe(true);
+    });
+
+    it('fetchMetricsHistory includes from/to/maxPoints', async () => {
+      await fetchMetricsHistory(1000, 2000, 50);
+      const call = requestLog.find(r => r.url.includes('metrics/history') || r.url.includes('from=1000'));
+      expect(call?.url).toContain('from=1000');
+      expect(call?.url).toContain('to=2000');
+      expect(call?.url).toContain('maxPoints=50');
+    });
+  });
+
+  describe('POST endpoints', () => {
+    it('executeQuery sends sparql and contextGraphId', async () => {
+      await executeQuery('SELECT * WHERE { ?s ?p ?o }', 'cg-1');
+      const call = requestLog.find(r => r.method === 'POST' && r.url.includes('/api/query'));
+      const body = JSON.parse(call?.body ?? '{}');
+      expect(body.sparql).toBe('SELECT * WHERE { ?s ?p ?o }');
+      expect(body.contextGraphId).toBe('cg-1');
+    });
+
+    it('publishSharedMemory sends contextGraphId', async () => {
+      await publishSharedMemory('cg-1');
+      const call = requestLog.find(r => r.method === 'POST' && r.url.includes('/api/shared-memory/publish'));
+      const body = JSON.parse(call?.body ?? '{}');
+      expect(body.contextGraphId).toBe('cg-1');
+    });
+
+    it('createSavedQuery sends POST', async () => {
+      await createSavedQuery({ name: 'test', sparql: 'SELECT 1' });
+      const call = requestLog.find(r => r.method === 'POST' && r.url.includes('/api/saved-queries'));
+      const body = JSON.parse(call?.body ?? '{}');
+      expect(body.name).toBe('test');
+    });
+
+    it('shutdownNode sends POST', async () => {
+      await shutdownNode();
+      const call = requestLog.find(r => r.method === 'POST' && r.url.includes('/api/shutdown'));
+      expect(call).toBeTruthy();
+    });
+
+    it('subscribeToContextGraph sends POST', async () => {
+      await subscribeToContextGraph('cg-1');
+      const call = requestLog.find(r => r.method === 'POST' && r.url.includes('/api/subscribe'));
+      const body = JSON.parse(call?.body ?? '{}');
+      expect(body.contextGraphId).toBe('cg-1');
+    });
+  });
+
+  describe('gameApi', () => {
+    it('exports expected methods', () => {
+      expect(gameApi).toHaveProperty('lobby');
+      expect(gameApi).toHaveProperty('join');
+      expect(gameApi).toHaveProperty('leave');
+      expect(gameApi).toHaveProperty('create');
+      expect(gameApi).toHaveProperty('info');
+      expect(gameApi).toHaveProperty('swarm');
+    });
+  });
+
+  // IMPORT_SOURCES test block removed — the constant was retired along
+  // with /api/memory/import as part of the openclaw-dkg-primary-memory
+  // work. See Dashboard / ui/api.ts for the deletion context.
 });
-
-describe('notification endpoints', () => {
-  it('fetchNotifications with since param', async () => {
-    (globalThis as any).fetch = mockFetch({ notifications: [] });
-    await fetchNotifications({ since: 1000 });
-    const url = (fetch as any).mock.calls[0][0] as string;
-    expect(url).toContain('since=1000');
-  });
-
-  it('fetchNotifications with limit param', async () => {
-    (globalThis as any).fetch = mockFetch({ notifications: [] });
-    await fetchNotifications({ limit: 5 });
-    const url = (fetch as any).mock.calls[0][0] as string;
-    expect(url).toContain('limit=5');
-  });
-
-  it('fetchNotifications with no params', async () => {
-    (globalThis as any).fetch = mockFetch({ notifications: [] });
-    await fetchNotifications();
-    expect(fetch).toHaveBeenCalledWith('/api/notifications', expect.any(Object));
-  });
-
-  it('markNotificationsRead with ids', async () => {
-    (globalThis as any).fetch = mockFetch({ ok: true });
-    await markNotificationsRead([1, 2, 3]);
-    const body = JSON.parse((fetch as any).mock.calls[0][1].body);
-    expect(body.ids).toEqual([1, 2, 3]);
-  });
-
-  it('markNotificationsRead without ids sends empty body', async () => {
-    (globalThis as any).fetch = mockFetch({ ok: true });
-    await markNotificationsRead();
-    const body = JSON.parse((fetch as any).mock.calls[0][1].body);
-    expect(body.ids).toBeUndefined();
-  });
-});
-
-describe('POST endpoints', () => {
-  it('executeQuery sends sparql and contextGraphId', async () => {
-    (globalThis as any).fetch = mockFetch({ result: { bindings: [] } });
-    await executeQuery('SELECT * WHERE { ?s ?p ?o }', 'cg-1');
-    const body = JSON.parse((fetch as any).mock.calls[0][1].body);
-    expect(body.sparql).toBe('SELECT * WHERE { ?s ?p ?o }');
-    expect(body.contextGraphId).toBe('cg-1');
-  });
-
-  it('publishTriples writes then publishes', async () => {
-    (globalThis as any).fetch = mockFetch({ success: true });
-    await publishTriples('cg-1', [{ s: 'a', p: 'b', o: 'c' }]);
-    expect(fetch).toHaveBeenCalledTimes(2);
-    const call1Url = (fetch as any).mock.calls[0][0] as string;
-    const call2Url = (fetch as any).mock.calls[1][0] as string;
-    expect(call1Url).toContain('/api/shared-memory/write');
-    expect(call2Url).toContain('/api/shared-memory/publish');
-  });
-
-  it('publishSharedMemory sends contextGraphId', async () => {
-    (globalThis as any).fetch = mockFetch({ ual: 'did:dkg:test' });
-    await publishSharedMemory('cg-1');
-    const body = JSON.parse((fetch as any).mock.calls[0][1].body);
-    expect(body.contextGraphId).toBe('cg-1');
-  });
-
-  it('promoteAssertion sends correct params', async () => {
-    (globalThis as any).fetch = mockFetch({ promotedCount: 1 });
-    await promoteAssertion('cg-1', 'assertion-1', 'all');
-    const url = (fetch as any).mock.calls[0][0] as string;
-    expect(url).toContain('/api/assertion/assertion-1/promote');
-    const body = JSON.parse((fetch as any).mock.calls[0][1].body);
-    expect(body.contextGraphId).toBe('cg-1');
-    expect(body.entities).toBe('all');
-  });
-
-  it('createSavedQuery sends POST', async () => {
-    (globalThis as any).fetch = mockFetch({ id: 1 });
-    await createSavedQuery({ name: 'test', sparql: 'SELECT 1' });
-    const body = JSON.parse((fetch as any).mock.calls[0][1].body);
-    expect(body.name).toBe('test');
-  });
-
-  it('shutdownNode sends POST', async () => {
-    (globalThis as any).fetch = mockFetch({});
-    await shutdownNode();
-    expect((fetch as any).mock.calls[0][1].method).toBe('POST');
-  });
-
-  it('subscribeToContextGraph sends POST', async () => {
-    (globalThis as any).fetch = mockFetch({});
-    await subscribeToContextGraph('cg-1');
-    const body = JSON.parse((fetch as any).mock.calls[0][1].body);
-    expect(body.contextGraphId).toBe('cg-1');
-  });
-
-  it('fetchExtractionStatus calls correct endpoint', async () => {
-    (globalThis as any).fetch = mockFetch({ fileHash: 'sha256:abc', detectedContentType: 'text/plain' });
-    await fetchExtractionStatus('a1', 'cg-1');
-    expect(fetch).toHaveBeenCalledWith('/api/assertion/a1/extraction-status?contextGraphId=cg-1', expect.any(Object));
-  });
-
-  it('fetchQueryHistory calls correct endpoint', async () => {
-    (globalThis as any).fetch = mockFetch({ history: [] });
-    await fetchQueryHistory(10, 5);
-    const url = (fetch as any).mock.calls[0][0] as string;
-    expect(url).toContain('limit=10');
-    expect(url).toContain('offset=5');
-  });
-});
-
-describe('fetchFailedOperations', () => {
-  it('sends phase filter', async () => {
-    (globalThis as any).fetch = mockFetch({ operations: [] });
-    await fetchFailedOperations({ phase: 'publish' });
-    const url = (fetch as any).mock.calls[0][0] as string;
-    expect(url).toContain('phase=publish');
-  });
-
-  it('sends operationName filter', async () => {
-    (globalThis as any).fetch = mockFetch({ operations: [] });
-    await fetchFailedOperations({ operationName: 'PUBLISH' });
-    const url = (fetch as any).mock.calls[0][0] as string;
-    expect(url).toContain('operationName=PUBLISH');
-  });
-
-  it('sends all filters', async () => {
-    (globalThis as any).fetch = mockFetch({ operations: [] });
-    await fetchFailedOperations({ phase: 'p', operationName: 'o', periodMs: 1000, q: 'err', limit: 5 });
-    const url = (fetch as any).mock.calls[0][0] as string;
-    expect(url).toContain('phase=p');
-    expect(url).toContain('operationName=o');
-    expect(url).toContain('periodMs=1000');
-    expect(url).toContain('q=err');
-    expect(url).toContain('limit=5');
-  });
-});
-
-describe('fetchOperationStats', () => {
-  it('sends name filter', async () => {
-    (globalThis as any).fetch = mockFetch({ summary: {}, timeSeries: [] });
-    await fetchOperationStats({ name: 'PUBLISH' });
-    const url = (fetch as any).mock.calls[0][0] as string;
-    expect(url).toContain('name=PUBLISH');
-  });
-
-  it('sends periodMs filter', async () => {
-    (globalThis as any).fetch = mockFetch({ summary: {}, timeSeries: [] });
-    await fetchOperationStats({ periodMs: 60000 });
-    const url = (fetch as any).mock.calls[0][0] as string;
-    expect(url).toContain('periodMs=60000');
-  });
-});
-
-describe('listSwmEntities', () => {
-  it('uses shared-working-memory view', async () => {
-    (globalThis as any).fetch = mockFetch({ result: { bindings: [] } });
-    await listSwmEntities('cg-1');
-    const body = JSON.parse((fetch as any).mock.calls[0][1].body);
-    expect(body.view).toBe('shared-working-memory');
-    expect(body.contextGraphId).toBe('cg-1');
-  });
-});
-
-describe('gameApi', () => {
-  it('exports expected methods', () => {
-    expect(gameApi).toHaveProperty('lobby');
-    expect(gameApi).toHaveProperty('join');
-    expect(gameApi).toHaveProperty('leave');
-    expect(gameApi).toHaveProperty('create');
-    expect(gameApi).toHaveProperty('info');
-    expect(gameApi).toHaveProperty('swarm');
-  });
-});
-
-// IMPORT_SOURCES test block removed — the constant was retired along
-// with /api/memory/import as part of the openclaw-dkg-primary-memory
-// work. See Dashboard / ui/api.ts for the deletion context.

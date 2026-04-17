@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { ACKCollector, type ACKCollectorDeps } from '../src/ack-collector.js';
 import { StorageACKHandler, type StorageACKHandlerConfig } from '../src/storage-ack-handler.js';
 import { computeFlatKCRootV10 as computeFlatKCRoot, computeFlatKCRootV10, computeTripleHashV10 } from '../src/merkle.js';
@@ -10,10 +10,9 @@ import {
 } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
 import type { Quad } from '@origintrail-official/dkg-storage';
+import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
+import { mintTokens, setMinimumRequiredSignatures, stakeAndSetAsk } from '../../chain/test/hardhat-harness.js';
 
-// Test H5 prefix inputs. Production fail-loud rejects non-numeric / zero
-// CG ids in both the collector and the handler, so the fixture uses a
-// plain numeric id.
 const TEST_CHAIN_ID = 31337n;
 const TEST_KAV10_ADDR = '0x000000000000000000000000000000000000c10a';
 
@@ -40,23 +39,53 @@ describe('V10 Publish E2E', () => {
 
   const publisherWallet = ethers.Wallet.createRandom();
 
-  // The earlier "full V10 publish flow" test was removed here: it manually
-  // signed via the legacy 2-field `computeACKDigest`, which the production
-  // path no longer uses. The round-trip below is the real end-to-end check
-  // against the H5-prefixed 8-field digest via the real handler + collector.
+  let chainCgId: bigint;
+  let realKAV10Addr: string;
+  let _fileSnapshot: string;
+
+  beforeAll(async () => {
+    _fileSnapshot = await takeSnapshot();
+    const ctx = getSharedContext();
+    const provider = createProvider();
+    const coreOp = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+    await mintTokens(provider, ctx.hubAddress, HARDHAT_KEYS.DEPLOYER, coreOp.address, ethers.parseEther('50000000'));
+
+    for (let i = 0; i < ctx.receiverIds.length; i++) {
+      const recOpKey = [HARDHAT_KEYS.REC1_OP, HARDHAT_KEYS.REC2_OP, HARDHAT_KEYS.REC3_OP][i]!;
+      await stakeAndSetAsk(provider, ctx.hubAddress, HARDHAT_KEYS.DEPLOYER, recOpKey, ctx.receiverIds[i]!);
+    }
+
+    const adapter = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const cgResult = await adapter.createOnChainContextGraph({
+      participantIdentityIds: [
+        BigInt(ctx.coreProfileId),
+        ...ctx.receiverIds.map(id => BigInt(id)),
+      ],
+      requiredSignatures: 3,
+      publishPolicy: 0,
+    });
+    if (!cgResult.success || cgResult.contextGraphId === 0n) {
+      throw new Error(`Failed to create on-chain context graph: ${JSON.stringify(cgResult)}`);
+    }
+    chainCgId = cgResult.contextGraphId;
+    realKAV10Addr = await adapter.getKnowledgeAssetsV10Address();
+  });
+  afterAll(async () => {
+    await revertSnapshot(_fileSnapshot);
+  });
 
   it('StorageACKHandler + ACKCollector round-trip', async () => {
     const merkleRoot = computeFlatKCRoot(publishQuads, []);
     const rootEntities = ['urn:experiment:wsd'];
 
-    const mockStore = {
-      insert: vi.fn(),
-      delete: vi.fn(),
-      deleteByPattern: vi.fn(),
-      hasGraph: vi.fn().mockResolvedValue(true),
-      createGraph: vi.fn(),
-      dropGraph: vi.fn(),
-      query: vi.fn().mockImplementation((sparql: string) => {
+    const store = {
+      insert: async () => {},
+      delete: async () => {},
+      deleteByPattern: async () => {},
+      hasGraph: async () => true,
+      createGraph: async () => {},
+      dropGraph: async () => {},
+      query: async (sparql: string) => {
         const entityMatch = sparql.match(/FILTER\(\?s = <([^>]+)>/);
         if (entityMatch) {
           const entity = entityMatch[1];
@@ -64,14 +93,15 @@ describe('V10 Publish E2E', () => {
           const filtered = publishQuads.filter(q =>
             q.subject === entity || q.subject.startsWith(genidPrefix),
           );
-          return Promise.resolve({ type: 'quads' as const, quads: filtered });
+          return { type: 'quads' as const, quads: filtered };
         }
-        return Promise.resolve({ type: 'quads' as const, quads: publishQuads });
-      }),
-      close: vi.fn(),
+        return { type: 'quads' as const, quads: publishQuads };
+      },
+      close: async () => {},
     };
 
-    // Create 3 StorageACK handlers (one per core node)
+    const noopBus = { emit: () => {}, on: () => {}, off: () => {}, once: () => {} };
+
     const handlers = coreWallets.map((wallet, idx) => {
       const config: StorageACKHandlerConfig = {
         nodeRole: 'core',
@@ -82,18 +112,11 @@ describe('V10 Publish E2E', () => {
         chainId: TEST_CHAIN_ID,
         kav10Address: TEST_KAV10_ADDR,
       };
-      const eventBus = {
-        emit: vi.fn(),
-        on: vi.fn(),
-        off: vi.fn(),
-        once: vi.fn(),
-      };
-      return new StorageACKHandler(mockStore as any, config, eventBus as any);
+      return new StorageACKHandler(store as any, config, noopBus as any);
     });
 
-    // Create ACKCollector that calls handlers directly (simulating P2P)
     const deps: ACKCollectorDeps = {
-      gossipPublish: vi.fn().mockResolvedValue(undefined),
+      gossipPublish: async () => {},
       sendP2P: async (peerId, _protocol, data) => {
         const idx = parseInt(peerId.replace('core-', ''), 10);
         const handler = handlers[idx];
@@ -101,7 +124,7 @@ describe('V10 Publish E2E', () => {
         return handler.handler(data, fakePeerId);
       },
       getConnectedCorePeers: () => ['core-0', 'core-1', 'core-2'],
-      log: vi.fn(),
+      log: () => {},
     };
 
     const collector = new ACKCollector(deps);
@@ -120,9 +143,6 @@ describe('V10 Publish E2E', () => {
 
     expect(result.acks).toHaveLength(3);
 
-    // Verify each collected ACK can be recovered to the core node's address.
-    // The handler signs the 8-field H5-prefixed digest via computePublishACKDigest
-    // in storage-ack-handler.ts; this reference must match byte-for-byte.
     const digest = computePublishACKDigest(
       TEST_CHAIN_ID,
       TEST_KAV10_ADDR,
@@ -141,7 +161,6 @@ describe('V10 Publish E2E', () => {
         r: ethers.hexlify(ack.signatureR),
         yParityAndS: ethers.hexlify(ack.signatureVS),
       });
-      // The recovered address should match one of the core wallets
       const coreAddresses = coreWallets.map(w => w.address.toLowerCase());
       expect(coreAddresses).toContain(recovered.toLowerCase());
     }
@@ -151,23 +170,19 @@ describe('V10 Publish E2E', () => {
     const root1 = computeFlatKCRootV10(publishQuads, []);
     const root2 = computeFlatKCRootV10(publishQuads, []);
 
-    // Same quads in same order → same root
     expect(Buffer.from(root1).equals(Buffer.from(root2))).toBe(true);
 
-    // Different quad order → still same root (V10MerkleTree sorts internally)
     const reversed = [...publishQuads].reverse();
     const root3 = computeFlatKCRootV10(reversed, []);
     expect(Buffer.from(root1).equals(Buffer.from(root3))).toBe(true);
   });
 
   it('V10 merkle root differs from V9 SHA-256 root', async () => {
-    // Import V9 functions
     const { computeFlatKCRoot } = await import('../src/merkle.js');
 
     const v9Root = computeFlatKCRoot(publishQuads, []);
     const v10Root = computeFlatKCRootV10(publishQuads, []);
 
-    // V9 uses SHA-256, V10 uses keccak256 — roots MUST differ
     expect(Buffer.from(v9Root).equals(Buffer.from(v10Root))).toBe(false);
     expect(v9Root.length).toBe(32);
     expect(v10Root.length).toBe(32);
@@ -229,22 +244,29 @@ describe('V10 Publish E2E', () => {
     expect(decodedR.length).toBe(32);
   });
 
-  it('V10 mock adapter round-trip: ACK collection → createKnowledgeAssetsV10', async () => {
-    const { MockChainAdapter } = await import('@origintrail-official/dkg-chain');
-    const adapter = new MockChainAdapter('mock:31337');
-    adapter.minimumRequiredSignatures = 3;
+  it('V10 EVM adapter round-trip: ACK collection → createKnowledgeAssetsV10', async () => {
+    const adapter = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const { hubAddress, receiverIds, coreProfileId } = getSharedContext();
+    const provider = createProvider();
+    await setMinimumRequiredSignatures(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, 3);
 
     const merkleRoot = computeFlatKCRootV10(publishQuads, []);
+    const publisherIdentityId = BigInt(coreProfileId);
+    const byteSize = BigInt(publishQuads.length * 100);
+    const epochs = 2n;
+    const tokenAmount = await adapter.getRequiredPublishTokenAmount(byteSize, epochs);
 
+    const receiverKeys = [HARDHAT_KEYS.REC1_OP, HARDHAT_KEYS.REC2_OP, HARDHAT_KEYS.REC3_OP];
     const ackSignatures = await Promise.all(
-      coreWallets.map(async (wallet, idx) => {
+      receiverKeys.map(async (key, idx) => {
+        const wallet = new ethers.Wallet(key);
         const digest = computePublishACKDigest(
-          TEST_CHAIN_ID, TEST_KAV10_ADDR, cgIdBigInt, merkleRoot,
-          BigInt(publishQuads.length), BigInt(publishQuads.length * 100), 2n, 50n,
+          TEST_CHAIN_ID, realKAV10Addr, chainCgId, merkleRoot,
+          BigInt(publishQuads.length), byteSize, epochs, tokenAmount,
         );
         const sig = ethers.Signature.from(await wallet.signMessage(digest));
         return {
-          identityId: BigInt(idx + 1),
+          identityId: BigInt(receiverIds[idx]!),
           r: ethers.getBytes(sig.r),
           vs: ethers.getBytes(sig.yParityAndS),
         };
@@ -253,17 +275,14 @@ describe('V10 Publish E2E', () => {
 
     expect(ackSignatures).toHaveLength(3);
 
-    // Exercise the real H5 + N26 publisher-digest helper so the mock-adapter
-    // round-trip stays byte-aligned with the production path. The mock
-    // adapter does not verify publisherSignature on its own, so without
-    // this we'd be silently round-tripping arbitrary bytes.
+    const pubWallet = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
     const pubSig = ethers.Signature.from(
-      await publisherWallet.signMessage(
+      await pubWallet.signMessage(
         computePublishPublisherDigest(
           TEST_CHAIN_ID,
-          TEST_KAV10_ADDR,
-          1n,
-          cgIdBigInt,
+          realKAV10Addr,
+          publisherIdentityId,
+          chainCgId,
           merkleRoot,
         ),
       ),
@@ -271,15 +290,15 @@ describe('V10 Publish E2E', () => {
 
     const result = await adapter.createKnowledgeAssetsV10!({
       publishOperationId: 'v10-e2e-test',
-      contextGraphId: cgIdBigInt,
+      contextGraphId: chainCgId,
       merkleRoot,
       knowledgeAssetsAmount: publishQuads.length,
-      byteSize: BigInt(publishQuads.length * 100),
-      epochs: 2,
-      tokenAmount: 50n,
+      byteSize,
+      epochs: Number(epochs),
+      tokenAmount,
       isImmutable: false,
       paymaster: ethers.ZeroAddress,
-      publisherNodeIdentityId: 1n,
+      publisherNodeIdentityId: publisherIdentityId,
       publisherSignature: {
         r: ethers.getBytes(pubSig.r),
         vs: ethers.getBytes(pubSig.yParityAndS),
@@ -289,7 +308,7 @@ describe('V10 Publish E2E', () => {
 
     expect(result.batchId).toBeGreaterThan(0n);
     expect(result.txHash).toBeDefined();
-    expect(result.tokenAmount).toBe(50n);
+    expect(result.tokenAmount).toBe(tokenAmount);
     expect(result.publisherAddress).toBeDefined();
   });
 });

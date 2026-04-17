@@ -14,7 +14,6 @@
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
-import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { TypedEventBus, generateEd25519Keypair } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
 import {

@@ -1,4 +1,14 @@
 // @vitest-environment happy-dom
+//
+// NOTE on mocking: this test mocks `../src/ui/api.js` and `../src/ui/api-wrapper.js`
+// because PanelRight is exclusively driven by OpenClaw integration calls
+// (`fetchLocalAgentIntegrations`, `streamLocalAgentChat`, `fetchOpenClawLocalHealth`,
+// etc.), and the OpenClaw bridge is a fully external runtime that the project
+// chooses to mock — see the user-approved exception covering OpenClaw and
+// graph-viz adapters elsewhere in the test suite. De-mocking would require
+// running a live OpenClaw daemon (or building a realistic fake of it) inside
+// CI, which the same exception explicitly opts out of. All other UI tests in
+// this package use real HTTP servers / real Storage shims (no mocks).
 
 import React, { act } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';

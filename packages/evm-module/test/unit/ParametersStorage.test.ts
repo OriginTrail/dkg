@@ -74,9 +74,7 @@ describe('@unit ParametersStorage contract', function () {
     const valueInContract = 1;
     const newValue = '7';
     stakeWithdrawalDelay = await ParametersStorage.stakeWithdrawalDelay();
-    const expectedValue = `${stakeWithdrawalDelay}/60`;
-
-    expect(eval(expectedValue)).to.eql(valueInContract);
+    expect(Number(stakeWithdrawalDelay) / 60).to.eql(valueInContract);
 
     // set new value for stake withdrawal delay and validate is correct
     await Hub.forwardCall(

@@ -4,7 +4,7 @@ import { kosavaOriginTrailGameCoverage } from '../../vitest.coverage';
 export default defineConfig({
   test: {
     include: ['test/**/*.test.ts'],
-    exclude: ['test/e2e/**'],
+    exclude: ['test/e2e/**', 'test/ui/**', '.test-nodes/**'],
     testTimeout: 10_000,
     coverage: {
       provider: 'v8',

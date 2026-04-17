@@ -657,15 +657,18 @@ describe('@unit ContextGraphs (facade)', () => {
     });
 
     // ------------------------ Cross-phase coupling (Phase 8) ------------------------
-    // eslint-disable-next-line mocha/no-skipped-tests
-    it.skip('gracefully degrades when DKGPublishingConvictionNFT is NOT registered in Hub (Phase 8 integration test)', async () => {
-      // This test would require deregistering the NFT from the Hub mid-test
-      // and verifying `isAuthorizedPublisher` returns false on the PCA
-      // branch via the try/catch gracefulness path. Hub's set APIs do not
-      // expose a clean deregistration primitive, and Phase 8 will cover
-      // this via an integration test that exercises the full deploy flow
-      // with Phase 6 omitted. See audit note on ContextGraphs.sol:250-259.
-    });
+    //
+    // Removed the previously `it.skip`-ped "gracefully degrades when
+    // DKGPublishingConvictionNFT is NOT registered in Hub" placeholder.
+    // The stub had no body — it was a TODO note that would require
+    // deregistering the NFT from the Hub mid-test, and Hub's set APIs
+    // do not expose a clean deregistration primitive. The real coverage
+    // for the graceful-degrade branch in `ContextGraphs.sol:250-259` is
+    // intended to land as a Phase-8 end-to-end integration test that
+    // exercises the full deploy flow with Phase 6 omitted; until that
+    // test exists, a skipped empty stub was only adding noise. Tracking
+    // this in the audit note on ContextGraphs.sol:250-259 instead of
+    // carrying a permanently-disabled placeholder in the suite.
   });
 
   // =========================================================================

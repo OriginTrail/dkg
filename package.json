@@ -21,7 +21,13 @@
     "sim:testnet": "SIM_TARGET=testnet pnpm --filter @origintrail-official/dkg-network-sim dev",
     "sim:build": "pnpm --filter @origintrail-official/dkg-network-sim build",
     "mcp": "node packages/mcp-server/dist/index.js",
-    "index": "node packages/cli/dist/cli.js index"
+    "index": "node packages/cli/dist/cli.js index",
+    "test:evm-integration": "./scripts/test-evm-integration.sh",
+    "test:evm": "./scripts/test-evm-integration.sh all",
+    "test:e2e:ui": "pnpm --filter @origintrail-official/dkg-node-ui test:e2e",
+    "test:game:ui": "pnpm --filter @origintrail-official/dkg-app-origin-trail-game test:ui",
+    "test:game:e2e": "pnpm --filter @origintrail-official/dkg-app-origin-trail-game test:e2e",
+    "test:all": "pnpm test && pnpm test:evm && pnpm test:game:ui"
   },
   "devDependencies": {
     "@types/node": "^22",

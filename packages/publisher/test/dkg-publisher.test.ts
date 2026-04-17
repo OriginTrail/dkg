@@ -1,17 +1,18 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, beforeAll, afterAll, afterEach } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
-import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter } from '@origintrail-official/dkg-chain';
 import { TypedEventBus, generateEd25519Keypair } from '@origintrail-official/dkg-core';
 import { DKGPublisher, RESERVED_SUBJECT_PREFIXES } from '../src/dkg-publisher.js';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
+import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, createTestContextGraph, seedContextGraphRegistration, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
+import { mintTokens } from '../../chain/test/hardhat-harness.js';
 
-const PARANET = 'agent-registry';
-const GRAPH = `did:dkg:context-graph:${PARANET}`;
+let PARANET: string;
+let GRAPH: string;
 const ENTITY = 'did:dkg:agent:QmImageBot';
 const ENTITY2 = 'did:dkg:agent:QmTextBot';
-const TEST_WALLET = ethers.Wallet.createRandom();
-const TEST_PUBLISHER_ADDRESS = TEST_WALLET.address;
+const TEST_PUBLISHER_ADDRESS = new ethers.Wallet(HARDHAT_KEYS.CORE_OP).address;
 
 function q(s: string, p: string, o: string, g = GRAPH): Quad {
   return { subject: s, predicate: p, object: o, graph: g };
@@ -20,12 +21,30 @@ function q(s: string, p: string, o: string, g = GRAPH): Quad {
 describe('DKGPublisher', () => {
   let publisher: DKGPublisher;
   let store: OxigraphStore;
-  let chain: MockChainAdapter;
+  let chain: EVMChainAdapter;
   let eventBus: TypedEventBus;
 
+  let _fileSnapshot: string;
+  beforeAll(async () => {
+    _fileSnapshot = await takeSnapshot();
+    const { hubAddress } = getSharedContext();
+    const provider = createProvider();
+    const coreOp = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+    await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, coreOp.address, ethers.parseEther('50000000'));
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const cgId = await createTestContextGraph(chain);
+    PARANET = String(cgId);
+    GRAPH = `did:dkg:context-graph:${PARANET}`;
+  });
+  afterAll(async () => {
+    await revertSnapshot(_fileSnapshot);
+  });
+
+  let _testSnapshot: string;
   beforeEach(async () => {
+    _testSnapshot = await takeSnapshot();
     store = new OxigraphStore();
-    chain = new MockChainAdapter('mock:31337', TEST_PUBLISHER_ADDRESS);
+    chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     eventBus = new TypedEventBus();
     const keypair = await generateEd25519Keypair();
     publisher = new DKGPublisher({
@@ -33,9 +52,12 @@ describe('DKGPublisher', () => {
       chain,
       eventBus,
       keypair,
-      publisherPrivateKey: TEST_WALLET.privateKey,
-      publisherNodeIdentityId: 1n,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
+  });
+  afterEach(async () => {
+    await revertSnapshot(_testSnapshot);
   });
 
   it('publishes a single KA', async () => {
@@ -199,7 +221,7 @@ describe('DKGPublisher', () => {
       expect(metaResult.bindings).toHaveLength(1);
       const ual = metaResult.bindings[0]['ual'];
       // V9 UAL: did:dkg:{chainId}/{publisherAddress}/{startKAId}
-      expect(ual).toMatch(/^did:dkg:mock:31337\/0x[0-9a-fA-F]{40}\/\d+$/);
+      expect(ual).toMatch(/^did:dkg:evm:31337\/0x[0-9a-fA-F]{40}\/\d+$/);
       expect(ual).toContain(result.onChainResult!.publisherAddress);
     }
   });
@@ -330,13 +352,23 @@ describe('DKGPublisher', () => {
       // meaning (`core nodes verify against local SWM copy, no inline
       // staging quads`) is independent of the guard decision — it
       // continues to work as before.
-      await expect(
-        publisher.publish({
-          contextGraphId: PARANET,
-          quads: [q(ENTITY, 'http://schema.org/name', '"fromSharedMemory-with-legit-quads"')],
-          fromSharedMemory: true,
-        }),
-      ).resolves.toBeDefined();
+      //
+      // Previously this test only asserted `.resolves.toBeDefined()` —
+      // which would pass even if the publisher returned a failed/empty
+      // result. Tighten to check the actual PublishResult shape: status
+      // must be one of the valid terminal values, UAL must exist, and
+      // at least one KA manifest entry must be present for the single
+      // root entity in the input.
+      const result = await publisher.publish({
+        contextGraphId: PARANET,
+        quads: [q(ENTITY, 'http://schema.org/name', '"fromSharedMemory-with-legit-quads"')],
+        fromSharedMemory: true,
+      });
+      expect(result).toBeDefined();
+      expect(['tentative', 'confirmed']).toContain(result.status);
+      expect(result.ual).toMatch(/^did:dkg:/);
+      expect(result.kaManifest.length).toBeGreaterThan(0);
+      expect(result.kaManifest[0].rootEntity).toBe(ENTITY);
     });
 
     it('Round 12 Bug 34: internal promote→publish path (via publishFromSharedMemory) still bypasses the guard', async () => {
@@ -365,9 +397,19 @@ describe('DKGPublisher', () => {
         [q(ENTITY, 'http://schema.org/name', '"internal-path-test"')],
         { publisherPeerId: 'peer-internal', localOnly: true },
       );
-      await expect(
-        publisher.publishFromSharedMemory(PARANET, 'all'),
-      ).resolves.toBeDefined();
+      await seedContextGraphRegistration(store, PARANET);
+      // Tighten from `.resolves.toBeDefined()` (which would pass even on a
+      // silent-tentative result with zero manifest entries) to a real shape
+      // check: the internal publish must land in a valid terminal state AND
+      // surface the ENTITY we shared via at least one KA manifest entry.
+      // If the internal token bypass regresses, the reserved-namespace guard
+      // would reject publishFromSharedMemory and we'd get a throw here —
+      // still caught, but with an actual error instead of a silent pass.
+      const result = await publisher.publishFromSharedMemory(PARANET, 'all');
+      expect(result).toBeDefined();
+      expect(['tentative', 'confirmed']).toContain(result.status);
+      expect(result.kaManifest.length).toBeGreaterThan(0);
+      expect(result.kaManifest.some(ka => ka.rootEntity === ENTITY)).toBe(true);
     });
 
     it('Round 12 Bug 34: update() rejects reserved-prefix quads (Bucket A hole closed)', async () => {

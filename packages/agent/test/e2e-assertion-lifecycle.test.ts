@@ -11,9 +11,23 @@
  * 8. Sub-graph assertions — assertion lifecycle within a sub-graph
  * 9. Two-node promote gossip — promoted data replicates via gossip
  */
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import { DKGAgent } from '../src/index.js';
-import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
+import { mintTokens } from '../../chain/test/hardhat-harness.js';
+import { ethers } from 'ethers';
+
+let _fileSnapshot: string;
+beforeAll(async () => {
+  _fileSnapshot = await takeSnapshot();
+  const { hubAddress } = getSharedContext();
+  const provider = createProvider();
+  const coreOp = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+  await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, coreOp.address, ethers.parseEther('50000000'));
+});
+afterAll(async () => {
+  await revertSnapshot(_fileSnapshot);
+});
 
 const agents: DKGAgent[] = [];
 
@@ -28,11 +42,11 @@ function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
 
 const CG_ID = 'assertion-e2e';
 
-async function createAgent(name: string, chainId = 'mock:31337') {
+async function createAgent(name: string) {
   const agent = await DKGAgent.create({
     name,
     listenPort: 0,
-    chainAdapter: new MockChainAdapter(chainId),
+    chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
   });
   agents.push(agent);
   await agent.start();
@@ -199,13 +213,13 @@ describe('Assertion promote gossip (2 nodes)', () => {
     const nodeA = await DKGAgent.create({
       name: 'PromoteGossipA',
       listenPort: 0,
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     agents.push(nodeA);
     const nodeB = await DKGAgent.create({
       name: 'PromoteGossipB',
       listenPort: 0,
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     agents.push(nodeB);
 

@@ -11,28 +11,39 @@
  * 5. Publish with private triples + access protocol round-trip
  * 6. Persistent-store isolation with temp directories
  */
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, beforeAll, afterAll } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DKGAgent } from '../src/index.js';
-import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
+import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import {
   DKGNode,
   ProtocolRouter,
   TypedEventBus,
   generateEd25519Keypair,
   PROTOCOL_ACCESS,
-  PROTOCOL_PUBLISH,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { AccessClient, AccessHandler, DKGPublisher } from '@origintrail-official/dkg-publisher';
-import { DKGQueryEngine } from '@origintrail-official/dkg-query';
 import { ethers } from 'ethers';
 
 const agents: DKGAgent[] = [];
 const nodes: DKGNode[] = [];
 const tempDirs: string[] = [];
+
+let _fileSnapshot: string;
+beforeAll(async () => {
+  _fileSnapshot = await takeSnapshot();
+  const { hubAddress } = getSharedContext();
+  const provider = createProvider();
+  const coreOp = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+  await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, coreOp.address, ethers.parseEther('50000000'));
+});
+afterAll(async () => {
+  await revertSnapshot(_fileSnapshot);
+});
 
 afterEach(async () => {
   for (const a of agents) {
@@ -60,13 +71,13 @@ describe('Private triple confidentiality via GossipSub', () => {
       name: 'PrivacyPublisher',
       listenPort: 0,
       skills: [],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     const agentB = await DKGAgent.create({
       name: 'PrivacyReceiver',
       listenPort: 0,
       skills: [],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.REC1_OP),
     });
     agents.push(agentA, agentB);
     await agentA.start();
@@ -126,13 +137,13 @@ describe('Private triple confidentiality via GossipSub', () => {
       name: 'RetentionPublisher',
       listenPort: 0,
       skills: [],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     const agentB = await DKGAgent.create({
       name: 'RetentionReceiver',
       listenPort: 0,
       skills: [],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.REC1_OP),
     });
     agents.push(agentA, agentB);
     await agentA.start();
@@ -208,14 +219,14 @@ describe('Remote query privacy', () => {
       name: 'QueryPrivPublisher',
       listenPort: 0,
       skills: [],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
       queryAccess: { defaultPolicy: 'public' },
     });
     const agentB = await DKGAgent.create({
       name: 'QueryPrivRequester',
       listenPort: 0,
       skills: [],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.REC1_OP),
     });
     agents.push(agentA, agentB);
     await agentA.start();
@@ -278,7 +289,7 @@ describe('Access protocol denial', () => {
 
     const result = await accessClient.requestAccess(
       nodeA.peerId,
-      'did:dkg:mock:31337/0xNonExistent/999/1',
+      'did:dkg:evm:31337/0xNonExistent/999/1',
     );
 
     expect(result.granted).toBe(false);
@@ -296,9 +307,8 @@ describe('Access protocol denial', () => {
     await nodeB.libp2p.dial(multiaddr(nodeA.multiaddrs[0]));
     await sleep(500);
 
-    const wallet = ethers.Wallet.createRandom();
     const storeA = new OxigraphStore();
-    const chainA = new MockChainAdapter('mock:31337', wallet.address);
+    const chainA = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const busA = new TypedEventBus();
     const keypairA = await generateEd25519Keypair();
 
@@ -307,13 +317,19 @@ describe('Access protocol denial', () => {
       chain: chainA,
       eventBus: busA,
       keypair: keypairA,
-      publisherPrivateKey: wallet.privateKey,
-      publisherNodeIdentityId: 1n,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
 
-    // Publish with public triples ONLY (no private)
+    const cgResult = await chainA.createOnChainContextGraph({
+      participantIdentityIds: [BigInt(getSharedContext().coreProfileId)],
+      requiredSignatures: 1,
+      publishPolicy: 1,
+    });
+
     await publisherA.publish({
       contextGraphId: 'no-priv-test',
+      publishContextGraphId: cgResult.contextGraphId.toString(),
       quads: [
         { subject: 'did:dkg:test:PubOnly', predicate: 'http://schema.org/name', object: '"PubOnly"', graph: 'did:dkg:context-graph:no-priv-test' },
       ],
@@ -329,7 +345,7 @@ describe('Access protocol denial', () => {
 
     const result = await accessClient.requestAccess(
       nodeA.peerId,
-      'did:dkg:mock:31337/0xFake/1/1',
+      'did:dkg:evm:31337/0xFake/1/1',
     );
 
     expect(result.granted).toBe(false);
@@ -345,7 +361,7 @@ describe('Paranet isolation', () => {
       name: 'IsolationBot',
       listenPort: 0,
       skills: [],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     agents.push(agent);
     await agent.start();
@@ -381,7 +397,7 @@ describe('Paranet isolation', () => {
       name: 'ParaPrivBot',
       listenPort: 0,
       skills: [],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     agents.push(agent);
     await agent.start();
@@ -422,9 +438,8 @@ describe('Access protocol round-trip', () => {
     await nodeB.libp2p.dial(multiaddr(nodeA.multiaddrs[0]));
     await sleep(500);
 
-    const wallet = ethers.Wallet.createRandom();
     const storeA = new OxigraphStore();
-    const chainA = new MockChainAdapter('mock:31337', wallet.address);
+    const chainA = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const busA = new TypedEventBus();
     const keypairA = await generateEd25519Keypair();
 
@@ -436,13 +451,21 @@ describe('Access protocol round-trip', () => {
       chain: chainA,
       eventBus: busA,
       keypair: keypairA,
-      publisherPrivateKey: wallet.privateKey,
-      publisherNodeIdentityId: 1n,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
+
+    const cgResult = await chainA.createOnChainContextGraph({
+      participantIdentityIds: [BigInt(getSharedContext().coreProfileId)],
+      requiredSignatures: 1,
+      publishPolicy: 1,
+    });
+    const onChainCgId = cgResult.contextGraphId.toString();
 
     const result = await publisherA.publish({
       contextGraphId: PARANET,
       publisherPeerId: nodeA.peerId.toString(),
+      publishContextGraphId: onChainCgId,
       quads: [
         { subject: ENTITY, predicate: 'http://schema.org/name', object: '"AccessBot"', graph: `did:dkg:context-graph:${PARANET}` },
       ],
@@ -483,7 +506,7 @@ describe('Access protocol round-trip', () => {
     const accessClient = new AccessClient(routerB, keypairB, nodeB.peerId);
 
     const onChain = result.onChainResult!;
-    const ual = `did:dkg:mock:31337/${onChain.publisherAddress}/${onChain.startKAId}/1`;
+    const ual = `did:dkg:evm:31337/${onChain.publisherAddress}/${onChain.startKAId}/1`;
     const accessResult = await accessClient.requestAccess(nodeA.peerId, ual);
 
     expect(accessResult.granted).toBe(true);
@@ -511,14 +534,14 @@ describe('Persistent store isolation', () => {
       name: 'PersistA',
       listenPort: 0,
       skills: [],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
       dataDir: dirA,
     });
     const agentB = await DKGAgent.create({
       name: 'PersistB',
       listenPort: 0,
       skills: [],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.REC1_OP),
       dataDir: dirB,
     });
     agents.push(agentA, agentB);
@@ -556,13 +579,13 @@ describe('Private triple confidentiality via sync protocol', () => {
       name: 'SyncPublisher',
       listenPort: 0,
       skills: [],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     const agentB = await DKGAgent.create({
       name: 'SyncReceiver',
       listenPort: 0,
       skills: [],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.REC1_OP),
     });
     agents.push(agentA, agentB);
     await agentA.start();
@@ -638,7 +661,7 @@ describe('SPARQL injection prevention', () => {
       name: 'InjectionBot',
       listenPort: 0,
       skills: [],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     agents.push(agent);
 

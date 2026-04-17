@@ -114,7 +114,7 @@ Abstracts triple store backends behind a common `TripleStore` interface. Ships w
 ### @origintrail-official/dkg-chain
 `packages/chain/`
 
-Defines the `ChainAdapter` interface for on-chain operations (identity registration, staking, knowledge asset creation, token transfers). Ships three implementations: `EVMChainAdapter` (real EVM via ethers.js), `MockChainAdapter` (for tests), and `NoChainAdapter` (offline mode).
+Defines the `ChainAdapter` interface for on-chain operations (identity registration, staking, knowledge asset creation, token transfers). Ships three implementations: `EVMChainAdapter` (real EVM via ethers.js), `MockChainAdapter` (local CLI dev mode), and `NoChainAdapter` (offline mode). All CI tests use `EVMChainAdapter` backed by a Hardhat node.
 
 **Depends on**: `core`, `evm-module` (for contract ABIs).
 

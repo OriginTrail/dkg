@@ -2,9 +2,11 @@
  * E2E tests for workspace sync: late-joining nodes pull workspace data from
  * peers via the sync protocol, and workspaceOwnedEntities stays consistent.
  */
-import { describe, it, expect, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { DKGAgent } from '../src/index.js';
-import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
+import { mintTokens } from '../../chain/test/hardhat-harness.js';
+import { ethers } from 'ethers';
 
 const PARANET = 'ws-sync-e2e';
 const ENTITY_1 = 'urn:ws-sync:entity:1';
@@ -13,6 +15,18 @@ const ENTITY_2 = 'urn:ws-sync:entity:2';
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
+
+let _fileSnapshot: string;
+beforeAll(async () => {
+  _fileSnapshot = await takeSnapshot();
+  const { hubAddress } = getSharedContext();
+  const provider = createProvider();
+  const coreOp = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+  await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, coreOp.address, ethers.parseEther('50000000'));
+});
+afterAll(async () => {
+  await revertSnapshot(_fileSnapshot);
+});
 
 describe('Workspace Sync E2E (2 nodes)', () => {
   let nodeA: DKGAgent;
@@ -31,7 +45,7 @@ describe('Workspace Sync E2E (2 nodes)', () => {
     nodeA = await DKGAgent.create({
       name: 'WsSyncA',
       listenPort: 0,
-      chainAdapter: new MockChainAdapter('mock:31337'),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
       syncContextGraphs: [PARANET],
     });
 
@@ -64,7 +78,7 @@ describe('Workspace Sync E2E (2 nodes)', () => {
     nodeC = await DKGAgent.create({
       name: 'WsSyncC',
       listenPort: 0,
-      chainAdapter: new MockChainAdapter('mock:31337'),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
       syncContextGraphs: [PARANET],
     });
 
@@ -138,7 +152,7 @@ describe('Workspace Sync E2E (3 nodes, chained)', () => {
   it('A writes, B syncs from A, B writes, C syncs from B and gets both', async () => {
     nodeA = await DKGAgent.create({
       name: '3NodeA', listenPort: 0,
-      chainAdapter: new MockChainAdapter('mock:31337'),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
       syncContextGraphs: [PARANET_3],
     });
     await nodeA.start();
@@ -155,7 +169,7 @@ describe('Workspace Sync E2E (3 nodes, chained)', () => {
     // B connects to A and syncs workspace
     nodeB = await DKGAgent.create({
       name: '3NodeB', listenPort: 0,
-      chainAdapter: new MockChainAdapter('mock:31337'),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
       syncContextGraphs: [PARANET_3],
     });
     await nodeB.start();
@@ -182,7 +196,7 @@ describe('Workspace Sync E2E (3 nodes, chained)', () => {
     // C connects to B and syncs — should get both A's and B's data
     nodeC = await DKGAgent.create({
       name: '3NodeC', listenPort: 0,
-      chainAdapter: new MockChainAdapter('mock:31337'),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
       syncContextGraphs: [PARANET_3],
     });
     await nodeC.start();

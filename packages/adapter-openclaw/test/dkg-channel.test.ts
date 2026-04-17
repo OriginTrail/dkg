@@ -3,14 +3,83 @@ import { DkgChannelPlugin, CHANNEL_NAME, formatInboundTurnDiagnostic } from '../
 import { DkgDaemonClient } from '../src/dkg-client.js';
 import type { OpenClawPluginApi } from '../src/types.js';
 
+interface TrackingFn {
+  (...args: unknown[]): any;
+  calls: unknown[][];
+}
+
+function trackFn(impl: (...args: unknown[]) => unknown = () => undefined): TrackingFn {
+  const calls: unknown[][] = [];
+  const fn = ((...args: unknown[]) => {
+    calls.push(args);
+    return impl(...args);
+  }) as TrackingFn;
+  fn.calls = calls;
+  return fn;
+}
+
+function trackAsyncFn(impl: (...args: unknown[]) => unknown = async () => undefined): TrackingFn {
+  const calls: unknown[][] = [];
+  const fn = (async (...args: unknown[]) => {
+    calls.push(args);
+    return impl(...args);
+  }) as TrackingFn;
+  fn.calls = calls;
+  return fn;
+}
+
 function makeApi(overrides?: Partial<OpenClawPluginApi>): OpenClawPluginApi {
   return {
     config: {},
-    registerTool: vi.fn(),
-    registerHook: vi.fn(),
-    on: vi.fn(),
-    logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    registerTool: trackFn(),
+    registerHook: trackFn(),
+    on: trackFn(),
+    logger: { info: trackFn(), warn: trackFn(), debug: trackFn() },
     ...overrides,
+  };
+}
+
+function makeMockRuntime(overrides?: {
+  resolveAgentRouteImpl?: () => any;
+  resolveStorePathImpl?: () => string;
+  readSessionUpdatedAtImpl?: () => any;
+  recordInboundSessionImpl?: (...args: any[]) => any;
+  resolveEnvelopeFormatOptionsImpl?: () => any;
+  formatAgentEnvelopeImpl?: () => string;
+  dispatchImpl?: (params: any) => Promise<void>;
+  dispatchReplyFn?: TrackingFn;
+}) {
+  const recordInboundSession = overrides?.recordInboundSessionImpl
+    ? trackAsyncFn(overrides.recordInboundSessionImpl)
+    : trackAsyncFn();
+
+  return {
+    recordInboundSession,
+    runtime: {
+      channel: {
+        routing: {
+          resolveAgentRoute: trackFn(overrides?.resolveAgentRouteImpl ?? (() => ({ agentId: 'agent-1', sessionKey: 'session-1' }))),
+        },
+        session: {
+          resolveStorePath: trackFn(overrides?.resolveStorePathImpl ?? (() => '/tmp/store')),
+          readSessionUpdatedAt: trackFn(overrides?.readSessionUpdatedAtImpl ?? (() => undefined)),
+          recordInboundSession,
+        },
+        reply: {
+          resolveEnvelopeFormatOptions: trackFn(overrides?.resolveEnvelopeFormatOptionsImpl ?? (() => ({}))),
+          formatAgentEnvelope: trackFn(overrides?.formatAgentEnvelopeImpl ?? (() => '[DKG UI Owner] Hello')),
+          ...(overrides?.dispatchReplyFn
+            ? { dispatchReplyWithBufferedBlockDispatcher: overrides.dispatchReplyFn }
+            : {
+                async dispatchReplyWithBufferedBlockDispatcher(params: any) {
+                  if (overrides?.dispatchImpl) {
+                    await overrides.dispatchImpl(params);
+                  }
+                },
+              }),
+        },
+      },
+    },
   };
 }
 
@@ -26,15 +95,17 @@ async function waitForBridgePort(plugin: DkgChannelPlugin): Promise<number> {
 describe('DkgChannelPlugin', () => {
   let client: DkgDaemonClient;
   let plugin: DkgChannelPlugin;
+  let origStoreChatTurn: typeof DkgDaemonClient.prototype.storeChatTurn;
 
   beforeEach(() => {
     client = new DkgDaemonClient({ baseUrl: 'http://localhost:9200', apiToken: 'test-token' });
+    origStoreChatTurn = client.storeChatTurn.bind(client);
     plugin = new DkgChannelPlugin({ enabled: true, port: 0 }, client);
   });
 
   afterEach(async () => {
     await plugin.stop();
-    vi.restoreAllMocks();
+    client.storeChatTurn = origStoreChatTurn;
   });
 
   it('should have channel name "dkg-ui"', () => {
@@ -139,29 +210,26 @@ describe('DkgChannelPlugin', () => {
     const api = makeApi();
     plugin.register(api);
 
-    // Bridge starts asynchronously during register — no session_start hook needed
-    expect(api.registerHook).not.toHaveBeenCalledWith(
-      'session_start',
-      expect.any(Function),
-      expect.objectContaining({ name: 'dkg-channel-start' }),
-    );
+    expect((api.registerHook as TrackingFn).calls.every(
+      (call) => !(call[0] === 'session_start' && (call[2] as any)?.name === 'dkg-channel-start'),
+    )).toBe(true);
   });
 
   it('should call registerChannel if available', () => {
-    const registerChannel = vi.fn();
+    const registerChannel = trackFn();
     const api = makeApi({ registerChannel });
     plugin.register(api);
 
-    expect(registerChannel).toHaveBeenCalledOnce();
-    expect(registerChannel.mock.calls[0][0].plugin.id).toBe(CHANNEL_NAME);
+    expect(registerChannel.calls).toHaveLength(1);
+    expect((registerChannel.calls[0][0] as any).plugin.id).toBe(CHANNEL_NAME);
   });
 
   it('should register a current-style channel config adapter for gateway health/runtime snapshots', async () => {
-    const registerChannel = vi.fn();
+    const registerChannel = trackFn();
     const api = makeApi({ registerChannel });
     plugin.register(api);
 
-    const registeredPlugin = registerChannel.mock.calls[0][0].plugin;
+    const registeredPlugin = (registerChannel.calls[0][0] as any).plugin;
     expect(registeredPlugin.config.listAccountIds({})).toEqual(['default']);
     expect(registeredPlugin.config.defaultAccountId({})).toBe('default');
     expect(registeredPlugin.config.isEnabled({}, {})).toBe(true);
@@ -180,19 +248,19 @@ describe('DkgChannelPlugin', () => {
   });
 
   it('should call registerHttpRoute if available', () => {
-    const registerHttpRoute = vi.fn();
+    const registerHttpRoute = trackFn();
     const api = makeApi({ registerHttpRoute });
     plugin.register(api);
 
-    expect(registerHttpRoute).toHaveBeenCalledTimes(2);
-    expect(registerHttpRoute.mock.calls.map((call) => call[0])).toEqual(expect.arrayContaining([
+    expect(registerHttpRoute.calls).toHaveLength(2);
+    expect(registerHttpRoute.calls.map((call) => call[0])).toEqual(expect.arrayContaining([
       expect.objectContaining({ method: 'POST', path: '/api/dkg-channel/inbound' }),
       expect.objectContaining({ method: 'GET', path: '/api/dkg-channel/health' }),
     ]));
   });
 
   it('should set useGatewayRoute when registerHttpRoute is available', () => {
-    const registerHttpRoute = vi.fn();
+    const registerHttpRoute = trackFn();
     const api = makeApi({ registerHttpRoute });
     plugin.register(api);
 
@@ -208,34 +276,19 @@ describe('DkgChannelPlugin', () => {
 
   it('processInbound should use the current object-style runtime dispatch when plugin-sdk helpers are unavailable', async () => {
     let dispatched: any;
-    const recordInboundSession = vi.fn().mockResolvedValue(undefined);
-    const mockRuntime = {
-      channel: {
-        routing: {
-          resolveAgentRoute: vi.fn().mockReturnValue({ agentId: 'agent-1', sessionKey: 'session-1' }),
-        },
-        session: {
-          resolveStorePath: vi.fn().mockReturnValue('/tmp/store'),
-          readSessionUpdatedAt: vi.fn().mockReturnValue(undefined),
-          recordInboundSession,
-        },
-        reply: {
-          resolveEnvelopeFormatOptions: vi.fn().mockReturnValue({}),
-          formatAgentEnvelope: vi.fn().mockReturnValue('[DKG UI Owner] Hello'),
-          async dispatchReplyWithBufferedBlockDispatcher(params: any) {
-            dispatched = params;
-            await params.dispatcherOptions.deliver({ text: 'Hello from agent' });
-          },
-        },
+    const { runtime, recordInboundSession } = makeMockRuntime({
+      dispatchImpl: async (params) => {
+        dispatched = params;
+        await params.dispatcherOptions.deliver({ text: 'Hello from agent' });
       },
-    };
+    });
     const mockCfg = { session: { dmScope: 'main' }, agents: {} };
 
     const api = makeApi() as any;
-    api.runtime = mockRuntime;
+    api.runtime = runtime;
     api.cfg = mockCfg;
-    // Mock storeChatTurn to prevent actual HTTP call
-    const storeSpy = vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+    const storeCalls: unknown[][] = [];
+    client.storeChatTurn = async (...args: unknown[]) => { storeCalls.push(args); return undefined as any; };
     plugin.register(api);
 
     const reply = await plugin.processInbound('Hello', 'corr-1', 'owner');
@@ -254,7 +307,7 @@ describe('DkgChannelPlugin', () => {
       }),
       replyOptions: {},
     });
-    expect(recordInboundSession).toHaveBeenCalledWith(expect.objectContaining({
+    expect(recordInboundSession.calls[0][0]).toEqual(expect.objectContaining({
       storePath: '/tmp/store',
       sessionKey: 'session-1',
       ctx: expect.objectContaining({
@@ -262,52 +315,36 @@ describe('DkgChannelPlugin', () => {
         From: 'owner',
       }),
     }));
-    expect(mockRuntime.channel.routing.resolveAgentRoute).toHaveBeenCalledWith(
+    expect((runtime.channel.routing.resolveAgentRoute as TrackingFn).calls[0][0]).toEqual(
       expect.objectContaining({ channel: CHANNEL_NAME }),
     );
   });
 
   it('processInbound should isolate non-owner identities into their own session', async () => {
     let dispatched: any;
-    const recordInboundSession = vi.fn().mockResolvedValue(undefined);
-    const mockRuntime = {
-      channel: {
-        routing: {
-          // Return a fresh object each call so mutations don't leak between invocations.
-          resolveAgentRoute: vi.fn().mockImplementation(() => ({ agentId: 'agent-1', sessionKey: 'session-1' })),
-        },
-        session: {
-          resolveStorePath: vi.fn().mockReturnValue('/tmp/store'),
-          readSessionUpdatedAt: vi.fn().mockReturnValue(undefined),
-          recordInboundSession,
-        },
-        reply: {
-          resolveEnvelopeFormatOptions: vi.fn().mockReturnValue({}),
-          formatAgentEnvelope: vi.fn().mockReturnValue('[DKG UI background-worker] decide'),
-          async dispatchReplyWithBufferedBlockDispatcher(params: any) {
-            dispatched = params;
-            await params.dispatcherOptions.deliver({ text: 'advance' });
-          },
-        },
+    const { runtime, recordInboundSession } = makeMockRuntime({
+      resolveAgentRouteImpl: () => ({ agentId: 'agent-1', sessionKey: 'session-1' }),
+      formatAgentEnvelopeImpl: () => '[DKG UI background-worker] decide',
+      dispatchImpl: async (params) => {
+        dispatched = params;
+        await params.dispatcherOptions.deliver({ text: 'advance' });
       },
-    };
+    });
     const mockCfg = { session: { dmScope: 'main' }, agents: {} };
 
     const api = makeApi() as any;
-    api.runtime = mockRuntime;
+    api.runtime = runtime;
     api.cfg = mockCfg;
-    const storeSpy = vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+    client.storeChatTurn = async () => undefined as any;
     plugin.register(api);
 
-    // Non-owner identity gets its own session key
     const reply = await plugin.processInbound('decide', 'corr-game', 'background-worker');
     expect(reply.text).toBe('advance');
     expect(dispatched.ctx.SessionKey).toBe('agent:agent-1:background-worker');
-    expect(recordInboundSession).toHaveBeenCalledWith(expect.objectContaining({
+    expect(recordInboundSession.calls[0][0]).toEqual(expect.objectContaining({
       sessionKey: 'agent:agent-1:background-worker',
     }));
 
-    // Owner identity keeps the default session key
     const ownerReply = await plugin.processInbound('hello', 'corr-owner', 'owner');
     expect(ownerReply.text).toBe('advance');
     expect(dispatched.ctx.SessionKey).toBe('session-1');
@@ -315,33 +352,19 @@ describe('DkgChannelPlugin', () => {
 
   it('processInbound should fall back to the legacy positional runtime dispatch when needed', async () => {
     const dispatchCalls: any[] = [];
-    const recordInboundSession = vi.fn().mockResolvedValue(undefined);
-    const mockRuntime = {
-      channel: {
-        routing: {
-          resolveAgentRoute: vi.fn().mockReturnValue({ agentId: 'agent-1', sessionKey: 'session-1' }),
-        },
-        session: {
-          resolveStorePath: vi.fn().mockReturnValue('/tmp/store'),
-          readSessionUpdatedAt: vi.fn().mockReturnValue(undefined),
-          recordInboundSession,
-        },
-        reply: {
-          resolveEnvelopeFormatOptions: vi.fn().mockReturnValue({}),
-          formatAgentEnvelope: vi.fn().mockReturnValue('[DKG UI Owner] Hello'),
-          async dispatchReplyWithBufferedBlockDispatcher(ctx: any, cfg: any, opts: any, replyOptions: any) {
-            dispatchCalls.push([ctx, cfg, opts, replyOptions]);
-            await opts.deliver({ text: 'Hello from legacy runtime' });
-          },
-        },
-      },
+    const { runtime, recordInboundSession } = makeMockRuntime();
+
+    runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher = async function (ctx: any, cfg: any, opts: any, replyOptions: any) {
+      dispatchCalls.push([ctx, cfg, opts, replyOptions]);
+      await opts.deliver({ text: 'Hello from legacy runtime' });
     };
+
     const mockCfg = { session: { dmScope: 'main' }, agents: {} };
 
     const api = makeApi() as any;
-    api.runtime = mockRuntime;
+    api.runtime = runtime;
     api.cfg = mockCfg;
-    const storeSpy = vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+    client.storeChatTurn = async () => undefined as any;
     plugin.register(api);
 
     const reply = await plugin.processInbound('Hello', 'corr-legacy', 'owner');
@@ -355,7 +378,7 @@ describe('DkgChannelPlugin', () => {
       onError: expect.any(Function),
     });
     expect(dispatchCalls[0][3]).toEqual({});
-    expect(recordInboundSession).toHaveBeenCalledWith(expect.objectContaining({
+    expect(recordInboundSession.calls[0][0]).toEqual(expect.objectContaining({
       storePath: '/tmp/store',
       sessionKey: 'session-1',
       ctx: expect.objectContaining({
@@ -366,44 +389,30 @@ describe('DkgChannelPlugin', () => {
   });
 
   it('processInbound should persist turn to DKG after successful dispatch', async () => {
-    const mockRuntime = {
-      channel: {
-        routing: {
-          resolveAgentRoute: vi.fn().mockReturnValue({ agentId: 'agent-1', sessionKey: 'session-1' }),
-        },
-        session: {
-          resolveStorePath: vi.fn().mockReturnValue('/tmp/store'),
-          readSessionUpdatedAt: vi.fn().mockReturnValue(undefined),
-          recordInboundSession: vi.fn(),
-        },
-        reply: {
-          resolveEnvelopeFormatOptions: vi.fn().mockReturnValue({}),
-          formatAgentEnvelope: vi.fn().mockReturnValue('[DKG UI Owner] Hello'),
-          async dispatchReplyWithBufferedBlockDispatcher(params: any) {
-            await params.dispatcherOptions.deliver({ text: 'Agent reply' });
-          },
-        },
+    const { runtime } = makeMockRuntime({
+      dispatchImpl: async (params) => {
+        await params.dispatcherOptions.deliver({ text: 'Agent reply' });
       },
-    };
+    });
     const mockCfg = { session: { dmScope: 'main' }, agents: {} };
 
     const api = makeApi() as any;
-    api.runtime = mockRuntime;
+    api.runtime = runtime;
     api.cfg = mockCfg;
-    const storeSpy = vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+    const storeCalls: unknown[][] = [];
+    client.storeChatTurn = async (...args: unknown[]) => { storeCalls.push(args); return undefined as any; };
     plugin.register(api);
 
     await plugin.processInbound('User message', 'corr-persist', 'owner');
 
-    // Wait a tick for fire-and-forget promise to resolve
     await new Promise(r => setTimeout(r, 10));
 
-    expect(storeSpy).toHaveBeenCalledWith(
+    expect(storeCalls[0]).toEqual([
       'openclaw:dkg-ui',
       'User message',
       'Agent reply',
       { turnId: 'corr-persist' },
-    );
+    ]);
   });
 
   it('processInbound should carry attachment refs into the runtime prompt and persist them with the turn', async () => {
@@ -537,130 +546,98 @@ describe('DkgChannelPlugin', () => {
   it('processInbound should retry turn persistence after a transient DKG failure', async () => {
     vi.useFakeTimers();
     try {
-      const mockRuntime = {
-        channel: {
-          routing: {
-            resolveAgentRoute: vi.fn().mockReturnValue({ agentId: 'agent-1', sessionKey: 'session-1' }),
-          },
-          session: {
-            resolveStorePath: vi.fn().mockReturnValue('/tmp/store'),
-            readSessionUpdatedAt: vi.fn().mockReturnValue(undefined),
-            recordInboundSession: vi.fn(),
-          },
-          reply: {
-            resolveEnvelopeFormatOptions: vi.fn().mockReturnValue({}),
-            formatAgentEnvelope: vi.fn().mockReturnValue('[DKG UI Owner] Retry me'),
-            async dispatchReplyWithBufferedBlockDispatcher(params: any) {
-              await params.dispatcherOptions.deliver({ text: 'Recovered reply' });
-            },
-          },
+      const { runtime } = makeMockRuntime({
+        dispatchImpl: async (params) => {
+          await params.dispatcherOptions.deliver({ text: 'Recovered reply' });
         },
-      };
+      });
       const mockCfg = { session: { dmScope: 'main' }, agents: {} };
 
       const api = makeApi() as any;
-      api.runtime = mockRuntime;
+      api.runtime = runtime;
       api.cfg = mockCfg;
-      const storeSpy = vi.spyOn(client, 'storeChatTurn')
-        .mockRejectedValueOnce(new Error('temporary store outage'))
-        .mockResolvedValueOnce(undefined);
+      const storeCalls: unknown[][] = [];
+      let storeCallCount = 0;
+      client.storeChatTurn = async (...args: unknown[]) => {
+        storeCalls.push(args);
+        storeCallCount++;
+        if (storeCallCount === 1) throw new Error('temporary store outage');
+        return undefined as any;
+      };
       plugin.register(api);
 
       await plugin.processInbound('Retry me', 'corr-retry', 'owner');
-      expect(storeSpy).toHaveBeenCalledTimes(1);
+      expect(storeCalls).toHaveLength(1);
 
       await vi.advanceTimersByTimeAsync(250);
-      expect(storeSpy).toHaveBeenCalledTimes(2);
-      expect(storeSpy).toHaveBeenLastCalledWith(
+      expect(storeCalls).toHaveLength(2);
+      expect(storeCalls[storeCalls.length - 1]).toEqual([
         'openclaw:dkg-ui',
         'Retry me',
         'Recovered reply',
         { turnId: 'corr-retry' },
-      );
+      ]);
     } finally {
       vi.useRealTimers();
     }
   });
 
   it('persistTurn should use separate sessionId for non-owner identities', async () => {
-    const mockRuntime = {
-      channel: {
-        routing: {
-          resolveAgentRoute: vi.fn().mockImplementation(() => ({ agentId: 'agent-1', sessionKey: 'session-1' })),
-        },
-        session: {
-          resolveStorePath: vi.fn().mockReturnValue('/tmp/store'),
-          readSessionUpdatedAt: vi.fn().mockReturnValue(undefined),
-          recordInboundSession: vi.fn(),
-        },
-        reply: {
-          resolveEnvelopeFormatOptions: vi.fn().mockReturnValue({}),
-          formatAgentEnvelope: vi.fn().mockReturnValue('[DKG UI] msg'),
-          async dispatchReplyWithBufferedBlockDispatcher(params: any) {
-            await params.dispatcherOptions.deliver({ text: 'reply' });
-          },
-        },
+    const { runtime } = makeMockRuntime({
+      resolveAgentRouteImpl: () => ({ agentId: 'agent-1', sessionKey: 'session-1' }),
+      formatAgentEnvelopeImpl: () => '[DKG UI] msg',
+      dispatchImpl: async (params) => {
+        await params.dispatcherOptions.deliver({ text: 'reply' });
       },
-    };
+    });
     const mockCfg = { session: { dmScope: 'main' }, agents: {} };
 
     const api = makeApi() as any;
-    api.runtime = mockRuntime;
+    api.runtime = runtime;
     api.cfg = mockCfg;
-    const storeSpy = vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+    const storeCalls: unknown[][] = [];
+    client.storeChatTurn = async (...args: unknown[]) => { storeCalls.push(args); return undefined as any; };
     plugin.register(api);
 
-    // background-worker identity → separate session
     await plugin.processInbound('decide', 'corr-game', 'background-worker');
     await new Promise(r => setTimeout(r, 10));
-    expect(storeSpy).toHaveBeenCalledWith(
+    expect(storeCalls[0]).toEqual([
       'openclaw:dkg-ui:background-worker',
       'decide',
       'reply',
       { turnId: 'corr-game' },
-    );
+    ]);
 
-    storeSpy.mockClear();
+    storeCalls.length = 0;
 
-    // owner identity → default session
     await plugin.processInbound('hello', 'corr-owner', 'owner');
     await new Promise(r => setTimeout(r, 10));
-    expect(storeSpy).toHaveBeenCalledWith(
+    expect(storeCalls[0]).toEqual([
       'openclaw:dkg-ui',
       'hello',
       'reply',
       { turnId: 'corr-owner' },
-    );
+    ]);
   });
 
   it('processInbound should use SDK core wrappers that preserve runtime method context', async () => {
     const sessionCalls: any[] = [];
     const dispatchCalls: any[] = [];
-    const mockRuntime = {
-      channel: {
-        routing: {
-          resolveAgentRoute: vi.fn().mockReturnValue({ agentId: 'agent-1', sessionKey: 'session-1' }),
-        },
-        session: {
-          resolveStorePath: vi.fn().mockReturnValue('/tmp/store'),
-          readSessionUpdatedAt: vi.fn().mockReturnValue(undefined),
-          recordInboundSession(this: any, params: any) {
-            sessionCalls.push({ self: this, params });
-          },
-        },
-        reply: {
-          resolveEnvelopeFormatOptions: vi.fn().mockReturnValue({}),
-          formatAgentEnvelope: vi.fn().mockReturnValue('[DKG UI Owner] Hello'),
-          async dispatchReplyWithBufferedBlockDispatcher(this: any, params: any) {
-            dispatchCalls.push({ self: this, params });
-            await params.dispatcherOptions.deliver({ text: 'Hello from sdk path' });
-          },
-        },
-      },
+
+    const { runtime } = makeMockRuntime();
+    runtime.channel.session.recordInboundSession = function (this: any, params: any) {
+      sessionCalls.push({ self: this, params });
     };
+    runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher = async function (this: any, params: any) {
+      dispatchCalls.push({ self: this, params });
+      await params.dispatcherOptions.deliver({ text: 'Hello from sdk path' });
+    };
+
     const mockCfg = { session: { dmScope: 'main' }, agents: {} };
+    const sdkCalls: unknown[][] = [];
     const mockSdk = {
-      dispatchInboundReplyWithBase: vi.fn().mockImplementation(async (params: any) => {
+      dispatchInboundReplyWithBase: async (params: any) => {
+        sdkCalls.push([params]);
         await params.core.channel.session.recordInboundSession({
           storePath: params.storePath,
           sessionKey: params.route.sessionKey,
@@ -675,24 +652,24 @@ describe('DkgChannelPlugin', () => {
           },
           replyOptions: {},
         });
-      }),
+      },
     };
 
     const api = makeApi() as any;
-    api.runtime = mockRuntime;
+    api.runtime = runtime;
     api.cfg = mockCfg;
-    vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+    client.storeChatTurn = async () => undefined as any;
     (plugin as any).sdk = mockSdk;
     plugin.register(api);
 
     const reply = await plugin.processInbound('Hello', 'corr-sdk', 'owner');
 
     expect(reply.text).toBe('Hello from sdk path');
-    expect(mockSdk.dispatchInboundReplyWithBase).toHaveBeenCalledOnce();
+    expect(sdkCalls).toHaveLength(1);
     expect(sessionCalls).toHaveLength(1);
-    expect(sessionCalls[0].self).toBe(mockRuntime.channel.session);
+    expect(sessionCalls[0].self).toBe(runtime.channel.session);
     expect(dispatchCalls).toHaveLength(1);
-    expect(dispatchCalls[0].self).toBe(mockRuntime.channel.reply);
+    expect(dispatchCalls[0].self).toBe(runtime.channel.reply);
     expect(dispatchCalls[0].params).toMatchObject({
       ctx: expect.objectContaining({ BodyForAgent: 'Hello', SessionKey: 'session-1' }),
       cfg: mockCfg,
@@ -706,7 +683,6 @@ describe('DkgChannelPlugin', () => {
   });
 
   it('processInbound should throw if no routing mechanism available', async () => {
-    // Register with a bare api (no runtime dispatch, no routeInboundMessage)
     const api = makeApi();
     plugin.register(api);
 
@@ -715,18 +691,19 @@ describe('DkgChannelPlugin', () => {
   });
 
   it('processInbound should use routeInboundMessage when runtime dispatch is unavailable', async () => {
-    const routeInboundMessage = vi.fn().mockResolvedValue({
+    const routeInboundMessage = trackAsyncFn(async () => ({
       correlationId: 'corr-2',
       text: 'Reply!',
       turnId: 't-2',
-    });
-    const storeSpy = vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+    }));
+    const storeCalls: unknown[][] = [];
+    client.storeChatTurn = async (...args: unknown[]) => { storeCalls.push(args); return undefined as any; };
     const api = makeApi({ routeInboundMessage });
     plugin.register(api);
 
     const reply = await plugin.processInbound('Hello', 'corr-2', 'owner');
 
-    expect(routeInboundMessage).toHaveBeenCalledWith({
+    expect(routeInboundMessage.calls[0][0]).toEqual({
       channelName: CHANNEL_NAME,
       senderId: 'owner',
       senderIsOwner: true,
@@ -737,12 +714,12 @@ describe('DkgChannelPlugin', () => {
     expect(reply.correlationId).toBe('corr-2');
 
     await new Promise((resolve) => setTimeout(resolve, 10));
-    expect(storeSpy).toHaveBeenCalledWith(
+    expect(storeCalls[0]).toEqual([
       'openclaw:dkg-ui',
       'Hello',
       'Reply!',
       { turnId: 'corr-2' },
-    );
+    ]);
   });
 
   it('processInbound wraps the routeInboundMessage fallback in an ALS dispatch scope so slot-backed recall sees the UI-selected CG (Codex B13)', async () => {
@@ -818,10 +795,10 @@ describe('DkgChannelPlugin', () => {
   });
 
   it('processInboundStream should fall back to routeInboundMessage when streaming dispatch is unavailable', async () => {
-    const routeInboundMessage = vi.fn().mockResolvedValue({
+    const routeInboundMessage = trackAsyncFn(async () => ({
       correlationId: 'corr-stream',
       text: 'Reply from route',
-    });
+    }));
     const api = makeApi({ routeInboundMessage });
     plugin.register(api);
 
@@ -830,7 +807,7 @@ describe('DkgChannelPlugin', () => {
       events.push(event as any);
     }
 
-    expect(routeInboundMessage).toHaveBeenCalledOnce();
+    expect(routeInboundMessage.calls).toHaveLength(1);
     expect(events).toEqual([
       { type: 'final', text: 'Reply from route', correlationId: 'corr-stream' },
     ]);
@@ -847,33 +824,20 @@ describe('DkgChannelPlugin', () => {
         detectedContentType: 'text/markdown',
       },
     ];
-    const mockRuntime = {
-      channel: {
-        routing: {
-          resolveAgentRoute: vi.fn().mockReturnValue({ agentId: 'agent-1', sessionKey: 'session-1' }),
-        },
-        session: {
-          resolveStorePath: vi.fn().mockReturnValue('/tmp/store'),
-          readSessionUpdatedAt: vi.fn().mockReturnValue(undefined),
-          recordInboundSession: vi.fn(),
-        },
-        reply: {
-          resolveEnvelopeFormatOptions: vi.fn().mockReturnValue({}),
-          formatAgentEnvelope: vi.fn().mockReturnValue('[DKG UI Owner] Hello'),
-          async dispatchReplyWithBufferedBlockDispatcher(params: any) {
-            dispatched = params;
-            await params.dispatcherOptions.deliver({ text: 'Streamed ' });
-            await params.dispatcherOptions.deliver({ text: 'reply' });
-          },
-        },
+    const { runtime } = makeMockRuntime({
+      dispatchImpl: async (params) => {
+        dispatched = params;
+        await params.dispatcherOptions.deliver({ text: 'Streamed ' });
+        await params.dispatcherOptions.deliver({ text: 'reply' });
       },
-    };
+    });
     const mockCfg = { session: { dmScope: 'main' }, agents: {} };
 
     const api = makeApi() as any;
-    api.runtime = mockRuntime;
+    api.runtime = runtime;
     api.cfg = mockCfg;
-    const storeSpy = vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+    const storeCalls: unknown[][] = [];
+    client.storeChatTurn = async (...args: unknown[]) => { storeCalls.push(args); return undefined as any; };
     plugin.register(api);
 
     const events: Array<{ type: string; delta?: string; text?: string; correlationId?: string }> = [];
@@ -902,43 +866,30 @@ describe('DkgChannelPlugin', () => {
       { type: 'text_delta', delta: 'reply' },
       { type: 'final', text: 'Streamed reply', correlationId: 'corr-stream-runtime' },
     ]);
-    expect(storeSpy).toHaveBeenCalledWith(
+    expect(storeCalls[0]).toEqual([
       'openclaw:dkg-ui',
       'Hello',
       'Streamed reply',
       { turnId: 'corr-stream-runtime', attachmentRefs },
-    );
+    ]);
   });
 
   it('processInboundStream should wait for a still-running dispatch to settle before persisting a closed stream', async () => {
     let resumeDispatch!: () => void;
-    const mockRuntime = {
-      channel: {
-        routing: {
-          resolveAgentRoute: vi.fn().mockReturnValue({ agentId: 'agent-1', sessionKey: 'session-1' }),
-        },
-        session: {
-          resolveStorePath: vi.fn().mockReturnValue('/tmp/store'),
-          readSessionUpdatedAt: vi.fn().mockReturnValue(undefined),
-          recordInboundSession: vi.fn(),
-        },
-        reply: {
-          resolveEnvelopeFormatOptions: vi.fn().mockReturnValue({}),
-          formatAgentEnvelope: vi.fn().mockReturnValue('[DKG UI Owner] Hello'),
-          async dispatchReplyWithBufferedBlockDispatcher(params: any) {
-            await params.dispatcherOptions.deliver({ text: 'Partial ' });
-            await new Promise<void>((resolve) => { resumeDispatch = resolve; });
-            await params.dispatcherOptions.deliver({ text: 'reply' });
-          },
-        },
+    const { runtime } = makeMockRuntime({
+      dispatchImpl: async (params) => {
+        await params.dispatcherOptions.deliver({ text: 'Partial ' });
+        await new Promise<void>((resolve) => { resumeDispatch = resolve; });
+        await params.dispatcherOptions.deliver({ text: 'reply' });
       },
-    };
+    });
     const mockCfg = { session: { dmScope: 'main' }, agents: {} };
 
     const api = makeApi() as any;
-    api.runtime = mockRuntime;
+    api.runtime = runtime;
     api.cfg = mockCfg;
-    const storeSpy = vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+    const storeCalls: unknown[][] = [];
+    client.storeChatTurn = async (...args: unknown[]) => { storeCalls.push(args); return undefined as any; };
     plugin.register(api);
 
     const stream = plugin.processInboundStream('Hello', 'corr-stream-cancel', 'owner');
@@ -950,44 +901,31 @@ describe('DkgChannelPlugin', () => {
       done: true,
       value: undefined,
     });
-    expect(storeSpy).not.toHaveBeenCalled();
+    expect(storeCalls).toHaveLength(0);
     resumeDispatch();
     await new Promise((resolve) => setTimeout(resolve, 10));
 
-    expect(storeSpy).toHaveBeenCalledWith(
+    expect(storeCalls[0]).toEqual([
       'openclaw:dkg-ui',
       'Hello',
       'Partial reply',
       { turnId: 'corr-stream-cancel' },
-    );
+    ]);
   });
 
   it('processInboundStream should persist the completed reply when final completion was already queued before the consumer stopped iterating', async () => {
-    const mockRuntime = {
-      channel: {
-        routing: {
-          resolveAgentRoute: vi.fn().mockReturnValue({ agentId: 'agent-1', sessionKey: 'session-1' }),
-        },
-        session: {
-          resolveStorePath: vi.fn().mockReturnValue('/tmp/store'),
-          readSessionUpdatedAt: vi.fn().mockReturnValue(undefined),
-          recordInboundSession: vi.fn(),
-        },
-        reply: {
-          resolveEnvelopeFormatOptions: vi.fn().mockReturnValue({}),
-          formatAgentEnvelope: vi.fn().mockReturnValue('[DKG UI Owner] Hello'),
-          async dispatchReplyWithBufferedBlockDispatcher(params: any) {
-            await params.dispatcherOptions.deliver({ text: 'Complete reply' });
-          },
-        },
+    const { runtime } = makeMockRuntime({
+      dispatchImpl: async (params) => {
+        await params.dispatcherOptions.deliver({ text: 'Complete reply' });
       },
-    };
+    });
     const mockCfg = { session: { dmScope: 'main' }, agents: {} };
 
     const api = makeApi() as any;
-    api.runtime = mockRuntime;
+    api.runtime = runtime;
     api.cfg = mockCfg;
-    const storeSpy = vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+    const storeCalls: unknown[][] = [];
+    client.storeChatTurn = async (...args: unknown[]) => { storeCalls.push(args); return undefined as any; };
     plugin.register(api);
 
     const stream = plugin.processInboundStream('Hello', 'corr-stream-finished-before-return', 'owner');
@@ -1001,46 +939,30 @@ describe('DkgChannelPlugin', () => {
     });
     await new Promise((resolve) => setTimeout(resolve, 10));
 
-    expect(storeSpy).toHaveBeenCalledWith(
+    expect(storeCalls[0]).toEqual([
       'openclaw:dkg-ui',
       'Hello',
       'Complete reply',
       { turnId: 'corr-stream-finished-before-return' },
-    );
+    ]);
   });
 
   it('processInboundStream should surface a real error when the agent returns no text', async () => {
-    const mockRuntime = {
-      channel: {
-        routing: {
-          resolveAgentRoute: vi.fn().mockReturnValue({ agentId: 'agent-1', sessionKey: 'session-1' }),
-        },
-        session: {
-          resolveStorePath: vi.fn().mockReturnValue('/tmp/store'),
-          readSessionUpdatedAt: vi.fn().mockReturnValue(undefined),
-          recordInboundSession: vi.fn(),
-        },
-        reply: {
-          resolveEnvelopeFormatOptions: vi.fn().mockReturnValue({}),
-          formatAgentEnvelope: vi.fn().mockReturnValue('[DKG UI Owner] Hello'),
-          async dispatchReplyWithBufferedBlockDispatcher() {
-            // Complete without yielding any text chunks.
-          },
-        },
-      },
-    };
+    const { runtime } = makeMockRuntime();
+
     const mockCfg = { session: { dmScope: 'main' }, agents: {} };
 
     const api = makeApi() as any;
-    api.runtime = mockRuntime;
+    api.runtime = runtime;
     api.cfg = mockCfg;
-    const storeSpy = vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+    const storeCalls: unknown[][] = [];
+    client.storeChatTurn = async (...args: unknown[]) => { storeCalls.push(args); return undefined as any; };
     plugin.register(api);
 
     const stream = plugin.processInboundStream('Hello', 'corr-stream-empty', 'owner');
     await expect(stream.next()).rejects.toThrow('Agent returned no text response');
     await new Promise((resolve) => setTimeout(resolve, 10));
-    expect(storeSpy).toHaveBeenCalledWith(
+    expect(storeCalls[0]).toEqual([
       'openclaw:dkg-ui',
       'Hello',
       '[OpenClaw reply failed before completion: Agent returned no text response]',
@@ -1049,40 +971,28 @@ describe('DkgChannelPlugin', () => {
         persistenceState: 'failed',
         failureReason: 'Agent returned no text response',
       },
-    );
+    ]);
   });
 
   it('processInboundStream should request block streaming when plugin-sdk helpers are available', async () => {
-    const mockRuntime = {
-      channel: {
-        routing: {
-          resolveAgentRoute: vi.fn().mockReturnValue({ agentId: 'agent-1', sessionKey: 'session-1' }),
-        },
-        session: {
-          resolveStorePath: vi.fn().mockReturnValue('/tmp/store'),
-          readSessionUpdatedAt: vi.fn().mockReturnValue(undefined),
-          recordInboundSession: vi.fn(),
-        },
-        reply: {
-          resolveEnvelopeFormatOptions: vi.fn().mockReturnValue({}),
-          formatAgentEnvelope: vi.fn().mockReturnValue('[DKG UI Owner] Hello'),
-          dispatchReplyWithBufferedBlockDispatcher: vi.fn(),
-        },
-      },
-    };
+    const { runtime } = makeMockRuntime();
+    runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher = trackFn();
+
     const mockCfg = { session: { dmScope: 'main' }, agents: {} };
+    const sdkCalls: unknown[][] = [];
     const mockSdk = {
-      dispatchInboundReplyWithBase: vi.fn().mockImplementation(async (params: any) => {
+      dispatchInboundReplyWithBase: async (params: any) => {
+        sdkCalls.push([params]);
         expect(params.replyOptions).toEqual({ disableBlockStreaming: false });
         await params.deliver({ text: 'SDK ' });
         await params.deliver({ text: 'reply' });
-      }),
+      },
     };
 
     const api = makeApi() as any;
-    api.runtime = mockRuntime;
+    api.runtime = runtime;
     api.cfg = mockCfg;
-    vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+    client.storeChatTurn = async () => undefined as any;
     (plugin as any).sdk = mockSdk;
     plugin.register(api);
 
@@ -1091,7 +1001,7 @@ describe('DkgChannelPlugin', () => {
       events.push(event as any);
     }
 
-    expect(mockSdk.dispatchInboundReplyWithBase).toHaveBeenCalledOnce();
+    expect(sdkCalls).toHaveLength(1);
     expect(events).toEqual([
       { type: 'text_delta', delta: 'SDK ' },
       { type: 'text_delta', delta: 'reply' },
@@ -1208,63 +1118,62 @@ describe('DkgChannelPlugin', () => {
     }));
   });
 
-  it('stop should be safe to call multiple times', async () => {
+  it('stop should be safe to call multiple times and stay in the stopping state', async () => {
     const api = makeApi();
     plugin.register(api);
 
-    await plugin.stop();
-    await plugin.stop();
+    // stop() sets an internal `stopping` flag and drains pending work.
+    // Calling it twice must not throw (double-cleanup on shutdown signals
+    // is a real code path) AND the second call must leave the plugin in
+    // the same stopped state — not reset `stopping` back to false, which
+    // would let new in-flight dispatches start during teardown and leak.
+    await expect(plugin.stop()).resolves.toBeUndefined();
+    const internal = plugin as unknown as { stopping: boolean };
+    expect(internal.stopping).toBe(true);
+    await expect(plugin.stop()).resolves.toBeUndefined();
+    expect(internal.stopping).toBe(true);
   });
 
   it('stop should allow a late non-stream persistence failure to retry within the bounded shutdown window', async () => {
     vi.useFakeTimers();
     try {
       let rejectPersist!: (err: Error) => void;
-      const mockRuntime = {
-        channel: {
-          routing: {
-            resolveAgentRoute: vi.fn().mockReturnValue({ agentId: 'agent-1', sessionKey: 'session-1' }),
-          },
-          session: {
-            resolveStorePath: vi.fn().mockReturnValue('/tmp/store'),
-            readSessionUpdatedAt: vi.fn().mockReturnValue(undefined),
-            recordInboundSession: vi.fn(),
-          },
-          reply: {
-            resolveEnvelopeFormatOptions: vi.fn().mockReturnValue({}),
-            formatAgentEnvelope: vi.fn().mockReturnValue('[DKG UI Owner] Hello'),
-            async dispatchReplyWithBufferedBlockDispatcher(params: any) {
-              await params.dispatcherOptions.deliver({ text: 'Reply before shutdown' });
-            },
-          },
+      const { runtime } = makeMockRuntime({
+        dispatchImpl: async (params) => {
+          await params.dispatcherOptions.deliver({ text: 'Reply before shutdown' });
         },
-      };
+      });
       const mockCfg = { session: { dmScope: 'main' }, agents: {} };
 
       const api = makeApi() as any;
-      api.runtime = mockRuntime;
+      api.runtime = runtime;
       api.cfg = mockCfg;
-      const storeSpy = vi.spyOn(client, 'storeChatTurn')
-        .mockImplementationOnce(() =>
-          new Promise<void>((_resolve, reject) => {
+      const storeCalls: unknown[][] = [];
+      let storeCallCount = 0;
+      client.storeChatTurn = ((...args: unknown[]) => {
+        storeCalls.push(args);
+        storeCallCount++;
+        if (storeCallCount === 1) {
+          return new Promise<void>((_resolve, reject) => {
             rejectPersist = reject;
-          }),
-        )
-        .mockResolvedValueOnce(undefined);
+          });
+        }
+        return Promise.resolve(undefined);
+      }) as any;
       plugin.register(api);
 
       await plugin.processInbound('Hello', 'corr-stop-retry', 'owner');
-      expect(storeSpy).toHaveBeenCalledTimes(1);
+      expect(storeCalls).toHaveLength(1);
 
       const stopPromise = plugin.stop();
       rejectPersist(new Error('late persistence failure'));
       await Promise.resolve();
       await vi.advanceTimersByTimeAsync(249);
-      expect(storeSpy).toHaveBeenCalledTimes(1);
+      expect(storeCalls).toHaveLength(1);
       await vi.advanceTimersByTimeAsync(1);
       await stopPromise;
 
-      expect(storeSpy).toHaveBeenCalledTimes(2);
+      expect(storeCalls).toHaveLength(2);
     } finally {
       vi.useRealTimers();
     }
@@ -1273,54 +1182,45 @@ describe('DkgChannelPlugin', () => {
   it('stop should preserve an already-scheduled shutdown-allowed persistence retry within the bounded drain window', async () => {
     vi.useFakeTimers();
     try {
-      const mockRuntime = {
-        channel: {
-          routing: {
-            resolveAgentRoute: vi.fn().mockReturnValue({ agentId: 'agent-1', sessionKey: 'session-1' }),
-          },
-          session: {
-            resolveStorePath: vi.fn().mockReturnValue('/tmp/store'),
-            readSessionUpdatedAt: vi.fn().mockReturnValue(undefined),
-            recordInboundSession: vi.fn(),
-          },
-          reply: {
-            resolveEnvelopeFormatOptions: vi.fn().mockReturnValue({}),
-            formatAgentEnvelope: vi.fn().mockReturnValue('[DKG UI Owner] Hello'),
-            async dispatchReplyWithBufferedBlockDispatcher(params: any) {
-              await params.dispatcherOptions.deliver({ text: 'Reply before shutdown' });
-            },
-          },
+      const { runtime } = makeMockRuntime({
+        dispatchImpl: async (params) => {
+          await params.dispatcherOptions.deliver({ text: 'Reply before shutdown' });
         },
-      };
+      });
       const mockCfg = { session: { dmScope: 'main' }, agents: {} };
 
       const api = makeApi() as any;
-      api.runtime = mockRuntime;
+      api.runtime = runtime;
       api.cfg = mockCfg;
-      const storeSpy = vi.spyOn(client, 'storeChatTurn')
-        .mockRejectedValueOnce(new Error('temporary daemon outage'))
-        .mockResolvedValueOnce(undefined);
+      const storeCalls: unknown[][] = [];
+      let storeCallCount = 0;
+      client.storeChatTurn = (async (...args: unknown[]) => {
+        storeCalls.push(args);
+        storeCallCount++;
+        if (storeCallCount === 1) throw new Error('temporary daemon outage');
+        return undefined;
+      }) as any;
       plugin.register(api);
 
       await plugin.processInbound('Hello', 'corr-stop-preserve-retry', 'owner');
-      expect(storeSpy).toHaveBeenCalledTimes(1);
+      expect(storeCalls).toHaveLength(1);
 
       await Promise.resolve();
       const stopPromise = plugin.stop();
 
       await vi.advanceTimersByTimeAsync(249);
-      expect(storeSpy).toHaveBeenCalledTimes(1);
+      expect(storeCalls).toHaveLength(1);
 
       await vi.advanceTimersByTimeAsync(1);
       await stopPromise;
 
-      expect(storeSpy).toHaveBeenCalledTimes(2);
-      expect(storeSpy).toHaveBeenLastCalledWith(
+      expect(storeCalls).toHaveLength(2);
+      expect(storeCalls[storeCalls.length - 1]).toEqual([
         'openclaw:dkg-ui',
         'Hello',
         'Reply before shutdown',
         { turnId: 'corr-stop-preserve-retry' },
-      );
+      ]);
     } finally {
       vi.useRealTimers();
     }
@@ -1330,35 +1230,22 @@ describe('DkgChannelPlugin', () => {
     let resumeDispatch!: () => void;
     let markDispatchReady!: () => void;
     const dispatchReady = new Promise<void>((resolve) => { markDispatchReady = resolve; });
-    const mockRuntime = {
-      channel: {
-        routing: {
-          resolveAgentRoute: vi.fn().mockReturnValue({ agentId: 'agent-1', sessionKey: 'session-1' }),
-        },
-        session: {
-          resolveStorePath: vi.fn().mockReturnValue('/tmp/store'),
-          readSessionUpdatedAt: vi.fn().mockReturnValue(undefined),
-          recordInboundSession: vi.fn(),
-        },
-        reply: {
-          resolveEnvelopeFormatOptions: vi.fn().mockReturnValue({}),
-          formatAgentEnvelope: vi.fn().mockReturnValue('[DKG UI Owner] Hello'),
-          async dispatchReplyWithBufferedBlockDispatcher(params: any) {
-            markDispatchReady();
-            await new Promise<void>((resolve) => { resumeDispatch = resolve; });
-            await params.dispatcherOptions.deliver({ text: 'Reply before shutdown' });
-          },
-        },
+    const { runtime } = makeMockRuntime({
+      dispatchImpl: async (params) => {
+        markDispatchReady();
+        await new Promise<void>((resolve) => { resumeDispatch = resolve; });
+        await params.dispatcherOptions.deliver({ text: 'Reply before shutdown' });
       },
-    };
+    });
     const mockCfg = { session: { dmScope: 'main' }, agents: {} };
 
     const api = makeApi() as any;
-    api.runtime = mockRuntime;
+    api.runtime = runtime;
     api.cfg = mockCfg;
     let resolveStore!: () => void;
     const storePromise = new Promise<void>((resolve) => { resolveStore = resolve; });
-    const storeSpy = vi.spyOn(client, 'storeChatTurn').mockImplementation(() => storePromise);
+    const storeCalls: unknown[][] = [];
+    client.storeChatTurn = ((...args: unknown[]) => { storeCalls.push(args); return storePromise; }) as any;
     plugin.register(api);
 
     const replyPromise = plugin.processInbound('Hello', 'corr-stop-nonstream', 'owner');
@@ -1374,52 +1261,39 @@ describe('DkgChannelPlugin', () => {
     let stopSettled = false;
     void stopPromise.then(() => { stopSettled = true; });
     await Promise.resolve();
-    expect(storeSpy).toHaveBeenCalledTimes(1);
+    expect(storeCalls).toHaveLength(1);
     expect(stopSettled).toBe(false);
 
     resolveStore();
     await stopPromise;
     expect(stopSettled).toBe(true);
-    expect(storeSpy).toHaveBeenCalledWith(
+    expect(storeCalls[0]).toEqual([
       'openclaw:dkg-ui',
       'Hello',
       'Reply before shutdown',
       { turnId: 'corr-stop-nonstream' },
-    );
+    ]);
   });
 
   it('stop should only wait a bounded time for a final turn persistence attempt that hangs during shutdown', async () => {
     vi.useFakeTimers();
     try {
       let resumeDispatch!: () => void;
-      const mockRuntime = {
-        channel: {
-          routing: {
-            resolveAgentRoute: vi.fn().mockReturnValue({ agentId: 'agent-1', sessionKey: 'session-1' }),
-          },
-          session: {
-            resolveStorePath: vi.fn().mockReturnValue('/tmp/store'),
-            readSessionUpdatedAt: vi.fn().mockReturnValue(undefined),
-            recordInboundSession: vi.fn(),
-          },
-          reply: {
-            resolveEnvelopeFormatOptions: vi.fn().mockReturnValue({}),
-            formatAgentEnvelope: vi.fn().mockReturnValue('[DKG UI Owner] Hello'),
-            async dispatchReplyWithBufferedBlockDispatcher(params: any) {
-              await params.dispatcherOptions.deliver({ text: 'Reply before shutdown' });
-              await new Promise<void>((resolve) => { resumeDispatch = resolve; });
-            },
-          },
+      const { runtime } = makeMockRuntime({
+        dispatchImpl: async (params) => {
+          await params.dispatcherOptions.deliver({ text: 'Reply before shutdown' });
+          await new Promise<void>((resolve) => { resumeDispatch = resolve; });
         },
-      };
+      });
       const mockCfg = { session: { dmScope: 'main' }, agents: {} };
 
       const api = makeApi() as any;
-      api.runtime = mockRuntime;
+      api.runtime = runtime;
       api.cfg = mockCfg;
       let resolveStore!: () => void;
       const storePromise = new Promise<void>((resolve) => { resolveStore = resolve; });
-      const storeSpy = vi.spyOn(client, 'storeChatTurn').mockImplementation(() => storePromise);
+      const storeCalls: unknown[][] = [];
+      client.storeChatTurn = ((...args: unknown[]) => { storeCalls.push(args); return storePromise; }) as any;
       plugin.register(api);
 
       const stream = plugin.processInboundStream('Hello', 'corr-stream-stop-store', 'owner');
@@ -1447,13 +1321,13 @@ describe('DkgChannelPlugin', () => {
       expect(stopSettled).toBe(true);
       expect((plugin as any).pendingTurnPersistence.size).toBe(0);
 
-      expect(storeSpy).toHaveBeenCalledTimes(1);
-      expect(storeSpy).toHaveBeenCalledWith(
+      expect(storeCalls).toHaveLength(1);
+      expect(storeCalls[0]).toEqual([
         'openclaw:dkg-ui',
         'Hello',
         'Reply before shutdown',
         { turnId: 'corr-stream-stop-store' },
-      );
+      ]);
 
       resolveStore();
       await Promise.resolve();
@@ -1466,34 +1340,25 @@ describe('DkgChannelPlugin', () => {
     vi.useFakeTimers();
     try {
       let resumeDispatch!: () => void;
-      const mockRuntime = {
-        channel: {
-          routing: {
-            resolveAgentRoute: vi.fn().mockReturnValue({ agentId: 'agent-1', sessionKey: 'session-1' }),
-          },
-          session: {
-            resolveStorePath: vi.fn().mockReturnValue('/tmp/store'),
-            readSessionUpdatedAt: vi.fn().mockReturnValue(undefined),
-            recordInboundSession: vi.fn(),
-          },
-          reply: {
-            resolveEnvelopeFormatOptions: vi.fn().mockReturnValue({}),
-            formatAgentEnvelope: vi.fn().mockReturnValue('[DKG UI Owner] Hello'),
-            async dispatchReplyWithBufferedBlockDispatcher(params: any) {
-              await params.dispatcherOptions.deliver({ text: 'Reply before shutdown' });
-              await new Promise<void>((resolve) => { resumeDispatch = resolve; });
-            },
-          },
+      const { runtime } = makeMockRuntime({
+        dispatchImpl: async (params) => {
+          await params.dispatcherOptions.deliver({ text: 'Reply before shutdown' });
+          await new Promise<void>((resolve) => { resumeDispatch = resolve; });
         },
-      };
+      });
       const mockCfg = { session: { dmScope: 'main' }, agents: {} };
 
       const api = makeApi() as any;
-      api.runtime = mockRuntime;
+      api.runtime = runtime;
       api.cfg = mockCfg;
-      const storeSpy = vi.spyOn(client, 'storeChatTurn')
-        .mockRejectedValueOnce(new Error('temporary daemon outage'))
-        .mockResolvedValueOnce(undefined);
+      const storeCalls: unknown[][] = [];
+      let storeCallCount = 0;
+      client.storeChatTurn = (async (...args: unknown[]) => {
+        storeCalls.push(args);
+        storeCallCount++;
+        if (storeCallCount === 1) throw new Error('temporary daemon outage');
+        return undefined;
+      }) as any;
       plugin.register(api);
 
       const stream = plugin.processInboundStream('Hello', 'corr-stream-stop-retry', 'owner');
@@ -1514,23 +1379,23 @@ describe('DkgChannelPlugin', () => {
       let stopSettled = false;
       void stopPromise.then(() => { stopSettled = true; });
       await Promise.resolve();
-      expect(storeSpy).toHaveBeenCalledTimes(1);
+      expect(storeCalls).toHaveLength(1);
       expect(stopSettled).toBe(false);
 
       await vi.advanceTimersByTimeAsync(249);
-      expect(storeSpy).toHaveBeenCalledTimes(1);
+      expect(storeCalls).toHaveLength(1);
       expect(stopSettled).toBe(false);
 
       await vi.advanceTimersByTimeAsync(1);
       await stopPromise;
-      expect(storeSpy).toHaveBeenCalledTimes(2);
+      expect(storeCalls).toHaveLength(2);
       expect(stopSettled).toBe(true);
-      expect(storeSpy).toHaveBeenLastCalledWith(
+      expect(storeCalls[storeCalls.length - 1]).toEqual([
         'openclaw:dkg-ui',
         'Hello',
         'Reply before shutdown',
         { turnId: 'corr-stream-stop-retry' },
-      );
+      ]);
     } finally {
       vi.useRealTimers();
     }

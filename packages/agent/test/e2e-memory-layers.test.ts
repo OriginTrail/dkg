@@ -9,11 +9,25 @@
  * 6. SWM query view vs default view
  * 7. Working memory view
  */
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, beforeAll, afterAll } from 'vitest';
 import { DKGAgent } from '../src/index.js';
-import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
+import { mintTokens } from '../../chain/test/hardhat-harness.js';
+import { ethers } from 'ethers';
 
 const agents: DKGAgent[] = [];
+
+let _fileSnapshot: string;
+beforeAll(async () => {
+  _fileSnapshot = await takeSnapshot();
+  const { hubAddress } = getSharedContext();
+  const provider = createProvider();
+  const coreOp = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+  await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, coreOp.address, ethers.parseEther('50000000'));
+});
+afterAll(async () => {
+  await revertSnapshot(_fileSnapshot);
+});
 
 afterEach(async () => {
   for (const a of agents) {
@@ -28,11 +42,12 @@ const CG_ID = 'memory-layers-e2e';
 const ENTITY_BASE = 'urn:mem:entity';
 
 async function createAgent(name: string) {
-  const chain = new MockChainAdapter();
+  const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
   const agent = await DKGAgent.create({
     name,
     listenPort: 0,
     chainAdapter: chain,
+    nodeRole: 'core',
   });
   agents.push(agent);
   await agent.start();
@@ -136,7 +151,7 @@ describe('WM → SWM → VM pipeline (single agent)', () => {
     expect(swmResult.bindings.length).toBe(1);
     expect(swmResult.bindings[0]?.['name']).toBe('"Pipeline Entity"');
 
-    // Step 3: Publish from SWM to verified memory (mock chain)
+    // Step 3: Publish from SWM to verified memory
     const pubResult = await agent.publishFromSharedMemory(CG_ID, 'all');
     expect(pubResult.status).toBe('confirmed');
     expect(pubResult.ual).toBeDefined();
@@ -199,11 +214,12 @@ describe('WM → SWM gossip → VM (2 nodes)', () => {
   }
 
   it('A drafts in WM → promotes to SWM → gossips to B → publishes → B finalizes', async () => {
-    const sharedChain = new MockChainAdapter('mock:31337');
+    const sharedChain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const nodeA = await DKGAgent.create({
       name: 'LayersA',
       listenPort: 0,
       chainAdapter: sharedChain,
+      nodeRole: 'core',
     });
     agents.push(nodeA);
 
@@ -211,6 +227,7 @@ describe('WM → SWM gossip → VM (2 nodes)', () => {
       name: 'LayersB',
       listenPort: 0,
       chainAdapter: sharedChain,
+      nodeRole: 'core',
     });
     agents.push(nodeB);
 

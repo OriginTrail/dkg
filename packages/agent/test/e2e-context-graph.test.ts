@@ -1,18 +1,20 @@
 /**
- * E2E tests for the context graph publishing flow (2 nodes, shared mock chain):
+ * E2E tests for the context graph publishing flow (2 nodes, shared chain):
  *
- * 1. Create a context graph on-chain (mock)
+ * 1. Create a context graph on-chain
  * 2. Write data to workspace → replicate via GossipSub
  * 3. Enshrine from workspace with contextGraphId
  * 4. Finalization message propagates → peer verifies on-chain → promotes to context graph URIs
  * 5. Verify data lives in context graph data/meta graphs (not paranet data graph)
  *
- * Uses a shared MockChainAdapter so both nodes see the same on-chain events,
+ * Uses a shared EVMChainAdapter so both nodes see the same on-chain events,
  * allowing B to verify A's publish transaction during finalization.
  */
-import { describe, it, expect, afterAll } from 'vitest';
+import { describe, it, expect, afterAll, beforeAll } from 'vitest';
 import { DKGAgent } from '../src/index.js';
-import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
+import { mintTokens } from '../../chain/test/hardhat-harness.js';
+import { ethers } from 'ethers';
 
 const PARANET = 'context-graph-e2e';
 const ENTITY_CTX_1 = 'urn:ctxgraph:entity:1';
@@ -20,8 +22,20 @@ const ENTITY_CTX_2 = 'urn:ctxgraph:entity:2';
 
 function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
 
-describe('E2E: context graph publish + finalization (shared mock chain)', () => {
-  const sharedChain = new MockChainAdapter('mock:31337');
+let _fileSnapshot: string;
+beforeAll(async () => {
+  _fileSnapshot = await takeSnapshot();
+  const { hubAddress } = getSharedContext();
+  const provider = createProvider();
+  const coreOp = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+  await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, coreOp.address, ethers.parseEther('50000000'));
+});
+afterAll(async () => {
+  await revertSnapshot(_fileSnapshot);
+});
+
+describe('E2E: context graph publish + finalization (shared chain)', () => {
+  const sharedChain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
   let nodeA: DKGAgent;
   let nodeB: DKGAgent;
   let contextGraphId: string;
@@ -37,12 +51,14 @@ describe('E2E: context graph publish + finalization (shared mock chain)', () => 
       listenPort: 0,
       skills: [],
       chainAdapter: sharedChain,
+      nodeRole: 'core',
     });
     nodeB = await DKGAgent.create({
       name: 'CtxB',
       listenPort: 0,
       skills: [],
       chainAdapter: sharedChain,
+      nodeRole: 'core',
     });
 
     await nodeA.start();

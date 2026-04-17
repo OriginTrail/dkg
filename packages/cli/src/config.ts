@@ -221,6 +221,10 @@ export function resolveSharedMemoryTtlMs(config: DkgConfig): number | undefined 
 
 let _networkConfig: NetworkConfig | null = null;
 
+export function _resetNetworkConfigCache(): void {
+  _networkConfig = null;
+}
+
 /**
  * Load the network config from network/testnet.json.
  *

@@ -293,6 +293,160 @@ describe('QueryHandler', () => {
     });
   });
 
+  describe('ENTITY_BY_UAL lookup', () => {
+    it('returns error when ual is missing', async () => {
+      const handler = new QueryHandler(engine, { defaultPolicy: 'public' });
+
+      const response = await handler.handle(
+        makeRequest({
+          lookupType: 'ENTITY_BY_UAL',
+          contextGraphId: undefined,
+          ual: undefined,
+        }),
+        'peer-1',
+      );
+
+      expect(response.status).toBe('ERROR');
+      expect(response.error).toContain('missing ual');
+    });
+
+    it('does not require contextGraphId', async () => {
+      const handler = new QueryHandler(engine, { defaultPolicy: 'public' });
+
+      const response = await handler.handle(
+        makeRequest({
+          lookupType: 'ENTITY_BY_UAL',
+          contextGraphId: undefined,
+          ual: 'did:dkg:ual:nonexistent',
+        }),
+        'peer-1',
+      );
+
+      // Will fail to resolve but should NOT error on missing contextGraphId
+      expect(response.status).toBe('ERROR');
+      expect(response.error).not.toContain('contextGraphId is required');
+      expect(response.error).toContain('Failed to resolve UAL');
+    });
+
+    it('returns error when UAL cannot be resolved', async () => {
+      const handler = new QueryHandler(engine, { defaultPolicy: 'public' });
+
+      const response = await handler.handle(
+        makeRequest({
+          lookupType: 'ENTITY_BY_UAL',
+          contextGraphId: undefined,
+          ual: 'did:dkg:ual:unknown',
+        }),
+        'peer-1',
+      );
+
+      expect(response.status).toBe('ERROR');
+      expect(response.error).toContain('Failed to resolve UAL');
+    });
+  });
+
+  describe('SPARQL security', () => {
+    let handler: QueryHandler;
+
+    beforeEach(() => {
+      handler = new QueryHandler(engine, { defaultPolicy: 'public' });
+    });
+
+    it('rejects GRAPH clauses in SPARQL queries', async () => {
+      const response = await handler.handle(
+        makeRequest({
+          lookupType: 'SPARQL_QUERY',
+          sparql: 'SELECT ?s WHERE { GRAPH <http://evil.com> { ?s ?p ?o } }',
+        }),
+        'peer-1',
+      );
+
+      expect(response.status).toBe('ERROR');
+      expect(response.error).toContain('GRAPH');
+    });
+
+    it('rejects FROM clauses in SPARQL queries', async () => {
+      const response = await handler.handle(
+        makeRequest({
+          lookupType: 'SPARQL_QUERY',
+          sparql: 'SELECT ?s FROM <http://evil.com> WHERE { ?s ?p ?o }',
+        }),
+        'peer-1',
+      );
+
+      expect(response.status).toBe('ERROR');
+      expect(response.error).toContain('FROM');
+    });
+
+    it('rejects empty sparql string', async () => {
+      const response = await handler.handle(
+        makeRequest({
+          lookupType: 'SPARQL_QUERY',
+          sparql: '',
+        }),
+        'peer-1',
+      );
+
+      expect(response.status).toBe('ERROR');
+      expect(response.error).toContain('missing sparql');
+    });
+  });
+
+  describe('edge cases', () => {
+    it('returns error for missing lookupType', async () => {
+      const handler = new QueryHandler(engine, { defaultPolicy: 'public' });
+
+      const response = await handler.handle(
+        { operationId: 'test', contextGraphId: CONTEXT_GRAPH } as any,
+        'peer-1',
+      );
+
+      expect(response.status).toBe('ERROR');
+      expect(response.error).toContain('missing lookupType');
+    });
+
+    it('returns UNSUPPORTED_LOOKUP for unknown lookup type', async () => {
+      const handler = new QueryHandler(engine, { defaultPolicy: 'public' });
+
+      const response = await handler.handle(
+        makeRequest({ lookupType: 'UNKNOWN_TYPE' as any }),
+        'peer-1',
+      );
+
+      expect(response.status).toBe('UNSUPPORTED_LOOKUP');
+    });
+
+    it('returns error for ENTITIES_BY_TYPE with missing rdfType', async () => {
+      const handler = new QueryHandler(engine, { defaultPolicy: 'public' });
+
+      const response = await handler.handle(
+        makeRequest({
+          lookupType: 'ENTITIES_BY_TYPE',
+          rdfType: undefined,
+        }),
+        'peer-1',
+      );
+
+      expect(response.status).toBe('ERROR');
+      expect(response.error).toContain('missing rdfType');
+    });
+
+    it('returns error for ENTITY_TRIPLES with missing entityUri', async () => {
+      const handler = new QueryHandler(engine, { defaultPolicy: 'public' });
+
+      const response = await handler.handle(
+        makeRequest({
+          lookupType: 'ENTITY_TRIPLES',
+          entityUri: undefined,
+        }),
+        'peer-1',
+      );
+
+      expect(response.status).toBe('ERROR');
+      expect(response.error).toContain('missing entityUri');
+    });
+  });
+
   describe('stream handler', () => {
     it('encodes/decodes JSON over the wire', async () => {
       const handler = new QueryHandler(engine, { defaultPolicy: 'public' });

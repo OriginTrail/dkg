@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { TypedEventBus } from '@origintrail-official/dkg-core';
 import { ACKCollector, type ACKCollectorDeps } from '../src/ack-collector.js';
 import { StorageACKHandler, type StorageACKHandlerConfig } from '../src/storage-ack-handler.js';
 import { computeFlatKCRootV10 } from '../src/merkle.js';
@@ -123,7 +124,7 @@ describe('V10 remap wire (PublishIntent.swmGraphId + subGraphName)', () => {
         return signTargetAck(peerWallets[idx], merkleRoot, idx + 1);
       },
       getConnectedCorePeers: () => ['peer-0', 'peer-1', 'peer-2'],
-      log: vi.fn(),
+      log: () => {},
     };
 
     const collector = new ACKCollector(deps);
@@ -169,7 +170,7 @@ describe('V10 remap wire (PublishIntent.swmGraphId + subGraphName)', () => {
         return signTargetAck(peerWallet, merkleRoot, idx + 1);
       },
       getConnectedCorePeers: () => ['peer-0', 'peer-1', 'peer-2'],
-      log: vi.fn(),
+      log: () => {},
     };
 
     const collector = new ACKCollector(deps);
@@ -210,15 +211,17 @@ describe('V10 remap wire (PublishIntent.swmGraphId + subGraphName)', () => {
     vi.useFakeTimers();
 
     const uriCalls: Array<[string, string | undefined]> = [];
+    const insertCalls: Quad[][] = [];
+    const noop = async () => {};
     const mockStore = {
-      insert: vi.fn(),
-      delete: vi.fn(),
-      deleteByPattern: vi.fn(),
-      hasGraph: vi.fn().mockResolvedValue(true),
-      createGraph: vi.fn(),
-      dropGraph: vi.fn(),
-      query: vi.fn(),
-      close: vi.fn(),
+      insert: async (quads: Quad[]) => { insertCalls.push(quads); },
+      delete: noop,
+      deleteByPattern: noop,
+      hasGraph: async () => true,
+      createGraph: noop,
+      dropGraph: noop,
+      query: noop,
+      close: noop,
     };
 
     const coreWallet = ethers.Wallet.createRandom();
@@ -241,7 +244,7 @@ describe('V10 remap wire (PublishIntent.swmGraphId + subGraphName)', () => {
     const handler = new StorageACKHandler(
       mockStore as unknown as Parameters<typeof StorageACKHandler.prototype.handler>[0] extends never ? never : any,
       config,
-      { emit: vi.fn(), on: vi.fn(), off: vi.fn(), once: vi.fn() } as any,
+      { emit: () => {}, on: () => {}, off: () => {}, once: () => {} } as unknown as TypedEventBus<any>,
     );
 
     const intent = encodePublishIntent({
@@ -269,10 +272,8 @@ describe('V10 remap wire (PublishIntent.swmGraphId + subGraphName)', () => {
     expect(uriCalls[0][0]).toBe(SOURCE_SWM_GRAPH_ID);
     expect(uriCalls[0][1]).toBe(SUB_GRAPH_NAME);
 
-    // 2. Staging insert landed under a URI derived from the source graph
-    //    + sub-graph, not the numeric target.
-    expect(mockStore.insert).toHaveBeenCalled();
-    const inserted = mockStore.insert.mock.calls[0][0] as Quad[];
+    expect(insertCalls.length).toBeGreaterThan(0);
+    const inserted = insertCalls[0];
     expect(inserted).toHaveLength(swmQuads.length);
     const stagingGraph = inserted[0].graph;
     expect(stagingGraph).toContain(SOURCE_SWM_GRAPH_ID);

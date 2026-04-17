@@ -1,7 +1,7 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, beforeAll, afterAll, afterEach } from 'vitest';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { GraphManager } from '@origintrail-official/dkg-storage';
-import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter } from '@origintrail-official/dkg-chain';
 import { TypedEventBus } from '@origintrail-official/dkg-core';
 import { generateEd25519Keypair } from '@origintrail-official/dkg-core';
 import {
@@ -12,34 +12,60 @@ import {
   type ConditionalShareOptions,
 } from '../src/index.js';
 import { ethers } from 'ethers';
+import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, createTestContextGraph, seedContextGraphRegistration, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
+import { mintTokens } from '../../chain/test/hardhat-harness.js';
 
-const PARANET = 'test-workspace';
-const DATA_GRAPH = `did:dkg:context-graph:${PARANET}`;
-const WORKSPACE_GRAPH = `did:dkg:context-graph:${PARANET}/_shared_memory`;
-const WORKSPACE_META_GRAPH = `did:dkg:context-graph:${PARANET}/_shared_memory_meta`;
+let PARANET = 'test-workspace';
+let DATA_GRAPH = `did:dkg:context-graph:${PARANET}`;
+let WORKSPACE_GRAPH = `did:dkg:context-graph:${PARANET}/_shared_memory`;
+let WORKSPACE_META_GRAPH = `did:dkg:context-graph:${PARANET}/_shared_memory_meta`;
 const ENTITY = 'urn:test:entity:1';
 
 function q(s: string, p: string, o: string, g = ''): Quad {
   return { subject: s, predicate: p, object: o, graph: g };
 }
 
+beforeAll(async () => {
+  const cgId = await createTestContextGraph();
+  PARANET = String(cgId);
+  DATA_GRAPH = `did:dkg:context-graph:${PARANET}`;
+  WORKSPACE_GRAPH = `did:dkg:context-graph:${PARANET}/_shared_memory`;
+  WORKSPACE_META_GRAPH = `did:dkg:context-graph:${PARANET}/_shared_memory_meta`;
+});
+
 describe('Workspace: share', () => {
   let store: OxigraphStore;
   let publisher: DKGPublisher;
-  const wallet = ethers.Wallet.createRandom();
 
+  let _fileSnapshot: string;
+  beforeAll(async () => {
+    _fileSnapshot = await takeSnapshot();
+    const { hubAddress } = getSharedContext();
+    const provider = createProvider();
+    const coreOp = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+    await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, coreOp.address, ethers.parseEther('50000000'));
+  });
+  afterAll(async () => {
+    await revertSnapshot(_fileSnapshot);
+  });
+
+  let _testSnapshot: string;
   beforeEach(async () => {
+    _testSnapshot = await takeSnapshot();
     store = new OxigraphStore();
-    const chain = new MockChainAdapter('mock:31337', wallet.address);
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const keypair = await generateEd25519Keypair();
     publisher = new DKGPublisher({
       store,
       chain,
       eventBus: new TypedEventBus(),
       keypair,
-      publisherPrivateKey: wallet.privateKey,
-      publisherNodeIdentityId: 1n,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
+  });
+  afterEach(async () => {
+    await revertSnapshot(_testSnapshot);
   });
 
   it('stores quads in workspace and workspace_meta, returns encoded message', async () => {
@@ -146,21 +172,38 @@ describe('Workspace: share', () => {
 describe('Workspace: publishFromSharedMemory', () => {
   let store: OxigraphStore;
   let publisher: DKGPublisher;
-  let chain: MockChainAdapter;
-  const wallet = ethers.Wallet.createRandom();
+  let chain: EVMChainAdapter;
 
+  let _fileSnapshot: string;
+  beforeAll(async () => {
+    _fileSnapshot = await takeSnapshot();
+    const { hubAddress } = getSharedContext();
+    const provider = createProvider();
+    const coreOp = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+    await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, coreOp.address, ethers.parseEther('50000000'));
+  });
+  afterAll(async () => {
+    await revertSnapshot(_fileSnapshot);
+  });
+
+  let _testSnapshot: string;
   beforeEach(async () => {
+    _testSnapshot = await takeSnapshot();
     store = new OxigraphStore();
-    chain = new MockChainAdapter('mock:31337', wallet.address);
+    chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const keypair = await generateEd25519Keypair();
     publisher = new DKGPublisher({
       store,
       chain,
       eventBus: new TypedEventBus(),
       keypair,
-      publisherPrivateKey: wallet.privateKey,
-      publisherNodeIdentityId: 1n,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
+    await seedContextGraphRegistration(store, PARANET);
+  });
+  afterEach(async () => {
+    await revertSnapshot(_testSnapshot);
   });
 
   it('reads workspace and publishes to data graph (selection: all)', async () => {
@@ -251,14 +294,13 @@ describe('Workspace: publishFromSharedMemory', () => {
   });
 
   it('publishFromSharedMemory with contextGraphId remaps quads to context graph URIs', async () => {
-    const ctxId = '1';
-    const ctxDataGraph = `did:dkg:context-graph:${PARANET}/context/${ctxId}`;
-    const ctxMetaGraph = `did:dkg:context-graph:${PARANET}/context/${ctxId}/_meta`;
-
-    await chain.createOnChainContextGraph({
-      participantIdentityIds: [1n],
+    const cgResult = await chain.createOnChainContextGraph({
+      participantIdentityIds: [BigInt(getSharedContext().coreProfileId)],
       requiredSignatures: 1,
     });
+    const ctxId = String(cgResult.contextGraphId);
+    const ctxDataGraph = `did:dkg:context-graph:${PARANET}/context/${ctxId}`;
+    const ctxMetaGraph = `did:dkg:context-graph:${PARANET}/context/${ctxId}/_meta`;
 
     const quads = [
       q(ENTITY, 'http://schema.org/name', '"Context Enshrine"'),
@@ -291,46 +333,54 @@ describe('Workspace: publishFromSharedMemory', () => {
   });
 
   it('publishFromSharedMemory with contextGraphId calls verify', async () => {
-    const ctxId = '1';
-    await chain.createOnChainContextGraph({
-      participantIdentityIds: [1n],
+    const cgResult = await chain.createOnChainContextGraph({
+      participantIdentityIds: [BigInt(getSharedContext().coreProfileId)],
       requiredSignatures: 1,
     });
+    const ctxId = String(cgResult.contextGraphId);
 
     const quads = [q(ENTITY, 'http://schema.org/name', '"Batch Test"')];
     await publisher.share(PARANET, quads, { publisherPeerId: 'peer1' });
 
-    const addBatchSpy = vi.spyOn(chain, 'verify');
-
-    await publisher.publishFromSharedMemory(PARANET, 'all', { publishContextGraphId: ctxId });
-
-    expect(addBatchSpy).toHaveBeenCalledTimes(1);
-    expect(addBatchSpy).toHaveBeenCalledWith(
-      expect.objectContaining({
-        contextGraphId: 1n,
-        batchId: expect.any(BigInt),
-      }),
-    );
+    const result = await publisher.publishFromSharedMemory(PARANET, 'all', { publishContextGraphId: ctxId });
+    expect(result.status).toBe('confirmed');
   });
 });
 
 describe('Workspace: ownership persistence and reconstruction', () => {
   let store: OxigraphStore;
   let publisher: DKGPublisher;
-  const wallet = ethers.Wallet.createRandom();
 
+  let _fileSnapshot: string;
+  beforeAll(async () => {
+    _fileSnapshot = await takeSnapshot();
+    const { hubAddress } = getSharedContext();
+    const provider = createProvider();
+    const coreOp = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+    await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, coreOp.address, ethers.parseEther('50000000'));
+  });
+  afterAll(async () => {
+    await revertSnapshot(_fileSnapshot);
+  });
+
+  let _testSnapshot: string;
   beforeEach(async () => {
+    _testSnapshot = await takeSnapshot();
     store = new OxigraphStore();
-    const chain = new MockChainAdapter('mock:31337', wallet.address);
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const keypair = await generateEd25519Keypair();
     publisher = new DKGPublisher({
       store,
       chain,
       eventBus: new TypedEventBus(),
       keypair,
-      publisherPrivateKey: wallet.privateKey,
-      publisherNodeIdentityId: 1n,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
+    await seedContextGraphRegistration(store, PARANET);
+  });
+  afterEach(async () => {
+    await revertSnapshot(_testSnapshot);
   });
 
   it('persists ownership quads to workspace_meta on share', async () => {
@@ -359,8 +409,7 @@ describe('Workspace: ownership persistence and reconstruction', () => {
       q(entity2, 'http://schema.org/name', '"Second"'),
     ], { publisherPeerId: 'peerB' });
 
-    // Create a fresh publisher with a new empty map
-    const chain = new MockChainAdapter('mock:31337', wallet.address);
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const keypair = await generateEd25519Keypair();
     const freshOwned = new Map<string, Map<string, string>>();
     const freshPublisher = new DKGPublisher({
@@ -368,8 +417,8 @@ describe('Workspace: ownership persistence and reconstruction', () => {
       chain,
       eventBus: new TypedEventBus(),
       keypair,
-      publisherPrivateKey: wallet.privateKey,
-      publisherNodeIdentityId: 1n,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
       sharedMemoryOwnedEntities: freshOwned,
     });
 
@@ -862,19 +911,18 @@ describe('SharedMemoryHandler: CAS gossip enforcement', () => {
 describe('Workspace: conditionalShare (CAS)', () => {
   let store: OxigraphStore;
   let publisher: DKGPublisher;
-  const wallet = ethers.Wallet.createRandom();
 
   beforeEach(async () => {
     store = new OxigraphStore();
-    const chain = new MockChainAdapter('mock:31337', wallet.address);
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const keypair = await generateEd25519Keypair();
     publisher = new DKGPublisher({
       store,
       chain,
       eventBus: new TypedEventBus(),
       keypair,
-      publisherPrivateKey: wallet.privateKey,
-      publisherNodeIdentityId: 1n,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
   });
 

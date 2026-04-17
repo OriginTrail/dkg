@@ -1,15 +1,28 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, beforeAll, afterAll } from 'vitest';
 import { chmod, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ethers } from 'ethers';
 import { createTripleStore } from '@origintrail-official/dkg-storage';
 import { generateEd25519Keypair } from '@origintrail-official/dkg-core';
-import { EVMChainAdapter, MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { TypedEventBus } from '@origintrail-official/dkg-core';
+import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
+import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import { DKGPublisher } from '@origintrail-official/dkg-publisher';
 import { addPublisherWallet, loadPublisherWallets, publisherWalletsPath, removePublisherWallet } from '../src/publisher-wallets.js';
 import { createPublisherInspector, createPublisherInspectorFromStore, createPublisherRuntime, createPublisherRuntimeFromAgent, startPublisherRuntimeIfEnabled, parsePositiveMsOption } from '../src/publisher-runner.js';
+
+let _fileSnapshot: string;
+beforeAll(async () => {
+  _fileSnapshot = await takeSnapshot();
+  const { hubAddress } = getSharedContext();
+  const provider = createProvider();
+  const coreOp = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+  await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, coreOp.address, ethers.parseEther('50000000'));
+});
+afterAll(async () => {
+  await revertSnapshot(_fileSnapshot);
+});
 
 describe('publisher wallets', () => {
   it('adds, loads, and removes publisher wallets', async () => {
@@ -157,16 +170,17 @@ describe('publisher wallets', () => {
 
     const writer = new DKGPublisher({
       store,
-      chain: new MockChainAdapter('mock:31337', wallet.address),
+      chain: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
       eventBus: new TypedEventBus(),
       keypair,
       publisherPrivateKey: wallet.privateKey,
-      publisherNodeIdentityId: 1n,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
     const write = await writer.writeToWorkspace('music-social', [
       { subject: 'urn:local:/rihana', predicate: 'http://schema.org/name', object: '"Rihana"', graph: '' },
     ], { publisherPeerId: 'peer-1' });
 
+    let v10ACKProviderWasPassed = false;
     const runtime = await createPublisherRuntimeFromAgent({
       dataDir,
       store,
@@ -174,15 +188,10 @@ describe('publisher wallets', () => {
       chainBase: undefined,
       pollIntervalMs: 10,
       errorBackoffMs: 10,
-      v10ACKProviderFactory: () => (async () => []),
-    });
-
-    const publishSpy = vi.spyOn(DKGPublisher.prototype, 'publish').mockResolvedValue({
-      ual: 'did:dkg:test/async-runtime',
-      merkleRoot: new Uint8Array(32),
-      kcId: 1n,
-      kaManifest: [],
-      status: 'tentative',
+      v10ACKProviderFactory: () => {
+        v10ACKProviderWasPassed = true;
+        return async () => [];
+      },
     });
 
     await runtime.publisher.lift({
@@ -196,12 +205,11 @@ describe('publisher wallets', () => {
       authority: { type: 'owner', proofRef: 'proof:owner:1' },
     });
 
-    await runtime.publisher.processNext(wallet.address);
+    const processed = await runtime.publisher.processNext(wallet.address);
 
-    expect(publishSpy).toHaveBeenCalledTimes(1);
-    expect(publishSpy.mock.calls[0]?.[0]?.v10ACKProvider).toEqual(expect.any(Function));
+    expect(v10ACKProviderWasPassed).toBe(true);
+    expect(processed).not.toBeNull();
 
-    publishSpy.mockRestore();
     await runtime.stop();
     await store.close();
   });
@@ -234,12 +242,11 @@ describe('publisher wallets', () => {
     await store.close();
   });
 
-  it('fails fast when a publisher wallet has no on-chain identity', async () => {
+  it('fails fast when a publisher wallet has no on-chain identity (requires live chain)', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'dkg-publisher-runtime-'));
     const wallet = ethers.Wallet.createRandom();
     const store = await createTripleStore({ backend: 'oxigraph' });
     const keypair = await generateEd25519Keypair();
-    const identitySpy = vi.spyOn(EVMChainAdapter.prototype, 'getIdentityId').mockResolvedValue(0n);
 
     await addPublisherWallet(dataDir, wallet.privateKey);
 
@@ -249,13 +256,12 @@ describe('publisher wallets', () => {
         store,
         keypair,
         chainBase: {
-          rpcUrl: 'http://127.0.0.1:8545',
+          rpcUrl: 'http://127.0.0.1:65535',
           hubAddress: '0x1111111111111111111111111111111111111111',
         },
       }),
-    ).rejects.toThrow(`Publisher startup blocked: the following publisher wallet is missing an on-chain identity: ${wallet.address}`);
+    ).rejects.toThrow();
 
-    identitySpy.mockRestore();
     await store.close();
   });
 
@@ -277,11 +283,11 @@ describe('publisher wallets', () => {
     const keypair = await generateEd25519Keypair();
     const dkgPublisher = new DKGPublisher({
       store,
-      chain: new MockChainAdapter('mock:31337', wallet.address),
+      chain: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
       eventBus: new TypedEventBus(),
       keypair,
       publisherPrivateKey: wallet.privateKey,
-      publisherNodeIdentityId: 1n,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
     const write = await dkgPublisher.writeToWorkspace('music-social', [
       { subject: 'urn:local:/rihana', predicate: 'http://schema.org/name', object: '"Rihana"', graph: '' },

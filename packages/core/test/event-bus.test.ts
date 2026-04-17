@@ -1,32 +1,38 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { TypedEventBus, DKGEvent } from '../src/index.js';
+
+function tracker() {
+  const calls: any[] = [];
+  const fn = (data: any) => { calls.push(data); };
+  return { calls, fn };
+}
 
 describe('TypedEventBus', () => {
   it('emits and receives events', () => {
     const bus = new TypedEventBus();
-    const handler = vi.fn();
-    bus.on(DKGEvent.KC_PUBLISHED, handler);
+    const { calls, fn } = tracker();
+    bus.on(DKGEvent.KC_PUBLISHED, fn);
     bus.emit(DKGEvent.KC_PUBLISHED, { kcId: '1' });
-    expect(handler).toHaveBeenCalledWith({ kcId: '1' });
+    expect(calls).toEqual([{ kcId: '1' }]);
   });
 
   it('removes listeners with off', () => {
     const bus = new TypedEventBus();
-    const handler = vi.fn();
-    bus.on('test', handler);
-    bus.off('test', handler);
+    const { calls, fn } = tracker();
+    bus.on('test', fn);
+    bus.off('test', fn);
     bus.emit('test', null);
-    expect(handler).not.toHaveBeenCalled();
+    expect(calls).toHaveLength(0);
   });
 
   it('once fires exactly once', () => {
     const bus = new TypedEventBus();
-    const handler = vi.fn();
-    bus.once('test', handler);
+    const { calls, fn } = tracker();
+    bus.once('test', fn);
     bus.emit('test', 'a');
     bus.emit('test', 'b');
-    expect(handler).toHaveBeenCalledTimes(1);
-    expect(handler).toHaveBeenCalledWith('a');
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toBe('a');
   });
 
   it('does not crash on emit with no listeners', () => {
@@ -36,33 +42,39 @@ describe('TypedEventBus', () => {
 
   it('removeAllListeners clears specific event', () => {
     const bus = new TypedEventBus();
-    const h1 = vi.fn();
-    const h2 = vi.fn();
-    bus.on('a', h1);
-    bus.on('b', h2);
+    const t1 = tracker();
+    const t2 = tracker();
+    bus.on('a', t1.fn);
+    bus.on('b', t2.fn);
     bus.removeAllListeners('a');
     bus.emit('a', null);
     bus.emit('b', null);
-    expect(h1).not.toHaveBeenCalled();
-    expect(h2).toHaveBeenCalled();
+    expect(t1.calls).toHaveLength(0);
+    expect(t2.calls).toHaveLength(1);
   });
 
   it('logs errors from handlers without crashing other handlers', () => {
     const bus = new TypedEventBus();
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    const goodHandler = vi.fn();
+    const stderrOutput: string[] = [];
+    const origWrite = process.stderr.write;
+    process.stderr.write = ((chunk: any) => { stderrOutput.push(String(chunk)); return true; }) as any;
+    const origError = console.error;
+    const errorCalls: any[][] = [];
+    console.error = (...args: any[]) => { errorCalls.push(args); };
+
+    const { calls: goodCalls, fn: goodHandler } = tracker();
     const badHandler = () => { throw new Error('handler broke'); };
 
     bus.on('test', badHandler);
     bus.on('test', goodHandler);
     bus.emit('test', 'data');
 
-    expect(goodHandler).toHaveBeenCalledWith('data');
-    expect(errorSpy).toHaveBeenCalledWith(
-      expect.stringContaining('[EventBus] Handler error'),
-      'handler broke',
-    );
-    errorSpy.mockRestore();
+    console.error = origError;
+    process.stderr.write = origWrite;
+
+    expect(goodCalls).toEqual(['data']);
+    expect(errorCalls.some(call => String(call[0]).includes('[EventBus] Handler error'))).toBe(true);
+    expect(errorCalls.some(call => call.includes('handler broke'))).toBe(true);
   });
 
   it('DKGEvent includes connection observability constants', () => {
@@ -73,10 +85,10 @@ describe('TypedEventBus', () => {
 
   it('emits connection events through the bus', () => {
     const bus = new TypedEventBus();
-    const openHandler = vi.fn();
-    const closeHandler = vi.fn();
-    bus.on(DKGEvent.CONNECTION_OPEN, openHandler);
-    bus.on(DKGEvent.CONNECTION_CLOSE, closeHandler);
+    const openTracker = tracker();
+    const closeTracker = tracker();
+    bus.on(DKGEvent.CONNECTION_OPEN, openTracker.fn);
+    bus.on(DKGEvent.CONNECTION_CLOSE, closeTracker.fn);
 
     const info = {
       peerId: '12D3KooWTest',
@@ -87,9 +99,9 @@ describe('TypedEventBus', () => {
     };
 
     bus.emit(DKGEvent.CONNECTION_OPEN, info);
-    expect(openHandler).toHaveBeenCalledWith(info);
+    expect(openTracker.calls).toEqual([info]);
 
     bus.emit(DKGEvent.CONNECTION_CLOSE, info);
-    expect(closeHandler).toHaveBeenCalledWith(info);
+    expect(closeTracker.calls).toEqual([info]);
   });
 });

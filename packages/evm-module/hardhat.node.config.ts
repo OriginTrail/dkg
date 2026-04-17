@@ -12,6 +12,8 @@ extendEnvironment((hre: HardhatRuntimeEnvironment) => {
   hre.helpers = lazyObject(() => new Helpers(hre));
 });
 
+const isCoverage = process.argv.includes('coverage');
+
 const config: HardhatUserConfig = {
   defaultNetwork: 'hardhat',
   namedAccounts: {
@@ -35,7 +37,7 @@ const config: HardhatUserConfig = {
       throwOnTransactionFailures: true,
       throwOnCallFailures: true,
       loggingEnabled: false,
-      allowUnlimitedContractSize: false,
+      allowUnlimitedContractSize: isCoverage,
       saveDeployments: false,
       mining: {
         auto: true,

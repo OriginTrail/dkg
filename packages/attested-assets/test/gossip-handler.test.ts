@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import {
   contextGraphSessionsTopic,
   sessionTopic,
@@ -6,27 +6,52 @@ import {
 } from '../src/gossip-handler.js';
 import type { GossipSubManager, GossipMessageHandler } from '@origintrail-official/dkg-core';
 
-function createMockGossip(): GossipSubManager & {
-  _handlers: Map<string, GossipMessageHandler>;
-  _subscribed: Set<string>;
-} {
+function createTrackingGossip() {
   const handlers = new Map<string, GossipMessageHandler>();
   const subscribed = new Set<string>();
-  return {
-    _handlers: handlers,
-    _subscribed: subscribed,
-    subscribe: vi.fn((topic: string) => { subscribed.add(topic); }),
-    unsubscribe: vi.fn((topic: string) => { subscribed.delete(topic); }),
-    onMessage: vi.fn((topic: string, handler: GossipMessageHandler) => {
+  const publishedMessages: Array<{ topic: string; data: Uint8Array }> = [];
+  let subscribeCount = 0;
+  let unsubscribeCount = 0;
+  let onMessageCount = 0;
+  let offMessageCount = 0;
+  const subscribeCalls: string[] = [];
+  const unsubscribeCalls: string[] = [];
+
+  const gossip: GossipSubManager = {
+    subscribe(topic: string) {
+      subscribed.add(topic);
+      subscribeCalls.push(topic);
+      subscribeCount++;
+    },
+    unsubscribe(topic: string) {
+      subscribed.delete(topic);
+      unsubscribeCalls.push(topic);
+      unsubscribeCount++;
+    },
+    onMessage(topic: string, handler: GossipMessageHandler) {
       handlers.set(topic, handler);
-    }),
-    offMessage: vi.fn((topic: string) => {
+      onMessageCount++;
+    },
+    offMessage(topic: string) {
       handlers.delete(topic);
-    }),
-    publish: vi.fn(),
-  } as unknown as GossipSubManager & {
-    _handlers: Map<string, GossipMessageHandler>;
-    _subscribed: Set<string>;
+      offMessageCount++;
+    },
+    async publish(topic: string, data: Uint8Array) {
+      publishedMessages.push({ topic, data });
+    },
+  };
+
+  return {
+    gossip,
+    handlers,
+    subscribed,
+    publishedMessages,
+    subscribeCalls,
+    unsubscribeCalls,
+    get subscribeCount() { return subscribeCount; },
+    get unsubscribeCount() { return unsubscribeCount; },
+    get onMessageCount() { return onMessageCount; },
+    get offMessageCount() { return offMessageCount; },
   };
 }
 
@@ -48,60 +73,56 @@ describe('gossip topic helpers', () => {
 });
 
 describe('AKAGossipHandler', () => {
-  let mockGossip: ReturnType<typeof createMockGossip>;
+  let tracking: ReturnType<typeof createTrackingGossip>;
   let handler: AKAGossipHandler;
 
   beforeEach(() => {
-    mockGossip = createMockGossip();
-    handler = new AKAGossipHandler(mockGossip);
+    tracking = createTrackingGossip();
+    handler = new AKAGossipHandler(tracking.gossip);
   });
 
   it('subscribeContextGraph subscribes to the correct topic', () => {
     handler.subscribeContextGraph('test-paranet');
-    expect(mockGossip.subscribe).toHaveBeenCalledWith('dkg/context-graph/test-paranet/sessions');
-    expect(mockGossip.onMessage).toHaveBeenCalledWith(
-      'dkg/context-graph/test-paranet/sessions',
-      expect.any(Function),
-    );
+    expect(tracking.subscribed.has('dkg/context-graph/test-paranet/sessions')).toBe(true);
+    expect(tracking.subscribeCount).toBe(1);
+    expect(tracking.onMessageCount).toBe(1);
   });
 
   it('subscribeContextGraph is idempotent — second call does not re-subscribe', () => {
     handler.subscribeContextGraph('test-paranet');
     handler.subscribeContextGraph('test-paranet');
-    expect(mockGossip.subscribe).toHaveBeenCalledTimes(1);
+    expect(tracking.subscribeCount).toBe(1);
   });
 
   it('unsubscribeContextGraph removes the subscription and handler', () => {
     handler.subscribeContextGraph('test-paranet');
     handler.unsubscribeContextGraph('test-paranet');
-    expect(mockGossip.offMessage).toHaveBeenCalledWith(
-      'dkg/context-graph/test-paranet/sessions',
-      expect.any(Function),
-    );
-    expect(mockGossip.unsubscribe).toHaveBeenCalledWith('dkg/context-graph/test-paranet/sessions');
+
+    expect(tracking.offMessageCount).toBe(1);
+    expect(tracking.unsubscribeCalls).toContain('dkg/context-graph/test-paranet/sessions');
   });
 
   it('subscribeSession subscribes to session-specific topic', () => {
     handler.subscribeSession('p1', 'session-abc');
-    expect(mockGossip.subscribe).toHaveBeenCalledWith('dkg/context-graph/p1/sessions/session-abc');
+    expect(tracking.subscribeCalls).toContain('dkg/context-graph/p1/sessions/session-abc');
   });
 
   it('unsubscribeSession removes session-specific subscription', () => {
     handler.subscribeSession('p1', 'session-abc');
     handler.unsubscribeSession('p1', 'session-abc');
-    expect(mockGossip.unsubscribe).toHaveBeenCalledWith('dkg/context-graph/p1/sessions/session-abc');
+    expect(tracking.unsubscribeCalls).toContain('dkg/context-graph/p1/sessions/session-abc');
   });
 
   it('onEvent/offEvent registers and removes event handlers', () => {
-    const eventHandler = vi.fn();
+    let called = false;
+    const eventHandler = () => { called = true; };
     const topic = 'dkg/context-graph/p1/sessions';
 
     handler.onEvent(topic, eventHandler);
     handler.offEvent(topic, eventHandler);
 
-    // After removal, the handler should not be called even if we simulate a message
-    // (no easy way to test without triggering gossip, but verify no throw)
     expect(() => handler.offEvent(topic, eventHandler)).not.toThrow();
+    expect(called).toBe(false);
   });
 
   it('publishEvent encodes and publishes via gossip', async () => {
@@ -120,21 +141,59 @@ describe('AKAGossipHandler', () => {
     };
 
     await handler.publishEvent(topic, event);
-    expect(mockGossip.publish).toHaveBeenCalledWith(topic, expect.any(Uint8Array));
+
+    expect(tracking.publishedMessages.length).toBe(1);
+    expect(tracking.publishedMessages[0].topic).toBe(topic);
+    expect(tracking.publishedMessages[0].data.length).toBeGreaterThan(0);
   });
 
-  it('incoming gossip message dispatches to registered event handlers', () => {
+  it('incoming gossip message with malformed data does not dispatch to handlers', () => {
     const topic = contextGraphSessionsTopic('test');
-    const eventHandler = vi.fn();
+    let handlerCalled = false;
+    const eventHandler = () => { handlerCalled = true; };
 
     handler.onEvent(topic, eventHandler);
     handler.subscribeContextGraph('test');
 
-    const registeredGossipHandler = mockGossip._handlers.get(topic);
+    const registeredGossipHandler = tracking.handlers.get(topic);
     expect(registeredGossipHandler).toBeDefined();
 
-    // Malformed data should be silently dropped (not throw, not call handler)
     registeredGossipHandler!(topic, new Uint8Array([0xff, 0xff]), 'peer-1');
-    expect(eventHandler).not.toHaveBeenCalled();
+    expect(handlerCalled).toBe(false);
+  });
+});
+
+describe('AKAGossipHandler — unsubscribeContextGraph then resubscribe', () => {
+  let tracking: ReturnType<typeof createTrackingGossip>;
+  let handler: AKAGossipHandler;
+
+  beforeEach(() => {
+    tracking = createTrackingGossip();
+    handler = new AKAGossipHandler(tracking.gossip);
+  });
+
+  it('re-subscribing after unsubscribe re-registers the handler', () => {
+    handler.subscribeContextGraph('test-paranet');
+    handler.unsubscribeContextGraph('test-paranet');
+    handler.subscribeContextGraph('test-paranet');
+
+    expect(tracking.subscribeCount).toBe(2);
+    expect(tracking.onMessageCount).toBe(2);
+  });
+
+  it('unsubscribeContextGraph for unknown id does not throw', () => {
+    expect(() => handler.unsubscribeContextGraph('nonexistent')).not.toThrow();
+  });
+
+  it('multiple context graphs can be subscribed independently', () => {
+    handler.subscribeContextGraph('cg-1');
+    handler.subscribeContextGraph('cg-2');
+
+    expect(tracking.subscribeCalls).toContain('dkg/context-graph/cg-1/sessions');
+    expect(tracking.subscribeCalls).toContain('dkg/context-graph/cg-2/sessions');
+
+    handler.unsubscribeContextGraph('cg-1');
+    expect(tracking.unsubscribeCalls).toContain('dkg/context-graph/cg-1/sessions');
+    expect(tracking.unsubscribeCalls).not.toContain('dkg/context-graph/cg-2/sessions');
   });
 });

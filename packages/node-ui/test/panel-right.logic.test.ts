@@ -1,5 +1,5 @@
 import React from 'react';
-import { beforeAll, describe, expect, it, vi } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 
 let ConnectedAgentsTab: any;
@@ -13,12 +13,26 @@ let shouldPreserveSessionForIntegrationSelection: any;
 let shouldPreserveSessionOnReconnect: any;
 let upsertLocalAgentIntegrationState: any;
 
+/**
+ * Minimal real Storage implementation for tests that import
+ * PanelRight under Node (no DOM, no jsdom). This satisfies the
+ * Web Storage API surface that PanelRight reads at module load
+ * time without using any test-framework mocking primitives.
+ */
+class TestLocalStorage implements Storage {
+  private readonly store = new Map<string, string>();
+  get length(): number { return this.store.size; }
+  clear(): void { this.store.clear(); }
+  getItem(key: string): string | null { return this.store.get(key) ?? null; }
+  key(index: number): string | null { return Array.from(this.store.keys())[index] ?? null; }
+  removeItem(key: string): void { this.store.delete(key); }
+  setItem(key: string, value: string): void { this.store.set(key, String(value)); }
+}
+
+const noop = () => {};
+
 beforeAll(async () => {
-  vi.stubGlobal('localStorage', {
-    getItem: vi.fn(() => null),
-    setItem: vi.fn(),
-    removeItem: vi.fn(),
-  });
+  (globalThis as any).localStorage = new TestLocalStorage();
 
   const panelRight = await import('../src/ui/components/Shell/PanelRight.js');
   ConnectedAgentsTab = panelRight.ConnectedAgentsTab;
@@ -56,6 +70,9 @@ function integration(overrides: Record<string, unknown> = {}) {
 }
 
 function renderConnectedAgentsTab(overrides: Record<string, unknown> = {}) {
+  // renderToStaticMarkup never fires event handlers, so plain no-op
+  // functions are sufficient for the callback props (no need for any
+  // test-framework spy/mock primitive here).
   const props = {
     integrations: [integration()],
     selectedIntegrationId: 'openclaw',
@@ -63,10 +80,10 @@ function renderConnectedAgentsTab(overrides: Record<string, unknown> = {}) {
     selectedSessionId: 'openclaw:default',
     selectedHasConversation: false,
     selectedIntegrationHasAnyConversation: false,
-    onSelectIntegration: vi.fn(),
-    onConnectIntegration: vi.fn(),
-    onDisconnectIntegration: vi.fn(),
-    onRefreshIntegrations: vi.fn(),
+    onSelectIntegration: noop,
+    onConnectIntegration: noop,
+    onDisconnectIntegration: noop,
+    onRefreshIntegrations: noop,
     connectBusyId: null,
     connectNotice: null,
     connectError: null,
@@ -74,8 +91,8 @@ function renderConnectedAgentsTab(overrides: Record<string, unknown> = {}) {
     localHistoryLoaded: true,
     localChatEndRef: { current: null },
     localInput: '',
-    onLocalInputChange: vi.fn(),
-    onSendLocalMessage: vi.fn(),
+    onLocalInputChange: noop,
+    onSendLocalMessage: noop,
     localSending: false,
     activeProjectId: 'origin-trail-game',
     availableProjects: [
@@ -83,10 +100,10 @@ function renderConnectedAgentsTab(overrides: Record<string, unknown> = {}) {
       { id: 'testing', name: 'Testing' },
     ],
     projectsLoading: false,
-    onSelectProject: vi.fn(),
+    onSelectProject: noop,
     attachments: [],
-    onAddAttachments: vi.fn(),
-    onRemoveAttachment: vi.fn(),
+    onAddAttachments: noop,
+    onRemoveAttachment: noop,
     ...overrides,
   } as any;
 

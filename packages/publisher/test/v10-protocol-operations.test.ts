@@ -1,6 +1,6 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { ethers } from 'ethers';
-import type { Quad } from '@origintrail-official/dkg-storage';
+import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import {
   computeFlatKCRootV10 as computeFlatKCRoot,
   computeTripleHashV10,
@@ -32,7 +32,7 @@ function makeQuad(s: string, p: string, o: string, g = ''): Quad {
 }
 
 function makeEventBus() {
-  return { emit: vi.fn(), on: vi.fn(), off: vi.fn(), once: vi.fn() };
+  return { emit: () => {}, on: () => {}, off: () => {}, once: () => {} };
 }
 
 async function signACK(
@@ -195,7 +195,7 @@ describe('V10 PUBLISH Protocol (spec §9.0)', () => {
       const merkleRoot = computeFlatKCRoot(singleEntityQuads, []);
       let callIdx = 0;
       const deps: ACKCollectorDeps = {
-        gossipPublish: vi.fn().mockResolvedValue(undefined),
+        gossipPublish: async () => {},
         sendP2P: async () => {
           const wallet = coreWallets[callIdx % coreWallets.length];
           // Match collector.collect inputs below so the H5 digest the signer
@@ -210,7 +210,7 @@ describe('V10 PUBLISH Protocol (spec §9.0)', () => {
           });
         },
         getConnectedCorePeers: () => ['p-0', 'p-1', 'p-2', 'p-3'],
-        log: vi.fn(),
+        log: () => {},
       };
 
       const collector = new ACKCollector(deps);
@@ -246,21 +246,12 @@ describe('V10 PUBLISH Protocol (spec §9.0)', () => {
   // `evm-adapter.createKnowledgeAssetsV10`.
 
   describe('Phase 4: SWM cleanup after publish', () => {
-    it('published triples removed from SWM (mock verification)', async () => {
-      const mockStore = {
-        query: vi.fn().mockResolvedValue({ type: 'quads' as const, quads: [] }),
-        insert: vi.fn(),
-        delete: vi.fn(),
-        dropGraph: vi.fn(),
-      };
-
-      await mockStore.dropGraph('did:dkg:context-graph:test/_shared_memory');
-      expect(mockStore.dropGraph).toHaveBeenCalledWith(
-        'did:dkg:context-graph:test/_shared_memory',
-      );
-
-      const result = await mockStore.query('CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <swm> { ?s ?p ?o } }');
-      expect(result.quads).toHaveLength(0);
+    it('SWM graph URI follows expected naming convention', () => {
+      const contextGraphId = 'test';
+      const swmUri = `did:dkg:context-graph:${contextGraphId}/_shared_memory`;
+      expect(swmUri).toBe('did:dkg:context-graph:test/_shared_memory');
+      expect(swmUri).toContain('/_shared_memory');
+      expect(swmUri).not.toContain('/_working_memory');
     });
   });
 });
@@ -283,8 +274,8 @@ describe('V10 SHARE Protocol (spec §7.0)', () => {
 
       for (const q of promoted) {
         expect(q.graph).toBe(swmUri);
-        expect(q.subject).toBeTruthy();
-        expect(q.predicate).toBeTruthy();
+        expect(q.subject).toMatch(/^urn:/);
+        expect(q.predicate).toMatch(/^(http|urn:)/);
       }
     });
 
@@ -335,7 +326,8 @@ describe('V10 GET Protocol (spec §12)', () => {
 
   it('view=verified-memory resolves to VM graph prefix', () => {
     const vmGraph = `did:dkg:context-graph:${contextGraphId}/_verified_memory/`;
-    expect(vmGraph).toContain('_verified_memory');
+    expect(vmGraph).toBe('did:dkg:context-graph:42/_verified_memory/');
+    expect(vmGraph).not.toContain('_shared_memory');
   });
 });
 
@@ -349,9 +341,10 @@ describe('V10 ACK Edge Cases', () => {
   const merkleRoot = computeFlatKCRoot(singleEntityQuads, []);
 
   it('fails fast when requiredACKs > connected peers', async () => {
+    let sendCalled = false;
     const deps: ACKCollectorDeps = {
-      gossipPublish: vi.fn().mockResolvedValue(undefined),
-      sendP2P: vi.fn(),
+      gossipPublish: async () => {},
+      sendP2P: async () => { sendCalled = true; return new Uint8Array(); },
       getConnectedCorePeers: () => ['peer-0', 'peer-1'],
     };
 
@@ -372,14 +365,14 @@ describe('V10 ACK Edge Cases', () => {
       }),
     ).rejects.toThrow('quorum impossible');
 
-    expect(deps.sendP2P).not.toHaveBeenCalled();
+    expect(sendCalled).toBe(false);
   });
 
   it('rejects ACK with wrong merkle root', async () => {
     const wrongRoot = new Uint8Array(32).fill(0xde);
 
     const deps: ACKCollectorDeps = {
-      gossipPublish: vi.fn().mockResolvedValue(undefined),
+      gossipPublish: async () => {},
       sendP2P: async () => {
         // Match collector inputs so the signer + verifier compute the same H5 digest.
         const { r, vs } = await signACK(coreWallets[0], cgIdBigInt, merkleRoot, 1, 100n);
@@ -392,7 +385,7 @@ describe('V10 ACK Edge Cases', () => {
         });
       },
       getConnectedCorePeers: () => ['p-0', 'p-1', 'p-2'],
-      log: vi.fn(),
+      log: () => {},
     };
 
     const collector = new ACKCollector(deps);
@@ -414,8 +407,9 @@ describe('V10 ACK Edge Cases', () => {
 
   it('rejects ACK from unknown identity (verifyIdentity returns false)', async () => {
     let idx = 0;
+    let verifyIdentityCalled = false;
     const deps: ACKCollectorDeps = {
-      gossipPublish: vi.fn().mockResolvedValue(undefined),
+      gossipPublish: async () => {},
       sendP2P: async () => {
         const wallet = coreWallets[idx++ % coreWallets.length];
         const { r, vs } = await signACK(wallet, cgIdBigInt, merkleRoot, 1, 100n);
@@ -428,8 +422,8 @@ describe('V10 ACK Edge Cases', () => {
         });
       },
       getConnectedCorePeers: () => ['p-0', 'p-1', 'p-2'],
-      verifyIdentity: vi.fn().mockResolvedValue(false),
-      log: vi.fn(),
+      verifyIdentity: async () => { verifyIdentityCalled = true; return false; },
+      log: () => {},
     };
 
     const collector = new ACKCollector(deps);
@@ -447,13 +441,13 @@ describe('V10 ACK Edge Cases', () => {
         rootEntities: [],
       }),
     ).rejects.toThrow('storage_ack_insufficient');
-    expect(deps.verifyIdentity).toHaveBeenCalled();
+    expect(verifyIdentityCalled).toBe(true);
   });
 
   it('deduplicates ACKs from same peerId', async () => {
     let callCount = 0;
     const deps: ACKCollectorDeps = {
-      gossipPublish: vi.fn().mockResolvedValue(undefined),
+      gossipPublish: async () => {},
       sendP2P: async () => {
         const wallet = coreWallets[0];
         const { r, vs } = await signACK(wallet, cgIdBigInt, merkleRoot, 1, 100n);
@@ -467,7 +461,7 @@ describe('V10 ACK Edge Cases', () => {
         });
       },
       getConnectedCorePeers: () => ['same-peer', 'same-peer', 'same-peer', 'p-3'],
-      log: vi.fn(),
+      log: () => {},
     };
 
     const collector = new ACKCollector(deps);
@@ -489,7 +483,7 @@ describe('V10 ACK Edge Cases', () => {
 
   it('deduplicates ACKs from same nodeIdentityId', async () => {
     const deps: ACKCollectorDeps = {
-      gossipPublish: vi.fn().mockResolvedValue(undefined),
+      gossipPublish: async () => {},
       sendP2P: async () => {
         const { r, vs } = await signACK(coreWallets[0], cgIdBigInt, merkleRoot, 1, 100n);
         return encodeStorageACK({
@@ -501,7 +495,7 @@ describe('V10 ACK Edge Cases', () => {
         });
       },
       getConnectedCorePeers: () => ['p-0', 'p-1', 'p-2'],
-      log: vi.fn(),
+      log: () => {},
     };
 
     const collector = new ACKCollector(deps);
@@ -593,7 +587,7 @@ describe('V10 ACK Edge Cases', () => {
       kav10Address: TEST_KAV10_ADDR,
     };
     const handler = new StorageACKHandler(
-      { query: vi.fn() } as any,
+      { query: async () => ({ type: 'quads' as const, quads: [] }) } as any,
       config,
       makeEventBus() as any,
     );
@@ -725,25 +719,48 @@ describe('V10 StorageACKHandler round-trip', () => {
   ];
   const merkleRoot = computeFlatKCRoot(testQuads, []);
 
-  function createMockStore(quads: Quad[]) {
-    return {
-      query: vi.fn().mockImplementation((sparql: string) => {
-        const entityMatch = sparql.match(/FILTER\(\?s = <([^>]+)>/);
-        if (entityMatch) {
-          const entity = entityMatch[1];
-          const genidPrefix = `${entity}/.well-known/genid/`;
-          const filtered = quads.filter(q =>
-            q.subject === entity || q.subject.startsWith(genidPrefix),
-          );
-          return Promise.resolve({ type: 'quads' as const, quads: filtered });
-        }
-        return Promise.resolve({ type: 'quads' as const, quads });
-      }),
-      insert: vi.fn(),
-      delete: vi.fn(),
-      dropGraph: vi.fn(),
-      close: vi.fn(),
+  // SWM URI used to seed the recording store. Must match the URI returned by
+  // `createHandler`'s `contextGraphSharedMemoryUri` so the handler's
+  // `loadSWMQuads` CONSTRUCT actually finds the seeded data.
+  const SWM_GRAPH_URI = `did:dkg:context-graph:${contextGraphId}/_shared_memory`;
+
+  /**
+   * Build a real {@link OxigraphStore}, seeded with `quads` placed in the
+   * SWM graph the handler queries, and wrap each TripleStore method we
+   * inspect in tests with a call recorder. The previous hand-rolled fake
+   * intercepted SPARQL via a regex (`FILTER(?s = <…>)`) and returned
+   * pre-filtered arrays — that bypassed the actual SPARQL engine and could
+   * not detect IRI-escaping or graph-keying regressions. With the real
+   * store, the handler's CONSTRUCT executes against parsed N-Quads, so the
+   * round-trip now exercises production code paths.
+   */
+  function createRecordingStore(quads: Quad[]) {
+    const store = new OxigraphStore();
+    if (quads.length > 0) {
+      void store.insert(quads.map((q) => ({ ...q, graph: SWM_GRAPH_URI })));
+    }
+    const queryCalls: unknown[][] = [];
+    const insertCalls: unknown[][] = [];
+    const dropGraphCalls: unknown[][] = [];
+    const realQuery = store.query.bind(store);
+    const realInsert = store.insert.bind(store);
+    const realDropGraph = store.dropGraph.bind(store);
+    (store as any).query = async (sparql: string) => {
+      queryCalls.push([sparql]);
+      return realQuery(sparql);
     };
+    (store as any).insert = async (qs: Quad[]) => {
+      insertCalls.push([qs]);
+      return realInsert(qs);
+    };
+    (store as any).dropGraph = async (uri: string) => {
+      dropGraphCalls.push([uri]);
+      return realDropGraph(uri);
+    };
+    (store as any)._queryCalls = queryCalls;
+    (store as any)._insertCalls = insertCalls;
+    (store as any)._dropGraphCalls = dropGraphCalls;
+    return store as any;
   }
 
   function createHandler(store: any, opts?: { role?: 'core' | 'edge'; identityId?: bigint }) {
@@ -763,7 +780,7 @@ describe('V10 StorageACKHandler round-trip', () => {
     const ntriples = quadsToNTriples(testQuads);
     const stagingBytes = new TextEncoder().encode(ntriples);
 
-    const handler = createHandler(createMockStore([]));
+    const handler = createHandler(createRecordingStore([]));
     const intent = encodePublishIntent({
       merkleRoot,
       contextGraphId,
@@ -804,7 +821,7 @@ describe('V10 StorageACKHandler round-trip', () => {
   });
 
   it('handler verifies data from SWM when no stagingQuads (enshrine path)', async () => {
-    const store = createMockStore(testQuads);
+    const store = createRecordingStore(testQuads);
     const handler = createHandler(store);
 
     const intent = encodePublishIntent({
@@ -820,11 +837,11 @@ describe('V10 StorageACKHandler round-trip', () => {
     const response = await handler.handler(intent, fakePeerId);
     const ack = decodeStorageACK(response);
     expect(ack.contextGraphId).toBe(contextGraphId);
-    expect(store.query).toHaveBeenCalled();
+    expect(store._queryCalls.length).toBeGreaterThan(0);
   });
 
   it('handler rejects non-core node role', async () => {
-    const handler = createHandler(createMockStore([]), { role: 'edge' });
+    const handler = createHandler(createRecordingStore([]), { role: 'edge' });
 
     const intent = encodePublishIntent({
       merkleRoot,
@@ -845,7 +862,7 @@ describe('V10 StorageACKHandler round-trip', () => {
     const ntriples = quadsToNTriples(differentQuads);
     const stagingBytes = new TextEncoder().encode(ntriples);
 
-    const handler = createHandler(createMockStore([]));
+    const handler = createHandler(createRecordingStore([]));
     const intent = encodePublishIntent({
       merkleRoot,
       contextGraphId,
@@ -862,7 +879,7 @@ describe('V10 StorageACKHandler round-trip', () => {
   });
 
   it('handler rejects empty stagingQuads', async () => {
-    const handler = createHandler(createMockStore([]));
+    const handler = createHandler(createRecordingStore([]));
     const emptyNTriples = '';
     const stagingBytes = new TextEncoder().encode(emptyNTriples);
 
@@ -884,7 +901,7 @@ describe('V10 StorageACKHandler round-trip', () => {
 
   it('handler rejects stagingQuads > 4MB', async () => {
     const oversized = new Uint8Array(4 * 1024 * 1024 + 1).fill(0x41);
-    const handler = createHandler(createMockStore([]));
+    const handler = createHandler(createRecordingStore([]));
 
     const intent = encodePublishIntent({
       merkleRoot,
@@ -902,7 +919,7 @@ describe('V10 StorageACKHandler round-trip', () => {
   });
 
   it('persists inline quads to staging graph before signing (crash safety)', async () => {
-    const store = createMockStore([]);
+    const store = createRecordingStore([]);
     const handler = createHandler(store);
 
     const ntriples = quadsToNTriples(testQuads);
@@ -921,9 +938,9 @@ describe('V10 StorageACKHandler round-trip', () => {
 
     await handler.handler(intent, fakePeerId);
 
-    expect(store.dropGraph).toHaveBeenCalled();
-    expect(store.insert).toHaveBeenCalled();
-    const insertedQuads = store.insert.mock.calls[0][0];
+    expect(store._dropGraphCalls.length).toBeGreaterThan(0);
+    expect(store._insertCalls.length).toBeGreaterThan(0);
+    const insertedQuads = store._insertCalls[0][0] as any[];
     expect(insertedQuads.length).toBeGreaterThan(0);
     expect(insertedQuads[0].graph).toContain('/staging/');
   });
@@ -939,7 +956,7 @@ describe('V10 StorageACKHandler round-trip', () => {
       chainId: TEST_CHAIN_ID,
       kav10Address: TEST_KAV10_ADDR,
     };
-    const store = createMockStore(testQuads);
+    const store = createRecordingStore(testQuads);
     const handler = new StorageACKHandler(store as any, config, makeEventBus() as any);
 
     const intent = encodePublishIntent({
@@ -1042,11 +1059,6 @@ describe('V10 Finalization (spec §9.0 Phase 6)', () => {
   });
 
   it('contextGraphId consistency: publisher and handler agree on the numeric on-chain id', () => {
-    // V10 publish requires a numeric on-chain context graph id — both the
-    // publisher (dkg-publisher.ts) and the receiving core node
-    // (storage-ack-handler.ts) parse the intent's `contextGraphId` via
-    // `BigInt(cgId)`, and both reject non-numeric or zero values at the
-    // fail-loud guard. This test pins that the two sides see the same id.
     const publisherDerived = BigInt(contextGraphId);
     const handlerDerived = BigInt(contextGraphId);
     expect(publisherDerived).toBe(handlerDerived);

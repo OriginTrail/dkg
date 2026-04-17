@@ -10,11 +10,25 @@
  * 7. Remove a sub-graph
  * 8. Two-node replication: sub-graph publish replicates to peer
  */
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, beforeAll, afterAll } from 'vitest';
 import { DKGAgent } from '../src/index.js';
-import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
+import { mintTokens } from '../../chain/test/hardhat-harness.js';
+import { ethers } from 'ethers';
 
 const agents: DKGAgent[] = [];
+
+let _fileSnapshot: string;
+beforeAll(async () => {
+  _fileSnapshot = await takeSnapshot();
+  const { hubAddress } = getSharedContext();
+  const provider = createProvider();
+  const coreOp = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+  await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, coreOp.address, ethers.parseEther('50000000'));
+});
+afterAll(async () => {
+  await revertSnapshot(_fileSnapshot);
+});
 
 afterEach(async () => {
   for (const a of agents) {
@@ -34,7 +48,7 @@ describe('Sub-graph lifecycle (single agent)', () => {
       name: 'SubGraphBot',
       listenPort: 0,
       skills: [],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     agents.push(agent);
     await agent.start();
@@ -62,7 +76,7 @@ describe('Sub-graph lifecycle (single agent)', () => {
       name: 'ValidationBot',
       listenPort: 0,
       skills: [],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     agents.push(agent);
     await agent.start();
@@ -84,7 +98,7 @@ describe('Sub-graph lifecycle (single agent)', () => {
       name: 'MissingCgBot',
       listenPort: 0,
       skills: [],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     agents.push(agent);
     await agent.start();
@@ -98,7 +112,7 @@ describe('Sub-graph lifecycle (single agent)', () => {
       name: 'RemoveBot',
       listenPort: 0,
       skills: [],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     agents.push(agent);
     await agent.start();
@@ -125,7 +139,7 @@ describe('Sub-graph publish + query (single agent)', () => {
       name: 'PubSubGraphBot',
       listenPort: 0,
       skills: [],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     agents.push(agent);
     await agent.start();
@@ -154,7 +168,7 @@ describe('Sub-graph publish + query (single agent)', () => {
       name: 'IsolationBot',
       listenPort: 0,
       skills: [],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     agents.push(agent);
     await agent.start();
@@ -196,7 +210,7 @@ describe('Sub-graph publish + query (single agent)', () => {
       name: 'MultiSubBot',
       listenPort: 0,
       skills: [],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     agents.push(agent);
     await agent.start();
@@ -235,7 +249,7 @@ describe('Sub-graph publish + query (single agent)', () => {
       name: 'SWMSubBot',
       listenPort: 0,
       skills: [],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     agents.push(agent);
     await agent.start();
@@ -285,10 +299,10 @@ describe('Sub-graph publish + query (single agent)', () => {
 describe('Sub-graph replication (two agents)', () => {
   it('sub-graph publish on A replicates to B', async () => {
     const agentA = await DKGAgent.create({
-      name: 'SubReplicaA', listenPort: 0, skills: [], chainAdapter: new MockChainAdapter(),
+      name: 'SubReplicaA', listenPort: 0, skills: [], chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     const agentB = await DKGAgent.create({
-      name: 'SubReplicaB', listenPort: 0, skills: [], chainAdapter: new MockChainAdapter(),
+      name: 'SubReplicaB', listenPort: 0, skills: [], chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     agents.push(agentA, agentB);
 
@@ -346,7 +360,7 @@ describe('Sub-graph across memory layers (single agent)', () => {
       name: 'SwmSubBot',
       listenPort: 0,
       skills: [],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     agents.push(agent);
     await agent.start();
@@ -380,7 +394,7 @@ describe('Sub-graph across memory layers (single agent)', () => {
       name: 'QuadDraftBot',
       listenPort: 0,
       skills: [],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     agents.push(agent);
     await agent.start();
@@ -405,7 +419,7 @@ describe('Sub-graph across memory layers (single agent)', () => {
       name: 'JsonLdInputBot',
       listenPort: 0,
       skills: [],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     agents.push(agent);
     await agent.start();
@@ -433,7 +447,7 @@ describe('Sub-graph across memory layers (single agent)', () => {
       name: 'AssertionSubBot',
       listenPort: 0,
       skills: [],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     agents.push(agent);
     await agent.start();
@@ -486,7 +500,7 @@ describe('Sub-graph across memory layers (single agent)', () => {
       name: 'PipelineBot',
       listenPort: 0,
       skills: [],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     agents.push(agent);
     await agent.start();
@@ -540,7 +554,7 @@ describe('Sub-graph across memory layers (single agent)', () => {
       name: 'IsoSwmBot',
       listenPort: 0,
       skills: [],
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
     agents.push(agent);
     await agent.start();

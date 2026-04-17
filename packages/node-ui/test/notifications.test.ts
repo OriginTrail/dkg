@@ -1,9 +1,9 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { IncomingMessage, ServerResponse } from 'node:http';
-import { Readable } from 'node:stream';
+import { createServer, type Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { DashboardDB } from '../src/db.js';
 import { handleNodeUIRequest } from '../src/api.js';
 
@@ -33,60 +33,44 @@ function makeNotification(overrides: Partial<{ ts: number; type: string; title: 
   };
 }
 
-// --- API test helpers ---
+// --- Real HTTP harness ---
+//
+// Boots an actual `node:http` server that delegates to `handleNodeUIRequest`,
+// rebinding the active `db` reference per request via the `getDb` closure so
+// each `beforeEach` swap of `db` is picked up automatically. Tests then make
+// real `fetch` calls into the server — exactly the wire format production
+// daemons receive (gzip streams, `Content-Length`, header casing, etc.) — so
+// any divergence between the hand-rolled fake req/res and what node:http
+// actually sends is no longer hidden.
+let server: Server;
+let baseUrl: string;
+const getDb = (): DashboardDB => db;
 
-function createMockReq(opts: {
-  method: string;
-  path: string;
-  body?: string;
-  headers?: Record<string, string>;
-}): { req: IncomingMessage; url: URL } {
-  const stream = Readable.from(opts.body != null ? [Buffer.from(opts.body, 'utf8')] : []);
-  const req = stream as unknown as IncomingMessage & {
-    method: string;
-    headers: Record<string, string>;
-  };
-  req.method = opts.method;
-  req.headers = opts.headers ?? {};
-  return {
-    req: req as IncomingMessage,
-    url: new URL(`http://localhost${opts.path}`),
-  };
-}
-
-function createMockRes(): {
-  res: ServerResponse;
-  state: { statusCode: number; headers: Record<string, string>; body: string };
-} {
-  const chunks: Buffer[] = [];
-  const state = { statusCode: 0, headers: {} as Record<string, string>, body: '' };
-  const res: any = {
-    writableEnded: false,
-    destroyed: false,
-    writeHead(code: number, headers?: Record<string, string>) {
-      state.statusCode = code;
-      state.headers = headers ?? {};
-      return res;
-    },
-    write(chunk: Buffer | string) {
-      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, 'utf8'));
-      return true;
-    },
-    end(chunk?: Buffer | string) {
-      if (chunk !== undefined) {
-        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, 'utf8'));
+beforeAll(async () => {
+  server = createServer((req, res) => {
+    const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+    handleNodeUIRequest(req, res, url, getDb(), '/fake/static').then((handled) => {
+      if (!handled && !res.headersSent) {
+        res.statusCode = 404;
+        res.end('Not Found');
       }
-      state.body = Buffer.concat(chunks).toString('utf8');
-      res.writableEnded = true;
-      return res;
-    },
-  };
-  return { res: res as ServerResponse, state };
-}
+    }).catch((err) => {
+      if (!res.headersSent) {
+        res.statusCode = 500;
+        res.end(String(err));
+      }
+    });
+  });
+  await new Promise<void>((resolve) => {
+    server.listen(0, '127.0.0.1', () => resolve());
+  });
+  const addr = server.address() as AddressInfo;
+  baseUrl = `http://127.0.0.1:${addr.port}`;
+});
 
-function parseJsonBody(body: string): any {
-  return body ? JSON.parse(body) : {};
-}
+afterAll(async () => {
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+});
 
 // --- DashboardDB notification tests ---
 
@@ -196,14 +180,9 @@ describe('DashboardDB — notifications', () => {
 
 describe('handleNodeUIRequest — notification routes', () => {
   it('GET /api/notifications returns empty state', async () => {
-    const { req, url } = createMockReq({ method: 'GET', path: '/api/notifications' });
-    const { res, state } = createMockRes();
-
-    const handled = await handleNodeUIRequest(req, res, url, db, '/fake/static');
-    expect(handled).toBe(true);
-    expect(state.statusCode).toBe(200);
-
-    const body = parseJsonBody(state.body);
+    const res = await fetch(`${baseUrl}/api/notifications`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
     expect(body.notifications).toEqual([]);
     expect(body.unreadCount).toBe(0);
   });
@@ -212,14 +191,9 @@ describe('handleNodeUIRequest — notification routes', () => {
     db.insertNotification(makeNotification({ ts: 1000, title: 'A' }));
     db.insertNotification(makeNotification({ ts: 2000, title: 'B' }));
 
-    const { req, url } = createMockReq({ method: 'GET', path: '/api/notifications' });
-    const { res, state } = createMockRes();
-
-    const handled = await handleNodeUIRequest(req, res, url, db, '/fake/static');
-    expect(handled).toBe(true);
-    expect(state.statusCode).toBe(200);
-
-    const body = parseJsonBody(state.body);
+    const res = await fetch(`${baseUrl}/api/notifications`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
     expect(body.notifications).toHaveLength(2);
     expect(body.unreadCount).toBe(2);
     expect(body.notifications[0].title).toBe('B');
@@ -230,13 +204,9 @@ describe('handleNodeUIRequest — notification routes', () => {
     db.insertNotification(makeNotification({ ts: 2000 }));
     db.insertNotification(makeNotification({ ts: 3000 }));
 
-    const { req, url } = createMockReq({ method: 'GET', path: '/api/notifications?limit=1' });
-    const { res, state } = createMockRes();
-
-    const handled = await handleNodeUIRequest(req, res, url, db, '/fake/static');
-    expect(handled).toBe(true);
-
-    const body = parseJsonBody(state.body);
+    const res = await fetch(`${baseUrl}/api/notifications?limit=1`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
     expect(body.notifications).toHaveLength(1);
   });
 
@@ -245,13 +215,9 @@ describe('handleNodeUIRequest — notification routes', () => {
     db.insertNotification(makeNotification({ ts: 2000 }));
     db.insertNotification(makeNotification({ ts: 3000 }));
 
-    const { req, url } = createMockReq({ method: 'GET', path: '/api/notifications?since=1500' });
-    const { res, state } = createMockRes();
-
-    const handled = await handleNodeUIRequest(req, res, url, db, '/fake/static');
-    expect(handled).toBe(true);
-
-    const body = parseJsonBody(state.body);
+    const res = await fetch(`${baseUrl}/api/notifications?since=1500`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
     expect(body.notifications).toHaveLength(2);
     expect(body.notifications.every((n: any) => n.ts > 1500)).toBe(true);
   });
@@ -260,19 +226,13 @@ describe('handleNodeUIRequest — notification routes', () => {
     db.insertNotification(makeNotification({ ts: 1000 }));
     db.insertNotification(makeNotification({ ts: 2000 }));
 
-    const { req, url } = createMockReq({
+    const res = await fetch(`${baseUrl}/api/notifications/read`, {
       method: 'POST',
-      path: '/api/notifications/read',
-      body: JSON.stringify({}),
       headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({}),
     });
-    const { res, state } = createMockRes();
-
-    const handled = await handleNodeUIRequest(req, res, url, db, '/fake/static');
-    expect(handled).toBe(true);
-    expect(state.statusCode).toBe(200);
-
-    const body = parseJsonBody(state.body);
+    expect(res.status).toBe(200);
+    const body = await res.json();
     expect(body.marked).toBe(2);
 
     const { unreadCount } = db.getNotifications();
@@ -283,19 +243,13 @@ describe('handleNodeUIRequest — notification routes', () => {
     const id1 = db.insertNotification(makeNotification({ ts: 1000 }));
     db.insertNotification(makeNotification({ ts: 2000 }));
 
-    const { req, url } = createMockReq({
+    const res = await fetch(`${baseUrl}/api/notifications/read`, {
       method: 'POST',
-      path: '/api/notifications/read',
-      body: JSON.stringify({ ids: [id1] }),
       headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ids: [id1] }),
     });
-    const { res, state } = createMockRes();
-
-    const handled = await handleNodeUIRequest(req, res, url, db, '/fake/static');
-    expect(handled).toBe(true);
-    expect(state.statusCode).toBe(200);
-
-    const body = parseJsonBody(state.body);
+    expect(res.status).toBe(200);
+    const body = await res.json();
     expect(body.marked).toBe(1);
 
     const { unreadCount } = db.getNotifications();

@@ -83,16 +83,28 @@ describe('Store Isolation (Spec §1.6, §1.7)', () => {
       expect(engine).not.toHaveProperty('proxyQuery');
     });
 
-    it('QueryOptions does not accept a federated flag', async () => {
+    it('QueryOptions does not accept a federated flag and query returns a valid local result type', async () => {
       const store = new OxigraphStore();
       const engine = new DKGQueryEngine(store);
 
       const options = { contextGraphId: CONTEXT_GRAPH };
       expect(options).not.toHaveProperty('federated');
 
-      await expect(
-        engine.query('SELECT ?s ?p ?o WHERE { ?s ?p ?o }', options),
-      ).resolves.toBeDefined();
+      // Previously this only asserted `.resolves.toBeDefined()` — a check
+      // that would "pass" even if the engine quietly returned `null` or
+      // `{}` on an unsupported option. Since the contract for
+      // DKGQueryEngine.query is to return `{ bindings: Array<...>, quads?: ... }`
+      // for a local SELECT, assert that shape explicitly. A regression
+      // where QueryOptions accidentally accepts `federated` (or silently
+      // drops the query, returning `undefined`) would fail here instead
+      // of silently passing.
+      const result = await engine.query(
+        'SELECT ?s ?p ?o WHERE { ?s ?p ?o }',
+        options,
+      );
+      expect(result).toBeDefined();
+      expect(Array.isArray(result.bindings), 'SELECT on empty store must return bindings array (possibly empty)').toBe(true);
+      expect(result.bindings.length, 'empty store should yield zero bindings').toBe(0);
     });
 
     it('queryAllContextGraphs only queries local store', async () => {

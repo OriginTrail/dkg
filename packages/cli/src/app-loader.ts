@@ -52,16 +52,34 @@ const MIME: Record<string, string> = {
  * For standalone NPM installs (no monorepo), falls back to scanning
  * the CLI package's own package.json dependencies.
  */
-export async function loadApps(agent?: unknown, config?: unknown, log?: (msg: string) => void): Promise<LoadedApp[]> {
+export interface LoadAppsOptions {
+  /**
+   * When set (e.g. in tests), load app manifests from this directory’s package.json
+   * instead of resolving via repoDir() or the CLI install path.
+   */
+  cliPackageRoot?: string;
+}
+
+export async function loadApps(
+  agent?: unknown,
+  config?: unknown,
+  log?: (msg: string) => void,
+  options?: LoadAppsOptions,
+): Promise<LoadedApp[]> {
   const apps: LoadedApp[] = [];
-  const root = repoDir();
   let pkgJsonBase: string;
-  if (root) {
-    pkgJsonBase = root;
+  if (options?.cliPackageRoot) {
+    pkgJsonBase = options.cliPackageRoot;
+    if (!existsSync(join(pkgJsonBase, 'package.json'))) return apps;
   } else {
-    const cliDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-    if (!existsSync(join(cliDir, 'package.json'))) return apps;
-    pkgJsonBase = cliDir;
+    const root = repoDir();
+    if (root) {
+      pkgJsonBase = root;
+    } else {
+      const cliDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+      if (!existsSync(join(cliDir, 'package.json'))) return apps;
+      pkgJsonBase = cliDir;
+    }
   }
   const require = createRequire(join(pkgJsonBase, 'package.json'));
 

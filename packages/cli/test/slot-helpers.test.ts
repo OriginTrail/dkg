@@ -1,17 +1,20 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, mkdir, writeFile, readFile, readlink, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 let tmpDir: string;
+let prevDkgHome: string | undefined;
 
 beforeEach(async () => {
+  prevDkgHome = process.env.DKG_HOME;
   tmpDir = await mkdtemp(join(tmpdir(), 'dkg-slot-'));
-  vi.stubEnv('DKG_HOME', tmpDir);
+  process.env.DKG_HOME = tmpDir;
 });
 
 afterEach(async () => {
-  vi.unstubAllEnvs();
+  if (prevDkgHome === undefined) delete process.env.DKG_HOME;
+  else process.env.DKG_HOME = prevDkgHome;
   await rm(tmpDir, { recursive: true, force: true });
 });
 

@@ -87,12 +87,29 @@ describe('resolveViewGraphs', () => {
       ]);
     });
 
-    it('every view resolves without throwing (except working-memory without agent)', () => {
+    it('every view in GET_VIEWS returns a populated ViewResolution (at least one graph or prefix)', () => {
+      // Previously this test only asserted `.not.toThrow()` in a loop —
+      // which would pass even if resolveViewGraphs started returning
+      // `{ graphs: [], graphPrefixes: [] }` (a silently-empty view that
+      // would break every downstream `GET` query). Assert the positive
+      // contract: each view yields at least one concrete graph URI or
+      // URI prefix, and every returned URI is shaped like a DKG context
+      // graph URI (starts with `did:dkg:context-graph:`). If a view
+      // is accidentally wired to return an empty resolution, the test
+      // will now fail at the specific view instead of silently passing.
       for (const view of GET_VIEWS) {
-        if (view === 'working-memory') {
-          expect(() => resolveViewGraphs(view, CG, { agentAddress: AGENT })).not.toThrow();
-        } else {
-          expect(() => resolveViewGraphs(view, CG)).not.toThrow();
+        const res: ViewResolution = view === 'working-memory'
+          ? resolveViewGraphs(view, CG, { agentAddress: AGENT })
+          : resolveViewGraphs(view, CG);
+
+        const total = res.graphs.length + res.graphPrefixes.length;
+        expect(total, `view "${view}" returned empty graphs+prefixes`).toBeGreaterThan(0);
+
+        for (const g of res.graphs) {
+          expect(g, `graph URI for "${view}" missing did:dkg prefix`).toMatch(/^did:dkg:context-graph:/);
+        }
+        for (const p of res.graphPrefixes) {
+          expect(p, `graph prefix for "${view}" missing did:dkg prefix`).toMatch(/^did:dkg:context-graph:/);
         }
       }
     });

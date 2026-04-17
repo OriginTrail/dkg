@@ -7,7 +7,6 @@ import {
   escapeSparqlLiteral,
   sparqlString,
   sparqlInt,
-  assertSafeRdfTerm,
 } from '../src/index.js';
 
 describe('assertSafeIri', () => {

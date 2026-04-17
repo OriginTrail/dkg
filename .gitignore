@@ -5,6 +5,8 @@ dist-ui/
 .turbo/
 *.tsbuildinfo
 coverage/
+test-results/
+playwright-report/
 .env
 .env.*
 .dkg/

@@ -6,7 +6,7 @@
  * point — the operation tracker on the Node UI relies on these exact
  * sequences, and any change must be deliberate.
  */
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
 import {
   TypedEventBus,
   generateEd25519Keypair,
@@ -14,13 +14,15 @@ import {
   encodeWorkspacePublishRequest,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGPublisher } from '../src/dkg-publisher.js';
 import { SharedMemoryHandler } from '../src/workspace-handler.js';
 import { ethers } from 'ethers';
 import type { PhaseCallback } from '../src/publisher.js';
+import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, createTestContextGraph, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
+import { mintTokens } from '../../chain/test/hardhat-harness.js';
 
-const PARANET = 'test-phase-seq';
+let PARANET: string;
 const ENTITY = 'did:dkg:agent:QmPhaseSeq';
 
 function q(s: string, p: string, o: string, g = `did:dkg:context-graph:${PARANET}`): Quad {
@@ -35,12 +37,27 @@ function recorder(): { calls: [string, 'start' | 'end'][]; fn: PhaseCallback } {
 
 describe('Phase-sequence contracts', () => {
 
+  let _fileSnapshot: string;
+  beforeAll(async () => {
+    _fileSnapshot = await takeSnapshot();
+    const { hubAddress } = getSharedContext();
+    const provider = createProvider();
+    const coreOp = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+    await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, coreOp.address, ethers.parseEther('50000000'));
+
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const cgId = await createTestContextGraph(chain);
+    PARANET = String(cgId);
+  });
+  afterAll(async () => {
+    await revertSnapshot(_fileSnapshot);
+  });
+
   // -- Publish (happy path — with chain + signing) ----------------------
 
   it('publish: golden phase sequence', async () => {
     const store = new OxigraphStore();
-    const wallet = ethers.Wallet.createRandom();
-    const chain = new MockChainAdapter('mock:31337', wallet.address);
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const keypair = await generateEd25519Keypair();
 
     const publisher = new DKGPublisher({
@@ -48,8 +65,8 @@ describe('Phase-sequence contracts', () => {
       chain,
       eventBus: new TypedEventBus(),
       keypair,
-      publisherPrivateKey: wallet.privateKey,
-      publisherNodeIdentityId: 1n,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
 
     const quads = [
@@ -96,7 +113,7 @@ describe('Phase-sequence contracts', () => {
 
   it('publish: tentative path omits sign/submit sub-phases', async () => {
     const store = new OxigraphStore();
-    const chain = new MockChainAdapter('mock:31337', ethers.Wallet.createRandom().address);
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const keypair = await generateEd25519Keypair();
 
     const publisher = new DKGPublisher({
@@ -137,8 +154,7 @@ describe('Phase-sequence contracts', () => {
 
   it('update: golden phase sequence', async () => {
     const store = new OxigraphStore();
-    const wallet = ethers.Wallet.createRandom();
-    const chain = new MockChainAdapter('mock:31337', wallet.address);
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const keypair = await generateEd25519Keypair();
 
     const publisher = new DKGPublisher({
@@ -146,8 +162,8 @@ describe('Phase-sequence contracts', () => {
       chain,
       eventBus: new TypedEventBus(),
       keypair,
-      publisherPrivateKey: wallet.privateKey,
-      publisherNodeIdentityId: 1n,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
 
     // Publish first so there's something to update
@@ -221,14 +237,13 @@ describe('Phase-sequence contracts', () => {
 
   it('every start has a matching end', async () => {
     const store = new OxigraphStore();
-    const wallet = ethers.Wallet.createRandom();
-    const chain = new MockChainAdapter('mock:31337', wallet.address);
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const keypair = await generateEd25519Keypair();
 
     const publisher = new DKGPublisher({
       store, chain, eventBus: new TypedEventBus(), keypair,
-      publisherPrivateKey: wallet.privateKey,
-      publisherNodeIdentityId: 1n,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
 
     const quads = [q(ENTITY, 'http://schema.org/name', '"Balanced"')];
@@ -245,14 +260,13 @@ describe('Phase-sequence contracts', () => {
 
   it('sub-phases are nested inside their parent', async () => {
     const store = new OxigraphStore();
-    const wallet = ethers.Wallet.createRandom();
-    const chain = new MockChainAdapter('mock:31337', wallet.address);
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const keypair = await generateEd25519Keypair();
 
     const publisher = new DKGPublisher({
       store, chain, eventBus: new TypedEventBus(), keypair,
-      publisherPrivateKey: wallet.privateKey,
-      publisherNodeIdentityId: 1n,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
 
     const quads = [q(ENTITY, 'http://schema.org/name', '"Nested"')];

@@ -1,238 +1,176 @@
-import { describe, it, expect, vi, afterEach } from 'vitest';
-import type { IncomingMessage, ServerResponse } from 'node:http';
-import { Readable, Writable } from 'node:stream';
-import { EventEmitter } from 'node:events';
+import { describe, it, expect, afterEach, beforeAll, afterAll } from 'vitest';
+import { createServer, type Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative, resolve, sep, isAbsolute } from 'node:path';
 import { handleNodeUIRequest } from '../src/api.js';
 
-function createMockReq(opts: {
-  method: string;
-  path: string;
-  body?: string;
-  headers?: Record<string, string>;
-}): { req: IncomingMessage; url: URL } {
-  const stream = Readable.from(opts.body != null ? [Buffer.from(opts.body, 'utf8')] : []);
-  const req = stream as unknown as IncomingMessage & {
-    method: string;
-    headers: Record<string, string>;
-  };
-  req.method = opts.method;
-  req.headers = opts.headers ?? {};
-  return {
-    req: req as IncomingMessage,
-    url: new URL(`http://localhost${opts.path}`),
-  };
-}
+/**
+ * Boots a real Node `http.Server` whose request handler delegates to
+ * `handleNodeUIRequest`. Tests then make real `fetch` calls into it — no
+ * fake req/res objects, no mocks of node:http.
+ *
+ * The handler arguments after the request triple are configured per request
+ * via the `configure` callback so each test can supply its own `memoryManager`,
+ * `dataDir`, `corsOrigin`, etc.
+ */
+function makeHarness() {
+  type HandlerArgs = Parameters<typeof handleNodeUIRequest>;
+  type Tail = [
+    HandlerArgs[3], // db
+    HandlerArgs[4], // staticRoot
+    HandlerArgs[5], HandlerArgs[6], HandlerArgs[7], HandlerArgs[8], HandlerArgs[9],
+    HandlerArgs[10]?, HandlerArgs[11]?, HandlerArgs[12]?,
+  ];
+  let nextArgs: Tail = [
+    {} as any, '.', undefined, undefined, undefined, undefined, undefined,
+  ] as Tail;
 
-function createMockRes(): {
-  res: ServerResponse;
-  state: {
-    statusCode: number;
-    headers: Record<string, string>;
-    body: string;
-  };
-  finished: Promise<void>;
-} {
-  const chunks: Buffer[] = [];
-  const state = {
-    statusCode: 0,
-    headers: {} as Record<string, string>,
-    body: '',
-  };
-
-  let resolveFinished: () => void;
-  const finished = new Promise<void>((r) => { resolveFinished = r; });
-
-  const writable = new Writable({
-    write(chunk, _enc, cb) {
-      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-      cb();
-    },
-    final(cb) {
-      state.body = Buffer.concat(chunks).toString('utf8');
-      resolveFinished();
-      cb();
-    },
-  });
-
-  const res = Object.assign(writable, {
-    headersSent: false,
-    statusCode: 200,
-    writeHead(code: number, headers?: Record<string, string>) {
-      state.statusCode = code;
-      state.headers = headers ?? {};
-      (res as any).headersSent = true;
-      return res;
-    },
-    end(chunk?: Buffer | string) {
-      if (chunk !== undefined) {
-        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, 'utf8'));
+  const server: Server = createServer((req, res) => {
+    const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+    handleNodeUIRequest(req, res, url, ...nextArgs).then((handled) => {
+      if (!handled && !res.headersSent) {
+        res.statusCode = 404;
+        res.end('Not Found');
       }
-      state.body = Buffer.concat(chunks).toString('utf8');
-      writable.destroy();
-      resolveFinished();
-      return res;
-    },
+    }).catch((err) => {
+      if (!res.headersSent) {
+        res.statusCode = 500;
+        res.end(String(err));
+      }
+    });
   });
 
-  return { res: res as unknown as ServerResponse, state, finished };
+  return {
+    server,
+    listen: (): Promise<number> => new Promise((resolve) => {
+      server.listen(0, '127.0.0.1', () => {
+        const addr = server.address() as AddressInfo;
+        resolve(addr.port);
+      });
+    }),
+    close: (): Promise<void> => new Promise((resolve) => server.close(() => resolve())),
+    setArgs: (tail: Tail) => { nextArgs = tail; },
+  };
 }
 
-function parseJsonBody(body: string): any {
-  return body ? JSON.parse(body) : {};
+let harness: ReturnType<typeof makeHarness>;
+let baseUrl: string;
+
+beforeAll(async () => {
+  harness = makeHarness();
+  const port = await harness.listen();
+  baseUrl = `http://127.0.0.1:${port}`;
+});
+
+afterAll(async () => {
+  await harness.close();
+});
+
+/** Stable test double that records calls; not a vi.fn so we can read from it directly. */
+function recorder<T>(impl: (...args: any[]) => T | Promise<T>) {
+  const calls: any[][] = [];
+  const fn = async (...args: any[]) => {
+    calls.push(args);
+    return impl(...args);
+  };
+  return { fn, calls };
 }
 
 describe('handleNodeUIRequest Stage 5 memory/publication routes', () => {
   it('returns session graph delta for valid session/turn parameters', async () => {
-    const memoryManager = {
-      getSessionGraphDelta: vi.fn().mockResolvedValue({
-        mode: 'delta',
-        sessionId: 'session-1',
-        turnId: 'turn-2',
-        watermark: {
-          baseTurnId: 'turn-1',
-          previousTurnId: 'turn-1',
-          appliedTurnId: 'turn-2',
-          latestTurnId: 'turn-2',
-          turnIndex: 2,
-          turnCount: 2,
-        },
-        triples: [{ subject: 's', predicate: 'p', object: 'o' }],
-      }),
-    } as any;
+    const delta = recorder(() => ({
+      mode: 'delta',
+      sessionId: 'session-1',
+      turnId: 'turn-2',
+      watermark: {
+        baseTurnId: 'turn-1',
+        previousTurnId: 'turn-1',
+        appliedTurnId: 'turn-2',
+        latestTurnId: 'turn-2',
+        turnIndex: 2,
+        turnCount: 2,
+      },
+      triples: [{ subject: 's', predicate: 'p', object: 'o' }],
+    }));
+    harness.setArgs([
+      {} as any, '.', undefined, undefined, undefined,
+      { getSessionGraphDelta: delta.fn } as any, undefined,
+    ] as any);
 
-    const { req, url } = createMockReq({
-      method: 'GET',
-      path: '/api/memory/sessions/session-1/graph-delta?turnId=turn-2&baseTurnId=turn-1',
-    });
-    const { res, state } = createMockRes();
-
-    const handled = await handleNodeUIRequest(
-      req,
-      res,
-      url,
-      {} as any,
-      '.',
-      undefined,
-      undefined,
-      undefined,
-      memoryManager,
-      undefined,
+    const res = await fetch(
+      `${baseUrl}/api/memory/sessions/session-1/graph-delta?turnId=turn-2&baseTurnId=turn-1`,
     );
 
-    expect(handled).toBe(true);
-    expect(state.statusCode).toBe(200);
-    expect(memoryManager.getSessionGraphDelta).toHaveBeenCalledWith('session-1', 'turn-2', { baseTurnId: 'turn-1' });
-    expect(parseJsonBody(state.body)).toMatchObject({ mode: 'delta', turnId: 'turn-2' });
+    expect(res.status).toBe(200);
+    expect(delta.calls[0]).toEqual(['session-1', 'turn-2', { baseTurnId: 'turn-1' }]);
+    const body = await res.json();
+    expect(body).toMatchObject({ mode: 'delta', turnId: 'turn-2' });
   });
 
   it('returns 400 for invalid turn id in graph-delta route', async () => {
-    const memoryManager = {
-      getSessionGraphDelta: vi.fn(),
-    } as any;
+    const delta = recorder(() => undefined);
+    harness.setArgs([
+      {} as any, '.', undefined, undefined, undefined,
+      { getSessionGraphDelta: delta.fn } as any, undefined,
+    ] as any);
 
-    const { req, url } = createMockReq({
-      method: 'GET',
-      path: '/api/memory/sessions/session-1/graph-delta?turnId=bad/turn',
-    });
-    const { res, state } = createMockRes();
+    const res = await fetch(`${baseUrl}/api/memory/sessions/session-1/graph-delta?turnId=bad/turn`);
 
-    const handled = await handleNodeUIRequest(
-      req,
-      res,
-      url,
-      {} as any,
-      '.',
-      undefined,
-      undefined,
-      undefined,
-      memoryManager,
-      undefined,
-    );
-
-    expect(handled).toBe(true);
-    expect(state.statusCode).toBe(400);
-    expect(parseJsonBody(state.body)).toMatchObject({ error: 'Missing or invalid "turnId"' });
-    expect(memoryManager.getSessionGraphDelta).not.toHaveBeenCalled();
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body).toMatchObject({ error: 'Missing or invalid "turnId"' });
+    expect(delta.calls).toHaveLength(0);
   });
 
   it('returns 400 for invalid baseTurnId in graph-delta route', async () => {
-    const memoryManager = {
-      getSessionGraphDelta: vi.fn(),
-    } as any;
+    const delta = recorder(() => undefined);
+    harness.setArgs([
+      {} as any, '.', undefined, undefined, undefined,
+      { getSessionGraphDelta: delta.fn } as any, undefined,
+    ] as any);
 
-    const { req, url } = createMockReq({
-      method: 'GET',
-      path: '/api/memory/sessions/session-1/graph-delta?turnId=turn-2&baseTurnId=bad/base',
-    });
-    const { res, state } = createMockRes();
-
-    const handled = await handleNodeUIRequest(
-      req,
-      res,
-      url,
-      {} as any,
-      '.',
-      undefined,
-      undefined,
-      undefined,
-      memoryManager,
-      undefined,
+    const res = await fetch(
+      `${baseUrl}/api/memory/sessions/session-1/graph-delta?turnId=turn-2&baseTurnId=bad/base`,
     );
 
-    expect(handled).toBe(true);
-    expect(state.statusCode).toBe(400);
-    expect(parseJsonBody(state.body)).toMatchObject({ error: 'Invalid "baseTurnId" format' });
-    expect(memoryManager.getSessionGraphDelta).not.toHaveBeenCalled();
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body).toMatchObject({ error: 'Invalid "baseTurnId" format' });
+    expect(delta.calls).toHaveLength(0);
   });
 
   it('passes session history limit and descending ordering through to memoryManager.getSession() without reordering the backend result', async () => {
-    const memoryManager = {
-      getSession: vi.fn().mockResolvedValue({
-        session: 'session-1',
-        messages: [
-          {
-            uri: 'urn:dkg:chat:msg:agent-2',
-            author: 'agent',
-            text: 'newest',
-            ts: '2026-04-14T08:00:01Z',
-          },
-          {
-            uri: 'urn:dkg:chat:msg:user-1',
-            author: 'user',
-            text: 'older',
-            ts: '2026-04-14T08:00:00Z',
-            failureReason: 'timeout',
-          },
-        ],
-      }),
-    } as any;
+    const session = recorder(() => ({
+      session: 'session-1',
+      messages: [
+        {
+          uri: 'urn:dkg:chat:msg:agent-2',
+          author: 'agent',
+          text: 'newest',
+          ts: '2026-04-14T08:00:01Z',
+        },
+        {
+          uri: 'urn:dkg:chat:msg:user-1',
+          author: 'user',
+          text: 'older',
+          ts: '2026-04-14T08:00:00Z',
+          failureReason: 'timeout',
+        },
+      ],
+    }));
+    harness.setArgs([
+      {} as any, '.', undefined, undefined, undefined,
+      { getSession: session.fn } as any, undefined,
+    ] as any);
 
-    const { req, url } = createMockReq({
-      method: 'GET',
-      path: '/api/memory/sessions/session-1?limit=25&order=desc',
-    });
-    const { res, state } = createMockRes();
+    const res = await fetch(`${baseUrl}/api/memory/sessions/session-1?limit=25&order=desc`);
 
-    const handled = await handleNodeUIRequest(
-      req,
-      res,
-      url,
-      {} as any,
-      '.',
-      undefined,
-      undefined,
-      undefined,
-      memoryManager,
-      undefined,
-    );
-
-    expect(handled).toBe(true);
-    expect(state.statusCode).toBe(200);
-    expect(memoryManager.getSession).toHaveBeenCalledWith('session-1', { limit: 25, order: 'desc' });
-    expect(parseJsonBody(state.body)).toMatchObject({
+    expect(res.status).toBe(200);
+    expect(session.calls[0]).toEqual(['session-1', { limit: 25, order: 'desc' }]);
+    const body = await res.json();
+    expect(body).toMatchObject({
       session: 'session-1',
       messages: [
         { uri: 'urn:dkg:chat:msg:agent-2', text: 'newest' },
@@ -242,38 +180,24 @@ describe('handleNodeUIRequest Stage 5 memory/publication routes', () => {
   });
 
   it('returns 400 for invalid session query parameters', async () => {
-    const memoryManager = {
-      getSession: vi.fn(),
-    } as any;
+    const session = recorder(() => undefined);
+    harness.setArgs([
+      {} as any, '.', undefined, undefined, undefined,
+      { getSession: session.fn } as any, undefined,
+    ] as any);
 
-    const invalidCases = [
+    const invalidPaths = [
       '/api/memory/sessions/session-1?limit=0',
       '/api/memory/sessions/session-1?limit=25xyz',
       '/api/memory/sessions/session-1?order=sideways',
     ];
 
-    for (const path of invalidCases) {
-      const { req, url } = createMockReq({ method: 'GET', path });
-      const { res, state } = createMockRes();
-
-      const handled = await handleNodeUIRequest(
-        req,
-        res,
-        url,
-        {} as any,
-        '.',
-        undefined,
-        undefined,
-        undefined,
-        memoryManager,
-        undefined,
-      );
-
-      expect(handled).toBe(true);
-      expect(state.statusCode).toBe(400);
+    for (const path of invalidPaths) {
+      const res = await fetch(`${baseUrl}${path}`);
+      expect(res.status).toBe(400);
     }
 
-    expect(memoryManager.getSession).not.toHaveBeenCalled();
+    expect(session.calls).toHaveLength(0);
   });
 
   // Codex Bug B38: the session-publication routes are no-ops in v1
@@ -286,82 +210,50 @@ describe('handleNodeUIRequest Stage 5 memory/publication routes', () => {
   // promotion-based reimplementation.
 
   it('returns 501 Not Implemented for GET /api/memory/sessions/:id/publication (Codex B38)', async () => {
-    const memoryManager = {
-      // These methods still exist on the class but v1 routes never
-      // invoke them — asserting below that they were not called.
-      getSessionPublicationStatus: vi.fn(),
-      publishSession: vi.fn(),
-    } as any;
+    const status = recorder(() => undefined);
+    const publish = recorder(() => undefined);
+    harness.setArgs([
+      {} as any, '.', undefined, undefined, undefined,
+      { getSessionPublicationStatus: status.fn, publishSession: publish.fn } as any, undefined,
+    ] as any);
 
-    const { req, url } = createMockReq({
-      method: 'GET',
-      path: '/api/memory/sessions/session-1/publication',
-    });
-    const { res, state } = createMockRes();
+    const res = await fetch(`${baseUrl}/api/memory/sessions/session-1/publication`);
 
-    const handled = await handleNodeUIRequest(
-      req,
-      res,
-      url,
-      {} as any,
-      '.',
-      undefined,
-      undefined,
-      undefined,
-      memoryManager,
-      undefined,
-    );
-
-    expect(handled).toBe(true);
-    expect(state.statusCode).toBe(501);
-    const body = parseJsonBody(state.body);
+    expect(res.status).toBe(501);
+    const body = await res.json();
     expect(body).toMatchObject({
       error: 'Session publication is not implemented in v1',
       errorCode: 'session_publication_not_implemented_v1',
     });
     expect(body.reason).toMatch(/Working Memory assertions|chat-turns/i);
-    expect(memoryManager.getSessionPublicationStatus).not.toHaveBeenCalled();
+    expect(status.calls).toHaveLength(0);
   });
 
   it('returns 501 Not Implemented for POST /api/memory/sessions/:id/publish (Codex B38)', async () => {
-    const memoryManager = {
-      getSessionPublicationStatus: vi.fn(),
-      publishSession: vi.fn(),
-    } as any;
+    const status = recorder(() => undefined);
+    const publish = recorder(() => undefined);
+    harness.setArgs([
+      {} as any, '.', undefined, undefined, undefined,
+      { getSessionPublicationStatus: status.fn, publishSession: publish.fn } as any, undefined,
+    ] as any);
 
-    const { req, url } = createMockReq({
+    const res = await fetch(`${baseUrl}/api/memory/sessions/session-1/publish`, {
       method: 'POST',
-      path: '/api/memory/sessions/session-1/publish',
+      headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         rootEntities: ['urn:dkg:chat:msg:m-1'],
         clearAfter: true,
       }),
-      headers: { 'content-type': 'application/json' },
     });
-    const { res, state } = createMockRes();
 
-    const handled = await handleNodeUIRequest(
-      req,
-      res,
-      url,
-      {} as any,
-      '.',
-      undefined,
-      undefined,
-      undefined,
-      memoryManager,
-      undefined,
-    );
-
-    expect(handled).toBe(true);
-    expect(state.statusCode).toBe(501);
-    const body = parseJsonBody(state.body);
+    expect(res.status).toBe(501);
+    const body = await res.json();
     expect(body).toMatchObject({
       error: 'Session publication is not implemented in v1',
       errorCode: 'session_publication_not_implemented_v1',
     });
     expect(body.reason).toMatch(/Working Memory assertions|chat-turns/i);
-    expect(memoryManager.publishSession).not.toHaveBeenCalled();
+    expect(publish.calls).toHaveLength(0);
   });
 
   // Codex Bug B52: the legacy `/api/memory/import` endpoint was retired
@@ -373,30 +265,19 @@ describe('handleNodeUIRequest Stage 5 memory/publication routes', () => {
   // `POST /api/assertion/:name/write` direct route. Mirrors the B38
   // pattern for the session-publication routes above.
   it('returns 410 Gone for POST /api/memory/import with migration pointers (Codex B52)', async () => {
-    const { req, url } = createMockReq({
+    harness.setArgs([
+      {} as any, '.', undefined, undefined, undefined,
+      undefined, undefined,
+    ] as any);
+
+    const res = await fetch(`${baseUrl}/api/memory/import`, {
       method: 'POST',
-      path: '/api/memory/import',
-      body: JSON.stringify({ text: 'anything', source: 'claude' }),
       headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text: 'anything', source: 'claude' }),
     });
-    const { res, state } = createMockRes();
 
-    const handled = await handleNodeUIRequest(
-      req,
-      res,
-      url,
-      {} as any,
-      '.',
-      undefined,
-      undefined,
-      undefined,
-      undefined, // memoryManager intentionally undefined — the stub doesn't need it
-      undefined,
-    );
-
-    expect(handled).toBe(true);
-    expect(state.statusCode).toBe(410);
-    const body = parseJsonBody(state.body);
+    expect(res.status).toBe(410);
+    const body = await res.json();
     expect(body).toMatchObject({
       error: 'POST /api/memory/import is retired in v1',
       errorCode: 'memory_import_endpoint_retired_v1',
@@ -413,8 +294,6 @@ describe('handleNodeUIRequest Stage 5 memory/publication routes', () => {
     const replacementPaths = body.replacements.map((r: any) => r.path ?? r.name ?? '');
     expect(replacementPaths.join(' ')).toMatch(/\/api\/assertion\/create/);
     expect(replacementPaths.join(' ')).toMatch(/\/api\/assertion\/:name\/write/);
-    // Negative assertion: the retired adapter tool must NOT be listed
-    // anymore (regression guard against re-introducing it).
     const allNames = body.replacements.map((r: any) => r.name ?? '').join(' ');
     expect(allNames).not.toMatch(/dkg_memory_import/);
   });
@@ -438,16 +317,13 @@ describe('handleNodeUIRequest /api/node-log', () => {
     const lines = Array.from({ length: 20 }, (_, i) => `log line ${i + 1}`);
     writeFileSync(join(tmpDir, 'daemon.log'), lines.join('\n') + '\n');
 
-    const { req, url } = createMockReq({ method: 'GET', path: '/api/node-log?lines=5' });
-    const { res, state } = createMockRes();
+    harness.setArgs([
+      makeFakeDb(tmpDir), '.', undefined, undefined, undefined, undefined, undefined,
+    ] as any);
 
-    const handled = await handleNodeUIRequest(
-      req, res, url, makeFakeDb(tmpDir), '.', undefined, undefined, undefined, undefined, undefined,
-    );
-
-    expect(handled).toBe(true);
-    expect(state.statusCode).toBe(200);
-    const body = parseJsonBody(state.body);
+    const res = await fetch(`${baseUrl}/api/node-log?lines=5`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
     const nonEmpty = body.lines.filter((l: string) => l.length > 0);
     expect(nonEmpty.length).toBeLessThanOrEqual(5);
     expect(nonEmpty[nonEmpty.length - 1]).toBe('log line 20');
@@ -458,14 +334,12 @@ describe('handleNodeUIRequest /api/node-log', () => {
     const lines = Array.from({ length: 10 }, (_, i) => `line ${i}`);
     writeFileSync(join(tmpDir, 'daemon.log'), lines.join('\n') + '\n');
 
-    const { req, url } = createMockReq({ method: 'GET', path: '/api/node-log' });
-    const { res, state } = createMockRes();
+    harness.setArgs([
+      makeFakeDb(tmpDir), '.', undefined, undefined, undefined, undefined, undefined,
+    ] as any);
 
-    await handleNodeUIRequest(
-      req, res, url, makeFakeDb(tmpDir), '.', undefined, undefined, undefined, undefined, undefined,
-    );
-
-    const body = parseJsonBody(state.body);
+    const res = await fetch(`${baseUrl}/api/node-log`);
+    const body = await res.json();
     expect(body.lines.length).toBeGreaterThan(0);
     expect(body.lines.length).toBeLessThanOrEqual(500);
   });
@@ -474,15 +348,13 @@ describe('handleNodeUIRequest /api/node-log', () => {
     tmpDir = mkdtempSync(join(tmpdir(), 'dkg-log-test-'));
     writeFileSync(join(tmpDir, 'daemon.log'), 'single line\n');
 
-    const { req, url } = createMockReq({ method: 'GET', path: '/api/node-log?lines=-10' });
-    const { res, state } = createMockRes();
+    harness.setArgs([
+      makeFakeDb(tmpDir), '.', undefined, undefined, undefined, undefined, undefined,
+    ] as any);
 
-    await handleNodeUIRequest(
-      req, res, url, makeFakeDb(tmpDir), '.', undefined, undefined, undefined, undefined, undefined,
-    );
-
-    expect(state.statusCode).toBe(200);
-    const body = parseJsonBody(state.body);
+    const res = await fetch(`${baseUrl}/api/node-log?lines=-10`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
     expect(body.lines).toBeDefined();
   });
 
@@ -491,16 +363,13 @@ describe('handleNodeUIRequest /api/node-log', () => {
     const lines = Array.from({ length: 100 }, (_, i) => `line ${i}`);
     writeFileSync(join(tmpDir, 'daemon.log'), lines.join('\n') + '\n');
 
-    const { req, url } = createMockReq({ method: 'GET', path: '/api/node-log?lines=99999' });
-    const { res, state } = createMockRes();
+    harness.setArgs([
+      makeFakeDb(tmpDir), '.', undefined, undefined, undefined, undefined, undefined,
+    ] as any);
 
-    await handleNodeUIRequest(
-      req, res, url, makeFakeDb(tmpDir), '.', undefined, undefined, undefined, undefined, undefined,
-    );
-
-    expect(state.statusCode).toBe(200);
-    const body = parseJsonBody(state.body);
-    // File has 100 lines, but clamped request means we get all of them (< 5000)
+    const res = await fetch(`${baseUrl}/api/node-log?lines=99999`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
     expect(body.lines.length).toBeGreaterThan(0);
   });
 
@@ -514,31 +383,26 @@ describe('handleNodeUIRequest /api/node-log', () => {
     ].join('\n') + '\n';
     writeFileSync(join(tmpDir, 'daemon.log'), content);
 
-    const { req, url } = createMockReq({ method: 'GET', path: '/api/node-log?q=publish' });
-    const { res, state } = createMockRes();
+    harness.setArgs([
+      makeFakeDb(tmpDir), '.', undefined, undefined, undefined, undefined, undefined,
+    ] as any);
 
-    await handleNodeUIRequest(
-      req, res, url, makeFakeDb(tmpDir), '.', undefined, undefined, undefined, undefined, undefined,
-    );
-
-    const body = parseJsonBody(state.body);
+    const res = await fetch(`${baseUrl}/api/node-log?q=publish`);
+    const body = await res.json();
     expect(body.lines.every((l: string) => l.toLowerCase().includes('publish'))).toBe(true);
     expect(body.lines).toHaveLength(2);
   });
 
   it('returns empty lines when daemon.log does not exist', async () => {
     tmpDir = mkdtempSync(join(tmpdir(), 'dkg-log-test-'));
-    // No daemon.log created
 
-    const { req, url } = createMockReq({ method: 'GET', path: '/api/node-log' });
-    const { res, state } = createMockRes();
+    harness.setArgs([
+      makeFakeDb(tmpDir), '.', undefined, undefined, undefined, undefined, undefined,
+    ] as any);
 
-    await handleNodeUIRequest(
-      req, res, url, makeFakeDb(tmpDir), '.', undefined, undefined, undefined, undefined, undefined,
-    );
-
-    expect(state.statusCode).toBe(200);
-    const body = parseJsonBody(state.body);
+    const res = await fetch(`${baseUrl}/api/node-log`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
     expect(body.lines).toEqual([]);
     expect(body.totalSize).toBe(0);
   });
@@ -562,57 +426,84 @@ describe('serveStatic path traversal prevention', () => {
 
   it('URL normalization prevents ../ traversal at the HTTP layer', async () => {
     setup();
-    const { req, url } = createMockReq({ method: 'GET', path: '/ui/../../etc/passwd' });
-    const { res, state } = createMockRes();
+    harness.setArgs([
+      fakeDb(staticDir), staticDir, undefined, undefined, undefined, undefined, undefined,
+    ] as any);
 
-    const handled = await handleNodeUIRequest(
-      req, res, url, fakeDb(staticDir), staticDir, undefined, undefined, undefined, undefined, undefined,
-    );
-
-    // URL parser normalizes /ui/../../etc/passwd to /etc/passwd which doesn't match /ui
-    expect(handled).toBe(false);
+    // Real HTTP normalizes /ui/../../etc/passwd → /etc/passwd before it
+    // reaches our handler, so the handler returns false (not its route)
+    // and our harness emits a 404. That matches the original test's
+    // assertion that `handled === false`.
+    const res = await fetch(`${baseUrl}/ui/../../etc/passwd`);
+    expect(res.status).toBe(404);
   });
 
+  // The next two tests directly call handleNodeUIRequest with a hand-crafted
+  // URL whose pathname bypasses normalization (defense-in-depth check). Since
+  // we cannot send such a path through real HTTP without a custom client, we
+  // exercise the handler directly here while still avoiding any req/res mocks
+  // — we use a real http server, route the request through it, and let the
+  // handler swap in the malicious URL via a small request middleware.
   it('rejects ../ traversal if URL bypasses normalization (defense-in-depth)', async () => {
     setup();
-    const { req } = createMockReq({ method: 'GET', path: '/ui/../../etc/passwd' });
-    const { res, state } = createMockRes();
-    const rawUrl = { pathname: '/ui/../../etc/passwd', searchParams: new URLSearchParams() } as unknown as URL;
+    const port = await new Promise<number>((resolve) => {
+      const s = createServer((req, res) => {
+        const rawUrl = { pathname: '/ui/../../etc/passwd', searchParams: new URLSearchParams() } as unknown as URL;
+        handleNodeUIRequest(
+          req, res, rawUrl, fakeDb(staticDir), staticDir,
+          undefined, undefined, undefined, undefined, undefined,
+        );
+      });
+      s.listen(0, '127.0.0.1', () => {
+        const a = s.address() as AddressInfo;
+        // Capture the server reference so we can close it after the request.
+        (s as any).__port = a.port;
+        resolve(a.port);
+      });
+      (globalThis as any).__lastTestServer = s;
+    });
 
-    await handleNodeUIRequest(
-      req, res, rawUrl, fakeDb(staticDir), staticDir, undefined, undefined, undefined, undefined, undefined,
-    );
-
-    expect(state.statusCode).toBe(403);
-    expect(state.body).toContain('Forbidden');
+    const res = await fetch(`http://127.0.0.1:${port}/ui/x`);
+    expect(res.status).toBe(403);
+    const body = await res.text();
+    expect(body).toContain('Forbidden');
+    await new Promise<void>((r) => (globalThis as any).__lastTestServer.close(() => r()));
   });
 
   it('rejects deeply nested traversal if URL bypasses normalization', async () => {
     setup();
-    const { req } = createMockReq({ method: 'GET', path: '/ui/x' });
-    const { res, state } = createMockRes();
-    const rawUrl = { pathname: '/ui/assets/../../../etc/passwd', searchParams: new URLSearchParams() } as unknown as URL;
+    const port = await new Promise<number>((resolve) => {
+      const s = createServer((req, res) => {
+        const rawUrl = { pathname: '/ui/assets/../../../etc/passwd', searchParams: new URLSearchParams() } as unknown as URL;
+        handleNodeUIRequest(
+          req, res, rawUrl, fakeDb(staticDir), staticDir,
+          undefined, undefined, undefined, undefined, undefined,
+        );
+      });
+      s.listen(0, '127.0.0.1', () => {
+        const a = s.address() as AddressInfo;
+        resolve(a.port);
+      });
+      (globalThis as any).__lastTestServer = s;
+    });
 
-    await handleNodeUIRequest(
-      req, res, rawUrl, fakeDb(staticDir), staticDir, undefined, undefined, undefined, undefined, undefined,
-    );
-
-    expect(state.statusCode).toBe(403);
-    expect(state.body).toContain('Forbidden');
+    const res = await fetch(`http://127.0.0.1:${port}/ui/x`);
+    expect(res.status).toBe(403);
+    const body = await res.text();
+    expect(body).toContain('Forbidden');
+    await new Promise<void>((r) => (globalThis as any).__lastTestServer.close(() => r()));
   });
 
   it('serves valid /ui/index.html normally', async () => {
     setup();
-    const { req, url } = createMockReq({ method: 'GET', path: '/ui/index.html' });
-    const { res, state, finished } = createMockRes();
+    harness.setArgs([
+      fakeDb(staticDir), staticDir, undefined, undefined, undefined, undefined, undefined,
+    ] as any);
 
-    await handleNodeUIRequest(
-      req, res, url, fakeDb(staticDir), staticDir, undefined, undefined, undefined, undefined, undefined,
-    );
-    await finished;
-
-    expect(state.statusCode).toBe(200);
-    expect(state.body).toContain('<html>');
+    const res = await fetch(`${baseUrl}/ui/index.html`);
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain('<html>');
   });
 
   it('allows filenames starting with .. that are not traversals', () => {
@@ -625,53 +516,48 @@ describe('serveStatic path traversal prevention', () => {
 
   it('serves valid /ui/ root normally', async () => {
     setup();
-    const { req, url } = createMockReq({ method: 'GET', path: '/ui/' });
-    const { res, state, finished } = createMockRes();
+    harness.setArgs([
+      fakeDb(staticDir), staticDir, undefined, undefined, undefined, undefined, undefined,
+    ] as any);
 
-    await handleNodeUIRequest(
-      req, res, url, fakeDb(staticDir), staticDir, undefined, undefined, undefined, undefined, undefined,
-    );
-    await finished;
-
-    expect(state.statusCode).toBe(200);
-    expect(state.body).toContain('<html>');
+    const res = await fetch(`${baseUrl}/ui/`);
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain('<html>');
   });
 });
 
 describe('handleNodeUIRequest CORS origin handling', () => {
   it('omits Access-Control-Allow-Origin when corsOrigin is undefined', async () => {
-    const { req, url } = createMockReq({ method: 'GET', path: '/api/metrics' });
-    const { res, state } = createMockRes();
-
     const fakeDb = { getMetrics: () => [], getErrorHotspots: () => [], getLatestSnapshot: () => ({}) } as any;
+    harness.setArgs([
+      fakeDb, '.', undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+    ] as any);
 
-    await handleNodeUIRequest(req, res, url, fakeDb, '.', undefined, undefined, undefined, undefined, undefined, undefined, undefined);
-
-    expect(state.statusCode).toBe(200);
-    expect(state.headers['Access-Control-Allow-Origin']).toBeUndefined();
+    const res = await fetch(`${baseUrl}/api/metrics`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('access-control-allow-origin')).toBeNull();
   });
 
   it('sets Access-Control-Allow-Origin when corsOrigin is provided', async () => {
-    const { req, url } = createMockReq({ method: 'GET', path: '/api/metrics' });
-    const { res, state } = createMockRes();
-
     const fakeDb = { getMetrics: () => [], getErrorHotspots: () => [], getLatestSnapshot: () => ({}) } as any;
+    harness.setArgs([
+      fakeDb, '.', undefined, undefined, undefined, undefined, undefined, undefined, 'https://example.com',
+    ] as any);
 
-    await handleNodeUIRequest(req, res, url, fakeDb, '.', undefined, undefined, undefined, undefined, undefined, undefined, 'https://example.com');
-
-    expect(state.statusCode).toBe(200);
-    expect(state.headers['Access-Control-Allow-Origin']).toBe('https://example.com');
+    const res = await fetch(`${baseUrl}/api/metrics`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('access-control-allow-origin')).toBe('https://example.com');
   });
 
   it('omits Access-Control-Allow-Origin when corsOrigin is explicitly null (rejected origin)', async () => {
-    const { req, url } = createMockReq({ method: 'GET', path: '/api/metrics' });
-    const { res, state } = createMockRes();
-
     const fakeDb = { getMetrics: () => [], getErrorHotspots: () => [], getLatestSnapshot: () => ({}) } as any;
+    harness.setArgs([
+      fakeDb, '.', undefined, undefined, undefined, undefined, undefined, undefined, null,
+    ] as any);
 
-    await handleNodeUIRequest(req, res, url, fakeDb, '.', undefined, undefined, undefined, undefined, undefined, undefined, null);
-
-    expect(state.statusCode).toBe(200);
-    expect(state.headers['Access-Control-Allow-Origin']).toBeUndefined();
+    const res = await fetch(`${baseUrl}/api/metrics`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('access-control-allow-origin')).toBeNull();
   });
 });

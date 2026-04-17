@@ -9,14 +9,26 @@
  * real deployments after DCUtR hole-punching). The relay is used for
  * encrypted chat to validate the circuit-relay path separately.
  */
-import { describe, it, expect, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { DKGAgent } from '../src/index.js';
 import { DKGNode } from '@origintrail-official/dkg-core';
-import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
+import { mintTokens } from '../../chain/test/hardhat-harness.js';
+import { ethers } from 'ethers';
 
 function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
 
-const CUSTOM_CHAIN_ID = 'evm:84532';
+let _fileSnapshot: string;
+beforeAll(async () => {
+  _fileSnapshot = await takeSnapshot();
+  const { hubAddress } = getSharedContext();
+  const provider = createProvider();
+  const coreOp = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+  await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, coreOp.address, ethers.parseEther('50000000'));
+});
+afterAll(async () => {
+  await revertSnapshot(_fileSnapshot);
+});
 
 describe('Network E2E (3 nodes + relay)', () => {
   let relay: DKGNode;
@@ -52,7 +64,6 @@ describe('Network E2E (3 nodes + relay)', () => {
     relayAddr = relay.multiaddrs.find(a => a.includes('/tcp/') && !a.includes('/ws'))!;
     expect(relayAddr).toBeDefined();
 
-    // Use a distinct chainId so we can assert broadcast UAL/chainId come from the adapter (not hardcoded)
     nodeA = await DKGAgent.create({
       name: 'NodeA',
       framework: 'OpenClaw',
@@ -63,7 +74,7 @@ describe('Network E2E (3 nodes + relay)', () => {
         pricePerCall: 1.0,
         handler: async () => ({ success: true }),
       }],
-      chainAdapter: new MockChainAdapter(CUSTOM_CHAIN_ID),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
 
     nodeB = await DKGAgent.create({
@@ -76,7 +87,7 @@ describe('Network E2E (3 nodes + relay)', () => {
         pricePerCall: 0.5,
         handler: async () => ({ success: true }),
       }],
-      chainAdapter: new MockChainAdapter(CUSTOM_CHAIN_ID),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
 
     nodeC = await DKGAgent.create({
@@ -85,7 +96,7 @@ describe('Network E2E (3 nodes + relay)', () => {
       listenPort: 0,
       relayPeers: [relayAddr],
       skills: [],
-      chainAdapter: new MockChainAdapter(CUSTOM_CHAIN_ID),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     });
 
     await nodeA.start();
@@ -243,15 +254,16 @@ describe('Network E2E (3 nodes + relay)', () => {
     );
     expect(qrC.bindings.length).toBe(1);
 
-    // Assert broadcast PublishRequest used the chain adapter's chainId (not hardcoded mock:31337)
+    // Assert broadcast PublishRequest used the chain adapter's chainId
     const metaGraph = 'did:dkg:context-graph:memes/_meta';
     const ualResult = await nodeB.store.query(
       `SELECT ?ual WHERE { GRAPH <${metaGraph}> { ?ual <http://dkg.io/ontology/status> ?status } }`,
     );
     expect(ualResult.type).toBe('bindings');
-    if (ualResult.type === 'bindings' && ualResult.bindings.length > 0) {
+    if (ualResult.type === 'bindings') {
+      expect(ualResult.bindings.length).toBeGreaterThan(0);
       const ual = String(ualResult.bindings[0]['ual'] ?? '');
-      expect(ual.startsWith(`did:dkg:${CUSTOM_CHAIN_ID}/`)).toBe(true);
+      expect(ual.startsWith('did:dkg:evm:31337/')).toBe(true);
     }
   }, 15000);
 

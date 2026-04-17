@@ -2,9 +2,23 @@
  * Tests for workspace TTL / expiry: expired workspace operations are cleaned
  * up and not served to peers during sync.
  */
-import { describe, it, expect, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { DKGAgent } from '../src/index.js';
-import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
+import { mintTokens } from '../../chain/test/hardhat-harness.js';
+import { ethers } from 'ethers';
+
+let _fileSnapshot: string;
+beforeAll(async () => {
+  _fileSnapshot = await takeSnapshot();
+  const { hubAddress } = getSharedContext();
+  const provider = createProvider();
+  const coreOp = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+  await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, coreOp.address, ethers.parseEther('50000000'));
+});
+afterAll(async () => {
+  await revertSnapshot(_fileSnapshot);
+});
 
 const PARANET = 'ws-ttl-test';
 const FRESH_ENTITY = 'urn:ws-ttl:fresh:1';
@@ -21,12 +35,12 @@ describe('Workspace TTL', () => {
     try { await node?.stop(); } catch {}
   });
 
-  it('sets up a node with a very short TTL and writes workspace data', async () => {
+  it('stale workspace data is cleaned up while fresh data survives', async () => {
     node = await DKGAgent.create({
       name: 'TtlNode',
       listenPort: 0,
-      chainAdapter: new MockChainAdapter('mock:31337'),
-      sharedMemoryTtlMs: 2000, // 2 seconds for testing
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      sharedMemoryTtlMs: 2000,
     });
 
     await node.start();
@@ -38,7 +52,6 @@ describe('Workspace TTL', () => {
       description: 'For workspace TTL tests',
     });
 
-    // Write the "stale" entity first
     await node.share(PARANET, [
       { subject: STALE_ENTITY, predicate: 'http://schema.org/name', object: '"Will Expire"', graph: '' },
     ]);
@@ -48,9 +61,7 @@ describe('Workspace TTL', () => {
       { contextGraphId: PARANET, graphSuffix: '_shared_memory' },
     );
     expect(before.bindings.length).toBe(1);
-  }, 10000);
 
-  it('waits for TTL to expire, writes fresh entity, runs cleanup', async () => {
     // Wait for the stale entity's TTL to expire (2s + buffer)
     await sleep(3000);
 
@@ -59,12 +70,9 @@ describe('Workspace TTL', () => {
       { subject: FRESH_ENTITY, predicate: 'http://schema.org/name', object: '"Still Fresh"', graph: '' },
     ]);
 
-    // Run cleanup explicitly
     const deleted = await node.cleanupExpiredSharedMemory();
     expect(deleted).toBeGreaterThan(0);
-  }, 10000);
 
-  it('stale entity is gone, fresh entity remains', async () => {
     const result = await node.query(
       'SELECT ?s ?name WHERE { ?s <http://schema.org/name> ?name }',
       { contextGraphId: PARANET, graphSuffix: '_shared_memory' },
@@ -76,7 +84,7 @@ describe('Workspace TTL', () => {
     const names = result.bindings.map((b: any) => String(b['name']));
     expect(names.some((n: string) => n === '"Still Fresh"')).toBe(true);
     expect(names.some((n: string) => n === '"Will Expire"')).toBe(false);
-  }, 5000);
+  }, 20000);
 });
 
 describe('setSharedMemoryTtlMs timer lifecycle', () => {
@@ -90,7 +98,7 @@ describe('setSharedMemoryTtlMs timer lifecycle', () => {
     node = await DKGAgent.create({
       name: 'TtlLifecycleNode',
       listenPort: 0,
-      chainAdapter: new MockChainAdapter('mock:31337'),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
       sharedMemoryTtlMs: 0, // disabled
     });
 
@@ -125,7 +133,7 @@ describe('Workspace TTL sync filtering', () => {
     nodeA = await DKGAgent.create({
       name: 'TtlSyncA',
       listenPort: 0,
-      chainAdapter: new MockChainAdapter('mock:31337'),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
       syncContextGraphs: ['ttl-sync-test'],
       sharedMemoryTtlMs: 2000,
     });
@@ -144,19 +152,11 @@ describe('Workspace TTL sync filtering', () => {
       { subject: 'urn:ttl-sync:old', predicate: 'http://schema.org/name', object: '"Old Data"', graph: '' },
     ]);
 
-    // Wait for it to expire
-    await sleep(3000);
-
-    // Write fresh entity
-    await nodeA.share('ttl-sync-test', [
-      { subject: 'urn:ttl-sync:new', predicate: 'http://schema.org/name', object: '"New Data"', graph: '' },
-    ]);
-
-    // Node B connects and syncs
+    // Set up nodeB while the stale data expires (saves wall-clock time)
     nodeB = await DKGAgent.create({
       name: 'TtlSyncB',
       listenPort: 0,
-      chainAdapter: new MockChainAdapter('mock:31337'),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
       syncContextGraphs: ['ttl-sync-test'],
     });
     await nodeB.start();
@@ -168,6 +168,14 @@ describe('Workspace TTL sync filtering', () => {
     const addrA = nodeA.multiaddrs.find((a) => a.includes('/tcp/') && !a.includes('/p2p-circuit'));
     if (addrA) await nodeB.connectTo(addrA);
     await sleep(1000);
+
+    // Ensure the old data has expired (TTL is 2s; node setup above took > 2s)
+    await sleep(1000);
+
+    // Write fresh entity right before sync so it's within the TTL window
+    await nodeA.share('ttl-sync-test', [
+      { subject: 'urn:ttl-sync:new', predicate: 'http://schema.org/name', object: '"New Data"', graph: '' },
+    ]);
 
     const synced = await nodeB.syncSharedMemoryFromPeer(nodeA.peerId, ['ttl-sync-test']);
     expect(synced).toBeGreaterThan(0);

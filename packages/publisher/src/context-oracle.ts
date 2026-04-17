@@ -3,6 +3,14 @@ import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import { contextGraphDataUri, assertSafeIri } from '@origintrail-official/dkg-core';
 import { ProofIndex, type TripleProof } from './proof-index.js';
 
+/**
+ * Minimal chain context the oracle needs — currently just the chain id used to
+ * stamp `VerificationInfo`. Accepting either a full {@link ChainAdapter} or a
+ * thin `{ chainId }` value lets callers wire in real adapters in production
+ * while tests pass in a literal id (no need to mock an adapter).
+ */
+export type ChainContext = Pick<ChainAdapter, 'chainId'>;
+
 export interface VerificationInfo {
   chainId: string;
   knowledgeAssetsStorageAddress?: string;
@@ -50,10 +58,10 @@ export interface TripleExistenceResult {
  */
 export class ContextOracle {
   private readonly store: TripleStore;
-  private readonly chain: ChainAdapter;
+  private readonly chain: ChainContext;
   readonly proofIndex: ProofIndex;
 
-  constructor(store: TripleStore, chain: ChainAdapter, proofIndex?: ProofIndex) {
+  constructor(store: TripleStore, chain: ChainContext, proofIndex?: ProofIndex) {
     this.store = store;
     this.chain = chain;
     this.proofIndex = proofIndex ?? new ProofIndex();

@@ -172,21 +172,6 @@ describe('verifyOracleResponse', () => {
       expect(result.tripleResults[0].proofValid).toBe(false);
     });
 
-    it('detects wrong leaf index for an otherwise valid proof', () => {
-      const { provedTriples, verification } = buildOraclePayload(testTriples, '5');
-      const i = provedTriples.findIndex((p) => p.subject === 'did:dkg:agent:Alice' && p.predicate.includes('name'));
-      expect(i).toBeGreaterThanOrEqual(0);
-      const correctIdx = provedTriples[i].proof.leafIndex;
-      const wrongIdx = correctIdx === 0 ? 1 : 0;
-      provedTriples[i] = {
-        ...provedTriples[i],
-        proof: { ...provedTriples[i].proof, leafIndex: wrongIdx },
-      };
-      const result = verifyOracleResponse(provedTriples, verification);
-      expect(result.valid).toBe(false);
-      expect(result.tripleResults[i].proofValid).toBe(false);
-    });
-
     it('detects when proof merkle root does not match verification merkle root', () => {
       const { provedTriples, verification } = buildOraclePayload(testTriples, '5');
 

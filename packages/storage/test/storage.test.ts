@@ -142,9 +142,14 @@ function tripleStoreConformanceSuite(name: string, factory: () => Promise<Triple
       }
     });
 
-    it('close is idempotent', async () => {
-      await store.close();
-      await store.close();
+    it('close is idempotent — a second close() resolves without throwing', async () => {
+      // Teardown paths (overlapping lifecycle events, double-unmount in UI
+      // hosts, shutdown signal racing with manual close) frequently call
+      // close() twice. This asserts the contract: the second call must
+      // resolve cleanly instead of throwing a "worker terminated" /
+      // "connection ended" error that would surface as a teardown failure.
+      await expect(store.close()).resolves.toBeUndefined();
+      await expect(store.close()).resolves.toBeUndefined();
     });
   });
 }
@@ -160,26 +165,49 @@ tripleStoreConformanceSuite('OxigraphStore (factory)', async () => createTripleS
 const blazeUrl = process.env.BLAZEGRAPH_URL;
 if (blazeUrl) {
   tripleStoreConformanceSuite('BlazegraphStore', async () => new BlazegraphStore(blazeUrl));
-} else {
-  describe('BlazegraphStore (skipped — set BLAZEGRAPH_URL to run)', () => {
-    it.skip('requires a running Blazegraph instance', () => {});
-  });
 }
+// NOTE: previously this branch ran `it.skip('requires a running Blazegraph …', () => {})`
+// as a placeholder to surface the skip in the reporter. That empty stub added
+// one "skipped" counter but carried no assertion, so it only existed to
+// decorate the output. The conformance suite above is what actually exercises
+// Blazegraph when `BLAZEGRAPH_URL` is set, so the placeholder was noise —
+// removed to keep the suite strictly assertion-backed.
 
 // ---------------------------------------------------------------------------
 // Adapter registry / factory tests
 // ---------------------------------------------------------------------------
 
 describe('createTripleStore factory', () => {
-  it('all built-in backends are registered', async () => {
+  it('all built-in backends are registered (factory throws something other than "Unknown TripleStore backend")', async () => {
+    // The *registry* contract being tested here is: every built-in
+    // backend name is recognized. The construction itself may require
+    // options (blazegraph needs `url`, sparql-http needs `queryEndpoint`)
+    // or worker artifacts (oxigraph-worker needs the compiled worker
+    // impl). So a backend passes this test iff calling `createTripleStore`
+    // either succeeds OR throws a *non*-"Unknown TripleStore backend"
+    // error.
+    //
+    // The previous version of this test used `.resolves.not.toThrow()`
+    // inside a catch-that-returned-'registered', which made the test
+    // effectively assert "a promise settled" — noise. This version
+    // asserts the positive contract explicitly and points at the
+    // specific failing backend if the registry regresses.
     const backends = ['oxigraph', 'oxigraph-worker', 'blazegraph', 'sparql-http'];
     for (const backend of backends) {
-      await expect(
-        createTripleStore({ backend }).catch((err: Error) => {
-          if (err.message.includes('Unknown TripleStore backend')) throw err;
-          return 'registered';
-        }),
-      ).resolves.not.toThrow();
+      let outcome: 'constructed' | Error;
+      try {
+        const store = await createTripleStore({ backend });
+        outcome = 'constructed';
+        try { await store.close(); } catch { /* close failures not in scope here */ }
+      } catch (err) {
+        outcome = err as Error;
+      }
+      if (outcome instanceof Error) {
+        expect(
+          outcome.message,
+          `backend "${backend}" surfaced "Unknown TripleStore backend" — registry regressed`,
+        ).not.toMatch(/Unknown TripleStore backend/);
+      }
     }
   });
 
@@ -210,7 +238,21 @@ describe('createTripleStore factory', () => {
     ).rejects.toThrow('queryEndpoint');
   });
 
-  it('oxigraph-worker adapter is registered', async () => {
+  it('oxigraph-worker adapter is registered', async (ctx) => {
+    // The worker adapter uses `new URL('./oxigraph-worker-impl.js', import.meta.url)`
+    // which resolves relative to the module actually loaded at runtime.
+    // When vitest runs against raw source (no prior `pnpm build`), that URL
+    // lands in `src/adapters/` where only the .ts files live, so the Worker
+    // constructor cannot find the `.js` sibling and throws.
+    //
+    // The previous test swallowed this error with `expect(true).toBe(true)` —
+    // visually "passing" while never exercising the worker. That's the
+    // opposite of what we want. Catch the exact same "module not found"
+    // condition but surface it as a **skipped** test (vitest `ctx.skip()`)
+    // so it shows up in the reporter, and re-throw anything else so real
+    // regressions still fail loudly. In CI the full adapter lane runs
+    // against the built artifact (see the dedicated worker E2E), which is
+    // where the round-trip contract is genuinely verified.
     try {
       const store = await createTripleStore({ backend: 'oxigraph-worker' });
       await store.insert([{
@@ -222,10 +264,9 @@ describe('createTripleStore factory', () => {
       expect(await store.countQuads()).toBe(1);
       await store.close();
     } catch (err: unknown) {
-      // Worker file may not exist when running tests against uncompiled source
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.includes('Cannot find module') && msg.includes('oxigraph-worker-impl')) {
-        expect(true).toBe(true);
+        ctx.skip();
         return;
       }
       throw err;
@@ -450,5 +491,79 @@ describe('PrivateContentStore', () => {
     expect(ps.hasPrivateTriples('p1', entity)).toBe(false);
     const remaining = await ps.getPrivateTriples('p1', entity);
     expect(remaining.length).toBe(0);
+  });
+
+  it('storePrivateTriples with empty quads is a no-op', async () => {
+    const entity = 'did:dkg:agent:NoOp';
+    await ps.storePrivateTriples('cg-1', entity, []);
+    expect(ps.hasPrivateTriples('cg-1', entity)).toBe(false);
+  });
+
+  it('hasPrivateTriples returns false before any data is stored', () => {
+    expect(ps.hasPrivateTriples('unknown-cg', 'urn:x')).toBe(false);
+  });
+
+  it('stores and retrieves private triples with subGraphName', async () => {
+    const entity = 'did:dkg:agent:QmSubGraph';
+    const quads: Quad[] = [
+      { subject: entity, predicate: 'http://ex.org/sg', object: '"subgraph-val"', graph: '' },
+    ];
+    await ps.storePrivateTriples('cg-sg', entity, quads, 'my-sub');
+    expect(ps.hasPrivateTriples('cg-sg', entity, 'my-sub')).toBe(true);
+    expect(ps.hasPrivateTriples('cg-sg', entity)).toBe(false);
+
+    const retrieved = await ps.getPrivateTriples('cg-sg', entity, 'my-sub');
+    expect(retrieved.length).toBe(1);
+    expect(retrieved[0].object).toBe('"subgraph-val"');
+  });
+
+  it('deletes private triples with subGraphName', async () => {
+    const entity = 'did:dkg:agent:QmSubDel';
+    await ps.storePrivateTriples('cg-del', entity, [
+      { subject: entity, predicate: 'http://ex.org/p', object: '"x"', graph: '' },
+    ], 'sub-del');
+
+    await ps.deletePrivateTriples('cg-del', entity, 'sub-del');
+    expect(ps.hasPrivateTriples('cg-del', entity, 'sub-del')).toBe(false);
+    const remaining = await ps.getPrivateTriples('cg-del', entity, 'sub-del');
+    expect(remaining.length).toBe(0);
+  });
+
+  it('clearCache removes in-memory tracker for a context graph', async () => {
+    const entity = 'did:dkg:agent:QmCacheClear';
+    await ps.storePrivateTriples('cg-cache', entity, [
+      { subject: entity, predicate: 'http://ex.org/p', object: '"val"', graph: '' },
+    ]);
+    expect(ps.hasPrivateTriples('cg-cache', entity)).toBe(true);
+
+    ps.clearCache('cg-cache');
+    // In-memory tracker cleared, but data is still in store
+    expect(ps.hasPrivateTriples('cg-cache', entity)).toBe(false);
+    const inStore = await ps.hasPrivateTriplesInStore('cg-cache', entity);
+    expect(inStore).toBe(true);
+  });
+
+  it('hasPrivateTriplesInStore returns false when no data exists', async () => {
+    const result = await ps.hasPrivateTriplesInStore('empty-cg', 'urn:nothing');
+    expect(result).toBe(false);
+  });
+
+  it('multiple entities can coexist in the same context graph', async () => {
+    const e1 = 'did:dkg:agent:Multi1';
+    const e2 = 'did:dkg:agent:Multi2';
+
+    await ps.storePrivateTriples('cg-multi', e1, [
+      { subject: e1, predicate: 'http://ex.org/p', object: '"v1"', graph: '' },
+    ]);
+    await ps.storePrivateTriples('cg-multi', e2, [
+      { subject: e2, predicate: 'http://ex.org/p', object: '"v2"', graph: '' },
+    ]);
+
+    expect(ps.hasPrivateTriples('cg-multi', e1)).toBe(true);
+    expect(ps.hasPrivateTriples('cg-multi', e2)).toBe(true);
+
+    await ps.deletePrivateTriples('cg-multi', e1);
+    expect(ps.hasPrivateTriples('cg-multi', e1)).toBe(false);
+    expect(ps.hasPrivateTriples('cg-multi', e2)).toBe(true);
   });
 });
