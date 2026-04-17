@@ -716,6 +716,462 @@ describe('bulletproof: SYNC set-reconciliation (regression for issue #2)', () =>
   }, 120_000);
 });
 
+// ---------------------------------------------------------------------------
+// INVITE (user-facing HTTP path) — regression for the path that Issue #7
+// and every "invite doesn't work" user report are actually hitting.
+//
+// The UI / node-ui calls `POST /api/context-graph/invite` with a `peerId`.
+// The daemon routes that to `agent.inviteToContextGraph(cgId, peerId)`
+// which appends a `DKG_ALLOWED_PEER` quad to the CG's `_meta` graph.
+//
+// The sync authorizer side, however, only reads allowlist entries from
+// `DKG_ALLOWED_AGENT` and `DKG_PARTICIPANT_IDENTITY_ID`:
+//
+//   packages/agent/src/dkg-agent.ts  getPrivateContextGraphParticipants()
+//   packages/agent/src/dkg-agent.ts  isPrivateContextGraph()
+//
+// Neither function queries `DKG_ALLOWED_PEER`. So for a private CG, the
+// UI-style peer-ID invite writes a quad that the authorizer ignores and
+// the invited peer is denied on sync. This is the concrete reason a
+// team can report "invite doesn't work" while our low-level
+// agentAddress-based test (above) happily passes.
+//
+// This test exercises the exact code path a UI click walks through:
+// curator calls `inviteToContextGraph(cgId, B.peerId)` with a real peer
+// ID, not `inviteAgentToContextGraph`. If the bug is present, B gets
+// denied on sync even though the UI says they were invited.
+// ---------------------------------------------------------------------------
+describe('bulletproof: INVITE via legacy peer-ID path (UI-facing, /api/context-graph/invite)', () => {
+  let curator: DKGAgent;
+  let invitee: DKGAgent;
+
+  afterAll(async () => {
+    try { await curator?.stop(); } catch { /* */ }
+    try { await invitee?.stop(); } catch { /* */ }
+  });
+
+  it('peer-ID invite on a private CG must actually let the invitee sync (else UI-level invite is theater)', async () => {
+    const cgId = freshCgId('bp-peer-invite');
+    const entity = 'urn:bulletproof:peer-invite:secret';
+
+    const walletA = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+
+    curator = await DKGAgent.create({
+      name: 'BulletproofPeerInviteCurator',
+      listenPort: 0,
+      skills: [],
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      nodeRole: 'core',
+    });
+    invitee = await DKGAgent.create({
+      name: 'BulletproofPeerInviteInvitee',
+      listenPort: 0,
+      skills: [],
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.REC1_OP),
+      nodeRole: 'core',
+    });
+    await curator.start();
+    await invitee.start();
+    await sleep(300);
+
+    // Connect. The UI-level invite only works once peers have a
+    // direct connection for the sync protocol to run over.
+    const curatorAddr = curator.multiaddrs.find(
+      (a) => a.includes('/tcp/') && !a.includes('/p2p-circuit'),
+    )!;
+    await invitee.connectTo(curatorAddr);
+    await sleep(300);
+
+    // Curator creates a PRIVATE CG — only themselves initially. The
+    // UI's "Invite member" button presumes this CG is private
+    // (otherwise there's nothing to protect) and that the invite will
+    // grant the new member read access.
+    await curator.createContextGraph({
+      id: cgId,
+      name: 'Bulletproof Peer Invite',
+      description: 'private — peer-ID invite must unblock sync',
+      private: true,
+      allowedAgents: [walletA.address],
+    });
+    const pub = await curator.publish(cgId, [
+      { subject: entity, predicate: 'http://schema.org/name', object: '"PeerInviteSecret"', graph: '' },
+    ]);
+    expect(pub.status).toBe('confirmed');
+
+    // Refresh ontology so the invitee knows the CG exists before the
+    // first sync attempt. This is exactly what the UI does via its
+    // ontology polling.
+    await invitee.syncFromPeer(curator.peerId, [SYSTEM_PARANETS.ONTOLOGY]);
+
+    // Sanity: before any invite, the invitee cannot sync this CG.
+    const preCount = await invitee.syncFromPeer(curator.peerId, [cgId]);
+    expect(preCount, 'pre-invite: invitee is not in any allowlist — sync must return 0').toBe(0);
+
+    // The UI-facing invite — the exact call the daemon makes in
+    // POST /api/context-graph/invite. We pass the invitee's libp2p
+    // peer ID, NOT their Ethereum wallet address. This is the whole
+    // point of this regression test: the legacy path is the one the
+    // node-ui and most CLI wrappers still use.
+    await curator.inviteToContextGraph(cgId, invitee.peerId);
+
+    // Give the auth handler a moment to see the _meta update on the
+    // curator side. No gossip propagation involved — this is a
+    // direct-sync authorization check on the curator's own store.
+    await sleep(200);
+
+    // The observable contract of "invite". Post-invite, the invitee
+    // MUST be able to sync the CG — that's the whole UX promise. If
+    // it returns 0, the allowlist write never became an authorization
+    // decision, and the UI-level invite is purely cosmetic.
+    const postCount = await invitee.syncFromPeer(curator.peerId, [cgId]);
+    expect(
+      postCount,
+      'Bug: curator.inviteToContextGraph(cgId, B.peerId) did not unblock sync. ' +
+        'The UI / POST /api/context-graph/invite path writes DKG_ALLOWED_PEER quads, ' +
+        'but packages/agent/src/dkg-agent.ts#getPrivateContextGraphParticipants() only ' +
+        'reads DKG_ALLOWED_AGENT and DKG_PARTICIPANT_IDENTITY_ID — the peer-ID allowlist ' +
+        'entry is never consulted on sync auth. Fix: include DKG_ALLOWED_PEER in the ' +
+        'allowlist resolution, or migrate /api/context-graph/invite to the agentAddress ' +
+        'path (inviteAgentToContextGraph).',
+    ).toBeGreaterThan(0);
+
+    // Secondary observable: the published secret should now be
+    // queryable on the invitee. This catches the case where the
+    // numeric triple count is >0 (e.g. just meta) but the real data
+    // never landed.
+    const qr = await invitee.query(
+      `SELECT ?o WHERE { <${entity}> <http://schema.org/name> ?o }`,
+      { contextGraphId: cgId },
+    );
+    expect(
+      qr.bindings.length,
+      'post-invite invitee must be able to read the published secret — ' +
+        'if this is 0 but sync count > 0, the CG was treated as public and ' +
+        'the invitee only got _meta triples.',
+    ).toBe(1);
+    expect(qr.bindings[0]?.['o']).toBe('"PeerInviteSecret"');
+  }, 120_000);
+});
+
+// ---------------------------------------------------------------------------
+// "I join another project, the UI says 0 even though they imported into
+// memory" — the user-reported UX failure. This test exercises the exact
+// button-click path the node-ui walks when a team member:
+//
+//   1. Node A clicks "Import" → UI posts to /api/shared-memory/write →
+//      daemon calls agent.share(cgId, quads) → quads land in SWM graph
+//      `dkg/context-graph/{id}/shared-memory` + meta triples in the
+//      matching `_shared_memory_meta` graph.
+//   2. Node A's UI lists entities via listSwmEntities() → posts
+//      SPARQL `SELECT ?s (COUNT(?p) AS ?cnt) WHERE { ?s ?p ?o } GROUP BY ?s`
+//      with `view: 'shared-working-memory'` → sees their rows.
+//   3. Node B clicks "Join project" → UI posts to /api/subscribe →
+//      daemon calls agent.syncContextGraphFromConnectedPeers(cgId,
+//      { includeSharedMemory: true }) → which fans out to every peer
+//      with PROTOCOL_SYNC and runs syncFromPeer + syncSharedMemoryFromPeer.
+//   4. Node B opens the project → UI calls listSwmEntities(cgId).
+//
+// If step 4 returns 0 rows, the user says "sync is broken" even though
+// every low-level API looks healthy. That's the specific false-positive
+// the existing tests miss. This test reproduces the full chain end-to-end
+// against a real Hardhat + real libp2p harness and asserts the counts
+// match. If sync is broken anywhere in that chain — at the SWM meta
+// validator, at the catchup iteration, at the SWM sync endpoint, or at
+// the view resolver — this test fails with an actionable error.
+// ---------------------------------------------------------------------------
+describe('bulletproof: user-facing "join project + import into memory" flow', () => {
+  let nodeA: DKGAgent;
+  let nodeB: DKGAgent;
+
+  afterAll(async () => {
+    try { await nodeA?.stop(); } catch { /* */ }
+    try { await nodeB?.stop(); } catch { /* */ }
+  });
+
+  it('entities imported into SWM on A are visible to B after subscribe + catchup (listSwmEntities returns the same rows)', async () => {
+    const cgId = freshCgId('bp-ux-swm');
+    // Three distinct "imported" root entities. This mirrors a user
+    // dragging three files into the node-ui or running three imports
+    // through OpenClaw — each becomes a root entity in SWM.
+    const entities = [
+      'urn:bulletproof:ux:alpha',
+      'urn:bulletproof:ux:beta',
+      'urn:bulletproof:ux:gamma',
+    ];
+
+    nodeA = await DKGAgent.create({
+      name: 'BulletproofUXCurator',
+      listenPort: 0,
+      skills: [],
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      nodeRole: 'core',
+    });
+    nodeB = await DKGAgent.create({
+      name: 'BulletproofUXJoiner',
+      listenPort: 0,
+      skills: [],
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.REC1_OP),
+      nodeRole: 'core',
+    });
+    await nodeA.start();
+    await nodeB.start();
+    await sleep(300);
+
+    // Public CG — no allowlist, no invite needed. This isolates the
+    // SWM-sync path so we can tell a SWM bug from an allowlist bug.
+    await nodeA.createContextGraph({
+      id: cgId,
+      name: 'Bulletproof UX SWM',
+      description: 'public CG: imported on A, viewed on B',
+    });
+
+    // Import three entities into SWM via agent.share — the exact path
+    // /api/shared-memory/write walks. Each call produces one
+    // WorkspaceOperation with one rootEntity; the sync meta validator
+    // at syncSharedMemoryFromPeer requires both rdf:type + publishedAt
+    // for each op, and generateShareMetadata writes both. If a future
+    // refactor drops either triple, the validator will drop every
+    // synced quad and this test will catch it on B's side.
+    for (const entity of entities) {
+      await nodeA.share(cgId, [
+        { subject: entity, predicate: 'http://schema.org/name', object: `"imported-${entity.split(':').pop()}"`, graph: '' },
+      ]);
+    }
+
+    // Local sanity on A: the UI's `listSwmEntities` query returns
+    // exactly the three entities we imported. If this is already 0,
+    // the bug is on the *writer* side (share broke), not the sync side.
+    const localRowsA = await nodeA.query(
+      `SELECT ?s (COUNT(?p) AS ?cnt) WHERE { ?s ?p ?o } GROUP BY ?s`,
+      { contextGraphId: cgId, view: 'shared-working-memory' },
+    );
+    const entitiesOnA = new Set(
+      localRowsA.bindings
+        .map((b) => b['s'])
+        .filter((s): s is string => typeof s === 'string'),
+    );
+    for (const e of entities) {
+      expect(
+        entitiesOnA.has(e),
+        `precondition failed on A: listSwmEntities didn't return "${e}" after agent.share — the writer is broken, not sync.`,
+      ).toBe(true);
+    }
+
+    // Connect B to A. This mimics the auto-relay/bootstrap step that
+    // the UI goes through before a "Join project" click. Without a
+    // connection, catchup has zero peers to sync from.
+    const addrA = nodeA.multiaddrs.find(
+      (a) => a.includes('/tcp/') && !a.includes('/p2p-circuit'),
+    )!;
+    await nodeB.connectTo(addrA);
+    await sleep(300);
+
+    // Make sure B knows about the CG (normally this arrives via
+    // ontology sync on first connect). Doing it explicitly removes
+    // timing flake from the subscribe pre-check.
+    await nodeB.syncFromPeer(nodeA.peerId, [SYSTEM_PARANETS.ONTOLOGY]);
+
+    // THE "Join project" button. The UI's subscribe endpoint eventually
+    // calls syncContextGraphFromConnectedPeers with includeSharedMemory
+    // set to true by default. If the SWM sync path is broken, the
+    // returned .sharedMemorySynced will be 0 here, which is already
+    // a useful early signal before we even query.
+    const catchup = await nodeB.syncContextGraphFromConnectedPeers(cgId, {
+      includeSharedMemory: true,
+    });
+    expect(
+      catchup.syncCapablePeers,
+      'B must see at least one peer that speaks PROTOCOL_SYNC (A). If 0, the harness didnt actually connect.',
+    ).toBeGreaterThan(0);
+    expect(
+      catchup.sharedMemorySynced,
+      `Bug: "Join project" completed but not a single SWM triple was synced from A. ` +
+        `Either (a) agent.share on A isn't writing to the same graph agent.syncSharedMemoryFromPeer queries, ` +
+        `or (b) the SWM meta-validator in syncSharedMemoryFromPeer is dropping every quad ` +
+        `because rdf:type=WorkspaceOperation or publishedAt isn't being emitted by agent.share anymore.`,
+    ).toBeGreaterThan(0);
+
+    // THE UI's "list entities" call that decides what shows up when
+    // the user clicks into the project. If this returns fewer rows
+    // than A has, the user-reported "I see 0" symptom has been
+    // reproduced — and now we know exactly which of the three
+    // entities is missing.
+    const localRowsB = await nodeB.query(
+      `SELECT ?s (COUNT(?p) AS ?cnt) WHERE { ?s ?p ?o } GROUP BY ?s`,
+      { contextGraphId: cgId, view: 'shared-working-memory' },
+    );
+    const entitiesOnB = new Set(
+      localRowsB.bindings
+        .map((b) => b['s'])
+        .filter((s): s is string => typeof s === 'string'),
+    );
+
+    for (const e of entities) {
+      expect(
+        entitiesOnB.has(e),
+        `Bug: entity "${e}" imported on A is not visible on B after /api/subscribe. ` +
+          `A has it (proven above), B was authorized to sync (public CG), and ` +
+          `sharedMemorySynced > 0. The likely culprits are: ` +
+          `(1) syncSharedMemoryFromPeer's meta validator dropped the quads for this root ` +
+          `(e.g. the share op's rootEntity predicate didn't survive sync), or ` +
+          `(2) the triples arrived under a graph URI the "shared-working-memory" view doesn't cover ` +
+          `(view resolves to contextGraphSharedMemoryUri(cgId) — if the writer or the sync handler ` +
+          `uses a different URI, the data is present but invisible to the UI query).`,
+      ).toBe(true);
+    }
+
+    expect(
+      entitiesOnB.size,
+      `Bug: B's project view shows ${entitiesOnB.size} root entities but A has ${entitiesOnA.size}. ` +
+        `This is the literal "I joined the project and see 0 (or fewer) even though they imported" symptom.`,
+    ).toBe(entitiesOnA.size);
+  }, 120_000);
+});
+
+// ---------------------------------------------------------------------------
+// The OTHER "I see 0 after they imported" path: working-memory assertions.
+//
+// When a user imports a file through the node-ui (drag-and-drop, OpenClaw,
+// LLM extraction, etc.), it doesn't necessarily go through `agent.share`.
+// In the assertion-based import flow it lands in a Working Memory
+// assertion graph:
+//
+//   did:dkg:context-graph:{id}/assertion/{THEIR_AGENT_ADDR}/{name}
+//
+// and a lifecycle record is written to `_meta` with
+//   dkg:memoryLayer = "WorkingMemory".
+//
+// The sync protocol's data-phase handler then *deliberately* excludes
+// assertion graphs whose lifecycle layer is WorkingMemory (see
+// packages/agent/src/dkg-agent.ts lines 770–779):
+//
+//   FILTER(
+//     !CONTAINS(STR(?g), "/assertion/") ||
+//     EXISTS {
+//       GRAPH <_meta> {
+//         ?lc dkg:assertionGraph ?g .
+//         ?lc dkg:memoryLayer ?layer .
+//         FILTER(?layer != "WorkingMemory")
+//       }
+//     }
+//   )
+//
+// This is intentional — Working Memory is per-agent private scratch.
+// But to a user clicking through the UI it looks exactly like the
+// symptom they're reporting: "I imported it, my teammate joined the
+// project, their UI says 0". There's no "promote to share with team"
+// button in the import flow, and no UI signal that explains WHY the
+// count is 0 on the other side.
+//
+// This test pins the behavior down on both sides so:
+//   - if someone "fixes" the sync to suddenly include WM (which would
+//     leak every user's private scratch across the team), this test
+//     will fail loudly,
+//   - if someone tweaks promote to flip the layer correctly, we catch
+//     regressions where a promoted assertion stops being visible to
+//     peers (which would be the literal user-reported bug).
+// ---------------------------------------------------------------------------
+describe('bulletproof: working-memory assertions are invisible to peers until promoted', () => {
+  let nodeA: DKGAgent;
+  let nodeB: DKGAgent;
+
+  afterAll(async () => {
+    try { await nodeA?.stop(); } catch { /* */ }
+    try { await nodeB?.stop(); } catch { /* */ }
+  });
+
+  it('WM-only assertion imported on A does NOT appear on B after full catchup (documented behavior)', async () => {
+    const cgId = freshCgId('bp-wm');
+    const assertionName = 'ImportedReport';
+    const entity = 'urn:bulletproof:wm:import';
+
+    nodeA = await DKGAgent.create({
+      name: 'BulletproofWMImporter',
+      listenPort: 0,
+      skills: [],
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      nodeRole: 'core',
+    });
+    nodeB = await DKGAgent.create({
+      name: 'BulletproofWMTeammate',
+      listenPort: 0,
+      skills: [],
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.REC1_OP),
+      nodeRole: 'core',
+    });
+    await nodeA.start();
+    await nodeB.start();
+    await sleep(300);
+
+    await nodeA.createContextGraph({
+      id: cgId,
+      name: 'Bulletproof WM Import',
+      description: 'public CG to isolate the WM-vs-sync issue',
+    });
+
+    // Simulates what the node-ui does when a user drags in a file or
+    // uses an LLM extractor — creates an assertion in Working Memory.
+    await nodeA.assertion.create(cgId, assertionName);
+    await nodeA.assertion.write(cgId, assertionName, [
+      { subject: entity, predicate: 'http://schema.org/name', object: '"ImportedPayload"' },
+    ]);
+
+    // Sanity: A can read their own WM assertion. This is what the
+    // importer sees on their own UI after import.
+    const aQuads = await nodeA.assertion.query(cgId, assertionName);
+    expect(aQuads.length, 'precondition: A must see their own just-written WM assertion').toBe(1);
+
+    // B joins and does the full catchup (data + SWM), the exact call
+    // sequence /api/subscribe triggers.
+    const addrA = nodeA.multiaddrs.find(
+      (a) => a.includes('/tcp/') && !a.includes('/p2p-circuit'),
+    )!;
+    await nodeB.connectTo(addrA);
+    await sleep(300);
+    await nodeB.syncFromPeer(nodeA.peerId, [SYSTEM_PARANETS.ONTOLOGY]);
+    await nodeB.syncContextGraphFromConnectedPeers(cgId, { includeSharedMemory: true });
+
+    // B does NOT see the WM assertion. This is the exact "I joined
+    // the project and see 0 even though they imported" symptom.
+    // If we ever want this to change, the fix lives in the
+    // data-phase filter at dkg-agent.ts:770–779 (remove the WM
+    // exclusion) AND in promote (so WM isn't leaked by default).
+    const bQuads = await nodeB.assertion.query(cgId, assertionName).catch(() => []);
+    expect(
+      bQuads.length,
+      'WM assertion leaked to peer — if this fails, the sync handler ' +
+        'changed to sync WorkingMemory assertion graphs. That is not a ' +
+        'fix for the user-reported bug, that is a privacy regression: ' +
+        'every user\'s private scratch would now replicate across the team.',
+    ).toBe(0);
+
+    // Now A promotes to SWM — the action the user ACTUALLY needs to
+    // perform to share with teammates. This is what the "Promote"
+    // button in the UI does (calls /api/assertion/:name/promote).
+    await nodeA.assertion.promote(cgId, assertionName, 'all');
+
+    // B re-runs catchup (like hitting Refresh) and should now see
+    // the promoted data.
+    await nodeB.syncContextGraphFromConnectedPeers(cgId, { includeSharedMemory: true });
+
+    // The promoted entity should now be visible on B via the
+    // shared-working-memory view — the same one listSwmEntities uses.
+    const promoted = await nodeB.query(
+      `SELECT ?o WHERE { <${entity}> <http://schema.org/name> ?o }`,
+      { contextGraphId: cgId, view: 'shared-working-memory' },
+    );
+    expect(
+      promoted.bindings.length,
+      'Bug: A promoted the WM assertion to SWM, B ran subscribe+catchup, ' +
+        'but B still cannot see the promoted triple via the shared-working-memory view. ' +
+        'Either assertion.promote didn\'t actually move the data to the SWM graph, ' +
+        'or syncSharedMemoryFromPeer dropped the triple, or the view resolver ' +
+        'no longer targets contextGraphSharedMemoryUri(cgId).',
+    ).toBe(1);
+    expect(promoted.bindings[0]?.['o']).toBe('"ImportedPayload"');
+  }, 120_000);
+});
+
 // Best-effort helper: count quads in a specific graph on an agent's
 // triple store by going through its SPARQL surface, scoped to the
 // given contextGraphId so the agent's access policy / view resolver
