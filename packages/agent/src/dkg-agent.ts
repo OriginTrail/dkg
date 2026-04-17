@@ -5831,20 +5831,58 @@ export class DKGAgent {
       const existing = this.subscribedContextGraphs.get(id);
       if (existing) continue;
 
-      this.subscribedContextGraphs.set(id, {
-        name,
-        subscribed: false,
-        synced: true,
-        metaSynced: source === 'meta',
-        onChainId: undefined,
-      });
+      // Two kinds of discovered CG, two different opt-in semantics:
+      //
+      // - Open / public CG (no curated _meta graph locally): Viktor's
+      //   v10-rc hardening (commit b9a73e7e "better sync") says do
+      //   NOT auto-subscribe — a node shouldn't auto-ingest every
+      //   public CG a peer happens to know about. Explicit subscribe
+      //   (UI "Join" / `subscribeToContextGraph`) is the opt-in.
+      //
+      // - Curated / private CG (access policy "private" or has an
+      //   allowlist): auto-subscribe so `trySyncFromPeer`'s
+      //   "newly discovered CGs" catchup pass (see dkg-agent.ts
+      //   ~#1009) actually fetches the KC data on the same connect
+      //   cycle. Without this, a freshly invited node would see
+      //   the CG registered locally but never pull any KCs —
+      //   regressed the e2e-privacy "B discovers and syncs a
+      //   private CG in a single connect cycle via trySyncFromPeer"
+      //   test. `authorizeSyncRequest` still enforces the allowlist
+      //   on the responder side, so auto-subscribing here cannot
+      //   leak private data to non-participants; it only means
+      //   "attempt the catchup now instead of deferring it".
+      //   NOTE: we use `isPrivateContextGraph` (which reads the
+      //   ontology OR the _meta graph for `dkg:accessPolicy
+      //   "private"`, and also treats any CG with a `DKG_ALLOWED_
+      //   AGENT` allowlist as private) rather than
+      //   `source === 'meta'`, because the ontology-vs-meta
+      //   collision resolver above lets an ontology row shadow a
+      //   meta row when both exist for the same id.
+      const isCurated = await this.isPrivateContextGraph(id);
 
-      this.log.info(ctx, `Discovered context graph "${name}" (${id}) from ${source} store — added as discoverable only`);
+      if (isCurated) {
+        this.subscribeToContextGraph(id);
+        const sub = this.subscribedContextGraphs.get(id);
+        if (sub) {
+          sub.metaSynced = true;
+          sub.synced = true;
+        }
+        this.log.info(ctx, `Discovered invited context graph "${name}" (${id}) — auto-subscribed (private/allowlisted)`);
+      } else {
+        this.subscribedContextGraphs.set(id, {
+          name,
+          subscribed: false,
+          synced: true,
+          metaSynced: source === 'meta',
+          onChainId: undefined,
+        });
+        this.log.info(ctx, `Discovered context graph "${name}" (${id}) from ${source} store — added as discoverable only`);
+      }
       discovered++;
     }
 
     if (discovered > 0) {
-      this.log.info(ctx, `Added ${discovered} new context graph(s) from store without subscribing`);
+      this.log.info(ctx, `Added ${discovered} new context graph(s) from store`);
     }
     return discovered;
   }
