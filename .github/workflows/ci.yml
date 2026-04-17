@@ -147,43 +147,16 @@ jobs:
         run: pnpm --filter @origintrail-official/dkg-chain test
 
   # ------------------------------------------------------------------
-  # Tornado publisher lane — sharded across 2 parallel runners.
+  # Tornado publisher lane — sharded across 3 parallel runners.
+  # Raised from 2→3 after the 5.12-min warm run showed publisher shards
+  # at ~3.5-3.9 min each; dividing by 3 lands each shard around ~2.5 min,
+  # comfortably under the agent tail that gates wall-clock.
   # ------------------------------------------------------------------
   tornado-publisher:
-    name: "Tornado: publisher [${{ matrix.shard }}/2]"
+    name: "Tornado: publisher [${{ matrix.shard }}/3]"
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version-file: .nvmrc
-          cache: pnpm
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-      - uses: actions/download-artifact@v4
-        with:
-          name: build-outputs
-          path: /tmp
-      - name: Restore build outputs
-        run: tar -xzf /tmp/build-outputs.tgz
-      - name: "Publisher tests (shard ${{ matrix.shard }}/2)"
-        run: pnpm --filter @origintrail-official/dkg-publisher exec vitest run --shard=${{ matrix.shard }}/2
-
-  # ------------------------------------------------------------------
-  # Tornado agent lane — the slowest Node suite, sharded across 3 runners.
-  # ------------------------------------------------------------------
-  tornado-agent:
-    name: "Tornado: agent [${{ matrix.shard }}/3]"
-    needs: build
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -203,8 +176,42 @@ jobs:
           path: /tmp
       - name: Restore build outputs
         run: tar -xzf /tmp/build-outputs.tgz
-      - name: "Agent tests (shard ${{ matrix.shard }}/3)"
-        run: pnpm --filter @origintrail-official/dkg-agent exec vitest run --shard=${{ matrix.shard }}/3
+      - name: "Publisher tests (shard ${{ matrix.shard }}/3)"
+        run: pnpm --filter @origintrail-official/dkg-publisher exec vitest run --shard=${{ matrix.shard }}/3
+
+  # ------------------------------------------------------------------
+  # Tornado agent lane — the slowest Node suite, sharded across 4 runners.
+  # Raised from 3→4 after the 5.12-min warm run showed agent shards at
+  # ~4.5-4.7 min, i.e. they were the tail gating wall-clock. 4 shards
+  # should bring each one down to ~3.5 min. Going higher (5+) starts
+  # losing to the ~1.5-min pnpm-install setup tax per runner.
+  # ------------------------------------------------------------------
+  tornado-agent:
+    name: "Tornado: agent [${{ matrix.shard }}/4]"
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: build-outputs
+          path: /tmp
+      - name: Restore build outputs
+        run: tar -xzf /tmp/build-outputs.tgz
+      - name: "Agent tests (shard ${{ matrix.shard }}/4)"
+        run: pnpm --filter @origintrail-official/dkg-agent exec vitest run --shard=${{ matrix.shard }}/4
 
   # ------------------------------------------------------------------
   # Product primary — cli and node-ui run on dedicated runners.
