@@ -946,20 +946,12 @@ export class DKGAgent {
       const synced = await this.syncFromPeer(remotePeer);
       this.log.info(ctx, `Synced ${synced} data triples from peer ${shortPeer}`);
 
-      // Only flip metaSynced for CGs whose _meta was actually fetched
-      // during this sync (i.e., those in the sync scope). Chain-discovered
-      // CGs added with trackSyncScope: false are NOT in scope and their
-      // _meta hasn't arrived yet.
       const syncScope = new Set<string>([
         SYSTEM_PARANETS.AGENTS,
         SYSTEM_PARANETS.ONTOLOGY,
         ...(this.config.syncContextGraphs ?? []),
       ]);
-      for (const [id, sub] of this.subscribedContextGraphs) {
-        if (sub.metaSynced === false && syncScope.has(id)) {
-          sub.metaSynced = true;
-        }
-      }
+      await this.refreshMetaSyncedFlags(syncScope);
 
       // After syncing ONTOLOGY, discover and auto-subscribe to any new context graphs
       await this.discoverContextGraphsFromStore();
@@ -974,18 +966,7 @@ export class DKGAgent {
         this.log.info(ctx, `Discovered ${newlyDiscovered.length} new CG(s) — syncing durable data from ${shortPeer}`);
         const discoverSynced = await this.syncFromPeer(remotePeer, newlyDiscovered);
         this.log.info(ctx, `Synced ${discoverSynced} durable triples for newly discovered CG(s) from ${shortPeer}`);
-        for (const id of newlyDiscovered) {
-          const sub = this.subscribedContextGraphs.get(id);
-          if (sub && sub.metaSynced === false) {
-            const metaGraph = paranetMetaGraphUri(id);
-            const check = await this.store.query(
-              `ASK WHERE { GRAPH <${metaGraph}> { ?s ?p ?o } }`,
-            );
-            if (check.type === 'boolean' && check.value === true) {
-              sub.metaSynced = true;
-            }
-          }
-        }
+        await this.refreshMetaSyncedFlags(newlyDiscovered);
       }
 
       const wsContextGraphIds = this.config.syncContextGraphs ?? [];
@@ -1329,6 +1310,8 @@ export class DKGAgent {
       `Catch-up sync for "${contextGraphId}": peers=${peersTried}/${syncCapablePeers} data=${dataSynced} sharedMemory=${sharedMemorySynced}`,
     );
 
+    await this.refreshMetaSyncedFlags([contextGraphId]);
+
     if (dataSynced > 0 || sharedMemorySynced > 0) {
       this.eventBus.emit(DKGEvent.PROJECT_SYNCED, {
         contextGraphId,
@@ -1363,6 +1346,41 @@ export class DKGAgent {
     }
 
     return false;
+  }
+
+  private async refreshMetaSyncedFlags(contextGraphIds: Iterable<string>): Promise<void> {
+    for (const contextGraphId of contextGraphIds) {
+      const sub = this.subscribedContextGraphs.get(contextGraphId);
+      if (!sub || sub.metaSynced === true) continue;
+      if (await this.hasConfirmedMetaState(contextGraphId)) {
+        sub.metaSynced = true;
+      }
+    }
+  }
+
+  private async hasConfirmedMetaState(contextGraphId: string): Promise<boolean> {
+    if ((Object.values(SYSTEM_PARANETS) as string[]).includes(contextGraphId)) {
+      return true;
+    }
+
+    const metaGraph = paranetMetaGraphUri(contextGraphId);
+    const metaResult = await this.store.query(
+      `ASK WHERE { GRAPH <${metaGraph}> { ?s ?p ?o } }`,
+    );
+    if (metaResult.type === 'boolean' && metaResult.value === true) {
+      return true;
+    }
+
+    const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
+    const contextGraphUri = paranetDataGraphUri(contextGraphId);
+    const ontologyResult = await this.store.query(
+      `ASK WHERE {
+        GRAPH <${ontologyGraph}> {
+          <${contextGraphUri}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_PARANET}> .
+        }
+      }`,
+    );
+    return ontologyResult.type === 'boolean' && ontologyResult.value === true;
   }
 
   /**
@@ -2484,13 +2502,8 @@ export class DKGAgent {
     }
 
     // Idempotent: skip if gossip handlers already installed for this context graph.
-    // Re-subscribing upgrades metaSynced → true: the caller is explicitly
-    // trusting this CG, so the deny-until-meta-synced gate can open.
     if (this.gossipRegistered.has(contextGraphId)) {
       const existing = this.subscribedContextGraphs.get(contextGraphId);
-      if (existing && existing.metaSynced === false) {
-        existing.metaSynced = true;
-      }
       if (!existing?.subscribed) {
         this.subscribedContextGraphs.set(contextGraphId, { ...existing, subscribed: true, synced: existing?.synced ?? false });
       }
