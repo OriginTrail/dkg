@@ -58,11 +58,14 @@ emit(uri(profileId), uri(Profile.P.primaryColor), lit('#a855f7'));
 emit(uri(profileId), uri(Profile.P.accentColor), lit('#22c55e'));
 
 // ── SubGraph bindings ─────────────────────────────────────────
+// `timeline` — when set, opts this sub-graph into a Timeline tab. The UI
+// reads `profile:timelinePredicate` from the binding and renders a
+// horizontal ribbon of the sub-graph's entities sorted by that literal.
 const subGraphs = [
   { slug: 'code',      icon: '⟨⟩', color: '#3b82f6', displayName: 'Code',      description: 'Packages, files, classes, and functions extracted from AST.', rank: 1 },
-  { slug: 'github',    icon: '⎇',  color: '#f59e0b', displayName: 'GitHub',    description: 'Pull requests, issues, commits, and reviews.',               rank: 2 },
-  { slug: 'decisions', icon: '◆',  color: '#ef4444', displayName: 'Decisions', description: 'Architectural decisions with context and consequences.',     rank: 3 },
-  { slug: 'tasks',     icon: '✓',  color: '#06b6d4', displayName: 'Tasks',     description: 'Planned and in-flight work, cross-linked to decisions + PRs.', rank: 4 },
+  { slug: 'github',    icon: '⎇',  color: '#f59e0b', displayName: 'GitHub',    description: 'Pull requests, issues, commits, and reviews.',               rank: 2, timeline: Github.P.mergedAt },
+  { slug: 'decisions', icon: '◆',  color: '#ef4444', displayName: 'Decisions', description: 'Architectural decisions with context and consequences.',     rank: 3, timeline: Decisions.P.date },
+  { slug: 'tasks',     icon: '✓',  color: '#06b6d4', displayName: 'Tasks',     description: 'Planned and in-flight work, cross-linked to decisions + PRs.', rank: 4, timeline: Tasks.P.dueDate },
   { slug: 'meta',      icon: 'ⓘ',  color: '#64748b', displayName: 'Meta',      description: 'Project self-description (the profile you are reading now).', rank: 5 },
 ];
 for (const sg of subGraphs) {
@@ -75,6 +78,7 @@ for (const sg of subGraphs) {
   emit(uri(id), uri(Profile.P.displayName), lit(sg.displayName));
   emit(uri(id), uri(Common.description), lit(sg.description));
   emit(uri(id), uri(Profile.P.rank), lit(sg.rank, XSD.int));
+  if (sg.timeline) emit(uri(id), uri(Profile.P.timelinePredicate), uri(sg.timeline));
 }
 
 // ── Entity type bindings (icon/color/label + GenUI prompt hint) ────
@@ -204,6 +208,109 @@ for (const v of views) {
   emit(uri(id), uri(Profile.P.nodeSize), lit(v.nodeSize));
   for (const t of v.includeTypes) emit(uri(id), uri(Profile.P.includeType), uri(t));
   for (const p of v.emphasizePredicates) emit(uri(id), uri(Profile.P.emphasizePredicate), uri(p));
+}
+
+// ── FilterChips ───────────────────────────────────────────────
+// Declare the interactive filter rows the UI should render above the
+// entity list in each sub-graph page. Multiple chips stack as OR within
+// the same predicate, AND across predicates.
+const chips = [
+  { slug: 'decision-status', sg: 'decisions', type: Decisions.T.Decision, predicate: Decisions.P.status,
+    label: 'Status', values: ['proposed', 'accepted', 'rejected', 'superseded'] },
+  { slug: 'task-status',     sg: 'tasks',     type: Tasks.T.Task,         predicate: Tasks.P.status,
+    label: 'Status', values: ['todo', 'in_progress', 'blocked', 'done', 'cancelled'] },
+  { slug: 'task-priority',   sg: 'tasks',     type: Tasks.T.Task,         predicate: Tasks.P.priority,
+    label: 'Priority', values: ['p0', 'p1', 'p2', 'p3'] },
+  { slug: 'gh-pr-state',     sg: 'github',    type: Github.T.PullRequest, predicate: Github.P.state,
+    label: 'State', values: ['open', 'closed'] },
+];
+for (const c of chips) {
+  const id = Profile.uri.chip(PROJECT_ID, c.slug);
+  emit(uri(id), uri(Common.type), uri(Profile.T.FilterChip));
+  emit(uri(id), uri(Profile.P.ofProfile), uri(profileId));
+  emit(uri(id), uri(Profile.P.forSubGraph), lit(c.sg));
+  emit(uri(id), uri(Profile.P.forType), uri(c.type));
+  emit(uri(id), uri(Profile.P.onPredicate), uri(c.predicate));
+  emit(uri(id), uri(Profile.P.label), lit(c.label));
+  for (const v of c.values) emit(uri(id), uri(Profile.P.chipValue), lit(v));
+}
+
+// ── Saved SPARQL queries ──────────────────────────────────────
+// Rendered as pills above the entity list. Clicking a pill runs the query
+// against /api/sparql/query and displays the result set as the filtered
+// entity list. `resultColumn` tells the UI which SELECT var holds the
+// target entity URI.
+const savedQueries = [
+  {
+    slug: 'decisions-touching-node-ui',
+    sg: 'decisions',
+    name: 'Decisions affecting node-ui',
+    description: 'Every decision whose `affects` reaches a file in packages/node-ui.',
+    resultColumn: 'decision',
+    sparql: `
+SELECT DISTINCT ?decision WHERE {
+  GRAPH ?g { ?decision a <${Decisions.T.Decision}> ;
+                       <${Decisions.P.affects}> ?target . }
+  FILTER(CONTAINS(STR(?target), "node-ui"))
+}`.trim(),
+  },
+  {
+    slug: 'p0-p1-tasks-in-flight',
+    sg: 'tasks',
+    name: 'P0 / P1 tasks in flight',
+    description: 'High-priority tasks currently `in_progress` or `blocked`.',
+    resultColumn: 'task',
+    sparql: `
+SELECT DISTINCT ?task WHERE {
+  GRAPH ?g {
+    ?task a <${Tasks.T.Task}> ;
+          <${Tasks.P.priority}> ?p ;
+          <${Tasks.P.status}> ?s .
+    FILTER(?p IN ("p0", "p1"))
+    FILTER(?s IN ("in_progress", "blocked"))
+  }
+}`.trim(),
+  },
+  {
+    slug: 'prs-that-affected-vm-packages',
+    sg: 'github',
+    name: 'PRs that touched flagship packages',
+    description: 'Closed PRs that changed node-ui or graph-viz — likely VM candidates.',
+    resultColumn: 'pr',
+    sparql: `
+SELECT DISTINCT ?pr WHERE {
+  GRAPH ?g { ?pr a <${Github.T.PullRequest}> ;
+                 <${Github.P.state}> "closed" ;
+                 <${Github.P.affects}> ?f . }
+  FILTER(CONTAINS(STR(?f), "node-ui") || CONTAINS(STR(?f), "graph-viz"))
+}`.trim(),
+  },
+  {
+    slug: 'decisions-with-open-tasks',
+    sg: 'decisions',
+    name: 'Decisions with open tasks',
+    description: 'Decisions still tracked by at least one non-done task.',
+    resultColumn: 'decision',
+    sparql: `
+SELECT DISTINCT ?decision WHERE {
+  GRAPH ?g1 { ?decision a <${Decisions.T.Decision}> . }
+  GRAPH ?g2 {
+    ?task <${Tasks.P.relatedDecision}> ?decision ;
+          <${Tasks.P.status}> ?s .
+    FILTER(?s != "done" && ?s != "cancelled")
+  }
+}`.trim(),
+  },
+];
+for (const q of savedQueries) {
+  const id = Profile.uri.query(PROJECT_ID, q.slug);
+  emit(uri(id), uri(Common.type), uri(Profile.T.SavedQuery));
+  emit(uri(id), uri(Profile.P.ofProfile), uri(profileId));
+  emit(uri(id), uri(Profile.P.forSubGraph), lit(q.sg));
+  emit(uri(id), uri(Profile.P.displayName), lit(q.name));
+  emit(uri(id), uri(Common.description), lit(q.description));
+  emit(uri(id), uri(Profile.P.sparqlQuery), lit(q.sparql));
+  emit(uri(id), uri(Profile.P.resultColumn), lit(q.resultColumn));
 }
 
 console.log(`[profile] Produced ${sink.size()} triples describing ${PROJECT_ID}.`);

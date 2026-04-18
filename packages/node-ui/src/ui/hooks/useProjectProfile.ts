@@ -28,6 +28,8 @@ export interface SubGraphBinding {
   icon?: string;
   color?: string;
   rank: number;
+  /** Predicate IRI (date-valued) that opts this sub-graph into the Timeline tab. */
+  timelinePredicate?: string;
 }
 
 export interface EntityTypeBinding {
@@ -47,6 +49,34 @@ export interface ViewConfig {
   nodeSize?: 'degree' | 'uniform';
 }
 
+/**
+ * A profile-declared filter chip row. The UI renders one row per
+ * `(subGraph, predicate)` pair with a pill per `values[]` entry; multiple
+ * selected values OR within the row, rows AND across predicates.
+ */
+export interface FilterChip {
+  slug: string;
+  subGraph: string;
+  typeIri: string;
+  predicate: string;
+  label: string;
+  values: string[];
+}
+
+/**
+ * A ViewConfig carrying a SPARQL query. Rendered as a pill above the
+ * entity list; clicking runs the query and narrows the list to the
+ * returned IRIs in `resultColumn`.
+ */
+export interface SavedQuery {
+  slug: string;
+  subGraph: string;
+  name: string;
+  description?: string;
+  sparql: string;
+  resultColumn: string;
+}
+
 export interface ProjectProfile {
   contextGraphId: string;
   displayName: string;
@@ -56,11 +86,15 @@ export interface ProjectProfile {
   subGraphs: SubGraphBinding[];
   typeBindings: EntityTypeBinding[];
   views: ViewConfig[];
+  filterChips: FilterChip[];
+  savedQueries: SavedQuery[];
   loading: boolean;
   error?: string;
   forSubGraph: (slug: string) => SubGraphBinding | undefined;
   forType: (typeIri: string) => EntityTypeBinding | undefined;
   view: (slug: string) => ViewConfig | undefined;
+  chipsFor: (subGraphSlug: string) => FilterChip[];
+  savedQueriesFor: (subGraphSlug: string) => SavedQuery[];
 }
 
 const DEFAULT_PROFILE_SEED = {
@@ -129,7 +163,7 @@ WHERE {
 function buildSubGraphBindingsQuery(contextGraphId: string): string {
   return `PREFIX prof: <${PROFILE_NS}>
 PREFIX schema: <http://schema.org/>
-SELECT ?slug ?displayName ?description ?icon ?color ?rank
+SELECT ?slug ?displayName ?description ?icon ?color ?rank ?timelinePredicate
 WHERE {
   GRAPH ?g {
     ?b a prof:SubGraphBinding ;
@@ -139,6 +173,42 @@ WHERE {
     OPTIONAL { ?b prof:icon ?icon }
     OPTIONAL { ?b prof:color ?color }
     OPTIONAL { ?b prof:rank ?rank }
+    OPTIONAL { ?b prof:timelinePredicate ?timelinePredicate }
+  }
+  ${metaGraphFilter(contextGraphId)}
+}`;
+}
+
+function buildFilterChipsQuery(contextGraphId: string): string {
+  return `PREFIX prof: <${PROFILE_NS}>
+SELECT ?chip ?subGraph ?type ?predicate ?label
+       (GROUP_CONCAT(DISTINCT ?v; separator="|") AS ?values)
+WHERE {
+  GRAPH ?g {
+    ?chip a prof:FilterChip ;
+          prof:forSubGraph ?subGraph ;
+          prof:forType ?type ;
+          prof:onPredicate ?predicate ;
+          prof:chipValue ?v .
+    OPTIONAL { ?chip prof:label ?label }
+  }
+  ${metaGraphFilter(contextGraphId)}
+}
+GROUP BY ?chip ?subGraph ?type ?predicate ?label`;
+}
+
+function buildSavedQueriesQuery(contextGraphId: string): string {
+  return `PREFIX prof: <${PROFILE_NS}>
+PREFIX schema: <http://schema.org/>
+SELECT ?q ?subGraph ?name ?description ?sparql ?column
+WHERE {
+  GRAPH ?g {
+    ?q a prof:SavedQuery ;
+       prof:forSubGraph ?subGraph ;
+       prof:sparqlQuery ?sparql .
+    OPTIONAL { ?q prof:displayName ?name }
+    OPTIONAL { ?q schema:description ?description }
+    OPTIONAL { ?q prof:resultColumn ?column }
   }
   ${metaGraphFilter(contextGraphId)}
 }`;
@@ -197,9 +267,13 @@ export function useProjectProfile(contextGraphId: string | undefined): ProjectPr
   const [subGraphs, setSubGraphs] = useState<SubGraphBinding[]>([]);
   const [typeBindings, setTypeBindings] = useState<EntityTypeBinding[]>([]);
   const [views, setViews] = useState<ViewConfig[]>([]);
+  const [filterChips, setFilterChips] = useState<FilterChip[]>([]);
+  const [savedQueries, setSavedQueries] = useState<SavedQuery[]>([]);
   const typeIndexRef = useRef<Map<string, EntityTypeBinding>>(new Map());
   const subIndexRef = useRef<Map<string, SubGraphBinding>>(new Map());
   const viewIndexRef = useRef<Map<string, ViewConfig>>(new Map());
+  const chipsBySgRef = useRef<Map<string, FilterChip[]>>(new Map());
+  const queriesBySgRef = useRef<Map<string, SavedQuery[]>>(new Map());
 
   useEffect(() => {
     if (!contextGraphId) {
@@ -212,11 +286,13 @@ export function useProjectProfile(contextGraphId: string | undefined): ProjectPr
       setLoading(true);
       setError(undefined);
       try {
-        const [rootRows, sgRows, typeRows, viewRows] = await Promise.all([
+        const [rootRows, sgRows, typeRows, viewRows, chipRows, queryRows] = await Promise.all([
           runProjectQuery(buildProfileRootQuery(contextGraphId), contextGraphId).catch(() => []),
           runProjectQuery(buildSubGraphBindingsQuery(contextGraphId), contextGraphId).catch(() => []),
           runProjectQuery(buildTypeBindingsQuery(contextGraphId), contextGraphId).catch(() => []),
           runProjectQuery(buildViewConfigsQuery(contextGraphId), contextGraphId).catch(() => []),
+          runProjectQuery(buildFilterChipsQuery(contextGraphId), contextGraphId).catch(() => []),
+          runProjectQuery(buildSavedQueriesQuery(contextGraphId), contextGraphId).catch(() => []),
         ]);
         if (cancelled) return;
 
@@ -236,6 +312,7 @@ export function useProjectProfile(contextGraphId: string | undefined): ProjectPr
             icon: stripLiteral(row.icon) || undefined,
             color: stripLiteral(row.color) || undefined,
             rank: parseInt10(row.rank) || 99,
+            timelinePredicate: stripIri(row.timelinePredicate) || undefined,
           }))
           .filter(s => s.slug)
           .sort((a, b) => a.rank - b.rank);
@@ -268,6 +345,56 @@ export function useProjectProfile(contextGraphId: string | undefined): ProjectPr
         });
         setViews(vs);
         viewIndexRef.current = new Map(vs.map(v => [v.slug, v]));
+
+        const chips: FilterChip[] = chipRows
+          .map(row => {
+            const chipIri = stripIri(row.chip);
+            const slug = chipIri.split(':chip:').pop() ?? chipIri;
+            const values = stripLiteral(row.values)
+              .split('|')
+              .map(v => stripLiteral(v.trim()))
+              .filter(Boolean);
+            return {
+              slug,
+              subGraph: stripLiteral(row.subGraph),
+              typeIri: stripIri(row.type),
+              predicate: stripIri(row.predicate),
+              label: stripLiteral(row.label) || 'Filter',
+              values,
+            };
+          })
+          .filter(c => c.subGraph && c.predicate && c.values.length > 0);
+        setFilterChips(chips);
+        const chipsBySg = new Map<string, FilterChip[]>();
+        for (const c of chips) {
+          const list = chipsBySg.get(c.subGraph) ?? [];
+          list.push(c);
+          chipsBySg.set(c.subGraph, list);
+        }
+        chipsBySgRef.current = chipsBySg;
+
+        const queries: SavedQuery[] = queryRows
+          .map(row => {
+            const qIri = stripIri(row.q);
+            const slug = qIri.split(':query:').pop() ?? qIri;
+            return {
+              slug,
+              subGraph: stripLiteral(row.subGraph),
+              name: stripLiteral(row.name) || slug,
+              description: stripLiteral(row.description) || undefined,
+              sparql: stripLiteral(row.sparql),
+              resultColumn: stripLiteral(row.column) || '',
+            };
+          })
+          .filter(q => q.subGraph && q.sparql);
+        setSavedQueries(queries);
+        const queriesBySg = new Map<string, SavedQuery[]>();
+        for (const q of queries) {
+          const list = queriesBySg.get(q.subGraph) ?? [];
+          list.push(q);
+          queriesBySg.set(q.subGraph, list);
+        }
+        queriesBySgRef.current = queriesBySg;
       } catch (err: any) {
         if (!cancelled) setError(err?.message ?? String(err));
       } finally {
@@ -290,6 +417,14 @@ export function useProjectProfile(contextGraphId: string | undefined): ProjectPr
     (slug: string) => viewIndexRef.current.get(slug),
     [],
   );
+  const chipsFor = useCallback(
+    (slug: string) => chipsBySgRef.current.get(slug) ?? [],
+    [],
+  );
+  const savedQueriesFor = useCallback(
+    (slug: string) => queriesBySgRef.current.get(slug) ?? [],
+    [],
+  );
 
   return {
     contextGraphId: contextGraphId ?? '',
@@ -300,11 +435,15 @@ export function useProjectProfile(contextGraphId: string | undefined): ProjectPr
     subGraphs,
     typeBindings,
     views,
+    filterChips,
+    savedQueries,
     loading,
     error,
     forSubGraph,
     forType,
     view,
+    chipsFor,
+    savedQueriesFor,
   };
 }
 

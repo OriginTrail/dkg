@@ -1,7 +1,7 @@
 import React, { useMemo, useState, useCallback, useEffect, lazy, Suspense } from 'react';
 import { useFetch } from '../hooks.js';
 import { api } from '../api-wrapper.js';
-import { listJoinRequests, approveJoinRequest, rejectJoinRequest, listParticipants, listAssertions, promoteAssertion, publishSharedMemory, type PendingJoinRequest } from '../api.js';
+import { listJoinRequests, approveJoinRequest, rejectJoinRequest, listParticipants, listAssertions, promoteAssertion, publishSharedMemory, executeQuery, type PendingJoinRequest, type PublishResult } from '../api.js';
 import { ImportFilesModal } from '../components/Modals/ImportFilesModal.js';
 import { ShareProjectModal } from '../components/Modals/ShareProjectModal.js';
 import { useMemoryEntities, type TrustLevel, type MemoryEntity, type Triple } from '../hooks/useMemoryEntities.js';
@@ -1504,12 +1504,141 @@ function ProvenanceBar({ memory }: { memory: ReturnType<typeof useMemoryEntities
 
 type KAPane = 'content' | 'triples' | 'graph';
 
-function KADetailView({ entity, allEntities, allTriples, onNavigate, onClose }: {
+// Small sub-graph badge rendered next to cross-references so the user
+// sees "oh, this link takes me to the github sub-graph" before clicking.
+function SubGraphBadge({
+  entity,
+  profile,
+}: {
+  entity: MemoryEntity;
+  profile: ReturnType<typeof useProjectProfileContext>;
+}) {
+  // Pick the first non-meta sub-graph the entity has triples in. Most
+  // entities only live in one sub-graph; when they span more, the
+  // primary (lowest rank) binding wins.
+  const slug = useMemo(() => {
+    for (const s of entity.subGraphs) {
+      if (s !== 'meta') return s;
+    }
+    return null;
+  }, [entity.subGraphs]);
+  if (!slug || !profile) return null;
+  const binding = profile.forSubGraph(slug);
+  const color = binding?.color ?? '#64748b';
+  const icon = binding?.icon ?? '•';
+  const label = binding?.displayName ?? slug;
+  return (
+    <span
+      className="v10-subgraph-badge"
+      style={{ '--sg-color': color } as React.CSSProperties}
+      title={`In sub-graph: ${label}`}
+    >
+      <span className="v10-subgraph-badge-icon" style={{ color }}>{icon}</span>
+      <span className="v10-subgraph-badge-label">{label}</span>
+    </span>
+  );
+}
+
+// ─── Verify on DKG CTA ───────────────────────────────────────
+// Publishes a single entity through the SWM publish endpoint. For WM-only
+// entities the daemon will surface a useful error ("not in SWM") which we
+// display verbatim — a follow-up can add a one-shot promote+publish
+// endpoint, but for the PoC this is honest and fast.
+function VerifyOnDkgButton({
+  entity,
+  contextGraphId,
+  onVerified,
+}: {
+  entity: MemoryEntity;
+  contextGraphId: string;
+  onVerified: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<PublishResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const layer = entity.trustLevel;
+  if (layer === 'verified') return null;
+
+  const handle = async () => {
+    setBusy(true);
+    setError(null);
+    setResult(null);
+    try {
+      const r = await publishSharedMemory(contextGraphId, [entity.uri]);
+      setResult(r);
+      onVerified();
+    } catch (err: any) {
+      setError(err?.message ?? 'Publish failed');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const needsPromote = layer === 'working';
+  const cta = needsPromote ? 'Verify on DKG (requires SWM promote)' : 'Verify on DKG →';
+
+  return (
+    <div className="v10-ka-verify">
+      {!result && (
+        <>
+          <button
+            className={`v10-ka-verify-btn ${needsPromote ? 'gated' : ''}`}
+            onClick={handle}
+            disabled={busy}
+          >
+            {busy ? 'Publishing…' : cta}
+          </button>
+          <div className="v10-ka-verify-hint">
+            {needsPromote
+              ? 'Entity is still in Working Memory. Promote it to Shared Memory via the Assertions tab first, then come back here.'
+              : 'Anchors this entity on-chain with a TRAC-locked Knowledge Asset. Consensus signers and TX hash appear below on success.'}
+          </div>
+        </>
+      )}
+      {error && (
+        <div className="v10-ka-verify-err">✕ {error}</div>
+      )}
+      {result && (
+        <div className="v10-ka-verify-ok">
+          <div className="v10-ka-verify-ok-row">
+            <span className="v10-ka-verify-ok-lbl">Status</span>
+            <span className="v10-ka-verify-ok-val">✓ {result.status}</span>
+          </div>
+          {result.txHash && (
+            <div className="v10-ka-verify-ok-row">
+              <span className="v10-ka-verify-ok-lbl">TX hash</span>
+              <span className="v10-ka-verify-ok-val mono" title={result.txHash}>
+                {result.txHash.slice(0, 10)}…{result.txHash.slice(-6)}
+              </span>
+            </div>
+          )}
+          {result.blockNumber != null && (
+            <div className="v10-ka-verify-ok-row">
+              <span className="v10-ka-verify-ok-lbl">Block</span>
+              <span className="v10-ka-verify-ok-val mono">#{result.blockNumber}</span>
+            </div>
+          )}
+          {result.kas?.[0]?.tokenId && (
+            <div className="v10-ka-verify-ok-row">
+              <span className="v10-ka-verify-ok-lbl">Token</span>
+              <span className="v10-ka-verify-ok-val mono">#{result.kas[0].tokenId}</span>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function KADetailView({ entity, allEntities, allTriples, onNavigate, onClose, contextGraphId, onRefresh }: {
   entity: MemoryEntity;
   allEntities: Map<string, MemoryEntity>;
   allTriples: Triple[];
   onNavigate: (uri: string) => void;
   onClose: () => void;
+  contextGraphId: string;
+  onRefresh: () => void;
 }) {
   const [pane, setPane] = useState<KAPane>('content');
   const profile = useProjectProfileContext();
@@ -1620,14 +1749,18 @@ function KADetailView({ entity, allEntities, allTriples, onNavigate, onClose }: 
 
               {entity.connections.length > 0 && (
                 <div className="v10-ka-section">
-                  <div className="v10-ka-section-title">Links to ({entity.connections.length})</div>
-                  {entity.connections.map((conn, i) => (
-                    <button key={i} className="v10-ka-conn" onClick={() => onNavigate(conn.targetUri)}>
-                      <span className="v10-ka-conn-pred">{shortPred(conn.predicate)}</span>
-                      <span className="v10-ka-conn-arrow">→</span>
-                      <span className="v10-ka-conn-target">{conn.targetLabel}</span>
-                    </button>
-                  ))}
+                  <div className="v10-ka-section-title">References ({entity.connections.length})</div>
+                  {entity.connections.map((conn, i) => {
+                    const target = allEntities.get(conn.targetUri);
+                    return (
+                      <button key={i} className="v10-ka-conn" onClick={() => onNavigate(conn.targetUri)}>
+                        <span className="v10-ka-conn-pred">{shortPred(conn.predicate)}</span>
+                        <span className="v10-ka-conn-arrow">→</span>
+                        <span className="v10-ka-conn-target">{conn.targetLabel}</span>
+                        {target && <SubGraphBadge entity={target} profile={profile} />}
+                      </button>
+                    );
+                  })}
                 </div>
               )}
 
@@ -1637,6 +1770,7 @@ function KADetailView({ entity, allEntities, allTriples, onNavigate, onClose }: 
                   {incoming.map((inc, i) => (
                     <button key={i} className="v10-ka-conn" onClick={() => onNavigate(inc.entity.uri)}>
                       <span className="v10-ka-conn-target">{inc.entity.label}</span>
+                      <SubGraphBadge entity={inc.entity} profile={profile} />
                       <span className="v10-ka-conn-arrow">→</span>
                       <span className="v10-ka-conn-pred">{inc.pred}</span>
                     </button>
@@ -1724,6 +1858,13 @@ function KADetailView({ entity, allEntities, allTriples, onNavigate, onClose }: 
               <div className="v10-ka-event-desc">Extracted from imported data or agent conversation</div>
             </div>
           </div>
+
+          {/* Verify on DKG — prominent CTA for WM/SWM entities */}
+          <VerifyOnDkgButton
+            entity={entity}
+            contextGraphId={contextGraphId}
+            onVerified={onRefresh}
+          />
 
           {/* Trust Summary */}
           <div style={{ marginTop: 16, padding: '10px 12px', borderRadius: 6, background: 'var(--bg-surface)', border: '1px solid var(--border-subtle)' }}>
@@ -1836,6 +1977,24 @@ function SubGraphOverviewGrid({
     return bySg;
   }, [memory.allTriples]);
 
+  // Per-sub-graph layer counts — drives the mini pyramid on each card so
+  // you can see at a glance which sub-graphs are mostly verified vs still
+  // in flight. Computed from rawMemory.entityList intersected with the
+  // entity's subGraphs bag.
+  const layerCountsBySubGraph = useMemo(() => {
+    const out = new Map<string, { wm: number; swm: number; vm: number }>();
+    for (const e of memory.entityList) {
+      for (const sg of e.subGraphs) {
+        let counts = out.get(sg);
+        if (!counts) { counts = { wm: 0, swm: 0, vm: 0 }; out.set(sg, counts); }
+        if (e.layers.has('working'))  counts.wm++;
+        if (e.layers.has('shared'))   counts.swm++;
+        if (e.layers.has('verified')) counts.vm++;
+      }
+    }
+    return out;
+  }, [memory.entityList]);
+
   // Merge registered sub-graphs (minus `meta`) with profile bindings so
   // icon/color/label/rank all flow from the single source of truth.
   const cards = useMemo(() => {
@@ -1853,10 +2012,11 @@ function SubGraphOverviewGrid({
           entityCount: sg.entityCount,
           tripleCount: sg.tripleCount,
           triples: triplesBySubGraph.get(sg.name) ?? [],
+          layerCounts: layerCountsBySubGraph.get(sg.name) ?? { wm: 0, swm: 0, vm: 0 },
         };
       })
       .sort((a, b) => a.rank - b.rank);
-  }, [subGraphs, profile, triplesBySubGraph]);
+  }, [subGraphs, profile, triplesBySubGraph, layerCountsBySubGraph]);
 
   if (loading && cards.length === 0) {
     return (
@@ -1902,6 +2062,7 @@ function SubGraphMiniCard({
     slug: string; icon: string; color: string; displayName: string;
     description?: string; entityCount: number; tripleCount: number;
     triples: Triple[];
+    layerCounts: { wm: number; swm: number; vm: number };
   };
   onNodeClick?: (node: any) => void;
   onOpen: () => void;
@@ -1958,6 +2119,9 @@ function SubGraphMiniCard({
         <span className="v10-sgov-card-stat"><b>{card.entityCount}</b> entities</span>
         <span className="v10-sgov-card-stat"><b>{card.tripleCount}</b> triples</span>
       </div>
+      <div className="v10-sgov-card-pyramid">
+        <MiniLayerPyramid counts={card.layerCounts} />
+      </div>
       <div className="v10-sgov-card-graph">
         {card.triples.length === 0 ? (
           <div className="v10-sgov-card-empty">
@@ -1980,6 +2144,507 @@ function SubGraphMiniCard({
   );
 }
 
+// ─── MiniLayerPyramid ────────────────────────────────────────
+// Three-segment WM/SWM/VM bar. Used as a header widget in the sub-graph
+// page (clickable — toggles which layers contribute entities) and as a
+// compact badge on SubGraphOverviewGrid cards (read-only).
+function MiniLayerPyramid({
+  counts,
+  activeLayers,
+  onClickLayer,
+  compact = false,
+}: {
+  counts: { wm: number; swm: number; vm: number };
+  activeLayers?: Set<TrustLevel>;
+  onClickLayer?: (layer: TrustLevel) => void;
+  compact?: boolean;
+}) {
+  const total = counts.wm + counts.swm + counts.vm;
+  if (total === 0) {
+    return compact ? null : <div className="v10-minipyr v10-minipyr-empty">No data</div>;
+  }
+  const rows: Array<{ key: TrustLevel; short: string; count: number; color: string; label: string }> = [
+    { key: 'verified', short: 'VM',  count: counts.vm,  color: '#22c55e', label: 'Verified' },
+    { key: 'shared',   short: 'SWM', count: counts.swm, color: '#f59e0b', label: 'Shared' },
+    { key: 'working',  short: 'WM',  count: counts.wm,  color: '#64748b', label: 'Working' },
+  ];
+  const interactive = !!onClickLayer;
+  return (
+    <div className={`v10-minipyr${compact ? ' compact' : ''}`}>
+      {!compact && (
+        <div className="v10-minipyr-bar">
+          {rows.filter(r => r.count > 0).map(r => {
+            const pct = (r.count / total) * 100;
+            const active = activeLayers ? activeLayers.has(r.key) : true;
+            return (
+              <div
+                key={r.key}
+                className={`v10-minipyr-seg${active ? '' : ' dim'}`}
+                style={{ width: `${pct}%`, background: r.color }}
+                title={`${r.label}: ${r.count}`}
+              />
+            );
+          })}
+        </div>
+      )}
+      <div className="v10-minipyr-legend">
+        {rows.map(r => {
+          const active = activeLayers ? activeLayers.has(r.key) : true;
+          return (
+            <button
+              key={r.key}
+              type="button"
+              className={`v10-minipyr-chip${active ? '' : ' dim'}${interactive ? ' interactive' : ''}`}
+              onClick={interactive ? () => onClickLayer!(r.key) : undefined}
+              disabled={!interactive}
+              title={`${r.label} Memory — ${r.count} entities${interactive ? ' (click to toggle)' : ''}`}
+            >
+              <span className="v10-minipyr-dot" style={{ background: r.color }} />
+              <span className="v10-minipyr-short">{r.short}</span>
+              <span className="v10-minipyr-count">{r.count}</span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ─── SubGraphTimeline ────────────────────────────────────────
+// Horizontal ribbon of entities sorted by the sub-graph's declared
+// `profile:timelinePredicate`. Grouped into year-month buckets so the
+// ribbon has natural section headers.
+function SubGraphTimeline({
+  items,
+  color,
+  onSelectEntity,
+}: {
+  items: Array<{ entity: MemoryEntity; date: Date }>;
+  color: string;
+  onSelectEntity: (uri: string) => void;
+}) {
+  const profile = useProjectProfileContext();
+  const grouped = useMemo(() => {
+    const out = new Map<string, Array<{ entity: MemoryEntity; date: Date }>>();
+    for (const it of items) {
+      const key = `${it.date.getFullYear()}-${String(it.date.getMonth() + 1).padStart(2, '0')}`;
+      const arr = out.get(key) ?? [];
+      arr.push(it);
+      out.set(key, arr);
+    }
+    return [...out.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  }, [items]);
+
+  if (items.length === 0) {
+    return (
+      <div className="v10-subgraph-timeline-empty">
+        No entities in this sub-graph have a timeline value (check the profile's <code>timelinePredicate</code> and the underlying data).
+      </div>
+    );
+  }
+
+  return (
+    <div className="v10-subgraph-timeline">
+      {grouped.map(([bucket, rows]) => (
+        <div key={bucket} className="v10-subgraph-timeline-bucket">
+          <div className="v10-subgraph-timeline-bucket-head">
+            <span className="v10-subgraph-timeline-bucket-dot" style={{ background: color }} />
+            <span className="v10-subgraph-timeline-bucket-label">{formatTimelineBucket(bucket)}</span>
+            <span className="v10-subgraph-timeline-bucket-count">{rows.length}</span>
+          </div>
+          <div className="v10-subgraph-timeline-items">
+            {rows.map(({ entity, date }) => {
+              const { icon } = entityMeta(entity, profile);
+              return (
+                <button
+                  key={entity.uri}
+                  className="v10-subgraph-timeline-item"
+                  onClick={() => onSelectEntity(entity.uri)}
+                  title={`${entity.label} · ${date.toISOString().slice(0, 10)}`}
+                >
+                  <span className="v10-subgraph-timeline-item-icon">{icon}</span>
+                  <span className="v10-subgraph-timeline-item-label">{entity.label}</span>
+                  <span className="v10-subgraph-timeline-item-date">{date.toISOString().slice(0, 10)}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function formatTimelineBucket(ym: string): string {
+  const [y, m] = ym.split('-');
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const mi = Math.max(0, Math.min(11, parseInt(m, 10) - 1));
+  return `${months[mi]} ${y}`;
+}
+
+// ─── SubGraphDetailView ──────────────────────────────────────
+// Renders a sub-graph as a first-class page with the same Entities /
+// Graph / (optional) Timeline / Documents tabs as the layer views. The
+// layer axis becomes a secondary filter in the header via the mini
+// pyramid chips; `profile:FilterChip` rows filter by predicate value;
+// `profile:SavedQuery` pills run SPARQL and narrow the entity list.
+type SubGraphTab = 'items' | 'graph' | 'timeline' | 'docs';
+
+function SubGraphDetailView({
+  slug,
+  rawMemory,
+  contextGraphId,
+  onNodeClick,
+  onSelectEntity,
+}: {
+  slug: string;
+  rawMemory: ReturnType<typeof useMemoryEntities>;
+  contextGraphId: string;
+  onNodeClick: (node: any) => void;
+  onSelectEntity: (uri: string) => void;
+}) {
+  const profile = useProjectProfileContext();
+  const binding = profile?.forSubGraph(slug);
+  const chips = profile?.chipsFor(slug) ?? [];
+  const savedQueries = profile?.savedQueriesFor(slug) ?? [];
+  const timelinePredicate = binding?.timelinePredicate;
+
+  const [activeTab, setActiveTab] = useState<SubGraphTab>('items');
+  const [enabledLayers, setEnabledLayers] = useState<Set<TrustLevel>>(
+    () => new Set<TrustLevel>(['working', 'shared', 'verified']),
+  );
+  const [chipState, setChipState] = useState<Map<string, Set<string>>>(new Map());
+  const [activeQuerySlug, setActiveQuerySlug] = useState<string | null>(null);
+  const [queryResults, setQueryResults] = useState<Set<string> | null>(null);
+  const [queryLoading, setQueryLoading] = useState(false);
+  const [queryError, setQueryError] = useState<string | null>(null);
+
+  // Base slice: every entity that has at least one WM triple in this sub-graph.
+  // SWM/VM triples don't carry sub-graph origin, so we additionally pull in
+  // any SWM/VM entity whose URI matches a scoped one (preserving the promoted
+  // slices of the same entity across layers).
+  const scopedEntities = useMemo(() => {
+    const scoped: MemoryEntity[] = [];
+    for (const e of rawMemory.entityList) {
+      if (e.subGraphs.has(slug)) scoped.push(e);
+    }
+    return scoped;
+  }, [rawMemory.entityList, slug]);
+
+  const scopedUris = useMemo(
+    () => new Set(scopedEntities.map(e => e.uri)),
+    [scopedEntities],
+  );
+
+  // Triples visible in the Graph tab: anything tagged with this sub-graph's
+  // origin, plus any triple whose endpoints are both scoped entities (this
+  // carries promoted SWM/VM edges whose origin was erased on promotion).
+  const scopedTriples = useMemo(
+    () => rawMemory.graphTriples.filter(t =>
+      t.subGraph === slug || (scopedUris.has(t.subject) && scopedUris.has(t.object)),
+    ),
+    [rawMemory.graphTriples, scopedUris, slug],
+  );
+
+  // Layer counts for the pyramid header.
+  const layerCounts = useMemo(() => {
+    let wm = 0, swm = 0, vm = 0;
+    for (const e of scopedEntities) {
+      if (e.layers.has('working'))  wm++;
+      if (e.layers.has('shared'))   swm++;
+      if (e.layers.has('verified')) vm++;
+    }
+    return { wm, swm, vm, total: scopedEntities.length };
+  }, [scopedEntities]);
+
+  // Apply the three filter axes on top of the base scope.
+  const filteredEntities = useMemo(() => {
+    let out = scopedEntities;
+    if (enabledLayers.size < 3) {
+      out = out.filter(e => enabledLayers.has(e.trustLevel));
+    }
+    if (chipState.size > 0) {
+      for (const chip of chips) {
+        const selected = chipState.get(chip.slug);
+        if (!selected || selected.size === 0) continue;
+        out = out.filter(e => {
+          const vals = e.properties.get(chip.predicate);
+          if (!vals || vals.length === 0) return false;
+          return vals.some(v => selected.has(v));
+        });
+      }
+    }
+    if (queryResults) {
+      out = out.filter(e => queryResults.has(e.uri));
+    }
+    return out;
+  }, [scopedEntities, enabledLayers, chipState, chips, queryResults]);
+
+  const filteredUris = useMemo(
+    () => new Set(filteredEntities.map(e => e.uri)),
+    [filteredEntities],
+  );
+
+  const filteredTriples = useMemo(() => {
+    if (filteredEntities.length === scopedEntities.length) return scopedTriples;
+    return scopedTriples.filter(
+      t => filteredUris.has(t.subject) || filteredUris.has(t.object),
+    );
+  }, [scopedTriples, scopedEntities, filteredEntities, filteredUris]);
+
+  const timelineItems = useMemo(() => {
+    if (!timelinePredicate) return [];
+    const out: Array<{ entity: MemoryEntity; date: Date }> = [];
+    for (const e of filteredEntities) {
+      const vals = e.properties.get(timelinePredicate);
+      if (!vals?.[0]) continue;
+      const dstr = vals[0].replace(/^"|"$/g, '').replace(/^"(.+)"(?:@\w+|\^\^.+)?$/, '$1');
+      const d = new Date(dstr);
+      if (isNaN(d.getTime())) continue;
+      out.push({ entity: e, date: d });
+    }
+    out.sort((a, b) => a.date.getTime() - b.date.getTime());
+    return out;
+  }, [filteredEntities, timelinePredicate]);
+
+  const toggleLayer = useCallback((layer: TrustLevel) => {
+    setEnabledLayers(prev => {
+      const next = new Set(prev);
+      if (next.has(layer)) {
+        // Refuse to turn off the last enabled layer — otherwise the list
+        // empties with no obvious recovery affordance.
+        if (next.size > 1) next.delete(layer);
+      } else {
+        next.add(layer);
+      }
+      return next;
+    });
+  }, []);
+
+  const toggleChip = useCallback((chipSlug: string, value: string) => {
+    setChipState(prev => {
+      const next = new Map(prev);
+      const curr = new Set(next.get(chipSlug) ?? []);
+      if (curr.has(value)) curr.delete(value);
+      else curr.add(value);
+      if (curr.size === 0) next.delete(chipSlug);
+      else next.set(chipSlug, curr);
+      return next;
+    });
+  }, []);
+
+  const clearQuery = useCallback(() => {
+    setActiveQuerySlug(null);
+    setQueryResults(null);
+    setQueryError(null);
+  }, []);
+
+  const runQuery = useCallback(async (q: { slug: string; sparql: string; resultColumn: string; name: string }) => {
+    setQueryLoading(true);
+    setQueryError(null);
+    setActiveQuerySlug(q.slug);
+    try {
+      const r = await executeQuery(q.sparql, contextGraphId);
+      const bindings = (r as any)?.result?.bindings ?? [];
+      const col = q.resultColumn || 'uri';
+      const ids = new Set<string>();
+      for (const row of bindings) {
+        const raw = (row as any)[col];
+        if (!raw) continue;
+        const s = typeof raw === 'string' ? raw : String(raw);
+        const iri = s.startsWith('<') && s.endsWith('>') ? s.slice(1, -1) : s;
+        ids.add(iri);
+      }
+      setQueryResults(ids);
+    } catch (err: any) {
+      setQueryError(err?.message ?? String(err));
+      setQueryResults(null);
+      setActiveQuerySlug(null);
+    } finally {
+      setQueryLoading(false);
+    }
+  }, [contextGraphId]);
+
+  const color = binding?.color ?? '#64748b';
+  const icon = binding?.icon ?? '•';
+  const title = binding?.displayName ?? slug;
+  const desc = binding?.description;
+
+  // Reset filters when the sub-graph changes — otherwise chips from
+  // `tasks` would linger when the user jumps to `decisions` and silently
+  // zero out the list.
+  useEffect(() => {
+    setActiveTab('items');
+    setEnabledLayers(new Set<TrustLevel>(['working', 'shared', 'verified']));
+    setChipState(new Map());
+    clearQuery();
+  }, [slug, clearQuery]);
+
+  const hasAnyFilter = enabledLayers.size < 3 || chipState.size > 0 || !!queryResults;
+  const resetFilters = () => {
+    setEnabledLayers(new Set<TrustLevel>(['working', 'shared', 'verified']));
+    setChipState(new Map());
+    clearQuery();
+  };
+
+  return (
+    <div
+      className="v10-layer-detail v10-subgraph-detail"
+      style={{ '--sg-color': color } as React.CSSProperties}
+    >
+      <div className="v10-subgraph-detail-header">
+        <span className="v10-subgraph-detail-icon" style={{ color }}>{icon}</span>
+        <div className="v10-subgraph-detail-title-wrap">
+          <div className="v10-subgraph-detail-title">{title}</div>
+          {desc && <div className="v10-subgraph-detail-desc">{desc}</div>}
+        </div>
+        <MiniLayerPyramid
+          counts={{ wm: layerCounts.wm, swm: layerCounts.swm, vm: layerCounts.vm }}
+          activeLayers={enabledLayers}
+          onClickLayer={toggleLayer}
+        />
+      </div>
+
+      {savedQueries.length > 0 && (
+        <div className="v10-subgraph-savedqueries">
+          <span className="v10-subgraph-savedqueries-label">Saved queries</span>
+          {savedQueries.map(q => {
+            const isActive = activeQuerySlug === q.slug;
+            return (
+              <button
+                key={q.slug}
+                type="button"
+                className={`v10-subgraph-savedquery${isActive ? ' active' : ''}`}
+                onClick={() => isActive ? clearQuery() : runQuery(q)}
+                title={q.description || q.name}
+                disabled={queryLoading && !isActive}
+              >
+                <span className="v10-subgraph-savedquery-glyph">
+                  {queryLoading && isActive ? '…' : isActive ? '✓' : '◎'}
+                </span>
+                {q.name}
+              </button>
+            );
+          })}
+          {queryError && (
+            <span className="v10-subgraph-savedquery-error" title={queryError}>✕ query failed</span>
+          )}
+          {queryResults && activeQuerySlug && (
+            <span className="v10-subgraph-savedquery-count">
+              {queryResults.size} match{queryResults.size === 1 ? '' : 'es'}
+            </span>
+          )}
+        </div>
+      )}
+
+      {chips.length > 0 && (
+        <div className="v10-subgraph-filters">
+          {chips.map(chip => {
+            const selected = chipState.get(chip.slug) ?? new Set<string>();
+            return (
+              <div key={chip.slug} className="v10-subgraph-filter-row">
+                <span className="v10-subgraph-filter-label">{chip.label}</span>
+                <div className="v10-subgraph-filter-chips">
+                  {chip.values.map(v => {
+                    const on = selected.has(v);
+                    return (
+                      <button
+                        key={v}
+                        type="button"
+                        className={`v10-subgraph-filter-chip${on ? ' active' : ''}`}
+                        onClick={() => toggleChip(chip.slug, v)}
+                      >
+                        {v}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })}
+          {hasAnyFilter && (
+            <button type="button" className="v10-subgraph-filter-reset" onClick={resetFilters}>
+              Reset filters
+            </button>
+          )}
+        </div>
+      )}
+
+      <div className="v10-layer-detail-body">
+        <div className="v10-layer-expand-tabs">
+          <button
+            className={`v10-layer-expand-tab ${activeTab === 'items' ? 'active' : ''}`}
+            onClick={() => setActiveTab('items')}
+          >
+            Entities ({filteredEntities.length}{filteredEntities.length !== scopedEntities.length ? ` / ${scopedEntities.length}` : ''})
+          </button>
+          <button
+            className={`v10-layer-expand-tab ${activeTab === 'graph' ? 'active' : ''}`}
+            onClick={() => setActiveTab('graph')}
+          >
+            Graph
+          </button>
+          {timelinePredicate && (
+            <button
+              className={`v10-layer-expand-tab ${activeTab === 'timeline' ? 'active' : ''}`}
+              onClick={() => setActiveTab('timeline')}
+            >
+              Timeline
+            </button>
+          )}
+          <button
+            className={`v10-layer-expand-tab ${activeTab === 'docs' ? 'active' : ''}`}
+            onClick={() => setActiveTab('docs')}
+          >
+            Documents
+          </button>
+        </div>
+
+        {activeTab === 'items' && (
+          <div className="v10-layer-expand-body entities-tab">
+            <EntityList
+              entities={filteredEntities}
+              layerKey="wm"
+              layerIcon={icon}
+              onSelectEntity={onSelectEntity}
+            />
+          </div>
+        )}
+
+        {activeTab === 'graph' && (
+          <div className="v10-layer-expand-body full-width">
+            <LayerGraphPanel
+              layer="wm"
+              triples={filteredTriples}
+              onNodeClick={onNodeClick}
+              contextGraphId={contextGraphId}
+            />
+          </div>
+        )}
+
+        {activeTab === 'timeline' && timelinePredicate && (
+          <div className="v10-layer-expand-body full-width">
+            <SubGraphTimeline
+              items={timelineItems}
+              color={color}
+              onSelectEntity={onSelectEntity}
+            />
+          </div>
+        )}
+
+        {activeTab === 'docs' && (
+          <div className="v10-layer-expand-body full-width">
+            <DocumentsList
+              entities={filteredEntities}
+              contextGraphId={contextGraphId}
+            />
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ─── Main ProjectView ────────────────────────────────────────
 
 export function ProjectView({ contextGraphId }: ProjectViewProps) {
@@ -1989,7 +2654,11 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   const [activeLayer, setActiveLayer] = useState<LayerView>('overview');
   const [selectedUri, setSelectedUri] = useState<string | null>(null);
   const [participants, setParticipants] = useState<string[]>([]);
-  const [selectedSubGraph, setSelectedSubGraph] = useState<string | null>(null);
+  // Active sub-graph *page* — when set, the middle pane renders the sub-graph
+  // detail view instead of the overview / layer views. This is structurally
+  // a sibling of `activeLayer`, not a filter over it: sub-graphs are a peer
+  // axis to layers, and each axis gets its own first-class page.
+  const [activeSubGraph, setActiveSubGraph] = useState<string | null>(null);
   const profile = useProjectProfile(contextGraphId);
 
   const cg = useMemo(
@@ -1998,40 +2667,6 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   );
 
   const rawMemory = useMemoryEntities(contextGraphId);
-
-  // When the user picks a sub-graph chip we transparently downscope every
-  // downstream surface (Memory Strip, Layer tabs, graph panels, provenance
-  // bar) without having to thread the selection through each component.
-  // Entities are matched through their `subGraphs` bag collected from
-  // triple origin. SWM/VM triples don't carry sub-graph origin yet, so a
-  // sub-graph selection naturally narrows the visible memory to WM — which
-  // is the right behaviour for the current PoC data shape.
-  const memory = useMemo<typeof rawMemory>(() => {
-    if (!selectedSubGraph) return rawMemory;
-    const sg = selectedSubGraph;
-    const entityList = rawMemory.entityList.filter(e => e.subGraphs.has(sg));
-    const keep = new Set(entityList.map(e => e.uri));
-    const entities = new Map<string, MemoryEntity>();
-    for (const uri of keep) {
-      const e = rawMemory.entities.get(uri);
-      if (e) entities.set(uri, e);
-    }
-    const allTriples = rawMemory.allTriples.filter(
-      t => t.subGraph === sg || (keep.has(t.subject) && keep.has(t.object)),
-    );
-    const graphTriples = rawMemory.graphTriples.filter(
-      t => t.subGraph === sg || (keep.has(t.subject) && keep.has(t.object)),
-    );
-    const trustMap = new Map<string, TrustLevel>();
-    for (const [u, level] of rawMemory.trustMap) if (keep.has(u)) trustMap.set(u, level);
-    const counts = {
-      wm: new Set(allTriples.filter(t => t.layer === 'working').map(t => t.subject)).size,
-      swm: new Set(allTriples.filter(t => t.layer === 'shared').map(t => t.subject)).size,
-      vm: new Set(allTriples.filter(t => t.layer === 'verified').map(t => t.subject)).size,
-      total: entities.size,
-    };
-    return { ...rawMemory, entities, entityList, allTriples, graphTriples, trustMap, counts };
-  }, [rawMemory, selectedSubGraph]);
 
   const refreshParticipants = useCallback(() => {
     if (cg?.id) {
@@ -2044,12 +2679,38 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   useEffect(() => { refreshParticipants(); }, [refreshParticipants]);
 
   const selectedEntity = useMemo(
-    () => selectedUri ? memory.entities.get(selectedUri) ?? null : null,
-    [selectedUri, memory.entities]
+    () => selectedUri ? rawMemory.entities.get(selectedUri) ?? null : null,
+    [selectedUri, rawMemory.entities]
   );
 
-  const handleNavigate = useCallback((uri: string) => { setSelectedUri(uri); }, []);
-  const handleNodeClick = useCallback((node: any) => { if (node?.id) setSelectedUri(node.id); }, []);
+  // Route a sub-graph chip click to the sub-graph page. Selecting "All"
+  // (null) exits the page back to the current layer view, or overview if
+  // we were already on one.
+  const handleSelectSubGraph = useCallback((slug: string | null) => {
+    setActiveSubGraph(slug);
+    setSelectedUri(null);
+  }, []);
+
+  // Cross-sub-graph jump: when the user clicks an entity link that lives
+  // in a different sub-graph, switch pages and open the entity detail.
+  // Falls back to just opening the detail if the entity has no sub-graph
+  // origin (SWM/VM entities without WM presence).
+  const handleNavigate = useCallback((uri: string) => {
+    const target = rawMemory.entities.get(uri);
+    if (target && target.subGraphs.size > 0) {
+      // Prefer the active sub-graph if the entity lives in it (stay put);
+      // otherwise hop to the first sub-graph it belongs to.
+      if (!activeSubGraph || !target.subGraphs.has(activeSubGraph)) {
+        const next = target.subGraphs.values().next().value;
+        if (next && next !== 'meta') setActiveSubGraph(next);
+      }
+    }
+    setSelectedUri(uri);
+  }, [rawMemory.entities, activeSubGraph]);
+
+  const handleNodeClick = useCallback((node: any) => {
+    if (node?.id) handleNavigate(node.id);
+  }, [handleNavigate]);
 
   if (!cg) {
     return (
@@ -2062,46 +2723,72 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   return (
     <ProjectProfileContext.Provider value={profile}>
     <div className="v10-memory-explorer">
-      {/* Layer Switcher */}
-      <LayerSwitcher
-        active={activeLayer}
-        counts={memory.counts}
-        onSwitch={v => { setActiveLayer(v); setSelectedUri(null); }}
-        onShare={() => setShowShare(true)}
-        onImport={() => setShowImport(true)}
-        onRefresh={memory.refresh}
-      />
+      {/* Layer Switcher — hidden while a sub-graph page is active because the
+          sub-graph page has its own layer filter (the mini pyramid). */}
+      {!activeSubGraph && (
+        <LayerSwitcher
+          active={activeLayer}
+          counts={rawMemory.counts}
+          onSwitch={v => { setActiveLayer(v); setSelectedUri(null); }}
+          onShare={() => setShowShare(true)}
+          onImport={() => setShowImport(true)}
+          onRefresh={rawMemory.refresh}
+        />
+      )}
 
       {/* Drilldown overlay */}
       {selectedEntity && (
         <KADetailView
           entity={selectedEntity}
-          allEntities={memory.entities}
-          allTriples={memory.graphTriples}
+          allEntities={rawMemory.entities}
+          allTriples={rawMemory.graphTriples}
           onNavigate={handleNavigate}
           onClose={() => setSelectedUri(null)}
+          contextGraphId={contextGraphId}
+          onRefresh={rawMemory.refresh}
         />
       )}
 
-      {/* Overview View */}
-      {activeLayer === 'overview' && !selectedEntity && (
+      {/* Sub-graph page mode — first-class peer of the layer views */}
+      {activeSubGraph && !selectedEntity && (
         <>
-          <ProjectOverviewCard cg={cg} memory={memory} participants={participants} />
+          <SubGraphBar
+            contextGraphId={contextGraphId}
+            profile={profile}
+            selected={activeSubGraph}
+            entities={rawMemory.entityList}
+            onSelect={handleSelectSubGraph}
+          />
+          <SubGraphDetailView
+            slug={activeSubGraph}
+            rawMemory={rawMemory}
+            contextGraphId={contextGraphId}
+            onNodeClick={handleNodeClick}
+            onSelectEntity={handleNavigate}
+          />
+        </>
+      )}
+
+      {/* Overview View */}
+      {!activeSubGraph && activeLayer === 'overview' && !selectedEntity && (
+        <>
+          <ProjectOverviewCard cg={cg} memory={rawMemory} participants={participants} />
           <PendingJoinRequestsBar contextGraphId={contextGraphId} onParticipantsChanged={refreshParticipants} />
           <SubGraphBar
             contextGraphId={contextGraphId}
             profile={profile}
-            selected={selectedSubGraph}
-            onSelect={setSelectedSubGraph}
+            selected={activeSubGraph}
+            entities={rawMemory.entityList}
+            onSelect={handleSelectSubGraph}
           />
-          {memory.loading && (
+          {rawMemory.loading && (
             <div className="v10-me-loading"><div className="v10-me-loading-text">Loading memory...</div></div>
           )}
-          {memory.error && (
-            <div className="v10-me-error">Error: {memory.error}</div>
+          {rawMemory.error && (
+            <div className="v10-me-error">Error: {rawMemory.error}</div>
           )}
           <MemoryStrip
-            memory={memory}
+            memory={rawMemory}
             onSwitchLayer={setActiveLayer}
             onSelectEntity={handleNavigate}
             contextGraphId={contextGraphId}
@@ -2111,30 +2798,28 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
       )}
 
       {/* Graph Overview — one mini graph per sub-graph, side-by-side */}
-      {activeLayer === 'graph-overview' && !selectedEntity && (
+      {!activeSubGraph && activeLayer === 'graph-overview' && !selectedEntity && (
         <SubGraphOverviewGrid
           contextGraphId={contextGraphId}
           memory={rawMemory}
           onNodeClick={handleNodeClick}
-          onSelectSubGraph={slug => {
-            setSelectedSubGraph(slug);
-            setActiveLayer('wm');
-          }}
+          onSelectSubGraph={handleSelectSubGraph}
         />
       )}
 
       {/* Layer Detail Views */}
-      {(activeLayer === 'wm' || activeLayer === 'swm' || activeLayer === 'vm') && !selectedEntity && (
+      {!activeSubGraph && (activeLayer === 'wm' || activeLayer === 'swm' || activeLayer === 'vm') && !selectedEntity && (
         <>
           <SubGraphBar
             contextGraphId={contextGraphId}
             profile={profile}
-            selected={selectedSubGraph}
-            onSelect={setSelectedSubGraph}
+            selected={activeSubGraph}
+            entities={rawMemory.entityList}
+            onSelect={handleSelectSubGraph}
           />
           <LayerDetailView
             layer={activeLayer}
-            memory={memory}
+            memory={rawMemory}
             onNodeClick={handleNodeClick}
             onSelectEntity={handleNavigate}
             contextGraphId={contextGraphId}
@@ -2143,7 +2828,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
       )}
 
       {/* Provenance Bar */}
-      <ProvenanceBar memory={memory} />
+      <ProvenanceBar memory={rawMemory} />
 
       <ImportFilesModal
         open={showImport}

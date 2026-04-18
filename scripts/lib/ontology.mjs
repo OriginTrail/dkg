@@ -199,12 +199,21 @@ export const Profile = {
     SubGraphBinding: NS.profile + 'SubGraphBinding',
     EntityTypeBinding: NS.profile + 'EntityTypeBinding',
     ViewConfig: NS.profile + 'ViewConfig',
+    // A FilterChip declares an interactive filter for an entity type in a
+    // sub-graph page (e.g. status chips for decisions, priority chips for
+    // tasks). The UI reads these and renders a chip row above the entity
+    // list with zero domain-specific code.
+    FilterChip: NS.profile + 'FilterChip',
+    // A SavedQuery is a ViewConfig that carries a SPARQL query instead of a
+    // declarative includeTypes list. Rendered as a pill; click runs the
+    // query and dumps results into the current entity list.
+    SavedQuery: NS.profile + 'SavedQuery',
   },
   P: {
     appliesTo: NS.profile + 'appliesTo',         // Profile -> context graph id (IRI or literal)
     ofProfile: NS.profile + 'ofProfile',         // Binding/View -> Profile
-    forSubGraph: NS.profile + 'forSubGraph',     // SubGraphBinding -> literal sub-graph name
-    forType: NS.profile + 'forType',             // EntityTypeBinding -> rdf:type IRI
+    forSubGraph: NS.profile + 'forSubGraph',     // SubGraphBinding / FilterChip / SavedQuery -> sub-graph name
+    forType: NS.profile + 'forType',             // EntityTypeBinding / FilterChip -> rdf:type IRI
     displayName: NS.profile + 'displayName',
     icon: NS.profile + 'icon',                   // emoji / short glyph
     color: NS.profile + 'color',                 // hex
@@ -218,6 +227,22 @@ export const Profile = {
     emphasizePredicate: NS.profile + 'emphasizePredicate', // ViewConfig -> predicate IRI
     nodeSize: NS.profile + 'nodeSize',           // "degree" | "uniform"
     defaultView: NS.profile + 'defaultView',     // Profile -> ViewConfig
+    // ── Filter chip extension ────────────────────────────────────
+    // A chip filters the entity list by (forSubGraph + forType) matching
+    // `onPredicate = value`. Multiple chips stack as OR within the same
+    // predicate, AND across predicates.
+    onPredicate: NS.profile + 'onPredicate',     // FilterChip -> predicate IRI
+    chipValue: NS.profile + 'chipValue',         // FilterChip -> literal value (repeat per enum value)
+    // ── Timeline extension ───────────────────────────────────────
+    // Opts a sub-graph into the Timeline tab. The UI picks up the declared
+    // predicate and renders a time-sorted ribbon of the sub-graph's entities.
+    timelinePredicate: NS.profile + 'timelinePredicate', // SubGraphBinding -> predicate IRI (a date/dateTime)
+    // ── Saved SPARQL queries (ViewConfig extension) ──────────────
+    // A SavedQuery ViewConfig renders as a pill above the entity list. On
+    // click the UI runs the query against the project's SPARQL endpoint
+    // and displays the result set as the filtered entity list.
+    sparqlQuery: NS.profile + 'sparqlQuery',     // SavedQuery -> literal SPARQL text
+    resultColumn: NS.profile + 'resultColumn',   // SavedQuery -> literal column name yielding ?uri
   },
   uri: {
     profile: (projectId) => `urn:dkg:profile:${encodeURIComponent(projectId)}`,
@@ -225,6 +250,10 @@ export const Profile = {
       `urn:dkg:profile:${encodeURIComponent(projectId)}:binding:${encodeURIComponent(slug)}`,
     view: (projectId, slug) =>
       `urn:dkg:profile:${encodeURIComponent(projectId)}:view:${encodeURIComponent(slug)}`,
+    chip: (projectId, slug) =>
+      `urn:dkg:profile:${encodeURIComponent(projectId)}:chip:${encodeURIComponent(slug)}`,
+    query: (projectId, slug) =>
+      `urn:dkg:profile:${encodeURIComponent(projectId)}:query:${encodeURIComponent(slug)}`,
   },
 };
 
