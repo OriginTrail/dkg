@@ -110,7 +110,7 @@ function log(msg) {
 // constrained environment and bundling `yaml` would slow every event.
 // The config shape we care about is line-oriented enough that a tiny
 // hand-rolled parser covers every realistic case.
-function parseDotDkgConfig(yamlText) {
+export function parseDotDkgConfig(yamlText) {
   const lines = yamlText.split(/\r?\n/);
   const cfg = { node: {}, agent: {}, capture: {} };
   let stack = [cfg];
@@ -245,7 +245,7 @@ async function readStdinJson() {
 // without us having to know it exactly up front. The spike hook
 // (dump-spike.mjs) tells us the real field names; this function lets us
 // bridge that gap without breaking once we learn them.
-function pick(obj, candidates, depth = 0) {
+export function pick(obj, candidates, depth = 0) {
   if (depth > 4 || obj == null || typeof obj !== 'object') return undefined;
   for (const c of candidates) {
     if (Object.prototype.hasOwnProperty.call(obj, c)) {
@@ -263,7 +263,7 @@ function pick(obj, candidates, depth = 0) {
   return undefined;
 }
 
-function extractText(payload) {
+export function extractText(payload) {
   // Field names confirmed from Cursor 3.1.15 payloads (2026-04-18):
   //   beforeSubmitPrompt → { prompt, conversation_id, … }
   //   afterAgentResponse → { text, conversation_id, model, … }
@@ -282,7 +282,7 @@ function extractText(payload) {
   return t ?? '';
 }
 
-function extractSessionKey(payload) {
+export function extractSessionKey(payload) {
   const id =
     pick(payload, [
       // Cursor 3.1.15 uses snake_case at top level
@@ -320,7 +320,7 @@ function extractMeta(payload) {
   };
 }
 
-function sanitiseSlug(s) {
+export function sanitiseSlug(s) {
   return String(s).replace(/[^A-Za-z0-9._-]+/g, '-').slice(0, 80);
 }
 
@@ -573,7 +573,7 @@ async function applyPendingAnnotations(cfg, sessionKey, turnUri) {
 // the skip ("agent-skipped-dkg-annotate-turn-prior-reply-despite-..."
 // — preserved at urn:dkg:finding:agent-skipped-...). This per-turn
 // nudge closes that gap without bloating context.
-function buildPerTurnReminder(sessionKey) {
+export function buildPerTurnReminder(sessionKey) {
   return `**DKG annotation reminder (this turn):** after your reply, call \`dkg_annotate_turn\` with \`forSession: "${sessionKey}"\` and at minimum 2-3 \`topics\` plus \`mentions\` URIs from \`dkg_search\`. Required for every substantive turn (definition is broad — anything that reasoned, examined, proposed, or referenced something counts). Skipping is the failure mode. Full protocol: see session-start context + \`.cursor/rules/dkg-annotate.mdc\`.`;
 }
 
@@ -586,7 +586,7 @@ function buildPerTurnReminder(sessionKey) {
 // Agent-emitted richer triples (chat:examines / chat:proposes / etc.)
 // remain additive on top.
 const URN_DKG_RE = /urn:dkg:[\w@:%./-]+(?:\/[\w@:%./-]+)*[\w%]/g;
-function extractMentionedUris(...texts) {
+export function extractMentionedUris(...texts) {
   const found = new Set();
   for (const t of texts) {
     if (!t) continue;

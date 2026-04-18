@@ -10,12 +10,17 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "clean": "rm -rf dist"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1",
     "zod": "^3.25",
     "yaml": "^2.6.0"
+  },
+  "devDependencies": {
+    "vitest": "^4.0.18"
   },
   "publishConfig": {
     "access": "public"

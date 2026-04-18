@@ -81,7 +81,7 @@ const STOPWORDS = new Set([
   'the', 'a', 'an', 'of', 'for', 'and', 'or', 'to', 'in', 'on', 'with',
 ]);
 
-function normaliseSlug(input: string): string {
+export function normaliseSlug(input: string): string {
   // 1. lowercase. 2. NFKD + strip diacritics. 3. strip stopwords.
   // 4. hyphenate. 5. trim. 6. truncate to 60.
   const folded = input
@@ -108,7 +108,7 @@ function emit(
 }
 
 /** Wrap a bare string as a URI if it doesn't already look like one. */
-function toUri(maybeUri: string, defaultType = 'concept'): string {
+export function toUri(maybeUri: string, defaultType = 'concept'): string {
   if (maybeUri.startsWith('urn:') || maybeUri.startsWith('http:') || maybeUri.startsWith('https:') || maybeUri.startsWith('did:')) {
     return maybeUri;
   }
