@@ -457,6 +457,36 @@ button:focus:not(:focus-visible) { outline: none; }
   color: var(--accent-red, #ef4444);
 }
 
+/* "My Projects" / "Participating Projects" group dividers */
+.v10-tree-group-label {
+  padding: 10px 14px 3px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-ghost);
+}
+
+/* Move-to-other-group button (⤑), same reveal-on-hover shape as hide */
+.v10-tree-move-btn {
+  flex-shrink: 0;
+  margin-left: 4px;
+  width: 18px; height: 18px;
+  padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: none; background: none;
+  color: var(--text-ghost);
+  font-size: 12px; line-height: 1;
+  cursor: pointer; border-radius: 4px;
+  opacity: 0;
+  transition: opacity 0.15s, background 0.15s, color 0.15s;
+}
+.v10-tree-section-header:hover .v10-tree-move-btn { opacity: 1; }
+.v10-tree-move-btn:hover {
+  background: rgba(59, 130, 246, 0.12);
+  color: var(--accent-blue, #3b82f6);
+}
+
 .v10-tree-show-hidden {
   display: block;
   width: calc(100% - 16px);
@@ -4188,6 +4218,273 @@ body.light .v10-me-graph-legend { background: rgba(255,255,255,0.8); }
   color: var(--text-tertiary);
   text-transform: none;
   letter-spacing: 0;
+}
+
+/* ── Memory Stack — cross-project 3-layer overview ── */
+.v10-memstack {
+  display: flex; flex-direction: column;
+  height: 100%; overflow: auto;
+  padding: 18px 22px 28px;
+}
+.v10-memstack-head {
+  margin-bottom: 18px;
+}
+.v10-memstack-title {
+  font-size: 20px; font-weight: 600;
+  color: var(--text-primary);
+  margin: 0 0 4px 0;
+}
+.v10-memstack-sub {
+  font-size: 12px; color: var(--text-tertiary);
+  margin: 0;
+}
+.v10-memstack-empty {
+  font-size: 12px; color: var(--text-tertiary);
+  padding: 40px 0;
+  text-align: center;
+  border: 1px dashed var(--border-subtle);
+  border-radius: 8px;
+}
+.v10-memstack-table {
+  display: flex; flex-direction: column;
+  gap: 10px;
+}
+.v10-memstack-colheads {
+  display: grid;
+  grid-template-columns: 220px repeat(3, 1fr);
+  gap: 10px;
+  padding: 0 2px 4px;
+}
+.v10-memstack-colhead {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.06em;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.v10-memstack-colhead.project { border-bottom: none; }
+.v10-memstack-colhead-icon { font-size: 14px; line-height: 1; }
+.v10-memstack-colhead-title { color: inherit; }
+.v10-memstack-colhead-desc {
+  margin-left: auto;
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--text-ghost);
+  font-size: 10px;
+}
+.v10-memstack-row {
+  display: grid;
+  grid-template-columns: 220px repeat(3, 1fr);
+  gap: 10px;
+  align-items: stretch;
+}
+.v10-memstack-project {
+  display: flex; flex-direction: column;
+  padding: 12px 10px;
+  border-right: 1px solid var(--border-subtle);
+}
+.v10-memstack-project-btn {
+  display: flex; align-items: center; gap: 8px;
+  padding: 0; background: none; border: none;
+  color: var(--text-primary);
+  font-size: 13px; font-weight: 600;
+  cursor: pointer; text-align: left;
+  font-family: var(--font-sans);
+  transition: color 0.15s;
+}
+.v10-memstack-project-btn:hover { color: var(--accent-blue, #3b82f6); }
+.v10-memstack-project-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: #a855f7;
+  box-shadow: 0 0 0 3px rgba(168,85,247,0.15);
+  flex-shrink: 0;
+}
+.v10-memstack-project-name {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.v10-memstack-project-desc {
+  font-size: 11px; color: var(--text-tertiary);
+  margin-top: 4px;
+  line-height: 1.45;
+  max-height: 3em;
+  overflow: hidden;
+}
+.v10-memstack-project-status {
+  margin-top: 6px;
+  font-size: 10px; color: var(--text-ghost);
+  font-style: italic;
+}
+.v10-memstack-project-status.error { color: var(--accent-red, #ef4444); }
+
+.v10-memstack-cell {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--cell-color, #64748b) 20%, var(--border-subtle));
+  background: color-mix(in srgb, var(--cell-color, #64748b) 3%, transparent);
+  min-height: 130px;
+}
+.v10-memstack-cell.empty {
+  opacity: 0.5;
+  background: transparent;
+}
+.v10-memstack-cell-stats {
+  display: flex; align-items: baseline; gap: 4px;
+  flex-wrap: wrap;
+}
+.v10-memstack-cell-n {
+  font-size: 20px; font-weight: 700;
+  font-family: var(--font-mono);
+  color: var(--cell-color, var(--text-primary));
+  line-height: 1;
+}
+.v10-memstack-cell-n-lbl {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.v10-memstack-cell-sep { color: var(--text-ghost); margin: 0 2px; }
+.v10-memstack-cell-t {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.v10-memstack-cell-t-lbl {
+  font-size: 9px;
+  color: var(--text-ghost);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.v10-memstack-cell-recent {
+  list-style: none; margin: 0; padding: 0;
+  display: flex; flex-direction: column; gap: 2px;
+  flex: 1;
+}
+.v10-memstack-cell-recent-item {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11px; color: var(--text-secondary);
+  padding: 2px 0;
+}
+.v10-memstack-cell-recent-bullet {
+  width: 4px; height: 4px; border-radius: 50%;
+  background: var(--cell-color, #64748b);
+  flex-shrink: 0;
+}
+.v10-memstack-cell-recent-label {
+  flex: 1;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.v10-memstack-cell-recent-time {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--text-ghost);
+  white-space: nowrap;
+}
+.v10-memstack-cell-empty-hint {
+  font-size: 10px; color: var(--text-ghost);
+  font-style: italic;
+  padding: 4px 0;
+  flex: 1;
+}
+.v10-memstack-cell-open {
+  align-self: flex-start;
+  padding: 3px 10px;
+  background: none;
+  border: 1px solid color-mix(in srgb, var(--cell-color, #64748b) 30%, var(--border-subtle));
+  border-radius: 6px;
+  color: var(--cell-color, var(--text-secondary));
+  font-size: 10px; font-weight: 700;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  font-family: var(--font-sans);
+  margin-top: auto;
+  transition: background 0.15s, color 0.15s;
+}
+.v10-memstack-cell-open:hover {
+  background: color-mix(in srgb, var(--cell-color, #64748b) 16%, transparent);
+  color: var(--text-primary);
+}
+
+/* ── Verified Memory on-chain identity banner (KA detail, right pane) ── */
+.v10-vm-identity {
+  margin-bottom: 16px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: linear-gradient(
+    135deg,
+    rgba(34,197,94,0.10) 0%,
+    rgba(245,158,11,0.05) 100%
+  );
+  border: 1px solid rgba(34,197,94,0.35);
+  display: flex; flex-direction: column; gap: 8px;
+}
+.v10-vm-identity-head {
+  display: flex; align-items: center; gap: 8px;
+}
+.v10-vm-identity-glyph {
+  font-size: 14px; color: #22c55e; line-height: 1;
+}
+.v10-vm-identity-title {
+  font-size: 12px; font-weight: 700; color: var(--text-primary);
+  letter-spacing: 0.01em;
+}
+.v10-vm-identity-badge {
+  margin-left: auto;
+  font-size: 9px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.08em;
+  padding: 2px 7px;
+  border-radius: 10px;
+  color: #22c55e;
+  background: rgba(34,197,94,0.12);
+  border: 1px solid rgba(34,197,94,0.35);
+}
+.v10-vm-identity-row {
+  display: flex; align-items: center; gap: 6px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: var(--text-secondary);
+  padding: 2px 0;
+}
+.v10-vm-identity-lbl {
+  font-size: 9px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--text-ghost);
+  min-width: 56px;
+}
+.v10-vm-identity-val {
+  display: inline-flex; align-items: center; gap: 6px;
+  color: var(--text-primary);
+  min-width: 0;
+  overflow: hidden; text-overflow: ellipsis;
+  max-width: 260px;
+  white-space: nowrap;
+}
+.v10-vm-identity-val.mono {
+  font-family: var(--font-mono); font-size: 11px;
+}
+.v10-vm-identity-wallet {
+  color: var(--text-tertiary);
+  font-size: 10px;
+}
+.v10-vm-identity-opid {
+  color: var(--text-ghost);
+  font-size: 10px;
+}
+.v10-vm-identity-copy {
+  padding: 1px 6px;
+  background: none;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  color: var(--text-ghost);
+  font-size: 10px;
+  cursor: pointer;
+  font-family: var(--font-sans);
+  transition: border-color 0.15s, color 0.15s;
+}
+.v10-vm-identity-copy:hover {
+  border-color: var(--border-strong); color: var(--text-primary);
 }
 
 /* Inline attribution inside each Provenance Trail event

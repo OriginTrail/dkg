@@ -14,14 +14,20 @@ const COLLAPSE_ICON = '◂';
 
 type TreeMode = 'explorer' | 'oracle';
 
-// ─── Hidden projects (local-only dismissal) ─────────────────────
-// The daemon doesn't ship a "delete context graph" endpoint yet, so
-// leftover projects from old tests / demo runs accumulate in the
-// sidebar. We let the user locally dismiss them via a tiny "×"
-// action on each row. State lives in localStorage (no daemon call),
-// so it's per-browser and instantly reversible via "Show hidden".
+// ─── Local per-project organisation ─────────────────────────────
+// Two concerns, both backed by localStorage because the daemon doesn't
+// currently expose per-project metadata we'd need to drive them:
+//
+//   1. Hidden — dismiss leftover test/demo projects.
+//   2. Participating — manually mark a project as "joined someone
+//      else's" rather than "mine". When the daemon starts returning
+//      a `createdBy` / `owner` field on /api/paranet/list we'll switch
+//      the detection automatic and this local override stays as a
+//      user preference that wins over the heuristic.
 const HIDDEN_KEY = 'v10:hiddenProjectIds';
 const HIDDEN_CHANGE_EVENT = 'v10:hidden-projects-change';
+const PARTICIPATING_KEY = 'v10:participatingProjectIds';
+const PARTICIPATING_CHANGE_EVENT = 'v10:participating-projects-change';
 
 function loadHiddenIds(): Set<string> {
   try {
@@ -63,15 +69,65 @@ function useHiddenProjectIds(): {
   return { hidden, hide, unhideAll };
 }
 
+// ─── "Participating in" tagging ─────────────────────────────────
+function loadParticipatingIds(): Set<string> {
+  try {
+    const raw = localStorage.getItem(PARTICIPATING_KEY);
+    if (!raw) return new Set();
+    const arr = JSON.parse(raw);
+    return new Set(Array.isArray(arr) ? arr : []);
+  } catch { return new Set(); }
+}
+
+function saveParticipatingIds(ids: Set<string>): void {
+  try {
+    localStorage.setItem(PARTICIPATING_KEY, JSON.stringify([...ids]));
+    window.dispatchEvent(new Event(PARTICIPATING_CHANGE_EVENT));
+  } catch { /* non-critical */ }
+}
+
+function useParticipatingIds(): {
+  participating: Set<string>;
+  toggle: (id: string) => void;
+} {
+  const [participating, setParticipating] = useState<Set<string>>(() => loadParticipatingIds());
+  useEffect(() => {
+    const sync = () => setParticipating(loadParticipatingIds());
+    window.addEventListener(PARTICIPATING_CHANGE_EVENT, sync);
+    window.addEventListener('storage', sync);
+    return () => {
+      window.removeEventListener(PARTICIPATING_CHANGE_EVENT, sync);
+      window.removeEventListener('storage', sync);
+    };
+  }, []);
+  const toggle = useCallback((id: string) => {
+    const next = new Set(loadParticipatingIds());
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    saveParticipatingIds(next);
+  }, []);
+  return { participating, toggle };
+}
+
 interface ProjectTreeItemProps {
   cg: ContextGraph;
   isActive: boolean;
+  isParticipating: boolean;
   onSelect: () => void;
   onImport: () => void;
   onHide: () => void;
+  onToggleParticipating: () => void;
 }
 
-function ProjectTreeItem({ cg, isActive, onSelect, onImport, onHide }: ProjectTreeItemProps) {
+function ProjectTreeItem({
+  cg,
+  isActive,
+  isParticipating,
+  onSelect,
+  onImport,
+  onHide,
+  onToggleParticipating,
+}: ProjectTreeItemProps) {
   const [open, setOpen] = useState(false);
   const { openTab } = useTabsStore();
   const assetCount = cg.assetCount ?? cg.assets ?? 0;
@@ -86,6 +142,16 @@ function ProjectTreeItem({ cg, isActive, onSelect, onImport, onHide }: ProjectTr
         <span className="v10-tree-project-dot" />
         <span className="v10-tree-section-label">{cg.name || cg.id.slice(0, 16)}</span>
         <span className="v10-tree-section-badge">{assetCount}</span>
+        <button
+          type="button"
+          className="v10-tree-move-btn"
+          title={isParticipating
+            ? 'Move to "My Projects"'
+            : 'Mark as participating (move to "Participating")'}
+          onClick={(e) => { e.stopPropagation(); onToggleParticipating(); }}
+        >
+          ⤑
+        </button>
         <button
           type="button"
           className="v10-tree-hide-btn"
@@ -172,7 +238,10 @@ export function PanelLeft() {
   const [treeMode, setTreeMode] = useState<TreeMode>('explorer');
 
   const { hidden: hiddenIds, hide: hideProject, unhideAll } = useHiddenProjectIds();
+  const { participating: participatingIds, toggle: toggleParticipating } = useParticipatingIds();
   const visibleContextGraphs = contextGraphs.filter((cg) => !hiddenIds.has(cg.id));
+  const myProjects = visibleContextGraphs.filter((cg) => !participatingIds.has(cg.id));
+  const participatingProjects = visibleContextGraphs.filter((cg) => participatingIds.has(cg.id));
   const hiddenCount = contextGraphs.length - visibleContextGraphs.length;
 
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -239,8 +308,8 @@ export function PanelLeft() {
 
           {contextGraphs.length > 0 && (
             <div style={{ display: 'flex', gap: 4 }}>
-              <button className="v10-new-project-btn" onClick={() => setShowCreateModal(true)}>+ New</button>
-              <button className="v10-new-project-btn" onClick={() => setShowJoinModal(true)}>↗ Join</button>
+              <button className="v10-new-project-btn" onClick={() => setShowCreateModal(true)}>+ New Project</button>
+              <button className="v10-new-project-btn" onClick={() => setShowJoinModal(true)}>↗ Join Project</button>
             </div>
           )}
 
@@ -260,22 +329,60 @@ export function PanelLeft() {
             </div>
           )}
 
-          {visibleContextGraphs.map((cg) => (
-            <ProjectTreeItem
-              key={cg.id}
-              cg={cg}
-              isActive={activeProjectId === cg.id}
-              onSelect={() => {
-                setActiveProject(cg.id);
-                openTab({ id: `project:${cg.id}`, label: cg.name || cg.id.slice(0, 16), closable: true });
-              }}
-              onImport={() => setImportTarget(cg)}
-              onHide={() => {
-                hideProject(cg.id);
-                if (activeProjectId === cg.id) setActiveProject(null);
-              }}
-            />
-          ))}
+          {/* Projects split into two groups. Default everything lives
+              under "My Projects"; the user can mark individual projects
+              as "participating" via the ⤑ button on the row, which
+              moves them to the Participating group. This is a
+              client-local tag (localStorage) — once the daemon exposes
+              real creator/owner metadata we'll auto-populate from that
+              and keep the manual override as a user preference. */}
+          {myProjects.length > 0 && (
+            <>
+              <div className="v10-tree-group-label">My Projects</div>
+              {myProjects.map((cg) => (
+                <ProjectTreeItem
+                  key={cg.id}
+                  cg={cg}
+                  isActive={activeProjectId === cg.id}
+                  isParticipating={false}
+                  onSelect={() => {
+                    setActiveProject(cg.id);
+                    openTab({ id: `project:${cg.id}`, label: cg.name || cg.id.slice(0, 16), closable: true });
+                  }}
+                  onImport={() => setImportTarget(cg)}
+                  onHide={() => {
+                    hideProject(cg.id);
+                    if (activeProjectId === cg.id) setActiveProject(null);
+                  }}
+                  onToggleParticipating={() => toggleParticipating(cg.id)}
+                />
+              ))}
+            </>
+          )}
+
+          {participatingProjects.length > 0 && (
+            <>
+              <div className="v10-tree-group-label">Participating Projects</div>
+              {participatingProjects.map((cg) => (
+                <ProjectTreeItem
+                  key={cg.id}
+                  cg={cg}
+                  isActive={activeProjectId === cg.id}
+                  isParticipating={true}
+                  onSelect={() => {
+                    setActiveProject(cg.id);
+                    openTab({ id: `project:${cg.id}`, label: cg.name || cg.id.slice(0, 16), closable: true });
+                  }}
+                  onImport={() => setImportTarget(cg)}
+                  onHide={() => {
+                    hideProject(cg.id);
+                    if (activeProjectId === cg.id) setActiveProject(null);
+                  }}
+                  onToggleParticipating={() => toggleParticipating(cg.id)}
+                />
+              ))}
+            </>
+          )}
 
           {hiddenCount > 0 && (
             <button

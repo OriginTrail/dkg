@@ -3,6 +3,7 @@ import { useTabsStore } from '../../stores/tabs.js';
 import { DashboardView } from '../../views/DashboardView.js';
 import { ProjectView } from '../../views/ProjectView.js';
 import { MemoryLayerView } from '../../views/MemoryLayerView.js';
+import { MemoryStackView } from '../../views/MemoryStackView.js';
 import { authHeaders } from '../../api.js';
 
 const CLOSE_ICON = (
@@ -53,35 +54,6 @@ function TabBar() {
           )}
         </button>
       ))}
-    </div>
-  );
-}
-
-function MemoryStackView() {
-  return (
-    <div style={{ maxWidth: 800, padding: '0' }}>
-      <h1 style={{ fontSize: 20, fontWeight: 600, color: 'var(--text-primary)', marginBottom: 8 }}>Memory Stack</h1>
-      <p style={{ fontSize: 12, color: 'var(--text-tertiary)', marginBottom: 24 }}>
-        Aggregate view of all memory layers across your projects.
-      </p>
-      <div style={{ display: 'flex', gap: 12 }}>
-        {(['Working Memory', 'Shared Working Memory', 'Verified Memory'] as const).map((label, i) => {
-          const icons = ['◇', '◈', '◉'];
-          const colors = ['var(--layer-working)', 'var(--layer-shared)', 'var(--layer-verified)'];
-          return (
-            <div key={label} style={{
-              flex: 1, padding: '18px 16px', borderRadius: 10,
-              border: '1px solid var(--border-default)', background: 'var(--bg-surface)',
-            }}>
-              <div style={{ fontSize: 18, color: colors[i], marginBottom: 8 }}>{icons[i]}</div>
-              <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)', marginBottom: 4 }}>{label}</div>
-              <div style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>
-                {i === 0 ? 'Private agent drafts' : i === 1 ? 'Shared proposals' : 'Published knowledge'}
-              </div>
-            </div>
-          );
-        })}
-      </div>
     </div>
   );
 }

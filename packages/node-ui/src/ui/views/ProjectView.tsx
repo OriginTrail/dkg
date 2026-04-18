@@ -9,6 +9,7 @@ import { useProjectProfile, ProjectProfileContext, useProjectProfileContext } fr
 import { useAgents, AgentsContext, useAgentsContext, type AgentSummary } from '../hooks/useAgents.js';
 import { AgentChip } from '../components/AgentChip.js';
 import { ActivityFeed } from '../components/ActivityFeed.js';
+import { VerifiedIdentityBanner } from '../components/VerifiedIdentityBanner.js';
 import { SubGraphBar } from '../components/SubGraphBar.js';
 import { fetchSubGraphs, type SubGraphInfo } from '../api.js';
 import { GenUIEntityPanel } from '../genui/index.js';
@@ -1885,8 +1886,12 @@ function KADetailView({ entity, allEntities, allTriples, onNavigate, onClose, co
     [entity.uri, allTriples]
   );
 
+  // 1-hop neighborhood is the sweet spot for the entity-detail graph:
+  // 2-hop quickly explodes (a function pulls in its file, the file's
+  // package, every other declaration in the file, etc.) and drowns the
+  // visual signal of "what does THIS entity connect to directly".
   const hoodTriples = useMemo(
-    () => neighborhoodTriples(entity.uri, allTriples, 2),
+    () => neighborhoodTriples(entity.uri, allTriples, 1),
     [entity.uri, allTriples]
   );
 
@@ -1906,6 +1911,16 @@ function KADetailView({ entity, allEntities, allTriples, onNavigate, onClose, co
     hexagon: { baseSize: 7, minSize: 4, maxSize: 10, scaleWithDegree: true },
     focus: { maxNodes: 500, hops: 999 },
   }), [entity.trustLevel]);
+
+  // ViewConfig makes the opened entity visually focal (bigger hexagon)
+  // and drives the `<CenterOnEntity>` child to pan the camera to it
+  // once force-graph has settled. Identity keyed on the URI so React
+  // re-applies the view when we switch entities without unmounting
+  // the whole RdfGraph.
+  const entityViewConfig = useMemo(() => ({
+    name: `entity-${entity.uri}`,
+    focal: { uri: entity.uri, sizeMultiplier: 2.4 },
+  }), [entity.uri]);
 
   const tripleCount = entity.connections.length + entity.properties.size;
 
@@ -2049,9 +2064,11 @@ function KADetailView({ entity, allEntities, allTriples, onNavigate, onClose, co
                     data={hoodTriples}
                     format="triples"
                     options={graphOptions}
+                    viewConfig={entityViewConfig}
                     style={{ position: 'absolute', inset: 0, width: '100%', height: '100%' }}
                     onNodeClick={(n: any) => n?.id && n.id !== entity.uri && onNavigate(n.id)}
                     initialFit
+                    initialFocus={entity.uri}
                   />
                 </Suspense>
               ) : (
@@ -2063,6 +2080,14 @@ function KADetailView({ entity, allEntities, allTriples, onNavigate, onClose, co
 
         {/* Right pane: Provenance Trail */}
         <div className="v10-ka-right">
+          {/* On-chain identity banner — only for VM entities; the hook
+              skips its SPARQL when `enabled` is false so there's no
+              cost for WM/SWM entities. */}
+          <VerifiedIdentityBanner
+            contextGraphId={contextGraphId}
+            entityUri={entity.uri}
+            enabled={entity.trustLevel === 'verified'}
+          />
           <div className="v10-ka-section-title">Provenance Trail</div>
           <ProvenanceTrail entity={entity} />
 
