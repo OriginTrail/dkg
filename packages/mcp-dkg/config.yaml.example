@@ -1,0 +1,43 @@
+# DKG workspace configuration — spec-canonical per dkgv10-spec/22_AGENT_ONBOARDING §2.1.
+#
+# This tells every DKG-aware agent process (MCP server, Cursor capture
+# hook, Claude Code, future adapters) how to reach the local daemon and
+# which project to target.
+#
+# Everything here is overridable by environment variables:
+#   DKG_API, DKG_TOKEN, DKG_PROJECT, DKG_AGENT_URI
+#
+# IMPORTANT: This file is an example pinned to the devnet node1 shipped
+# in .devnet/. Copy / edit to match your setup; don't commit real
+# production tokens — use tokenFile to point at a gitignored file.
+
+# contextGraph (or "project"): the CG this workspace is bound to.
+contextGraph: dkg-code-project
+
+# Auto-promote newly captured chat turns + other agent writes to SWM
+# so teammates see them. Humans still confirm VM publish via the UI.
+autoShare: true
+
+node:
+  api: http://localhost:9201
+  # Relative to this file; absolute paths also accepted.
+  tokenFile: ../.devnet/node1/auth.token
+
+agent:
+  # The agent URI representing *this operator's* assistant instance.
+  # First time this file is used, make sure the agent is registered in
+  # the project's `meta` sub-graph (see scripts/import-agents.mjs).
+  uri: urn:dkg:agent:cursor-branarakic
+
+capture:
+  # Where chat turns land.
+  subGraph: chat
+  assertion: chat-log
+  # Session default privacy label surfaced in the chat sub-graph filter.
+  # "private" = only this operator sees it; "team" = SWM-visible;
+  # "public" = anchored for everyone. Agents auto-set this to match
+  # the autoShare gradient.
+  privacy: team
+  # Which tool's turns this workspace captures. Purely cosmetic; picks
+  # the glyph in the Chat sub-graph. "cursor" / "claude-code" / "aider".
+  tool: cursor

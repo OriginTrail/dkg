@@ -1,0 +1,42 @@
+{
+  "name": "@origintrail-official/dkg-mcp",
+  "version": "0.1.0",
+  "description": "MCP server that exposes the local DKG daemon (projects, sub-graphs, activity, chat) to Cursor, Claude Code, and any other MCP-aware coding assistant.",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "dkg-mcp": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1",
+    "zod": "^3.25",
+    "yaml": "^2.6.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/OriginTrail/dkg-v9.git",
+    "directory": "packages/mcp-dkg"
+  },
+  "keywords": [
+    "dkg",
+    "mcp",
+    "model-context-protocol",
+    "cursor",
+    "claude-code",
+    "origintrail"
+  ]
+}

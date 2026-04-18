@@ -1,0 +1,9 @@
+{
+  "_comment": "DKG MCP read tools. Wired to the TS build output at packages/mcp-dkg/dist/index.js. Build once with `pnpm --filter @origintrail-official/dkg-mcp build`. Config (API, token, project) comes from .dkg/config.yaml in the workspace root.",
+  "mcpServers": {
+    "dkg": {
+      "command": "node",
+      "args": ["packages/mcp-dkg/dist/index.js"]
+    }
+  }
+}
