@@ -22,6 +22,19 @@ export interface GossipPublishHandlerCallbacks {
   contextGraphExists: (id: string) => Promise<boolean>;
   getContextGraphOwner: (id: string) => Promise<string | null>;
   subscribeToContextGraph: (id: string, options?: { trackSyncScope?: boolean }) => void;
+  /**
+   * Same semantics as `DKGAgent#hasConfirmedMetaState`: returns true when the
+   * local store already has a trustworthy public announcement for this CG
+   * (system paranet, populated `_meta` graph, or `<cg> rdf:type dkg:Paranet`
+   * asserted in ontology). Used to open the metaSynced gate lazily when
+   * gossip arrives before `refreshMetaSyncedFlags` has had a chance to run.
+   *
+   * Optional — callers (notably the standalone gossip-handler tests) may
+   * omit this without breaking the callback contract. When absent, the
+   * strict deny behavior for unsynced curated CGs is preserved (as if the
+   * callback returned `false`).
+   */
+  hasConfirmedMetaState?: (id: string) => Promise<boolean>;
   onPhase?: GossipPhaseCallback;
 }
 
@@ -184,13 +197,30 @@ export class GossipPublishHandler {
         // completes. A null allowlist with metaSynced=false could mean the CG
         // is curated but the allowlist hasn't arrived via authenticated sync.
         // System paranets (agents/ontology) are exempt — always open.
+        // Gossip race: `DKGAgent#refreshMetaSyncedFlags` flips `metaSynced`
+        // eagerly at the end of every sync cycle, but a gossip publish can
+        // arrive on a freshly subscribed node *before* the first sync has
+        // run. Ask the agent's own helper whether the CG is already
+        // confirmable from the local store (system paranet, populated
+        // `_meta`, or `<cg> rdf:type dkg:Paranet` in ontology — the same
+        // check Viktor introduced in `hasConfirmedMetaState`). If yes,
+        // flip the flag in place and proceed; if no, keep the strict
+        // deny behavior so curated CGs without a synced allowlist can't
+        // leak through.
         if (allowedPeers === null
           && request.paranetId !== SYSTEM_PARANETS.AGENTS
           && request.paranetId !== SYSTEM_PARANETS.ONTOLOGY) {
           const sub = this.subscribedContextGraphs.get(request.paranetId);
           if (sub && sub.metaSynced === false) {
-            this.log.warn(ctx, `Gossip publish deferred: context graph "${request.paranetId}" _meta not yet synced — defaulting to deny`);
-            return;
+            const confirmed = this.callbacks.hasConfirmedMetaState
+              ? await this.callbacks.hasConfirmedMetaState(request.paranetId)
+              : false;
+            if (confirmed) {
+              sub.metaSynced = true;
+            } else {
+              this.log.warn(ctx, `Gossip publish deferred: context graph "${request.paranetId}" _meta not yet synced — defaulting to deny`);
+              return;
+            }
           }
         }
       }

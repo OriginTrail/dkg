@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import {
   DKGAgentWallet,
   buildAgentProfile,
@@ -18,7 +18,7 @@ import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { getGenesisQuads, computeNetworkId, PROTOCOL_SYNC, SYSTEM_PARANETS, DKG_ONTOLOGY, paranetDataGraphUri, paranetWorkspaceGraphUri, sparqlString } from '@origintrail-official/dkg-core';
 import { DKGQueryEngine } from '@origintrail-official/dkg-query';
 import { sha256 } from '@noble/hashes/sha2.js';
-import { EVMChainAdapter } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import { ethers } from 'ethers';
@@ -1380,16 +1380,42 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         return { protocols: [PROTOCOL_SYNC] } as any;
       });
 
-      const syncFromPeer = vi.spyOn(agent, 'syncFromPeer').mockResolvedValue(5);
-      const syncSharedMemoryFromPeer = vi.spyOn(agent, 'syncSharedMemoryFromPeer').mockResolvedValue(2);
+      // `syncContextGraphFromConnectedPeers` dispatches through the private
+      // `*Detailed` variants (see packages/agent/src/dkg-agent.ts #1441/1453)
+      // because it consumes the per-phase diagnostics, not just the plain
+      // `insertedTriples` count exposed by `syncFromPeer` / `syncSharedMemoryFromPeer`.
+      // Mock those so we can assert both the call shape and the reported totals
+      // without spinning up a remote peer.
+      const syncFromPeerDetailed = vi.spyOn(agent as any, 'syncFromPeerDetailed').mockResolvedValue({
+        insertedTriples: 5,
+        fetchedMetaTriples: 0,
+        fetchedDataTriples: 0,
+        insertedMetaTriples: 0,
+        insertedDataTriples: 5,
+        emptyResponses: 0,
+        metaOnlyResponses: 0,
+        dataRejectedMissingMeta: 0,
+        rejectedKcs: 0,
+        failedPeers: 0,
+      });
+      const syncSharedMemoryFromPeerDetailed = vi.spyOn(agent as any, 'syncSharedMemoryFromPeerDetailed').mockResolvedValue({
+        insertedTriples: 2,
+        fetchedMetaTriples: 0,
+        fetchedDataTriples: 0,
+        insertedMetaTriples: 0,
+        insertedDataTriples: 2,
+        emptyResponses: 0,
+        droppedDataTriples: 0,
+        failedPeers: 0,
+      });
 
       const result = await agent.syncContextGraphFromConnectedPeers('runtime-paranet', {
         includeSharedMemory: true,
       });
 
       expect(peerStoreReads).toBe(3);
-      expect(syncFromPeer).toHaveBeenCalledWith(remotePeer.toString(), ['runtime-paranet']);
-      expect(syncSharedMemoryFromPeer).toHaveBeenCalledWith(remotePeer.toString(), ['runtime-paranet']);
+      expect(syncFromPeerDetailed).toHaveBeenCalledWith(remotePeer.toString(), ['runtime-paranet']);
+      expect(syncSharedMemoryFromPeerDetailed).toHaveBeenCalledWith(remotePeer.toString(), ['runtime-paranet']);
       expect(result.connectedPeers).toBe(1);
       expect(result.syncCapablePeers).toBe(1);
       expect(result.peersTried).toBe(1);
@@ -1657,6 +1683,8 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         synced: true,
         onChainId: '1',
       });
+      // Ensure buildSyncRequest takes the authenticated private-CG path.
+      (agent as any).isPrivateContextGraph = async () => true;
 
       const chain = (agent as any).chain as EVMChainAdapter;
       const identityId = await chain.ensureProfile();
@@ -1680,10 +1708,18 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
   });
 
   it('fails loudly when auth-required sync cannot be signed by the default agent', async () => {
+    // `autoRegisterDefaultAgent` only runs when the chain adapter exposes
+    // `getOperationalPrivateKey`. MockChainAdapter doesn't, so on that
+    // adapter `localAgents` is empty and `getDefaultAgentAddress()` returns
+    // undefined — the test would fail at the `toBeDefined()` precondition
+    // before exercising `buildSyncRequest`. The adjacent "denies private
+    // sync requests" test uses the same real-chain pattern for the same
+    // reason.
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const agent = await DKGAgent.create({
       name: 'PrivateSyncAuthMissingKey',
       listenHost: '127.0.0.1',
-      chainAdapter: new MockChainAdapter(),
+      chainAdapter: chain,
     });
     try {
       await agent.start();
@@ -1693,6 +1729,20 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         synced: false,
         onChainId: '1',
       });
+      // Force `needsAuth = true` in buildSyncRequest — the precondition
+      // check Viktor added (see dkg-agent.ts #4880) only fires on the
+      // authenticated-sync path. Without this stub, MockChainAdapter /
+      // a clean Hardhat both report the CG as non-private and the
+      // unsigned path succeeds.
+      (agent as any).isPrivateContextGraph = async () => true;
+      // Force the fallback signing path in buildSyncRequest — when the
+      // chain identity is non-zero (EVMChainAdapter post-ensureProfile),
+      // it signs via `chain.signMessage` and the default-agent key is
+      // never touched, so deleting it has no effect. Stubbing
+      // identityId → 0 drives the code into the
+      // `defaultAgentAddress && agent.privateKey` branch we actually
+      // want to assert on.
+      (chain as any).getIdentityId = async () => 0n;
 
       const defaultAgentAddress = agent.getDefaultAgentAddress();
       expect(defaultAgentAddress).toBeDefined();

@@ -676,6 +676,15 @@ describe('bulletproof: SYNC set-reconciliation (regression for issue #2)', () =>
     // needs to be poked to see its peer's data IS the bug.
     await nodeB.syncFromPeer(nodeA.peerId, [SYSTEM_PARANETS.ONTOLOGY]);
     await sleep(500);
+    // Since v10-rc, ontology-discovered CGs are registered as
+    // "discoverable only" with `subscribed: false` — intentional
+    // product hardening so a node doesn't auto-ingest every public
+    // CG a peer happens to know about. Issue #2 is about "effective
+    // KC set differs across peers after the operator opts in", not
+    // about implicit ingestion, so explicitly subscribe here before
+    // the authoritative data-catchup sync. This is the exact call
+    // the UI / API makes when the user clicks "join public CG X".
+    nodeB.subscribeToContextGraph(cgId);
     // Now the CG ought to be in B's runtime scope. If it isn't, this
     // next explicit sync is a no-op and the subsequent assertions
     // will fail with the exact missing-entity or count mismatch.

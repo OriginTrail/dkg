@@ -1515,7 +1515,6 @@ export class DKGAgent {
       const preferredPeer = peers.find((peer) => peer.toString() === preferredPeerId);
       if (preferredPeer) return [preferredPeer];
     }
-
     return [...peers].sort((a, b) => {
       if (a.toString() === preferredPeerId) return -1;
       if (b.toString() === preferredPeerId) return 1;
@@ -1602,6 +1601,20 @@ export class DKGAgent {
     );
     if (metaResult.type === 'boolean' && metaResult.value === true) {
       return true;
+    }
+
+    // Ontology-only fallback: a CG declared `rdf:type dkg:Paranet` can be
+    // treated as confirmably-public for the gossip race-opener ONLY when
+    // no local evidence of a restriction exists. Raw paranet declaration
+    // is not enough on its own — `inviteToContextGraph` writes
+    // `dkg:allowedPeer` straight to `_meta` without updating ontology, so
+    // a CG that was announced publicly and later allowlisted would look
+    // "just a paranet" here even though the curator expects the allowlist
+    // to gate gossip. Require `isPrivateContextGraph()` (now also reads
+    // `DKG_ALLOWED_PEER`) to explicitly return false before honoring the
+    // bypass.
+    if (await this.isPrivateContextGraph(contextGraphId)) {
+      return false;
     }
 
     const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
@@ -2606,6 +2619,14 @@ export class DKGAgent {
       }
     } catch { /* identity lookup failed — continue to deny */ }
 
+    // Legacy peer-ID allowlist: `inviteToContextGraph` writes `DKG_ALLOWED_PEER`
+    // quads. Honor them for local reads so a peer-ID-invited node can query
+    // the data it just synced.
+    const allowedPeers = await this.getContextGraphAllowedPeers(contextGraphId);
+    if (allowedPeers?.includes(this.peerId)) {
+      return true;
+    }
+
     // Edge nodes without an on-chain identity (identityId 0n) fall back to
     // subscription-based access — the subscription itself is an authorization
     // (the node was invited or created this CG).
@@ -2807,6 +2828,7 @@ export class DKGAgent {
           contextGraphExists: (id) => this.contextGraphExists(id),
           getContextGraphOwner: (id) => this.getContextGraphOwner(id),
           subscribeToContextGraph: (id, options) => this.subscribeToContextGraph(id, options),
+          hasConfirmedMetaState: (id) => this.hasConfirmedMetaState(id),
         },
       );
     }
@@ -4997,6 +5019,19 @@ export class DKGAgent {
       (requesterIdentityId > 0n && p === String(requesterIdentityId)),
     ) ?? false;
 
+    // Legacy peer-ID allowlist: `inviteToContextGraph` (the path behind
+    // `POST /api/context-graph/invite`) writes `DKG_ALLOWED_PEER` quads.
+    // Honor them here so peer-ID invites actually unblock sync. The
+    // libp2p transport has already authenticated `remotePeerId`, and we
+    // validated `request.requesterPeerId === remotePeerId` above, so
+    // matching the peer ID against the allowlist is a trusted comparison.
+    if (!allowed) {
+      const allowedPeers = await this.getContextGraphAllowedPeers(request.contextGraphId);
+      if (allowedPeers?.includes(remotePeerId)) {
+        allowed = true;
+      }
+    }
+
     // Requester has valid on-chain identity but is not in our local participant
     // list. The curator may have invited them after our last meta sync — try
     // refreshing the meta graph from the curator before denying.
@@ -5008,6 +5043,13 @@ export class DKGAgent {
           p.toLowerCase() === recoveredAddress.toLowerCase() ||
           p === String(requesterIdentityId),
         ) ?? false;
+
+        if (!allowed) {
+          const freshPeers = await this.getContextGraphAllowedPeers(request.contextGraphId);
+          if (freshPeers?.includes(remotePeerId)) {
+            allowed = true;
+          }
+        }
       }
     }
 
@@ -5043,13 +5085,20 @@ export class DKGAgent {
       return true;
     }
 
-    // Also treat CGs with an allowlist as private, even if no explicit
-    // access_policy triple exists (e.g. allowedAgents were set without
-    // accessPolicy=1).
+    // Also treat CGs with any allowlist predicate as private, even when no
+    // explicit `accessPolicy` triple exists (e.g. `inviteToContextGraph`
+    // writes `DKG_ALLOWED_PEER` straight into `_meta` without touching the
+    // ontology's access_policy; `inviteAgentToContextGraph` does the same
+    // with `DKG_ALLOWED_AGENT`). Both the V10 agent model AND the legacy
+    // peer-ID model need to be recognized here, otherwise the store-
+    // discovery path would misclassify a freshly-invited CG as "open /
+    // discoverable only" and skip the same-connect catchup.
     const allowlistResult = await this.store.query(
       `ASK WHERE {
         GRAPH <${cgMetaGraph}> {
-          <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_ALLOWED_AGENT}> ?agent
+          { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_ALLOWED_AGENT}> ?agent }
+          UNION
+          { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_ALLOWED_PEER}> ?peer }
         }
       }`,
     );
@@ -5809,20 +5858,73 @@ export class DKGAgent {
       const existing = this.subscribedContextGraphs.get(id);
       if (existing) continue;
 
-      this.subscribedContextGraphs.set(id, {
-        name,
-        subscribed: false,
-        synced: true,
-        metaSynced: source === 'meta',
-        onChainId: undefined,
-      });
+      // Two kinds of discovered CG, two different opt-in semantics:
+      //
+      // - Open / public CG (no curated _meta graph locally): Viktor's
+      //   v10-rc hardening (commit b9a73e7e "better sync") says do
+      //   NOT auto-subscribe — a node shouldn't auto-ingest every
+      //   public CG a peer happens to know about. Explicit subscribe
+      //   (UI "Join" / `subscribeToContextGraph`) is the opt-in.
+      //
+      // - Curated / private CG (access policy "private" or has an
+      //   allowlist): auto-subscribe so `trySyncFromPeer`'s
+      //   "newly discovered CGs" catchup pass (see dkg-agent.ts
+      //   ~#1009) actually fetches the KC data on the same connect
+      //   cycle. Without this, a freshly invited node would see
+      //   the CG registered locally but never pull any KCs —
+      //   regressed the e2e-privacy "B discovers and syncs a
+      //   private CG in a single connect cycle via trySyncFromPeer"
+      //   test. `authorizeSyncRequest` still enforces the allowlist
+      //   on the responder side, so auto-subscribing here cannot
+      //   leak private data to non-participants; it only means
+      //   "attempt the catchup now instead of deferring it".
+      //   NOTE: we use `isPrivateContextGraph` (which reads the
+      //   ontology OR the _meta graph for `dkg:accessPolicy
+      //   "private"`, and also treats any CG with a `DKG_ALLOWED_
+      //   AGENT` allowlist as private) rather than
+      //   `source === 'meta'`, because the ontology-vs-meta
+      //   collision resolver above lets an ontology row shadow a
+      //   meta row when both exist for the same id.
+      const isCurated = await this.isPrivateContextGraph(id);
 
-      this.log.info(ctx, `Discovered context graph "${name}" (${id}) from ${source} store — added as discoverable only`);
+      if (isCurated) {
+        // Seed the subscription entry BEFORE calling subscribeToContextGraph
+        // so the `...existing` spread in `subscribeToContextGraph` preserves
+        // the discovered human-readable `name` (otherwise the UI/listing
+        // APIs fall back to the raw CG id).
+        //
+        // Intentionally leave `metaSynced` FALSE here. The gossip handler's
+        // "deny until _meta is synced" guard must stay armed until the
+        // authenticated allowlist (`_meta` graph) has actually arrived —
+        // discovery alone can land with just the ontology/access-policy
+        // triples while `allowedPeers` is still null. The follow-up
+        // `refreshMetaSyncedFlags(newlyDiscovered)` call from
+        // `trySyncFromPeer` (see ~#1012) will flip the flag once the
+        // allowlist has been fetched via the authenticated sync path.
+        this.subscribedContextGraphs.set(id, {
+          name,
+          subscribed: false,
+          synced: true,
+          metaSynced: false,
+          onChainId: undefined,
+        });
+        this.subscribeToContextGraph(id);
+        this.log.info(ctx, `Discovered invited context graph "${name}" (${id}) — auto-subscribed (private/allowlisted)`);
+      } else {
+        this.subscribedContextGraphs.set(id, {
+          name,
+          subscribed: false,
+          synced: true,
+          metaSynced: source === 'meta',
+          onChainId: undefined,
+        });
+        this.log.info(ctx, `Discovered context graph "${name}" (${id}) from ${source} store — added as discoverable only`);
+      }
       discovered++;
     }
 
     if (discovered > 0) {
-      this.log.info(ctx, `Added ${discovered} new context graph(s) from store without subscribing`);
+      this.log.info(ctx, `Added ${discovered} new context graph(s) from store`);
     }
     return discovered;
   }
