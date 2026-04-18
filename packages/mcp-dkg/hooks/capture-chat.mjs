@@ -57,6 +57,7 @@ const NS = {
   xsd:     'http://www.w3.org/2001/XMLSchema#',
   prov:    'http://www.w3.org/ns/prov#',
   chat:    'http://dkg.io/ontology/chat/',
+  agent:   'http://dkg.io/ontology/agent/',
 };
 const T = {
   Session: NS.chat + 'Session',
@@ -77,6 +78,7 @@ const P = {
   privacy:   NS.chat + 'privacy',
   contentHash: NS.chat + 'contentHash',
   aboutEntity: NS.chat + 'aboutEntity',
+  mentions:  NS.chat + 'mentions',
   summary:   NS.chat + 'summary',
   rawPayload: NS.chat + 'rawPayload',
   // Optional metadata predicates — best-effort enrichment from tool payload.
@@ -375,17 +377,82 @@ async function promoteEntities(cfg, entities) {
 }
 
 // ── Ensure sub-graph exists (no-op if already registered) ─────
-async function ensureSubGraph(cfg) {
+async function ensureSubGraph(cfg, name) {
+  const target = name ?? cfg.subGraph;
   try {
     await postJson(cfg.api, `/api/sub-graph/create`, cfg.token, {
       contextGraphId: cfg.project,
-      subGraphName: cfg.subGraph,
+      subGraphName: target,
     });
   } catch (err) {
     // Already-exists is the 99% case; anything else we log + move on.
     const m = String(err?.message ?? err);
-    if (!m.includes('already exists')) log(`ensureSubGraph: ${m}`);
+    if (!m.includes('already exists')) log(`ensureSubGraph(${target}): ${m}`);
   }
+}
+
+// ── Self-register the agent in `meta` on first sessionStart ────
+//
+// Without this, operator B has to manually `node scripts/import-agents.mjs`
+// before their first chat turn or attribution chips render bare URIs in
+// the UI. Self-register writes a minimal Agent entity (label, framework,
+// joinedAt) into a per-agent assertion (`agent-self-register-<slug>`)
+// so it doesn't clobber other agents in `meta/participants`. Idempotent:
+// the per-session state file remembers we've done it so subsequent
+// sessionStart events skip the write.
+async function selfRegisterAgent(cfg, state) {
+  if (!cfg.agent) return;
+  if (state.agentRegistered) return;
+  // Slug from the agent URI (everything after the last colon).
+  const slug = cfg.agent.split(':').pop() ?? 'unknown-agent';
+  const assertion = `agent-self-register-${slug}`;
+  const triples = [
+    { subject: cfg.agent, predicate: P.type, object: URI(NS.agent + 'Agent') },
+    { subject: cfg.agent, predicate: P.type, object: URI(NS.agent + 'AIAgent') },
+    { subject: cfg.agent, predicate: P.label, object: LIT(slug) },
+    { subject: cfg.agent, predicate: P.name, object: LIT(slug) },
+    { subject: cfg.agent, predicate: NS.agent + 'framework', object: LIT(cfg.tool) },
+    { subject: cfg.agent, predicate: NS.agent + 'joinedAt', object: LIT(state.startedAt, NS.xsd + 'dateTime') },
+  ];
+  try {
+    await ensureSubGraph(cfg, 'meta');
+    await postJson(cfg.api, `/api/assertion/${encodeURIComponent(assertion)}/write`, cfg.token, {
+      contextGraphId: cfg.project,
+      subGraphName: 'meta',
+      quads: triples,
+    });
+    if (cfg.autoShare) {
+      await postJson(cfg.api, `/api/assertion/${encodeURIComponent(assertion)}/promote`, cfg.token, {
+        contextGraphId: cfg.project,
+        subGraphName: 'meta',
+        entities: [cfg.agent],
+      }).catch((e) => log(`promote agent self-register: ${e.message}`));
+    }
+    state.agentRegistered = true;
+    log(`self-registered agent ${cfg.agent} in meta/${assertion}`);
+  } catch (err) {
+    // Don't block the session over this — it's recoverable.
+    log(`self-register agent: ${err?.message ?? err}`);
+  }
+}
+
+// ── Mention-regex backstop ────────────────────────────────────
+//
+// Defensive: even if the agent forgets to call dkg_annotate_turn, any
+// urn:dkg:* URI quoted verbatim in the prompt or response gets a
+// chat:mentions edge from the turn. Cheap (one regex pass), deterministic,
+// covers the most common case (agent referencing existing entities).
+// Agent-emitted richer triples (chat:examines / chat:proposes / etc.)
+// remain additive on top.
+const URN_DKG_RE = /urn:dkg:[\w@:%./-]+(?:\/[\w@:%./-]+)*[\w%]/g;
+function extractMentionedUris(...texts) {
+  const found = new Set();
+  for (const t of texts) {
+    if (!t) continue;
+    const matches = String(t).match(URN_DKG_RE) ?? [];
+    for (const m of matches) found.add(m.replace(/[.,;:)\]}>]+$/, ''));
+  }
+  return [...found];
 }
 
 // ── Event handlers ────────────────────────────────────────────
@@ -439,6 +506,9 @@ async function handleSessionStart(cfg, payload) {
   } catch (err) {
     log(`session start write: ${err?.message ?? err}`);
   }
+  // Self-register the agent in `meta` so attribution chips render
+  // properly without a manual import-agents step. Idempotent.
+  await selfRegisterAgent(cfg, state);
   saveSessionState(sessionKey, state);
 }
 
@@ -518,6 +588,14 @@ async function handleAfterAgentResponse(cfg, payload) {
     triples.push(...sessionTriples(cfg, state, payload));
   }
 
+  // Mention-regex backstop (Phase 7): defensive auto-link for any
+  // urn:dkg:* URI quoted verbatim in the prompt or response. Even if
+  // the agent forgets to call dkg_annotate_turn, basic mentions still
+  // land. Agent-emitted richer triples remain additive on top.
+  for (const uri of extractMentionedUris(userText, asstText)) {
+    triples.push({ subject: turn, predicate: P.mentions, object: URI(uri) });
+  }
+
   try {
     await writeTriples(cfg, triples);
     if (bootstrapSession) state.sessionWritten = true;
@@ -554,11 +632,100 @@ async function handleSessionEnd(cfg, payload) {
   }
 }
 
+// ── Session-start additionalContext (Phase 7) ─────────────────
+//
+// Both Cursor's sessionStart and Claude Code's SessionStart support
+// returning JSON with an `additionalContext` field whose markdown gets
+// prepended to the agent's working context for the rest of the session.
+// We use this to inject (a) a tight summary of the project's annotation
+// protocol so the agent knows to call dkg_annotate_turn from turn #1,
+// and (b) a short snapshot of recent entities so look-before-mint has
+// candidates to match against without needing a separate dkg_search.
+//
+// Budget: ~600-800 tokens. Cheap relative to any modern context window.
+async function buildSessionStartContext(cfg) {
+  if (!cfg.project) return null;
+
+  const RECENT_LIMIT = 30;
+  let recentRows = [];
+  try {
+    const sparql = `
+SELECT ?s ?type ?label WHERE {
+  GRAPH ?g {
+    ?s a ?type .
+    OPTIONAL { ?s <http://www.w3.org/2000/01/rdf-schema#label> ?label }
+    FILTER(STRSTARTS(STR(?s), "urn:dkg:"))
+    FILTER(?type IN (
+      <http://dkg.io/ontology/decisions/Decision>,
+      <http://dkg.io/ontology/tasks/Task>,
+      <http://dkg.io/ontology/coding-project/Finding>,
+      <http://dkg.io/ontology/coding-project/Question>,
+      <http://www.w3.org/2004/02/skos/core#Concept>,
+      <http://dkg.io/ontology/agent/Agent>,
+      <http://dkg.io/ontology/agent/AIAgent>,
+      <http://dkg.io/ontology/chat/Session>
+    ))
+  }
+}
+LIMIT ${RECENT_LIMIT}`;
+    const r = await postJson(cfg.api, '/api/query', cfg.token, {
+      sparql,
+      contextGraphId: cfg.project,
+      includeSharedMemory: true,
+    });
+    recentRows = r?.result?.bindings ?? [];
+  } catch (err) {
+    log(`buildSessionStartContext: recent-entities query failed: ${err.message}`);
+  }
+
+  const recentLines = recentRows
+    .map((row) => {
+      const s = (row.s?.value ?? row.s ?? '').toString();
+      const t = (row.type?.value ?? row.type ?? '').toString().replace(/^http:\/\/[^/]+\/[^#]+[#/]/, '');
+      const l = (row.label?.value ?? row.label ?? '').toString().replace(/^"|"$/g, '');
+      return `- \`${s}\`${l ? ` — ${l.slice(0, 60)}` : ''}${t ? ` (${t})` : ''}`;
+    })
+    .slice(0, RECENT_LIMIT)
+    .join('\n');
+
+  const md = `## DKG project context — \`${cfg.project}\`
+
+This workspace is bound to a DKG context graph. Every chat turn here is
+captured into the project's \`chat\` sub-graph and gossipped to all
+subscribed nodes. After every substantive turn, you SHOULD call
+\`dkg_annotate_turn\` to emit structured triples about what the turn was
+about — topics, mentions, examines, proposes, concludes, asks. The
+chat sub-graph then becomes a navigable knowledge graph rather than
+just a text log.
+
+**Look-before-mint protocol** (the convergence rule):
+1. Before minting any new \`urn:dkg:<type>:<slug>\` URI, call \`dkg_search\` with the unnormalised label.
+2. If a result has the same normalised slug, REUSE its URI.
+3. Slug rule: lowercase → ASCII-fold → strip stopwords (the/a/an/of/for/and/or/to/in/on/with) → hyphenate → ≤60 chars.
+4. Only mint fresh if no match. Never fabricate URIs.
+
+**Universal annotation primitives** (for any project type):
+- \`chat:topic\` (literal) — short topical buckets
+- \`chat:mentions\` (URI) — entities the turn referenced
+- \`chat:examines\` (URI) — entities analysed in detail
+- \`chat:proposes\` (URI) — ideas/decisions/tasks put forward
+- \`chat:concludes\` (URI) — Findings worth preserving
+- \`chat:asks\` (URI) — open Questions
+
+Call \`dkg_get_ontology\` for the full agent guide + formal Turtle (one-time per session).
+
+${recentLines.length ? `**Recent entities in this graph** (look here first before minting):\n\n${recentLines}\n` : '_(no recent entities found — graph is fresh)_'}
+`;
+
+  return md;
+}
+
 // ── Entry point ───────────────────────────────────────────────
 (async () => {
   const payload = await readStdinJson();
   const cfg = loadConfig();
   log(`cfg: api=${cfg.api} project=${cfg.project} agent=${cfg.agent} token=${cfg.token ? '[set]' : '[empty]'} autoShare=${cfg.autoShare}`);
+  let response = {};
   try {
     switch (EVENT) {
       // Cursor native events + Claude Code equivalents:
@@ -569,6 +736,26 @@ async function handleSessionEnd(cfg, payload) {
       case 'sessionStart':
       case 'SessionStart':
         await handleSessionStart(cfg, payload);
+        // Inject ontology summary + recent entities so the agent boots
+        // already knowing the annotation protocol + graph state. Both
+        // Cursor and Claude Code honour `additionalContext` in the
+        // sessionStart hook response (top-level field, markdown body).
+        try {
+          const ctxMd = await buildSessionStartContext(cfg);
+          if (ctxMd) {
+            // Claude Code expects `hookSpecificOutput.additionalContext`
+            // (per docs.claude.com/en/docs/claude-code/hooks). Cursor
+            // accepts either shape; we emit both for portability.
+            response.additionalContext = ctxMd;
+            response.hookSpecificOutput = {
+              hookEventName: 'SessionStart',
+              additionalContext: ctxMd,
+            };
+            log(`injected session-start additionalContext (${ctxMd.length} chars)`);
+          }
+        } catch (err) {
+          log(`session-start context injection: ${err?.message ?? err}`);
+        }
         break;
       case 'beforeSubmitPrompt':
       case 'UserPromptSubmit':
@@ -588,6 +775,6 @@ async function handleSessionEnd(cfg, payload) {
   } catch (err) {
     log(`handler error: ${err?.stack ?? err?.message ?? err}`);
   }
-  process.stdout.write('{}\n');
+  process.stdout.write(JSON.stringify(response) + '\n');
   process.exit(0);
 })();

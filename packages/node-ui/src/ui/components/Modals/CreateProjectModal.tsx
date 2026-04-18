@@ -3,6 +3,7 @@ import { createContextGraph, fetchContextGraphs, fetchCurrentAgent } from '../..
 import { useProjectsStore } from '../../stores/projects.js';
 import { useTabsStore } from '../../stores/tabs.js';
 import { useJourneyStore } from '../../stores/journey.js';
+import { installOntology, listStarters } from '../../lib/ontologyInstall.js';
 
 function slugify(str: string): string {
   return str
@@ -21,7 +22,11 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
   const [description, setDescription] = useState('');
   const [access, setAccess] = useState<'curated' | 'public'>('curated');
   const [publishPolicy, setPublishPolicy] = useState<'curator-only' | 'open'>('curator-only');
-  const [ontology, setOntology] = useState<'agent' | 'upload' | 'community'>('agent');
+  const [ontology, setOntology] = useState<'agent' | 'upload' | 'community'>('community');
+  // Which starter to install when ontology mode is 'community' (or 'agent' v1 default).
+  // Source: packages/mcp-dkg/templates/ontologies/<slug>/ — bundled by Vite.
+  const starters = listStarters();
+  const [starterSlug, setStarterSlug] = useState<string>(starters[0]?.slug ?? 'coding-project');
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [quorum, setQuorum] = useState('off');
   const [swmTtl, setSwmTtl] = useState('7d');
@@ -71,6 +76,24 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
 
       const result = await createContextGraph(cgId, trimmedName, description.trim() || undefined, opts);
       clearTimeout(slowTimer);
+
+      // Phase 7: install the chosen ontology into meta/project-ontology so
+      // the agent has the project's predicate vocabulary and URI patterns
+      // from turn #1. Both `community` (operator picked a starter) and
+      // `agent` (v1 = default to the closest starter; v2 will let the
+      // agent customise based on the project description) install one
+      // here. `upload` is deferred — the picker is disabled for that mode.
+      if (ontology === 'community' || ontology === 'agent') {
+        try {
+          setProgress(`Installing '${starterSlug}' ontology…`);
+          await installOntology(result.created, starterSlug);
+        } catch (ontoErr: any) {
+          // Don't roll back the CG — log the warning, surface a hint, and
+          // let the operator re-run installation later if they want.
+          console.warn('[CreateProjectModal] ontology install failed:', ontoErr);
+          setProgress(`Project created, but ontology install failed: ${ontoErr?.message ?? ontoErr}`);
+        }
+      }
 
       setProgress('Refreshing project list…');
       const { contextGraphs: freshList } = await fetchContextGraphs();
@@ -183,23 +206,43 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
             </div>
           </div>
 
-          <div className="v10-form-group" style={{ opacity: 0.5, pointerEvents: 'none' }}>
-            <label className="v10-form-label">Ontology <span style={{ fontSize: 10, fontWeight: 400, color: 'var(--text-tertiary)' }}>(coming soon)</span></label>
+          <div className="v10-form-group">
+            <label className="v10-form-label">Ontology</label>
             <div className="v10-form-radio-group">
               <label className="v10-form-radio">
-                <input type="radio" checked={ontology === 'agent'} readOnly disabled />
-                Let agent decide — your agent will choose the best vocabulary
+                <input type="radio" checked={ontology === 'community'} onChange={() => setOntology('community')} />
+                Choose a starter — install one of the bundled project-type ontologies
               </label>
-              <div className="v10-form-radio-desc">
-                Your agent will query community ontologies and select the most relevant one.
-              </div>
+              {ontology === 'community' && (
+                <div style={{ marginLeft: 24, marginTop: 4, marginBottom: 8 }}>
+                  <select
+                    className="v10-form-select"
+                    value={starterSlug}
+                    onChange={(e) => setStarterSlug(e.target.value)}
+                  >
+                    {starters.map((s) => (
+                      <option key={s.slug} value={s.slug}>{s.displayName}</option>
+                    ))}
+                  </select>
+                  <div style={{ marginTop: 6, fontSize: 11, color: 'var(--text-tertiary)' }}>
+                    {starters.find((s) => s.slug === starterSlug)?.description}
+                  </div>
+                </div>
+              )}
               <label className="v10-form-radio">
-                <input type="radio" checked={ontology === 'upload'} readOnly disabled />
-                Upload an ontology file (.ttl, .owl, .rdf)
+                <input type="radio" checked={ontology === 'agent'} onChange={() => setOntology('agent')} />
+                Let agent decide — defaults to the closest starter (v1)
               </label>
-              <label className="v10-form-radio">
-                <input type="radio" checked={ontology === 'community'} readOnly disabled />
-                Choose from community ontologies
+              {ontology === 'agent' && (
+                <div className="v10-form-radio-desc" style={{ marginLeft: 24, marginTop: 4, marginBottom: 8 }}>
+                  v1 installs the <code>{starterSlug}</code> starter as a sensible default. A future
+                  release will have the agent draft a project-specific ontology by extending the closest
+                  starter from the project description.
+                </div>
+              )}
+              <label className="v10-form-radio" style={{ opacity: 0.5 }}>
+                <input type="radio" checked={ontology === 'upload'} onChange={() => setOntology('upload')} disabled />
+                Upload an ontology file (.ttl, .owl, .rdf) <span style={{ fontSize: 10, fontWeight: 400, color: 'var(--text-tertiary)' }}>(coming soon)</span>
               </label>
             </div>
           </div>

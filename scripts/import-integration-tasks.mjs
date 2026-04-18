@@ -202,6 +202,97 @@ const TASKS = [
     dependsOn: ['cursor-dkg-eod-demo'],
     createdAt: '2026-04-18T15:00:00Z',
   },
+
+  // ─── Phase 7 — agent annotations + project ontology + URI convergence ─
+  {
+    slug: 'cursor-dkg-coding-project-ontology',
+    title: 'Phase 7 · Author coding-project starter ontology (formal Turtle/OWL + agent-guide.md) at packages/mcp-dkg/templates/ontologies/coding-project/',
+    status: 'done', priority: 'p1', estimate: 3,
+    dependsOn: ['cursor-dkg-write-tools'],
+    createdAt: '2026-04-18T19:00:00Z',
+  },
+  {
+    slug: 'cursor-dkg-import-ontology-script',
+    title: 'Phase 7 · scripts/import-ontology.mjs loads .ttl + .md into meta/project-ontology assertion + auto-promotes to SWM',
+    status: 'done', priority: 'p1', estimate: 1,
+    dependsOn: ['cursor-dkg-coding-project-ontology'],
+    createdAt: '2026-04-18T19:10:00Z',
+  },
+  {
+    slug: 'cursor-dkg-mcp-get-ontology',
+    title: 'Phase 7 · dkg_get_ontology MCP tool — returns formal .ttl + agent guide markdown for the project ontology',
+    status: 'done', priority: 'p1', estimate: 1,
+    dependsOn: ['cursor-dkg-import-ontology-script'],
+    createdAt: '2026-04-18T19:20:00Z',
+  },
+  {
+    slug: 'cursor-dkg-mcp-annotate-turn',
+    title: 'Phase 7 · dkg_annotate_turn MCP tool — batch-emits chat:topic/mentions/examines/proposes/concludes/asks + sugar over Phase 6 writes (proposedDecisions/Tasks/comments/vmPublishRequests)',
+    status: 'done', priority: 'p1', estimate: 3,
+    dependsOn: ['cursor-dkg-mcp-get-ontology'],
+    createdAt: '2026-04-18T19:30:00Z',
+  },
+  {
+    slug: 'cursor-dkg-hook-mention-regex',
+    title: 'Phase 7 · Mention-regex backstop in capture-chat.mjs — auto-emits chat:mentions for any urn:dkg:* in turn text (defensive backstop if agent forgets dkg_annotate_turn)',
+    status: 'done', priority: 'p2', estimate: 1,
+    dependsOn: ['cursor-dkg-mcp-annotate-turn'],
+    createdAt: '2026-04-18T19:40:00Z',
+  },
+  {
+    slug: 'cursor-dkg-hook-agent-self-register',
+    title: 'Phase 7 · capture-chat.mjs auto-registers agent in meta/agent-self-register-<slug> on first sessionStart — fixes operator-B onboarding pinch point',
+    status: 'done', priority: 'p2', estimate: 1,
+    dependsOn: ['cursor-dkg-mcp-annotate-turn'],
+    createdAt: '2026-04-18T19:45:00Z',
+  },
+  {
+    slug: 'cursor-dkg-hook-session-context',
+    title: 'Phase 7 · capture-chat.mjs returns additionalContext on sessionStart — annotation protocol summary + 30 most-recent entities → agent boots with conventions in working context',
+    status: 'done', priority: 'p1', estimate: 2,
+    dependsOn: ['cursor-dkg-hook-agent-self-register'],
+    createdAt: '2026-04-18T19:50:00Z',
+  },
+  {
+    slug: 'cursor-dkg-cursor-rule',
+    title: 'Phase 7 · .cursor/rules/dkg-annotate.mdc with alwaysApply:true — annotation contract + look-before-mint + slug normalisation rule + URI patterns',
+    status: 'done', priority: 'p2', estimate: 1,
+    dependsOn: ['cursor-dkg-mcp-annotate-turn'],
+    createdAt: '2026-04-18T20:00:00Z',
+  },
+  {
+    slug: 'cursor-dkg-agents-md',
+    title: 'Phase 7 · AGENTS.md sibling for Claude Code/Continue/etc. — same protocol, more comprehensive than the Cursor rule',
+    status: 'done', priority: 'p2', estimate: 1,
+    dependsOn: ['cursor-dkg-cursor-rule'],
+    createdAt: '2026-04-18T20:05:00Z',
+  },
+  {
+    slug: 'cursor-dkg-starter-ontologies',
+    title: 'Phase 7 · 4 additional starter ontologies (book-research, pkm, scientific-research, narrative-writing) shipped as ttl+md pairs in packages/mcp-dkg/templates/ontologies/',
+    status: 'done', priority: 'p2', estimate: 3,
+    dependsOn: ['cursor-dkg-coding-project-ontology'],
+    createdAt: '2026-04-18T20:15:00Z',
+  },
+  {
+    slug: 'cursor-dkg-create-project-modal-wire',
+    title: 'Phase 7 · CreateProjectModal ontology picker wired (community + agent enabled with starter dropdown; upload deferred). Bundled starters via Vite import.meta.glob; calls /api/assertion/project-ontology/write+promote on CG creation',
+    status: 'done', priority: 'p2', estimate: 2,
+    dependsOn: ['cursor-dkg-starter-ontologies'],
+    createdAt: '2026-04-18T20:30:00Z',
+  },
+  {
+    slug: 'cursor-dkg-inbound-invite-investigation',
+    title: 'Phase 7 · Investigated passive inbound-invite UX (gap confirmed: requires daemon CONTEXT_GRAPH_INVITED event + sseBroadcast). Spec + minimum-fix plan documented in packages/mcp-dkg/docs/INBOUND_INVITES.md for Phase 8',
+    status: 'done', priority: 'p3', estimate: 1,
+    createdAt: '2026-04-18T20:45:00Z',
+  },
+  {
+    slug: 'cursor-dkg-reconciliation-doc',
+    title: 'Phase 7 · Spec for future dkg_propose_same_as reconciliation flow documented in packages/mcp-dkg/docs/RECONCILIATION.md (Phase 8 work — repair pathway for the rare cases where look-before-mint loses a race)',
+    status: 'done', priority: 'p3', estimate: 1,
+    createdAt: '2026-04-18T20:50:00Z',
+  },
 ];
 
 const sink = createTripleSink();

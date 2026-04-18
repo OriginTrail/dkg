@@ -13,6 +13,7 @@ import { loadConfig, describeConfig } from './config.js';
 import { DkgClient } from './client.js';
 import { registerReadTools } from './tools.js';
 import { registerWriteTools } from './tools/writes.js';
+import { registerAnnotationTools } from './tools/annotations.js';
 
 const VERSION = '0.1.0';
 
@@ -25,6 +26,7 @@ async function main(): Promise<void> {
 
   registerReadTools(server, client, config);
   registerWriteTools(server, client, config);
+  registerAnnotationTools(server, client, config);
 
   const transport = new StdioServerTransport();
   await server.connect(transport);

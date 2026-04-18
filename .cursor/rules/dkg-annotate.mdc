@@ -1,0 +1,49 @@
+---
+description: Annotate every chat turn into the DKG project's chat sub-graph via the dkg MCP tools so shared project memory grows organically and stays navigable.
+alwaysApply: true
+---
+
+# DKG annotation protocol
+
+This workspace is bound to a DKG context graph. Use the `dkg` MCP server to keep the graph rich and convergent.
+
+## After every substantive turn
+
+Call **`dkg_annotate_turn`** exactly once. A turn is "substantive" if it reasoned, proposed, examined, or referenced something — basically every turn that wasn't a one-line acknowledgement. Over-eagerness is not a failure mode; under-coverage is.
+
+Minimum payload:
+
+```jsonc
+dkg_annotate_turn({
+  topics:   [<2-3 short topic strings>],
+  mentions: [<URIs found via dkg_search; mint fresh ones if no match>]
+})
+```
+
+Add `examines` / `proposes` / `concludes` / `asks` / `proposedDecisions` / `proposedTasks` / `comments` / `vmPublishRequests` when the turn warrants them. The full schema is in the agent guide returned by `dkg_get_ontology`.
+
+## Look-before-mint protocol (the convergence rule)
+
+Before minting any new `urn:dkg:<type>:<slug>` URI:
+
+1. Compute the normalised slug: `lowercase → ASCII-fold → strip stopwords (the/a/an/of/for/and/or/to/in/on/with) → hyphenate → ≤60 chars`.
+2. Call `dkg_search` with the unnormalised label.
+3. If any result's normalised slug matches yours, **REUSE** that URI.
+4. Otherwise mint fresh per the URI patterns below. **Never fabricate URIs** for entities that don't exist yet.
+
+## URI patterns
+
+```
+urn:dkg:concept:<slug>      free-text concept (skos:Concept)
+urn:dkg:topic:<slug>        broad topical bucket
+urn:dkg:question:<slug>     open question
+urn:dkg:finding:<slug>      preserved claim/observation
+urn:dkg:decision:<slug>     architectural decision
+urn:dkg:task:<slug>         work item
+```
+
+## Reference
+
+Call `dkg_get_ontology` once per session for the full agent guide + formal Turtle/OWL ontology. The session-start hook injects a summary so this is mostly a refresher; consult it whenever uncertain about which predicate to use.
+
+VM publish is **always** human-gated. Use `dkg_request_vm_publish` to write a marker; never publish on-chain directly.
