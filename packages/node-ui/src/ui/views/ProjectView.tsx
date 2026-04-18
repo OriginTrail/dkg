@@ -1075,8 +1075,7 @@ function EntityList({ entities, layerKey, layerIcon, onSelectEntity }: {
 }
 
 // ─── Shared LayerContent (tabs + bodies, used by both inline strip and full page) ──
-
-type LayerContentTab = 'items' | 'assertions' | 'graph' | 'docs';
+// (LayerContentTab is declared at the top of the file.)
 
 function LayerContent({
   layer,

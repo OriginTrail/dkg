@@ -6047,13 +6047,18 @@ async function handleRequest(
       });
     }
 
-    // Fetch entity triples
+    // Fetch entity triples.
+    // The entity's data lives in the sub-graph's named assertion graph, so
+    // we must wrap the pattern in GRAPH ?g — otherwise we'd only see the
+    // default graph, which is empty for these imports. DISTINCT because
+    // promoted triples can appear under both WM and SWM/VM named graphs
+    // for the same sub-graph.
     let triples: Array<{ p: string; o: string }> = [];
     let entityRdfType: string | null = null;
     try {
       const entityIri = entityUri.replace(/^<|>$/g, '');
       const triplesResult = await agent.query(
-        `SELECT ?p ?o WHERE { <${entityIri}> ?p ?o } LIMIT 200`,
+        `SELECT DISTINCT ?p ?o WHERE { GRAPH ?g { <${entityIri}> ?p ?o } } LIMIT 200`,
         { contextGraphId },
       );
       triples = (triplesResult?.bindings ?? []).map((row: any) => ({
@@ -6076,7 +6081,9 @@ async function handleRequest(
       });
     }
 
-    // Fetch the profile's detailHint for this type from the `meta` sub-graph
+    // Fetch the profile's detailHint for this type from the `meta` sub-graph.
+    // Same GRAPH ?g reasoning as above — the profile lives in a named
+    // assertion graph under `.../meta/assertion/...`, not in the default.
     let detailHint: string | null = null;
     let entityTypeLabel: string | null = null;
     if (entityRdfType) {
@@ -6084,9 +6091,11 @@ async function handleRequest(
         const hintResult = await agent.query(
           `
             SELECT ?hint ?label WHERE {
-              ?binding <http://dkg.io/ontology/profile/forType> <${entityRdfType}> ;
-                       <http://dkg.io/ontology/profile/detailHint> ?hint .
-              OPTIONAL { ?binding <http://dkg.io/ontology/profile/label> ?label }
+              GRAPH ?g {
+                ?binding <http://dkg.io/ontology/profile/forType> <${entityRdfType}> ;
+                         <http://dkg.io/ontology/profile/detailHint> ?hint .
+                OPTIONAL { ?binding <http://dkg.io/ontology/profile/label> ?label }
+              }
             } LIMIT 1
           `,
           { contextGraphId, subGraphName: 'meta' },

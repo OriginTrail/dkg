@@ -2653,6 +2653,58 @@ body.light .v10-import-dropzone.drag-over { border-color: #b0b0b0; background: #
   border: 1px solid rgba(248,113,113,0.25);
   border-radius: 8px;
 }
+/* When the error is specifically "LLM not configured", we upgrade to a
+   call-to-action card: amber tone (info, not error), a head row, and a
+   button jumping to the Settings tab. */
+.v10-genui-error-cta {
+  color: var(--text-primary);
+  background: rgba(245,158,11,0.08);
+  border-color: rgba(245,158,11,0.3);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.v10-genui-error-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+.v10-genui-error-icon {
+  font-size: 20px;
+  line-height: 1;
+  color: #f59e0b;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+.v10-genui-error-title {
+  font-weight: 600;
+  color: var(--text-primary);
+  font-size: 13px;
+  margin-bottom: 4px;
+}
+.v10-genui-error-desc {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  line-height: 1.55;
+}
+.v10-genui-error-cta-btn {
+  align-self: flex-start;
+  padding: 6px 14px;
+  border-radius: 6px;
+  background: rgba(245,158,11,0.16);
+  color: #f59e0b;
+  border: 1px solid rgba(245,158,11,0.4);
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  font-family: var(--font-sans);
+  transition: background 0.15s, border-color 0.15s;
+}
+.v10-genui-error-cta-btn:hover {
+  background: rgba(245,158,11,0.24);
+  border-color: rgba(245,158,11,0.6);
+}
 .v10-me-error { padding: 12px 16px; font-size: 12px; color: var(--accent-red); background: rgba(239,68,68,0.06); }
 
 /* ── Graph View (full graph tab) ── */

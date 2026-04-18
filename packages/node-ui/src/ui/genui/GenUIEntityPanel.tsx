@@ -11,6 +11,7 @@ import React from 'react';
 import { Renderer } from '@openuidev/react-lang';
 import { genuiLibrary, getGenuiLibraryPrompt } from './registry.js';
 import { streamGenUI } from './streamGenUI.js';
+import { useTabsStore } from '../stores/tabs.js';
 
 export interface GenUIEntityPanelProps {
   contextGraphId: string;
@@ -75,7 +76,8 @@ export const GenUIEntityPanel: React.FC<GenUIEntityPanelProps> = ({
   }, [contextGraphId, entityUri]);
 
   if (error) {
-    return <>{fallback ? fallback(error) : <div className="v10-genui-error">GenUI unavailable: {error}</div>}</>;
+    if (fallback) return <>{fallback(error)}</>;
+    return <GenUIErrorBlock error={error} />;
   }
 
   if (!response && isStreaming) {
@@ -89,6 +91,42 @@ export const GenUIEntityPanel: React.FC<GenUIEntityPanelProps> = ({
         library={genuiLibrary}
         isStreaming={isStreaming}
       />
+    </div>
+  );
+};
+
+// ── Error block ──────────────────────────────────────────────
+// The most common failure mode in practice is the daemon responding 503
+// because no LLM API key is configured. Detect that specifically and
+// offer a one-click jump to the Settings tab where the key is set.
+const LLM_NOT_CONFIGURED_HINT = 'LLM not configured';
+
+const GenUIErrorBlock: React.FC<{ error: string }> = ({ error }) => {
+  const openTab = useTabsStore((s) => s.openTab);
+  const isLlmMissing = error.includes(LLM_NOT_CONFIGURED_HINT);
+
+  if (!isLlmMissing) {
+    return <div className="v10-genui-error">GenUI unavailable: {error}</div>;
+  }
+
+  return (
+    <div className="v10-genui-error v10-genui-error-cta">
+      <div className="v10-genui-error-head">
+        <span className="v10-genui-error-icon">⚙</span>
+        <div>
+          <div className="v10-genui-error-title">Set up your LLM to enable GenUI</div>
+          <div className="v10-genui-error-desc">
+            GenUI streams entity detail views from an OpenAI-compatible model.
+            Add an API key in Settings and open this entity again.
+          </div>
+        </div>
+      </div>
+      <button
+        className="v10-genui-error-cta-btn"
+        onClick={() => openTab({ id: 'settings', label: 'Settings', closable: true })}
+      >
+        Open Settings →
+      </button>
     </div>
   );
 };

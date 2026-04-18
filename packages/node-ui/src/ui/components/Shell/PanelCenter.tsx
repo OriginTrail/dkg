@@ -23,6 +23,10 @@ const GameView = React.lazy(() =>
   import('../../pages/Apps.js').then((m) => ({ default: m.AppsPage }))
 );
 
+const SettingsView = React.lazy(() =>
+  import('../../pages/Settings.js').then((m) => ({ default: m.SettingsPage }))
+);
+
 function TabBar() {
   const { tabs, activeTabId, setActiveTab, closeTab } = useTabsStore();
 
@@ -216,6 +220,14 @@ function ViewContainer() {
     return (
       <Suspense fallback={<div className="lazy-spinner">Loading game...</div>}>
         <GameView />
+      </Suspense>
+    );
+  }
+
+  if (activeTabId === 'settings') {
+    return (
+      <Suspense fallback={<div className="lazy-spinner">Loading settings...</div>}>
+        <SettingsView />
       </Suspense>
     );
   }
