@@ -1,0 +1,193 @@
+/**
+ * Manifest templates with {{placeholder}} substitution.
+ *
+ * The cursor-rule and AGENTS.md templates are intentionally NOT here
+ * — those are sourced from the canonical files in the repo at
+ * publish time (`.cursor/rules/dkg-annotate.mdc` and `AGENTS.md`)
+ * so they stay in lockstep with what we actually ship locally.
+ *
+ * The hook templates and config template ARE here because they're
+ * authored solely for distribution (not used as files in the repo
+ * itself — the repo's `.cursor/hooks.json` is hand-edited per
+ * machine; the manifest distributes a parameterised version).
+ *
+ * Substitutable placeholders (see schema.ts MANIFEST_PLACEHOLDERS):
+ *   {{agentSlug}}          operator-chosen slug
+ *   {{agentUri}}            urn:dkg:agent:<agentSlug>
+ *   {{contextGraphId}}     CG id
+ *   {{daemonApiUrl}}        local daemon API URL
+ *   {{daemonTokenFile}}     relative path to auth.token
+ *   {{workspaceAbsPath}}    absolute workspace path
+ *   {{mcpDkgDistAbsPath}}   absolute path to packages/mcp-dkg/dist/index.js
+ *   {{captureScriptPath}}   absolute path to packages/mcp-dkg/hooks/capture-chat.mjs
+ *   {{network}}             testnet / mainnet / devnet
+ */
+
+/**
+ * `<workspace>/.cursor/hooks.json` — wires capture-chat.mjs to all
+ * four Cursor session events with the right env vars baked in.
+ */
+export const CURSOR_HOOKS_TEMPLATE = JSON.stringify(
+  {
+    _comment:
+      'Workspace-scoped Cursor hooks for the DKG capture-chat integration. ' +
+      'Generated from a project manifest by `dkg-mcp join`. ' +
+      'DKG_WORKSPACE pins the hook to this workspace; DKG_API/DKG_AGENT_URI/DKG_TOKEN ' +
+      'override what the script would otherwise read from .dkg/config.yaml. ' +
+      "All hooks are failClosed:false — the script never blocks the user's chat.",
+    version: 1,
+    hooks: {
+      sessionStart: [
+        {
+          command:
+            'DKG_WORKSPACE={{workspaceAbsPath}} DKG_API={{daemonApiUrl}} DKG_AGENT_URI={{agentUri}} ' +
+            'node {{captureScriptPath}} sessionStart',
+          failClosed: false,
+        },
+      ],
+      sessionEnd: [
+        {
+          command:
+            'DKG_WORKSPACE={{workspaceAbsPath}} DKG_API={{daemonApiUrl}} DKG_AGENT_URI={{agentUri}} ' +
+            'node {{captureScriptPath}} sessionEnd',
+          failClosed: false,
+        },
+      ],
+      beforeSubmitPrompt: [
+        {
+          command:
+            'DKG_WORKSPACE={{workspaceAbsPath}} DKG_API={{daemonApiUrl}} DKG_AGENT_URI={{agentUri}} ' +
+            'node {{captureScriptPath}} beforeSubmitPrompt',
+          failClosed: false,
+        },
+      ],
+      afterAgentResponse: [
+        {
+          command:
+            'DKG_WORKSPACE={{workspaceAbsPath}} DKG_API={{daemonApiUrl}} DKG_AGENT_URI={{agentUri}} ' +
+            'node {{captureScriptPath}} afterAgentResponse',
+          failClosed: false,
+        },
+      ],
+    },
+  },
+  null,
+  2,
+);
+
+/**
+ * `~/.claude/settings.json` HOOKS BLOCK — installer merges this into
+ * the operator's existing settings.json (preserves their permissions
+ * and other config). DKG_CAPTURE_TOOL=claude-code makes turns chip
+ * correctly in the UI.
+ */
+export const CLAUDE_HOOKS_TEMPLATE = JSON.stringify(
+  {
+    hooks: {
+      SessionStart: [
+        {
+          hooks: [
+            {
+              type: 'command',
+              command:
+                'DKG_WORKSPACE={{workspaceAbsPath}} DKG_CAPTURE_TOOL=claude-code DKG_API={{daemonApiUrl}} ' +
+                'DKG_AGENT_URI={{agentUri}} node {{captureScriptPath}} SessionStart',
+            },
+          ],
+        },
+      ],
+      UserPromptSubmit: [
+        {
+          hooks: [
+            {
+              type: 'command',
+              command:
+                'DKG_WORKSPACE={{workspaceAbsPath}} DKG_CAPTURE_TOOL=claude-code DKG_API={{daemonApiUrl}} ' +
+                'DKG_AGENT_URI={{agentUri}} node {{captureScriptPath}} UserPromptSubmit',
+            },
+          ],
+        },
+      ],
+      Stop: [
+        {
+          hooks: [
+            {
+              type: 'command',
+              command:
+                'DKG_WORKSPACE={{workspaceAbsPath}} DKG_CAPTURE_TOOL=claude-code DKG_API={{daemonApiUrl}} ' +
+                'DKG_AGENT_URI={{agentUri}} node {{captureScriptPath}} Stop',
+            },
+          ],
+        },
+      ],
+      SessionEnd: [
+        {
+          hooks: [
+            {
+              type: 'command',
+              command:
+                'DKG_WORKSPACE={{workspaceAbsPath}} DKG_CAPTURE_TOOL=claude-code DKG_API={{daemonApiUrl}} ' +
+                'DKG_AGENT_URI={{agentUri}} node {{captureScriptPath}} SessionEnd',
+            },
+          ],
+        },
+      ],
+    },
+  },
+  null,
+  2,
+);
+
+/**
+ * `<workspace>/.dkg/config.yaml` — the daemon binding config the MCP
+ * server reads. The cursor MCP config inherits from this via the env
+ * vars in the hooks; same for claude-code.
+ */
+export const CONFIG_YAML_TEMPLATE = `# .dkg/config.yaml — generated by \`dkg-mcp join\` for project {{contextGraphId}}
+# on the {{network}} network. Edit by hand if you want to override
+# anything; this file is gitignored.
+
+contextGraph: {{contextGraphId}}
+autoShare: true
+
+node:
+  api: {{daemonApiUrl}}
+  tokenFile: {{daemonTokenFile}}
+
+agent:
+  uri: {{agentUri}}
+
+capture:
+  subGraph: chat
+  assertion: chat-log
+  privacy: team
+  tool: cursor
+`;
+
+/**
+ * `<workspace>/.cursor/mcp.json` — wires the dkg MCP server into
+ * Cursor with the right env vars. Installer merges with any existing
+ * mcpServers block.
+ */
+export const CURSOR_MCP_JSON_TEMPLATE = JSON.stringify(
+  {
+    _comment:
+      'Cursor MCP wiring for the DKG project {{contextGraphId}} on the ' +
+      '{{network}} network. Generated by `dkg-mcp join`. The dkg server is ' +
+      'spawned per-Cursor-instance; env vars override what it would read from ' +
+      '.dkg/config.yaml.',
+    mcpServers: {
+      dkg: {
+        command: 'node',
+        args: ['{{mcpDkgDistAbsPath}}'],
+        env: {
+          DKG_API: '{{daemonApiUrl}}',
+          DKG_PROJECT: '{{contextGraphId}}',
+          DKG_AGENT_URI: '{{agentUri}}',
+        },
+      },
+    },
+  },
+  null,
+  2,
+);
