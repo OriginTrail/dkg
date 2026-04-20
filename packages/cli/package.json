@@ -9,6 +9,8 @@
   "scripts": {
     "prebuild": "pnpm --filter @origintrail-official/dkg-adapter-openclaw run build",
     "build": "tsc && node -e \"const fs=require('fs');const p=require('path');fs.mkdirSync('network',{recursive:true});for(const f of fs.readdirSync('../../network')){if(f.endsWith('.json'))fs.copyFileSync(p.join('../../network',f),p.join('network',f))};fs.copyFileSync('../../project.json','project.json')\"",
+    "benchmark:catchup-runner": "node scripts/catchup-runner-benchmark.cjs",
+    "benchmark:daemon-responsiveness": "node scripts/daemon-responsiveness-benchmark.cjs",
     "postinstall": "node ./scripts/bundle-markitdown-binaries.mjs --quiet --current-platform --best-effort",
     "markitdown:build": "node ./scripts/bundle-markitdown-binaries.mjs --build-current-platform",
     "test": "vitest run",

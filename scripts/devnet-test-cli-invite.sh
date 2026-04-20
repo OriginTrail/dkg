@@ -16,9 +16,9 @@ fi
 
 CLI="node $REPO_ROOT/packages/cli/dist/cli.js"
 
-PORT1=9201
-PORT2=9202
-PORT3=9203
+PORT1="${API_PORT_BASE:-9201}"
+PORT2=$((PORT1 + 1))
+PORT3=$((PORT1 + 2))
 HOME1="$DEVNET_DIR/node1"
 HOME2="$DEVNET_DIR/node2"
 HOME3="$DEVNET_DIR/node3"

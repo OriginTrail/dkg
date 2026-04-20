@@ -80,6 +80,7 @@ export class ProtocolRouter {
     const { peerIdFromString } = await import('@libp2p/peer-id');
     const peerId = peerIdFromString(peerIdStr);
     const signal = AbortSignal.timeout(timeoutMs);
+    const startedAt = Date.now();
 
     // libp2p internally upgrades relay connections to direct during
     // dialProtocol/newStream (peerStore.merge triggers the connection manager
@@ -89,20 +90,31 @@ export class ProtocolRouter {
     let lastErr: unknown;
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
+        const dialStartedAt = Date.now();
         const stream = await libp2p.dialProtocol(peerId, protocolId, {
           runOnLimitedConnection: true,
           signal,
         });
+        const dialDurationMs = Date.now() - dialStartedAt;
 
         if (stream.writeStatus === 'closed' || stream.writeStatus === 'closing') {
           stream.abort(new Error('stream closed before send'));
           throw new Error('stream returned in closed state');
         }
 
+        const sendStartedAt = Date.now();
         stream.send(data);
         await stream.close({ signal });
+        const sendDurationMs = Date.now() - sendStartedAt;
 
-        return await readAll(stream, this.maxReadBytes);
+        const readStartedAt = Date.now();
+        const response = await readAll(stream, this.maxReadBytes);
+        const readDurationMs = Date.now() - readStartedAt;
+        const totalDurationMs = Date.now() - startedAt;
+        if (totalDurationMs > 100) {
+          console.warn(`[ProtocolRouter] send ${protocolId} to ${peerIdStr}: dial=${dialDurationMs}ms send=${sendDurationMs}ms read=${readDurationMs}ms total=${totalDurationMs}ms`);
+        }
+        return response;
       } catch (err: unknown) {
         lastErr = err;
         if (!isRecoverableSendError(err) || attempt >= 2) throw err;
