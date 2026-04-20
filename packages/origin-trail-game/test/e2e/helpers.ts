@@ -363,6 +363,20 @@ export async function startTestCluster(nodeCount: number, options?: ClusterOptio
 }
 
 function startDaemon(node: TestNode): ChildProcess {
+  // `dkg start --foreground` runs a foreground supervisor that spawns a
+  // separate worker process which owns the pidfile + network ports.
+  // `SIGTERM` to the supervisor propagates to the worker, but `SIGKILL`
+  // does NOT — so if our cleanup ever has to force-kill (slow-shutdown
+  // race on 2-core CI runners) the worker is orphaned and the next
+  // test file's `startTestCluster` trips over:
+  //
+  //   Daemon already running (PID N). Use "dkg stop" first.
+  //   EADDRINUSE: address already in use 0.0.0.0:19301
+  //
+  // Putting the supervisor in its own process group (`detached: true`)
+  // lets us signal the WHOLE group via `process.kill(-pid, sig)` in
+  // stopTestCluster, so supervisor + worker die together even under
+  // SIGKILL.
   const child = spawn(
     process.execPath,
     [CLI_JS, 'start', '--foreground'],
@@ -370,6 +384,7 @@ function startDaemon(node: TestNode): ChildProcess {
       cwd: DKG_V9_ROOT,
       env: { ...process.env, DKG_HOME: node.homeDir },
       stdio: ['ignore', 'pipe', 'pipe'],
+      detached: true,
     },
   );
 
@@ -381,10 +396,22 @@ function startDaemon(node: TestNode): ChildProcess {
   return child;
 }
 
+function killProcessGroup(pid: number | undefined, signal: NodeJS.Signals): void {
+  if (pid === undefined) return;
+  try {
+    // Negative pid targets the whole process group (requires detached spawn).
+    process.kill(-pid, signal);
+  } catch {
+    // ESRCH if group is already gone; EPERM if it was spawned without a
+    // session leader. Fall back to signalling only the direct child.
+    try { process.kill(pid, signal); } catch { /* already dead */ }
+  }
+}
+
 export async function stopTestCluster(nodes: TestNode[]): Promise<void> {
   const alive = nodes.filter(n => n.process && n.process.exitCode === null);
   for (const node of alive) {
-    node.process!.kill('SIGTERM');
+    killProcessGroup(node.process!.pid, 'SIGTERM');
   }
 
   // Wait up to 5s for clean shutdown, then force-kill any stragglers.
@@ -397,17 +424,45 @@ export async function stopTestCluster(nodes: TestNode[]): Promise<void> {
 
   const stillAlive = alive.filter(n => n.process!.exitCode === null);
   for (const node of stillAlive) {
-    node.process!.kill('SIGKILL');
+    killProcessGroup(node.process!.pid, 'SIGKILL');
   }
   // Give SIGKILL'd processes a moment to release file handles so the next
   // test file's `rmSync(TEST_DIR)` doesn't race with a writing daemon.
   await Promise.all(stillAlive.map(n => waitExit(n, 3000)));
-  await sleep(500);
+
+  // Belt-and-braces: make sure nothing is still listening on our API or
+  // libp2p ports before we return. If a worker survived both SIGTERM and
+  // a SIGKILL'd process-group (very rare, but observed on overloaded
+  // 2-core CI runners), the next test file would fail with EADDRINUSE.
+  await waitForPortsFree(nodes.flatMap(n => [n.apiPort, n.libp2pPort]), 5000);
 
   const chain = (globalThis as any).__e2eHardhat as HardhatChain | undefined;
   if (chain) {
     await stopHardhat(chain);
     (globalThis as any).__e2eHardhat = undefined;
+    await waitForPortsFree([HARDHAT_E2E_PORT], 3000);
+  }
+}
+
+async function waitForPortsFree(ports: number[], timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  const net = await import('node:net');
+  const isFree = (port: number): Promise<boolean> =>
+    new Promise(resolve => {
+      const srv = net.createServer();
+      srv.once('error', () => resolve(false));
+      srv.once('listening', () => srv.close(() => resolve(true)));
+      srv.listen(port, '127.0.0.1');
+    });
+  while (Date.now() < deadline) {
+    const results = await Promise.all(ports.map(isFree));
+    if (results.every(Boolean)) return;
+    // Best-effort: try to kill anything holding these ports (linux `fuser`).
+    try {
+      const { execSync } = await import('node:child_process');
+      execSync(`fuser -k -n tcp ${ports.join(' ')} 2>/dev/null || true`, { timeout: 2000 });
+    } catch { /* best-effort */ }
+    await sleep(300);
   }
 }
 
