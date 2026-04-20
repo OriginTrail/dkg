@@ -8,6 +8,8 @@
   },
   "scripts": {
     "build": "tsc && node -e \"const fs=require('fs');fs.mkdirSync('network',{recursive:true});fs.copyFileSync('../../network/testnet.json','network/testnet.json')\"",
+    "benchmark:catchup-runner": "node scripts/catchup-runner-benchmark.cjs",
+    "benchmark:daemon-responsiveness": "node scripts/daemon-responsiveness-benchmark.cjs",
     "postinstall": "node ./scripts/bundle-markitdown-binaries.mjs --quiet --current-platform --best-effort",
     "markitdown:build": "node ./scripts/bundle-markitdown-binaries.mjs --build-current-platform",
     "test": "vitest run",

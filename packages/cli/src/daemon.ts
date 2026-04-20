@@ -73,6 +73,7 @@ import {
   CLI_NPM_PACKAGE,
 } from './config.js';
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from './publisher-runner.js';
+import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from './catchup-runner.js';
 import { loadTokens, httpAuthGuard, extractBearerToken } from './auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from './extraction/index.js';
@@ -361,37 +362,6 @@ let isUpdating = false;
 
 type CatchupJobState = "queued" | "running" | "done" | "failed" | "denied";
 
-interface CatchupJobResult {
-  connectedPeers: number;
-  syncCapablePeers: number;
-  peersTried: number;
-  dataSynced: number;
-  sharedMemorySynced: number;
-  diagnostics?: {
-    noProtocolPeers: number;
-    durable: {
-      fetchedMetaTriples: number;
-      fetchedDataTriples: number;
-      insertedMetaTriples: number;
-      insertedDataTriples: number;
-      emptyResponses: number;
-      metaOnlyResponses: number;
-      dataRejectedMissingMeta: number;
-      rejectedKcs: number;
-      failedPeers: number;
-    };
-    sharedMemory: {
-      fetchedMetaTriples: number;
-      fetchedDataTriples: number;
-      insertedMetaTriples: number;
-      insertedDataTriples: number;
-      emptyResponses: number;
-      droppedDataTriples: number;
-      failedPeers: number;
-    };
-  };
-}
-
 interface CatchupJob {
   jobId: string;
   paranetId: string;
@@ -410,6 +380,8 @@ interface CatchupTracker {
 }
 
 type PublishAccessPolicy = "public" | "ownerOnly" | "allowList";
+
+let daemonCatchupRunner: CatchupRunner | null = null;
 
 interface PublishQuad {
   subject: string;
@@ -1444,6 +1416,7 @@ async function runDaemonInner(
     ],
   );
   let corsAllowed: CorsAllowlist = "*";
+  daemonCatchupRunner = createCatchupRunner(agent);
 
   const server = createServer(async (req, res) => {
     try {
@@ -1686,6 +1659,11 @@ async function runDaemonInner(
       ?.stop()
       .catch((err: any) =>
         log(`Publisher runtime stop error: ${err?.message ?? String(err)}`),
+      );
+    await daemonCatchupRunner
+      ?.close()
+      .catch((err: any) =>
+        log(`Catch-up runner stop error: ${err?.message ?? String(err)}`),
       );
     server.close();
     appStaticServer?.close();
@@ -6230,12 +6208,10 @@ async function handleRequest(
       job.status = "running";
       job.startedAt = Date.now();
       try {
-        const result = await agent.syncContextGraphFromConnectedPeers(
-          paranetId,
-          {
-            includeSharedMemory: shouldSyncSharedMemory,
-          },
-        );
+        const result = await daemonCatchupRunner!.run({
+          contextGraphId: paranetId,
+          includeSharedMemory: shouldSyncSharedMemory,
+        });
         job.result = result;
         job.status = "done";
       } catch (err) {
