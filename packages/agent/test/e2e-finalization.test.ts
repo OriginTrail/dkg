@@ -252,8 +252,10 @@ describe('E2E: workspace-first publish with real blockchain', () => {
     expect(nodeB.node.libp2p.getPeers().length).toBeGreaterThanOrEqual(1);
 
     await nodeA.createContextGraph({ id: PARANET, name: 'Finalization Chain Test', description: '' });
-    await nodeA.registerContextGraph(PARANET);
-    nodeA.subscribeToContextGraph(PARANET);
+    // V10: `createContextGraph` already auto-registers on-chain when an EVM
+    // chain adapter + identity are present. Calling `registerContextGraph`
+    // again now throws `already registered on-chain`. We still need B to
+    // join the gossip topic; A is already subscribed via create().
     nodeB.subscribeToContextGraph(PARANET);
     await sleep(1000);
   }, 30_000);
