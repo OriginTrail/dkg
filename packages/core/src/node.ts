@@ -33,6 +33,13 @@ const RELAY_WATCHDOG_BASE_INTERVAL_MS = 10_000;
 const RELAY_WATCHDOG_MAX_INTERVAL_MS = 5 * 60_000;
 /** Short delay before redialing a disconnected relay to avoid hammering (ms). */
 const RELAY_REDIAL_DELAY_MS = 1_500;
+/**
+ * How long to allow a fresh reservation negotiation to complete after a relay
+ * redial before the watchdog considers the relay unhealthy again. Circuit
+ * Relay v2 reservation setup is usually sub-second on a healthy link, but we
+ * give it a generous grace window to absorb transient latency.
+ */
+const RELAY_RESERVATION_GRACE_MS = 15_000;
 
 interface RelayTarget {
   peerId: ReturnType<typeof peerIdFromString>;
@@ -47,6 +54,13 @@ export class DKGNode {
   private relayWatchdogTimer: ReturnType<typeof setTimeout> | null = null;
   private relayTargets: RelayTarget[] = [];
   private relayWatchdogConsecutiveFailures = 0;
+  /**
+   * Per-relay timestamp of the last redial we issued specifically because the
+   * circuit reservation had lapsed. Used to suppress spurious "reservation
+   * missing" findings while a freshly re-dialed relay is still negotiating
+   * the new reservation on the wire.
+   */
+  private relayReservationRedialAt: Map<string, number> = new Map();
 
   constructor(config: DKGNodeConfig = {}) {
     this.config = config;
@@ -225,28 +239,86 @@ export class DKGNode {
 
     const ts = () => new Date().toISOString();
     const short = (id: string) => id.slice(-8);
-    let allConnected = true;
+    let allHealthy = true;
+
+    // Snapshot advertised self-multiaddrs once per tick so we can check which
+    // relays still have a live /p2p-circuit reservation advertised via us.
+    const selfAddrs = node.getMultiaddrs().map(ma => ma.toString());
+    const now = Date.now();
 
     for (const { peerId, addr } of this.relayTargets) {
       if (peerId.equals(node.peerId)) continue;
 
+      const relayPidStr = peerId.toString();
       const conns = node.getConnections(peerId);
-      if (conns.length > 0) continue;
+      const transportUp = conns.length > 0;
 
-      allConnected = false;
-      console.log(`[${ts()}] Relay watchdog: ${short(peerId.toString())} disconnected, redialing…`);
-      // Brief delay before redial to avoid hammering the relay after a drop.
+      const hasReservation = selfAddrs.some(a =>
+        a.includes(`/p2p/${relayPidStr}/p2p-circuit`),
+      );
+
+      // Happy path: transport connected AND we advertise a circuit address
+      // through this relay → reservation is live.
+      if (transportUp && hasReservation) {
+        this.relayReservationRedialAt.delete(relayPidStr);
+        continue;
+      }
+
+      // Transport is up but reservation is missing → either it has just been
+      // re-negotiated and we're in the grace window, or it has genuinely
+      // lapsed and we need to force a re-listen by dropping+redialing.
+      if (transportUp && !hasReservation) {
+        const lastForcedRedial = this.relayReservationRedialAt.get(relayPidStr) ?? 0;
+        if (now - lastForcedRedial < RELAY_RESERVATION_GRACE_MS) {
+          // We just redialed; give libp2p time to finish negotiating a new
+          // reservation before declaring failure.
+          allHealthy = false;
+          continue;
+        }
+
+        allHealthy = false;
+        console.log(
+          `[${ts()}] Relay watchdog: reservation lapsed on ${short(relayPidStr)} ` +
+          `(connection up, no /p2p-circuit self-addr) — dropping + redialing to force reserve`,
+        );
+        this.relayReservationRedialAt.set(relayPidStr, now);
+
+        for (const c of conns) {
+          try {
+            await c.close();
+          } catch {
+            // Best-effort: if the close call itself fails we still try to
+            // redial below; libp2p will reuse an existing connection if one
+            // somehow survived.
+          }
+        }
+        // Brief delay so the remote side has time to release the prior hop
+        // reservation slot before we ask for a new one.
+        const delayMs = RELAY_REDIAL_DELAY_MS + Math.floor(Math.random() * 1000);
+        await new Promise(r => setTimeout(r, delayMs));
+        try {
+          await node.dial(addr);
+          console.log(`[${ts()}] Relay watchdog: redialed ${short(relayPidStr)} for fresh reservation`);
+        } catch (err: any) {
+          console.log(`[${ts()}] Relay watchdog: reservation-redial failed for ${short(relayPidStr)}: ${err.message}`);
+        }
+        continue;
+      }
+
+      // Transport is down — classic disconnect path.
+      allHealthy = false;
+      console.log(`[${ts()}] Relay watchdog: ${short(relayPidStr)} disconnected, redialing…`);
       const delayMs = RELAY_REDIAL_DELAY_MS + Math.floor(Math.random() * 1000);
       await new Promise(r => setTimeout(r, delayMs));
       try {
         await node.dial(addr);
-        console.log(`[${ts()}] Relay watchdog: reconnected to ${short(peerId.toString())}`);
+        console.log(`[${ts()}] Relay watchdog: reconnected to ${short(relayPidStr)}`);
       } catch (err: any) {
-        console.log(`[${ts()}] Relay watchdog: redial failed for ${short(peerId.toString())}: ${err.message}`);
+        console.log(`[${ts()}] Relay watchdog: redial failed for ${short(relayPidStr)}: ${err.message}`);
       }
     }
 
-    if (allConnected) {
+    if (allHealthy) {
       this.relayWatchdogConsecutiveFailures = 0;
     } else {
       this.relayWatchdogConsecutiveFailures++;
@@ -333,6 +405,7 @@ export class DKGNode {
     }
     this.relayTargets = [];
     this.relayWatchdogConsecutiveFailures = 0;
+    this.relayReservationRedialAt.clear();
     this.relayedPeers.clear();
     await this.node.stop();
     this.node = null;

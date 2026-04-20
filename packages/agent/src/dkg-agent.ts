@@ -99,6 +99,20 @@ const SYNC_MIN_GRAPH_BUDGET_MS = 10_000;
 const DEFAULT_SWM_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 const SWM_CLEANUP_INTERVAL_MS = 15 * 60 * 1000; // run cleanup every 15 minutes
 const SYNC_DENIED_RESPONSE = '__DKG_SYNC_DENIED__';
+/**
+ * How long to wait between reconnect-on-gossip dial attempts for the same peer.
+ * A CG with chatty gossip could otherwise produce a dial per message; this
+ * throttles us to at most one attempted dial per peer per window.
+ */
+const GOSSIP_DIAL_COOLDOWN_MS = 30_000;
+/** Per-dial-attempt timeout for reconnect-on-gossip so a stuck dial can't starve the gossip handler path. */
+const GOSSIP_DIAL_TIMEOUT_MS = 10_000;
+/**
+ * Cooldown for catchup-on-connection:open: suppresses duplicate catchup kicks
+ * when the same peer briefly has overlapping direct + relayed connections
+ * (each of which fires its own connection:open).
+ */
+const CATCHUP_ON_CONNECT_COOLDOWN_MS = 60_000;
 
 interface SyncRequestEnvelope {
   contextGraphId: string;
@@ -280,6 +294,18 @@ export class DKGAgent {
   private readonly seenPrivateSyncRequestIds = new Map<string, number>();
   private readonly metaRefreshTimestamps = new Map<string, number>();
   private readonly preferredSyncPeers = new Map<string, string>();
+  /**
+   * Per-peer timestamp of the last reconnect-on-gossip dial we attempted.
+   * Prevents a noisy topic from generating a dial storm against a peer we
+   * already tried recently. See DOC: p2p-resilience.md.
+   */
+  private readonly gossipDialAttemptedAt = new Map<string, number>();
+  /**
+   * Per-peer timestamp of the last catchup-on-connect we queued, to dedupe
+   * connection:open events when the same peer briefly churns between
+   * direct + relayed connections within a short window.
+   */
+  private readonly catchupOnConnectAt = new Map<string, number>();
 
   /** Registered agents on this node: agentAddress → AgentKeyRecord */
   private readonly localAgents = new Map<string, AgentKeyRecord>();
@@ -929,6 +955,42 @@ export class DKGAgent {
       }, 3000);
     });
 
+    // Also fire on connection:open so that a *reconnecting* peer (same
+    // peer-id, new connection after a prior drop) triggers a fresh sync
+    // attempt. peer:connect fires only on the first connection to a new
+    // peer, so without this handler a peer that temporarily disconnected
+    // after its first sync failed would never get a retry. The cooldown
+    // dedupes overlapping direct+relayed connections for the same peer.
+    this.node.libp2p.addEventListener('connection:open', (evt) => {
+      const remotePeer = evt.detail.remotePeer.toString();
+      if (remotePeer === this.node.libp2p.peerId.toString()) return;
+      const now = Date.now();
+      const last = this.catchupOnConnectAt.get(remotePeer) ?? 0;
+      if (now - last < CATCHUP_ON_CONNECT_COOLDOWN_MS) return;
+      this.catchupOnConnectAt.set(remotePeer, now);
+      setTimeout(() => {
+        this.trySyncFromPeer(remotePeer).catch((err: unknown) => {
+          handleSyncError(remotePeer, err);
+        });
+      }, 3000);
+    });
+
+    // Reconnect-on-gossip: when a gossip message arrives from a peer we're
+    // not currently connected to, best-effort dial them. This catches the
+    // case where two NAT'd edge nodes briefly lose their direct path but
+    // gossipsub still routes their messages to each other via the mesh —
+    // the arriving message is both proof-of-life *and* a cheap trigger to
+    // rebuild the direct link so subsequent sync requests have a path.
+    this.eventBus.on(DKGEvent.GOSSIP_MESSAGE, (data) => {
+      const from = (data as { from?: string })?.from;
+      if (!from || from === 'unknown') return;
+      this.maybeDialGossipSender(from).catch(() => {
+        // Swallow: reconnect-on-gossip is best-effort; failures are already
+        // logged inside the method and we don't want to disrupt gossip
+        // delivery if a single peer happens to be unreachable.
+      });
+    });
+
     // Sync from peers already connected (e.g. relay dialed during node.start())
     const alreadyConnected = this.node.libp2p.getPeers();
     for (const pid of alreadyConnected) {
@@ -1020,6 +1082,82 @@ export class DKGAgent {
     } finally {
       this.syncingPeers.delete(remotePeer);
     }
+  }
+
+  /**
+   * Reconnect-on-gossip: ensure we have a live libp2p path to the sender of
+   * a gossip message we just received. GossipSub delivers messages signed by
+   * their original publisher, so `from` is the author regardless of how many
+   * mesh hops the message took to reach us — making it a reliable signal
+   * that the author is online *right now*.
+   *
+   * Why: two edge nodes behind NAT can briefly lose their direct circuit
+   * without either side noticing until the next publish fails. By reacting
+   * to incoming gossip with an opportunistic dial, we restore the path long
+   * before the application-layer sync protocol is invoked.
+   *
+   * Best-effort only: we try peerStore-known multiaddrs first, then fall
+   * back to constructing `/p2p-circuit` multiaddrs through each configured
+   * relay. Failures are logged but never surface to the caller.
+   */
+  private async maybeDialGossipSender(peerIdStr: string): Promise<void> {
+    const selfPeerId = this.node.libp2p.peerId.toString();
+    if (peerIdStr === selfPeerId) return;
+
+    // Already connected → nothing to do.
+    const connected = this.node.libp2p.getPeers().some(p => p.toString() === peerIdStr);
+    if (connected) return;
+
+    // Cooldown: a single chatty CG can produce many gossip messages/second.
+    // One dial-attempt per peer per GOSSIP_DIAL_COOLDOWN_MS is enough.
+    const now = Date.now();
+    const last = this.gossipDialAttemptedAt.get(peerIdStr) ?? 0;
+    if (now - last < GOSSIP_DIAL_COOLDOWN_MS) return;
+    this.gossipDialAttemptedAt.set(peerIdStr, now);
+
+    const ctx = createOperationContext('connect');
+    const shortPeer = peerIdStr.slice(-8);
+
+    const { peerIdFromString } = await import('@libp2p/peer-id');
+    let peerId: ReturnType<typeof peerIdFromString>;
+    try {
+      peerId = peerIdFromString(peerIdStr);
+    } catch (err) {
+      this.log.warn(ctx, `Skipping gossip redial for invalid peer id ${shortPeer}: ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
+
+    // First pass: let libp2p try whatever addresses it already knows about
+    // for this peer (direct multiaddrs from identify, previous relay
+    // addresses from peerStore, etc.).
+    try {
+      await this.node.libp2p.dial(peerId, { signal: AbortSignal.timeout(GOSSIP_DIAL_TIMEOUT_MS) });
+      this.log.info(ctx, `Reconnect-on-gossip: dialed ${shortPeer} via peerStore`);
+      return;
+    } catch (err) {
+      this.log.info(ctx, `Reconnect-on-gossip: peerStore dial to ${shortPeer} failed (${err instanceof Error ? err.message : String(err)}); trying relay fallbacks`);
+    }
+
+    // Relay fallback: for each configured relay, construct an explicit
+    // circuit-relay multiaddr and dial. The first relay with a valid
+    // reservation for the sender wins.
+    const relays = this.config.relayPeers ?? [];
+    for (const relayAddr of relays) {
+      const circuitAddr = `${relayAddr}/p2p-circuit/p2p/${peerIdStr}`;
+      try {
+        await this.node.libp2p.dial(
+          multiaddr(circuitAddr),
+          { signal: AbortSignal.timeout(GOSSIP_DIAL_TIMEOUT_MS) },
+        );
+        this.log.info(ctx, `Reconnect-on-gossip: dialed ${shortPeer} via ${relayAddr.slice(-16)}`);
+        return;
+      } catch {
+        // Try next relay. We don't log per-relay failures at INFO to avoid
+        // log spam when a peer simply has no reservation anywhere right now.
+      }
+    }
+
+    this.log.info(ctx, `Reconnect-on-gossip: no path to ${shortPeer} via peerStore or ${relays.length} relay(s); will retry after cooldown`);
   }
 
   /**
