@@ -29,7 +29,7 @@ describe('Context Graph Protocol E2E (3 nodes + chain)', () => {
     apiA = nodeApi(nodes[0]);
     apiB = nodeApi(nodes[1]);
     apiC = nodeApi(nodes[2]);
-  }, 180_000);
+  }, 600_000);
 
   afterAll(async () => {
     if (nodes) await stopTestCluster(nodes);

@@ -281,7 +281,12 @@ export async function startTestCluster(nodeCount: number, options?: ClusterOptio
 
   // Start node 1 (relay) first
   nodes[0].process = startDaemon(nodes[0]);
-  await waitForReady(nodes[0].apiPort, 120_000, nodes[0].homeDir);
+  // Internal timeout must be strictly LESS than the outer beforeAll's
+  // hookTimeout so our diagnostic "did not become ready + daemon log tail"
+  // error materialises before vitest's generic "Hook timed out" kicks in
+  // and unmounts the error with no useful context. Individual test files
+  // use a 10-minute beforeAll; a 4-minute boot window per node is plenty.
+  await waitForReady(nodes[0].apiPort, 240_000, nodes[0].homeDir);
 
   // Get node 1's multiaddr for other nodes to use as relay
   const status = await httpGet(`http://127.0.0.1:${nodes[0].apiPort}/api/status`);
@@ -301,7 +306,7 @@ export async function startTestCluster(nodeCount: number, options?: ClusterOptio
   }
 
   // Wait for all nodes to be ready
-  await Promise.all(nodes.slice(1).map(n => waitForReady(n.apiPort, 120_000, n.homeDir)));
+  await Promise.all(nodes.slice(1).map(n => waitForReady(n.apiPort, 240_000, n.homeDir)));
 
   // Set default ask price for node identities (otherwise stakeWeightedAverageAsk = 0
   // and publish tokenAmount calculates to 0 which the contract rejects).

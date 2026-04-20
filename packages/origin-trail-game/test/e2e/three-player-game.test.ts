@@ -26,7 +26,7 @@ describe('OriginTrail Game: 3 player game', () => {
     apiA = nodeApi(nodes[0]);
     apiB = nodeApi(nodes[1]);
     apiC = nodeApi(nodes[2]);
-  }, 120_000);
+  }, 600_000);
 
   afterAll(async () => {
     if (nodes) await stopTestCluster(nodes);

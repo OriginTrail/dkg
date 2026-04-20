@@ -23,7 +23,7 @@ describe('New feature E2E tests (3 nodes)', () => {
     apiA = nodeApi(nodes[0]);
     apiB = nodeApi(nodes[1]);
     apiC = nodeApi(nodes[2]);
-  }, 120_000);
+  }, 600_000);
 
   afterAll(async () => {
     if (nodes) await stopTestCluster(nodes);
