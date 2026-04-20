@@ -28,8 +28,15 @@ if (
 }
 export const MARKITDOWN_UPSTREAM_VERSION = MARKITDOWN_BUILD_INFO.markItDownUpstreamVersion;
 export const PYINSTALLER_VERSION = MARKITDOWN_BUILD_INFO.pyInstallerVersion;
+export const RELEASE_BINARY_FETCH_TIMEOUT_MS = 15_000;
+export const RELEASE_CHECKSUM_FETCH_TIMEOUT_MS = 5_000;
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
 function loadDefaultReleaseRepo() {
-  for (const base of [resolve(__dirname, '..'), resolve(__dirname, '..', '..', '..', '..')]) {
+  const scriptDir = __dirname;
+  for (const base of [resolve(scriptDir, '..'), resolve(scriptDir, '..', '..', '..', '..')]) {
     try {
       const proj = JSON.parse(readFileSync(join(base, 'project.json'), 'utf-8'));
       if (proj.repo) return proj.repo;
@@ -38,11 +45,6 @@ function loadDefaultReleaseRepo() {
   return 'OriginTrail/dkg-v9';
 }
 export const DEFAULT_RELEASE_REPO = loadDefaultReleaseRepo();
-export const RELEASE_BINARY_FETCH_TIMEOUT_MS = 15_000;
-export const RELEASE_CHECKSUM_FETCH_TIMEOUT_MS = 5_000;
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
 const DEFAULT_PACKAGE_DIR = resolve(__dirname, '..');
 
 function loadSupportedTargets(packageDir = DEFAULT_PACKAGE_DIR) {
