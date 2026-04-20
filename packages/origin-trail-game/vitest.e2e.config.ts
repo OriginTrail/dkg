@@ -4,7 +4,7 @@ export default defineConfig({
   test: {
     include: ['test/e2e/**/*.test.ts'],
     testTimeout: 60_000,
-    hookTimeout: 120_000,
+    hookTimeout: 300_000,
     // `sequence.concurrent: false` only serializes tests *within* a file.
     // Each e2e file boots 3 DKG daemons + Hardhat into a shared
     // `.test-nodes/` directory and shared ports (19200-19202, 18545), so

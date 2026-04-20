@@ -60,7 +60,7 @@ async function httpPost(url: string, body: any, token?: string): Promise<any> {
   return res.json();
 }
 
-async function waitForReady(port: number, maxWaitMs = 60_000): Promise<void> {
+async function waitForReady(port: number, maxWaitMs = 120_000, homeDir?: string): Promise<void> {
   const start = Date.now();
   while (Date.now() - start < maxWaitMs) {
     try {
@@ -69,7 +69,33 @@ async function waitForReady(port: number, maxWaitMs = 60_000): Promise<void> {
     } catch { /* not ready */ }
     await sleep(500);
   }
-  throw new Error(`Node on port ${port} did not become ready within ${maxWaitMs}ms`);
+  // Include daemon log tail so CI failures are actually diagnosable instead
+  // of just "did not become ready".
+  let tail = '';
+  if (homeDir) {
+    const logFile = join(homeDir, 'test-daemon.log');
+    if (existsSync(logFile)) {
+      try {
+        const full = readFileSync(logFile, 'utf-8');
+        tail = '\n--- test-daemon.log (last 100 lines) ---\n' +
+          full.split('\n').slice(-100).join('\n');
+      } catch { /* best-effort */ }
+    }
+  }
+  throw new Error(`Node on port ${port} did not become ready within ${maxWaitMs}ms${tail}`);
+}
+
+async function safeRemoveTestDir(): Promise<void> {
+  if (!existsSync(TEST_DIR)) return;
+  for (let attempt = 0; attempt < 20; attempt++) {
+    try {
+      rmSync(TEST_DIR, { recursive: true, force: true, maxRetries: 5, retryDelay: 300 });
+      if (!existsSync(TEST_DIR)) return;
+    } catch (err) {
+      if (attempt === 19) throw err;
+    }
+    await sleep(500);
+  }
 }
 
 export function sleep(ms: number): Promise<void> {
@@ -190,9 +216,11 @@ function fundWallet(rpcUrl: string, address: string): void {
 }
 
 export async function startTestCluster(nodeCount: number, options?: ClusterOptions): Promise<TestNode[]> {
-  if (existsSync(TEST_DIR)) {
-    rmSync(TEST_DIR, { recursive: true, maxRetries: 3, retryDelay: 200 });
-  }
+  // Retry the dir wipe — in CI, a previous test file's daemon process may
+  // still be finalising log flushes when we try to rmSync here, which
+  // surfaces as ENOTEMPTY. safeRemoveTestDir polls until the directory is
+  // genuinely gone before we rebuild it.
+  await safeRemoveTestDir();
   mkdirSync(TEST_DIR, { recursive: true });
 
   const authToken = 'test-token-for-e2e';
@@ -253,7 +281,7 @@ export async function startTestCluster(nodeCount: number, options?: ClusterOptio
 
   // Start node 1 (relay) first
   nodes[0].process = startDaemon(nodes[0]);
-  await waitForReady(nodes[0].apiPort);
+  await waitForReady(nodes[0].apiPort, 120_000, nodes[0].homeDir);
 
   // Get node 1's multiaddr for other nodes to use as relay
   const status = await httpGet(`http://127.0.0.1:${nodes[0].apiPort}/api/status`);
@@ -273,7 +301,7 @@ export async function startTestCluster(nodeCount: number, options?: ClusterOptio
   }
 
   // Wait for all nodes to be ready
-  await Promise.all(nodes.slice(1).map(n => waitForReady(n.apiPort)));
+  await Promise.all(nodes.slice(1).map(n => waitForReady(n.apiPort, 120_000, n.homeDir)));
 
   // Set default ask price for node identities (otherwise stakeWeightedAverageAsk = 0
   // and publish tokenAmount calculates to 0 which the contract rejects).
@@ -353,14 +381,24 @@ export async function stopTestCluster(nodes: TestNode[]): Promise<void> {
   for (const node of alive) {
     node.process!.kill('SIGTERM');
   }
-  await sleep(2000);
-  for (const node of alive) {
-    if (node.process!.exitCode === null) {
-      node.process!.kill('SIGKILL');
-    }
-  }
 
-  // Stop Hardhat if it was started for this cluster
+  // Wait up to 5s for clean shutdown, then force-kill any stragglers.
+  const waitExit = (n: TestNode, timeoutMs: number): Promise<boolean> =>
+    Promise.race([
+      new Promise<boolean>(resolve => n.process!.once('exit', () => resolve(true))),
+      sleep(timeoutMs).then(() => false),
+    ]);
+  await Promise.all(alive.map(n => waitExit(n, 5000)));
+
+  const stillAlive = alive.filter(n => n.process!.exitCode === null);
+  for (const node of stillAlive) {
+    node.process!.kill('SIGKILL');
+  }
+  // Give SIGKILL'd processes a moment to release file handles so the next
+  // test file's `rmSync(TEST_DIR)` doesn't race with a writing daemon.
+  await Promise.all(stillAlive.map(n => waitExit(n, 3000)));
+  await sleep(500);
+
   const chain = (globalThis as any).__e2eHardhat as HardhatChain | undefined;
   if (chain) {
     await stopHardhat(chain);
