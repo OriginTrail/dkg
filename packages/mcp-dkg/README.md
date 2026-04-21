@@ -196,8 +196,8 @@ three DKG memory layers:
 - `swm` — shared working memory (gossiped to every participant on the CG)
 - `union` — wm + swm combined (default for most tools; matches the
   Node UI's default reader)
-- `vm` — verified / on-chain memory (hits `verifiedGraph: true` on
-  the daemon, whose responses include UAL + publisher info)
+- `vm` — verified / on-chain memory (hits `view: "verified-memory"`
+  on the daemon, whose responses include UAL + publisher info)
 
 Chat tools default to `union` so you see everything your own agent
 wrote plus everything your teammates shared.

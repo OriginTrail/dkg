@@ -155,8 +155,37 @@ export function templateUri(contextGraphId: string, slug: TemplateField): string
 // ── Substitution helper ─────────────────────────────────────────────
 
 /**
+ * POSIX shell single-quoting: wraps `v` so it's safe to paste literally
+ * into a shell command line. A single quote inside the value is closed,
+ * escaped as `\'`, and reopened — the canonical POSIX trick that works
+ * in every sh-family shell (bash, zsh, dash, sh).
+ *
+ * Used by the `{{sh:...}}` placeholder form so hook-command templates
+ * can safely embed operator-supplied values (absolute paths, URLs,
+ * nicknames) without shell metacharacters like `$(...)`, backticks,
+ * spaces, or quotes being interpreted by the user's shell.
+ */
+export function shellSingleQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
  * Apply {{placeholder}} substitution to a template body. Unknown
  * placeholders are left as literal text — fail-soft, by design.
+ *
+ * Two placeholder forms are supported:
+ *   `{{name}}`       — raw substitution; the template is responsible
+ *                      for its own quoting (suitable for non-shell
+ *                      contexts like markdown/YAML string values).
+ *   `{{sh:name}}`    — POSIX-shell-safe substitution; the value is
+ *                      single-quoted and embedded single quotes are
+ *                      escaped. Use this for every placeholder that
+ *                      ends up inside a shell command line (see
+ *                      `CURSOR_HOOKS_TEMPLATE` / `CLAUDE_HOOKS_TEMPLATE`
+ *                      in templates.ts). Without this form an attacker
+ *                      who controls e.g. `workspaceAbsPath` or
+ *                      `daemonApiUrl` could inject arbitrary commands
+ *                      into the hook that runs on every Cursor session.
  */
 export function substitutePlaceholders(
   body: string,
@@ -166,6 +195,7 @@ export function substitutePlaceholders(
   for (const ph of MANIFEST_PLACEHOLDERS) {
     const v = values[ph];
     if (v == null) continue;
+    out = out.split(`{{sh:${ph}}}`).join(shellSingleQuote(v));
     out = out.split(`{{${ph}}}`).join(v);
   }
   return out;

@@ -1323,6 +1323,13 @@ export class DKGAgent {
           onAccessDenied?.(pid);
           continue;
         }
+        // Non-ACL failure (transport error, timeout, malformed response,
+        // store write error, …). Track it so the caller can tell the
+        // difference between "every peer errored out" and "peers
+        // responded cleanly but had 0 new triples for us" — otherwise
+        // the daemon's catchup-status endpoint flips to "synced" even
+        // when nothing actually synced. See daemon.ts subscribe job.
+        summary.failedPeers += 1;
         this.log.warn(ctx, `Sync from ${remotePeerId} for "${pid}" failed: ${err instanceof Error ? err.message : String(err)}`);
       }
       }
@@ -3933,6 +3940,19 @@ export class DKGAgent {
   /**
    * Send a P2P notification to the approved agent so their node
    * automatically retries the subscription.
+   *
+   * Delivers the message ONLY to the requester's peer, resolved via the
+   * local agent registry. The earlier implementation broadcast to every
+   * connected peer and relied on each recipient's handler to filter by
+   * `agentAddress`. That leaked membership information for curated
+   * context graphs: every peer on the P2P network learned that
+   * `agentAddress` had just been invited to `contextGraphId`, which is
+   * exactly the metadata a curated CG is supposed to hide.
+   *
+   * If the requester isn't in the local registry we fall back to a
+   * best-effort dial through their relay address when available. We do
+   * NOT broadcast in any case — the invitee will re-learn on their next
+   * subscribe attempt if the direct notification fails.
    */
   private async notifyJoinApproval(contextGraphId: string, agentAddress: string): Promise<void> {
     const payload = JSON.stringify({
@@ -3940,29 +3960,7 @@ export class DKGAgent {
       contextGraphId,
       agentAddress,
     });
-    const payloadBytes = new TextEncoder().encode(payload);
-    const ctx = createOperationContext('system');
-
-    // Broadcast to all connected peers — each peer's handler checks the
-    // agentAddress and only the matching node auto-subscribes. This avoids
-    // relying on the agent registry which may be incomplete.
-    const peers = this.node.libp2p.getPeers();
-    let delivered = 0;
-    for (const pid of peers) {
-      const remotePeerId = pid.toString();
-      if (remotePeerId === this.peerId) continue;
-      try {
-        await this.router.send(remotePeerId, PROTOCOL_JOIN_REQUEST, payloadBytes, 5000);
-        delivered++;
-      } catch {
-        // Peer doesn't support protocol or timeout — skip
-      }
-    }
-    if (delivered === 0) {
-      this.log.warn(ctx, `Could not deliver join-approval notification for "${contextGraphId}" to ${agentAddress} — no reachable peers`);
-    } else {
-      this.log.info(ctx, `Broadcasted join-approval for "${contextGraphId}" (${agentAddress}) to ${delivered} peer(s)`);
-    }
+    return this.deliverPrivateJoinNotification(contextGraphId, agentAddress, payload, 'join-approval');
   }
 
   /**
@@ -3998,10 +3996,9 @@ export class DKGAgent {
   }
 
   /**
-   * Send a P2P notification to the rejected agent. Mirror of
-   * notifyJoinApproval — broadcast the rejection to all connected peers
-   * so the invitee's node (wherever it is) can surface a notification
-   * and clean up its stale "pending" state.
+   * Send a P2P notification to the rejected agent. Same privacy model
+   * as `notifyJoinApproval` — delivered only to the rejectee's peer,
+   * never broadcast. See that method's doc comment for rationale.
    */
   private async notifyJoinRejection(contextGraphId: string, agentAddress: string): Promise<void> {
     const payload = JSON.stringify({
@@ -4009,25 +4006,88 @@ export class DKGAgent {
       contextGraphId,
       agentAddress,
     });
+    return this.deliverPrivateJoinNotification(contextGraphId, agentAddress, payload, 'join-rejection');
+  }
+
+  /**
+   * Resolve the target agent's peer ID via the local agent registry and
+   * send the payload only to that peer. If the peer isn't currently
+   * connected but has a relay address on file we attempt to dial through
+   * the relay first. Never broadcasts — a missed notification is a much
+   * smaller harm than leaking curated-CG membership to every peer.
+   *
+   * @returns void (logged success/failure; callers treat this as
+   *          fire-and-forget)
+   */
+  private async deliverPrivateJoinNotification(
+    contextGraphId: string,
+    agentAddress: string,
+    payload: string,
+    label: 'join-approval' | 'join-rejection',
+  ): Promise<void> {
     const payloadBytes = new TextEncoder().encode(payload);
     const ctx = createOperationContext('system');
+    const addrLower = agentAddress.toLowerCase();
 
-    const peers = this.node.libp2p.getPeers();
-    let delivered = 0;
-    for (const pid of peers) {
-      const remotePeerId = pid.toString();
-      if (remotePeerId === this.peerId) continue;
+    let targetPeerId: string | null = null;
+    let targetRelayAddress: string | undefined;
+    try {
+      const agents = await this.discovery.findAgents();
+      const match = agents.find((a) => a.agentAddress?.toLowerCase() === addrLower);
+      if (match) {
+        targetPeerId = match.peerId;
+        targetRelayAddress = match.relayAddress;
+      }
+    } catch {
+      // Registry unavailable — we'll just skip delivery below.
+    }
+
+    if (!targetPeerId) {
+      this.log.warn(
+        ctx,
+        `Cannot deliver ${label} for "${contextGraphId}" to ${agentAddress} — agent not in local registry. ` +
+          `Dropping notification (invitee will re-learn on next subscribe).`,
+      );
+      return;
+    }
+
+    if (targetPeerId === this.peerId) {
+      this.log.info(ctx, `Skipping ${label} to ${agentAddress}: target is this node`);
+      return;
+    }
+
+    // Ensure we actually have a path to the target before attempting to
+    // send. If we're not connected and we have a relay hint from the
+    // registry, try a circuit dial once.
+    const hasConnection = this.node.libp2p
+      .getConnections()
+      .some((c) => c.remotePeer.toString() === targetPeerId);
+    if (!hasConnection && targetRelayAddress) {
       try {
-        await this.router.send(remotePeerId, PROTOCOL_JOIN_REQUEST, payloadBytes, 5000);
-        delivered++;
-      } catch {
-        // Peer doesn't support protocol or timed out — skip
+        const { peerIdFromString } = await import('@libp2p/peer-id');
+        const { multiaddr } = await import('@multiformats/multiaddr');
+        const circuitAddr = multiaddr(`${targetRelayAddress}/p2p-circuit/p2p/${targetPeerId}`);
+        const pid = peerIdFromString(targetPeerId);
+        await this.node.libp2p.peerStore.merge(pid, { multiaddrs: [circuitAddr] });
+        await this.node.libp2p.dial(pid);
+      } catch (dialErr) {
+        this.log.warn(
+          ctx,
+          `Could not dial ${targetPeerId} via relay for ${label} notification: ` +
+            (dialErr instanceof Error ? dialErr.message : String(dialErr)),
+        );
       }
     }
-    if (delivered === 0) {
-      this.log.warn(ctx, `Could not deliver join-rejection notification for "${contextGraphId}" to ${agentAddress} — no reachable peers`);
-    } else {
-      this.log.info(ctx, `Broadcasted join-rejection for "${contextGraphId}" (${agentAddress}) to ${delivered} peer(s)`);
+
+    try {
+      await this.router.send(targetPeerId, PROTOCOL_JOIN_REQUEST, payloadBytes, 5000);
+      this.log.info(ctx, `Delivered ${label} for "${contextGraphId}" to ${agentAddress} (${targetPeerId})`);
+    } catch (err) {
+      this.log.warn(
+        ctx,
+        `Could not deliver ${label} for "${contextGraphId}" to ${agentAddress} (${targetPeerId}): ` +
+          (err instanceof Error ? err.message : String(err)),
+      );
     }
   }
 

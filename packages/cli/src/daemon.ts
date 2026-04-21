@@ -151,17 +151,28 @@ function manifestNetworkLabel(networkName: string | undefined | null): 'testnet'
 
 /**
  * Construct a self-pointing DkgClient for the manifest helpers to
- * round-trip through. We use req.headers.host so this works
- * regardless of which port the daemon bound to (apiPort=0 picks
- * a free one). The bearer token is forwarded as-is so audit logs
- * still attribute writes to the calling agent.
+ * round-trip through.
+ *
+ * The URL is derived from the daemon's own listening socket
+ * (`apiHost`/`apiPort` resolved by the outer scope) — NOT from request
+ * headers like `Host` or `X-Forwarded-Proto`. Those headers are
+ * attacker-controlled on a direct daemon request: a crafted POST can
+ * point this self-client at an arbitrary origin and exfiltrate the
+ * bearer token we forward. The daemon only binds 127.0.0.1 by default
+ * and always over plain HTTP, so hard-coding both is both safer and
+ * more accurate.
  */
-function manifestSelfClient(req: IncomingMessage, requestToken: string | null | undefined): DkgClient {
-  const host = req.headers.host ?? `localhost:9200`;
-  const proto = (req.headers['x-forwarded-proto'] as string) ?? 'http';
+function manifestSelfClient(
+  apiHost: string,
+  apiPort: number,
+  requestToken: string | null | undefined,
+): DkgClient {
+  // Prefer a loopback literal so the call can't escape the machine even
+  // if the operator set `apiHost` to 0.0.0.0 for LAN access.
+  const loopback = apiHost === '0.0.0.0' || apiHost === '::' ? '127.0.0.1' : apiHost;
   return new DkgClient({
     config: {
-      api: `${proto}://${host}`,
+      api: `http://${loopback}:${apiPort}`,
       token: requestToken ?? '',
       defaultProject: null,
       agentUri: null,
@@ -1823,6 +1834,8 @@ async function runDaemonInner(
         vectorStore,
         embeddingProvider,
         validTokens,
+        apiHost,
+        apiPortRef,
       );
     } catch (err: any) {
       if (res.headersSent || res.writableEnded) return;
@@ -3308,6 +3321,11 @@ async function handleRequest(
   vectorStore: VectorStore,
   embeddingProvider: EmbeddingProvider | null,
   validTokens: Set<string>,
+  // API socket identity — passed in from the outer daemon closure so
+  // `manifestSelfClient()` can build a self-pointing URL from trusted
+  // server state instead of request headers (SSRF defence).
+  apiHost: string,
+  apiPortRef: { value: number },
 ): Promise<void> {
   const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
   const path = url.pathname;
@@ -6627,7 +6645,12 @@ async function handleRequest(
       const supportedTools: ('cursor' | 'claude-code')[] = Array.isArray(body.supportedTools) && body.supportedTools.length
         ? body.supportedTools.filter((t: unknown): t is 'cursor' | 'claude-code' => t === 'cursor' || t === 'claude-code')
         : ['cursor', 'claude-code'];
-      const publisherAgentUri = (body.publisherAgentUri as string) ?? manifestPublisherUri(requestAgentAddress);
+      // Always derive the publisher from the authenticated caller. Accepting
+      // `publisherAgentUri` from the request body let any client forge
+      // `prov:wasAttributedTo` on the manifest entities, impersonating another
+      // agent's provenance on-chain. The server-side derivation below is the
+      // only source of truth.
+      const publisherAgentUri = manifestPublisherUri(requestAgentAddress);
       const requiresMcpDkgVersion = (body.requiresMcpDkgVersion as string) ?? '>=0.1.0';
 
       const repoRoot = manifestRepoRoot();
@@ -6643,7 +6666,7 @@ async function handleRequest(
       }
 
       const ontologyUri = body.ontologyUri ?? `urn:dkg:project:${contextGraphId}:ontology`;
-      const client = manifestSelfClient(req, requestToken);
+      const client = manifestSelfClient(apiHost, apiPortRef.value, requestToken);
       const result = await publishManifestImpl({
         contextGraphId,
         network: networkLabel,
@@ -6677,7 +6700,7 @@ async function handleRequest(
     try {
       const ctx = buildManifestInstallContext(req, body, contextGraphId, requestToken, requestAgentAddress);
       if (!ctx.ok) return jsonResponse(res, 400, { error: ctx.error });
-      const fetched = await fetchManifestImpl({ client: manifestSelfClient(req, requestToken), contextGraphId });
+      const fetched = await fetchManifestImpl({ client: manifestSelfClient(apiHost, apiPortRef.value, requestToken), contextGraphId });
       // Strip supportedTools the operator didn't pick — planner uses
       // supportedTools to gate claude-code wiring, and we want the same
       // gating to apply for any tool the operator deselected.
@@ -6729,7 +6752,7 @@ async function handleRequest(
     try {
       const ctx = buildManifestInstallContext(req, body, contextGraphId, requestToken, requestAgentAddress);
       if (!ctx.ok) return jsonResponse(res, 400, { error: ctx.error });
-      const fetched = await fetchManifestImpl({ client: manifestSelfClient(req, requestToken), contextGraphId });
+      const fetched = await fetchManifestImpl({ client: manifestSelfClient(apiHost, apiPortRef.value, requestToken), contextGraphId });
       const manifest = {
         ...fetched,
         supportedTools: fetched.supportedTools.filter((t) =>
@@ -6876,7 +6899,14 @@ async function handleRequest(
         // any data. Transport timeouts / unreachable peers do NOT
         // increment accessDeniedPeers, so an open CG with slow/offline
         // peers won't be misclassified as denied.
-        if (result.accessDeniedPeers > 0 && result.dataSynced === 0) {
+        //
+        // We also check sharedMemorySynced — an authorised peer that
+        // only returned SWM (with durable data empty) is not a denial.
+        if (
+          result.accessDeniedPeers > 0 &&
+          result.dataSynced === 0 &&
+          result.sharedMemorySynced === 0
+        ) {
           job.status = "denied";
           job.error = "Sync denied by peers — you may not be on the allowlist for this curated project.";
           // Only unsubscribe if the CG was only known via auto-discovery,
@@ -6887,22 +6917,49 @@ async function handleRequest(
           }
         }
 
-        // If catch-up ended in "done", flip the subscription's synced flag.
-        // syncContextGraphFromConnectedPeers only emits an event; without
-        // this update the UI never leaves the "syncing" state for curated
-        // CGs we've just legitimately joined.
+        // If catch-up ended in "done", flip the subscription's synced
+        // flag ONLY when at least one peer actually returned a clean
+        // response — i.e. we have concrete evidence sync worked.
+        //
+        // The earlier implementation flipped synced=true whenever the
+        // job didn't throw, which is wrong: if every peer's transport
+        // died mid-sync (timeout, reset, truncated stream), the agent
+        // catches the errors internally, returns dataSynced=0, and the
+        // UI ends up showing "synced" with an empty graph.
+        //
+        // "Clean response" = we either inserted triples, or at least
+        // one peer responded with the empty-result / meta-only signal
+        // (`emptyResponses`, `metaOnlyResponses`). Non-ACL failures are
+        // now counted in `diagnostics.durable.failedPeers`; if every
+        // peer-CG pair landed in the failure counter and nothing
+        // succeeded, leave the sub in its pre-catchup state.
         if (job.status === "done") {
-          const subMap = (agent as any).subscribedContextGraphs as
-            | Map<string, { subscribed: boolean; synced: boolean; metaSynced?: boolean; name?: string; [k: string]: unknown }>
-            | undefined;
-          const sub = subMap?.get(paranetId);
-          if (sub) {
-            sub.synced = true;
-            // Meta is considered synced iff we have _any_ local content;
-            // otherwise we might have talked to peers that hold the CG's
-            // declaration but couldn't give us the _meta graph yet.
-            const hasContent = await agent.contextGraphHasLocalContent(paranetId).catch(() => false);
-            if (hasContent) sub.metaSynced = true;
+          const d = result.diagnostics?.durable;
+          const s = result.diagnostics?.sharedMemory;
+          const cleanResponse =
+            result.dataSynced > 0 ||
+            result.sharedMemorySynced > 0 ||
+            (d?.emptyResponses ?? 0) > 0 ||
+            (d?.metaOnlyResponses ?? 0) > 0 ||
+            (s?.emptyResponses ?? 0) > 0;
+          if (cleanResponse) {
+            const subMap = (agent as any).subscribedContextGraphs as
+              | Map<string, { subscribed: boolean; synced: boolean; metaSynced?: boolean; name?: string; [k: string]: unknown }>
+              | undefined;
+            const sub = subMap?.get(paranetId);
+            if (sub) {
+              sub.synced = true;
+              // Meta is considered synced iff we have _any_ local content;
+              // otherwise we might have talked to peers that hold the CG's
+              // declaration but couldn't give us the _meta graph yet.
+              const hasContent = await agent.contextGraphHasLocalContent(paranetId).catch(() => false);
+              if (hasContent) sub.metaSynced = true;
+            }
+          } else if (result.peersTried > 0) {
+            // Every peer we talked to errored out. Surface this as a
+            // failure so the UI doesn't pretend the sync succeeded.
+            job.status = "failed";
+            job.error = "Sync did not complete — all reachable peers failed (timeouts or transport errors). Retry once the network is healthier.";
           }
         }
       } catch (err) {

@@ -132,13 +132,19 @@ export class DkgClient {
 
   // ── Query ──────────────────────────────────────────────────────
   /**
-   * `graphSuffix` controls which memory layer the daemon resolves against:
-   *   undefined          — WM (assertion / default graphs)
-   *   "_shared_memory"   — SWM
-   *   "_shared_memory_meta" — SWM metadata (UAL, owner, publisher)
+   * Memory-layer routing is controlled by `view` + `graphSuffix`:
+   *   view=undefined, graphSuffix=undefined  — WM (default, private)
+   *   graphSuffix="_shared_memory"           — SWM
+   *   graphSuffix="_shared_memory_meta"      — SWM metadata (UAL, owner, publisher)
+   *   view="verified-memory"                 — VM (on-chain verified)
+   *   includeSharedMemory=true               — WM ∪ SWM (UI default)
    *
-   * `includeSharedMemory` unions WM + SWM, matching the UI's default. VM
-   * queries go through the same endpoint with `verifiedGraph: true`.
+   * `verifiedGraph` is a STRING naming a specific verified graph inside
+   * VM; it narrows a `view: "verified-memory"` query to one graph. It is
+   * NOT a boolean toggle — passing `verifiedGraph: true` silently failed
+   * to route to VM because the query engine expects a graph name, not a
+   * flag. Clients that want "give me VM" should pass `view:
+   * "verified-memory"` (and optionally `verifiedGraph: "<graphName>"`).
    */
   async query(args: {
     sparql: string;
@@ -146,7 +152,8 @@ export class DkgClient {
     subGraphName?: string;
     graphSuffix?: '_shared_memory' | '_shared_memory_meta';
     includeSharedMemory?: boolean;
-    verifiedGraph?: boolean;
+    view?: 'working-memory' | 'shared-working-memory' | 'verified-memory';
+    verifiedGraph?: string;
     assertionName?: string;
   }): Promise<SparqlResult> {
     const body: Record<string, unknown> = { sparql: args.sparql };
@@ -154,6 +161,7 @@ export class DkgClient {
     if (args.subGraphName) body.subGraphName = args.subGraphName;
     if (args.graphSuffix) body.graphSuffix = args.graphSuffix;
     if (args.includeSharedMemory != null) body.includeSharedMemory = args.includeSharedMemory;
+    if (args.view != null) body.view = args.view;
     if (args.verifiedGraph != null) body.verifiedGraph = args.verifiedGraph;
     if (args.assertionName) body.assertionName = args.assertionName;
 

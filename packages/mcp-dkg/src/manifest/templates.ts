@@ -28,6 +28,12 @@
 /**
  * `<workspace>/.cursor/hooks.json` — wires capture-chat.mjs to all
  * four Cursor session events with the right env vars baked in.
+ *
+ * Every placeholder that lands inside a shell command line uses the
+ * `{{sh:...}}` form so `substitutePlaceholders` POSIX-shell-quotes the
+ * value. Unquoted interpolation would let a path containing `$(...)`,
+ * backticks, or a space inject arbitrary commands into the hook that
+ * runs on every Cursor event.
  */
 export const CURSOR_HOOKS_TEMPLATE = JSON.stringify(
   {
@@ -42,32 +48,32 @@ export const CURSOR_HOOKS_TEMPLATE = JSON.stringify(
       sessionStart: [
         {
           command:
-            'DKG_WORKSPACE={{workspaceAbsPath}} DKG_API={{daemonApiUrl}} DKG_AGENT_URI={{agentUri}} ' +
-            'node {{captureScriptPath}} sessionStart',
+            'DKG_WORKSPACE={{sh:workspaceAbsPath}} DKG_API={{sh:daemonApiUrl}} DKG_AGENT_URI={{sh:agentUri}} ' +
+            'node {{sh:captureScriptPath}} sessionStart',
           failClosed: false,
         },
       ],
       sessionEnd: [
         {
           command:
-            'DKG_WORKSPACE={{workspaceAbsPath}} DKG_API={{daemonApiUrl}} DKG_AGENT_URI={{agentUri}} ' +
-            'node {{captureScriptPath}} sessionEnd',
+            'DKG_WORKSPACE={{sh:workspaceAbsPath}} DKG_API={{sh:daemonApiUrl}} DKG_AGENT_URI={{sh:agentUri}} ' +
+            'node {{sh:captureScriptPath}} sessionEnd',
           failClosed: false,
         },
       ],
       beforeSubmitPrompt: [
         {
           command:
-            'DKG_WORKSPACE={{workspaceAbsPath}} DKG_API={{daemonApiUrl}} DKG_AGENT_URI={{agentUri}} ' +
-            'node {{captureScriptPath}} beforeSubmitPrompt',
+            'DKG_WORKSPACE={{sh:workspaceAbsPath}} DKG_API={{sh:daemonApiUrl}} DKG_AGENT_URI={{sh:agentUri}} ' +
+            'node {{sh:captureScriptPath}} beforeSubmitPrompt',
           failClosed: false,
         },
       ],
       afterAgentResponse: [
         {
           command:
-            'DKG_WORKSPACE={{workspaceAbsPath}} DKG_API={{daemonApiUrl}} DKG_AGENT_URI={{agentUri}} ' +
-            'node {{captureScriptPath}} afterAgentResponse',
+            'DKG_WORKSPACE={{sh:workspaceAbsPath}} DKG_API={{sh:daemonApiUrl}} DKG_AGENT_URI={{sh:agentUri}} ' +
+            'node {{sh:captureScriptPath}} afterAgentResponse',
           failClosed: false,
         },
       ],
@@ -92,8 +98,8 @@ export const CLAUDE_HOOKS_TEMPLATE = JSON.stringify(
             {
               type: 'command',
               command:
-                'DKG_WORKSPACE={{workspaceAbsPath}} DKG_CAPTURE_TOOL=claude-code DKG_API={{daemonApiUrl}} ' +
-                'DKG_AGENT_URI={{agentUri}} node {{captureScriptPath}} SessionStart',
+                'DKG_WORKSPACE={{sh:workspaceAbsPath}} DKG_CAPTURE_TOOL=claude-code DKG_API={{sh:daemonApiUrl}} ' +
+                'DKG_AGENT_URI={{sh:agentUri}} node {{sh:captureScriptPath}} SessionStart',
             },
           ],
         },
@@ -104,8 +110,8 @@ export const CLAUDE_HOOKS_TEMPLATE = JSON.stringify(
             {
               type: 'command',
               command:
-                'DKG_WORKSPACE={{workspaceAbsPath}} DKG_CAPTURE_TOOL=claude-code DKG_API={{daemonApiUrl}} ' +
-                'DKG_AGENT_URI={{agentUri}} node {{captureScriptPath}} UserPromptSubmit',
+                'DKG_WORKSPACE={{sh:workspaceAbsPath}} DKG_CAPTURE_TOOL=claude-code DKG_API={{sh:daemonApiUrl}} ' +
+                'DKG_AGENT_URI={{sh:agentUri}} node {{sh:captureScriptPath}} UserPromptSubmit',
             },
           ],
         },
@@ -116,8 +122,8 @@ export const CLAUDE_HOOKS_TEMPLATE = JSON.stringify(
             {
               type: 'command',
               command:
-                'DKG_WORKSPACE={{workspaceAbsPath}} DKG_CAPTURE_TOOL=claude-code DKG_API={{daemonApiUrl}} ' +
-                'DKG_AGENT_URI={{agentUri}} node {{captureScriptPath}} Stop',
+                'DKG_WORKSPACE={{sh:workspaceAbsPath}} DKG_CAPTURE_TOOL=claude-code DKG_API={{sh:daemonApiUrl}} ' +
+                'DKG_AGENT_URI={{sh:agentUri}} node {{sh:captureScriptPath}} Stop',
             },
           ],
         },
@@ -128,8 +134,8 @@ export const CLAUDE_HOOKS_TEMPLATE = JSON.stringify(
             {
               type: 'command',
               command:
-                'DKG_WORKSPACE={{workspaceAbsPath}} DKG_CAPTURE_TOOL=claude-code DKG_API={{daemonApiUrl}} ' +
-                'DKG_AGENT_URI={{agentUri}} node {{captureScriptPath}} SessionEnd',
+                'DKG_WORKSPACE={{sh:workspaceAbsPath}} DKG_CAPTURE_TOOL=claude-code DKG_API={{sh:daemonApiUrl}} ' +
+                'DKG_AGENT_URI={{sh:agentUri}} node {{sh:captureScriptPath}} SessionEnd',
             },
           ],
         },

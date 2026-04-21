@@ -162,7 +162,7 @@ export function registerReadTools(
           : layer === 'union'
           ? { includeSharedMemory: true }
           : layer === 'vm'
-          ? { verifiedGraph: true }
+          ? { view: 'verified-memory' as const }
           : {};
       try {
         const result = await client.query({
@@ -210,7 +210,7 @@ export function registerReadTools(
           : layer === 'wm'
           ? {}
           : layer === 'vm'
-          ? { verifiedGraph: true }
+          ? { view: 'verified-memory' as const }
           : { includeSharedMemory: true };
       try {
         const [outgoing, incoming] = await Promise.all([
@@ -291,7 +291,7 @@ SELECT DISTINCT ?s ?p WHERE { GRAPH ?g { ?s ?p <${uri}> } } LIMIT 50`,
           : layer === 'wm'
           ? {}
           : layer === 'vm'
-          ? { verifiedGraph: true }
+          ? { view: 'verified-memory' as const }
           : { includeSharedMemory: true };
       const kEsc = escapeSparqlLiteral(keyword);
       const typeFilter = (types && types.length)
@@ -370,7 +370,7 @@ SELECT DISTINCT ?s ?label ?t WHERE {
           : layer === 'wm'
           ? {}
           : layer === 'vm'
-          ? { verifiedGraph: true }
+          ? { view: 'verified-memory' as const }
           : { includeSharedMemory: true };
 
       const typeFilterBySubgraph: Record<string, string> = {
