@@ -1,5 +1,6 @@
 {
   "$schema": "https://turbo.build/schema.json",
+  "globalEnv": ["DKG_SKIP_EVM_BUILD"],
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
