@@ -1503,7 +1503,7 @@ describe('OpenClaw UI Connect/Disconnect/Refresh fresh-HOME integration (issue #
     // the temp-HOME openclaw.json. This is the highest-fidelity stand-in we can
     // get without spinning up a real daemon in the test.
     const runSetup = async () => {
-      mergeOpenClawConfig(openclawConfigPath, adapterPath, testEntryConfig);
+      mergeOpenClawConfig(openclawConfigPath, adapterPath, testEntryConfig, workspaceDir);
     };
     const restartGateway = async () => {};
     const waitForReady = async () => ({ ok: true as const, target: 'bridge' });
@@ -1571,25 +1571,43 @@ describe('OpenClaw UI Connect/Disconnect/Refresh fresh-HOME integration (issue #
     expect(integration?.runtime.lastError).toBeFalsy();
   });
 
-  it('scenario 2: post-Connect Disconnect reverse-merges adapter wiring and writes a .bak.<ts>', async () => {
+  it('scenario 2: post-Connect Disconnect reverse-merges adapter wiring, writes .bak.<ts>, and removes SKILL.md from the authoritative installedWorkspace', async () => {
     // Seed a pre-merged openclaw.json (as if Connect already ran).
-    mergeOpenClawConfig(openclawConfigPath, adapterPath, testEntryConfig);
+    mergeOpenClawConfig(openclawConfigPath, adapterPath, testEntryConfig, workspaceDir);
 
-    // Also seed the canonical node skill + an unrelated sibling under
-    // skills/dkg-node/, as if setup step 6 copied SKILL.md in and the user
-    // dropped a `custom-note.md` alongside it. Disconnect must remove the
-    // adapter-owned SKILL.md but leave the sibling untouched.
-    const skillDir = join(workspaceDir, 'skills', 'dkg-node');
-    const skillPath = join(skillDir, 'SKILL.md');
-    const siblingPath = join(skillDir, 'custom-note.md');
-    mkdirSync(skillDir, { recursive: true });
-    writeFileSync(skillPath, '# Canonical DKG Node Skill\n');
-    writeFileSync(siblingPath, '# User note alongside the adapter skill\n');
+    // Codex R2-1: Disconnect MUST target `entry.installedWorkspace`, not the
+    // openclaw.json workspace keys. To prove that, mutate `installedWorkspace`
+    // to a DIFFERENT directory than `agents.defaults.workspace` — the two
+    // typically agree in production, but any drift (override flag used, or
+    // openclaw.json edited between Connect and Disconnect) must be resolved
+    // in favor of the authoritative install path setup actually wrote to.
+    const authoritativeInstallDir = join(tempRoot, 'authoritative-install');
+    mkdirSync(authoritativeInstallDir, { recursive: true });
+    const afterMerge = JSON.parse(readFileSync(openclawConfigPath, 'utf-8'));
+    afterMerge.plugins.entries['adapter-openclaw'].installedWorkspace = authoritativeInstallDir;
+    writeFileSync(openclawConfigPath, JSON.stringify(afterMerge, null, 2));
+
+    // Seed SKILL.md + a sibling `custom-note.md` at the AUTHORITATIVE path —
+    // where setup actually installed. Also seed a distinct SKILL.md at the
+    // config-derived workspaceDir to show Disconnect does NOT touch it when
+    // installedWorkspace is authoritative.
+    const installedSkillDir = join(authoritativeInstallDir, 'skills', 'dkg-node');
+    const installedSkillPath = join(installedSkillDir, 'SKILL.md');
+    const installedSiblingPath = join(installedSkillDir, 'custom-note.md');
+    mkdirSync(installedSkillDir, { recursive: true });
+    writeFileSync(installedSkillPath, '# Canonical DKG Node Skill (authoritative)\n');
+    writeFileSync(installedSiblingPath, '# User note alongside the adapter skill\n');
+
+    const driftSkillDir = join(workspaceDir, 'skills', 'dkg-node');
+    const driftSkillPath = join(driftSkillDir, 'SKILL.md');
+    mkdirSync(driftSkillDir, { recursive: true });
+    writeFileSync(driftSkillPath, '# Stale SKILL.md that Disconnect must NOT touch\n');
 
     // Sanity: adapter is fully wired before disconnect.
     const before = JSON.parse(readFileSync(openclawConfigPath, 'utf-8'));
     expect(before.plugins.slots.memory).toBe('adapter-openclaw');
     expect(before.plugins.allow).toContain('adapter-openclaw');
+    expect(before.plugins.entries['adapter-openclaw'].installedWorkspace).toBe(authoritativeInstallDir);
 
     const config = makeConfig();
     await reverseLocalAgentSetupForUi(config, openclawConfigPath);
@@ -1608,11 +1626,14 @@ describe('OpenClaw UI Connect/Disconnect/Refresh fresh-HOME integration (issue #
     const siblings = readdirSync(openclawDir);
     expect(siblings.some((name) => /^openclaw\.json\.bak\.\d+$/.test(name))).toBe(true);
 
-    // Clean-retirement: the adapter-owned canonical node skill is gone, while
-    // the unrelated sibling survives and keeps skills/dkg-node/ alive.
-    expect(existsSync(skillPath)).toBe(false);
-    expect(existsSync(siblingPath)).toBe(true);
-    expect(existsSync(join(workspaceDir, 'skills'))).toBe(true);
+    // Authoritative install: SKILL.md retired, sibling custom-note.md survives,
+    // outer skills/ parent untouched (other skills may live there).
+    expect(existsSync(installedSkillPath)).toBe(false);
+    expect(existsSync(installedSiblingPath)).toBe(true);
+    expect(existsSync(join(authoritativeInstallDir, 'skills'))).toBe(true);
+    // Drift directory: Disconnect did NOT target the config-derived path once
+    // installedWorkspace was populated — the stale SKILL.md stays where it is.
+    expect(existsSync(driftSkillPath)).toBe(true);
   });
 
   it('scenario 2b: bare { enabled: false } PUT payload still routes through the reverse-setup path (Codex #2)', async () => {
@@ -1624,7 +1645,7 @@ describe('OpenClaw UI Connect/Disconnect/Refresh fresh-HOME integration (issue #
     // `normalizeExplicitLocalAgentDisconnectBody` BEFORE computing `explicitDisconnect`.
 
     // Seed a pre-merged openclaw.json (as if Connect already ran).
-    mergeOpenClawConfig(openclawConfigPath, adapterPath, testEntryConfig);
+    mergeOpenClawConfig(openclawConfigPath, adapterPath, testEntryConfig, workspaceDir);
     const before = JSON.parse(readFileSync(openclawConfigPath, 'utf-8'));
     expect(before.plugins.slots.memory).toBe('adapter-openclaw');
 
@@ -1668,7 +1689,7 @@ describe('OpenClaw UI Connect/Disconnect/Refresh fresh-HOME integration (issue #
     // defers to the adapter's `verifyUnmergeInvariants`, which covers all four invariants.
 
     // Seed a pre-merged openclaw.json (as if Connect already ran).
-    mergeOpenClawConfig(openclawConfigPath, adapterPath, testEntryConfig);
+    mergeOpenClawConfig(openclawConfigPath, adapterPath, testEntryConfig, workspaceDir);
     const before = JSON.parse(readFileSync(openclawConfigPath, 'utf-8'));
     expect(before.plugins.slots.memory).toBe('adapter-openclaw');
     expect(before.plugins.allow).toContain('adapter-openclaw');
@@ -1728,39 +1749,50 @@ describe('OpenClaw UI Connect/Disconnect/Refresh fresh-HOME integration (issue #
     expect(existsSync(skillPath)).toBe(true);
   });
 
-  it('scenario 2d: disconnect resolves a ~-prefixed workspace via resolveWorkspaceDirFromConfig (Codex R1-1)', async () => {
+  it('scenario 2d: legacy (pre-R2) openclaw.json without installedWorkspace falls back to resolveWorkspaceDirFromConfig and expands ~ (Codex R1-1)', async () => {
     // Regression for https://github.com/OriginTrail/dkg-v9/pull/234#discussion_r3120093687
     // Disconnect previously did a raw `raw?.agents?.defaults?.workspace ?? raw?.workspace`
     // lookup — no `~` expansion, no relative-path resolution, no `workspaceDir` key,
     // no default-fallback. Setup's install used `discoverWorkspace` which covered all
     // of those, so a user with a `~/…` workspace in openclaw.json got SKILL.md
     // installed at the correct absolute path but left behind at a literal `~/…` path
-    // on Disconnect. Helper is now shared.
+    // on Disconnect. Codex R2-1 then made `entry.installedWorkspace` the authoritative
+    // path on new installs — but pre-R2 openclaw.json files don't carry that field,
+    // so the config-derived resolver remains the fallback. This scenario locks that
+    // fallback in.
 
-    // Seed openclaw.json with a ~-prefixed workspace. The merged entry still writes
-    // the absolute-load-path, but agents.defaults.workspace stays literal.
+    // Seed openclaw.json with a ~-prefixed workspace + merge. Then strip
+    // `installedWorkspace` off the entry to simulate a pre-R2 install.
     const tildeWorkspace = '~/dkg-r11-temp-scenario2d';
     writeFileSync(openclawConfigPath, JSON.stringify({
       plugins: {},
       agents: { defaults: { workspace: tildeWorkspace } },
     }, null, 2));
-    mergeOpenClawConfig(openclawConfigPath, adapterPath, testEntryConfig);
+    mergeOpenClawConfig(openclawConfigPath, adapterPath, testEntryConfig, workspaceDir);
+    const mergedPre = JSON.parse(readFileSync(openclawConfigPath, 'utf-8'));
+    delete mergedPre.plugins.entries['adapter-openclaw'].installedWorkspace;
+    writeFileSync(openclawConfigPath, JSON.stringify(mergedPre, null, 2));
 
-    // Sanity — the literal ~ survived the merge (install path also uses the helper,
-    // but it's the on-disk string form that matters for this regression).
+    // Sanity — the literal ~ survived the merge, installedWorkspace is gone.
     const merged = JSON.parse(readFileSync(openclawConfigPath, 'utf-8'));
     expect(merged.agents.defaults.workspace).toBe(tildeWorkspace);
+    expect(merged.plugins.entries['adapter-openclaw'].installedWorkspace).toBeUndefined();
 
     const { resolveWorkspaceDirFromConfig: realResolver } = await import(
       '@origintrail-official/dkg-adapter-openclaw'
     );
     const resolverSpy = vi.fn((cfg: unknown, path: string) => realResolver(cfg, path));
     const removeSkillSpy = vi.fn();
+    // Stub verifySkillRemoved so the synthetic ~-expanded path (which has no
+    // SKILL.md on disk) doesn't hit the real verifier either way — we're
+    // exercising the resolver/remove path here, not the verify path.
+    const verifySkillRemovedStub = vi.fn(() => null);
 
     const config = makeConfig();
     await reverseLocalAgentSetupForUi(config, openclawConfigPath, {
       resolveWorkspaceDirFromConfig: resolverSpy,
       removeCanonicalNodeSkill: removeSkillSpy,
+      verifySkillRemoved: verifySkillRemovedStub,
     });
 
     // Helper was invoked with the parsed config + the openclaw.json path.
@@ -1769,12 +1801,55 @@ describe('OpenClaw UI Connect/Disconnect/Refresh fresh-HOME integration (issue #
     expect(pathArg).toBe(openclawConfigPath);
     expect((cfgArg as any)?.agents?.defaults?.workspace).toBe(tildeWorkspace);
 
-    // Helper returned the ~-expanded absolute path, and that path was what drove
-    // SKILL.md removal — NOT the raw literal `~/…` string.
+    // Helper returned the ~-expanded absolute path, and that path drove
+    // both the skill removal AND the verify step — NOT the raw literal `~/…`.
     const expandedAbsolute = join(homedir(), 'dkg-r11-temp-scenario2d');
     expect(resolverSpy.mock.results[0].value).toBe(expandedAbsolute);
     expect(removeSkillSpy).toHaveBeenCalledTimes(1);
     expect(removeSkillSpy.mock.calls[0][0]).toBe(expandedAbsolute);
+    expect(verifySkillRemovedStub).toHaveBeenCalledTimes(1);
+    expect(verifySkillRemovedStub.mock.calls[0][0]).toBe(expandedAbsolute);
+  });
+
+  it('scenario 2e: skill-removal failure propagates to runtime.lastError — Disconnect no longer silently succeeds (Codex R2-2)', async () => {
+    // Regression for https://github.com/OriginTrail/dkg-v9/pull/234#discussion_r3120159512
+    // Earlier drafts wrapped `removeCanonicalNodeSkill` in try/catch + console.warn.
+    // That left a state mismatch: the UI flipped to "disconnected" while SKILL.md
+    // still sat in the workspace. Now that `entry.installedWorkspace` is the
+    // authoritative target, failure to retire the file is a real disconnect failure
+    // worth surfacing via runtime.lastError.
+
+    mergeOpenClawConfig(openclawConfigPath, adapterPath, testEntryConfig, workspaceDir);
+
+    // Stub removal to succeed (no-op) but have verifySkillRemoved claim the
+    // file is still present — as if the unlink raced with another writer, or
+    // a permission issue prevented the delete. The injected verifier mirrors
+    // the real contract: non-null string → failure.
+    const removeSkillNoop = vi.fn();
+    const verifySkillRemovedFail = vi.fn(
+      (ws: string) => `canonical node skill still present at ${join(ws, 'skills', 'dkg-node', 'SKILL.md')}`,
+    );
+
+    const config = makeConfig();
+    await expect(
+      reverseLocalAgentSetupForUi(config, openclawConfigPath, {
+        removeCanonicalNodeSkill: removeSkillNoop,
+        verifySkillRemoved: verifySkillRemovedFail,
+      }),
+    ).rejects.toThrow(/SKILL\.md|still present/);
+
+    // Both injected dependencies were exercised against the installedWorkspace
+    // recorded at merge time (workspaceDir is what scenario 2's merge passed).
+    expect(removeSkillNoop).toHaveBeenCalledTimes(1);
+    expect(removeSkillNoop.mock.calls[0][0]).toBe(workspaceDir);
+    expect(verifySkillRemovedFail).toHaveBeenCalledTimes(1);
+    expect(verifySkillRemovedFail.mock.calls[0][0]).toBe(workspaceDir);
+
+    // The openclaw.json unmerge still completed (it runs before the skill
+    // checks), so the PUT handler sees a consistent "disconnect went most of
+    // the way but the skill doc is still present" state and surfaces it.
+    const after = JSON.parse(readFileSync(openclawConfigPath, 'utf-8'));
+    expect(after.plugins.entries['adapter-openclaw']).toBeUndefined();
   });
 
   it('scenario 3a: refresh endpoint moves a bridge-ok integration to ready', async () => {

@@ -10,6 +10,7 @@ import {
   mergeOpenClawConfig,
   unmergeOpenClawConfig,
   verifyUnmergeInvariants,
+  verifySkillRemoved,
   installCanonicalNodeSkill,
   removeCanonicalNodeSkill,
   resolveWorkspaceDirFromConfig,
@@ -26,6 +27,12 @@ const defaultEntryConfig: AdapterEntryConfig = {
   memory: { enabled: true },
   channel: { enabled: true },
 };
+
+// Default install workspace fixture for `mergeOpenClawConfig`'s fourth
+// positional arg (Codex PR #234 R2-1). Cases that assert `installedWorkspace`
+// semantics seed their own path. The value doesn't need to exist on disk —
+// it's a string stored verbatim on the entry.
+const defaultInstalledWorkspace = '/tmp/dkg-test-workspace';
 import { homedir } from 'node:os';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -233,7 +240,7 @@ describe('mergeOpenClawConfig', () => {
     const configPath = join(testDir, 'openclaw.json');
     writeFileSync(configPath, JSON.stringify({ plugins: {} }));
 
-    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig);
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
 
     const config = JSON.parse(readFileSync(configPath, 'utf-8'));
     expect(config.plugins.allow).toContain('adapter-openclaw');
@@ -251,8 +258,8 @@ describe('mergeOpenClawConfig', () => {
     const configPath = join(testDir, 'openclaw.json');
     writeFileSync(configPath, JSON.stringify({ plugins: {} }));
 
-    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig);
-    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig);
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
 
     const config = JSON.parse(readFileSync(configPath, 'utf-8'));
     expect(config.plugins.allow.filter((x: string) => x === 'adapter-openclaw')).toHaveLength(1);
@@ -270,7 +277,7 @@ describe('mergeOpenClawConfig', () => {
       someOtherKey: 123,
     }));
 
-    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig);
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
 
     const config = JSON.parse(readFileSync(configPath, 'utf-8'));
     expect(config.plugins.allow).toContain('other-plugin');
@@ -284,7 +291,7 @@ describe('mergeOpenClawConfig', () => {
     const configPath = join(testDir, 'openclaw.json');
     writeFileSync(configPath, JSON.stringify({ plugins: {} }));
 
-    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig);
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
 
     const files = readdirSync(testDir);
     const backups = files.filter((f: string) => f.startsWith('openclaw.json.bak.'));
@@ -295,7 +302,7 @@ describe('mergeOpenClawConfig', () => {
     const configPath = join(testDir, 'openclaw.json');
     writeFileSync(configPath, JSON.stringify({ plugins: {} }));
 
-    mergeOpenClawConfig(configPath, 'C:\\Users\\test\\adapter', defaultEntryConfig);
+    mergeOpenClawConfig(configPath, 'C:\\Users\\test\\adapter', defaultEntryConfig, defaultInstalledWorkspace);
 
     const config = JSON.parse(readFileSync(configPath, 'utf-8'));
     expect(config.plugins.load.paths[0]).toBe('C:/Users/test/adapter');
@@ -318,7 +325,7 @@ describe('mergeOpenClawConfig', () => {
       },
     }));
 
-    mergeOpenClawConfig(configPath, 'C:\\Projects\\dkg-v9\\packages\\adapter-openclaw', defaultEntryConfig);
+    mergeOpenClawConfig(configPath, 'C:\\Projects\\dkg-v9\\packages\\adapter-openclaw', defaultEntryConfig, defaultInstalledWorkspace);
 
     const config = JSON.parse(readFileSync(configPath, 'utf-8'));
     expect(config.plugins.load.paths).toEqual([
@@ -331,7 +338,7 @@ describe('mergeOpenClawConfig', () => {
     const configPath = join(testDir, 'openclaw.json');
     writeFileSync(configPath, JSON.stringify({ plugins: {} }));
 
-    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig);
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
 
     const config = JSON.parse(readFileSync(configPath, 'utf-8'));
     expect(config.plugins.slots).toBeDefined();
@@ -349,7 +356,7 @@ describe('mergeOpenClawConfig', () => {
       },
     }));
 
-    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig);
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
 
     const config = JSON.parse(readFileSync(configPath, 'utf-8'));
     expect(config.plugins.slots.memory).toBe('adapter-openclaw');
@@ -365,7 +372,7 @@ describe('mergeOpenClawConfig', () => {
       },
     }));
 
-    expect(() => mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig)).toThrow(/contextEngine/);
+    expect(() => mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace)).toThrow(/contextEngine/);
   });
 
   it('overwrites a different plugins.slots.memory value with a log line', () => {
@@ -376,7 +383,7 @@ describe('mergeOpenClawConfig', () => {
       },
     }));
 
-    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig);
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
 
     const config = JSON.parse(readFileSync(configPath, 'utf-8'));
     expect(config.plugins.slots.memory).toBe('adapter-openclaw');
@@ -386,11 +393,11 @@ describe('mergeOpenClawConfig', () => {
     const configPath = join(testDir, 'openclaw.json');
     writeFileSync(configPath, JSON.stringify({ plugins: {} }));
 
-    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig);
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
     const firstRun = readFileSync(configPath, 'utf-8');
     const firstBackupCount = readdirSync(testDir).filter((f: string) => f.startsWith('openclaw.json.bak.')).length;
 
-    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig);
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
     const secondRun = readFileSync(configPath, 'utf-8');
     const secondBackupCount = readdirSync(testDir).filter((f: string) => f.startsWith('openclaw.json.bak.')).length;
 
@@ -405,7 +412,7 @@ describe('mergeOpenClawConfig', () => {
       plugins: { slots: { memory: 'memory-core' } },
     }));
 
-    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig);
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
 
     const config = JSON.parse(readFileSync(configPath, 'utf-8'));
     expect(config.plugins.slots.memory).toBe('adapter-openclaw');
@@ -419,13 +426,13 @@ describe('mergeOpenClawConfig', () => {
     }));
 
     // First merge captures "memory-core" into the entry.
-    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig);
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
     const afterFirst = JSON.parse(readFileSync(configPath, 'utf-8'));
     expect(afterFirst.plugins.entries['adapter-openclaw'].previousMemorySlotOwner).toBe('memory-core');
 
     // Second merge: slot is already the adapter, so the capture branch won't
     // fire — and even if it did, the first-wins guard keeps the original.
-    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig);
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
     const afterSecond = JSON.parse(readFileSync(configPath, 'utf-8'));
     expect(afterSecond.plugins.entries['adapter-openclaw'].previousMemorySlotOwner).toBe('memory-core');
   });
@@ -441,7 +448,7 @@ describe('mergeOpenClawConfig', () => {
       daemonUrl: 'http://127.0.0.1:9200',
       memory: { enabled: true },
       channel: { enabled: true },
-    });
+    }, defaultInstalledWorkspace);
 
     const config = JSON.parse(readFileSync(configPath, 'utf-8'));
     const entryConfig = config.plugins.entries['adapter-openclaw'].config;
@@ -473,7 +480,7 @@ describe('mergeOpenClawConfig', () => {
       daemonUrl: 'http://127.0.0.1:9200',
       memory: { enabled: true },
       channel: { enabled: true },
-    });
+    }, defaultInstalledWorkspace);
 
     const config = JSON.parse(readFileSync(configPath, 'utf-8'));
     const entryConfig = config.plugins.entries['adapter-openclaw'].config;
@@ -509,6 +516,7 @@ describe('mergeOpenClawConfig', () => {
         memory: { enabled: true },
         channel: { enabled: true },
       },
+      defaultInstalledWorkspace,
       { overrideDaemonUrl: true },
     );
 
@@ -529,7 +537,7 @@ describe('unmergeOpenClawConfig', () => {
     }));
 
     // Merge → captures "memory-core" as previousMemorySlotOwner.
-    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig);
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
     const afterMerge = JSON.parse(readFileSync(configPath, 'utf-8'));
     expect(afterMerge.plugins.slots.memory).toBe('adapter-openclaw');
     expect(afterMerge.plugins.entries['adapter-openclaw'].previousMemorySlotOwner).toBe('memory-core');
@@ -546,7 +554,7 @@ describe('unmergeOpenClawConfig', () => {
     writeFileSync(configPath, JSON.stringify({ plugins: {} }));
 
     // Merge on a clean config — no previousMemorySlotOwner is captured.
-    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig);
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
     const afterMerge = JSON.parse(readFileSync(configPath, 'utf-8'));
     expect(afterMerge.plugins.slots.memory).toBe('adapter-openclaw');
     expect(afterMerge.plugins.entries['adapter-openclaw'].previousMemorySlotOwner).toBeUndefined();
@@ -562,7 +570,7 @@ describe('unmergeOpenClawConfig', () => {
     // fresh install that hasn't configured a memory provider yet.
     writeFileSync(configPath, JSON.stringify({ plugins: {} }));
 
-    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig);
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
     unmergeOpenClawConfig(configPath);
 
     const final = JSON.parse(readFileSync(configPath, 'utf-8'));
@@ -576,7 +584,7 @@ describe('unmergeOpenClawConfig', () => {
       plugins: { slots: { memory: 'memory-core' } },
     }));
 
-    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig);
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
     unmergeOpenClawConfig(configPath);
     const firstBackupCount = readdirSync(testDir).filter((f: string) => f.startsWith('openclaw.json.bak.')).length;
     const firstContent = readFileSync(configPath, 'utf-8');
@@ -595,7 +603,7 @@ describe('unmergeOpenClawConfig', () => {
       plugins: { slots: { memory: 'memory-core' } },
     }));
 
-    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig);
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
     // Simulate external modification: user swaps in a different memory plugin.
     const intermediate = JSON.parse(readFileSync(configPath, 'utf-8'));
     intermediate.plugins.slots.memory = 'some-other-memory-plugin';
@@ -657,7 +665,7 @@ describe('unmergeOpenClawConfig', () => {
     mkdirSync(defaultHome, { recursive: true });
     const defaultConfigPath = join(defaultHome, 'openclaw.json');
     writeFileSync(defaultConfigPath, JSON.stringify({ plugins: {} }, null, 2) + '\n');
-    mergeOpenClawConfig(defaultConfigPath, '/path/to/adapter', defaultEntryConfig);
+    mergeOpenClawConfig(defaultConfigPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
     const defaultContentBefore = readFileSync(defaultConfigPath, 'utf-8');
     const defaultBackupsBefore = readdirSync(defaultHome).filter(
       (f: string) => f.startsWith('openclaw.json.bak.'),
@@ -695,7 +703,7 @@ describe('unmergeOpenClawConfig', () => {
     writeFileSync(configPath, JSON.stringify({ plugins: {} }));
 
     // Merge populates entry + entry.config.
-    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig);
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
     const afterMerge = JSON.parse(readFileSync(configPath, 'utf-8'));
     expect(afterMerge.plugins.entries['adapter-openclaw'].config).toBeDefined();
 
@@ -703,6 +711,135 @@ describe('unmergeOpenClawConfig', () => {
 
     const afterUnmerge = JSON.parse(readFileSync(configPath, 'utf-8'));
     expect(afterUnmerge.plugins.entries['adapter-openclaw']).toBeUndefined();
+  });
+
+  // Codex PR #234 R2-1 — unmerge returns setup-persisted metadata so the
+  // daemon-side Disconnect path can target the authoritative install workspace.
+  it('returns the installedWorkspace and previousMemorySlotOwner read before entry deletion', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({
+      plugins: { slots: { memory: 'memory-core' } },
+    }));
+    const ws = join(testDir, 'workspace');
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, ws);
+
+    const result = unmergeOpenClawConfig(configPath);
+
+    expect(result).toEqual({
+      previousMemorySlotOwner: 'memory-core',
+      installedWorkspace: ws,
+    });
+    const afterUnmerge = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterUnmerge.plugins.entries['adapter-openclaw']).toBeUndefined();
+  });
+
+  it('returns an empty object when openclaw.json is absent', () => {
+    const missingPath = join(testDir, 'never-existed.json');
+    expect(unmergeOpenClawConfig(missingPath)).toEqual({});
+  });
+
+  it('returns an empty object when openclaw.json is unparseable JSON', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, '{this is not: json');
+    expect(unmergeOpenClawConfig(configPath)).toEqual({});
+  });
+
+  it('omits installedWorkspace when the entry has no installedWorkspace field (pre-PR #234 R2 configs)', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({ plugins: {} }));
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+    // Strip the field the merge just wrote to simulate a pre-R2 install.
+    const pre = JSON.parse(readFileSync(configPath, 'utf-8'));
+    delete pre.plugins.entries['adapter-openclaw'].installedWorkspace;
+    writeFileSync(configPath, JSON.stringify(pre, null, 2));
+
+    const result = unmergeOpenClawConfig(configPath);
+
+    expect(result.installedWorkspace).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// mergeOpenClawConfig installedWorkspace persistence (Codex PR #234 R2-1)
+// ---------------------------------------------------------------------------
+
+describe('mergeOpenClawConfig installedWorkspace', () => {
+  it('persists installedWorkspace verbatim on the adapter entry', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({ plugins: {} }));
+    const ws = join(testDir, 'workspace');
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, ws);
+
+    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(config.plugins.entries['adapter-openclaw'].installedWorkspace).toBe(ws);
+  });
+
+  it('overwrites installedWorkspace on re-merge (latest-wins)', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({ plugins: {} }));
+    const firstWs = join(testDir, 'first-workspace');
+    const secondWs = join(testDir, 'second-workspace');
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, firstWs);
+    expect(JSON.parse(readFileSync(configPath, 'utf-8'))
+      .plugins.entries['adapter-openclaw'].installedWorkspace).toBe(firstWs);
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, secondWs);
+
+    // Latest-wins: re-install updates the authoritative pointer (matches the
+    // same semantics as `entry.enabled` and `entry.config.daemonUrl` with
+    // overrideDaemonUrl — reinstalls reflect current reality).
+    expect(JSON.parse(readFileSync(configPath, 'utf-8'))
+      .plugins.entries['adapter-openclaw'].installedWorkspace).toBe(secondWs);
+  });
+
+  it('is idempotent when the same workspace is re-supplied', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({ plugins: {} }));
+    const ws = join(testDir, 'workspace');
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, ws);
+    const first = readFileSync(configPath, 'utf-8');
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, ws);
+    const second = readFileSync(configPath, 'utf-8');
+
+    expect(second).toBe(first);
+    expect(JSON.parse(second).plugins.entries['adapter-openclaw'].installedWorkspace).toBe(ws);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// verifySkillRemoved (Codex PR #234 R2-2)
+// ---------------------------------------------------------------------------
+
+describe('verifySkillRemoved', () => {
+  it('returns null when the canonical node skill file is absent', () => {
+    const ws = join(testDir, 'workspace');
+    mkdirSync(ws, { recursive: true });
+    expect(verifySkillRemoved(ws)).toBeNull();
+  });
+
+  it('returns a descriptive failure string when the skill file still exists', () => {
+    const ws = join(testDir, 'workspace');
+    const skillDir = join(ws, 'skills', 'dkg-node');
+    mkdirSync(skillDir, { recursive: true });
+    const skillPath = join(skillDir, 'SKILL.md');
+    writeFileSync(skillPath, '# Canonical DKG Node Skill\n');
+
+    const failure = verifySkillRemoved(ws);
+
+    expect(failure).not.toBeNull();
+    expect(failure).toContain(skillPath);
+    expect(failure).toMatch(/still present/);
+  });
+
+  it('treats a dangling dkg-node/ directory with no SKILL.md as clean (directory alone does not fail)', () => {
+    const ws = join(testDir, 'workspace');
+    mkdirSync(join(ws, 'skills', 'dkg-node'), { recursive: true });
+    // No SKILL.md inside the directory. Verify targets the file, not the
+    // parent — matches `removeCanonicalNodeSkill`'s unlink target.
+    expect(verifySkillRemoved(ws)).toBeNull();
   });
 });
 

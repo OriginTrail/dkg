@@ -2592,9 +2592,10 @@ export async function connectLocalAgentIntegrationFromUi(
  * `mergeOpenClawConfig` and writes a `.bak.<ts>` backup.
  */
 export type ReverseLocalAgentSetupDeps = {
-  unmergeOpenClawConfig?: (configPath: string) => void;
+  unmergeOpenClawConfig?: (configPath: string) => { installedWorkspace?: string } | void;
   verifyUnmergeInvariants?: (configPath: string) => string | null;
   removeCanonicalNodeSkill?: (workspaceDir: string) => void;
+  verifySkillRemoved?: (installedWorkspace: string) => string | null;
   resolveWorkspaceDirFromConfig?: (config: unknown, openclawConfigPath: string) => string | null;
 };
 
@@ -2608,59 +2609,68 @@ export async function reverseLocalAgentSetupForUi(
     : localOpenclawConfigPath();
 
   // Defer to the adapter for every helper we need so install (setup) and
-  // removal (Disconnect) resolve the workspace through one codepath —
-  // agents.defaults.workspace / workspace / workspaceDir key variants,
-  // `~` expansion, relative-to-openclaw.json resolution, and the
-  // $OPENCLAW_HOME/workspace default fallback. See Codex R1-1 on PR #234.
+  // removal (Disconnect) agree on the same primitives. Codex R1-1 shared
+  // the workspace resolver; Codex R2-1/R2-2 now routes the authoritative
+  // install path through `entry.installedWorkspace` (persisted by
+  // `mergeOpenClawConfig` at install time, read out of `unmergeOpenClawConfig`
+  // before the entry is deleted).
   const adapter = (
     deps.unmergeOpenClawConfig
     && deps.verifyUnmergeInvariants
     && deps.removeCanonicalNodeSkill
+    && deps.verifySkillRemoved
     && deps.resolveWorkspaceDirFromConfig
   )
     ? {
         unmergeOpenClawConfig: deps.unmergeOpenClawConfig,
         verifyUnmergeInvariants: deps.verifyUnmergeInvariants,
         removeCanonicalNodeSkill: deps.removeCanonicalNodeSkill,
+        verifySkillRemoved: deps.verifySkillRemoved,
         resolveWorkspaceDirFromConfig: deps.resolveWorkspaceDirFromConfig,
       }
     : await import('@origintrail-official/dkg-adapter-openclaw');
   const unmergeOpenClawConfig = deps.unmergeOpenClawConfig ?? adapter.unmergeOpenClawConfig;
   const verifyUnmergeInvariants = deps.verifyUnmergeInvariants ?? adapter.verifyUnmergeInvariants;
   const removeCanonicalNodeSkill = deps.removeCanonicalNodeSkill ?? adapter.removeCanonicalNodeSkill;
+  const verifySkillRemoved = deps.verifySkillRemoved ?? adapter.verifySkillRemoved;
   const resolveWorkspaceDirFromConfig =
     deps.resolveWorkspaceDirFromConfig ?? adapter.resolveWorkspaceDirFromConfig;
 
-  // Discover the workspace dir BEFORE unmerge (post-unmerge the adapter entry
-  // is reshaped, but `agents.defaults.workspace` / `workspace` / `workspaceDir`
-  // live outside the adapter block and survive either way). Null on any read
-  // or parse failure — skill removal is best-effort.
-  let workspaceDir: string | null = null;
+  // Legacy/safety-net workspace discovery — used only when the adapter entry
+  // in openclaw.json predates the `installedWorkspace` field (pre-PR #234 R2).
+  // Read BEFORE unmerge so the config-derived fallback is available even
+  // after the entry is deleted.
+  let configDerivedWorkspace: string | null = null;
   if (existsSync(resolvedPath)) {
     try {
       const raw = JSON.parse(readFileSync(resolvedPath, 'utf-8'));
-      workspaceDir = resolveWorkspaceDirFromConfig(raw, resolvedPath);
+      configDerivedWorkspace = resolveWorkspaceDirFromConfig(raw, resolvedPath);
     } catch {
-      // Unparseable openclaw.json — leave workspaceDir null; the existing
-      // unmerge path short-circuits on the same condition.
+      // Unparseable openclaw.json — leave null; the existing unmerge path
+      // short-circuits on the same condition.
     }
   }
 
-  unmergeOpenClawConfig(resolvedPath);
+  const unmergeResult = unmergeOpenClawConfig(resolvedPath) ?? {};
   const failure = verifyUnmergeInvariants(resolvedPath);
   if (failure) {
     throw new Error(failure);
   }
 
-  // Invariant holds → adapter is functionally disconnected. Retire the
-  // agent-facing canonical node skill too (symmetric to the install step of
-  // setup). Best-effort: a filesystem failure here logs but does not fail
-  // the disconnect — the openclaw.json unmerge has already succeeded.
+  // Invariant holds → adapter is functionally disconnected. Prefer the
+  // authoritative install-time workspace persisted by setup on the adapter
+  // entry (Codex R2-1) — falls back to the config-derived path only when
+  // `installedWorkspace` was absent (e.g. openclaw.json from before this PR).
+  const workspaceDir = unmergeResult.installedWorkspace ?? configDerivedWorkspace;
   if (workspaceDir) {
-    try {
-      removeCanonicalNodeSkill(workspaceDir);
-    } catch (err: any) {
-      console.warn(`[dkg] removeCanonicalNodeSkill failed: ${err?.message ?? err}`);
+    // Codex R2-2: skill-removal failures are no longer swallowed. Since we
+    // now know authoritatively which file should be gone, leaving it behind
+    // is a real state mismatch worth surfacing via `runtime.lastError` —
+    // the outer PUT handler converts the throw into the UI-visible error.
+    removeCanonicalNodeSkill(workspaceDir);
+    const skillFailure = verifySkillRemoved(workspaceDir);
+    if (skillFailure) {
+      throw new Error(skillFailure);
     }
   }
 }

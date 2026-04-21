@@ -516,6 +516,7 @@ export function mergeOpenClawConfig(
   openclawConfigPath: string,
   adapterPath: string,
   entryConfig: AdapterEntryConfig,
+  installedWorkspace: string,
   options?: { overrideDaemonUrl?: boolean },
 ): void {
   if (!openclawConfigPath || !existsSync(openclawConfigPath)) {
@@ -609,6 +610,18 @@ export function mergeOpenClawConfig(
     log(`Populated plugins.entries.${pluginId}.config`);
   }
 
+  // Persist the authoritative install-time workspace on the entry so the
+  // daemon's Disconnect path can target the exact directory setup installed
+  // SKILL.md into — even if the openclaw.json workspace key is later edited
+  // or was never congruent with the `--workspace` override used at install.
+  // Latest-wins: a re-install updates the pointer, matching the behavior of
+  // `entry.enabled` and the `--port` override on `entry.config.daemonUrl`.
+  // (Codex PR #234 R2-1.)
+  if (entryForConfig.installedWorkspace !== installedWorkspace) {
+    entryForConfig.installedWorkspace = installedWorkspace;
+    log(`Set plugins.entries.${pluginId}.installedWorkspace = "${installedWorkspace}"`);
+  }
+
   // Ensure plugin-registered tools are visible to the agent
   if (!config.tools) config.tools = {};
   if (!Array.isArray(config.tools.alsoAllow)) {
@@ -694,7 +707,24 @@ export function mergeOpenClawConfig(
  * that doesn't exist (or can't be parsed), so blocking the Disconnect UI
  * flow on it would strand users who removed or relocated OpenClaw.
  */
-export function unmergeOpenClawConfig(openclawConfigPath: string): void {
+export interface UnmergeResult {
+  /**
+   * Prior memory-slot owner captured by `mergeOpenClawConfig` and read out of
+   * the adapter entry BEFORE it was deleted. Used to restore `plugins.slots.memory`
+   * when the adapter had displaced another plugin at install time.
+   */
+  previousMemorySlotOwner?: string;
+  /**
+   * Authoritative absolute workspace directory setup installed into,
+   * read from `plugins.entries["adapter-openclaw"].installedWorkspace`
+   * before the entry is deleted. `undefined` for openclaw.json files
+   * that predate this field (pre-PR #234 R2). Callers fall back to the
+   * config-derived workspace in that case.
+   */
+  installedWorkspace?: string;
+}
+
+export function unmergeOpenClawConfig(openclawConfigPath: string): UnmergeResult {
   // Fall back to the default `~/.openclaw/openclaw.json` ONLY when no path was
   // supplied. If the caller passed an explicit path that happens to be missing
   // (e.g. the user relocated OpenClaw), never swap to the default home —
@@ -704,7 +734,7 @@ export function unmergeOpenClawConfig(openclawConfigPath: string): void {
   }
   if (!existsSync(openclawConfigPath)) {
     log(`openclaw.json not found at ${openclawConfigPath} — nothing to unmerge`);
-    return;
+    return {};
   }
 
   const raw = readFileSync(openclawConfigPath, 'utf-8');
@@ -713,7 +743,7 @@ export function unmergeOpenClawConfig(openclawConfigPath: string): void {
     config = JSON.parse(raw);
   } catch (err: any) {
     log(`openclaw.json at ${openclawConfigPath} is not valid JSON (${err?.message ?? err}) — nothing to unmerge`);
-    return;
+    return {};
   }
   const pluginId = ADAPTER_PLUGIN_ID;
 
@@ -740,13 +770,22 @@ export function unmergeOpenClawConfig(openclawConfigPath: string): void {
     }
   }
 
-  // Read the prior memory-slot owner that `mergeOpenClawConfig` persisted
-  // (before we mutate the entry). A string value means we should restore the
-  // slot on disconnect; anything else means the slot was empty at merge time.
+  // Read setup-persisted metadata BEFORE we mutate the entry:
+  //   - `previousMemorySlotOwner` — string → restore the slot on disconnect.
+  //   - `installedWorkspace` — authoritative install-time workspace dir that
+  //     setup's `installCanonicalNodeSkill` targeted. Returning it lets the
+  //     daemon-side Disconnect path retire the exact SKILL.md setup installed,
+  //     independent of whatever the openclaw.json workspace keys say today.
   let previousMemorySlotOwner: string | undefined;
+  let installedWorkspace: string | undefined;
   const entry = config.plugins?.entries?.[pluginId];
-  if (entry && typeof entry === 'object' && typeof entry.previousMemorySlotOwner === 'string') {
-    previousMemorySlotOwner = entry.previousMemorySlotOwner;
+  if (entry && typeof entry === 'object') {
+    if (typeof entry.previousMemorySlotOwner === 'string') {
+      previousMemorySlotOwner = entry.previousMemorySlotOwner;
+    }
+    if (typeof entry.installedWorkspace === 'string' && entry.installedWorkspace.trim()) {
+      installedWorkspace = entry.installedWorkspace;
+    }
   }
 
   // Delete the adapter entry entirely. The adapter owns this entry — all of
@@ -775,7 +814,7 @@ export function unmergeOpenClawConfig(openclawConfigPath: string): void {
   const updated = JSON.stringify(config, null, 2) + '\n';
   if (updated === raw) {
     log('openclaw.json already disconnected from adapter — no changes needed');
-    return;
+    return { previousMemorySlotOwner, installedWorkspace };
   }
 
   // Backup only when content actually changes (same contract as mergeOpenClawConfig)
@@ -784,6 +823,7 @@ export function unmergeOpenClawConfig(openclawConfigPath: string): void {
 
   writeFileSync(openclawConfigPath, updated);
   log(`Unmerged adapter from ${openclawConfigPath} (backed up original)`);
+  return { previousMemorySlotOwner, installedWorkspace };
 }
 
 /**
@@ -892,6 +932,25 @@ export function removeCanonicalNodeSkill(workspaceDir: string): void {
   } catch {
     // Directory not empty (sibling file placed by user) or already gone — fine.
   }
+}
+
+/**
+ * Post-remove invariant check, counterpart to `verifyUnmergeInvariants` but
+ * for the skill-file side of Disconnect. Returns `null` when the canonical
+ * node skill at `<installedWorkspace>/skills/dkg-node/SKILL.md` is absent
+ * (clean retirement). Returns a descriptive string when it's still present —
+ * the daemon's Disconnect path treats this as a failure to surface via
+ * `runtime.lastError`, so the UI never reports "disconnected" while the
+ * workspace still carries the adapter-owned skill doc (Codex PR #234 R2-2).
+ *
+ * Non-throwing by design.
+ */
+export function verifySkillRemoved(installedWorkspace: string): string | null {
+  const targetPath = canonicalWorkspaceSkillPath(installedWorkspace);
+  if (existsSync(targetPath)) {
+    return `canonical node skill still present at ${targetPath}`;
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -1103,7 +1162,7 @@ export async function runSetup(options: SetupOptions): Promise<void> {
     channel: { enabled: true },
   };
   if (!dryRun) {
-    mergeOpenClawConfig(openclawConfigPath, resolvedAdapterPath, entryConfig, {
+    mergeOpenClawConfig(openclawConfigPath, resolvedAdapterPath, entryConfig, workspaceDir, {
       overrideDaemonUrl: portExplicit,
     });
   } else {
