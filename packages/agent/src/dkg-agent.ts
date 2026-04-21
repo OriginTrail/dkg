@@ -38,7 +38,7 @@ import { MessageHandler, type SkillHandler, type SkillRequest, type SkillRespons
 import { ed25519ToX25519Private, ed25519ToX25519Public } from './encryption.js';
 import { AGENT_REGISTRY_CONTEXT_GRAPH, type AgentProfileConfig } from './profile.js';
 import { SyncVerifyWorker } from './sync-verify-worker.js';
-import { ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
+import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
 import { waitForPeerProtocol } from './p2p/protocol-readiness.js';
 import { orderCatchupPeers } from './p2p/peer-selection.js';
 import { sendSyncRequest } from './p2p/sync-transport.js';
@@ -2154,7 +2154,7 @@ export class DKGAgent {
   }
 
   async connectTo(multiaddress: string): Promise<void> {
-    await this.node.libp2p.dial(multiaddr(multiaddress));
+    await connectToMultiaddr(this.node.libp2p as any, multiaddress);
   }
 
   /**

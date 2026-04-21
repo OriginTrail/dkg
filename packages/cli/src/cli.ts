@@ -648,6 +648,29 @@ program
     }
   });
 
+program
+  .command('peer info <peer-id>')
+  .description('Inspect connection and sync capability for a specific peer')
+  .action(async (peerId: string) => {
+    try {
+      const client = await ApiClient.connect();
+      const info = await client.peerInfo(peerId);
+      console.log(`Peer:          ${info.peerId}`);
+      console.log(`Connected:     ${info.connected ? 'yes' : 'no'}`);
+      console.log(`Connections:   ${info.connectionCount}`);
+      console.log(`Sync Capable:  ${info.syncCapable ? 'yes' : 'no'}`);
+      if (info.transports.length > 0) console.log(`Transports:    ${info.transports.join(', ')}`);
+      if (info.directions.length > 0) console.log(`Directions:    ${info.directions.join(', ')}`);
+      if (info.remoteAddrs.length > 0) console.log(`Remote Addrs:  ${info.remoteAddrs.filter(Boolean).join(', ')}`);
+      if (info.protocols.length > 0) console.log(`Protocols:     ${info.protocols.join(', ')}`);
+      if (info.lastSeen) console.log(`Last Seen:     ${new Date(info.lastSeen).toISOString()}`);
+      if (info.latencyMs != null) console.log(`Latency:       ${info.latencyMs} ms`);
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
 // ─── dkg send <name> <message> ───────────────────────────────────────
 
 program
@@ -1059,40 +1082,74 @@ const syncCmd = program
   .command('sync')
   .description('Sync status helpers');
 
+type CatchupStatusCommandOptions = { watch?: boolean; interval?: string | number };
+
+function printCatchupStatus(status: Awaited<ReturnType<ApiClient['catchupStatus']>>) {
+  console.log(`Context Graph: ${status.contextGraphId}`);
+  console.log(`Job:           ${status.jobId}`);
+  console.log(`Status:        ${status.status}`);
+  console.log(`Shared Memory: ${status.includeWorkspace ? 'enabled' : 'disabled'}`);
+  console.log(`Queued:        ${new Date(status.queuedAt).toISOString()}`);
+  if (status.startedAt) console.log(`Started:       ${new Date(status.startedAt).toISOString()}`);
+  if (status.finishedAt) console.log(`Finished:      ${new Date(status.finishedAt).toISOString()}`);
+  if (status.result) {
+    console.log(
+      `Result:        peers ${status.result.peersTried}/${status.result.syncCapablePeers} (connected ${status.result.connectedPeers}), data ${status.result.dataSynced}, shared memory ${status.result.sharedMemorySynced}`,
+    );
+    if (status.result.diagnostics) {
+      console.log(
+        `Diagnostics:   no-protocol ${status.result.diagnostics.noProtocolPeers}, durable fetched meta/data ${status.result.diagnostics.durable.fetchedMetaTriples}/${status.result.diagnostics.durable.fetchedDataTriples}, inserted meta/data ${status.result.diagnostics.durable.insertedMetaTriples}/${status.result.diagnostics.durable.insertedDataTriples}`,
+      );
+      console.log(
+        `               durable empty ${status.result.diagnostics.durable.emptyResponses}, meta-only ${status.result.diagnostics.durable.metaOnlyResponses}, no-meta rejects ${status.result.diagnostics.durable.dataRejectedMissingMeta}, rejected KCs ${status.result.diagnostics.durable.rejectedKcs}, failures ${status.result.diagnostics.durable.failedPeers}`,
+      );
+      console.log(
+        `               swm fetched meta/data ${status.result.diagnostics.sharedMemory.fetchedMetaTriples}/${status.result.diagnostics.sharedMemory.fetchedDataTriples}, inserted meta/data ${status.result.diagnostics.sharedMemory.insertedMetaTriples}/${status.result.diagnostics.sharedMemory.insertedDataTriples}, empty ${status.result.diagnostics.sharedMemory.emptyResponses}, dropped ${status.result.diagnostics.sharedMemory.droppedDataTriples}, failures ${status.result.diagnostics.sharedMemory.failedPeers}`,
+      );
+    }
+  }
+  if (status.error) {
+    console.log(`Error:         ${status.error}`);
+  }
+  if (
+    status.result &&
+    status.result.connectedPeers > 0 &&
+    status.result.syncCapablePeers === 0 &&
+    status.result.dataSynced === 0 &&
+    status.result.sharedMemorySynced === 0
+  ) {
+    console.log('Warning:       Connected peers were found, but none advertised the sync protocol.');
+  }
+}
+
+async function runCatchupStatusCommand(contextGraph: string, opts: CatchupStatusCommandOptions) {
+  const client = await ApiClient.connect();
+  const watch = !!opts.watch;
+  const intervalSeconds = Math.max(1, Number(opts.interval ?? 2));
+  const terminalStates = new Set(['done', 'failed', 'denied']);
+
+  do {
+    const status = await client.catchupStatus(contextGraph);
+    if (watch) {
+      console.clear();
+      console.log(`Watching catch-up status every ${intervalSeconds}s\n`);
+    }
+    printCatchupStatus(status);
+    if (!watch || terminalStates.has(status.status)) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalSeconds * 1000));
+  } while (true);
+}
+
 syncCmd
   .command('catchup-status <context-graph>')
   .description('Show latest background catch-up status for a context graph')
-  .action(async (contextGraph: string) => {
+  .option('--watch', 'Poll until the catch-up job reaches a terminal state')
+  .option('--interval <seconds>', 'Polling interval for --watch', '2')
+  .action(async (contextGraph: string, opts: CatchupStatusCommandOptions) => {
     try {
-      const client = await ApiClient.connect();
-      const status = await client.catchupStatus(contextGraph);
-
-      console.log(`Context Graph: ${status.contextGraphId}`);
-      console.log(`Job:           ${status.jobId}`);
-      console.log(`Status:        ${status.status}`);
-      console.log(`Shared Memory: ${status.includeWorkspace ? 'enabled' : 'disabled'}`);
-      console.log(`Queued:        ${new Date(status.queuedAt).toISOString()}`);
-      if (status.startedAt) console.log(`Started:       ${new Date(status.startedAt).toISOString()}`);
-      if (status.finishedAt) console.log(`Finished:      ${new Date(status.finishedAt).toISOString()}`);
-      if (status.result) {
-        console.log(
-          `Result:        peers ${status.result.peersTried}/${status.result.syncCapablePeers} (connected ${status.result.connectedPeers}), data ${status.result.dataSynced}, shared memory ${status.result.sharedMemorySynced}`,
-        );
-        if (status.result.diagnostics) {
-          console.log(
-            `Diagnostics:   no-protocol ${status.result.diagnostics.noProtocolPeers}, durable fetched meta/data ${status.result.diagnostics.durable.fetchedMetaTriples}/${status.result.diagnostics.durable.fetchedDataTriples}, inserted meta/data ${status.result.diagnostics.durable.insertedMetaTriples}/${status.result.diagnostics.durable.insertedDataTriples}`,
-          );
-          console.log(
-            `               durable empty ${status.result.diagnostics.durable.emptyResponses}, meta-only ${status.result.diagnostics.durable.metaOnlyResponses}, no-meta rejects ${status.result.diagnostics.durable.dataRejectedMissingMeta}, rejected KCs ${status.result.diagnostics.durable.rejectedKcs}, failures ${status.result.diagnostics.durable.failedPeers}`,
-          );
-          console.log(
-            `               swm fetched meta/data ${status.result.diagnostics.sharedMemory.fetchedMetaTriples}/${status.result.diagnostics.sharedMemory.fetchedDataTriples}, inserted meta/data ${status.result.diagnostics.sharedMemory.insertedMetaTriples}/${status.result.diagnostics.sharedMemory.insertedDataTriples}, empty ${status.result.diagnostics.sharedMemory.emptyResponses}, dropped ${status.result.diagnostics.sharedMemory.droppedDataTriples}, failures ${status.result.diagnostics.sharedMemory.failedPeers}`,
-          );
-        }
-      }
-      if (status.error) {
-        console.log(`Error:         ${status.error}`);
-      }
+      await runCatchupStatusCommand(contextGraph, opts);
     } catch (err) {
       console.error(toErrorMessage(err));
       process.exit(1);
@@ -1105,6 +1162,20 @@ const contextGraphCmd = program
   .command('context-graph')
   .alias('paranet')
   .description('Manage context graphs (knowledge graph partitions)');
+
+contextGraphCmd
+  .command('catchup-status <context-graph>')
+  .description('Show latest background catch-up status for a context graph')
+  .option('--watch', 'Poll until the catch-up job reaches a terminal state')
+  .option('--interval <seconds>', 'Polling interval for --watch', '2')
+  .action(async (contextGraph: string, opts: CatchupStatusCommandOptions) => {
+    try {
+      await runCatchupStatusCommand(contextGraph, opts);
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
 
 contextGraphCmd
   .command('create <id>')

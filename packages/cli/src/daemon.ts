@@ -379,6 +379,14 @@ interface CatchupTracker {
   latestByParanet: Map<string, string>;
 }
 
+function toCatchupStatusResponse(job: CatchupJob) {
+  return {
+    ...job,
+    contextGraphId: job.paranetId,
+    includeSharedMemory: job.includeWorkspace,
+  };
+}
+
 type PublishAccessPolicy = "public" | "ownerOnly" | "allowList";
 
 let daemonCatchupRunner: CatchupRunner | null = null;
@@ -3317,6 +3325,40 @@ async function handleRequest(
     return jsonResponse(res, 200, { agents: enriched });
   }
 
+  // GET /api/peer-info?peerId=<id>
+  if (req.method === "GET" && path === "/api/peer-info") {
+    const peerId = url.searchParams.get("peerId");
+    if (!peerId) {
+      return jsonResponse(res, 400, { error: 'Missing "peerId" query param' });
+    }
+
+    const allConns = agent.node.libp2p.getConnections();
+    const peerConns = allConns.filter((c) => c.remotePeer.toString() === peerId);
+    let protocols: string[] = [];
+    try {
+      const peer = await agent.node.libp2p.peerStore.get({ toString: () => peerId } as any);
+      protocols = [...(peer.protocols ?? [])];
+    } catch {
+      protocols = [];
+    }
+
+    const health = agent.getPeerHealth().get(peerId);
+    return jsonResponse(res, 200, {
+      peerId,
+      connected: peerConns.length > 0,
+      connectionCount: peerConns.length,
+      transports: peerConns.map((c) =>
+        c.remoteAddr?.toString().includes('/p2p-circuit') ? 'relayed' : 'direct',
+      ),
+      directions: peerConns.map((c) => c.direction),
+      remoteAddrs: peerConns.map((c) => c.remoteAddr?.toString() ?? null),
+      protocols,
+      syncCapable: protocols.includes('/dkg/10.0.0/sync'),
+      lastSeen: health?.lastSeen ?? null,
+      latencyMs: health?.latencyMs ?? null,
+    });
+  }
+
   // GET /api/skills
   // Optional query params: ?skillType=X
   if (req.method === "GET" && path === "/api/skills") {
@@ -6213,7 +6255,17 @@ async function handleRequest(
           includeSharedMemory: shouldSyncSharedMemory,
         });
         job.result = result;
-        job.status = "done";
+        if (
+          result.connectedPeers > 0 &&
+          result.syncCapablePeers === 0 &&
+          result.dataSynced === 0 &&
+          result.sharedMemorySynced === 0
+        ) {
+          job.status = "failed";
+          job.error = "No sync-capable peers found for catch-up";
+        } else {
+          job.status = "done";
+        }
       } catch (err) {
         job.error = err instanceof Error ? err.message : String(err);
         job.status = "failed";
@@ -6258,7 +6310,7 @@ async function handleRequest(
       });
     }
 
-    return jsonResponse(res, 200, job);
+    return jsonResponse(res, 200, toCatchupStatusResponse(job));
   }
 
   // POST /api/paranet/create (legacy) — create a context graph definition

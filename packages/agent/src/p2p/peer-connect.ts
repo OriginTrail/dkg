@@ -8,6 +8,29 @@ interface Libp2pLike {
   };
 }
 
+export async function connectToMultiaddr(
+  libp2p: Libp2pLike,
+  multiaddress: string,
+): Promise<void> {
+  const { multiaddr } = await import('@multiformats/multiaddr');
+
+  if (!multiaddress.includes('/p2p-circuit/p2p/')) {
+    await libp2p.dial(multiaddr(multiaddress));
+    return;
+  }
+
+  const circuitIndex = multiaddress.indexOf('/p2p-circuit/p2p/');
+  const relayMultiaddr = multiaddress.slice(0, circuitIndex);
+  const targetPeerId = multiaddress.slice(circuitIndex + '/p2p-circuit/p2p/'.length);
+
+  await libp2p.dial(multiaddr(relayMultiaddr));
+
+  const { peerIdFromString } = await import('@libp2p/peer-id');
+  const targetPid = peerIdFromString(targetPeerId);
+  await libp2p.peerStore.merge(targetPid, { multiaddrs: [multiaddr(multiaddress)] });
+  await libp2p.dial(targetPid);
+}
+
 export async function ensurePeerConnected(
   libp2p: Libp2pLike,
   discovery: DiscoveryClient,

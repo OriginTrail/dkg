@@ -56,6 +56,21 @@ export class ApiClient {
     return this.get('/api/agents');
   }
 
+  async peerInfo(peerId: string): Promise<{
+    peerId: string;
+    connected: boolean;
+    connectionCount: number;
+    transports: string[];
+    directions: string[];
+    remoteAddrs: Array<string | null>;
+    protocols: string[];
+    syncCapable: boolean;
+    lastSeen: number | null;
+    latencyMs: number | null;
+  }> {
+    return this.get(`/api/peer-info?peerId=${encodeURIComponent(peerId)}`);
+  }
+
   async skills(): Promise<{
     skills: Array<{
       agentName: string; skillType: string;
