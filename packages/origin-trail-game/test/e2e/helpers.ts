@@ -376,7 +376,16 @@ export async function startTestCluster(nodeCount: number, options?: ClusterOptio
           let identityId = i + 1;
           if (identityStorageAddr) {
             try {
-              const callData = '0xd7236ebf' + hw.address.slice(2).padStart(64, '0');
+              // selector: 0x867a4680 (getIdentityId(address)) — from
+              // `ethers.id('getIdentityId(address)').slice(0,10)` against
+              // contracts/storage/IdentityStorage.sol:108. The previous
+              // value `0xd7236ebf` was stale and always reverted with
+              // "function selector was not recognized", which meant this
+              // `try` block fell through to the sequential `i+1` fallback
+              // and the updateAsk below was applied to the WRONG identity
+              // ID for every node — silently, because execSync swallows
+              // non-2xx RPC responses.
+              const callData = '0x867a4680' + hw.address.slice(2).padStart(64, '0');
               const callBody = JSON.stringify({
                 jsonrpc: '2.0', id: 1, method: 'eth_call',
                 params: [{ to: identityStorageAddr, data: callData }, 'latest'],
@@ -406,10 +415,47 @@ export async function startTestCluster(nodeCount: number, options?: ClusterOptio
     } catch { /* best-effort */ }
   }
 
-  // Wait for gossipsub mesh to form (extra time with chain for identity creation)
-  await sleep(chain ? 8000 : 3000);
+  // Wait for gossipsub mesh to form.
+  await sleep(3000);
+
+  // When running with a chain, each node's DKGAgent registers an on-chain
+  // profile asynchronously AFTER its HTTP `/api/status` endpoint reports
+  // ready, so `waitForReady` isn't sufficient — we also need to see either
+  // `identityId=<n>` (success) or `No valid on-chain identity` (definitive
+  // failure) in the daemon log before returning, otherwise the first
+  // assertion in `context-graph.test.ts` and friends races with a slow
+  // 2-core CI runner. A fixed sleep(8000) here was enough locally but
+  // surfaced intermittently on CI after CI-2 was resolved.
+  if (chain) {
+    await Promise.all(nodes.map(n => waitForOnChainIdentity(n, 180_000)));
+  }
 
   return nodes;
+}
+
+async function waitForOnChainIdentity(node: TestNode, maxWaitMs: number): Promise<void> {
+  const deadline = Date.now() + maxWaitMs;
+  const logFile = join(node.homeDir, 'test-daemon.log');
+  while (Date.now() < deadline) {
+    try {
+      const log = readFileSync(logFile, 'utf-8');
+      if (/identityId=\d+/.test(log)) return;
+      if (log.includes('No valid on-chain identity')) {
+        throw new Error(
+          `node ${node.index + 1} (port ${node.apiPort}) reported "No valid on-chain identity" — ` +
+          `chain is up but on-chain profile creation failed. See ${logFile}.`,
+        );
+      }
+    } catch (err: any) {
+      if (err?.code !== 'ENOENT' && !err?.message?.includes('No valid on-chain identity')) {
+        if (err?.message?.startsWith(`node ${node.index + 1}`)) throw err;
+      }
+    }
+    await sleep(500);
+  }
+  throw new Error(
+    `node ${node.index + 1} (port ${node.apiPort}) did not register an on-chain identityId within ${maxWaitMs}ms`,
+  );
 }
 
 function startDaemon(node: TestNode): ChildProcess {
