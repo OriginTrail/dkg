@@ -4439,7 +4439,7 @@ async function handleRequest(
     // registered later via POST /api/context-graph/register.
     if (register === true) {
       try {
-        const regResult = await agent.registerContextGraph(id);
+        const regResult = await agent.registerContextGraph(id, { callerAgentAddress: requestAgentAddress });
         return jsonResponse(res, 200, {
           created: id,
           uri: `did:dkg:context-graph:${id}`,
@@ -4476,7 +4476,7 @@ async function handleRequest(
       return jsonResponse(res, 400, { error: '"accessPolicy" must be 0 (open) or 1 (private)' });
     }
     try {
-      const result = await agent.registerContextGraph(id, { revealOnChain, accessPolicy });
+      const result = await agent.registerContextGraph(id, { revealOnChain, accessPolicy, callerAgentAddress: requestAgentAddress });
       return jsonResponse(res, 200, {
         registered: id,
         onChainId: result.onChainId,
@@ -4512,7 +4512,7 @@ async function handleRequest(
     }
     if (!isValidContextGraphId(contextGraphId)) return jsonResponse(res, 400, { error: 'Invalid context graph id' });
     try {
-      await agent.inviteToContextGraph(contextGraphId, targetPeerId);
+      await agent.inviteToContextGraph(contextGraphId, targetPeerId, requestAgentAddress);
       return jsonResponse(res, 200, { invited: targetPeerId, contextGraphId });
     } catch (err: any) {
       const msg = err?.message ?? '';
@@ -6183,10 +6183,11 @@ async function handleRequest(
     // the sync protocol enforces access on the remote side regardless.
     const localAllowed = await agent.getContextGraphAllowedAgents(paranetId).catch(() => [] as string[]);
     if (localAllowed.length > 0) {
-      const myAddr = agent.getDefaultAgentAddress();
-      if (myAddr && !localAllowed.some((a: string) => a.toLowerCase() === myAddr.toLowerCase())) {
+      const callerAddr = requestAgentAddress ?? agent.getDefaultAgentAddress();
+      const isEthAddress = callerAddr && /^0x[0-9a-fA-F]{40}$/.test(callerAddr);
+      if (isEthAddress && !localAllowed.some((a: string) => a.toLowerCase() === callerAddr.toLowerCase())) {
         return jsonResponse(res, 403, {
-          error: `Your agent (${myAddr}) is not on the allowlist for this curated project. Ask the curator to invite you first.`,
+          error: `Your agent (${callerAddr}) is not on the allowlist for this curated project. Ask the curator to invite you first.`,
         });
       }
     }
@@ -6523,12 +6524,21 @@ async function handleRequest(
         error: "Missing required fields: paranetId, policyUri",
       });
     }
-    const result = await agent.approveCclPolicy({
-      paranetId,
-      policyUri,
-      contextType,
-    });
-    return jsonResponse(res, 200, result);
+    try {
+      const result = await agent.approveCclPolicy({
+        paranetId,
+        policyUri,
+        contextType,
+        callerAgentAddress: requestAgentAddress,
+      });
+      return jsonResponse(res, 200, result);
+    } catch (err: any) {
+      const msg = err?.message ?? "";
+      if (/Only the paranet owner can manage policies/.test(msg)) {
+        return jsonResponse(res, 403, { error: msg });
+      }
+      throw err;
+    }
   }
 
   // POST /api/ccl/policy/revoke
@@ -6540,12 +6550,21 @@ async function handleRequest(
         error: "Missing required fields: paranetId, policyUri",
       });
     }
-    const result = await agent.revokeCclPolicy({
-      paranetId,
-      policyUri,
-      contextType,
-    });
-    return jsonResponse(res, 200, result);
+    try {
+      const result = await agent.revokeCclPolicy({
+        paranetId,
+        policyUri,
+        contextType,
+        callerAgentAddress: requestAgentAddress,
+      });
+      return jsonResponse(res, 200, result);
+    } catch (err: any) {
+      const msg = err?.message ?? "";
+      if (/Only the paranet owner can manage policies/.test(msg)) {
+        return jsonResponse(res, 403, { error: msg });
+      }
+      throw err;
+    }
   }
 
   // GET /api/ccl/policy/list
