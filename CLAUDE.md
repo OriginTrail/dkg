@@ -295,3 +295,8 @@ Manifest format is in `agent-scope/README.md`. Never edit a protected path
 (`.cursor/hooks/**`, `agent-scope/lib/**`, etc.) without user-granted
 bootstrap. Never improvise around a denial.
 
+The guard restricts **agent** actions only. Humans committing, pushing, or
+editing through their own terminal are not restricted — there are no git
+hooks and no CI enforcement layer. That distinction matters if a user edits
+a protected file by hand: they can commit and push normally.
+

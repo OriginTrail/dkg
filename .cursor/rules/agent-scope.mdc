@@ -200,15 +200,18 @@ Always denied regardless of task, unless a human has enabled bootstrap
 (`touch agent-scope/.bootstrap-token` or `AGENT_SCOPE_BOOTSTRAP=1`):
 
 - `.cursor/hooks/**`, `.cursor/hooks.json`, `.cursor/rules/agent-scope.mdc`
-- `agent-scope/lib/**`, `agent-scope/bin/**`, `agent-scope/hooks/**`
-- `agent-scope/schema/**`, `agent-scope/tasks/**`, `agent-scope/active`,
-  `agent-scope/.bootstrap-token`
-- `.git/hooks/**`, `.github/workflows/agent-scope.yml`
+- `agent-scope/lib/**`, `agent-scope/bin/**`, `agent-scope/schema/**`
+- `agent-scope/tasks/**`, `agent-scope/active`, `agent-scope/.bootstrap-token`
 
 If one of these needs to change, use the `bootstrap` option from the denial
 menu — do not try to bypass (no shell redirection, no `node -e`, no alternate
 tooling). The `afterShell` hook will delete any untracked files in these paths
 even if the bypass succeeded, so retry attempts are wasted.
+
+Note: the guard operates **only on agent actions**. Humans committing or
+pushing manually through their terminal/IDE are not restricted — there are no
+git hooks and no CI enforcement. If a human edits a protected file by hand,
+they can commit and push normally.
 
 ## Manifest cheat sheet
 

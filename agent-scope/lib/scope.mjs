@@ -39,13 +39,10 @@ export const PROTECTED_PATTERNS = [
   '.cursor/rules/agent-scope.mdc',
   'agent-scope/lib/**',
   'agent-scope/bin/**',
-  'agent-scope/hooks/**',
   'agent-scope/schema/**',
   'agent-scope/tasks/**',
   'agent-scope/active',
   'agent-scope/.bootstrap-token',
-  '.git/hooks/**',
-  '.github/workflows/agent-scope.yml',
 ];
 
 function bootstrapActive(root) {

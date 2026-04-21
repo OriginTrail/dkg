@@ -28,11 +28,8 @@
     "test:game:ui": "pnpm --filter @origintrail-official/dkg-app-origin-trail-game test:ui",
     "test:game:e2e": "pnpm --filter @origintrail-official/dkg-app-origin-trail-game test:e2e",
     "test:all": "pnpm test && pnpm test:evm && pnpm test:game:ui",
-    "pretest": "node --test agent-scope/lib/scope.test.mjs agent-scope/lib/shell-parse.test.mjs agent-scope/lib/denial.test.mjs && node agent-scope/bin/task.mjs validate",
     "task": "node agent-scope/bin/task.mjs",
-    "scope-check": "node agent-scope/bin/scope-check.mjs",
     "scope:test": "node --test agent-scope/lib/scope.test.mjs agent-scope/lib/shell-parse.test.mjs agent-scope/lib/denial.test.mjs",
-    "scope:install-hooks": "bash agent-scope/bin/install-git-hooks.sh",
     "scope:validate": "node agent-scope/bin/task.mjs validate",
     "scope:status": "node agent-scope/bin/task.mjs resolve && echo && node agent-scope/bin/task.mjs show"
   },

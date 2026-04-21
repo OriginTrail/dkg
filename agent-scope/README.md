@@ -3,9 +3,14 @@
 Task-scoped write permissions for AI coding agents.
 
 An agent can **read** the whole repo, but can only **write** files that are
-listed in the active task's manifest. Attempts to write out-of-scope files are
-blocked by Cursor hooks, git pre-commit, and CI — and must be explicitly
-approved by a human (by editing the manifest).
+listed in the active task's manifest. Attempts to write out-of-scope files
+are blocked by a stack of Cursor hooks and must be explicitly approved by a
+human (by editing the manifest).
+
+The guard restricts **agent** actions only. Humans committing, pushing, or
+editing through their own terminal are never restricted — there are no git
+hooks and no CI enforcement. If you edit a protected file by hand, you can
+commit and push normally.
 
 ## Opt-in by default
 
@@ -35,16 +40,16 @@ default.
 Agent  → Cursor sessionStart hook       → injects active-task context (silent when idle)
 Agent  → Cursor preToolUse hook         → blocks out-of-scope Write/Edit/Delete
 Agent  → Cursor beforeShellExecution    → blocks destructive shell cmds on denied paths
-Agent  → Cursor afterShellExecution     → reverts out-of-scope shell writes
-System → hardcoded protected paths      → always blocks writes to agent-scope itself
-Dev    → git pre-commit hook            → blocks local commits of out-of-scope files
-CI     → GitHub Actions                 → blocks PRs with out-of-scope diffs
+Agent  → Cursor afterShellExecution     → reverts out-of-scope shell writes, deletes untracked files in denied paths
+System → hardcoded protected paths      → always blocks agent writes to agent-scope itself
 Ops    → optional webhook sink          → forwards denials to DKG/Slack/etc.
 ```
 
-All layers use the same library (`agent-scope/lib/scope.mjs`) and the same
-manifests (`agent-scope/tasks/*.json`). No layer is optional — bypassing one
-(e.g. Cursor's hook) still leaves the commit, PR, and review layers.
+All four agent-facing layers use the same library
+(`agent-scope/lib/scope.mjs`) and the same manifests
+(`agent-scope/tasks/*.json`). The pre-shell and after-shell layers back each
+other up, so destructive commands that slip past the pre-check get reverted
+or deleted afterwards.
 
 ## Concepts
 
@@ -63,11 +68,11 @@ manifests (`agent-scope/tasks/*.json`). No layer is optional — bypassing one
 
 ## One-time setup
 
-```bash
-# Install the git pre-commit hook (per developer)
-pnpm scope:install-hooks
+There is no setup. The Cursor hooks are configured via `.cursor/hooks.json`
+and activate automatically in any Cursor session opened on this repo. Sanity
+checks:
 
-# Verify everything is in order
+```bash
 pnpm scope:test          # runs the scope library unit tests
 pnpm scope:validate      # validates every manifest
 ```
@@ -173,18 +178,18 @@ Run `pnpm scope:validate` to verify all manifests conform to
 
 ## How enforcement works
 
-Six layers:
+Four agent-facing layers, all running inside Cursor:
 
-1. **Cursor `sessionStart` hook** (`.cursor/hooks/session-start.mjs`) injects
-   the active task's allowed patterns into the agent's context so it knows
-   what it may modify from the first turn. **When no task is active and
-   bootstrap is off, the hook emits nothing** — the agent's initial context
-   is untouched. Only when a task is active (or bootstrap is on) does it
-   surface a context block.
-2. **Cursor `preToolUse` hook** (`.cursor/hooks/scope-guard.mjs`) runs before
-   every `Write`, `StrReplace`, `Delete`, `EditNotebook`, `MultiEdit`, and
-   `Edit`. Runs the protected-path check first, then the task-scope check.
-3. **Cursor `beforeShellExecution` hook** (`.cursor/hooks/shell-precheck.mjs`)
+1. **`sessionStart` hook** (`.cursor/hooks/session-start.mjs`) injects the
+   active task's allowed patterns into the agent's context so it knows what
+   it may modify from the first turn. **When no task is active and bootstrap
+   is off, the hook emits nothing** — the agent's initial context is
+   untouched. Only when a task is active (or bootstrap is on) does it surface
+   a context block.
+2. **`preToolUse` hook** (`.cursor/hooks/scope-guard.mjs`) runs before every
+   `Write`, `StrReplace`, `Delete`, `EditNotebook`, `MultiEdit`, and `Edit`.
+   It runs the protected-path check first, then the task-scope check.
+3. **`beforeShellExecution` hook** (`.cursor/hooks/shell-precheck.mjs`)
    tokenises the pending shell command and blocks destructive verbs
    (`rm`, `mv`, `cp`, `chmod`, `chown`, `truncate`, `ln -sf`, `sed -i`,
    redirections `>` / `>>` / `tee`, `find -delete`, `xargs rm`) when their
@@ -193,26 +198,21 @@ Six layers:
    catch bypass attempts that hide destructive operations inside string
    arguments. Parsing logic lives in `agent-scope/lib/shell-parse.mjs` and
    is fully unit-tested.
-4. **Cursor `afterShellExecution` hook** (`.cursor/hooks/shell-diff-check.mjs`)
-   is the backstop for anything the pre-check misses: it runs
-   `git status --porcelain` and `git checkout --` reverts any tracked
-   out-of-scope/protected modifications. Untracked files in denied paths
-   are **deleted** (so an agent cannot establish persistent state like a
-   new hook file via a pre-shell bypass).
-5. **Git pre-commit hook** (`agent-scope/hooks/pre-commit`, installed via
-   `pnpm scope:install-hooks`) blocks local commits of out-of-scope files.
-   Also hard-refuses to commit `agent-scope/.bootstrap-token`.
-6. **GitHub Actions** (`.github/workflows/agent-scope.yml`) runs on every
-   PR: validates all manifests, runs the unit tests, blocks the bootstrap
-   token from being committed, resolves the task id from the PR body or
-   branch name, and fails the check (with a PR comment) if any changed file
-   is out of scope.
+4. **`afterShellExecution` hook** (`.cursor/hooks/shell-diff-check.mjs`) is
+   the backstop for anything the pre-check misses: it runs
+   `git status --porcelain`, `git checkout --` reverts any tracked
+   out-of-scope/protected modifications, and **deletes** untracked files in
+   denied paths (so an agent cannot establish persistent state like a new
+   hook file via a pre-shell bypass).
 
 If no active task is set (no env, no file, no matching branch, no git-config)
 **and** bootstrap is off, layer 1 is silent and layers 2–4 only trigger on
-the hardcoded protected paths. Layers 5–6 likewise only gate protected-path
-commits/PRs. Everything else is a no-op — you can do ad-hoc work without
-changing the workflow.
+the hardcoded protected paths. Everything else is a no-op — you can do
+ad-hoc work without changing the workflow.
+
+No layer restricts **humans**. You can `git commit`, `git push`, and edit
+anything manually through your terminal or IDE without interacting with the
+guard — it only sees what the agent does.
 
 ## Hardcoded protected paths
 
@@ -221,10 +221,12 @@ edit them, the whole thing would be worthless. These paths are **always
 denied** regardless of active task, unless bootstrap mode is active:
 
 - `.cursor/hooks/**`, `.cursor/hooks.json`, `.cursor/rules/agent-scope.mdc`
-- `agent-scope/lib/**`, `agent-scope/bin/**`, `agent-scope/hooks/**`
-- `agent-scope/schema/**`, `agent-scope/tasks/**`, `agent-scope/active`
-- `agent-scope/.bootstrap-token`
-- `.git/hooks/**`, `.github/workflows/agent-scope.yml`
+- `agent-scope/lib/**`, `agent-scope/bin/**`, `agent-scope/schema/**`
+- `agent-scope/tasks/**`, `agent-scope/active`,
+  `agent-scope/.bootstrap-token`
+
+(This list applies to **agent** writes only. A human editing any of these
+files through their own terminal/IDE is not restricted.)
 
 ### Bootstrap mode
 
@@ -246,8 +248,9 @@ the agent context. When you're done, remove it:
 rm agent-scope/.bootstrap-token
 ```
 
-The bootstrap token is in `.gitignore` and the pre-commit hook hard-refuses
-to commit it, so it cannot leak into git history.
+The bootstrap token is in `.gitignore`, so it cannot accidentally leak into
+a commit even if you `git add .`. If you ever do `git add -f` it, remove it
+before pushing.
 
 ## Manifest inheritance
 
@@ -345,16 +348,6 @@ agent-scope/lib/denial.test.mjs    # 33 unit tests
 
 No special tokens or APIs — the manifest is the source of truth; edit it to
 grant permission. Changes to a manifest still go through normal review.
-
-## Emergency override
-
-For genuine emergencies, the git pre-commit hook can be skipped with:
-
-```bash
-AGENT_SCOPE_SKIP=1 git commit ...
-```
-
-The CI check cannot be bypassed from the dev machine — it runs on GitHub.
 
 ## Debug / audit
 

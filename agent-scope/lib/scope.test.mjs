@@ -153,16 +153,19 @@ test('coversProtected: bootstrap bypasses', () => {
 });
 
 test('PROTECTED_PATTERNS: covers all system surfaces', () => {
-  // Sanity: make sure nothing is forgotten.
+  // Sanity: make sure nothing is forgotten. The guard only protects its own
+  // live surfaces (Cursor hooks + rule + scope library + bin CLI + task
+  // manifests + active-task pointer + the bootstrap token itself).
   const required = [
     '.cursor/hooks/**',
     '.cursor/hooks.json',
+    '.cursor/rules/agent-scope.mdc',
     'agent-scope/lib/**',
     'agent-scope/bin/**',
+    'agent-scope/schema/**',
     'agent-scope/tasks/**',
     'agent-scope/active',
     'agent-scope/.bootstrap-token',
-    '.git/hooks/**',
   ];
   for (const p of required) assert.ok(PROTECTED_PATTERNS.includes(p), `missing protection: ${p}`);
 });
