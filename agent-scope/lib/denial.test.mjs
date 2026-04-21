@@ -9,6 +9,7 @@ import {
   buildOutOfScopeOptions, buildProtectedOptions, buildLoadErrorOptions,
   buildPreToolUseDenial, buildLoadErrorDenial,
   buildShellPrecheckDenial, buildAfterShellContext,
+  classifyProtected,
   DENIAL_FENCE_START, DENIAL_FENCE_END,
 } from './denial.mjs';
 
@@ -196,14 +197,42 @@ test('buildOutOfScopeOptions: switch options are added per alternative (max 3)',
 // buildProtectedOptions
 // ---------------------------------------------------------------------------
 
-test('buildProtectedOptions: bootstrap + skip + cancel + custom_instruction', () => {
+// ---------------------------------------------------------------------------
+// classifyProtected — explains WHY a specific protected file is guarded
+// ---------------------------------------------------------------------------
+
+test('classifyProtected: cursor hook', () => {
+  assert.equal(classifyProtected('.cursor/hooks/scope-guard.mjs').kind, 'cursor-hook');
+  assert.equal(classifyProtected('.cursor/hooks.json').kind, 'cursor-hook');
+});
+test('classifyProtected: scope library / CLI / schema', () => {
+  assert.equal(classifyProtected('agent-scope/lib/scope.mjs').kind, 'scope-library');
+  assert.equal(classifyProtected('agent-scope/bin/task.mjs').kind, 'scope-cli');
+  assert.equal(classifyProtected('agent-scope/schema/task.schema.json').kind, 'scope-schema');
+});
+test('classifyProtected: manifests, active, token, rule', () => {
+  assert.equal(classifyProtected('agent-scope/tasks/sync.json').kind, 'task-manifest');
+  assert.equal(classifyProtected('agent-scope/active').kind, 'active-pointer');
+  assert.equal(classifyProtected('agent-scope/.bootstrap-token').kind, 'bootstrap-token');
+  assert.equal(classifyProtected('.cursor/rules/agent-scope.mdc').kind, 'cursor-rule');
+});
+test('classifyProtected: unknown input yields safe default', () => {
+  assert.equal(classifyProtected(null).kind, 'unknown');
+  assert.equal(classifyProtected('').kind, 'unknown');
+});
+
+test('buildProtectedOptions: bootstrap + cancel + skip + custom_instruction', () => {
   const opts = buildProtectedOptions({ deniedPath: '.cursor/hooks/x.mjs' });
   assert.deepEqual(
     opts.map(o => o.id),
-    ['bootstrap', 'skip', 'cancel', 'custom_instruction'],
+    ['bootstrap', 'cancel', 'skip', 'custom_instruction'],
   );
   assert.equal(opts[0].action.kind, 'bootstrap');
   assert.ok(opts[0].action.instruction.includes('bootstrap-token'));
+  // Yes / No framing — `bootstrap` label leads with "Yes", `cancel`/`skip` with "No".
+  assert.ok(opts[0].label.startsWith('Yes'), 'bootstrap label should start with Yes');
+  assert.ok(opts[1].label.startsWith('No'),  'cancel label should start with No');
+  assert.ok(opts[2].label.startsWith('No'),  'skip label should start with No');
 });
 
 // ---------------------------------------------------------------------------
@@ -237,12 +266,19 @@ test('buildPreToolUseDenial: protected → structured protected menu', () => {
     assert.ok(parsed.protectedPatterns.length > 0);
     assert.deepEqual(
       parsed.options.map(o => o.id),
-      ['bootstrap', 'skip', 'cancel', 'custom_instruction'],
+      ['bootstrap', 'cancel', 'skip', 'custom_instruction'],
     );
     assert.equal(parsed.recommendedOptionId, 'cancel');
     assert.equal(parsed.agentReasoning, null, 'agent fills this in when surfacing');
     assert.equal(structured.reason, 'protected');
     assert.ok(message.includes('PROTECTED PATH'));
+    // Prose now explains WHY this specific file is guarded + the yes/no flow.
+    assert.ok(message.includes('Why this file is guarded'), 'prose has Why block');
+    assert.ok(message.includes('What happens if the user says YES'), 'prose has YES block');
+    assert.ok(message.includes('What happens if the user says NO'),  'prose has NO block');
+    // Structured payload carries the classification so downstream tools can use it.
+    assert.equal(parsed.protectedKind, 'cursor-hook');
+    assert.ok(typeof parsed.protectedRole === 'string' && parsed.protectedRole.length > 0);
   } finally { cleanup(root); }
 });
 
@@ -331,7 +367,7 @@ test('buildShellPrecheckDenial: protected violation → protected menu', () => {
     assert.equal(p.violations.length, 1);
     assert.deepEqual(
       p.options.map(o => o.id),
-      ['bootstrap', 'skip', 'cancel', 'custom_instruction'],
+      ['bootstrap', 'cancel', 'skip', 'custom_instruction'],
     );
     assert.equal(p.recommendedOptionId, 'cancel');
   } finally { cleanup(root); }
@@ -374,7 +410,7 @@ test('buildShellPrecheckDenial: mixed protected+out-of-scope → protected wins'
     assert.equal(p.reason, 'protected');
     assert.deepEqual(
       p.options.map(o => o.id),
-      ['bootstrap', 'skip', 'cancel', 'custom_instruction'],
+      ['bootstrap', 'cancel', 'skip', 'custom_instruction'],
     );
   } finally { cleanup(root); }
 });

@@ -261,12 +261,19 @@ AskQuestion prompt (see below).
 2. **Extract the JSON.** Parse between the fences.
 3. **Call `AskQuestion`** with ONE question whose prompt **must include**:
    - The denied path / command.
+   - **Why it's restricted** — for `reason: "protected"` denials, summarise
+     the `Why this file is guarded` prose block (use `protectedRole` /
+     `protectedKind` from the structured JSON for a concrete label). For
+     `reason: "out-of-scope"` denials, state that the active task's manifest
+     does not list this path.
    - **Your reasoning in 1–2 sentences** — why you wanted to touch this file,
      what you were trying to accomplish. This is the "here's what I was
      thinking" that the user needs to make an informed decision.
    - **Your recommendation** — lead with the JSON's `recommendedOptionId`
      unless you have a concrete reason to override it.
-   - The full `options` array, verbatim — use each entry's `id`/`label`.
+   - The full `options` array, verbatim — use each entry's `id`/`label`. For
+     protected denials the labels are pre-phrased as Yes / No / No-but-skip
+     / custom so the prompt reads as a plain yes/no question.
 4. **Act on the user's choice** by matching the `action.kind`:
    - `add_to_manifest` → edit `agent-scope/tasks/<task>.json`, append patterns
      to `allowed`, retry.

@@ -158,6 +158,11 @@ The JSON has this shape (TypeScript for clarity):
 2. **Extract the JSON** from between `agent-scope-menu:begin` and `:end`.
 3. **Call `AskQuestion`** with a single question whose prompt **must include**:
    - The denied path (or command).
+   - **Why it's restricted**: for `reason: "protected"` denials, read the
+     prose `Why this file is guarded` block and summarise it for the user
+     (use `protectedRole` / `protectedKind` from the structured JSON). For
+     `reason: "out-of-scope"` denials, state that the active task's manifest
+     does not list this path.
    - **Your reasoning** in 1–2 sentences: why you wanted to touch this file,
      what you were trying to accomplish. This is the plan-mode "here's what I
      was thinking" that the user needs to make an informed decision.
@@ -165,7 +170,8 @@ The JSON has this shape (TypeScript for clarity):
      and why. Lead with the JSON's `recommendedOptionId` unless you have a
      concrete reason to override it.
    - The options array, verbatim from the JSON — use each entry's `id` as the
-     option id and `label` as the display label.
+     option id and `label` as the display label. For protected denials the
+     labels are already phrased as Yes / No / No-but-continue / Custom.
 4. **Act on the user's choice** using the matching `action` object:
    - `add_to_manifest` → edit `agent-scope/tasks/<task>.json`, append the
      listed patterns to `allowed`, save, then retry the original operation.
