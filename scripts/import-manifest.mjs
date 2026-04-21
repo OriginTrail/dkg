@@ -61,22 +61,24 @@ for (const [k, v] of Object.entries(templates)) {
 }
 
 const ontologyUri = `urn:dkg:project:${PROJECT_ID}:ontology`;
-const composeArgs = {
-  contextGraphId: PROJECT_ID,
-  network: NETWORK,
-  supportedTools: TOOLS,
-  publisherAgentUri: PUBLISHER,
-  ontologyUri,
-  requiresMcpDkgVersion: '>=0.1.0',
-  templates,
-};
 
 if (DRY_RUN) {
-  // Use composeManifestQuads directly (no daemon round-trip).
+  // Use composeManifestQuads directly (no daemon round-trip). We pass
+  // PROJECT_ID verbatim here because dry-run never hits the daemon, so
+  // there's no wallet address to resolve — the printed URIs are just
+  // informational.
   const { composeManifestQuads } = await import(
     path.resolve(REPO_ROOT, 'packages/mcp-dkg/dist/manifest/publish.js')
   );
-  const { manifestUri, templateUris, quads } = composeManifestQuads(composeArgs);
+  const { manifestUri, templateUris, quads } = composeManifestQuads({
+    contextGraphId: PROJECT_ID,
+    network: NETWORK,
+    supportedTools: TOOLS,
+    publisherAgentUri: PUBLISHER,
+    ontologyUri,
+    requiresMcpDkgVersion: '>=0.1.0',
+    templates,
+  });
   console.log(`\n[manifest] DRY RUN — would write ${quads.length} triples`);
   console.log(`  manifest URI: ${manifestUri}`);
   console.log(`  template URIs:`);
@@ -86,6 +88,16 @@ if (DRY_RUN) {
 
 const token = resolveToken(REPO_ROOT);
 const client = makeClient({ apiBase: API_BASE, token });
+const cgId = await client.toCanonicalCgId(PROJECT_ID);
+const composeArgs = {
+  contextGraphId: cgId,
+  network: NETWORK,
+  supportedTools: TOOLS,
+  publisherAgentUri: PUBLISHER,
+  ontologyUri,
+  requiresMcpDkgVersion: '>=0.1.0',
+  templates,
+};
 
 // Wrap the JS client (scripts/lib/dkg-daemon.mjs) in the shape
 // publishManifest expects (DkgClient interface from src/client.ts).
@@ -105,7 +117,7 @@ const adaptedClient = {
 };
 
 const result = await publish({ ...composeArgs, client: adaptedClient });
-console.log(`\n[manifest] Published ${result.tripleCount} triples to ${PROJECT_ID}/meta/project-manifest:`);
+console.log(`\n[manifest] Published ${result.tripleCount} triples to ${cgId}/meta/project-manifest:`);
 console.log(`  manifest URI: ${result.manifestUri}`);
 console.log(`  template URIs:`);
 for (const [k, v] of Object.entries(result.templateUris)) console.log(`    ${k.padEnd(22)} ${v}`);

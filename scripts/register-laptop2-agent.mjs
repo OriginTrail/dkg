@@ -57,10 +57,11 @@ console.log(`[laptop2-agent] Produced ${sink.size()} triples for ${id}.`);
 
 const token = resolveToken(REPO_ROOT, { nodeId: NODE_ID });
 const client = makeClient({ apiBase: API_BASE, token });
-await client.ensureSubGraph(PROJECT_ID, SUBGRAPH);
+const cgId = await client.toCanonicalCgId(PROJECT_ID);
+await client.ensureSubGraph(cgId, SUBGRAPH);
 await client.writeAssertion(
   {
-    contextGraphId: PROJECT_ID,
+    contextGraphId: cgId,
     assertionName: ASSERTION_NAME,
     subGraphName: SUBGRAPH,
     triples: sink.triples,
@@ -69,7 +70,7 @@ await client.writeAssertion(
 );
 try {
   await client.promote({
-    contextGraphId: PROJECT_ID,
+    contextGraphId: cgId,
     assertionName: ASSERTION_NAME,
     subGraphName: SUBGRAPH,
     entities: [id],

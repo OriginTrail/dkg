@@ -28,7 +28,7 @@ const __dirname = path.dirname(__filename);
 const REPO_ROOT = path.resolve(__dirname, '..');
 
 const args = parseArgs();
-const API_BASE = (args.api ?? process.env.DEVNET_API ?? 'http://localhost:9201').replace(/\/$/, '');
+const API_BASE = (args.api ?? process.env.DEVNET_API ?? 'http://localhost:9200').replace(/\/$/, '');
 const PROJECT_ID = args.project ?? 'dkg-code-project';
 const PROJECT_NAME = args.name ?? 'DKG Code memory';
 const PROJECT_DESC =
@@ -59,12 +59,15 @@ const client = makeClient({ apiBase: API_BASE, token });
 
 // 1. Project + all sub-graphs (idempotent)
 console.log(`[seed] Ensuring project ${PROJECT_ID}…`);
-await client.ensureProject({ id: PROJECT_ID, name: PROJECT_NAME, description: PROJECT_DESC });
+const { cgId } = await client.ensureProject({ id: PROJECT_ID, name: PROJECT_NAME, description: PROJECT_DESC });
 for (const sg of ['meta', 'code', 'github', 'decisions', 'tasks']) {
-  await client.ensureSubGraph(PROJECT_ID, sg);
+  await client.ensureSubGraph(cgId, sg);
 }
 
-const pass = [`--project=${PROJECT_ID}`, `--api=${API_BASE}`];
+// Pass the already-resolved canonical cgId down to sub-scripts so they
+// don't each independently re-resolve it. `toCanonicalCgId` is a no-op
+// on an already-canonical id.
+const pass = [`--project=${cgId}`, `--api=${API_BASE}`];
 
 // 2. Imports (skip with --skip-imports once WM is already populated)
 if (!SKIP_IMPORTS) {
@@ -113,7 +116,7 @@ function bareIri(v) {
 }
 
 async function selectBindings(sparql) {
-  const r = await client.query({ contextGraphId: PROJECT_ID, sparql });
+  const r = await client.query({ contextGraphId: cgId, sparql });
   return r?.result?.bindings ?? [];
 }
 
@@ -127,7 +130,7 @@ const githubPromotions = await (async () => {
           ?pr a <http://dkg.io/ontology/github/PullRequest> ;
               <http://dkg.io/ontology/github/state> "closed" .
         }
-        FILTER(strstarts(str(?g), "did:dkg:context-graph:${PROJECT_ID}/github/"))
+        FILTER(strstarts(str(?g), "did:dkg:context-graph:${cgId}/github/"))
       } ORDER BY DESC(?pr) LIMIT 20
     `);
     return rows.map((r) => bareIri(r.pr)).filter(Boolean);
@@ -142,7 +145,7 @@ const codePromotions = await (async () => {
     const rows = await selectBindings(`
       SELECT ?pkg WHERE {
         GRAPH ?g { ?pkg a <http://dkg.io/ontology/code/Package> }
-        FILTER(strstarts(str(?g), "did:dkg:context-graph:${PROJECT_ID}/code/"))
+        FILTER(strstarts(str(?g), "did:dkg:context-graph:${cgId}/code/"))
       }
     `);
     return rows.map((r) => bareIri(r.pkg)).filter(Boolean);
@@ -155,7 +158,7 @@ const codePromotions = await (async () => {
 async function promote(assertionName, subGraphName, entities, label) {
   try {
     const r = await client.promote({
-      contextGraphId: PROJECT_ID,
+      contextGraphId: cgId,
       assertionName,
       entities,
       subGraphName,
@@ -215,7 +218,7 @@ const vmGithub = githubPromotions.slice(0, 5);
 // Register the project on-chain (idempotent — 409 = already registered).
 try {
   const reg = await client.request('POST', '/api/context-graph/register', {
-    id: PROJECT_ID,
+    id: cgId,
     revealOnChain: true,
     accessPolicy: 0,
   });
@@ -239,7 +242,7 @@ async function publishSubGraph(subGraphName, selection, label) {
   }
   try {
     const r = await client.request('POST', '/api/shared-memory/publish', {
-      contextGraphId: PROJECT_ID,
+      contextGraphId: cgId,
       subGraphName,
       selection,
       // Disjoint layers: once an entity is anchored on-chain it leaves

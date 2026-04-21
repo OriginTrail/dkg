@@ -394,19 +394,19 @@ if (DRY_RUN) {
 
 const token = resolveToken(REPO_ROOT);
 const client = makeClient({ apiBase: API_BASE, token });
-await client.ensureProject({
+const { cgId } = await client.ensureProject({
   id: PROJECT_ID,
   name: args.name ?? 'DKG Code memory',
   description: 'Shared context graph for the dkg-v9 monorepo itself.',
 });
-await client.ensureSubGraph(PROJECT_ID, SUBGRAPH);
+await client.ensureSubGraph(cgId, SUBGRAPH);
 await client.writeAssertion(
   {
-    contextGraphId: PROJECT_ID,
+    contextGraphId: cgId,
     assertionName: ASSERTION_NAME,
     subGraphName: SUBGRAPH,
     triples: sink.triples,
   },
   { label: 'profile' },
 );
-console.log(`[profile] Done. Wrote profile for ${PROJECT_ID} into ${SUBGRAPH}/${ASSERTION_NAME}.`);
+console.log(`[profile] Done. Wrote profile for ${cgId} into ${SUBGRAPH}/${ASSERTION_NAME}.`);
