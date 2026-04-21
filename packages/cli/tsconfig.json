@@ -10,6 +10,7 @@
     { "path": "../core" },
     { "path": "../agent" },
     { "path": "../epcis" },
-    { "path": "../node-ui" }
+    { "path": "../node-ui" },
+    { "path": "../adapter-openclaw" }
   ]
 }
