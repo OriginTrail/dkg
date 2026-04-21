@@ -1853,14 +1853,16 @@ describe('runSetup workspace migration', () => {
 });
 
 // ---------------------------------------------------------------------------
-// runSetup openclaw.json preflight (Codex PR #234 R6-2)
+// runSetup openclaw.json preflight (Codex PR #234 R6-2 + R8-2)
 // Before step 5 copies SKILL.md to disk, runSetup must preflight the
 // openclaw.json that step 6 will merge into. If the preflight throws,
 // step 5 never runs — so `mergeOpenClawConfig` can never fail AFTER
-// `installCanonicalNodeSkill` has left an orphan on disk.
+// `installCanonicalNodeSkill` has left an orphan on disk. R8-2 extends
+// the preflight to also catch the `plugins.slots.contextEngine` wrong-
+// slot guard that mergeOpenClawConfig enforces at merge time.
 // ---------------------------------------------------------------------------
 
-describe('runSetup openclaw.json preflight (R6-2)', () => {
+describe('runSetup openclaw.json preflight (R6-2 + R8-2)', () => {
   it('throws when openclaw.json is invalid JSON and does NOT install SKILL.md', async () => {
     const dkgHome = join(testDir, '.dkg');
     const openclawHome = join(testDir, '.openclaw');
@@ -1906,6 +1908,47 @@ describe('runSetup openclaw.json preflight (R6-2)', () => {
         runSetup({ workspace: ws, start: false, verify: false }),
       ).rejects.toThrow(/openclaw\.json not found/);
 
+      expect(existsSync(join(ws, 'skills', 'dkg-node', 'SKILL.md'))).toBe(false);
+    } finally {
+      process.env.DKG_HOME = originalDkg;
+      process.env.OPENCLAW_HOME = originalOpenclaw;
+    }
+  });
+
+  // R8-2: the contextEngine wrong-slot guard is merge-time deep inside
+  // mergeOpenClawConfig. The preflight must replicate it so a user who
+  // misconfigured `plugins.slots.contextEngine = "adapter-openclaw"`
+  // fails fast BEFORE step 5 writes the skill file.
+  it('throws when plugins.slots.contextEngine === adapter-openclaw and does NOT install SKILL.md (R8-2)', async () => {
+    const dkgHome = join(testDir, '.dkg');
+    const openclawHome = join(testDir, '.openclaw');
+    const ws = join(testDir, 'workspace');
+    mkdirSync(ws, { recursive: true });
+    mkdirSync(openclawHome, { recursive: true });
+    writeFileSync(
+      join(openclawHome, 'openclaw.json'),
+      JSON.stringify({
+        plugins: {
+          allow: [],
+          load: { paths: [] },
+          entries: {},
+          // Misconfigured: adapter ID pinned to the wrong slot.
+          slots: { contextEngine: 'adapter-openclaw' },
+        },
+      }, null, 2) + '\n',
+    );
+
+    const originalDkg = process.env.DKG_HOME;
+    const originalOpenclaw = process.env.OPENCLAW_HOME;
+    process.env.DKG_HOME = dkgHome;
+    process.env.OPENCLAW_HOME = openclawHome;
+
+    try {
+      await expect(
+        runSetup({ workspace: ws, start: false, verify: false }),
+      ).rejects.toThrow(/plugins\.slots\.contextEngine/);
+
+      // Preflight fired BEFORE step 5 → no orphan SKILL.md on disk.
       expect(existsSync(join(ws, 'skills', 'dkg-node', 'SKILL.md'))).toBe(false);
     } finally {
       process.env.DKG_HOME = originalDkg;

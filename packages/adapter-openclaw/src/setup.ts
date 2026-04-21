@@ -1160,12 +1160,14 @@ export async function runSetup(options: SetupOptions): Promise<void> {
   // OLD workspace, which IS the real install, so a retry sees OLD as the
   // prior and migrates normally (R5-3).
   //
-  // R6-2 preflight: before step 5 writes SKILL.md to disk, validate that
-  // openclaw.json is usable by `mergeOpenClawConfig` at step 6 — exists,
-  // parses as JSON, and is writable. If any check fails we throw BEFORE
-  // `installCanonicalNodeSkill` runs, so step 6's failure can never leave
-  // an orphaned SKILL.md on disk. The parsed config is reused for migration
-  // discovery.
+  // R6-2 + R8-2 preflight: before step 5 writes SKILL.md to disk, validate
+  // that openclaw.json is usable by `mergeOpenClawConfig` at step 6 —
+  // exists, parses as JSON, is writable, and doesn't have the adapter
+  // mis-wired into `plugins.slots.contextEngine` (wrong-slot guard). If any
+  // check fails we throw BEFORE `installCanonicalNodeSkill` runs, so step
+  // 6's failure on a deterministic, statically-checkable condition can
+  // never leave an orphaned SKILL.md on disk. The parsed config is reused
+  // for migration discovery.
   //
   // `discoverWorkspace` returns configPath: '' when `--workspace` was used,
   // so resolve the effective path the same way `mergeOpenClawConfig` does at
@@ -1194,6 +1196,22 @@ export async function runSetup(options: SetupOptions): Promise<void> {
     } catch (err: any) {
       throw new Error(
         `openclaw.json at ${effectiveConfigPathForMigration} is not writable: ${err?.message ?? err}`,
+      );
+    }
+
+    // R8-2: also pre-validate the wrong-slot guard `mergeOpenClawConfig`
+    // runs at setup.ts:646. Without this, a misconfigured
+    // `plugins.slots.contextEngine === "adapter-openclaw"` would let step 5
+    // write SKILL.md to disk before step 6 threw. Running the same check
+    // against `rawExisting` here fails fast with no disk mutation. Note:
+    // unpreventable failure modes (disk-full on write, backup rename
+    // failure, abort between step 5 and 6) remain covered by the canary
+    // ordering + `openclaw-entry.mjs` sync-on-load self-heal — the worst
+    // case is a retry where step 6b's migration cleans up any orphan.
+    if (rawExisting?.plugins?.slots?.contextEngine === ADAPTER_PLUGIN_ID) {
+      throw new Error(
+        `Refusing to install: plugins.slots.contextEngine is set to "${ADAPTER_PLUGIN_ID}" ` +
+        `but the adapter declares kind: "memory". Clear plugins.slots.contextEngine first.`,
       );
     }
 
