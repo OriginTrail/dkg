@@ -253,17 +253,29 @@ function isDkgPackageRoot(dir: string): boolean {
 }
 
 /**
- * Return true when `dir` is the DKG monorepo root, as determined by
- * structural markers: a top-level `pnpm-workspace.yaml`, a `packages/`
- * directory, and `project.json`. These together are unlikely to exist
- * in an unrelated consumer workspace that merely happens to also use
- * pnpm.
+ * Return true when `dir` is the DKG monorepo root.
+ *
+ * We combine two layers of evidence so this never matches an unrelated
+ * consumer workspace (e.g. a pnpm/Nx repo that also happens to have a
+ * root `project.json`):
+ *
+ *  1. Structural markers — `pnpm-workspace.yaml`, `packages/`, and
+ *     `project.json` — which are required but not sufficient.
+ *  2. A DKG-specific sub-marker — `packages/cli/package.json` whose
+ *     `name` is exactly `@origintrail-official/dkg`. The package name
+ *     is reserved for us on npm and cannot be spoofed by a consumer
+ *     repo without colliding with our own published package.
  */
 function isDkgMonorepoRoot(dir: string): boolean {
   try {
-    return existsSync(join(dir, 'pnpm-workspace.yaml'))
-      && existsSync(join(dir, 'packages'))
-      && existsSync(join(dir, 'project.json'));
+    if (!existsSync(join(dir, 'pnpm-workspace.yaml'))) return false;
+    if (!existsSync(join(dir, 'packages'))) return false;
+    if (!existsSync(join(dir, 'project.json'))) return false;
+
+    const cliPkgPath = join(dir, 'packages', 'cli', 'package.json');
+    if (!existsSync(cliPkgPath)) return false;
+    const cliPkg = JSON.parse(readFileSync(cliPkgPath, 'utf-8'));
+    return cliPkg?.name === '@origintrail-official/dkg';
   } catch { return false; }
 }
 

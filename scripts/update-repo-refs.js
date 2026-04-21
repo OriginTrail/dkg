@@ -34,14 +34,43 @@ function update(filePath) {
   updated++;
 }
 
-const pkgsDir = path.join(root, 'packages');
-for (const dir of fs.readdirSync(pkgsDir).sort()) {
-  const p = path.join(pkgsDir, dir, 'package.json');
-  if (fs.existsSync(p)) update(p);
+// Recursively find every tracked package.json below the repo root so
+// the tool matches its own contract ("all package.json files") even as
+// the monorepo grows new top-level folders (apps/, tools/, etc.).
+// Skip build outputs, vendored deps, and version-control noise.
+const SKIP = new Set([
+  'node_modules',
+  'dist',
+  'build',
+  '.git',
+  '.turbo',
+  '.next',
+  'coverage',
+  '.pnpm-store',
+  '.cache',
+]);
+
+function walk(dir) {
+  const found = [];
+  let entries;
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
+  catch { return found; }
+  for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+    if (SKIP.has(entry.name)) continue;
+    // Skip hidden dirs (except well-known repo ones) to avoid editor/
+    // tooling state like .vscode/, .idea/, etc.
+    if (entry.name.startsWith('.') && entry.name !== '.github') continue;
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      found.push(...walk(full));
+    } else if (entry.isFile() && entry.name === 'package.json') {
+      found.push(full);
+    }
+  }
+  return found;
 }
 
-const demoPath = path.join(root, 'demo', 'package.json');
-if (fs.existsSync(demoPath)) update(demoPath);
+for (const pkgJson of walk(root)) update(pkgJson);
 
 if (updated === 0) {
   console.log('All repository URLs already match project.json — nothing to do.');
