@@ -145,6 +145,42 @@ contract KnowledgeAssetsStorage is INamed, IVersioned, IERC1155DeltaQueryable, E
         return (r.startId, r.endId);
     }
 
+    /// @notice Spec §07_EVM_MODULE / BUGS_FOUND.md#E-9 — V10 publish must
+    /// dual-emit `KnowledgeBatchCreated` so legacy V8/V9 indexers keep
+    /// receiving a batch-shaped event when KAV10 routes a publish through
+    /// `KnowledgeCollectionStorage`. This emit-only entry point performs
+    /// no state mutation, no minting, and no counter advance — it exists
+    /// purely so the event surfaces from THIS contract's address (where
+    /// indexers subscribe). KAV10 calls it from `_executePublishCore`
+    /// after the KCS create succeeds.
+    function emitV10KnowledgeBatchCreated(
+        uint256 batchId,
+        address publisherAddress,
+        bytes32 merkleRoot,
+        uint64 publicByteSize,
+        uint32 knowledgeAssetsCount,
+        uint64 startKAId,
+        uint64 endKAId,
+        uint40 startEpoch,
+        uint40 endEpoch,
+        uint96 tokenAmount,
+        bool isPermanent
+    ) external onlyContracts {
+        emit KnowledgeBatchCreated(
+            batchId,
+            publisherAddress,
+            merkleRoot,
+            publicByteSize,
+            knowledgeAssetsCount,
+            startKAId,
+            endKAId,
+            startEpoch,
+            endEpoch,
+            tokenAmount,
+            isPermanent
+        );
+    }
+
     // --- Knowledge Batch CRUD ---
 
     function createKnowledgeBatch(

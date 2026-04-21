@@ -7,6 +7,7 @@ import {EpochStorage} from "./storage/EpochStorage.sol";
 import {PaymasterManager} from "./storage/PaymasterManager.sol";
 import {Chronos} from "./storage/Chronos.sol";
 import {KnowledgeCollectionStorage} from "./storage/KnowledgeCollectionStorage.sol";
+import {KnowledgeAssetsStorage} from "./storage/KnowledgeAssetsStorage.sol";
 import {IdentityStorage} from "./storage/IdentityStorage.sol";
 import {ParametersStorage} from "./storage/ParametersStorage.sol";
 import {StakingStorage} from "./storage/StakingStorage.sol";
@@ -147,6 +148,13 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
     ParanetKnowledgeMinersRegistry public paranetKnowledgeMinersRegistry;
     ParanetsRegistry public paranetsRegistry;
     KnowledgeCollectionStorage public knowledgeCollectionStorage;
+    /// @notice Legacy V8/V9 batch storage. KAV10 invokes
+    /// `emitV10KnowledgeBatchCreated` here so V8/V9 indexers keep
+    /// receiving a `KnowledgeBatchCreated` event for every V10 publish
+    /// (BUGS_FOUND.md#E-9). Resolved best-effort in `initialize` — if
+    /// the legacy storage is not Hub-registered the dual-emit is
+    /// silently skipped (graceful degrade for V10-only deploys).
+    KnowledgeAssetsStorage public knowledgeAssetsStorage;
     Chronos public chronos;
     IERC20 public tokenContract;
     ParametersStorage public parametersStorage;
@@ -156,6 +164,27 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
     ContextGraphStorage public contextGraphStorage;
     ContextGraphValueStorage public contextGraphValueStorage;
     IDKGPublishingConvictionNFT public publishingConvictionNFT;
+
+    // --- Events ---
+
+    /// @notice Spec §07_EVM_MODULE — V10 batch-shaped event emitted on
+    /// every publish so v10 indexers receive a CG-aware projection of
+    /// the publish without having to join `KnowledgeCollectionCreated`
+    /// + `registerKnowledgeCollection`. Distinct from the V8/V9
+    /// `KnowledgeAssetsStorage.KnowledgeBatchCreated` (different
+    /// signature → different topic hash); KAV10 ALSO triggers the
+    /// legacy event via `KnowledgeAssetsStorage.emitV10KnowledgeBatchCreated`
+    /// so dual-indexer support is preserved (BUGS_FOUND.md#E-9).
+    event KnowledgeBatchCreated(
+        uint256 indexed batchId,
+        uint256 contextGraphId,
+        uint256 knowledgeAssetsAmount,
+        uint256 byteSize,
+        uint256 startEpoch,
+        uint256 endEpoch,
+        uint96 tokenAmount,
+        bool isImmutable
+    );
 
     // --- Errors ---
 
@@ -201,6 +230,19 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
         knowledgeCollectionStorage = KnowledgeCollectionStorage(
             hub.getAssetStorageAddress("KnowledgeCollectionStorage")
         );
+        // Legacy V8/V9 batch storage — best-effort resolve so V10-only
+        // deploys don't fail initialize. If it IS deployed, KAV10 will
+        // dual-emit `KnowledgeBatchCreated` from there for indexer
+        // symmetry (BUGS_FOUND.md#E-9). Hub.getAssetStorageAddress
+        // reverts `ContractDoesNotExist` when the key is missing, so the
+        // lookup is wrapped in try/catch to allow graceful degradation.
+        try hub.getAssetStorageAddress("KnowledgeAssetsStorage") returns (address kasAddr) {
+            if (kasAddr != address(0)) {
+                knowledgeAssetsStorage = KnowledgeAssetsStorage(kasAddr);
+            }
+        } catch {
+            knowledgeAssetsStorage = KnowledgeAssetsStorage(address(0));
+        }
         chronos = Chronos(hub.getContractAddress("Chronos"));
         tokenContract = IERC20(hub.getContractAddress("Token"));
         parametersStorage = ParametersStorage(hub.getContractAddress("ParametersStorage"));
@@ -422,6 +464,42 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
             p.tokenAmount,
             p.isImmutable
         );
+
+        // E-9 dual-emit:
+        //   1. V10 batch-shaped projection (this contract) — gives
+        //      indexers a CG-aware event without a join.
+        //   2. Legacy V8/V9 `KnowledgeBatchCreated` from KASStorage so
+        //      pre-V10 indexers keep working unmodified.
+        //
+        // The legacy emit is best-effort — if KASStorage isn't deployed
+        // (V10-only stacks) the call is skipped. It performs no state
+        // mutation: KAV10 publish does not mint into KASStorage's ID
+        // space; only the projected event is emitted there.
+        emit KnowledgeBatchCreated(
+            kcId,
+            p.contextGraphId,
+            p.knowledgeAssetsAmount,
+            uint256(p.byteSize),
+            uint256(currentEpoch),
+            uint256(currentEpoch + p.epochs),
+            p.tokenAmount,
+            p.isImmutable
+        );
+        if (address(knowledgeAssetsStorage) != address(0)) {
+            knowledgeAssetsStorage.emitV10KnowledgeBatchCreated(
+                kcId,
+                msg.sender,
+                p.merkleRoot,
+                uint64(p.byteSize),
+                uint32(p.knowledgeAssetsAmount),
+                uint64(kcId),
+                uint64(kcId),
+                currentEpoch,
+                currentEpoch + p.epochs,
+                p.tokenAmount,
+                p.isImmutable
+            );
+        }
 
         // --- 4. N20: atomic CG↔KC binding + CG value diff ---
 
