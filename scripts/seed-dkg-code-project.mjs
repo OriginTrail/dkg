@@ -119,16 +119,21 @@ async function selectBindings(sparql) {
 
 const githubPromotions = await (async () => {
   try {
-    // PR URIs sort lexicographically with the numeric suffix, so
-    // ORDER BY DESC(?pr) happens to give us the most recent first.
+    // Order PRs by `mergedAt` (falls back to `closedAt`) so we actually
+    // get the 20 most recently closed, not a lexicographic slice —
+    // `ORDER BY DESC(?pr)` on the URI sorts `.../99` after `.../100`
+    // once PR numbers have different digit lengths.
     const rows = await selectBindings(`
-      SELECT ?pr WHERE {
+      SELECT ?pr ?when WHERE {
         GRAPH ?g {
           ?pr a <http://dkg.io/ontology/github/PullRequest> ;
               <http://dkg.io/ontology/github/state> "closed" .
+          OPTIONAL { ?pr <http://dkg.io/ontology/github/mergedAt> ?mergedAt }
+          OPTIONAL { ?pr <http://dkg.io/ontology/github/closedAt> ?closedAt }
+          BIND(COALESCE(?mergedAt, ?closedAt) AS ?when)
         }
         FILTER(strstarts(str(?g), "did:dkg:context-graph:${PROJECT_ID}/github/"))
-      } ORDER BY DESC(?pr) LIMIT 20
+      } ORDER BY DESC(?when) LIMIT 20
     `);
     return rows.map((r) => bareIri(r.pr)).filter(Boolean);
   } catch (err) {
@@ -242,11 +247,15 @@ async function publishSubGraph(subGraphName, selection, label) {
       contextGraphId: PROJECT_ID,
       subGraphName,
       selection,
-      // Disjoint layers: once an entity is anchored on-chain it leaves
-      // SWM. This keeps the UI's layer counters additive (WM + SWM-only
-      // + VM = total unique triples) which makes the pyramid visual
-      // (20% WM / 30% SWM / 50% VM) read as intended.
-      clearAfter: true,
+      // Published entities are always removed from SWM after a confirmed
+      // chain tx (disjoint layers), so the pyramid visual already reads
+      // as intended. We intentionally do NOT set `clearAfter: true` —
+      // that option wipes the *entire* SWM partition for this sub-graph,
+      // including the larger set step 3 just promoted. With step 3
+      // promoting `all` decisions/tasks/packages/PRs and step 4 publishing
+      // only a curated VM subset, `clearAfter: true` leaves the SWM-only
+      // band empty and destroys the seeded shared layer.
+      clearAfter: false,
     });
     console.log(
       `[seed]   + ${label}: published ${selection.length} entities ` +

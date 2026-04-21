@@ -42,16 +42,31 @@ export interface VerifiedEntityIdentity {
   error?: string;
 }
 
-function stripLiteral(value: string | undefined): string {
-  if (!value) return '';
-  const m = value.match(/^"((?:[^"\\]|\\.)*)"(?:@[\w-]+|\^\^<[^>]+>)?$/);
-  if (m) return m[1];
-  return value;
+// `/api/query` can return SPARQL-JSON binding cells (`{ value, type, … }`)
+// rather than bare strings — running `.match()` / `.trim()` on the object
+// form throws. Normalise first.
+function bindingValue(v: unknown): string {
+  if (v === null || v === undefined) return '';
+  if (typeof v === 'string') return v;
+  if (typeof v === 'object' && 'value' in (v as Record<string, unknown>)) {
+    const raw = (v as { value?: unknown }).value;
+    return raw === null || raw === undefined ? '' : String(raw);
+  }
+  return String(v);
 }
 
-function stripIri(value: string | undefined): string {
-  if (!value) return '';
-  const s = value.trim();
+function stripLiteral(value: unknown): string {
+  const raw = bindingValue(value);
+  if (!raw) return '';
+  const m = raw.match(/^"((?:[^"\\]|\\.)*)"(?:@[\w-]+|\^\^<[^>]+>)?$/);
+  if (m) return m[1];
+  return raw;
+}
+
+function stripIri(value: unknown): string {
+  const raw = bindingValue(value);
+  if (!raw) return '';
+  const s = raw.trim();
   if (s.startsWith('<') && s.endsWith('>')) return s.slice(1, -1);
   return s;
 }

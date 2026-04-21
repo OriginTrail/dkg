@@ -27,7 +27,7 @@ const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
+import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
 import {
   DashboardDB,
@@ -281,6 +281,21 @@ function currentBundledMarkItDownAssetName(): string | null {
         target.platform === process.platform && target.arch === process.arch,
     )?.assetName ?? null
   );
+}
+
+// SPARQL bindings returned by `agent.query()` / `/api/query` can arrive as
+// either bare strings (quadstore internal path) or SPARQL-JSON objects like
+// `{ value, type, datatype?, "xml:lang"? }` (the path that goes through the
+// query-result normaliser). Calling `.match()` / `.trim()` on the object
+// form throws at runtime, so every consumer must normalise the cell first.
+function bindingValue(v: unknown): string {
+  if (v === null || v === undefined) return '';
+  if (typeof v === 'string') return v;
+  if (typeof v === 'object' && 'value' in (v as Record<string, unknown>)) {
+    const raw = (v as { value?: unknown }).value;
+    return raw === null || raw === undefined ? '' : String(raw);
+  }
+  return String(v);
 }
 
 async function carryForwardBundledMarkItDownBinary(opts: {
@@ -6056,14 +6071,31 @@ async function handleRequest(
     let triples: Array<{ p: string; o: string }> = [];
     let entityRdfType: string | null = null;
     try {
+      // Stripping angle brackets is only ergonomic ("accept <uri> or uri"),
+      // not sanitisation — a crafted input containing `>` or whitespace can
+      // still break out of the interpolated `<…>`. `sparqlIri` runs
+      // `assertSafeIri` before wrapping.
       const entityIri = entityUri.replace(/^<|>$/g, '');
+      let safeEntityIri: string;
+      try {
+        safeEntityIri = sparqlIri(entityIri);
+      } catch {
+        return jsonResponse(res, 400, {
+          error: `Unsafe entityUri: ${entityUri}`,
+        });
+      }
       const triplesResult = await agent.query(
-        `SELECT DISTINCT ?p ?o WHERE { GRAPH ?g { <${entityIri}> ?p ?o } } LIMIT 200`,
+        `SELECT DISTINCT ?p ?o WHERE { GRAPH ?g { ${safeEntityIri} ?p ?o } } LIMIT 200`,
         { contextGraphId },
       );
+      // `agent.query()` can return bindings as SPARQL-JSON objects
+      // (`{value, type, …}`) once the result has passed through the
+      // normaliser — stringifying them directly produces "[object Object]"
+      // and wrecks the downstream rdf:type lookup / LLM prompt. See
+      // `bindingValue` near the top of this file.
       triples = (triplesResult?.bindings ?? []).map((row: any) => ({
-        p: String(row.p ?? ''),
-        o: String(row.o ?? ''),
+        p: bindingValue(row.p),
+        o: bindingValue(row.o),
       }));
       const typeT = triples.find(
         (t) => t.p === 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
@@ -6087,26 +6119,41 @@ async function handleRequest(
     let detailHint: string | null = null;
     let entityTypeLabel: string | null = null;
     if (entityRdfType) {
+      // `entityRdfType` came from the quadstore as the value of `rdf:type`,
+      // so it's normally a safe IRI — but crafted imported data could in
+      // principle smuggle unsafe chars through. Validate before interpolating.
+      let safeTypeIri: string | null = null;
       try {
-        const hintResult = await agent.query(
-          `
-            SELECT ?hint ?label WHERE {
-              GRAPH ?g {
-                ?binding <http://dkg.io/ontology/profile/forType> <${entityRdfType}> ;
-                         <http://dkg.io/ontology/profile/detailHint> ?hint .
-                OPTIONAL { ?binding <http://dkg.io/ontology/profile/label> ?label }
-              }
-            } LIMIT 1
-          `,
-          { contextGraphId, subGraphName: 'meta' },
-        );
-        const row = hintResult?.bindings?.[0];
-        if (row) {
-          detailHint = String(row.hint ?? '').replace(/^"|"$/g, '').replace(/^"(.+)"(?:@\w+|\^\^.+)?$/, '$1');
-          if (row.label) entityTypeLabel = String(row.label).replace(/^"|"$/g, '').replace(/^"(.+)"(?:@\w+|\^\^.+)?$/, '$1');
-        }
+        safeTypeIri = sparqlIri(entityRdfType);
       } catch {
-        // meta sub-graph may be missing — fall through, LLM still has triples.
+        safeTypeIri = null;
+      }
+      if (safeTypeIri) {
+        try {
+          const hintResult = await agent.query(
+            `
+              SELECT ?hint ?label WHERE {
+                GRAPH ?g {
+                  ?binding <http://dkg.io/ontology/profile/forType> ${safeTypeIri} ;
+                           <http://dkg.io/ontology/profile/detailHint> ?hint .
+                  OPTIONAL { ?binding <http://dkg.io/ontology/profile/label> ?label }
+                }
+              } LIMIT 1
+            `,
+            { contextGraphId, subGraphName: 'meta' },
+          );
+          const row = hintResult?.bindings?.[0];
+          if (row) {
+            const hintRaw = bindingValue(row.hint);
+            detailHint = hintRaw.replace(/^"|"$/g, '').replace(/^"(.+)"(?:@\w+|\^\^.+)?$/, '$1');
+            if (row.label) {
+              const labelRaw = bindingValue(row.label);
+              entityTypeLabel = labelRaw.replace(/^"|"$/g, '').replace(/^"(.+)"(?:@\w+|\^\^.+)?$/, '$1');
+            }
+          }
+        } catch {
+          // meta sub-graph may be missing — fall through, LLM still has triples.
+        }
       }
     }
 

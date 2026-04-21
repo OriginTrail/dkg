@@ -16,9 +16,13 @@ import { executeQuery } from '../api.js';
 async function runProjectQuery(
   sparql: string,
   contextGraphId: string,
-): Promise<Array<Record<string, string>>> {
+): Promise<Array<Record<string, unknown>>> {
   const r = await executeQuery(sparql, contextGraphId);
-  return ((r?.result?.bindings as any[]) ?? []) as Array<Record<string, string>>;
+  // Bindings can arrive as either bare strings (quadstore internal path)
+  // or SPARQL-JSON objects like `{ value, type, datatype?, "xml:lang"? }`.
+  // Preserve the raw shape here — `stripLiteral` / `stripIri` normalise
+  // each cell via `bindingValue`, which handles both.
+  return ((r?.result?.bindings as any[]) ?? []) as Array<Record<string, unknown>>;
 }
 
 export interface SubGraphBinding {
@@ -138,14 +142,29 @@ const DEFAULT_TYPE_FALLBACK = (typeIri: string): EntityTypeBinding => ({
 // ── SPARQL helpers ────────────────────────────────────────────
 const PROFILE_NS = 'http://dkg.io/ontology/profile/';
 
-function stripLiteral(value: string | undefined): string {
-  if (!value) return '';
-  const m = value.match(/^"((?:[^"\\]|\\.)*)"(?:@[\w-]+|\^\^<[^>]+>)?$/);
-  if (m) return m[1].replace(/\\"/g, '"').replace(/\\n/g, '\n').replace(/\\\\/g, '\\');
-  return value;
+// Normalise a SPARQL binding cell. `/api/query` returns SPARQL-JSON
+// objects (`{value, type, datatype?, "xml:lang"?}`) for most paths,
+// not bare strings — calling `.match()` / `.trim()` on the object form
+// throws, so every helper below must normalise first.
+function bindingValue(v: unknown): string {
+  if (v === null || v === undefined) return '';
+  if (typeof v === 'string') return v;
+  if (typeof v === 'object' && 'value' in (v as Record<string, unknown>)) {
+    const raw = (v as { value?: unknown }).value;
+    return raw === null || raw === undefined ? '' : String(raw);
+  }
+  return String(v);
 }
 
-function parseInt10(value: string | undefined): number {
+function stripLiteral(value: unknown): string {
+  const raw = bindingValue(value);
+  if (!raw) return '';
+  const m = raw.match(/^"((?:[^"\\]|\\.)*)"(?:@[\w-]+|\^\^<[^>]+>)?$/);
+  if (m) return m[1].replace(/\\"/g, '"').replace(/\\n/g, '\n').replace(/\\\\/g, '\\');
+  return raw;
+}
+
+function parseInt10(value: unknown): number {
   const s = stripLiteral(value);
   const n = parseInt(s, 10);
   return Number.isFinite(n) ? n : 0;
@@ -274,9 +293,10 @@ WHERE {
 GROUP BY ?view ?name ?description ?nodeSize`;
 }
 
-function stripIri(value: string | undefined): string {
-  if (!value) return '';
-  const s = value.trim();
+function stripIri(value: unknown): string {
+  const raw = bindingValue(value);
+  if (!raw) return '';
+  const s = raw.trim();
   if (s.startsWith('<') && s.endsWith('>')) return s.slice(1, -1);
   return s;
 }
@@ -320,12 +340,22 @@ export function useProjectProfile(contextGraphId: string | undefined): ProjectPr
         ]);
         if (cancelled) return;
 
+        // Reset root metadata to defaults before applying the new project's
+        // profile row. Without this, switching to a project that has no
+        // profile root (or a partial one) would leak the previous project's
+        // display name / description / colors into the header.
+        const defaultName = contextGraphId;
         if (rootRows[0]) {
           const r = rootRows[0];
-          setDisplayName(stripLiteral(r.name) || contextGraphId);
+          setDisplayName(stripLiteral(r.name) || defaultName);
           setDescription(stripLiteral(r.description) || undefined);
           setPrimaryColor(stripLiteral(r.primary) || DEFAULT_PROFILE_SEED.primaryColor);
           setAccentColor(stripLiteral(r.accent) || DEFAULT_PROFILE_SEED.accentColor);
+        } else {
+          setDisplayName(defaultName);
+          setDescription(undefined);
+          setPrimaryColor(DEFAULT_PROFILE_SEED.primaryColor);
+          setAccentColor(DEFAULT_PROFILE_SEED.accentColor);
         }
 
         const sgs: SubGraphBinding[] = sgRows
