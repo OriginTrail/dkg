@@ -338,6 +338,16 @@ export const executeQuery = (
 ) =>
   post<{ result: any }>('/api/query', { sparql, contextGraphId, includeSharedMemory, graphSuffix, view });
 
+/** Scoped SPARQL query — hits a specific sub-graph only. Returns raw bindings rows. */
+export const executeSubGraphQuery = async (
+  sparql: string,
+  contextGraphId: string,
+  subGraphName: string,
+): Promise<Array<Record<string, string>>> => {
+  const r = await post<{ result: any }>('/api/query', { sparql, contextGraphId, subGraphName });
+  return r?.result?.bindings ?? [];
+};
+
 // --- Publish (SWM-first: write to shared memory, then publish) ---
 export const publishTriples = async (contextGraphId: string, quads: any[]) => {
   await post<any>('/api/shared-memory/write', { contextGraphId, quads });
@@ -1232,3 +1242,19 @@ export const gameApi = {
   forceResolve: (swarmId: string) =>
     post<any>(`${GAME_BASE}/force-resolve`, { swarmId }),
 };
+
+// --- Sub-graphs (lightweight list + counts for SubGraphBar) ---
+export interface SubGraphInfo {
+  name: string;
+  uri: string;
+  description?: string;
+  createdBy?: string;
+  createdAt?: string;
+  entityCount: number;
+  tripleCount: number;
+}
+export const fetchSubGraphs = (contextGraphId: string) =>
+  get<{ contextGraphId: string; subGraphs: SubGraphInfo[] }>(
+    `/api/sub-graph/list?contextGraphId=${encodeURIComponent(contextGraphId)}`,
+  );
+

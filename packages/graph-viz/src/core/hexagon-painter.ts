@@ -237,7 +237,7 @@ export class HexagonPainter {
       ctx.globalAlpha = opacity;
       ctx.fillStyle = palette.textPrimary;
       ctx.fillText(
-        truncateLabel(node.label, 40),
+        truncateLabel(node.label, 24),
         x,
         y + radius + 2 / globalScale
       );
@@ -471,8 +471,44 @@ export class HexagonPainter {
   }
 }
 
+/**
+ * Shorten a node label to fit under a hexagon.
+ *
+ * For path-like labels ("packages/node-ui/src/ui/views/ProjectView.tsx")
+ * the informative bit is usually the *basename*, not the prefix — so we
+ * middle-elide to preserve a hint of the parent and the full tail:
+ *   packages/node-ui/src/ui/views/ProjectView.tsx
+ *   → packages/…/ProjectView.tsx
+ *
+ * For `#123 Some Pull Request Title`-style labels we also preserve the
+ * leading identifier (`#123 …`) because the number is more identifying
+ * than the first words of the title.
+ *
+ * Everything else falls back to a tail ellipsis.
+ */
 function truncateLabel(label: string, maxLen: number): string {
   if (label.length <= maxLen) return label;
+
+  // Path-like: keep first segment + basename, elide the middle.
+  if (label.includes('/')) {
+    const parts = label.split('/');
+    const head = parts[0];
+    const tail = parts[parts.length - 1];
+    const candidate = `${head}/\u2026/${tail}`;
+    if (parts.length >= 3 && candidate.length <= maxLen) return candidate;
+    // Still too long — just keep the basename.
+    if (tail.length <= maxLen - 2) return `\u2026/${tail}`;
+  }
+
+  // "#123 Title Of The Thing" — keep the number, elide the title tail.
+  const numMatch = /^(#\d+)\s+(.+)$/.exec(label);
+  if (numMatch) {
+    const prefix = numMatch[1];
+    const rest = numMatch[2];
+    const room = maxLen - prefix.length - 2;
+    if (room > 4) return `${prefix} ${rest.slice(0, room)}\u2026`;
+  }
+
   return label.slice(0, maxLen - 1) + '\u2026';
 }
 

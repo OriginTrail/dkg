@@ -27,7 +27,7 @@ const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
+import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
 import {
   DashboardDB,
@@ -36,6 +36,7 @@ import {
   handleNodeUIRequest,
   ChatMemoryManager,
   LogPushWorker,
+  LlmClient,
   type MetricsSource,
 } from "@origintrail-official/dkg-node-ui";
 import {
@@ -280,6 +281,21 @@ function currentBundledMarkItDownAssetName(): string | null {
         target.platform === process.platform && target.arch === process.arch,
     )?.assetName ?? null
   );
+}
+
+// SPARQL bindings returned by `agent.query()` / `/api/query` can arrive as
+// either bare strings (quadstore internal path) or SPARQL-JSON objects like
+// `{ value, type, datatype?, "xml:lang"? }` (the path that goes through the
+// query-result normaliser). Calling `.match()` / `.trim()` on the object
+// form throws at runtime, so every consumer must normalise the cell first.
+function bindingValue(v: unknown): string {
+  if (v === null || v === undefined) return '';
+  if (typeof v === 'string') return v;
+  if (typeof v === 'object' && 'value' in (v as Record<string, unknown>)) {
+    const raw = (v as { value?: unknown }).value;
+    return raw === null || raw === undefined ? '' : String(raw);
+  }
+  return String(v);
 }
 
 async function carryForwardBundledMarkItDownBinary(opts: {
@@ -4565,6 +4581,71 @@ async function handleRequest(
     }
   }
 
+  // GET /api/sub-graph/list?contextGraphId=...
+  // Returns per-sub-graph metadata + entity/triple counts so UIs can render a
+  // SubGraphBar without a second round-trip per sub-graph.
+  if (req.method === "GET" && path === "/api/sub-graph/list") {
+    const qs = new URL(req.url ?? "", "http://localhost").searchParams;
+    const contextGraphId = qs.get("contextGraphId");
+    if (!validateRequiredContextGraphId(contextGraphId, res)) return;
+    try {
+      const registered = await agent.listSubGraphs(contextGraphId!);
+      // One pass enumerates *all* named graphs in the project + their
+      // distinct-subject and triple counts. Sub-graph ownership is inferred
+      // from the named-graph path segment after the context-graph id:
+      //   did:dkg:context-graph:<cg>/<subGraph>/assertion/<author>/<name>
+      //   did:dkg:context-graph:<cg>/<subGraph>   (committed sub-graph view)
+      // This is one SPARQL round-trip regardless of how many sub-graphs exist.
+      const counts = new Map<string, { entityCount: number; tripleCount: number }>();
+      try {
+        const sparql = `
+          SELECT ?g (COUNT(DISTINCT ?s) AS ?entities) (COUNT(*) AS ?triples)
+          WHERE { GRAPH ?g { ?s ?p ?o } }
+          GROUP BY ?g
+        `;
+        const result = await agent.query(sparql, { contextGraphId: contextGraphId! });
+        const prefix = `did:dkg:context-graph:${contextGraphId}/`;
+        const parseCount = (v: any) => {
+          if (v === undefined || v === null) return 0;
+          const s = typeof v === 'string' ? v : (v && typeof v === 'object' && 'value' in v ? (v as any).value : '');
+          const m = String(s).match(/^"?(\d+)/);
+          return m ? Number(m[1]) : 0;
+        };
+        for (const row of (result?.bindings ?? []) as Array<Record<string, any>>) {
+          const g = typeof row.g === 'string' ? row.g : (row.g && typeof row.g === 'object' && 'value' in row.g ? row.g.value : undefined);
+          if (!g || !g.startsWith(prefix)) continue;
+          const tail = g.slice(prefix.length);
+          // tail starts with either "<subGraphName>/..." or "_meta" or "_shared_memory".
+          // Only care about the first segment, but skip daemon-internal graphs.
+          const firstSlash = tail.indexOf('/');
+          const seg = firstSlash >= 0 ? tail.slice(0, firstSlash) : tail;
+          if (!seg || seg.startsWith('_')) continue;
+          const entry = counts.get(seg) ?? { entityCount: 0, tripleCount: 0 };
+          entry.entityCount += parseCount(row.entities);
+          entry.tripleCount += parseCount(row.triples);
+          counts.set(seg, entry);
+        }
+      } catch {
+        // Counts are best-effort — UI degrades to zeros on query failure.
+      }
+      const items = registered.map((sg) => ({
+        name: sg.name,
+        uri: sg.uri,
+        description: sg.description,
+        createdBy: sg.createdBy,
+        createdAt: sg.createdAt,
+        entityCount: counts.get(sg.name)?.entityCount ?? 0,
+        tripleCount: counts.get(sg.name)?.tripleCount ?? 0,
+      }));
+      return jsonResponse(res, 200, { contextGraphId, subGraphs: items });
+    } catch (err: any) {
+      if (err.message?.includes("not found") || err.message?.includes("Invalid")) {
+        return jsonResponse(res, 400, { error: err.message });
+      }
+      throw err;
+    }
+  }
+
   // POST /api/assertion/create  { contextGraphId, name, subGraphName? }
   if (req.method === "POST" && path === "/api/assertion/create") {
     const body = await readBody(req, SMALL_BODY_BYTES);
@@ -5956,6 +6037,194 @@ async function handleRequest(
     }
   }
 
+  // POST /api/genui/render  { contextGraphId, entityUri, libraryPrompt }
+  //
+  // Streams OpenUI Lang deltas over Server-Sent Events. The UI registers
+  // the component library client-side with @openuidev/react-lang and
+  // passes its `library.prompt()` text up; the daemon does the heavy
+  // lifting — resolving triples, reading the profile hint for the entity's
+  // rdf:type, composing the messages, and piping LlmClient stream events.
+  if (req.method === "POST" && path === "/api/genui/render") {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const parsed = safeParseJson(body, res);
+    if (!parsed) return;
+    const { contextGraphId, entityUri, libraryPrompt } = parsed;
+    if (!validateRequiredContextGraphId(contextGraphId, res)) return;
+    if (typeof entityUri !== "string" || !entityUri.trim()) {
+      return jsonResponse(res, 400, { error: 'Missing "entityUri"' });
+    }
+    if (typeof libraryPrompt !== "string" || !libraryPrompt.trim()) {
+      return jsonResponse(res, 400, { error: 'Missing "libraryPrompt"' });
+    }
+    if (!config.llm?.apiKey) {
+      return jsonResponse(res, 503, {
+        error: 'LLM not configured. Set an API key in Settings to enable GenUI.',
+      });
+    }
+
+    // Fetch entity triples.
+    // The entity's data lives in the sub-graph's named assertion graph, so
+    // we must wrap the pattern in GRAPH ?g — otherwise we'd only see the
+    // default graph, which is empty for these imports. DISTINCT because
+    // promoted triples can appear under both WM and SWM/VM named graphs
+    // for the same sub-graph.
+    let triples: Array<{ p: string; o: string }> = [];
+    let entityRdfType: string | null = null;
+    try {
+      // Stripping angle brackets is only ergonomic ("accept <uri> or uri"),
+      // not sanitisation — a crafted input containing `>` or whitespace can
+      // still break out of the interpolated `<…>`. `sparqlIri` runs
+      // `assertSafeIri` before wrapping.
+      const entityIri = entityUri.replace(/^<|>$/g, '');
+      let safeEntityIri: string;
+      try {
+        safeEntityIri = sparqlIri(entityIri);
+      } catch {
+        return jsonResponse(res, 400, {
+          error: `Unsafe entityUri: ${entityUri}`,
+        });
+      }
+      const triplesResult = await agent.query(
+        `SELECT DISTINCT ?p ?o WHERE { GRAPH ?g { ${safeEntityIri} ?p ?o } } LIMIT 200`,
+        { contextGraphId },
+      );
+      // `agent.query()` can return bindings as SPARQL-JSON objects
+      // (`{value, type, …}`) once the result has passed through the
+      // normaliser — stringifying them directly produces "[object Object]"
+      // and wrecks the downstream rdf:type lookup / LLM prompt. See
+      // `bindingValue` near the top of this file.
+      triples = (triplesResult?.bindings ?? []).map((row: any) => ({
+        p: bindingValue(row.p),
+        o: bindingValue(row.o),
+      }));
+      const typeT = triples.find(
+        (t) => t.p === 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
+      );
+      if (typeT) entityRdfType = typeT.o;
+    } catch (err: any) {
+      return jsonResponse(res, 500, {
+        error: `Failed to fetch entity triples: ${err.message}`,
+      });
+    }
+
+    if (triples.length === 0) {
+      return jsonResponse(res, 404, {
+        error: `No triples found for <${entityUri}> in ${contextGraphId}`,
+      });
+    }
+
+    // Fetch the profile's detailHint for this type from the `meta` sub-graph.
+    // Same GRAPH ?g reasoning as above — the profile lives in a named
+    // assertion graph under `.../meta/assertion/...`, not in the default.
+    let detailHint: string | null = null;
+    let entityTypeLabel: string | null = null;
+    if (entityRdfType) {
+      // `entityRdfType` came from the quadstore as the value of `rdf:type`,
+      // so it's normally a safe IRI — but crafted imported data could in
+      // principle smuggle unsafe chars through. Validate before interpolating.
+      let safeTypeIri: string | null = null;
+      try {
+        safeTypeIri = sparqlIri(entityRdfType);
+      } catch {
+        safeTypeIri = null;
+      }
+      if (safeTypeIri) {
+        try {
+          const hintResult = await agent.query(
+            `
+              SELECT ?hint ?label WHERE {
+                GRAPH ?g {
+                  ?binding <http://dkg.io/ontology/profile/forType> ${safeTypeIri} ;
+                           <http://dkg.io/ontology/profile/detailHint> ?hint .
+                  OPTIONAL { ?binding <http://dkg.io/ontology/profile/label> ?label }
+                }
+              } LIMIT 1
+            `,
+            { contextGraphId, subGraphName: 'meta' },
+          );
+          const row = hintResult?.bindings?.[0];
+          if (row) {
+            const hintRaw = bindingValue(row.hint);
+            detailHint = hintRaw.replace(/^"|"$/g, '').replace(/^"(.+)"(?:@\w+|\^\^.+)?$/, '$1');
+            if (row.label) {
+              const labelRaw = bindingValue(row.label);
+              entityTypeLabel = labelRaw.replace(/^"|"$/g, '').replace(/^"(.+)"(?:@\w+|\^\^.+)?$/, '$1');
+            }
+          }
+        } catch {
+          // meta sub-graph may be missing — fall through, LLM still has triples.
+        }
+      }
+    }
+
+    // Compose the prompt
+    const systemPrompt =
+      libraryPrompt +
+      `\n\n# Task\n` +
+      `You will be given an RDF entity from a DKG context graph, described by its triples (predicate -> object). ` +
+      `Compose a single OpenUI Lang response that renders a rich, domain-appropriate detail view of this entity ` +
+      `using only components from the library above.\n` +
+      `\n## Rules\n` +
+      `- Output OpenUI Lang only. No prose, no markdown fences, no commentary.\n` +
+      `- Use the EntityDetail root if the library declares one; otherwise start with whatever the library's root wants.\n` +
+      `- Extract display values from the literal objects (strip XSD datatype suffixes).\n` +
+      `- If URI objects look like "urn:dkg:...", treat them as links to other entities.\n` +
+      `- Prefer grouping: header card -> stats grid -> related lists.\n` +
+      `- Keep it compact — no more than ~12 child blocks.\n`;
+
+    const userMessage = [
+      `Entity URI: ${entityUri}`,
+      entityRdfType ? `rdf:type: ${entityRdfType}${entityTypeLabel ? ` (${entityTypeLabel})` : ''}` : '',
+      detailHint ? `\nProfile hint for this type:\n${detailHint}` : '',
+      `\nTriples (${triples.length}):\n` + triples.slice(0, 120).map(t => `  ${t.p}  ${t.o}`).join('\n'),
+      triples.length > 120 ? `  … (${triples.length - 120} more triples truncated)` : '',
+    ].filter(Boolean).join('\n');
+
+    // Start SSE stream
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      Connection: 'keep-alive',
+    });
+
+    const client = new LlmClient();
+    const sendEvent = (type: string, data: unknown) => {
+      res.write(`event: ${type}\n`);
+      res.write(`data: ${JSON.stringify(data)}\n\n`);
+    };
+
+    sendEvent('start', { entityUri, entityRdfType, entityTypeLabel });
+    try {
+      const events = client.stream({
+        config: config.llm!,
+        request: {
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userMessage },
+          ],
+          stream: true,
+          temperature: 0.3,
+          maxTokens: 1500,
+        },
+      });
+      for await (const ev of events) {
+        if (ev.type === 'text_delta') {
+          sendEvent('delta', { text: ev.delta });
+        } else if (ev.type === 'final') {
+          sendEvent('final', { content: ev.message.content ?? '' });
+        } else if (ev.type === 'error') {
+          sendEvent('error', { error: ev.error });
+        }
+      }
+      sendEvent('done', {});
+    } catch (err: any) {
+      sendEvent('error', { error: err?.message ?? String(err) });
+    } finally {
+      res.end();
+    }
+    return;
+  }
+
   // POST /api/query-remote  { peerId, lookupType, paranetId?, ual?, entityUri?, rdfType?, sparql?, limit?, timeout? }
   if (req.method === "POST" && path === "/api/query-remote") {
     const body = await readBody(req, SMALL_BODY_BYTES);
@@ -6305,6 +6574,41 @@ async function handleRequest(
       created: id,
       uri: `did:dkg:context-graph:${id}`,
     });
+  }
+
+  // POST /api/context-graph/rename (or /api/paranet/rename)
+  //
+  // Updates the display name (schema:name) of an existing context graph
+  // without touching any of its data. Delegates to `agent.renameContextGraph`
+  // which (a) enforces owner-only authorization via `assertCallerIsOwner`
+  // (same protection as add/remove-participant), (b) wipes old name triples
+  // from both the ONTOLOGY graph and the CG `_meta` graph, and (c) writes
+  // the new name into both so the rename is durable for open AND private
+  // CGs (private curated graphs read their definition from `_meta`).
+  if (
+    req.method === "POST" &&
+    (path === "/api/context-graph/rename" || path === "/api/paranet/rename")
+  ) {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const { id, name } = JSON.parse(body);
+    if (!id || !name) {
+      return jsonResponse(res, 400, { error: 'Missing "id" or "name"' });
+    }
+    try {
+      await agent.renameContextGraph(id, String(name), requestAgentAddress);
+      return jsonResponse(res, 200, { renamed: id, name });
+    } catch (err: any) {
+      const msg = err?.message ?? String(err);
+      if (/Only the context graph creator/.test(msg)) {
+        return jsonResponse(res, 403, { error: msg });
+      }
+      if (/does not exist|has no known creator|non-empty string/.test(msg)) {
+        return jsonResponse(res, 400, { error: msg });
+      }
+      return jsonResponse(res, 500, {
+        error: `Failed to rename context graph: ${msg}`,
+      });
+    }
   }
 
   // GET /api/context-graph/list (V10) or /api/paranet/list (legacy)

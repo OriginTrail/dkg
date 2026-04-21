@@ -28,6 +28,13 @@ export interface RdfGraphProps {
   style?: React.CSSProperties;
   /** Run a single zoomToFit after the first data load (does not affect autoFitDisabled) */
   initialFit?: boolean;
+  /**
+   * URI of a node to pan + zoom the camera to shortly after the initial
+   * layout settles. Re-fires whenever this prop changes, so it doubles
+   * as "focus the currently selected entity" when the caller supplies
+   * a live selection.
+   */
+  initialFocus?: string;
   /** Child components (can use useRdfGraph hook to access viz instance) */
   children?: ReactNode;
 }
@@ -55,6 +62,7 @@ export function RdfGraph({
   options = {},
   viewConfig,
   initialFit,
+  initialFocus,
   onNodeClick,
   onNodeHover,
   onNodeUnhover,
@@ -177,6 +185,22 @@ export function RdfGraph({
     viz.applyView(viewConfig);
     viz.refresh();
   }, [viewConfig]);
+
+  // Camera focus on a specific node. Re-fires whenever `initialFocus`
+  // changes — useful for "pan to the selected entity" behaviours where
+  // the same RdfGraph instance serves successive entity detail panels.
+  // Delay lets force-graph finish its initial alpha decay; without it
+  // centerOnNode lands before any layout has happened.
+  useEffect(() => {
+    if (!initialFocus) return;
+    const viz = vizRef.current;
+    if (!viz) return;
+    const t = setTimeout(() => {
+      try { viz.centerOnNode(initialFocus, { durationMs: 600, zoomLevel: 2 }); }
+      catch { /* node may not exist in current data — harmless */ }
+    }, 550);
+    return () => clearTimeout(t);
+  }, [initialFocus, data]);
 
   // Memoized context value
   const contextValue = useCallback(() => ({

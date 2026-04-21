@@ -3491,6 +3491,69 @@ export class DKGAgent {
   }
 
   /**
+   * Rename a context graph (updates its `schema:name` display label).
+   *
+   * Writes into BOTH the ONTOLOGY graph (primary source for
+   * `listContextGraphs()` on open CGs) and the CG's `_meta` graph
+   * (used as the private/curated CG definition index) so the rename is
+   * durable regardless of which graph type the CG was originally created
+   * in. Previous display-name triples are wiped from both graphs first
+   * to guarantee idempotent rename (no "two names in the store").
+   *
+   * Authorization: same as other CG mutations — only the creator can
+   * rename. Enforced via `assertCallerIsOwner`.
+   */
+  async renameContextGraph(
+    contextGraphId: string,
+    name: string,
+    callerAgentAddress?: string,
+  ): Promise<void> {
+    const ctx = createOperationContext('system');
+    const trimmed = typeof name === 'string' ? name.trim() : '';
+    if (!trimmed) {
+      throw new Error('Context graph name must be a non-empty string.');
+    }
+
+    const exists = await this.contextGraphExists(contextGraphId);
+    if (!exists) {
+      throw new Error(`Context graph "${contextGraphId}" does not exist`);
+    }
+
+    const owner = await this.getContextGraphOwner(contextGraphId);
+    if (!owner) {
+      throw new Error(
+        `Context graph "${contextGraphId}" has no known creator. ` +
+        `Wait for sync to complete or create it locally first.`,
+      );
+    }
+    this.assertCallerIsOwner(owner, callerAgentAddress, 'rename context graph');
+
+    const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
+    const cgMetaGraph = paranetMetaGraphUri(contextGraphId);
+    const paranetUri = paranetDataGraphUri(contextGraphId);
+    const schemaName = DKG_ONTOLOGY.SCHEMA_NAME;
+
+    await this.store.deleteByPattern({
+      subject: paranetUri,
+      predicate: schemaName,
+      graph: ontologyGraph,
+    });
+    await this.store.deleteByPattern({
+      subject: paranetUri,
+      predicate: schemaName,
+      graph: cgMetaGraph,
+    });
+
+    const escaped = `"${escapeSparqlLiteral(trimmed)}"`;
+    await this.store.insert([
+      { subject: paranetUri, predicate: schemaName, object: escaped, graph: ontologyGraph },
+      { subject: paranetUri, predicate: schemaName, object: escaped, graph: cgMetaGraph },
+    ]);
+
+    this.log.info(ctx, `Renamed context graph "${contextGraphId}" to "${trimmed}"`);
+  }
+
+  /**
    * List allowed agents for a context graph.
    */
   async getContextGraphAllowedAgents(contextGraphId: string): Promise<string[]> {
