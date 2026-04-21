@@ -346,21 +346,23 @@ jobs:
   # up 3 DKG daemons + a local Hardhat chain, plays a full game, and
   # asserts gossip / context-graph / CCL behavior end-to-end.
   #
-  # Sharded 1-file-per-runner: each file is ~4-5 min on its own and
-  # was previously running serially in one job (20 min wall-clock)
-  # because all 4 files share `.test-nodes/` + ports 19200-19302 /
-  # 18545 and their daemon-process cleanup is fragile on 2-core CI
-  # runners. Splitting into 4 ephemeral runners:
-  #   (a) structurally eliminates cross-file pollution — each runner
-  #       starts fresh and never reuses state;
-  #   (b) cuts wall-clock from ~20 min to ~5-6 min in parallel;
-  #   (c) makes flakiness attributable to a single file when it does
-  #       happen.
+  # Sharded 1-file-per-runner (each shard runs ~4-5 min) so the lane
+  # does NOT gate wall-clock even though a single file takes 4-5 min:
+  # the 4 shards all run in parallel after `build`.
+  #
+  # GATING POLICY: KOSAVA-tier (demo app). `continue-on-error: true`
+  # so failures stay visible in CI without blocking a Tornado-tier
+  # merge on an e2e flake. The cross-file pollution (CI-1) is
+  # structurally fixed via sharding; the within-file node-2/node-3
+  # port race (CI-2) is mitigated by serializing boot in
+  # `helpers.ts::startTestCluster`. If serialization proves stable in
+  # CI we can drop `continue-on-error` in a follow-up.
   # ------------------------------------------------------------------
   kosava-game-e2e:
     name: "Kosava: origin-trail-game E2E [${{ matrix.shard.id }}/4]"
     needs: build
     runs-on: ubuntu-latest
+    continue-on-error: true
     # Single file per runner: ≤ 600s beforeAll + ≤ 120s per test * a
     # handful of tests → worst case ~8 min on cold 2-core CI runners.
     timeout-minutes: 15

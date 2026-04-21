@@ -293,7 +293,14 @@ export async function startTestCluster(nodeCount: number, options?: ClusterOptio
   const relayAddr = status.multiaddrs?.find((a: string) => a.includes('127.0.0.1'))
     ?? `/ip4/127.0.0.1/tcp/${nodes[0].libp2pPort}/p2p/${status.peerId}`;
 
-  // Start remaining nodes bootstrapped to node 1
+  // Start remaining nodes bootstrapped to node 1, ONE AT A TIME.
+  // Concurrent boot of nodes 2 + 3 on 2-core ubuntu-latest CI runners
+  // reliably triggers an `EADDRINUSE: 0.0.0.0:19301` race inside the
+  // `dkg start --foreground` supervisor→worker handoff where the
+  // first worker briefly holds the libp2p port after a silent
+  // restart. Serializing boot (node 2 fully ready before node 3
+  // spawns) sidesteps the race without touching production code.
+  // Documented as CI-2 in `.test-audit/BUGS_FOUND.md`.
   for (let i = 1; i < nodeCount; i++) {
     const configPath = join(nodes[i].homeDir, 'config.json');
     const cfg = JSON.parse(readFileSync(configPath, 'utf-8'));
@@ -303,10 +310,8 @@ export async function startTestCluster(nodeCount: number, options?: ClusterOptio
     writeFileSync(configPath, JSON.stringify(cfg, null, 2));
 
     nodes[i].process = startDaemon(nodes[i]);
+    await waitForReady(nodes[i].apiPort, 240_000, nodes[i].homeDir);
   }
-
-  // Wait for all nodes to be ready
-  await Promise.all(nodes.slice(1).map(n => waitForReady(n.apiPort, 240_000, n.homeDir)));
 
   // Set default ask price for node identities (otherwise stakeWeightedAverageAsk = 0
   // and publish tokenAmount calculates to 0 which the contract rejects).
