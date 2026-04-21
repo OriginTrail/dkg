@@ -367,15 +367,20 @@ export interface AssertionInfo {
  *
  * WM uses a cheap graph-listing query: the assertion graph URI shape is
  * `did:dkg:context-graph:<cg>/assertion/<agent>/<name>` and a WM assertion
- * still carries its triples there. SWM is different: when an assertion is
- * promoted, its triples move into the single `/_shared_memory` graph, so
- * the assertion graph itself becomes empty and the WM-style listing would
- * return nothing. The canonical record of "which assertions exist and
- * where" is the `_meta` graph, where every assertion's lifecycle URI
- * carries a `dkg:memoryLayer` literal that we can filter on.
+ * still carries its triples there.
  *
- * We keep the existing WM behaviour unchanged (safest rollback path) and
- * use the `_meta`-driven query only for SWM.
+ * SWM is different. When an assertion is promoted its triples move into
+ * the single `/_shared_memory` graph, so the assertion graph itself becomes
+ * empty and the WM-style listing returns nothing. The `_meta` graph is the
+ * canonical record of lifecycle state, but crucially the lifecycle-entity
+ * triples that carry `dkg:state` / `dkg:memoryLayer` / `dkg:assertionGraph`
+ * are only written on the node that authored the transition — they are not
+ * re-emitted on replicas that receive the data via sync. What *does*
+ * propagate on every node is the append-only stream of `prov:Activity`
+ * event records under `<lifecycleUri>/event/<eventId>`, each tagged with
+ * `prov:used|prov:generated <lifecycleUri>`, `prov:startedAtTime` and
+ * `dkg:toLayer`. So to find SWM assertions we pick, per lifecycle, the
+ * latest event and keep those whose `toLayer` is `"SWM"`.
  */
 export async function listAssertions(
   contextGraphId: string,
@@ -383,16 +388,29 @@ export async function listAssertions(
 ): Promise<AssertionInfo[]> {
   if (layer === 'swm') {
     const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
+    const PROV = 'http://www.w3.org/ns/prov#';
     const DKG = 'http://dkg.io/ontology/';
-    // Query the assertion-lifecycle records in `_meta` for entries marked
-    // `memoryLayer "SWM"`. `assertionGraph` is optional because older
-    // records may pre-date that predicate; in that case we fall back to
-    // reconstructing the graph URI from the lifecycle URN below.
-    const sparql = `SELECT ?lifecycle ?assertionGraph WHERE {
-      GRAPH <${metaGraph}> {
-        ?lifecycle <${DKG}memoryLayer> "SWM" .
-        OPTIONAL { ?lifecycle <${DKG}assertionGraph> ?assertionGraph }
+    // Pick the latest `prov:Activity` per lifecycle and filter by toLayer.
+    // The inner subquery picks max(startedAt) per lifecycle; the outer join
+    // reads that event's `toLayer`. We anchor `?lifecycle` to the
+    // `urn:dkg:assertion:` namespace so we don't pick up other activities.
+    const sparql = `SELECT DISTINCT ?lifecycle WHERE {
+      {
+        SELECT ?lifecycle (MAX(?st) AS ?maxTime) WHERE {
+          GRAPH <${metaGraph}> {
+            ?ev (<${PROV}used>|<${PROV}generated>) ?lifecycle ;
+                <${PROV}startedAtTime> ?st .
+            FILTER(STRSTARTS(STR(?lifecycle), "urn:dkg:assertion:"))
+          }
+        }
+        GROUP BY ?lifecycle
       }
+      GRAPH <${metaGraph}> {
+        ?ev2 (<${PROV}used>|<${PROV}generated>) ?lifecycle ;
+             <${PROV}startedAtTime> ?maxTime ;
+             <${DKG}toLayer> ?toLayer .
+      }
+      FILTER(?toLayer = "SWM")
     }`;
     const data = await executeQuery(sparql, contextGraphId);
     const bindings: any[] = data?.result?.bindings ?? [];
@@ -407,10 +425,7 @@ export async function listAssertions(
       const lastColon = lifecycle.lastIndexOf(':');
       if (lastColon < 0) continue;
       const name = lifecycle.slice(lastColon + 1);
-      const graphUri = typeof b.assertionGraph === 'string'
-        ? b.assertionGraph
-        : (b.assertionGraph?.value ?? '');
-      result.push({ name, graphUri });
+      result.push({ name, graphUri: lifecycle });
     }
     return result;
   }

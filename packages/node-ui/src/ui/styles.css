@@ -3046,12 +3046,28 @@ body.light .v10-me-graph-legend { background: rgba(255,255,255,0.8); }
   flex: 1 1 auto; min-height: 0;
   width: 100%;
 }
-/* Fallback scroll region for the Entities tab: EntityList provides its
-   own overflow-y:auto, but if any sibling (hero banner, widget strip,
-   footer) misbehaves and oversizes the inner list, allow the body
-   itself to scroll rather than clip the remainder. */
+/* Entities tab body is a single block-level scroll region. We deliberately
+   opt out of the parent's flex-column layout here: with flex, each child
+   (hero banner, widget strip, entity list, footer) competes for vertical
+   space via its own flex-basis/shrink rules, and any sibling that ends up
+   oversized silently clips the entity list below. As a plain block with
+   overflow-y:auto the children stack by their natural height and the body
+   itself scrolls — simple, predictable, and independent of how individual
+   widgets grow. */
 .v10-layer-expand-body.entities-tab {
-  overflow-y: auto; overflow-x: hidden;
+  display: block;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+/* Inside a block-scrolling body the list is just content — its
+   flex:1/min-height/overflow-y rules from the flex-layout world would
+   either collapse it to zero or spawn a nested scrollbar that fights the
+   outer one. Neutralise them here without touching the layer-detail view
+   that still uses the flex layout. */
+.v10-layer-expand-body.entities-tab .v10-entity-list {
+  flex: none;
+  min-height: 0;
+  overflow: visible;
 }
 
 /* Horizontal widget strip at the top of the Entities tab — sticky, not vertically scrollable */
