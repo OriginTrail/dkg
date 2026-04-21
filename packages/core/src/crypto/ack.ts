@@ -204,7 +204,7 @@ export function computePublishACKDigest(
  *     uint256(p.newTokenAmount),              // uint256 (32)
  *     p.mintKnowledgeAssetsAmount,            // uint256 (32)
  *     keccak256(abi.encodePacked(burnIds))    // bytes32 (32)
- *   ))                                        // total packed width = 340 bytes
+ *   ))                                        // total packed width = 308 bytes
  */
 export function computeUpdateACKDigest(
   chainId: bigint,
@@ -230,7 +230,11 @@ export function computeUpdateACKDigest(
   }
   const burnHash = keccak256(burnPacked);
 
-  const packed = new Uint8Array(340);
+  // Packed width = 32 (chainId) + 20 (addr) + 32*8 (8× uint256/bytes32 fields) = 308.
+  // Earlier versions allocated 340, which silently appended 32 zero bytes and
+  // produced a digest that never matched KAV10.sol:832-846 → update ACK signed
+  // off-chain would be rejected on-chain. See test/v10-ack-digests-extra.ts [C-1].
+  const packed = new Uint8Array(308);
   let offset = 0;
   packed.set(uint256ToBytes(chainId), offset); offset += 32;
   packed.set(addrBytes, offset); offset += 20;
