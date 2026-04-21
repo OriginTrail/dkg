@@ -52,6 +52,22 @@ jobs:
   # One canonical build. Every test job downloads this artifact instead
   # of rebuilding from scratch (saves ~3-4 min per job).
   #
+  # IMPORTANT — `pnpm build` here is TSC-ONLY for every package. Both
+  # Vite UI bundles (`@dkg-node-ui` + `@dkg-app-origin-trail-game`)
+  # were split out of the `build` task into a separate `build:ui` task
+  # (see `turbo.json` + the `build` / `build:ui` / `build:full` scripts
+  # in those two packages). The node-ui Vite build alone was 1m 52s —
+  # ~60 % of the old build's 3 min wall-clock — and no test in CI reads
+  # `dist-ui/` at runtime (API tests never hit the static dashboard
+  # routes, daemon gracefully 404s if the dir is absent, and the
+  # node-ui vitest suite fabricates its own temp staticDir). Dropping
+  # Vite from CI moved `Build packages` from ~3:00 → ~1:00, which is
+  # what makes the sub-5-min total wall-clock possible.
+  #
+  # Releases DO need `dist-ui/` shipped to npm — `release.yml` and
+  # `npm-continuous-publish.yml` run `pnpm turbo run build:ui` right
+  # after `pnpm build` to produce the bundles before publishing.
+  #
   # Turbo remote cache is opt-in: if TURBO_TOKEN / TURBO_TEAM secrets
   # are set the build step will pull previously-cached outputs; with no
   # secrets the env vars are empty and turbo transparently no-ops.
@@ -182,21 +198,26 @@ jobs:
         run: pnpm --filter @origintrail-official/dkg-publisher exec vitest run --shard=${{ matrix.shard }}/2
 
   # ------------------------------------------------------------------
-  # Tornado agent lane — the slowest Node suite, sharded across 4 runners.
-  # Raised from 3→4 after the 5.12-min warm run showed agent shards at
-  # ~4.5-4.7 min, i.e. they were the tail gating wall-clock. 4 shards
-  # should bring each one down to ~3.5 min. Going higher (5+) starts
-  # losing to the ~1.5-min pnpm-install setup tax per runner.
+  # Tornado agent lane — the slowest Node suite, sharded across 8 runners.
+  # Sharding history:
+  #   3 shards → 6+ min each (wall-clock tail)
+  #   4 shards → ~4.5 min each (still the gating tail)
+  #   8 shards → ~2.5-2.8 min each ← current, lets total wall-clock
+  #              land under 5 min once the shared `build` job dropped
+  #              the Vite UI builds (see that job's header comment).
+  # 40 test files means 8 shards each run ~5 files; further sharding
+  # hits diminishing returns because per-runner setup is ~60-70s of
+  # checkout + pnpm-install + artifact download.
   # ------------------------------------------------------------------
   tornado-agent:
-    name: "Tornado: agent [${{ matrix.shard }}/4]"
+    name: "Tornado: agent [${{ matrix.shard }}/8]"
     needs: build
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -212,8 +233,8 @@ jobs:
           path: /tmp
       - name: Restore build outputs
         run: tar -xzf /tmp/build-outputs.tgz
-      - name: "Agent tests (shard ${{ matrix.shard }}/4)"
-        run: pnpm --filter @origintrail-official/dkg-agent exec vitest run --shard=${{ matrix.shard }}/4
+      - name: "Agent tests (shard ${{ matrix.shard }}/8)"
+        run: pnpm --filter @origintrail-official/dkg-agent exec vitest run --shard=${{ matrix.shard }}/8
 
   # ------------------------------------------------------------------
   # Bura lane — `cli` is the heaviest BURA package (CLI daemon, HTTP API,

@@ -5,8 +5,9 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
-    "build": "node -e \"const fs=require('fs'); ['dist','tsconfig.tsbuildinfo'].forEach((p)=>fs.rmSync(p,{recursive:true,force:true}))\" && tsc && pnpm build:ui",
+    "build": "node -e \"const fs=require('fs'); ['dist','tsconfig.tsbuildinfo'].forEach((p)=>fs.rmSync(p,{recursive:true,force:true}))\" && tsc",
     "build:ui": "cross-env NODE_OPTIONS=--max-old-space-size=4096 vite build",
+    "build:full": "pnpm build && pnpm build:ui",
     "dev:ui": "vite",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
