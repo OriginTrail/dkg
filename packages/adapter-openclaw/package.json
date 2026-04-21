@@ -9,6 +9,10 @@
     ".": {
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
+    },
+    "./setup": {
+      "import": "./dist/setup-command.js",
+      "types": "./dist/setup-command.d.ts"
     }
   },
   "files": [

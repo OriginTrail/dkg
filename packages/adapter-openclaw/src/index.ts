@@ -2,6 +2,7 @@ export { DkgNodePlugin } from './DkgNodePlugin.js';
 export { DkgDaemonClient, type DkgClientOptions } from './dkg-client.js';
 export { DkgChannelPlugin, CHANNEL_NAME } from './DkgChannelPlugin.js';
 export { runSetup, type SetupOptions } from './setup.js';
+export { registerSetupCommand } from './setup-command.js';
 // Codex Bug B24: the `DkgMemoryPlugin` class no longer exposes the legacy
 // `OpenClawMemorySearchManager` surface (see the breaking-change JSDoc on
 // the class). Both explicit tool surfaces that previously shipped alongside

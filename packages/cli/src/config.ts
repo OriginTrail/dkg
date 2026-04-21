@@ -239,15 +239,31 @@ export interface ProjectConfig {
 let _projectConfig: ProjectConfig | null = null;
 
 /**
- * Return true when `dir` looks like the DKG repo/package root (has a
- * project.json whose `projectName` is "dkg"). This prevents walking
- * into unrelated ancestor directories in npm-installed layouts.
+ * Return true when `dir` is the published DKG CLI package root, as
+ * determined by an adjacent `package.json` whose `name` is
+ * `@origintrail-official/dkg`. This is resilient to `projectName`
+ * renames in `project.json` and cannot be spoofed by an unrelated app.
  */
-function isDkgRoot(dir: string): boolean {
+function isDkgPackageRoot(dir: string): boolean {
   try {
-    const raw = readFileSync(join(dir, 'project.json'), 'utf-8');
-    const proj = JSON.parse(raw);
-    return proj.projectName === 'dkg';
+    const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf-8'));
+    return pkg?.name === '@origintrail-official/dkg'
+      && existsSync(join(dir, 'project.json'));
+  } catch { return false; }
+}
+
+/**
+ * Return true when `dir` is the DKG monorepo root, as determined by
+ * structural markers: a top-level `pnpm-workspace.yaml`, a `packages/`
+ * directory, and `project.json`. These together are unlikely to exist
+ * in an unrelated consumer workspace that merely happens to also use
+ * pnpm.
+ */
+function isDkgMonorepoRoot(dir: string): boolean {
+  try {
+    return existsSync(join(dir, 'pnpm-workspace.yaml'))
+      && existsSync(join(dir, 'packages'))
+      && existsSync(join(dir, 'project.json'));
   } catch { return false; }
 }
 
@@ -255,17 +271,32 @@ function isDkgRoot(dir: string): boolean {
  * Resolve candidate directories where repo-root files (project.json,
  * network/*.json) may live, in priority order.
  *
- * Only directories that pass `isDkgRoot()` are included, so an npm-
- * installed package never accidentally reads a consumer's project.json.
+ * The package-local root (`thisDir/..` in an npm install) is preferred
+ * over any ancestor, so a published package never accidentally reads
+ * a consumer's own `project.json` under `node_modules`. Ancestor
+ * candidates are only included when they look like the DKG monorepo
+ * itself.
  */
 function candidateRoots(): string[] {
   const thisDir = dirname(fileURLToPath(import.meta.url));
-  const candidates = [
-    join(thisDir, '..', '..', '..'),         // monorepo from dist/
-    join(thisDir, '..', '..', '..', '..'),   // monorepo from src/ during dev
-    join(thisDir, '..'),                      // NPM package (files at package root)
+  const out: string[] = [];
+
+  // Package-local root first — in an npm install this is the only
+  // location that should ever win, and it's unambiguous.
+  const pkgRoot = join(thisDir, '..');
+  if (isDkgPackageRoot(pkgRoot)) out.push(pkgRoot);
+
+  // Monorepo ancestors (dev / source checkout). `dist/` and `src/`
+  // live at different depths so both paths are tried.
+  const monorepoCandidates = [
+    join(thisDir, '..', '..', '..'),        // from dist/
+    join(thisDir, '..', '..', '..', '..'),  // from src/ during dev
   ];
-  return candidates.filter(isDkgRoot);
+  for (const dir of monorepoCandidates) {
+    if (isDkgMonorepoRoot(dir)) out.push(dir);
+  }
+
+  return out;
 }
 
 /**
@@ -349,7 +380,7 @@ export function isDkgMonorepo(): boolean {
   if (_isDkgMonorepo !== null) return _isDkgMonorepo;
   const root = repoDir();
   if (!root) { _isDkgMonorepo = false; return false; }
-  _isDkgMonorepo = isDkgRoot(root) && existsSync(join(root, 'pnpm-workspace.yaml'));
+  _isDkgMonorepo = isDkgMonorepoRoot(root);
   return _isDkgMonorepo;
 }
 

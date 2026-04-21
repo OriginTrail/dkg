@@ -1578,25 +1578,17 @@ const openclawCmd = program
   .command('openclaw')
   .description('OpenClaw adapter management');
 
-openclawCmd
-  .command('setup')
-  .description('Set up the DKG OpenClaw adapter (non-interactive, idempotent)')
-  .option('--workspace <dir>', 'Override OpenClaw workspace directory')
-  .option('--name <name>', 'Override agent name')
-  .option('--port <port>', 'Override daemon API port (default: 9200)')
-  .option('--no-fund', 'Skip wallet funding via faucet')
-  .option('--no-verify', 'Skip post-setup verification')
-  .option('--no-start', 'Skip daemon start (configure only)')
-  .option('--dry-run', 'Preview changes without writing anything')
-  .action(async (opts: Record<string, unknown>) => {
-    try {
-      const { runSetup } = await import('@origintrail-official/dkg-adapter-openclaw');
-      await runSetup(opts);
-    } catch (err: any) {
-      console.error(`\n[setup] ERROR: ${err.message}\n`);
-      process.exit(1);
-    }
-  });
+// Delegate to the adapter's shared commander registrar so the flag
+// surface, help text, and exit semantics stay in exactly one place
+// (packages/adapter-openclaw/src/setup-command.ts) and cannot drift
+// between `dkg openclaw setup` and the standalone `dkg-openclaw setup`.
+// The `/setup` subpath export is a light module that only pulls in
+// `commander` types at load; `runSetup` is loaded lazily when the
+// command actually runs, keeping `dkg` cold-start cheap.
+{
+  const { registerSetupCommand } = await import('@origintrail-official/dkg-adapter-openclaw/setup');
+  registerSetupCommand(openclawCmd);
+}
 
 // ─── dkg ccl ────────────────────────────────────────────────────────
 
