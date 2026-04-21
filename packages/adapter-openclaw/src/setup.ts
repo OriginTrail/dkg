@@ -15,6 +15,7 @@
 
 import { execSync } from 'node:child_process';
 import { copyFileSync, existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { join, dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -214,10 +215,23 @@ export function loadNetworkConfig(): NetworkConfig {
   );
 }
 
-function resolveCanonicalNodeSkillSourcePath(): string {
+export function resolveCanonicalNodeSkillSourcePath(): string {
+  // (1) Monorepo dev checkout — sibling `packages/cli`.
   const localWorkspaceCandidate = resolve(adapterRoot(), '..', 'cli', 'skills', 'dkg-node', 'SKILL.md');
   if (existsSync(localWorkspaceCandidate)) return localWorkspaceCandidate;
 
+  // (2) Local install — CLI resolved via node_modules from the adapter's
+  // own require-root. Covers `./node_modules/@origintrail-official/dkg/...`
+  // layouts that a non-global `npm install @origintrail-official/dkg`
+  // produces, which the `npm prefix -g` branch below cannot see.
+  try {
+    const req = createRequire(import.meta.url);
+    const cliPkgJson = req.resolve('@origintrail-official/dkg/package.json');
+    const localInstallCandidate = join(dirname(cliPkgJson), 'skills', 'dkg-node', 'SKILL.md');
+    if (existsSync(localInstallCandidate)) return localInstallCandidate;
+  } catch { /* fall through to npm prefix -g */ }
+
+  // (3) Global install — `npm install -g @origintrail-official/dkg`.
   try {
     const npmPrefix = execSync('npm prefix -g', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
     const candidates = [
