@@ -67,10 +67,10 @@ function createInProcessAgent(peerId = 'test-peer-1') {
       publishedFromSwm.push({ selection, options });
       return { onChainResult: { txHash: '0xpublish123', blockNumber: 100 }, ual: 'did:dkg:test:published' };
     },
-    createContextGraph: async (params: any) => {
+    registerContextGraphOnChain: async (params: any) => {
       const id = BigInt(contextGraphs.length + 1);
       contextGraphs.push(params);
-      return { contextGraphId: id, success: true };
+      return { contextGraphId: id, txHash: '0xcg' + id.toString() };
     },
     signContextGraphDigest: async (_contextGraphId: bigint, _merkleRoot: Uint8Array) => ({
       identityId: 0n,

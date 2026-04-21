@@ -2,7 +2,7 @@
  * Context Graph Integration Tests
  *
  * Verifies that the game coordinator properly wires up to the DKG context
- * graph protocol: createContextGraph on launch, publishFromSharedMemory on
+ * graph protocol: registerContextGraphOnChain on launch, publishFromSharedMemory on
  * turn resolution, and identity propagation through gossip messages.
  */
 
@@ -50,10 +50,10 @@ function makeMockAgent(peerId: string, identityId = 1n) {
       publishedFromSwm.push({ selection, options });
       return { onChainResult: { txHash: '0xpublish123', blockNumber: 100 }, ual: 'did:dkg:test:published' };
     },
-    createContextGraph: async (params: any) => {
+    registerContextGraphOnChain: async (params: any) => {
       const id = BigInt(contextGraphs.length + 1);
       contextGraphs.push(params);
-      return { contextGraphId: id, success: true };
+      return { contextGraphId: id, txHash: '0xcg' + id.toString() };
     },
     signContextGraphDigest: async (_contextGraphId: bigint, _merkleRoot: Uint8Array) => ({
       identityId,
@@ -258,9 +258,9 @@ describe('Context Graph Integration', () => {
       coord.destroy();
     });
 
-    it('proceeds without context graph if createContextGraph fails', async () => {
+    it('proceeds without context graph if registerContextGraphOnChain fails', async () => {
       const failAgent = makeMockAgent('peer-A', 1n);
-      failAgent.createContextGraph = async () => { throw new Error('chain not available'); };
+      failAgent.registerContextGraphOnChain = async () => { throw new Error('chain not available'); };
 
       const { coord, swarmId } = await setupThreePlayerGame(failAgent);
       const expedition = await coord.launchExpedition(swarmId);
@@ -346,7 +346,7 @@ describe('Context Graph Integration', () => {
 
     it('falls back to publish when no contextGraphId', async () => {
       const noCtxAgent = makeMockAgent('peer-A', 1n);
-      noCtxAgent.createContextGraph = async () => { throw new Error('nope'); };
+      noCtxAgent.registerContextGraphOnChain = async () => { throw new Error('nope'); };
 
       const { coord, swarmId } = await setupThreePlayerGame(noCtxAgent);
       await coord.launchExpedition(swarmId);
@@ -489,7 +489,7 @@ describe('Context Graph Integration', () => {
 
     it('fallback publish works when context graph creation fails', async () => {
       const noCtxAgent = makeMockAgent('peer-A', 1n);
-      noCtxAgent.createContextGraph = async () => { throw new Error('nope'); };
+      noCtxAgent.registerContextGraphOnChain = async () => { throw new Error('nope'); };
 
       const { coord, swarmId } = await setupThreePlayerGame(noCtxAgent);
       await coord.launchExpedition(swarmId);
@@ -693,33 +693,54 @@ describe('Context Graph Integration', () => {
 
   describe('Security and Robustness (review feedback)', () => {
     it('rejects spoofed identityId in turn approval', async () => {
-      const { coord, swarmId } = await setupThreePlayerGame(agent);
-      await coord.launchExpedition(swarmId);
-      const swarm = coord.getSwarm(swarmId)!;
-
-      // Cast votes
-      await coord.castVote(swarmId, 'continue');
+      // Use 4 players so M = ceil(2*4/3) = 3. This keeps `pendingProposal`
+      // alive after a single (spoofed) approval so we can inspect the
+      // rejection state. With 3 players (M=2), leader auto-approves (1) +
+      // one peer approval (2) immediately clears threshold and resolves the
+      // proposal, destroying the state we're asserting against.
+      const coord = createCoordinator(agent);
+      const swarm = await coord.createSwarm('Alice', 'TestSwarm', 4);
+      const swarmId = swarm.id;
       const topic = proto.appTopic('origin-trail-game');
-      const voteB = proto.encode({
-        app: proto.APP_ID, type: 'vote:cast', swarmId, peerId: 'peer-B',
-        timestamp: Date.now(), turn: 1, action: 'continue',
-      });
-      leaderInject(agent, topic, voteB, 'peer-B');
+
+      const peers = [
+        { peerId: 'peer-B', name: 'Bob', identityId: '2' },
+        { peerId: 'peer-C', name: 'Charlie', identityId: '3' },
+        { peerId: 'peer-D', name: 'Dave', identityId: '4' },
+      ];
+      for (const p of peers) {
+        const join = proto.encode({
+          app: proto.APP_ID, type: 'swarm:joined', swarmId,
+          peerId: p.peerId, timestamp: Date.now(), playerName: p.name, identityId: p.identityId,
+        });
+        agent._injectMessage(topic, join, p.peerId);
+      }
+      await new Promise(r => setTimeout(r, 50));
+
+      await coord.launchExpedition(swarmId);
+      const liveSwarm = coord.getSwarm(swarmId)!;
+
+      // All 4 players vote to form a canonical proposal (triggers
+      // proposeTurnResolution via allAliveVoted).
+      await coord.castVote(swarmId, 'continue');
+      for (const p of peers) {
+        const voteMsg = proto.encode({
+          app: proto.APP_ID, type: 'vote:cast', swarmId,
+          peerId: p.peerId, timestamp: Date.now(), turn: 1, action: 'continue',
+        });
+        leaderInject(agent, topic, voteMsg, p.peerId);
+      }
       await new Promise(r => setTimeout(r, 20));
 
-      // A vacuous `if (!swarm.pendingProposal) return;` would silently pass
-      // the test without ever exercising the spoofed-identity rejection path.
-      // The turn-proposal must exist for the test to have any meaning — if
-      // it doesn't, that itself is a bug in the leader flow we should surface.
       expect(
-        swarm.pendingProposal,
-        'turn proposal must exist after vote injection; if null, leader flow regressed',
-      ).toBeDefined();
+        liveSwarm.pendingProposal,
+        'turn proposal must exist after all-voted; if null, leader proposeTurnResolution regressed',
+      ).not.toBeNull();
 
       // Inject approval from peer-B claiming peer-C's identityId (spoofed)
       const spoofedApproval = proto.encode({
         app: proto.APP_ID, type: 'turn:approve', swarmId, peerId: 'peer-B',
-        timestamp: Date.now(), turn: 1, proposalHash: swarm.pendingProposal.hash,
+        timestamp: Date.now(), turn: 1, proposalHash: liveSwarm.pendingProposal!.hash,
         identityId: '3', // peer-B claims to be identity 3 (peer-C's)
         signatureR: '0x' + '00'.repeat(32),
         signatureVS: '0x' + '00'.repeat(32),
@@ -727,17 +748,20 @@ describe('Context Graph Integration', () => {
       leaderInject(agent, topic, spoofedApproval, 'peer-B');
       await new Promise(r => setTimeout(r, 20));
 
-      // The spoofed sig should NOT be counted. Guarding this behind
-      // `if (sigs)` would vacuously pass if `participantSignatures` got
-      // renamed / dropped; make the precondition explicit so shape changes
-      // surface here instead of silently disabling the assertion.
-      const sigs = swarm.pendingProposal?.participantSignatures;
+      // After 1 spoofed approval (+ leader auto-approval = 2), threshold=3
+      // not yet met, so pendingProposal stays alive. Spoofed signature must
+      // be rejected (participantSignatures must not contain peer-B).
+      expect(
+        liveSwarm.pendingProposal,
+        'pendingProposal must remain alive with 2/3 approvals; if null, threshold math regressed',
+      ).not.toBeNull();
+      const sigs = liveSwarm.pendingProposal!.participantSignatures;
       expect(
         sigs,
         'participantSignatures must exist after a vote/approval exchange; nil → shape regression',
       ).toBeDefined();
-      const peerBSig = sigs!.get('peer-B');
-      expect(peerBSig).toBeUndefined();
+      const peerBSig = sigs.get('peer-B');
+      expect(peerBSig, 'spoofed identityId must not land in participantSignatures').toBeUndefined();
 
       coord.destroy();
     });

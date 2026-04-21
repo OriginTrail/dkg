@@ -57,10 +57,10 @@ interface DKGAgent {
       contextGraphSignatures?: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
     },
   ): Promise<DKGPublishReturn | undefined>;
-  createContextGraph(params: {
+  registerContextGraphOnChain(params: {
     participantIdentityIds: bigint[];
     requiredSignatures: number;
-  }): Promise<{ contextGraphId: bigint; success: boolean }>;
+  }): Promise<{ contextGraphId: bigint; txHash?: string; blockNumber?: number }>;
   signContextGraphDigest(
     contextGraphId: bigint,
     merkleRoot: Uint8Array,
@@ -763,11 +763,11 @@ export class OriginTrailGameCoordinator {
         const participantIdentityIds = allIds.map(id => BigInt(id!))
           .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
         const M = signatureThreshold(participantIdentityIds.length);
-        const result = await this.agent.createContextGraph({
+        const result = await this.agent.registerContextGraphOnChain({
           participantIdentityIds,
           requiredSignatures: M,
         });
-        if (result.success) {
+        if (result && result.contextGraphId != null) {
           swarm.contextGraphId = String(result.contextGraphId);
           swarm.requiredSignatures = M;
           this.log(`Context graph ${swarm.contextGraphId} created for swarm ${swarmId} (M=${M}, ${participantIdentityIds.length} participants)`);
@@ -1235,6 +1235,9 @@ export class OriginTrailGameCoordinator {
           if (publishResult) {
             const turnEntity = rdf.turnUri(swarm.id, proposal.turn);
             await this.publishProvenanceChain(turnEntity, publishResult);
+            await this.writeLineageFromSnapshot(opsSnapshot, publishResult).catch(() => {});
+          } else {
+            await this.writeLineageFromSnapshot(opsSnapshot, undefined).catch(() => {});
           }
         }
       } catch (err: any) {
@@ -1366,6 +1369,7 @@ export class OriginTrailGameCoordinator {
 
       const turnEntity = rdf.turnUri(swarm.id, turnNumber);
       await this.publishProvenanceChain(turnEntity, publishResult);
+      await this.writeLineageFromSnapshot(opsSnapshot, publishResult).catch(() => {});
     } catch (err: any) {
       this.log(`Failed to publish force-resolved turn ${turnNumber}: ${err.message}`);
       await this.writeFailedLineage(opsSnapshot).catch(() => {});

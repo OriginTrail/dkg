@@ -204,7 +204,8 @@ export function computePublishACKDigest(
  *     uint256(p.newTokenAmount),              // uint256 (32)
  *     p.mintKnowledgeAssetsAmount,            // uint256 (32)
  *     keccak256(abi.encodePacked(burnIds))    // bytes32 (32)
- *   ))                                        // total packed width = 340 bytes
+ *   ))                                        // total packed width = 308 bytes
+ *                                              // (32+20+32+32+32+32+32+32+32+32)
  */
 export function computeUpdateACKDigest(
   chainId: bigint,
@@ -230,7 +231,7 @@ export function computeUpdateACKDigest(
   }
   const burnHash = keccak256(burnPacked);
 
-  const packed = new Uint8Array(340);
+  const packed = new Uint8Array(308);
   let offset = 0;
   packed.set(uint256ToBytes(chainId), offset); offset += 32;
   packed.set(addrBytes, offset); offset += 20;
