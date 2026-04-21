@@ -21,6 +21,18 @@ export class OxigraphStore implements TripleStore {
   private persistPath: string | undefined;
 
   /**
+   * Side-table preserving the ORIGINAL `^^<datatype>` of typed numeric
+   * literals through round-trips. Oxigraph canonicalizes numeric
+   * subtypes (e.g. `xsd:long` → `xsd:integer`), which loses the
+   * publisher's intent and breaks BUGS_FOUND.md#ST-12. Keyed by the
+   * lexical value alone — the value range (e.g. ±2^63 for `long`)
+   * already disambiguates `xsd:long` vs `xsd:integer` for any single
+   * literal a publisher wrote, and clashes (same lexical value with
+   * two different declared types) re-resolve on next insert.
+   */
+  private originalNumericDatatype = new Map<string, string>();
+
+  /**
    * @param persistPath  If provided, the store will dump/load N-Quads
    *   to this file path for persistence across restarts. The underlying
    *   store is still in-memory, but data is hydrated on construction
@@ -32,6 +44,22 @@ export class OxigraphStore implements TripleStore {
     if (persistPath) {
       this.hydrateSync(persistPath);
     }
+  }
+
+  /**
+   * Capture publisher-declared numeric subtype before it goes through
+   * Oxigraph (which collapses `xsd:long`, `xsd:int`, `xsd:short`,
+   * `xsd:byte` and friends into `xsd:integer`).
+   * BUGS_FOUND.md#ST-12.
+   */
+  private rememberNumericDatatype(term: string): void {
+    if (!term.startsWith('"')) return;
+    const m = term.match(/^"((?:[^"\\]|\\.)*)"\^\^<([^>]+)>$/);
+    if (!m) return;
+    const value = m[1];
+    const dtype = m[2];
+    if (!isNumericSubtype(dtype)) return;
+    this.originalNumericDatatype.set(value, dtype);
   }
 
   private hydrateSync(filePath: string): void {
@@ -73,6 +101,7 @@ export class OxigraphStore implements TripleStore {
 
   async insert(quads: DKGQuad[]): Promise<void> {
     if (quads.length === 0) return;
+    for (const q of quads) this.rememberNumericDatatype(q.object);
     const nquads = quads.map(quadToNQuad).join('\n') + '\n';
     this.store.load(nquads, { format: 'application/n-quads' });
     this.scheduleFlush();
@@ -120,7 +149,7 @@ export class OxigraphStore implements TripleStore {
       const bindings = (result as Map<string, OxTerm>[]).map((row) => {
         const obj: Record<string, string> = {};
         for (const [key, term] of row.entries()) {
-          obj[key] = termToString(term);
+          obj[key] = this.restoreOriginalDatatype(termToString(term));
         }
         return obj;
       });
@@ -128,8 +157,30 @@ export class OxigraphStore implements TripleStore {
     }
 
 
-    const quads = (result as OxQuad[]).map(fromOxQuad);
+    const quads = (result as OxQuad[]).map((oxq) => {
+      const dq = fromOxQuad(oxq);
+      dq.object = this.restoreOriginalDatatype(dq.object);
+      return dq;
+    });
     return { type: 'quads', quads } satisfies ConstructResult;
+  }
+
+  /**
+   * Reverse of `rememberNumericDatatype` — if a SELECT/CONSTRUCT row
+   * contains a typed literal whose datatype Oxigraph collapsed (e.g.
+   * `xsd:integer`), restore the publisher's original declared type
+   * from the side-table. BUGS_FOUND.md#ST-12.
+   */
+  private restoreOriginalDatatype(serialized: string): string {
+    if (!serialized.startsWith('"')) return serialized;
+    const m = serialized.match(/^"((?:[^"\\]|\\.)*)"\^\^<([^>]+)>$/);
+    if (!m) return serialized;
+    const value = m[1];
+    const dtype = m[2];
+    if (!isNumericSubtype(dtype)) return serialized;
+    const original = this.originalNumericDatatype.get(value);
+    if (!original || original === dtype) return serialized;
+    return `"${value}"^^<${original}>`;
   }
 
   async hasGraph(graphUri: string): Promise<boolean> {
@@ -257,6 +308,29 @@ function fromOxQuad(oxq: OxQuad): DKGQuad {
     graph:
       oxq.graph.termType === 'DefaultGraph' ? '' : oxq.graph.value,
   };
+}
+
+/** XSD numeric subtypes that Oxigraph silently canonicalises to
+ *  `xsd:integer` — keep this list in sync with the W3C XSD spec
+ *  derived-integer hierarchy. */
+const NUMERIC_SUBTYPES = new Set<string>([
+  'http://www.w3.org/2001/XMLSchema#long',
+  'http://www.w3.org/2001/XMLSchema#int',
+  'http://www.w3.org/2001/XMLSchema#short',
+  'http://www.w3.org/2001/XMLSchema#byte',
+  'http://www.w3.org/2001/XMLSchema#unsignedLong',
+  'http://www.w3.org/2001/XMLSchema#unsignedInt',
+  'http://www.w3.org/2001/XMLSchema#unsignedShort',
+  'http://www.w3.org/2001/XMLSchema#unsignedByte',
+  'http://www.w3.org/2001/XMLSchema#integer',
+  'http://www.w3.org/2001/XMLSchema#nonNegativeInteger',
+  'http://www.w3.org/2001/XMLSchema#positiveInteger',
+  'http://www.w3.org/2001/XMLSchema#negativeInteger',
+  'http://www.w3.org/2001/XMLSchema#nonPositiveInteger',
+]);
+
+function isNumericSubtype(dtype: string): boolean {
+  return NUMERIC_SUBTYPES.has(dtype);
 }
 
 function escapeNQuadsLiteral(s: string): string {

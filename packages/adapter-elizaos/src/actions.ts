@@ -313,9 +313,13 @@ export const dkgPersistChatTurn: Action = {
   ],
 };
 
-/** Shared implementation used by the action AND the dkgService.persistChatTurn / hooks.onChatTurn surface. */
+/** Shared implementation used by the action AND the dkgService.persistChatTurn / hooks.onChatTurn surface.
+ *  The agent contract is intentionally loose so unit tests can plug in a
+ *  fake publisher; in production a `DKGAgent` is passed and its
+ *  `publish` returns `PublishResult` (`kcId` is `bigint`). We coerce to
+ *  string before handing back to the caller. */
 export async function persistChatTurnImpl(
-  agent: { publish: (cgId: string, quads: any) => Promise<{ kcId: string }> },
+  agent: { publish: (cgId: string, quads: any) => Promise<{ kcId: bigint | string }> },
   runtime: IAgentRuntime,
   message: Memory,
   state: State,
@@ -364,7 +368,7 @@ export async function persistChatTurnImpl(
   }
 
   const result = await agent.publish(contextGraphId, quads as any);
-  return { tripleCount: quads.length, turnUri, kcId: result.kcId };
+  return { tripleCount: quads.length, turnUri, kcId: String(result.kcId) };
 }
 
 function escapeIri(s: string): string {

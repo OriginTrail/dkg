@@ -14,6 +14,18 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 contract Hub is INamed, IVersioned, Ownable {
     using UnorderedNamedContractDynamicSet for UnorderedNamedContractDynamicSet.Set;
 
+    /// @dev Re-declared here purely so the error selector appears in Hub's ABI.
+    /// All HubDependent contracts revert with `HubLib.UnauthorizedAccess(...)`.
+    /// Tests historically pin `revertedWithCustomError(HubContract, 'UnauthorizedAccess')`
+    /// even when the actual revert originates in HubDependent. Without this
+    /// declaration, hardhat-chai-matchers cannot resolve the selector from
+    /// the Hub ABI and tests blow up with
+    /// "The given contract doesn't have a custom error named 'UnauthorizedAccess'".
+    /// This is a pure ABI-surface declaration; Hub itself never emits it
+    /// (it uses `OwnableUnauthorizedAccount` from OZ Ownable v5 — see
+    /// `_checkOwnerOrMultiSigOwner`).
+    error UnauthorizedAccess(string msg);
+
     event NewContract(string contractName, address newContractAddress);
     event ContractChanged(string contractName, address newContractAddress);
     event NewAssetStorage(string contractName, address newContractAddress);

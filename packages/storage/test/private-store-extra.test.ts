@@ -83,10 +83,13 @@ describe('PrivateContentStore — at-rest confidentiality [ST-2]', () => {
     }
   });
 
-  it('a second, unrelated SPARQL client can read the secret verbatim', async () => {
-    // The "confidentiality" model is purely a query-routing convention:
-    // whoever queries `GRAPH <…/_private> { ?s ?p ?o }` gets everything.
-    // No capability check, no encryption key. Demonstrates the gap.
+  it('a second, unrelated SPARQL client must NOT see the plaintext literal', async () => {
+    // FIXED (ST-2): PrivateContentStore now seals the literal `object`
+    // with AES-256-GCM before handing the quad to the TripleStore. A
+    // raw SPARQL caller (no PrivateContentStore decrypt) sees only the
+    // `enc:gcm:v1:<base64>` envelope. PrivateContentStore.getPrivateTriples
+    // reverses the seal and returns the original literal — exercised
+    // by the "round-trip" assertion below.
     const store = new OxigraphStore();
     const gm = new ContextGraphManager(store);
     const ps = new PrivateContentStore(store, gm);
@@ -95,17 +98,20 @@ describe('PrivateContentStore — at-rest confidentiality [ST-2]', () => {
       { subject: ROOT, predicate: 'http://schema.org/ssn', object: `"${SECRET}"`, graph: '' },
     ]);
 
-    // Simulate an unrelated caller that just knows the graph URI.
     const privateGraph = contextGraphPrivateUri(CONTEXT_GRAPH);
-    const result = await store.query(
+    const raw = await store.query(
       `SELECT ?o WHERE { GRAPH <${privateGraph}> { ?s ?p ?o } }`,
     );
-    expect(result.type).toBe('bindings');
-    if (result.type !== 'bindings') return;
-    const objects = result.bindings.map((b) => b['o']);
-    // PROD-BUG: plaintext readable by anyone with SPARQL access.
-    // See BUGS_FOUND.md ST-2.
-    expect(objects).toContain(`"${SECRET}"`);
+    expect(raw.type).toBe('bindings');
+    if (raw.type !== 'bindings') return;
+    const rawObjects = raw.bindings.map((b) => b['o']);
+    // Raw SPARQL view: only the AES-GCM envelope is observable.
+    expect(rawObjects.join(' ')).not.toContain(SECRET);
+    expect(rawObjects.some((o) => o.startsWith('"enc:gcm:v1:'))).toBe(true);
+
+    // Authorised path round-trips: getPrivateTriples decrypts.
+    const decrypted = await ps.getPrivateTriples(CONTEXT_GRAPH, ROOT);
+    expect(decrypted.map((q) => q.object)).toContain(`"${SECRET}"`);
   });
 });
 

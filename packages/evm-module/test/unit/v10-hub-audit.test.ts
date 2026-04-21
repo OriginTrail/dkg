@@ -137,17 +137,18 @@ describe('@unit v10 Hub audit', function () {
   describe('E-1 — `Hub.setAndReinitializeContracts` atomic contract swap', () => {
     it('non-owner cannot call setAndReinitializeContracts', async () => {
       const HubAsNonOwner = HubContract.connect(accounts[1]);
-      // HubLib.UnauthorizedAccess("Only Hub Owner or Multisig Owner") is the
-      // concrete selector. hardhat-chai-matchers resolves library errors
-      // through the passed-in contract's ABI, so we can pin both the error
-      // name AND its message arg — this catches regressions that change
-      // the ACL text (e.g., to "Only Hub Owner") or swap the selector for
-      // a different unauthorized path.
+      // After alignment with OZ Ownable v5 (BUGS_FOUND.md
+      // "OwnableUnauthorizedAccount vs UnauthorizedAccess") the gate raises
+      // the standard `OwnableUnauthorizedAccount(msg.sender)` selector so
+      // indexers + clients can route on the same selector that
+      // `_checkOwner` produces. Pinning the selector AND the address arg
+      // catches regressions that drop the gate, swap to a different
+      // unauthorized path, or accidentally accept a non-owner.
       await expect(
         HubAsNonOwner.setAndReinitializeContracts([], [], [], []),
       )
-        .to.be.revertedWithCustomError(HubContract, 'UnauthorizedAccess')
-        .withArgs('Only Hub Owner or Multisig Owner');
+        .to.be.revertedWithCustomError(HubContract, 'OwnableUnauthorizedAccount')
+        .withArgs(accounts[1].address);
     });
 
     it('success path: sets new contracts and re-initializes them', async () => {
