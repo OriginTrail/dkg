@@ -229,26 +229,29 @@ jobs:
         run: pnpm --filter @origintrail-official/dkg-publisher exec vitest run --shard=${{ matrix.shard }}/4
 
   # ------------------------------------------------------------------
-  # Tornado agent lane — the slowest Node suite, sharded across 8 runners.
+  # Tornado agent lane — the slowest Node suite, sharded across 10 runners.
   # Sharding history:
   #   3 shards → 6+ min each (wall-clock tail)
   #   4 shards → ~4.5 min each (still the gating tail)
-  #   8 shards → ~2.5-2.8 min each ← current, lets total wall-clock
-  #              land under 5 min once the shared `build` job dropped
-  #              the Vite UI builds (see that job's header comment).
-  # 40 test files means 8 shards each run ~5 files; further sharding
-  # hits diminishing returns because per-runner setup is ~60-70s of
-  # checkout + pnpm-install + artifact download.
+  #   8 shards → ~3m-3m 49s each; slowest shard (4m 16s total) was the
+  #              green-state critical path that pushed total CI to 5m 18s
+  #  10 shards → ~3m-3m 20s each ← current. Per-shard wall-clock is
+  #              dominated by ~140s of vitest hook overhead (parallel
+  #              beforeAll/afterAll across files) not test body time
+  #              (test bodies only sum to 40-68s per shard). Reducing
+  #              files-per-shard from 5 → 4 cuts hook wall-clock by
+  #              ~20-30s because fewer beforeAlls queue up on the
+  #              2-core ubuntu-latest runner.
   # ------------------------------------------------------------------
   tornado-agent:
-    name: "Tornado: agent [${{ matrix.shard }}/8]"
+    name: "Tornado: agent [${{ matrix.shard }}/10]"
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -264,8 +267,8 @@ jobs:
           path: /tmp
       - name: Restore build outputs
         run: tar -xzf /tmp/build-outputs.tgz
-      - name: "Agent tests (shard ${{ matrix.shard }}/8)"
-        run: pnpm --filter @origintrail-official/dkg-agent exec vitest run --shard=${{ matrix.shard }}/8
+      - name: "Agent tests (shard ${{ matrix.shard }}/10)"
+        run: pnpm --filter @origintrail-official/dkg-agent exec vitest run --shard=${{ matrix.shard }}/10
 
   # ------------------------------------------------------------------
   # Bura lane — `cli` is the heaviest BURA package (CLI daemon, HTTP API,
@@ -409,8 +412,8 @@ jobs:
   #     "plays many turns" test capped at 5 turns via CI_FAST_MODE=1;
   #     see the `env:` block on the test step below)
   # All four shards therefore finish in ≤ 3 min green, leaving the
-  # `tornado-agent [4/8]` shard (~4 min green) as the true critical path
-  # and keeping total wall-clock under 5 min.
+  # slowest `tornado-agent` shard (~3m-3m 20s green with 10 shards) as
+  # the true critical path and keeping total wall-clock under 5 min.
   #
   # GATING POLICY: KOSAVA-tier but fully gating. CI-1 (cross-file
   # pollution) was structurally resolved by per-file sharding and CI-2
