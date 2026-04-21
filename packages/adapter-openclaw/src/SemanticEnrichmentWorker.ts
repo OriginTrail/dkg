@@ -50,6 +50,11 @@ interface PromptSourceContext {
   text: string;
 }
 
+interface PromptExecutionPlan {
+  sessionKey: string;
+  prompt: string;
+}
+
 interface OntologyTermCard {
   iri: string;
   kind: 'class' | 'property' | 'term';
@@ -172,6 +177,31 @@ function contextGraphOntologyUri(contextGraphId: string): string {
 
 function truncate(value: string, maxLength: number): string {
   return value.length > maxLength ? `${value.slice(0, maxLength)}\n...[truncated]` : value;
+}
+
+function splitTextIntoChunks(value: string, maxLength: number): string[] {
+  const chunks: string[] = [];
+  let cursor = 0;
+  while (cursor < value.length) {
+    let end = Math.min(cursor + maxLength, value.length);
+    if (end < value.length) {
+      const preferredBreaks = [
+        value.lastIndexOf('\n\n', end),
+        value.lastIndexOf('\n', end),
+        value.lastIndexOf(' ', end),
+      ];
+      const candidate = preferredBreaks.find((index) => index > cursor + Math.floor(maxLength * 0.6));
+      if (typeof candidate === 'number' && candidate > cursor) {
+        const breakWidth = value.startsWith('\n\n', candidate) ? 2 : 1;
+        end = candidate + breakWidth;
+      }
+    }
+    const chunk = value.slice(cursor, end).trim();
+    if (chunk) chunks.push(chunk);
+    cursor = end;
+    while (cursor < value.length && /\s/.test(value[cursor] ?? '')) cursor += 1;
+  }
+  return chunks.length > 0 ? chunks : [value];
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -297,6 +327,20 @@ function normalizeTriples(raw: unknown): SemanticTripleInput[] {
     triples.push({ subject, predicate, object });
   }
   return triples;
+}
+
+function mergeSemanticTriples(tripleGroups: Iterable<SemanticTripleInput[]>): SemanticTripleInput[] {
+  const dedup = new Set<string>();
+  const merged: SemanticTripleInput[] = [];
+  for (const group of tripleGroups) {
+    for (const triple of group) {
+      const key = `${triple.subject}\u0000${triple.predicate}\u0000${triple.object}`;
+      if (dedup.has(key)) continue;
+      dedup.add(key);
+      merged.push(triple);
+    }
+  }
+  return merged;
 }
 
 function extractJsonCandidates(raw: string): string[] {
@@ -530,7 +574,6 @@ export class SemanticEnrichmentWorker {
     event: SemanticEnrichmentEventLease,
     subagent: OpenClawRuntimeSubagent,
   ): Promise<void> {
-    const sessionKey = this.buildSubagentSessionKey(event);
     const leaseHeartbeat = this.startLeaseHeartbeat(event.id);
     let leaseLost = false;
     let stoppedDuringRun = false;
@@ -548,45 +591,28 @@ export class SemanticEnrichmentWorker {
     };
 
     try {
-      const prompt = await this.buildSubagentPrompt(event);
+      const promptPlans = await this.buildSubagentPromptPlans(event);
       if (syncLeaseState() || syncStopState()) return;
-      const runResult = await subagent.run({
-        sessionKey,
-        message: prompt,
-        deliver: false,
-      });
-      if (syncLeaseState() || syncStopState()) return;
-      const runId = typeof runResult?.runId === 'string' && runResult.runId.trim()
-        ? runResult.runId.trim()
-        : undefined;
-      if (!runId) {
-        throw new Error('OpenClaw subagent run did not return a runId');
+      const tripleGroups: SemanticTripleInput[][] = [];
+      for (const promptPlan of promptPlans) {
+        const triples = await this.runPromptPlan(
+          promptPlan,
+          subagent,
+          leaseHeartbeat,
+          syncLeaseState,
+          syncStopState,
+        );
+        if (triples === 'lease-lost') {
+          leaseLost = true;
+          return;
+        }
+        if (triples === 'stopped') {
+          stoppedDuringRun = true;
+          return;
+        }
+        tripleGroups.push(triples);
       }
-
-      const waitResult = await this.waitForRunUntilLeaseLoss(runId, subagent, leaseHeartbeat);
-      if (waitResult.kind === 'lease-lost') {
-        leaseLost = true;
-        return;
-      }
-      if (waitResult.kind === 'stopped') {
-        stoppedDuringRun = true;
-        return;
-      }
-      if (syncLeaseState() || syncStopState()) return;
-      const waitStatus = typeof waitResult.value?.status === 'string' ? waitResult.value.status.trim().toLowerCase() : '';
-      if (!waitStatus) {
-        throw new Error(`OpenClaw subagent run ${runId} did not report a terminal success status`);
-      }
-      if (!SUCCESSFUL_SUBAGENT_RUN_STATUSES.has(waitStatus)) {
-        throw new Error(`OpenClaw subagent run ${runId} ended with status "${waitResult.value?.status}"`);
-      }
-      const messages = await subagent.getSessionMessages({
-        sessionKey,
-        limit: DEFAULT_SUBAGENT_MESSAGE_LIMIT,
-      });
-      if (syncLeaseState() || syncStopState()) return;
-      const assistantText = this.extractAssistantText(messages.messages ?? []);
-      const triples = this.parseTriplesFromAssistantText(assistantText);
+      const triples = mergeSemanticTriples(tripleGroups);
       if (syncLeaseState() || syncStopState()) return;
       const appendResult = await this.client.appendSemanticEnrichmentEvent(
         event.id,
@@ -614,11 +640,6 @@ export class SemanticEnrichmentWorker {
       );
     } finally {
       leaseHeartbeat.stop();
-      await subagent.deleteSession({ sessionKey }).catch((err: any) => {
-        this.api.logger.warn?.(
-          `[semantic-enrichment] session cleanup failed for ${event.id}: ${err?.message ?? String(err)}`,
-        );
-      });
       if (stoppedDuringRun && !leaseLost) {
         await this.client
           .releaseSemanticEnrichmentEvent(event.id, this.workerInstanceId)
@@ -641,6 +662,57 @@ export class SemanticEnrichmentWorker {
           `[semantic-enrichment] lease for ${event.kind}:${event.id} was reclaimed before completion`,
         );
       }
+    }
+  }
+
+  private async runPromptPlan(
+    promptPlan: PromptExecutionPlan,
+    subagent: OpenClawRuntimeSubagent,
+    leaseHeartbeat: LeaseHeartbeatController,
+    syncLeaseState: () => boolean,
+    syncStopState: () => boolean,
+  ): Promise<SemanticTripleInput[] | 'lease-lost' | 'stopped'> {
+    try {
+      const runResult = await subagent.run({
+        sessionKey: promptPlan.sessionKey,
+        message: promptPlan.prompt,
+        deliver: false,
+      });
+      if (syncLeaseState()) return 'lease-lost';
+      if (syncStopState()) return 'stopped';
+      const runId = typeof runResult?.runId === 'string' && runResult.runId.trim()
+        ? runResult.runId.trim()
+        : undefined;
+      if (!runId) {
+        throw new Error('OpenClaw subagent run did not return a runId');
+      }
+
+      const waitResult = await this.waitForRunUntilLeaseLoss(runId, subagent, leaseHeartbeat);
+      if (waitResult.kind === 'lease-lost') return 'lease-lost';
+      if (waitResult.kind === 'stopped') return 'stopped';
+      if (syncLeaseState()) return 'lease-lost';
+      if (syncStopState()) return 'stopped';
+      const waitStatus = typeof waitResult.value?.status === 'string' ? waitResult.value.status.trim().toLowerCase() : '';
+      if (!waitStatus) {
+        throw new Error(`OpenClaw subagent run ${runId} did not report a terminal success status`);
+      }
+      if (!SUCCESSFUL_SUBAGENT_RUN_STATUSES.has(waitStatus)) {
+        throw new Error(`OpenClaw subagent run ${runId} ended with status "${waitResult.value?.status}"`);
+      }
+      const messages = await subagent.getSessionMessages({
+        sessionKey: promptPlan.sessionKey,
+        limit: DEFAULT_SUBAGENT_MESSAGE_LIMIT,
+      });
+      if (syncLeaseState()) return 'lease-lost';
+      if (syncStopState()) return 'stopped';
+      const assistantText = this.extractAssistantText(messages.messages ?? []);
+      return this.parseTriplesFromAssistantText(assistantText);
+    } finally {
+      await subagent.deleteSession({ sessionKey: promptPlan.sessionKey }).catch((err: any) => {
+        this.api.logger.warn?.(
+          `[semantic-enrichment] session cleanup failed for ${promptPlan.sessionKey}: ${err?.message ?? String(err)}`,
+        );
+      });
     }
   }
 
@@ -733,21 +805,47 @@ export class SemanticEnrichmentWorker {
     };
   }
 
-  private async buildSubagentPrompt(event: SemanticEnrichmentEventLease): Promise<string> {
-    const sourceContext = event.payload.kind === 'chat_turn'
-      ? await this.buildChatTurnSource(event.payload)
-      : await this.buildFileImportSource(event.payload);
-    const ontologyContext = await this.loadOntologyContext(event.payload, sourceContext.text);
-    const taskGuidance = event.payload.kind === 'chat_turn'
-      ? {
-          title: 'Chat-turn guidance:',
-          lines: this.buildChatTurnPromptGuidance(),
-        }
-      : {
+  private async buildSubagentPromptPlans(event: SemanticEnrichmentEventLease): Promise<PromptExecutionPlan[]> {
+    if (event.payload.kind === 'chat_turn') {
+      const sourceContext = await this.buildChatTurnSource(event.payload);
+      const ontologyContext = await this.loadOntologyContext(event.payload, sourceContext.text);
+      return [{
+        sessionKey: this.buildSubagentSessionKey(event),
+        prompt: this.renderSubagentPrompt(
+          event,
+          {
+            title: 'Chat-turn guidance:',
+            lines: this.buildChatTurnPromptGuidance(),
+          },
+          ontologyContext,
+          sourceContext.section,
+        ),
+      }];
+    }
+
+    const fileSource = await this.loadFileImportSource(event.payload);
+    const ontologyContext = await this.loadOntologyContext(event.payload, fileSource.markdown);
+    const chunks = splitTextIntoChunks(fileSource.markdown, MAX_SOURCE_TEXT_CHARS);
+    return chunks.map((chunk, index) => ({
+      sessionKey: this.buildSubagentSessionKey(event, `chunk-${index + 1}`),
+      prompt: this.renderSubagentPrompt(
+        event,
+        {
           title: 'File-import guidance:',
           lines: this.buildFileImportPromptGuidance(),
-        };
+        },
+        ontologyContext,
+        this.buildFileImportChunkSection(fileSource, chunk, index, chunks.length),
+      ),
+    }));
+  }
 
+  private renderSubagentPrompt(
+    event: SemanticEnrichmentEventLease,
+    taskGuidance: { title: string; lines: string[] },
+    ontologyContext: OntologyContext,
+    sourceSection: string,
+  ): string {
     const lines = [
       'You are an expert semantic extraction subagent for a DKG graph.',
       'Goal: produce as many grounded, semantically useful triples as the source directly supports while staying faithful to the provided ontology guidance.',
@@ -770,7 +868,7 @@ export class SemanticEnrichmentWorker {
       '',
       'Untrusted source data:',
       '<<<BEGIN SOURCE DATA>>>',
-      sourceContext.section,
+      sourceSection,
       '<<<END SOURCE DATA>>>',
       '',
       'Output JSON only.',
@@ -806,7 +904,7 @@ export class SemanticEnrichmentWorker {
 
   private buildFileImportPromptGuidance(): string[] {
     return [
-      'Inspect the full markdown-derived document, including headings, lists, tables rendered as text, and repeated references across sections.',
+      'Inspect this markdown chunk carefully. The full document may be processed across multiple chunked passes, so extract only grounded facts supported by this chunk while preserving entities that clearly connect across the document.',
       'Extract the important entities and connections described by the document, including people, organizations, products, projects, requirements, milestones, risks, decisions, claims, processes, dependencies, metrics, dates, and locations when explicitly supported.',
       'Prefer triples that capture the structure and meaning of the document, such as what the document is about, which entities participate in key events or processes, and how requirements, decisions, or claims relate to one another.',
       'Reuse the provided root entity and document-related URIs whenever they fit, so semantic output expands the imported assertion instead of creating detached parallel document graphs.',
@@ -890,12 +988,15 @@ export class SemanticEnrichmentWorker {
     };
   }
 
-  private async buildFileImportSource(payload: FileImportSemanticEventPayload): Promise<PromptSourceContext> {
+  private async loadFileImportSource(payload: FileImportSemanticEventPayload): Promise<{
+    metadataLines: string[];
+    markdown: string;
+  }> {
     const markdownHash = payload.mdIntermediateHash ?? payload.fileHash;
     const markdown = await this.client.fetchFileText(markdownHash, 'text/markdown');
     const explicitOntologyRef = this.normalizeOntologyRefHint(payload.ontologyRef);
-    const section = [
-      'Source material:',
+    return {
+      metadataLines: [
       `- Context graph: ${payload.contextGraphId}`,
       `- Assertion graph: ${payload.assertionUri}`,
       ...(payload.rootEntity ? [`- Root entity: ${payload.rootEntity}`] : []),
@@ -904,13 +1005,27 @@ export class SemanticEnrichmentWorker {
       `- Detected content type: ${payload.detectedContentType}`,
       ...(payload.sourceFileName ? [`- Source file name: ${payload.sourceFileName}`] : []),
       ...(explicitOntologyRef ? [`- Event ontologyRef override hint (replace-only): ${this.renderPromptLiteral(explicitOntologyRef)}`] : []),
-      '- Markdown source:',
-      truncate(markdown, MAX_SOURCE_TEXT_CHARS),
-    ].join('\n');
-    return {
-      section,
-      text: markdown,
+      ],
+      markdown,
     };
+  }
+
+  private buildFileImportChunkSection(
+    source: { metadataLines: string[]; markdown: string },
+    markdownChunk: string,
+    chunkIndex: number,
+    chunkCount: number,
+  ): string {
+    return [
+      'Source material:',
+      ...source.metadataLines,
+      `- Markdown chunk: ${chunkIndex + 1} of ${chunkCount}`,
+      ...(chunkCount > 1
+        ? ['- Note: the full document is being processed across multiple chunked passes; other chunks may contain additional grounded context.']
+        : ['- Note: this chunk covers the full document source.']),
+      '- Markdown source chunk:',
+      markdownChunk,
+    ].join('\n');
   }
 
   private async loadOntologyContext(
@@ -1216,7 +1331,7 @@ export class SemanticEnrichmentWorker {
     return { userMsgUri, assistantMsgUri };
   }
 
-  private buildSubagentSessionKey(event: SemanticEnrichmentEventLease): string {
+  private buildSubagentSessionKey(event: SemanticEnrichmentEventLease, suffix?: string): string {
     return [
       SUBAGENT_SESSION_PREFIX,
       this.workerInstanceId,
@@ -1225,6 +1340,7 @@ export class SemanticEnrichmentWorker {
       event.kind,
       event.id,
       `attempt-${Math.max(1, event.attempts || 1)}`,
+      ...(suffix ? [suffix] : []),
     ].join(':');
   }
 

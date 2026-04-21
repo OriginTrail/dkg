@@ -1198,7 +1198,7 @@ describe('SemanticEnrichmentWorker', () => {
     );
     expect(run.mock.calls[0]?.[0]?.message).toContain('File-import guidance:');
     expect(run.mock.calls[0]?.[0]?.message).toContain(
-      'Inspect the full markdown-derived document, including headings, lists, tables rendered as text, and repeated references across sections.',
+      'Inspect this markdown chunk carefully. The full document may be processed across multiple chunked passes, so extract only grounded facts supported by this chunk while preserving entities that clearly connect across the document.',
     );
     expect(run.mock.calls[0]?.[0]?.message).toContain(
       'Do not turn every sentence into a paraphrase; focus on durable facts and relationships that improve retrieval, linking, and downstream reasoning.',
@@ -1216,6 +1216,123 @@ describe('SemanticEnrichmentWorker', () => {
       ],
     );
     expect(worker.getPendingSummaries()).toHaveLength(0);
+  });
+
+  it('processes long file imports across multiple subagent chunk passes and merges triples before append', async () => {
+    const claim = vi.fn<() => Promise<{ event: SemanticEnrichmentEventLease | null }>>()
+      .mockResolvedValueOnce({
+        event: {
+          id: 'evt-file-chunked',
+          kind: 'file_import',
+          payload: {
+            kind: 'file_import',
+            contextGraphId: 'project-chunked',
+            assertionName: 'long-brief',
+            assertionUri: 'did:dkg:context-graph:project-chunked/assertion/peer/long-brief',
+            importStartedAt: '2026-04-15T10:00:00.000Z',
+            fileHash: 'keccak256:file-chunked',
+            mdIntermediateHash: 'keccak256:md-chunked',
+            detectedContentType: 'text/markdown',
+            sourceFileName: 'long-brief.md',
+          },
+          status: 'leased',
+          attempts: 1,
+          maxAttempts: 5,
+          leaseOwner: 'worker',
+          leaseExpiresAt: Date.now() + 60_000,
+          nextAttemptAt: Date.now(),
+        },
+      })
+      .mockResolvedValueOnce({ event: null })
+      .mockResolvedValue({ event: null });
+    const overviewSection = `# Overview\n\n${'alpha '.repeat(1800)}`;
+    const appendixSection = `\n\n# Appendix Marker\n\n${'omega '.repeat(600)}`;
+    const markdown = `${overviewSection}${appendixSection}`;
+    const fetchFileText = vi.fn().mockResolvedValue(markdown);
+    const query = vi.fn().mockResolvedValue({ result: { bindings: [] } });
+    const append = vi.fn().mockResolvedValue({
+      applied: true,
+      completed: true,
+      semanticEnrichment: {
+        eventId: 'evt-file-chunked',
+        status: 'completed',
+        semanticTripleCount: 2,
+        updatedAt: new Date().toISOString(),
+      },
+    });
+    const run = vi.fn()
+      .mockResolvedValueOnce({ runId: 'run-file-chunked-1' })
+      .mockResolvedValueOnce({ runId: 'run-file-chunked-2' });
+    const waitForRun = vi.fn().mockResolvedValue({ status: 'completed' });
+    const getSessionMessages = vi.fn()
+      .mockResolvedValueOnce({
+        messages: [
+          {
+            role: 'assistant',
+            text: '{"triples":[{"subject":"urn:dkg:file:keccak256:file-chunked#doc","predicate":"https://schema.org/about","object":"https://schema.org/Product"}]}',
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        messages: [
+          {
+            role: 'assistant',
+            text: '{"triples":[{"subject":"urn:dkg:file:keccak256:file-chunked#doc","predicate":"https://schema.org/about","object":"https://schema.org/Product"},{"subject":"urn:dkg:file:keccak256:file-chunked#doc","predicate":"https://schema.org/mentions","object":"https://schema.org/Organization"}]}',
+          },
+        ],
+      });
+    const deleteSession = vi.fn().mockResolvedValue(undefined);
+
+    const worker = new SemanticEnrichmentWorker(
+      makeApi({
+        subagent: {
+          run,
+          waitForRun,
+          getSessionMessages,
+          deleteSession,
+        } as any,
+      }),
+      makeClient({
+        claimSemanticEnrichmentEvent: claim,
+        fetchFileText,
+        query,
+        appendSemanticEnrichmentEvent: append,
+      }),
+    );
+
+    worker.noteWake({
+      kind: 'file_import',
+      eventKey: 'evt-file-chunked',
+      triggerSource: 'daemon',
+    });
+    await worker.flush();
+
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(run.mock.calls[0]?.[0]?.sessionKey).toContain(':chunk-1');
+    expect(run.mock.calls[1]?.[0]?.sessionKey).toContain(':chunk-2');
+    expect(run.mock.calls[0]?.[0]?.message).toContain('- Markdown chunk: 1 of 2');
+    expect(run.mock.calls[1]?.[0]?.message).toContain('- Markdown chunk: 2 of 2');
+    expect(run.mock.calls[0]?.[0]?.message).toContain('# Overview');
+    expect(run.mock.calls.map((call) => String(call?.[0]?.message ?? '')).join('\n')).toContain('# Appendix Marker');
+    expect(run.mock.calls[0]?.[0]?.message).not.toContain('...[truncated]');
+    expect(run.mock.calls[1]?.[0]?.message).not.toContain('...[truncated]');
+    expect(deleteSession).toHaveBeenCalledTimes(2);
+    expect(append).toHaveBeenCalledWith(
+      'evt-file-chunked',
+      worker.getWorkerInstanceId(),
+      [
+        {
+          subject: 'urn:dkg:file:keccak256:file-chunked#doc',
+          predicate: 'https://schema.org/about',
+          object: 'https://schema.org/Product',
+        },
+        {
+          subject: 'urn:dkg:file:keccak256:file-chunked#doc',
+          predicate: 'https://schema.org/mentions',
+          object: 'https://schema.org/Organization',
+        },
+      ],
+    );
   });
 
   it('prefers assistant-role session messages over later non-assistant text when parsing triples', async () => {
