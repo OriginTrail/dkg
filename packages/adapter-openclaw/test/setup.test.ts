@@ -10,11 +10,20 @@ import {
   mergeOpenClawConfig,
   unmergeOpenClawConfig,
   verifyUnmergeInvariants,
-  writeWorkspaceConfig,
   installCanonicalNodeSkill,
   openclawConfigPath,
   runSetup,
+  type AdapterEntryConfig,
 } from '../src/setup.js';
+
+// Default entryConfig fixture used by most mergeOpenClawConfig call sites
+// (the new third positional arg after D2). Cases that assert specific
+// entry.config values seed their own.
+const defaultEntryConfig: AdapterEntryConfig = {
+  daemonUrl: 'http://127.0.0.1:9200',
+  memory: { enabled: true },
+  channel: { enabled: true },
+};
 import { homedir } from 'node:os';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -222,20 +231,26 @@ describe('mergeOpenClawConfig', () => {
     const configPath = join(testDir, 'openclaw.json');
     writeFileSync(configPath, JSON.stringify({ plugins: {} }));
 
-    mergeOpenClawConfig(configPath, '/path/to/adapter');
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig);
 
     const config = JSON.parse(readFileSync(configPath, 'utf-8'));
     expect(config.plugins.allow).toContain('adapter-openclaw');
     expect(config.plugins.load.paths).toContain('/path/to/adapter');
-    expect(config.plugins.entries['adapter-openclaw']).toEqual({ enabled: true });
+    const entry = config.plugins.entries['adapter-openclaw'];
+    expect(entry.enabled).toBe(true);
+    expect(entry.config).toEqual({
+      daemonUrl: 'http://127.0.0.1:9200',
+      memory: { enabled: true },
+      channel: { enabled: true },
+    });
   });
 
   it('is idempotent — no duplicates on second run', () => {
     const configPath = join(testDir, 'openclaw.json');
     writeFileSync(configPath, JSON.stringify({ plugins: {} }));
 
-    mergeOpenClawConfig(configPath, '/path/to/adapter');
-    mergeOpenClawConfig(configPath, '/path/to/adapter');
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig);
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig);
 
     const config = JSON.parse(readFileSync(configPath, 'utf-8'));
     expect(config.plugins.allow.filter((x: string) => x === 'adapter-openclaw')).toHaveLength(1);
@@ -253,7 +268,7 @@ describe('mergeOpenClawConfig', () => {
       someOtherKey: 123,
     }));
 
-    mergeOpenClawConfig(configPath, '/path/to/adapter');
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig);
 
     const config = JSON.parse(readFileSync(configPath, 'utf-8'));
     expect(config.plugins.allow).toContain('other-plugin');
@@ -267,7 +282,7 @@ describe('mergeOpenClawConfig', () => {
     const configPath = join(testDir, 'openclaw.json');
     writeFileSync(configPath, JSON.stringify({ plugins: {} }));
 
-    mergeOpenClawConfig(configPath, '/path/to/adapter');
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig);
 
     const files = readdirSync(testDir);
     const backups = files.filter((f: string) => f.startsWith('openclaw.json.bak.'));
@@ -278,7 +293,7 @@ describe('mergeOpenClawConfig', () => {
     const configPath = join(testDir, 'openclaw.json');
     writeFileSync(configPath, JSON.stringify({ plugins: {} }));
 
-    mergeOpenClawConfig(configPath, 'C:\\Users\\test\\adapter');
+    mergeOpenClawConfig(configPath, 'C:\\Users\\test\\adapter', defaultEntryConfig);
 
     const config = JSON.parse(readFileSync(configPath, 'utf-8'));
     expect(config.plugins.load.paths[0]).toBe('C:/Users/test/adapter');
@@ -301,7 +316,7 @@ describe('mergeOpenClawConfig', () => {
       },
     }));
 
-    mergeOpenClawConfig(configPath, 'C:\\Projects\\dkg-v9\\packages\\adapter-openclaw');
+    mergeOpenClawConfig(configPath, 'C:\\Projects\\dkg-v9\\packages\\adapter-openclaw', defaultEntryConfig);
 
     const config = JSON.parse(readFileSync(configPath, 'utf-8'));
     expect(config.plugins.load.paths).toEqual([
@@ -314,7 +329,7 @@ describe('mergeOpenClawConfig', () => {
     const configPath = join(testDir, 'openclaw.json');
     writeFileSync(configPath, JSON.stringify({ plugins: {} }));
 
-    mergeOpenClawConfig(configPath, '/path/to/adapter');
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig);
 
     const config = JSON.parse(readFileSync(configPath, 'utf-8'));
     expect(config.plugins.slots).toBeDefined();
@@ -332,7 +347,7 @@ describe('mergeOpenClawConfig', () => {
       },
     }));
 
-    mergeOpenClawConfig(configPath, '/path/to/adapter');
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig);
 
     const config = JSON.parse(readFileSync(configPath, 'utf-8'));
     expect(config.plugins.slots.memory).toBe('adapter-openclaw');
@@ -348,7 +363,7 @@ describe('mergeOpenClawConfig', () => {
       },
     }));
 
-    expect(() => mergeOpenClawConfig(configPath, '/path/to/adapter')).toThrow(/contextEngine/);
+    expect(() => mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig)).toThrow(/contextEngine/);
   });
 
   it('overwrites a different plugins.slots.memory value with a log line', () => {
@@ -359,7 +374,7 @@ describe('mergeOpenClawConfig', () => {
       },
     }));
 
-    mergeOpenClawConfig(configPath, '/path/to/adapter');
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig);
 
     const config = JSON.parse(readFileSync(configPath, 'utf-8'));
     expect(config.plugins.slots.memory).toBe('adapter-openclaw');
@@ -369,11 +384,11 @@ describe('mergeOpenClawConfig', () => {
     const configPath = join(testDir, 'openclaw.json');
     writeFileSync(configPath, JSON.stringify({ plugins: {} }));
 
-    mergeOpenClawConfig(configPath, '/path/to/adapter');
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig);
     const firstRun = readFileSync(configPath, 'utf-8');
     const firstBackupCount = readdirSync(testDir).filter((f: string) => f.startsWith('openclaw.json.bak.')).length;
 
-    mergeOpenClawConfig(configPath, '/path/to/adapter');
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig);
     const secondRun = readFileSync(configPath, 'utf-8');
     const secondBackupCount = readdirSync(testDir).filter((f: string) => f.startsWith('openclaw.json.bak.')).length;
 
@@ -388,7 +403,7 @@ describe('mergeOpenClawConfig', () => {
       plugins: { slots: { memory: 'memory-core' } },
     }));
 
-    mergeOpenClawConfig(configPath, '/path/to/adapter');
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig);
 
     const config = JSON.parse(readFileSync(configPath, 'utf-8'));
     expect(config.plugins.slots.memory).toBe('adapter-openclaw');
@@ -402,15 +417,101 @@ describe('mergeOpenClawConfig', () => {
     }));
 
     // First merge captures "memory-core" into the entry.
-    mergeOpenClawConfig(configPath, '/path/to/adapter');
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig);
     const afterFirst = JSON.parse(readFileSync(configPath, 'utf-8'));
     expect(afterFirst.plugins.entries['adapter-openclaw'].previousMemorySlotOwner).toBe('memory-core');
 
     // Second merge: slot is already the adapter, so the capture branch won't
     // fire — and even if it did, the first-wins guard keeps the original.
-    mergeOpenClawConfig(configPath, '/path/to/adapter');
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig);
     const afterSecond = JSON.parse(readFileSync(configPath, 'utf-8'));
     expect(afterSecond.plugins.entries['adapter-openclaw'].previousMemorySlotOwner).toBe('memory-core');
+  });
+
+  // D2 — entry.config is the single source of truth for DkgNodePlugin runtime
+  // config. Fresh merge populates it; re-merge preserves user-customized values
+  // (first-wins), matching the previousMemorySlotOwner pattern.
+  it('writes entry.config with daemonUrl/memory/channel on fresh merge', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({ plugins: {} }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', {
+      daemonUrl: 'http://127.0.0.1:9200',
+      memory: { enabled: true },
+      channel: { enabled: true },
+    });
+
+    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    const entryConfig = config.plugins.entries['adapter-openclaw'].config;
+    expect(entryConfig.daemonUrl).toBe('http://127.0.0.1:9200');
+    expect(entryConfig.memory).toEqual({ enabled: true });
+    expect(entryConfig.channel).toEqual({ enabled: true });
+  });
+
+  it('preserves existing entry.config values on re-merge (first-wins semantics)', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    // Seed: user has a prior merge with a custom daemonUrl and a memory
+    // block with enabled:false. The channel block is absent — re-merge
+    // should fill it in from defaults without touching existing keys.
+    writeFileSync(configPath, JSON.stringify({
+      plugins: {
+        entries: {
+          'adapter-openclaw': {
+            enabled: true,
+            config: {
+              daemonUrl: 'http://custom:9300',
+              memory: { enabled: false },
+            },
+          },
+        },
+      },
+    }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', {
+      daemonUrl: 'http://127.0.0.1:9200',
+      memory: { enabled: true },
+      channel: { enabled: true },
+    });
+
+    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    const entryConfig = config.plugins.entries['adapter-openclaw'].config;
+    // User-customized values survive.
+    expect(entryConfig.daemonUrl).toBe('http://custom:9300');
+    expect(entryConfig.memory.enabled).toBe(false);
+    // Missing sub-object gets filled in from defaults.
+    expect(entryConfig.channel).toEqual({ enabled: true });
+  });
+
+  it('overrideDaemonUrl option replaces existing daemonUrl (used when --port is explicit)', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({
+      plugins: {
+        entries: {
+          'adapter-openclaw': {
+            enabled: true,
+            config: {
+              daemonUrl: 'http://custom:9300',
+              memory: { enabled: true },
+              channel: { enabled: true },
+            },
+          },
+        },
+      },
+    }));
+
+    mergeOpenClawConfig(
+      configPath,
+      '/path/to/adapter',
+      {
+        daemonUrl: 'http://127.0.0.1:9400',
+        memory: { enabled: true },
+        channel: { enabled: true },
+      },
+      { overrideDaemonUrl: true },
+    );
+
+    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(config.plugins.entries['adapter-openclaw'].config.daemonUrl).toBe('http://127.0.0.1:9400');
   });
 });
 
@@ -426,17 +527,16 @@ describe('unmergeOpenClawConfig', () => {
     }));
 
     // Merge → captures "memory-core" as previousMemorySlotOwner.
-    mergeOpenClawConfig(configPath, '/path/to/adapter');
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig);
     const afterMerge = JSON.parse(readFileSync(configPath, 'utf-8'));
     expect(afterMerge.plugins.slots.memory).toBe('adapter-openclaw');
     expect(afterMerge.plugins.entries['adapter-openclaw'].previousMemorySlotOwner).toBe('memory-core');
 
-    // Unmerge → restores "memory-core" and strips the metadata.
+    // Unmerge → restores "memory-core" and removes the entry entirely.
     unmergeOpenClawConfig(configPath);
     const afterUnmerge = JSON.parse(readFileSync(configPath, 'utf-8'));
     expect(afterUnmerge.plugins.slots.memory).toBe('memory-core');
-    expect(afterUnmerge.plugins.entries['adapter-openclaw'].previousMemorySlotOwner).toBeUndefined();
-    expect(afterUnmerge.plugins.entries['adapter-openclaw'].enabled).toBe(false);
+    expect(afterUnmerge.plugins.entries['adapter-openclaw']).toBeUndefined();
   });
 
   it('clears plugins.slots.memory when no prior owner was persisted', () => {
@@ -444,7 +544,7 @@ describe('unmergeOpenClawConfig', () => {
     writeFileSync(configPath, JSON.stringify({ plugins: {} }));
 
     // Merge on a clean config — no previousMemorySlotOwner is captured.
-    mergeOpenClawConfig(configPath, '/path/to/adapter');
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig);
     const afterMerge = JSON.parse(readFileSync(configPath, 'utf-8'));
     expect(afterMerge.plugins.slots.memory).toBe('adapter-openclaw');
     expect(afterMerge.plugins.entries['adapter-openclaw'].previousMemorySlotOwner).toBeUndefined();
@@ -460,7 +560,7 @@ describe('unmergeOpenClawConfig', () => {
     // fresh install that hasn't configured a memory provider yet.
     writeFileSync(configPath, JSON.stringify({ plugins: {} }));
 
-    mergeOpenClawConfig(configPath, '/path/to/adapter');
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig);
     unmergeOpenClawConfig(configPath);
 
     const final = JSON.parse(readFileSync(configPath, 'utf-8'));
@@ -474,7 +574,7 @@ describe('unmergeOpenClawConfig', () => {
       plugins: { slots: { memory: 'memory-core' } },
     }));
 
-    mergeOpenClawConfig(configPath, '/path/to/adapter');
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig);
     unmergeOpenClawConfig(configPath);
     const firstBackupCount = readdirSync(testDir).filter((f: string) => f.startsWith('openclaw.json.bak.')).length;
     const firstContent = readFileSync(configPath, 'utf-8');
@@ -493,7 +593,7 @@ describe('unmergeOpenClawConfig', () => {
       plugins: { slots: { memory: 'memory-core' } },
     }));
 
-    mergeOpenClawConfig(configPath, '/path/to/adapter');
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig);
     // Simulate external modification: user swaps in a different memory plugin.
     const intermediate = JSON.parse(readFileSync(configPath, 'utf-8'));
     intermediate.plugins.slots.memory = 'some-other-memory-plugin';
@@ -502,9 +602,9 @@ describe('unmergeOpenClawConfig', () => {
     unmergeOpenClawConfig(configPath);
 
     const final = JSON.parse(readFileSync(configPath, 'utf-8'));
-    // We don't clobber the user's new choice, and we clean up our marker.
+    // We don't clobber the user's new choice, and the adapter entry is gone.
     expect(final.plugins.slots.memory).toBe('some-other-memory-plugin');
-    expect(final.plugins.entries['adapter-openclaw'].previousMemorySlotOwner).toBeUndefined();
+    expect(final.plugins.entries['adapter-openclaw']).toBeUndefined();
   });
 
   // PR #228 Codex N4 — a missing openclaw.json is treated as already-
@@ -555,7 +655,7 @@ describe('unmergeOpenClawConfig', () => {
     mkdirSync(defaultHome, { recursive: true });
     const defaultConfigPath = join(defaultHome, 'openclaw.json');
     writeFileSync(defaultConfigPath, JSON.stringify({ plugins: {} }, null, 2) + '\n');
-    mergeOpenClawConfig(defaultConfigPath, '/path/to/adapter');
+    mergeOpenClawConfig(defaultConfigPath, '/path/to/adapter', defaultEntryConfig);
     const defaultContentBefore = readFileSync(defaultConfigPath, 'utf-8');
     const defaultBackupsBefore = readdirSync(defaultHome).filter(
       (f: string) => f.startsWith('openclaw.json.bak.'),
@@ -584,6 +684,24 @@ describe('unmergeOpenClawConfig', () => {
     // And the explicit path didn't get a freshly-created file either.
     expect(existsSync(explicitMissingPath)).toBe(false);
   });
+
+  // D1 — unmerge deletes the adapter entry entirely (including its config
+  // sub-object). The adapter owns every field on this entry post-D2, so there
+  // is no user-customizable state to preserve.
+  it('removes the adapter entry entirely on unmerge (including entry.config)', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({ plugins: {} }));
+
+    // Merge populates entry + entry.config.
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig);
+    const afterMerge = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterMerge.plugins.entries['adapter-openclaw'].config).toBeDefined();
+
+    unmergeOpenClawConfig(configPath);
+
+    const afterUnmerge = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterUnmerge.plugins.entries['adapter-openclaw']).toBeUndefined();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -591,7 +709,28 @@ describe('unmergeOpenClawConfig', () => {
 // ---------------------------------------------------------------------------
 
 describe('verifyUnmergeInvariants', () => {
-  it('returns null when every field `mergeOpenClawConfig` writes has been unwound', () => {
+  it('returns null when every field `mergeOpenClawConfig` writes has been unwound (entry absent)', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(
+      configPath,
+      JSON.stringify(
+        {
+          plugins: {
+            allow: [],
+            load: { paths: [] },
+            entries: {},
+            slots: {},
+          },
+        },
+        null,
+        2,
+      ) + '\n',
+    );
+
+    expect(verifyUnmergeInvariants(configPath)).toBeNull();
+  });
+
+  it('returns null when entry exists but is disabled (defensive — absent is the normal post-unmerge state)', () => {
     const configPath = join(testDir, 'openclaw.json');
     writeFileSync(
       configPath,
@@ -665,7 +804,7 @@ describe('verifyUnmergeInvariants', () => {
     expect(result).toContain('/home/me/packages/adapter-openclaw');
   });
 
-  it('returns a descriptive string when plugins.entries["adapter-openclaw"].enabled is still true', () => {
+  it('returns a descriptive string when plugins.entries["adapter-openclaw"] is still present with enabled=true', () => {
     const configPath = join(testDir, 'openclaw.json');
     writeFileSync(
       configPath,
@@ -680,7 +819,7 @@ describe('verifyUnmergeInvariants', () => {
     );
 
     expect(verifyUnmergeInvariants(configPath)).toMatch(
-      /plugins\.entries\["adapter-openclaw"\]\.enabled is still true/,
+      /plugins\.entries\["adapter-openclaw"\] is still present with enabled=true/,
     );
   });
 
@@ -755,93 +894,6 @@ describe('openclaw.plugin.json manifest', () => {
     const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8'));
     expect(manifest.kind).toBe('memory');
     expect(manifest.id).toBe('adapter-openclaw');
-  });
-});
-
-// ---------------------------------------------------------------------------
-// writeWorkspaceConfig
-// ---------------------------------------------------------------------------
-
-describe('writeWorkspaceConfig', () => {
-  it('creates workspace config with defaults', () => {
-    const ws = join(testDir, 'workspace');
-    mkdirSync(ws, { recursive: true });
-
-    writeWorkspaceConfig(ws, 9200);
-
-    const config = JSON.parse(readFileSync(join(ws, 'config.json'), 'utf-8'));
-    expect(config['dkg-node'].daemonUrl).toBe('http://127.0.0.1:9200');
-    expect(config['dkg-node'].memory.enabled).toBe(true);
-    expect(config['dkg-node'].channel.enabled).toBe(true);
-    expect(config['dkg-node'].game).toBeUndefined();
-  });
-
-  it('preserves existing workspace config keys', () => {
-    const ws = join(testDir, 'workspace');
-    mkdirSync(ws, { recursive: true });
-    writeFileSync(join(ws, 'config.json'), JSON.stringify({
-      'some-other-plugin': { key: 'value' },
-    }));
-
-    writeWorkspaceConfig(ws, 9200);
-
-    const config = JSON.parse(readFileSync(join(ws, 'config.json'), 'utf-8'));
-    expect(config['some-other-plugin']).toEqual({ key: 'value' });
-    expect(config['dkg-node']).toBeDefined();
-  });
-
-  it('removes legacy game config from the workspace dkg-node block', () => {
-    const ws = join(testDir, 'workspace');
-    mkdirSync(ws, { recursive: true });
-    writeFileSync(join(ws, 'config.json'), JSON.stringify({
-      'dkg-node': {
-        daemonUrl: 'http://127.0.0.1:9200',
-        memory: { enabled: true },
-        channel: { enabled: true },
-        game: { enabled: true },
-      },
-    }));
-
-    writeWorkspaceConfig(ws, 9200);
-
-    const config = JSON.parse(readFileSync(join(ws, 'config.json'), 'utf-8'));
-    expect(config['dkg-node'].game).toBeUndefined();
-  });
-
-  it('preserves existing daemonUrl when --port not explicit', () => {
-    const ws = join(testDir, 'workspace');
-    mkdirSync(ws, { recursive: true });
-    writeFileSync(join(ws, 'config.json'), JSON.stringify({
-      'dkg-node': {
-        daemonUrl: 'http://custom:8080',
-        memory: { enabled: false, watchDebounceMs: 3000 },
-      },
-    }));
-
-    writeWorkspaceConfig(ws, 9200);
-
-    const config = JSON.parse(readFileSync(join(ws, 'config.json'), 'utf-8'));
-    // daemonUrl is preserved when portExplicit is not set
-    expect(config['dkg-node'].daemonUrl).toBe('http://custom:8080');
-    // Sub-config keys like watchDebounceMs are preserved
-    expect(config['dkg-node'].memory.watchDebounceMs).toBe(3000);
-    // User-configured enabled: false is respected on re-runs (idempotent)
-    expect(config['dkg-node'].memory.enabled).toBe(false);
-  });
-
-  it('overrides daemonUrl when --port is explicit', () => {
-    const ws = join(testDir, 'workspace');
-    mkdirSync(ws, { recursive: true });
-    writeFileSync(join(ws, 'config.json'), JSON.stringify({
-      'dkg-node': {
-        daemonUrl: 'http://custom:8080',
-      },
-    }));
-
-    writeWorkspaceConfig(ws, 9200, true);
-
-    const config = JSON.parse(readFileSync(join(ws, 'config.json'), 'utf-8'));
-    expect(config['dkg-node'].daemonUrl).toBe('http://127.0.0.1:9200');
   });
 });
 

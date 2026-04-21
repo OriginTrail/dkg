@@ -29,7 +29,7 @@ npm install -g @origintrail-official/dkg
 dkg openclaw setup
 ```
 
-The setup flow is non-interactive and idempotent. It writes `~/.dkg/config.json`, merges the adapter into `~/.openclaw/openclaw.json`, writes `WORKSPACE_DIR/config.json`, starts the daemon if requested, and verifies the node.
+The setup flow is non-interactive and idempotent. It writes `~/.dkg/config.json`, merges the adapter into `~/.openclaw/openclaw.json` (including the adapter's runtime config under `plugins.entries.adapter-openclaw.config`), starts the daemon if requested, and verifies the node.
 
 The node UI's right-panel "Connect OpenClaw" button runs this same setup flow in-process — clicking it from a fresh install is equivalent to running `dkg openclaw setup` on the command line (issue #198).
 
@@ -53,21 +53,22 @@ A healthy setup should satisfy all of the following:
 | File | Owner | Purpose |
 | --- | --- | --- |
 | `~/.dkg/config.json` | DKG node | node config: networking, chain, auth, API |
-| `WORKSPACE_DIR/config.json` | adapter setup | adapter-facing `dkg-node` config such as daemon URL, memory, and channel flags |
-| `~/.openclaw/openclaw.json` | OpenClaw | plugin loading config |
+| `~/.openclaw/openclaw.json` | OpenClaw | plugin loading config; the adapter's runtime config also lives here under `plugins.entries.adapter-openclaw.config` |
 
 ## Adapter Config
 
-These keys live under `"dkg-node"` in `WORKSPACE_DIR/config.json`.
+These keys live under `plugins.entries.adapter-openclaw.config` in `~/.openclaw/openclaw.json`. `dkg openclaw setup` populates them with first-wins semantics — customizations survive re-runs unless `--port` is passed explicitly (which refreshes `daemonUrl`).
 
 | Key | Default | Purpose |
 | --- | --- | --- |
-| `daemonUrl` | `http://127.0.0.1:9200` | DKG daemon HTTP URL |
-| `memory.enabled` | `false` (`true` after setup) | register the DKG memory-slot capability on attach (slot-backed recall via `api.registerMemoryCapability`; no adapter-side write tool — writes go through SKILL.md direct routes) |
-| `channel.enabled` | `false` (`true` after setup) | enable the DKG UI to OpenClaw bridge |
-| `channel.port` | `9201` | standalone bridge port when gateway route registration is unavailable |
+| `daemonUrl` | `http://127.0.0.1:9200` | DKG daemon HTTP URL (env `DKG_DAEMON_URL` overrides at runtime) |
+| `memory.enabled` | `true` after setup | register the DKG memory-slot capability on attach (slot-backed recall via `api.registerMemoryCapability`; no adapter-side write tool — writes go through SKILL.md direct routes) |
+| `channel.enabled` | `true` after setup | enable the DKG UI to OpenClaw bridge |
+| `channel.port` | `9201` (optional) | standalone bridge port when gateway route registration is unavailable; setup does not write this key — set it manually on the entry config if you need to override the default |
 
-The legacy `memory.memoryDir` and `memory.watchDebounceMs` config keys, the filesystem-watcher + `/api/memory/import` ingestion flow they configured, and the `dkg_memory_import` / `dkg_memory_search` adapter tools that previously wrapped the daemon routes were all retired in the openclaw-dkg-primary-memory work. Memory now flows exclusively through `api.registerMemoryCapability` for slot-backed recall reads (handled by `DkgMemorySearchManager`, which fans out four parallel SPARQL queries — one against `agent-context` / `chat-turns` in working memory plus three against the resolved project CG's `memory` assertion with `view: 'working-memory'`, `'shared-working-memory'`, and `'verified-memory'` — and ranks the merged results with a trust-weighted score) and through the daemon routes documented in `packages/cli/skills/dkg-node/SKILL.md` for writes (`POST /api/assertion/create` on the first write to a fresh project CG, then `POST /api/assertion/:name/write` for each write after that).
+**Disconnect semantics.** The node UI's "Disconnect" button removes `plugins.entries.adapter-openclaw` entirely from `~/.openclaw/openclaw.json`, including any customized `config` values. If you had set a non-default `daemonUrl` (for example via `dkg openclaw setup --port 9300` or a remote daemon URL), re-run `dkg openclaw setup --port <N>` after Reconnect to restore it. Default-port users see no visible difference across a Disconnect/Reconnect cycle.
+
+Memory flows exclusively through `api.registerMemoryCapability` for slot-backed recall reads (handled by `DkgMemorySearchManager`, which fans out four parallel SPARQL queries — one against `agent-context` / `chat-turns` in working memory plus three against the resolved project CG's `memory` assertion with `view: 'working-memory'`, `'shared-working-memory'`, and `'verified-memory'` — and ranks the merged results with a trust-weighted score) and through the daemon routes documented in `packages/cli/skills/dkg-node/SKILL.md` for writes (`POST /api/assertion/create` on the first write to a fresh project CG, then `POST /api/assertion/:name/write` for each write after that).
 
 ## Notes
 

@@ -5,10 +5,10 @@
  *  1. Discover OpenClaw workspace and agent name
  *  2. Write ~/.dkg/config.json with testnet defaults
  *  3. Start the DKG daemon
- *  4. Merge adapter plugin into ~/.openclaw/openclaw.json
- *  5. Write workspace config.json with feature flags
- *  6. Copy the canonical DKG node skill into the OpenClaw workspace
- *  7. Verify setup
+ *  4. Merge adapter plugin into ~/.openclaw/openclaw.json (including
+ *     plugins.entries.adapter-openclaw.config with feature flags)
+ *  5. Copy the canonical DKG node skill into the OpenClaw workspace
+ *  6. Verify setup
  *
  * Every step is idempotent — re-running is safe.
  */
@@ -19,6 +19,7 @@ import { createRequire } from 'node:module';
 import { join, dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import type { DkgOpenClawConfig } from './types.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -477,7 +478,21 @@ function isAdapterLoadPath(value: string): boolean {
     || normalized.includes('/packages/adapter-openclaw/');
 }
 
-export function mergeOpenClawConfig(openclawConfigPath: string, adapterPath: string): void {
+/**
+ * Shape of `plugins.entries.adapter-openclaw.config` that
+ * `mergeOpenClawConfig` accepts. A `Pick` of `DkgOpenClawConfig` so the
+ * write-path stays aligned with the runtime's config contract: callers
+ * can pass any of the same sub-fields the adapter reads at load time,
+ * including `channel.port` for advanced bridge-port overrides.
+ */
+export type AdapterEntryConfig = Pick<DkgOpenClawConfig, 'daemonUrl' | 'memory' | 'channel'>;
+
+export function mergeOpenClawConfig(
+  openclawConfigPath: string,
+  adapterPath: string,
+  entryConfig: AdapterEntryConfig,
+  options?: { overrideDaemonUrl?: boolean },
+): void {
   if (!openclawConfigPath || !existsSync(openclawConfigPath)) {
     // If we got here via --workspace override, the openclaw.json path may be unknown.
     // Try the default location.
@@ -539,6 +554,34 @@ export function mergeOpenClawConfig(openclawConfigPath: string, adapterPath: str
     log(`Re-enabled ${pluginId} in plugins.entries`);
   } else {
     log(`${pluginId} already in plugins.entries`);
+  }
+
+  // Populate entry.config with first-wins semantics: user-customized values
+  // survive re-runs (same pattern as previousMemorySlotOwner). Sub-objects
+  // (memory, channel) are shallow-merged per-key so new defaults added in a
+  // later release flow in while user overrides for existing keys hold.
+  // When `overrideDaemonUrl` is set (caller passed --port explicitly), the
+  // new `daemonUrl` wins over any existing value.
+  const entryForConfig = config.plugins.entries[pluginId];
+  const hadConfig = entryForConfig.config && typeof entryForConfig.config === 'object';
+  const existingEntryConfig: Record<string, any> = hadConfig ? { ...entryForConfig.config } : {};
+  if (options?.overrideDaemonUrl) {
+    delete existingEntryConfig.daemonUrl;
+  }
+  const existingMemory = existingEntryConfig.memory && typeof existingEntryConfig.memory === 'object'
+    ? existingEntryConfig.memory
+    : {};
+  const existingChannel = existingEntryConfig.channel && typeof existingEntryConfig.channel === 'object'
+    ? existingEntryConfig.channel
+    : {};
+  entryForConfig.config = {
+    ...entryConfig,
+    ...existingEntryConfig,
+    memory: { ...entryConfig.memory, ...existingMemory },
+    channel: { ...entryConfig.channel, ...existingChannel },
+  };
+  if (!hadConfig) {
+    log(`Populated plugins.entries.${pluginId}.config`);
   }
 
   // Ensure plugin-registered tools are visible to the agent
@@ -609,11 +652,11 @@ export function mergeOpenClawConfig(openclawConfigPath: string, adapterPath: str
  * would have written:
  *   - removes `"adapter-openclaw"` from `plugins.allow`
  *   - filters `plugins.load.paths` by the same `isAdapterLoadPath` predicate
- *   - flips `plugins.entries["adapter-openclaw"].enabled = false` (keeps other fields)
+ *   - removes `plugins.entries["adapter-openclaw"]` entirely (including any
+ *     `config` sub-object — the adapter owns the whole entry)
  *   - restores `plugins.slots.memory` to the prior owner captured during merge
- *     (`entries["adapter-openclaw"].previousMemorySlotOwner`), or clears it
- *     when no prior owner was persisted. Either way, strips the
- *     `previousMemorySlotOwner` metadata so a future merge re-captures fresh.
+ *     (`entries["adapter-openclaw"].previousMemorySlotOwner`, read before the
+ *     entry is deleted), or clears it when no prior owner was persisted.
  *
  * Leaves `tools.alsoAllow` (shared with other plugins), workspace `config.json`
  * (user-owned), and any workspace `SKILL.md` copies alone. Idempotent — a
@@ -681,20 +724,14 @@ export function unmergeOpenClawConfig(openclawConfigPath: string): void {
     previousMemorySlotOwner = entry.previousMemorySlotOwner;
   }
 
-  // Flip entry.enabled to false (preserve other plugin-specific fields) and
-  // strip the previousMemorySlotOwner marker so a future merge re-captures
-  // whatever's in the slot at that point rather than restoring stale state.
-  if (config.plugins && config.plugins.entries) {
-    const entryForWrite = config.plugins.entries[pluginId];
-    if (entryForWrite && typeof entryForWrite === 'object') {
-      if (entryForWrite.enabled !== false) {
-        entryForWrite.enabled = false;
-        log(`Disabled ${pluginId} in plugins.entries`);
-      }
-      if ('previousMemorySlotOwner' in entryForWrite) {
-        delete entryForWrite.previousMemorySlotOwner;
-      }
-    }
+  // Delete the adapter entry entirely. The adapter owns this entry — all of
+  // its fields (enabled, config, previousMemorySlotOwner) are setup-written,
+  // so there's no user-customizable state to preserve. A fresh merge will
+  // rebuild everything from scratch, including re-capturing the current slot
+  // owner into previousMemorySlotOwner.
+  if (config.plugins && config.plugins.entries && pluginId in config.plugins.entries) {
+    delete config.plugins.entries[pluginId];
+    log(`Removed ${pluginId} from plugins.entries`);
   }
 
   // Restore or clear slots.memory iff it still points at the adapter. If the
@@ -779,53 +816,14 @@ export function verifyUnmergeInvariants(configPath: string): string | null {
   }
   const entry = plugins?.entries?.[pluginId];
   if (entry && typeof entry === 'object' && entry.enabled === true) {
-    return `plugins.entries["${pluginId}"].enabled is still true`;
+    return `plugins.entries["${pluginId}"] is still present with enabled=true`;
   }
 
   return null;
 }
 
 // ---------------------------------------------------------------------------
-// Step 6: Write workspace config
-// ---------------------------------------------------------------------------
-
-export function writeWorkspaceConfig(workspaceDir: string, apiPort: number, portExplicit?: boolean): void {
-  const configPath = join(workspaceDir, 'config.json');
-
-  let existing: Record<string, any> = {};
-  if (existsSync(configPath)) {
-    try {
-      existing = JSON.parse(readFileSync(configPath, 'utf-8'));
-    } catch {
-      warn(`Could not parse ${configPath} — will overwrite`);
-    }
-  }
-
-  // Deep-merge: preserve existing dkg-node sub-config.
-  // daemonUrl is only overridden when --port is explicitly passed; otherwise
-  // the existing value is kept so custom URLs (e.g. remote daemons) survive re-runs.
-  // Feature flags default to true on first run but are not overridden on re-runs
-  // so that user-configured `false` values are respected.
-  const dkgNode = existing['dkg-node'] ?? {};
-  const nextDkgNode = {
-    ...dkgNode,
-    daemonUrl: portExplicit ? `http://127.0.0.1:${apiPort}` : (dkgNode.daemonUrl ?? `http://127.0.0.1:${apiPort}`),
-    memory: { enabled: true, ...dkgNode.memory },
-    channel: { enabled: true, ...dkgNode.channel },
-  };
-  if (nextDkgNode.game !== undefined) {
-    delete nextDkgNode.game;
-    log('Removed legacy dkg-node.game config from workspace config');
-  }
-  existing['dkg-node'] = nextDkgNode;
-
-  mkdirSync(workspaceDir, { recursive: true });
-  writeFileSync(configPath, JSON.stringify(existing, null, 2) + '\n');
-  log('Wrote workspace config (memory=on, channel=on)');
-}
-
-// ---------------------------------------------------------------------------
-// Step 7: Copy the canonical DKG node skill into the OpenClaw workspace
+// Step 6: Copy the canonical DKG node skill into the OpenClaw workspace
 // ---------------------------------------------------------------------------
 
 export function installCanonicalNodeSkill(
@@ -840,7 +838,7 @@ export function installCanonicalNodeSkill(
 }
 
 // ---------------------------------------------------------------------------
-// Step 8: Verify
+// Step 7: Verify
 // ---------------------------------------------------------------------------
 
 export async function verifySetup(
@@ -1041,21 +1039,21 @@ export async function runSetup(options: SetupOptions): Promise<void> {
       '         npm install -g @origintrail-official/dkg',
     );
   }
+  const portExplicit = options.port != null;
+  const entryConfig: AdapterEntryConfig = {
+    daemonUrl: `http://127.0.0.1:${effectivePort}`,
+    memory: { enabled: true },
+    channel: { enabled: true },
+  };
   if (!dryRun) {
-    mergeOpenClawConfig(openclawConfigPath, resolvedAdapterPath);
+    mergeOpenClawConfig(openclawConfigPath, resolvedAdapterPath, entryConfig, {
+      overrideDaemonUrl: portExplicit,
+    });
   } else {
     log(`[dry-run] Would merge adapter (${resolvedAdapterPath}) into openclaw.json`);
   }
 
-  // Step 6: Write workspace config
-  throwIfAborted();
-  if (!dryRun) {
-    writeWorkspaceConfig(workspaceDir, effectivePort, options.port != null);
-  } else {
-    log('[dry-run] Would write workspace config.json');
-  }
-
-  // Step 7: Copy the canonical DKG node skill into the OpenClaw workspace
+  // Step 6: Copy the canonical DKG node skill into the OpenClaw workspace
   throwIfAborted();
   if (!dryRun) {
     installCanonicalNodeSkill(workspaceDir);
@@ -1067,7 +1065,7 @@ export async function runSetup(options: SetupOptions): Promise<void> {
   // after config changes, but manual restart remains the safe fallback.
   log('Reload the OpenClaw gateway if it does not auto-restart after the config update');
 
-  // Step 8: Verify
+  // Step 7: Verify
   throwIfAborted();
   if (shouldVerify && !dryRun) {
     await verifySetup(effectivePort, { openclawConfigPath });

@@ -28,8 +28,16 @@ import {
   shouldBypassRateLimitForLoopbackTraffic,
   updateLocalAgentIntegration,
 } from '../src/daemon.js';
-import { mergeOpenClawConfig } from '@origintrail-official/dkg-adapter-openclaw';
+import { mergeOpenClawConfig, type AdapterEntryConfig } from '@origintrail-official/dkg-adapter-openclaw';
 import type { DkgConfig } from '../src/config.js';
+
+// Default entryConfig fixture matching the shape `runSetup` builds at
+// Step 5 — same values setup writes into plugins.entries.adapter-openclaw.config.
+const testEntryConfig: AdapterEntryConfig = {
+  daemonUrl: 'http://127.0.0.1:9200',
+  memory: { enabled: true },
+  channel: { enabled: true },
+};
 
 function makeConfig(overrides: Partial<DkgConfig> = {}): DkgConfig {
   return {
@@ -1495,7 +1503,7 @@ describe('OpenClaw UI Connect/Disconnect/Refresh fresh-HOME integration (issue #
     // the temp-HOME openclaw.json. This is the highest-fidelity stand-in we can
     // get without spinning up a real daemon in the test.
     const runSetup = async () => {
-      mergeOpenClawConfig(openclawConfigPath, adapterPath);
+      mergeOpenClawConfig(openclawConfigPath, adapterPath, testEntryConfig);
     };
     const restartGateway = async () => {};
     const waitForReady = async () => ({ ok: true as const, target: 'bridge' });
@@ -1537,7 +1545,16 @@ describe('OpenClaw UI Connect/Disconnect/Refresh fresh-HOME integration (issue #
     const merged = JSON.parse(mergedRaw);
     expect(merged.plugins.slots.memory).toBe('adapter-openclaw');
     expect(merged.plugins.allow).toContain('adapter-openclaw');
-    expect(merged.plugins.entries['adapter-openclaw']).toEqual({ enabled: true });
+    const mergedEntry = merged.plugins.entries['adapter-openclaw'];
+    expect(mergedEntry.enabled).toBe(true);
+    // D2: adapter runtime config lives in the plugin entry now (was
+    // $WORKSPACE_DIR/config.json before PR #232). Full shape — daemonUrl,
+    // memory.enabled, channel.enabled — is what openclaw-entry.mjs reads.
+    expect(mergedEntry.config).toBeDefined();
+    expect(typeof mergedEntry.config.daemonUrl).toBe('string');
+    expect(mergedEntry.config.daemonUrl).toMatch(/^http:\/\/127\.0\.0\.1:/);
+    expect(mergedEntry.config.memory.enabled).toBe(true);
+    expect(mergedEntry.config.channel.enabled).toBe(true);
     // Windows-path normalization assertion: mergeOpenClawConfig normalizes backslashes to
     // forward slashes before storing the path.
     const storedPaths = merged.plugins.load.paths as string[];
@@ -1556,7 +1573,7 @@ describe('OpenClaw UI Connect/Disconnect/Refresh fresh-HOME integration (issue #
 
   it('scenario 2: post-Connect Disconnect reverse-merges adapter wiring and writes a .bak.<ts>', async () => {
     // Seed a pre-merged openclaw.json (as if Connect already ran).
-    mergeOpenClawConfig(openclawConfigPath, adapterPath);
+    mergeOpenClawConfig(openclawConfigPath, adapterPath, testEntryConfig);
 
     // Sanity: adapter is fully wired before disconnect.
     const before = JSON.parse(readFileSync(openclawConfigPath, 'utf-8'));
@@ -1569,7 +1586,8 @@ describe('OpenClaw UI Connect/Disconnect/Refresh fresh-HOME integration (issue #
     const after = JSON.parse(readFileSync(openclawConfigPath, 'utf-8'));
     expect(after.plugins.slots.memory).toBeUndefined();
     expect(after.plugins.allow).not.toContain('adapter-openclaw');
-    expect(after.plugins.entries['adapter-openclaw'].enabled).toBe(false);
+    // D1: adapter entry is removed entirely on unmerge (not just disabled).
+    expect(after.plugins.entries['adapter-openclaw']).toBeUndefined();
     const remainingPaths = (after.plugins.load.paths ?? []) as string[];
     expect(remainingPaths.some((p) => /packages[\\/]adapter-openclaw/.test(p))).toBe(false);
     // tools.alsoAllow is intentionally NOT reverted (shared with other plugins per D1 decision).
@@ -1589,7 +1607,7 @@ describe('OpenClaw UI Connect/Disconnect/Refresh fresh-HOME integration (issue #
     // `normalizeExplicitLocalAgentDisconnectBody` BEFORE computing `explicitDisconnect`.
 
     // Seed a pre-merged openclaw.json (as if Connect already ran).
-    mergeOpenClawConfig(openclawConfigPath, adapterPath);
+    mergeOpenClawConfig(openclawConfigPath, adapterPath, testEntryConfig);
     const before = JSON.parse(readFileSync(openclawConfigPath, 'utf-8'));
     expect(before.plugins.slots.memory).toBe('adapter-openclaw');
 
@@ -1607,7 +1625,8 @@ describe('OpenClaw UI Connect/Disconnect/Refresh fresh-HOME integration (issue #
     const after = JSON.parse(readFileSync(openclawConfigPath, 'utf-8'));
     expect(after.plugins.slots.memory).toBeUndefined();
     expect(after.plugins.allow).not.toContain('adapter-openclaw');
-    expect(after.plugins.entries['adapter-openclaw'].enabled).toBe(false);
+    // D1: adapter entry is removed entirely on unmerge.
+    expect(after.plugins.entries['adapter-openclaw']).toBeUndefined();
   });
 
   it('scenario 2c: reverse-setup surfaces non-slot invariant failures via verifyUnmergeInvariants (Codex N3)', async () => {
@@ -1620,7 +1639,7 @@ describe('OpenClaw UI Connect/Disconnect/Refresh fresh-HOME integration (issue #
     // defers to the adapter's `verifyUnmergeInvariants`, which covers all four invariants.
 
     // Seed a pre-merged openclaw.json (as if Connect already ran).
-    mergeOpenClawConfig(openclawConfigPath, adapterPath);
+    mergeOpenClawConfig(openclawConfigPath, adapterPath, testEntryConfig);
     const before = JSON.parse(readFileSync(openclawConfigPath, 'utf-8'));
     expect(before.plugins.slots.memory).toBe('adapter-openclaw');
     expect(before.plugins.allow).toContain('adapter-openclaw');
