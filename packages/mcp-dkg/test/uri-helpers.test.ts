@@ -37,12 +37,16 @@ describe('toUri — URI passthrough vs minting', () => {
     expect(toUri('foo bar')).toBe('urn:dkg:concept:foo-bar');
   });
 
-  it('does NOT mint for empty input (slug becomes empty)', () => {
-    // Edge case: caller passing empty string should at least be predictable.
-    // Current behaviour: returns "urn:dkg:concept:" — caller responsibility
-    // to validate non-empty before passing in. We pin the behaviour so a
-    // change in slug rule doesn't accidentally start emitting valid-looking
-    // URIs from empty input.
-    expect(toUri('')).toBe('urn:dkg:concept:');
+  it.each([
+    '',
+    '   ',
+    '???',
+    '*** / ***',
+    'the a an of',       // stopwords only
+  ])('returns null for label "%s" that slugifies to empty', (input) => {
+    // Without this guard we'd mint malformed URIs like `urn:dkg:concept:`
+    // and persist them as real entities in the graph. Callers must
+    // fall back (skip the reference) on null.
+    expect(toUri(input)).toBeNull();
   });
 });

@@ -320,6 +320,22 @@ export class DKGAgent {
   private readonly metaRefreshTimestamps = new Map<string, number>();
   private readonly preferredSyncPeers = new Map<string, string>();
   /**
+   * Remembers the libp2p peer ID that delivered each pending join request
+   * to this curator. Keyed by `${contextGraphId}::${agentAddress_lower}`.
+   *
+   * This is the authoritative source when we later need to notify that
+   * requester about approval/rejection — the agent registry can be stale
+   * (a requester may P2P-reach us before their agent profile has indexed
+   * locally), so without this map we'd drop notifications and leave the
+   * invitee stuck on "Join request sent, awaiting approval". See
+   * `notifyJoinApproval` / `notifyJoinRejection`.
+   *
+   * In-memory only: survives for the curator's process lifetime, which
+   * matches the approval window in practice. On restart we fall back to
+   * the agent registry.
+   */
+  private readonly joinRequestOriginPeers = new Map<string, string>();
+  /**
    * Per-peer timestamp of the last reconnect-on-gossip dial we attempted.
    * Prevents a noisy topic from generating a dial storm against a peer we
    * already tried recently. See DOC: p2p-resilience.md.
@@ -967,6 +983,13 @@ export class DKGAgent {
         }
         this.verifyJoinRequest(contextGraphId, agentAddress, timestamp, signature);
         await this.storePendingJoinRequest(contextGraphId, agentAddress, signature, timestamp, agentName);
+        // Remember which peer actually delivered this request so we can
+        // send approval/rejection back to the same peer later, even if
+        // the agent registry hasn't indexed them yet.
+        this.joinRequestOriginPeers.set(
+          `${contextGraphId}::${agentAddress.toLowerCase()}`,
+          peerId.toString(),
+        );
         this.eventBus.emit(DKGEvent.JOIN_REQUEST_RECEIVED, {
           contextGraphId,
           agentAddress,
@@ -4010,11 +4033,24 @@ export class DKGAgent {
   }
 
   /**
-   * Resolve the target agent's peer ID via the local agent registry and
-   * send the payload only to that peer. If the peer isn't currently
-   * connected but has a relay address on file we attempt to dial through
-   * the relay first. Never broadcasts — a missed notification is a much
-   * smaller harm than leaking curated-CG membership to every peer.
+   * Resolve the target agent's peer ID and send the payload only to that
+   * peer. Never broadcasts — leaking a curated CG's membership to every
+   * peer on the network is a real privacy violation, and dropping the
+   * notification is a far milder failure (the invitee relearns on next
+   * subscribe).
+   *
+   * Two resolution sources, in order:
+   *
+   *   1. `joinRequestOriginPeers` — the peer that actually delivered the
+   *      original join request over P2P. Set by the handler at register
+   *      time and persists for the curator's process lifetime. This
+   *      avoids a regression from the old broadcast implementation: the
+   *      requester may reach us via P2P before their agent profile is
+   *      indexed locally, so relying on `findAgents()` alone would drop
+   *      every approval/rejection until registry replication catches up.
+   *   2. `discovery.findAgents()` fallback for the case where the
+   *      curator restarted between receiving the request and acting on
+   *      it (and thus lost the in-memory peer mapping).
    *
    * @returns void (logged success/failure; callers treat this as
    *          fire-and-forget)
@@ -4031,21 +4067,32 @@ export class DKGAgent {
 
     let targetPeerId: string | null = null;
     let targetRelayAddress: string | undefined;
-    try {
-      const agents = await this.discovery.findAgents();
-      const match = agents.find((a) => a.agentAddress?.toLowerCase() === addrLower);
-      if (match) {
-        targetPeerId = match.peerId;
-        targetRelayAddress = match.relayAddress;
+
+    // Preferred source: the peer that actually delivered the join
+    // request. This is always correct for the common flow and doesn't
+    // depend on registry replication timing.
+    const originKey = `${contextGraphId}::${addrLower}`;
+    const rememberedPeerId = this.joinRequestOriginPeers.get(originKey);
+    if (rememberedPeerId) {
+      targetPeerId = rememberedPeerId;
+    } else {
+      // Fallback: agent registry (covers curator-restart case).
+      try {
+        const agents = await this.discovery.findAgents();
+        const match = agents.find((a) => a.agentAddress?.toLowerCase() === addrLower);
+        if (match) {
+          targetPeerId = match.peerId;
+          targetRelayAddress = match.relayAddress;
+        }
+      } catch {
+        // Registry unavailable — we'll just skip delivery below.
       }
-    } catch {
-      // Registry unavailable — we'll just skip delivery below.
     }
 
     if (!targetPeerId) {
       this.log.warn(
         ctx,
-        `Cannot deliver ${label} for "${contextGraphId}" to ${agentAddress} — agent not in local registry. ` +
+        `Cannot deliver ${label} for "${contextGraphId}" to ${agentAddress} — no origin peer remembered and agent not in local registry. ` +
           `Dropping notification (invitee will re-learn on next subscribe).`,
       );
       return;
@@ -4082,6 +4129,9 @@ export class DKGAgent {
     try {
       await this.router.send(targetPeerId, PROTOCOL_JOIN_REQUEST, payloadBytes, 5000);
       this.log.info(ctx, `Delivered ${label} for "${contextGraphId}" to ${agentAddress} (${targetPeerId})`);
+      // The join request is finalised now — forget the origin peer so
+      // the map doesn't grow unbounded over the curator's lifetime.
+      this.joinRequestOriginPeers.delete(originKey);
     } catch (err) {
       this.log.warn(
         ctx,

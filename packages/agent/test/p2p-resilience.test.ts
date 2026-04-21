@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { DKGAgent } from '../src/index.js';
 import { DKGEvent } from '@origintrail-official/dkg-core';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { peerIdFromString } from '@libp2p/peer-id';
 
 /**
  * A rotating bank of well-formed libp2p peer id strings (taken from the
@@ -72,10 +73,9 @@ describe('p2p resilience hooks', () => {
         // this instead of opening a real connection so the test doesn't need
         // a live remote node.
         const origGetPeers = agent.node.libp2p.getPeers.bind(agent.node.libp2p);
-        vi.spyOn(agent.node.libp2p, 'getPeers').mockImplementation(() => {
-          const { peerIdFromString } = require('@libp2p/peer-id');
-          return [...origGetPeers(), peerIdFromString(remotePeer)];
-        });
+        vi.spyOn(agent.node.libp2p, 'getPeers').mockImplementation(
+          () => [...origGetPeers(), peerIdFromString(remotePeer)],
+        );
 
         agent.eventBus.emit(DKGEvent.GOSSIP_MESSAGE, {
           topic: 'dkg/context-graph/test/pub',

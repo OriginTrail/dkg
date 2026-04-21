@@ -298,17 +298,39 @@ export function extractText(payload) {
 }
 
 export function extractSessionKey(payload) {
-  const id =
-    pick(payload, [
-      // Cursor 3.1.15 uses snake_case at top level
-      'conversation_id', 'session_id', 'thread_id', 'chat_id',
-      // camelCase + short aliases for other frameworks
-      'conversationId', 'sessionId', 'threadId', 'chatId', 'convId', 'id',
-    ]) ??
-    // No id from the tool? Use the wall-clock hour so we at least group
-    // turns within the same hour into one session.
-    `anon-${new Date().toISOString().slice(0, 13)}`;
-  return sanitiseSlug(id);
+  const id = pick(payload, [
+    // Cursor 3.1.15 uses snake_case at top level
+    'conversation_id', 'session_id', 'thread_id', 'chat_id',
+    // camelCase + short aliases for other frameworks
+    'conversationId', 'sessionId', 'threadId', 'chatId', 'convId', 'id',
+  ]);
+  if (id) return sanitiseSlug(id);
+  // No id from the tool? Synthesize a unique, per-invocation key and
+  // persist it in a small index file so repeated events from the same
+  // shell process share the same session. The previous fallback used
+  // the current hour, which silently merged unrelated conversations
+  // that happened to run in the same 60-minute window.
+  return sanitiseSlug(anonSessionKey());
+}
+
+function anonSessionKey() {
+  try {
+    const stateDir = path.join(os.homedir(), '.dkg', 'hook-state');
+    fs.mkdirSync(stateDir, { recursive: true });
+    const idxFile = path.join(stateDir, `anon-session-${process.ppid || process.pid}.txt`);
+    if (fs.existsSync(idxFile)) {
+      const buf = fs.readFileSync(idxFile, 'utf-8').trim();
+      if (buf) return buf;
+    }
+    const fresh = `anon-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+    fs.writeFileSync(idxFile, fresh, 'utf-8');
+    return fresh;
+  } catch {
+    // If we can't persist, fall back to per-invocation; still much
+    // safer than the hourly bucket — at worst we lose session grouping
+    // across events but never merge unrelated conversations.
+    return `anon-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  }
 }
 
 /** Pull optional metadata Cursor sends that enriches a Session/Turn
@@ -375,20 +397,82 @@ async function postJson(api, route, token, body) {
   return text ? JSON.parse(text) : {};
 }
 
-async function writeTriples(cfg, triples) {
-  return postJson(cfg.api, `/api/assertion/${encodeURIComponent(cfg.assertion)}/write`, cfg.token, {
+/**
+ * Low-level write. Callers pass an assertion name so each logical
+ * write-unit (a single turn, the agent-self-register, a session
+ * bootstrap, …) gets its own named assertion graph. Sharing one
+ * `cfg.assertion` across many writes would couple every turn's
+ * promote/discard lifecycle together and (per `/api/assertion/…/write`
+ * semantics) risk clobbering already-committed turn history.
+ */
+async function writeTriples(cfg, triples, assertionName = cfg.assertion) {
+  return postJson(cfg.api, `/api/assertion/${encodeURIComponent(assertionName)}/write`, cfg.token, {
     contextGraphId: cfg.project,
     subGraphName: cfg.subGraph,
     quads: triples,
   });
 }
 
-async function promoteEntities(cfg, entities) {
-  return postJson(cfg.api, `/api/assertion/${encodeURIComponent(cfg.assertion)}/promote`, cfg.token, {
+async function promoteEntities(cfg, entities, assertionName = cfg.assertion) {
+  return postJson(cfg.api, `/api/assertion/${encodeURIComponent(assertionName)}/promote`, cfg.token, {
     contextGraphId: cfg.project,
     subGraphName: cfg.subGraph,
     entities,
   });
+}
+
+/**
+ * Build a per-turn assertion name. Including the session key + turn
+ * index keeps successive turns in distinct assertion graphs, so a
+ * write for turn N cannot overwrite the one for turn N-1 even under
+ * the most-permissive `/api/assertion/…/write` semantics, and each
+ * turn can be promoted/discarded independently.
+ */
+function perTurnAssertionName(cfg, sessionKey, turnIdx) {
+  const base = cfg.assertion ?? 'chat-log';
+  return sanitiseSlug(`${base}-${sessionKey}-turn-${turnIdx}`);
+}
+
+/**
+ * Resolve whether a session should auto-promote to SWM.
+ *
+ * Rules (in order):
+ *   1. If `cfg.autoShare` is false for this operator, never promote.
+ *   2. If the session has an explicit `chat:privacy "private"` flag
+ *      (set by `dkg_set_session_privacy`) in any memory layer, never
+ *      promote — the operator explicitly opted out for this thread.
+ *   3. Otherwise, promote.
+ *
+ * Result is cached on `state` so we only hit the daemon once per
+ * session lifetime; a later `dkg_set_session_privacy` call will see
+ * the next hook invocation reload this via the session state file.
+ */
+async function shouldPromote(cfg, state) {
+  if (!cfg.autoShare) return false;
+  if (state.privacyChecked && state.privacyCached) {
+    return state.privacyCached !== 'private';
+  }
+  try {
+    const q = `
+      SELECT ?p WHERE {
+        <${state.sessionUri}> <${P.privacy}> ?p .
+      } LIMIT 1`;
+    const body = await postJson(cfg.api, '/api/query', cfg.token, {
+      contextGraphId: cfg.project,
+      subGraphName: cfg.subGraph,
+      sparql: q,
+      includeSharedMemory: true,
+    });
+    const row = body?.result?.bindings?.[0];
+    const raw = row ? String(row.p ?? '') : '';
+    const privacy = raw.replace(/^"|"$/g, '').replace(/"\^\^<.*>$/, '').replace(/"@.+$/, '') || 'team';
+    state.privacyChecked = true;
+    state.privacyCached = privacy;
+    return privacy !== 'private';
+  } catch (err) {
+    log(`shouldPromote: privacy query failed (${err?.message ?? err}); falling back to cfg.autoShare=${cfg.autoShare}`);
+    return cfg.autoShare;
+  }
 }
 
 // ── Ensure sub-graph exists (no-op if already registered) ─────
@@ -774,18 +858,21 @@ async function handleAfterAgentResponse(cfg, payload) {
   }
 
   let writeOk = false;
+  const turnAssertion = perTurnAssertionName(cfg, sessionKey, idx);
   try {
-    await writeTriples(cfg, triples);
+    await writeTriples(cfg, triples, turnAssertion);
     writeOk = true;
     // Commit progress only on success — see comment above the `idx` calc.
     state.turnIndex = idx;
     state.pendingPrompt = null;
     if (bootstrapSession) state.sessionWritten = true;
-    if (cfg.autoShare) {
+    if (shouldPromote(cfg, state)) {
       // Promote both the session and the individual turn so the team
       // sees the turn immediately and the aggregate Session is kept
       // in SWM.
-      await promoteEntities(cfg, [turn, state.sessionUri]).catch((e) => log(`promote turn: ${e.message}`));
+      await promoteEntities(cfg, [turn, state.sessionUri], turnAssertion).catch((e) => log(`promote turn: ${e.message}`));
+    } else if (cfg.autoShare) {
+      log(`auto-share skipped: session ${sessionKey} is private`);
     }
     log(`wrote turn #${idx} for session ${sessionKey}${bootstrapSession ? ' (bootstrapped session)' : ''}`);
     // Phase 7 race-fix: apply any pending annotations queued by

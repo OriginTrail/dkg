@@ -165,9 +165,14 @@ describe('extractSessionKey — session ID resolver', () => {
       .not.toContain('../');
   });
 
-  it('falls back to anon-<hour-bucket> when no id present', () => {
+  it('falls back to a unique per-invocation anon key when no id present', () => {
+    // The old hour-bucket fallback (`anon-2026-04-20T14`) silently merged
+    // unrelated conversations that happened to land in the same 60-minute
+    // window. The new fallback is a randomised `anon-<timestamp>-<rand>`
+    // persisted per shell process.
     const key = extractSessionKey({});
-    expect(key).toMatch(/^anon-\d{4}-\d{2}-\d{2}T\d{2}$/);
+    expect(key).toMatch(/^anon-[a-z0-9]+-[a-z0-9]+$/);
+    expect(key).not.toMatch(/^anon-\d{4}-\d{2}-\d{2}T\d{2}$/);
   });
 });
 

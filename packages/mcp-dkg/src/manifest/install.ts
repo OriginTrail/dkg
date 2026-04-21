@@ -208,6 +208,31 @@ export function planInstall(ctx: InstallContext): InstallPlan {
     }
   }
 
+  // Symmetric gating for Cursor templates. Without this, selecting
+  // `tools=['claude-code']` still writes `.cursor/rules`,
+  // `.cursor/hooks.json`, and `.cursor/mcp.json`, which contradicts
+  // the operator's tool choice and can clobber existing Cursor wiring
+  // unexpectedly.
+  if (!m.supportedTools.includes('cursor')) {
+    const cursorFields = new Set<PlannedFile['field']>([
+      'cursorRule',
+      'cursorHooksTemplate',
+      'cursorMcpJson',
+    ]);
+    const removed = files.filter((f) => cursorFields.has(f.field));
+    if (removed.length > 0) {
+      warnings.push(
+        `Manifest declared Cursor templates (${removed
+          .map((f) => f.field)
+          .join(', ')}) but supportedTools doesn't include cursor; skipping .cursor/* wiring.`,
+      );
+      for (const f of removed) {
+        const idx = files.indexOf(f);
+        if (idx >= 0) files.splice(idx, 1);
+      }
+    }
+  }
+
   return { files, substitutionValues: subValues, warnings };
 }
 
@@ -299,9 +324,15 @@ export async function writeInstall(plan: InstallPlan): Promise<WriteResult[]> {
   const results: WriteResult[] = [];
   for (const f of plan.files) {
     fs.mkdirSync(path.dirname(f.absPath), { recursive: true });
+    // Re-check existence at write time. `f.exists` was captured during
+    // the plan phase — if the target was created between preview and
+    // install (e.g. another tool wrote `~/.claude/settings.json` in
+    // parallel), branching on the stale flag would clobber a file that
+    // should have been merged.
+    const existsNow = fs.existsSync(f.absPath);
     let action: WriteResult['action'];
     let toWrite = f.body;
-    if (f.merges && f.exists) {
+    if (f.merges && existsNow) {
       const existing = fs.readFileSync(f.absPath, 'utf-8');
       try {
         const addition = JSON.parse(f.body);
@@ -314,7 +345,7 @@ export async function writeInstall(plan: InstallPlan): Promise<WriteResult[]> {
         );
       }
     } else {
-      action = f.exists ? 'overwrote' : 'created';
+      action = existsNow ? 'overwrote' : 'created';
     }
     fs.writeFileSync(f.absPath, toWrite, 'utf-8');
     results.push({

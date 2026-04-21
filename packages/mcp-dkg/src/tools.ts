@@ -213,16 +213,21 @@ export function registerReadTools(
           ? { view: 'verified-memory' as const }
           : { includeSharedMemory: true };
       try {
+        // NOTE: no explicit `GRAPH ?g { … }` wrapper here — the query
+        // engine injects one that scopes to the requested CG. Adding our
+        // own skips that scoping and lets results bleed across other
+        // context graphs on the same node. See `wrapWithGraph` in
+        // `@origintrail-official/dkg-query/dkg-query-engine.ts`.
         const [outgoing, incoming] = await Promise.all([
           client.query({
             sparql: `${PREFIXES}
-SELECT DISTINCT ?p ?o WHERE { GRAPH ?g { <${uri}> ?p ?o } }`,
+SELECT DISTINCT ?p ?o WHERE { <${uri}> ?p ?o }`,
             contextGraphId: pid,
             ...scope,
           }),
           client.query({
             sparql: `${PREFIXES}
-SELECT DISTINCT ?s ?p WHERE { GRAPH ?g { ?s ?p <${uri}> } } LIMIT 50`,
+SELECT DISTINCT ?s ?p WHERE { ?s ?p <${uri}> } LIMIT 50`,
             contextGraphId: pid,
             ...scope,
           }),
@@ -297,29 +302,29 @@ SELECT DISTINCT ?s ?p WHERE { GRAPH ?g { ?s ?p <${uri}> } } LIMIT 50`,
       const typeFilter = (types && types.length)
         ? `FILTER(?t IN (${types.map((t) => `<${expandPrefixed(t)}>`).join(', ')}))`
         : '';
+      // No `GRAPH ?g` wrapper — let the engine scope the query to the
+      // requested CG (see dkg_get_entity for the rationale).
       const sparql = `${PREFIXES}
 SELECT DISTINCT ?s ?label ?t WHERE {
-  GRAPH ?g {
-    ?s a ?t .
-    OPTIONAL {
-      { ?s rdfs:label ?label } UNION
-      { ?s schema:name ?label } UNION
-      { ?s dcterms:title ?label }
-    }
-    OPTIONAL {
-      { ?s schema:description ?body } UNION
-      { ?s <${NS.decisions}context> ?body } UNION
-      { ?s <${NS.decisions}outcome> ?body } UNION
-      { ?s schema:text ?body } UNION
-      { ?s <${NS.chat}userPrompt> ?body } UNION
-      { ?s <${NS.chat}assistantResponse> ?body }
-    }
-    ${typeFilter}
-    FILTER(
-      CONTAINS(LCASE(STR(COALESCE(?label, ""))), LCASE("${kEsc}")) ||
-      CONTAINS(LCASE(STR(COALESCE(?body, ""))), LCASE("${kEsc}"))
-    )
+  ?s a ?t .
+  OPTIONAL {
+    { ?s rdfs:label ?label } UNION
+    { ?s schema:name ?label } UNION
+    { ?s dcterms:title ?label }
   }
+  OPTIONAL {
+    { ?s schema:description ?body } UNION
+    { ?s <${NS.decisions}context> ?body } UNION
+    { ?s <${NS.decisions}outcome> ?body } UNION
+    { ?s schema:text ?body } UNION
+    { ?s <${NS.chat}userPrompt> ?body } UNION
+    { ?s <${NS.chat}assistantResponse> ?body }
+  }
+  ${typeFilter}
+  FILTER(
+    CONTAINS(LCASE(STR(COALESCE(?label, ""))), LCASE("${kEsc}")) ||
+    CONTAINS(LCASE(STR(COALESCE(?body, ""))), LCASE("${kEsc}"))
+  )
 } LIMIT ${Math.max(1, Math.min(limit ?? 25, 200))}`;
       try {
         const r = await client.query({
@@ -386,19 +391,28 @@ SELECT DISTINCT ?s ?label ?t WHERE {
         ? `FILTER(?when >= "${escapeSparqlLiteral(sinceIso)}"^^<http://www.w3.org/2001/XMLSchema#dateTime>)`
         : '';
 
+      // No `GRAPH ?g` wrapper — let the engine scope the query to the
+      // requested CG (see dkg_get_entity for the rationale).
+      //
+      // `?when` is a COALESCE over separate timestamp bindings so we pick
+      // the latest available timestamp without letting an already-bound
+      // `?when` on `dcterms:created` block later `dcterms:modified`
+      // values from ever winning. Reusing a single `?when` across
+      // OPTIONAL patterns (the previous behaviour) silently collapsed
+      // these to "first match" and sorted updated items by their creation
+      // date instead of their most recent activity.
       const sparql = `${PREFIXES}
 SELECT DISTINCT ?s ?t ?when ?author WHERE {
-  GRAPH ?g {
-    ${typeClause}
-    OPTIONAL { ?s a ?t }
-    OPTIONAL { ?s dcterms:created ?when }
-    OPTIONAL { ?s dcterms:modified ?when }
-    OPTIONAL { ?s <${NS.decisions}date> ?when }
-    OPTIONAL { ?s <${NS.tasks}dueDate> ?when }
-    OPTIONAL { ?s prov:wasAttributedTo ?author }
-    ${agentClause}
-    ${sinceClause}
-  }
+  ${typeClause}
+  OPTIONAL { ?s a ?t }
+  OPTIONAL { ?s dcterms:created ?created }
+  OPTIONAL { ?s dcterms:modified ?modified }
+  OPTIONAL { ?s <${NS.decisions}date> ?decisionDate }
+  OPTIONAL { ?s <${NS.tasks}dueDate> ?taskDue }
+  OPTIONAL { ?s prov:wasAttributedTo ?author }
+  BIND(COALESCE(?modified, ?created, ?decisionDate, ?taskDue) AS ?when)
+  ${agentClause}
+  ${sinceClause}
 }
 ORDER BY DESC(?when)
 LIMIT ${Math.max(1, Math.min(limit ?? 25, 200))}`;

@@ -107,13 +107,25 @@ function emit(
   sink.push({ subject, predicate, object });
 }
 
-/** Wrap a bare string as a URI if it doesn't already look like one. */
-export function toUri(maybeUri: string, defaultType = 'concept'): string {
-  if (maybeUri.startsWith('urn:') || maybeUri.startsWith('http:') || maybeUri.startsWith('https:') || maybeUri.startsWith('did:')) {
+/**
+ * Wrap a bare string as a URI if it doesn't already look like one.
+ *
+ * Returns null when the label slugifies to empty (blank input, pure
+ * punctuation, stopword-only) so the caller can skip the reference
+ * instead of persisting a malformed `urn:dkg:concept:` URI in the
+ * graph. See `normaliseSlug` for the slug rules.
+ */
+export function toUri(maybeUri: string, defaultType = 'concept'): string | null {
+  if (
+    maybeUri.startsWith('urn:') ||
+    maybeUri.startsWith('http:') ||
+    maybeUri.startsWith('https:') ||
+    maybeUri.startsWith('did:')
+  ) {
     return maybeUri;
   }
-  // Treat as a free-text label and mint a concept URI.
   const slug = normaliseSlug(maybeUri);
+  if (!slug) return null;
   return `urn:dkg:${defaultType}:${slug}`;
 }
 
@@ -328,19 +340,25 @@ ${ttl || '# (missing — re-run import-ontology.mjs)'}
       const nowIso = new Date().toISOString();
 
       // ── Universal primitives ────────────────────────────────
+      const skippedEmptyLabels: string[] = [];
       for (const t of args.topics ?? []) {
         emit(triples, U(turnUri), U(NS.chat + 'topic'), L(t));
       }
       for (const m of args.mentions ?? []) {
-        emit(triples, U(turnUri), U(NS.chat + 'mentions'), U(toUri(m, 'concept')));
+        const mUri = toUri(m, 'concept');
+        if (!mUri) { skippedEmptyLabels.push(m); continue; }
+        emit(triples, U(turnUri), U(NS.chat + 'mentions'), U(mUri));
       }
       for (const e of args.examines ?? []) {
-        emit(triples, U(turnUri), U(NS.chat + 'examines'), U(toUri(e, 'concept')));
+        const eUri = toUri(e, 'concept');
+        if (!eUri) { skippedEmptyLabels.push(e); continue; }
+        emit(triples, U(turnUri), U(NS.chat + 'examines'), U(eUri));
       }
 
       // Findings — referenced via chat:concludes; minted as :Finding entities
       for (const f of args.concludes ?? []) {
         const fUri = toUri(f, 'finding');
+        if (!fUri) { skippedEmptyLabels.push(f); continue; }
         emit(triples, U(turnUri), U(NS.chat + 'concludes'), U(fUri));
         // If newly minted (i.e. caller passed a bare string), declare type + label
         if (!f.startsWith('urn:') && !f.startsWith('http')) {
@@ -355,6 +373,7 @@ ${ttl || '# (missing — re-run import-ontology.mjs)'}
       // Questions — referenced via chat:asks; minted as :Question entities
       for (const q of args.asks ?? []) {
         const qUri = toUri(q, 'question');
+        if (!qUri) { skippedEmptyLabels.push(q); continue; }
         emit(triples, U(turnUri), U(NS.chat + 'asks'), U(qUri));
         if (!q.startsWith('urn:') && !q.startsWith('http')) {
           emit(triples, U(qUri), U(TypeP), U('http://dkg.io/ontology/coding-project/Question'));
@@ -369,6 +388,7 @@ ${ttl || '# (missing — re-run import-ontology.mjs)'}
       // ── Sugared writes ──────────────────────────────────────
       for (const d of args.proposedDecisions ?? []) {
         const slug = normaliseSlug(d.title);
+        if (!slug) { skippedEmptyLabels.push(d.title); continue; }
         const decUri = `urn:dkg:decision:${slug}-${rand(4)}`;
         const decStatus = d.status ?? 'proposed';
         emit(triples, U(decUri), U(TypeP), U(NS.decisions + 'Decision'));
@@ -387,6 +407,7 @@ ${ttl || '# (missing — re-run import-ontology.mjs)'}
       }
       for (const t of args.proposedTasks ?? []) {
         const slug = normaliseSlug(t.title);
+        if (!slug) { skippedEmptyLabels.push(t.title); continue; }
         const taskUri = `urn:dkg:task:${slug}-${rand(4)}`;
         emit(triples, U(taskUri), U(TypeP), U(NS.tasks + 'Task'));
         emit(triples, U(taskUri), U(NameP), L(t.title));
@@ -479,10 +500,10 @@ ${ttl || '# (missing — re-run import-ontology.mjs)'}
             shared = true;
           } catch (e) {
             // Promote failure on annotation is non-fatal.
-            return ok(buildSummary(turnUri, args, newEntityUris, triples.length, false, formatError(e), deferredForSession));
+            return ok(buildSummary(turnUri, args, newEntityUris, triples.length, false, formatError(e), deferredForSession, skippedEmptyLabels));
           }
         }
-        return ok(buildSummary(turnUri, args, newEntityUris, triples.length, shared, undefined, deferredForSession));
+        return ok(buildSummary(turnUri, args, newEntityUris, triples.length, shared, undefined, deferredForSession, skippedEmptyLabels));
       } catch (e) {
         return errResult(`Failed to annotate turn: ${formatError(e)}`);
       }
@@ -498,6 +519,7 @@ function buildSummary(
   shared: boolean,
   promoteError?: string,
   deferredForSession?: string | null,
+  skippedEmptyLabels: string[] = [],
 ): string {
   const counts = {
     topics: args.topics?.length ?? 0,
@@ -528,6 +550,13 @@ function buildSummary(
   if (newEntityUris.length) {
     lines.push('', `**${newEntityUris.length} new entit${newEntityUris.length === 1 ? 'y' : 'ies'} minted:**`);
     for (const uri of newEntityUris) lines.push(`- \`${uri}\``);
+  }
+  if (skippedEmptyLabels.length) {
+    lines.push(
+      '',
+      `**${skippedEmptyLabels.length} label${skippedEmptyLabels.length === 1 ? '' : 's'} skipped** (would have slugified to empty; rephrase with alpha-numerics):`,
+    );
+    for (const l of skippedEmptyLabels) lines.push(`- \`${l}\``);
   }
   return lines.join('\n');
 }
