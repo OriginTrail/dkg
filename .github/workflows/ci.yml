@@ -233,15 +233,25 @@ jobs:
   # Sharding history:
   #   3 shards → 6+ min each (wall-clock tail)
   #   4 shards → ~4.5 min each (still the gating tail)
-  #   8 shards → ~3m-3m 49s each; slowest shard (4m 16s total) was the
-  #              green-state critical path that pushed total CI to 5m 18s
-  #  10 shards → ~3m-3m 20s each ← current. Per-shard wall-clock is
-  #              dominated by ~140s of vitest hook overhead (parallel
-  #              beforeAll/afterAll across files) not test body time
-  #              (test bodies only sum to 40-68s per shard). Reducing
-  #              files-per-shard from 5 → 4 cuts hook wall-clock by
-  #              ~20-30s because fewer beforeAlls queue up on the
-  #              2-core ubuntu-latest runner.
+  #   8 shards → ~3m-3m 49s each (slowest shard 4m 16s → total 5m 18s)
+  #  10 shards --shard=N/M (vitest hash) → slowest 4m 22s → total 4m 53s
+  #  10 shards greedy bin-packed ← current. Three files dominate hook
+  #           wall-clock (e2e-privacy 47s, e2e-publish-protocol 43s,
+  #           e2e-flows 39s body + ~2 min of beforeAll hooks each).
+  #           vitest's default --shard=N/M hashes files to shards and
+  #           can land multiple heavies together (shard 8/10 previously
+  #           got e2e-publish-protocol + e2e-workspace-sync + gossip-
+  #           validation = ~80s body + stacked hooks → 4m 22s ceiling).
+  #
+  #           Greedy bin-packing using historical per-file weights gives
+  #           each of the top-3 heavies its own shard and distributes
+  #           the remaining ~37 files evenly across the rest. Projected
+  #           ceiling is shard 1 (e2e-privacy alone, ~3m 30s total).
+  #
+  #           Weights live in `scripts/ci-shard-agent.mjs` in this
+  #           package and are refreshed whenever per-file timings shift
+  #           meaningfully — unknown files default to a light weight and
+  #           fall into the lightest bin automatically.
   # ------------------------------------------------------------------
   tornado-agent:
     name: "Tornado: agent [${{ matrix.shard }}/10]"
@@ -268,7 +278,14 @@ jobs:
       - name: Restore build outputs
         run: tar -xzf /tmp/build-outputs.tgz
       - name: "Agent tests (shard ${{ matrix.shard }}/10)"
-        run: pnpm --filter @origintrail-official/dkg-agent exec vitest run --shard=${{ matrix.shard }}/10
+        working-directory: packages/agent
+        run: |
+          set -euo pipefail
+          mapfile -t SHARD_FILES < <(node scripts/ci-shard-agent.mjs ${{ matrix.shard }} 10)
+          echo "::group::Agent shard ${{ matrix.shard }}/10 — ${#SHARD_FILES[@]} files"
+          printf '  %s\n' "${SHARD_FILES[@]}"
+          echo "::endgroup::"
+          pnpm exec vitest run "${SHARD_FILES[@]}"
 
   # ------------------------------------------------------------------
   # Bura lane — `cli` is the heaviest BURA package (CLI daemon, HTTP API,
