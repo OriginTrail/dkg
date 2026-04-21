@@ -1467,7 +1467,7 @@ describe('runSetup abort signal', () => {
 // ---------------------------------------------------------------------------
 
 describe('runSetup workspace migration', () => {
-  it('removes the prior install\'s SKILL.md when the workspace changes between setups', async () => {
+  it('removes the prior install\'s SKILL.md when the workspace changes between setups (cleanup runs AFTER new install lands)', async () => {
     const dkgHome = join(testDir, '.dkg');
     const openclawHome = join(testDir, '.openclaw');
     const dirA = join(testDir, 'workspace-a');
@@ -1496,10 +1496,63 @@ describe('runSetup workspace migration', () => {
       // Second install targets dirB — old install's skill at dirA must be retired.
       await runSetup({ workspace: dirB, start: false, verify: false });
       const skillB = join(dirB, 'skills', 'dkg-node', 'SKILL.md');
-      expect(existsSync(skillA)).toBe(false);
+
+      // Post-R4-2: end state is new-install-present + old-install-absent +
+      // pointer flipped. All three must hold together — proves the migration
+      // ran the cleanup strictly after the new install landed.
       expect(existsSync(skillB)).toBe(true);
+      expect(existsSync(skillA)).toBe(false);
       const afterB = JSON.parse(readFileSync(join(openclawHome, 'openclaw.json'), 'utf-8'));
       expect(afterB.plugins.entries['adapter-openclaw'].installedWorkspace).toBe(dirB);
+    } finally {
+      process.env.DKG_HOME = originalDkg;
+      process.env.OPENCLAW_HOME = originalOpenclaw;
+    }
+  });
+
+  // Codex PR #234 R4-2: strictly-additive install sequence. If new-install
+  // fails mid-migration, the prior install's SKILL.md must still be on disk —
+  // the user keeps a working install instead of being left with nothing.
+  it('leaves the prior install\'s SKILL.md intact when installing the new skill fails (R4-2)', async () => {
+    const dkgHome = join(testDir, '.dkg');
+    const openclawHome = join(testDir, '.openclaw');
+    const dirA = join(testDir, 'workspace-a');
+    const dirB = join(testDir, 'workspace-b');
+    mkdirSync(dirA, { recursive: true });
+    mkdirSync(dirB, { recursive: true });
+    mkdirSync(openclawHome, { recursive: true });
+    writeFileSync(
+      join(openclawHome, 'openclaw.json'),
+      JSON.stringify({ plugins: {} }, null, 2) + '\n',
+    );
+
+    const originalDkg = process.env.DKG_HOME;
+    const originalOpenclaw = process.env.OPENCLAW_HOME;
+    process.env.DKG_HOME = dkgHome;
+    process.env.OPENCLAW_HOME = openclawHome;
+
+    try {
+      // First install lands cleanly at dirA — baseline.
+      await runSetup({ workspace: dirA, start: false, verify: false });
+      const skillA = join(dirA, 'skills', 'dkg-node', 'SKILL.md');
+      expect(existsSync(skillA)).toBe(true);
+
+      // Sabotage dirB so installCanonicalNodeSkill's mkdirSync(skills/dkg-node)
+      // throws: create `skills` as a FILE so the recursive mkdir hits an
+      // intermediate non-directory and fails with ENOTDIR/EEXIST.
+      writeFileSync(join(dirB, 'skills'), 'not a directory\n');
+
+      await expect(
+        runSetup({ workspace: dirB, start: false, verify: false }),
+      ).rejects.toThrow();
+
+      // R4-2 guarantee: old install survived because migration cleanup runs
+      // strictly after the new install. The user still has a working SKILL.md
+      // in dirA — a subsequent `dkg openclaw setup --workspace /dir-a` would
+      // restore full consistency.
+      expect(existsSync(skillA)).toBe(true);
+      // And the new install's SKILL.md is NOT somewhere unexpected.
+      expect(existsSync(join(dirB, 'skills', 'dkg-node', 'SKILL.md'))).toBe(false);
     } finally {
       process.env.DKG_HOME = originalDkg;
       process.env.OPENCLAW_HOME = originalOpenclaw;
