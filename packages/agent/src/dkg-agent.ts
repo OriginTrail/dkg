@@ -1784,6 +1784,42 @@ export class DKGAgent {
     return this.discovery.findAgentByPeerId(peerId);
   }
 
+  /**
+   * Append ontology guidance quads into the canonical project ontology graph.
+   * Temporary helper until the dedicated ontology-management endpoints land.
+   */
+  async writeContextGraphOntology(
+    contextGraphId: string,
+    quads: Array<{ subject: string; predicate: string; object: string }>,
+    callerAgentAddress?: string,
+  ): Promise<number> {
+    const ctx = createOperationContext('system');
+    if (!Array.isArray(quads) || quads.length === 0) return 0;
+
+    const exists = await this.contextGraphExists(contextGraphId);
+    if (!exists) {
+      throw new Error(`Context graph "${contextGraphId}" does not exist`);
+    }
+
+    const owner = await this.getContextGraphOwner(contextGraphId);
+    if (!owner) {
+      throw new Error(
+        `Context graph "${contextGraphId}" has no known creator. ` +
+        `Wait for sync to complete or create it locally first.`,
+      );
+    }
+    this.assertCallerIsOwner(owner, callerAgentAddress, 'manage the project ontology');
+
+    const ontologyGraph = `did:dkg:context-graph:${contextGraphId}/_ontology`;
+    await this.store.insert(quads.map((quad) => ({
+      ...quad,
+      graph: ontologyGraph,
+    })));
+
+    this.log.info(ctx, `Wrote ${quads.length} ontology quads to "${ontologyGraph}"`);
+    return quads.length;
+  }
+
   // ---------------------------------------------------------------------------
   // Agent Registry — multi-agent identity management
   // ---------------------------------------------------------------------------

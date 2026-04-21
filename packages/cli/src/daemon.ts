@@ -2389,6 +2389,22 @@ export function requestAdvertisesLocalAgentSemanticEnrichment(
   );
 }
 
+export function isAuthorizedLocalAgentSemanticWorkerRequest(
+  config: DkgConfig,
+  req: IncomingMessage,
+  integrationId: string,
+): boolean {
+  const normalizedIntegrationId = normalizeIntegrationId(integrationId);
+  if (!normalizedIntegrationId) return false;
+  const stored = getLocalAgentIntegration(config, normalizedIntegrationId);
+  if (!stored?.enabled) return false;
+  const headerIntegrationId = normalizeIntegrationId(
+    readSingleHeaderValue(req.headers['x-dkg-local-agent-integration']) ?? '',
+  );
+  if (headerIntegrationId !== normalizedIntegrationId) return false;
+  return isLoopbackClientIp(req.socket.remoteAddress ?? '');
+}
+
 export function reconcileOpenClawSemanticAvailability(
   config: DkgConfig,
   extractionStatus: Map<string, ExtractionStatusRecord>,
@@ -4791,6 +4807,11 @@ async function handleRequest(
   }
 
   if (req.method === 'POST' && path === '/api/semantic-enrichment/events/claim') {
+    if (!isAuthorizedLocalAgentSemanticWorkerRequest(config, req, 'openclaw')) {
+      return jsonResponse(res, 403, {
+        error: 'Semantic enrichment worker routes are restricted to the local OpenClaw runtime',
+      });
+    }
     const body = await readBody(req, SMALL_BODY_BYTES);
     let payload: Record<string, unknown>;
     try {
@@ -4865,6 +4886,11 @@ async function handleRequest(
   }
 
   if (req.method === 'POST' && path === '/api/semantic-enrichment/events/renew') {
+    if (!isAuthorizedLocalAgentSemanticWorkerRequest(config, req, 'openclaw')) {
+      return jsonResponse(res, 403, {
+        error: 'Semantic enrichment worker routes are restricted to the local OpenClaw runtime',
+      });
+    }
     const body = await readBody(req, SMALL_BODY_BYTES);
     let payload: Record<string, unknown>;
     try {
@@ -4882,6 +4908,11 @@ async function handleRequest(
   }
 
   if (req.method === 'POST' && path === '/api/semantic-enrichment/events/release') {
+    if (!isAuthorizedLocalAgentSemanticWorkerRequest(config, req, 'openclaw')) {
+      return jsonResponse(res, 403, {
+        error: 'Semantic enrichment worker routes are restricted to the local OpenClaw runtime',
+      });
+    }
     const body = await readBody(req, SMALL_BODY_BYTES);
     let payload: Record<string, unknown>;
     try {
@@ -4921,6 +4952,11 @@ async function handleRequest(
   }
 
   if (req.method === 'POST' && path === '/api/semantic-enrichment/events/complete') {
+    if (!isAuthorizedLocalAgentSemanticWorkerRequest(config, req, 'openclaw')) {
+      return jsonResponse(res, 403, {
+        error: 'Semantic enrichment worker routes are restricted to the local OpenClaw runtime',
+      });
+    }
     const body = await readBody(req, SMALL_BODY_BYTES);
     let payload: Record<string, unknown>;
     try {
@@ -4962,6 +4998,11 @@ async function handleRequest(
   }
 
   if (req.method === 'POST' && path === '/api/semantic-enrichment/events/fail') {
+    if (!isAuthorizedLocalAgentSemanticWorkerRequest(config, req, 'openclaw')) {
+      return jsonResponse(res, 403, {
+        error: 'Semantic enrichment worker routes are restricted to the local OpenClaw runtime',
+      });
+    }
     const body = await readBody(req, SMALL_BODY_BYTES);
     let payload: Record<string, unknown>;
     try {
@@ -5010,6 +5051,11 @@ async function handleRequest(
   }
 
   if (req.method === 'POST' && path === '/api/semantic-enrichment/events/append') {
+    if (!isAuthorizedLocalAgentSemanticWorkerRequest(config, req, 'openclaw')) {
+      return jsonResponse(res, 403, {
+        error: 'Semantic enrichment worker routes are restricted to the local OpenClaw runtime',
+      });
+    }
     const body = await readBody(req, SMALL_BODY_BYTES);
     let payload: Record<string, unknown>;
     try {
@@ -5819,7 +5865,7 @@ async function handleRequest(
       return jsonResponse(res, 400, { error: 'Missing "quads"' });
     }
     const ontologyGraph = contextGraphOntologyUri(contextGraphId);
-    const normalizedQuads: Array<{ subject: string; predicate: string; object: string; graph: string }> = [];
+    const normalizedQuads: Array<{ subject: string; predicate: string; object: string }> = [];
     for (const entry of quads) {
       if (!isPlainRecord(entry)) {
         return jsonResponse(res, 400, { error: 'Each ontology quad must be an object' });
@@ -5841,19 +5887,33 @@ async function handleRequest(
         subject,
         predicate,
         object,
-        graph: ontologyGraph,
       });
     }
-    await agent.store.insert(normalizedQuads);
-    res.setHeader('Deprecation', 'true');
-    return jsonResponse(res, 200, {
-      written: normalizedQuads.length,
-      graph: ontologyGraph,
-      deprecated: {
-        currentEndpoint: 'POST /api/context-graph/{id}/_ontology/write',
-        plannedReplacementEndpoint: 'POST /api/context-graph/{id}/ontology',
-      },
-    });
+    try {
+      const written = await agent.writeContextGraphOntology(
+        contextGraphId,
+        normalizedQuads,
+        requestAgentAddress,
+      );
+      res.setHeader('Deprecation', 'true');
+      return jsonResponse(res, 200, {
+        written,
+        graph: ontologyGraph,
+        deprecated: {
+          currentEndpoint: 'POST /api/context-graph/{id}/_ontology/write',
+          plannedReplacementEndpoint: 'POST /api/context-graph/{id}/ontology',
+        },
+      });
+    } catch (err: any) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message.includes('Only the context graph creator')) {
+        return jsonResponse(res, 403, { error: message });
+      }
+      if (message.includes('does not exist')) {
+        return jsonResponse(res, 404, { error: message });
+      }
+      return jsonResponse(res, 400, { error: message });
+    }
   }
 
   // POST /api/assertion/create  { contextGraphId, name, subGraphName? }

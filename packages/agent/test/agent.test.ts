@@ -997,6 +997,50 @@ decisions: []
     await other.stop().catch(() => {});
   });
 
+  it('restricts temporary project ontology writes to the context graph creator', async () => {
+    const store = new OxigraphStore();
+    const owner = await DKGAgent.create({
+      name: 'OntologyOwnerBot',
+      store,
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+    });
+    const other = await DKGAgent.create({
+      name: 'OntologyOtherBot',
+      store,
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+    });
+
+    await owner.start();
+    await other.start();
+    await owner.createContextGraph({ id: 'ops-ontology-owner', name: 'Ops Ontology Owner' });
+
+    const ontologyQuad = {
+      subject: 'https://example.org/ontology#Task',
+      predicate: 'http://www.w3.org/2000/01/rdf-schema#label',
+      object: '"Task"',
+    };
+
+    await expect(other.writeContextGraphOntology('ops-ontology-owner', [ontologyQuad]))
+      .rejects.toThrow(/Only the context graph creator can manage the project ontology/);
+
+    await expect(owner.writeContextGraphOntology('ops-ontology-owner', [ontologyQuad]))
+      .resolves.toBe(1);
+
+    const inserted = await store.query(
+      `SELECT ?label WHERE {
+        GRAPH <did:dkg:context-graph:ops-ontology-owner/_ontology> {
+          <https://example.org/ontology#Task> <http://www.w3.org/2000/01/rdf-schema#label> ?label
+        }
+      }`,
+    );
+    expect(inserted.type).toBe('bindings');
+    expect(inserted.bindings).toHaveLength(1);
+    expect(inserted.bindings[0]?.label).toBe('"Task"');
+
+    await owner.stop().catch(() => {});
+    await other.stop().catch(() => {});
+  });
+
   it('validates CCL policy content before publish', async () => {
     const store = new OxigraphStore();
     const agent = await DKGAgent.create({

@@ -25,6 +25,7 @@ import {
   parseRequiredSignatures,
   pipeOpenClawStream,
   probeOpenClawChannelHealth,
+  isAuthorizedLocalAgentSemanticWorkerRequest,
   requestAdvertisesLocalAgentSemanticEnrichment,
   verifyOpenClawAttachmentRefsProvenance,
   normalizeExplicitLocalAgentDisconnectBody,
@@ -673,6 +674,42 @@ describe('best-effort semantic enqueue helper', () => {
     }), 'openclaw', {
       liveSemanticEnrichmentSupported: requestAdvertisesLocalAgentSemanticEnrichment(req, 'openclaw'),
     })).toBe(false);
+  });
+
+  it('restricts semantic worker routes to loopback OpenClaw integration requests', () => {
+    const enabledConfig = makeConfig({
+      localAgentIntegrations: {
+        openclaw: {
+          enabled: true,
+        },
+      },
+    });
+
+    expect(isAuthorizedLocalAgentSemanticWorkerRequest(enabledConfig, {
+      headers: {
+        'x-dkg-local-agent-integration': 'openclaw',
+      },
+      socket: { remoteAddress: '127.0.0.1' },
+    } as any, 'openclaw')).toBe(true);
+
+    expect(isAuthorizedLocalAgentSemanticWorkerRequest(enabledConfig, {
+      headers: {},
+      socket: { remoteAddress: '127.0.0.1' },
+    } as any, 'openclaw')).toBe(false);
+
+    expect(isAuthorizedLocalAgentSemanticWorkerRequest(enabledConfig, {
+      headers: {
+        'x-dkg-local-agent-integration': 'openclaw',
+      },
+      socket: { remoteAddress: '10.0.0.8' },
+    } as any, 'openclaw')).toBe(false);
+
+    expect(isAuthorizedLocalAgentSemanticWorkerRequest(makeConfig(), {
+      headers: {
+        'x-dkg-local-agent-integration': 'openclaw',
+      },
+      socket: { remoteAddress: '127.0.0.1' },
+    } as any, 'openclaw')).toBe(false);
   });
 
   it('uses the same resolved default agent address as assertion writes for chat-turn semantic URIs', () => {
