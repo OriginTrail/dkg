@@ -818,17 +818,22 @@ export class OriginTrailGameCoordinator {
         swarm.cclPolicyInstalled = true;
         this.log(`CCL turn-validation policy installed for ${swarmId}`);
       } catch (err: any) {
-        // If the agent supports CCL evaluation, installation failure is fatal —
-        // evaluateCclPolicy will be called later and followers will independently
-        // attempt to resolve the policy. If it's absent, they reject all turns.
-        if (this.agent.evaluateCclPolicy) {
+        // If the agent supports CCL evaluation, installation failure is normally
+        // fatal because evaluateCclPolicy is invoked later and followers will
+        // independently attempt to resolve the policy. However, a paranet with
+        // no registered on-chain owner (e.g. tests / dev without chain identity)
+        // cannot manage policies at all — in that case degrade gracefully and
+        // proceed without CCL rather than bricking every launch. Followers in
+        // the same mode will hit the identical failure and also skip CCL.
+        const msg = String(err?.message ?? err);
+        const noChainOwner = /no registered owner|cannot manage policies|identity not yet provisioned|Identity not set/i.test(msg);
+        if (this.agent.evaluateCclPolicy && !noChainOwner) {
           this.swarms.delete(swarmId);
           throw new Error(
             `Expedition startup aborted: CCL policy installation failed (${err.message}). ` +
             `Cannot proceed without governance — followers would reject all proposals.`,
           );
         }
-        // Agent doesn't support CCL evaluation — safe to proceed without it
         swarm.cclPolicyInstalled = false;
         this.log(`CCL policy installation failed: ${err.message} — CCL governance not available, proceeding without`);
       }

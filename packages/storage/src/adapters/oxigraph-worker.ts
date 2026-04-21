@@ -1,7 +1,21 @@
 import { Worker } from 'node:worker_threads';
 import { fileURLToPath } from 'node:url';
+import { existsSync } from 'node:fs';
 import type { TripleStore, Quad, QueryResult } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
+
+// Resolve the compiled worker impl. At production runtime (dist/adapters/
+// oxigraph-worker.js) the sibling `./oxigraph-worker-impl.js` exists. When
+// running under vitest against src/ the sibling is `.ts`, so fall back to
+// `../../dist/adapters/oxigraph-worker-impl.js` (compiled by `pnpm build`)
+// instead of throwing `Cannot find module`.
+function resolveWorkerImplPath(): string {
+  const sibling = new URL('./oxigraph-worker-impl.js', import.meta.url);
+  const siblingPath = fileURLToPath(sibling);
+  if (existsSync(siblingPath)) return siblingPath;
+  const distFromSrc = new URL('../../dist/adapters/oxigraph-worker-impl.js', import.meta.url);
+  return fileURLToPath(distFromSrc);
+}
 
 export class OxigraphWorkerStore implements TripleStore {
   private worker: Worker;
@@ -9,8 +23,7 @@ export class OxigraphWorkerStore implements TripleStore {
   private pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
 
   constructor(persistPath?: string) {
-    const workerUrl = new URL('./oxigraph-worker-impl.js', import.meta.url);
-    this.worker = new Worker(fileURLToPath(workerUrl), {
+    this.worker = new Worker(resolveWorkerImplPath(), {
       workerData: { persistPath },
     });
     this.worker.on('message', (msg: { id: number; result?: unknown; error?: string }) => {
