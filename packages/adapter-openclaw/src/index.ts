@@ -5,6 +5,7 @@ export {
   mergeOpenClawConfig,
   openclawConfigPath,
   removeCanonicalNodeSkill,
+  resolveWorkspaceDirFromConfig,
   runSetup,
   unmergeOpenClawConfig,
   verifyMemorySlotInvariants,

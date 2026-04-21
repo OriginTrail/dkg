@@ -2595,6 +2595,7 @@ export type ReverseLocalAgentSetupDeps = {
   unmergeOpenClawConfig?: (configPath: string) => void;
   verifyUnmergeInvariants?: (configPath: string) => string | null;
   removeCanonicalNodeSkill?: (workspaceDir: string) => void;
+  resolveWorkspaceDirFromConfig?: (config: unknown, openclawConfigPath: string) => string | null;
 };
 
 export async function reverseLocalAgentSetupForUi(
@@ -2606,32 +2607,45 @@ export async function reverseLocalAgentSetupForUi(
     ? openclawConfigPath
     : localOpenclawConfigPath();
 
-  // Discover the workspace dir BEFORE unmerge (post-unmerge the entry is
-  // reshaped, but agents.defaults.workspace / workspace live outside the
-  // adapter block and are preserved either way). Null on any parse/read
-  // failure — skill removal is best-effort.
+  // Defer to the adapter for every helper we need so install (setup) and
+  // removal (Disconnect) resolve the workspace through one codepath —
+  // agents.defaults.workspace / workspace / workspaceDir key variants,
+  // `~` expansion, relative-to-openclaw.json resolution, and the
+  // $OPENCLAW_HOME/workspace default fallback. See Codex R1-1 on PR #234.
+  const adapter = (
+    deps.unmergeOpenClawConfig
+    && deps.verifyUnmergeInvariants
+    && deps.removeCanonicalNodeSkill
+    && deps.resolveWorkspaceDirFromConfig
+  )
+    ? {
+        unmergeOpenClawConfig: deps.unmergeOpenClawConfig,
+        verifyUnmergeInvariants: deps.verifyUnmergeInvariants,
+        removeCanonicalNodeSkill: deps.removeCanonicalNodeSkill,
+        resolveWorkspaceDirFromConfig: deps.resolveWorkspaceDirFromConfig,
+      }
+    : await import('@origintrail-official/dkg-adapter-openclaw');
+  const unmergeOpenClawConfig = deps.unmergeOpenClawConfig ?? adapter.unmergeOpenClawConfig;
+  const verifyUnmergeInvariants = deps.verifyUnmergeInvariants ?? adapter.verifyUnmergeInvariants;
+  const removeCanonicalNodeSkill = deps.removeCanonicalNodeSkill ?? adapter.removeCanonicalNodeSkill;
+  const resolveWorkspaceDirFromConfig =
+    deps.resolveWorkspaceDirFromConfig ?? adapter.resolveWorkspaceDirFromConfig;
+
+  // Discover the workspace dir BEFORE unmerge (post-unmerge the adapter entry
+  // is reshaped, but `agents.defaults.workspace` / `workspace` / `workspaceDir`
+  // live outside the adapter block and survive either way). Null on any read
+  // or parse failure — skill removal is best-effort.
   let workspaceDir: string | null = null;
   if (existsSync(resolvedPath)) {
     try {
       const raw = JSON.parse(readFileSync(resolvedPath, 'utf-8'));
-      const candidate = raw?.agents?.defaults?.workspace ?? raw?.workspace ?? null;
-      workspaceDir = typeof candidate === 'string' && candidate.trim() ? candidate : null;
+      workspaceDir = resolveWorkspaceDirFromConfig(raw, resolvedPath);
     } catch {
       // Unparseable openclaw.json — leave workspaceDir null; the existing
       // unmerge path short-circuits on the same condition.
     }
   }
 
-  const adapter = (deps.unmergeOpenClawConfig && deps.verifyUnmergeInvariants && deps.removeCanonicalNodeSkill)
-    ? {
-        unmergeOpenClawConfig: deps.unmergeOpenClawConfig,
-        verifyUnmergeInvariants: deps.verifyUnmergeInvariants,
-        removeCanonicalNodeSkill: deps.removeCanonicalNodeSkill,
-      }
-    : await import('@origintrail-official/dkg-adapter-openclaw');
-  const unmergeOpenClawConfig = deps.unmergeOpenClawConfig ?? adapter.unmergeOpenClawConfig;
-  const verifyUnmergeInvariants = deps.verifyUnmergeInvariants ?? adapter.verifyUnmergeInvariants;
-  const removeCanonicalNodeSkill = deps.removeCanonicalNodeSkill ?? adapter.removeCanonicalNodeSkill;
   unmergeOpenClawConfig(resolvedPath);
   const failure = verifyUnmergeInvariants(resolvedPath);
   if (failure) {

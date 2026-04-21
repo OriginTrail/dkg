@@ -12,6 +12,7 @@ import {
   verifyUnmergeInvariants,
   installCanonicalNodeSkill,
   removeCanonicalNodeSkill,
+  resolveWorkspaceDirFromConfig,
   openclawConfigPath,
   runSetup,
   type AdapterEntryConfig,
@@ -1015,6 +1016,142 @@ describe('removeCanonicalNodeSkill', () => {
     expect(existsSync(join(ws, 'skills', 'dkg-node'))).toBe(false);
     expect(existsSync(otherSkillPath)).toBe(true);
     expect(existsSync(join(ws, 'skills'))).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolveWorkspaceDirFromConfig — shared resolver between setup install and
+// the daemon-side Disconnect path (Codex PR #234 R1-1).
+// ---------------------------------------------------------------------------
+
+describe('resolveWorkspaceDirFromConfig', () => {
+  // Use a deterministic openclaw.json path inside testDir so relative-path
+  // resolution is independent of cwd. OPENCLAW_HOME is scoped per-test only
+  // for the default-fallback cases.
+  let openclawConfigFilePath: string;
+
+  beforeEach(() => {
+    const openclawHome = join(testDir, '.openclaw');
+    mkdirSync(openclawHome, { recursive: true });
+    openclawConfigFilePath = join(openclawHome, 'openclaw.json');
+  });
+
+  it('prefers agents.defaults.workspace over other key variants', () => {
+    const wanted = join(testDir, 'wanted-ws');
+    const result = resolveWorkspaceDirFromConfig(
+      {
+        agents: { defaults: { workspace: wanted } },
+        workspace: join(testDir, 'ignored-ws'),
+        workspaceDir: join(testDir, 'also-ignored'),
+      },
+      openclawConfigFilePath,
+    );
+    expect(result).toBe(wanted);
+  });
+
+  it('falls back to top-level workspace when agents.defaults.workspace is absent', () => {
+    const wanted = join(testDir, 'top-level-ws');
+    const result = resolveWorkspaceDirFromConfig(
+      { workspace: wanted, workspaceDir: join(testDir, 'ignored') },
+      openclawConfigFilePath,
+    );
+    expect(result).toBe(wanted);
+  });
+
+  it('falls back to workspaceDir when the first two keys are absent', () => {
+    const wanted = join(testDir, 'legacy-key-ws');
+    const result = resolveWorkspaceDirFromConfig(
+      { workspaceDir: wanted },
+      openclawConfigFilePath,
+    );
+    expect(result).toBe(wanted);
+  });
+
+  it('expands a leading ~ to homedir()', () => {
+    const result = resolveWorkspaceDirFromConfig(
+      { agents: { defaults: { workspace: '~/foo' } } },
+      openclawConfigFilePath,
+    );
+    expect(result).toBe(join(homedir(), 'foo'));
+  });
+
+  it('resolves relative paths against dirname(openclawConfigPath) — not cwd', () => {
+    const result = resolveWorkspaceDirFromConfig(
+      { workspace: './workspace' },
+      openclawConfigFilePath,
+    );
+    expect(result).toBe(join(dirname(openclawConfigFilePath), 'workspace'));
+  });
+
+  it('passes absolute paths through unchanged', () => {
+    const absolute = join(testDir, 'already', 'absolute');
+    const result = resolveWorkspaceDirFromConfig(
+      { workspace: absolute },
+      openclawConfigFilePath,
+    );
+    expect(result).toBe(absolute);
+  });
+
+  it('returns default $OPENCLAW_HOME/workspace when no key is set but the dir exists', () => {
+    const openclawHome = join(testDir, 'default-home');
+    const defaultWs = join(openclawHome, 'workspace');
+    mkdirSync(defaultWs, { recursive: true });
+
+    const original = process.env.OPENCLAW_HOME;
+    process.env.OPENCLAW_HOME = openclawHome;
+    try {
+      const result = resolveWorkspaceDirFromConfig(
+        { plugins: {} },
+        join(openclawHome, 'openclaw.json'),
+      );
+      expect(result).toBe(defaultWs);
+    } finally {
+      if (original === undefined) delete process.env.OPENCLAW_HOME;
+      else process.env.OPENCLAW_HOME = original;
+    }
+  });
+
+  it('returns null when no key is set and the default $OPENCLAW_HOME/workspace does not exist', () => {
+    const openclawHome = join(testDir, 'empty-home');
+    mkdirSync(openclawHome, { recursive: true });
+
+    const original = process.env.OPENCLAW_HOME;
+    process.env.OPENCLAW_HOME = openclawHome;
+    try {
+      const result = resolveWorkspaceDirFromConfig(
+        { plugins: {} },
+        join(openclawHome, 'openclaw.json'),
+      );
+      expect(result).toBeNull();
+    } finally {
+      if (original === undefined) delete process.env.OPENCLAW_HOME;
+      else process.env.OPENCLAW_HOME = original;
+    }
+  });
+
+  it('returns null when the winning key is present but not a non-empty string (no fallback cascade across keys)', () => {
+    // Matches discoverWorkspace semantics: `??` only skips null/undefined, so
+    // a present-but-empty-string / non-string value does NOT cascade to the
+    // next key. With no default $OPENCLAW_HOME/workspace on disk the resolver
+    // returns null, matching the existing install-path throw conditions.
+    const openclawHome = join(testDir, 'empty-home-2');
+    mkdirSync(openclawHome, { recursive: true });
+
+    const original = process.env.OPENCLAW_HOME;
+    process.env.OPENCLAW_HOME = openclawHome;
+    try {
+      const result = resolveWorkspaceDirFromConfig(
+        {
+          agents: { defaults: { workspace: '' } },
+          workspace: 'would-have-been-picked-if-cascading',
+        },
+        join(openclawHome, 'openclaw.json'),
+      );
+      expect(result).toBeNull();
+    } finally {
+      if (original === undefined) delete process.env.OPENCLAW_HOME;
+      else process.env.OPENCLAW_HOME = original;
+    }
   });
 });
 

@@ -130,6 +130,46 @@ function canonicalWorkspaceSkillPath(workspaceDir: string): string {
 // Step 1: Discover OpenClaw workspace
 // ---------------------------------------------------------------------------
 
+/**
+ * Pure resolver for the workspace directory from an already-parsed
+ * openclaw.json object. Shared between `discoverWorkspace` (setup / install
+ * path) and the daemon's Disconnect path so install + removal agree on
+ * exactly the same target directory.
+ *
+ * Resolution rules (matching `discoverWorkspace` semantics):
+ *   1. Priority order across the three known keys:
+ *      `agents.defaults.workspace` → `workspace` → `workspaceDir`.
+ *      First non-empty string wins.
+ *   2. Leading `~` is expanded to `homedir()`.
+ *   3. Relative paths are resolved against `dirname(openclawConfigPath)`,
+ *      not `cwd` — so a given openclaw.json produces the same absolute
+ *      workspace no matter where the process is invoked from.
+ *   4. When no key is set, fall back to `$OPENCLAW_HOME/workspace` (via
+ *      `openclawDir()`) only if that directory exists on disk.
+ *   5. Otherwise return `null`. Callers decide whether to throw or
+ *      skip-best-effort.
+ */
+export function resolveWorkspaceDirFromConfig(
+  config: unknown,
+  openclawConfigPath: string,
+): string | null {
+  const cfg = (config ?? {}) as Record<string, any>;
+  const candidate: unknown =
+    cfg?.agents?.defaults?.workspace ??
+    cfg?.workspace ??
+    cfg?.workspaceDir;
+
+  if (typeof candidate === 'string' && candidate.trim()) {
+    const expanded = candidate.replace(/^~/, homedir());
+    return resolve(dirname(openclawConfigPath), expanded);
+  }
+
+  const defaultWs = join(openclawDir(), 'workspace');
+  if (existsSync(defaultWs)) return defaultWs;
+
+  return null;
+}
+
 export function discoverWorkspace(override?: string): { configPath: string; workspaceDir: string } {
   if (override) {
     const ws = resolve(override.replace(/^~/, homedir()));
@@ -149,24 +189,9 @@ export function discoverWorkspace(override?: string): { configPath: string; work
   const raw = readFileSync(configPath, 'utf-8');
   const config = JSON.parse(raw);
 
-  // Try multiple paths where workspace might be configured
-  const workspaceDir: string | undefined =
-    config?.agents?.defaults?.workspace ??
-    config?.workspace ??
-    config?.workspaceDir;
-
-  if (workspaceDir) {
-    const expanded = workspaceDir.replace(/^~/, homedir());
-    // Resolve relative paths from the config file's directory, not cwd,
-    // so setup produces the same result regardless of working directory.
-    const resolved = resolve(dirname(configPath), expanded);
+  const resolved = resolveWorkspaceDirFromConfig(config, configPath);
+  if (resolved) {
     return { configPath, workspaceDir: resolved };
-  }
-
-  // Default workspace location
-  const defaultWs = join(openclawDir(), 'workspace');
-  if (existsSync(defaultWs)) {
-    return { configPath, workspaceDir: defaultWs };
   }
 
   throw new Error(
