@@ -311,16 +311,42 @@ describe('PrivateContentStore — SPARQL injection defence [ST-7]', () => {
     };
     await store.insert([probeQuad]);
 
+    // Either outcome is acceptable for this malicious-input probe:
+    //   (a) delete rejects with an IRI-safety / syntax error — the
+    //       desired defensive behaviour; OR
+    //   (b) delete succeeds as a scoped no-op and leaves the probe
+    //       intact — also acceptable because the real invariant is
+    //       "no injection widening".
+    // A bare empty catch used to accept ANY thrown error shape, which
+    // would have hidden regressions in the delete pipeline (store
+    // error, timeout, assertion framework error). Narrow to the
+    // defensive error class and assert the probe invariant always.
+    let deleteThrew = false;
+    let deleteError: unknown;
     try {
       await ps.deletePrivateTriples(CONTEXT_GRAPH, root);
-    } catch {
-      // Rejection is fine — that's the defensive outcome.
+    } catch (err) {
+      deleteThrew = true;
+      deleteError = err;
     }
 
-    // Regardless of whether the call threw, the probe quad in a totally
-    // unrelated graph must survive. If injection widened the DELETE the
-    // probe would be gone and this assertion catches the regression.
+    // Probe invariant: the unrelated-graph quad MUST survive no matter
+    // which branch ran. If injection widened the DELETE the probe
+    // would be gone and this assertion catches the regression.
     expect(await store.countQuads('urn:probe:graph')).toBe(1);
+
+    // If delete rejected, at minimum it must be a real Error — not
+    // `undefined`, a string, or an assertion-framework artefact. The
+    // original empty catch accepted anything; we tightened that much
+    // at least. We deliberately do NOT pin the error message shape:
+    // the defensive rejection vocabulary legitimately varies across
+    // layers (assertSafeIri, Oxigraph SPARQL parser, Blazegraph query
+    // engine) and across the parametric malicious-input matrix, so a
+    // narrow regex produces false-positive test failures that hide
+    // the real invariant (probe survival, asserted above).
+    if (deleteThrew) {
+      expect(deleteError).toBeInstanceOf(Error);
+    }
   });
 
   it('storePrivateTriples silently accepts unsafe rootEntity (defence-in-depth gap)', async () => {

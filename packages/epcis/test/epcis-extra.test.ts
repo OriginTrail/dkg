@@ -183,12 +183,17 @@ describe('[K-6] EPCIS capture → query contract (always runs, no devnet)', () =
     it('publisher is not invoked when validation fails', async () => {
       const scratch: Captured[] = [];
       const p = inMemoryPublisher(scratch);
+      // Pin to validation-shaped error vocabulary. `rejects.toBeDefined()`
+      // passes for ANY rejection (even e.g. a bug where the publisher itself
+      // crashed), hiding the case where validation silently ran and the
+      // publisher call was what actually failed — we want to prove
+      // validation rejected first.
       await expect(
         handleCapture(
           { epcisDocument: INVALID_DOC },
           { contextGraphId: CONTEXT_GRAPH_ID, publisher: p },
         ),
-      ).rejects.toBeDefined();
+      ).rejects.toThrow(/validation|invalid|schema|epcis|document|missing|required/i);
       expect(scratch).toHaveLength(0);
     });
   });

@@ -49,6 +49,14 @@ describe('VerifyProposalMsg', () => {
     expect(decoded.contextGraphId).toBe(proposal.contextGraphId);
     expect(new Uint8Array(decoded.agentSignatureR)).toEqual(proposal.agentSignatureR);
     expect(new Uint8Array(decoded.agentSignatureVS)).toEqual(proposal.agentSignatureVS);
+    // The title claims "all fields"; the previous assertion set silently
+    // skipped verifiedMemoryId and batchId, so a wire-tag drift or
+    // field-drop on those two ints would land green. Pin them here so
+    // the round-trip guarantee matches the name.
+    // protobufjs decodes uint64 fields as a Long object; normalise
+    // before comparing against the plain JS-number input values.
+    expect(Number(decoded.verifiedMemoryId)).toBe(proposal.verifiedMemoryId);
+    expect(Number(decoded.batchId)).toBe(proposal.batchId);
   });
 
   it('deterministic: same input produces same bytes', () => {
@@ -106,6 +114,14 @@ describe('StorageACKMsg', () => {
     expect(new Uint8Array(decoded.coreNodeSignatureR)).toEqual(ack.coreNodeSignatureR);
     expect(new Uint8Array(decoded.coreNodeSignatureVS)).toEqual(ack.coreNodeSignatureVS);
     expect(decoded.contextGraphId).toBe(ack.contextGraphId);
+    // `nodeIdentityId` distinguishes WHICH core node signed the ACK.
+    // Dropping it silently would let the publisher count N junk ACKs
+    // all attributed to node 0 as if they came from N distinct nodes
+    // — a consensus-level false positive. Pin the round-trip.
+    // Note: protobufjs decodes uint64 fields as a Long object by
+    // default, so we normalise to Number before comparing against the
+    // plain JS-number input.
+    expect(Number(decoded.nodeIdentityId)).toBe(ack.nodeIdentityId);
   });
 
   it('deterministic encoding', () => {

@@ -152,12 +152,19 @@ describe('@unit ContextGraphs (facade)', () => {
       const authority = accounts[5].address;
       const caller = accounts[0];
 
+      // Pin the full event payload so a regression that swaps arg order
+      // (e.g. owner vs authority) or silently mutates the hosting-node list
+      // fails immediately. Args per ContextGraphStorage.ContextGraphCreated:
+      // (contextGraphId, owner, hostingNodes, participantAgents,
+      //  requiredSignatures, metadataBatchId, publishPolicy,
+      //  publishAuthority, publishAuthorityAccountId).
       await expect(
         Facade.connect(caller).createContextGraph(
           hosts(), noAgents(), 2, 0, 0, authority, 0,
         ),
       )
-        .to.emit(Storage, 'ContextGraphCreated');
+        .to.emit(Storage, 'ContextGraphCreated')
+        .withArgs(1n, caller.address, hosts(), noAgents(), 2, 0, 0, authority, 0);
 
       expect(await Storage.ownerOf(1)).to.equal(caller.address);
       expect(await Storage.balanceOf(caller.address)).to.equal(1);
@@ -388,11 +395,25 @@ describe('@unit ContextGraphs (facade)', () => {
   describe('PCA coherence validation', () => {
     it('create: happy path — authority matches ownerOf(accountId)', async () => {
       const pcaAccountId = await createPCAAccount(accounts[0], '60000');
+      // Pin the CG id + owner + policy triple so a regression that accepts
+      // the call but writes wrong curator metadata fails immediately.
       await expect(
         Facade.connect(accounts[0]).createContextGraph(
           hosts(), noAgents(), 2, 0, 0, accounts[0].address, pcaAccountId,
         ),
-      ).to.emit(Storage, 'ContextGraphCreated');
+      )
+        .to.emit(Storage, 'ContextGraphCreated')
+        .withArgs(
+          1n,
+          accounts[0].address,
+          hosts(),
+          noAgents(),
+          2,
+          0,
+          0,
+          accounts[0].address,
+          pcaAccountId,
+        );
     });
 
     it('create: reverts with PCAAuthorityMismatch when authority is not the NFT owner', async () => {
@@ -425,19 +446,47 @@ describe('@unit ContextGraphs (facade)', () => {
     it('create: accountId == 0 skips the coherence check (non-PCA EOA)', async () => {
       // Any authority, accountId=0: coherence is skipped, storage's
       // EOA/Safe curator path stores the authority verbatim.
+      // Pin full args so a regression that silently flips to a PCA write
+      // path (non-zero accountId) or drops the EOA authority fails.
       await expect(
         Facade.connect(accounts[0]).createContextGraph(
           hosts(), noAgents(), 2, 0, 0, accounts[5].address, 0,
         ),
-      ).to.emit(Storage, 'ContextGraphCreated');
+      )
+        .to.emit(Storage, 'ContextGraphCreated')
+        .withArgs(
+          1n,
+          accounts[0].address,
+          hosts(),
+          noAgents(),
+          2,
+          0,
+          0,
+          accounts[5].address,
+          0,
+        );
     });
 
     it('create: open policy with accountId 0 still works (unaffected by gate)', async () => {
+      // Pin both the publishPolicy=1 (open) and zero-authority fields so a
+      // regression that conflates open/curated writes is caught.
       await expect(
         Facade.connect(accounts[0]).createContextGraph(
           hosts(), noAgents(), 2, 0, 1, ethers.ZeroAddress, 0,
         ),
-      ).to.emit(Storage, 'ContextGraphCreated');
+      )
+        .to.emit(Storage, 'ContextGraphCreated')
+        .withArgs(
+          1n,
+          accounts[0].address,
+          hosts(),
+          noAgents(),
+          2,
+          0,
+          1,
+          ethers.ZeroAddress,
+          0,
+        );
     });
 
     it('updatePublishPolicy: reverts with PCAAuthorityMismatch on mismatched pair', async () => {
@@ -912,9 +961,15 @@ describe('@unit ContextGraphs (facade)', () => {
     });
 
     it('owner can switch open -> curated with authority', async () => {
+      // PublishPolicyUpdated(contextGraphId, publishPolicy,
+      // publishAuthority, publishAuthorityAccountId). Pin all four so a
+      // regression that silently flips open<->curated or swaps the
+      // authority/accountId pair is caught.
       await expect(
         Facade.connect(accounts[0]).updatePublishPolicy(1, 0, accounts[5].address, 0),
-      ).to.emit(Storage, 'PublishPolicyUpdated');
+      )
+        .to.emit(Storage, 'PublishPolicyUpdated')
+        .withArgs(1, 0, accounts[5].address, 0);
       const policy = await Storage.getPublishPolicy(1);
       expect(policy.publishPolicy).to.equal(0);
       expect(policy.publishAuthority).to.equal(accounts[5].address);

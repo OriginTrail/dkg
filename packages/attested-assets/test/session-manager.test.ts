@@ -28,14 +28,16 @@ import type {
 
 function createTrackingGossip() {
   const publishCalls: Array<{ args: unknown[] }> = [];
+  const subscribeCalls: Array<{ args: unknown[] }> = [];
   return {
-    subscribe: async () => {},
+    subscribe: async (...args: unknown[]) => { subscribeCalls.push({ args }); },
     unsubscribe: async () => {},
     publish: async (...args: unknown[]) => { publishCalls.push({ args }); },
     onMessage: () => {},
     offMessage: () => {},
     get subscribedTopics() { return []; },
     _publishCalls: publishCalls,
+    _subscribeCalls: subscribeCalls,
   };
 }
 
@@ -153,13 +155,24 @@ describe('SessionManager', () => {
   });
 
   it('subscribes to session gossip topic on creation', async () => {
-    await manager.createSession(
+    const before = trackingGossip._subscribeCalls.length;
+    const config = await manager.createSession(
       'paranet-1', 'test-app', membership, quorumPolicy, reducerConfig, 30000, null,
     );
 
-    // Session creation triggers subscription - verified by the fact that
-    // the session was created successfully (subscribe is called internally)
-    expect(manager.getSession(manager.listSessions()[0].sessionId)).toBeDefined();
+    // Prove the subscription pipeline was actually exercised — a bare
+    // `expect(getSession(...)).toBeDefined()` would pass even if the manager
+    // silently dropped the subscribe() call (e.g. a bug where a future
+    // refactor drops per-paranet topic subscription).
+    expect(trackingGossip._subscribeCalls.length).toBeGreaterThan(before);
+    const subscribedTopic = trackingGossip._subscribeCalls
+      .slice(before)
+      .map((c) => c.args[0] as string)
+      .find((t) => t.includes('paranet-1') && t.includes('sessions'));
+    expect(subscribedTopic, 'subscribe() must fire for the sessions topic').toBeDefined();
+    // And the session actually exists, so this is still a positive test of
+    // the full creation path.
+    expect(manager.getSession(config.sessionId)).toBeDefined();
   });
 
   it('getSession retrieves a created session', async () => {
@@ -622,7 +635,12 @@ describe('SessionManager', () => {
 
       const session = manager.getSession(config.sessionId)!;
       session.currentRound = 2;
-      manager.startRound(config.sessionId).catch(() => {});
+      // Await startRound so any failure surfaces as a test error instead
+      // of being swallowed by a fire-and-forget `.catch(() => {})`. The
+      // neighbouring RoundFinalized test (below) already awaits this
+      // call successfully with identical setup, so there is no async-hang
+      // reason to fire-and-forget here.
+      await manager.startRound(config.sessionId);
 
       const roundState = session.roundStates.get(2)!;
       roundState.proposal = {

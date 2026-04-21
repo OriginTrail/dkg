@@ -28,14 +28,19 @@
  *   - CLI-17            — api-client live daemon round-trip (no mocks).
  *
  * Strategy: spin up one real daemon in `beforeAll` using the built CLI
- * (`packages/cli/dist/cli.js daemon-worker`) with a mock chain adapter. All
- * tests reuse the daemon via fetch. Teardown sends SIGTERM and asserts the
- * exit code + bounded shutdown.
+ * (`packages/cli/dist/cli.js daemon-worker`). All tests reuse the daemon via
+ * fetch. Teardown sends SIGTERM and asserts the exit code + bounded shutdown.
  *
- * Mocks policy: ZERO test-level mocks. The daemon's `chain.type = "mock"`
- * option is production code — it is the same `MockChainAdapter` shipped to
- * offline/air-gapped users. The only reason it is used here is to avoid
- * requiring a live hardhat RPC for unrelated HTTP-layer tests.
+ * Mocks policy: ZERO blockchain mocks. The daemon is wired against the
+ * SHARED HARDHAT NODE spun up by `packages/chain/test/hardhat-global-setup.ts`
+ * on `process.env.HARDHAT_PORT` (9548 for the CLI lane). The daemon uses a
+ * real `EVMChainAdapter` against that node with the real Hub address and the
+ * pre-registered `CORE_OP` operational wallet (its identityId was posted on
+ * chain by the harness' profile setup). None of the tests in this file
+ * exercise on-chain behaviour — they all validate HTTP-layer contracts —
+ * but they pay the small real-chain boot cost so NO test in the suite uses
+ * a mock chain adapter. This matches the project policy ("every test hits
+ * a real chain") enforced in CI.
  */
 
 import { beforeAll, afterAll, describe, expect, it } from 'vitest';
@@ -46,6 +51,8 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { request } from 'node:http';
+import { ethers } from 'ethers';
+import { getSharedContext, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { ApiClient } from '../src/api-client.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -75,6 +82,7 @@ async function writeDaemonConfig(
   authEnabled: boolean,
   extra: Record<string, unknown> = {},
 ): Promise<void> {
+  const { rpcUrl, hubAddress } = getSharedContext();
   await writeFile(
     join(home, 'config.json'),
     JSON.stringify({
@@ -82,6 +90,11 @@ async function writeDaemonConfig(
       apiPort,
       listenPort,
       apiHost: '127.0.0.1',
+      // Edge-role because these tests are HTTP-layer only — they must not
+      // register on-chain handlers (ACK / storage-ack) whose absence would
+      // otherwise time out in `DKGAgent.start()`. An edge node is a real
+      // production node mode: it skips profile registration entirely and
+      // simply dials other core nodes for publishes.
       nodeRole: 'edge',
       relay: 'none',
       auth: { enabled: authEnabled },
@@ -89,16 +102,34 @@ async function writeDaemonConfig(
         backend: 'oxigraph-worker',
         options: { path: join(home, 'store.nq') },
       },
+      // Real EVM adapter against the shared Hardhat node (port 9548 per
+      // packages/cli/vitest.config.ts). NO `type: 'mock'` — every test in
+      // the repo must hit a real chain, even HTTP-layer tests that never
+      // issue a chain call. The daemon's `ensureProfile` skips profile
+      // creation for edge nodes, so the (CORE_OP-derived) op wallet is
+      // never actually submitted as an on-chain identity here.
       chain: {
-        type: 'mock',
-        rpcUrl: 'mock://local',
-        hubAddress: '0x0000000000000000000000000000000000000000',
-        chainId: 'mock:31337',
-        mockIdentityId: '1',
+        type: 'evm',
+        rpcUrl,
+        hubAddress,
+        chainId: 'evm:31337',
       },
       paranets: [],
       ...extra,
     }),
+  );
+
+  // The daemon reads op wallets from `<DKG_HOME>/wallets.json`. Seed it
+  // with the harness' CORE_OP key so the daemon boots without first
+  // auto-generating a fresh wallet (which would also be fine, but using
+  // the harness key keeps the signer address deterministic across tests).
+  const coreOp = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+  await writeFile(
+    join(home, 'wallets.json'),
+    JSON.stringify({
+      wallets: [{ address: coreOp.address, privateKey: coreOp.privateKey }],
+    }, null, 2) + '\n',
+    { mode: 0o600 },
   );
 }
 
@@ -625,14 +656,18 @@ describe('CLI-17 — api-client round-trip against live daemon', () => {
   it('ApiClient with an invalid token is rejected (401)', async () => {
     const d = daemon!;
     const client = new ApiClient(d.apiPort, 'not-a-real-token');
-    // Any authenticated call should throw.
-    await expect(client.agents()).rejects.toThrow();
+    // Pin to auth-shaped error vocabulary — a bare `rejects.toThrow()` would
+    // pass on unrelated failures (server 500, connection drop, typo in URL)
+    // and hide a real 401-path regression.
+    await expect(client.agents()).rejects.toThrow(/401|unauthori[sz]ed|forbidden|auth|token|http/i);
   });
 
   it('ApiClient handles connection refused gracefully (port with no daemon)', async () => {
     // Port 65432 almost certainly has nothing on it.
     const client = new ApiClient(65432, 'whatever');
-    await expect(client.status()).rejects.toThrow();
+    // Pin to transport-layer error vocabulary to prove the failure is a
+    // connection failure, not a regex-silent success on some other throw.
+    await expect(client.status()).rejects.toThrow(/ECONNREFUSED|refused|connect|fetch|ENOTFOUND|ETIMEDOUT|network|socket|reset|aborted/i);
   });
 });
 

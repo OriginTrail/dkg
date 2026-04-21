@@ -149,13 +149,14 @@ describe('@unit Hub — extra audit coverage (E-1, E-7)', () => {
         it('non-owner (EOA) call reverts (auth gate closes)', async () => {
           // `setAndReinitializeContracts` carries `onlyOwnerOrMultiSigOwner`.
           // The underlying `_checkOwnerOrMultiSigOwner` reverts via
-          // `HubLib.UnauthorizedAccess`, but the error's library-level
-          // location (and custom error selector collision possibilities)
-          // mean a `.revertedWithoutReason` is the most portable assertion
-          // that still proves the gate runs. Any regression that turns the
-          // revert into a pass is immediately visible.
+          // `HubLib.UnauthorizedAccess("Only Hub Owner or Multisig Owner")`.
+          // Pinning the custom error (and its single string arg) catches
+          // regressions where the gate is replaced with a different error
+          // selector or accidentally loosened to `Ownable` only.
           const asStranger = HubContract.connect(accounts[5]);
-          await expect(asStranger.setAndReinitializeContracts([], [], [], [])).to.be.reverted;
+          await expect(asStranger.setAndReinitializeContracts([], [], [], []))
+            .to.be.revertedWithCustomError(HubContract, 'UnauthorizedAccess')
+            .withArgs('Only Hub Owner or Multisig Owner');
         });
 
     it('bubbles a revert from _reinitializeContracts (no try/catch on initialize)', async () => {
@@ -174,11 +175,21 @@ describe('@unit Hub — extra audit coverage (E-1, E-7)', () => {
 
       // Snapshot pre-call registrations so we can prove atomic rollback on
       // revert: neither the newContract nor the asset storage should be
-      // registered afterwards.
-      await expect(HubContract.getContractAddress('AtomicRollbackContract')).to.be.reverted;
-      await expect(HubContract.getAssetStorageAddress('AtomicRollbackAssetStorage')).to.be
-        .reverted;
+      // registered afterwards. `get` on the internal set reverts with
+      // `ContractDoesNotExist(name)` when the name isn't registered —
+      // pinning this catches regressions that accidentally return address(0)
+      // instead of reverting.
+      await expect(HubContract.getContractAddress('AtomicRollbackContract'))
+        .to.be.revertedWithCustomError(HubContract, 'ContractDoesNotExist')
+        .withArgs('AtomicRollbackContract');
+      await expect(HubContract.getAssetStorageAddress('AtomicRollbackAssetStorage'))
+        .to.be.revertedWithCustomError(HubContract, 'ContractDoesNotExist')
+        .withArgs('AtomicRollbackAssetStorage');
 
+      // The inner initialize() hits an `onlyHub` gate pointing at a foreign
+      // Hub, raising HubLib.UnauthorizedAccess. We can't reliably pin the
+      // exact message from here because it's emitted by a different Hub
+      // instance, so match on the custom error name only (args are fuzzy).
       await expect(
         HubContract.setAndReinitializeContracts(
           [{ name: 'AtomicRollbackContract', addr: accounts[7].address }],
@@ -186,14 +197,18 @@ describe('@unit Hub — extra audit coverage (E-1, E-7)', () => {
           [await foreignKAV10.getAddress()],
           [],
         ),
-      ).to.be.reverted;
+      ).to.be.revertedWithCustomError(HubContract, 'UnauthorizedAccess');
 
       // Atomic: whole tx reverted, so the earlier setContractAddress /
       // setAssetStorageAddress inside the same call should have been
-      // rolled back along with the reinitialize revert.
-      await expect(HubContract.getContractAddress('AtomicRollbackContract')).to.be.reverted;
-      await expect(HubContract.getAssetStorageAddress('AtomicRollbackAssetStorage')).to.be
-        .reverted;
+      // rolled back along with the reinitialize revert. Same
+      // ContractDoesNotExist pinning as above.
+      await expect(HubContract.getContractAddress('AtomicRollbackContract'))
+        .to.be.revertedWithCustomError(HubContract, 'ContractDoesNotExist')
+        .withArgs('AtomicRollbackContract');
+      await expect(HubContract.getAssetStorageAddress('AtomicRollbackAssetStorage'))
+        .to.be.revertedWithCustomError(HubContract, 'ContractDoesNotExist')
+        .withArgs('AtomicRollbackAssetStorage');
     });
 
     it('bubbles a revert from _forwardCalls when the target call reverts', async () => {
@@ -213,9 +228,16 @@ describe('@unit Hub — extra audit coverage (E-1, E-7)', () => {
 
       // Snapshot a parallel registration attempt to verify atomic rollback:
       // if _forwardCalls reverts, the `newContracts` loop's registration
-      // must not persist.
-      await expect(HubContract.getContractAddress('ForwardRollbackContract')).to.be.reverted;
+      // must not persist. Pin ContractDoesNotExist to catch regressions
+      // where `get` silently returns address(0).
+      await expect(HubContract.getContractAddress('ForwardRollbackContract'))
+        .to.be.revertedWithCustomError(HubContract, 'ContractDoesNotExist')
+        .withArgs('ForwardRollbackContract');
 
+      // Token.mint is Ownable — when called via forwardCall from Hub, which
+      // isn't Token's owner, Token reverts with OwnableUnauthorizedAccount.
+      // We match the custom error name (args come from Token, not Hub, so
+      // skip .withArgs here to avoid ABI mismatch false-negatives).
       await expect(
         HubContract.setAndReinitializeContracts(
           [{ name: 'ForwardRollbackContract', addr: accounts[7].address }],
@@ -223,9 +245,11 @@ describe('@unit Hub — extra audit coverage (E-1, E-7)', () => {
           [],
           [{ contractName: 'Token', encodedData: [mintData] }],
         ),
-      ).to.be.reverted;
+      ).to.be.revertedWithCustomError(TokenContract, 'OwnableUnauthorizedAccount');
 
-      await expect(HubContract.getContractAddress('ForwardRollbackContract')).to.be.reverted;
+      await expect(HubContract.getContractAddress('ForwardRollbackContract'))
+        .to.be.revertedWithCustomError(HubContract, 'ContractDoesNotExist')
+        .withArgs('ForwardRollbackContract');
     });
 
     it('idempotency: repeated registrations of the same name/addr leave state identical', async () => {

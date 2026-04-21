@@ -138,9 +138,12 @@ describe('VectorStore — Tri-Modal Memory §21 compliance', () => {
   });
 
   it('search: rejects memory-layer outside WM/SWM/VM enum via CHECK constraint', async () => {
+    // Pin to CHECK-constraint error vocabulary so a bare rejection (e.g. a
+    // bug that accidentally accepts 'ltm' but rejects on something else
+    // downstream) cannot satisfy the assertion.
     await expect(
       store.insert({ ...baseRec(), memoryLayer: 'ltm' as unknown as 'wm' }),
-    ).rejects.toThrow();
+    ).rejects.toThrow(/CHECK|constraint|memoryLayer|memory_layer|enum|invalid/i);
   });
 
   it('search: dimension mismatch silently skips rows instead of throwing', async () => {

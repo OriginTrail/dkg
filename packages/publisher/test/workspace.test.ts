@@ -1098,8 +1098,15 @@ describe('Workspace: conditionalShare (CAS)', () => {
         expectedValue: '"recruiting"',
       }],
     };
-    await expect(publisher.conditionalShare(PARANET, [], literalOpts))
-      .resolves.toBeDefined();
+    // Weak `resolves.toBeDefined()` would accept a skeleton result
+    // object or a failed-CAS shape where the assertion-condition
+    // matched coincidentally. Pin both fields of the `ShareResult`
+    // contract so a regression that silently no-ops the CAS (returns
+    // a dummy "success" shape) cannot pass.
+    const casResult = await publisher.conditionalShare(PARANET, [], literalOpts);
+    expect(casResult.shareOperationId).toMatch(/.+/);
+    expect(casResult.message).toBeInstanceOf(Uint8Array);
+    expect(casResult.message.length).toBeGreaterThan(0);
   });
 
   it('serializes concurrent CAS writes to the same subject+predicate', async () => {

@@ -238,39 +238,45 @@ describe('createTripleStore factory', () => {
     ).rejects.toThrow('queryEndpoint');
   });
 
-  it('oxigraph-worker adapter is registered', async (ctx) => {
-    // The worker adapter uses `new URL('./oxigraph-worker-impl.js', import.meta.url)`
-    // which resolves relative to the module actually loaded at runtime.
-    // When vitest runs against raw source (no prior `pnpm build`), that URL
-    // lands in `src/adapters/` where only the .ts files live, so the Worker
-    // constructor cannot find the `.js` sibling and throws.
+  it('oxigraph-worker adapter is registered and round-trips an insert', async () => {
+    // The worker adapter resolves `./oxigraph-worker-impl.js` relative to
+    // the module loaded at runtime. When vitest runs against raw source
+    // without a prior `pnpm build`, that URL lands in `src/adapters/` where
+    // only the .ts files live, so the Worker constructor throws
+    // "Cannot find module … oxigraph-worker-impl.js".
     //
-    // The previous test swallowed this error with `expect(true).toBe(true)` —
-    // visually "passing" while never exercising the worker. That's the
-    // opposite of what we want. Catch the exact same "module not found"
-    // condition but surface it as a **skipped** test (vitest `ctx.skip()`)
-    // so it shows up in the reporter, and re-throw anything else so real
-    // regressions still fail loudly. In CI the full adapter lane runs
-    // against the built artifact (see the dedicated worker E2E), which is
-    // where the round-trip contract is genuinely verified.
+    // This used to be caught and converted to `ctx.skip()`, which meant a
+    // green CI run even when the worker artifact was missing — i.e. a
+    // broken build never triggered a test failure. We now FAIL LOUDLY in
+    // that case with a remediation hint, so:
+    //   • locally, the developer sees "run pnpm build first" instead of a
+    //     silent skip;
+    //   • in CI, if `pnpm build` was not wired into the lane (or the build
+    //     regresses), this test surfaces it as a red failure.
+    let store: Awaited<ReturnType<typeof createTripleStore>>;
     try {
-      const store = await createTripleStore({ backend: 'oxigraph-worker' });
-      await store.insert([{
-        subject: 'http://ex.org/s',
-        predicate: 'http://ex.org/p',
-        object: '"hi"',
-        graph: 'http://ex.org/g',
-      }]);
-      expect(await store.countQuads()).toBe(1);
-      await store.close();
+      store = await createTripleStore({ backend: 'oxigraph-worker' });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.includes('Cannot find module') && msg.includes('oxigraph-worker-impl')) {
-        ctx.skip();
-        return;
+        throw new Error(
+          `oxigraph-worker adapter is not runnable — the compiled ` +
+          `oxigraph-worker-impl.js artifact is missing from ` +
+          `packages/storage/dist/adapters/. Run ` +
+          `\`pnpm --filter @origintrail-official/dkg-storage build\` ` +
+          `before running this test. Underlying error: ${msg}`,
+        );
       }
       throw err;
     }
+    await store.insert([{
+      subject: 'http://ex.org/s',
+      predicate: 'http://ex.org/p',
+      object: '"hi"',
+      graph: 'http://ex.org/g',
+    }]);
+    expect(await store.countQuads()).toBe(1);
+    await store.close();
   });
 
   it('throws on unknown backend', async () => {

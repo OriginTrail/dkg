@@ -156,18 +156,79 @@ describe('V10 remap wire (PublishIntent.swmGraphId + subGraphName)', () => {
     expect(decoded.swmGraphId).toBe(SOURCE_SWM_GRAPH_ID);
     expect(decoded.subGraphName).toBe(SUB_GRAPH_NAME);
     expect(decoded.kaCount).toBe(KA_COUNT);
+
+    // Per-ACK crypto verification. `toHaveLength(3)` alone would be
+    // satisfied by three OPAQUE ACKs, including ones forged against
+    // the SOURCE graph id instead of the TARGET (the exact regression
+    // this describe block is meant to catch). Recover each ACK's
+    // signer from the TARGET digest and require the recovered address
+    // to match one of the three simulated peer wallets with no
+    // duplicates — identity dedup + cryptographic provenance in one
+    // loop.
+    const expectedPeerAddrs = new Set(
+      peerWallets.map((w) => w.address.toLowerCase()),
+    );
+    const targetDigest = computeTargetAckDigest(merkleRoot);
+    const targetPrefixedHash = ethers.hashMessage(targetDigest);
+    // Enclosing result carries the merkleRoot every surviving ACK
+    // was verified against. Pin it so a future collector refactor
+    // that returns a different root would fail this test.
+    expect(result.merkleRoot).toEqual(merkleRoot);
+
+    const recoveredAddrs = new Set<string>();
+    const seenIdentityIds = new Set<string>();
+    for (const ack of result.acks) {
+      // `CollectedACK` exposes `signatureR` / `signatureVS` — NOT the
+      // wire-format `coreNodeSignatureR/VS` field names. Recover
+      // against the TARGET digest and require the signer to be one of
+      // the three simulated peer wallets with no duplicates.
+      const r = ack.signatureR instanceof Uint8Array
+        ? ack.signatureR
+        : new Uint8Array(ack.signatureR);
+      const vs = ack.signatureVS instanceof Uint8Array
+        ? ack.signatureVS
+        : new Uint8Array(ack.signatureVS);
+      const recovered = ethers.recoverAddress(targetPrefixedHash, {
+        r: ethers.hexlify(r),
+        yParityAndS: ethers.hexlify(vs),
+      }).toLowerCase();
+      expect(
+        expectedPeerAddrs.has(recovered),
+        `ACK signer ${recovered} is NOT one of the three simulated peer ` +
+          `wallets — either the collector accepted a forged ACK, or it ` +
+          `signed against the SOURCE graph id and recover drifted`,
+      ).toBe(true);
+      expect(recoveredAddrs.has(recovered), `duplicate signer ${recovered}`).toBe(false);
+      recoveredAddrs.add(recovered);
+      const idKey = String(ack.nodeIdentityId);
+      expect(seenIdentityIds.has(idKey), `duplicate nodeIdentityId ${idKey}`).toBe(false);
+      seenIdentityIds.add(idKey);
+    }
+    expect(recoveredAddrs.size).toBe(3);
   });
 
   it('ACKCollector elides swmGraphId when source equals target (direct publish)', async () => {
     let dispatchedIntent: Uint8Array | undefined;
-    const peerWallet = ethers.Wallet.createRandom();
+    // Three distinct wallets so three distinct ACKs pass collector-side
+    // identity dedup. Using ONE wallet here caused the collector to reject
+    // the 2nd/3rd ACK as duplicates, which is why this test previously
+    // masked the rejection with `.catch(() => {})` after the dispatch
+    // assertion. Removing the catch means a real collector failure (for
+    // any reason, not just ACK dedup) surfaces instead of being silently
+    // swallowed — we want the whole `collect()` to succeed so the assert
+    // block below runs against a known-good post-dispatch state.
+    const peerWallets = [
+      ethers.Wallet.createRandom(),
+      ethers.Wallet.createRandom(),
+      ethers.Wallet.createRandom(),
+    ];
 
     const deps: ACKCollectorDeps = {
       gossipPublish: async () => {},
       sendP2P: async (peerId, _protocol, data) => {
         if (dispatchedIntent === undefined) dispatchedIntent = data;
         const idx = parseInt(peerId.replace('peer-', ''), 10);
-        return signTargetAck(peerWallet, merkleRoot, idx + 1);
+        return signTargetAck(peerWallets[idx], merkleRoot, idx + 1);
       },
       getConnectedCorePeers: () => ['peer-0', 'peer-1', 'peer-2'],
       log: () => {},
@@ -192,7 +253,7 @@ describe('V10 remap wire (PublishIntent.swmGraphId + subGraphName)', () => {
       tokenAmount: TOKEN_AMOUNT,
       swmGraphId: TARGET_CG_ID_STR,
       stagingQuads,
-    }).catch(() => {});
+    });
 
     expect(dispatchedIntent).toBeDefined();
     const decoded = decodePublishIntent(dispatchedIntent!);

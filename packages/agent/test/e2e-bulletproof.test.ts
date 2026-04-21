@@ -1145,7 +1145,23 @@ describe('bulletproof: working-memory assertions are invisible to peers until pr
     // If we ever want this to change, the fix lives in the
     // data-phase filter at dkg-agent.ts:770–779 (remove the WM
     // exclusion) AND in promote (so WM isn't leaked by default).
-    const bQuads = await nodeB.assertion.query(cgId, assertionName).catch(() => []);
+    //
+    // Bug-hiding guard: we previously `.catch(() => [])` here which
+    // silently turned ANY throw (not just "assertion graph unknown")
+    // into a passing privacy check. We now ONLY accept the specific
+    // "graph not present" error shape as equivalent to zero rows; any
+    // other failure re-throws so a broken query pipeline cannot
+    // masquerade as a successful privacy outcome.
+    let bQuads: Awaited<ReturnType<typeof nodeB.assertion.query>>;
+    try {
+      bQuads = await nodeB.assertion.query(cgId, assertionName);
+    } catch (err) {
+      const msg = String((err as Error)?.message ?? err);
+      if (!/not\s*found|does\s*not\s*exist|no\s*such|unknown\s*assertion|missing/i.test(msg)) {
+        throw err;
+      }
+      bQuads = [];
+    }
     expect(
       bQuads.length,
       'WM assertion leaked to peer — if this fails, the sync handler ' +

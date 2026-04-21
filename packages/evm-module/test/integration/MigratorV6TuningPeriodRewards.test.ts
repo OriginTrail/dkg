@@ -313,37 +313,61 @@ describe('MigratorV6TuningPeriodRewards Integration Tests', function () {
 
     describe('Access Control for Setters', function () {
       it('should only allow owner or multisig to set delegator rewards', async function () {
+        // `_checkOwnerOrMultiSigOwner` in the V6 migrator reverts via
+        // `HubLib.UnauthorizedAccess("Only Hub Owner or Multisig Owner")`.
+        // Pinning both the error name and its string arg catches regressions
+        // where the gate is swapped for a different primitive (e.g. Ownable)
+        // or opened to any caller.
+        const rewardAmount = toTRAC(1_000);
         await expect(
           contracts.migrator
             .connect(accounts.delegator1)
             .setDelegatorRewardAmount(
               node1Id,
               accounts.delegator1.address,
-              toTRAC(1_000),
+              rewardAmount,
             ),
-        ).to.be.reverted;
+        )
+          .to.be.revertedWithCustomError(
+            contracts.migrator,
+            'UnauthorizedAccess',
+          )
+          .withArgs('Only Hub Owner or Multisig Owner');
 
-        // Verify owner can set rewards
-        await expect(
-          contracts.migrator.setDelegatorRewardAmount(
+        // Owner-path success: assert state changed rather than only
+        // .not.be.reverted, so a regression that silently no-ops still fails.
+        await contracts.migrator.setDelegatorRewardAmount(
+          node1Id,
+          accounts.delegator1.address,
+          rewardAmount,
+        );
+        expect(
+          await contracts.migrator.delegatorRewardAmount(
             node1Id,
             accounts.delegator1.address,
-            toTRAC(1_000),
           ),
-        ).to.not.be.reverted;
+        ).to.equal(rewardAmount);
       });
 
       it('should only allow owner or multisig to set operator rewards', async function () {
+        const rewardAmount = toTRAC(1_000);
         await expect(
           contracts.migrator
             .connect(accounts.delegator1)
-            .setOperatorRewardAmount(node1Id, toTRAC(1_000)),
-        ).to.be.reverted;
+            .setOperatorRewardAmount(node1Id, rewardAmount),
+        )
+          .to.be.revertedWithCustomError(
+            contracts.migrator,
+            'UnauthorizedAccess',
+          )
+          .withArgs('Only Hub Owner or Multisig Owner');
 
-        // Verify owner can set rewards
-        await expect(
-          contracts.migrator.setOperatorRewardAmount(node1Id, toTRAC(1_000)),
-        ).to.not.be.reverted;
+        // Owner-path success: prove state updated via the public mapping
+        // getter so silent no-op regressions surface.
+        await contracts.migrator.setOperatorRewardAmount(node1Id, rewardAmount);
+        expect(await contracts.migrator.operatorRewardAmount(node1Id)).to.equal(
+          rewardAmount,
+        );
       });
     });
   });
@@ -1512,7 +1536,12 @@ describe('MigratorV6TuningPeriodRewards Integration Tests', function () {
             accounts.delegator3.address,
             toTRAC(1_000),
           ),
-      ).to.be.reverted;
+      )
+        .to.be.revertedWithCustomError(
+          contracts.migrator,
+          'UnauthorizedAccess',
+        )
+        .withArgs('Only Hub Owner or Multisig Owner');
 
       console.log(`   ✅ Only system admin can set V6 tuning rewards`);
 

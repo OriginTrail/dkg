@@ -138,11 +138,16 @@ describe('@unit v10 Hub audit', function () {
     it('non-owner cannot call setAndReinitializeContracts', async () => {
       const HubAsNonOwner = HubContract.connect(accounts[1]);
       // HubLib.UnauthorizedAccess("Only Hub Owner or Multisig Owner") is the
-      // concrete selector — use low-level `.reverted` since the custom error
-      // is declared in a library and the Hub typechain doesn't re-export it.
+      // concrete selector. hardhat-chai-matchers resolves library errors
+      // through the passed-in contract's ABI, so we can pin both the error
+      // name AND its message arg — this catches regressions that change
+      // the ACL text (e.g., to "Only Hub Owner") or swap the selector for
+      // a different unauthorized path.
       await expect(
         HubAsNonOwner.setAndReinitializeContracts([], [], [], []),
-      ).to.be.reverted;
+      )
+        .to.be.revertedWithCustomError(HubContract, 'UnauthorizedAccess')
+        .withArgs('Only Hub Owner or Multisig Owner');
     });
 
     it('success path: sets new contracts and re-initializes them', async () => {
@@ -197,6 +202,12 @@ describe('@unit v10 Hub audit', function () {
       )) as unknown as ParametersStorage;
       await realPS.waitForDeployment();
 
+      // High-level call to an EOA (eoaTarget) produces an empty-data
+      // revert (Solidity extcodesize check / call-to-non-contract).
+      // `revertedWithoutReason` pins "empty revert data" specifically so
+      // this test fails if the path starts reverting with ANY selector or
+      // reason string (e.g. a new custom error added to Hub.sol). The
+      // atomicity invariant below still pins the post-state.
       await expect(
         HubContract.setAndReinitializeContracts(
           [{ name: 'E1RollbackA', addr: await realPS.getAddress() }],
@@ -204,7 +215,7 @@ describe('@unit v10 Hub audit', function () {
           [eoaTarget],
           [],
         ),
-      ).to.be.reverted;
+      ).to.be.revertedWithoutReason();
 
       // Atomicity: "E1RollbackA" must not be registered after the revert.
       expect(
@@ -234,6 +245,15 @@ describe('@unit v10 Hub audit', function () {
       await realPS.waitForDeployment();
       const eoaTarget = accounts[8].address;
 
+      // As in the previous case, the phase-3 reinit failure is a
+      // low-level EVM revert from calling an EOA — no string / selector
+      // available. We therefore pin atomicity via explicit post-call
+      // state assertions below: pre-existing record is unchanged and
+      // E1NewName is absent.
+      // Same rationale as the prior test: call-to-EOA produces empty
+      // revert data. `revertedWithoutReason` enforces that shape so the
+      // atomic-rollback assertions below can't silently pass if a future
+      // change replaces the empty revert with a reasoned one.
       await expect(
         HubContract.setAndReinitializeContracts(
           [
@@ -244,7 +264,7 @@ describe('@unit v10 Hub audit', function () {
           [eoaTarget],
           [],
         ),
-      ).to.be.reverted;
+      ).to.be.revertedWithoutReason();
 
       // Pre-existing registration must be unchanged (no flipped address).
       expect(await HubContract.getContractAddress('E1Preexisting')).to.equal(

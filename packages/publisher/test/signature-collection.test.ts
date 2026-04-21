@@ -425,7 +425,18 @@ describe('Context Graph Enshrinement with Signatures', () => {
       ],
     });
 
-    expect(result).toBeDefined();
+    // Test title claims the batch is REGISTERED in the context graph.
+    // `toBeDefined` alone was green for any non-null return, including
+    // "tentative" (chain rejected) or an empty result. Assert the
+    // publish is actually confirmed on-chain AND carries concrete
+    // registration evidence: a 66-char tx hash, a positive batchId,
+    // and the correct publisher address.
+    expect(result.status).toBe('confirmed');
+    expect(result.onChainResult).toBeDefined();
+    expect(result.onChainResult!.txHash).toMatch(/^0x[0-9a-fA-F]{64}$/);
+    expect(result.onChainResult!.batchId).toBeGreaterThan(0n);
+    expect(result.onChainResult!.publisherAddress.toLowerCase())
+      .toBe(new ethers.Wallet(HARDHAT_KEYS.CORE_OP).address.toLowerCase());
   });
 
   it('publishToContextGraph available on EVMChainAdapter for atomic path', async () => {
@@ -545,7 +556,16 @@ describe('Regression: sorted and deduplicated participant signatures', () => {
       contextGraphSignatures: sigs,
     });
 
-    expect(result).toBeDefined();
+    // Title guarantees "prevents contract revert" — `toBeDefined` was
+    // green even when chain rejected and returned 'tentative'. Pin the
+    // success invariant: publish must be confirmed and carry a real
+    // tx hash + batchId, which only happens when the sort-and-dedup
+    // logic produced an ordered participant-sig array the contract
+    // accepted.
+    expect(result.status).toBe('confirmed');
+    expect(result.onChainResult).toBeDefined();
+    expect(result.onChainResult!.txHash).toMatch(/^0x[0-9a-fA-F]{64}$/);
+    expect(result.onChainResult!.batchId).toBeGreaterThan(0n);
   });
 
   it('duplicate identityId participant sigs are removed (prevents contract revert)', async () => {
@@ -565,7 +585,15 @@ describe('Regression: sorted and deduplicated participant signatures', () => {
       contextGraphSignatures: sigs,
     });
 
-    expect(result).toBeDefined();
+    // Title guarantees "prevents contract revert". A green
+    // `toBeDefined` was compatible with the dedup regressing and the
+    // chain rejecting — pin confirmed status + real tx evidence
+    // instead, so a regression where duplicates slip through and the
+    // contract reverts (publish returns 'tentative') fails loudly.
+    expect(result.status).toBe('confirmed');
+    expect(result.onChainResult).toBeDefined();
+    expect(result.onChainResult!.txHash).toMatch(/^0x[0-9a-fA-F]{64}$/);
+    expect(result.onChainResult!.batchId).toBeGreaterThan(0n);
   });
 });
 

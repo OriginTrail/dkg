@@ -151,7 +151,12 @@ describe('@unit DKGPublishingConvictionNFT — extra audit coverage (E-6)', func
 
       const topUpAmount = hre.ethers.parseEther('2000');
       await TokenContract.connect(accounts[0]).approve(await NFT.getAddress(), topUpAmount);
-      await expect(NFT.connect(accounts[0]).topUp(acctId, topUpAmount)).to.be.reverted;
+      // Pin AccountExpired + args so a regression that reverts for the
+      // wrong reason (e.g. allowance/balance check) — but still leaves
+      // state unchanged — doesn't silently pass this "no-mutation" test.
+      await expect(NFT.connect(accounts[0]).topUp(acctId, topUpAmount))
+        .to.be.revertedWithCustomError(NFT, 'AccountExpired')
+        .withArgs(acctId, expiresAt);
 
       expect(await NFT.topUpBalance(acctId)).to.equal(bufferBefore);
       expect(await TokenContract.balanceOf(accounts[0].address)).to.equal(publisherBalBefore);
@@ -244,9 +249,16 @@ describe('@unit DKGPublishingConvictionNFT — extra audit coverage (E-6)', func
       const bufferBefore = await NFT.topUpBalance(acctId);
       const spentBefore = await NFT.epochSpent(acctId, BigInt(info.createdAtEpoch));
 
+      // Post-expiry coverPublishingCost reverts with
+      // `AccountExpired(accountId, expiresAtEpoch)`. Pinning both the error
+      // selector and its args catches regressions that accidentally ingest
+      // token value at or past the expiry boundary (the exact class of
+      // bug the no-op-on-failure assertions below guard against).
       await expect(
         NFT.connect(kav10).coverPublishingCost(agent.address, hre.ethers.parseEther('10')),
-      ).to.be.reverted;
+      )
+        .to.be.revertedWithCustomError(NFT, 'AccountExpired')
+        .withArgs(acctId, expiresAt);
 
       expect(await NFT.topUpBalance(acctId)).to.equal(bufferBefore);
       expect(await NFT.epochSpent(acctId, BigInt(info.createdAtEpoch))).to.equal(spentBefore);
@@ -261,9 +273,29 @@ describe('@unit DKGPublishingConvictionNFT — extra audit coverage (E-6)', func
       await advanceToEpoch(expiresAt - 1n);
 
       const baseCost = hre.ethers.parseEther('10');
+      // Compute the expected discounted cost from the on-chain discountBps
+      // so this check pins the exact event payload: if a future change
+      // changes the discount formula, drawnFromEpoch, or drops any arg,
+      // this fails. CostCovered(id, epoch, baseCost, discountedCost,
+      // drawnFromEpoch, drawnFromTopUp).
+      const BPS_DENOMINATOR = 10_000n;
+      const discountBps = BigInt(info.discountBps);
+      const expectedDiscounted =
+        (BigInt(baseCost) * (BPS_DENOMINATOR - discountBps)) / BPS_DENOMINATOR;
+      const currentEpoch = await ChronosContract.getCurrentEpoch();
+
       await expect(
         NFT.connect(kav10).coverPublishingCost(agent.address, baseCost),
-      ).to.emit(NFT, 'CostCovered');
+      )
+        .to.emit(NFT, 'CostCovered')
+        .withArgs(
+          acctId,
+          currentEpoch,
+          baseCost,
+          expectedDiscounted,
+          expectedDiscounted, // drawnFromEpoch: fully covered from baseAllowance
+          0n, // drawnFromTopUp: no buffer used
+        );
     });
 
     it('account created AT epoch N still has a full LOCK_DURATION window before AccountExpired fires', async () => {

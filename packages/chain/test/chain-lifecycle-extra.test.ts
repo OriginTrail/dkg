@@ -292,9 +292,14 @@ describe('chain-lifecycle-extra — V10 lifecycle + adapter invariants', () => {
 
     it('adapter.disputeDelivery rejects instead of silently succeeding when called on a non-existent purchase', async () => {
       const adapter = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+      // Bare `rejects.toThrow()` tolerated ANY failure class — even a
+      // provider-layer crash would have satisfied it while the on-chain
+      // contract silently accepted the dispute. Match the chain revert
+      // vocabulary so a regression where the call returns early (or
+      // fails for an orthogonal reason) is distinguishable.
       await expect(
         adapter.disputeDelivery!(999_999n, new Uint8Array(0)),
-      ).rejects.toThrow();
+      ).rejects.toThrow(/revert|purchase|does not exist|not found|Invalid|state|unknown/i);
     });
 
     it('adapter.disputeDelivery reverts on a freshly-initiated (not-yet-fulfilled) purchase', async () => {
@@ -315,10 +320,13 @@ describe('chain-lifecycle-extra — V10 lifecycle + adapter invariants', () => {
 
       // State is now 1 (Initiated). disputeDelivery requires a fulfilled
       // purchase, so this MUST revert — the bug surfaces if adapter
-      // silently returns success=true.
+      // silently returns success=true. Bare `rejects.toThrow()` would
+      // also pass if the provider died or the call reverted for a
+      // completely unrelated reason; tie the expected failure to the
+      // chain-originated state-machine vocabulary.
       await expect(
         buyer.disputeDelivery!(purchaseId, ethers.getBytes('0x00')),
-      ).rejects.toThrow();
+      ).rejects.toThrow(/revert|state|fulfill|InvalidState|Wrong|not (fulfilled|ready)/i);
     }, 60_000);
   });
 
@@ -383,6 +391,12 @@ describe('chain-lifecycle-extra — V10 lifecycle + adapter invariants', () => {
       const adapter = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
       const { coreProfileId } = getSharedContext();
       const merkleRoot = ethers.getBytes(ethers.keccak256(ethers.toUtf8Bytes('no-auth')));
+      // The adapter's nextAuthorizedSigner helper throws the pinned
+      // "No authorized publisher wallet found in signer pool for context
+      // graph" message (verified by the companion CH-18 test directly
+      // above). Match that vocabulary OR any chain revert so a silent-
+      // null regression (adapter returns success instead of throwing)
+      // is unambiguously red.
       await expect(
         adapter.createKnowledgeAssetsV10!({
           publishOperationId: ethers.hexlify(ethers.randomBytes(32)),
@@ -398,7 +412,7 @@ describe('chain-lifecycle-extra — V10 lifecycle + adapter invariants', () => {
           publisherSignature: { r: new Uint8Array(32), vs: new Uint8Array(32) },
           ackSignatures: [],
         } as any),
-      ).rejects.toThrow();
+      ).rejects.toThrow(/No authorized publisher wallet|authorized|context graph|revert|Unauthorized/i);
     }, 60_000);
 
     it('createKnowledgeAssetsV10 rejects non-positive contextGraphId with the documented pre-tx guard', async () => {

@@ -81,26 +81,24 @@ describe('Real Oxigraph ↔ Blazegraph parity [ST-1]', () => {
   it.runIf(!BLAZEGRAPH_URL)(
     'BLAZEGRAPH_URL not set — real parity cannot be verified (CI must set this)',
     () => {
-      // This test intentionally fails when run in a "CI parity lane"
-      // but no BLAZEGRAPH_URL is provided. It documents the gap rather
-      // than silently skipping: the project's CI is responsible for
-      // standing up a real Blazegraph and pointing this env var at it.
+      // This test intentionally fails red when run in any "CI parity
+      // lane" that did NOT stand up a real Blazegraph and export
+      // BLAZEGRAPH_URL. It documents the gap rather than silently
+      // skipping.
       //
-      // Local dev may legitimately skip this by exporting
-      // `DKG_SKIP_REAL_BLAZEGRAPH=1`. We honour that escape hatch but
-      // make the skip noisy.
-      if (process.env.DKG_SKIP_REAL_BLAZEGRAPH === '1') {
-        // eslint-disable-next-line no-console
-        console.warn(
-          '[ST-1] DKG_SKIP_REAL_BLAZEGRAPH=1 — skipping real parity. ' +
-            'Do NOT use this in CI.',
-        );
-        return;
-      }
+      // Previous iterations honoured a `DKG_SKIP_REAL_BLAZEGRAPH=1`
+      // escape hatch that returned silently. Under the "zero false
+      // positives" policy an empty-assertion green pass is itself a
+      // bug-hider: CI could believe parity was validated when no
+      // engine was ever contacted. The escape hatch has been removed.
+      // Local devs who cannot run a real Blazegraph should either
+      // install one (the README covers this) or accept the red on
+      // this single test — the rest of the storage suite runs green.
       throw new Error(
         '[ST-1] Real Oxigraph↔Blazegraph parity untested: ' +
-          'set BLAZEGRAPH_URL=<sparql endpoint> to enable, or ' +
-          'DKG_SKIP_REAL_BLAZEGRAPH=1 for local dev.',
+          'export BLAZEGRAPH_URL=<sparql endpoint> to enable. ' +
+          'Any CI job that reports this lane green without setting ' +
+          'the env var is lying about parity coverage.',
       );
     },
   );

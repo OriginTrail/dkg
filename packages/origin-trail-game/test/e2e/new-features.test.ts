@@ -123,7 +123,14 @@ describe('New feature E2E tests (3 nodes)', () => {
     it('joining a swarm generates a player_joined notification on the leader', async () => {
       const lobby = await apiA.lobby();
       const swarm = lobby.mySwarms?.find((s: any) => s.name === 'Notif Swarm');
-      if (!swarm) return;
+      // A vacuous `if (!swarm) return;` would pass even if the previous test
+      // silently dropped the swarm — that masks a real regression in the
+      // create/lobby path. Assert the swarm exists; the test is meaningful
+      // only with a live swarm to join.
+      expect(
+        swarm,
+        'precondition: "Notif Swarm" created in prior test must be visible in apiA.lobby()',
+      ).toBeTruthy();
 
       const beforeNotifs = await apiA.notifications();
       const beforeCount = beforeNotifs.unreadCount;
@@ -141,7 +148,19 @@ describe('New feature E2E tests (3 nodes)', () => {
 
     it('mark-read clears unread count', async () => {
       const before = await apiA.notifications();
-      if (before.unreadCount === 0) return;
+      // Vacuous early return (`if (before.unreadCount === 0) return;`) would
+      // pass the test without exercising mark-read at all, which hides the
+      // regression where mark-read silently no-ops. Force a notification
+      // first if the queue is empty.
+      if (before.unreadCount === 0) {
+        await apiC.create('MarkReadSetup', 'Mark Read Setup Swarm');
+        await sleep(2000);
+      }
+      const withNotifs = await apiA.notifications();
+      expect(
+        withNotifs.unreadCount,
+        'mark-read test requires at least one unread notification to be meaningful',
+      ).toBeGreaterThan(0);
 
       await apiA.markNotificationsRead();
       const after = await apiA.notifications();
@@ -157,9 +176,17 @@ describe('New feature E2E tests (3 nodes)', () => {
       const unreadIds = notifs.notifications
         ?.filter((n: any) => !n.read)
         .map((n: any) => n.id);
-      if (!unreadIds || unreadIds.length < 2) return;
+      // A vacuous `if (!unreadIds || unreadIds.length < 2) return;` would
+      // silently pass if gossip/notifications never delivered anything, which
+      // would hide the very bug we're probing (partial-selective mark-read).
+      // Assert the preconditions loudly.
+      expect(unreadIds, 'notifications() must return at least one unread id').toBeDefined();
+      expect(
+        unreadIds!.length,
+        'partial-mark-read test needs >=2 unread notifications; node B was expected to receive them via gossip',
+      ).toBeGreaterThanOrEqual(2);
 
-      await apiB.markNotificationsRead([unreadIds[0]]);
+      await apiB.markNotificationsRead([unreadIds![0]]);
       const after = await apiB.notifications();
       expect(after.unreadCount).toBe(notifs.unreadCount - 1);
     });

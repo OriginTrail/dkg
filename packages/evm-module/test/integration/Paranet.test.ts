@@ -760,6 +760,13 @@ describe('@unit Paranet', () => {
 
       const maxUint256 = ethers.MaxUint256;
 
+      // `_checkKnowledgeAssetOwner` computes
+      // `(knowledgeCollectionId - 1) * maxSize + knowledgeAssetId` before
+      // doing the ownership balance check. With both ids = MaxUint256 the
+      // multiplication overflows unchecked arithmetic and Solidity raises
+      // Panic(0x11) (arithmetic overflow/underflow). Pinning the panic code
+      // catches regressions where silent truncation is reintroduced or the
+      // check is removed entirely.
       await expect(
         Paranet.connect(paranetOwner).updateParanetMetadata(
           paranetKCStorageContract,
@@ -768,7 +775,7 @@ describe('@unit Paranet', () => {
           'New Name',
           'New Description',
         ),
-      ).to.be.reverted; // Should revert with token ID out of range or similar
+      ).to.be.revertedWithPanic(0x11);
     });
   });
 

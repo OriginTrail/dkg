@@ -49,12 +49,17 @@ describe('@unit Hub contract', function () {
   it('Set contract address and name (non-owner wallet); expect revert: only hub owner can set contracts', async () => {
     const HubWithNonOwnerSigner = Hub.connect(accounts[1]);
 
+    // OZ Ownable v5: `onlyOwner` reverts with `OwnableUnauthorizedAccount(account)`.
+    // Catches regression where the onlyOwner modifier is dropped or replaced
+    // with a different ACL primitive.
     await expect(
       HubWithNonOwnerSigner.setContractAddress(
         'TestContract',
         accounts[1].address,
       ),
-    ).to.be.reverted;
+    )
+      .to.be.revertedWithCustomError(Hub, 'OwnableUnauthorizedAccount')
+      .withArgs(accounts[1].address);
   });
 
   it('Set contract with empty name; expect revert: name cannot be empty', async () => {
@@ -106,11 +111,14 @@ describe('@unit Hub contract', function () {
 
     const contracts = await Hub.getAllContracts();
 
-    contracts.forEach(async (contract) => {
+    // `forEach` doesn't await async callbacks — any assertion failure would
+    // have been lost as an unhandled rejection. Rewriting as a `for...of`
+    // loop guarantees each assertion is awaited and reported.
+    for (const contract of contracts) {
       expect(await Hub.getContractAddress(contract.name)).to.equal(
         contract.addr,
       );
-    });
+    }
   });
 
   it('Set correct asset contract address and name; emits NewAssetContract event', async () => {
@@ -192,17 +200,23 @@ describe('@unit Hub contract', function () {
 
     const contracts = await Hub.getAllAssetStorages();
 
-    contracts.forEach(async (contract) => {
+    // Same fix as getAllContracts: await each assertion via for...of so
+    // failures are reported instead of silently lost inside `forEach`.
+    for (const contract of contracts) {
       expect(await Hub.getAssetStorageAddress(contract.name)).to.equal(
         contract.addr,
       );
-    });
+    }
   });
 
   it('Set contract address, set the same address with different name; Expect to be reverted as address is already in the set', async () => {
+    // Pin the NewContract args so a regression that emits the event with a
+    // different name/address (e.g. swapped argument order) fails loudly.
     await expect(
       Hub.setContractAddress('TestContract1', accounts[1].address),
-    ).to.emit(Hub, 'NewContract');
+    )
+      .to.emit(Hub, 'NewContract')
+      .withArgs('TestContract1', accounts[1].address);
     await expect(
       Hub.setContractAddress('TestContract2', accounts[1].address),
     ).to.be.revertedWithCustomError(Hub, 'AddressAlreadyInSet');
@@ -221,8 +235,14 @@ describe('@unit Hub contract', function () {
     const Hub2 = await (await hre.ethers.getContractFactory('Hub')).deploy();
     await Hub.transferOwnership(await Hub2.getAddress());
     const hubAsNonOwner = Hub.connect(accounts[1]);
+    // After the Hub2 ownership transfer, accounts[1] is no longer the owner
+    // and is not a multi-sig signer either, so OZ Ownable v5 must raise
+    // `OwnableUnauthorizedAccount(accounts[1])`. Catches regression where the
+    // catch-path returns true or the modifier is weakened.
     await expect(
       hubAsNonOwner.setContractAddress('TestContract', accounts[1].address),
-    ).to.be.reverted;
+    )
+      .to.be.revertedWithCustomError(Hub, 'OwnableUnauthorizedAccount')
+      .withArgs(accounts[1].address);
   });
 });

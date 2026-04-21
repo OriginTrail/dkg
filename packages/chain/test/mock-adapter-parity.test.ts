@@ -1,30 +1,45 @@
 /**
  * MockChainAdapter ↔ EVMChainAdapter API-parity audit.
  *
+ * ╔══════════════════════════════════════════════════════════════════════╗
+ * ║ POLICY CLARIFICATION — this file is NOT a "blockchain-mock in tests" ║
+ * ║ violation of the zero-mocks policy.                                  ║
+ * ║                                                                      ║
+ * ║ `MockChainAdapter` is PRODUCTION code (see                           ║
+ * ║ `packages/chain/src/mock-adapter.ts`, exported from the public       ║
+ * ║ `@origintrail-official/dkg-chain` surface, and instantiated by       ║
+ * ║ `packages/cli/src/daemon.ts:591` when a user runs the CLI daemon    ║
+ * ║ with `chain: { type: 'mock' }` for offline development).             ║
+ * ║                                                                      ║
+ * ║ This test file tests THAT PRODUCTION CLASS — it is analogous to      ║
+ * ║ `no-chain-adapter.test.ts` which tests the production                ║
+ * ║ `NoChainAdapter`. No other test in the tree uses                     ║
+ * ║ `MockChainAdapter` as a stand-in for the real chain; the historical ║
+ * ║ publisher/agent-test usage has been migrated to the real Hardhat    ║
+ * ║ harness. MockChainAdapter is only used in tests HERE, to audit       ║
+ * ║ itself.                                                              ║
+ * ╚══════════════════════════════════════════════════════════════════════╝
+ *
  * Audit findings covered:
  *
- *   CH-8 (HIGH) — MockChainAdapter has no tests of its own. The publisher
- *                 and agent packages rely on it as a stand-in for the real
- *                 adapter in ~680 unit tests; any drift between the two
- *                 surfaces — a new method on EVMChainAdapter that the mock
- *                 doesn't implement, or an off-by-one in argument count —
- *                 is invisible until a black-box integration run hits the
- *                 missing symbol.
+ *   CH-8 (HIGH) — `MockChainAdapter` is a user-facing offline-mode
+ *                 adapter that must stay API-compatible with
+ *                 `EVMChainAdapter`; a user who develops against the mock
+ *                 and then flips `chain.type` to `evm` should not hit
+ *                 "method not implemented" surprises. This file uses
+ *                 runtime reflection (walking the prototype chain) to
+ *                 assert API parity across both classes for every method
+ *                 declared on `ChainAdapter`. It also pins a small set of
+ *                 invariants (e.g. `isV10Ready() === true` so the V10
+ *                 code paths are exercised off-line; `signMessage`
+ *                 returns 32-byte r/vs; `createKnowledgeAssetsV10`
+ *                 tolerates `cgId === 0n` on the mock even though the
+ *                 real adapter rejects).
  *
- *                 This file uses runtime reflection (walking the prototype
- *                 chain) to assert API parity across both classes for every
- *                 method declared on `ChainAdapter`. It also pins a small
- *                 set of invariants that the mock must preserve to remain a
- *                 faithful stand-in (e.g. `isV10Ready() === true` so the
- *                 V10 code paths are exercised; `signMessage` returns 32b
- *                 r/vs; `createKnowledgeAssetsV10` tolerates `cgId === 0n`
- *                 on the mock even though the real adapter rejects).
- *
- * Per QA policy: if the parity check fails, the mock has drifted — the
- * test stays red until the mock is brought back in line with
- * EVMChainAdapter. This is *not* a bug in production code per se, but it
- * IS a regression vector for every downstream test that relies on the
- * mock.
+ * Per QA policy: if the parity check fails, production code has drifted
+ * — the mock adapter no longer faithfully emulates the real adapter and
+ * offline-mode users will hit surprises on chain switch. The test stays
+ * red until parity is restored or a documented exemption is added.
  */
 import { describe, it, expect } from 'vitest';
 import { EVMChainAdapter } from '../src/evm-adapter.js';

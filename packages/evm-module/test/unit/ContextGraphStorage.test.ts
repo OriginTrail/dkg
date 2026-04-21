@@ -299,9 +299,15 @@ describe('@unit ContextGraphStorage', () => {
     });
 
     it('reverts for nonexistent CG', async () => {
+      // `_requireExists` routes through OZ ERC721's `_requireOwned`, which
+      // reverts with `ERC721NonexistentToken(tokenId)` in v5 when the CG id
+      // has no owner minted. Catches regression where the existence check
+      // is removed and `setHostingNodes` silently initializes a ghost CG.
       await expect(
         StorageContract.connect(opSigner).setHostingNodes(999, [1n]),
-      ).to.be.reverted;
+      )
+        .to.be.revertedWithCustomError(StorageContract, 'ERC721NonexistentToken')
+        .withArgs(999);
     });
 
     it('isHostingNode reflects updated set', async () => {
@@ -733,40 +739,57 @@ describe('@unit ContextGraphStorage', () => {
   describe('nonexistent CG rejection', () => {
     const ghostId = 999n;
 
+    // Every mutator routes through `_requireExists` → OZ v5 ERC721
+    // `_requireOwned`, so an unknown CG id must surface as
+    // `ERC721NonexistentToken(ghostId)`. Pinning this catches regressions
+    // where the existence check is dropped and a ghost CG is silently
+    // mutated (or where the revert bubbles from a later branch instead).
     it('addParticipantAgent reverts on unknown CG', async () => {
       await expect(
         StorageContract.connect(opSigner).addParticipantAgent(ghostId, accounts[3].address),
-      ).to.be.reverted;
+      )
+        .to.be.revertedWithCustomError(StorageContract, 'ERC721NonexistentToken')
+        .withArgs(ghostId);
     });
 
     it('removeParticipantAgent reverts on unknown CG', async () => {
       await expect(
         StorageContract.connect(opSigner).removeParticipantAgent(ghostId, accounts[3].address),
-      ).to.be.reverted;
+      )
+        .to.be.revertedWithCustomError(StorageContract, 'ERC721NonexistentToken')
+        .withArgs(ghostId);
     });
 
     it('updatePublishPolicy reverts on unknown CG', async () => {
       await expect(
         StorageContract.connect(opSigner).updatePublishPolicy(ghostId, 1, ethers.ZeroAddress, 0),
-      ).to.be.reverted;
+      )
+        .to.be.revertedWithCustomError(StorageContract, 'ERC721NonexistentToken')
+        .withArgs(ghostId);
     });
 
     it('updatePublishAuthority reverts on unknown CG', async () => {
       await expect(
         StorageContract.connect(opSigner).updatePublishAuthority(ghostId, ethers.ZeroAddress, 0),
-      ).to.be.reverted;
+      )
+        .to.be.revertedWithCustomError(StorageContract, 'ERC721NonexistentToken')
+        .withArgs(ghostId);
     });
 
     it('updateQuorum reverts on unknown CG', async () => {
       await expect(
         StorageContract.connect(opSigner).updateQuorum(ghostId, 1),
-      ).to.be.reverted;
+      )
+        .to.be.revertedWithCustomError(StorageContract, 'ERC721NonexistentToken')
+        .withArgs(ghostId);
     });
 
     it('deactivateContextGraph reverts on unknown CG', async () => {
       await expect(
         StorageContract.connect(opSigner).deactivateContextGraph(ghostId),
-      ).to.be.reverted;
+      )
+        .to.be.revertedWithCustomError(StorageContract, 'ERC721NonexistentToken')
+        .withArgs(ghostId);
     });
 
     it('registerKCToContextGraph reverts on unknown CG (ContextGraphNotActive)', async () => {

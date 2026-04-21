@@ -370,6 +370,14 @@ describe('@unit DKGPublishingConvictionNFT', function () {
       return nft;
     }
 
+    // NOTE: Hub.setContractAddress rejects address(0), and
+    // hub.getContractAddress reverts with `ContractDoesNotExist(name)` when a
+    // name is unregistered. That means `initialize` never actually sees a
+    // zero address via Hub — the lookup reverts first. These tests originally
+    // asserted a bare revert; we now pin `ContractDoesNotExist(name)` which
+    // is the TRUE runtime revert bubbling through Hub.forwardCall. If the
+    // Hub ever starts returning address(0) (regression), `ZeroAddressDependency`
+    // would fire instead; tests would still fail, surfacing the behavior change.
     it('initialize reverts when EpochStorageV8 is address(0)', async () => {
       const freshHub = await deployDisposableHub();
       // Register Token + StakingStorage + Chronos stubs (EOA signers are fine —
@@ -386,7 +394,9 @@ describe('@unit DKGPublishingConvictionNFT', function () {
           await nft.getAddress(),
           nft.interface.encodeFunctionData('initialize'),
         ),
-      ).to.be.reverted;
+      )
+        .to.be.revertedWithCustomError(freshHub, 'ContractDoesNotExist')
+        .withArgs('EpochStorageV8');
     });
 
     it('initialize reverts when StakingStorage is address(0)', async () => {
@@ -402,7 +412,9 @@ describe('@unit DKGPublishingConvictionNFT', function () {
           await nft.getAddress(),
           nft.interface.encodeFunctionData('initialize'),
         ),
-      ).to.be.reverted;
+      )
+        .to.be.revertedWithCustomError(freshHub, 'ContractDoesNotExist')
+        .withArgs('StakingStorage');
     });
 
     it('initialize reverts when Chronos is address(0)', async () => {
@@ -418,7 +430,9 @@ describe('@unit DKGPublishingConvictionNFT', function () {
           await nft.getAddress(),
           nft.interface.encodeFunctionData('initialize'),
         ),
-      ).to.be.reverted;
+      )
+        .to.be.revertedWithCustomError(freshHub, 'ContractDoesNotExist')
+        .withArgs('Chronos');
     });
 
     it('initialize reverts when Token is address(0)', async () => {
@@ -435,7 +449,9 @@ describe('@unit DKGPublishingConvictionNFT', function () {
           await nft.getAddress(),
           nft.interface.encodeFunctionData('initialize'),
         ),
-      ).to.be.reverted;
+      )
+        .to.be.revertedWithCustomError(freshHub, 'ContractDoesNotExist')
+        .withArgs('Token');
     });
   });
 
@@ -813,7 +829,12 @@ describe('@unit DKGPublishingConvictionNFT', function () {
     });
 
     it('non-hub-owner cannot set maxAgentsPerAccount', async () => {
-      await expect(NFT.connect(accounts[5]).setMaxAgentsPerAccount(200)).to.be.reverted;
+      // `onlyHubOwner` modifier → `HubLib.UnauthorizedAccess("Only Hub Owner")`.
+      // Pin both error + arg so regressions that open this governance
+      // setter to any caller (or swap to a different ACL primitive) fail.
+      await expect(NFT.connect(accounts[5]).setMaxAgentsPerAccount(200))
+        .to.be.revertedWithCustomError(NFT, 'UnauthorizedAccess')
+        .withArgs('Only Hub Owner');
     });
 
     it('defaults to 100', async () => {

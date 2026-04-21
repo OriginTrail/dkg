@@ -191,8 +191,12 @@ describe('[K-3] DkgClient lifecycle against a REAL http.Server', () => {
     await new Promise<void>((r) => server.close(() => r()));
 
     // First attempt against the dead port must fail fast (not hang).
+    // Pin to transport-layer error vocabulary so a bug that makes status()
+    // return a falsy result (or throw something unrelated) doesn't pass.
     const dead = new DkgClient(port, 'tok');
-    await expect(dead.status()).rejects.toBeDefined();
+    await expect(dead.status()).rejects.toThrow(
+      /ECONNREFUSED|refused|connect|fetch|ENOTFOUND|ETIMEDOUT|socket|network|closed|reset/i,
+    );
 
     // Bring up a NEW server (possibly a different port — fine; DkgClient is
     // per-port so we rebuild it too, mirroring the "daemon restart → fresh
@@ -208,7 +212,12 @@ describe('[K-3] DkgClient lifecycle against a REAL http.Server', () => {
   it('connection refused on an unused port surfaces as an Error (no silent hang)', async () => {
     // Use an intentionally dead port (choose port 1 — always privileged and
     // unlikely to be listening as a DKG daemon).
+    // Pin to transport-layer error vocabulary: a bare `.toBeDefined()` would
+    // satisfy on any rejection (e.g. a client bug that throws a TypeError
+    // before even attempting the socket connect).
     const client = new DkgClient(1, 'tok');
-    await expect(client.status()).rejects.toBeDefined();
+    await expect(client.status()).rejects.toThrow(
+      /ECONNREFUSED|refused|connect|fetch|EACCES|EPERM|network|socket|closed/i,
+    );
   });
 });

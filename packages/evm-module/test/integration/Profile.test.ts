@@ -1031,14 +1031,24 @@ describe('Profile Contract', () => {
 
       // Claim rewards for some older epochs (e.g., 2, 3, 4).
       // This will not satisfy the condition for epoch 6.
+      //
+      // Only tolerate "nothing to claim" style reverts — any other failure
+      // (e.g. order-violation, unauthorised signer) should surface instead of
+      // being silently swallowed. Catches regression where a real bug in
+      // claimDelegatorRewards hides behind an empty catch.
       for (const epoch of [2, 3, 4]) {
-        await Staking.connect(delegatorForNode1)
-          .claimDelegatorRewards(
+        try {
+          await Staking.connect(delegatorForNode1).claimDelegatorRewards(
             node1.identityId,
             epoch,
             delegatorForNode1.address,
-          )
-          .catch(() => {});
+          );
+        } catch (err: unknown) {
+          const msg = String((err as { message?: string })?.message ?? err);
+          if (!/nothing to claim|NoRewards|zero amount|already claimed|no rewards/i.test(msg)) {
+            throw err;
+          }
+        }
       }
 
       // We are still in epoch 7, and rewards for epoch 6 are still not claimed.
@@ -1073,13 +1083,22 @@ describe('Profile Contract', () => {
       ];
 
       for (const claim of claims) {
-        await Staking.connect(claim.delegator)
-          .claimDelegatorRewards(
+        try {
+          await Staking.connect(claim.delegator).claimDelegatorRewards(
             node1.identityId,
             claim.epoch,
             claim.delegator.address,
-          )
-          .catch(() => {});
+          );
+        } catch (err: unknown) {
+          // Accept only the benign "nothing to claim" case; other errors
+          // must surface. Catches regression where an unrelated revert is
+          // silently swallowed and the subsequent fee-update assertions
+          // falsely pass.
+          const msg = String((err as { message?: string })?.message ?? err);
+          if (!/nothing to claim|NoRewards|zero amount|already claimed|no rewards/i.test(msg)) {
+            throw err;
+          }
+        }
       }
 
       // STEP 2: Update operator fee and read when it should become effective
@@ -1149,13 +1168,20 @@ describe('Profile Contract', () => {
         }
 
         for (const claim of claims) {
-          await Staking.connect(claim.delegator)
-            .claimDelegatorRewards(
+          try {
+            await Staking.connect(claim.delegator).claimDelegatorRewards(
               node1.identityId,
               claim.epoch,
               claim.delegator.address,
-            )
-            .catch(() => {});
+            );
+          } catch (err: unknown) {
+            // Same tightening as above: only swallow the benign
+            // "nothing to claim" case so real regressions surface.
+            const msg = String((err as { message?: string })?.message ?? err);
+            if (!/nothing to claim|NoRewards|zero amount|already claimed|no rewards/i.test(msg)) {
+              throw err;
+            }
+          }
         }
       }
 

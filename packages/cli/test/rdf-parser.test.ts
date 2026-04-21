@@ -128,8 +128,12 @@ describe('parseRdf', () => {
 
   describe('error handling', () => {
     it('rejects on invalid N-Triples content', async () => {
+      // Pin to parser-shaped error vocabulary. A bare `rejects.toThrow()` would
+      // incorrectly pass if parseRdf started failing for unrelated reasons
+      // (e.g. missing module, bad graph arg) — we want to prove the syntax
+      // validator rejected the garbage input.
       await expect(parseRdf('not valid ntriples at all !!!', 'ntriples', DEFAULT_GRAPH))
-        .rejects.toThrow();
+        .rejects.toThrow(/parse|parsing|syntax|invalid|unexpected|expected|ntriples|n-triples|eof|token/i);
     });
   });
 

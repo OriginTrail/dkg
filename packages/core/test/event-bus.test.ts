@@ -35,9 +35,23 @@ describe('TypedEventBus', () => {
     expect(calls[0]).toBe('a');
   });
 
-  it('does not crash on emit with no listeners', () => {
+  it('does not crash on emit with no listeners AND does not fan out to unrelated events', () => {
     const bus = new TypedEventBus();
+    const { calls: sentinelCalls, fn: sentinelHandler } = tracker();
+    // Register a sentinel on an unrelated event. If `emit('nonexistent', …)`
+    // silently fans out across all listeners (e.g. a regression that
+    // broadcasts to every registered handler regardless of event name),
+    // the sentinel would fire. This is stronger than `not.toThrow`:
+    // a no-op `emit` would also satisfy `not.toThrow`, but must
+    // still honour per-event routing.
+    bus.on('unrelated-event', sentinelHandler);
     expect(() => bus.emit('nonexistent', null)).not.toThrow();
+    expect(sentinelCalls).toHaveLength(0);
+    // Re-emit on the registered event to prove the sentinel is wired
+    // correctly (otherwise "never called" could simply mean broken
+    // registration rather than correct routing).
+    bus.emit('unrelated-event', 'fired');
+    expect(sentinelCalls).toEqual(['fired']);
   });
 
   it('removeAllListeners clears specific event', () => {

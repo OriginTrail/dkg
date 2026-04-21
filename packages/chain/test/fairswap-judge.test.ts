@@ -102,9 +102,15 @@ describe('FairSwap Judge (EVMChainAdapter)', () => {
 
     const { purchaseId } = await buyer.initiatePurchase!(sellerAddr, KC_ID, KA_ID, PRICE);
 
+    // Bare `rejects.toThrow()` would accept ANY throw — including a
+    // network error, a provider panic, or a regression that rejected
+    // for the wrong reason (e.g. state-machine error instead of the
+    // caller-identity check). Pin to the chain-originated revert
+    // vocabulary so an unrelated failure cannot masquerade as
+    // "non-seller correctly rejected".
     await expect(
       buyer.fulfillPurchase!(purchaseId, new Uint8Array(32), new Uint8Array(32)),
-    ).rejects.toThrow();
+    ).rejects.toThrow(/revert|NotSeller|Unauthorized|only seller|caller|not the seller/i);
   });
 
   it('returns null for nonexistent purchase', async () => {

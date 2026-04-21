@@ -734,11 +734,41 @@ describe('@unit v10 KnowledgeAssetsV10 audit', () => {
         publishOperationId: 'e9-op',
       });
       await TokenContract.connect(creator).approve(kav10Address, tokenAmount);
+      const kcIdBefore = await KCS.getLatestKnowledgeCollectionId();
       const tx = await KAV10.connect(creator).publishDirect(
         p,
         ethers.ZeroAddress,
       );
-      await expect(tx).to.emit(KCS, 'KnowledgeCollectionCreated');
+
+      // Parse the receipt to read the assigned kcId so we can assert the
+      // event args exactly. Pinning the full KCS payload (id, operationId,
+      // merkleRoot, byteSize, tokenAmount, isImmutable) catches regressions
+      // that silently swap operationId, drop the immutability bit, or log
+      // the wrong merkle root.
+      const receipt = await tx.wait();
+      const kcIdAfter = await KCS.getLatestKnowledgeCollectionId();
+      expect(kcIdAfter).to.equal(kcIdBefore + 1n);
+
+      const topic = KCS.interface.getEvent('KnowledgeCollectionCreated').topicHash;
+      const kcsAddr = (await KCS.getAddress()).toLowerCase();
+      const eventLog = receipt!.logs.find(
+        (l) => l.address.toLowerCase() === kcsAddr && l.topics[0] === topic,
+      );
+      expect(eventLog, 'KnowledgeCollectionCreated log present').to.not.equal(undefined);
+      const decoded = KCS.interface.decodeEventLog(
+        'KnowledgeCollectionCreated',
+        eventLog!.data,
+        eventLog!.topics,
+      );
+      expect(decoded.id).to.equal(kcIdAfter);
+      expect(decoded.publishOperationId).to.equal('e9-op');
+      expect(decoded.merkleRoot).to.equal(merkleRoot);
+      expect(decoded.byteSize).to.equal(1000n);
+      expect(decoded.tokenAmount).to.equal(tokenAmount);
+      expect(decoded.isImmutable).to.equal(false);
+      // startEpoch/endEpoch are Chronos-dependent; assert invariants rather
+      // than hardcoding values.
+      expect(decoded.endEpoch - decoded.startEpoch).to.equal(2n);
     });
 
     it('SPEC-GAP: must ALSO emit KnowledgeBatchCreated alongside KnowledgeCollectionCreated', async () => {
