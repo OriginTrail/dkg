@@ -17,9 +17,46 @@ const CLI_JS = join(DKG_V9_ROOT, 'packages', 'cli', 'dist', 'cli.js');
 const EVM_MODULE = join(DKG_V9_ROOT, 'packages', 'evm-module');
 const TEST_DIR = join(__dirname, '..', '..', '.test-nodes');
 
-const API_PORT_BASE = 19200;
-const LIBP2P_PORT_BASE = 19300;
-const HARDHAT_E2E_PORT = 18545;
+// Ports are picked at cluster-start time from a per-process random window to
+// eliminate CI-2 (`EADDRINUSE: 0.0.0.0:19301` on 2-core ubuntu-latest runners).
+// With hard-coded 19200/19300/18545 the test relies on those ports being free
+// at boot AND never being grabbed by a concurrent process; on CI the supervisor
+// → worker handoff in `dkg start --foreground` opens a ~6-8 s window where the
+// kernel hasn't released the libp2p port yet. Randomizing into the 20000-30000
+// private range AND probing each port as free via `net.createServer` before we
+// commit makes port contention structurally impossible.
+let API_PORT_BASE = 0;
+let LIBP2P_PORT_BASE = 0;
+let HARDHAT_E2E_PORT = 0;
+
+/**
+ * Pick a free contiguous TCP port window and probe every port in it to make
+ * sure nothing else is listening. Returns the starting port.
+ *
+ * We intentionally stay in `20000-30000` — well above the ephemeral range on
+ * both Linux (`net.ipv4.ip_local_port_range` default 32768-60999) and macOS
+ * (49152-65535), so the OS won't randomly assign one of our ports to a client
+ * socket mid-run.
+ */
+async function pickFreePortRange(count: number, attempts = 40): Promise<number> {
+  const net = await import('node:net');
+  const isFree = (port: number): Promise<boolean> =>
+    new Promise(resolve => {
+      const srv = net.createServer();
+      srv.once('error', () => resolve(false));
+      srv.once('listening', () => srv.close(() => resolve(true)));
+      srv.listen(port, '0.0.0.0');
+    });
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    // 20000..29000 base + up to `count` slots, so max allocated port < 30000.
+    const base = 20000 + Math.floor(Math.random() * (9000 - count));
+    const checks = await Promise.all(
+      Array.from({ length: count }, (_, i) => isFree(base + i)),
+    );
+    if (checks.every(Boolean)) return base;
+  }
+  throw new Error(`pickFreePortRange: could not find ${count} consecutive free ports in 20000-30000 after ${attempts} tries`);
+}
 
 // Hardhat well-known accounts 5-9 (accounts 0-4 reserved for devnet)
 const HARDHAT_WALLETS = [
@@ -222,6 +259,14 @@ export async function startTestCluster(nodeCount: number, options?: ClusterOptio
   // genuinely gone before we rebuild it.
   await safeRemoveTestDir();
   mkdirSync(TEST_DIR, { recursive: true });
+
+  // Allocate a fresh, probed-free port window for this cluster run. This is
+  // the structural fix for CI-2: we never reuse the same ports across CI
+  // shards or local re-runs, and we never commit to a port that the kernel
+  // already holds a socket on.
+  API_PORT_BASE = await pickFreePortRange(nodeCount);
+  LIBP2P_PORT_BASE = await pickFreePortRange(nodeCount);
+  HARDHAT_E2E_PORT = (await pickFreePortRange(1));
 
   const authToken = 'test-token-for-e2e';
 

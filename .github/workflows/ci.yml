@@ -350,19 +350,19 @@ jobs:
   # does NOT gate wall-clock even though a single file takes 4-5 min:
   # the 4 shards all run in parallel after `build`.
   #
-  # GATING POLICY: KOSAVA-tier (demo app). `continue-on-error: true`
-  # so failures stay visible in CI without blocking a Tornado-tier
-  # merge on an e2e flake. The cross-file pollution (CI-1) is
-  # structurally fixed via sharding; the within-file node-2/node-3
-  # port race (CI-2) is mitigated by serializing boot in
-  # `helpers.ts::startTestCluster`. If serialization proves stable in
-  # CI we can drop `continue-on-error` in a follow-up.
+  # GATING POLICY: KOSAVA-tier but fully gating. CI-1 (cross-file
+  # pollution) was structurally resolved by per-file sharding and CI-2
+  # (within-file EADDRINUSE race on libp2p port) was structurally
+  # resolved in `helpers.ts::pickFreePortRange` — each cluster run now
+  # allocates a probed-free random port window in the 20000-30000
+  # range, so two workers can never collide on 19200/19300/18545 and
+  # the kernel can never hold a port longer than we're willing to wait.
+  # Every remaining failure in this lane is a real product bug.
   # ------------------------------------------------------------------
   kosava-game-e2e:
     name: "Kosava: origin-trail-game E2E [${{ matrix.shard.id }}/4]"
     needs: build
     runs-on: ubuntu-latest
-    continue-on-error: true
     # Single file per runner: ≤ 600s beforeAll + ≤ 120s per test * a
     # handful of tests → worst case ~8 min on cold 2-core CI runners.
     timeout-minutes: 15
