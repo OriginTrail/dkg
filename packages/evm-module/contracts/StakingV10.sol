@@ -1290,7 +1290,25 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         stakingStorage.increaseNodeStake(identityId, uint96(rewardTotal));
         stakingStorage.increaseTotalStake(uint96(rewardTotal));
 
-        // 4. Advance the position's claim cursor to the walked boundary so
+        // 4. Sharding-table + Ask maintenance. The reward compound grew
+        //    `nodeStake`, which changes the node's weight in the active
+        //    set and may cross `minimumStake` for a node that had been
+        //    evicted. `stake()` (lines 436-442) does the same — keeping
+        //    claim()'s post-stake-change housekeeping uniform across
+        //    every V10 entry point avoids stale sharding/ask state after
+        //    restake. The reward is always an increase, so no eviction
+        //    path is needed — only the cross-above-minimum insert.
+        {
+            ParametersStorage ps = parametersStorage;
+            ShardingTableStorage sts = shardingTableStorage;
+            uint96 newNodeStake = stakingStorage.getNodeStake(identityId);
+            if (!sts.nodeExists(identityId) && newNodeStake >= ps.minimumStake()) {
+                shardingTable.insertNode(identityId);
+            }
+        }
+        ask.recalculateActiveSet();
+
+        // 5. Advance the position's claim cursor to the walked boundary so
         //    subsequent calls in the same epoch are pure no-ops.
         convictionStorage.setLastClaimedEpoch(tokenId, uint64(claimToEpoch));
 
