@@ -2594,6 +2594,7 @@ export async function connectLocalAgentIntegrationFromUi(
 export type ReverseLocalAgentSetupDeps = {
   unmergeOpenClawConfig?: (configPath: string) => void;
   verifyUnmergeInvariants?: (configPath: string) => string | null;
+  removeCanonicalNodeSkill?: (workspaceDir: string) => void;
 };
 
 export async function reverseLocalAgentSetupForUi(
@@ -2604,15 +2605,49 @@ export async function reverseLocalAgentSetupForUi(
   const resolvedPath = openclawConfigPath && openclawConfigPath.trim()
     ? openclawConfigPath
     : localOpenclawConfigPath();
-  const adapter = (deps.unmergeOpenClawConfig && deps.verifyUnmergeInvariants)
-    ? { unmergeOpenClawConfig: deps.unmergeOpenClawConfig, verifyUnmergeInvariants: deps.verifyUnmergeInvariants }
+
+  // Discover the workspace dir BEFORE unmerge (post-unmerge the entry is
+  // reshaped, but agents.defaults.workspace / workspace live outside the
+  // adapter block and are preserved either way). Null on any parse/read
+  // failure — skill removal is best-effort.
+  let workspaceDir: string | null = null;
+  if (existsSync(resolvedPath)) {
+    try {
+      const raw = JSON.parse(readFileSync(resolvedPath, 'utf-8'));
+      const candidate = raw?.agents?.defaults?.workspace ?? raw?.workspace ?? null;
+      workspaceDir = typeof candidate === 'string' && candidate.trim() ? candidate : null;
+    } catch {
+      // Unparseable openclaw.json — leave workspaceDir null; the existing
+      // unmerge path short-circuits on the same condition.
+    }
+  }
+
+  const adapter = (deps.unmergeOpenClawConfig && deps.verifyUnmergeInvariants && deps.removeCanonicalNodeSkill)
+    ? {
+        unmergeOpenClawConfig: deps.unmergeOpenClawConfig,
+        verifyUnmergeInvariants: deps.verifyUnmergeInvariants,
+        removeCanonicalNodeSkill: deps.removeCanonicalNodeSkill,
+      }
     : await import('@origintrail-official/dkg-adapter-openclaw');
   const unmergeOpenClawConfig = deps.unmergeOpenClawConfig ?? adapter.unmergeOpenClawConfig;
   const verifyUnmergeInvariants = deps.verifyUnmergeInvariants ?? adapter.verifyUnmergeInvariants;
+  const removeCanonicalNodeSkill = deps.removeCanonicalNodeSkill ?? adapter.removeCanonicalNodeSkill;
   unmergeOpenClawConfig(resolvedPath);
   const failure = verifyUnmergeInvariants(resolvedPath);
   if (failure) {
     throw new Error(failure);
+  }
+
+  // Invariant holds → adapter is functionally disconnected. Retire the
+  // agent-facing canonical node skill too (symmetric to the install step of
+  // setup). Best-effort: a filesystem failure here logs but does not fail
+  // the disconnect — the openclaw.json unmerge has already succeeded.
+  if (workspaceDir) {
+    try {
+      removeCanonicalNodeSkill(workspaceDir);
+    } catch (err: any) {
+      console.warn(`[dkg] removeCanonicalNodeSkill failed: ${err?.message ?? err}`);
+    }
   }
 }
 

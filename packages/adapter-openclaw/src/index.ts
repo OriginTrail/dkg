@@ -4,6 +4,7 @@ export { DkgChannelPlugin, CHANNEL_NAME } from './DkgChannelPlugin.js';
 export {
   mergeOpenClawConfig,
   openclawConfigPath,
+  removeCanonicalNodeSkill,
   runSetup,
   unmergeOpenClawConfig,
   verifyMemorySlotInvariants,

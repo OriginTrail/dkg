@@ -14,7 +14,7 @@
  */
 
 import { execSync } from 'node:child_process';
-import { copyFileSync, existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
+import { copyFileSync, existsSync, readFileSync, writeFileSync, mkdirSync, rmdirSync, statSync, unlinkSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join, dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
@@ -835,6 +835,38 @@ export function installCanonicalNodeSkill(
   copyFileSync(sourcePath, targetPath);
   log(`Installed canonical node skill from ${sourcePath} to ${targetPath}`);
   return targetPath;
+}
+
+/**
+ * Symmetric counterpart to {@link installCanonicalNodeSkill}: removes the
+ * adapter-owned `$WORKSPACE_DIR/skills/dkg-node/SKILL.md` doc installed by
+ * step 6 of setup. Called from the daemon-side disconnect path so the agent-
+ * facing skill is retired alongside the openclaw.json entry.
+ *
+ * Idempotent: a missing file is a no-op. After removing the file we also try
+ * `rmdirSync` on the now-empty `skills/dkg-node/` parent so Disconnect leaves
+ * no adapter-named empty directories behind — but we never touch the outer
+ * `skills/` dir (user skills live there) and we swallow ENOTEMPTY when a
+ * sibling file was placed alongside SKILL.md.
+ */
+export function removeCanonicalNodeSkill(workspaceDir: string): void {
+  const targetPath = canonicalWorkspaceSkillPath(workspaceDir);
+  if (!existsSync(targetPath)) {
+    log(`No canonical node skill at ${targetPath} — nothing to remove`);
+    return;
+  }
+  try {
+    unlinkSync(targetPath);
+    log(`Removed canonical node skill from ${targetPath}`);
+  } catch (err: any) {
+    warn(`Failed to remove canonical node skill at ${targetPath}: ${err?.message ?? err}`);
+    return;
+  }
+  try {
+    rmdirSync(dirname(targetPath));
+  } catch {
+    // Directory not empty (sibling file placed by user) or already gone — fine.
+  }
 }
 
 // ---------------------------------------------------------------------------

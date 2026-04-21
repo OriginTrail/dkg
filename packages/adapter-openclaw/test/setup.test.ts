@@ -11,6 +11,7 @@ import {
   unmergeOpenClawConfig,
   verifyUnmergeInvariants,
   installCanonicalNodeSkill,
+  removeCanonicalNodeSkill,
   openclawConfigPath,
   runSetup,
   type AdapterEntryConfig,
@@ -939,6 +940,81 @@ describe('installCanonicalNodeSkill', () => {
     installCanonicalNodeSkill(ws, sourcePath);
 
     expect(readFileSync(join(ws, 'skills', 'dkg-node', 'SKILL.md'), 'utf-8')).toBe('# Canonical DKG Node Skill\n');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// removeCanonicalNodeSkill — symmetric counterpart used by the daemon-side
+// Disconnect path to retire the agent-facing skill alongside the config entry.
+// ---------------------------------------------------------------------------
+
+describe('removeCanonicalNodeSkill', () => {
+  it('removes the canonical node skill and cleans up the empty dkg-node directory', () => {
+    const ws = join(testDir, 'workspace');
+    const sourceDir = join(testDir, 'cli-skill');
+    const sourcePath = join(sourceDir, 'SKILL.md');
+    mkdirSync(sourceDir, { recursive: true });
+    writeFileSync(sourcePath, '# Canonical DKG Node Skill\n');
+    installCanonicalNodeSkill(ws, sourcePath);
+    const skillPath = join(ws, 'skills', 'dkg-node', 'SKILL.md');
+    expect(existsSync(skillPath)).toBe(true);
+
+    removeCanonicalNodeSkill(ws);
+
+    expect(existsSync(skillPath)).toBe(false);
+    expect(existsSync(join(ws, 'skills', 'dkg-node'))).toBe(false);
+    // Outer skills/ parent is adapter-agnostic and must never be touched.
+    expect(existsSync(join(ws, 'skills'))).toBe(true);
+  });
+
+  it('is idempotent when the skill is absent', () => {
+    const ws = join(testDir, 'workspace');
+    // No seed — workspace exists but nothing under skills/.
+    mkdirSync(ws, { recursive: true });
+
+    expect(() => removeCanonicalNodeSkill(ws)).not.toThrow();
+    expect(() => removeCanonicalNodeSkill(ws)).not.toThrow();
+
+    expect(existsSync(join(ws, 'skills', 'dkg-node', 'SKILL.md'))).toBe(false);
+    expect(existsSync(join(ws, 'skills', 'dkg-node'))).toBe(false);
+  });
+
+  it('leaves unrelated files in skills/dkg-node/ intact', () => {
+    const ws = join(testDir, 'workspace');
+    const sourceDir = join(testDir, 'cli-skill');
+    const sourcePath = join(sourceDir, 'SKILL.md');
+    mkdirSync(sourceDir, { recursive: true });
+    writeFileSync(sourcePath, '# Canonical DKG Node Skill\n');
+    installCanonicalNodeSkill(ws, sourcePath);
+    const siblingPath = join(ws, 'skills', 'dkg-node', 'custom-note.md');
+    writeFileSync(siblingPath, '# User note alongside the adapter skill\n');
+
+    removeCanonicalNodeSkill(ws);
+
+    expect(existsSync(join(ws, 'skills', 'dkg-node', 'SKILL.md'))).toBe(false);
+    expect(existsSync(siblingPath)).toBe(true);
+    // Sibling keeps the dir non-empty, so rmdirSync(ENOTEMPTY) was swallowed.
+    expect(existsSync(join(ws, 'skills', 'dkg-node'))).toBe(true);
+    expect(readFileSync(siblingPath, 'utf-8')).toBe('# User note alongside the adapter skill\n');
+  });
+
+  it('leaves other skills under skills/ intact', () => {
+    const ws = join(testDir, 'workspace');
+    const sourceDir = join(testDir, 'cli-skill');
+    const sourcePath = join(sourceDir, 'SKILL.md');
+    mkdirSync(sourceDir, { recursive: true });
+    writeFileSync(sourcePath, '# Canonical DKG Node Skill\n');
+    installCanonicalNodeSkill(ws, sourcePath);
+    const otherSkillPath = join(ws, 'skills', 'other-skill', 'notes.md');
+    mkdirSync(dirname(otherSkillPath), { recursive: true });
+    writeFileSync(otherSkillPath, '# Unrelated sibling skill\n');
+
+    removeCanonicalNodeSkill(ws);
+
+    expect(existsSync(join(ws, 'skills', 'dkg-node', 'SKILL.md'))).toBe(false);
+    expect(existsSync(join(ws, 'skills', 'dkg-node'))).toBe(false);
+    expect(existsSync(otherSkillPath)).toBe(true);
+    expect(existsSync(join(ws, 'skills'))).toBe(true);
   });
 });
 

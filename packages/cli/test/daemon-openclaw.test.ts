@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -1575,6 +1575,17 @@ describe('OpenClaw UI Connect/Disconnect/Refresh fresh-HOME integration (issue #
     // Seed a pre-merged openclaw.json (as if Connect already ran).
     mergeOpenClawConfig(openclawConfigPath, adapterPath, testEntryConfig);
 
+    // Also seed the canonical node skill + an unrelated sibling under
+    // skills/dkg-node/, as if setup step 6 copied SKILL.md in and the user
+    // dropped a `custom-note.md` alongside it. Disconnect must remove the
+    // adapter-owned SKILL.md but leave the sibling untouched.
+    const skillDir = join(workspaceDir, 'skills', 'dkg-node');
+    const skillPath = join(skillDir, 'SKILL.md');
+    const siblingPath = join(skillDir, 'custom-note.md');
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(skillPath, '# Canonical DKG Node Skill\n');
+    writeFileSync(siblingPath, '# User note alongside the adapter skill\n');
+
     // Sanity: adapter is fully wired before disconnect.
     const before = JSON.parse(readFileSync(openclawConfigPath, 'utf-8'));
     expect(before.plugins.slots.memory).toBe('adapter-openclaw');
@@ -1596,6 +1607,12 @@ describe('OpenClaw UI Connect/Disconnect/Refresh fresh-HOME integration (issue #
     // A .bak.<ts> snapshot sits next to the config.
     const siblings = readdirSync(openclawDir);
     expect(siblings.some((name) => /^openclaw\.json\.bak\.\d+$/.test(name))).toBe(true);
+
+    // Clean-retirement: the adapter-owned canonical node skill is gone, while
+    // the unrelated sibling survives and keeps skills/dkg-node/ alive.
+    expect(existsSync(skillPath)).toBe(false);
+    expect(existsSync(siblingPath)).toBe(true);
+    expect(existsSync(join(workspaceDir, 'skills'))).toBe(true);
   });
 
   it('scenario 2b: bare { enabled: false } PUT payload still routes through the reverse-setup path (Codex #2)', async () => {
@@ -1619,6 +1636,15 @@ describe('OpenClaw UI Connect/Disconnect/Refresh fresh-HOME integration (issue #
       && (normalizedPatch.runtime as Record<string, unknown>).status === 'disconnected';
     expect(explicitDisconnect).toBe(true);
 
+    // Same SKILL.md + sibling seeding as scenario 2 — the bare-body path must
+    // also retire the canonical skill and spare unrelated neighbors.
+    const skillDir = join(workspaceDir, 'skills', 'dkg-node');
+    const skillPath = join(skillDir, 'SKILL.md');
+    const siblingPath = join(skillDir, 'custom-note.md');
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(skillPath, '# Canonical DKG Node Skill\n');
+    writeFileSync(siblingPath, '# User note alongside the adapter skill\n');
+
     const config = makeConfig();
     await reverseLocalAgentSetupForUi(config, openclawConfigPath);
 
@@ -1627,6 +1653,9 @@ describe('OpenClaw UI Connect/Disconnect/Refresh fresh-HOME integration (issue #
     expect(after.plugins.allow).not.toContain('adapter-openclaw');
     // D1: adapter entry is removed entirely on unmerge.
     expect(after.plugins.entries['adapter-openclaw']).toBeUndefined();
+
+    expect(existsSync(skillPath)).toBe(false);
+    expect(existsSync(siblingPath)).toBe(true);
   });
 
   it('scenario 2c: reverse-setup surfaces non-slot invariant failures via verifyUnmergeInvariants (Codex N3)', async () => {
@@ -1668,11 +1697,21 @@ describe('OpenClaw UI Connect/Disconnect/Refresh fresh-HOME integration (issue #
     // Load the real verifier from the adapter barrel so we exercise the actual invariant.
     const { verifyUnmergeInvariants } = await import('@origintrail-official/dkg-adapter-openclaw');
 
+    // Seed a SKILL.md — removal runs AFTER the invariant check, so on failure
+    // the skill must stay in place (we don't cascade a half-finished cleanup).
+    const skillDir = join(workspaceDir, 'skills', 'dkg-node');
+    const skillPath = join(skillDir, 'SKILL.md');
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(skillPath, '# Canonical DKG Node Skill\n');
+
+    const removeSkillSpy = vi.fn();
+
     const config = makeConfig();
     await expect(
       reverseLocalAgentSetupForUi(config, openclawConfigPath, {
         unmergeOpenClawConfig: partialUnmerge,
         verifyUnmergeInvariants,
+        removeCanonicalNodeSkill: removeSkillSpy,
       }),
     ).rejects.toThrow(/plugins\.allow still contains/);
 
@@ -1681,6 +1720,12 @@ describe('OpenClaw UI Connect/Disconnect/Refresh fresh-HOME integration (issue #
     const after = JSON.parse(readFileSync(openclawConfigPath, 'utf-8'));
     expect(after.plugins.slots.memory).toBeUndefined();
     expect(after.plugins.allow).toContain('adapter-openclaw');
+
+    // Skill removal is gated on the invariant check passing. When it fails the
+    // openclaw.json rollback is already partial — we must not compound that by
+    // also retiring the agent-facing SKILL.md.
+    expect(removeSkillSpy).not.toHaveBeenCalled();
+    expect(existsSync(skillPath)).toBe(true);
   });
 
   it('scenario 3a: refresh endpoint moves a bridge-ok integration to ready', async () => {
