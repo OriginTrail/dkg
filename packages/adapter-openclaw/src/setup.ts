@@ -31,6 +31,14 @@ export interface SetupOptions {
   verify?: boolean;
   start?: boolean;
   dryRun?: boolean;
+  /**
+   * Abort signal for cooperative cancellation. Checked at each step boundary
+   * so an aborted job stops between steps without further filesystem writes
+   * — matches the granularity of the previous child-process SIGKILL model.
+   * Long-running sync calls (e.g. `execSync('dkg start', ...)`) are not
+   * interrupted mid-call; cancellation takes effect before the next step.
+   */
+  signal?: AbortSignal;
 }
 
 interface NetworkConfig {
@@ -98,6 +106,19 @@ function dkgDir(): string {
 
 function openclawDir(): string {
   return process.env.OPENCLAW_HOME ?? join(homedir(), '.openclaw');
+}
+
+/**
+ * Resolve the `openclaw.json` config path, honoring `OPENCLAW_HOME` the same
+ * way `runSetup()` does. Exported so out-of-process callers (e.g. the DKG
+ * daemon's post-setup invariant check and disconnect handler in
+ * `packages/cli/src/daemon.ts`) read the same file that `mergeOpenClawConfig`
+ * writes to; hardcoding `join(homedir(), '.openclaw', 'openclaw.json')` on the
+ * daemon side caused false slot-election failures when the user set
+ * `OPENCLAW_HOME` to a non-default location.
+ */
+export function openclawConfigPath(): string {
+  return join(openclawDir(), 'openclaw.json');
 }
 
 function canonicalWorkspaceSkillPath(workspaceDir: string): string {
@@ -181,29 +202,72 @@ export function discoverAgentName(workspaceDir: string, override?: string): stri
 // Step 3: Write DKG config
 // ---------------------------------------------------------------------------
 
-export function loadNetworkConfig(): NetworkConfig {
-  // Try resolving from the installed CLI package first
+/**
+ * Locate the `@origintrail-official/dkg` CLI package root. Probes three
+ * layouts in the order they're likeliest to succeed during setup:
+ *   (1) Monorepo dev checkout — `packages/cli` sibling of this adapter.
+ *   (2) Local install — `./node_modules/@origintrail-official/dkg`, found
+ *       via `createRequire(import.meta.url).resolve('.../package.json')`.
+ *   (3) Global install — `npm prefix -g` + `[lib/]node_modules/...`.
+ *
+ * Returns `null` when the CLI isn't reachable; callers are responsible for
+ * emitting the error message that's appropriate for the specific file they
+ * were looking for (SKILL.md, testnet.json, etc.).
+ */
+export function resolveCliPackageDir(): string | null {
+  // (1) Monorepo dev checkout — sibling `packages/cli`.
+  const monorepoCandidate = resolve(adapterRoot(), '..', 'cli');
+  if (existsSync(join(monorepoCandidate, 'package.json'))) {
+    return monorepoCandidate;
+  }
+
+  // (2) Local install — `./node_modules/@origintrail-official/dkg/...`.
+  // This path is invisible to `npm prefix -g` since the CLI lives inside the
+  // calling project rather than the global prefix.
   try {
-    // Use dynamic resolution — CLI is installed globally
+    const req = createRequire(import.meta.url);
+    const cliPkgJson = req.resolve('@origintrail-official/dkg/package.json');
+    const localInstallCandidate = dirname(cliPkgJson);
+    if (existsSync(join(localInstallCandidate, 'package.json'))) {
+      return localInstallCandidate;
+    }
+  } catch { /* fall through to npm prefix -g */ }
+
+  // (3) Global install — `npm install -g @origintrail-official/dkg`.
+  try {
     const npmPrefix = execSync('npm prefix -g', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
     const candidates = [
-      join(npmPrefix, 'lib', 'node_modules', '@origintrail-official', 'dkg', 'network', 'testnet.json'),
-      join(npmPrefix, 'node_modules', '@origintrail-official', 'dkg', 'network', 'testnet.json'),
+      join(npmPrefix, 'lib', 'node_modules', '@origintrail-official', 'dkg'),
+      join(npmPrefix, 'node_modules', '@origintrail-official', 'dkg'),
     ];
     for (const candidate of candidates) {
-      if (existsSync(candidate)) {
-        return JSON.parse(readFileSync(candidate, 'utf-8'));
+      if (existsSync(join(candidate, 'package.json'))) {
+        return candidate;
       }
     }
   } catch { /* fall through */ }
 
-  // Monorepo fallback
+  return null;
+}
+
+export function loadNetworkConfig(): NetworkConfig {
+  const cliDir = resolveCliPackageDir();
+  if (cliDir) {
+    const candidate = join(cliDir, 'network', 'testnet.json');
+    if (existsSync(candidate)) {
+      return JSON.parse(readFileSync(candidate, 'utf-8'));
+    }
+  }
+
+  // Monorepo pre-build fallback: the cli package copies `network/*.json`
+  // from the repo root into `packages/cli/network/` during its build, so
+  // before `pnpm build` has run the cli-scoped path above won't resolve.
+  // Probe the repo-root `network/testnet.json` directly so the monorepo dev
+  // flow (tests, scratch checkouts) keeps working pre-build.
   const monorepoPath = resolve(__dirname, '..', '..', '..', 'network', 'testnet.json');
   if (existsSync(monorepoPath)) {
     return JSON.parse(readFileSync(monorepoPath, 'utf-8'));
   }
-
-  // Another monorepo path (from src/ during dev)
   const devPath = resolve(__dirname, '..', '..', '..', '..', 'network', 'testnet.json');
   if (existsSync(devPath)) {
     return JSON.parse(readFileSync(devPath, 'utf-8'));
@@ -216,32 +280,13 @@ export function loadNetworkConfig(): NetworkConfig {
 }
 
 export function resolveCanonicalNodeSkillSourcePath(): string {
-  // (1) Monorepo dev checkout — sibling `packages/cli`.
-  const localWorkspaceCandidate = resolve(adapterRoot(), '..', 'cli', 'skills', 'dkg-node', 'SKILL.md');
-  if (existsSync(localWorkspaceCandidate)) return localWorkspaceCandidate;
-
-  // (2) Local install — CLI resolved via node_modules from the adapter's
-  // own require-root. Covers `./node_modules/@origintrail-official/dkg/...`
-  // layouts that a non-global `npm install @origintrail-official/dkg`
-  // produces, which the `npm prefix -g` branch below cannot see.
-  try {
-    const req = createRequire(import.meta.url);
-    const cliPkgJson = req.resolve('@origintrail-official/dkg/package.json');
-    const localInstallCandidate = join(dirname(cliPkgJson), 'skills', 'dkg-node', 'SKILL.md');
-    if (existsSync(localInstallCandidate)) return localInstallCandidate;
-  } catch { /* fall through to npm prefix -g */ }
-
-  // (3) Global install — `npm install -g @origintrail-official/dkg`.
-  try {
-    const npmPrefix = execSync('npm prefix -g', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
-    const candidates = [
-      join(npmPrefix, 'lib', 'node_modules', '@origintrail-official', 'dkg', 'skills', 'dkg-node', 'SKILL.md'),
-      join(npmPrefix, 'node_modules', '@origintrail-official', 'dkg', 'skills', 'dkg-node', 'SKILL.md'),
-    ];
-    for (const candidate of candidates) {
-      if (existsSync(candidate)) return candidate;
+  const cliDir = resolveCliPackageDir();
+  if (cliDir) {
+    const candidate = join(cliDir, 'skills', 'dkg-node', 'SKILL.md');
+    if (existsSync(candidate)) {
+      return candidate;
     }
-  } catch { /* fall through */ }
+  }
 
   throw new Error(
     'Could not find the canonical DKG node SKILL.md in the installed CLI package. ' +
@@ -798,6 +843,16 @@ export async function runSetup(options: SetupOptions): Promise<void> {
     throw new Error(`Invalid port "${options.port}" — must be an integer between 1 and 65535`);
   }
 
+  // Cooperative cancellation: check at each step boundary. Matches the
+  // previous child-process model where SIGKILL only took effect between
+  // steps, so we don't try to interrupt mid-call sync work like
+  // `execSync('dkg start', ...)`.
+  const throwIfAborted = (): void => {
+    if (options.signal?.aborted) {
+      throw new Error('Setup aborted');
+    }
+  };
+
   console.log('\nDKG OpenClaw Adapter Setup');
   console.log('='.repeat(40) + '\n');
 
@@ -806,14 +861,17 @@ export async function runSetup(options: SetupOptions): Promise<void> {
   }
 
   // Step 1: Discover OpenClaw workspace
+  throwIfAborted();
   const { configPath: openclawConfigPath, workspaceDir } = discoverWorkspace(options.workspace);
   log(`OpenClaw workspace: ${workspaceDir}`);
 
   // Step 2: Discover agent name
+  throwIfAborted();
   const agentName = discoverAgentName(workspaceDir, options.name);
   log(`Agent name: ${agentName}`);
 
   // Step 3: Write DKG config
+  throwIfAborted();
   let network: NetworkConfig | null = null;
   try {
     network = loadNetworkConfig();
@@ -846,6 +904,7 @@ export async function runSetup(options: SetupOptions): Promise<void> {
   }
 
   // Step 4: Start daemon
+  throwIfAborted();
   if (shouldStart && !dryRun) {
     await startDaemon(effectivePort);
   } else if (shouldStart) {
@@ -857,6 +916,7 @@ export async function runSetup(options: SetupOptions): Promise<void> {
   // Step 5: Merge adapter into openclaw.json
   // Use the script's own location as the adapter path — always correct for
   // the currently running code. Warn if the path looks ephemeral (npx cache).
+  throwIfAborted();
   const resolvedAdapterPath = adapterRoot();
   if (isEphemeralPath(resolvedAdapterPath)) {
     warn(
@@ -872,6 +932,7 @@ export async function runSetup(options: SetupOptions): Promise<void> {
   }
 
   // Step 6: Write workspace config
+  throwIfAborted();
   if (!dryRun) {
     writeWorkspaceConfig(workspaceDir, effectivePort, options.port != null);
   } else {
@@ -879,6 +940,7 @@ export async function runSetup(options: SetupOptions): Promise<void> {
   }
 
   // Step 7: Copy the canonical DKG node skill into the OpenClaw workspace
+  throwIfAborted();
   if (!dryRun) {
     installCanonicalNodeSkill(workspaceDir);
   } else {
@@ -890,6 +952,7 @@ export async function runSetup(options: SetupOptions): Promise<void> {
   log('Reload the OpenClaw gateway if it does not auto-restart after the config update');
 
   // Step 8: Verify
+  throwIfAborted();
   if (shouldVerify && !dryRun) {
     await verifySetup(effectivePort, { openclawConfigPath });
   } else if (shouldVerify) {

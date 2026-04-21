@@ -20,8 +20,8 @@ import { execSync, exec, execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { join, dirname, resolve } from 'node:path';
 import { existsSync, readdirSync, readFileSync, openSync, closeSync, writeFileSync as fsWriteFileSync, unlinkSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { openclawConfigPath as adapterOpenclawConfigPath } from '@origintrail-official/dkg-adapter-openclaw';
 import { ethers } from 'ethers';
 
 const execAsync = promisify(exec);
@@ -2275,16 +2275,16 @@ export async function probeOpenClawChannelHealth(
   return { ok: false, bridge, gateway, error: lastError };
 }
 
-async function runOpenClawUiSetup(signal?: AbortSignal): Promise<void> {
+export async function runOpenClawUiSetup(signal?: AbortSignal): Promise<void> {
   if (signal?.aborted) throw new Error('OpenClaw attach cancelled');
   const { runSetup } = await import('@origintrail-official/dkg-adapter-openclaw');
-  await runSetup({ start: false, verify: false });
+  await runSetup({ start: false, verify: false, signal });
 }
 
-function isOpenClawMemorySlotElected(openclawConfigPath?: string): boolean {
+export function isOpenClawMemorySlotElected(openclawConfigPath?: string): boolean {
   const configPath = openclawConfigPath && openclawConfigPath.trim()
     ? openclawConfigPath
-    : join(homedir(), '.openclaw', 'openclaw.json');
+    : adapterOpenclawConfigPath();
   if (!existsSync(configPath)) return false;
   try {
     const raw = readFileSync(configPath, 'utf-8');
@@ -2572,7 +2572,7 @@ export async function reverseLocalAgentSetupForUi(
 ): Promise<void> {
   const resolvedPath = openclawConfigPath && openclawConfigPath.trim()
     ? openclawConfigPath
-    : join(homedir(), '.openclaw', 'openclaw.json');
+    : adapterOpenclawConfigPath();
   const { unmergeOpenClawConfig } = await import('@origintrail-official/dkg-adapter-openclaw');
   unmergeOpenClawConfig(resolvedPath);
   if (isOpenClawMemorySlotElected(resolvedPath)) {
@@ -6339,14 +6339,28 @@ async function handleRequest(
     }
   }
 
-  // POST /api/local-agent-integrations/openclaw/refresh — re-probe OpenClaw bridge health with cache bypass
-  if (req.method === 'POST' && path === '/api/local-agent-integrations/openclaw/refresh') {
+  // POST /api/local-agent-integrations/:id/refresh — re-probe bridge health (OpenClaw) or
+  // return the current record (other integrations that don't yet have a bridge).
+  if (
+    req.method === 'POST'
+    && path.startsWith('/api/local-agent-integrations/')
+    && path.endsWith('/refresh')
+  ) {
+    const segments = path.slice('/api/local-agent-integrations/'.length, -'/refresh'.length);
+    if (!segments || segments.includes('/')) {
+      return jsonResponse(res, 404, { error: 'Unknown integration' });
+    }
+    const rawId = decodeURIComponent(segments);
+    const normalizedId = normalizeIntegrationId(rawId);
+    if (!LOCAL_AGENT_INTEGRATION_DEFINITIONS[normalizedId]) {
+      return jsonResponse(res, 404, { error: 'Unknown integration' });
+    }
     try {
-      const integration = await refreshLocalAgentIntegrationFromUi(config, 'openclaw', bridgeAuthToken);
+      const integration = await refreshLocalAgentIntegrationFromUi(config, normalizedId, bridgeAuthToken);
       await saveConfig(config);
       return jsonResponse(res, 200, { ok: true, integration });
     } catch (err: any) {
-      return jsonResponse(res, 400, { error: err?.message ?? 'OpenClaw refresh failed' });
+      return jsonResponse(res, 400, { error: err?.message ?? 'Integration refresh failed' });
     }
   }
 
@@ -6359,12 +6373,11 @@ async function handleRequest(
     try { parsed = JSON.parse(body); } catch { return jsonResponse(res, 400, { error: 'Invalid JSON body' }); }
     try {
       const normalizedId = normalizeIntegrationId(id);
-      const explicitDisconnect = parsed.enabled === false
-        && isPlainRecord(parsed.runtime)
-        && parsed.runtime.status === 'disconnected';
-      const disconnectRequested = parsed.enabled === false
-        || (isPlainRecord(parsed.runtime) && parsed.runtime.status === 'disconnected');
-      if (disconnectRequested && normalizedId) {
+      const normalizedPatch = normalizeExplicitLocalAgentDisconnectBody(parsed);
+      const explicitDisconnect = normalizedPatch.enabled === false
+        && isPlainRecord(normalizedPatch.runtime)
+        && normalizedPatch.runtime.status === 'disconnected';
+      if (explicitDisconnect && normalizedId) {
         cancelPendingLocalAgentAttachJob(normalizedId);
       }
 
@@ -6384,7 +6397,7 @@ async function handleRequest(
         }
       }
 
-      const integration = updateLocalAgentIntegration(config, id, parsed);
+      const integration = updateLocalAgentIntegration(config, id, normalizedPatch);
       await saveConfig(config);
       return jsonResponse(res, 200, { ok: true, integration });
     } catch (err: any) {

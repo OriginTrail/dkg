@@ -1587,7 +1587,21 @@ openclawCmd
   .option('--no-verify', 'Skip post-setup verification')
   .option('--no-start', 'Skip daemon start (configure only)')
   .option('--dry-run', 'Preview changes without writing anything')
-  .action(async (opts) => {
+  // Deprecated flags kept for backwards compatibility with automation that
+  // shipped before faucet funding was removed from setup. Accepted as no-ops
+  // with a one-line warning so scripted `dkg openclaw setup --no-fund ...`
+  // invocations don't fail with `error: unknown option '--no-fund'`.
+  .option('--no-fund', 'Deprecated no-op — faucet funding has been removed')
+  .option('--fund', 'Deprecated no-op — faucet funding has been removed')
+  .action(async (opts, command) => {
+    // Warn once if either deprecated flag was explicitly supplied, then strip
+    // both from the opts so `SetupOptions` (which no longer has `fund`) sees a
+    // clean surface.
+    if (command.getOptionValueSource('fund') === 'cli') {
+      console.warn('[setup] note: --no-fund/--fund is deprecated; faucet funding was removed. Ignoring.');
+    }
+    delete opts.fund;
+
     let runSetup: typeof import('@origintrail-official/dkg-adapter-openclaw').runSetup;
     try {
       ({ runSetup } = await import('@origintrail-official/dkg-adapter-openclaw'));

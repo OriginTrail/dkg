@@ -13,6 +13,7 @@ import {
   hasConfiguredLocalAgentChat,
   hasOpenClawChatTurnContent,
   isLoopbackClientIp,
+  isOpenClawMemorySlotElected,
   normalizeOpenClawAttachmentRefs,
   isValidOpenClawPersistTurnPayload,
   listLocalAgentIntegrations,
@@ -21,6 +22,7 @@ import {
   probeOpenClawChannelHealth,
   refreshLocalAgentIntegrationFromUi,
   reverseLocalAgentSetupForUi,
+  runOpenClawUiSetup,
   verifyOpenClawAttachmentRefsProvenance,
   normalizeExplicitLocalAgentDisconnectBody,
   shouldBypassRateLimitForLoopbackTraffic,
@@ -1398,6 +1400,60 @@ describe('local agent integration registry helpers', () => {
   });
 });
 
+describe('runOpenClawUiSetup AbortSignal forwarding (Codex #1)', () => {
+  // Regression test for https://github.com/OriginTrail/dkg-v9/pull/228#discussion_r3117710809
+  // The child-process path used to SIGKILL setup on abort; the in-process path must
+  // refuse to start on a pre-aborted signal and (via the adapter's step-boundary
+  // throwIfAborted helper) also stop cleanly if the signal fires mid-flow.
+  it('pre-aborted signal throws before importing the adapter (no config writes)', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    await expect(runOpenClawUiSetup(controller.signal)).rejects.toThrow(/OpenClaw attach cancelled/);
+  });
+});
+
+describe('isOpenClawMemorySlotElected honors OPENCLAW_HOME (Codex #6)', () => {
+  // Regression test for https://github.com/OriginTrail/dkg-v9/pull/228#discussion_r3117931371
+  // The previous implementation hardcoded `join(homedir(), '.openclaw', 'openclaw.json')`,
+  // so with a non-default OpenClaw home the post-setup invariant read the wrong file and
+  // reported false slot-election failures. The check now delegates to the adapter's
+  // `openclawConfigPath()` helper, which honors `process.env.OPENCLAW_HOME`.
+  let tempRoot: string;
+  const origOpenclawHome = process.env.OPENCLAW_HOME;
+
+  beforeEach(() => {
+    tempRoot = mkdtempSync(join(tmpdir(), 'dkg-openclaw-home-'));
+    process.env.OPENCLAW_HOME = tempRoot;
+  });
+
+  afterEach(() => {
+    if (origOpenclawHome === undefined) delete process.env.OPENCLAW_HOME;
+    else process.env.OPENCLAW_HOME = origOpenclawHome;
+    rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  it('reads openclaw.json from OPENCLAW_HOME and returns true when the slot is elected', () => {
+    const configPath = join(tempRoot, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({
+      plugins: { slots: { memory: 'adapter-openclaw' } },
+    }));
+    expect(isOpenClawMemorySlotElected()).toBe(true);
+  });
+
+  it('returns false when OPENCLAW_HOME points at a config with a different slot owner', () => {
+    const configPath = join(tempRoot, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({
+      plugins: { slots: { memory: 'some-other-plugin' } },
+    }));
+    expect(isOpenClawMemorySlotElected()).toBe(false);
+  });
+
+  it('returns false when OPENCLAW_HOME has no openclaw.json (fresh home)', () => {
+    // no file written
+    expect(isOpenClawMemorySlotElected()).toBe(false);
+  });
+});
+
 describe('OpenClaw UI Connect/Disconnect/Refresh fresh-HOME integration (issue #198)', () => {
   let tempRoot: string;
   let openclawDir: string;
@@ -1524,6 +1580,36 @@ describe('OpenClaw UI Connect/Disconnect/Refresh fresh-HOME integration (issue #
     expect(siblings.some((name) => /^openclaw\.json\.bak\.\d+$/.test(name))).toBe(true);
   });
 
+  it('scenario 2b: bare { enabled: false } PUT payload still routes through the reverse-setup path (Codex #2)', async () => {
+    // Regression test for https://github.com/OriginTrail/dkg-v9/pull/228#discussion_r3117710814
+    // Background: an earlier draft of the PUT handler gated the reverse-merge on
+    // `parsed.enabled === false && parsed.runtime?.status === 'disconnected'`, which skipped
+    // bare `{ enabled: false }` payloads. Those clients still disabled the integration but left
+    // openclaw.json fully wired to adapter-openclaw. The handler now normalizes via
+    // `normalizeExplicitLocalAgentDisconnectBody` BEFORE computing `explicitDisconnect`.
+
+    // Seed a pre-merged openclaw.json (as if Connect already ran).
+    mergeOpenClawConfig(openclawConfigPath, adapterPath);
+    const before = JSON.parse(readFileSync(openclawConfigPath, 'utf-8'));
+    expect(before.plugins.slots.memory).toBe('adapter-openclaw');
+
+    // Mirror the exact sequence the PUT handler uses (packages/cli/src/daemon.ts ~6362).
+    const parsed: Record<string, unknown> = { enabled: false };
+    const normalizedPatch = normalizeExplicitLocalAgentDisconnectBody(parsed);
+    const explicitDisconnect = normalizedPatch.enabled === false
+      && !!normalizedPatch.runtime
+      && (normalizedPatch.runtime as Record<string, unknown>).status === 'disconnected';
+    expect(explicitDisconnect).toBe(true);
+
+    const config = makeConfig();
+    await reverseLocalAgentSetupForUi(config, openclawConfigPath);
+
+    const after = JSON.parse(readFileSync(openclawConfigPath, 'utf-8'));
+    expect(after.plugins.slots.memory).toBeUndefined();
+    expect(after.plugins.allow).not.toContain('adapter-openclaw');
+    expect(after.plugins.entries['adapter-openclaw'].enabled).toBe(false);
+  });
+
   it('scenario 3a: refresh endpoint moves a bridge-ok integration to ready', async () => {
     const config = makeConfig({
       localAgentIntegrations: {
@@ -1594,6 +1680,36 @@ describe('OpenClaw UI Connect/Disconnect/Refresh fresh-HOME integration (issue #
     } finally {
       globalThis.fetch = origFetch;
     }
+  });
+
+  it('scenario 3c: refresh on a non-openclaw known integration (hermes) returns the record without probing bridge health (Codex #3)', async () => {
+    // Regression test for https://github.com/OriginTrail/dkg-v9/pull/228#discussion_r3117710821
+    // The refresh route accepts any known integration id, not just openclaw. For non-openclaw
+    // ids the helper short-circuits and returns the existing record without a health probe.
+    const config = makeConfig();
+
+    const origFetch = globalThis.fetch;
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => {
+      fetchCalls++;
+      return new Response('should not be reached', { status: 500 });
+    }) as typeof fetch;
+
+    try {
+      const integration = await refreshLocalAgentIntegrationFromUi(config, 'hermes', 'bridge-token');
+      expect(integration).toBeTruthy();
+      expect(integration.id).toBe('hermes');
+      expect(fetchCalls).toBe(0); // no bridge probe for non-openclaw
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it('scenario 3d: refresh on an unknown integration id throws (route maps to 404)', async () => {
+    const config = makeConfig();
+    await expect(
+      refreshLocalAgentIntegrationFromUi(config, 'does-not-exist', 'bridge-token'),
+    ).rejects.toThrow(/Unknown integration/);
   });
 
   it('scenario 4: post-setup invariant surfaces error when slot election silently fails', async () => {

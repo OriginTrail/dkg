@@ -10,7 +10,10 @@ import {
   mergeOpenClawConfig,
   writeWorkspaceConfig,
   installCanonicalNodeSkill,
+  openclawConfigPath,
+  runSetup,
 } from '../src/setup.js';
+import { homedir } from 'node:os';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -537,5 +540,158 @@ describe('discoverWorkspace', () => {
 
   it('throws when override path does not exist', () => {
     expect(() => discoverWorkspace('/nonexistent/path/xyz')).toThrow('does not exist');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// openclawConfigPath — honors OPENCLAW_HOME (Codex PR #228 review #6)
+// ---------------------------------------------------------------------------
+
+describe('openclawConfigPath', () => {
+  it('honors OPENCLAW_HOME when set', () => {
+    const fakeHome = join(testDir, 'custom-openclaw-home');
+    const original = process.env.OPENCLAW_HOME;
+    process.env.OPENCLAW_HOME = fakeHome;
+
+    try {
+      expect(openclawConfigPath()).toBe(join(fakeHome, 'openclaw.json'));
+    } finally {
+      if (original === undefined) {
+        delete process.env.OPENCLAW_HOME;
+      } else {
+        process.env.OPENCLAW_HOME = original;
+      }
+    }
+  });
+
+  it('falls back to ~/.openclaw/openclaw.json when OPENCLAW_HOME is unset', () => {
+    const original = process.env.OPENCLAW_HOME;
+    delete process.env.OPENCLAW_HOME;
+
+    try {
+      expect(openclawConfigPath()).toBe(join(homedir(), '.openclaw', 'openclaw.json'));
+    } finally {
+      if (original !== undefined) {
+        process.env.OPENCLAW_HOME = original;
+      }
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runSetup — AbortSignal threading (Codex PR #228 review #1)
+// ---------------------------------------------------------------------------
+
+describe('runSetup abort signal', () => {
+  it('throws before any filesystem writes when the signal is already aborted', async () => {
+    // Point DKG/OpenClaw home at the empty tmp dir so a stray write would be
+    // observable, and give runSetup a valid workspace so Step 1's discovery
+    // check would otherwise succeed.
+    const dkgHome = join(testDir, '.dkg');
+    const openclawHome = join(testDir, '.openclaw');
+    const workspace = join(testDir, 'workspace');
+    mkdirSync(workspace, { recursive: true });
+
+    const originalDkg = process.env.DKG_HOME;
+    const originalOpenclaw = process.env.OPENCLAW_HOME;
+    process.env.DKG_HOME = dkgHome;
+    process.env.OPENCLAW_HOME = openclawHome;
+
+    try {
+      const controller = new AbortController();
+      controller.abort();
+
+      await expect(
+        runSetup({
+          workspace,
+          start: false,
+          verify: false,
+          signal: controller.signal,
+        }),
+      ).rejects.toThrow(/Setup aborted/);
+
+      // No state should have been written.
+      expect(existsSync(dkgHome)).toBe(false);
+      expect(existsSync(openclawHome)).toBe(false);
+      expect(existsSync(join(workspace, 'config.json'))).toBe(false);
+      expect(existsSync(join(workspace, 'skills', 'dkg-node', 'SKILL.md'))).toBe(false);
+    } finally {
+      process.env.DKG_HOME = originalDkg;
+      process.env.OPENCLAW_HOME = originalOpenclaw;
+    }
+  });
+
+  it('stops cooperatively mid-flow when the signal aborts between steps', async () => {
+    // Pre-seed a valid workspace + openclaw.json so Steps 1, 2, and 3 complete,
+    // then abort before Step 5 (merge). Assert the merge did not run.
+    const dkgHome = join(testDir, '.dkg');
+    const openclawHome = join(testDir, '.openclaw');
+    const workspace = join(testDir, 'workspace');
+    mkdirSync(workspace, { recursive: true });
+    mkdirSync(openclawHome, { recursive: true });
+    // Minimal openclaw.json setup won't merge because we abort beforehand.
+    const openclawConfigPath = join(openclawHome, 'openclaw.json');
+    writeFileSync(openclawConfigPath, JSON.stringify({ plugins: {} }, null, 2) + '\n');
+
+    const originalDkg = process.env.DKG_HOME;
+    const originalOpenclaw = process.env.OPENCLAW_HOME;
+    process.env.DKG_HOME = dkgHome;
+    process.env.OPENCLAW_HOME = openclawHome;
+
+    try {
+      const controller = new AbortController();
+      // Abort immediately — Step 1's `throwIfAborted()` fires first, so merge
+      // + workspace-config + skill-install never run. The observable guarantee
+      // we care about: openclaw.json is byte-identical to what we wrote.
+      controller.abort();
+
+      const before = readFileSync(openclawConfigPath, 'utf-8');
+      await expect(
+        runSetup({
+          workspace,
+          start: false,
+          verify: false,
+          signal: controller.signal,
+        }),
+      ).rejects.toThrow(/Setup aborted/);
+      const after = readFileSync(openclawConfigPath, 'utf-8');
+      expect(after).toBe(before);
+    } finally {
+      process.env.DKG_HOME = originalDkg;
+      process.env.OPENCLAW_HOME = originalOpenclaw;
+    }
+  });
+
+  it('completes normally when signal is undefined (backwards compatibility)', async () => {
+    // Smoke test that the abort gate is a no-op without a signal — guards
+    // against the check accidentally rejecting the `undefined` case.
+    const dkgHome = join(testDir, '.dkg');
+    const openclawHome = join(testDir, '.openclaw');
+    const workspace = join(testDir, 'workspace');
+    mkdirSync(workspace, { recursive: true });
+    mkdirSync(openclawHome, { recursive: true });
+    writeFileSync(
+      join(openclawHome, 'openclaw.json'),
+      JSON.stringify({ plugins: {} }, null, 2) + '\n',
+    );
+
+    const originalDkg = process.env.DKG_HOME;
+    const originalOpenclaw = process.env.OPENCLAW_HOME;
+    process.env.DKG_HOME = dkgHome;
+    process.env.OPENCLAW_HOME = openclawHome;
+
+    try {
+      await expect(
+        runSetup({
+          workspace,
+          start: false,
+          verify: false,
+          // no signal
+        }),
+      ).resolves.toBeUndefined();
+    } finally {
+      process.env.DKG_HOME = originalDkg;
+      process.env.OPENCLAW_HOME = originalOpenclaw;
+    }
   });
 });

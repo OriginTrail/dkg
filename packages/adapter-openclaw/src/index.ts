@@ -3,6 +3,7 @@ export { DkgDaemonClient, type DkgClientOptions } from './dkg-client.js';
 export { DkgChannelPlugin, CHANNEL_NAME } from './DkgChannelPlugin.js';
 export {
   mergeOpenClawConfig,
+  openclawConfigPath,
   runSetup,
   unmergeOpenClawConfig,
   verifyMemorySlotInvariants,
