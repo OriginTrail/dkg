@@ -4374,10 +4374,12 @@ export class DKGAgent {
     const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
     const approvedAt = new Date().toISOString();
     const effectiveContextType = opts.contextType ?? record.contextType;
-    // Use the persisted owner DID for metadata so gossip-publish-handler
-    // accepts the binding (it validates approvedBy matches the paranet owner).
-    const ownerDid = await this.getContextGraphOwner(opts.paranetId)
-      ?? `did:dkg:agent:${opts.callerAgentAddress ?? this.defaultAgentAddress ?? this.peerId}`;
+    // Emit the public `dkg:creator` peer DID as the binding owner: it's the
+    // handle remote peers resolve via ONTOLOGY gossip, so gossip-publish-handler
+    // will accept the approval. `_meta`-only `dkg:curator` (wallet DID) is
+    // used for local authorization via `assertParanetOwner` above.
+    const ownerDid = await this.getContextGraphCreator(opts.paranetId)
+      ?? `did:dkg:agent:${this.peerId}`;
     const { bindingUri, quads } = buildPolicyApprovalQuads({
       paranetId: opts.paranetId,
       policyUri: opts.policyUri,
@@ -4420,8 +4422,10 @@ export class DKGAgent {
 
     const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
     const revokedAt = new Date().toISOString();
-    const ownerDid = await this.getContextGraphOwner(opts.paranetId)
-      ?? `did:dkg:agent:${opts.callerAgentAddress ?? this.defaultAgentAddress ?? this.peerId}`;
+    // See note in approveCclPolicy — use `dkg:creator` (peer DID) for the
+    // public binding metadata so it round-trips through ONTOLOGY gossip.
+    const ownerDid = await this.getContextGraphCreator(opts.paranetId)
+      ?? `did:dkg:agent:${this.peerId}`;
     const quads = buildPolicyRevocationQuads({
       bindingUri: target.bindingUri,
       revoker: ownerDid,
@@ -5569,7 +5573,6 @@ export class DKGAgent {
   }
 
   private async getContextGraphOwner(paranetId: string): Promise<string | null> {
-    const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
     const cgMetaGraph = paranetMetaGraphUri(paranetId);
     const paranetUri = `did:dkg:context-graph:${paranetId}`;
     // Prefer the curator (wallet-scoped owner) so per-agent authorization
@@ -5587,7 +5590,21 @@ export class DKGAgent {
       const owner = (curatorResult.bindings[0] as Record<string, string>)['owner'];
       if (owner) return owner;
     }
-    const creatorResult = await this.store.query(`
+    return this.getContextGraphCreator(paranetId);
+  }
+
+  /**
+   * Read `dkg:creator` (peer-ID DID) for a paranet. This is the publicly
+   * discoverable owner handle used in gossip validation — it propagates
+   * through ONTOLOGY sync for open CGs, while `dkg:curator` stays in `_meta`.
+   * Emitted approve/revoke binding metadata must use this value so remote
+   * peers validating via `gossip-publish-handler` see a matching owner.
+   */
+  private async getContextGraphCreator(paranetId: string): Promise<string | null> {
+    const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
+    const cgMetaGraph = paranetMetaGraphUri(paranetId);
+    const paranetUri = `did:dkg:context-graph:${paranetId}`;
+    const result = await this.store.query(`
       SELECT ?owner WHERE {
         {
           GRAPH <${ontologyGraph}> {
@@ -5601,8 +5618,8 @@ export class DKGAgent {
       }
       LIMIT 1
     `);
-    if (creatorResult.type !== 'bindings' || creatorResult.bindings.length === 0) return null;
-    return (creatorResult.bindings[0] as Record<string, string>)['owner'] ?? null;
+    if (result.type !== 'bindings' || result.bindings.length === 0) return null;
+    return (result.bindings[0] as Record<string, string>)['owner'] ?? null;
   }
 
   private async listCclPolicyBindings(opts: {
