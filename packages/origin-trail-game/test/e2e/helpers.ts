@@ -377,12 +377,23 @@ function startDaemon(node: TestNode): ChildProcess {
   // lets us signal the WHOLE group via `process.kill(-pid, sig)` in
   // stopTestCluster, so supervisor + worker die together even under
   // SIGKILL.
+  // `DKG_NO_BLUE_GREEN=1` skips the blue-green release-slot migration
+  // (`migrateToBlueGreen` in `packages/cli/src/migration.ts`), which in a
+  // real deployment clones + `pnpm install` + `pnpm build:runtime` the
+  // repo into `<DKG_HOME>/releases/a` + `b` to enable hot-swap upgrades.
+  // For tests that is pure waste: each daemon boot adds ~2-3 min of git
+  // clone + pnpm install that we don't need because we already have the
+  // built monorepo on disk. `resolveDaemonEntryPoint()` in cli.ts
+  // specifically honours this flag and uses the current cli.js entry
+  // instead of the slot. Without this, each of 3 test daemons pays ~3
+  // min of migration tax before they even try to bind their listen
+  // port, causing 5-min beforeAll timeouts on 2-core CI runners.
   const child = spawn(
     process.execPath,
     [CLI_JS, 'start', '--foreground'],
     {
       cwd: DKG_V9_ROOT,
-      env: { ...process.env, DKG_HOME: node.homeDir },
+      env: { ...process.env, DKG_HOME: node.homeDir, DKG_NO_BLUE_GREEN: '1' },
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: true,
     },
