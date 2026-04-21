@@ -4924,6 +4924,7 @@ export class DKGAgent {
     if (!isPrivate) {
       return true;
     }
+    const ctx = createOperationContext('sync');
 
     const now = Date.now();
     for (const [requestId, seenAt] of this.seenPrivateSyncRequestIds) {
@@ -4945,10 +4946,15 @@ export class DKGAgent {
       !request.requesterSignatureR ||
       !request.requesterSignatureVS
     ) {
+      this.log.warn(
+        ctx,
+        `Denied sync request for "${request.contextGraphId}": malformed or mismatched envelope (requesterPeer=${request.requesterPeerId ?? 'n/a'} targetPeer=${request.targetPeerId ?? 'n/a'} remotePeer=${remotePeerId} identityId=${request.requesterIdentityId ?? '0'} agentAddress=${request.requesterAgentAddress ?? 'n/a'})`,
+      );
       return false;
     }
 
     if (this.seenPrivateSyncRequestIds.has(request.requestId)) {
+      this.log.warn(ctx, `Denied sync request for "${request.contextGraphId}": replay detected for request ${request.requestId}`);
       return false;
     }
 
@@ -4970,6 +4976,7 @@ export class DKGAgent {
         yParityAndS: request.requesterSignatureVS,
       });
     } catch {
+      this.log.warn(ctx, `Denied sync request for "${request.contextGraphId}": failed to recover signer (identityId=${request.requesterIdentityId ?? '0'} agentAddress=${request.requesterAgentAddress ?? 'n/a'})`);
       return false;
     }
 
@@ -4980,14 +4987,17 @@ export class DKGAgent {
     if (requesterIdentityId > 0n) {
       const verifyIdentity = this.chain.verifySyncIdentity ?? this.chain.verifyACKIdentity;
       if (typeof verifyIdentity !== 'function') {
+        this.log.warn(ctx, `Denied sync request for "${request.contextGraphId}": identity verification unavailable (identityId=${requesterIdentityId.toString()} signer=${recoveredAddress})`);
         return false;
       }
       const validIdentity = await verifyIdentity.call(this.chain, recoveredAddress, requesterIdentityId);
       if (!validIdentity) {
+        this.log.warn(ctx, `Denied sync request for "${request.contextGraphId}": signer ${recoveredAddress} does not verify for identityId=${requesterIdentityId.toString()}`);
         return false;
       }
     } else if (!request.requesterAgentAddress ||
       recoveredAddress.toLowerCase() !== request.requesterAgentAddress.toLowerCase()) {
+      this.log.warn(ctx, `Denied sync request for "${request.contextGraphId}": edge signer mismatch (signer=${recoveredAddress} requesterAgentAddress=${request.requesterAgentAddress ?? 'n/a'})`);
       return false;
     }
 
@@ -5010,6 +5020,11 @@ export class DKGAgent {
         ) ?? false;
       }
     }
+
+    this.log.info(
+      ctx,
+      `Private sync auth for "${request.contextGraphId}": identityId=${requesterIdentityId.toString()} signer=${recoveredAddress} requesterAgentAddress=${request.requesterAgentAddress ?? 'n/a'} participants=${participants?.join(',') ?? 'none'} allowed=${allowed}`,
+    );
 
     if (allowed) {
       this.seenPrivateSyncRequestIds.set(request.requestId, now);
