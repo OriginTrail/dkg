@@ -1594,14 +1594,9 @@ openclawCmd
   .option('--no-fund', 'Deprecated no-op — faucet funding has been removed')
   .option('--fund', 'Deprecated no-op — faucet funding has been removed')
   .action(async (opts, command) => {
-    // Warn once if either deprecated flag was explicitly supplied, then strip
-    // both from the opts so `SetupOptions` (which no longer has `fund`) sees a
-    // clean surface.
-    if (command.getOptionValueSource('fund') === 'cli') {
-      console.warn('[setup] note: --no-fund/--fund is deprecated; faucet funding was removed. Ignoring.');
-    }
-    delete opts.fund;
-
+    // Dynamic import + process.exit plumbing stay here; the deprecation-flag
+    // bookkeeping and the actual `runSetup` call live in `openclawSetupAction`
+    // so they can be unit-tested without spawning the built CLI.
     let runSetup: typeof import('@origintrail-official/dkg-adapter-openclaw').runSetup;
     try {
       ({ runSetup } = await import('@origintrail-official/dkg-adapter-openclaw'));
@@ -1613,8 +1608,9 @@ openclawCmd
       process.exit(1);
     }
 
+    const { openclawSetupAction } = await import('./openclaw-setup.js');
     try {
-      await runSetup(opts);
+      await openclawSetupAction(opts, command, { runSetup });
     } catch (err: any) {
       console.error(`\n[setup] ERROR: ${err?.message ?? err}\n`);
       process.exit(1);

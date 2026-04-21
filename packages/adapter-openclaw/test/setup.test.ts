@@ -506,6 +506,38 @@ describe('unmergeOpenClawConfig', () => {
     expect(final.plugins.slots.memory).toBe('some-other-memory-plugin');
     expect(final.plugins.entries['adapter-openclaw'].previousMemorySlotOwner).toBeUndefined();
   });
+
+  // PR #228 Codex N4 — a missing openclaw.json is treated as already-
+  // disconnected so the Disconnect UI flow doesn't strand users who removed
+  // or relocated OpenClaw. No throw, no `.bak`, no file created.
+  it('is a no-op when openclaw.json is missing', () => {
+    const configPath = join(testDir, 'does-not-exist.json');
+    const countBefore = readdirSync(testDir).length;
+
+    expect(() => unmergeOpenClawConfig(configPath)).not.toThrow();
+
+    expect(existsSync(configPath)).toBe(false);
+    expect(readdirSync(testDir).length).toBe(countBefore);
+    expect(
+      readdirSync(testDir).some((f: string) => f.includes('.bak.')),
+    ).toBe(false);
+  });
+
+  it('is a no-op when openclaw.json exists but is not valid JSON', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    const original = '{ not-valid-json';
+    writeFileSync(configPath, original);
+    const countBefore = readdirSync(testDir).length;
+
+    expect(() => unmergeOpenClawConfig(configPath)).not.toThrow();
+
+    // File untouched (not rewritten), no `.bak` sibling written.
+    expect(readFileSync(configPath, 'utf-8')).toBe(original);
+    expect(readdirSync(testDir).length).toBe(countBefore);
+    expect(
+      readdirSync(testDir).some((f: string) => f.startsWith('openclaw.json.bak.')),
+    ).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -606,11 +638,13 @@ describe('verifyUnmergeInvariants', () => {
     );
   });
 
-  it('does not throw on a missing config file — returns a descriptive string', () => {
+  // PR #228 Codex N4 — missing file is treated as already-disconnected so
+  // the Disconnect UI flow doesn't strand users who removed or relocated
+  // OpenClaw. The invariants hold trivially when the config doesn't exist.
+  it('returns null on a missing config file (treated as already-disconnected)', () => {
     const configPath = join(testDir, 'does-not-exist.json');
 
-    const result = verifyUnmergeInvariants(configPath);
-    expect(result).toMatch(/openclaw\.json not found/);
+    expect(verifyUnmergeInvariants(configPath)).toBeNull();
   });
 
   it('does not throw on an unparseable config file — returns a descriptive string', () => {

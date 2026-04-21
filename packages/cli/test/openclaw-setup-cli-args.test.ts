@@ -1,108 +1,91 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
-import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { tmpdir } from 'node:os';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { Command } from 'commander';
+import { openclawSetupAction } from '../src/openclaw-setup.js';
 
-const execFileAsync = promisify(execFile);
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const CLI_ENTRY = join(__dirname, '..', 'dist', 'cli.js');
+// Regression test for PR #228 Codex review #4 (--no-fund backwards-compat)
+// and review #5 (don't depend on a prebuilt CLI). Unit-tests the extracted
+// action handler directly — no child process, no `dist/cli.js` dependency,
+// so it runs green on an unbuilt checkout.
 
-// Regression test for PR #228 Codex review #1 (--no-fund backwards-compat).
-// Before the adapter-bundling rework, `dkg openclaw setup` delegated to the
-// standalone `dkg-openclaw` binary with `allowUnknownOption(true)`, so any
-// scripted invocation passing `--no-fund` succeeded. The bundled in-process
-// rewrite switched to strict commander options; this test guards against a
-// regression where `--no-fund` (or `--fund`) throws `unknown option`.
-describe.sequential('dkg openclaw setup — deprecated --no-fund/--fund flags', () => {
-  let tmpRoot: string;
-  let workspace: string;
-  let openclawHome: string;
-  let dkgHome: string;
+type FundSource = 'cli' | 'default' | 'env' | 'config' | 'implied';
 
-  beforeAll(async () => {
-    if (!existsSync(CLI_ENTRY)) {
-      throw new Error(
-        `CLI entry not found at ${CLI_ENTRY}. Run \`pnpm --filter @origintrail-official/dkg build\` before running this suite.`,
-      );
-    }
+/**
+ * Minimal commander-like stub that satisfies the `getOptionValueSource`
+ * surface the action consults. Pass `'cli'` to simulate the user explicitly
+ * supplying `--fund` or `--no-fund`; `'default'` simulates the flag not
+ * being passed.
+ */
+function makeCommand(fundSource: FundSource): Pick<Command, 'getOptionValueSource'> {
+  return {
+    getOptionValueSource: (optionName: string) =>
+      optionName === 'fund' ? fundSource : undefined,
+  } as Pick<Command, 'getOptionValueSource'>;
+}
 
-    tmpRoot = await mkdtemp(join(tmpdir(), 'dkg-openclaw-flag-test-'));
-    workspace = join(tmpRoot, 'workspace');
-    openclawHome = join(tmpRoot, 'openclaw');
-    dkgHome = join(tmpRoot, 'dkg');
-    await mkdir(workspace, { recursive: true });
-    await mkdir(openclawHome, { recursive: true });
-    // Seed a minimal openclaw.json so `discoverWorkspace` resolves via the
-    // explicit --workspace path and the merge step has a config to work with.
-    await writeFile(
-      join(openclawHome, 'openclaw.json'),
-      JSON.stringify({ plugins: {} }, null, 2) + '\n',
-    );
+describe('openclawSetupAction — deprecated --no-fund/--fund flags', () => {
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
   });
 
-  afterAll(async () => {
-    if (tmpRoot) {
-      await rm(tmpRoot, { recursive: true, force: true });
-    }
+  afterEach(() => {
+    warnSpy.mockRestore();
   });
 
-  it('accepts --no-fund --dry-run without throwing and emits a deprecation warning', async () => {
-    const { stdout, stderr } = await execFileAsync(
-      process.execPath,
-      [CLI_ENTRY, 'openclaw', 'setup', '--workspace', workspace, '--no-fund', '--dry-run', '--no-start', '--no-verify'],
-      {
-        env: {
-          ...process.env,
-          OPENCLAW_HOME: openclawHome,
-          DKG_HOME: dkgHome,
-        },
-      },
-    );
+  it('logs a deprecation warning and strips `fund` from opts when --no-fund was supplied', async () => {
+    const runSetup = vi.fn(async () => {});
+    // Commander's `--no-fund` parsing sets `fund: false`; source is `'cli'`.
+    const opts = { dryRun: true, fund: false };
 
-    const combined = `${stdout}\n${stderr}`;
-    expect(combined).toContain('--no-fund/--fund is deprecated');
-    // DRY RUN marker proves setup actually entered runSetup (not a commander
-    // parse-error bail-out).
-    expect(combined).toContain('DRY RUN');
+    await openclawSetupAction(opts, makeCommand('cli'), { runSetup: runSetup as any });
+
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('--no-fund/--fund is deprecated'),
+    );
+    expect(runSetup).toHaveBeenCalledTimes(1);
+    const forwarded = runSetup.mock.calls[0][0];
+    expect(forwarded).not.toHaveProperty('fund');
+    expect(forwarded.dryRun).toBe(true);
   });
 
-  it('accepts --fund --dry-run without throwing and emits a deprecation warning', async () => {
-    const { stdout, stderr } = await execFileAsync(
-      process.execPath,
-      [CLI_ENTRY, 'openclaw', 'setup', '--workspace', workspace, '--fund', '--dry-run', '--no-start', '--no-verify'],
-      {
-        env: {
-          ...process.env,
-          OPENCLAW_HOME: openclawHome,
-          DKG_HOME: dkgHome,
-        },
-      },
-    );
+  it('logs a deprecation warning and strips `fund` from opts when --fund was supplied', async () => {
+    const runSetup = vi.fn(async () => {});
+    // Commander's `--fund` parsing sets `fund: true`; source is `'cli'`.
+    const opts = { dryRun: true, fund: true };
 
-    const combined = `${stdout}\n${stderr}`;
-    expect(combined).toContain('--no-fund/--fund is deprecated');
-    expect(combined).toContain('DRY RUN');
+    await openclawSetupAction(opts, makeCommand('cli'), { runSetup: runSetup as any });
+
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('--no-fund/--fund is deprecated'),
+    );
+    expect(runSetup).toHaveBeenCalledTimes(1);
+    expect(runSetup.mock.calls[0][0]).not.toHaveProperty('fund');
   });
 
-  it('does NOT emit the deprecation warning when neither flag is passed', async () => {
-    const { stdout, stderr } = await execFileAsync(
-      process.execPath,
-      [CLI_ENTRY, 'openclaw', 'setup', '--workspace', workspace, '--dry-run', '--no-start', '--no-verify'],
-      {
-        env: {
-          ...process.env,
-          OPENCLAW_HOME: openclawHome,
-          DKG_HOME: dkgHome,
-        },
-      },
-    );
+  it('does NOT log the deprecation warning when neither flag is explicitly supplied', async () => {
+    const runSetup = vi.fn(async () => {});
+    // Default value present (commander fills `fund: true` from the --no-fund
+    // declaration) but source is `'default'` — user did not type the flag.
+    const opts = { dryRun: true, fund: true };
 
-    const combined = `${stdout}\n${stderr}`;
-    expect(combined).not.toContain('deprecated');
-    expect(combined).toContain('DRY RUN');
+    await openclawSetupAction(opts, makeCommand('default'), { runSetup: runSetup as any });
+
+    expect(warnSpy).not.toHaveBeenCalled();
+    expect(runSetup).toHaveBeenCalledTimes(1);
+    // `fund` is still stripped — SetupOptions on the adapter side has no such field.
+    expect(runSetup.mock.calls[0][0]).not.toHaveProperty('fund');
+  });
+
+  it('propagates errors from runSetup so the caller can decide exit semantics', async () => {
+    const runSetup = vi.fn(async () => {
+      throw new Error('adapter blew up');
+    });
+
+    await expect(
+      openclawSetupAction({ dryRun: true }, makeCommand('default'), { runSetup: runSetup as any }),
+    ).rejects.toThrow('adapter blew up');
   });
 });

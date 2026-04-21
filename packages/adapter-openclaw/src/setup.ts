@@ -619,17 +619,30 @@ export function mergeOpenClawConfig(openclawConfigPath: string, adapterPath: str
  * (user-owned), and any workspace `SKILL.md` copies alone. Idempotent — a
  * second call produces zero diff. Backs up to `.bak.<ts>` only when content
  * changes (same contract as merge).
+ *
+ * Already-disconnected shortcut: a missing or unparseable `openclaw.json` is
+ * treated as "nothing to unmerge" — logs a one-liner and returns without
+ * throwing or writing `.bak`. The adapter cannot be loading from a config
+ * that doesn't exist (or can't be parsed), so blocking the Disconnect UI
+ * flow on it would strand users who removed or relocated OpenClaw.
  */
 export function unmergeOpenClawConfig(openclawConfigPath: string): void {
   if (!openclawConfigPath || !existsSync(openclawConfigPath)) {
     openclawConfigPath = join(openclawDir(), 'openclaw.json');
-    if (!existsSync(openclawConfigPath)) {
-      throw new Error(`openclaw.json not found at ${openclawConfigPath}`);
-    }
+  }
+  if (!existsSync(openclawConfigPath)) {
+    log(`openclaw.json not found at ${openclawConfigPath} — nothing to unmerge`);
+    return;
   }
 
   const raw = readFileSync(openclawConfigPath, 'utf-8');
-  const config = JSON.parse(raw);
+  let config: any;
+  try {
+    config = JSON.parse(raw);
+  } catch (err: any) {
+    log(`openclaw.json at ${openclawConfigPath} is not valid JSON (${err?.message ?? err}) — nothing to unmerge`);
+    return;
+  }
   const pluginId = ADAPTER_PLUGIN_ID;
 
   // Remove from plugins.allow
@@ -722,15 +735,18 @@ export function unmergeOpenClawConfig(openclawConfigPath: string): void {
  * `packages/cli/src/daemon.ts`) surface the string as `runtime.lastError` and
  * refuse to transition the integration to `disconnected`.
  *
- * Non-throwing by design: a missing/unparseable config file yields a
- * descriptive string instead of an exception so the daemon can decide what
- * to do (in most scenarios, if the file vanished between unmerge and verify
- * the disconnect is effectively complete and a dedicated error line is the
- * right surface).
+ * Non-throwing by design. File-state handling mirrors
+ * `unmergeOpenClawConfig`:
+ *   - Missing file → returns `null`. The invariants hold trivially because
+ *     no adapter can be loading from a config that doesn't exist; blocking
+ *     Disconnect in this case would strand users who removed OpenClaw.
+ *   - Unparseable file → returns a descriptive string. That's a genuinely
+ *     broken state worth surfacing — we can't verify invariants one way or
+ *     the other.
  */
 export function verifyUnmergeInvariants(configPath: string): string | null {
   if (!existsSync(configPath)) {
-    return `openclaw.json not found at ${configPath}`;
+    return null;
   }
 
   let config: any;
