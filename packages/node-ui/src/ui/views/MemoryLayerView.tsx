@@ -358,7 +358,7 @@ export function MemoryLayerView({ layer, contextGraphId }: MemoryLayerViewProps)
 
 function AssertionList({ contextGraphId, onPromoted }: { contextGraphId: string; onPromoted: () => void }) {
   const { data: assertions, loading, refresh } = useFetch(
-    () => listAssertions(contextGraphId),
+    () => listAssertions(contextGraphId, 'wm'),
     [contextGraphId],
     0
   );

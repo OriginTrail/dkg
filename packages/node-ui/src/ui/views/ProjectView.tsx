@@ -1055,7 +1055,7 @@ function LayerActionsWidget({ layer, count, contextGraphId, onComplete }: {
     setResult(null);
     try {
       if (isWm) {
-        const assertions = await listAssertions(contextGraphId);
+        const assertions = await listAssertions(contextGraphId, 'wm');
         let promoted = 0;
         for (const a of assertions) {
           const res = await promoteAssertion(contextGraphId, a.name);
@@ -1444,8 +1444,8 @@ function AssertionsList({ contextGraphId, layer, onComplete }: {
   onComplete: () => void;
 }) {
   const { data: assertions, loading, refresh } = useFetch(
-    () => listAssertions(contextGraphId),
-    [contextGraphId],
+    () => listAssertions(contextGraphId, layer),
+    [contextGraphId, layer],
     0
   );
   const [busy, setBusy] = useState<string | null>(null);

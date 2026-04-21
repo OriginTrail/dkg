@@ -2456,6 +2456,11 @@ body.light .v10-import-dropzone.drag-over { border-color: #b0b0b0; background: #
   gap: 12px;
   padding: 14px 16px;
   margin-bottom: 10px;
+  /* Banner sits above the scrollable EntityList inside a fixed-height
+     (70vh) flex-column. Without flex-shrink:0 it competes with the list
+     for vertical space and squeezes the list below the visible region,
+     which makes scrolling the list impossible. */
+  flex-shrink: 0;
   background: linear-gradient(135deg,
     rgba(34,197,94,0.14) 0%,
     rgba(59,130,246,0.10) 50%,
@@ -3041,6 +3046,13 @@ body.light .v10-me-graph-legend { background: rgba(255,255,255,0.8); }
   flex: 1 1 auto; min-height: 0;
   width: 100%;
 }
+/* Fallback scroll region for the Entities tab: EntityList provides its
+   own overflow-y:auto, but if any sibling (hero banner, widget strip,
+   footer) misbehaves and oversizes the inner list, allow the body
+   itself to scroll rather than clip the remainder. */
+.v10-layer-expand-body.entities-tab {
+  overflow-y: auto; overflow-x: hidden;
+}
 
 /* Horizontal widget strip at the top of the Entities tab — sticky, not vertically scrollable */
 .v10-layer-widgets-strip {
@@ -3050,7 +3062,9 @@ body.light .v10-me-graph-legend { background: rgba(255,255,255,0.8); }
   border-bottom: 1px solid var(--border-subtle);
   background: var(--bg-panel);
   overflow-x: auto;
-  max-height: 40vh;
+  /* Cap the widget strip so it never eats more than ~40% of the 70vh
+     expanded layer box — leaves at least ~40vh for the EntityList below. */
+  max-height: 30vh;
 }
 .v10-layer-widgets-strip.empty {
   justify-content: center; align-items: center;

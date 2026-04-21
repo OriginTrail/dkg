@@ -362,8 +362,60 @@ export interface AssertionInfo {
   tripleCount?: number;
 }
 
-/** Discover assertions in WM by querying named graphs that match the assertion pattern. */
-export async function listAssertions(contextGraphId: string): Promise<AssertionInfo[]> {
+/**
+ * Discover assertions in a given memory layer.
+ *
+ * WM uses a cheap graph-listing query: the assertion graph URI shape is
+ * `did:dkg:context-graph:<cg>/assertion/<agent>/<name>` and a WM assertion
+ * still carries its triples there. SWM is different: when an assertion is
+ * promoted, its triples move into the single `/_shared_memory` graph, so
+ * the assertion graph itself becomes empty and the WM-style listing would
+ * return nothing. The canonical record of "which assertions exist and
+ * where" is the `_meta` graph, where every assertion's lifecycle URI
+ * carries a `dkg:memoryLayer` literal that we can filter on.
+ *
+ * We keep the existing WM behaviour unchanged (safest rollback path) and
+ * use the `_meta`-driven query only for SWM.
+ */
+export async function listAssertions(
+  contextGraphId: string,
+  layer: 'wm' | 'swm' = 'wm',
+): Promise<AssertionInfo[]> {
+  if (layer === 'swm') {
+    const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
+    const DKG = 'http://dkg.io/ontology/';
+    // Query the assertion-lifecycle records in `_meta` for entries marked
+    // `memoryLayer "SWM"`. `assertionGraph` is optional because older
+    // records may pre-date that predicate; in that case we fall back to
+    // reconstructing the graph URI from the lifecycle URN below.
+    const sparql = `SELECT ?lifecycle ?assertionGraph WHERE {
+      GRAPH <${metaGraph}> {
+        ?lifecycle <${DKG}memoryLayer> "SWM" .
+        OPTIONAL { ?lifecycle <${DKG}assertionGraph> ?assertionGraph }
+      }
+    }`;
+    const data = await executeQuery(sparql, contextGraphId);
+    const bindings: any[] = data?.result?.bindings ?? [];
+    const result: AssertionInfo[] = [];
+    for (const b of bindings) {
+      const lifecycle = typeof b.lifecycle === 'string' ? b.lifecycle : b.lifecycle?.value;
+      if (!lifecycle) continue;
+      // Lifecycle URN shape is
+      //   urn:dkg:assertion:<cgId>[:<subGraphName>]:<agent>:<name>
+      // The agent is a 0x EVM address which never contains ':', and the
+      // name is the last colon-separated segment.
+      const lastColon = lifecycle.lastIndexOf(':');
+      if (lastColon < 0) continue;
+      const name = lifecycle.slice(lastColon + 1);
+      const graphUri = typeof b.assertionGraph === 'string'
+        ? b.assertionGraph
+        : (b.assertionGraph?.value ?? '');
+      result.push({ name, graphUri });
+    }
+    return result;
+  }
+
+  // layer === 'wm'
   const sparql = `SELECT DISTINCT ?g (COUNT(?s) AS ?cnt) WHERE { GRAPH ?g { ?s ?p ?o } } GROUP BY ?g`;
   const data = await executeQuery(sparql, contextGraphId);
   const bindings: any[] = data?.result?.bindings ?? [];
