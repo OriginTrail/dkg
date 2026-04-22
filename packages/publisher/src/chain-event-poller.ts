@@ -84,9 +84,24 @@ export class ChainEventPoller {
   private headKnown = false;
   private timer: ReturnType<typeof setInterval> | null = null;
   private running = false;
+  /**
+   * Consecutive transient failures since the last successful poll. Used to
+   * escalate a stuck transient (e.g. RPC URL is permanently broken) from
+   * [WARN] to [ERROR] so genuinely-broken endpoints surface in the E2E
+   * "no fatal ERROR lines" contract instead of being suppressed forever.
+   */
+  private consecutiveTransientFailures = 0;
 
   /** Max blocks to scan per poll — stays within typical RPC range limits. */
   private static readonly MAX_RANGE = 9_000;
+  /**
+   * After this many consecutive transient failures we assume the
+   * "transient" classifier is masking a permanent fault and log at
+   * [ERROR] instead. With the default 12s interval that is ~60s of
+   * uninterrupted upstream errors, well past any reasonable transient
+   * blip on a healthy RPC endpoint.
+   */
+  private static readonly TRANSIENT_ESCALATION_AFTER = 5;
 
   constructor(config: ChainEventPollerConfig) {
     this.chain = config.chain;
@@ -121,35 +136,89 @@ export class ChainEventPoller {
     this.log.info(ctx, `Starting chain event poller (interval=${this.intervalMs}ms)`);
 
     this.timer = setInterval(() => {
-      this.poll().catch((err) => {
-        const pollCtx = createOperationContext('system');
-        const msg = err instanceof Error ? err.message : String(err);
-        // PR #229 bot review round 12 tail: the Hardhat/ethers provider
-        // has a well-known race where `eth_getLogs` is called with a
-        // `toBlock` that momentarily "extends beyond current head
-        // block" — between our bounded `getBlockNumber()` and the
-        // `eth_getLogs` round-trip, hardhat can revert a block or the
-        // provider re-resolves `latest` against a stale cursor. The
-        // poller already retries on the next tick and the cursor does
-        // not advance on failure, so this is a recoverable transient;
-        // logging it at [WARN] keeps the E2E "no fatal ERROR lines"
-        // contract accurate.
-        const isTransientHeadRace =
-          /block range extends beyond current head block/i.test(msg)
-          || /code=UNKNOWN_ERROR.*32602/i.test(msg);
-        if (isTransientHeadRace) {
-          this.log.warn(
-            pollCtx,
-            `Poll transient (chain head race — retrying next tick): ${msg}`,
-          );
-        } else {
-          this.log.error(pollCtx, `Poll failed: ${msg}`);
-        }
-      });
+      this.poll()
+        .then(() => {
+          // Successful poll — reset the transient-failure escalation
+          // counter so a fresh series of upstream blips starts from
+          // zero rather than carrying over decade-old retries.
+          this.consecutiveTransientFailures = 0;
+        })
+        .catch((err) => {
+          this.handlePollFailure(err);
+        });
     }, this.intervalMs);
 
     // Run first poll immediately
     this.poll().catch(() => {});
+  }
+
+  /**
+   * Classify a poll-loop error as a recoverable transient or a real
+   * failure. Exposed (and tested) so the rule-set is auditable in
+   * isolation rather than buried inside the `setInterval` callback.
+   *
+   * Two transient categories are treated as recoverable:
+   *
+   *   - `chain head race` — Hardhat / ethers fast-iterating tests
+   *     occasionally call `eth_getLogs` with `toBlock` momentarily
+   *     past the current head between our `getBlockNumber()` and the
+   *     `eth_getLogs` round-trip. The cursor does not advance on
+   *     failure and the next tick retries. (PR #229 r12 fix.)
+   *   - `upstream RPC` — public RPC endpoints (e.g. sepolia.base.org)
+   *     periodically return 5xx gateway errors or close the socket
+   *     mid-request. ethers wraps these as `code=SERVER_ERROR`. Same
+   *     contract: cursor does not advance, next tick retries.
+   *     (Post-v10-rc merge fix; surfaced by the
+   *     `three-player-game.test.ts` E2E "no fatal ERROR lines"
+   *     assertion red-lighting on a single 502.)
+   *
+   * Anything else is a real failure. Logging at [ERROR] is the right
+   * shape so genuine bugs surface in the same E2E assertion.
+   */
+  static classifyPollFailure(err: unknown): {
+    kind: 'chain-head-race' | 'upstream-rpc' | 'fatal';
+    message: string;
+  } {
+    const message = err instanceof Error ? err.message : String(err);
+    const isTransientHeadRace =
+      /block range extends beyond current head block/i.test(message)
+      || /code=UNKNOWN_ERROR.*32602/i.test(message);
+    if (isTransientHeadRace) return { kind: 'chain-head-race', message };
+    const isTransientUpstreamRpc =
+      /code=SERVER_ERROR/i.test(message)
+      || /\b50\d\b\s*(?:Bad Gateway|Service Unavailable|Gateway Timeout|Internal Server Error)/i.test(message)
+      || /ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|fetch failed/i.test(message);
+    if (isTransientUpstreamRpc) return { kind: 'upstream-rpc', message };
+    return { kind: 'fatal', message };
+  }
+
+  /**
+   * Apply the classifier and emit the matching log line. Tracks
+   * consecutive transient failures so a permanently broken endpoint
+   * (wrong URL, dead provider) eventually escalates from [WARN] to
+   * [ERROR] — without this, the warn-only classifier would itself be
+   * a false-negative-producing test smell.
+   */
+  private handlePollFailure(err: unknown): void {
+    const pollCtx = createOperationContext('system');
+    const { kind, message } = ChainEventPoller.classifyPollFailure(err);
+    if (kind === 'fatal') {
+      this.log.error(pollCtx, `Poll failed: ${message}`);
+      return;
+    }
+    this.consecutiveTransientFailures += 1;
+    if (this.consecutiveTransientFailures >= ChainEventPoller.TRANSIENT_ESCALATION_AFTER) {
+      this.log.error(
+        pollCtx,
+        `Poll failed: transient persisted ${this.consecutiveTransientFailures} ticks (last error: ${message})`,
+      );
+      return;
+    }
+    const reason = kind === 'chain-head-race' ? 'chain head race' : 'upstream RPC';
+    this.log.warn(
+      pollCtx,
+      `Poll transient (${reason} — retrying next tick, ${this.consecutiveTransientFailures}/${ChainEventPoller.TRANSIENT_ESCALATION_AFTER}): ${message}`,
+    );
   }
 
   stop(): void {
