@@ -57,37 +57,19 @@ export class BlazegraphStore implements TripleStore {
     const o = pattern.object ? formatTerm(pattern.object) : '?o';
     const triple = `${s} ${p} ${o}`;
     if (pattern.graph) {
-      // Materialise the matching quads first so we can return an
-      // accurate `removed` count. Blazegraph 2.1.5's `DROP/DELETE
-      // WHERE` updates return 200 with no count, and a before/after
-      // `countQuads()` diff is unreliable in quads-mode (the count
-      // query unions default + named graphs, and Blazegraph treats
-      // certain quad inserts as visible in both views, so the diff
-      // double-counts). Counting the materialised binding rows is
-      // the only deterministic path.
-      const projVars: string[] = [];
-      if (!pattern.subject) projVars.push('?s');
-      if (!pattern.predicate) projVars.push('?p');
-      if (!pattern.object) projVars.push('?o');
-      const proj = projVars.length > 0 ? projVars.join(' ') : '*';
-      const matched = await this.query(
-        `SELECT ${proj} WHERE { GRAPH <${escapeUri(pattern.graph)}> { ${triple} } }`,
+      // Single-graph case: countQuads(graphUri) is reliable
+      // (`SELECT (COUNT(*) AS ?c) WHERE { GRAPH <g> { ?s ?p ?o } }`
+      // never double-counts), so the before/after delta gives us
+      // the correct removed count even when bindings round-trip
+      // unreliably. Use the standard SPARQL-1.1 graph-template
+      // delete here — this form works on Blazegraph when the graph
+      // is concrete.
+      const before = await this.countQuads(pattern.graph);
+      await this.sparqlUpdate(
+        `DELETE { GRAPH <${escapeUri(pattern.graph)}> { ${triple} } } WHERE { GRAPH <${escapeUri(pattern.graph)}> { ${triple} } }`,
       );
-      let removed = 0;
-      if (matched.type === 'bindings') {
-        for (const row of matched.bindings) {
-          const sx = pattern.subject ?? row['s'];
-          const px = pattern.predicate ?? row['p'];
-          const ox = pattern.object ?? row['o'];
-          if (!sx || !px || !ox) continue;
-          const tripleData = `<${escapeUri(sx)}> <${escapeUri(px)}> ${formatTerm(ox)} .`;
-          await this.sparqlUpdate(
-            `DELETE DATA { GRAPH <${escapeUri(pattern.graph)}> { ${tripleData} } }`,
-          );
-          removed++;
-        }
-      }
-      return removed;
+      const after = await this.countQuads(pattern.graph);
+      return Math.max(0, before - after);
     }
 
     // No graph filter: enumerate every matching tuple (named graphs
