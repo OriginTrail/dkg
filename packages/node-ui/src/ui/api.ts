@@ -1,5 +1,4 @@
 const BASE = '';
-
 declare global {
   interface Window { __DKG_TOKEN__?: string; }
 }
@@ -16,6 +15,17 @@ class HttpError extends Error {
   constructor(status: number) {
     super(`HTTP ${status}`);
     this.status = status;
+  }
+}
+
+async function fetchWithTimeout(input: string, init: RequestInit = {}, timeoutMs = 10000): Promise<Response> {
+  try {
+    return await fetch(input, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+  } catch (error) {
+    if (error instanceof Error && error.name === 'TimeoutError') {
+      throw new Error(`Request timed out after ${Math.round(timeoutMs / 1000)}s`);
+    }
+    throw error;
   }
 }
 
@@ -78,6 +88,20 @@ export const fetchTelemetrySettings = () => get<{ enabled: boolean }>('/api/sett
 export const updateTelemetrySettings = (enabled: boolean) =>
   put<{ ok: boolean; enabled: boolean }>('/api/settings/telemetry', { enabled });
 export const fetchConnections = () => get<any>('/api/connections');
+export const connectToPeer = (multiaddr: string) => post<{ connected?: boolean }>('/api/connect', { multiaddr });
+export const connectToPeerWithTimeout = (multiaddr: string, timeoutMs = 10000) =>
+  fetchWithTimeout(`${BASE}/api/connect`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ multiaddr }),
+  }, timeoutMs).then(async (res) => {
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({}));
+      const msg = (errBody as { error?: string })?.error ?? `HTTP ${res.status}`;
+      throw new Error(msg);
+    }
+    return res.json() as Promise<{ connected?: boolean }>;
+  });
 export const fetchAgents = () => get<any>('/api/agents');
 
 // --- Metrics ---
@@ -247,7 +271,7 @@ export interface CatchupStatusResponse {
   jobId: string;
   contextGraphId: string;
   includeSharedMemory: boolean;
-  status: 'queued' | 'running' | 'done' | 'failed';
+  status: 'queued' | 'running' | 'done' | 'denied' | 'failed';
   queuedAt: number;
   startedAt?: number;
   finishedAt?: number;
@@ -257,6 +281,34 @@ export interface CatchupStatusResponse {
     peersTried: number;
     dataSynced: number;
     sharedMemorySynced: number;
+    denied: boolean;
+    diagnostics?: {
+      noProtocolPeers: number;
+      durable: {
+        fetchedMetaTriples: number;
+        fetchedDataTriples: number;
+        insertedMetaTriples: number;
+        insertedDataTriples: number;
+        bytesReceived: number;
+        resumedPhases: number;
+        emptyResponses: number;
+        metaOnlyResponses: number;
+        dataRejectedMissingMeta: number;
+        rejectedKcs: number;
+        failedPeers: number;
+      };
+      sharedMemory: {
+        fetchedMetaTriples: number;
+        fetchedDataTriples: number;
+        insertedMetaTriples: number;
+        insertedDataTriples: number;
+        bytesReceived: number;
+        resumedPhases: number;
+        emptyResponses: number;
+        droppedDataTriples: number;
+        failedPeers: number;
+      };
+    };
   };
   error?: string;
 }

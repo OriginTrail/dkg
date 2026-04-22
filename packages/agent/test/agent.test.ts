@@ -2138,6 +2138,63 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     }
   });
 
+  it('authorizeSyncRequest denies when signer does not verify for claimed identityId', async () => {
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const wallet = ethers.Wallet.createRandom();
+    const agent = await DKGAgent.create({
+      name: 'SyncIdentityMismatchTest',
+      listenHost: '127.0.0.1',
+      chainAdapter: chain,
+    });
+    try {
+      await agent.start();
+      (agent as any).subscribedContextGraphs.set('private-cg', {
+        name: 'private-cg',
+        subscribed: false,
+        synced: true,
+        onChainId: '1',
+        participantIdentityIds: [108n],
+      });
+      (agent as any).isPrivateContextGraph = async () => true;
+      (agent as any).getPrivateContextGraphParticipants = async () => ['108', wallet.address];
+      (chain as any).verifySyncIdentity = async () => false;
+
+      const request = {
+        contextGraphId: 'private-cg',
+        offset: 0,
+        limit: 10,
+        includeSharedMemory: false,
+        targetPeerId: agent.peerId,
+        requesterPeerId: 'peer-req',
+        requestId: `req-${Date.now()}`,
+        issuedAtMs: Date.now(),
+        requesterIdentityId: '108',
+      };
+
+      const digest = (agent as any).computeSyncDigest(
+        request.contextGraphId,
+        request.offset,
+        request.limit,
+        request.includeSharedMemory,
+        request.targetPeerId,
+        request.requesterPeerId,
+        request.requestId,
+        request.issuedAtMs,
+      );
+      const sig = ethers.Signature.from(await wallet.signMessage(digest));
+      const signed = {
+        ...request,
+        requesterSignatureR: sig.r,
+        requesterSignatureVS: sig.yParityAndS,
+      };
+
+      const result = await (agent as any).authorizeSyncRequest(signed, 'peer-req');
+      expect(result).toBe(false);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
   it('buildSyncRequest uses pipe-delimited format for public CGs', async () => {
     const agent = await DKGAgent.create({
       name: 'BuildReqPublic',

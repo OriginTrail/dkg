@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import {
-  subscribeToContextGraph, fetchContextGraphs, authHeaders,
+  subscribeToContextGraph, fetchContextGraphs,
   signJoinRequest, submitJoinRequest, fetchCurrentAgent, fetchCatchupStatus,
+  connectToPeerWithTimeout,
 } from '../../api.js';
 import { useProjectsStore } from '../../stores/projects.js';
 import { useTabsStore } from '../../stores/tabs.js';
@@ -14,13 +15,21 @@ interface JoinProjectModalProps {
 
 function parseInviteCode(raw: string): { cgId: string; multiaddr: string | null } {
   const normalized = raw.trim().replace(/\\n/g, '\n');
-  const multiaddrMatch = normalized.match(/(?:^|\s)(\/(?:ip4|ip6|dns|dns4|dns6)\/\S+)/);
-  const multiaddr = multiaddrMatch?.[1] ?? null;
-  const cgId = (multiaddr
-    ? normalized.replace(multiaddr, '')
-    : normalized
-  ).split('\n').map(l => l.trim()).filter(Boolean)[0] ?? '';
+  const lines = normalized.split('\n').map((line) => line.trim()).filter(Boolean);
+  const cgId = lines[0] ?? '';
+  const multilineMultiaddr = lines.slice(1).join('').replace(/\s+/g, '');
+  const inlineMultiaddrMatch = normalized.match(/(?:^|\s)(\/(?:ip4|ip6|dns|dns4|dns6)\/\S+)/);
+  const inlineMultiaddr = inlineMultiaddrMatch?.[1]?.replace(/\s+/g, '') ?? null;
+  const multiaddr = multilineMultiaddr.startsWith('/') ? multilineMultiaddr : inlineMultiaddr;
   return { cgId, multiaddr };
+}
+
+function validateInvite(cgId: string, multiaddr: string | null): string | null {
+  if (!cgId) return 'Missing project ID';
+  if (!multiaddr) return null;
+  if (!multiaddr.startsWith('/')) return 'Invalid curator multiaddr';
+  if (!multiaddr.includes('/p2p/')) return 'Curator multiaddr is missing peer ID';
+  return null;
 }
 
 async function pollCatchupStatus(cgId: string, maxAttempts = 10, intervalMs = 1500): Promise<{ status: string; error?: string }> {
@@ -70,7 +79,11 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
 
   const handleJoin = async () => {
     const { cgId, multiaddr } = parseInviteCode(inviteCode);
-    if (!cgId) return;
+    const inviteError = validateInvite(cgId, multiaddr);
+    if (inviteError) {
+      setError(inviteError);
+      return;
+    }
 
     setJoining(true);
     setError(null);
@@ -82,14 +95,10 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
       if (multiaddr) {
         setProgress('Connecting to curator node…');
         try {
-          await fetch('/api/connect', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', ...authHeaders() },
-            body: JSON.stringify({ multiaddr }),
-          });
+          await connectToPeerWithTimeout(multiaddr);
           await new Promise(r => setTimeout(r, 1000));
         } catch {
-          // Non-fatal -- nodes may already be connected
+          // Non-fatal — subscribe/catch-up may still work via existing peers/relays.
         }
       }
 
@@ -109,6 +118,12 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
 
       if (catchup.status === 'failed') {
         setError(catchup.error || 'Sync failed');
+        setProgress('');
+        return;
+      }
+
+      if (catchup.status === 'timeout') {
+        setError('Project subscription succeeded, but syncing is still in progress. Please wait a few seconds and try again.');
         setProgress('');
         return;
       }
@@ -143,7 +158,11 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
 
   const handleSendRequest = async () => {
     const { cgId, multiaddr } = parseInviteCode(inviteCode);
-    if (!cgId) return;
+    const inviteError = validateInvite(cgId, multiaddr);
+    if (inviteError) {
+      setError(inviteError);
+      return;
+    }
 
     setSendingRequest(true);
     setError(null);
@@ -151,14 +170,10 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
     try {
       if (multiaddr) {
         try {
-          await fetch('/api/connect', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', ...authHeaders() },
-            body: JSON.stringify({ multiaddr }),
-          });
+          await connectToPeerWithTimeout(multiaddr);
           await new Promise(r => setTimeout(r, 500));
         } catch {
-          // Non-fatal
+          // Non-fatal — signed join requests can still be delivered via existing peers.
         }
       }
 

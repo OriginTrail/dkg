@@ -19,7 +19,7 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DEVNET_DIR="${DEVNET_DIR:-$REPO_ROOT/.devnet}"
 HARDHAT_PORT="${HARDHAT_PORT:-8545}"
 NUM_NODES="${2:-6}"
-API_PORT_BASE=9201
+API_PORT_BASE="${API_PORT_BASE:-9201}"
 LIBP2P_PORT_BASE=10001
 NUM_OP_WALLETS=3
 BLAZEGRAPH_PORT=9999
@@ -435,11 +435,19 @@ start_node() {
   # Wait for API to be ready — relay node (1) gets extra time since first boot
   # compiles Solidity contracts which is CPU-intensive.
   local api_port=$((API_PORT_BASE + node_num - 1))
+  local auth_token=""
+  local -a auth_args=()
+  if [ -f "$DEVNET_DIR/node1/auth.token" ]; then
+    auth_token=$(tail -1 "$DEVNET_DIR/node1/auth.token" 2>/dev/null || echo "")
+    if [ -n "$auth_token" ]; then
+      auth_args=(-H "Authorization: Bearer $auth_token")
+    fi
+  fi
   local max_wait=30
   [ "$node_num" -eq 1 ] && max_wait=120
   local ready=false
   for i in $(seq 1 "$max_wait"); do
-    if curl -s "http://127.0.0.1:$api_port/api/status" > /dev/null 2>&1; then
+    if curl -sf "${auth_args[@]}" "http://127.0.0.1:$api_port/api/status" > /dev/null 2>&1; then
       log "Node $node_num ready (PID $node_pid, API http://127.0.0.1:$api_port)"
       ready=true
       break
@@ -457,7 +465,7 @@ start_node() {
     local peer_id=""
     for attempt in $(seq 1 10); do
       local peer_info
-      peer_info=$(curl -s "http://127.0.0.1:$api_port/api/status" 2>/dev/null || echo "{}")
+      peer_info=$(curl -sf "${auth_args[@]}" "http://127.0.0.1:$api_port/api/status" 2>/dev/null || echo "{}")
       peer_id=$(echo "$peer_info" | node -e "
         let d=''; process.stdin.on('data',c=>d+=c);
         process.stdin.on('end',()=>{

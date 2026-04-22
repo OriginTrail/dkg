@@ -75,6 +75,7 @@ import {
   CLI_NPM_PACKAGE,
 } from './config.js';
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from './publisher-runner.js';
+import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from './catchup-runner.js';
 import { loadTokens, httpAuthGuard, extractBearerToken } from './auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from './extraction/index.js';
@@ -378,37 +379,6 @@ let isUpdating = false;
 
 type CatchupJobState = "queued" | "running" | "done" | "failed" | "denied";
 
-interface CatchupJobResult {
-  connectedPeers: number;
-  syncCapablePeers: number;
-  peersTried: number;
-  dataSynced: number;
-  sharedMemorySynced: number;
-  diagnostics?: {
-    noProtocolPeers: number;
-    durable: {
-      fetchedMetaTriples: number;
-      fetchedDataTriples: number;
-      insertedMetaTriples: number;
-      insertedDataTriples: number;
-      emptyResponses: number;
-      metaOnlyResponses: number;
-      dataRejectedMissingMeta: number;
-      rejectedKcs: number;
-      failedPeers: number;
-    };
-    sharedMemory: {
-      fetchedMetaTriples: number;
-      fetchedDataTriples: number;
-      insertedMetaTriples: number;
-      insertedDataTriples: number;
-      emptyResponses: number;
-      droppedDataTriples: number;
-      failedPeers: number;
-    };
-  };
-}
-
 interface CatchupJob {
   jobId: string;
   paranetId: string;
@@ -426,7 +396,17 @@ interface CatchupTracker {
   latestByParanet: Map<string, string>;
 }
 
+function toCatchupStatusResponse(job: CatchupJob) {
+  return {
+    ...job,
+    contextGraphId: job.paranetId,
+    includeSharedMemory: job.includeWorkspace,
+  };
+}
+
 type PublishAccessPolicy = "public" | "ownerOnly" | "allowList";
+
+let daemonCatchupRunner: CatchupRunner | null = null;
 
 interface PublishQuad {
   subject: string;
@@ -1461,6 +1441,7 @@ async function runDaemonInner(
     ],
   );
   let corsAllowed: CorsAllowlist = "*";
+  daemonCatchupRunner = createCatchupRunner(agent);
 
   const server = createServer(async (req, res) => {
     try {
@@ -1703,6 +1684,11 @@ async function runDaemonInner(
       ?.stop()
       .catch((err: any) =>
         log(`Publisher runtime stop error: ${err?.message ?? String(err)}`),
+      );
+    await daemonCatchupRunner
+      ?.close()
+      .catch((err: any) =>
+        log(`Catch-up runner stop error: ${err?.message ?? String(err)}`),
       );
     server.close();
     appStaticServer?.close();
@@ -3430,6 +3416,34 @@ async function handleRequest(
       };
     });
     return jsonResponse(res, 200, { agents: enriched });
+  }
+
+  // GET /api/peer-info?peerId=<id>
+  if (req.method === "GET" && path === "/api/peer-info") {
+    const peerId = url.searchParams.get("peerId");
+    if (!peerId) {
+      return jsonResponse(res, 400, { error: 'Missing "peerId" query param' });
+    }
+
+    const allConns = agent.node.libp2p.getConnections();
+    const peerConns = allConns.filter((c) => c.remotePeer.toString() === peerId);
+    const protocols = await agent.getPeerProtocols(peerId);
+
+    const health = agent.getPeerHealth().get(peerId);
+    return jsonResponse(res, 200, {
+      peerId,
+      connected: peerConns.length > 0,
+      connectionCount: peerConns.length,
+      transports: peerConns.map((c) =>
+        c.remoteAddr?.toString().includes('/p2p-circuit') ? 'relayed' : 'direct',
+      ),
+      directions: peerConns.map((c) => c.direction),
+      remoteAddrs: peerConns.map((c) => c.remoteAddr?.toString() ?? null),
+      protocols,
+      syncCapable: protocols.includes('/dkg/10.0.0/sync'),
+      lastSeen: health?.lastSeen ?? null,
+      latencyMs: health?.latencyMs ?? null,
+    });
   }
 
   // GET /api/skills
@@ -6540,6 +6554,7 @@ async function handleRequest(
 
     const shouldSyncSharedMemory =
       (includeSharedMemory ?? includeWorkspace) !== false;
+    console.log(`[subscribe] contextGraph=${paranetId} includeSharedMemory=${shouldSyncSharedMemory}`);
     agent.subscribeToContextGraph(paranetId);
 
     const jobId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -6576,18 +6591,34 @@ async function handleRequest(
     void (async () => {
       job.status = "running";
       job.startedAt = Date.now();
+      console.log(`[catchup] job=${jobId} contextGraph=${paranetId} started`);
       try {
-        const result = await agent.syncContextGraphFromConnectedPeers(
-          paranetId,
-          {
-            includeSharedMemory: shouldSyncSharedMemory,
-          },
-        );
+        const result = await daemonCatchupRunner!.run({
+          contextGraphId: paranetId,
+          includeSharedMemory: shouldSyncSharedMemory,
+        });
         job.result = result;
-        job.status = "done";
+        if (
+          result.connectedPeers > 0 &&
+          result.syncCapablePeers === 0 &&
+          result.dataSynced === 0 &&
+          result.sharedMemorySynced === 0
+        ) {
+          job.status = "failed";
+          job.error = "No sync-capable peers found for catch-up";
+          console.log(`[catchup] job=${jobId} contextGraph=${paranetId} failed: ${job.error}`);
+        } else if (result.denied) {
+          job.status = "denied";
+          job.error = "Sync denied by remote peer";
+          console.log(`[catchup] job=${jobId} contextGraph=${paranetId} denied by remote peer`);
+        } else {
+          job.status = "done";
+          console.log(`[catchup] job=${jobId} contextGraph=${paranetId} done peers=${result.peersTried}/${result.syncCapablePeers} connected=${result.connectedPeers} data=${result.dataSynced} swm=${result.sharedMemorySynced}`);
+        }
       } catch (err) {
         job.error = err instanceof Error ? err.message : String(err);
         job.status = "failed";
+        console.log(`[catchup] job=${jobId} contextGraph=${paranetId} threw: ${job.error}`);
       } finally {
         job.finishedAt = Date.now();
       }
@@ -6629,7 +6660,7 @@ async function handleRequest(
       });
     }
 
-    return jsonResponse(res, 200, job);
+    return jsonResponse(res, 200, toCatchupStatusResponse(job));
   }
 
   // POST /api/paranet/create (legacy) — create a context graph definition
