@@ -9,7 +9,7 @@ const { Type, Field } = protobuf;
  * Sent via direct P2P streams, not GossipSub.
  */
 
-export const VerifyProposalSchema = new Type('VerifyProposal')
+const VerifyProposalSchema = new Type('VerifyProposal')
   .add(new Field('proposalId', 1, 'bytes'))
   .add(new Field('verifiedMemoryId', 2, 'uint64'))
   .add(new Field('batchId', 3, 'uint64'))
@@ -20,7 +20,7 @@ export const VerifyProposalSchema = new Type('VerifyProposal')
   .add(new Field('expiresAt', 8, 'string'))
   .add(new Field('contextGraphId', 9, 'string'));
 
-export const VerifyApprovalSchema = new Type('VerifyApproval')
+const VerifyApprovalSchema = new Type('VerifyApproval')
   .add(new Field('proposalId', 1, 'bytes'))
   .add(new Field('agentSignatureR', 2, 'bytes'))
   .add(new Field('agentSignatureVS', 3, 'bytes'))

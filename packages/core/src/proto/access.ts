@@ -2,14 +2,14 @@ import protobuf from 'protobufjs';
 
 const { Type, Field } = protobuf;
 
-export const AccessRequestSchema = new Type('AccessRequest')
+const AccessRequestSchema = new Type('AccessRequest')
   .add(new Field('kaUal', 1, 'string'))
   .add(new Field('requesterPeerId', 2, 'string'))
   .add(new Field('paymentProof', 3, 'bytes'))
   .add(new Field('requesterSignature', 4, 'bytes'))
   .add(new Field('requesterPublicKey', 5, 'bytes'));
 
-export const AccessResponseSchema = new Type('AccessResponse')
+const AccessResponseSchema = new Type('AccessResponse')
   .add(new Field('granted', 1, 'bool'))
   .add(new Field('nquads', 2, 'bytes'))
   .add(new Field('privateMerkleRoot', 3, 'bytes'))

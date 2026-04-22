@@ -86,9 +86,3 @@ export function bindingsToParagraphs(bindings: SparqlBinding[]): string {
     .join('\n\n');
 }
 
-/** URI helpers — keep them aligned with scripts/lib/ontology.mjs. */
-export const uri = {
-  agent: (slug: string) => `urn:dkg:agent:${encodeURIComponent(slug)}`,
-  chatSession: (slug: string) => `urn:dkg:chat:session:${encodeURIComponent(slug)}`,
-  profile: (projectId: string) => `urn:dkg:profile:${encodeURIComponent(projectId)}`,
-};

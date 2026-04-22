@@ -12,7 +12,7 @@ const { Type, Field } = protobuf;
  * - Agent identity and signature for authentication
  */
 
-export const GossipEnvelopeSchema = new Type('GossipEnvelope')
+const GossipEnvelopeSchema = new Type('GossipEnvelope')
   .add(new Field('version', 1, 'string'))
   .add(new Field('type', 2, 'string'))
   .add(new Field('contextGraphId', 3, 'string'))

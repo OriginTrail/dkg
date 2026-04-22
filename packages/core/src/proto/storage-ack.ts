@@ -14,7 +14,7 @@ const { Type, Field } = protobuf;
  * byte-for-byte.
  */
 
-export const StorageACKSchema = new Type('StorageACK')
+const StorageACKSchema = new Type('StorageACK')
   .add(new Field('merkleRoot', 1, 'bytes'))
   .add(new Field('coreNodeSignatureR', 2, 'bytes'))
   .add(new Field('coreNodeSignatureVS', 3, 'bytes'))

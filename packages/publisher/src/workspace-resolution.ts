@@ -34,7 +34,7 @@ export async function resolveWorkspaceSelection(params: {
   return quads;
 }
 
-export async function resolveWorkspaceOperation(params: {
+async function resolveWorkspaceOperation(params: {
   store: TripleStore;
   graphManager: GraphManager;
   contextGraphId: string;

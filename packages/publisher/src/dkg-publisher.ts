@@ -120,7 +120,7 @@ export type WriteConditionalToWorkspaceOptions = ConditionalShareOptions;
 // bare `urn:dkg:file:` (not `urn:dkg:file:keccak256:`) so any future
 // hash-algorithm variant (e.g., `urn:dkg:file:blake3:...`) is also
 // covered without a guard update.
-export class ReservedNamespaceError extends Error {
+class ReservedNamespaceError extends Error {
   readonly subject: string;
   readonly prefix: string;
   constructor(subject: string, prefix: string) {

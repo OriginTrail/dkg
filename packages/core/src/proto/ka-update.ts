@@ -6,12 +6,12 @@ const PbLong = protobuf.util.Long as unknown as {
   fromNumber(val: number, unsigned?: boolean): { low: number; high: number; unsigned: boolean };
 };
 
-export const KAUpdateManifestEntrySchema = new Type('KAUpdateManifestEntry')
+const KAUpdateManifestEntrySchema = new Type('KAUpdateManifestEntry')
   .add(new Field('rootEntity', 1, 'string'))
   .add(new Field('privateMerkleRoot', 2, 'bytes'))
   .add(new Field('privateTripleCount', 3, 'uint32'));
 
-export const KAUpdateRequestSchema = new Type('KAUpdateRequest')
+const KAUpdateRequestSchema = new Type('KAUpdateRequest')
   .add(new Field('paranetId', 1, 'string'))
   .add(new Field('batchId', 2, 'uint64'))
   .add(new Field('nquads', 3, 'bytes'))

@@ -2,7 +2,7 @@ import protobuf from 'protobufjs';
 
 const { Type, Field } = protobuf;
 
-export const FinalizationMessageSchema = new Type('FinalizationMessage')
+const FinalizationMessageSchema = new Type('FinalizationMessage')
   .add(new Field('ual', 1, 'string'))
   .add(new Field('paranetId', 2, 'string'))
   .add(new Field('kcMerkleRoot', 3, 'bytes'))

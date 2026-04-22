@@ -11,12 +11,12 @@ import protobuf from 'protobufjs';
 
 const { Type, Field } = protobuf;
 
-export const QueryRequestSchema = new Type('QueryRequest')
+const QueryRequestSchema = new Type('QueryRequest')
   .add(new Field('sparql', 1, 'string'))
   .add(new Field('paranetId', 2, 'string'))
   .add(new Field('timeout', 3, 'uint32'));
 
-export const QueryResponseSchema = new Type('QueryResponse')
+const QueryResponseSchema = new Type('QueryResponse')
   .add(new Field('nquads', 1, 'bytes'))
   .add(new Field('bindings', 2, 'bytes'))
   .add(new Field('error', 3, 'string'));

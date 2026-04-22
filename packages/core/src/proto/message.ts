@@ -2,7 +2,7 @@ import protobuf from 'protobufjs';
 
 const { Type, Field } = protobuf;
 
-export const AgentMessageSchema = new Type('AgentMessage')
+const AgentMessageSchema = new Type('AgentMessage')
   .add(new Field('conversationId', 1, 'string'))
   .add(new Field('sequence', 2, 'uint64'))
   .add(new Field('senderPeerId', 3, 'string'))
