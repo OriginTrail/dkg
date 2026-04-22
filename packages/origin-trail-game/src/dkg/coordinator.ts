@@ -1563,6 +1563,17 @@ export class OriginTrailGameCoordinator {
     const swarm = this.swarms.get(msg.swarmId);
     if (!swarm) return;
     if (swarm.players.some(p => p.peerId === msg.peerId)) return;
+    // Ignore stale `swarm:joined` gossip that races behind a later
+    // `swarm:left` for the same peer (G-4): without this check a delayed
+    // join broadcast can resurrect a player who has already left the
+    // swarm because gossipsub does not guarantee ordering across topics.
+    // The tombstone records `swarm:left.timestamp`; only re-admit when
+    // the new join is strictly newer than that tombstone.
+    const tombstones = this.swarmMemberTombstones.get(msg.swarmId);
+    const tombstonedAt = tombstones?.get(msg.peerId);
+    if (tombstonedAt != null && msg.timestamp <= tombstonedAt) {
+      return;
+    }
     swarm.players.push({
       peerId: msg.peerId,
       displayName: msg.playerName,

@@ -273,8 +273,18 @@ describe('New feature E2E tests (3 nodes)', () => {
     });
 
     it('locations endpoint returns available locations', async () => {
+      // The daemon enforces bearer auth for `/api/apps/*`; the public-path
+      // allowlist only covers `/apps/` (static UI). The previous version of
+      // this test issued an unauthenticated `fetch` and got 401, then read
+      // `data.locations` off the error body — silently `undefined`. Use the
+      // same auth header the rest of the suite uses so the assertion
+      // exercises the actual handler instead of the auth guard.
       const base = `http://127.0.0.1:${nodes[0].apiPort}`;
-      const res = await fetch(`${base}/api/apps/origin-trail-game/locations`);
+      const res = await fetch(
+        `${base}/api/apps/origin-trail-game/locations`,
+        { headers: { Authorization: `Bearer ${nodes[0].authToken}` } },
+      );
+      expect(res.status, `locations endpoint returned ${res.status}`).toBe(200);
       const data = await res.json();
       expect(data.locations).toBeDefined();
       expect(Array.isArray(data.locations)).toBe(true);
