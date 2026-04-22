@@ -5803,11 +5803,15 @@ export class DKGAgent {
       //     subscribes later, the next catch-up writes _meta or data
       //     and the entry will appear on the next refresh.
       if (!sub.onChainId) {
-        const dataGraph = paranetDataGraphUri(id);
-        const hasAnyContent = await this.store.query(
-          `ASK WHERE { GRAPH <${dataGraph}> { ?s ?p ?o } }`,
-        );
-        const hasContent = hasAnyContent.type === 'boolean' && hasAnyContent.value;
+        // Delegate to `contextGraphHasLocalContent()` so the check
+        // covers sub-graphs, assertion graphs and SWM — not just the
+        // root data graph. For any non-trivial project the root data
+        // graph is routinely empty (content lives in `/tasks`,
+        // `/chat`, `/assertion/...`, `_shared_memory`), and checking
+        // only the root caused legitimate synced projects to be
+        // hidden as phantoms here (Codex tier-4m follow-up to N29,
+        // same issue in a separate call site).
+        const hasContent = await this.contextGraphHasLocalContent(id);
         if (!hasContent) continue;
       }
 

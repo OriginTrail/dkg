@@ -487,10 +487,19 @@ ${ttl || '# (missing — re-run import-ontology.mjs)'}
         emit(triples, U(turnUri), U(AttrP), U(config.agentUri));
       }
 
-      // Stable assertion name keyed off the turn so re-annotations of the
-      // same turn replace cleanly (deterministic — NO random suffix). For
-      // pending annotations, scope by session so multiple in-flight
-      // pendings coexist without colliding.
+      // Stable assertion name keyed off BOTH the turn AND the annotating
+      // agent so re-annotations of the same turn by the SAME agent replace
+      // cleanly (deterministic — NO random suffix), but distinct agents
+      // annotating the same turn don't clobber each other's annotation
+      // graph. For pending annotations, scope by session so multiple
+      // in-flight pendings coexist without colliding.
+      //
+      // Codex tier-4m flagged the previous `agent-annotate-<turnSuffix>`
+      // naming: two agents annotating the same turn would both hit the
+      // same assertion name and the second write's `discardAssertion`
+      // call would wipe the first agent's annotation before writing its
+      // own. Mixing the agent's wallet/peer-id tail into the suffix gives
+      // per-agent-per-turn idempotency, which is the intended shape.
       //
       // `/api/assertion/.../write` is append-only, so we MUST discard the
       // prior assertion body before rewriting. Without this, retrying the
@@ -498,9 +507,10 @@ ${ttl || '# (missing — re-run import-ontology.mjs)'}
       // correction) would double-add every `chat:*` edge and re-mint every
       // sugared entity in shared memory.
       const turnSuffix = turnUri.replace(/[^A-Za-z0-9]+/g, '-').slice(-40);
+      const agentSuffix = config.agentUri.replace(/[^A-Za-z0-9]+/g, '-').slice(-20);
       const assertion = deferredForSession
-        ? `agent-annotate-pending-${turnSuffix}`
-        : `agent-annotate-${turnSuffix}`;
+        ? `agent-annotate-pending-${agentSuffix}-${turnSuffix}`
+        : `agent-annotate-${agentSuffix}-${turnSuffix}`;
       try {
         await client.ensureSubGraph(pid, 'chat');
         await client.discardAssertion({

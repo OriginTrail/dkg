@@ -453,6 +453,18 @@ export async function listAssertions(
   if (layer === 'swm') {
     const DKG = 'http://dkg.io/ontology/';
     const swmMetaPrefix = `did:dkg:context-graph:${contextGraphId}`;
+    // Mirrors the pattern `useSwmAttributions.ts` uses to read
+    // `_shared_memory_meta` graphs — the explicit `GRAPH ?g { … }`
+    // plus `FILTER(STRSTARTS … STRENDS)` pair makes the query
+    // self-scoping: the query engine's `wrapWithGraph` early-returns
+    // when the SPARQL already contains `graph `, so the query runs
+    // raw over the store and the FILTER pins it to *this* CG's
+    // `_shared_memory_meta` partitions (root + each sub-graph) only.
+    // Codex tier-4m flagged this as "runs against the default WM
+    // view", which is incorrect for this shape of SPARQL; keeping
+    // the same shape as `useSwmAttributions` — which is already in
+    // production for the SWM agent-attribution badge — keeps both
+    // call sites consistent and provably working on the same path.
     const sparql = `SELECT DISTINCT ?g ?source ?agent WHERE {
       GRAPH ?g {
         ?s a <${DKG}ShareTransition> ;

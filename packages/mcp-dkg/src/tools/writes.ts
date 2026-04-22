@@ -91,6 +91,39 @@ function rand(n = 6): string {
   return Math.random().toString(36).slice(2, 2 + n);
 }
 
+/**
+ * Short deterministic fingerprint of the content fields that define an
+ * entity's "semantic identity". Used as a URI discriminator so two
+ * genuinely distinct decisions/tasks that happen to share a title
+ * don't collapse into one RDF subject while still letting agents
+ * propose the SAME decision/task (same title AND same content) and
+ * converge on the same URI — which is the look-before-mint convergence
+ * rule from AGENTS.md.
+ *
+ * Codex tier-4m flagged the pure title-slug URI (N19 removed the
+ * random suffix but didn't add an alternative discriminator): two
+ * different decisions with the same title merged unrelated
+ * status/context/consequence triples onto one subject.
+ *
+ * djb2-style 32-bit rolling hash encoded in base36 → 4-char suffix.
+ * Collision probability at modest volumes (a few thousand entities
+ * per project) is ~1 in 1.7M, which is well below the same-title
+ * collision rate the old code exhibited.
+ */
+function contentFingerprint(...fields: Array<string | number | undefined | null>): string {
+  const joined = fields
+    .filter((v): v is string | number => v !== undefined && v !== null && v !== '')
+    .map((v) => String(v).trim().toLowerCase())
+    .join('|');
+  if (!joined) return '';
+  let h = 5381;
+  for (let i = 0; i < joined.length; i++) {
+    h = ((h << 5) + h + joined.charCodeAt(i)) | 0;
+  }
+  const unsigned = h >>> 0;
+  return unsigned.toString(36).padStart(4, '0').slice(-4);
+}
+
 /** Push a `{ subject, predicate, object }` triple into `sink`. */
 function emit(
   sink: Array<{ subject: string; predicate: string; object: string }>,
@@ -132,14 +165,17 @@ export function registerWriteTools(
       if (!config.agentUri) return agentErr();
       const decStatus = status ?? 'proposed';
       const slug = slugify(title, `decision-${rand()}`);
-      // Deterministic URI: drop the random suffix so two agents writing the
-      // same decision title converge on the same URI (see AGENTS.md
-      // "look-before-mint" / convergence rule). The assertion name below
-      // still carries a rand(4) to let the same slug be re-asserted with
-      // refined context/outcome/status without colliding on the write —
-      // but the subject URI stays stable so later
-      // `mentions`/`references`/`dkg_search` hit one canonical node.
-      const id = `urn:dkg:decision:${slug}`;
+      // Deterministic URI with a short content fingerprint: agents
+      // writing the SAME decision (same title, same outcome, same
+      // context) converge on the same URI per the AGENTS.md
+      // look-before-mint rule. But two decisions that happen to share
+      // a title and nothing else no longer collapse into one RDF
+      // subject with merged status/context/consequence triples (Codex
+      // tier-4m N34). The assertion name below still carries a rand(4)
+      // so the SAME-identity decision can be re-asserted with wording
+      // tweaks without colliding on the write layer.
+      const fp = contentFingerprint(title, outcome, context, decStatus);
+      const id = fp ? `urn:dkg:decision:${slug}-${fp}` : `urn:dkg:decision:${slug}`;
       const nowIso = new Date().toISOString();
       const triples: Array<{ subject: string; predicate: string; object: string }> = [];
       emit(triples, U(id), U(TypeP), U(NS.decisions + 'Decision'));
@@ -222,10 +258,12 @@ export function registerWriteTools(
       const st = status ?? 'todo';
       const pr = priority ?? 'p2';
       const slug = slugify(title, `task-${rand()}`);
-      // Deterministic URI (see dkg_propose_decision above) — drop the
-      // random suffix so `dkg_create_task` on the same title converges
-      // rather than fragmenting the graph into rand(4) duplicates.
-      const id = `urn:dkg:task:${slug}`;
+      // Deterministic URI with a short content fingerprint (same
+      // rationale as `dkg_propose_decision`): same title+assignee+
+      // dueDate+priority converge, genuinely distinct tasks with the
+      // same title don't merge. Codex tier-4m N34.
+      const fp = contentFingerprint(title, assignee, dueDate, st, pr);
+      const id = fp ? `urn:dkg:task:${slug}-${fp}` : `urn:dkg:task:${slug}`;
       const nowIso = new Date().toISOString();
       const triples: Array<{ subject: string; predicate: string; object: string }> = [];
       emit(triples, U(id), U(TypeP), U(NS.tasks + 'Task'));
