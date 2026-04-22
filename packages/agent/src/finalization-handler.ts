@@ -361,8 +361,31 @@ export class FinalizationHandler {
         ? contextGraphDataUri(contextGraphId, ctxGraphId)
         : graphManager.dataGraphUri(contextGraphId);
 
+    // Compute canonical quads now, but defer the `store.insert` until AFTER
+    // the confirmed-meta write and SWM cleanup (see bottom of this method).
+    //
+    // Rationale: on a replica the three store mutations (canonical insert,
+    // confirmed-meta insert, SWM cleanup) happen as three sequential awaits.
+    // Readers polling the canonical graph (e.g. downstream consumers waiting
+    // for "KC landed") can observe the canonical insert before the meta flip
+    // to `confirmed` or before SWM has been drained, producing a visible
+    // "data-without-confirmed-meta" intermediate state that is wrong from a
+    // causal-consistency standpoint (the whole point of the finalization
+    // gossip is that by the time data is canonical on a replica, the chain
+    // proof is durable too). On fast dev machines the window is sub-
+    // millisecond and invisible; on slower CI runners it widens to ~70 ms
+    // and a poll that happens to land there sees `tentative` instead of
+    // `confirmed` (flipped the `Tornado EVM integration: agent`
+    // e2e-finalization suite red on every PR-224 run since the
+    // sync-refactor merge at `bc65c3ae`).
+    //
+    // Ordering meta+cleanup BEFORE canonical insert makes the public state
+    // transition single-stepped from an observer's point of view: either
+    // you don't see the data yet, or you see data + confirmed meta + empty
+    // SWM. The only user-visible partial state that remains (confirmed
+    // meta + no data) is naturally recovered by `isAlreadyConfirmed` on the
+    // next retry path, and it's strictly less broken than the converse.
     const canonicalQuads = sharedMemoryQuads.map(q => ({ ...q, graph: dataGraph }));
-    await this.store.insert(canonicalQuads);
 
     const privateRoots = await this.getPrivateRootsFromMeta(contextGraphId, msgRootEntities, subGraphName);
     const merkleRoot = computeFlatKCRoot(canonicalQuads, privateRoots);
@@ -462,6 +485,12 @@ export class FinalizationHandler {
       });
       await this.deleteMetaForRoot(swmMetaGraph, rootEntity);
     }
+
+    // Canonical insert LAST — see the comment above `const canonicalQuads`.
+    // By the time any reader observes these quads in the canonical graph,
+    // `_meta` already carries `confirmed` status + chain provenance and the
+    // matching SWM entries have been drained.
+    await this.store.insert(canonicalQuads);
 
     this.log.info(ctx, `Promoted ${canonicalQuads.length} quads from shared memory to canonical for ${ual}`);
   }
