@@ -115,17 +115,19 @@ Follow these steps exactly:
    - `allow_multiple`: `false`
    - `prompt`: two short sentences. First: a one-line rephrase of what you
      understood the task to be. Second: the scope you'd propose, as a short
-     bullet list of globs (3–5 lines max). Finish with "Sound good?" Example:
+     **numbered** list of globs (3–5 lines max). Finish with "Sound good?"
+     Example:
 
      > Refactor peer sync to use the new workspace auth. I'd scope it to:
-     > • `packages/agent/**`
-     > • `packages/core/**`
+     > 1) `packages/agent/**`
+     > 2) `packages/core/**`
+     > 3) inherit `base` (standard build-artefact exemptions)
      >
      > Sound good?
 
    - `options` (IDs must match exactly — only these two):
      - `go` — `"Yes, go with that"`
-     - `custom_instruction` — `"Tell me what to change"`
+     - `custom_instruction` — `"Type what you want instead"`
 
 5. **On `go`:** **YOU (the agent) run the command directly** via the Shell
    tool. The `afterShellExecution` hook has a narrow allowlist for the
@@ -198,7 +200,7 @@ The JSON shape (TypeScript for clarity):
   activeTask: string | null,
   simpleOptions: [          // exactly two entries — SURFACE THESE
     { id: string, label: string, action: { kind: "..." /* + fields */ } },
-    { id: "custom_instruction", label: "Something else — tell me what",
+    { id: "custom_instruction", label: "Type what you want instead",
       action: { kind: "custom" } }
   ],
   recommendedOptionId: string,  // matches simpleOptions[0].id
@@ -248,7 +250,7 @@ The JSON shape (TypeScript for clarity):
 ### Phrasing rules (for onboarding AND denials)
 
 - Write like you're texting a coworker, not filing a ticket.
-- One short question. One recommendation. One "something else" option.
+- One short question. One recommendation. One "type what you want" option.
 - Never use ALL CAPS banners ("PROTECTED PATH", "STOP", "WARNING").
 - Don't explain the internal architecture in the prompt — the user doesn't
   need to know about hooks or manifests to answer. Keep it action-focused:

@@ -85,7 +85,7 @@ const CUSTOM_OPTION = {
 // like a chat button, not a legal clause.
 const CUSTOM_OPTION_SIMPLE = {
   id: 'custom_instruction',
-  label: 'Something else — tell me what',
+  label: 'Type what you want instead',
   action: { kind: 'custom' },
 };
 

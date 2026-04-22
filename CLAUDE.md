@@ -265,17 +265,18 @@ protocol below.
 4. **Propose the scope via a SINGLE `AskQuestion` — one question, two
    options.** Write it like you're asking a coworker, not filling out a
    form. 3 sentences max: one-line rephrase of the task, the scope you'd
-   propose (3–5 bullet globs), then "Sound good?" Example:
+   propose (3–5 numbered globs), then "Sound good?" Example:
 
    > Refactor peer sync to use the new workspace auth. I'd scope it to:
-   > • `packages/agent/**`
-   > • `packages/core/**`
+   > 1) `packages/agent/**`
+   > 2) `packages/core/**`
+   > 3) inherit `base` (standard build-artefact exemptions)
    >
    > Sound good?
 
    Options (IDs must match exactly — only these two):
    - `go` — `"Yes, go with that"`
-   - `custom_instruction` — `"Tell me what to change"`
+   - `custom_instruction` — `"Type what you want instead"`
 
 5. **On `go`**, **YOU (the agent) run the command yourself** via the
    Shell tool. The `afterShellExecution` hook has a narrow allowlist for
@@ -326,7 +327,7 @@ The JSON shape (key fields only):
   simpleOptions: [                // exactly two entries — SURFACE these
     { id, label, action },        // the recommended option
     { id: "custom_instruction",   // free-text fallback (always present)
-      label: "Something else — tell me what",
+      label: "Type what you want instead",
       action: { kind: "custom" } }
   ],
   recommendedOptionId: string,    // matches simpleOptions[0].id

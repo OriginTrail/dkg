@@ -225,7 +225,7 @@ async function start() {
   const prompter = createPrompter();
   let description = '';
   try {
-    console.log('What are you working on? One or two sentences is fine.');
+    console.log('What are you working on?');
     console.log('');
     description = await prompter.askPasteableDescription('> ');
   } finally {
@@ -242,9 +242,9 @@ async function start() {
   const clip = copyToClipboard(trigger);
 
   console.log('');
-  console.log('Got it. Open any chat and say hi.');
+  console.log('Got it. Send any message in chat (e.g. `start working`).');
   console.log('I\'ll read what you wrote, look around the repo, and ask you');
-  console.log('to OK a scope before I touch anything.');
+  console.log('to accept a scope before I touch anything.');
   if (clip.ok) {
     console.log('');
     console.log('(Also copied to your clipboard, just in case.)');

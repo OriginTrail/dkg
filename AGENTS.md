@@ -90,17 +90,18 @@ active:
 4. Propose the scope to the user as **one short question with two
    options**. Write it like you're asking a coworker, not filling out a
    form. 3 sentences max: one-line rephrase of the task, the scope you'd
-   propose (3–5 bullet globs), then "Sound good?" Example:
+   propose (3–5 numbered globs), then "Sound good?" Example:
 
    > Refactor peer sync to use the new workspace auth. I'd scope it to:
-   > • `packages/agent/**`
-   > • `packages/core/**`
+   > 1) `packages/agent/**`
+   > 2) `packages/core/**`
+   > 3) inherit `base` (standard build-artefact exemptions)
    >
    > Sound good?
 
    Options (only these two, IDs exactly):
    - `go` — `"Yes, go with that"`
-   - `custom_instruction` — `"Tell me what to change"`
+   - `custom_instruction` — `"Type what you want instead"`
 
 5. On `go`: **run the command yourself** via your shell tool, then
    continue with the actual work in the same turn. The command's
@@ -162,7 +163,7 @@ verbatim** — never surface the verbose `options` list:
   > continue?
 
 - Options = `simpleOptions` verbatim (exactly two entries: the
-  recommendation and "Something else — tell me what").
+  recommendation and "Type what you want instead").
 
 Match the user's answer to the chosen `action.kind` and carry it out. If
 they pick `custom_instruction`, ask them in plain chat what they'd like

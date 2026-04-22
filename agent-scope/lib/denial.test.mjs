@@ -606,7 +606,7 @@ test('simpleOptions: recommended labels are short and natural', () => {
     assert.equal(p2.simpleOptions[0].label, 'Skip it');
 
     // custom label is the natural one too
-    assert.equal(p2.simpleOptions[1].label, 'Something else — tell me what');
+    assert.equal(p2.simpleOptions[1].label, 'Type what you want instead');
   } finally { cleanup(root); }
 });
 

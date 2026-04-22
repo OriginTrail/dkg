@@ -237,8 +237,6 @@ agent takes it from there.
 1. **You run `pnpm task start`** in the terminal. The CLI prompts:
 
    > What are you working on?
-   > (One or two sentences is plenty. Paste longer briefs if you have them.)
-   > Press Enter to send.
 
    Single Enter submits; multi-line pastes are captured in full via
    paste-detection.
@@ -265,10 +263,10 @@ agent takes it from there.
       relevant files. Counts matching files per candidate package.
    3. Proposes a scope via a **single short `AskQuestion`** — one
       question, two options. The prompt is a one-line rephrase of the
-      task + the scope as 3–5 bullet globs + "Sound good?" The options
-      are:
+      task + the scope as a numbered list (`1)`, `2)`, `3)` …) + "Sound
+      good?" The options are:
       - `go` — "Yes, go with that"
-      - `custom_instruction` — "Tell me what to change"
+      - `custom_instruction` — "Type what you want instead"
    4. On `go`, the agent itself runs `pnpm task create <id> ...` via the
       shell tool. The `afterShellExecution` / PostToolUse-Bash hooks
       recognise the canonical task-create invocation and allow its two
@@ -448,7 +446,7 @@ The structured block is fenced by HTML comments so it's trivial to locate:
   "alternativeTasks": [ { "id": "staking", "description": "..." } ],
   "simpleOptions": [
     { "id": "add_glob",           "label": "Add this folder to the task and try again", "action": { "kind": "add_to_manifest", ... } },
-    { "id": "custom_instruction", "label": "Something else — tell me what",            "action": { "kind": "custom" } }
+    { "id": "custom_instruction", "label": "Type what you want instead",                "action": { "kind": "custom" } }
   ],
   "options": [
     /* full verbose list — audit/back-compat only, NOT surfaced to users */
@@ -481,8 +479,8 @@ Extra guidance in the block:
 - `simpleOptions` always has **exactly two entries**: the LLM-recommended
   action (short human label like "Add this folder to the task and try
   again", "Skip it", "Yes, unlock it so I can do this edit") and a
-  free-text fallback `custom_instruction` → `"Something else — tell me
-  what"`. Agents surface these two options and **never** surface the
+  free-text fallback `custom_instruction` → `"Type what you want
+  instead"`. Agents surface these two options and **never** surface the
   verbose `options` list.
 - `options` is the verbose, audit-grade list (add_file, add_glob, switch
   tasks, skip, cancel, bootstrap, fix_manifest, clear_task, custom). It is
