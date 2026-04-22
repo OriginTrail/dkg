@@ -2,12 +2,16 @@
   "$schema": "https://unpkg.com/knip@6/schema.json",
   "ignore": [
     "packages/app-autoresearch/demo/.venv/**",
+    "experiments/**/.venv/**",
     "packages/*/.test-nodes/**",
     "packages/**/typechain/**",
     "packages/**/artifacts/**",
     "packages/**/cache/**",
     "packages/**/coverage/**",
-    "packages/**/deployments/**"
+    "packages/**/deployments/**",
+    "ccl_v0_1/**",
+    "docs/plans/**/*.mjs",
+    "docs/experiments/**"
   ],
   "ignoreDependencies": [
     "@openzeppelin/contracts",
@@ -75,6 +79,21 @@
         "src/parsers/index.ts",
         "test/**/*.test.{ts,tsx}",
         "vitest.config.ts"
+      ]
+    },
+    "packages/agent": {
+      "entry": [
+        "scripts/ci-shard-agent.mjs"
+      ]
+    },
+    "packages/cli": {
+      "entry": [
+        "scripts/**/*.{mjs,mts,d.mts}"
+      ]
+    },
+    "packages/mcp-dkg": {
+      "entry": [
+        "scripts/smoke-*.mjs"
       ]
     }
   }
