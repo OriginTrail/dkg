@@ -62,8 +62,14 @@ export class BlazegraphStore implements TripleStore {
         `DELETE { GRAPH <${escapeUri(pattern.graph)}> { ${triple} } } WHERE { GRAPH <${escapeUri(pattern.graph)}> { ${triple} } }`,
       );
     } else {
+      // Original form `DELETE { ?g_ctx { ${triple} } }` is rejected by
+      // Blazegraph's SPARQL parser with HTTP 400 — the GRAPH keyword is
+      // mandatory whenever a graph variable surrounds the triple
+      // pattern in either the template or the WHERE clause. Re-emit
+      // both halves with the keyword. See storage.test.ts conformance
+      // suite (BlazegraphStore: deleteByPattern removes matching quads).
       await this.sparqlUpdate(
-        `DELETE { ?g_ctx { ${triple} } } WHERE { GRAPH ?g_ctx { ${triple} } }`,
+        `DELETE { GRAPH ?g_ctx { ${triple} } } WHERE { GRAPH ?g_ctx { ${triple} } }`,
       );
     }
     const after = await this.countQuads(pattern.graph);

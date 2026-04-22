@@ -62,11 +62,13 @@ describe('[K-1] production parity — tool list scanned from src/index.ts', () =
     prodTools = extractRegisteredToolNames(prodSource);
   });
 
-  it('registers exactly the 7 expected production tools', () => {
+  it('registers exactly the 8 expected production tools', () => {
     // This is the SAME list that tools.test.ts asserts its inline copy against.
     // If production drops or renames any tool, the two lists diverge and this
     // test fails (whereas tools.test.ts — which uses a hand-rolled clone —
-    // would still pass).
+    // would still pass). The list grew to 8 with the K-2 mcp_auth tool
+    // (BUGS_FOUND.md K-2): every MCP server that talks to a remote DKG
+    // node must expose a credential-introspection / rotation entry point.
     expect(prodTools).toEqual([
       'dkg_file_summary',
       'dkg_find_classes',
@@ -75,11 +77,18 @@ describe('[K-1] production parity — tool list scanned from src/index.ts', () =
       'dkg_find_packages',
       'dkg_publish',
       'dkg_query',
+      'mcp_auth',
     ]);
   });
 
-  it('each tool name begins with the dkg_ prefix (namespace safety)', () => {
+  it('each DKG-namespaced tool begins with the dkg_ prefix; mcp_auth is whitelisted', () => {
+    // K-2 (BUGS_FOUND.md): the spec name for the auth tool is
+    // `mcp_auth` (it's part of the MCP convention, not a DKG verb), so
+    // the dkg_ prefix rule has a single, well-known exception. Any
+    // OTHER non-dkg_ name still trips the regression.
+    const NAMESPACE_EXCEPTIONS = new Set(['mcp_auth']);
     for (const name of prodTools) {
+      if (NAMESPACE_EXCEPTIONS.has(name)) continue;
       expect(name, `tool name "${name}" must start with dkg_`).toMatch(/^dkg_/);
     }
   });

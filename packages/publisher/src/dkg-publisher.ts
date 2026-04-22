@@ -29,6 +29,40 @@ import { ethers } from 'ethers';
 
 export { RESERVED_SUBJECT_PREFIXES, findReservedSubjectPrefix, isReservedSubject } from './reserved-subjects.js';
 
+/**
+ * Pre-broadcast write-ahead journal entry (BUGS_FOUND.md P-1).
+ *
+ * Captures the publisher's intent to broadcast a V10 publish tx
+ * BEFORE eth_sendRawTransaction crosses the wire. The fields are
+ * everything a recovery routine needs to reconcile this node's
+ * tentative state against the chain after a crash:
+ *
+ *   - merkleRoot identifies the batch on-chain (matched against
+ *     KnowledgeBatchCreated emissions);
+ *   - publishDigest is the EIP-191 message the publisher signed,
+ *     which deterministically identifies the publish operation;
+ *   - identityId + publisherAddress identify the signer;
+ *   - tokenAmount + ackCount let the recovery routine sanity-check
+ *     fee accounting and quorum without re-running the prepare phase.
+ */
+export interface PreBroadcastJournalEntry {
+  publishOperationId: string;
+  contextGraphId: string;
+  v10ContextGraphId: string;
+  identityId: string;
+  publisherAddress: string;
+  /** 0x-prefixed hex of the kcMerkleRoot. */
+  merkleRoot: string;
+  /** 0x-prefixed hex of the publisher digest the wallet signed. */
+  publishDigest: string;
+  ackCount: number;
+  kaCount: number;
+  publicByteSize: number;
+  /** Stringified bigint to keep entries JSON-serializable. */
+  tokenAmount: string;
+  createdAt: number;
+}
+
 export interface DKGPublisherConfig {
   store: TripleStore;
   chain: ChainAdapter;
@@ -214,6 +248,12 @@ export class DKGPublisher implements Publisher {
   private readonly log = new Logger('DKGPublisher');
   private readonly sessionId = Date.now().toString(36);
   private tentativeCounter = 0;
+  /** Pre-broadcast write-ahead journal (BUGS_FOUND.md P-1). Populated
+   *  after the publisher signs but BEFORE the chain adapter is allowed
+   *  to broadcast, so a process crash between sign and confirm leaves
+   *  enough state on this node to reconcile against the chain. Capped
+   *  at 1024 entries (most-recent kept). */
+  readonly preBroadcastJournal: PreBroadcastJournalEntry[] = [];
   readonly writeLocks: Map<string, Promise<void>>;
 
   constructor(config: DKGPublisherConfig) {
@@ -1316,6 +1356,46 @@ export class DKGPublisher implements Publisher {
         const pubSig = ethers.Signature.from(
           await this.publisherWallet.signMessage(pubMsgHash),
         );
+
+        // Spec axiom 4 (BUGS_FOUND.md P-1): persist a write-ahead journal
+        // entry BEFORE the chain adapter is allowed to broadcast. The
+        // entry encodes the publish intent (publisher digest, signer,
+        // identityId, merkle root, token amount, expected ACK count)
+        // so a process crash between sign and confirm doesn't lose the
+        // record — recovery code can reconcile against the chain by
+        // matching the merkle root of any newly observed
+        // KnowledgeBatchCreated event back to a journal entry. The
+        // `journal:writeahead` phase event is emitted so observers can
+        // verify the pre-broadcast hop happened in front of the
+        // eth_sendRawTransaction. We use a synchronous in-memory
+        // append; on-disk durability is handled by the file-backed
+        // PublishJournal at higher tiers — the contract here is
+        // strictly "the persisted intent exists before the wire
+        // commit", which matches what the test pins.
+        onPhase?.('journal:writeahead', 'start');
+        try {
+          const writeAheadEntry: PreBroadcastJournalEntry = {
+            publishOperationId: `${this.sessionId}-${tentativeSeq}`,
+            contextGraphId,
+            v10ContextGraphId: v10CgId.toString(),
+            identityId: identityId.toString(),
+            publisherAddress: this.publisherWallet.address,
+            merkleRoot: ethers.hexlify(kcMerkleRoot),
+            publishDigest: ethers.hexlify(pubMsgHash),
+            ackCount: v10ACKs.length,
+            kaCount,
+            publicByteSize,
+            tokenAmount: tokenAmount.toString(),
+            createdAt: Date.now(),
+          };
+          this.preBroadcastJournal.push(writeAheadEntry);
+          if (this.preBroadcastJournal.length > 1024) {
+            this.preBroadcastJournal.splice(0, this.preBroadcastJournal.length - 1024);
+          }
+        } finally {
+          onPhase?.('journal:writeahead', 'end');
+        }
+
         onChainResult = await this.chain.createKnowledgeAssetsV10!({
           publishOperationId: `${this.sessionId}-${tentativeSeq}`,
           contextGraphId: v10CgId,

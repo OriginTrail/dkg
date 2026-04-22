@@ -102,6 +102,15 @@ describe('Phase-sequence contracts', () => {
       'chain:sign:start',
       'chain:sign:end',
       'chain:submit:start',
+      // Pre-broadcast write-ahead journal hop (BUGS_FOUND.md P-1).
+      // Must complete before eth_sendRawTransaction crosses the
+      // wire — emitted inside the chain:submit phase, after the
+      // publisher has computed and signed the digest, but before
+      // the chain adapter is invoked. The corresponding RPC-spy
+      // test (publish-ordering-rpc-spy-extra) verifies the actual
+      // ordering against the live JSON-RPC stream.
+      'journal:writeahead:start',
+      'journal:writeahead:end',
       'chain:submit:end',
       'chain:metadata:start',
       'chain:metadata:end',

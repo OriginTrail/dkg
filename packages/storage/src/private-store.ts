@@ -33,6 +33,44 @@ const ENC_PREFIX = 'enc:gcm:v1:';
  *      DKG_PRIVATE_STORE_KEY to a per-deployment secret.
  */
 const DEFAULT_KEY_DOMAIN = 'dkg-v10/private-store/default-key/v1';
+
+/**
+ * Stateless mirror of {@link PrivateContentStore}'s seal — used by
+ * pipelines that read private quads back from the underlying store via
+ * raw SPARQL (and therefore see ciphertext envelopes) but want to
+ * reason about plaintext semantics. Examples include the publisher's
+ * `subtractFinalizedExactQuads`, which compares input plaintext quads
+ * against on-disk authoritative quads for exact dedup. Without this,
+ * the subtraction silently misses every private match because
+ * `"plaintext"` never equals `"enc:gcm:v1:…"`.
+ *
+ * The helper resolves the same encryption key (DKG_PRIVATE_STORE_KEY
+ * or the deterministic default-domain hash) so every consumer in the
+ * process round-trips to identical bytes. Non-encrypted literals,
+ * URIs, and blank nodes are returned unchanged.
+ */
+export function decryptPrivateLiteral(
+  serialized: string,
+  options: { encryptionKey?: Uint8Array | string } = {},
+): string {
+  if (!serialized.startsWith(`"${ENC_PREFIX}`)) return serialized;
+  const m = serialized.match(/^"enc:gcm:v1:([^"]+)"$/);
+  if (!m) return serialized;
+  const key = resolveEncryptionKey(options.encryptionKey);
+  try {
+    const buf = Buffer.from(m[1], 'base64');
+    const iv = buf.subarray(0, 12);
+    const tag = buf.subarray(12, 28);
+    const ct = buf.subarray(28);
+    const decipher = createDecipheriv('aes-256-gcm', key, iv);
+    decipher.setAuthTag(tag);
+    const plain = Buffer.concat([decipher.update(ct), decipher.final()]);
+    return plain.toString('utf8');
+  } catch {
+    return serialized;
+  }
+}
+
 function resolveEncryptionKey(explicit?: Uint8Array | string): Buffer {
   const fromExplicit = explicit ?? process.env.DKG_PRIVATE_STORE_KEY;
   if (fromExplicit) {

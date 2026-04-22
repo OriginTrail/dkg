@@ -1,6 +1,6 @@
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import { assertSafeRdfTerm } from '@origintrail-official/dkg-core';
-import { GraphManager } from '@origintrail-official/dkg-storage';
+import { GraphManager, decryptPrivateLiteral } from '@origintrail-official/dkg-storage';
 import type { LiftResolvedPublishSlice } from './async-lift-publish-options.js';
 import type { LiftJobValidationMetadata, LiftRequest } from './lift-job.js';
 
@@ -33,10 +33,16 @@ export async function subtractFinalizedExactQuads(params: {
     params.graphManager.dataGraphUri(params.request.contextGraphId),
     confirmedRoots,
   );
+  // Private quads land on disk as AES-GCM-SIV ciphertext (BUGS_FOUND.md
+  // ST-2). The deterministic IV guarantees identical plaintexts produce
+  // identical ciphertexts, but the authoritative-key set still has to
+  // be in plaintext form so callers can match against the
+  // user-supplied (plaintext) input quads. Decrypt as we read.
   const authoritativePrivate = await loadAuthoritativeQuadKeys(
     params.store,
     params.graphManager.privateGraphUri(params.request.contextGraphId),
     confirmedRoots,
+    /* decryptObjects */ true,
   );
 
   const publicResult = subtractGraphExactMatches(params.resolved.quads, confirmedRoots, authoritativePublic);
@@ -106,7 +112,12 @@ function subtractGraphExactMatches(
   return { remaining, removedCount };
 }
 
-async function loadAuthoritativeQuadKeys(store: TripleStore, graph: string, confirmedRoots: Set<string>): Promise<Set<string>> {
+async function loadAuthoritativeQuadKeys(
+  store: TripleStore,
+  graph: string,
+  confirmedRoots: Set<string>,
+  decryptObjects = false,
+): Promise<Set<string>> {
   if (confirmedRoots.size === 0) {
     return new Set();
   }
@@ -131,7 +142,12 @@ async function loadAuthoritativeQuadKeys(store: TripleStore, graph: string, conf
     return new Set();
   }
 
-  return new Set(result.quads.map((quad) => toQuadKey({ ...quad, graph: '' })));
+  return new Set(
+    result.quads.map((quad) => {
+      const object = decryptObjects ? decryptPrivateLiteral(quad.object) : quad.object;
+      return toQuadKey({ ...quad, object, graph: '' });
+    }),
+  );
 }
 
 function rootForSubject(subject: string, confirmedRoots: Set<string>): string | null {

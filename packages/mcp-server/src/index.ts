@@ -3,6 +3,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
+import { createHash } from 'node:crypto';
 import { DkgClient } from './connection.js';
 import { escapeSparqlLiteral } from '@origintrail-official/dkg-core';
 
@@ -385,10 +386,115 @@ server.registerTool(
 );
 
 // ---------------------------------------------------------------------------
+// mcp_auth — credentialing & connection state (BUGS_FOUND.md K-2)
+// ---------------------------------------------------------------------------
+//
+// Spec requirement: every MCP server that talks to a remote DKG node MUST
+// expose an `mcp_auth` tool so the host (Claude / Cursor / openclaw) can
+// programmatically inspect the active credential, swap/rotate it, and
+// confirm the daemon is reachable with that credential — without forcing
+// the user to read DKG_NODE_TOKEN environment variables out-of-band.
+//
+// Operations:
+//
+//   - status   → current node URL, sanitized credential fingerprint,
+//                /api/status liveness probe, server version
+//   - set      → install a new bearer token in-process (overrides
+//                DKG_NODE_TOKEN for the lifetime of the server)
+//   - whoami   → minimal identity echo derived from the credential —
+//                ALWAYS returns a fingerprint (sha256[:8]) of the token,
+//                never the raw token, so transcripts can't leak it.
+//
+// The whole flow is read-only with respect to the underlying DKG node;
+// rotation against the daemon's on-disk auth.token is handled by the CLI
+// `dkg auth rotate` subcommand (CLI-11) — exposing rotation here would
+// mean leaking the token surface area into the MCP transcript.
+
+server.registerTool(
+  'mcp_auth',
+  {
+    title: 'MCP DKG Authentication',
+    description:
+      'Inspect or update the bearer credential the MCP server uses to reach the DKG node. ' +
+      'Use op="status" for a liveness probe + sanitized credential fingerprint; ' +
+      'op="set" to install a new bearer token in-process; ' +
+      'op="whoami" to echo the active credential fingerprint without the raw value.',
+    inputSchema: {
+      op: z
+        .enum(['status', 'set', 'whoami'])
+        .describe('Operation to perform: status | set | whoami'),
+      token: z
+        .string()
+        .optional()
+        .describe('Bearer token to install (required when op="set")'),
+    },
+  },
+  async ({ op, token }) => {
+    try {
+      if (op === 'set') {
+        if (!token || token.trim().length < 8) {
+          return err(
+            'mcp_auth: op="set" requires a non-empty `token` argument (>= 8 chars).',
+          );
+        }
+        process.env.DKG_NODE_TOKEN = token;
+        _client = null;
+        return ok(
+          `Bearer credential rotated in-process. Fingerprint: ${fingerprintCredential(token)}.\n` +
+            'The next DKG tool invocation will reconnect with the new token.',
+        );
+      }
+
+      const url = process.env.DKG_NODE_URL ?? 'http://127.0.0.1:7777';
+      const cred = process.env.DKG_NODE_TOKEN ?? '';
+      const fingerprint = cred ? fingerprintCredential(cred) : '∅ (no credential configured)';
+
+      if (op === 'whoami') {
+        return ok(
+          `node = ${url}\n` +
+            `credential fingerprint = ${fingerprint}\n` +
+            `(raw token deliberately not returned — use op="status" for the liveness probe)`,
+        );
+      }
+
+      const status = await probeStatus(url, cred);
+      return ok(
+        `node = ${url}\n` +
+          `credential fingerprint = ${fingerprint}\n` +
+          `status probe = ${status.ok ? 'OK' : 'FAILED'} ${status.code ? `(${status.code})` : ''}\n` +
+          (status.body ? `body = ${status.body}\n` : ''),
+      );
+    } catch (e) {
+      return err(`mcp_auth error: ${formatError(e)}`);
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
 const esc = escapeSparqlLiteral;
+
+function fingerprintCredential(token: string): string {
+  const hash = createHash('sha256').update(token, 'utf8').digest('hex');
+  return `sha256:${hash.slice(0, 12)}…`;
+}
+
+async function probeStatus(
+  url: string,
+  token: string,
+): Promise<{ ok: boolean; code?: number; body?: string }> {
+  try {
+    const headers: Record<string, string> = { Accept: 'application/json' };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    const res = await fetch(`${url.replace(/\/$/, '')}/api/status`, { headers });
+    const text = await res.text().catch(() => '');
+    return { ok: res.ok, code: res.status, body: text.slice(0, 240) };
+  } catch (e) {
+    return { ok: false, body: e instanceof Error ? e.message : String(e) };
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Adapter loading — DKG_ADAPTERS=autoresearch,other,...
