@@ -1960,9 +1960,38 @@ export class DKGAgent {
 
   /**
    * Wrap `payload` in a signed `GossipEnvelope` (spec §08_PROTOCOL_WIRE)
-   * and publish to `topic`. Falls back to raw publish when no signing key
-   * is available (e.g. pre-bootstrap node), so the on-the-wire format
-   * stays backward compatible during a rolling upgrade.
+   * and publish to `topic`.
+   *
+   * PR #229 bot review round 16 (r16-1): previously we "fell back to
+   * raw publish" when no wallet was available (pre-bootstrap /
+   * self-sovereign / observer nodes). After the r14-1 ingress flip
+   * that made `strictGossipEnvelope` fail-closed by default, any peer
+   * on a newer build drops those raw bytes — so a wallet-less agent
+   * would SILENTLY stop propagating publish / share / finalization
+   * messages to most of the mesh while thinking its publishes were
+   * succeeding. That's a correctness footgun: the UX is "my node is
+   * online and sending traffic, but nobody replicates my KAs".
+   *
+   * New contract: egress REQUIRES a signing wallet. When one is
+   * absent we throw a clear error at the call site instead of
+   * pushing bytes every strict receiver will discard. Operators have
+   * two escape hatches:
+   *
+   *   1. Provision a publisher wallet (the standard path — one is
+   *      generated automatically on `DKGAgent.init()` unless the
+   *      deployment explicitly runs in observer/no-sign mode).
+   *   2. Set `DKG_GOSSIP_ALLOW_UNSIGNED_EGRESS=1` to opt back into
+   *      the legacy raw-bytes path AT YOUR OWN RISK. Strict peers
+   *      will still drop these, but for pure local-cluster tests /
+   *      single-node demos where every subscriber runs lenient
+   *      mode, this unblocks propagation. We log a WARN per call so
+   *      the degradation is visible in node logs.
+   *
+   * Rolling upgrades that need to ship with no wallet temporarily
+   * should flip the env var, then remove it once every node has a
+   * wallet — mirrors the `strictGossipEnvelope` opt-out on the
+   * ingress side (r14-1) so both sides of the upgrade have a
+   * matching escape hatch.
    */
   async signedGossipPublish(
     topic: string,
@@ -1972,8 +2001,31 @@ export class DKGAgent {
   ): Promise<void> {
     const wallet = this.getDefaultPublisherWallet();
     if (!wallet) {
-      await this.gossip.publish(topic, payload);
-      return;
+      const allowUnsigned = (process.env.DKG_GOSSIP_ALLOW_UNSIGNED_EGRESS ?? '').toLowerCase();
+      if (allowUnsigned === '1' || allowUnsigned === 'true' || allowUnsigned === 'yes') {
+        const ctx = createOperationContext('system');
+        this.log.warn(
+          ctx,
+          `[signedGossipPublish] WARNING: publishing RAW (unsigned) gossip on ` +
+            `topic=${topic} type=${type} cg=${contextGraphId} — no signing ` +
+            `wallet available and DKG_GOSSIP_ALLOW_UNSIGNED_EGRESS is set. ` +
+            `Strict peers (r14-1 default) will DROP this message; only ` +
+            `lenient peers will receive it.`,
+        );
+        await this.gossip.publish(topic, payload);
+        return;
+      }
+      throw new Error(
+        `[signedGossipPublish] No signing wallet available for topic=${topic} ` +
+          `type=${type} cg=${contextGraphId}. Cannot publish signed gossip ` +
+          `envelope. Provision a publisher wallet (the standard path on ` +
+          `DKGAgent.init) or — ONLY for local-cluster / single-node ` +
+          `deployments where every subscriber runs lenient mode — set ` +
+          `DKG_GOSSIP_ALLOW_UNSIGNED_EGRESS=1 to opt into legacy raw ` +
+          `bytes. Refusing to fall back silently because strict peers ` +
+          `(r14-1 default) would drop the message and propagation would ` +
+          `stop without any visible error.`,
+      );
     }
     const wire = buildSignedGossipEnvelope({
       type,

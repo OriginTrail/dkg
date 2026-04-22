@@ -51,6 +51,33 @@ export interface Memory {
 }
 
 /**
+ * Narrowed `Memory` variant that the user-turn persistence path
+ * requires. `id` is the stable turn-source identifier — when
+ * missing, `persistChatTurnImpl` throws deterministically because
+ * fabricating a time-based id would break idempotence across
+ * retries. Splitting the type (PR #229 bot review round 16, r16-4)
+ * lets downstream TypeScript callers see this requirement at
+ * COMPILE TIME instead of discovering it via a runtime exception.
+ *
+ * Assistant-reply paths don't need this — they derive the turn key
+ * from `ChatTurnPersistOptions.userMessageId` instead — so the
+ * plain `Memory` type stays as-is for those callers.
+ *
+ * Usage:
+ *
+ *   // user-turn persistence path (onChatTurn):
+ *   async function persistUserTurn(runtime: IAgentRuntime, m: PersistableMemory) {
+ *     await hooks.onChatTurn(runtime, m, state, options);
+ *   }
+ *
+ *   // assistant-reply path (onAssistantReply):
+ *   async function persistReply(runtime: IAgentRuntime, m: Memory, userMessageId: string) {
+ *     await hooks.onAssistantReply(runtime, m, state, { userMessageId, mode: 'assistant-reply' });
+ *   }
+ */
+export type PersistableMemory = Memory & { readonly id: string };
+
+/**
  * Options recognised by `persistChatTurnImpl` and the
  * `dkgService.persistChatTurn` / `hooks.onChatTurn` /
  * `hooks.onAssistantReply` surfaces. Exposed as a named type so

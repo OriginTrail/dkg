@@ -47,8 +47,38 @@ const ENC_PREFIX = 'enc:gcm:v1:';
 const DEFAULT_KEY_DOMAIN = 'dkg-v10/private-store/default-key/v1';
 const PERSISTED_KEY_FILENAME = 'private-store.key';
 let defaultKeyWarned = false;
-let persistedKeyWarned = false;
-let cachedPersistedKey: Buffer | null = null;
+/**
+ * Per-path cache of persisted keys (PR #229 bot review round 16,
+ * r16-3). The previous revision used a single module-global
+ * `cachedPersistedKey: Buffer | null`, which silently aliased
+ * multiple `PrivateContentStore` instances onto the FIRST node's key
+ * whenever one process hosted several nodes with different
+ * `DKG_HOME` / `DKG_PRIVATE_STORE_KEY_FILE` values (test fixtures,
+ * multi-tenant daemons, simulation harnesses). The second node
+ * would:
+ *   1. call `resolvePersistedKeyPath()` → get its OWN path
+ *   2. call `loadOrCreatePersistedKey()` → hit the module-global
+ *      cache populated by node #1, return node #1's key
+ *   3. read/write all private data under node #1's secret, breaking
+ *      crypto isolation.
+ * When the env later flipped back to the original path, cached key
+ * still won and data became unreadable.
+ *
+ * Fix: key the cache by resolved file path. Each node's path maps
+ * to its own key buffer. Writes to the same path still hit the
+ * cache (the round-12-2 intra-process sharing property). Different
+ * paths get different keys.
+ *
+ * The cache is still process-local, unbounded-by-design (the set
+ * of paths a single process opens in its lifetime is inherently
+ * bounded by the number of node instances it hosts — this is
+ * thousands at most, not millions of entries). A hostile caller
+ * that spins up a new path every call would still be bounded by
+ * the filesystem's own limits long before the Map becomes a
+ * memory issue.
+ */
+let persistedKeyWarnedPaths: Set<string> = new Set();
+const persistedKeyByPath: Map<string, Buffer> = new Map();
 
 function strictKeyRequestedFromEnv(): boolean {
   const v = (process.env.DKG_PRIVATE_STORE_STRICT_KEY ?? '').toLowerCase();
@@ -83,14 +113,18 @@ function resolvePersistedKeyPath(): string {
  * the file on every construction.
  */
 function loadOrCreatePersistedKey(): Buffer | null {
-  if (cachedPersistedKey) return cachedPersistedKey;
   const path = resolvePersistedKeyPath();
+  // r16-3: per-path cache, so two nodes in the same process with
+  // different key files each get THEIR OWN key.
+  const cached = persistedKeyByPath.get(path);
+  if (cached) return cached;
   try {
     if (existsSync(path)) {
       const raw = readFileSync(path);
       if (raw.length >= 32) {
-        cachedPersistedKey = Buffer.from(raw.subarray(0, 32));
-        return cachedPersistedKey;
+        const key = Buffer.from(raw.subarray(0, 32));
+        persistedKeyByPath.set(path, key);
+        return key;
       }
     }
     // Generate + persist a fresh 32-byte secret. 0o600 so only the
@@ -100,8 +134,11 @@ function loadOrCreatePersistedKey(): Buffer | null {
     const fresh = randomBytes(32);
     writeFileSync(path, fresh, { mode: 0o600 });
     try { chmodSync(path, 0o600); } catch { /* non-POSIX FS */ }
-    if (!persistedKeyWarned) {
-      persistedKeyWarned = true;
+    // r16-3: warn-once PER PATH so multi-node processes see a
+    // separate warning line for each generated key file (signals to
+    // the operator that more than one node is running).
+    if (!persistedKeyWarnedPaths.has(path)) {
+      persistedKeyWarnedPaths.add(path);
       console.warn(
         `[PrivateContentStore] Generated per-node private-store key at ${path}. ` +
           'Back this file up alongside your node data; losing it makes existing ' +
@@ -109,8 +146,8 @@ function loadOrCreatePersistedKey(): Buffer | null {
           'or DKG_PRIVATE_STORE_KEY_FILE to use a managed secret instead.',
       );
     }
-    cachedPersistedKey = fresh;
-    return cachedPersistedKey;
+    persistedKeyByPath.set(path, fresh);
+    return fresh;
   } catch {
     return null;
   }
@@ -119,9 +156,9 @@ function loadOrCreatePersistedKey(): Buffer | null {
 /** Test-only: drop any cached per-node key so a subsequent call
  *  re-reads from the (possibly-changed) persistence path. */
 export function __resetPrivateStoreKeyCacheForTests(): void {
-  cachedPersistedKey = null;
+  persistedKeyByPath.clear();
   defaultKeyWarned = false;
-  persistedKeyWarned = false;
+  persistedKeyWarnedPaths = new Set();
 }
 
 /**

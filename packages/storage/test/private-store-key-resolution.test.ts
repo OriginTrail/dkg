@@ -533,6 +533,200 @@ describe('r15-1: legacy DEFAULT_KEY_DOMAIN fallback keeps pre-r12 private cipher
   });
 });
 
+// ---------------------------------------------------------------------------
+// PR #229 bot review round 16 — r16-3: the persisted-key cache must be keyed
+// by file path, NOT module-global. Otherwise a single process hosting two
+// nodes (test fixtures, multi-tenant daemon, simulation harness) silently
+// aliases both onto the FIRST node's key, breaking crypto isolation.
+// ---------------------------------------------------------------------------
+describe('r16-3 — persisted key cache is keyed by resolved file path', () => {
+  let prevKeyFile: string | undefined;
+  let prevHome: string | undefined;
+  beforeEach(() => {
+    prevKeyFile = process.env.DKG_PRIVATE_STORE_KEY_FILE;
+    prevHome = process.env.DKG_HOME;
+    __resetPrivateStoreKeyCacheForTests();
+  });
+  afterEach(() => {
+    if (prevKeyFile === undefined) delete process.env.DKG_PRIVATE_STORE_KEY_FILE;
+    else process.env.DKG_PRIVATE_STORE_KEY_FILE = prevKeyFile;
+    if (prevHome === undefined) delete process.env.DKG_HOME;
+    else process.env.DKG_HOME = prevHome;
+    __resetPrivateStoreKeyCacheForTests();
+  });
+
+  it('two PATHS in the same process → two DIFFERENT keys (no aliasing)', () => {
+    const dirA = mkdtempSync(join(tmpdir(), 'dkg-ps-r16-3-a-'));
+    const dirB = mkdtempSync(join(tmpdir(), 'dkg-ps-r16-3-b-'));
+    const fileA = join(dirA, 'private-store.key');
+    const fileB = join(dirB, 'private-store.key');
+    try {
+      // Node A boots, generates its key at path A.
+      process.env.DKG_PRIVATE_STORE_KEY_FILE = fileA;
+      const { store: storeA, cleanup: cleanA } = makeFreshStore();
+      try {
+        const gmA = new ContextGraphManager(storeA);
+        // eslint-disable-next-line no-void
+        void new PrivateContentStore(storeA, gmA); // triggers key creation
+      } finally {
+        cleanA();
+      }
+      const keyA = readFileSync(fileA);
+
+      // Node B boots in the SAME process with a different key path.
+      process.env.DKG_PRIVATE_STORE_KEY_FILE = fileB;
+      const { store: storeB, cleanup: cleanB } = makeFreshStore();
+      try {
+        const gmB = new ContextGraphManager(storeB);
+        // eslint-disable-next-line no-void
+        void new PrivateContentStore(storeB, gmB); // triggers key creation
+      } finally {
+        cleanB();
+      }
+      const keyB = readFileSync(fileB);
+
+      // r16-3 core invariant: distinct paths → distinct keys. Under the
+      // pre-r16-3 module-global cache, B would have returned A's key
+      // without ever touching disk at `fileB`.
+      expect(keyA.length).toBe(32);
+      expect(keyB.length).toBe(32);
+      expect(keyA.equals(keyB)).toBe(false);
+      // Sanity: each path carries its OWN file on disk.
+      expect(existsSync(fileA)).toBe(true);
+      expect(existsSync(fileB)).toBe(true);
+    } finally {
+      rmSync(dirA, { recursive: true, force: true });
+      rmSync(dirB, { recursive: true, force: true });
+    }
+  });
+
+  it('node B CANNOT read data sealed by node A when they run in the same process with different key paths (crypto isolation)', async () => {
+    const dirA = mkdtempSync(join(tmpdir(), 'dkg-ps-r16-3-iso-a-'));
+    const dirB = mkdtempSync(join(tmpdir(), 'dkg-ps-r16-3-iso-b-'));
+    const fileA = join(dirA, 'private-store.key');
+    const fileB = join(dirB, 'private-store.key');
+    // Deliberately share the underlying triple-store: this simulates
+    // the nightmare scenario the bot flagged — a multi-tenant process
+    // where node B accidentally queries node A's graph DB. Pre-r16-3
+    // the cache alias made plaintext recoverable; after r16-3 it is
+    // not, because B holds a DIFFERENT 32-byte secret.
+    const { store, cleanup } = makeFreshStore();
+    try {
+      const gm = new ContextGraphManager(store);
+      await gm.ensureContextGraph('cg-iso');
+
+      process.env.DKG_PRIVATE_STORE_KEY_FILE = fileA;
+      __resetPrivateStoreKeyCacheForTests();
+      const nodeA = new PrivateContentStore(store, gm);
+      await nodeA.storePrivateTriples('cg-iso', 'did:dkg:agent:S', [
+        { subject: 'did:dkg:agent:S', predicate: 'http://example.org/p', object: '"secret-on-A"', graph: '' },
+      ] as Quad[]);
+
+      process.env.DKG_PRIVATE_STORE_KEY_FILE = fileB;
+      __resetPrivateStoreKeyCacheForTests();
+      const nodeB = new PrivateContentStore(store, gm);
+      const readB = await nodeB.getPrivateTriples('cg-iso', 'did:dkg:agent:S');
+      expect(readB).toHaveLength(1);
+      // B must NOT see A's plaintext — under the pre-r16-3 alias bug
+      // this returned "secret-on-A". Now B sees only the envelope.
+      expect(readB[0].object).not.toBe('"secret-on-A"');
+      expect(readB[0].object.startsWith('"enc:gcm:v1:')).toBe(true);
+
+      // Sanity: flip back to A and confirm A still decrypts its own
+      // data. This proves r16-3 didn't break the intra-process sharing
+      // property for a single path — it only disaggregated across paths.
+      process.env.DKG_PRIVATE_STORE_KEY_FILE = fileA;
+      __resetPrivateStoreKeyCacheForTests();
+      const nodeAAgain = new PrivateContentStore(store, gm);
+      const readA = await nodeAAgain.getPrivateTriples('cg-iso', 'did:dkg:agent:S');
+      expect(readA).toHaveLength(1);
+      expect(readA[0].object).toBe('"secret-on-A"');
+    } finally {
+      cleanup();
+      rmSync(dirA, { recursive: true, force: true });
+      rmSync(dirB, { recursive: true, force: true });
+    }
+  });
+
+  it('the SAME path stays cached across instances (no re-generation, no re-read) — only the cache KEY changed, not the sharing property', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dkg-ps-r16-3-share-'));
+    const file = join(dir, 'private-store.key');
+    try {
+      process.env.DKG_PRIVATE_STORE_KEY_FILE = file;
+      __resetPrivateStoreKeyCacheForTests();
+
+      const { store, cleanup } = makeFreshStore();
+      try {
+        const gm = new ContextGraphManager(store);
+        await gm.ensureContextGraph('cg-share');
+        // First instance: file is generated on disk.
+        const ps1 = new PrivateContentStore(store, gm);
+        await ps1.storePrivateTriples('cg-share', 'did:dkg:agent:K', [
+          { subject: 'did:dkg:agent:K', predicate: 'http://example.org/p', object: '"shared"', graph: '' },
+        ] as Quad[]);
+        const keyBytes1 = readFileSync(file);
+
+        // Second instance in the SAME process with the SAME path:
+        // MUST see the same secret (the r12-2 intra-process sharing
+        // property r16-3 preserves).
+        const ps2 = new PrivateContentStore(store, gm);
+        const read = await ps2.getPrivateTriples('cg-share', 'did:dkg:agent:K');
+        expect(read).toHaveLength(1);
+        expect(read[0].object).toBe('"shared"');
+
+        // The on-disk key is untouched — we never regenerated it.
+        const keyBytes2 = readFileSync(file);
+        expect(keyBytes1.equals(keyBytes2)).toBe(true);
+      } finally {
+        cleanup();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('__resetPrivateStoreKeyCacheForTests drops ALL paths, not just the last one used', async () => {
+    const dirA = mkdtempSync(join(tmpdir(), 'dkg-ps-r16-3-reset-a-'));
+    const dirB = mkdtempSync(join(tmpdir(), 'dkg-ps-r16-3-reset-b-'));
+    const fileA = join(dirA, 'private-store.key');
+    const fileB = join(dirB, 'private-store.key');
+    try {
+      // Warm the cache for path A.
+      process.env.DKG_PRIVATE_STORE_KEY_FILE = fileA;
+      const { store: sA, cleanup: cA } = makeFreshStore();
+      try { void new PrivateContentStore(sA, new ContextGraphManager(sA)); } finally { cA(); }
+
+      // Warm the cache for path B as well.
+      process.env.DKG_PRIVATE_STORE_KEY_FILE = fileB;
+      const { store: sB, cleanup: cB } = makeFreshStore();
+      try { void new PrivateContentStore(sB, new ContextGraphManager(sB)); } finally { cB(); }
+
+      // Reset must flush BOTH entries. We re-observe by deleting the
+      // on-disk key files and asking for a store under path A again —
+      // it must regenerate (not serve a stale cached buffer).
+      __resetPrivateStoreKeyCacheForTests();
+      rmSync(fileA, { force: true });
+      rmSync(fileB, { force: true });
+      expect(existsSync(fileA)).toBe(false);
+      expect(existsSync(fileB)).toBe(false);
+
+      process.env.DKG_PRIVATE_STORE_KEY_FILE = fileA;
+      const { store: sA2, cleanup: cA2 } = makeFreshStore();
+      try {
+        void new PrivateContentStore(sA2, new ContextGraphManager(sA2));
+      } finally {
+        cA2();
+      }
+      // New file regenerated → cache was truly empty after reset.
+      expect(existsSync(fileA)).toBe(true);
+      expect(readFileSync(fileA).length).toBe(32);
+    } finally {
+      rmSync(dirA, { recursive: true, force: true });
+      rmSync(dirB, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('PrivateContentStore.decryptLiteral — returns envelope on bad key (defence-in-depth)', () => {
   it('wrong key: the instance decrypt method leaves the envelope visible so callers can detect the failure', async () => {
     const { store, cleanup } = makeFreshStore();

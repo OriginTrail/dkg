@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
   dkgPlugin,
   dkgPublish,
@@ -9,6 +9,7 @@ import {
   dkgPersistChatTurn,
   dkgKnowledgeProvider,
   dkgService,
+  __resetPersistedUserTurnCacheForTests,
 } from '../src/index.js';
 
 describe('dkgPlugin', () => {
@@ -89,6 +90,14 @@ describe('dkgPlugin.hooks wiring', () => {
 // explicit `userTurnPersisted` signal when the caller doesn't.
 // -----------------------------------------------------------------------
 describe('dkgPlugin.hooks.onAssistantReply — r14-2 userTurnPersisted plumbing', () => {
+  beforeEach(() => {
+    // r16-2: the plugin now consults an in-process cache of successful
+    // onChatTurn writes. Reset between tests so r14-2 semantics (default
+    // false absent explicit caller signal) remain observable in
+    // isolation — the r16-2 suite below tests the cache-hit path.
+    __resetPersistedUserTurnCacheForTests();
+  });
+
   it('defaults userTurnPersisted to false when the caller does not set it', async () => {
     const spy = vi.spyOn(dkgService, 'persistChatTurn' as any)
       .mockResolvedValue({ tripleCount: 0, turnUri: '', kcId: '' } as any);
@@ -165,6 +174,145 @@ describe('dkgPlugin.hooks.onAssistantReply — r14-2 userTurnPersisted plumbing'
       );
       const opts = spy.mock.calls[0][3] as any;
       expect(opts.userTurnPersisted).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+// -----------------------------------------------------------------------
+// PR #229 bot review round 16 — r16-2: the plugin's own
+// onChatTurn → onAssistantReply chain must take the APPEND-ONLY path
+// (userTurnPersisted=true) when it knows onChatTurn just persisted the
+// matching user message in this same process. r14-2's "default false"
+// was correct FROM THE BOUNDARY (we can't trust unknown upstream hook
+// wiring), but from the boundary of the plugin's own hook chain we
+// DO know — because the plugin dispatched onChatTurn. r16-2 adds a
+// small in-process cache so the plugin's own chain binds readers to
+// the real user-message subject instead of a headless stub.
+// -----------------------------------------------------------------------
+describe('dkgPlugin.hooks — r16-2: onChatTurn → onAssistantReply in-process chain', () => {
+  beforeEach(() => {
+    __resetPersistedUserTurnCacheForTests();
+  });
+
+  it('after onChatTurn succeeds for (roomId, msgId), onAssistantReply for same replyTo takes the APPEND-ONLY path', async () => {
+    const spy = vi.spyOn(dkgService, 'persistChatTurn' as any)
+      .mockResolvedValue({ tripleCount: 0, turnUri: '', kcId: '' } as any);
+    try {
+      const runtime = { getSetting: () => undefined, character: { name: 'x' } } as any;
+      const userMsg = { content: { text: 'hello' }, id: 'user-1', userId: 'u', roomId: 'r42' } as any;
+      const assistantMsg = {
+        content: { text: 'reply' }, id: 'asst-1', userId: 'a', roomId: 'r42',
+        replyTo: 'user-1',
+      } as any;
+
+      await (dkgPlugin as any).hooks.onChatTurn(runtime, userMsg, {}, {});
+      await (dkgPlugin as any).hooks.onAssistantReply(runtime, assistantMsg, {}, {});
+
+      // First call = onChatTurn (user-turn path, no mode), second = reply.
+      expect(spy).toHaveBeenCalledTimes(2);
+      const replyOpts = spy.mock.calls[1][3] as any;
+      expect(replyOpts.mode).toBe('assistant-reply');
+      expect(replyOpts.userMessageId).toBe('user-1');
+      // r16-2 key invariant: the cache hit flips the default to TRUE.
+      expect(replyOpts.userTurnPersisted).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('onChatTurn FAILURE does NOT populate the cache — reply falls through to safe headless branch', async () => {
+    const spy = vi.spyOn(dkgService, 'persistChatTurn' as any);
+    // First call throws (simulates a failed onChatTurn write), second
+    // call resolves (the assistant reply's own persist).
+    spy.mockRejectedValueOnce(new Error('boom'))
+       .mockResolvedValue({ tripleCount: 0, turnUri: '', kcId: '' } as any);
+    try {
+      const runtime = { getSetting: () => undefined, character: { name: 'x' } } as any;
+      const userMsg = { content: { text: 'hi' }, id: 'user-fail', userId: 'u', roomId: 'rX' } as any;
+      const assistantMsg = {
+        content: { text: 'reply' }, id: 'asst-fail', userId: 'a', roomId: 'rX',
+        replyTo: 'user-fail',
+      } as any;
+
+      await expect(
+        (dkgPlugin as any).hooks.onChatTurn(runtime, userMsg, {}, {}),
+      ).rejects.toThrow(/boom/);
+      await (dkgPlugin as any).hooks.onAssistantReply(runtime, assistantMsg, {}, {});
+
+      const replyOpts = spy.mock.calls[1][3] as any;
+      // Cache stayed clean → headless branch → the r15-2 collision
+      // guard keeps the stub URI distinct from any real subject.
+      expect(replyOpts.userTurnPersisted).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('reply in a DIFFERENT room (same msgId coincidence) falls through to headless — cache is (roomId, msgId)-keyed', async () => {
+    const spy = vi.spyOn(dkgService, 'persistChatTurn' as any)
+      .mockResolvedValue({ tripleCount: 0, turnUri: '', kcId: '' } as any);
+    try {
+      const runtime = { getSetting: () => undefined, character: { name: 'x' } } as any;
+      const userMsg = { content: { text: 'hi' }, id: 'shared-id', userId: 'u', roomId: 'room-A' } as any;
+      const replyInOtherRoom = {
+        content: { text: 'reply' }, id: 'a1', userId: 'a', roomId: 'room-B',
+        replyTo: 'shared-id',
+      } as any;
+
+      await (dkgPlugin as any).hooks.onChatTurn(runtime, userMsg, {}, {});
+      await (dkgPlugin as any).hooks.onAssistantReply(runtime, replyInOtherRoom, {}, {});
+
+      const replyOpts = spy.mock.calls[1][3] as any;
+      expect(replyOpts.userTurnPersisted).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('explicit caller opt-out (userTurnPersisted:false) WINS over the cache (caller signal is authoritative)', async () => {
+    const spy = vi.spyOn(dkgService, 'persistChatTurn' as any)
+      .mockResolvedValue({ tripleCount: 0, turnUri: '', kcId: '' } as any);
+    try {
+      const runtime = { getSetting: () => undefined, character: { name: 'x' } } as any;
+      const userMsg = { content: { text: 'hi' }, id: 'u-auth', userId: 'u', roomId: 'rA' } as any;
+      const reply = {
+        content: { text: 'r' }, id: 'a-auth', userId: 'a', roomId: 'rA',
+        replyTo: 'u-auth',
+      } as any;
+
+      await (dkgPlugin as any).hooks.onChatTurn(runtime, userMsg, {}, {});
+      await (dkgPlugin as any).hooks.onAssistantReply(
+        runtime, reply, {}, { userTurnPersisted: false },
+      );
+
+      const replyOpts = spy.mock.calls[1][3] as any;
+      // Cache would have said "true"; explicit caller said "false".
+      expect(replyOpts.userTurnPersisted).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('reply WITHOUT replyTo/parentId/inReplyTo has no correlation key → headless (defence-in-depth)', async () => {
+    const spy = vi.spyOn(dkgService, 'persistChatTurn' as any)
+      .mockResolvedValue({ tripleCount: 0, turnUri: '', kcId: '' } as any);
+    try {
+      const runtime = { getSetting: () => undefined, character: { name: 'x' } } as any;
+      const userMsg = { content: { text: 'hi' }, id: 'u-iso', userId: 'u', roomId: 'rZ' } as any;
+      // No replyTo — proactive assistant message with no parent.
+      const reply = {
+        content: { text: 'r' }, id: 'a-iso', userId: 'a', roomId: 'rZ',
+      } as any;
+
+      await (dkgPlugin as any).hooks.onChatTurn(runtime, userMsg, {}, {});
+      await (dkgPlugin as any).hooks.onAssistantReply(runtime, reply, {}, {});
+
+      const replyOpts = spy.mock.calls[1][3] as any;
+      // No userMessageId → correlation impossible → headless path.
+      expect(replyOpts.userTurnPersisted).toBe(false);
+      expect(replyOpts.userMessageId).toBeUndefined();
     } finally {
       spy.mockRestore();
     }
