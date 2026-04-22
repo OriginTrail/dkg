@@ -62,15 +62,28 @@ export class BlazegraphStore implements TripleStore {
         `DELETE { GRAPH <${escapeUri(pattern.graph)}> { ${triple} } } WHERE { GRAPH <${escapeUri(pattern.graph)}> { ${triple} } }`,
       );
     } else {
-      // Original form `DELETE { ?g_ctx { ${triple} } }` is rejected by
-      // Blazegraph's SPARQL parser with HTTP 400 — the GRAPH keyword is
-      // mandatory whenever a graph variable surrounds the triple
-      // pattern in either the template or the WHERE clause. Re-emit
-      // both halves with the keyword. See storage.test.ts conformance
-      // suite (BlazegraphStore: deleteByPattern removes matching quads).
-      await this.sparqlUpdate(
-        `DELETE { GRAPH ?g_ctx { ${triple} } } WHERE { GRAPH ?g_ctx { ${triple} } }`,
+      // No graph filter: enumerate every graph the pattern could appear in
+      // (named graphs + default graph) and issue an explicit DELETE per
+      // graph. Blazegraph 2.1.5 accepts the SPARQL-1.1 graph-variable form
+      // `DELETE { GRAPH ?g { ... } } WHERE { GRAPH ?g { ... } }` for
+      // parsing, but in practice the template fails to actually remove
+      // matching quads through its REST endpoint (returns 200 OK but
+      // `countQuads` afterwards still shows the pattern). Materializing
+      // the affected graphs first and looping is the only reliable form.
+      const graphsRes = await this.query(
+        `SELECT DISTINCT ?g WHERE { GRAPH ?g { ${triple} } }`,
       );
+      if (graphsRes.type === 'bindings') {
+        for (const row of graphsRes.bindings) {
+          const g = row['g'];
+          if (!g) continue;
+          await this.sparqlUpdate(
+            `DELETE WHERE { GRAPH <${escapeUri(g)}> { ${triple} } }`,
+          );
+        }
+      }
+      // Default graph: matches when no GRAPH wrapper is present.
+      await this.sparqlUpdate(`DELETE WHERE { ${triple} }`);
     }
     const after = await this.countQuads(pattern.graph);
     return Math.max(0, before - after);
