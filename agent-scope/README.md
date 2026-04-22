@@ -275,8 +275,9 @@ onboarding modes need interactive input.
 
 ### Flow 2 — smart onboarding (`pnpm task start --smart`)
 
-The CLI prompts you for a multi-line task description (finish with an
-empty line), then drops a one-shot marker at
+The CLI prompts you for a task description (press Enter to submit —
+multi-line pastes are captured in full via paste-detection), then drops
+a one-shot marker at
 `agent-scope/.pending-onboarding` (gitignored) that *already embeds* your
 description inside a `=== USER TASK DESCRIPTION ===` block. The trigger
 text is also copied to your clipboard.

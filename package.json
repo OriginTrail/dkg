@@ -29,7 +29,7 @@
     "test:game:e2e": "pnpm --filter @origintrail-official/dkg-app-origin-trail-game test:e2e",
     "test:all": "pnpm test && pnpm test:evm && pnpm test:game:ui",
     "task": "node agent-scope/bin/task.mjs",
-    "scope:test": "node --test agent-scope/lib/scope.test.mjs agent-scope/lib/shell-parse.test.mjs agent-scope/lib/denial.test.mjs agent-scope/lib/onboarding.test.mjs agent-scope/lib/check-agent.test.mjs agent-scope/lib/wizard.test.mjs",
+    "scope:test": "node --test agent-scope/lib/scope.test.mjs agent-scope/lib/shell-parse.test.mjs agent-scope/lib/denial.test.mjs agent-scope/lib/onboarding.test.mjs agent-scope/lib/check-agent.test.mjs agent-scope/lib/wizard.test.mjs agent-scope/lib/prompter.test.mjs",
     "scope:validate": "node agent-scope/bin/task.mjs validate",
     "scope:status": "node agent-scope/bin/task.mjs resolve && echo && node agent-scope/bin/task.mjs show",
     "scope:check-agent": "node agent-scope/bin/task.mjs check-agent"

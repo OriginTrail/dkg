@@ -266,11 +266,11 @@ async function startSmart() {
   const prompter = createPrompter();
   let description = '';
   try {
-    console.log('Describe the task in detail — what to build or fix, which packages / behaviours');
-    console.log('/ tests, and any files you already know about. Multi-line OK.');
-    console.log('Finish with an empty line.');
+    console.log('Describe the task — what to build or fix, which packages / behaviours');
+    console.log('/ tests, and any files you already know about.');
+    console.log('Press Enter to submit. (Multi-line pastes are captured in full.)');
     console.log('');
-    description = await readMultilineDescription(prompter);
+    description = await prompter.askPasteableDescription('> ');
   } finally {
     prompter.close();
   }
@@ -310,30 +310,6 @@ async function startSmart() {
   console.log('Change your mind? `rm agent-scope/.pending-onboarding` and run');
   console.log('`pnpm task start` for the deterministic wizard instead.');
   bootstrapWarning();
-}
-
-async function readMultilineDescription(prompter) {
-  // Read lines until we see a single empty line AFTER at least one non-
-  // empty line. Lets the user paste multi-paragraph text (paste usually
-  // ends with a blank line) or type naturally and hit Enter twice.
-  //
-  // Safety rails: cap iterations and stop on consecutive blanks before
-  // any content (prevents runaway loops when stdin is closed / EOF).
-  const lines = [];
-  let seenContent = false;
-  let blankRun = 0;
-  for (let i = 0; i < 2000; i++) {
-    const line = await prompter.ask('> ');
-    if (!line || !line.trim()) {
-      if (seenContent) break;
-      if (++blankRun >= 3) break;
-      continue;
-    }
-    blankRun = 0;
-    lines.push(line);
-    seenContent = true;
-  }
-  return lines.join('\n');
 }
 
 async function startInteractive() {
