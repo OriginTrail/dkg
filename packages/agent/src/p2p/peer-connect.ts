@@ -10,6 +10,7 @@ interface Libp2pLike {
 
 const CONNECT_WAIT_TIMEOUT_MS = 5000;
 const CONNECT_WAIT_INTERVAL_MS = 100;
+const DEBUG_SYNC_TRACE = process.env.DKG_DEBUG_SYNC_PROGRESS === '1' || process.env.DKG_DEBUG_SYNC === '1';
 
 async function waitForPeerConnection(
   libp2p: Libp2pLike,
@@ -32,15 +33,19 @@ export async function connectToMultiaddr(
   multiaddress: string,
   log?: (message: string) => void,
 ): Promise<void> {
+  const debugLog = DEBUG_SYNC_TRACE ? log : undefined;
   const { multiaddr } = await import('@multiformats/multiaddr');
 
   if (!multiaddress.includes('/p2p-circuit/p2p/')) {
-    log?.(`Dialing direct invite multiaddr: ${multiaddress}`);
+    debugLog?.(`Dialing direct invite multiaddr: ${multiaddress}`);
     await libp2p.dial(multiaddr(multiaddress));
     const directPeerId = multiaddress.split('/p2p/').pop();
     if (directPeerId) {
       const connected = await waitForPeerConnection(libp2p, directPeerId);
-      log?.(`Direct invite connection ${connected ? 'confirmed' : 'not observed before timeout'} for peer ${directPeerId}`);
+      debugLog?.(`Direct invite connection ${connected ? 'confirmed' : 'not observed before timeout'} for peer ${directPeerId}`);
+      if (!connected) {
+        throw new Error(`Direct target peer ${directPeerId} not observed before timeout`);
+      }
     }
     return;
   }
@@ -49,17 +54,20 @@ export async function connectToMultiaddr(
   const relayMultiaddr = multiaddress.slice(0, circuitIndex);
   const targetPeerId = multiaddress.slice(circuitIndex + '/p2p-circuit/p2p/'.length);
 
-  log?.(`Dialing relay from circuit invite: relay=${relayMultiaddr} targetPeer=${targetPeerId}`);
+  debugLog?.(`Dialing relay from circuit invite: relay=${relayMultiaddr} targetPeer=${targetPeerId}`);
   await libp2p.dial(multiaddr(relayMultiaddr));
 
   const { peerIdFromString } = await import('@libp2p/peer-id');
   const targetPid = peerIdFromString(targetPeerId);
-  log?.(`Merging circuit target multiaddr into peerStore: targetPeer=${targetPeerId}`);
+  debugLog?.(`Merging circuit target multiaddr into peerStore: targetPeer=${targetPeerId}`);
   await libp2p.peerStore.merge(targetPid, { multiaddrs: [multiaddr(multiaddress)] });
-  log?.(`Dialing final circuit target peer: ${targetPeerId}`);
+  debugLog?.(`Dialing final circuit target peer: ${targetPeerId}`);
   await libp2p.dial(targetPid);
   const connected = await waitForPeerConnection(libp2p, targetPeerId);
-  log?.(`Circuit target connection ${connected ? 'confirmed' : 'not observed before timeout'} for peer ${targetPeerId}`);
+  debugLog?.(`Circuit target connection ${connected ? 'confirmed' : 'not observed before timeout'} for peer ${targetPeerId}`);
+  if (!connected) {
+    throw new Error(`Circuit target peer ${targetPeerId} not observed before timeout`);
+  }
 }
 
 export async function ensurePeerConnected(

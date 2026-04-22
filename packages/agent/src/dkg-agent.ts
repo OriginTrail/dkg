@@ -50,6 +50,8 @@ import { runDurableSync } from './sync/requester/durable-sync.js';
 import { runSharedMemorySync } from './sync/requester/shared-memory-sync.js';
 import { buildSyncRequestEnvelope } from './sync/auth/request-build.js';
 import { authorizePrivateSyncRequest } from './sync/auth/request-authorize.js';
+import { registerSyncHandler } from './sync/responder/sync-handler.js';
+import { runSyncOnConnect } from './sync/on-connect/sync-on-connect.js';
 import {
   generateCustodialAgent, registerSelfSovereignAgent, agentFromPrivateKey,
   hashAgentToken,
@@ -738,226 +740,19 @@ export class DKGAgent {
       }
     }
 
-    // Register sync handler: responds with a page of data OR meta triples.
-    // Request: JSON SyncRequestEnvelope (authenticated for private CGs) or
-    //          pipe-delimited "contextGraphId|offset|limit[|meta]".
-    // The "phase" field ('data' or 'meta') controls which graph is queried.
-    // Meta is fetched separately (paginated) to avoid exceeding the 10 MB
-    // stream read limit that occurred when the full meta graph was bundled
-    // with the first data page.
-    this.router.register(PROTOCOL_SYNC, async (data, peerId) => {
-      const handlerStartedAt = Date.now();
-      const request = this.parseSyncRequest(data);
-      const offset = Math.max(0, Math.min(Number.isSafeInteger(Number(request.offset)) ? Number(request.offset) : 0, 1_000_000));
-      const limit = Math.max(1, Math.min(Number.isSafeInteger(Number(request.limit)) ? Number(request.limit) : SYNC_PAGE_SIZE, SYNC_PAGE_SIZE));
-      const phase = request.phase ?? 'data';
-      const isWorkspace = request.includeSharedMemory;
-      const contextGraphId = request.contextGraphId;
-      if (!contextGraphId || typeof contextGraphId !== 'string') {
-        return new TextEncoder().encode('');
-      }
-      const nquads: string[] = [];
-
-      const authStartedAt = Date.now();
-      const authorized = await this.authorizeSyncRequest(request, peerId.toString());
-      const authDurationMs = Date.now() - authStartedAt;
-      if (!authorized) {
-        this.log.warn(createOperationContext('sync'), `Denied sync request for "${contextGraphId}" from peer ${peerId} (phase=${phase})`);
-        // Emit the explicit denial sentinel (vs. empty body which would
-        // be indistinguishable from "peer has no data for this CG").
-        return new TextEncoder().encode(`${SYNC_ACCESS_DENIED_MARKER}\n`);
-      }
-
-      if (isWorkspace) {
-        const wsGraph = paranetWorkspaceGraphUri(contextGraphId);
-        const wsMetaGraph = paranetWorkspaceMetaGraphUri(contextGraphId);
-        const wsTtl = this.config.sharedMemoryTtlMs ?? DEFAULT_SWM_TTL_MS;
-        const cutoff = wsTtl > 0 ? new Date(Date.now() - wsTtl).toISOString() : null;
-
-        if (phase === 'meta') {
-          const metaQuery = cutoff != null
-            ? `SELECT ?s ?p ?o WHERE {
-                GRAPH <${wsMetaGraph}> { ?s ?p ?o }
-                FILTER EXISTS {
-                  GRAPH <${wsMetaGraph}> {
-                    ?s <http://dkg.io/ontology/publishedAt> ?ts .
-                    FILTER(?ts >= "${cutoff}"^^<http://www.w3.org/2001/XMLSchema#dateTime>)
-                  }
-                }
-              } ORDER BY ?s ?p ?o OFFSET ${offset} LIMIT ${limit}`
-            : `SELECT ?s ?p ?o WHERE { GRAPH <${wsMetaGraph}> { ?s ?p ?o } } ORDER BY ?s ?p ?o OFFSET ${offset} LIMIT ${limit}`;
-
-          const queryStartedAt = Date.now();
-          const metaResult = await this.store.query(metaQuery);
-          const queryDurationMs = Date.now() - queryStartedAt;
-          const serializeStartedAt = Date.now();
-          if (metaResult.type === 'bindings') {
-            for (const b of metaResult.bindings) {
-              const obj = b['o'].startsWith('"') ? b['o'] : `<${b['o']}>`;
-              nquads.push(`<${b['s']}> <${b['p']}> ${obj} <${wsMetaGraph}> .`);
-            }
-          }
-          const serializeDurationMs = Date.now() - serializeStartedAt;
-          this.log.debug(createOperationContext('sync'), `Sync responder SWM meta for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
-        } else {
-          // Apply TTL/root-entity filter inside SPARQL before pagination so that
-          // we return the first N non-expired triples. Only include exact root subject
-          // or skolemized children (/.well-known/genid/...) to avoid pulling unrelated
-          // entities that share a URI prefix (e.g. urn:x vs urn:x/other).
-          const wsQuery =
-            cutoff != null
-              ? `SELECT DISTINCT ?s ?p ?o WHERE {
-  GRAPH <${wsMetaGraph}> {
-    ?op <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dkg.io/ontology/WorkspaceOperation> .
-    ?op <http://dkg.io/ontology/publishedAt> ?ts .
-    ?op <http://dkg.io/ontology/rootEntity> ?re .
-    FILTER(?ts >= "${cutoff}"^^<http://www.w3.org/2001/XMLSchema#dateTime>)
-  }
-  GRAPH <${wsGraph}> { ?s ?p ?o }
-  FILTER(?s = ?re || STRSTARTS(STR(?s), CONCAT(STR(?re), "/.well-known/genid/")))
-} ORDER BY ?s ?p ?o OFFSET ${offset} LIMIT ${limit}`
-              : `SELECT ?s ?p ?o WHERE { GRAPH <${wsGraph}> { ?s ?p ?o } } ORDER BY ?s ?p ?o OFFSET ${offset} LIMIT ${limit}`;
-
-          const queryStartedAt = Date.now();
-          const wsResult = await this.store.query(wsQuery);
-          const queryDurationMs = Date.now() - queryStartedAt;
-          if (wsResult.type !== 'bindings' || wsResult.bindings.length === 0) {
-            return new TextEncoder().encode('');
-          }
-          const serializeStartedAt = Date.now();
-          for (const b of wsResult.bindings) {
-            const obj = b['o'].startsWith('"') ? b['o'] : `<${b['o']}>`;
-            nquads.push(`<${b['s']}> <${b['p']}> ${obj} <${wsGraph}> .`);
-          }
-          const serializeDurationMs = Date.now() - serializeStartedAt;
-          this.log.debug(createOperationContext('sync'), `Sync responder SWM data for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
-        }
-
-        if (nquads.length === 0) return new TextEncoder().encode('');
-      } else {
-        const dataGraph = paranetDataGraphUri(contextGraphId);
-        const metaGraph = paranetMetaGraphUri(contextGraphId);
-
-        if (phase === 'meta') {
-          // Whitelist approach: only sync _meta triples that are either
-          // CG-level metadata (always safe) or assertion metadata for
-          // assertions that have been promoted out of WM.
-          //
-          // CG-level subjects (always included):
-          //  - did:dkg:context-graph:{id}  (CG definition)
-          //  - did:dkg:activity:*           (CG creation provenance)
-          //  - did:dkg:join-request:*       (access control)
-          //
-          // Assertion-level subjects (only if memoryLayer != WM):
-          //  - urn:dkg:assertion:*          (lifecycle entities)
-          //  - urn:dkg:assertion:*/event/*  (event entities)
-          //  - */assertion/*                (import metadata)
-          //
-          // Everything else is excluded by default.
-          const DKG_NS = 'http://dkg.io/ontology/';
-          const cgEntity = `did:dkg:context-graph:${contextGraphId}`;
-          const queryStartedAt = Date.now();
-          const metaResult = await this.store.query(
-            `SELECT ?s ?p ?o WHERE {
-              GRAPH <${metaGraph}> { ?s ?p ?o }
-              FILTER(
-                STR(?s) = "${cgEntity}" ||
-                STRSTARTS(STR(?s), "did:dkg:activity:") ||
-                STRSTARTS(STR(?s), "did:dkg:join-request:") ||
-                EXISTS {
-                  GRAPH <${metaGraph}> {
-                    ?lc <${DKG_NS}memoryLayer> ?layer .
-                    FILTER(?layer != "${MemoryLayer.WorkingMemory}")
-                    {
-                      FILTER(?lc = ?s)
-                    } UNION {
-                      ?lc <${DKG_NS}assertionGraph> ?s .
-                    } UNION {
-                      ?lc <${DKG_NS}assertionName> ?aname .
-                      FILTER(
-                        CONTAINS(STR(?s), "/assertion/") &&
-                        STRENDS(STR(?s), CONCAT("/", STR(?aname)))
-                      )
-                    }
-                  }
-                } ||
-                EXISTS {
-                  GRAPH <${metaGraph}> {
-                    { ?evt_src <http://www.w3.org/ns/prov#generated> ?parent }
-                    UNION
-                    { ?evt_src <http://www.w3.org/ns/prov#used> ?parent }
-                    FILTER(?evt_src = ?s)
-                    ?parent <${DKG_NS}memoryLayer> ?elayer .
-                    FILTER(?elayer != "${MemoryLayer.WorkingMemory}")
-                  }
-                }
-              )
-            } ORDER BY ?s ?p ?o OFFSET ${offset} LIMIT ${limit}`,
-          );
-          const queryDurationMs = Date.now() - queryStartedAt;
-          const serializeStartedAt = Date.now();
-          if (metaResult.type === 'bindings') {
-            for (const b of metaResult.bindings) {
-              const obj = b['o'].startsWith('"') ? b['o'] : `<${b['o']}>`;
-              nquads.push(`<${b['s']}> <${b['p']}> ${obj} <${metaGraph}> .`);
-            }
-          }
-          const serializeDurationMs = Date.now() - serializeStartedAt;
-          this.log.debug(createOperationContext('sync'), `Sync responder durable meta for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
-        } else {
-          // Sync all graphs under the CG prefix EXCEPT:
-          //  - _meta graphs (bookkeeping, synced in the meta phase)
-          //  - _private graphs (never shared)
-          //  - assertion graphs still in Working Memory (WM)
-          //
-          // Assertions promoted to SWM or VM ARE included. The lifecycle
-          // entity links to the graph via dkg:assertionGraph and tracks
-          // the current layer via dkg:memoryLayer. Assertion graphs with
-          // no lifecycle record are treated as WM (safe default).
-          const cgUriPrefix = `did:dkg:context-graph:${contextGraphId}`;
-          const metaGraph = `${cgUriPrefix}/_meta`;
-          const DKG_NS = 'http://dkg.io/ontology/';
-          const queryStartedAt = Date.now();
-          const dataResult = await this.store.query(
-            `SELECT ?s ?p ?o ?g WHERE {
-              GRAPH ?g { ?s ?p ?o }
-              FILTER(
-                (STR(?g) = "${cgUriPrefix}" || STRSTARTS(STR(?g), "${cgUriPrefix}/")) &&
-                !STRENDS(STR(?g), "/_meta") &&
-                !CONTAINS(STR(?g), "/_private")
-              )
-              FILTER(
-                !CONTAINS(STR(?g), "/assertion/") ||
-                EXISTS {
-                  GRAPH <${metaGraph}> {
-                    ?lifecycle <${DKG_NS}assertionGraph> ?g .
-                    ?lifecycle <${DKG_NS}memoryLayer> ?layer .
-                    FILTER(?layer != "${MemoryLayer.WorkingMemory}")
-                  }
-                }
-              )
-            } ORDER BY ?g ?s ?p ?o OFFSET ${offset} LIMIT ${limit}`,
-          );
-          const queryDurationMs = Date.now() - queryStartedAt;
-          if (dataResult.type !== 'bindings' || dataResult.bindings.length === 0) {
-            return new TextEncoder().encode('');
-          }
-          const serializeStartedAt = Date.now();
-          for (const b of dataResult.bindings) {
-            const obj = b['o'].startsWith('"') ? b['o'] : `<${b['o']}>`;
-            const graph = b['g'] ?? dataGraph;
-            nquads.push(`<${b['s']}> <${b['p']}> ${obj} <${graph}> .`);
-          }
-          const serializeDurationMs = Date.now() - serializeStartedAt;
-          this.log.debug(createOperationContext('sync'), `Sync responder durable data for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
-        }
-      }
-
-      const totalDurationMs = Date.now() - handlerStartedAt;
-      if (totalDurationMs > 100) {
-        this.log.debug(createOperationContext('sync'), `Sync responder total for "${contextGraphId}" (phase=${phase}, workspace=${isWorkspace}): ${totalDurationMs}ms`);
-      }
-      return new TextEncoder().encode(nquads.join('\n'));
+    registerSyncHandler({
+      router: this.router,
+      protocolSync: PROTOCOL_SYNC,
+      syncDeniedResponse: SYNC_DENIED_RESPONSE,
+      syncPageSize: SYNC_PAGE_SIZE,
+      sharedMemoryTtlMs: this.config.sharedMemoryTtlMs ?? DEFAULT_SWM_TTL_MS,
+      systemParanets: SYSTEM_PARANETS,
+      store: this.store,
+      peerId: this.peerId,
+      parseSyncRequest: this.parseSyncRequest.bind(this),
+      authorizeSyncRequest: this.authorizeSyncRequest.bind(this),
+      logWarn: (ctx, message) => this.log.warn(ctx, message),
+      logDebug: (ctx, message) => this.log.debug(ctx, message),
     });
 
     // Join-request protocol: receives signed join requests forwarded by peers.
@@ -1187,69 +982,21 @@ export class DKGAgent {
    * with a per-peer guard to avoid overlapping sync storms.
    */
   private async trySyncFromPeer(remotePeer: string): Promise<void> {
-    const ctx = createOperationContext('sync');
-    const shortPeer = remotePeer.slice(-8);
-
-    if (this.syncingPeers.has(remotePeer)) return;
-    this.syncingPeers.add(remotePeer);
-
-    try {
-      const { peerIdFromString } = await import('@libp2p/peer-id');
-      const pid = peerIdFromString(remotePeer);
-      const peer = await this.node.libp2p.peerStore.get(pid);
-      const protocols = peer.protocols ?? [];
-
-      // Track which peers are core nodes by checking StorageACK protocol
-      // support. Only core nodes register this protocol, so its presence
-      // is a reliable role indicator. Used by getConnectedCorePeers().
-      if (protocols.includes(PROTOCOL_STORAGE_ACK)) {
-        this.knownCorePeerIds.add(remotePeer);
-      } else {
-        this.knownCorePeerIds.delete(remotePeer);
-      }
-
-      const hasSync = protocols.includes(PROTOCOL_SYNC);
-      if (!hasSync) {
-        this.log.info(ctx, `Peer ${shortPeer} does not support sync protocol (protocols: ${protocols.join(', ')})`);
-        return;
-      }
-
-      this.log.info(ctx, `Syncing from peer ${shortPeer}...`);
-      const knownCgsBefore = new Set(this.config.syncContextGraphs ?? []);
-      const synced = await this.syncFromPeer(remotePeer);
-      this.log.info(ctx, `Synced ${synced} data triples from peer ${shortPeer}`);
-
-      const syncScope = new Set<string>([
-        SYSTEM_PARANETS.AGENTS,
-        SYSTEM_PARANETS.ONTOLOGY,
-        ...(this.config.syncContextGraphs ?? []),
-      ]);
-      await this.refreshMetaSyncedFlags(syncScope);
-
-      // After syncing ONTOLOGY, discover and auto-subscribe to any new context graphs
-      await this.discoverContextGraphsFromStore();
-
-      // Sync durable data for any CGs discovered after the initial sync pass.
-      // Without this, newly discovered private CGs would only sync on the next
-      // peer connection since they weren't in syncContextGraphs during the
-      // first syncFromPeer call.
-      const allCgsAfter = this.config.syncContextGraphs ?? [];
-      const newlyDiscovered = allCgsAfter.filter((id) => !knownCgsBefore.has(id));
-      if (newlyDiscovered.length > 0) {
-        this.log.info(ctx, `Discovered ${newlyDiscovered.length} new CG(s) — syncing durable data from ${shortPeer}`);
-        const discoverSynced = await this.syncFromPeer(remotePeer, newlyDiscovered);
-        this.log.info(ctx, `Synced ${discoverSynced} durable triples for newly discovered CG(s) from ${shortPeer}`);
-        await this.refreshMetaSyncedFlags(newlyDiscovered);
-      }
-
-      const wsContextGraphIds = this.config.syncContextGraphs ?? [];
-      if (wsContextGraphIds.length > 0) {
-        const wsSynced = await this.syncSharedMemoryFromPeer(remotePeer, wsContextGraphIds);
-        this.log.info(ctx, `Synced ${wsSynced} shared memory triples from peer ${shortPeer}`);
-      }
-    } finally {
-      this.syncingPeers.delete(remotePeer);
+    if (!this.started) {
+      return;
     }
+    return runSyncOnConnect({
+      remotePeer,
+      syncingPeers: this.syncingPeers,
+      getPeerProtocols: (peerId) => this.getPeerProtocols(peerId),
+      knownCorePeerIds: this.knownCorePeerIds,
+      getSyncContextGraphs: () => this.config.syncContextGraphs ?? [],
+      syncFromPeer: (peerId, contextGraphIds) => this.syncFromPeer(peerId, contextGraphIds),
+      refreshMetaSyncedFlags: (contextGraphIds) => this.refreshMetaSyncedFlags(contextGraphIds),
+      discoverContextGraphsFromStore: () => this.discoverContextGraphsFromStore(),
+      syncSharedMemoryFromPeer: (peerId, contextGraphIds) => this.syncSharedMemoryFromPeer(peerId, contextGraphIds),
+      logInfo: (ctx, message) => this.log.info(ctx, message),
+    });
   }
 
   /**
@@ -1564,10 +1311,12 @@ export class DKGAgent {
       },
     };
 
-    this.log.info(
-      ctx,
-      `Catch-up peer set for "${contextGraphId}": ${peers.map((peer) => peer.toString()).join(', ') || 'none'}`,
-    );
+    if (DEBUG_SYNC_PROGRESS) {
+      this.log.info(
+        ctx,
+        `Catch-up peer set for "${contextGraphId}": ${peers.map((peer) => peer.toString()).join(', ') || 'none'}`,
+      );
+    }
 
     // Phase 1: probe all peers for PROTOCOL_SYNC support serially. This is
     // cheap (peerStore lookup / waitForPeerProtocol), but we keep it a
@@ -1576,11 +1325,15 @@ export class DKGAgent {
     // no gain. See the "Run per-peer syncs in parallel" comment below.
     const syncCapable: string[] = [];
     for (const pid of peers) {
-      this.log.info(ctx, `Checking sync protocol for peer ${pid.toString()} in catch-up for "${contextGraphId}"`);
+      if (DEBUG_SYNC_PROGRESS) {
+        this.log.info(ctx, `Checking sync protocol for peer ${pid.toString()} in catch-up for "${contextGraphId}"`);
+      }
       const hasSync = await this.waitForSyncProtocol(pid);
       if (!hasSync) {
         noProtocolPeers++;
-        this.log.warn(ctx, `Peer ${pid.toString()} is connected but not sync-capable for "${contextGraphId}"`);
+        if (DEBUG_SYNC_PROGRESS) {
+          this.log.warn(ctx, `Peer ${pid.toString()} is connected but not sync-capable for "${contextGraphId}"`);
+        }
         continue;
       }
       syncCapable.push(pid.toString());

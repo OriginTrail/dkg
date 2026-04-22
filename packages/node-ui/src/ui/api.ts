@@ -281,6 +281,7 @@ export interface CatchupStatusResponse {
     dataSynced: number;
     sharedMemorySynced: number;
     denied: boolean;
+    deniedPeers: number;
     diagnostics?: {
       noProtocolPeers: number;
       durable: {
@@ -1376,4 +1377,3 @@ export const fetchSubGraphs = (contextGraphId: string) =>
   get<{ contextGraphId: string; subGraphs: SubGraphInfo[] }>(
     `/api/sub-graph/list?contextGraphId=${encodeURIComponent(contextGraphId)}`,
   );
-

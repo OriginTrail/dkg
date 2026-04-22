@@ -11,6 +11,7 @@ export interface CatchupJobResult {
   dataSynced: number;
   sharedMemorySynced: number;
   denied: boolean;
+  deniedPeers: number;
   diagnostics?: {
     noProtocolPeers: number;
     durable: {
