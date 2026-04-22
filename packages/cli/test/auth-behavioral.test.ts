@@ -807,6 +807,94 @@ describe('httpAuthGuard — signed GET/HEAD requests verify HMAC synchronously',
 });
 
 // ---------------------------------------------------------------------------
+// PR #229 bot review round 10 (cli/auth.ts:678). The pre-body replay
+// check inside `httpAuthGuard` used to key on the raw nonce string
+// while `verifySignedRequest` (r9-3) keys on `sha256(token):nonce`.
+// Two different bearer credentials that reused the same nonce would
+// 401 each other at the pre-body gate even though the full signed
+// request would verify cleanly — exactly the cross-client
+// false-positive r9-3 was meant to eliminate. These tests pin the
+// parity: both gates enforce identical replay semantics.
+// ---------------------------------------------------------------------------
+
+describe('httpAuthGuard — pre-body nonce replay cache scope (bot review r10-1)', () => {
+  const TOK_A = 'tok-A-' + 'a'.repeat(16);
+  const TOK_B = 'tok-B-' + 'b'.repeat(16);
+  let server: Server;
+  let baseUrl: string;
+  let handlerCallCount: number;
+
+  beforeEach(async () => {
+    _clearReplayCacheForTesting();
+    handlerCallCount = 0;
+    server = createServer((req: IncomingMessage, res: ServerResponse) => {
+      if (!httpAuthGuard(req, res, true, new Set([TOK_A, TOK_B]), null)) return;
+      handlerCallCount++;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end('{"ok":true}');
+    });
+    await new Promise<void>(r => server.listen(0, '127.0.0.1', r));
+    const addr = server.address() as { port: number };
+    baseUrl = `http://127.0.0.1:${addr.port}`;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>(r => server.close(() => r()));
+  });
+
+  function headersFor(token: string, nonce: string) {
+    const ts = String(Date.now());
+    const sig = sigFor(token, 'GET', '/api/agents', ts, nonce, '');
+    return {
+      Authorization: `Bearer ${token}`,
+      'x-dkg-timestamp': ts,
+      'x-dkg-nonce': nonce,
+      'x-dkg-signature': sig,
+    };
+  }
+
+  it('same nonce used with two DIFFERENT tokens — both succeed (no cross-client replay false-positive)', async () => {
+    const sharedNonce = `shared-${randomBytes(8).toString('hex')}`;
+
+    const r1 = await fetch(`${baseUrl}/api/agents`, {
+      method: 'GET',
+      headers: headersFor(TOK_A, sharedNonce),
+    });
+    expect(r1.status).toBe(200);
+
+    // Second request: same nonce, different token. Pre-round-10 this
+    // returned 401 "Replayed nonce" from the pre-body gate even though
+    // verifySignedRequest (which is per-credential) would have verified
+    // it. Post-round-10 both gates agree and the request succeeds.
+    const r2 = await fetch(`${baseUrl}/api/agents`, {
+      method: 'GET',
+      headers: headersFor(TOK_B, sharedNonce),
+    });
+    expect(r2.status).toBe(200);
+    expect(handlerCallCount).toBe(2);
+  });
+
+  it('same nonce used TWICE with the SAME token — second call rejected (401 replayed-nonce)', async () => {
+    const nonce = `repeat-${randomBytes(8).toString('hex')}`;
+
+    const r1 = await fetch(`${baseUrl}/api/agents`, {
+      method: 'GET',
+      headers: headersFor(TOK_A, nonce),
+    });
+    expect(r1.status).toBe(200);
+
+    const r2 = await fetch(`${baseUrl}/api/agents`, {
+      method: 'GET',
+      headers: headersFor(TOK_A, nonce),
+    });
+    expect(r2.status).toBe(401);
+    const body = await r2.json();
+    expect(body.error).toMatch(/Replayed nonce|replayed-nonce/);
+    expect(handlerCallCount).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // PR #229 follow-up: signed HMAC must bind the FULL request path
 // (pathname + search), not just pathname. Previously an attacker could
 // swap query parameters after signing and the signature stayed valid.

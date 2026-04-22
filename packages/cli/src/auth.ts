@@ -674,8 +674,21 @@ export function httpAuthGuard(
       // Pre-body replay rejection: an attacker swapping in a fresh
       // nonce still fails the post-body HMAC (nonce is bound), but
       // catching a replayed nonce here saves the body parse.
+      //
+      // PR #229 bot review round 10 (cli/auth.ts:678). Until r10 this
+      // pre-body check keyed on the raw `nonceHeader` string, while
+      // the full verifier below (r9-3) keys on
+      // `sha256(token) + ":" + nonce`. Two different bearer
+      // credentials that reused the same nonce would 401 each other
+      // HERE even though the signed body would verify cleanly —
+      // exactly the cross-client false positive r9-3 was meant to
+      // eliminate. Apply the same per-credential scope here so the
+      // pre-check and the full verifier enforce identical replay
+      // semantics.
       pruneNonces(now);
-      if (seenNonces.has(nonceHeader)) {
+      const preBodyNonceScope = createHash('sha256').update(acceptedToken).digest('hex');
+      const preBodyNonceKey = `${preBodyNonceScope}:${nonceHeader}`;
+      if (seenNonces.has(preBodyNonceKey)) {
         res.writeHead(401, {
           'Content-Type': 'application/json',
           'WWW-Authenticate': 'Bearer realm="dkg-node"',

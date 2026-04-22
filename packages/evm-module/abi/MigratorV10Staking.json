@@ -90,6 +90,17 @@
     "type": "error"
   },
   {
+    "inputs": [
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      }
+    ],
+    "name": "UnknownIdentityId",
+    "type": "error"
+  },
+  {
     "inputs": [],
     "name": "ZeroAddressHub",
     "type": "error"

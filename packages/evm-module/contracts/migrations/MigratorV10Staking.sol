@@ -51,6 +51,17 @@ contract MigratorV10Staking is ContractStatus, INamed, IVersioned, IInitializabl
     error DelegatorAlreadyMigrated(uint72 identityId, address delegator);
     error NodeAlreadyMigrated(uint72 identityId);
     error InvalidIdentityId();
+    /// PR #229 bot review round 10 (MigratorV10Staking.sol:137).
+    /// Raised when the supplied `identityId` is non-zero but does not
+    /// correspond to an existing profile in `ProfileStorage`. Until
+    /// round 10 a fat-fingered snapshot row (e.g. a typo in the
+    /// generated CSV) would slip past the `identityId != 0` check
+    /// and permanently inflate `stakingStorage.totalStake` plus
+    /// pollute `DelegatorsInfo` under a bogus id. The downstream
+    /// write surfaces (`addDelegator`, `setDelegatorStakeBase`,
+    /// `increaseNodeStake`, `increaseTotalStake`) accept arbitrary
+    /// ids so this guard is the first integrity gate.
+    error UnknownIdentityId(uint72 identityId);
     error InvalidDelegator();
     error TotalStakeMismatch(uint72 identityId, uint96 expected, uint96 received);
 
@@ -135,6 +146,18 @@ contract MigratorV10Staking is ContractStatus, INamed, IVersioned, IInitializabl
         uint96 stakeBase
     ) external onlyOwnerOrMultiSigOwner whenInitiated {
         if (identityId == 0) revert InvalidIdentityId();
+        // PR #229 bot review round 10 (MigratorV10Staking.sol:137).
+        // `identityId != 0` alone does NOT prove the id belongs to a
+        // real profile — `DelegatorsInfo.addDelegator`,
+        // `StakingStorage.setDelegatorStakeBase`,
+        // `StakingStorage.increaseNodeStake`, and `increaseTotalStake`
+        // all accept arbitrary ids, so one fat-fingered snapshot row
+        // would permanently inflate `totalStake` and pollute
+        // `DelegatorsInfo` under a nonexistent identity. Gate every
+        // write behind `profileStorage.profileExists(identityId)`.
+        if (!profileStorage.profileExists(identityId)) {
+            revert UnknownIdentityId(identityId);
+        }
         if (delegator == address(0)) revert InvalidDelegator();
         if (delegatorMigrated[identityId][delegator]) {
             revert DelegatorAlreadyMigrated(identityId, delegator);
@@ -168,6 +191,16 @@ contract MigratorV10Staking is ContractStatus, INamed, IVersioned, IInitializabl
         uint96 expectedTotalStake
     ) external onlyOwnerOrMultiSigOwner whenInitiated {
         if (identityId == 0) revert InvalidIdentityId();
+        // Same guard as `migrateDelegator`: reject ids that do not
+        // correspond to a registered profile so a typo can never
+        // mark a nonexistent node as migrated (which would also
+        // cause `markNodeMigrated` to "succeed" on a non-zero
+        // expectedTotalStake via the default zero `getNodeStake`
+        // only when expectedTotalStake is 0, but even the zero case
+        // should not be reachable for unknown ids).
+        if (!profileStorage.profileExists(identityId)) {
+            revert UnknownIdentityId(identityId);
+        }
         if (nodeMigrated[identityId]) revert NodeAlreadyMigrated(identityId);
 
         uint96 onChain = stakingStorage.getNodeStake(identityId);

@@ -867,6 +867,53 @@ export class EVMChainAdapter implements ChainAdapter {
         // batch-shaped projection.
       }
 
+      // PR #229 bot review round 10 (evm-adapter.ts:815). The PR
+      // introduced `V10KnowledgeBatchEmitted` on KASStorage (distinct
+      // from legacy `KnowledgeBatchCreated`) and explicitly tells
+      // V10-aware consumers to subscribe to this topic directly. The
+      // adapter had no branch for it, so any caller following that
+      // guidance got an empty stream. Add the branch so the event is
+      // consumable through the same `listenForEvents()` API as every
+      // other chain event.
+      if (eventType === 'V10KnowledgeBatchEmitted') {
+        const kasStorage = this.contracts.knowledgeAssetsStorage;
+        if (kasStorage) {
+          const eventFilter = kasStorage.filters.V10KnowledgeBatchEmitted();
+          const logs = await kasStorage.queryFilter(
+            eventFilter,
+            filter.fromBlock ?? 0,
+            filter.toBlock,
+          );
+          for (const log of logs) {
+            const parsed = kasStorage.interface.parseLog({
+              topics: [...log.topics],
+              data: log.data,
+            });
+            if (parsed) {
+              yield {
+                type: 'V10KnowledgeBatchEmitted',
+                blockNumber: log.blockNumber,
+                data: {
+                  batchId: parsed.args.batchId.toString(),
+                  publisherAddress: parsed.args.publisher?.toString(),
+                  merkleRoot: parsed.args.merkleRoot,
+                  publicByteSize: parsed.args.publicByteSize?.toString(),
+                  knowledgeAssetsCount: parsed.args.knowledgeAssetsCount?.toString(),
+                  startKAId: parsed.args.startKAId.toString(),
+                  endKAId: parsed.args.endKAId.toString(),
+                  startEpoch: parsed.args.startEpoch?.toString(),
+                  endEpoch: parsed.args.endEpoch?.toString(),
+                  tokenAmount: parsed.args.tokenAmount?.toString(),
+                  // Event field is `isPermanent` (see KASStorage.sol:75).
+                  isPermanent: Boolean(parsed.args.isPermanent),
+                  txHash: log.transactionHash,
+                },
+              };
+            }
+          }
+        }
+      }
+
       if (eventType === 'ContextGraphExpanded') {
         const cgStorage = this.contracts.contextGraphStorage;
         if (cgStorage) {

@@ -279,4 +279,40 @@ describe('EVM E2E: Full on-chain publishing lifecycle', () => {
     // Restore to 1 for subsequent tests
     await setMinimumRequiredSignatures(ctx.provider, ctx.hubAddress, HARDHAT_KEYS.DEPLOYER, 1);
   }, 60_000);
+
+  // PR #229 bot review round 10 (evm-adapter.ts:815). The PR
+  // introduced `V10KnowledgeBatchEmitted` on KASStorage and
+  // documented it as the topic V10-aware consumers should subscribe
+  // to, but `listenForEvents()` had no branch for it — any
+  // subscriber following the docs got an empty stream. This test
+  // pins the adapter-side fix by asserting the event is now reachable
+  // through the same API as every other chain event.
+  it('listenForEvents exposes V10KnowledgeBatchEmitted after a V10 publish (bot review r10-4)', async () => {
+    const adapter = new EVMChainAdapter(makeAdapterConfig(ctx.rpcUrl, ctx.hubAddress, HARDHAT_KEYS.DEPLOYER));
+
+    const events: Array<{ type: string; data: Record<string, unknown> }> = [];
+    for await (const event of adapter.listenForEvents({
+      eventTypes: ['V10KnowledgeBatchEmitted'],
+      fromBlock: 0,
+    })) {
+      events.push(event);
+    }
+
+    // Prior V10 publishes in this suite MUST have surfaced at least
+    // one V10KnowledgeBatchEmitted record.
+    expect(events.length).toBeGreaterThanOrEqual(1);
+    const e = events[0];
+    expect(e.type).toBe('V10KnowledgeBatchEmitted');
+    expect(BigInt(e.data.batchId as string | bigint)).toBeGreaterThan(0n);
+    expect(e.data.publisherAddress).toMatch(/^0x[0-9a-fA-F]{40}$/);
+    expect(e.data.merkleRoot).toMatch(/^0x[0-9a-f]{64}$/);
+    // Shape pins: these are the normalized fields documented in
+    // evm-adapter.ts for the new branch.
+    expect(typeof e.data.knowledgeAssetsCount).toBe('string');
+    expect(typeof e.data.publicByteSize).toBe('string');
+    expect(typeof e.data.startKAId).toBe('string');
+    expect(typeof e.data.endKAId).toBe('string');
+    expect(typeof e.data.isPermanent).toBe('boolean');
+    expect(e.data.txHash).toMatch(/^0x[0-9a-f]{64}$/);
+  }, 30_000);
 });

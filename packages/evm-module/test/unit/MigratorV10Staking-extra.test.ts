@@ -93,6 +93,33 @@ describe('@unit MigratorV10Staking — extra audit coverage (E-11)', () => {
     }
   });
 
+  // PR #229 bot review round 10 (MigratorV10Staking.sol:137).
+  //
+  // Before the round-10 fix `migrateDelegator` / `markNodeMigrated`
+  // only rejected `identityId == 0`. Any non-zero id (including a
+  // typo in the generated `epoch-snapshot.ts` CSV) would silently
+  // pass the guard and permanently inflate
+  // `StakingStorage.totalStake` / pollute `DelegatorsInfo` under a
+  // nonexistent identity. The fix adds a `profileExists` check that
+  // reverts with `UnknownIdentityId(uint72)`. Pin the new custom
+  // error at the ABI/artifact layer so a refactor that drops the
+  // guard also breaks this test.
+  it('bot review r10-5: UnknownIdentityId error is present in the compiled ABI', () => {
+    const artifact = JSON.parse(fs.readFileSync(artifactPath, 'utf8')) as {
+      abi: Array<{ type: string; name?: string; inputs?: Array<{ type: string; name?: string }> }>;
+    };
+
+    const unknownIdErr = artifact.abi.find(
+      (entry) => entry.type === 'error' && entry.name === 'UnknownIdentityId',
+    );
+    expect(
+      unknownIdErr,
+      'MigratorV10Staking ABI must expose the UnknownIdentityId error (bot review r10-5)',
+    ).to.not.equal(undefined);
+    expect(unknownIdErr!.inputs).to.have.length(1);
+    expect(unknownIdErr!.inputs![0].type).to.equal('uint72');
+  });
+
   it('baseline sanity: other historical migrators DO exist (pins detection)', () => {
     // If this assertion ever fails the detection path is broken, not the
     // product — flags false-positive risk in the two tests above.

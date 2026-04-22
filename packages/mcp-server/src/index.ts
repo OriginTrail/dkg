@@ -4,7 +4,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { createHash } from 'node:crypto';
-import { DkgClient } from './connection.js';
+import { DkgClient, resolveDaemonEndpoint } from './connection.js';
 import { probeStatus, probeAuth } from './auth-probe.js';
 import { escapeSparqlLiteral } from '@origintrail-official/dkg-core';
 
@@ -446,14 +446,34 @@ server.registerTool(
         );
       }
 
-      const url = process.env.DKG_NODE_URL ?? 'http://127.0.0.1:7777';
-      const cred = process.env.DKG_NODE_TOKEN ?? '';
-      const fingerprint = cred ? fingerprintCredential(cred) : '∅ (no credential configured)';
+      // PR #229 bot review round 10 (mcp-server/index.ts:449). Until
+      // round 10 this path resolved the URL + credential from env vars
+      // ONLY. With no env overrides it reported `127.0.0.1:7777` and
+      // an empty bearer even though `DkgClient.connect()` would have
+      // successfully discovered the port via `readDkgApiPort()` and
+      // the token via `loadAuthToken()`. That meant `mcp_auth status`
+      // said "auth broken" on a normal install where tool calls
+      // worked fine. Mirror `DkgClient.connect()`'s discovery path so
+      // the displayed + probed endpoint matches what the tool channel
+      // actually uses.
+      const resolved = await resolveDaemonEndpoint({ requireReachable: false });
+      const url = resolved.displayUrl;
+      const cred = resolved.token;
+      const credSourceHint =
+        resolved.tokenSource === 'env'
+          ? ' (source: DKG_NODE_TOKEN env)'
+          : resolved.tokenSource === 'file'
+            ? ' (source: auth.token file)'
+            : '';
+      const fingerprint = cred
+        ? fingerprintCredential(cred) + credSourceHint
+        : '∅ (no credential configured)';
 
       if (op === 'whoami') {
         return ok(
           `node = ${url}\n` +
             `credential fingerprint = ${fingerprint}\n` +
+            `url source = ${resolved.urlSource === 'env' ? 'DKG_NODE_URL env' : 'daemon.port file'}\n` +
             `(raw token deliberately not returned — use op="status" for the liveness probe)`,
         );
       }
@@ -470,8 +490,16 @@ server.registerTool(
       // requires the credential to be accepted; a 401/403 from the
       // authenticated probe surfaces as `auth probe = FAILED (401)`
       // even when the node is reachable.
-      const status = await probeStatus(url, cred);
-      const authProbe = await probeAuth(url, cred);
+      // Build a probe URL from the resolved endpoint. `displayUrl`
+      // may carry a human-readable suffix (e.g. "(daemon not running)")
+      // when `readDkgApiPort()` returned nothing, so we derive the
+      // actual fetch target from `baseOrPort` directly.
+      const probeUrl =
+        typeof resolved.baseOrPort === 'number'
+          ? `http://127.0.0.1:${resolved.baseOrPort}`
+          : resolved.baseOrPort;
+      const status = await probeStatus(probeUrl, cred);
+      const authProbe = await probeAuth(probeUrl, cred);
       // PR #229 bot review round 7 (auth-probe.ts:69): when no
       // credential is configured AND the daemon accepts the
       // unauthenticated `/api/agents` probe, surface that as a

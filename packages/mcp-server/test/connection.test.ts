@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { DkgClient, extractPortFromUrl } from '../src/connection.js';
+import { DkgClient, extractPortFromUrl, normalizeBaseUrl, resolveDaemonEndpoint } from '../src/connection.js';
 
 function jsonRes(data: unknown, ok = true): Response {
   return {
@@ -183,6 +183,137 @@ describe('DkgClient', () => {
         await c.status();
         expect(calls[0].url).toBe('http://127.0.0.1:9201/api/status');
       });
+    });
+
+    // PR #229 bot review round 10 (connection.ts:40). Until r10 the
+    // env overrides collapsed `DKG_NODE_URL` to a port number and
+    // hard-coded `http://127.0.0.1`, silently dropping remote hosts,
+    // HTTPS, and base paths. These tests pin the fix: the full base
+    // URL now routes through to the `fetch()` call site.
+    describe('DKG_NODE_URL full base URL routing (bot review r10-2)', () => {
+      it('routes to a remote HTTPS host with an explicit port and a base path', async () => {
+        process.env.DKG_NODE_URL = 'https://remote.example:8443/api';
+        const c = await DkgClient.connect();
+
+        const { fn, calls } = createTrackingFetch([
+          jsonRes({
+            name: 'n', peerId: 'p', uptimeMs: 1,
+            connectedPeers: 0, relayConnected: false, multiaddrs: [],
+          }),
+        ]);
+        globalThis.fetch = fn;
+        await c.status();
+        expect(calls[0].url).toBe('https://remote.example:8443/api/api/status');
+      });
+
+      it('routes to a remote HTTP host when no port is specified (defaults to :80)', async () => {
+        process.env.DKG_NODE_URL = 'http://remote.example';
+        const c = await DkgClient.connect();
+
+        const { fn, calls } = createTrackingFetch([
+          jsonRes({
+            name: 'n', peerId: 'p', uptimeMs: 1,
+            connectedPeers: 0, relayConnected: false, multiaddrs: [],
+          }),
+        ]);
+        globalThis.fetch = fn;
+        await c.status();
+        expect(calls[0].url).toBe('http://remote.example:80/api/status');
+      });
+
+      it('tolerates a trailing slash on the env URL (no `//` in concatenation)', async () => {
+        process.env.DKG_NODE_URL = 'http://remote.example:9999/';
+        const c = await DkgClient.connect();
+
+        const { fn, calls } = createTrackingFetch([
+          jsonRes({
+            name: 'n', peerId: 'p', uptimeMs: 1,
+            connectedPeers: 0, relayConnected: false, multiaddrs: [],
+          }),
+        ]);
+        globalThis.fetch = fn;
+        await c.status();
+        expect(calls[0].url).toBe('http://remote.example:9999/api/status');
+      });
+    });
+  });
+
+  describe('normalizeBaseUrl (bot review r10-2)', () => {
+    it('preserves scheme + host + port + base path', () => {
+      expect(normalizeBaseUrl('https://remote.example:8443/api')).toBe(
+        'https://remote.example:8443/api',
+      );
+      expect(normalizeBaseUrl('http://10.0.0.1:7777')).toBe(
+        'http://10.0.0.1:7777',
+      );
+    });
+
+    it('strips trailing slashes from the base path', () => {
+      expect(normalizeBaseUrl('http://node.example:80/api/')).toBe(
+        'http://node.example:80/api',
+      );
+      expect(normalizeBaseUrl('http://node.example:80//api//')).toBe(
+        'http://node.example:80//api',
+      );
+    });
+
+    it('fills in the default port for http/https when absent', () => {
+      expect(normalizeBaseUrl('http://node.example')).toBe(
+        'http://node.example:80',
+      );
+      expect(normalizeBaseUrl('https://node.example')).toBe(
+        'https://node.example:443',
+      );
+    });
+
+    it('returns undefined for empty, malformed, or non-http URLs', () => {
+      expect(normalizeBaseUrl('')).toBeUndefined();
+      expect(normalizeBaseUrl('not-a-url')).toBeUndefined();
+      expect(normalizeBaseUrl('file:///etc/passwd')).toBeUndefined();
+      expect(normalizeBaseUrl('ftp://node.example:21')).toBeUndefined();
+    });
+  });
+
+  // PR #229 bot review round 10 (mcp-server/index.ts:449). `mcp_auth
+  // status/whoami` diverged from `DkgClient.connect()` on discovery —
+  // this helper centralizes the logic so both surfaces agree.
+  describe('resolveDaemonEndpoint (bot review r10-3)', () => {
+    it('resolves from DKG_NODE_URL + DKG_NODE_TOKEN when set', async () => {
+      process.env.DKG_NODE_URL = 'https://remote.example:8443/api';
+      process.env.DKG_NODE_TOKEN = 'env-tok';
+      const r = await resolveDaemonEndpoint({ requireReachable: true });
+      expect(r.baseOrPort).toBe('https://remote.example:8443/api');
+      expect(r.displayUrl).toBe('https://remote.example:8443/api');
+      expect(r.token).toBe('env-tok');
+      expect(r.tokenSource).toBe('env');
+      expect(r.urlSource).toBe('env');
+    });
+
+    it('falls back to the file-derived port + token on a normal install', async () => {
+      process.env.DKG_API_PORT = '9201';
+      await writeFile(join(tempDir, 'auth.token'), 'file-tok\n');
+
+      const r = await resolveDaemonEndpoint({ requireReachable: true });
+      expect(r.baseOrPort).toBe(9201);
+      expect(r.displayUrl).toBe('http://127.0.0.1:9201');
+      expect(r.token).toBe('file-tok');
+      expect(r.tokenSource).toBe('file');
+      expect(r.urlSource).toBe('file');
+    });
+
+    it('reports tokenSource="none" when no credential is configured anywhere', async () => {
+      process.env.DKG_API_PORT = '9201';
+      const r = await resolveDaemonEndpoint({ requireReachable: true });
+      expect(r.token).toBe('');
+      expect(r.tokenSource).toBe('none');
+    });
+
+    it('requireReachable=false returns a placeholder instead of throwing when daemon is down', async () => {
+      // No DKG_API_PORT set, no env URL, no daemon.port file — the
+      // reachable path would throw; the non-strict path must not.
+      const r = await resolveDaemonEndpoint({ requireReachable: false });
+      expect(typeof r.baseOrPort === 'number').toBe(true);
+      expect(r.displayUrl).toContain('daemon not running');
     });
   });
 
