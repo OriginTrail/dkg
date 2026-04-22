@@ -190,20 +190,26 @@ This repo ships an opt-in task-scoping guard. It stays **invisible** unless
 engaged. Default behaviour: write normally, read anything. The guard only
 kicks in when:
 
-1. The user pastes a line starting with `agent-scope: start task onboarding`
-   (output of `pnpm task start`), OR
-2. An active task is set (session-start hook injects a context block naming
+1. The user runs `pnpm task start` (interactive wizard — most common; by
+   the time they message you, an active task is already set and the
+   session-start hook has injected the context block), OR
+2. The user runs `pnpm task start --chat` and the trigger line
+   `agent-scope: start task onboarding` appears in your context (marker
+   consumed by a hook or by your top-of-turn check), OR
+3. An active task is set (session-start hook injects a context block naming
    it), OR
-3. You try to touch one of the hardcoded protected paths that defend the
+4. You try to touch one of the hardcoded protected paths that defend the
    guard itself — those are always blocked unless the user has enabled
    bootstrap mode.
 
-### Task onboarding protocol (triggered by `pnpm task start` / "start a scoped task")
+### Task onboarding protocol (triggered by `pnpm task start --chat` / "start a scoped task")
 
-`pnpm task start` drops `agent-scope/.pending-onboarding` (gitignored) and
-copies the trigger to the user's clipboard. The marker is one-shot: the
-first thing that consumes it also deletes it, so it fires for **exactly one**
-user message no matter which chat that message lands in.
+`pnpm task start --chat` drops `agent-scope/.pending-onboarding` (gitignored)
+and copies the trigger to the user's clipboard. (The default
+`pnpm task start` without `--chat` is the interactive CLI wizard — it
+writes the manifest itself and never reaches you.) The marker is one-shot:
+the first thing that consumes it also deletes it, so it fires for **exactly
+one** user message no matter which chat that message lands in.
 
 Three parallel consumers — whichever runs first wins:
 
@@ -229,8 +235,8 @@ active task** (`agent-scope/active` is absent), your FIRST action MUST be:
       was a specific instruction — they knew onboarding was pending when
       they sent it).
    c. Pivot to the **Task onboarding protocol** below: acknowledge that
-      onboarding was queued via `pnpm task start`, and immediately ask the
-      user to describe the task in detail.
+      onboarding was queued via `pnpm task start --chat`, and immediately
+      ask the user to describe the task in detail.
 
 Skip this check only when `agent-scope/active` exists (a task is already
 set — no onboarding needed) or when this is a multi-turn conversation
@@ -333,7 +339,8 @@ AskQuestion prompt (see below).
 ### CLI quick reference
 
 ```
-pnpm task start                   # begin guided onboarding (prints chat trigger)
+pnpm task start                   # interactive wizard (default) — user runs this; writes + activates manifest directly
+pnpm task start --chat            # legacy: hand off onboarding to you via chat
 pnpm task create <id> [flags]     # non-interactive manifest build — USER runs this
 pnpm task list | show | set <id> | clear | check <path> | audit | resolve
 pnpm scope:status | scope:validate | scope:test

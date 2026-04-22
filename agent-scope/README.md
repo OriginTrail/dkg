@@ -22,15 +22,21 @@ session-start hook emits nothing, and the write/shell hooks only fire on the
 hardcoded protected paths (the guard's own files). You can do ad-hoc work
 without any task ceremony.
 
-You engage the system in one of three ways:
+You engage the system in one of four ways:
 
-1. **Guided onboarding** — run `pnpm task start`. The CLI prints a line you
-   paste into your Cursor chat. The agent then asks you to describe the task,
-   explores the codebase, proposes a scope via AskQuestion, and prints the
-   exact `pnpm task create` command for you to run.
-2. **Explicit** — `pnpm task set <existing-id>` activates a manifest you
+1. **Interactive wizard (default)** — run `pnpm task start`. A terminal
+   wizard asks you a few questions (description, which packages, extras),
+   drafts a manifest, shows a preview, and activates it. No agent round-trip
+   needed; works identically in every agent (Cursor, Claude Code, Codex,
+   Gemini, …) and even with no agent at all.
+2. **Agent-guided (`pnpm task start --chat`)** — legacy flow. Drops a
+   one-shot marker and copies the trigger text to your clipboard. The agent
+   explores the repo, proposes a scope via `AskQuestion`, and prints the
+   exact `pnpm task create` command for you to run. Use this when you want
+   the agent to do the thinking.
+3. **Explicit** — `pnpm task set <existing-id>` activates a manifest you
    already have.
-3. **Direct** — `pnpm task create <id> --description "..." --allowed "..." --activate`
+4. **Direct** — `pnpm task create <id> --description "..." --allowed "..." --activate`
    builds + activates a manifest in one shot.
 
 Clearing the active task (`pnpm task clear`) returns Cursor to its invisible
@@ -151,10 +157,13 @@ pnpm scope:validate      # validates every manifest
 ## Quick start
 
 ```bash
-# Guided onboarding — prints a chat trigger for the Cursor agent
+# Interactive wizard (default) — asks a few questions, drafts + activates a manifest
 pnpm task start
 
-# Non-interactive manifest creation (run this yourself; see "Onboarding flow")
+# Agent-guided flow (legacy) — hands off onboarding to the agent via chat
+pnpm task start --chat
+
+# Non-interactive manifest creation (flags)
 pnpm task create my-task \
   --description "Refactor peer sync for workspace auth" \
   --allowed "packages/agent/src/**sync*" \
@@ -190,28 +199,54 @@ pnpm task clear
 
 ## Onboarding flow
 
-The `pnpm task start` command is the paved path. It does three things:
+There are two onboarding flows. The **interactive wizard** is the default;
+the **agent-guided flow** (`--chat`) is an alternative when you want the
+agent to do the thinking.
 
-1. Drops a one-shot marker file at `agent-scope/.pending-onboarding`
-   (gitignored).
-2. Copies the onboarding trigger to your clipboard (best-effort, via
-   `pbcopy` / `wl-copy` / `xclip` / `clip` depending on OS).
-3. Prints a short message explaining the three equivalent paths to trigger
-   the agent.
+### Flow 1 — interactive wizard (default)
 
-Any of these will start the onboarding — pick whichever is easiest:
+Run `pnpm task start`. The CLI walks you through a short questionnaire:
 
-- **New chat (Cmd+L / "new chat" button)** — the `sessionStart` hook
-  detects the marker, injects the trigger as initial context, deletes the
-  marker. The agent immediately asks you to describe the task.
-- **Current chat, any message** — the next tool the agent calls triggers
-  the `postToolUse` hook, which injects the trigger as
-  `additional_context`. The agent sees it on the very next turn and
-  pivots to onboarding.
-- **Manual paste (Cmd+V / Ctrl+V)** — the trigger is already in your
-  clipboard. Paste into any chat and send.
+1. **Description** — one sentence describing the task. Used as
+   `description` in the manifest and as the seed for the task id.
+2. **Task id** — auto-kebab-cased from the description; press Enter to
+   accept or type your own.
+3. **Packages** — the wizard discovers workspace packages from
+   `pnpm-workspace.yaml` (or `package.json` `workspaces`, or a `packages/*`
+   fallback), presents them as a numbered list, and pre-selects the ones
+   whose names overlap with keywords in your description. Type the numbers
+   you want, or press Enter to accept the suggestion, or `none` to skip.
+4. **Build-artefact exemptions** — y/n for the standard
+   `**/dist/**`, `**/*.tsbuildinfo`, `pnpm-lock.yaml` set.
+5. **Extra allowed globs** (optional) and **extra deny globs** (optional) —
+   free-text, one per line, blank to finish. `!**/secrets.*` and
+   `!**/.env*` are always denied automatically.
+6. **Preview** — prints the drafted manifest JSON.
+7. **Save / edit / cancel** — `s` saves & activates, `e` opens `$EDITOR`
+   (or `$VISUAL`) on the file and re-validates on exit, `c` aborts without
+   writing anything.
 
-Whichever path fires, the agent then follows a fixed protocol (defined in
+No chat round-trip, no agent needed, runs in under a second, works
+identically in every agent. This is the recommended path.
+
+If `stdin` is not a TTY (CI, piped input), `pnpm task start` auto-falls-back
+to the agent-guided flow so nothing hangs. You can also force the legacy
+flow with `pnpm task start --chat`.
+
+### Flow 2 — agent-guided (`pnpm task start --chat`)
+
+Drops a one-shot marker at `agent-scope/.pending-onboarding` (gitignored)
+and copies the trigger to your clipboard. Your NEXT message in any chat
+(new or existing) makes the agent pivot to onboarding. Three parallel
+consumers compete for the marker so it fires exactly once:
+
+- **New chat (Cmd+L)** — the `sessionStart` hook injects the trigger.
+- **Current chat, any message** — the agent's top-of-turn rule reads the
+  marker on its first action; the `postToolUse` hook injects it as
+  `additional_context` if the agent happens to call a tool first.
+- **Manual paste** — the trigger is already in your clipboard.
+
+The agent then follows a fixed protocol (defined in
 `.cursor/rules/agent-scope.mdc` and `CLAUDE.md`):
 
 1. Asks you to describe what you're building or fixing.

@@ -18,6 +18,14 @@ import {
   copyToClipboard,
 } from '../lib/onboarding.mjs';
 import { detectAgents, statusGlyph, summary } from '../lib/check-agent.mjs';
+import {
+  discoverPackages,
+  deriveTaskId,
+  suggestPackagesFromDescription,
+  buildManifest,
+} from '../lib/wizard.mjs';
+import { createPrompter } from '../lib/prompter.mjs';
+import { spawnSync } from 'node:child_process';
 
 try { checkNodeVersion(); }
 catch (e) { console.error(e.message); process.exit(3); }
@@ -189,14 +197,26 @@ async function init(id) {
 }
 
 // ---------------------------------------------------------------------------
-// Task onboarding — `task start` prints a trigger the user pastes to chat;
-// `task create` is the non-interactive manifest builder the onboarding flow
-// ultimately runs. Both are designed so *the human* creates the manifest —
-// an agent-invoked shell command that writes to agent-scope/tasks/ would be
-// wiped by the afterShellExecution backstop.
+// Task onboarding
+// ---------------------------------------------------------------------------
+//
+// There are two independent ways to start a task:
+//
+//   (1) `pnpm task start` — default. Interactive CLI wizard that asks a few
+//       questions, drafts a manifest, previews it, and saves + activates it.
+//       No agent round-trip; works identically in every agent (Cursor,
+//       Claude Code, Codex, Gemini, …) and even with no agent at all.
+//
+//   (2) `pnpm task start --chat` — legacy flow. Drops a one-shot marker and
+//       copies the trigger text to the clipboard so the agent picks up
+//       onboarding on the user's next message. Use this when you want the
+//       agent to explore the repo and propose a scope for you.
+//
+// Non-interactive shell (no TTY / piped stdin) auto-falls-back to --chat so
+// CI / non-interactive harnesses don't hang on a prompt.
 // ---------------------------------------------------------------------------
 
-function start() {
+async function start(argv = []) {
   const { id: activeId } = resolveActiveTaskId(root);
   if (activeId) {
     console.log(`A task is already active: ${activeId}`);
@@ -206,49 +226,267 @@ function start() {
     return;
   }
 
-  // Drop the one-shot marker. Three parallel consumers (sessionStart hook /
-  // postToolUse hook / agent top-of-turn rule check) all compete for it;
-  // whoever reads it also deletes it, so onboarding triggers for exactly
-  // ONE user message after this call.
-  const markerPath = writeOnboardingMarker(root);
+  const chatMode = argv.includes('--chat') || argv.includes('-c');
+  const forceInteractive = argv.includes('--interactive') || argv.includes('-i');
+  const ttyOk = Boolean(process.stdin.isTTY);
 
-  // Best-effort clipboard copy so the user can paste into the current chat
-  // without selecting the trigger text by hand.
+  if (chatMode || (!forceInteractive && !ttyOk)) {
+    return startChat({ reason: chatMode ? 'flag' : 'no-tty' });
+  }
+  await startInteractive();
+}
+
+function startChat({ reason } = {}) {
+  const markerPath = writeOnboardingMarker(root);
   const clip = copyToClipboard(ONBOARDING_TRIGGER_TEXT);
 
-  console.log('agent-scope: task onboarding primed.');
+  console.log('agent-scope: task onboarding primed (chat mode).');
+  if (reason === 'no-tty') {
+    console.log('(stdin is not a TTY — falling back to chat mode so nothing hangs.)');
+  }
   console.log('');
-  console.log('The NEXT message you send in any Cursor chat (new or existing)');
-  console.log('will pivot the agent into onboarding. Then the marker is');
-  console.log('deleted, so it only triggers once.');
+  console.log('Your NEXT message in any chat (new or existing) will pivot the');
+  console.log('agent into onboarding. The marker is then consumed, so it only');
+  console.log('fires once.');
   console.log('');
-  console.log('Paths that work (pick whichever is easiest):');
-  console.log('');
-  console.log('  (1) Open a NEW chat (Cmd+L / "new chat" button) and say');
-  console.log('      anything — the sessionStart hook will inject the trigger.');
-  console.log('  (2) In your CURRENT chat, send any message — the agent\'s');
-  console.log('      always-on rule checks for the marker at the top of every');
-  console.log('      turn, so even "hi" will kick off onboarding.');
   if (clip.ok) {
-    console.log(`  (3) Paste (Cmd+V) — the trigger is already in your clipboard`);
-    console.log(`      (via ${clip.method}).`);
+    console.log(`The trigger is already in your clipboard (via ${clip.method}).`);
+    console.log('Just send any message in your current chat — or paste (Cmd+V)');
+    console.log('and send, for maximum reliability.');
   } else {
-    console.log(`  (3) Paste the trigger below into chat manually`);
-    console.log(`      (clipboard copy unavailable: ${clip.reason}):`);
+    console.log(`Clipboard copy unavailable (${clip.reason}). Paste this manually:`);
     console.log('');
     for (const line of ONBOARDING_TRIGGER_TEXT.split('\n')) {
-      console.log('      ' + line);
+      console.log('  ' + line);
     }
   }
   console.log('');
   console.log(`Marker file: ${markerPath}`);
-  console.log('(Auto-deleted the first time any consumer reads it.)');
   console.log('');
-  console.log('Already know the scope? Skip the dance and run directly:');
-  console.log('  pnpm task create <id> --description "..." \\');
-  console.log('    --allowed "packages/foo/**" --allowed "packages/bar/baz.ts" \\');
-  console.log('    --inherits base --activate');
+  console.log('Prefer to skip the chat round-trip? Run `pnpm task start` without');
+  console.log('--chat for the interactive wizard (default), or use');
+  console.log('`pnpm task create <id> --description "..." --allowed "<glob>" ...` directly.');
   bootstrapWarning();
+}
+
+async function startInteractive() {
+  console.log('agent-scope: interactive task wizard');
+  console.log('  (no agent needed — hit Ctrl+C any time to cancel, nothing is saved until the final "save" step.)');
+  console.log('  (tip: for agent-guided onboarding instead, run `pnpm task start --chat`)');
+  console.log('');
+
+  const prompter = createPrompter();
+  try {
+    // 1) Description ---------------------------------------------------------
+    const description = await askNonEmpty(
+      prompter,
+      'What are you working on? (one short sentence)\n> ',
+      'A description is required so the task manifest is self-explanatory.',
+    );
+    console.log('');
+
+    // 2) Task ID -------------------------------------------------------------
+    const existingIds = listTasks(root);
+    const suggestedId = deriveTaskId(description, { existingIds });
+    const idInput = await prompter.ask(
+      `Task id (press Enter to accept "${suggestedId}"): `,
+      { default: suggestedId },
+    );
+    let taskId = idInput;
+    if (!/^[a-z0-9][a-z0-9-_.]{0,63}$/.test(taskId)) {
+      console.log(`  (invalid id "${taskId}" — falling back to "${suggestedId}")`);
+      taskId = suggestedId;
+    }
+    if (existingIds.includes(taskId)) {
+      const deduped = deriveTaskId(taskId + '-alt', { existingIds });
+      console.log(`  (id "${taskId}" already exists — using "${deduped}")`);
+      taskId = deduped;
+    }
+    const manifestPath = resolve(tasksDir, `${taskId}.json`);
+    console.log('');
+
+    // 3) Packages ------------------------------------------------------------
+    const packages = discoverPackages(root);
+    let selectedPackages = [];
+    if (packages.length === 0) {
+      console.log('No workspace packages detected — skipping package picker.');
+      console.log('(You can add allowed globs freely in the next step.)');
+    } else {
+      const suggested = suggestPackagesFromDescription(description, packages);
+      const suggestedSet = new Set(suggested.map(p => p.path));
+      const suggestedIndices = [];
+      printPackageList(packages, suggestedSet);
+      packages.forEach((p, i) => {
+        if (suggestedSet.has(p.path)) suggestedIndices.push(i + 1);
+      });
+      const prompt = suggestedIndices.length
+        ? `Pick packages (space/comma separated; Enter = suggested [${suggestedIndices.join(' ')}]; type "none" for none): `
+        : `Pick packages (space/comma separated; "none" or blank for none): `;
+      const picked = await prompter.askMultiNumber(prompt, packages.length, {
+        default: suggestedIndices,
+      });
+      selectedPackages = picked.map(i => packages[i - 1]).filter(Boolean);
+      if (selectedPackages.length) {
+        console.log(`  Selected: ${selectedPackages.map(p => p.name).join(', ')}`);
+      } else {
+        console.log('  No packages selected. You can still add custom allowed globs below.');
+      }
+    }
+    console.log('');
+
+    // 4) Build artefacts -----------------------------------------------------
+    const includeBuildArtifacts = await prompter.askYesNo(
+      'Include build artefacts + lockfile as exemptions (**/dist/**, *.tsbuildinfo, pnpm-lock.yaml)?',
+      { default: true },
+    );
+    console.log('');
+
+    // 5) Extras --------------------------------------------------------------
+    const extraAllowed = await prompter.askLines(
+      'Additional ALLOWED globs (optional):',
+      { hint: 'one per line, blank to finish (e.g. scripts/dev.ts)' },
+    );
+    const extraDeny = await prompter.askLines(
+      'Additional DENY globs (optional):',
+      { hint: 'one per line, blank to finish (! is added automatically). secrets and .env* are denied by default.' },
+    );
+    console.log('');
+
+    // 6) Build & preview -----------------------------------------------------
+    const inheritBase = listTasks(root).includes('base');
+    const manifest = buildManifest({
+      id: taskId,
+      description,
+      selectedPackages,
+      includeBuildArtifacts,
+      extraAllowed,
+      extraDeny,
+      inheritBase,
+      existingIds,
+    });
+
+    const errs = validateManifest(manifest, taskId);
+    if (errs.length) {
+      console.error('Generated manifest failed validation:');
+      for (const e of errs) console.error(`  - ${e}`);
+      bail('could not build a valid manifest from your inputs — aborting without saving');
+    }
+
+    if (!manifest.allowed && !manifest.inherits) {
+      console.log('Heads up: no allowed globs and no inherits — agent will have nothing it can write.');
+      const proceed = await prompter.askYesNo('Continue anyway?', { default: false });
+      if (!proceed) { console.log('Aborted. Nothing was saved.'); return; }
+    }
+
+    console.log('Proposed manifest:');
+    console.log(`  ${manifestPath}`);
+    console.log('');
+    for (const line of JSON.stringify(manifest, null, 2).split('\n')) {
+      console.log(`  ${line}`);
+    }
+    console.log('');
+
+    // 7) Save / edit / cancel -----------------------------------------------
+    const decision = await prompter.askChoice('What next?', [
+      { key: 's', label: 'save and activate (recommended)' },
+      { key: 'e', label: 'edit manually (opens $EDITOR; saved & activated on close)' },
+      { key: 'c', label: 'cancel — nothing will be written' },
+    ], { default: 's' });
+
+    if (decision === 'c') { console.log('Aborted. Nothing was saved.'); return; }
+
+    if (existsSync(manifestPath)) {
+      const overwrite = await prompter.askYesNo(
+        `Manifest already exists at ${manifestPath}. Overwrite?`,
+        { default: false },
+      );
+      if (!overwrite) { console.log('Aborted. Existing manifest untouched.'); return; }
+    }
+
+    writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n', 'utf8');
+    console.log(`Created ${manifestPath}`);
+
+    if (decision === 'e') {
+      const opened = openInEditor(manifestPath);
+      if (!opened.ok) {
+        console.log(`(editor launch failed: ${opened.reason} — manifest is saved as-is, edit it later with your editor of choice)`);
+      } else {
+        // Re-validate after editing; if invalid, leave it there and warn.
+        let edited;
+        try { edited = JSON.parse(readFileSync(manifestPath, 'utf8')); }
+        catch (e) {
+          console.error(`Saved file is no longer valid JSON: ${e.message}`);
+          console.error('Leaving it in place. Fix it by hand and run `pnpm task validate ' + taskId + '`.');
+          return;
+        }
+        const editErrs = validateManifest(edited, taskId);
+        if (editErrs.length) {
+          console.error('Edited manifest has validation errors:');
+          for (const e of editErrs) console.error(`  - ${e}`);
+          console.error('Leaving it in place. Fix it and run `pnpm task validate ' + taskId + '`.');
+          return;
+        }
+      }
+    }
+
+    writeFileSync(activeFile, `${taskId}\n`, 'utf8');
+    console.log(`Activated: ${taskId}`);
+    console.log('');
+    console.log('The agent can now only write files matching the allowed globs.');
+    console.log('Useful next commands:');
+    console.log('  pnpm task show            — see current scope');
+    console.log('  pnpm task check <path>    — test a single path');
+    console.log('  pnpm task clear           — exit task mode');
+    bootstrapWarning();
+  } finally {
+    prompter.close();
+  }
+}
+
+async function askNonEmpty(prompter, prompt, explain) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const v = await prompter.ask(prompt);
+    if (v && v.trim().length >= 3) return v.trim();
+    console.log(`  ${explain}`);
+  }
+  bail('no description provided after 3 tries — aborting');
+}
+
+function printPackageList(packages, suggestedSet) {
+  console.log('Workspace packages:');
+  const width = Math.max(...packages.map(p => p.name.length), 4);
+  const cols = 2;
+  const rows = Math.ceil(packages.length / cols);
+  for (let r = 0; r < rows; r++) {
+    const line = [];
+    for (let c = 0; c < cols; c++) {
+      const i = c * rows + r;
+      if (i >= packages.length) continue;
+      const p = packages[i];
+      const n = (i + 1).toString().padStart(2, ' ');
+      const marker = suggestedSet && suggestedSet.has(p.path) ? '*' : ' ';
+      line.push(`  ${marker}${n}. ${p.name.padEnd(width, ' ')}`);
+    }
+    console.log(line.join('  '));
+  }
+  if (suggestedSet && suggestedSet.size) console.log('  (* = suggested from your description)');
+}
+
+function openInEditor(filePath) {
+  const editor = process.env.VISUAL || process.env.EDITOR || 'vi';
+  try {
+    const parts = editor.split(/\s+/).filter(Boolean);
+    const cmd = parts[0];
+    const args = parts.slice(1).concat(filePath);
+    const r = spawnSync(cmd, args, { stdio: 'inherit' });
+    if (r.error) return { ok: false, reason: r.error.message };
+    if (typeof r.status === 'number' && r.status !== 0) {
+      return { ok: false, reason: `editor exited with status ${r.status}` };
+    }
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, reason: e.message };
+  }
 }
 
 function parseCreateArgs(argv) {
@@ -450,7 +688,7 @@ try {
     case 'clear':    clear(); break;
     case 'check':    check(rest[0]); break;
     case 'init':     await init(rest[0]); break;
-    case 'start':    start(); break;
+    case 'start':    await start(rest); break;
     case 'create':   create(rest); break;
     case 'validate': validate(rest[0]); break;
     case 'audit':    audit(rest); break;
@@ -461,7 +699,8 @@ try {
       console.log([
         'usage: task <command> [args]',
         '',
-        '  start              begin guided onboarding (prints a chat trigger)',
+        '  start              interactive wizard: draft a manifest + activate',
+        '  start --chat       legacy flow: hand off onboarding to the agent',
         '  list               list available task manifests',
         '  show               show the active task and its scope',
         '  set <id>           set the active task',

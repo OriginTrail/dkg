@@ -12,7 +12,10 @@ Key points for Gemini:
   `pnpm task check <path>` to test a specific path.
 - A set of system files is **always protected** regardless of task. See
   the "Hardcoded protected paths" section in `AGENTS.md`.
-- If the user runs `pnpm task start`, a one-shot marker file at
+- Most users run `pnpm task start` without flags — that's an interactive
+  CLI wizard that writes a manifest directly. You don't see anything
+  special; by the time the user messages you, the active task is set.
+- If the user runs `pnpm task start --chat`, a one-shot marker file at
   `agent-scope/.pending-onboarding` is dropped. On your first action of
   any new turn (when no task is active), check whether that marker exists;
   if it does, delete it and run the task-onboarding protocol from

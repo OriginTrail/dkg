@@ -19,8 +19,11 @@ through `.cursor/rules/agent-scope.mdc` and `CLAUDE.md`.
 
 The guard is **invisible by default**. It only activates when:
 
-1. The user pastes a line beginning with `agent-scope: start task onboarding.`
-   (output of `pnpm task start`), OR
+1. The user runs `pnpm task start --chat` and the trigger line
+   `agent-scope: start task onboarding.` reaches you (via a hook or via
+   your own top-of-turn marker check). The default `pnpm task start`
+   without `--chat` is an interactive CLI wizard that writes a manifest
+   itself and never reaches you, so most users will skip this flow, OR
 2. An active task is set (`agent-scope/active` exists; the session-start
    hook will inject a context block naming it; or you can check by running
    `pnpm task show`), OR
@@ -50,10 +53,13 @@ terminal:
 touch agent-scope/.bootstrap-token
 ```
 
-## Task onboarding (when the user runs `pnpm task start`)
+## Task onboarding (when the user runs `pnpm task start --chat`)
 
-`pnpm task start` drops a one-shot marker file at
-`agent-scope/.pending-onboarding` containing trigger text. The marker is
+`pnpm task start --chat` drops a one-shot marker file at
+`agent-scope/.pending-onboarding` containing trigger text. (The default
+`pnpm task start` without `--chat` is an interactive CLI wizard that never
+involves you — by the time the user messages you, the manifest is already
+written and activated.) The marker is
 consumed atomically the first time anything reads it.
 
 For Codex CLI and other agents without hook support, you should **proactively
@@ -132,7 +138,8 @@ an option that wasn't listed.
 ## CLI quick reference
 
 ```
-pnpm task start                   # begin guided onboarding
+pnpm task start                   # interactive wizard (default, preferred)
+pnpm task start --chat            # legacy: hand off onboarding to the agent
 pnpm task list                    # list available task manifests
 pnpm task show                    # show the active task and its scope
 pnpm task set <id>                # set the active task

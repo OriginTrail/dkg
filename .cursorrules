@@ -20,7 +20,10 @@ Quick summary:
   - `.claude/hooks/**`, `.claude/settings.json`
   - `agent-scope/**` (lib, bin, schema, tasks, active, .bootstrap-token)
   - `AGENTS.md`, `GEMINI.md`, `.cursorrules`
-- If the user runs `pnpm task start`, a one-shot marker at
+- The user's default onboarding is `pnpm task start` — an interactive CLI
+  wizard that writes the manifest itself. You see nothing; an active task
+  may just be set when you start talking.
+- If the user runs `pnpm task start --chat`, a one-shot marker at
   `agent-scope/.pending-onboarding` is dropped. On your first action of any
   turn with no active task, check the marker — if present, delete it and
   pivot to the onboarding protocol in `AGENTS.md`.
