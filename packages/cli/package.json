@@ -7,7 +7,7 @@
     "dkg": "./dist/cli.js"
   },
   "scripts": {
-    "prebuild": "pnpm --filter @origintrail-official/dkg-adapter-openclaw run build",
+    "prebuild": "pnpm --filter @origintrail-official/dkg-adapter-openclaw run build && pnpm --filter @origintrail-official/dkg-mcp run build",
     "build": "tsc && node -e \"const fs=require('fs');const p=require('path');fs.mkdirSync('network',{recursive:true});for(const f of fs.readdirSync('../../network')){if(f.endsWith('.json'))fs.copyFileSync(p.join('../../network',f),p.join('network',f))};fs.copyFileSync('../../project.json','project.json')\"",
     "benchmark:catchup-runner": "node scripts/catchup-runner-benchmark.cjs",
     "benchmark:daemon-responsiveness": "node scripts/daemon-responsiveness-benchmark.cjs",
@@ -23,6 +23,7 @@
     "@origintrail-official/dkg-app-origin-trail-game": "workspace:*",
     "@origintrail-official/dkg-chain": "workspace:*",
     "@origintrail-official/dkg-core": "workspace:*",
+    "@origintrail-official/dkg-mcp": "workspace:*",
     "@origintrail-official/dkg-epcis": "workspace:*",
     "@origintrail-official/dkg-node-ui": "workspace:*",
     "@origintrail-official/dkg-publisher": "workspace:*",

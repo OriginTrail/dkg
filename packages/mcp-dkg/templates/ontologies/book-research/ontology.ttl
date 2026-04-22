@@ -1,0 +1,102 @@
+@prefix owl:     <http://www.w3.org/2002/07/owl#> .
+@prefix rdf:     <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
+@prefix dcterms: <http://purl.org/dc/terms/> .
+@prefix schema:  <http://schema.org/> .
+@prefix foaf:    <http://xmlns.com/foaf/0.1/> .
+@prefix prov:    <http://www.w3.org/ns/prov#> .
+@prefix skos:    <http://www.w3.org/2004/02/skos/core#> .
+@prefix bibo:    <http://purl.org/ontology/bibo/> .
+@prefix fabio:   <http://purl.org/spar/fabio/> .
+@prefix cito:    <http://purl.org/spar/cito/> .
+@prefix frbr:    <http://purl.org/vocab/frbr/core#> .
+
+@prefix chat: <http://dkg.io/ontology/chat/> .
+@prefix dkg:  <http://dkg.io/ontology/> .
+@prefix :     <http://dkg.io/ontology/book-research/> .
+
+<http://dkg.io/ontology/book-research/>
+  a owl:Ontology ;
+  dcterms:title "DKG Book Research Project Ontology (v1)" ;
+  dcterms:description """Starter ontology for projects that research and
+write books, papers, or long-form non-fiction. Built on schema.org +
+BIBO + the SPAR family (FaBiO, CiTO) + FRBR + SKOS so it composes with
+existing scholarly publishing infrastructure.""" ;
+  owl:versionInfo "1.0.0" ;
+  dcterms:created "2026-04-18"^^xsd:date ;
+  owl:imports
+    <http://schema.org/> , <http://purl.org/dc/terms/> ,
+    <http://www.w3.org/ns/prov#> , <http://xmlns.com/foaf/0.1/> ,
+    <http://www.w3.org/2004/02/skos/core#> ,
+    <http://purl.org/ontology/bibo/> ,
+    <http://purl.org/spar/fabio/> ,
+    <http://purl.org/spar/cito/> ,
+    <http://purl.org/vocab/frbr/core#> .
+
+# ─── Universal annotation predicates (shared across all starters) ───
+chat:topic    a owl:DatatypeProperty ; rdfs:domain chat:Turn ; rdfs:range xsd:string .
+chat:mentions a owl:ObjectProperty   ; rdfs:domain chat:Turn ; rdfs:subPropertyOf schema:mentions .
+chat:examines a owl:ObjectProperty   ; rdfs:domain chat:Turn ; rdfs:range owl:Thing .
+chat:proposes a owl:ObjectProperty   ; rdfs:domain chat:Turn ; rdfs:range owl:Thing .
+chat:concludes a owl:ObjectProperty  ; rdfs:domain chat:Turn ; rdfs:range :Finding .
+chat:asks     a owl:ObjectProperty   ; rdfs:domain chat:Turn ; rdfs:range :Question .
+
+# ─── Universal annotation entities ──────────────────────────────────
+:Concept rdfs:subClassOf skos:Concept .
+:Topic   rdfs:subClassOf skos:Concept .
+:Question rdfs:subClassOf schema:Question .
+:Finding  rdfs:subClassOf prov:Entity .
+
+# ─── Book-research specific ─────────────────────────────────────────
+
+:Hypothesis a owl:Class ;
+  rdfs:label "Hypothesis" ;
+  rdfs:comment "A claim under investigation. Supersedes when refuted; promotes to a Finding when supported." ;
+  rdfs:subClassOf prov:Entity .
+
+:Argument a owl:Class ;
+  rdfs:label "Argument" ;
+  rdfs:comment "A reasoned position taken on a Hypothesis or other entity." ;
+  rdfs:subClassOf prov:Entity .
+
+:Counterexample a owl:Class ;
+  rdfs:label "Counterexample" ;
+  rdfs:comment "Evidence that refutes a Hypothesis or Argument." ;
+  rdfs:subClassOf prov:Entity .
+
+:Quote a owl:Class ;
+  rdfs:label "Quote" ;
+  rdfs:comment "Verbatim passage extracted from a source. Subclass of bibo:Quote so it composes with bibliographic tools." ;
+  rdfs:subClassOf bibo:Quote .
+
+:supports a owl:ObjectProperty ;
+  rdfs:label "supports" ;
+  rdfs:comment "An Argument or Quote supports a Hypothesis." ;
+  rdfs:subPropertyOf cito:agreesWith .
+
+:refutes a owl:ObjectProperty ;
+  rdfs:label "refutes" ;
+  rdfs:comment "An Argument, Counterexample, or Quote refutes a Hypothesis." ;
+  rdfs:subPropertyOf cito:disagreesWith .
+
+:cites a owl:ObjectProperty ;
+  rdfs:label "cites" ;
+  rdfs:subPropertyOf cito:cites ;
+  rdfs:range bibo:Document .
+
+# ─── URI patterns ───────────────────────────────────────────────────
+:UriPattern rdfs:label "URI minting pattern" .
+
+:concept-pattern    a :UriPattern ; skos:notation "urn:dkg:concept:<slug>" .
+:topic-pattern      a :UriPattern ; skos:notation "urn:dkg:topic:<slug>" .
+:question-pattern   a :UriPattern ; skos:notation "urn:dkg:question:<slug>" .
+:finding-pattern    a :UriPattern ; skos:notation "urn:dkg:finding:<slug>" .
+:hypothesis-pattern a :UriPattern ; skos:notation "urn:dkg:hypothesis:<slug>" .
+:argument-pattern   a :UriPattern ; skos:notation "urn:dkg:argument:<slug>" .
+:quote-pattern      a :UriPattern ; skos:notation "urn:dkg:quote:<slug>" .
+:citation-pattern   a :UriPattern ; skos:notation "urn:dkg:citation:<slug>" ;
+  skos:definition "Bibliographic citation; aligned with bibo:Document via cito:cites." .
+
+:slug-normalisation a skos:Note ;
+  skos:definition "Lowercase → ASCII-fold → strip stopwords (the/a/an/of/for/and/or/to/in/on/with) → hyphenate → ≤60 chars. Apply BEFORE comparing dkg_search results to decide reuse-vs-mint." .

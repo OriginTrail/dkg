@@ -1,0 +1,114 @@
+@prefix owl:     <http://www.w3.org/2002/07/owl#> .
+@prefix rdf:     <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
+@prefix dcterms: <http://purl.org/dc/terms/> .
+@prefix schema:  <http://schema.org/> .
+@prefix prov:    <http://www.w3.org/ns/prov#> .
+@prefix skos:    <http://www.w3.org/2004/02/skos/core#> .
+@prefix dcat:    <http://www.w3.org/ns/dcat#> .
+@prefix fabio:   <http://purl.org/spar/fabio/> .
+@prefix time:    <http://www.w3.org/2006/time#> .
+
+@prefix chat: <http://dkg.io/ontology/chat/> .
+@prefix :     <http://dkg.io/ontology/scientific-research/> .
+
+<http://dkg.io/ontology/scientific-research/>
+  a owl:Ontology ;
+  dcterms:title "DKG Scientific Research Project Ontology (v1)" ;
+  dcterms:description """Starter for empirical scientific research:
+hypotheses → experiments → results → reproducibility chains. Composes
+with FaBiO for scholarly works, DCAT for datasets, PROV-O for
+provenance, OWL Time for sequencing.""" ;
+  owl:versionInfo "1.0.0" ;
+  dcterms:created "2026-04-18"^^xsd:date ;
+  owl:imports
+    <http://schema.org/> , <http://purl.org/dc/terms/> ,
+    <http://www.w3.org/ns/prov#> ,
+    <http://www.w3.org/2004/02/skos/core#> ,
+    <http://www.w3.org/ns/dcat#> ,
+    <http://purl.org/spar/fabio/> ,
+    <http://www.w3.org/2006/time#> .
+
+# ─── Universal annotation predicates ────────────────────────────────
+chat:topic    a owl:DatatypeProperty ; rdfs:domain chat:Turn ; rdfs:range xsd:string .
+chat:mentions a owl:ObjectProperty   ; rdfs:domain chat:Turn ; rdfs:subPropertyOf schema:mentions .
+chat:examines a owl:ObjectProperty   ; rdfs:domain chat:Turn .
+chat:proposes a owl:ObjectProperty   ; rdfs:domain chat:Turn .
+chat:concludes a owl:ObjectProperty  ; rdfs:domain chat:Turn ; rdfs:range :Result .
+chat:asks     a owl:ObjectProperty   ; rdfs:domain chat:Turn ; rdfs:range :Question .
+
+# ─── Universal annotation entities ──────────────────────────────────
+:Concept rdfs:subClassOf skos:Concept .
+:Topic   rdfs:subClassOf skos:Concept .
+:Question rdfs:subClassOf schema:Question .
+:Finding  rdfs:subClassOf prov:Entity .
+
+# ─── Scientific-research-specific ───────────────────────────────────
+
+:Hypothesis a owl:Class ;
+  rdfs:label "Hypothesis" ;
+  rdfs:comment "A testable claim. Linked to Experiments via :testedBy and to Results via :supportedBy / :refutedBy." ;
+  rdfs:subClassOf prov:Entity .
+
+:Experiment a owl:Class ;
+  rdfs:label "Experiment" ;
+  rdfs:comment "A defined procedure executed to test a Hypothesis. Subclass of prov:Activity for full provenance." ;
+  rdfs:subClassOf prov:Activity .
+
+:Method a owl:Class ;
+  rdfs:label "Method" ;
+  rdfs:comment "A reusable methodology applied within Experiments." ;
+  rdfs:subClassOf prov:Plan .
+
+:Result a owl:Class ;
+  rdfs:label "Result" ;
+  rdfs:comment "An outcome produced by an Experiment — quantitative or qualitative." ;
+  rdfs:subClassOf prov:Entity .
+
+:Dataset a owl:Class ;
+  rdfs:label "Dataset" ;
+  rdfs:comment "An input or output dataset for an Experiment. Aligned with DCAT." ;
+  rdfs:subClassOf dcat:Dataset .
+
+:testedBy a owl:ObjectProperty ;
+  rdfs:label "tested by" ;
+  rdfs:domain :Hypothesis ;
+  rdfs:range :Experiment .
+
+:supportedBy a owl:ObjectProperty ;
+  rdfs:label "supported by" ;
+  rdfs:domain :Hypothesis ;
+  rdfs:range :Result .
+
+:refutedBy a owl:ObjectProperty ;
+  rdfs:label "refuted by" ;
+  rdfs:domain :Hypothesis ;
+  rdfs:range :Result .
+
+:usesDataset a owl:ObjectProperty ;
+  rdfs:label "uses dataset" ;
+  rdfs:domain :Experiment ;
+  rdfs:range :Dataset .
+
+:reproducedBy a owl:ObjectProperty ;
+  rdfs:label "reproduced by" ;
+  rdfs:domain :Experiment ;
+  rdfs:range :Experiment ;
+  rdfs:comment "An Experiment that successfully reproduced this one's Results." .
+
+# ─── URI patterns ───────────────────────────────────────────────────
+:UriPattern rdfs:label "URI minting pattern" .
+
+:concept-pattern    a :UriPattern ; skos:notation "urn:dkg:concept:<slug>" .
+:topic-pattern      a :UriPattern ; skos:notation "urn:dkg:topic:<slug>" .
+:question-pattern   a :UriPattern ; skos:notation "urn:dkg:question:<slug>" .
+:finding-pattern    a :UriPattern ; skos:notation "urn:dkg:finding:<slug>" .
+:hypothesis-pattern a :UriPattern ; skos:notation "urn:dkg:hypothesis:<slug>" .
+:experiment-pattern a :UriPattern ; skos:notation "urn:dkg:experiment:<slug>" .
+:method-pattern     a :UriPattern ; skos:notation "urn:dkg:method:<slug>" .
+:result-pattern     a :UriPattern ; skos:notation "urn:dkg:result:<slug>" .
+:dataset-pattern    a :UriPattern ; skos:notation "urn:dkg:dataset:<slug>" .
+
+:slug-normalisation a skos:Note ;
+  skos:definition "Lowercase → ASCII-fold → strip stopwords → hyphenate → ≤60 chars." .

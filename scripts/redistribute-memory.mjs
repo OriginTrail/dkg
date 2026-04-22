@@ -35,7 +35,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '..');
 
 const args = parseArgs();
-const API_BASE = (args.api ?? process.env.DEVNET_API ?? 'http://localhost:9201').replace(/\/$/, '');
+const API_BASE = (args.api ?? process.env.DEVNET_API ?? 'http://localhost:9200').replace(/\/$/, '');
 const PROJECT_ID = args.project ?? 'dkg-code-project';
 const SKIP_VM = args['skip-vm'] === 'true';
 const BATCH = Number(args.batch ?? 40);
@@ -60,6 +60,7 @@ const ASSERTION_BY_SG = {
 
 const token = resolveToken(REPO_ROOT);
 const client = makeClient({ apiBase: API_BASE, token });
+const cgId = await client.toCanonicalCgId(PROJECT_ID);
 
 function bv(v) {
   if (v == null) return undefined;
@@ -72,7 +73,7 @@ function intOf(v) {
   return m ? Number(m[1]) : Number(raw);
 }
 async function select(sparql) {
-  const r = await client.query({ contextGraphId: PROJECT_ID, sparql });
+  const r = await client.query({ contextGraphId: cgId, sparql });
   return r?.result?.bindings ?? [];
 }
 
@@ -81,7 +82,7 @@ async function countLayer(filterExpr) {
   const rows = await select(
     `SELECT (COUNT(*) AS ?n) WHERE {
        GRAPH ?g { ?s ?p ?o }
-       FILTER(STRSTARTS(STR(?g), "did:dkg:context-graph:${PROJECT_ID}") && ${filterExpr})
+       FILTER(STRSTARTS(STR(?g), "did:dkg:context-graph:${cgId}") && ${filterExpr})
      }`,
   );
   return intOf(rows[0]?.n);
@@ -123,7 +124,7 @@ async function enumerateSubGraph(sg) {
       {
         SELECT DISTINCT ?s ?p ?o ?g WHERE {
           GRAPH ?g { ?s ?p ?o . ?s a ?t }
-          FILTER(STRSTARTS(STR(?g), "did:dkg:context-graph:${PROJECT_ID}/${sg}/assertion/"))
+          FILTER(STRSTARTS(STR(?g), "did:dkg:context-graph:${cgId}/${sg}/assertion/"))
         }
       }
     }
@@ -139,11 +140,11 @@ async function enumerateSubGraph(sg) {
 async function enumerateSwmOnly(sg) {
   const rows = await select(`
     SELECT ?s (COUNT(?p) AS ?n) WHERE {
-      GRAPH <did:dkg:context-graph:${PROJECT_ID}/${sg}/_shared_memory> {
+      GRAPH <did:dkg:context-graph:${cgId}/${sg}/_shared_memory> {
         ?s ?p ?o . ?s a ?t .
       }
       FILTER NOT EXISTS {
-        GRAPH <did:dkg:context-graph:${PROJECT_ID}/${sg}> { ?s ?p2 ?o2 }
+        GRAPH <did:dkg:context-graph:${cgId}/${sg}> { ?s ?p2 ?o2 }
       }
     }
     GROUP BY ?s
@@ -210,7 +211,7 @@ const vmFromSwmBySg = group(vmFromSwm);
 //       also get published on-chain in the next step.
 async function promoteOnce(sg, entities) {
   const r = await client.promote({
-    contextGraphId: PROJECT_ID,
+    contextGraphId: cgId,
     assertionName: ASSERTION_BY_SG[sg],
     entities: entities.map(e => e.uri),
     subGraphName: sg,
@@ -297,7 +298,7 @@ async function publishBatches(sg, ents) {
     const isLast = batchN === totalBatches;
     try {
       const r = await client.request('POST', '/api/shared-memory/publish', {
-        contextGraphId: PROJECT_ID,
+        contextGraphId: cgId,
         subGraphName: sg,
         selection: slice,
         clearAfter: isLast,
@@ -314,7 +315,7 @@ console.log('\n──── publish SWM → VM ────');
 // Best-effort on-chain registration before publish (409 = already done).
 try {
   await client.request('POST', '/api/context-graph/register', {
-    id: PROJECT_ID,
+    id: cgId,
     revealOnChain: true,
     accessPolicy: 0,
   });

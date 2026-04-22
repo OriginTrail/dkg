@@ -122,16 +122,32 @@ async function readTriples(file, limit) {
   return out;
 }
 
+async function resolveCgId(slug) {
+  // Mirror lib/dkg-daemon.mjs's wallet-scoping so this legacy script
+  // writes into the same canonical `<wallet>/<slug>` context graph the
+  // node-ui creates. Pass through unchanged if the slug already contains
+  // a wallet prefix or is a did: URI.
+  if (slug.includes('/') || slug.startsWith('did:')) return slug;
+  const info = await api('GET', '/api/agent/identity');
+  if (!info?.agentAddress) {
+    throw new Error('Daemon did not return an agentAddress for this token.');
+  }
+  return `${info.agentAddress}/${slug}`;
+}
+
 async function main() {
   console.log(`[demo] API          = ${API}`);
   console.log(`[demo] Source file  = ${NT_FILE}`);
   console.log(`[demo] Triple limit = ${LIMIT}`);
-  console.log(`[demo] Project id   = ${PROJECT_ID}`);
+  console.log(`[demo] Project slug = ${PROJECT_ID}`);
   console.log(`[demo] Assertion    = ${ASSERTION}`);
 
   if (!fs.existsSync(NT_FILE)) {
     throw new Error(`Source file missing: ${NT_FILE}`);
   }
+
+  const cgId = await resolveCgId(PROJECT_ID);
+  console.log(`[demo] Canonical CG = ${cgId}`);
 
   console.log('[demo] Reading & parsing triples …');
   const triples = await readTriples(NT_FILE, LIMIT);
@@ -140,16 +156,16 @@ async function main() {
   console.log('[demo] Creating project …');
   try {
     const created = await api('POST', '/api/paranet/create', {
-      id: PROJECT_ID,
+      id: cgId,
       name: PROJECT_NAME,
       description:
         'Demo slice of Guardian sentiment-attribution graph (Binance). ' +
         'Auto-imported for UI demos.',
     });
-    console.log(`[demo] Project created: ${created.uri ?? PROJECT_ID}`);
+    console.log(`[demo] Project created: ${created.uri ?? cgId}`);
   } catch (err) {
     if (String(err.message).includes('already exists')) {
-      console.log(`[demo] Project "${PROJECT_ID}" already exists — reusing.`);
+      console.log(`[demo] Project "${cgId}" already exists — reusing.`);
     } else {
       throw err;
     }
@@ -162,7 +178,7 @@ async function main() {
     await api(
       'POST',
       `/api/assertion/${encodeURIComponent(ASSERTION)}/write`,
-      { contextGraphId: PROJECT_ID, quads: batch },
+      { contextGraphId: cgId, quads: batch },
     );
     written += batch.length;
     process.stdout.write(

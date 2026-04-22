@@ -20,9 +20,24 @@ import { execSync, exec, execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { join, dirname, resolve } from 'node:path';
 import { existsSync, readdirSync, readFileSync, openSync, closeSync, writeFileSync as fsWriteFileSync, unlinkSync } from 'node:fs';
-import { homedir } from 'node:os';
+// Namespace import: our Phase-8 install-context builder (~line 290) calls
+// `osModule.homedir()`, and the later agent-identity probe (~line 6851)
+// uses `osModule.hostname()` + `osModule.userInfo()`. v10-rc's new
+// OpenClaw config helper (~line 2535) uses a bare `homedir()` — aliased
+// below so both sites coexist without a duplicate-module import.
+import * as osModule from 'node:os';
+const { homedir } = osModule;
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 import { ethers } from 'ethers';
+
+// Lazy resolver used by the manifest-install flow: find the
+// @origintrail-official/dkg-mcp package via Node's own resolution
+// algorithm, so the daemon can write workspace-level configs that
+// point at a valid MCP server install regardless of whether it's
+// running from a monorepo checkout, an npm-global `dkg`, or a
+// `pnpm dlx` tarball.
+const daemonRequire = createRequire(import.meta.url);
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
@@ -94,6 +109,22 @@ import { FileStore } from './file-store.js';
 import { VectorStore, OpenAIEmbeddingProvider, type EmbeddingProvider } from './vector-store.js';
 import { parseBoundary, parseMultipart, MultipartParseError } from './http/multipart.js';
 import { handleCapture, EpcisValidationError, handleEventsQuery, EpcisQueryError, type Publisher as EpcisPublisher } from '@origintrail-official/dkg-epcis';
+// Phase 8 — project-manifest publish + install (UI-driven onboarding flow).
+// Daemon constructs a self-pointing DkgClient (localhost:listenPort) and
+// reuses the same publish/fetch/plan/write helpers the CLI uses, so wire
+// format stays identical between curator/joiner/CLI paths.
+import {
+  publishManifest as publishManifestImpl,
+  assembleStandardTemplates,
+} from '@origintrail-official/dkg-mcp/manifest/publish';
+import { fetchManifest as fetchManifestImpl } from '@origintrail-official/dkg-mcp/manifest/fetch';
+import {
+  planInstall as planInstallImpl,
+  writeInstall as writeInstallImpl,
+  buildReviewMarkdown as buildReviewMarkdownImpl,
+  type InstallContext,
+} from '@origintrail-official/dkg-mcp/manifest/install';
+import { DkgClient } from '@origintrail-official/dkg-mcp/client';
 
 type MarkItDownTarget = {
   platform: string;
@@ -101,6 +132,465 @@ type MarkItDownTarget = {
   assetName: string;
   runner?: string;
 };
+
+// ── Phase 8 manifest helpers (used by /api/context-graph/{id}/manifest/* routes) ──
+//
+// These are deliberately small and pure so the route handlers stay
+// readable. They live at module scope (not inside handleRequest) so
+// they don't get re-created on every request.
+
+/**
+ * Marker files/dirs that prove we're running from a dkg-v9 checkout.
+ * Anything on this list must be present at the resolved repo root, and
+ * must NOT exist next to a typical npm-global `node_modules/.bin`
+ * install tree, so we can cheaply tell the two apart.
+ */
+const REPO_ROOT_MARKERS = ['.cursor', 'AGENTS.md', 'packages'] as const;
+
+/**
+ * Resolve the dkg-v9 repo root from the daemon's compiled location.
+ * The daemon ships at packages/cli/dist/daemon.js, so the repo root
+ * is three levels up.
+ *
+ * Bakes a monorepo-checkout assumption into every generated
+ * `.dkg/config.yaml`, hooks file, and `mcp.json` the daemon's
+ * manifest install flow produces — absolute paths like
+ * `<root>/packages/mcp-dkg/src/index.ts` are written verbatim into
+ * the workspace. If that assumption is wrong (npm-global install,
+ * tarball extract, etc.) those paths don't exist and the workspace
+ * wiring is silently dead: the MCP server fails to start and every
+ * subsequent tool call 500s with cryptic "ENOENT … index.ts".
+ *
+ * Rather than ship a dead config, fail fast here with a clear message.
+ * When npm distribution lands we'll switch this to a bundled-assets
+ * resolver, but until then "require a checkout" is the actual
+ * invariant of the manifest publish flow.
+ */
+function manifestRepoRoot(): string {
+  const daemonDir = dirname(fileURLToPath(import.meta.url));
+  const root = resolve(daemonDir, '..', '..', '..');
+  const missing = REPO_ROOT_MARKERS.filter((m) => !existsSync(resolve(root, m)));
+  if (missing.length) {
+    throw new Error(
+      `manifestRepoRoot: daemon appears to be running outside a dkg-v9 checkout ` +
+        `(resolved root ${root} is missing ${missing.join(', ')}). The manifest ` +
+        `publish flow reads canonical cursor-rule + AGENTS.md from the repo, ` +
+        `so it is only supported from a checkout today. Install/plan-install ` +
+        `flows use resolveMcpDkgAssets() and work against npm-installed packages.`,
+    );
+  }
+  return root;
+}
+
+/**
+ * Resolve the absolute paths of `@origintrail-official/dkg-mcp`'s
+ * runtime assets (bundled entry + capture-chat hook) that get baked
+ * into the generated `.cursor/mcp.json` / `.cursor/hooks.json` /
+ * `.claude/settings.json`.
+ *
+ * Tries three sources, in order:
+ *   1. Node module resolution of `@origintrail-official/dkg-mcp/package.json`.
+ *      Works for npm-global installs, per-workspace `node_modules`, and
+ *      monorepo checkouts (pnpm symlinks the workspace package in).
+ *   2. The daemon's own monorepo layout (`packages/mcp-dkg/...`) as a
+ *      fallback for checkouts where the import graph somehow didn't
+ *      surface dkg-mcp on the require paths.
+ *   3. Throws with a clear, actionable error — callers should turn
+ *      this into a 500 on `/manifest/plan-install` + `/manifest/install`.
+ *
+ * The returned paths MUST exist on disk; the manifest installer
+ * embeds them in free-form JSON/YAML without further validation, and
+ * a missing path would silently break Cursor/Claude wiring on the
+ * operator's machine.
+ *
+ * Fixes Codex tier-4g finding N7: before this, both install routes
+ * called `manifestRepoRoot()` and 500'd when the daemon ran from a
+ * published `@origintrail-official/dkg` package.
+ */
+interface McpDkgAssets {
+  packageDir: string;
+  distEntry: string;       // <pkg>/dist/index.js
+  captureScript: string;   // <pkg>/hooks/capture-chat.mjs
+  source: 'node-resolution' | 'repo-fallback';
+}
+function resolveMcpDkgAssets(): McpDkgAssets {
+  try {
+    const pkgJsonPath = daemonRequire.resolve('@origintrail-official/dkg-mcp/package.json');
+    const packageDir = dirname(pkgJsonPath);
+    const distEntry = resolve(packageDir, 'dist', 'index.js');
+    const captureScript = resolve(packageDir, 'hooks', 'capture-chat.mjs');
+    if (existsSync(distEntry) && existsSync(captureScript)) {
+      return { packageDir, distEntry, captureScript, source: 'node-resolution' };
+    }
+    // Resolution worked but assets are missing (e.g. a pruned install).
+    // Fall through to repo-layout path so checkouts still work.
+  } catch {
+    // Not resolvable via node — e.g. the daemon is running from a
+    // plain `tsx` on source without any `node_modules`. Fall back to
+    // the monorepo layout below.
+  }
+  const daemonDir = dirname(fileURLToPath(import.meta.url));
+  const repoRoot = resolve(daemonDir, '..', '..', '..');
+  const packageDir = resolve(repoRoot, 'packages', 'mcp-dkg');
+  const distEntry = resolve(packageDir, 'dist', 'index.js');
+  const captureScript = resolve(packageDir, 'hooks', 'capture-chat.mjs');
+  if (existsSync(distEntry) && existsSync(captureScript)) {
+    return { packageDir, distEntry, captureScript, source: 'repo-fallback' };
+  }
+  throw new Error(
+    `resolveMcpDkgAssets: could not locate @origintrail-official/dkg-mcp. ` +
+      `Tried Node module resolution and the monorepo layout at ${packageDir}. ` +
+      `Install @origintrail-official/dkg-mcp alongside the daemon or run ` +
+      `from a built dkg-v9 checkout (pnpm -r build).`,
+  );
+}
+
+/**
+ * Read the installed @origintrail-official/dkg-mcp package version from
+ * its package.json. Used by the manifest install/plan-install routes to
+ * enforce `requiresMcpDkgVersion`. Returns null when the package can't
+ * be located (caller should treat this as "unknown" and skip gating
+ * rather than block).
+ */
+function readMcpDkgVersion(): string | null {
+  try {
+    const pkgJsonPath = daemonRequire.resolve('@origintrail-official/dkg-mcp/package.json');
+    const raw = readFileSync(pkgJsonPath, 'utf8');
+    const parsed = JSON.parse(raw) as { version?: unknown };
+    if (typeof parsed.version === 'string' && parsed.version.length > 0) return parsed.version;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Parse an "X.Y.Z[-pre]" semver into comparable tuple; returns null on
+ * malformed input so callers can bail cleanly.
+ */
+function parseSemver(v: string): [number, number, number, string] | null {
+  const m = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?/.exec(v.trim());
+  if (!m) return null;
+  return [Number(m[1]), Number(m[2]), Number(m[3]), m[4] ?? ''];
+}
+
+// NOTE: we use a local variant (`cmpSemverForRange`) rather than the
+// exported `compareSemver` below because the exported one is also used
+// by the auto-update path and its prerelease ordering is slightly
+// looser than the range-checking semantics we need here.
+function cmpSemverForRange(a: string, b: string): number {
+  const pa = parseSemver(a);
+  const pb = parseSemver(b);
+  if (!pa || !pb) return 0;
+  for (let i = 0; i < 3; i++) {
+    const d = (pa[i] as number) - (pb[i] as number);
+    if (d !== 0) return d < 0 ? -1 : 1;
+  }
+  if (pa[3] === pb[3]) return 0;
+  if (pa[3] === '') return 1;
+  if (pb[3] === '') return -1;
+  return pa[3] < pb[3] ? -1 : 1;
+}
+
+/**
+ * Minimal `requiresMcpDkgVersion` range check. Understands the range
+ * forms the mcp-dkg ecosystem actually publishes today: exact version,
+ * `>=a.b.c`, `>a.b.c`, `<=a.b.c`, `<a.b.c`, `^a.b.c` (compatible within
+ * major), `~a.b.c` (compatible within minor), space-separated `AND`
+ * conjunctions, and ` || ` disjunctions. Unparseable ranges resolve to
+ * `true` — we'd rather let an install proceed with a warning than block
+ * it on a syntax we don't recognise. Codex tier-4k N30.
+ */
+function versionSatisfiesRange(version: string, range: string): boolean {
+  if (!range || range.trim() === '*' || range.trim() === 'latest') return true;
+  const alts = range.split('||').map((s) => s.trim()).filter(Boolean);
+  for (const alt of alts) {
+    const comparators = alt.split(/\s+/).filter(Boolean);
+    let ok = true;
+    for (const c of comparators) {
+      let passed = true;
+      if (c.startsWith('>=')) passed = cmpSemverForRange(version, c.slice(2)) >= 0;
+      else if (c.startsWith('<=')) passed = cmpSemverForRange(version, c.slice(2)) <= 0;
+      else if (c.startsWith('>')) passed = cmpSemverForRange(version, c.slice(1)) > 0;
+      else if (c.startsWith('<')) passed = cmpSemverForRange(version, c.slice(1)) < 0;
+      else if (c.startsWith('^')) {
+        const base = parseSemver(c.slice(1));
+        const cur = parseSemver(version);
+        if (!base || !cur) { passed = true; break; }
+        const upper: [number, number, number] =
+          base[0] > 0 ? [base[0] + 1, 0, 0]
+          : base[1] > 0 ? [base[0], base[1] + 1, 0]
+          : [base[0], base[1], base[2] + 1];
+        passed = cmpSemverForRange(version, `${base[0]}.${base[1]}.${base[2]}`) >= 0 &&
+          cmpSemverForRange(version, `${upper[0]}.${upper[1]}.${upper[2]}`) < 0;
+      } else if (c.startsWith('~')) {
+        const base = parseSemver(c.slice(1));
+        if (!base) { passed = true; break; }
+        const upper: [number, number, number] = [base[0], base[1] + 1, 0];
+        passed = cmpSemverForRange(version, `${base[0]}.${base[1]}.${base[2]}`) >= 0 &&
+          cmpSemverForRange(version, `${upper[0]}.${upper[1]}.${upper[2]}`) < 0;
+      } else if (/^\d/.test(c)) {
+        passed = cmpSemverForRange(version, c) === 0;
+      } else {
+        // Unrecognised comparator — give up on this alt rather than block.
+        return true;
+      }
+      if (!passed) { ok = false; break; }
+    }
+    if (ok) return true;
+  }
+  return false;
+}
+
+/**
+ * Map the loaded `network.networkName` to the canonical label used
+ * in the manifest schema. Anything that doesn't smell like testnet
+ * or mainnet falls through to devnet.
+ */
+function manifestNetworkLabel(networkName: string | undefined | null): 'testnet' | 'mainnet' | 'devnet' {
+  const n = (networkName ?? '').toLowerCase();
+  if (n.includes('testnet')) return 'testnet';
+  if (n.includes('mainnet')) return 'mainnet';
+  return 'devnet';
+}
+
+/**
+ * Construct a self-pointing DkgClient for the manifest helpers to
+ * round-trip through.
+ *
+ * The URL is derived from the daemon's own listening socket
+ * (`apiHost`/`apiPort` resolved by the outer scope) — NOT from request
+ * headers like `Host` or `X-Forwarded-Proto`. Those headers are
+ * attacker-controlled on a direct daemon request: a crafted POST can
+ * point this self-client at an arbitrary origin and exfiltrate the
+ * bearer token we forward. The daemon only binds 127.0.0.1 by default
+ * and always over plain HTTP, so hard-coding both is both safer and
+ * more accurate.
+ */
+/**
+ * Format a `host:port` pair safely for an `http://` URL, including the
+ * IPv6-literal bracket rules from RFC-3986 §3.2.2 (`[::1]:9201`, not
+ * `::1:9201`). We also downgrade the "all-interfaces" binds to their
+ * matching loopback so a self-call can't escape the machine when the
+ * operator bound the daemon to LAN: `0.0.0.0` → `127.0.0.1`, `::` →
+ * `::1`. Crucially, `::` does NOT become `127.0.0.1` — an IPv6-only
+ * listener (e.g. `bindv6only=1`) won't accept v4 loopback, and the
+ * self-client would silently point at a dead socket.
+ *
+ * Returned strings are always parseable as a URL authority component:
+ *   127.0.0.1   → 127.0.0.1:9201
+ *   ::1         → [::1]:9201
+ *   fe80::1     → [fe80::1]:9201
+ *   localhost   → localhost:9201
+ */
+function formatDaemonAuthority(apiHost: string, apiPort: number): string {
+  // Downgrade the "all-interfaces" binds to their same-family loopback
+  // so the self-client can't escape the machine even if the operator
+  // opened the daemon to the LAN. `::` MUST go to `::1`, not 127.0.0.1
+  // — on v6-only listeners (bindv6only=1) v4 loopback doesn't reach the
+  // socket and `/manifest/*` would 404 at the transport layer. `::1` is
+  // already loopback and we emit it verbatim (bracketed below).
+  let downgraded: string;
+  if (apiHost === '0.0.0.0') {
+    downgraded = '127.0.0.1';
+  } else if (apiHost === '::') {
+    downgraded = '::1';
+  } else {
+    downgraded = apiHost;
+  }
+  // Bracket bare IPv6 literals. `:` only appears in IPv6 addresses for
+  // anything we emit (host names and IPv4 literals never contain `:`).
+  const isIpv6Literal = downgraded.includes(':') && !downgraded.startsWith('[');
+  const host = isIpv6Literal ? `[${downgraded}]` : downgraded;
+  return `${host}:${apiPort}`;
+}
+
+function manifestSelfClient(
+  apiHost: string,
+  apiPort: number,
+  requestToken: string | null | undefined,
+): DkgClient {
+  return new DkgClient({
+    config: {
+      api: `http://${formatDaemonAuthority(apiHost, apiPort)}`,
+      token: requestToken ?? '',
+      defaultProject: null,
+      agentUri: null,
+      capture: { autoShare: true, defaultPrivacy: 'team', subGraph: 'chat', assertion: 'chat-log' },
+      sourcePath: null,
+    },
+  });
+}
+
+/**
+ * Map the requesting agent's resolved ETH address into the
+ * `urn:dkg:agent:<address>` URI form used for prov:wasAttributedTo
+ * on every manifest entity.
+ *
+ * `DKGAgent.resolveAgentAddress()` falls back to the node's peer ID
+ * when there's no agent token and no default wallet on the daemon.
+ * A peer ID is NOT an EVM address, so lowercasing it into
+ * `urn:dkg:agent:<peerId>` would mint an invalid, non-dereferenceable
+ * agent URI and then write it into the generated workspace config
+ * (where the chat-capture hook uses it as `agentUri`). Reject anything
+ * that isn't a canonical `0x` + 40 hex char address and emit
+ * `urn:dkg:agent:unknown` so the rest of the manifest still validates
+ * and the operator can see the misconfiguration downstream.
+ */
+const EVM_ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
+function manifestPublisherUri(requestAgentAddress: string | undefined | null): string {
+  if (requestAgentAddress && EVM_ADDRESS_RE.test(requestAgentAddress)) {
+    return `urn:dkg:agent:${requestAgentAddress.toLowerCase()}`;
+  }
+  return 'urn:dkg:agent:unknown';
+}
+
+/**
+ * Tools the install panel may target. `cursor` and `claude-code` map to
+ * actual template entities the manifest publisher ships today; `codex`
+ * is recognised so the UI can list it but no template wiring exists yet
+ * — selecting it is a no-op apart from logging.
+ */
+type SupportedTool = 'cursor' | 'claude-code' | 'codex';
+
+/**
+ * Slug-shape an arbitrary nickname so back-compat with anything that
+ * still expects a slug-form `agentSlug` keeps working. Same rule as
+ * `normaliseSlug` in mcp-dkg/src/tools/annotations.ts.
+ */
+function nicknameToSlug(s: string): string {
+  return s
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 60) || 'agent';
+}
+
+/**
+ * Build an InstallContext from the request body. The body shape:
+ *   { workspaceRoot, agentNickname?, agentSlug? (legacy), tools?: string[] }
+ *
+ * The cryptographic agent URI is derived from the daemon's bearer-token
+ * wallet, NOT from anything in the body — that's the whole point of
+ * grounding attribution in the wallet.
+ *
+ * The `tools` field lists which template categories the operator wants
+ * installed (cursor / claude-code / codex). Anything not in the list is
+ * stripped from `manifest.supportedTools` before plan, so the planner
+ * naturally skips its templates (mirroring the legacy --skip-claude flag).
+ */
+function buildManifestInstallContext(
+  _req: IncomingMessage,
+  body: Record<string, unknown>,
+  _contextGraphId: string,
+  _requestToken: string | null | undefined,
+  requestAgentAddress: string | undefined | null,
+  daemonApiHost: string,
+  daemonApiPort: number,
+):
+  | { ok: true; context: Omit<InstallContext, 'manifest'> & { tools: SupportedTool[]; agentNickname: string }; }
+  | { ok: false; error: string } {
+  const workspaceRoot = typeof body.workspaceRoot === 'string' ? body.workspaceRoot.trim() : '';
+  const rawNickname = typeof body.agentNickname === 'string'
+    ? body.agentNickname.trim()
+    : (typeof body.agentSlug === 'string' ? body.agentSlug.trim() : '');
+  if (!workspaceRoot) return { ok: false, error: 'workspaceRoot is required (absolute path)' };
+  if (!workspaceRoot.startsWith('/') && !workspaceRoot.match(/^[A-Za-z]:[\\/]/)) {
+    return { ok: false, error: 'workspaceRoot must be an absolute path (must start with /)' };
+  }
+  if (!rawNickname) return { ok: false, error: 'agentNickname is required' };
+  if (rawNickname.length > 80) return { ok: false, error: 'agentNickname must be ≤ 80 characters' };
+  if (!requestAgentAddress) {
+    return { ok: false, error: 'cannot derive agent URI: no wallet address resolved from the bearer token' };
+  }
+  // `DKGAgent.resolveAgentAddress()` falls back to the node's peer ID
+  // when no agent token / default wallet is configured. A peer ID is
+  // NOT a canonical EVM address, so lowercasing it here would mint a
+  // malformed `urn:dkg:agent:<peerId>` and bake it into the generated
+  // `.dkg/config.yaml` as `agentUri`. Downstream (chat-capture,
+  // manifest prov) would then emit non-dereferenceable agent URIs on
+  // every turn. Fail fast so the operator sees the misconfiguration
+  // immediately instead of silently poisoning the graph.
+  if (!EVM_ADDRESS_RE.test(requestAgentAddress)) {
+    return {
+      ok: false,
+      error:
+        'cannot derive agent URI: the daemon resolved a non-EVM identifier ' +
+        '(likely the node peer ID fallback). Configure a default wallet on the ' +
+        'daemon or use a bearer token tied to an agent wallet before installing.',
+    };
+  }
+
+  // Tool selection. Default to ['cursor'] when nothing's specified — the
+  // single most common case. Claude Code requires explicit opt-in to avoid
+  // the ~/.claude/settings.json pollution we hit during day-2 testing.
+  let tools: SupportedTool[] = ['cursor'];
+  if (Array.isArray(body.tools)) {
+    tools = (body.tools as unknown[])
+      .filter((t): t is SupportedTool =>
+        t === 'cursor' || t === 'claude-code' || t === 'codex')
+      .filter((t, i, a) => a.indexOf(t) === i);
+    if (tools.length === 0) tools = ['cursor'];
+  }
+
+  // Resolve the MCP package via Node's resolver first, so the install
+  // flow works when the daemon is running from a published
+  // `@origintrail-official/dkg` package (no monorepo checkout). Falls
+  // back to the repo layout. Codex tier-4g finding N7.
+  const mcpDkgAssets = resolveMcpDkgAssets();
+  // `daemonApiUrl` must come from the daemon's own trusted listening
+  // socket, NOT from `req.headers.host` / `x-forwarded-proto`. Those
+  // headers are attacker-controlled on any direct HTTP request: a
+  // crafted Host header would get baked into the generated
+  // `.dkg/config.yaml` and hooks config, so subsequent MCP/hook calls
+  // would send the local bearer token to whatever origin the attacker
+  // chose. Plain HTTP over loopback is what the daemon actually serves
+  // by default, so this is also more accurate than trusting proxies.
+  // `formatDaemonAuthority` handles IPv6 bracketing so binds to `::1`
+  // or `fe80::…` produce valid URLs (`http://[::1]:9201`) instead of
+  // the ambiguous `http://::1:9201`.
+  const daemonAuthority = formatDaemonAuthority(daemonApiHost, daemonApiPort);
+  const wallet = requestAgentAddress.toLowerCase();
+  const agentUri = `urn:dkg:agent:${wallet}`;
+  return {
+    ok: true,
+    context: {
+      workspaceAbsPath: workspaceRoot,
+      // The schema's required `agentSlug` placeholder gets the slug-shape
+      // of the nickname so legacy templates that reference {{agentSlug}}
+      // still substitute sensibly. Everything new uses {{agentNickname}}
+      // (free-form) or {{agentUri}} (wallet-based).
+      agentSlug: nicknameToSlug(rawNickname),
+      daemonApiUrl: `http://${daemonAuthority}`,
+      // Absolute default (the daemon's auth.token always lives at
+      // <homedir>/.dkg/auth.token unless overridden). Avoids the ~/...
+      // expansion-bug class entirely; still overridable by the operator.
+      daemonTokenFile: typeof body.daemonTokenFile === 'string'
+        ? body.daemonTokenFile
+        : `${osModule.homedir()}/.dkg/auth.token`,
+      mcpDkgDistAbsPath: mcpDkgAssets.distEntry,
+      mcpDkgPackageDir: mcpDkgAssets.packageDir,
+      // Legacy {{mcpDkgSrcAbsPath}} placeholder: only populated when
+      // we're running from a monorepo checkout (src/ doesn't ship in
+      // the published tarball). Modern templates reference the dist
+      // entry so this being stale is fine.
+      mcpDkgSrcAbsPath: resolve(mcpDkgAssets.packageDir, 'src', 'index.ts'),
+      captureScriptPath: mcpDkgAssets.captureScript,
+      tools,
+      agentNickname: rawNickname,
+      // Cryptographic agent URI derived from the daemon's wallet (the
+      // requestAgentAddress resolved from the bearer token). planInstall
+      // reads this directly from the context and feeds it into the
+      // {{agentUri}} substitution; if we left it null the planner would
+      // fall back to the legacy slug-based form, which is exactly what
+      // the Phase-8-day-3-plus polish was meant to fix.
+      agentUri,
+      agentAddress: wallet,
+    } as unknown as Omit<InstallContext, 'manifest'> & { tools: SupportedTool[]; agentNickname: string },
+  };
+}
 
 export const _autoUpdateIo = {
   readFile,
@@ -1163,6 +1653,28 @@ async function runDaemonInner(
     }
   });
 
+  agent.eventBus.on(DKGEvent.JOIN_REJECTED, (data: any) => {
+    try {
+      dashDb.insertNotification({
+        ts: Date.now(),
+        type: "join_rejected",
+        title: "Join request rejected",
+        message: `Your request to join project ${shortId(data.contextGraphId)} was declined by the curator.`,
+        source: "access-control",
+        meta: JSON.stringify({
+          contextGraphId: data.contextGraphId,
+          agentAddress: data.agentAddress,
+        }),
+      });
+      sseBroadcast("join_rejected", {
+        contextGraphId: data.contextGraphId,
+        agentAddress: data.agentAddress,
+      });
+    } catch {
+      /* never crash */
+    }
+  });
+
   agent.eventBus.on(DKGEvent.PROJECT_SYNCED, (data: any) => {
     try {
       sseBroadcast("project_synced", {
@@ -1609,6 +2121,8 @@ async function runDaemonInner(
         vectorStore,
         embeddingProvider,
         validTokens,
+        apiHost,
+        apiPortRef,
       );
     } catch (err: any) {
       if (res.headersSent || res.writableEnded) return;
@@ -3175,6 +3689,11 @@ async function handleRequest(
   vectorStore: VectorStore,
   embeddingProvider: EmbeddingProvider | null,
   validTokens: Set<string>,
+  // API socket identity — passed in from the outer daemon closure so
+  // `manifestSelfClient()` can build a self-pointing URL from trusted
+  // server state instead of request headers (SSRF defence).
+  apiHost: string,
+  apiPortRef: { value: number },
 ): Promise<void> {
   const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
   const path = url.pathname;
@@ -6523,6 +7042,321 @@ async function handleRequest(
     }
   }
 
+  // ── Phase 8: project-manifest publish + install (UI-driven) ───────
+  //
+  // These three routes power the CreateProjectModal (curator side,
+  // /publish) and JoinProjectModal (joiner side, /plan-install +
+  // /install) wire-workspace flow. They reuse the same publish /
+  // fetch / plan / write helpers that scripts/import-manifest.mjs
+  // and `dkg-mcp join` use, by constructing a self-pointing DkgClient
+  // that talks back to this same daemon over HTTP.
+  //
+  // Why a self-client and not direct internal calls? Two reasons:
+  // (1) keeps the manifest helpers framework-agnostic (one wire
+  // format whether they're called from CLI, browser-via-daemon, or
+  // anywhere else), (2) honours the same auth/rate-limit/audit path
+  // any other client would go through.
+
+  const manifestPublishMatch = path.match(/^\/api\/context-graph\/([^/]+)\/manifest\/publish$/);
+  if (req.method === 'POST' && manifestPublishMatch) {
+    const contextGraphId = decodeURIComponent(manifestPublishMatch[1]);
+    let body: any = {};
+    try { body = JSON.parse(await readBody(req, SMALL_BODY_BYTES) || '{}'); }
+    catch { return jsonResponse(res, 400, { error: 'Invalid JSON body' }); }
+
+    // Authorization gate (Codex tier-4g finding on 6921): publish
+    // rewrites + promotes the project's onboarding templates into
+    // Shared Working Memory. Without an owner-check, any participant
+    // who reaches the daemon with a valid bearer token could overwrite
+    // the manifest and poison every future install (malicious hook
+    // URLs, swapped agent URIs, etc.). Only the CG's registered
+    // curator/creator may publish.
+    try {
+      await agent.assertContextGraphOwner(contextGraphId, requestAgentAddress, 'publish a project manifest');
+    } catch (authErr: unknown) {
+      const msg = authErr instanceof Error ? authErr.message : String(authErr);
+      // Distinguish "not the owner" from "CG has no registered owner".
+      const code = /has no registered owner/.test(msg) ? 400 : 403;
+      return jsonResponse(res, code, { error: msg });
+    }
+
+    try {
+      const requestedNetwork = typeof body.networkLabel === 'string' ? body.networkLabel : null;
+      const networkLabel: 'testnet' | 'mainnet' | 'devnet' =
+        requestedNetwork === 'testnet' || requestedNetwork === 'mainnet' || requestedNetwork === 'devnet'
+          ? requestedNetwork
+          : manifestNetworkLabel(network?.networkName);
+      // Codex tier-4h finding N11: the prior `Array.isArray(...) && .length
+      // ? filter : defaults` chain accepted the request when `body.supportedTools`
+      // contained ONLY values the filter throws away (e.g. `['codex']`). The
+      // filter would return `[]`, `publishManifestImpl` would happily publish
+      // a manifest with zero supported tools, and then `fetchManifest()`'s Zod
+      // schema would reject the manifest because it requires at least one —
+      // so the project would be un-installable until someone republishes.
+      // Fail fast at the route when the caller supplied a non-empty array
+      // but nothing in it survives the filter; fall back to the default
+      // ONLY when the caller didn't specify anything.
+      let supportedTools: ('cursor' | 'claude-code')[];
+      if (Array.isArray(body.supportedTools) && body.supportedTools.length) {
+        supportedTools = body.supportedTools
+          .filter((t: unknown): t is 'cursor' | 'claude-code' => t === 'cursor' || t === 'claude-code');
+        if (supportedTools.length === 0) {
+          return jsonResponse(res, 400, {
+            error:
+              `"supportedTools" contained none of the supported values. ` +
+              `Pass one or more of ["cursor", "claude-code"], or omit the ` +
+              `field entirely to publish the default set.`,
+          });
+        }
+      } else {
+        supportedTools = ['cursor', 'claude-code'];
+      }
+      // Always derive the publisher from the authenticated caller. Accepting
+      // `publisherAgentUri` from the request body let any client forge
+      // `prov:wasAttributedTo` on the manifest entities, impersonating another
+      // agent's provenance on-chain. The server-side derivation below is the
+      // only source of truth.
+      const publisherAgentUri = manifestPublisherUri(requestAgentAddress);
+      const requiresMcpDkgVersion = (body.requiresMcpDkgVersion as string) ?? '>=0.1.0';
+
+      const repoRoot = manifestRepoRoot();
+      let templates;
+      try {
+        templates = assembleStandardTemplates(repoRoot);
+      } catch (assembleErr: unknown) {
+        const msg = assembleErr instanceof Error ? assembleErr.message : String(assembleErr);
+        return jsonResponse(res, 500, {
+          error: `Could not assemble templates from repo root ${repoRoot}: ${msg}. ` +
+            `The daemon must be started from a dkg-v9 checkout for manifest publish to work today.`,
+        });
+      }
+
+      const ontologyUri = body.ontologyUri ?? `urn:dkg:project:${contextGraphId}:ontology`;
+      const client = manifestSelfClient(apiHost, apiPortRef.value, requestToken);
+      const result = await publishManifestImpl({
+        contextGraphId,
+        network: networkLabel,
+        supportedTools,
+        publisherAgentUri,
+        ontologyUri,
+        requiresMcpDkgVersion,
+        templates,
+        client,
+      });
+      return jsonResponse(res, 200, {
+        ok: true,
+        manifestUri: result.manifestUri,
+        templateUris: result.templateUris,
+        tripleCount: result.tripleCount,
+        network: networkLabel,
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return jsonResponse(res, 500, { error: `manifest publish failed: ${msg}` });
+    }
+  }
+
+  const manifestPlanInstallMatch = path.match(/^\/api\/context-graph\/([^/]+)\/manifest\/plan-install$/);
+  if (req.method === 'POST' && manifestPlanInstallMatch) {
+    const contextGraphId = decodeURIComponent(manifestPlanInstallMatch[1]);
+    let body: any = {};
+    try { body = JSON.parse(await readBody(req, SMALL_BODY_BYTES) || '{}'); }
+    catch { return jsonResponse(res, 400, { error: 'Invalid JSON body' }); }
+
+    try {
+      const ctx = buildManifestInstallContext(req, body, contextGraphId, requestToken, requestAgentAddress, apiHost, apiPortRef.value);
+      if (!ctx.ok) return jsonResponse(res, 400, { error: ctx.error });
+      const fetched = await fetchManifestImpl({ client: manifestSelfClient(apiHost, apiPortRef.value, requestToken), contextGraphId });
+      // Strip supportedTools the operator didn't pick — planner uses
+      // supportedTools to gate claude-code wiring, and we want the same
+      // gating to apply for any tool the operator deselected.
+      const filteredSupportedTools = fetched.supportedTools.filter((t) =>
+        (ctx.context.tools as readonly string[]).includes(t));
+      // Fail fast when the intersection of requested tools and the
+      // manifest's supportedTools is empty (Codex tier-4k N28). Without
+      // this, `plan-install` happily returns a "successful" plan that
+      // writes AGENTS.md / config.yaml but no usable Cursor/Claude
+      // wiring, because the planner gates each wiring block on
+      // `supportedTools.includes(…)`. Operators then hit a confusing
+      // "install succeeded but nothing works" state. Return 400 with
+      // the actionable options so the UI can surface the choice.
+      if (filteredSupportedTools.length === 0) {
+        return jsonResponse(res, 400, {
+          error:
+            `None of the requested tools (${(ctx.context.tools as readonly string[]).join(', ') || 'none'}) ` +
+            `are supported by this project's manifest. Supported tools are: ` +
+            `[${fetched.supportedTools.join(', ')}]. Pass at least one of those in ` +
+            `"tools", or ask the curator to republish the manifest with broader ` +
+            `"supportedTools".`,
+        });
+      }
+      // Enforce `requiresMcpDkgVersion` before planning (Codex tier-4k N30).
+      // A manifest can declare the minimum mcp-dkg version its wiring needs
+      // (e.g. new capture-hook format, new schema fields). Without this
+      // check an operator on an older local @origintrail-official/dkg-mcp
+      // gets a plan that looks fine but fails the moment Cursor/Claude
+      // tries to invoke the bundled entry. We skip gating when the range
+      // is absent OR when we can't read the local mcp-dkg version — the
+      // latter is very rare (no resolution path) and erring-permissive
+      // keeps existing deployments working.
+      if (fetched.requiresMcpDkgVersion) {
+        const installedVersion = readMcpDkgVersion();
+        if (installedVersion && !versionSatisfiesRange(installedVersion, fetched.requiresMcpDkgVersion)) {
+          return jsonResponse(res, 400, {
+            error:
+              `This project's manifest requires @origintrail-official/dkg-mcp ` +
+              `"${fetched.requiresMcpDkgVersion}", but the local installation is ` +
+              `v${installedVersion}. Upgrade mcp-dkg (e.g. \`pnpm add -g ` +
+              `@origintrail-official/dkg-mcp@${fetched.requiresMcpDkgVersion}\`) ` +
+              `before running install.`,
+          });
+        }
+      }
+      const manifest = {
+        ...fetched,
+        supportedTools: filteredSupportedTools,
+      };
+      const plan = planInstallImpl({ ...ctx.context, manifest });
+      const markdown = buildReviewMarkdownImpl(manifest, plan);
+      return jsonResponse(res, 200, {
+        ok: true,
+        manifest: {
+          uri: manifest.uri,
+          contextGraphId: manifest.contextGraphId,
+          network: manifest.network,
+          publishedBy: manifest.publishedBy,
+          publishedAt: manifest.publishedAt,
+          supportedTools: manifest.supportedTools,
+          ontologyUri: manifest.ontologyUri,
+        },
+        plan: {
+          files: plan.files.map((f) => ({
+            field: f.field,
+            absPath: f.absPath,
+            exists: f.exists,
+            merges: f.merges,
+            bytes: f.bytes,
+            encodingFormat: f.encodingFormat,
+          })),
+          warnings: plan.warnings,
+          substitutionValues: plan.substitutionValues,
+        },
+        markdown,
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return jsonResponse(res, 500, { error: `manifest plan-install failed: ${msg}` });
+    }
+  }
+
+  const manifestInstallMatch = path.match(/^\/api\/context-graph\/([^/]+)\/manifest\/install$/);
+  if (req.method === 'POST' && manifestInstallMatch) {
+    const contextGraphId = decodeURIComponent(manifestInstallMatch[1]);
+    let body: any = {};
+    try { body = JSON.parse(await readBody(req, SMALL_BODY_BYTES) || '{}'); }
+    catch { return jsonResponse(res, 400, { error: 'Invalid JSON body' }); }
+
+    try {
+      const ctx = buildManifestInstallContext(req, body, contextGraphId, requestToken, requestAgentAddress, apiHost, apiPortRef.value);
+      if (!ctx.ok) return jsonResponse(res, 400, { error: ctx.error });
+      const fetched = await fetchManifestImpl({ client: manifestSelfClient(apiHost, apiPortRef.value, requestToken), contextGraphId });
+      const filteredSupportedTools = fetched.supportedTools.filter((t) =>
+        (ctx.context.tools as readonly string[]).includes(t));
+      // Same fail-fast as `/manifest/plan-install` (Codex N28): refuse to
+      // run the install if the operator's selected tools don't intersect
+      // what the manifest actually supports — otherwise we silently
+      // write generic config without any of the editor wiring the user
+      // asked for.
+      if (filteredSupportedTools.length === 0) {
+        return jsonResponse(res, 400, {
+          error:
+            `None of the requested tools (${(ctx.context.tools as readonly string[]).join(', ') || 'none'}) ` +
+            `are supported by this project's manifest. Supported tools are: ` +
+            `[${fetched.supportedTools.join(', ')}]. Pass at least one of those in ` +
+            `"tools", or ask the curator to republish the manifest with broader ` +
+            `"supportedTools".`,
+        });
+      }
+      // Same `requiresMcpDkgVersion` gate as /manifest/plan-install
+      // (Codex tier-4k N30). Blocking here prevents the writeInstallImpl
+      // step from spraying incompatible wiring onto disk that the local
+      // mcp-dkg can't actually service.
+      if (fetched.requiresMcpDkgVersion) {
+        const installedVersion = readMcpDkgVersion();
+        if (installedVersion && !versionSatisfiesRange(installedVersion, fetched.requiresMcpDkgVersion)) {
+          return jsonResponse(res, 400, {
+            error:
+              `This project's manifest requires @origintrail-official/dkg-mcp ` +
+              `"${fetched.requiresMcpDkgVersion}", but the local installation is ` +
+              `v${installedVersion}. Upgrade mcp-dkg (e.g. \`pnpm add -g ` +
+              `@origintrail-official/dkg-mcp@${fetched.requiresMcpDkgVersion}\`) ` +
+              `before running install.`,
+          });
+        }
+      }
+      const manifest = {
+        ...fetched,
+        supportedTools: filteredSupportedTools,
+      };
+      const plan = planInstallImpl({ ...ctx.context, manifest });
+      const written = await writeInstallImpl(plan);
+      const skipped: string[] = [];
+      if (!(ctx.context.tools as readonly string[]).includes('claude-code')) {
+        skipped.push('claudeHooksTemplate (claude-code not selected)');
+      }
+      if ((ctx.context.tools as readonly string[]).includes('codex')) {
+        skipped.push('codex wiring is "coming soon" — no template entries shipped yet');
+      }
+      return jsonResponse(res, 200, {
+        ok: true,
+        written: written.map((w) => ({
+          field: w.field,
+          absPath: w.absPath,
+          bytesWritten: w.bytesWritten,
+          action: w.action,
+        })),
+        warnings: plan.warnings,
+        skipped,
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return jsonResponse(res, 500, { error: `manifest install failed: ${msg}` });
+    }
+  }
+
+  // GET /api/host/info — surface enough host info for the WireWorkspacePanel
+  // to render real absolute defaults (no `~` paths). Auth-required because
+  // hostname/username can be considered identifying. Returns nothing
+  // sensitive — just $HOME, hostname, platform, and a sensible default
+  // workspace parent dir.
+  if (req.method === 'GET' && path === '/api/host/info') {
+    try {
+      const home = osModule.homedir();
+      const hostname = osModule.hostname();
+      const username = osModule.userInfo().username;
+      const platform = process.platform;
+      // Default workspace parent: ~/code if it exists, else ~/dev,
+      // else ~. Most operators put projects under ~/code in macOS / Linux.
+      const candidates = [`${home}/code`, `${home}/dev`, `${home}/projects`];
+      let defaultWorkspaceParent = home;
+      for (const c of candidates) {
+        try {
+          if (existsSync(c)) { defaultWorkspaceParent = c; break; }
+        } catch { /* ignore */ }
+      }
+      return jsonResponse(res, 200, {
+        homedir: home,
+        hostname,
+        username,
+        platform,
+        defaultWorkspaceParent,
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return jsonResponse(res, 500, { error: `host info failed: ${msg}` });
+    }
+  }
+
   // POST /api/context-graph/subscribe (V10) or /api/subscribe (legacy)
   if (
     req.method === "POST" &&
@@ -6598,22 +7432,145 @@ async function handleRequest(
           includeSharedMemory: shouldSyncSharedMemory,
         });
         job.result = result;
-        if (
-          result.connectedPeers > 0 &&
-          result.syncCapablePeers === 0 &&
-          result.dataSynced === 0 &&
-          result.sharedMemorySynced === 0
-        ) {
-          job.status = "failed";
-          job.error = "No sync-capable peers found for catch-up";
-          console.log(`[catchup] job=${jobId} contextGraph=${paranetId} failed: ${job.error}`);
-        } else if (result.denied) {
+        job.status = "done";
+
+        // Compute the "at least one peer gave us a clean response"
+        // signal once, up front. We use it for two different gates:
+        //
+        //   (1) the "denied" gate below — a mixed pool of one denying
+        //       peer + one authorised-but-empty peer is NOT a denial,
+        //       so we must NOT flip to `denied` if ANY peer sent a
+        //       clean empty/meta-only response.
+        //   (2) the "synced" flip further down — we only promote the
+        //       subscription to `synced=true` on concrete evidence,
+        //       never on "no peer threw" (transport death is silent).
+        //
+        // "Clean response" = we either ingested triples, or at least
+        // one peer responded with the empty-result / meta-only signal
+        // (`emptyResponses`, `metaOnlyResponses`). Non-ACL failures
+        // (timeout, reset) land in `diagnostics.durable.failedPeers`
+        // and do NOT qualify as clean here.
+        const d = result.diagnostics?.durable;
+        const s = result.diagnostics?.sharedMemory;
+        const cleanResponse =
+          result.dataSynced > 0 ||
+          result.sharedMemorySynced > 0 ||
+          (d?.emptyResponses ?? 0) > 0 ||
+          (d?.metaOnlyResponses ?? 0) > 0 ||
+          (s?.emptyResponses ?? 0) > 0;
+
+        // Authoritative ACL denial: at least one peer explicitly denied
+        // the sync (via the `syncDenied` sentinel surfaced by the new
+        // `runDurableSync` worker — see `sync/requester/page-fetch.ts`
+        // which flips `deniedPhases`, which `runCatchupOverPeers` then
+        // rolls up into the single `denied` boolean we read here). The
+        // boolean replaces HEAD's per-peer `accessDeniedPeers` counter
+        // that was removed by the v10-rc sync refactor; we no longer
+        // need the count because we gate on `cleanResponse` to handle
+        // mixed pools. Transport timeouts / unreachable peers do NOT
+        // set `syncDenied`, so an open CG with slow/offline peers won't
+        // be misclassified as denied.
+        //
+        // Corner case the earlier guard missed: an authorised peer that
+        // responded empty or meta-only (legitimate — CG exists but has
+        // no durable data yet) alongside a denying peer on the same CG.
+        // With the previous `dataSynced===0 && sharedMemorySynced===0`
+        // test, that pool would flip to "denied" even though we heard
+        // from a peer that's happy to serve us. Gating on
+        // `cleanResponse` makes the classification symmetric with the
+        // synced-flip below.
+        //
+        // Codex tier-4g (curated CG catch-up, 15:14:16) and tier-4h/4i
+        // (N12 / N17, on this line): for curated context graphs,
+        // `cleanResponse` is NOT proof of authorisation — a non-curator
+        // peer that simply doesn't have this graph yet returns
+        // `emptyResponses=1` legitimately, so a requester who genuinely
+        // isn't on the allowlist could land on `done` alongside
+        // `denied=true` and silently think they synced. Any explicit
+        // `denied` must therefore win unless we have positive evidence
+        // a peer actually served us this CG.
+        //
+        // Earlier attempts — `localAllowed.length > 0` (4g) and
+        // `agent.contextGraphIsCurated(paranetId)` (4h) — both keyed off
+        // *local* knowledge of the CG's access policy. Codex 4i rightly
+        // pointed out that for a first-time invitee neither source is
+        // populated yet: a curator can deny us while another peer
+        // returns a clean empty response, `isCurated` stays false,
+        // `cleanResponse` stays true, and the denial slips through.
+        //
+        // Flip the test: denial is authoritative by default, and only
+        // the presence of a peer that actually served this CG (i.e. we
+        // have triples from them, not just "I don't know this graph"
+        // empty responses) rescues the job to "done". Meta-only
+        // responses count as served because they prove a peer knew the
+        // CG and chose to share its _meta graph with us. `d`/`s` are
+        // already captured for `cleanResponse` above.
+        const servedByPeer =
+          result.dataSynced > 0 ||
+          result.sharedMemorySynced > 0 ||
+          (d?.insertedMetaTriples ?? 0) > 0 ||
+          (s?.insertedMetaTriples ?? 0) > 0 ||
+          (d?.metaOnlyResponses ?? 0) > 0;
+        if (result.denied && !servedByPeer) {
           job.status = "denied";
-          job.error = "Sync denied by remote peer";
-          console.log(`[catchup] job=${jobId} contextGraph=${paranetId} denied by remote peer`);
-        } else {
-          job.status = "done";
-          console.log(`[catchup] job=${jobId} contextGraph=${paranetId} done peers=${result.peersTried}/${result.syncCapablePeers} connected=${result.connectedPeers} data=${result.dataSynced} swm=${result.sharedMemorySynced}`);
+          job.error = "Sync denied by peers — you may not be on the allowlist for this curated project.";
+          // Only unsubscribe if the CG was only known via auto-discovery
+          // (N13): `contextGraphExists()` flips to true the moment we
+          // have the CG's ontology/_meta declaration, which is ALSO
+          // true for auto-discovered projects, so the earlier guard
+          // never cleaned them up. Use `contextGraphHasLocalContent`
+          // instead — that's only true when we've stored actual data
+          // for the CG (local creation or a prior legitimate sync),
+          // which is the "the operator actually wanted this project"
+          // signal we meant all along.
+          const hasLocal = await agent.contextGraphHasLocalContent(paranetId).catch(() => false);
+          if (!hasLocal) {
+            (agent as any).subscribedContextGraphs?.delete(paranetId);
+          }
+        }
+
+        // If catch-up ended in "done", flip the subscription's synced
+        // flag ONLY when at least one peer actually returned a clean
+        // response — i.e. we have concrete evidence sync worked.
+        //
+        // The earlier implementation flipped synced=true whenever the
+        // job didn't throw, which is wrong: if every peer's transport
+        // died mid-sync (timeout, reset, truncated stream), the agent
+        // catches the errors internally, returns dataSynced=0, and the
+        // UI ends up showing "synced" with an empty graph.
+        if (job.status === "done") {
+          if (cleanResponse) {
+            const subMap = (agent as any).subscribedContextGraphs as
+              | Map<string, { subscribed: boolean; synced: boolean; metaSynced?: boolean; name?: string; [k: string]: unknown }>
+              | undefined;
+            const sub = subMap?.get(paranetId);
+            if (sub) {
+              sub.synced = true;
+              // Meta is considered synced iff we have _any_ local content;
+              // otherwise we might have talked to peers that hold the CG's
+              // declaration but couldn't give us the _meta graph yet.
+              const hasContent = await agent.contextGraphHasLocalContent(paranetId).catch(() => false);
+              if (hasContent) sub.metaSynced = true;
+            }
+          } else if (result.peersTried > 0) {
+            // Every peer we talked to errored out. Surface this as a
+            // failure so the UI doesn't pretend the sync succeeded.
+            job.status = "failed";
+            job.error = "Sync did not complete — all reachable peers failed (timeouts or transport errors). Retry once the network is healthier.";
+          } else if (result.connectedPeers > 0 && result.syncCapablePeers === 0) {
+            // v10-rc surfaces this explicitly: peers are connected but
+            // none advertise the sync protocol yet. Not "our sync failed",
+            // just "no one can serve us right now" — surface as failure
+            // so the UI retries instead of declaring "synced".
+            job.status = "failed";
+            job.error = "No sync-capable peers found for catch-up";
+          }
+
+          console.log(
+            `[catchup] job=${jobId} contextGraph=${paranetId} status=${job.status} ` +
+              `peers=${result.peersTried}/${result.syncCapablePeers} connected=${result.connectedPeers} ` +
+              `data=${result.dataSynced} swm=${result.sharedMemorySynced} denied=${result.denied}`,
+          );
         }
       } catch (err) {
         job.error = err instanceof Error ? err.message : String(err);

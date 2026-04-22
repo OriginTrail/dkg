@@ -1,4 +1,5 @@
 import React, { useMemo, useState, useCallback, useEffect, lazy, Suspense } from 'react';
+import type { ReactNode } from 'react';
 import { useFetch } from '../hooks.js';
 import { api } from '../api-wrapper.js';
 import { listJoinRequests, approveJoinRequest, rejectJoinRequest, listParticipants, listAssertions, promoteAssertion, publishSharedMemory, executeQuery, type PendingJoinRequest, type PublishResult } from '../api.js';
@@ -1047,8 +1048,6 @@ function LayerActionsWidget({ layer, count, contextGraphId, onComplete }: {
   const [result, setResult] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const isWm = layer === 'wm';
-  const color = isWm ? '#f59e0b' : '#22c55e';
-  const target = isWm ? 'Shared Memory' : 'Verified Memory';
 
   const handleAction = useCallback(async () => {
     setBusy(true);
@@ -1056,7 +1055,7 @@ function LayerActionsWidget({ layer, count, contextGraphId, onComplete }: {
     setResult(null);
     try {
       if (isWm) {
-        const assertions = await listAssertions(contextGraphId);
+        const assertions = await listAssertions(contextGraphId, 'wm');
         let promoted = 0;
         for (const a of assertions) {
           const res = await promoteAssertion(contextGraphId, a.name);
@@ -1067,7 +1066,7 @@ function LayerActionsWidget({ layer, count, contextGraphId, onComplete }: {
         await publishSharedMemory(contextGraphId);
         setResult('Published to Verified Memory');
       }
-      onComplete();
+      onComplete?.();
     } catch (err: any) {
       setError(err.message ?? 'Action failed');
     } finally {
@@ -1076,6 +1075,8 @@ function LayerActionsWidget({ layer, count, contextGraphId, onComplete }: {
   }, [isWm, contextGraphId, onComplete]);
 
   if (count === 0) return null;
+  const color = isWm ? '#f59e0b' : '#22c55e';
+  const target = isWm ? 'Shared Memory' : 'Verified Memory';
 
   return (
     <GenWidget title={isWm ? 'Promote' : 'Publish'} footnote={`Moves assets from this layer to ${target}.`}>
@@ -1106,8 +1107,8 @@ function LayerWidgetStrip({ layer, entities, tripleCount, contextGraphId, onComp
   layer: 'wm' | 'swm' | 'vm';
   entities: MemoryEntity[];
   tripleCount: number;
-  contextGraphId: string;
-  onComplete: () => void;
+  contextGraphId?: string;
+  onComplete?: () => void;
 }) {
   if (entities.length === 0) {
     return (
@@ -1138,16 +1139,39 @@ function LayerWidgetStrip({ layer, entities, tripleCount, contextGraphId, onComp
 
 // ─── Enhanced Entity list (sorted by triple count, with type pill) ──────
 
-function EntityList({ entities, layerKey, layerIcon, onSelectEntity, onOpenAgent }: {
+function EntityList({
+  entities,
+  layerKey,
+  layerIcon,
+  onSelectEntity,
+  onOpenAgent,
+  externallySorted = false,
+  sortLabel,
+  headerExtra,
+  timestampPredicate,
+}: {
   entities: MemoryEntity[];
   layerKey: 'wm' | 'swm' | 'vm';
   layerIcon: string;
   onSelectEntity: (uri: string) => void;
   onOpenAgent?: (uri: string) => void;
+  /** Skip the internal triple-count sort — caller already ordered `entities`. */
+  externallySorted?: boolean;
+  /** Hint text shown next to the count (e.g. "newest first"). Defaults to
+   *  "sorted by triples" when the list does its own sort. */
+  sortLabel?: string;
+  /** Optional control element rendered to the right of the count
+   *  (e.g. a `<select>` for sort mode). */
+  headerExtra?: ReactNode;
+  /** Predicate (e.g. dcterms:created) whose object value should be rendered
+   *  as a relative timestamp on each entity card. Pass `binding.timelinePredicate`
+   *  for sub-graphs that have one. */
+  timestampPredicate?: string;
 }) {
   const profile = useProjectProfileContext();
   const agents = useAgentsContext();
   const sorted = useMemo(() => {
+    if (externallySorted) return entities;
     const copy = [...entities];
     copy.sort((a, b) => {
       const aCount = a.connections.length + a.properties.size;
@@ -1155,7 +1179,7 @@ function EntityList({ entities, layerKey, layerIcon, onSelectEntity, onOpenAgent
       return bCount - aCount;
     });
     return copy;
-  }, [entities]);
+  }, [entities, externallySorted]);
 
   const trustLabel = layerKey === 'vm' ? 'Verified' : layerKey === 'swm' ? 'Shared' : 'Working';
 
@@ -1167,17 +1191,21 @@ function EntityList({ entities, layerKey, layerIcon, onSelectEntity, onOpenAgent
     );
   }
 
+  const hint = sortLabel ?? (externallySorted ? 'click to open' : 'sorted by triples · click to open');
+
   return (
     <div className="v10-entity-list">
       <div className="v10-entity-list-header">
         <span className="v10-entity-list-count">{sorted.length} entit{sorted.length === 1 ? 'y' : 'ies'}</span>
-        <span className="v10-entity-list-hint">sorted by triples · click to open</span>
+        <span className="v10-entity-list-hint">{hint}</span>
+        {headerExtra && <span className="v10-entity-list-extra">{headerExtra}</span>}
       </div>
       {sorted.map(e => {
         const { icon, type } = entityMeta(e, profile);
         const tripleCount = e.connections.length + e.properties.size;
         const authorUri = entityAuthorUri(e);
         const author = authorUri ? agents?.get(authorUri) : null;
+        const ts = timestampPredicate ? entityTimestamp(e, timestampPredicate) : null;
         return (
           <div
             key={e.uri}
@@ -1198,6 +1226,14 @@ function EntityList({ entities, layerKey, layerIcon, onSelectEntity, onOpenAgent
                 )}
                 {type && type !== 'Entity' && (
                   <span className="v10-entity-type-pill">{icon} {type}</span>
+                )}
+                {ts != null && (
+                  <span
+                    className="v10-entity-card-timestamp"
+                    title={new Date(ts).toLocaleString()}
+                  >
+                    {formatRelativeTime(ts)}
+                  </span>
                 )}
                 <span className="v10-entity-card-triples">{tripleCount} triples</span>
               </div>
@@ -1408,8 +1444,8 @@ function AssertionsList({ contextGraphId, layer, onComplete }: {
   onComplete: () => void;
 }) {
   const { data: assertions, loading, refresh } = useFetch(
-    () => listAssertions(contextGraphId),
-    [contextGraphId],
+    () => listAssertions(contextGraphId, layer),
+    [contextGraphId, layer],
     0
   );
   const [busy, setBusy] = useState<string | null>(null);
@@ -2633,6 +2669,42 @@ function formatTimelineBucket(ym: string): string {
 // `profile:SavedQuery` pills run SPARQL and narrow the entity list.
 type SubGraphTab = 'items' | 'graph' | 'timeline' | 'docs';
 
+/** Sort modes for the Entities tab on a sub-graph page. `created-*` is
+ *  only meaningful when the sub-graph profile defines a `timelinePredicate`
+ *  (e.g. chat → dcterms:created); falls back gracefully otherwise. */
+type SubGraphEntitySort = 'created-desc' | 'created-asc' | 'triples' | 'label';
+
+/** Best-effort timestamp parser shared between Timeline and Entities sort.
+ *  Strips `"…"@en` / `"…"^^xsd:dateTime` wrappers and accepts plain ISO. */
+function entityTimestamp(e: MemoryEntity, predicate: string): number | null {
+  const vals = e.properties.get(predicate);
+  const raw = vals?.[0];
+  if (!raw) return null;
+  const cleaned = raw
+    .replace(/^"|"$/g, '')
+    .replace(/^"(.+)"(?:@\w+|\^\^.+)?$/, '$1');
+  const t = Date.parse(cleaned);
+  return Number.isNaN(t) ? null : t;
+}
+
+/** Compact relative-time formatter for entity cards. Follows the
+ *  conventions most chat / activity feeds use: "now" / "2m" / "3h" /
+ *  "5d" / falls back to ISO date for anything older than 30 days. */
+function formatRelativeTime(ts: number): string {
+  const diffMs = Date.now() - ts;
+  if (diffMs < 0) return 'just now';
+  const sec = Math.floor(diffMs / 1000);
+  if (sec < 45) return 'just now';
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  const day = Math.floor(hr / 24);
+  if (day < 30) return `${day}d ago`;
+  // Older than a month — show the date so it's still useful at a glance.
+  return new Date(ts).toISOString().slice(0, 10);
+}
+
 function SubGraphDetailView({
   slug,
   rawMemory,
@@ -2653,6 +2725,19 @@ function SubGraphDetailView({
   const timelinePredicate = binding?.timelinePredicate;
 
   const [activeTab, setActiveTab] = useState<SubGraphTab>('items');
+  // Default to newest-first for any sub-graph that defines a timeline
+  // predicate (chat, github, tasks, decisions). Sub-graphs with no time
+  // signal (code, meta) fall back to the legacy "richest entity first"
+  // ordering so the list still feels organised.
+  const [entitySort, setEntitySort] = useState<SubGraphEntitySort>(
+    binding?.timelinePredicate ? 'created-desc' : 'triples',
+  );
+  // Reset sort when the user navigates between sub-graphs that have
+  // different time signals — otherwise switching from chat → code
+  // would leave us trying to sort by a predicate the sub-graph lacks.
+  useEffect(() => {
+    setEntitySort(binding?.timelinePredicate ? 'created-desc' : 'triples');
+  }, [slug, binding?.timelinePredicate]);
   const [enabledLayers, setEnabledLayers] = useState<Set<TrustLevel>>(
     () => new Set<TrustLevel>(['working', 'shared', 'verified']),
   );
@@ -2739,16 +2824,49 @@ function SubGraphDetailView({
     if (!timelinePredicate) return [];
     const out: Array<{ entity: MemoryEntity; date: Date }> = [];
     for (const e of filteredEntities) {
-      const vals = e.properties.get(timelinePredicate);
-      if (!vals?.[0]) continue;
-      const dstr = vals[0].replace(/^"|"$/g, '').replace(/^"(.+)"(?:@\w+|\^\^.+)?$/, '$1');
-      const d = new Date(dstr);
-      if (isNaN(d.getTime())) continue;
-      out.push({ entity: e, date: d });
+      const t = entityTimestamp(e, timelinePredicate);
+      if (t == null) continue;
+      out.push({ entity: e, date: new Date(t) });
     }
     out.sort((a, b) => a.date.getTime() - b.date.getTime());
     return out;
   }, [filteredEntities, timelinePredicate]);
+
+  // Apply the user's chosen sort to the Entities tab. Time-based modes
+  // bucket undated entities at the bottom so the list stays predictable
+  // when only some entities carry the timeline predicate.
+  const sortedEntities = useMemo(() => {
+    const copy = [...filteredEntities];
+    if ((entitySort === 'created-desc' || entitySort === 'created-asc') && timelinePredicate) {
+      const dir = entitySort === 'created-desc' ? -1 : 1;
+      copy.sort((a, b) => {
+        const ta = entityTimestamp(a, timelinePredicate);
+        const tb = entityTimestamp(b, timelinePredicate);
+        if (ta == null && tb == null) return 0;
+        if (ta == null) return 1;
+        if (tb == null) return -1;
+        return (ta - tb) * dir;
+      });
+      return copy;
+    }
+    if (entitySort === 'label') {
+      copy.sort((a, b) => (a.label ?? '').localeCompare(b.label ?? ''));
+      return copy;
+    }
+    // 'triples' (default fallback)
+    copy.sort((a, b) => {
+      const aCount = a.connections.length + a.properties.size;
+      const bCount = b.connections.length + b.properties.size;
+      return bCount - aCount;
+    });
+    return copy;
+  }, [filteredEntities, entitySort, timelinePredicate]);
+
+  const sortLabel =
+    entitySort === 'created-desc' ? 'newest first · click to open'
+    : entitySort === 'created-asc' ? 'oldest first · click to open'
+    : entitySort === 'label' ? 'A → Z · click to open'
+    : 'sorted by triples · click to open';
 
   const toggleLayer = useCallback((layer: TrustLevel) => {
     setEnabledLayers(prev => {
@@ -2946,10 +3064,33 @@ function SubGraphDetailView({
         {activeTab === 'items' && (
           <div className="v10-layer-expand-body entities-tab">
             <EntityList
-              entities={filteredEntities}
+              entities={sortedEntities}
               layerKey="wm"
               layerIcon={icon}
               onSelectEntity={onSelectEntity}
+              externallySorted
+              sortLabel={sortLabel}
+              timestampPredicate={timelinePredicate}
+              headerExtra={
+                <label className="v10-entity-list-sort">
+                  <span className="v10-entity-list-sort-label">Sort</span>
+                  <select
+                    className="v10-entity-list-sort-select"
+                    value={entitySort}
+                    onChange={(e) => setEntitySort(e.target.value as SubGraphEntitySort)}
+                    aria-label="Sort entities"
+                  >
+                    {timelinePredicate && (
+                      <>
+                        <option value="created-desc">Newest first</option>
+                        <option value="created-asc">Oldest first</option>
+                      </>
+                    )}
+                    <option value="triples">Most triples</option>
+                    <option value="label">Label (A→Z)</option>
+                  </select>
+                </label>
+              }
             />
           </div>
         )}
