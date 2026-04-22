@@ -267,27 +267,28 @@ protocol below.
    slightly broad; prefer whole-package globs (`packages/<name>/**`) over
    file-level globs; inherit `base`; always append `!**/secrets.*`,
    `!**/.env*`.
-4. **Propose the scope via a SINGLE `AskQuestion` call with TWO questions.**
-   - **Q1 — packages (multi-select).** `id: "packages"`,
-     `allow_multiple: true`, `prompt: "Which packages should be writable
-     for this task?"` Include a one-line rephrase of the description and
-     the suggested task id in the prompt. Options: one per candidate
-     package labelled `"<pkg-path> — <N> files match"`, with a sample of
-     relevant paths in the label where helpful. List the recommended
-     packages first and say so in the prompt.
-   - **Q2 — action (single-select).** `id: "action"`,
-     `allow_multiple: false`, `prompt: "Action?"`. Options (IDs must
-     match exactly): `approve`, `show_json`, `edit_globs`, `widen`,
-     `narrow`, `cancel`, `custom_instruction`. Recommend `approve` in the
-     prompt.
-5. **On `approve`** + the Q1 package selection, **YOU (the agent) run the
-   command yourself** via the Shell tool. The `afterShellExecution` hook
-   has a narrow allowlist for exactly this invocation: a canonical
-   `pnpm task create <id> ...` or
+4. **Propose the scope via a SINGLE `AskQuestion` — one question, two
+   options.** Write it like you're asking a coworker, not filling out a
+   form. 3 sentences max: one-line rephrase of the task, the scope you'd
+   propose (3–5 bullet globs), then "Sound good?" Example:
+
+   > Refactor peer sync to use the new workspace auth. I'd scope it to:
+   > • `packages/agent/**`
+   > • `packages/core/**`
+   >
+   > Sound good?
+
+   Options (IDs must match exactly — only these two):
+   - `go` — `"Yes, go with that"`
+   - `custom_instruction` — `"Tell me what to change"`
+
+5. **On `go`**, **YOU (the agent) run the command yourself** via the
+   Shell tool. The `afterShellExecution` hook has a narrow allowlist for
+   exactly this invocation: a canonical `pnpm task create <id> ...` or
    `node agent-scope/bin/task.mjs create <id> ...` is the ONLY shape that
    may persist new files under `agent-scope/tasks/` and `agent-scope/active`.
-   The command must match Q1's package selection verbatim (any deviation
-   is a protocol violation — the user approved a specific scope):
+   The command's `--allowed` flags must match your proposed scope verbatim
+   (any deviation is a protocol violation):
 
    ```bash
    pnpm task create <id> \
@@ -298,32 +299,23 @@ protocol below.
      --activate
    ```
 
-   After the command succeeds (exit 0, manifest shown), continue with the
-   actual work in the same turn. Do NOT bounce the command back to the
-   user — they already approved it via the AskQuestion. If the command
-   fails for any reason (schema error, collision, etc.), surface the
-   error and re-ask via AskQuestion instead of retrying blindly.
-6. **On `show_json`**, print the drafted manifest, then re-ask both
-   questions.
-7. **On `edit_globs` / `widen` / `narrow`**, ask one targeted follow-up in
-   chat, update the draft, then re-ask both questions.
-8. **On `cancel`**, acknowledge and keep working without a task.
-9. **On `custom_instruction`**, ask in plain chat what they want instead.
+   After the command succeeds, continue with the actual work in the same
+   turn. If the command fails, surface the error and re-ask via
+   AskQuestion instead of retrying blindly.
+
+6. **On `custom_instruction`**, ask the user in plain chat what they want
+   changed (packages, globs, task id, whatever), apply it to the draft,
+   then re-ask step 4 — still one short question with two options.
 
 ### Plan-mode denial protocol (runs for every agent-scope denial)
 
-When any of these happen, stop and surface a menu. Do NOT retry, rewrite, or
-work around the denial — the defense-in-depth layers revert tracked changes
-and delete untracked files in denied paths anyway:
+When agent-scope blocks a write or reverts a shell command, stop and
+surface a short menu. Do NOT retry, rewrite, or work around the denial —
+the defense-in-depth layers revert tracked changes and delete untracked
+files in denied paths anyway.
 
-- `preToolUse` returned `{ permission: "deny" }` with `OUT OF TASK SCOPE` or
-  `PROTECTED PATH` in the message.
-- `beforeShellExecution` returned `{ permission: "deny" }` with
-  `Destructive shell command blocked` in the message.
-- `afterShellExecution` returned `additional_context` starting with
-  `agent-scope: shell command modified`.
-
-Every such message contains a fenced JSON block:
+Every denial message starts with `agent-scope:` prose and contains a
+fenced JSON block:
 
 ```
 <!-- agent-scope-menu:begin -->
@@ -331,29 +323,39 @@ Every such message contains a fenced JSON block:
 <!-- agent-scope-menu:end -->
 ```
 
-The JSON has `options[]` and `recommendedOptionId`. It also has a placeholder
-`agentReasoning: null` — you fill this in by including your reasoning in the
-AskQuestion prompt (see below).
+The JSON shape (key fields only):
+
+```ts
+{
+  humanSummary: string,           // QUOTE this in your AskQuestion prompt
+  simpleOptions: [                // exactly two entries — SURFACE these
+    { id, label, action },        // the recommended option
+    { id: "custom_instruction",   // free-text fallback (always present)
+      label: "Something else — tell me what",
+      action: { kind: "custom" } }
+  ],
+  recommendedOptionId: string,    // matches simpleOptions[0].id
+  reason: "out-of-scope" | "protected" | "manifest-load-error" | "unknown",
+  deniedPath?, command?, activeTask, options: [ /* verbose — do NOT surface */ ],
+}
+```
 
 **Protocol:**
 
 1. **Stop.** Do not retry via another tool or command form.
 2. **Extract the JSON.** Parse between the fences.
-3. **Call `AskQuestion`** with ONE question whose prompt **must include**:
-   - The denied path / command.
-   - **Why it's restricted** — for `reason: "protected"` denials, summarise
-     the `Why this file is guarded` prose block (use `protectedRole` /
-     `protectedKind` from the structured JSON for a concrete label). For
-     `reason: "out-of-scope"` denials, state that the active task's manifest
-     does not list this path.
-   - **Your reasoning in 1–2 sentences** — why you wanted to touch this file,
-     what you were trying to accomplish. This is the "here's what I was
-     thinking" that the user needs to make an informed decision.
-   - **Your recommendation** — lead with the JSON's `recommendedOptionId`
-     unless you have a concrete reason to override it.
-   - The full `options` array, verbatim — use each entry's `id`/`label`. For
-     protected denials the labels are pre-phrased as Yes / No / No-but-skip
-     / custom so the prompt reads as a plain yes/no question.
+3. **Call `AskQuestion`** — ONE question, the TWO `simpleOptions` entries
+   verbatim. Prompt = `humanSummary` verbatim, plus one short sentence of
+   your own reasoning (why you wanted to do this), plus a simple ask.
+   Keep the whole prompt to 3 sentences max. Example:
+
+   > I'd like to edit `packages/evm-module/contracts/S.sol`, but the
+   > active task `sync` doesn't cover that file. I was trying to update
+   > the staking integration the PR depends on. Want me to add it and
+   > continue?
+
+   Do NOT surface the verbose `options` list. Do NOT add or rewrite options.
+
 4. **Act on the user's choice** by matching the `action.kind`:
    - `add_to_manifest` → edit `agent-scope/tasks/<task>.json`, append patterns
      to `allowed`, retry.
@@ -364,10 +366,21 @@ AskQuestion prompt (see below).
    - `clear_task` → `pnpm task clear`.
    - `skip` → acknowledge, move on.
    - `cancel` → stop the turn, summarise.
-   - `custom` → ask the user in plain chat "what should I do instead?", do
-     what they say.
-5. **Never invent options.** If nothing fits and no `custom` is listed (it
-   always is), pick `cancel`.
+   - `custom` → ask the user in plain chat "OK, what should I do instead?"
+     Wait for their free-text reply, then carry out whatever they say.
+
+5. **Never invent options.** The `custom_instruction` entry is always in
+   `simpleOptions` — route through it when neither side fits.
+
+### Phrasing rules (onboarding AND denials)
+
+- Write like you're texting a coworker. One short question. One
+  recommendation. One "something else" option.
+- Never use ALL CAPS banners ("PROTECTED PATH", "STOP", "WARNING").
+- Don't explain internal architecture in the prompt. The user doesn't
+  need to know about hooks or manifests to answer.
+- One sentence is enough to say why something is restricted.
+- No emoji unless the user uses them first.
 
 ### CLI quick reference
 

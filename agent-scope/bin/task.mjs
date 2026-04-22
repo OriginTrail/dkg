@@ -266,9 +266,9 @@ async function startSmart() {
   const prompter = createPrompter();
   let description = '';
   try {
-    console.log('Describe the task — what to build or fix, which packages / behaviours');
-    console.log('/ tests, and any files you already know about.');
-    console.log('Press Enter to submit. (Multi-line pastes are captured in full.)');
+    console.log('What are you working on?');
+    console.log('(One or two sentences is plenty. Paste longer briefs if you have them.)');
+    console.log('Press Enter to send.');
     console.log('');
     description = await prompter.askPasteableDescription('> ');
   } finally {

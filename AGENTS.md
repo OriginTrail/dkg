@@ -92,20 +92,24 @@ active:
 3. Draft a conservative set of allowed globs. Prefer whole-package
    globs (`packages/<name>/**`). Inherit from `base`. Always append
    `!**/secrets.*` and `!**/.env*`.
-4. Propose the scope to the user as a **two-part question** (use
-   whatever multi-select + single-select UI your client supports):
-   - **Q1 (multi-select, "Which packages should be writable?"):** one
-     option per candidate package labelled
-     `<pkg-path> — <N> files match`, with 2-3 sample paths inline where
-     helpful. Pre-select the packages you already decided to include.
-     Include a `None of the above / I'll specify manually` escape
-     option.
-   - **Q2 (single-select, "Action?"):** `approve`, `show_json`,
-     `edit_globs`, `widen`, `narrow`, `cancel`, `custom_instruction`.
-5. On `approve` + the Q1 package selection: **run the command yourself**
-   via your shell tool, then continue with the actual work in the same
-   turn. The command's `--allowed` flags must match Q1 verbatim (the user
-   approved a specific scope — altering it is a protocol violation):
+4. Propose the scope to the user as **one short question with two
+   options**. Write it like you're asking a coworker, not filling out a
+   form. 3 sentences max: one-line rephrase of the task, the scope you'd
+   propose (3–5 bullet globs), then "Sound good?" Example:
+
+   > Refactor peer sync to use the new workspace auth. I'd scope it to:
+   > • `packages/agent/**`
+   > • `packages/core/**`
+   >
+   > Sound good?
+
+   Options (only these two, IDs exactly):
+   - `go` — `"Yes, go with that"`
+   - `custom_instruction` — `"Tell me what to change"`
+
+5. On `go`: **run the command yourself** via your shell tool, then
+   continue with the actual work in the same turn. The command's
+   `--allowed` flags must match your proposed scope verbatim:
 
    ```bash
    pnpm task create <id> \
@@ -116,8 +120,11 @@ active:
      --activate
    ```
 
-   If the command fails, surface the error and re-ask via AskQuestion
-   instead of retrying blindly.
+   If the command fails, surface the error and re-ask (still one short
+   question, two options) — do not retry blindly.
+
+   On `custom_instruction`: ask the user in plain chat what they want
+   changed, apply it to the draft, then re-ask step 4.
 
 > 🛈 **On Cursor / Claude Code the `afterShellExecution` / PostToolUse Bash
 > hook has a narrow allowlist** so this one invocation can persist the
@@ -137,28 +144,44 @@ active:
 ## Plan-mode denial protocol
 
 When a write is denied (whether by a hard hook or by your own self-check),
-the denial message contains a fenced JSON block:
+the denial message starts with an `agent-scope:` summary line and contains
+a fenced JSON block:
 
 ```
 <!-- agent-scope-menu:begin -->
-{ ... JSON payload with options[] and recommendedOptionId ... }
+{ humanSummary, simpleOptions, recommendedOptionId, options, ... }
 <!-- agent-scope-menu:end -->
 ```
 
 When you see this, STOP. Do not retry, rewrite, or work around the denial.
-Surface a structured menu to the user via whatever question/option mechanism
-your client supports. Include:
+Ask the user **one short question with the two `simpleOptions` entries
+verbatim** — never surface the verbose `options` list:
 
-- The denied path or command.
-- **Why it's restricted** — protected? out of task scope? broken manifest?
-- **Your reasoning** — 1–2 sentences on why you wanted to touch the file
-  and what you were trying to accomplish.
-- **Your recommendation** — usually the JSON's `recommendedOptionId`.
-- The full `options` array verbatim.
+- Prompt = `humanSummary` verbatim + one short sentence of your own
+  reasoning (why you wanted to do this) + a simple ask. Keep the whole
+  prompt to 3 sentences max. Example:
 
-Wait for the user's choice. Match their answer to one of the listed
-options. If nothing fits, ask them what they want instead — never invent
-an option that wasn't listed.
+  > I'd like to edit `packages/evm-module/contracts/S.sol`, but the
+  > active task `sync` doesn't cover that file. I was trying to update
+  > the staking integration the PR depends on. Want me to add it and
+  > continue?
+
+- Options = `simpleOptions` verbatim (exactly two entries: the
+  recommendation and "Something else — tell me what").
+
+Match the user's answer to the chosen `action.kind` and carry it out. If
+they pick `custom_instruction`, ask them in plain chat what they'd like
+instead and follow their reply. Never invent options.
+
+### Phrasing rules (onboarding AND denials)
+
+- Write like you're texting a coworker. One short question, one
+  recommendation, one "something else" option.
+- No ALL CAPS banners ("PROTECTED PATH", "STOP", "WARNING").
+- Don't explain internal architecture in the prompt. The user doesn't
+  need to know about hooks or manifests to answer.
+- One sentence is enough to say why something is restricted.
+- No emoji unless the user uses them first.
 
 ## CLI quick reference
 

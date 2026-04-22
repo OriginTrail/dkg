@@ -271,11 +271,19 @@ test('buildPreToolUseDenial: protected → structured protected menu', () => {
     assert.equal(parsed.recommendedOptionId, 'cancel');
     assert.equal(parsed.agentReasoning, null, 'agent fills this in when surfacing');
     assert.equal(structured.reason, 'protected');
-    assert.ok(message.includes('PROTECTED PATH'));
-    // Prose now explains WHY this specific file is guarded + the yes/no flow.
-    assert.ok(message.includes('Why this file is guarded'), 'prose has Why block');
-    assert.ok(message.includes('What happens if the user says YES'), 'prose has YES block');
-    assert.ok(message.includes('What happens if the user says NO'),  'prose has NO block');
+    // Human summary is short, natural, contains the denied path, and is
+    // surfaced in the rendered prose so the agent can quote it verbatim.
+    assert.ok(typeof parsed.humanSummary === 'string');
+    assert.ok(parsed.humanSummary.length > 0 && parsed.humanSummary.length < 400,
+      'humanSummary stays concise');
+    assert.ok(parsed.humanSummary.includes('.cursor/hooks/x.mjs'));
+    assert.ok(message.includes(parsed.humanSummary),
+      'rendered prose includes the humanSummary verbatim');
+    // No more ALL-CAPS banners or agent-directed meta copy in the prose.
+    assert.ok(!message.includes('PROTECTED PATH'), 'prose is banner-free');
+    assert.ok(!message.includes('STOP'),           'prose is banner-free');
+    assert.ok(!/surface the menu below/i.test(message),
+      'prose has no "surface the menu" agent-directed copy');
     // Structured payload carries the classification so downstream tools can use it.
     assert.equal(parsed.protectedKind, 'cursor-hook');
     assert.ok(typeof parsed.protectedRole === 'string' && parsed.protectedRole.length > 0);
@@ -307,7 +315,12 @@ test('buildPreToolUseDenial: out-of-scope → full metadata + alternatives', () 
     assert.ok(ids.includes('custom_instruction'));
     assert.equal(p.recommendedOptionId, 'add_glob');
     assert.equal(p.agentReasoning, null);
-    assert.ok(message.includes('OUT OF TASK SCOPE'));
+    // Human-sounding summary instead of the old ALL-CAPS banner.
+    assert.ok(!message.includes('OUT OF TASK SCOPE'),
+      'prose no longer uses the ALL-CAPS banner');
+    assert.ok(typeof p.humanSummary === 'string' && p.humanSummary.length < 400);
+    assert.ok(p.humanSummary.includes('packages/evm-module/contracts/S.sol'));
+    assert.ok(p.humanSummary.includes('sync'), 'summary mentions the active task');
   } finally { cleanup(root); }
 });
 
@@ -428,8 +441,8 @@ test('buildAfterShellContext: reverted + deleted in message', () => {
       deleted:  ['.cursor/hooks/bad.mjs'],
       unreverted: [],
     });
-    assert.ok(message.includes('Reverted via'));
-    assert.ok(message.includes('Deleted (untracked'));
+    assert.ok(message.includes('Reverted:'));
+    assert.ok(message.includes('Deleted:'));
     assert.ok(message.includes('packages/other/x.ts'));
     assert.ok(message.includes('.cursor/hooks/bad.mjs'));
     const p = extractJson(message);
@@ -531,6 +544,103 @@ test('every denial builder sets recommendedOptionId to a valid option', () => {
       );
       assert.equal(p.agentReasoning, null,
         'agentReasoning is a null placeholder the agent fills in via AskQuestion prompt');
+    }
+  } finally { cleanup(root); }
+});
+
+// ---------------------------------------------------------------------------
+// simpleOptions — the two-option plan-mode surface
+// ---------------------------------------------------------------------------
+
+test('simpleOptions: exactly two entries (recommended + custom) on every builder', () => {
+  const root = makeTempRepo();
+  try {
+    const cases = [
+      buildPreToolUseDenial({ tool: 'Write', deniedPath: 'a/b.ts', decision: 'deny',
+        task: { id: 't', allowed: ['c/**'] }, taskId: 't', root }),
+      buildPreToolUseDenial({ tool: 'Write', deniedPath: '.cursor/hooks/x.mjs',
+        decision: 'protected', task: null, taskId: null, root }),
+      buildLoadErrorDenial({ taskId: 't', error: 'bad' }),
+      buildShellPrecheckDenial({ command: 'rm x',
+        violations: [{ cmd: 'rm', path: 'x', decision: 'deny' }],
+        task: { id: 't' }, taskId: 't', root }),
+      buildAfterShellContext({ command: 'x',
+        task: { id: 't' }, taskId: 't', root,
+        reverted: ['a.ts'], deleted: [], unreverted: [] }),
+    ];
+    for (const { message } of cases) {
+      const p = extractJson(message);
+      assert.ok(Array.isArray(p.simpleOptions), 'simpleOptions is an array');
+      assert.equal(p.simpleOptions.length, 2,
+        'simpleOptions always has exactly two entries (recommended + custom)');
+      const [rec, custom] = p.simpleOptions;
+      assert.equal(rec.id, p.recommendedOptionId,
+        'first simple option matches recommendedOptionId');
+      assert.equal(custom.id, 'custom_instruction',
+        'second simple option is the custom free-text fallback');
+      assert.equal(custom.action.kind, 'custom');
+      for (const opt of p.simpleOptions) {
+        assert.ok(typeof opt.id === 'string' && opt.id.length);
+        assert.ok(typeof opt.label === 'string' && opt.label.length);
+        assert.ok(opt.action && typeof opt.action.kind === 'string');
+      }
+    }
+  } finally { cleanup(root); }
+});
+
+test('simpleOptions: recommended labels are short and natural', () => {
+  const root = makeTempRepo();
+  try {
+    // out-of-scope → recommended is add_glob → "Add this folder..."
+    const { message: m1 } = buildPreToolUseDenial({ tool: 'Write',
+      deniedPath: 'packages/foo/bar.ts', decision: 'deny',
+      task: { id: 't', allowed: ['other/**'] }, taskId: 't', root });
+    const p1 = extractJson(m1);
+    assert.equal(p1.simpleOptions[0].label, 'Add this folder to the task and try again');
+
+    // protected → recommended is cancel → "Skip it"
+    const { message: m2 } = buildPreToolUseDenial({ tool: 'Write',
+      deniedPath: '.cursor/hooks/x.mjs', decision: 'protected',
+      task: null, taskId: null, root });
+    const p2 = extractJson(m2);
+    assert.equal(p2.simpleOptions[0].label, 'Skip it');
+
+    // custom label is the natural one too
+    assert.equal(p2.simpleOptions[1].label, 'Something else — tell me what');
+  } finally { cleanup(root); }
+});
+
+// ---------------------------------------------------------------------------
+// humanSummary — short, natural, quotable by the agent
+// ---------------------------------------------------------------------------
+
+test('humanSummary: present, short, no banners, no agent-directed meta copy', () => {
+  const root = makeTempRepo();
+  try {
+    const cases = [
+      buildPreToolUseDenial({ tool: 'Write', deniedPath: 'a/b.ts', decision: 'deny',
+        task: { id: 't', allowed: ['c/**'] }, taskId: 't', root }),
+      buildPreToolUseDenial({ tool: 'Write', deniedPath: '.cursor/hooks/x.mjs',
+        decision: 'protected', task: null, taskId: null, root }),
+      buildLoadErrorDenial({ taskId: 't', error: 'bad' }),
+      buildShellPrecheckDenial({ command: 'rm x',
+        violations: [{ cmd: 'rm', path: 'x', decision: 'deny' }],
+        task: { id: 't' }, taskId: 't', root }),
+      buildAfterShellContext({ command: 'x',
+        task: { id: 't' }, taskId: 't', root,
+        reverted: ['a.ts'], deleted: [], unreverted: [] }),
+    ];
+    for (const { message } of cases) {
+      const p = extractJson(message);
+      assert.ok(typeof p.humanSummary === 'string' && p.humanSummary.length > 0);
+      assert.ok(p.humanSummary.length <= 400,
+        `humanSummary is concise (<= 400 chars): "${p.humanSummary}"`);
+      // No ALL-CAPS banners.
+      assert.ok(!/PROTECTED PATH|OUT OF TASK SCOPE|STOP\b/.test(p.humanSummary),
+        'humanSummary has no ALL-CAPS banners');
+      // No agent-directed meta copy.
+      assert.ok(!/surface .* menu|via AskQuestion/i.test(p.humanSummary),
+        'humanSummary is not agent-directed meta copy');
     }
   } finally { cleanup(root); }
 });

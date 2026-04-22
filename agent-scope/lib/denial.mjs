@@ -1,8 +1,14 @@
 // Builds structured denial payloads for every agent-scope enforcement layer.
-// Each denial carries both a human-readable prose block AND a machine-readable
-// JSON block delimited by the `agent-scope-menu` fence. Agents are instructed
-// (via CLAUDE.md + .cursor/rules/agent-scope.mdc) to parse the JSON and surface
-// the `options` array via AskQuestion — the plan-mode equivalent for denials.
+// Each denial carries a short human-readable summary AND a machine-readable
+// JSON block delimited by the `agent-scope-menu` fence.
+//
+// Agents are instructed (via CLAUDE.md + .cursor/rules/agent-scope.mdc +
+// AGENTS.md) to:
+//   1. Quote `humanSummary` in their AskQuestion prompt (keep it short and
+//      natural — like a chat message to a coworker).
+//   2. Offer only the two entries in `simpleOptions` — the LLM-recommended
+//      action plus a free-text fallback. Never surface the full `options`
+//      list to the user; it exists for audit / back-compat / tests.
 //
 // Zero IO, zero deps. Pure functions; unit-testable.
 
@@ -73,6 +79,48 @@ const CUSTOM_OPTION = {
   label: 'Let me type my own instruction',
   action: { kind: 'custom' },
 };
+
+// Shorter version used in the two-option `simpleOptions` surface — this is
+// the label the user sees in the plan-mode AskQuestion, so it should read
+// like a chat button, not a legal clause.
+const CUSTOM_OPTION_SIMPLE = {
+  id: 'custom_instruction',
+  label: 'Something else — tell me what',
+  action: { kind: 'custom' },
+};
+
+// Short, natural-language label for the recommended action. The full
+// `options` array keeps its verbose labels (back-compat + audit), but the
+// plan-mode AskQuestion uses these casual ones so the prompt reads like a
+// human wrote it. Falls back to the verbose label if the id is unknown.
+function simpleLabelFor(optionId, { deniedPath, activeTaskId, altTaskId } = {}) {
+  if (optionId === 'add_file')   return 'Add this file to the task and try again';
+  if (optionId === 'add_glob')   return 'Add this folder to the task and try again';
+  if (optionId === 'bootstrap')  return 'Yes, unlock it so I can do this edit';
+  if (optionId === 'cancel')     return 'Skip it';
+  if (optionId === 'skip')       return 'Skip and keep working on other things';
+  if (optionId === 'fix_manifest') return 'Open the task file so I can fix it';
+  if (optionId === 'clear_task') return 'Clear the active task for now';
+  if (optionId === 'acknowledge') return 'OK, keep going';
+  if (optionId && optionId.startsWith('switch_task_') && altTaskId) {
+    return `Switch to task "${altTaskId}" and try again`;
+  }
+  return null;
+}
+
+// Build the two-option `simpleOptions` array for plan-mode AskQuestion.
+// It always contains exactly two entries: the recommended option (with a
+// short human label) and a free-text fallback.
+function buildSimpleOptions(fullOptions, recommendedId) {
+  const rec = fullOptions.find(o => o.id === recommendedId) || fullOptions[0];
+  if (!rec) return [CUSTOM_OPTION_SIMPLE];
+  const altTaskId = rec.id.startsWith('switch_task_') ? rec.id.slice('switch_task_'.length) : null;
+  const label = simpleLabelFor(rec.id, { altTaskId }) || rec.label;
+  return [
+    { id: rec.id, label, action: rec.action },
+    CUSTOM_OPTION_SIMPLE,
+  ];
+}
 
 // Menu for out-of-scope write denials (path is in the repo but not in scope).
 export function buildOutOfScopeOptions({ deniedPath, activeTaskId, alternatives }) {
@@ -209,13 +257,14 @@ function wrapStructured(payload) {
   ].join('\n');
 }
 
-// Emit the human-readable prose and append the machine-readable JSON block.
-// Agents are expected to find the fence and call AskQuestion with `options`.
-function render(prose, structured) {
+// Emit a short human-readable summary and append the machine-readable JSON
+// block. Agents are instructed to quote `humanSummary` verbatim in their
+// AskQuestion prompt and offer only the two `simpleOptions` — never the
+// full `options` list.
+function render(summary, structured) {
   return [
-    prose.trim(),
+    `agent-scope: ${summary}`,
     '',
-    '⇣  Plan-mode menu (agent: surface these options via AskQuestion):',
     wrapStructured(structured),
   ].join('\n');
 }
@@ -227,6 +276,11 @@ export function buildPreToolUseDenial({
   if (decision === 'protected') {
     const classification = classifyProtected(deniedPath);
     const options = buildProtectedOptions({ deniedPath });
+    const recommendedOptionId = recommendFor('protected', options);
+    const humanSummary =
+      `I'd like to edit \`${deniedPath}\`, but it's ${classification.role}. ` +
+      `It's locked on purpose so an agent can't silently reshape its own guardrails — ` +
+      `unlocking needs your OK.`;
     const structured = {
       version: 1,
       hook: 'preToolUse',
@@ -237,42 +291,26 @@ export function buildPreToolUseDenial({
       protectedRole: classification.role,
       activeTask: taskId || null,
       protectedPatterns: [...PROTECTED_PATTERNS],
+      humanSummary,
       options,
-      recommendedOptionId: recommendFor('protected', options),
+      simpleOptions: buildSimpleOptions(options, recommendedOptionId),
+      recommendedOptionId,
       agentReasoning: null,
     };
-    const prose = [
-      `PROTECTED PATH — ${tool} on "${deniedPath}" was blocked by agent-scope.`,
-      ``,
-      `Why this file is guarded:`,
-      `  ${deniedPath} is ${classification.role}.`,
-      `  Letting an agent edit it would let the agent disable or reshape its own`,
-      `  enforcement. That's why it's always denied until a human explicitly`,
-      `  opts in — even when no task is active.`,
-      ``,
-      `What happens if the user says YES (enable bootstrap):`,
-      `  The human runs \`touch agent-scope/.bootstrap-token\` in their own`,
-      `  terminal. For as long as that file exists, ALL protection is disabled`,
-      `  (both protected paths and task-scope checks). After the edit is done,`,
-      `  they run \`rm agent-scope/.bootstrap-token\` to re-lock the system.`,
-      ``,
-      `What happens if the user says NO:`,
-      `  The edit is cancelled (or skipped). No hidden retries — the other`,
-      `  hooks would revert it anyway.`,
-      ``,
-      `Agent: surface the menu below via AskQuestion. Include a 1–2 sentence`,
-      `explanation of WHY you wanted to touch this file (your reasoning) and`,
-      `lead with the recommended option unless you have concrete grounds to`,
-      `override it.`,
-    ].join('\n');
-    return { message: render(prose, structured), structured };
+    return { message: render(humanSummary, structured), structured };
   }
 
   // out-of-scope (deny)
   const alternatives = findAlternativeTasks(deniedPath, root, taskId);
   const options = buildOutOfScopeOptions({ deniedPath, activeTaskId: taskId, alternatives });
+  const recommendedOptionId = recommendFor('out-of-scope', options);
   const positives  = ((task && task.allowed)    || []).filter(p => !p.startsWith('!'));
   const exemptions = ((task && task.exemptions) || []).filter(p => !p.startsWith('!'));
+  const humanSummary =
+    `I'd like to edit \`${deniedPath}\`, but the active task ` +
+    `${taskId ? `\`${taskId}\`` : '(none)'}` +
+    `${task && task.description ? ` — ${task.description}` : ''}` +
+    ` doesn't cover that file.`;
   const structured = {
     version: 1,
     hook: 'preToolUse',
@@ -286,45 +324,35 @@ export function buildPreToolUseDenial({
     suggestedGlob: suggestGlob(deniedPath),
     suggestedTightGlob: suggestTightGlob(deniedPath),
     alternativeTasks: alternatives,
+    humanSummary,
     options,
-    recommendedOptionId: recommendFor('out-of-scope', options),
+    simpleOptions: buildSimpleOptions(options, recommendedOptionId),
+    recommendedOptionId,
     agentReasoning: null,
   };
-  const prose = [
-    `OUT OF TASK SCOPE — ${tool} blocked by agent-scope.`,
-    `  Active task: ${taskId}${task && task.description ? ` — ${task.description}` : ''}`,
-    `  Denied path: ${deniedPath}`,
-    ``,
-    `This task only permits writes matching:`,
-    ...(positives.length ? positives.map(p => `    - ${p}`) : ['    (nothing — manifest has no positive allows)']),
-    ...(exemptions.length ? ['', 'Plus always-allowed exemptions:', ...exemptions.map(p => `    - ${p}`)] : []),
-    ``,
-    `STOP. Do not retry via another tool or a different command form. Use the`,
-    `plan-mode menu below to ask the user how to proceed.`,
-  ].join('\n');
-  return { message: render(prose, structured), structured };
+  return { message: render(humanSummary, structured), structured };
 }
 
 // Build a manifest-load-error denial message.
 export function buildLoadErrorDenial({ taskId, error }) {
   const options = buildLoadErrorOptions({ taskId, error });
+  const recommendedOptionId = recommendFor('manifest-load-error', options);
+  const humanSummary =
+    `The active task manifest \`${taskId}\` won't load — ${error}. ` +
+    `I can't apply any scope check until it's fixed or cleared.`;
   const structured = {
     version: 1,
     hook: 'preToolUse',
     reason: 'manifest-load-error',
     activeTask: taskId,
     error,
+    humanSummary,
     options,
-    recommendedOptionId: recommendFor('manifest-load-error', options),
+    simpleOptions: buildSimpleOptions(options, recommendedOptionId),
+    recommendedOptionId,
     agentReasoning: null,
   };
-  const prose = [
-    `agent-scope: failed to load active task manifest "${taskId}".`,
-    `  Error: ${error}`,
-    ``,
-    `Fix agent-scope/tasks/${taskId}.json or clear the active task.`,
-  ].join('\n');
-  return { message: render(prose, structured), structured };
+  return { message: render(humanSummary, structured), structured };
 }
 
 // Build a beforeShellExecution denial message from a set of violations.
@@ -361,6 +389,18 @@ export function buildShellPrecheckDenial({
     suggestedFix = null;
   }
 
+  const recommendedOptionId = recommendFor(reason, options);
+  const firstPath = firstProtPath || firstScopePath || '(target)';
+  const firstCmd = violations[0]?.cmd || 'command';
+  const humanSummary =
+    reason === 'protected'
+      ? `The shell command I was about to run (\`${firstCmd}\` on \`${firstPath}\`) ` +
+        `would touch a protected system file. Blocked before it ran.`
+      : reason === 'out-of-scope'
+      ? `The shell command I was about to run (\`${firstCmd}\` on \`${firstPath}\`) ` +
+        `would write outside the active task \`${taskId || '(none)'}\`. Blocked before it ran.`
+      : `That shell command was blocked before it ran.`;
+
   const structured = {
     version: 1,
     hook: 'beforeShellExecution',
@@ -371,23 +411,14 @@ export function buildShellPrecheckDenial({
       cmd: v.cmd, path: v.path, decision: v.decision,
     })),
     suggestedFix,
+    humanSummary,
     options,
-    recommendedOptionId: recommendFor(reason, options),
+    simpleOptions: buildSimpleOptions(options, recommendedOptionId),
+    recommendedOptionId,
     agentReasoning: null,
   };
 
-  const prose = [
-    `Destructive shell command blocked by agent-scope pre-shell guard.`,
-    `  Active task: ${task ? task.id : '(none — only system protection applies)'}`,
-    ``,
-    `Violations:`,
-    ...violations.map(v => `    - ${v.cmd} ${v.path}  [${v.decision}]`),
-    ``,
-    `STOP. The post-exec backstop would revert tracked files and delete`,
-    `untracked ones in denied paths anyway; use the menu below instead of`,
-    `retrying with a different command form.`,
-  ].join('\n');
-  return { message: render(prose, structured), structured };
+  return { message: render(humanSummary, structured), structured };
 }
 
 // Build an afterShellExecution context message. Unlike the other two this
@@ -429,6 +460,25 @@ export function buildAfterShellContext({
     ];
   }
 
+  const recommendedOptionId = recommendFor(reason, options);
+  const touchedCount = reverted.length + deleted.length;
+  const humanSummary = (() => {
+    if (touchedCount === 0) {
+      return `A shell command ran and finished cleanly — nothing needed to be reverted.`;
+    }
+    const bits = [];
+    if (reverted.length) bits.push(`reverted ${reverted.length} file${reverted.length === 1 ? '' : 's'}`);
+    if (deleted.length)  bits.push(`deleted ${deleted.length} new file${deleted.length === 1 ? '' : 's'}`);
+    const fix = bits.join(' and ');
+    if (reason === 'protected') {
+      return `A shell command touched a protected system file, so I ${fix} to put things back.`;
+    }
+    if (reason === 'out-of-scope') {
+      return `A shell command touched files outside the active task \`${taskId}\`, so I ${fix} to put things back.`;
+    }
+    return `A shell command touched files it shouldn't have, so I ${fix}.`;
+  })();
+
   const structured = {
     version: 1,
     hook: 'afterShellExecution',
@@ -438,25 +488,26 @@ export function buildAfterShellContext({
     reverted,
     deleted,
     unreverted: unreverted.map(u => ({ path: u.path, status: u.status, reason: u.reason })),
+    humanSummary,
     options,
-    recommendedOptionId: recommendFor(reason, options),
+    simpleOptions: buildSimpleOptions(options, recommendedOptionId),
+    recommendedOptionId,
     agentReasoning: null,
   };
 
-  const lines = [
-    `agent-scope: shell command modified out-of-task or protected files` +
-      (task ? ` (task: ${task.id}).` : ' (no active task — only protected paths enforced).'),
-  ];
+  // Prose stays minimal: the humanSummary + paths the agent may want to
+  // reference. No banners, no STOP, no agent-directed meta copy.
+  const lines = [humanSummary];
   if (reverted.length) {
-    lines.push('', 'Reverted via `git checkout --`:');
+    lines.push('', 'Reverted:');
     for (const p of reverted) lines.push(`  - ${p}`);
   }
   if (deleted.length) {
-    lines.push('', 'Deleted (untracked, not allowed to persist):');
+    lines.push('', 'Deleted:');
     for (const p of deleted) lines.push(`  - ${p}`);
   }
   if (unreverted.length) {
-    lines.push('', 'Could NOT revert (please review manually):');
+    lines.push('', 'Could not revert (please review):');
     for (const u of unreverted) lines.push(`  - ${u.path}  [${u.status}] ${u.reason}`);
   }
 

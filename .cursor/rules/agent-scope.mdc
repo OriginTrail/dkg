@@ -112,45 +112,34 @@ Follow these steps exactly:
    - Inherits `base` unless there is a reason not to (base supplies the
      standard exemptions: `**/dist/**`, lockfiles, build artefacts)
 
-4. **Propose the scope via a SINGLE `AskQuestion` call with TWO questions.**
+4. **Propose the scope via a SINGLE `AskQuestion` call with ONE question
+   and TWO options.** Keep it short and natural — like you're asking a
+   coworker, not filling out a form. Do NOT include a second question, do
+   NOT list every package individually, do NOT dump JSON into the prompt.
 
-   **Q1 — package picker (multi-select).**
-   - `id`: `packages`
-   - `allow_multiple`: `true`
-   - `prompt`: `"Which packages should be writable for this task?"` —
-     directly above the list, include a one-sentence rephrasing of the
-     user's description and the proposed task id.
-   - `options`: one entry per candidate package, labelled
-     `"<pkg-path> — <N> files match"` with a sample of 2-3 relevant file
-     paths in the label where it helps. Pre-check the packages you've
-     already decided to include by listing them first and describing them
-     as the recommended selection in the prompt.
-   - Include a final option `other` labelled
-     `"None of the above / I'll specify files manually"` so the user can
-     escape the picker.
-
-   **Q2 — action (single-select).**
-   - `id`: `action`
+   - `id`: `scope`
    - `allow_multiple`: `false`
-   - `prompt`: `"Action?"`
-   - `options` (IDs must match exactly):
-     - `approve` — `"Create + activate this scope"`
-     - `show_json` — `"Show the full manifest JSON first"`
-     - `edit_globs` — `"Let me hand-edit the allowed/deny globs"`
-     - `widen` — `"Let me add another package/file"`
-     - `narrow` — `"Let me remove a package/file"`
-     - `cancel` — `"Abort, no task"`
-     - `custom_instruction` — `"Let me type my own instruction"`
-   - Your recommendation should appear inline in the prompt
-     ("I recommend `approve`").
+   - `prompt`: two short sentences. First: a one-line rephrase of what you
+     understood the task to be. Second: the scope you'd propose, as a short
+     bullet list of globs (3–5 lines max). Finish with "Sound good?" Example:
 
-5. **On `approve` + the Q1 package selection:** **YOU (the agent) run the
-   command directly** via the Shell tool. The `afterShellExecution` hook
-   has a narrow allowlist for the canonical task-create invocation:
-   `pnpm task create <id> ...` and `node agent-scope/bin/task.mjs create
-   <id> ...` are the ONLY shapes whose writes to `agent-scope/tasks/<id>.json`
-   and `agent-scope/active` may persist. The command's `--allowed` flags
-   must match Q1 verbatim (any divergence is a protocol violation):
+     > Refactor peer sync to use the new workspace auth. I'd scope it to:
+     > • `packages/agent/**`
+     > • `packages/core/**`
+     >
+     > Sound good?
+
+   - `options` (IDs must match exactly — only these two):
+     - `go` — `"Yes, go with that"`
+     - `custom_instruction` — `"Tell me what to change"`
+
+5. **On `go`:** **YOU (the agent) run the command directly** via the Shell
+   tool. The `afterShellExecution` hook has a narrow allowlist for the
+   canonical task-create invocation: `pnpm task create <id> ...` and
+   `node agent-scope/bin/task.mjs create <id> ...` are the ONLY shapes whose
+   writes to `agent-scope/tasks/<id>.json` and `agent-scope/active` may
+   persist. Use the exact globs you proposed (any divergence is a protocol
+   violation):
 
    ```bash
    pnpm task create <id> \
@@ -163,22 +152,13 @@ Follow these steps exactly:
    ```
 
    After the command succeeds, continue with the actual work in the same
-   turn. Do NOT bounce the command back to the user — they already
-   approved the scope via AskQuestion. If the command fails, surface the
-   error and re-ask via AskQuestion instead of retrying blindly.
+   turn. If the command fails, surface the error and re-ask via
+   AskQuestion instead of retrying blindly.
 
-6. **On `show_json`:** print the drafted manifest JSON, then re-ask the
-   same two questions.
-
-7. **On `edit_globs` / `widen` / `narrow`:** ask one targeted follow-up in
-   chat ("Which globs would you like to change / add / remove?"), apply
-   the user's answer to the draft, then re-ask the same two questions.
-
-8. **On `cancel`:** acknowledge and continue working without a task (the
-   system stays invisible).
-
-9. **On `custom_instruction`:** ask the user in plain chat what they want
-   instead, then do that.
+6. **On `custom_instruction`:** ask the user in plain chat what they want
+   changed — e.g. `"What would you like different? (add/remove packages,
+   tighten globs, different task id, whatever.)"` Then apply their reply to
+   the draft and re-ask step 4 (still a single question, still two options).
 
 From step 5 onward, the active task is set and the plan-mode denial
 protocol (below) governs every future write.
@@ -186,22 +166,14 @@ protocol (below) governs every future write.
 ## Plan-mode denial protocol — MANDATORY once a task is active
 
 Every denial message from agent-scope carries a structured menu. You must
-**stop**, parse it, and surface it via `AskQuestion`. Do not retry, rewrite,
-or work around a denial — the defense-in-depth layers will revert or delete
-anything that slips through anyway.
+**stop**, parse it, and surface it via `AskQuestion` — one question, two
+options, short human prose. Do not retry, rewrite, or work around a denial
+— the defense-in-depth layers will revert or delete anything that slips
+through anyway.
 
 ### Detecting a denial
 
-- `preToolUse` returned `{ permission: "deny" }` where `agent_message` starts
-  with `OUT OF TASK SCOPE` or `PROTECTED PATH`.
-- `beforeShellExecution` returned `{ permission: "deny" }` whose
-  `agent_message` starts with `Destructive shell command blocked`.
-- `afterShellExecution` returned an `additional_context` starting with
-  `agent-scope: shell command modified`.
-
-### Parsing the menu
-
-Every such message contains a fenced JSON block:
+A denial always contains a fenced JSON block:
 
 ```
 <!-- agent-scope-menu:begin -->
@@ -209,32 +181,34 @@ Every such message contains a fenced JSON block:
 <!-- agent-scope-menu:end -->
 ```
 
-The JSON has this shape (TypeScript for clarity):
+Plus a one-line prose summary starting with `agent-scope:` that you can
+also key off:
+
+- `preToolUse` / `beforeShellExecution` return `{ permission: "deny" }`
+  with an `agent_message` containing the fence.
+- `afterShellExecution` returns an `additional_context` containing the
+  fence. Files have already been reverted or deleted.
+
+### Parsing the menu
+
+The JSON shape (TypeScript for clarity):
 
 ```ts
 {
   version: 1,
   hook: "preToolUse" | "beforeShellExecution" | "afterShellExecution",
   reason: "out-of-scope" | "protected" | "manifest-load-error" | "unknown",
-  deniedPath?: string,       // preToolUse
-  command?: string,          // shell hooks
+  humanSummary: string,     // short, natural — QUOTE THIS in your prompt
+  deniedPath?: string,
+  command?: string,
   activeTask: string | null,
-  suggestedGlob?: string,
-  alternativeTasks?: { id: string, description: string }[],
-  violations?: { cmd, path, decision }[],   // shell-precheck
-  reverted?: string[],                      // after-shell
-  deleted?: string[],                       // after-shell
-  options: {
-    id: string,
-    label: string,
-    action: {
-      kind: "add_to_manifest" | "switch_task" | "skip" | "cancel"
-          | "bootstrap" | "fix_manifest" | "clear_task" | "custom",
-      task?: string, patterns?: string[], instruction?: string, error?: string,
-    }
-  }[],
-  recommendedOptionId: string,          // suggested default (out-of-scope → add_glob, protected → cancel, load-error → fix_manifest)
-  agentReasoning: null,                 // placeholder — you fill this in via the AskQuestion prompt, see below
+  simpleOptions: [          // exactly two entries — SURFACE THESE
+    { id: string, label: string, action: { kind: "..." /* + fields */ } },
+    { id: "custom_instruction", label: "Something else — tell me what",
+      action: { kind: "custom" } }
+  ],
+  recommendedOptionId: string,  // matches simpleOptions[0].id
+  options: [ /* full verbose list — do NOT surface to the user */ ],
 }
 ```
 
@@ -242,22 +216,22 @@ The JSON has this shape (TypeScript for clarity):
 
 1. **Stop.** Do not retry the operation with another tool or command form.
 2. **Extract the JSON** from between `agent-scope-menu:begin` and `:end`.
-3. **Call `AskQuestion`** with a single question whose prompt **must include**:
-   - The denied path (or command).
-   - **Why it's restricted**: for `reason: "protected"` denials, read the
-     prose `Why this file is guarded` block and summarise it for the user
-     (use `protectedRole` / `protectedKind` from the structured JSON). For
-     `reason: "out-of-scope"` denials, state that the active task's manifest
-     does not list this path.
-   - **Your reasoning** in 1–2 sentences: why you wanted to touch this file,
-     what you were trying to accomplish. This is the plan-mode "here's what I
-     was thinking" that the user needs to make an informed decision.
-   - Your **recommendation**: which option you'd pick if you were the user,
-     and why. Lead with the JSON's `recommendedOptionId` unless you have a
-     concrete reason to override it.
-   - The options array, verbatim from the JSON — use each entry's `id` as the
-     option id and `label` as the display label. For protected denials the
-     labels are already phrased as Yes / No / No-but-continue / Custom.
+3. **Call `AskQuestion`** with ONE question and TWO options:
+   - `prompt`: quote `humanSummary` verbatim, then add **one short
+     sentence** of your own reasoning (why you wanted to do this), then
+     finish with a simple ask. Keep the whole prompt to 3 sentences max.
+     Example:
+
+     > I'd like to edit `packages/evm-module/contracts/S.sol`, but the
+     > active task `sync` doesn't cover that file. I was trying to update
+     > the staking integration referenced in the PR. Want me to add it to
+     > the scope and continue?
+
+   - `options`: pass `simpleOptions` from the JSON, verbatim. It always
+     has exactly two entries — the recommended action and a free-text
+     fallback. Do NOT surface the verbose `options` list. Do NOT add or
+     reword options.
+
 4. **Act on the user's choice** using the matching `action` object:
    - `add_to_manifest` → edit `agent-scope/tasks/<task>.json`, append the
      listed patterns to `allowed`, save, then retry the original operation.
@@ -272,8 +246,21 @@ The JSON has this shape (TypeScript for clarity):
    - `cancel` → stop the turn; summarise what got done and what didn't.
    - `custom` → ask the user in plain chat: "OK, what should I do instead?"
      Wait for their free-text reply, then carry out whatever they say.
-5. **Never invent options.** If none of the presets match and `custom` isn't
-   present (shouldn't happen — it's in every menu), pick `cancel`.
+
+5. **Never invent options.** If neither `simpleOptions` entry matches the
+   user's intent, the `custom_instruction` entry is always there — route
+   through it.
+
+### Phrasing rules (for onboarding AND denials)
+
+- Write like you're texting a coworker, not filing a ticket.
+- One short question. One recommendation. One "something else" option.
+- Never use ALL CAPS banners ("PROTECTED PATH", "STOP", "WARNING").
+- Don't explain the internal architecture in the prompt — the user doesn't
+  need to know about hooks or manifests to answer. Keep it action-focused:
+  "I want to do X. Should I?"
+- If you need to say why something is restricted, one sentence is enough.
+- No emoji unless the user uses them first.
 
 ## What counts as a write
 
@@ -333,6 +320,6 @@ they can commit and push normally.
   the menu's `switch_task` action, or via `pnpm task set`.
 - Don't add patterns to a manifest to unblock yourself — always confirm via
   the plan-mode menu first.
-- Don't run `pnpm task create` yourself for a new task — the user runs it, so
-  the manifest is human-authored and the afterShell backstop doesn't wipe it.
+- Don't surface the verbose `options` list in AskQuestion — always use
+  `simpleOptions` (two entries: recommendation + "something else").
 - Don't retry a blocked operation with a different tool or command form.

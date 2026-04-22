@@ -298,20 +298,20 @@ The agent then follows a fixed protocol (defined in
 1. Reads your description from the marker (does NOT ask you again).
 2. Explores the codebase (Grep / Glob / SemanticSearch / DKG) to find
    relevant files. Counts matching files per candidate package.
-3. Proposes a scope via a **two-part `AskQuestion`**:
-   - **Q1 — packages (multi-select):** pick which packages should be
-     writable. Each option shows the package path, file-match count, and
-     (where helpful) 2-3 sample file paths. The packages the agent
-     already decided to include are pre-selected.
-   - **Q2 — action (single-select):** `approve`, `show_json`,
-     `edit_globs`, `widen`, `narrow`, `cancel`, `custom_instruction`.
-4. On `approve`, the agent itself runs `pnpm task create <id> ...` via
-   the shell tool. The `afterShellExecution` / PostToolUse-Bash hooks
+3. Proposes a scope via a **single short `AskQuestion`** — one question,
+   two options. The prompt is one-line rephrase of the task + the scope
+   as 3–5 bullet globs + "Sound good?" The options are:
+   - `go` — "Yes, go with that"
+   - `custom_instruction` — "Tell me what to change"
+4. On `go`, the agent itself runs `pnpm task create <id> ...` via the
+   shell tool. The `afterShellExecution` / PostToolUse-Bash hooks
    recognise the canonical task-create invocation and allow its two
    specific writes (`agent-scope/tasks/<id>.json` and `agent-scope/active`)
    to persist; every other write to those paths is still reverted. See
    the "approved-task-create allowlist" section for details.
-5. The agent starts the real work in the same turn.
+5. On `custom_instruction`, the agent asks in plain chat what you'd like
+   changed, updates the draft, and re-asks step 3.
+6. Once approved, the agent starts the real work in the same turn.
 
 From here, every attempted write to an out-of-scope file triggers a
 plan-mode AskQuestion menu — see **Escalation** below.
@@ -457,10 +457,11 @@ Forward denials to a DKG node / Slack / log aggregator by setting
 ## Escalation — plan-mode denial menu
 
 Every denial (preToolUse, beforeShellExecution, afterShellExecution) emits both
-a human-readable prose block **and** a machine-readable JSON menu embedded in
-the hook's response. Agents following `.cursor/rules/agent-scope.mdc` (and
-`CLAUDE.md`) must parse the menu and surface it to the user via the same
-`AskQuestion` mechanism Cursor uses for plan mode.
+a short human summary **and** a machine-readable JSON menu embedded in the
+hook's response. Agents following `.cursor/rules/agent-scope.mdc`,
+`CLAUDE.md`, or `AGENTS.md` must parse the menu and surface it via their
+client's plan-mode-style question mechanism (`AskQuestion` in Cursor) —
+**one question, two options**.
 
 The structured block is fenced by HTML comments so it's trivial to locate:
 
@@ -470,17 +471,17 @@ The structured block is fenced by HTML comments so it's trivial to locate:
   "version": 1,
   "hook": "preToolUse",
   "reason": "out-of-scope",
+  "humanSummary": "I'd like to edit `packages/evm-module/contracts/Staking.sol`, but the active task `sync-refactor` doesn't cover that file.",
   "deniedPath": "packages/evm-module/contracts/Staking.sol",
   "activeTask": "sync-refactor",
   "suggestedGlob": "packages/evm-module/contracts/**",
   "alternativeTasks": [ { "id": "staking", "description": "..." } ],
+  "simpleOptions": [
+    { "id": "add_glob",           "label": "Add this folder to the task and try again", "action": { "kind": "add_to_manifest", ... } },
+    { "id": "custom_instruction", "label": "Something else — tell me what",            "action": { "kind": "custom" } }
+  ],
   "options": [
-    { "id": "add_file",           "label": "...", "action": { "kind": "add_to_manifest", ... } },
-    { "id": "add_glob",           "label": "...", "action": { "kind": "add_to_manifest", ... } },
-    { "id": "switch_task_staking","label": "...", "action": { "kind": "switch_task",     "task": "staking" } },
-    { "id": "skip",               "label": "...", "action": { "kind": "skip" } },
-    { "id": "cancel",             "label": "...", "action": { "kind": "cancel" } },
-    { "id": "custom_instruction", "label": "Let me type my own instruction", "action": { "kind": "custom" } }
+    /* full verbose list — audit/back-compat only, NOT surfaced to users */
   ],
   "recommendedOptionId": "add_glob",
   "agentReasoning": null
@@ -503,14 +504,25 @@ Possible `action.kind` values:
 
 Extra guidance in the block:
 
-- `recommendedOptionId` is a hint for which option to highlight. It's chosen
-  conservatively (`add_glob` for out-of-scope, `cancel` for protected,
-  `fix_manifest` for manifest-load errors). The agent is told to lead with it
-  unless overriding has a concrete reason.
-- `agentReasoning: null` is a placeholder. The hook can't know the agent's
-  reasoning, so the agent **fills it in when surfacing the menu via
-  `AskQuestion`**: the prompt must include a 1–2 sentence "here's what I was
-  trying to do and why this file came up". Plan-mode equivalent.
+- `humanSummary` is the one-line natural-language framing of the situation.
+  The agent is told to **quote this verbatim** in the AskQuestion prompt and
+  add one short sentence of their own reasoning (why they wanted to do it).
+  Keep the whole prompt to 3 sentences max.
+- `simpleOptions` always has **exactly two entries**: the LLM-recommended
+  action (short human label like "Add this folder to the task and try
+  again", "Skip it", "Yes, unlock it so I can do this edit") and a
+  free-text fallback `custom_instruction` → `"Something else — tell me
+  what"`. Agents surface these two options and **never** surface the
+  verbose `options` list.
+- `options` is the verbose, audit-grade list (add_file, add_glob, switch
+  tasks, skip, cancel, bootstrap, fix_manifest, clear_task, custom). It is
+  preserved for back-compat, tests, and anyone inspecting the JSON
+  directly — but not intended for end-user display.
+- `recommendedOptionId` is the id of `simpleOptions[0]`. Chosen
+  conservatively: `add_glob` for out-of-scope, `cancel` for protected,
+  `fix_manifest` for manifest-load errors.
+- `agentReasoning: null` is a placeholder the agent overwrites when
+  quoting it in their prompt.
 
 Heuristics (in `agent-scope/lib/denial.mjs`):
 
@@ -518,14 +530,15 @@ Heuristics (in `agent-scope/lib/denial.mjs`):
   (`dirname/**`).
 - `alternativeTasks` lists up to 3 other manifests that already cover the
   denied path.
-- `protected` reasons offer only `bootstrap` / `skip` / `cancel` /
-  `custom_instruction` — no other option can legitimately unblock the write.
+- Protected denials recommend `cancel` by default — the user must
+  explicitly opt into `bootstrap` via the "something else" free-text
+  fallback if they want to unlock the system.
 
 Builders and tests live alongside the scope library:
 
 ```
 agent-scope/lib/denial.mjs         # the builders
-agent-scope/lib/denial.test.mjs    # 33 unit tests
+agent-scope/lib/denial.test.mjs    # 40 unit tests
 ```
 
 No special tokens or APIs — the manifest is the source of truth; edit it to
