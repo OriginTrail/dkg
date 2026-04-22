@@ -2611,9 +2611,9 @@ export async function reverseLocalAgentSetupForUi(
   // Defer to the adapter for every helper we need so install (setup) and
   // removal (Disconnect) agree on the same primitives. Codex R1-1 shared
   // the workspace resolver; R2-1/R2-2 persisted the authoritative install
-  // path on `entry.installedWorkspace`; R3-2 now reorders so the skill
+  // path on `entry.config.installedWorkspace`; R3-2 now reorders so the skill
   // cleanup runs BEFORE the config-level unmerge — a failed cleanup leaves
-  // both `entry.installedWorkspace` AND the openclaw.json wiring intact,
+  // both `entry.config.installedWorkspace` AND the openclaw.json wiring intact,
   // so the user can retry Disconnect and we still know where to look.
   const adapter = (
     deps.unmergeOpenClawConfig
@@ -2638,12 +2638,14 @@ export async function reverseLocalAgentSetupForUi(
     deps.resolveWorkspaceDirFromConfig ?? adapter.resolveWorkspaceDirFromConfig;
 
   // Step 1 — discover the workspace to clean up, reading openclaw.json once.
-  // Authoritative source is `plugins.entries['adapter-openclaw'].installedWorkspace`
-  // persisted at merge time (R2-1). Config-derived resolver is the pre-R2
-  // / legacy fallback, but ONLY when the adapter entry exists — an absent
-  // entry means the adapter was never installed (or already disconnected),
-  // and the config-derived fallback would point at a workspace the user may
-  // be using for other purposes (e.g. a user-placed SKILL.md after a prior
+  // Authoritative source is `plugins.entries['adapter-openclaw'].config.installedWorkspace`
+  // persisted at merge time (R2-1, hotfixed to live inside `entry.config`
+  // because OpenClaw's gateway schema strict-rejects unknown keys at the
+  // entry root). Config-derived resolver is the pre-R2 / legacy fallback,
+  // but ONLY when the adapter entry exists — an absent entry means the
+  // adapter was never installed (or already disconnected), and the
+  // config-derived fallback would point at a workspace the user may be
+  // using for other purposes (e.g. a user-placed SKILL.md after a prior
   // clean Disconnect). Gating on entry presence (Codex R5-4) keeps skill
   // cleanup scoped to adapter-owned state.
   let workspaceDir: string | null = null;
@@ -2652,10 +2654,18 @@ export async function reverseLocalAgentSetupForUi(
       const raw = JSON.parse(readFileSync(resolvedPath, 'utf-8'));
       const entry = raw?.plugins?.entries?.['adapter-openclaw'];
       if (entry && typeof entry === 'object') {
-        if (typeof entry.installedWorkspace === 'string' && entry.installedWorkspace.trim()) {
-          workspaceDir = entry.installedWorkspace;
+        const installedFromConfig = typeof entry.config?.installedWorkspace === 'string'
+          && entry.config.installedWorkspace.trim()
+          ? entry.config.installedWorkspace
+          : undefined;
+        if (installedFromConfig) {
+          workspaceDir = installedFromConfig;
         } else {
-          // Legacy entry predating R2 — fall back to the config-derived workspace.
+          // Legacy entry predating R2 (or a pre-hotfix entry where the
+          // field lived at the entry root) — fall back to the config-
+          // derived workspace. The root-level read is skipped intentionally:
+          // an already-broken config with root-level `installedWorkspace`
+          // has been failing gateway validation and isn't a trusted source.
           workspaceDir = resolveWorkspaceDirFromConfig(raw, resolvedPath);
         }
       }
@@ -2671,7 +2681,7 @@ export async function reverseLocalAgentSetupForUi(
   // Step 2 — retire the adapter-owned SKILL.md BEFORE touching the config.
   // Failures here throw out of the function; the outer PUT handler surfaces
   // them as `runtime.lastError`. Because the config is untouched,
-  // `entry.installedWorkspace` is still on disk, so a retry re-enters this
+  // `entry.config.installedWorkspace` is still on disk, so a retry re-enters this
   // same branch with the same workspace target (R3-2).
   if (workspaceDir) {
     removeCanonicalNodeSkill(workspaceDir);

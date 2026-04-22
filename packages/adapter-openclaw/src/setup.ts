@@ -593,7 +593,26 @@ export function mergeOpenClawConfig(
   // later release flow in while user overrides for existing keys hold.
   // When `overrideDaemonUrl` is set (caller passed --port explicitly), the
   // new `daemonUrl` wins over any existing value.
+  //
+  // `installedWorkspace` lives INSIDE `entry.config` (not at entry root) —
+  // OpenClaw's gateway schema strict-rejects unknown keys on plugin entries
+  // themselves (`plugins.entries.adapter-openclaw: Unrecognized key`), but
+  // `entry.config` is the plugin-owned passthrough space where our
+  // `daemonUrl` / `memory` / `channel` fields already live. Latest-wins via
+  // explicit placement AFTER the `existingEntryConfig` spread so a re-install
+  // updates the pointer (matches the behavior of the `--port` override on
+  // `entry.config.daemonUrl`).
   const entryForConfig = config.plugins.entries[pluginId];
+
+  // Clean up any root-level `installedWorkspace` from earlier builds of
+  // this PR that wrote it at the entry root — it trips OpenClaw's strict
+  // schema validator and blocks config reload. Safe to delete
+  // unconditionally: nothing else ever reads or writes this field at root.
+  if ('installedWorkspace' in entryForConfig) {
+    delete entryForConfig.installedWorkspace;
+    log(`Removed stale root-level installedWorkspace from plugins.entries.${pluginId} (moved into entry.config)`);
+  }
+
   const hadConfig = entryForConfig.config && typeof entryForConfig.config === 'object';
   const existingEntryConfig: Record<string, any> = hadConfig ? { ...entryForConfig.config } : {};
   if (options?.overrideDaemonUrl) {
@@ -605,26 +624,24 @@ export function mergeOpenClawConfig(
   const existingChannel = existingEntryConfig.channel && typeof existingEntryConfig.channel === 'object'
     ? existingEntryConfig.channel
     : {};
+  const priorInstalledWorkspace =
+    typeof existingEntryConfig.installedWorkspace === 'string'
+      ? existingEntryConfig.installedWorkspace
+      : undefined;
   entryForConfig.config = {
     ...entryConfig,
     ...existingEntryConfig,
     memory: { ...entryConfig.memory, ...existingMemory },
     channel: { ...entryConfig.channel, ...existingChannel },
+    // Explicit placement AFTER the `existingEntryConfig` spread — latest-wins
+    // for the adapter-owned pointer so a re-install updates it cleanly.
+    installedWorkspace,
   };
   if (!hadConfig) {
     log(`Populated plugins.entries.${pluginId}.config`);
   }
-
-  // Persist the authoritative install-time workspace on the entry so the
-  // daemon's Disconnect path can target the exact directory setup installed
-  // SKILL.md into — even if the openclaw.json workspace key is later edited
-  // or was never congruent with the `--workspace` override used at install.
-  // Latest-wins: a re-install updates the pointer, matching the behavior of
-  // `entry.enabled` and the `--port` override on `entry.config.daemonUrl`.
-  // (Codex PR #234 R2-1.)
-  if (entryForConfig.installedWorkspace !== installedWorkspace) {
-    entryForConfig.installedWorkspace = installedWorkspace;
-    log(`Set plugins.entries.${pluginId}.installedWorkspace = "${installedWorkspace}"`);
+  if (priorInstalledWorkspace !== installedWorkspace) {
+    log(`Set plugins.entries.${pluginId}.config.installedWorkspace = "${installedWorkspace}"`);
   }
 
   // Ensure plugin-registered tools are visible to the agent
@@ -771,7 +788,7 @@ export function unmergeOpenClawConfig(openclawConfigPath: string): UnmergeResult
   // BEFORE we mutate the entry. A string value means we should restore the
   // slot on disconnect; anything else means the slot was empty at merge time.
   //
-  // `entry.installedWorkspace` is intentionally NOT returned here — post-PR
+  // `entry.config.installedWorkspace` is intentionally NOT returned here — post-PR
   // #234 R3-2 the daemon reads it directly from openclaw.json before calling
   // this function, so the skill cleanup runs BEFORE the entry is deleted.
   // That ordering lets a failed skill cleanup retry against the still-present
@@ -1222,9 +1239,18 @@ export async function runSetup(options: SetupOptions): Promise<void> {
 
     const existingEntry = rawExisting?.plugins?.entries?.[ADAPTER_PLUGIN_ID];
     if (existingEntry && typeof existingEntry === 'object') {
-      if (typeof existingEntry.installedWorkspace === 'string'
-          && existingEntry.installedWorkspace.trim()) {
-        priorInstalledForMigration = existingEntry.installedWorkspace.trim();
+      // Post-hotfix: `installedWorkspace` lives inside `entry.config`
+      // (OpenClaw's gateway schema strict-rejects unknown keys on entry
+      // root). Legacy root-level entries from pre-hotfix builds of this PR
+      // are already broken (config reload fails), so we don't read from
+      // the root — a fresh merge will clean up the stale root key and
+      // repopulate the new location.
+      const installedFromEntryConfig = typeof existingEntry.config?.installedWorkspace === 'string'
+        && existingEntry.config.installedWorkspace.trim()
+        ? existingEntry.config.installedWorkspace.trim()
+        : undefined;
+      if (installedFromEntryConfig) {
+        priorInstalledForMigration = installedFromEntryConfig;
       } else {
         // R5-2: legacy adapter entry predates the `installedWorkspace`
         // field. Fall back to the config-derived workspace — same
@@ -1252,7 +1278,7 @@ export async function runSetup(options: SetupOptions): Promise<void> {
     log('[dry-run] Would copy the canonical DKG node skill into the OpenClaw workspace');
   }
 
-  // Step 6: Merge adapter wiring into openclaw.json. Flips `entry.installedWorkspace`
+  // Step 6: Merge adapter wiring into openclaw.json. Flips `entry.config.installedWorkspace`
   // to the new workspace — safe now that the new SKILL.md is on disk (R5-3).
   throwIfAborted();
   if (!dryRun) {
@@ -1272,7 +1298,7 @@ export async function runSetup(options: SetupOptions): Promise<void> {
   //
   // R6-3: `removeCanonicalNodeSkill` swallows unlink errors (locked file,
   // permissions, etc.) so the new-install path never fails on a best-effort
-  // cleanup. But merge has already flipped `entry.installedWorkspace` to the
+  // cleanup. But merge has already flipped `entry.config.installedWorkspace` to the
   // new path, so a silent-miss here would orphan the prior workspace's
   // SKILL.md permanently (Disconnect only knows about the new path). Call
   // `verifySkillRemoved` immediately after and surface residue as a loud

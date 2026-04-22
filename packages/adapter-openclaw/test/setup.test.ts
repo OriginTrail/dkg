@@ -251,6 +251,7 @@ describe('mergeOpenClawConfig', () => {
       daemonUrl: 'http://127.0.0.1:9200',
       memory: { enabled: true },
       channel: { enabled: true },
+      installedWorkspace: defaultInstalledWorkspace,
     });
   });
 
@@ -767,7 +768,7 @@ describe('mergeOpenClawConfig installedWorkspace', () => {
     mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, ws);
 
     const config = JSON.parse(readFileSync(configPath, 'utf-8'));
-    expect(config.plugins.entries['adapter-openclaw'].installedWorkspace).toBe(ws);
+    expect(config.plugins.entries['adapter-openclaw'].config.installedWorkspace).toBe(ws);
   });
 
   it('overwrites installedWorkspace on re-merge (latest-wins)', () => {
@@ -778,7 +779,7 @@ describe('mergeOpenClawConfig installedWorkspace', () => {
 
     mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, firstWs);
     expect(JSON.parse(readFileSync(configPath, 'utf-8'))
-      .plugins.entries['adapter-openclaw'].installedWorkspace).toBe(firstWs);
+      .plugins.entries['adapter-openclaw'].config.installedWorkspace).toBe(firstWs);
 
     mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, secondWs);
 
@@ -786,7 +787,7 @@ describe('mergeOpenClawConfig installedWorkspace', () => {
     // same semantics as `entry.enabled` and `entry.config.daemonUrl` with
     // overrideDaemonUrl — reinstalls reflect current reality).
     expect(JSON.parse(readFileSync(configPath, 'utf-8'))
-      .plugins.entries['adapter-openclaw'].installedWorkspace).toBe(secondWs);
+      .plugins.entries['adapter-openclaw'].config.installedWorkspace).toBe(secondWs);
   });
 
   it('is idempotent when the same workspace is re-supplied', () => {
@@ -800,7 +801,7 @@ describe('mergeOpenClawConfig installedWorkspace', () => {
     const second = readFileSync(configPath, 'utf-8');
 
     expect(second).toBe(first);
-    expect(JSON.parse(second).plugins.entries['adapter-openclaw'].installedWorkspace).toBe(ws);
+    expect(JSON.parse(second).plugins.entries['adapter-openclaw'].config.installedWorkspace).toBe(ws);
   });
 });
 
@@ -1528,7 +1529,7 @@ describe('runSetup workspace migration', () => {
       const skillA = join(dirA, 'skills', 'dkg-node', 'SKILL.md');
       expect(existsSync(skillA)).toBe(true);
       const afterA = JSON.parse(readFileSync(join(openclawHome, 'openclaw.json'), 'utf-8'));
-      expect(afterA.plugins.entries['adapter-openclaw'].installedWorkspace).toBe(dirA);
+      expect(afterA.plugins.entries['adapter-openclaw'].config.installedWorkspace).toBe(dirA);
 
       // Second install targets dirB — old install's skill at dirA must be retired.
       await runSetup({ workspace: dirB, start: false, verify: false });
@@ -1540,7 +1541,7 @@ describe('runSetup workspace migration', () => {
       expect(existsSync(skillB)).toBe(true);
       expect(existsSync(skillA)).toBe(false);
       const afterB = JSON.parse(readFileSync(join(openclawHome, 'openclaw.json'), 'utf-8'));
-      expect(afterB.plugins.entries['adapter-openclaw'].installedWorkspace).toBe(dirB);
+      expect(afterB.plugins.entries['adapter-openclaw'].config.installedWorkspace).toBe(dirB);
     } finally {
       process.env.DKG_HOME = originalDkg;
       process.env.OPENCLAW_HOME = originalOpenclaw;
@@ -1552,7 +1553,7 @@ describe('runSetup workspace migration', () => {
   // SKILL.md AND the openclaw.json pointer must still reflect the old
   // workspace — so a retry reads OLD as the prior install and migrates
   // normally, instead of reading NEW and treating the orphan as fresh.
-  it('leaves the prior install\'s SKILL.md AND entry.installedWorkspace intact when installing the new skill fails (R4-2 + R5-3)', async () => {
+  it('leaves the prior install\'s SKILL.md AND entry.config.installedWorkspace intact when installing the new skill fails (R4-2 + R5-3)', async () => {
     const dkgHome = join(testDir, '.dkg');
     const openclawHome = join(testDir, '.openclaw');
     const dirA = join(testDir, 'workspace-a');
@@ -1576,7 +1577,7 @@ describe('runSetup workspace migration', () => {
       const skillA = join(dirA, 'skills', 'dkg-node', 'SKILL.md');
       expect(existsSync(skillA)).toBe(true);
       const configAfterA = JSON.parse(readFileSync(join(openclawHome, 'openclaw.json'), 'utf-8'));
-      expect(configAfterA.plugins.entries['adapter-openclaw'].installedWorkspace).toBe(dirA);
+      expect(configAfterA.plugins.entries['adapter-openclaw'].config.installedWorkspace).toBe(dirA);
 
       // Sabotage dirB so installCanonicalNodeSkill's mkdirSync(skills/dkg-node)
       // throws: create `skills` as a FILE so the recursive mkdir hits an
@@ -1595,7 +1596,7 @@ describe('runSetup workspace migration', () => {
       // install threw, the config pointer was never flipped. A retry will
       // correctly identify OLD as the prior install.
       const configAfterB = JSON.parse(readFileSync(join(openclawHome, 'openclaw.json'), 'utf-8'));
-      expect(configAfterB.plugins.entries['adapter-openclaw'].installedWorkspace).toBe(dirA);
+      expect(configAfterB.plugins.entries['adapter-openclaw'].config.installedWorkspace).toBe(dirA);
     } finally {
       process.env.DKG_HOME = originalDkg;
       process.env.OPENCLAW_HOME = originalOpenclaw;
@@ -1603,7 +1604,7 @@ describe('runSetup workspace migration', () => {
   });
 
   // Codex PR #234 R5-2: legacy adapter entries (pre-R2) lack
-  // `entry.installedWorkspace`. Migration must fall back to the
+  // `entry.config.installedWorkspace`. Migration must fall back to the
   // config-derived workspace via `resolveWorkspaceDirFromConfig` so the old
   // SKILL.md gets retired on the next setup.
   it('retires legacy adapter-entry skills via the config-derived fallback (R5-2)', async () => {
@@ -1655,7 +1656,7 @@ describe('runSetup workspace migration', () => {
 
       // Post-migration the entry now carries the new installedWorkspace.
       const after = JSON.parse(readFileSync(join(openclawHome, 'openclaw.json'), 'utf-8'));
-      expect(after.plugins.entries['adapter-openclaw'].installedWorkspace).toBe(newWs);
+      expect(after.plugins.entries['adapter-openclaw'].config.installedWorkspace).toBe(newWs);
     } finally {
       process.env.DKG_HOME = originalDkg;
       process.env.OPENCLAW_HOME = originalOpenclaw;
@@ -1817,7 +1818,7 @@ describe('runSetup workspace migration', () => {
   // replaced by a directory, etc.) verifySkillRemoved must detect the
   // residue and surface it as a loud warning — otherwise the orphan is
   // invisible and Disconnect (which only knows about the new
-  // entry.installedWorkspace) can never clean it up.
+  // entry.config.installedWorkspace) can never clean it up.
   it('warns loudly when migration cleanup silently fails to remove the prior SKILL.md (R6-3)', async () => {
     const dkgHome = join(testDir, '.dkg');
     const openclawHome = join(testDir, '.openclaw');

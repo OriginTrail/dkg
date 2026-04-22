@@ -1575,7 +1575,7 @@ describe('OpenClaw UI Connect/Disconnect/Refresh fresh-HOME integration (issue #
     // Seed a pre-merged openclaw.json (as if Connect already ran).
     mergeOpenClawConfig(openclawConfigPath, adapterPath, testEntryConfig, workspaceDir);
 
-    // Codex R2-1: Disconnect MUST target `entry.installedWorkspace`, not the
+    // Codex R2-1: Disconnect MUST target `entry.config.installedWorkspace`, not the
     // openclaw.json workspace keys. To prove that, mutate `installedWorkspace`
     // to a DIFFERENT directory than `agents.defaults.workspace` — the two
     // typically agree in production, but any drift (override flag used, or
@@ -1584,7 +1584,7 @@ describe('OpenClaw UI Connect/Disconnect/Refresh fresh-HOME integration (issue #
     const authoritativeInstallDir = join(tempRoot, 'authoritative-install');
     mkdirSync(authoritativeInstallDir, { recursive: true });
     const afterMerge = JSON.parse(readFileSync(openclawConfigPath, 'utf-8'));
-    afterMerge.plugins.entries['adapter-openclaw'].installedWorkspace = authoritativeInstallDir;
+    afterMerge.plugins.entries['adapter-openclaw'].config.installedWorkspace = authoritativeInstallDir;
     writeFileSync(openclawConfigPath, JSON.stringify(afterMerge, null, 2));
 
     // Seed SKILL.md + a sibling `custom-note.md` at the AUTHORITATIVE path —
@@ -1607,7 +1607,7 @@ describe('OpenClaw UI Connect/Disconnect/Refresh fresh-HOME integration (issue #
     const before = JSON.parse(readFileSync(openclawConfigPath, 'utf-8'));
     expect(before.plugins.slots.memory).toBe('adapter-openclaw');
     expect(before.plugins.allow).toContain('adapter-openclaw');
-    expect(before.plugins.entries['adapter-openclaw'].installedWorkspace).toBe(authoritativeInstallDir);
+    expect(before.plugins.entries['adapter-openclaw'].config.installedWorkspace).toBe(authoritativeInstallDir);
 
     const config = makeConfig();
     await reverseLocalAgentSetupForUi(config, openclawConfigPath);
@@ -1760,7 +1760,7 @@ describe('OpenClaw UI Connect/Disconnect/Refresh fresh-HOME integration (issue #
     // no default-fallback. Setup's install used `discoverWorkspace` which covered all
     // of those, so a user with a `~/…` workspace in openclaw.json got SKILL.md
     // installed at the correct absolute path but left behind at a literal `~/…` path
-    // on Disconnect. Codex R2-1 then made `entry.installedWorkspace` the authoritative
+    // on Disconnect. Codex R2-1 then made `entry.config.installedWorkspace` the authoritative
     // path on new installs — but pre-R2 openclaw.json files don't carry that field,
     // so the config-derived resolver remains the fallback. This scenario locks that
     // fallback in.
@@ -1774,13 +1774,13 @@ describe('OpenClaw UI Connect/Disconnect/Refresh fresh-HOME integration (issue #
     }, null, 2));
     mergeOpenClawConfig(openclawConfigPath, adapterPath, testEntryConfig, workspaceDir);
     const mergedPre = JSON.parse(readFileSync(openclawConfigPath, 'utf-8'));
-    delete mergedPre.plugins.entries['adapter-openclaw'].installedWorkspace;
+    delete mergedPre.plugins.entries['adapter-openclaw'].config.installedWorkspace;
     writeFileSync(openclawConfigPath, JSON.stringify(mergedPre, null, 2));
 
     // Sanity — the literal ~ survived the merge, installedWorkspace is gone.
     const merged = JSON.parse(readFileSync(openclawConfigPath, 'utf-8'));
     expect(merged.agents.defaults.workspace).toBe(tildeWorkspace);
-    expect(merged.plugins.entries['adapter-openclaw'].installedWorkspace).toBeUndefined();
+    expect(merged.plugins.entries['adapter-openclaw'].config.installedWorkspace).toBeUndefined();
 
     const { resolveWorkspaceDirFromConfig: realResolver } = await import(
       '@origintrail-official/dkg-adapter-openclaw'
@@ -1820,7 +1820,7 @@ describe('OpenClaw UI Connect/Disconnect/Refresh fresh-HOME integration (issue #
     // (R2-2) and #discussion_r3120241631 (R3-2). R2-2 stopped swallowing skill-
     // removal errors; R3-2 reordered the flow so skill cleanup runs BEFORE
     // the config-level unmerge — a failure at the skill step must leave
-    // `entry.installedWorkspace` and the adapter wiring intact so the user
+    // `entry.config.installedWorkspace` and the adapter wiring intact so the user
     // can retry Disconnect and we still know which file to target.
 
     mergeOpenClawConfig(openclawConfigPath, adapterPath, testEntryConfig, workspaceDir);
@@ -1867,13 +1867,13 @@ describe('OpenClaw UI Connect/Disconnect/Refresh fresh-HOME integration (issue #
     expect(readFileSync(openclawConfigPath, 'utf-8')).toBe(beforeDisconnect);
     const after = JSON.parse(readFileSync(openclawConfigPath, 'utf-8'));
     expect(after.plugins.entries['adapter-openclaw']).toBeDefined();
-    expect(after.plugins.entries['adapter-openclaw'].installedWorkspace).toBe(workspaceDir);
+    expect(after.plugins.entries['adapter-openclaw'].config.installedWorkspace).toBe(workspaceDir);
   });
 
   it('scenario 2f: retry after a failed skill cleanup succeeds (Codex R3-2 recovery)', async () => {
     // First Disconnect: skill cleanup fails, openclaw.json is untouched.
     // Second Disconnect: real skill cleanup + real verify succeed, entry is removed.
-    // Proves `entry.installedWorkspace` is still readable on retry — the whole
+    // Proves `entry.config.installedWorkspace` is still readable on retry — the whole
     // point of the R3-2 reorder.
 
     mergeOpenClawConfig(openclawConfigPath, adapterPath, testEntryConfig, workspaceDir);
@@ -1897,12 +1897,12 @@ describe('OpenClaw UI Connect/Disconnect/Refresh fresh-HOME integration (issue #
     // Post-failure state: the adapter entry AND installedWorkspace survived.
     const afterAttempt1 = JSON.parse(readFileSync(openclawConfigPath, 'utf-8'));
     expect(afterAttempt1.plugins.entries['adapter-openclaw']).toBeDefined();
-    expect(afterAttempt1.plugins.entries['adapter-openclaw'].installedWorkspace).toBe(workspaceDir);
+    expect(afterAttempt1.plugins.entries['adapter-openclaw'].config.installedWorkspace).toBe(workspaceDir);
     expect(afterAttempt1.plugins.slots.memory).toBe('adapter-openclaw');
     expect(existsSync(skillPath)).toBe(true);
 
     // Attempt 2: no stubs — run the real flow end-to-end. The
-    // `entry.installedWorkspace` left in place is what the real
+    // `entry.config.installedWorkspace` left in place is what the real
     // `reverseLocalAgentSetupForUi` reads to target SKILL.md.
     await expect(reverseLocalAgentSetupForUi(config, openclawConfigPath)).resolves.toBeUndefined();
 
