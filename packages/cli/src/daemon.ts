@@ -1647,7 +1647,14 @@ async function runDaemonInner(
         jsonResponse(res, 400, { error: err.message });
       } else {
         enrichEvmError(err);
-        jsonResponse(res, 500, { error: err.message });
+        const rawMsg = typeof err?.message === "string" ? err.message : String(err);
+        // CLI-9 (BUGS_FOUND.md dup #159): scrub raw chain-revert
+        // hex / `unknown custom error` markers from the 500 body so
+        // ANY endpoint that bubbles a chain error gets the same
+        // privacy-safe treatment, not just /api/verify. Endpoints
+        // that already mapped the error to a 4xx never reach here.
+        const sanitized = sanitizeRevertMessage(rawMsg);
+        jsonResponse(res, 500, { error: sanitized });
       }
     }
   });
@@ -6279,6 +6286,22 @@ async function handleRequest(
       return jsonResponse(res, 200, response);
     } catch (err) {
       tracker.fail(ctx, err);
+      // CLI-7 (BUGS_FOUND.md dup #72 #85): the previous behaviour was
+      // to re-throw and let the global catch emit a 500 with the raw
+      // libp2p / agent message. That conflates "I couldn't reach the
+      // peer" with "the daemon crashed", which the audit flagged as a
+      // false-positive 5xx. We now translate well-known
+      // peer-resolution / unreachable / dial-timeout errors to 404/400
+      // so callers can distinguish operator error from server bugs.
+      // Anything that doesn't match the conservative client-error
+      // vocabulary still falls through to the top-level 500 handler.
+      const msg = err instanceof Error ? err.message : String(err);
+      const classified = classifyClientError(msg);
+      if (classified) {
+        return jsonResponse(res, classified.status, {
+          error: classified.sanitized,
+        });
+      }
       throw err;
     }
   }
@@ -6806,14 +6829,53 @@ async function handleRequest(
       return jsonResponse(res, 400, { error: parsedSigs.error });
     }
     const validatedRequiredSigs = parsedSigs.value || undefined;
-    const result = await agent.verify({
-      contextGraphId,
-      verifiedMemoryId,
-      batchId: BigInt(batchId),
-      timeoutMs: timeoutMs ? Number(timeoutMs) : undefined,
-      requiredSignatures: validatedRequiredSigs,
-    });
-    return jsonResponse(res, 200, { ...result, batchId: String(batchId) });
+
+    // CLI-9 (BUGS_FOUND.md dup #158): batchId is user-controlled; an
+    // unparseable value used to throw `SyntaxError: Cannot convert ...
+    // to a BigInt` deep inside `BigInt()` and bubble up as a 500 with
+    // a stack trace. Pre-validate so the operator gets a crisp 400.
+    let parsedBatchId: bigint;
+    try {
+      parsedBatchId = BigInt(batchId);
+    } catch {
+      return jsonResponse(res, 400, {
+        error: `Invalid batchId — must be an integer string, got ${JSON.stringify(batchId)}`,
+      });
+    }
+
+    try {
+      const result = await agent.verify({
+        contextGraphId,
+        verifiedMemoryId,
+        batchId: parsedBatchId,
+        timeoutMs: timeoutMs ? Number(timeoutMs) : undefined,
+        requiredSignatures: validatedRequiredSigs,
+      });
+      return jsonResponse(res, 200, { ...result, batchId: String(batchId) });
+    } catch (err) {
+      // CLI-9 dup #158 #159: a non-existent (cgId, vmId, batchId)
+      // tuple used to bubble up a chain custom-error revert as a
+      // generic 500 with the raw `data="0x…"` payload in the body.
+      // Map "not found / does not exist" to 404 and other client-shape
+      // errors to 400. Sanitize the message either way so we never
+      // leak the raw revert hex (#159 specifically). Unknown errors
+      // still fall through to the global 500 handler (with the same
+      // sanitization applied below) so genuine internal failures
+      // remain visible.
+      const msg = err instanceof Error ? err.message : String(err);
+      const classified = classifyClientError(msg);
+      if (classified) {
+        return jsonResponse(res, classified.status, {
+          error: classified.sanitized,
+        });
+      }
+      // Re-throw as a sanitized error so the global catch's 500 body
+      // does not include the raw chain payload either.
+      const sanitized = sanitizeRevertMessage(msg);
+      throw err instanceof Error
+        ? Object.assign(new Error(sanitized), { cause: err })
+        : new Error(sanitized);
+    }
   }
 
   // POST /api/endorse
@@ -7730,6 +7792,71 @@ function parsePublishRequestBody(
   };
 }
 
+/**
+ * CLI-9 (BUGS_FOUND.md dup #159): scrub raw chain-revert payloads from
+ * error messages before they reach the HTTP body. Ethers wraps custom
+ * errors into long, ABI-encoded `data="0x…"` blobs and an `unknown
+ * custom error` prefix; both are operator fingerprints that have leaked
+ * privacy-sensitive context in past audits. We normalise to a clean,
+ * human-readable string before responding. Callers still get the
+ * underlying agent message for debugging — just without the chain
+ * payload.
+ */
+function sanitizeRevertMessage(raw: string): string {
+  return raw
+    .replace(/data="0x[0-9a-fA-F]+"/g, 'data="<redacted>"')
+    .replace(/unknown custom error[^.\n]*\.?/gi, "request rejected by chain")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * CLI-7/9 helper: classify a thrown error as a "client mistake" (4xx)
+ * vs an "infrastructure failure" (5xx). The vocabulary is conservative
+ * — only well-known not-found / invalid-input / unreachable-peer
+ * patterns map to 4xx; everything else stays 5xx so a real internal
+ * problem still surfaces via the top-level catch.
+ */
+function classifyClientError(
+  msg: string,
+):
+  | { status: 404; sanitized: string }
+  | { status: 400; sanitized: string }
+  | null {
+  const sanitized = sanitizeRevertMessage(msg);
+  if (
+    /\b(not found|does not exist|no such|unknown (policy|paranet|context.?graph|peer|verified.?memory)|peer is not connected|cannot resolve|no addresses)\b/i.test(
+      msg,
+    )
+  ) {
+    return { status: 404, sanitized };
+  }
+  if (
+    /\b(invalid (peer|peerId|multihash|base|batchId|verifiedMemoryId|contextGraphId|policyUri|paranetId)|aborted|timed? ?out|timeout|unable to dial|could not (dial|parse)|parse (peer|peerId)|peer (id|ID) (is not valid|invalid)|malformed|bad request|incorrect length)\b/i.test(
+      msg,
+    )
+  ) {
+    return { status: 400, sanitized };
+  }
+  // multiformats / @multiformats/multibase throws "Non-base58btc
+  // character" / "Non-base32 character" / "Unknown base" when handed
+  // a malformed peer-id / multihash / CID. These are unambiguous
+  // client-side input errors — surfacing them as 500 misleads
+  // operators into thinking the daemon itself is broken.
+  if (/Non-base[0-9]+(btc|hex|z)? character|Unknown base|expected (base|prefix|multibase)/i.test(msg)) {
+    return { status: 400, sanitized };
+  }
+  // Last-resort heuristic: libp2p / multiformats throws errors with
+  // codes like ERR_INVALID_PEER_ID / ERR_INVALID_MULTIHASH that don't
+  // include human-readable English. Match the canonical ERR_INVALID_*
+  // shape so a fresh dependency-version upgrade doesn't silently
+  // start returning 500 on what's plainly a malformed-input 400.
+  if (/ERR_INVALID_(PEER|MULTIHASH|MULTIADDR|CID|BASE)/.test(msg)) {
+    return { status: 400, sanitized };
+  }
+  return null;
+}
+
 function jsonResponse(
   res: ServerResponse,
   status: number,
@@ -8123,6 +8250,20 @@ export function shouldBypassRateLimitForLoopbackTraffic(ip: string, pathname: st
 function isValidContextGraphId(id: string): boolean {
   if (!id || typeof id !== "string") return false;
   if (id.length > 256) return false;
+  // CLI-16 (BUGS_FOUND.md dup #87): reject path-traversal patterns
+  // explicitly. The character whitelist below allows `.` and `/`
+  // (because URNs / DIDs / URLs legitimately use them), so a naive
+  // identifier like `../etc/passwd` or `legit-cg/../../other-cg`
+  // slips past the regex and gets handed to file-system / on-chain
+  // code that has no business seeing parent-directory segments.
+  // Tokenise on `/` and refuse anything that resolves to a
+  // parent-directory or hidden-traversal segment, then refuse any
+  // raw `..` substring (catches `..foo` style obfuscations even
+  // though the segment check would already block them).
+  if (id.includes("..")) return false;
+  for (const seg of id.split("/")) {
+    if (seg === "." || seg === "..") return false;
+  }
   // Allow URNs, DIDs, simple slug-like identifiers, and URIs
   return /^[\w:/.@\-]+$/.test(id);
 }

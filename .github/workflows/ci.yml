@@ -164,6 +164,22 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # ST-1 (BUGS_FOUND.md packages/storage): the BlazegraphStore parity
+    # gate in adapter-parity-extra.test.ts intentionally fails red when
+    # `BLAZEGRAPH_URL` is missing so a green pass cannot lie about
+    # parity coverage. We boot a real `lyrasis/blazegraph` service
+    # container (NanoSparqlServer on :9999) so the parity test
+    # exercises both adapters against actual engines instead of the
+    # canned node:http stub that ST-1 documents as misleading.
+    services:
+      blazegraph:
+        image: lyrasis/blazegraph:2.1.5
+        ports:
+          # The image declares EXPOSE 9999 but actually starts the
+          # NanoSparqlServer on Jetty's :8080 (verified via
+          # `netstat` inside the container). Map host:9999 -> container:8080
+          # so the rest of this job can keep referring to localhost:9999.
+          - 9999:8080
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -180,9 +196,32 @@ jobs:
       - name: Restore build outputs
         run: tar -xzf /tmp/build-outputs.tgz
 
+      - name: Wait for Blazegraph SPARQL endpoint
+        # NanoSparqlServer needs ~5-15s on a cold start. Poll the
+        # default `kb` namespace's SPARQL endpoint with `ASK {}` for
+        # up to 60s. We use `continue-on-error: true` so a failed
+        # boot does not turn the whole shard red — instead the
+        # storage suite below will run, hit the original ST-1 sentinel,
+        # and surface the missing-engine error in the failure log
+        # exactly like before. That preserves the "no false positives"
+        # contract: silently passing without a real engine is impossible.
+        run: |
+          set -e
+          for i in $(seq 1 30); do
+            if curl -sf "http://localhost:9999/bigdata/namespace/kb/sparql?query=ASK%20%7B%7D" >/dev/null 2>&1; then
+              echo "blazegraph ready after ${i}s"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::warning::blazegraph never became ready within 60s; ST-1 parity test will report"
+        continue-on-error: true
+
       - name: "Core (442 tests)"
         run: pnpm --filter @origintrail-official/dkg-core test
       - name: "Storage (78 tests)"
+        env:
+          BLAZEGRAPH_URL: http://localhost:9999/bigdata/namespace/kb/sparql
         run: pnpm --filter @origintrail-official/dkg-storage test
       - name: "Chain unit (46 tests)"
         run: pnpm --filter @origintrail-official/dkg-chain test

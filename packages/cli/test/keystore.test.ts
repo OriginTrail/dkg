@@ -8,7 +8,15 @@ import {
 } from '../src/keystore.js';
 
 beforeAll(() => {
-  _setScryptN(2 ** 14);
+  // Production scrypt N for the keystore is 2^18, but that's ~128 MB
+  // per derivation which OOMs constrained CI workers running 4 vitest
+  // shards in parallel. Use 2^15 — the *minimum production floor*
+  // enforced by `decryptKeystore` (see CLI-1 in
+  // .test-audit/BUGS_FOUND.md). This keeps the test fast while still
+  // exercising a parameter set that the production-hardened loader
+  // accepts (a previous value of 2^14 was below the floor and would
+  // now correctly be refused as a weak keystore).
+  _setScryptN(2 ** 15);
 });
 
 const TEST_KEY = 'aabbccdd11223344aabbccdd11223344aabbccdd11223344aabbccdd11223344';

@@ -891,9 +891,18 @@ describe('verifyUnmergeInvariants', () => {
 describe('openclaw.plugin.json manifest', () => {
   it('declares kind: "memory" so the adapter is eligible for memory-slot election', () => {
     const manifestPath = join(__dirname, '..', 'openclaw.plugin.json');
+    const packagePath = join(__dirname, '..', 'package.json');
     const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8'));
+    const pkg = JSON.parse(readFileSync(packagePath, 'utf-8'));
     expect(manifest.kind).toBe('memory');
-    expect(manifest.id).toBe('adapter-openclaw');
+    // K-9 (BUGS_FOUND.md): the manifest `id` MUST match the published
+    // npm `name` so plugin discovery / OpenClaw slot resolution can
+    // identify the package by either field interchangeably. The
+    // historical short `'adapter-openclaw'` id silently shadowed the
+    // scoped npm name and broke discovery whenever both fields were
+    // checked. The id is now the canonical scoped npm name.
+    expect(manifest.id).toBe(pkg.name);
+    expect(manifest.id).toBe('@origintrail-official/dkg-adapter-openclaw');
   });
 });
 

@@ -91,10 +91,18 @@ describe('CLI-1 — scrypt KDF parameter floor (PROD-BUG: not enforced)', () => 
     // encrypted with.
     expect(weakKs.crypto.kdfparams.n).toBe(WEAK_N);
 
-    // Sanity: the "strong" keystore is rejected if we lie about its N
-    // (tampered kdfparams → wrong key → GCM auth failure).
+    // Sanity: `decryptKeystore` actually reads `kdfparams.n` when deriving
+    // (regression guard against the historical bug where the loader
+    // ignored the file's advertised cost factor and always used the
+    // module-global `SCRYPT_N`). To prove the param is honoured without
+    // tripping the brand-new "weak keystore" gate, tamper with a value
+    // that's STILL above the production floor (2^15) but different from
+    // what the keystore was actually encrypted with — different N →
+    // different derived key → GCM auth failure → "Decryption failed".
+    const STRONG_BUT_DIFFERENT_N = 2 ** 16;
+    expect(STRONG_BUT_DIFFERENT_N).toBeGreaterThan(SAFE_N);
     await expect(
-      decryptKeystore(withKdfParams(ks, { n: WEAK_N }), PASSPHRASE),
+      decryptKeystore(withKdfParams(ks, { n: STRONG_BUT_DIFFERENT_N }), PASSPHRASE),
     ).rejects.toThrow(/Decryption failed/);
 
     // PROD-BUG: the below call SHOULD throw "KDF parameters below minimum"
