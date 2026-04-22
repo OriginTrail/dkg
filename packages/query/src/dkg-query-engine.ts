@@ -532,6 +532,73 @@ function stripSparqlLineComments(src: string): string {
   return out;
 }
 
+/**
+ * Split a SPARQL WHERE body on **top-level** triple terminators, i.e.
+ * dots that live outside quoted literals and outside IRI angle
+ * brackets. PR #229 bot review round 8 (dkg-query-engine.ts:576): the
+ * previous `/\.(?=\s|$)/` regex broke on literal dots in messages like
+ * `?s <p> "hello. world"`, silently fragmenting the statement so the
+ * subject scanner returned garbage and `_minTrust` fail-closed to `[]`
+ * for every text/chat query. This tokenizer walks the body character
+ * by character, tracks `<…>` and `"…"` / `'…'` scopes (with `\`-escape
+ * handling), and only treats `.` as a separator when it sits at depth
+ * zero and is followed by whitespace or end-of-input. Comments have
+ * already been stripped by {@link stripSparqlLineComments} before we
+ * get here, so `#` is treated as an ordinary character.
+ *
+ * Parentheses and braces would also open top-level scopes in general
+ * SPARQL, but `injectMinTrustFilter` refuses to rewrite any WHERE that
+ * contains `{`, `}`, `FILTER EXISTS`, subselects, or property paths
+ * with grouping (the `/\{|\}/.test(inner)` + token guard above), so
+ * this helper only has to handle the three grammar contexts that can
+ * legally carry a bare `.` in the shapes we rewrite: IRI, string
+ * literal, and top-level statement terminator.
+ */
+function splitTopLevelTripleStatements(body: string): string[] {
+  const out: string[] = [];
+  let start = 0;
+  let i = 0;
+  const n = body.length;
+  while (i < n) {
+    const ch = body[i];
+    if (ch === '<') {
+      const end = body.indexOf('>', i + 1);
+      if (end === -1) { i = n; break; }
+      i = end + 1;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      const quote = ch;
+      let j = i + 1;
+      while (j < n) {
+        if (body[j] === '\\' && j + 1 < n) { j += 2; continue; }
+        if (body[j] === quote) { j++; break; }
+        j++;
+      }
+      i = j;
+      continue;
+    }
+    if (ch === '.') {
+      // Terminator only when followed by whitespace OR end-of-input.
+      // This keeps decimals and prefixed-name dots (rdf:type.foo —
+      // rejected upstream anyway) from accidentally splitting, and
+      // matches the original regex semantics on the top-level cases.
+      const next = i + 1 < n ? body[i + 1] : '';
+      if (next === '' || /\s/.test(next)) {
+        const piece = body.slice(start, i).trim();
+        if (piece) out.push(piece);
+        start = i + 1;
+        i += 1;
+        continue;
+      }
+    }
+    i++;
+  }
+  const tail = body.slice(start).trim();
+  if (tail) out.push(tail);
+  return out;
+}
+
 function injectMinTrustFilter(sparql: string, minTrust: number): string | null {
   const whereIdx = sparql.search(/WHERE\s*\{/i);
   if (whereIdx === -1) return null;
@@ -572,8 +639,13 @@ function injectMinTrustFilter(sparql: string, minTrust: number): string | null {
   if (trimmedInner.length === 0) return null;
 
   // Split on the top-level `.` separator to walk each triple pattern.
-  // Rejoin so the separator is preserved for the emitted query.
-  const statements = trimmedInner.split(/\.(?=\s|$)/).map(s => s.trim()).filter(Boolean);
+  // PR #229 bot review round 8 (dkg-query-engine.ts:576): use a
+  // quote/IRI-aware tokenizer instead of a naive regex so `?s <p>
+  // "hello. world"` isn't fragmented into broken statements that the
+  // subject scanner then refuses, fail-closing `_minTrust` to `[]`
+  // for every text/chat query. Rejoined dots are preserved for the
+  // emitted query by the clause builder below.
+  const statements = splitTopLevelTripleStatements(trimmedInner);
 
   const subjectVars = new Set<string>();
   const subjectIris = new Set<string>();

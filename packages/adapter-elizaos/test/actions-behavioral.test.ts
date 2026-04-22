@@ -320,17 +320,24 @@ describe('persistChatTurnImpl — assistant-reply mode is append-only (no user-t
   });
 
   // ---------------------------------------------------------------------
-  // Bot review (PR #229 follow-up, actions.ts:517): the headless-assistant
-  // path (mode=assistant-reply with NO userMessageId) used to emit only
-  // the assistant message + hasAssistantMessage link, leaving the turnUri
-  // without a `rdf:type dkg:ChatTurn` or `dkg:hasUserMessage` edge —
-  // ChatMemoryManager queries filtered on `?turn a dkg:ChatTurn` then
-  // dropped the reply entirely. The fix emits the full turn envelope
-  // (minus hasUserMessage, because there is no user message) so readers
-  // find the reply. Pin both the presence of the ChatTurn envelope and
-  // the deliberate absence of a spurious hasUserMessage edge.
+  // Bot review (PR #229 round 8, actions.ts:746): the original round-7
+  // headless-assistant fix emitted a dkg:ChatTurn envelope WITHOUT a
+  // `dkg:hasUserMessage` edge. That shape is technically valid RDF but
+  // the chat reader contract in `packages/node-ui/src/chat-memory.ts`
+  // resolves a turn via a single
+  //   SELECT ?user ?assistant WHERE {
+  //     ?turn dkg:hasUserMessage ?user . ?turn dkg:hasAssistantMessage ?a .
+  //   }
+  // — so a turn that only has the assistant side is still reported as
+  // `turn_not_found`. Round 8 emits a stub user Message so BOTH edges
+  // exist; the stub carries `dkg:headlessUserMessage "true"` + empty
+  // text + a `dkg:agent:system` author so UIs don't render a blank
+  // user bubble. The turn itself carries `dkg:headlessTurn "true"` so
+  // consumers that care about the distinction can filter on it. We
+  // also strip the misleading `dkg:replyTo` edge from the assistant
+  // Message (no real user message to reply to).
   // ---------------------------------------------------------------------
-  it('HEADLESS assistant-reply (no userMessageId) emits the full dkg:ChatTurn envelope', async () => {
+  it('HEADLESS assistant-reply emits both hasUserMessage + hasAssistantMessage edges (reader contract compliance)', async () => {
     const { agent, publishes } = makeCapturingAgent();
     await persistChatTurnImpl(
       agent, makeRuntime(),
@@ -340,10 +347,15 @@ describe('persistChatTurnImpl — assistant-reply mode is append-only (no user-t
     );
     const quads = publishes[0].quads;
     const turnUri = 'urn:dkg:chat:turn:r:asst-only-mem';
+    const userMsgUri = 'urn:dkg:chat:msg:user:r:asst-only-mem';
     const assistantMsgUri = 'urn:dkg:chat:msg:agent:r:asst-only-mem';
 
+    // Full envelope with BOTH edges — what the node-ui reader wants.
     expect(quads).toContainEqual(expect.objectContaining({
       subject: turnUri, predicate: RDF_TYPE, object: `${DKG_ONT}ChatTurn`,
+    }));
+    expect(quads).toContainEqual(expect.objectContaining({
+      subject: turnUri, predicate: `${DKG_ONT}hasUserMessage`, object: userMsgUri,
     }));
     expect(quads).toContainEqual(expect.objectContaining({
       subject: turnUri, predicate: `${DKG_ONT}hasAssistantMessage`, object: assistantMsgUri,
@@ -351,12 +363,33 @@ describe('persistChatTurnImpl — assistant-reply mode is append-only (no user-t
     expect(quads).toContainEqual(expect.objectContaining({
       subject: turnUri, predicate: `${DKG_ONT}turnId`,
     }));
-    // Critically: NO hasUserMessage edge (there is no user message).
-    expect(quads.some((q) => q.subject === turnUri && q.predicate === `${DKG_ONT}hasUserMessage`)).toBe(false);
-    // Assistant text is still emitted.
+    // Headless markers so downstream consumers can distinguish.
+    expect(quads).toContainEqual(expect.objectContaining({
+      subject: turnUri, predicate: `${DKG_ONT}headlessTurn`, object: '"true"',
+    }));
+    expect(quads).toContainEqual(expect.objectContaining({
+      subject: userMsgUri, predicate: `${DKG_ONT}headlessUserMessage`, object: '"true"',
+    }));
+    // Stub user message: empty text + system author, NOT the regular
+    // CHAT_USER_ACTOR — so UIs don't render an empty user bubble.
+    expect(quads).toContainEqual(expect.objectContaining({
+      subject: userMsgUri, predicate: RDF_TYPE, object: `${SCHEMA}Message`,
+    }));
+    expect(quads).toContainEqual(expect.objectContaining({
+      subject: userMsgUri, predicate: `${SCHEMA}text`, object: '""',
+    }));
+    expect(quads).toContainEqual(expect.objectContaining({
+      subject: userMsgUri, predicate: `${SCHEMA}author`, object: `${DKG_ONT}agent:system`,
+    }));
+    // Assistant text is still emitted normally.
     expect(quads).toContainEqual(expect.objectContaining({
       subject: assistantMsgUri, predicate: `${SCHEMA}text`, object: '"unsolicited reply"',
     }));
+    // No misleading `replyTo` edge when the user side is a stub — there
+    // is no real user message to reply to.
+    expect(quads.some((q) =>
+      q.subject === assistantMsgUri && q.predicate === `${DKG_ONT}replyTo`,
+    )).toBe(false);
   });
 
   it('HEADLESS assistant-reply writes the same bytes on re-fire (idempotent: stable timestamp)', async () => {

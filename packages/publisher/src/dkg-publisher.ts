@@ -26,7 +26,7 @@ import {
   type KAMetadata,
 } from './metadata.js';
 import { ethers } from 'ethers';
-import { openSync, writeSync, fsyncSync, closeSync, mkdirSync } from 'node:fs';
+import { openSync, writeSync, fsyncSync, closeSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
 import { dirname } from 'node:path';
 
 export { RESERVED_SUBJECT_PREFIXES, findReservedSubjectPrefix, isReservedSubject } from './reserved-subjects.js';
@@ -38,6 +38,63 @@ export { RESERVED_SUBJECT_PREFIXES, findReservedSubjectPrefix, isReservedSubject
  * in that window leaves a recoverable record. Throws on I/O failure —
  * callers MUST NOT broadcast without a durable entry.
  */
+/**
+ * Read an NDJSON write-ahead log back into memory, skipping malformed
+ * lines so a partial write from the pre-fsync crash window can't
+ * poison the whole recovery pass. Returns entries in append order.
+ *
+ * PR #229 bot review round 8 (publisher.ts:1479): the round-6 WAL fix
+ * fsync'd entries to disk but never reloaded them on startup, so the
+ * pre-broadcast crash window was still unrecoverable — the in-memory
+ * `preBroadcastJournal` was wiped and nothing ever reconstructed it.
+ * This helper closes that hole: {@link DKGPublisher} now calls it
+ * during construction and seeds `preBroadcastJournal` from the file
+ * so the recovery routine (and any chain-event reconciliation) sees
+ * the surviving "we signed and were about to send" records.
+ */
+export function readWalEntriesSync(filePath: string): PreBroadcastJournalEntry[] {
+  if (!existsSync(filePath)) return [];
+  let raw: string;
+  try {
+    raw = readFileSync(filePath, 'utf-8');
+  } catch {
+    return [];
+  }
+  const out: PreBroadcastJournalEntry[] = [];
+  for (const line of raw.split('\n')) {
+    const trimmed = line.trim();
+    if (trimmed === '') continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+    if (!isValidJournalEntry(parsed)) continue;
+    out.push(parsed);
+  }
+  return out;
+}
+
+function isValidJournalEntry(value: unknown): value is PreBroadcastJournalEntry {
+  if (typeof value !== 'object' || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v.publishOperationId === 'string' &&
+    typeof v.contextGraphId === 'string' &&
+    typeof v.v10ContextGraphId === 'string' &&
+    typeof v.identityId === 'string' &&
+    typeof v.publisherAddress === 'string' &&
+    typeof v.merkleRoot === 'string' &&
+    typeof v.publishDigest === 'string' &&
+    typeof v.ackCount === 'number' &&
+    typeof v.kaCount === 'number' &&
+    typeof v.publicByteSize === 'string' &&
+    typeof v.tokenAmount === 'string' &&
+    typeof v.createdAt === 'number'
+  );
+}
+
 function appendWalEntrySync(filePath: string, entry: PreBroadcastJournalEntry): void {
   try {
     mkdirSync(dirname(filePath), { recursive: true });
@@ -332,6 +389,59 @@ export class DKGPublisher implements Publisher {
     this.sharedMemoryOwnedEntities = config.sharedMemoryOwnedEntities ?? new Map();
     this.knownBatchContextGraphs = config.knownBatchContextGraphs ?? new Map();
     this.writeLocks = config.writeLocks ?? new Map();
+
+    // PR #229 bot review round 8 (publisher.ts:1479): reload the
+    // fsync'd WAL entries into `preBroadcastJournal` at construction
+    // time so the recovery path actually HAS something to reconcile
+    // against the chain after a process restart. Without this the
+    // pre-broadcast crash window (signed tx, fsync'd intent, killed
+    // before `eth_sendRawTransaction` returns) was unrecoverable —
+    // the in-memory journal was empty and the surviving WAL file
+    // was never consulted. We cap at the same 1024 high-water mark
+    // the live journal uses so a long-lived WAL doesn't balloon
+    // memory; the oldest entries are dropped first (same tail-retain
+    // policy as the live path).
+    if (this.publishWalFilePath) {
+      try {
+        const recovered = readWalEntriesSync(this.publishWalFilePath);
+        if (recovered.length > 0) {
+          const retained = recovered.length > 1024
+            ? recovered.slice(recovered.length - 1024)
+            : recovered;
+          this.preBroadcastJournal.push(...retained);
+          this.log.info(
+            createOperationContext('DKGPublisher.init'),
+            `WAL recovery: loaded ${retained.length} pre-broadcast journal entries from ${this.publishWalFilePath} (oldest=${retained[0]?.publishOperationId}, newest=${retained[retained.length - 1]?.publishOperationId})`,
+          );
+        }
+      } catch (walErr) {
+        // Startup must not be blocked by WAL hydration: a corrupt
+        // file yields an empty journal which the chain poller will
+        // treat the same as "no surviving intent", i.e. the worst
+        // case degrades to the pre-r6 behaviour.
+        this.log.warn(
+          createOperationContext('DKGPublisher.init'),
+          `WAL recovery SKIPPED (${this.publishWalFilePath}): ${walErr instanceof Error ? walErr.message : String(walErr)}`,
+        );
+      }
+    }
+  }
+
+  /**
+   * Look up a surviving pre-broadcast WAL entry by the on-chain
+   * `merkleRoot` hex string — the same field the poller gets from
+   * `KnowledgeBatchCreated` / `KCCreated` events. Used by the chain
+   * adapter / publisher recovery to decide whether an observed
+   * on-chain batch was one this node was mid-flight when it crashed
+   * (PR #229 bot review round 8).
+   */
+  findWalEntryByMerkleRoot(merkleRootHex: string): PreBroadcastJournalEntry | undefined {
+    const needle = merkleRootHex.toLowerCase();
+    for (let i = this.preBroadcastJournal.length - 1; i >= 0; i--) {
+      const entry = this.preBroadcastJournal[i];
+      if (entry.merkleRoot.toLowerCase() === needle) return entry;
+    }
+    return undefined;
   }
 
   private async withWriteLocks<T>(keys: string[], fn: () => Promise<T>): Promise<T> {

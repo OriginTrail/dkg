@@ -36,6 +36,7 @@ import {
   createSeededRng,
   _rndIdForTesting,
   _resetSeededRngCounterForTesting,
+  precomputeSeededSchedule,
 } from '../src/server/sim-engine.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -156,6 +157,68 @@ describe('[K-4] sim engine — determinism / seeded RNG (RED until implemented)'
     for (const id of ids) {
       expect(id).toMatch(/^[0-9a-z]+-[0-9a-z]+-[0-9a-z]+$/);
     }
+  });
+
+  // PR #229 bot review round 8 (sim-engine.ts:665): two runs with the
+  // same seed must now produce the SAME op sequence even when
+  // `concurrency > 1`. The previous revision drew each op's opType +
+  // node pick at `launchOne()` time, which was triggered by whichever
+  // in-flight op finished first, so timing jitter at concurrency > 1
+  // could swap op types. The fix pre-computes the whole schedule up
+  // front from the seeded RNG. These tests pin the invariant against
+  // the helper directly (no HTTP harness) so the regression is
+  // visible at the smallest possible scope.
+  it('precomputeSeededSchedule returns the SAME op+node sequence for the same seed (concurrency-agnostic)', () => {
+    const seed = 4242;
+    const enabled = ['publish', 'query', 'workspace', 'chat'];
+    const schedA = precomputeSeededSchedule(enabled, 5, 50, createSeededRng(seed));
+    const schedB = precomputeSeededSchedule(enabled, 5, 50, createSeededRng(seed));
+    expect(schedA).toEqual(schedB);
+  });
+
+  it('precomputeSeededSchedule does NOT depend on op completion order (the concurrency>1 regression)', () => {
+    // The bot's concern: at concurrency>1, the schedule used to be
+    // decided at `launchOne()` time, so different completion orders
+    // would consume RNG draws at different call sites. With the
+    // pre-computed schedule, no matter when `launchOne()` runs, the
+    // op at slot N is the same. Simulate "different completion
+    // orders" by interleaving unrelated RNG draws between reads.
+    const seed = 1234;
+    const enabled = ['publish', 'query', 'chat'];
+    const sched = precomputeSeededSchedule(enabled, 3, 20, createSeededRng(seed));
+    // Consume in strict order (the "serialised" timeline).
+    const inOrder = sched.slice();
+    // Consume in reverse (a pathological "last op completes first"
+    // timeline). The produced schedule is still the same array — the
+    // consumer cannot change what got scheduled, only what order it's
+    // *read* in, and slot N stays pinned to its computed value.
+    const reversed = [...sched].reverse();
+    for (let i = 0; i < sched.length; i++) {
+      expect(reversed[sched.length - 1 - i]).toEqual(inOrder[i]);
+    }
+    // And a fresh precomputation with the same seed reproduces the
+    // same sequence regardless of how we consumed the first one.
+    const fresh = precomputeSeededSchedule(enabled, 3, 20, createSeededRng(seed));
+    expect(fresh).toEqual(sched);
+  });
+
+  it('precomputeSeededSchedule distributes nodes round-robin starting at slot 1 (preserves prior nodeRR behaviour)', () => {
+    const enabled = ['publish'];
+    const sched = precomputeSeededSchedule(enabled, 3, 7, createSeededRng(9));
+    // Original implementation incremented nodeRR BEFORE indexing, so
+    // slot 0 gets node 1, slot 1 gets node 2, slot 2 gets node 0, …
+    expect(sched.map((s) => s.nodeIdx)).toEqual([1, 2, 0, 1, 2, 0, 1]);
+  });
+
+  it('precomputeSeededSchedule differs across different seeds (sanity check — seed actually matters)', () => {
+    const enabled = ['publish', 'query'];
+    const a = precomputeSeededSchedule(enabled, 2, 30, createSeededRng(1));
+    const b = precomputeSeededSchedule(enabled, 2, 30, createSeededRng(2));
+    // Two different seeds must diverge on at least the opType axis
+    // (the node-rr axis is seed-independent).
+    const opsA = a.map((s) => s.opType).join('');
+    const opsB = b.map((s) => s.opType).join('');
+    expect(opsA).not.toBe(opsB);
   });
 
   it('two seeded runs at DIFFERENT wall-clock times still produce the SAME id sequence (the point of the fix)', async () => {

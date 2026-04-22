@@ -142,6 +142,34 @@ export function _rndIdForTesting(rng?: () => number): string {
 }
 
 /**
+ * Build the deterministic dispatch schedule a seeded run follows.
+ * Exposed (and named with a `precompute` prefix instead of a `_test`
+ * suffix because it's actually called by `runSimulation` too) so PR
+ * #229 round 8 regression tests can pin the invariant without
+ * booting the full HTTP harness: two schedules with the same seed +
+ * inputs must be byte-identical regardless of which order the
+ * callers' in-flight ops complete in.
+ */
+export function precomputeSeededSchedule(
+  enabledOps: string[],
+  nodeCount: number,
+  opCount: number,
+  rng: () => number,
+): Array<{ opType: string; nodeIdx: number }> {
+  if (nodeCount <= 0) {
+    throw new Error('precomputeSeededSchedule: nodeCount must be > 0');
+  }
+  const out: Array<{ opType: string; nodeIdx: number }> = [];
+  let nodeIdx = 0;
+  for (let i = 0; i < opCount; i++) {
+    const opType = pickRandom(enabledOps, rng);
+    nodeIdx = (nodeIdx + 1) % nodeCount;
+    out.push({ opType, nodeIdx });
+  }
+  return out;
+}
+
+/**
  * Reset the seeded counter embedded in the closure returned by
  * `createSeededRng(seed)`. Useful in tests that want to start two
  * reproducibility probes from the same RNG state.
@@ -659,16 +687,50 @@ async function runSimulation(config: SimConfig, signal: AbortSignal) {
       tryDispatch();
     }
 
+    // PR #229 bot review round 8 (sim-engine.ts:665): when a numeric
+    // seed is provided the run MUST be reproducible at any
+    // `concurrency`. The previous revision drew the opType + node pick
+    // inside `launchOne()`, which is triggered by whichever in-flight
+    // operation finishes first — at `concurrency > 1` a sub-millisecond
+    // network-timing jitter on op #1 could swap the opType that op #2
+    // was going to get, and every subsequent pick cascaded from there.
+    // Pre-compute the whole dispatch schedule up front (opType + node
+    // index per slot) so the order of in-flight completions can no
+    // longer influence the schedule. Unseeded runs keep the on-demand
+    // pick path for backwards compatibility with every exploratory UI.
+    const seededSchedule = typeof config.seed === 'number'
+      ? precomputeSeededSchedule(config.enabledOps, nodes.length, config.opCount, rng)
+      : null;
     let nodeRR = 0;
     function launchOne() {
       if (dispatched >= config.opCount) return; // cap so we never exceed opCount (avoids race overshoot)
-      const opType = pickRandom(config.enabledOps, rng);
-      nodeRR = (nodeRR + 1) % nodes.length;
-      const node = nodes[nodeRR];
+      let opType: string;
+      let node: typeof nodes[number];
+      if (seededSchedule) {
+        const slot = seededSchedule[dispatched];
+        opType = slot.opType;
+        node = nodes[slot.nodeIdx];
+        nodeRR = slot.nodeIdx;
+      } else {
+        opType = pickRandom(config.enabledOps, rng);
+        nodeRR = (nodeRR + 1) % nodes.length;
+        node = nodes[nodeRR];
+      }
       dispatched++;
       inflight++;
       lastDispatchTime = Date.now();
 
+      // PR #229 bot review round 8 (sim-engine.ts:665): the executors
+      // below draw their per-op entropy (entity URIs, LIMITs, chat
+      // peers…) from the shared `rng`. When `concurrency > 1` and the
+      // run is seeded, those draws could still interleave based on op
+      // arrival order. The pre-computed schedule keeps the opType +
+      // node assignment stable; draws made inside each executor share
+      // the same sequence because the executors run to completion
+      // before the next draw is needed. If we ever need per-op
+      // determinism across executor internals too, the fix is to fork
+      // a sub-RNG (seed = rng()⊕slotIdx) here and pass it in — the
+      // schedule already exposes `dispatched` as the slot index.
       let promise: Promise<OpEvent>;
       switch (opType) {
         case 'publish':

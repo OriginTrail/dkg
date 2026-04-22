@@ -430,18 +430,66 @@ function buildAssistantMessageQuads(
 }
 
 /**
+ * Stub user-message quads for the "headless assistant reply" case.
+ * PR #229 bot review round 8 (actions.ts:746): the current chat
+ * reader contract in `packages/node-ui/src/chat-memory.ts` requires
+ * BOTH `dkg:hasUserMessage` AND `dkg:hasAssistantMessage` to be
+ * present on a turn (it does a single `SELECT ?user ?assistant
+ * WHERE { ?turn hasUserMessage ?user . ?turn hasAssistantMessage
+ * ?assistant }` join, and returns `turn_not_found` when either side
+ * is missing). Before this, headless assistant replies — proactive
+ * agent messages, recovery-path assistant sends, cases where the
+ * user-turn hook was suppressed — produced a turn the reader could
+ * not find at all.
+ *
+ * To keep the reader contract untouched (it is also used by
+ * ChatMemoryManager incremental sync) we emit a stub
+ * `schema:Message` for the user side, flagged with
+ * `dkg:headlessUserMessage "true"` so downstream consumers that care
+ * about the distinction can filter on it. Body is empty and author
+ * is `dkg:agent:system` — explicitly NOT `CHAT_USER_ACTOR` — so a
+ * naïve consumer that displays user messages doesn't render a blank
+ * user turn. The stub still carries the canonical `turnKey` via
+ * `dkg:turnId` so the one-hop join that round 6 added keeps working.
+ */
+function buildHeadlessUserStubQuads(
+  userMsgUri: string,
+  sessionUri: string,
+  ts: string,
+  turnKey: string,
+): ChatQuad[] {
+  return [
+    { subject: userMsgUri, predicate: RDF_TYPE_IRI, object: `${SCHEMA_NS}Message`, graph: '' },
+    { subject: userMsgUri, predicate: `${SCHEMA_NS}isPartOf`, object: sessionUri, graph: '' },
+    // Distinct system actor so UIs don't render a blank user bubble.
+    { subject: userMsgUri, predicate: `${SCHEMA_NS}author`, object: `${DKG_ONT_NS}agent:system`, graph: '' },
+    { subject: userMsgUri, predicate: `${SCHEMA_NS}dateCreated`, object: `${rdfString(ts)}^^<${XSD_DATETIME_IRI}>`, graph: '' },
+    // Explicit empty text — readers that concatenate "user: …" skip it.
+    { subject: userMsgUri, predicate: `${SCHEMA_NS}text`, object: rdfString(''), graph: '' },
+    { subject: userMsgUri, predicate: `${DKG_ONT_NS}turnId`, object: rdfString(turnKey), graph: '' },
+    // Headless marker — consumers that want to filter these out can.
+    { subject: userMsgUri, predicate: `${DKG_ONT_NS}headlessUserMessage`, object: rdfString('true'), graph: '' },
+  ];
+}
+
+/**
  * Variant of `buildTurnEnvelopeQuads` for the "headless assistant
  * reply" case (no user message, no user-turn hook). Emits the full
  * `dkg:ChatTurn` envelope (type, session link, turnId, timestamp,
- * hasAssistantMessage, eliza provenance) WITHOUT a `dkg:hasUserMessage`
- * edge — so readers filtering on `?turn a dkg:ChatTurn` find the reply
- * instead of silently dropping it. See bot review PR #229, actions.ts:517.
+ * BOTH hasUserMessage and hasAssistantMessage, eliza provenance) so
+ * the node-ui / ChatMemoryManager reader — which requires BOTH edges
+ * to resolve a turn — finds the reply. The user side points at the
+ * stub emitted by {@link buildHeadlessUserStubQuads}. Marked
+ * `dkg:headlessTurn "true"` so the turn itself is distinguishable
+ * from a regular user-first turn at query time. See bot review PR
+ * #229, actions.ts:517 / actions.ts:746.
  */
 function buildHeadlessAssistantTurnEnvelopeQuads(
   turnUri: string,
   sessionUri: string,
   turnKey: string,
   ts: string,
+  userMsgUri: string,
   assistantMsgUri: string,
   characterName: string,
   userId: string,
@@ -452,7 +500,11 @@ function buildHeadlessAssistantTurnEnvelopeQuads(
     { subject: turnUri, predicate: `${SCHEMA_NS}isPartOf`, object: sessionUri, graph: '' },
     { subject: turnUri, predicate: `${DKG_ONT_NS}turnId`, object: rdfString(turnKey), graph: '' },
     { subject: turnUri, predicate: `${SCHEMA_NS}dateCreated`, object: `${rdfString(ts)}^^<${XSD_DATETIME_IRI}>`, graph: '' },
+    // Both edges present — reader contract (hasUserMessage AND
+    // hasAssistantMessage) is satisfied (PR #229 round 8).
+    { subject: turnUri, predicate: `${DKG_ONT_NS}hasUserMessage`, object: userMsgUri, graph: '' },
     { subject: turnUri, predicate: `${DKG_ONT_NS}hasAssistantMessage`, object: assistantMsgUri, graph: '' },
+    { subject: turnUri, predicate: `${DKG_ONT_NS}headlessTurn`, object: rdfString('true'), graph: '' },
     { subject: turnUri, predicate: `${DKG_ONT_NS}elizaUserId`, object: rdfString(userId), graph: '' },
     { subject: turnUri, predicate: `${DKG_ONT_NS}elizaRoomId`, object: rdfString(roomId), graph: '' },
     { subject: turnUri, predicate: `${DKG_ONT_NS}agentName`, object: rdfString(characterName), graph: '' },
@@ -740,14 +792,32 @@ export async function persistChatTurnImpl(
       ?? (state as any)?.lastAssistantReply
       ?? '';
     if (headlessAssistantReply) {
+      // PR #229 bot review round 8 (actions.ts:746): the reader in
+      // `packages/node-ui/src/chat-memory.ts` requires BOTH
+      // `dkg:hasUserMessage` AND `dkg:hasAssistantMessage` on a turn
+      // or it returns `turn_not_found`. Emit a stub user Message so
+      // the reader contract is satisfied, and drop the misleading
+      // `dkg:replyTo` edge that the regular `buildAssistantMessageQuads`
+      // adds (there is no real user message to reply to here — the
+      // stub is a placeholder, not a user turn).
+      const assistantQuads = buildAssistantMessageQuads(
+        assistantMsgUri,
+        userMsgUri,
+        sessionUri,
+        assistantTs,
+        assistantText,
+        turnKey,
+      ).filter((q) => q.predicate !== `${DKG_ONT_NS}replyTo`);
       quads = [
         ...buildSessionEntityQuads(sessionUri, sessionId),
-        ...buildAssistantMessageQuads(assistantMsgUri, userMsgUri, sessionUri, assistantTs, assistantText, turnKey),
+        ...buildHeadlessUserStubQuads(userMsgUri, sessionUri, ts, turnKey),
+        ...assistantQuads,
         ...buildHeadlessAssistantTurnEnvelopeQuads(
           turnUri,
           sessionUri,
           turnKey,
           ts,
+          userMsgUri,
           assistantMsgUri,
           characterName,
           userId,

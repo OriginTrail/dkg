@@ -201,6 +201,48 @@ describe('[Q-1] DKGQueryEngine._minTrust is unused — PROD-BUG', () => {
     expect(result.bindings.map((b) => b['n'])).toEqual(['"ok"']);
   });
 
+  // PR #229 bot review round 8 (dkg-query-engine.ts:576): the naive
+  // `/\.(?=\s|$)/` split fragmented any query whose literal contained
+  // a sentence-terminating dot ("hello. world", an email address
+  // ending a chat message, a float "3.14 " — anything where `.` was
+  // followed by whitespace inside the string). The rewrite would
+  // then bail out and `_minTrust` would fail-closed to `[]` for
+  // every text/chat query. These two cases pin the fix.
+  it('honors _minTrust when a triple-object literal contains a dot followed by whitespace ("hello. world")', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const consensus = contextGraphVerifiedMemoryUri(CG, 'consensus-verified');
+    await store.insert([
+      quad('urn:msg', 'http://schema.org/text', '"hello. world"', consensus),
+      quad('urn:msg', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.ConsensusVerified}"`, consensus),
+    ]);
+    const result = await engine.query(
+      'SELECT ?t WHERE { <urn:msg> <http://schema.org/text> ?t }',
+      { contextGraphId: CG, view: 'verified-memory', _minTrust: TrustLevel.ConsensusVerified },
+    );
+    expect(result.bindings.map((b) => b['t'])).toEqual(['"hello. world"']);
+  });
+
+  it('honors _minTrust on a multi-triple BGP where the FIRST literal contains a sentence-terminator dot', async () => {
+    // If the fragmenter splits on the inner-literal dot it will treat
+    // "world" . ?s <p> ... as the start of the next statement — the
+    // subject scanner then refuses the shape and the query returns
+    // [] instead of the join result.
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const consensus = contextGraphVerifiedMemoryUri(CG, 'consensus-verified');
+    await store.insert([
+      quad('urn:m', 'http://schema.org/text', '"ack. ok"', consensus),
+      quad('urn:m', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.ConsensusVerified}"`, consensus),
+      quad('urn:m', 'http://schema.org/author', '"alice"', consensus),
+    ]);
+    const result = await engine.query(
+      'SELECT ?a WHERE { <urn:m> <http://schema.org/text> "ack. ok" . <urn:m> <http://schema.org/author> ?a }',
+      { contextGraphId: CG, view: 'verified-memory', _minTrust: TrustLevel.ConsensusVerified },
+    );
+    expect(result.bindings.map((b) => b['a'])).toEqual(['"alice"']);
+  });
+
   it('honors _minTrust on MIXED concrete + variable subjects in a single BGP', async () => {
     const store = new OxigraphStore();
     const engine = new DKGQueryEngine(store);
