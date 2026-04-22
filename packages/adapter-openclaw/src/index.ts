@@ -4,12 +4,16 @@ export { DkgChannelPlugin, CHANNEL_NAME } from './DkgChannelPlugin.js';
 export {
   mergeOpenClawConfig,
   openclawConfigPath,
+  removeCanonicalNodeSkill,
+  resolveWorkspaceDirFromConfig,
   runSetup,
   unmergeOpenClawConfig,
   verifyMemorySlotInvariants,
+  verifySkillRemoved,
   verifyUnmergeInvariants,
   type AdapterEntryConfig,
   type SetupOptions,
+  type UnmergeResult,
 } from './setup.js';
 // Codex Bug B24: the `DkgMemoryPlugin` class no longer exposes the legacy
 // `OpenClawMemorySearchManager` surface (see the breaking-change JSDoc on
