@@ -479,14 +479,26 @@ ${ttl || '# (missing — re-run import-ontology.mjs)'}
       }
 
       // Stable assertion name keyed off the turn so re-annotations of the
-      // same turn replace cleanly. For pending annotations, scope by
-      // session so multiple in-flight pendings coexist cleanly.
+      // same turn replace cleanly (deterministic — NO random suffix). For
+      // pending annotations, scope by session so multiple in-flight
+      // pendings coexist without colliding.
+      //
+      // `/api/assertion/.../write` is append-only, so we MUST discard the
+      // prior assertion body before rewriting. Without this, retrying the
+      // same annotate call (common after a network blip or a model
+      // correction) would double-add every `chat:*` edge and re-mint every
+      // sugared entity in shared memory.
       const turnSuffix = turnUri.replace(/[^A-Za-z0-9]+/g, '-').slice(-40);
       const assertion = deferredForSession
         ? `agent-annotate-pending-${turnSuffix}`
-        : `agent-annotate-${turnSuffix}-${rand(4)}`;
+        : `agent-annotate-${turnSuffix}`;
       try {
         await client.ensureSubGraph(pid, 'chat');
+        await client.discardAssertion({
+          contextGraphId: pid,
+          assertionName: assertion,
+          subGraphName: 'chat',
+        });
         await client.writeAssertion({
           contextGraphId: pid,
           assertionName: assertion,

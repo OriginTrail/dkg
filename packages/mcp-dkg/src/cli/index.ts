@@ -203,11 +203,38 @@ async function cmdJoin(args: string[]): Promise<number> {
   // ── 1. Sanity-check the daemon ──
   console.log(`[join] checking local daemon at ${opts.daemonUrl}...`);
   const config = loadConfig(opts.workspace);
-  // Override config with explicit args.
+  // Resolve the bearer token BEFORE the first daemon call so fresh
+  // machines don't 401 on the very first `listProjects()`. Priority:
+  //
+  //   1. --token / DKG_TOKEN / DEVNET_TOKEN (explicit opts.token)
+  //   2. existing .dkg/config.yaml (config.token from loadConfig)
+  //   3. --token-file (explicit or default ~/.dkg/auth.token)
+  //
+  // Previously (3) was silently ignored here, so `dkg-mcp join` on a
+  // first-run machine with only a daemon-written auth.token file would
+  // send an empty Bearer, get 401 on /listProjects, and abort before
+  // the generated config.yaml could even be written. loadConfig already
+  // resolves `.dkg/config.yaml`'s tokenFile field, but that file doesn't
+  // exist yet the first time you run `join` — so we also read the CLI
+  // tokenFile ourselves.
+  let resolvedToken = opts.token ?? config.token ?? null;
+  if (!resolvedToken && opts.tokenFile) {
+    try {
+      const raw = fs.readFileSync(opts.tokenFile, 'utf-8');
+      const lines = raw.split(/\r?\n/).filter((l) => l && !l.startsWith('#'));
+      const candidate = lines.join('').trim();
+      if (candidate) resolvedToken = candidate;
+    } catch {
+      // tokenFile doesn't exist / isn't readable yet — fall through and
+      // let the daemon call 401 with a helpful error below. Don't fail
+      // hard here because the user may legitimately have set a literal
+      // --token or DKG_TOKEN that we already picked up.
+    }
+  }
   const effectiveConfig = {
     ...config,
     api: opts.daemonUrl,
-    token: opts.token ?? config.token,
+    token: resolvedToken ?? '',
     defaultProject: invite.contextGraphId,
   };
   const client = new DkgClient({ config: effectiveConfig });
@@ -283,11 +310,54 @@ async function cmdJoin(args: string[]): Promise<number> {
     return 1;
   }
 
+  // ── 4b. Resolve cryptographic agent URI ──
+  //
+  // The UI install path resolves `agentUri` from the daemon's bearer
+  // token (DKGAgent.resolveAgentAddress) so every install by the same
+  // operator binds to the SAME `urn:dkg:agent:<wallet>`. The CLI used
+  // to fall through to the legacy `urn:dkg:agent:<slug>` form, which
+  // meant the same person joining via CLI vs. UI showed up as two
+  // different agents in the graph and broke attribution / search
+  // convergence. Ask the daemon who we are and, if it returns a valid
+  // `0x…` wallet address, pass that into the planner. Peer-ID
+  // fallbacks (resolveAgentAddress returns the node peer ID when no
+  // wallet is configured) are NOT valid agent URIs, so we keep the
+  // slug fallback for those setups to preserve the old behaviour
+  // rather than mint malformed `urn:dkg:agent:<peerId>` URIs.
+  const EVM_ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
+  let agentUri: string | undefined;
+  let agentAddress: string | undefined;
+  try {
+    const identity = (await (client as any).request(
+      'GET',
+      '/api/agent/identity',
+    )) as { agentAddress?: string } | undefined;
+    const raw = identity?.agentAddress;
+    if (raw && EVM_ADDRESS_RE.test(raw)) {
+      agentAddress = raw.toLowerCase();
+      agentUri = `urn:dkg:agent:${agentAddress}`;
+      console.log(`[join] agent URI: ${agentUri}`);
+    } else if (raw) {
+      console.warn(
+        `[join] daemon returned non-wallet agent identifier "${raw.slice(0, 24)}…"; ` +
+          `falling back to slug-based URI. Configure a default wallet on the ` +
+          `daemon (or use a token bound to an agent wallet) for wallet-based attribution.`,
+      );
+    }
+  } catch (err) {
+    console.warn(
+      `[join] /api/agent/identity unavailable; falling back to slug-based URI. ` +
+        `Wallet-based attribution will not be wired for this install. (${(err as Error).message.slice(0, 120)})`,
+    );
+  }
+
   // ── 5. Plan + show preview ──
   const ctx = {
     manifest,
     workspaceAbsPath: opts.workspace,
     agentSlug,
+    ...(agentUri ? { agentUri } : {}),
+    ...(agentAddress ? { agentAddress } : {}),
     daemonApiUrl: opts.daemonUrl,
     daemonTokenFile: opts.tokenFile,
     mcpDkgDistAbsPath: path.resolve(HERE, '..', 'index.js'),
@@ -323,9 +393,13 @@ async function cmdJoin(args: string[]): Promise<number> {
           `~/.claude/settings.json currently has DKG hooks bound to workspace "${existingWs}" — installing into "${opts.workspace}" will REPLACE them. Use --skip-claude to keep your existing wiring, or this will silently break Claude Code in the other workspace.`,
         );
       }
-      if (existingAgent && existingAgent !== `urn:dkg:agent:${agentSlug}`) {
+      // Compare against the wallet-derived URI if available (matches
+      // what planInstall will actually template in); otherwise fall
+      // back to the slug-based form we used historically.
+      const plannedAgentUri = agentUri ?? `urn:dkg:agent:${agentSlug}`;
+      if (existingAgent && existingAgent !== plannedAgentUri) {
         plan.warnings.push(
-          `~/.claude/settings.json currently has DKG hooks attributed to "${existingAgent}" — installing as "urn:dkg:agent:${agentSlug}" will REPLACE that attribution.`,
+          `~/.claude/settings.json currently has DKG hooks attributed to "${existingAgent}" — installing as "${plannedAgentUri}" will REPLACE that attribution.`,
         );
       }
     } catch {

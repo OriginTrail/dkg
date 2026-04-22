@@ -60,12 +60,14 @@ export interface InstallContext {
   /** Relative path (from `<workspace>/.dkg/config.yaml`) to the daemon's auth.token. */
   daemonTokenFile: string;
   /**
-   * Absolute path to `packages/mcp-dkg/dist/index.js`. LEGACY: older
-   * generated `.cursor/mcp.json` templates spawned `node <dist>` here;
-   * current templates run the TS source via `pnpm exec tsx` (see
-   * `mcpDkgPackageDir` / `mcpDkgSrcAbsPath`) because `dist/` is
-   * gitignored and a fresh clone would 404. Kept on the context so
-   * older in-flight manifests still substitute cleanly.
+   * Absolute path to `packages/mcp-dkg/dist/index.js` (or the
+   * installed `@origintrail-official/dkg-mcp/dist/index.js` when the
+   * operator is coming through an npm install). The generated
+   * `.cursor/mcp.json` template spawns `node <this>` because `dist/`
+   * is the only shipped runtime surface — the published tarball
+   * omits `src/`, so a `pnpm exec tsx {{mcpDkgSrcAbsPath}}` template
+   * would point at a missing file on any workspace that installed
+   * the package from the registry.
    */
   mcpDkgDistAbsPath: string;
   /**
