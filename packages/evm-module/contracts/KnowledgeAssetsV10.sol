@@ -199,6 +199,12 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
     error ZeroAddressDependency(string name);
     error ZeroContextGraphId();
     error ZeroEpochs();
+    /// @dev PR #229 bot review round 9 (KAV10:510): an otherwise valid
+    /// publish with `knowledgeAssetsAmount == 0` would overflow
+    /// `kcId + 0 - 1` when projecting the legacy KAS shim range. Reject
+    /// the zero case explicitly at the entry point so the caller sees a
+    /// deterministic custom error instead of a generic panic.
+    error ZeroKnowledgeAssetsAmount();
 
     // --- Update-specific errors (V10 Phase 8 Task 2) ---
 
@@ -428,6 +434,14 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
         // Decision #3: contextGraphId == 0 is forbidden. No legacy path.
         if (p.contextGraphId == 0) revert ZeroContextGraphId();
 
+        // PR #229 bot review round 9 (KAV10:510): reject zero-asset
+        // publishes BEFORE any state mutation or child-contract call so
+        // the legacy KAS shim range computation (`kcId + N - 1`) can't
+        // underflow. A publish with no assets carries no data anyway —
+        // turning this into a custom-error revert keeps the failure
+        // deterministic and cheap for the caller.
+        if (p.knowledgeAssetsAmount == 0) revert ZeroKnowledgeAssetsAmount();
+
         // Same-contract input validation — without this, epochs == 0 would
         // flow through `_validateTokenAmount` (which computes 0), through
         // KCS create, and only revert downstream in
@@ -509,7 +523,20 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
             uint64 startKAId = uint64(kcId);
             uint256 endKAIdRaw = kcId + p.knowledgeAssetsAmount - 1;
             uint64 endKAId = endKAIdRaw > type(uint64).max ? type(uint64).max : uint64(endKAIdRaw);
-            knowledgeAssetsStorage.emitV10KnowledgeBatchCreated(
+            // PR #229 bot review round 9 (KAV10:512): during a rolling
+            // upgrade the Hub-registered `KnowledgeAssetsStorage` slot may
+            // still point at a legacy V8/V9 KAS that predates
+            // `emitV10KnowledgeBatchCreated`. A direct call would hit an
+            // unknown selector and revert the WHOLE V10 publish, not just
+            // the legacy audit emit. The audit emit is documented as
+            // best-effort (the canonical V10 event is already emitted by
+            // this contract above), so wrap the call in `try/catch` — on
+            // any failure (missing selector, out-of-gas on child, Guardian
+            // reject) we silently drop the legacy shim emit and let the
+            // V10 event carry the payload. `catch` matches every Solidity
+            // revert family (string, panic, custom, bubbled OOG from the
+            // callee up to 1/64 remaining gas).
+            try knowledgeAssetsStorage.emitV10KnowledgeBatchCreated(
                 kcId,
                 msg.sender,
                 p.merkleRoot,
@@ -521,7 +548,14 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
                 currentEpoch + p.epochs,
                 p.tokenAmount,
                 p.isImmutable
-            );
+            ) {
+                // success: V8/V9 legacy consumers see the V10 audit projection
+            } catch {
+                // pre-upgrade KAS or transient child-call failure; the
+                // canonical V10 `KnowledgeBatchCreated` event above is
+                // unaffected, so skip silently (matches the "best-effort"
+                // contract documented in the comment block above).
+            }
         }
 
         // --- 4. N20: atomic CG↔KC binding + CG value diff ---

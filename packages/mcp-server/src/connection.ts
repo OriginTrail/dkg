@@ -15,7 +15,30 @@ export class DkgClient {
   }
 
   static async connect(): Promise<DkgClient> {
-    const port = await readDkgApiPort();
+    // PR #229 bot review round 9 (mcp-server/index.ts:441): `mcp_auth
+    // set` mutates `process.env.DKG_NODE_TOKEN` and clears the cached
+    // client so the NEXT invocation reconnects — but the reconnect
+    // path used to read ONLY from the local auth-token file
+    // (`loadAuthToken()`), silently ignoring the MCP-side override.
+    // A host that called `mcp_auth op=set` would see `mcp_auth status`
+    // report the new credential while real `dkg_*` tool calls kept
+    // using the stale file-derived token, so rotation was effectively
+    // a no-op for tool traffic. Prefer `DKG_NODE_TOKEN` when set (the
+    // mutable mcp_auth channel) and fall back to the file-derived
+    // token otherwise, so both the status surface and the tool
+    // traffic resolve to the same credential after `mcp_auth set`.
+    const envToken = (process.env.DKG_NODE_TOKEN ?? '').trim();
+
+    // Same rationale applies to the daemon endpoint: mcp_auth status
+    // resolves `DKG_NODE_URL` for display, so honoring the same
+    // override here keeps the displayed + used endpoint consistent
+    // after a rotation. The URL must look like `http(s)://host:port`
+    // and produce a parseable port; anything else falls back to the
+    // standard file-derived port so a malformed env var never
+    // silently misroutes tool traffic.
+    const envUrl = (process.env.DKG_NODE_URL ?? '').trim();
+    const envPort = extractPortFromUrl(envUrl);
+    const port = envPort ?? (await readDkgApiPort());
 
     if (!port) {
       const pid = await readDaemonPid();
@@ -25,7 +48,7 @@ export class DkgClient {
       throw new Error('Cannot read API port. Set DKG_API_PORT or restart: dkg stop && dkg start');
     }
 
-    const token = await loadAuthToken();
+    const token = envToken.length > 0 ? envToken : await loadAuthToken();
     return new DkgClient(port, token);
   }
 
@@ -114,5 +137,26 @@ export class DkgClient {
 
   async subscribe(contextGraphId: string) {
     return this.post<{ subscribed: string }>('/api/subscribe', { contextGraphId });
+  }
+}
+
+/**
+ * Extract the port from a `DKG_NODE_URL` env override. Returns
+ * `undefined` if the URL is unset, malformed, uses a non-http(s)
+ * protocol, or has no parseable port — the caller then falls back to
+ * the file-derived port. Exported for test coverage from
+ * `test/connection-env-override.test.ts`.
+ * (PR #229 bot review round 9.)
+ */
+export function extractPortFromUrl(raw: string): number | undefined {
+  if (!raw) return undefined;
+  try {
+    const u = new URL(raw);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return undefined;
+    const explicit = u.port ? Number(u.port) : u.protocol === 'https:' ? 443 : 80;
+    if (!Number.isFinite(explicit) || explicit <= 0 || explicit > 65535) return undefined;
+    return explicit;
+  } catch {
+    return undefined;
   }
 }

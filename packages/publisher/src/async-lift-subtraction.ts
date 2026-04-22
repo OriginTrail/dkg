@@ -18,6 +18,21 @@ export async function subtractFinalizedExactQuads(params: {
   request: LiftRequest;
   validation: LiftJobValidationMetadata;
   resolved: LiftResolvedPublishSlice;
+  /**
+   * Explicit encryption key used when sealing private literals (same
+   * value the caller's `PrivateContentStore` was constructed with).
+   *
+   * PR #229 bot review round 9 (async-lift-subtraction.ts:147): without
+   * this, the subtraction called `decryptPrivateLiteral` with no
+   * override and resolved ONLY the env/default key. A deployment that
+   * uses a non-default key therefore never matched any plaintext input
+   * against the on-disk envelope — every private quad reappeared as
+   * "unseen" and got republished. Callers (DKGPublisher) thread the
+   * same key they passed to `PrivateContentStore` here. `undefined`
+   * keeps the legacy env/default resolution so tests with no explicit
+   * key keep working.
+   */
+  privateStoreEncryptionKey?: Uint8Array | string;
 }): Promise<ExactQuadSubtractionResult> {
   if (params.request.transitionType !== 'CREATE') {
     return {
@@ -43,6 +58,7 @@ export async function subtractFinalizedExactQuads(params: {
     params.graphManager.privateGraphUri(params.request.contextGraphId),
     confirmedRoots,
     /* decryptObjects */ true,
+    params.privateStoreEncryptionKey,
   );
 
   const publicResult = subtractGraphExactMatches(params.resolved.quads, confirmedRoots, authoritativePublic);
@@ -117,6 +133,7 @@ async function loadAuthoritativeQuadKeys(
   graph: string,
   confirmedRoots: Set<string>,
   decryptObjects = false,
+  encryptionKey?: Uint8Array | string,
 ): Promise<Set<string>> {
   if (confirmedRoots.size === 0) {
     return new Set();
@@ -144,7 +161,17 @@ async function loadAuthoritativeQuadKeys(
 
   return new Set(
     result.quads.map((quad) => {
-      const object = decryptObjects ? decryptPrivateLiteral(quad.object) : quad.object;
+      // PR #229 bot review round 9 (async-lift-subtraction.ts:147):
+      // forward the store's explicit `encryptionKey` (when the caller
+      // supplied one) so the decrypt here uses the SAME key the
+      // backing `PrivateContentStore` sealed under. Without this,
+      // `decryptPrivateLiteral` silently falls back to env/default
+      // and never round-trips a non-default-key seal — causing
+      // subtraction to miss every authoritative private quad on a
+      // retry and republish duplicates.
+      const object = decryptObjects
+        ? decryptPrivateLiteral(quad.object, { encryptionKey })
+        : quad.object;
       return toQuadKey({ ...quad, object, graph: '' });
     }),
   );

@@ -216,8 +216,21 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
     return typeof chain?.resolvePublishByTxHash === 'function';
   });
 
+  // PR #229 bot review round 9: forward the PrivateContentStore
+  // encryption key (if any) into the async-lift publisher so its
+  // `subtractFinalizedExactQuads` dedup step decrypts authoritative
+  // private quads with the SAME key every `DKGPublisher` in the map
+  // sealed them under. All DKGPublishers in this runtime share the
+  // same backing `TripleStore` and therefore the same seal key, so
+  // picking the first one is safe (and `undefined` when none is set
+  // keeps the env/default fallback).
+  const privateStoreEncryptionKey = [...publishers.values()]
+    .map((p) => (p as unknown as { privateStoreEncryptionKey?: Uint8Array | string }).privateStoreEncryptionKey)
+    .find((k) => k !== undefined);
+
   const asyncPublisher = new TripleStoreAsyncLiftPublisher(args.store, {
     chainRecoveryResolver: hasChainRecovery ? createChainRecoveryResolver(publishers) : undefined,
+    privateStoreEncryptionKey,
     publishExecutor: async ({ walletId, publishOptions }: AsyncLiftPublishExecutionInput) => {
       const publisher = publishers.get(walletId);
       if (!publisher) {

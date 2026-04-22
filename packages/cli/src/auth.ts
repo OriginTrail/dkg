@@ -451,7 +451,19 @@ export function verifySignedRequest(input: SignedRequestInput): SignedRequestOut
   }
 
   pruneNonces(now);
-  if (seenNonces.has(input.nonce)) {
+  // PR #229 bot review round 9 (auth.ts:293): the replay cache used to
+  // be keyed by the raw nonce string, so two different bearer tokens
+  // that happened to pick the same nonce would reject each other for
+  // the full freshness window. That's a trivial cross-client DoS (any
+  // caller that emits `nonce=aaa...` blocks every other caller that
+  // picks the same value) and also a false-positive: a replay is only
+  // a problem when it's the SAME credential reusing the SAME nonce.
+  // Scope the key by `sha256(token)+":"+nonce` so each credential has
+  // its own nonce namespace; collisions across credentials no longer
+  // cross-block.
+  const nonceScope = createHash('sha256').update(input.token).digest('hex');
+  const nonceKey = `${nonceScope}:${input.nonce}`;
+  if (seenNonces.has(nonceKey)) {
     return { ok: false, reason: 'replayed-nonce' };
   }
 
@@ -488,7 +500,7 @@ export function verifySignedRequest(input: SignedRequestInput): SignedRequestOut
     return { ok: false, reason: 'bad-signature' };
   }
 
-  seenNonces.set(input.nonce, now + windowMs);
+  seenNonces.set(nonceKey, now + windowMs);
   return { ok: true };
 }
 

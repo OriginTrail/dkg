@@ -70,6 +70,12 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
   private readonly chainRecoveryResolver?: AsyncLiftPublisherRecoveryResolver;
   private readonly publishExecutor?: AsyncLiftPublisherConfig['publishExecutor'];
   private readonly resolvedSliceOverrides?: Partial<LiftResolvedPublishSlice>;
+  /**
+   * Cached key plumbed through to `subtractFinalizedExactQuads` so
+   * authoritative private quads decrypt under the SAME key the caller's
+   * `PrivateContentStore` sealed them with (PR #229 bot review r9).
+   */
+  private readonly privateStoreEncryptionKey?: Uint8Array | string;
   private readonly graphManager: GraphManager;
   private paused = false;
   private graphEnsured = false;
@@ -88,6 +94,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     this.chainRecoveryResolver = config.chainRecoveryResolver;
     this.publishExecutor = config.publishExecutor;
     this.resolvedSliceOverrides = config.resolvedSliceOverrides;
+    this.privateStoreEncryptionKey = config.privateStoreEncryptionKey;
     this.graphManager = new GraphManager(store);
   }
 
@@ -243,6 +250,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
       request: job.request,
       validation: validated.validation,
       resolved: validated.resolved,
+      privateStoreEncryptionKey: this.privateStoreEncryptionKey,
     });
 
     return {
@@ -294,6 +302,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
         request: claimed.request,
         validation: validated.validation,
         resolved: validated.resolved,
+        privateStoreEncryptionKey: this.privateStoreEncryptionKey,
       });
 
       if (subtracted.resolved.quads.length === 0 && (subtracted.resolved.privateQuads?.length ?? 0) === 0) {

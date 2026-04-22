@@ -187,6 +187,32 @@ export interface DKGPublisherConfig {
    * persistent dkgDir.
    */
   publishWalFilePath?: string;
+  /**
+   * Explicit encryption key for the backing {@link PrivateContentStore}.
+   *
+   * PR #229 bot review round 9 (async-lift-subtraction.ts:147) — when a
+   * deployment constructs the store with an explicit non-default key,
+   * the `subtractFinalizedExactQuads` dedup step used to call the
+   * global `decryptPrivateLiteral()` helper, which only resolves the
+   * env/default key. The subtraction therefore never matched any
+   * plaintext quad against the on-disk envelope and every private
+   * quad was republished on retry. Plumb the SAME key the publisher
+   * gives to its `PrivateContentStore` into the subtraction path so
+   * the dedup round-trip is honest for every key configuration.
+   *
+   * Accepts a 32-byte `Uint8Array` or a passphrase/hex string (same
+   * shapes `PrivateContentStore#constructor` accepts).
+   */
+  privateStoreEncryptionKey?: Uint8Array | string;
+  /**
+   * If true, the backing {@link PrivateContentStore} is constructed in
+   * strict-key mode: if no key is configured (neither the constructor
+   * argument above nor the `DKG_PRIVATE_STORE_KEY` env var), every
+   * seal/unseal throws instead of falling back to the deterministic
+   * default key. Off by default so existing test harnesses are
+   * unaffected.
+   */
+  privateStoreStrictKey?: boolean;
 }
 
 export interface ShareOptions {
@@ -341,6 +367,15 @@ export class DKGPublisher implements Publisher {
   private readonly keypair: Ed25519Keypair;
   private readonly graphManager: GraphManager;
   private readonly privateStore: PrivateContentStore;
+  /**
+   * Cached copy of the key the backing `PrivateContentStore` is using
+   * so the async-lift subtraction helper can decrypt authoritative
+   * private quads with the SAME key the store sealed them under
+   * (PR #229 bot review round 9). `undefined` when no explicit key was
+   * configured — callers fall back to the env/default resolution in
+   * `decryptPrivateLiteral`.
+   */
+  readonly privateStoreEncryptionKey: Uint8Array | string | undefined;
   private readonly ownedEntities = new Map<string, Set<string>>();
   private readonly sharedMemoryOwnedEntities: Map<string, Map<string, string>>;
   readonly knownBatchContextGraphs: Map<string, string>;
@@ -385,7 +420,11 @@ export class DKGPublisher implements Publisher {
     }
 
     this.graphManager = new GraphManager(config.store);
-    this.privateStore = new PrivateContentStore(config.store, this.graphManager);
+    this.privateStoreEncryptionKey = config.privateStoreEncryptionKey;
+    this.privateStore = new PrivateContentStore(config.store, this.graphManager, {
+      encryptionKey: config.privateStoreEncryptionKey,
+      strictKey: config.privateStoreStrictKey,
+    });
     this.sharedMemoryOwnedEntities = config.sharedMemoryOwnedEntities ?? new Map();
     this.knownBatchContextGraphs = config.knownBatchContextGraphs ?? new Map();
     this.writeLocks = config.writeLocks ?? new Map();

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { DkgClient } from '../src/connection.js';
+import { DkgClient, extractPortFromUrl } from '../src/connection.js';
 
 function jsonRes(data: unknown, ok = true): Response {
   return {
@@ -32,12 +32,16 @@ describe('DkgClient', () => {
   const originalFetch = globalThis.fetch;
   const originalDkgHome = process.env.DKG_HOME;
   const originalDkgApiPort = process.env.DKG_API_PORT;
+  const originalDkgNodeToken = process.env.DKG_NODE_TOKEN;
+  const originalDkgNodeUrl = process.env.DKG_NODE_URL;
   let tempDir: string;
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), 'dkg-conn-test-'));
     process.env.DKG_HOME = tempDir;
     delete process.env.DKG_API_PORT;
+    delete process.env.DKG_NODE_TOKEN;
+    delete process.env.DKG_NODE_URL;
   });
 
   afterEach(async () => {
@@ -51,6 +55,16 @@ describe('DkgClient', () => {
       process.env.DKG_API_PORT = originalDkgApiPort;
     } else {
       delete process.env.DKG_API_PORT;
+    }
+    if (originalDkgNodeToken !== undefined) {
+      process.env.DKG_NODE_TOKEN = originalDkgNodeToken;
+    } else {
+      delete process.env.DKG_NODE_TOKEN;
+    }
+    if (originalDkgNodeUrl !== undefined) {
+      process.env.DKG_NODE_URL = originalDkgNodeUrl;
+    } else {
+      delete process.env.DKG_NODE_URL;
     }
     await rm(tempDir, { recursive: true }).catch(() => {});
   });
@@ -70,6 +84,124 @@ describe('DkgClient', () => {
     it('throws when port unreadable but process alive', async () => {
       await writeFile(join(tempDir, 'daemon.pid'), String(process.pid));
       await expect(DkgClient.connect()).rejects.toThrow(/Cannot read API port/);
+    });
+
+    // PR #229 bot review round 9 (mcp-server/index.ts:441): `mcp_auth
+    // set` mutates `process.env.DKG_NODE_TOKEN`, but the tool-call path
+    // used to read ONLY from the on-disk auth.token file via
+    // `loadAuthToken()`, so the rotation was invisible to real traffic.
+    // `connect()` now prefers `DKG_NODE_TOKEN` when set.
+    describe('mcp_auth override plumbing (bot review r9-2)', () => {
+      it('connect honors DKG_NODE_TOKEN over on-disk auth.token', async () => {
+        process.env.DKG_API_PORT = '9201';
+        await writeFile(join(tempDir, 'auth.token'), 'file-token\n');
+        process.env.DKG_NODE_TOKEN = 'env-override-token';
+
+        const c = await DkgClient.connect();
+
+        const { fn, calls } = createTrackingFetch([
+          jsonRes({
+            name: 'n', peerId: 'p', uptimeMs: 1,
+            connectedPeers: 0, relayConnected: false, multiaddrs: [],
+          }),
+        ]);
+        globalThis.fetch = fn;
+        await c.status();
+        expect(
+          (calls[0].init?.headers as Record<string, string>)?.Authorization,
+        ).toBe('Bearer env-override-token');
+      });
+
+      it('connect falls back to file token when DKG_NODE_TOKEN is unset', async () => {
+        process.env.DKG_API_PORT = '9201';
+        await writeFile(join(tempDir, 'auth.token'), 'file-token\n');
+
+        const c = await DkgClient.connect();
+
+        const { fn, calls } = createTrackingFetch([
+          jsonRes({
+            name: 'n', peerId: 'p', uptimeMs: 1,
+            connectedPeers: 0, relayConnected: false, multiaddrs: [],
+          }),
+        ]);
+        globalThis.fetch = fn;
+        await c.status();
+        expect(
+          (calls[0].init?.headers as Record<string, string>)?.Authorization,
+        ).toBe('Bearer file-token');
+      });
+
+      it('connect treats empty DKG_NODE_TOKEN as unset', async () => {
+        process.env.DKG_API_PORT = '9201';
+        await writeFile(join(tempDir, 'auth.token'), 'file-token\n');
+        process.env.DKG_NODE_TOKEN = '   ';
+
+        const c = await DkgClient.connect();
+
+        const { fn, calls } = createTrackingFetch([
+          jsonRes({
+            name: 'n', peerId: 'p', uptimeMs: 1,
+            connectedPeers: 0, relayConnected: false, multiaddrs: [],
+          }),
+        ]);
+        globalThis.fetch = fn;
+        await c.status();
+        expect(
+          (calls[0].init?.headers as Record<string, string>)?.Authorization,
+        ).toBe('Bearer file-token');
+      });
+
+      it('connect honors DKG_NODE_URL port when valid', async () => {
+        // No DKG_API_PORT, no auth.token — DKG_NODE_URL should route.
+        process.env.DKG_NODE_URL = 'http://127.0.0.1:9999';
+        const c = await DkgClient.connect();
+
+        const { fn, calls } = createTrackingFetch([
+          jsonRes({
+            name: 'n', peerId: 'p', uptimeMs: 1,
+            connectedPeers: 0, relayConnected: false, multiaddrs: [],
+          }),
+        ]);
+        globalThis.fetch = fn;
+        await c.status();
+        expect(calls[0].url).toBe('http://127.0.0.1:9999/api/status');
+      });
+
+      it('connect ignores a malformed DKG_NODE_URL and falls back to file port', async () => {
+        process.env.DKG_NODE_URL = 'not-a-url';
+        process.env.DKG_API_PORT = '9201';
+        await writeFile(join(tempDir, 'auth.token'), 'tok\n');
+        const c = await DkgClient.connect();
+
+        const { fn, calls } = createTrackingFetch([
+          jsonRes({
+            name: 'n', peerId: 'p', uptimeMs: 1,
+            connectedPeers: 0, relayConnected: false, multiaddrs: [],
+          }),
+        ]);
+        globalThis.fetch = fn;
+        await c.status();
+        expect(calls[0].url).toBe('http://127.0.0.1:9201/api/status');
+      });
+    });
+  });
+
+  describe('extractPortFromUrl (bot review r9-2)', () => {
+    it('extracts explicit port', () => {
+      expect(extractPortFromUrl('http://127.0.0.1:9999')).toBe(9999);
+      expect(extractPortFromUrl('https://node.example.com:8443')).toBe(8443);
+    });
+
+    it('defaults to 80/443 when port is absent', () => {
+      expect(extractPortFromUrl('http://example.com')).toBe(80);
+      expect(extractPortFromUrl('https://example.com')).toBe(443);
+    });
+
+    it('returns undefined for empty, malformed, or non-http URLs', () => {
+      expect(extractPortFromUrl('')).toBeUndefined();
+      expect(extractPortFromUrl('not-a-url')).toBeUndefined();
+      expect(extractPortFromUrl('file:///etc/passwd')).toBeUndefined();
+      expect(extractPortFromUrl('ftp://example.com:21')).toBeUndefined();
     });
   });
 

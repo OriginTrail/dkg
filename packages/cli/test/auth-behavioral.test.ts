@@ -215,6 +215,53 @@ describe('verifySignedRequest', () => {
     expect(out).toEqual({ ok: true });
   });
 
+  // PR #229 bot review round 9 (auth.ts:293): the replay cache used to
+  // be keyed by the raw nonce string, so two different bearer tokens
+  // that happened to pick the same nonce would reject each other for
+  // the full freshness window (cross-client DoS + false-positive
+  // replays). Scope the key by the token as well.
+  describe('replay-cache scope (bot review r9-3)', () => {
+    it('nonce collision across different tokens does NOT cross-block', () => {
+      const ts = new Date().toISOString();
+      const nonce = freshNonce();
+
+      const TOKEN_A = 'token-A-1234567890abcdef';
+      const TOKEN_B = 'token-B-1234567890abcdef';
+
+      const sigA = sigFor(TOKEN_A, 'POST', '/x', ts, nonce, BODY);
+      const sigB = sigFor(TOKEN_B, 'POST', '/x', ts, nonce, BODY);
+
+      const firstA = verifySignedRequest({
+        method: 'POST', path: '/x', body: BODY,
+        timestamp: ts, signature: sigA, token: TOKEN_A, nonce,
+      });
+      expect(firstA).toEqual({ ok: true });
+
+      // Same nonce, DIFFERENT token — must succeed (not a replay).
+      const firstB = verifySignedRequest({
+        method: 'POST', path: '/x', body: BODY,
+        timestamp: ts, signature: sigB, token: TOKEN_B, nonce,
+      });
+      expect(firstB).toEqual({ ok: true });
+    });
+
+    it('same token + same nonce IS still rejected as a replay', () => {
+      const ts = new Date().toISOString();
+      const nonce = freshNonce();
+      const sig = sigFor(TOKEN, 'POST', '/y', ts, nonce, BODY);
+      const first = verifySignedRequest({
+        method: 'POST', path: '/y', body: BODY,
+        timestamp: ts, signature: sig, token: TOKEN, nonce,
+      });
+      expect(first.ok).toBe(true);
+      const replay = verifySignedRequest({
+        method: 'POST', path: '/y', body: BODY,
+        timestamp: ts, signature: sig, token: TOKEN, nonce,
+      });
+      expect(replay).toEqual({ ok: false, reason: 'replayed-nonce' });
+    });
+  });
+
   it('respects a custom freshnessWindowMs', () => {
     const now = Date.now();
     const ts = new Date(now - 10_000).toISOString();

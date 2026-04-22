@@ -882,5 +882,52 @@ describe('@unit v10 KnowledgeAssetsV10 audit', () => {
       expect(decoded.knowledgeAssetsCount).to.equal(10n);
       expect(decoded.publicByteSize).to.equal(1000n);
     });
+
+    // PR #229 bot review round 9 (KnowledgeAssetsV10.sol:457).
+    //
+    // `_executePublishCore` used to compute `endKAIdRaw = startKAIdRaw
+    // + p.knowledgeAssetsAmount - 1` without first checking that
+    // `knowledgeAssetsAmount` was > 0. The 0 case underflowed inside a
+    // Solidity-0.8 checked-arithmetic block, producing a bare
+    // `Panic(0x11)` revert instead of a caller-legible error. The
+    // fix adds a custom `ZeroKnowledgeAssetsAmount()` revert gated
+    // at the top of the publish core. This test pins both (a) the
+    // revert happens and (b) it carries the specific custom-error
+    // selector (not a Panic) so the client can surface a meaningful
+    // message.
+    it('publishDirect reverts with ZeroKnowledgeAssetsAmount when knowledgeAssetsAmount == 0 (bot review r9-4)', async () => {
+      const creator = getDefaultKCCreator(accounts);
+      const {
+        publishingNode,
+        publisherIdentityId,
+        receivingNodes,
+        receiverIdentityIds,
+      } = await setupNodes();
+      const cgId = await createOpenCG(creator);
+
+      const merkleRoot = ethers.keccak256(ethers.toUtf8Bytes('r9-4-zero-kas'));
+      const tokenAmount = ethers.parseEther('10');
+      const p = await buildPublishParams({
+        chainId,
+        kav10Address,
+        publishingNode,
+        receivingNodes,
+        publisherIdentityId,
+        receiverIdentityIds,
+        contextGraphId: cgId,
+        merkleRoot,
+        knowledgeAssetsAmount: 0,
+        byteSize: 1000,
+        epochs: 2,
+        tokenAmount,
+        isImmutable: false,
+        publishOperationId: 'r9-4-zero',
+      });
+      await TokenContract.connect(creator).approve(kav10Address, tokenAmount);
+
+      await expect(
+        KAV10.connect(creator).publishDirect(p, ethers.ZeroAddress),
+      ).to.be.revertedWithCustomError(KAV10, 'ZeroKnowledgeAssetsAmount');
+    });
   });
 });

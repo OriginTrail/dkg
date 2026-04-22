@@ -302,6 +302,11 @@
     "type": "error"
   },
   {
+    "inputs": [],
+    "name": "ZeroKnowledgeAssetsAmount",
+    "type": "error"
+  },
+  {
     "anonymous": false,
     "inputs": [
       {
