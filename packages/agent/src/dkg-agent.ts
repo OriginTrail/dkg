@@ -4057,12 +4057,22 @@ export class DKGAgent {
 
     // Always consult the registry when we either had no remembered peer
     // OR we have one but no live connection to it right now. This fixes
-    // the regression Codex flagged: with only the remembered path, if
-    // the requester disconnected between submitting the request and the
-    // curator acting on it, we'd have no `targetRelayAddress` to redial
-    // and the notification would be silently dropped even though the
-    // registry knows exactly how to reach them. Registry lookup is
-    // cheap (local graph query) so this is fine to do opportunistically.
+    // two related regressions:
+    //
+    //   * If the requester disconnected between submitting the request
+    //     and the curator acting on it, with only the remembered-peer
+    //     path we'd have no relay address to redial and the
+    //     notification would be silently dropped even though the
+    //     registry knows exactly how to reach them.
+    //   * If the requester reconnected with a brand-new peer ID (e.g.
+    //     ephemeral peer IDs, node restart on a volatile host), the
+    //     remembered ID is now stale. Sending to a dead peer ID just
+    //     times out; the registry's current peer ID is authoritative.
+    //
+    // So when the remembered peer isn't connected, we REPLACE it with
+    // the registry's current peer ID (not just supplement it with a
+    // relay hint), which is what Codex N25 asks for. Registry lookup is
+    // cheap (local graph query).
     const rememberedIsConnected = rememberedPeerId
       ? this.node.libp2p
           .getConnections()
@@ -4073,10 +4083,9 @@ export class DKGAgent {
         const agents = await this.discovery.findAgents();
         const match = agents.find((a) => a.agentAddress?.toLowerCase() === addrLower);
         if (match) {
-          // Only swap targetPeerId when we didn't already have a
-          // remembered one — the remembered id is the authoritative
-          // routing hint; we're just picking up the relay fallback.
-          if (!targetPeerId) targetPeerId = match.peerId;
+          // Take the registry's peer ID whenever we don't have a live
+          // connection to the remembered one — it may be fresher.
+          targetPeerId = match.peerId;
           targetRelayAddress = match.relayAddress;
         }
       } catch {

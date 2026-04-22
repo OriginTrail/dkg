@@ -123,10 +123,12 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
       // bootstrap their own Cursor wiring from the graph alone. Same
       // fail-open posture as ontology install — a missing manifest
       // doesn't invalidate the CG; the curator can re-publish later.
+      let manifestPublished = true;
       try {
         setProgress('Publishing project manifest…');
         await publishProjectManifest(result.created, {});
       } catch (manifestErr: any) {
+        manifestPublished = false;
         console.warn('[CreateProjectModal] manifest publish failed:', manifestErr);
         setProgress(`Project created, but manifest publish failed: ${manifestErr?.message ?? manifestErr}`);
       }
@@ -139,13 +141,30 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
       openTab({ id: `project:${result.created}`, label: trimmedName, closable: true });
       if (stage < 2) setStage(2);
 
-      // Transition into the wire-workspace step instead of closing.
-      // Curator can either install into their own workspace and start
-      // populating the project plan, or click "Skip for now" if they
-      // only want the CG registered without a local Cursor wiring.
-      setWiredProjectName(trimmedName);
-      setWiredCgId(result.created);
-      setProgress('');
+      // Phase 8: transition into the wire-workspace step ONLY if the
+      // manifest publish succeeded. `WireWorkspacePanel`'s preview/
+      // install flow depends on `fetchManifest()` returning the
+      // just-published manifest out of the graph — if publish failed
+      // (e.g. standalone/npm install without a template bundle), the
+      // panel can only ever error out on the very next step. Close
+      // the modal with the warning already visible in `progress`
+      // instead, so the curator can see that project creation itself
+      // succeeded and they can re-publish the manifest later. Codex
+      // tier-4j finding on CreateProjectModal.tsx:147.
+      if (manifestPublished) {
+        setWiredProjectName(trimmedName);
+        setWiredCgId(result.created);
+        setProgress('');
+      } else {
+        // Leave `progress` showing the manifest-publish warning and
+        // defer closing by a short beat so the user sees the message.
+        setTimeout(() => {
+          setName('');
+          setDescription('');
+          setProgress('');
+          onClose();
+        }, 2500);
+      }
     } catch (err: any) {
       const msg = err?.message || 'Failed to create project';
       if (msg.includes('already exists') || msg.includes('409')) {

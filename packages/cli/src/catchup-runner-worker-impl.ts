@@ -107,11 +107,52 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
   syncCapablePeers = syncCapable.length;
   peersTried = syncCapable.length;
 
+  // Isolate per-peer failures: if one peer's `syncDurable` or
+  // `syncSharedMemory` throws (timeout, reset, bad payload), we still
+  // want to aggregate what we got from the other peers — otherwise a
+  // single flaky peer in a 10-peer pool would fail
+  // `/api/context-graph/subscribe` outright. This mirrors the inline
+  // runner in `packages/agent/src/dkg-agent.ts`, which already wraps
+  // each peer with `.catch(emptyDurable)`. A bare `Promise.all` without
+  // the per-peer catch would reject on the first error and discard all
+  // the other peers' results. Codex tier-4j finding N24.
+  const emptyDurable = () => ({
+    insertedTriples: 0,
+    fetchedMetaTriples: 0,
+    fetchedDataTriples: 0,
+    insertedMetaTriples: 0,
+    insertedDataTriples: 0,
+    bytesReceived: 0,
+    resumedPhases: 0,
+    emptyResponses: 0,
+    metaOnlyResponses: 0,
+    dataRejectedMissingMeta: 0,
+    rejectedKcs: 0,
+    failedPeers: 1,
+    deniedPhases: 0,
+  });
+  const emptyShared = () => ({
+    insertedTriples: 0,
+    fetchedMetaTriples: 0,
+    fetchedDataTriples: 0,
+    insertedMetaTriples: 0,
+    insertedDataTriples: 0,
+    bytesReceived: 0,
+    resumedPhases: 0,
+    emptyResponses: 0,
+    droppedDataTriples: 0,
+    failedPeers: 1,
+    deniedPhases: 0,
+  });
   const perPeerResults = await Promise.all(
     syncCapable.map(async (peerId) => {
-      const durable = await invoke<any>('syncDurable', peerId, request.contextGraphId);
+      const durable = await invoke<any>('syncDurable', peerId, request.contextGraphId).catch(
+        () => emptyDurable(),
+      );
       const shared = request.includeSharedMemory
-        ? await invoke<any>('syncSharedMemory', peerId, request.contextGraphId)
+        ? await invoke<any>('syncSharedMemory', peerId, request.contextGraphId).catch(
+            () => emptyShared(),
+          )
         : null;
       return { durable, shared };
     }),
