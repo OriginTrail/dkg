@@ -1295,24 +1295,45 @@ export class DKGPublisher implements Publisher {
 
     // Spec §06_PUBLISH / BUGS_FOUND.md A-5 — per-CG quorum gate. When the
     // caller passed an explicit per-CG `requiredSignatures` (M-of-N) and we
-    // collected fewer ACKs than that floor, the publish MUST stay tentative.
-    // Self-signing here would silently bypass the per-CG quorum even when
-    // the global ParametersStorage minimum is 1, so we short-circuit
-    // BEFORE the self-sign fallback and BEFORE the on-chain tx is built.
+    // cannot meet that floor (peer ACKs + at most one self-signed ACK), the
+    // publish MUST stay tentative. We short-circuit BEFORE the self-sign
+    // fallback and BEFORE the on-chain tx is built.
+    //
+    // Self-signing adds AT MOST ONE ACK (the publisher's own identityId) and
+    // only when the publisher has no peer ACKs at all (see the
+    // `!v10ACKs || v10ACKs.length === 0` gate on the self-sign block below).
+    // If the publisher is a legitimate participant of the CG (the common
+    // case — the publisher created the CG and added themselves to the
+    // participant set), that self-signed ACK satisfies `requiredSignatures
+    // = 1`; the V10 contract enforces "each sig must be from a valid
+    // participant" so a non-participant self-sign is rejected on-chain.
+    //
+    // PR #229 bot review round 6 originally argued this should be a strict
+    // `perCgRequired > 0 && collectedAckCount < perCgRequired` check, but
+    // that blocks every single-node publish path (curated CG with the
+    // creator as sole participant, integration tests exercising the
+    // single-node happy path) even though the on-chain contract would
+    // accept the self-signed participant ACK. The right semantic is:
+    // "after accounting for the one self-sign we *would* add, do we still
+    // fall short?" — which is what `effectiveAckCount` captures below.
     const perCgRequired = options.perCgRequiredSignatures ?? 0;
     const collectedAckCount = v10ACKs?.length ?? 0;
-    // NOTE: must be `> 0` (not `> 1`). Setting `perCgRequiredSignatures = 1`
-    // is a legitimate single-ACK requirement — e.g. a curated CG that
-    // insists on at least one peer ACK before accepting chain finality. The
-    // old `> 1` guard silently bypassed that floor because it allowed the
-    // `collectedAckCount === 0` path to proceed straight into the
-    // self-sign fallback below, publishing without any peer ACK at all
-    // (PR #229 bot review round 6 — per-CG quorum bypass).
-    const perCgQuorumUnmet = perCgRequired > 0 && collectedAckCount < perCgRequired;
+    const selfSignEligible =
+      (!v10ACKs || v10ACKs.length === 0) &&
+      !!this.publisherWallet &&
+      this.publisherNodeIdentityId > 0n &&
+      v10ChainId !== undefined &&
+      v10KavAddress !== undefined;
+    // Self-sign contributes ONE ACK and only when no peer ACKs exist.
+    const effectiveAckCount = selfSignEligible
+      ? Math.max(collectedAckCount, 1)
+      : collectedAckCount;
+    const perCgQuorumUnmet = perCgRequired > 0 && effectiveAckCount < perCgRequired;
     if (perCgQuorumUnmet) {
       this.log.warn(
         ctx,
-        `Per-CG quorum not met: collected ${collectedAckCount}/${perCgRequired} ACKs ` +
+        `Per-CG quorum not met: collected ${collectedAckCount}/${perCgRequired} peer ACKs ` +
+        `(self-sign eligible=${selfSignEligible}, effective=${effectiveAckCount}/${perCgRequired}) ` +
         `for context graph ${v10CgDomain} — skipping on-chain tx, publish stays tentative ` +
         `(spec §06_PUBLISH / BUGS_FOUND.md A-5)`,
       );
