@@ -106,10 +106,6 @@ importers:
         version: 4.0.18(@types/node@22.19.11)(happy-dom@20.8.3(bufferutil@4.1.0)(utf-8-validate@5.0.10))(jiti@2.6.1)(tsx@4.21.0)(yaml@2.8.3)
 
   packages/adapter-hermes:
-    dependencies:
-      '@origintrail-official/dkg-core':
-        specifier: workspace:*
-        version: link:../core
     devDependencies:
       '@vitest/coverage-v8':
         specifier: ^4.0.18
@@ -145,9 +141,6 @@ importers:
       '@noble/curves':
         specifier: ^2
         version: 2.0.1
-      '@noble/ed25519':
-        specifier: ^3
-        version: 3.0.0
       '@noble/hashes':
         specifier: ^2
         version: 2.0.1
@@ -417,9 +410,6 @@ importers:
       '@types/chai':
         specifier: ^4.3.20
         version: 4.3.20
-      '@types/mocha':
-        specifier: ^10.0.10
-        version: 10.0.10
       '@types/node':
         specifier: ^22.10.2
         version: 22.19.11
@@ -441,9 +431,6 @@ importers:
       hardhat-gas-reporter:
         specifier: ^2.2.2
         version: 2.3.0(bufferutil@4.1.0)(hardhat@2.28.6(patch_hash=0d296aadcb2c28c2040ee89cecb4d10311c66f2e64ca77faf8151dbc4822dff9)(bufferutil@4.1.0)(ts-node@10.9.2(@types/node@22.19.11)(typescript@5.9.3))(typescript@5.9.3)(utf-8-validate@5.0.10))(typescript@5.9.3)(utf-8-validate@5.0.10)(zod@4.3.6)
-      hardhat-tracer:
-        specifier: ^3.1.0
-        version: 3.4.0(bufferutil@4.1.0)(chai@4.5.0)(hardhat@2.28.6(patch_hash=0d296aadcb2c28c2040ee89cecb4d10311c66f2e64ca77faf8151dbc4822dff9)(bufferutil@4.1.0)(ts-node@10.9.2(@types/node@22.19.11)(typescript@5.9.3))(typescript@5.9.3)(utf-8-validate@5.0.10))(utf-8-validate@5.0.10)
       solidity-coverage:
         specifier: ^0.8.14
         version: 0.8.17(hardhat@2.28.6(patch_hash=0d296aadcb2c28c2040ee89cecb4d10311c66f2e64ca77faf8151dbc4822dff9)(bufferutil@4.1.0)(ts-node@10.9.2(@types/node@22.19.11)(typescript@5.9.3))(typescript@5.9.3)(utf-8-validate@5.0.10))
@@ -478,9 +465,6 @@ importers:
       '@types/react':
         specifier: ^19.2.14
         version: 19.2.14
-      '@types/react-dom':
-        specifier: ^19.2.3
-        version: 19.2.3(@types/react@19.2.14)
       '@vitest/coverage-v8':
         specifier: ^4.0.18
         version: 4.0.18(vitest@4.0.18(@types/node@22.19.11)(happy-dom@20.8.3(bufferutil@4.1.0)(utf-8-validate@5.0.10))(jiti@2.6.1)(tsx@4.21.0)(yaml@2.8.3))
@@ -713,9 +697,6 @@ importers:
       react-dom:
         specifier: ^19
         version: 19.2.4(react@19.2.4)
-      react-router-dom:
-        specifier: ^7
-        version: 7.13.1(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
       typescript:
         specifier: ^5.7
         version: 5.9.3
@@ -2280,9 +2261,6 @@ packages:
     resolution: {integrity: sha512-zmPitbQ8+6zNutpwgcQuLcsEpn/Cj54Kbn7L5pX0Os5kdWplB7xPgEh/g+SWOB/qmows2gpuCaPyduq8ZZRnxA==}
     deprecated: This is a stub types definition. minimatch provides its own type definitions, so you do not need this installed.
 
-  '@types/mocha@10.0.10':
-    resolution: {integrity: sha512-xPyYSz1cMPnJQhl0CLMH68j3gprKZaTjG3s5Vi+fDgx+uhG9NOXwbVt52eFS8ECyXhyKcjDLCBEqBExKuiZb7Q==}
-
   '@types/multicast-dns@7.2.4':
     resolution: {integrity: sha512-ib5K4cIDR4Ro5SR3Sx/LROkMDa0BHz0OPaCBL/OSPDsAXEGZ3/KQeS6poBKYVN7BfjXDL9lWNwzyHVgt/wkyCw==}
 
@@ -3535,12 +3513,6 @@ packages:
     resolution: {integrity: sha512-ySdA+044xMQv1BlJu5CYXToHzMexKFfIWxlQTBNNoerx1x96+d15IMdN01iQZ/TJ7NH2V5sU73bz77LoS/PEVw==}
     peerDependencies:
       hardhat: ^2.16.0
-
-  hardhat-tracer@3.4.0:
-    resolution: {integrity: sha512-Szro71artobfytPVvv6SMLlboXoe/Z3opjuij3A0fEOCgQs1YKZhlvkKK+KAY7kLRgqQse0jO/dF2Sq3xIAJwg==}
-    peerDependencies:
-      chai: 4.x
-      hardhat: '>=2.22.5 <3.x'
 
   hardhat@2.28.6:
     resolution: {integrity: sha512-zQze7qe+8ltwHvhX5NQ8sN1N37WWZGw8L63y+2XcPxGwAjc/SMF829z3NS6o1krX0sryhAsVBK/xrwUqlsot4Q==}
@@ -7255,8 +7227,6 @@ snapshots:
     dependencies:
       minimatch: 10.2.3
 
-  '@types/mocha@10.0.10': {}
-
   '@types/multicast-dns@7.2.4':
     dependencies:
       '@types/dns-packet': 5.6.5
@@ -8758,19 +8728,6 @@ snapshots:
       - typescript
       - utf-8-validate
       - zod
-
-  hardhat-tracer@3.4.0(bufferutil@4.1.0)(chai@4.5.0)(hardhat@2.28.6(patch_hash=0d296aadcb2c28c2040ee89cecb4d10311c66f2e64ca77faf8151dbc4822dff9)(bufferutil@4.1.0)(ts-node@10.9.2(@types/node@22.19.11)(typescript@5.9.3))(typescript@5.9.3)(utf-8-validate@5.0.10))(utf-8-validate@5.0.10):
-    dependencies:
-      chai: 4.5.0
-      chalk: 4.1.2
-      debug: 4.4.3(supports-color@8.1.1)
-      ethers: 5.8.0(bufferutil@4.1.0)(utf-8-validate@5.0.10)
-      hardhat: 2.28.6(patch_hash=0d296aadcb2c28c2040ee89cecb4d10311c66f2e64ca77faf8151dbc4822dff9)(bufferutil@4.1.0)(ts-node@10.9.2(@types/node@22.19.11)(typescript@5.9.3))(typescript@5.9.3)(utf-8-validate@5.0.10)
-      semver: 7.7.4
-    transitivePeerDependencies:
-      - bufferutil
-      - supports-color
-      - utf-8-validate
 
   hardhat@2.28.6(patch_hash=0d296aadcb2c28c2040ee89cecb4d10311c66f2e64ca77faf8151dbc4822dff9)(bufferutil@4.1.0)(ts-node@10.9.2(@types/node@22.19.11)(typescript@5.9.3))(typescript@5.9.3)(utf-8-validate@5.0.10):
     dependencies:

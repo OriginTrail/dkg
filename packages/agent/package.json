@@ -23,7 +23,6 @@
     "@origintrail-official/dkg-publisher": "workspace:*",
     "@origintrail-official/dkg-query": "workspace:*",
     "@origintrail-official/dkg-storage": "workspace:*",
-    "@noble/ed25519": "^3",
     "ethers": "^6",
     "js-yaml": "^4.1.1",
     "jsonld": "^8.3.3"
