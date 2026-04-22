@@ -45,6 +45,35 @@ contract KnowledgeAssetsStorage is INamed, IVersioned, IERC1155DeltaQueryable, E
         bool isPermanent
     );
 
+    /// @notice Bot review PR #229 (post-round-5) — `KnowledgeBatchCreated`
+    /// is the V8/V9 batch-creation signal and legacy indexers subscribe to
+    /// its topic under the assumption that `knowledgeBatches[batchId]`,
+    /// `kaIdToBatch[publisher][id]`, `getBatchPublisher(batchId)`, and
+    /// `_totalTokenAmount` / `_totalKnowledgeAssets` were also mutated.
+    /// V10 publishes go through `KnowledgeCollectionStorage`, NOT this
+    /// contract, so reusing `KnowledgeBatchCreated` for a V10 shim emit
+    /// would tell legacy indexers "a batch exists" while every legacy
+    /// getter returns zero/default data or `BatchNotFound` — a silent
+    /// data-integrity bug. The V10 emit-shim now uses a dedicated event
+    /// with the SAME payload shape but a DISTINCT topic hash so legacy
+    /// indexers ignore it, and V10-aware consumers that want the legacy-
+    /// shaped projection can subscribe to this event explicitly. The
+    /// payload intentionally mirrors `KnowledgeBatchCreated` so v10
+    /// adapters can share the decoding path — only the topic differs.
+    event V10KnowledgeBatchEmitted(
+        uint256 indexed batchId,
+        address indexed publisher,
+        bytes32 merkleRoot,
+        uint64 publicByteSize,
+        uint32 knowledgeAssetsCount,
+        uint64 startKAId,
+        uint64 endKAId,
+        uint40 startEpoch,
+        uint40 endEpoch,
+        uint96 tokenAmount,
+        bool isPermanent
+    );
+
     event KnowledgeBatchUpdated(
         uint256 indexed batchId,
         bytes32 newMerkleRoot,
@@ -145,14 +174,19 @@ contract KnowledgeAssetsStorage is INamed, IVersioned, IERC1155DeltaQueryable, E
         return (r.startId, r.endId);
     }
 
-    /// @notice Spec §07_EVM_MODULE / BUGS_FOUND.md#E-9 — V10 publish must
-    /// dual-emit `KnowledgeBatchCreated` so legacy V8/V9 indexers keep
-    /// receiving a batch-shaped event when KAV10 routes a publish through
-    /// `KnowledgeCollectionStorage`. This emit-only entry point performs
-    /// no state mutation, no minting, and no counter advance — it exists
-    /// purely so the event surfaces from THIS contract's address (where
-    /// indexers subscribe). KAV10 calls it from `_executePublishCore`
-    /// after the KCS create succeeds.
+    /// @notice Spec §07_EVM_MODULE / BUGS_FOUND.md#E-9 — V10 publish
+    /// surfaces a batch-shaped audit record from this contract's address
+    /// so V10-aware consumers that want a legacy-shaped projection can
+    /// subscribe to it without having to join `KnowledgeCollectionCreated`
+    /// + `KnowledgeAssetsMinted`. Bot review PR #229 (post-round-5): the
+    /// event was renamed from `KnowledgeBatchCreated` to
+    /// `V10KnowledgeBatchEmitted` so legacy V8/V9 indexers — which call
+    /// `getBatchPublisher(batchId)` and expect `knowledgeBatches[batchId]`
+    /// / `kaIdToBatch` to be populated — do not mistake a V10 shim emit
+    /// for a real V8/V9 batch. This function performs no state mutation,
+    /// no minting, and no counter advance: the V10 source of truth lives
+    /// in `KnowledgeCollectionStorage`. KAV10 calls it from
+    /// `_executePublishCore` after the KCS create succeeds.
     function emitV10KnowledgeBatchCreated(
         uint256 batchId,
         address publisherAddress,
@@ -166,7 +200,7 @@ contract KnowledgeAssetsStorage is INamed, IVersioned, IERC1155DeltaQueryable, E
         uint96 tokenAmount,
         bool isPermanent
     ) external onlyContracts {
-        emit KnowledgeBatchCreated(
+        emit V10KnowledgeBatchEmitted(
             batchId,
             publisherAddress,
             merkleRoot,

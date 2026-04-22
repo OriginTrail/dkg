@@ -365,22 +365,52 @@ describe('httpAuthGuard — advanced branches', () => {
     expect(res.status).toBe(200);
   });
 
-  it('dedupes identical body-less POST replays within the TTL window', async () => {
-    // First body-less POST is accepted (handler sends 200).
+  it('does NOT reject legitimate duplicate body-less POST retries (bot review PR #229 regression fix)', async () => {
+    // Previous behaviour: the CLI-10 fingerprint dedup 401-rejected the
+    // second identical body-less POST within 60 s. That broke every
+    // idempotent retry like `POST /api/local-agent-integrations/:id/refresh`
+    // when a user clicked the "refresh" button twice. The guard was
+    // removed in favour of opt-in signed-request replay protection.
     const first = await fetch(`${baseUrl}/api/shared-memory/publish`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${VALID}` },
     });
     expect(first.status).toBe(200);
 
-    // Exact same body-less POST is caught by the CLI-10 replay cache.
     const second = await fetch(`${baseUrl}/api/shared-memory/publish`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${VALID}` },
     });
-    expect(second.status).toBe(401);
-    const body = await second.json();
-    expect(body.error).toMatch(/Replay detected/);
+    expect(second.status).toBe(200);
+
+    // A third, immediate retry is also fine — there is no coarse
+    // fingerprint cache any more; callers that want strict replay
+    // defence opt into signed-request mode.
+    const third = await fetch(`${baseUrl}/api/shared-memory/publish`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${VALID}` },
+    });
+    expect(third.status).toBe(200);
+  });
+
+  it('does NOT reject legitimate duplicate body-less DELETE retries', async () => {
+    // Parallel regression case: body-less DELETE used to also fall into
+    // the fingerprint dedup. It must be safe to retry an idempotent
+    // DELETE because the underlying state transition is itself
+    // idempotent (delete of absent resource → 404/200, never 401-replay).
+    const first = await fetch(`${baseUrl}/api/agents/nope`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${VALID}` },
+    });
+    // The daemon may respond 404 (unknown id) — what matters here is
+    // that the auth layer does NOT 401 on the second call.
+    expect(first.status).not.toBe(401);
+
+    const second = await fetch(`${baseUrl}/api/agents/nope`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${VALID}` },
+    });
+    expect(second.status).not.toBe(401);
   });
 
   it('does NOT dedupe POSTs that carry a body', async () => {

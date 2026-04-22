@@ -771,15 +771,19 @@ describe('@unit v10 KnowledgeAssetsV10 audit', () => {
       expect(decoded.endEpoch - decoded.startEpoch).to.equal(2n);
     });
 
-    it('SPEC-GAP: must ALSO emit KnowledgeBatchCreated alongside KnowledgeCollectionCreated', async () => {
+    it('emits V10KnowledgeBatchEmitted (distinct topic) alongside KnowledgeCollectionCreated for V10-aware indexers', async () => {
       // Precondition: the legacy KnowledgeAssetsStorage must be deployed —
-      // the PRD expects V10 publish to fan out to it AND to the V10 KCS for
-      // indexer symmetry with V8/V9. If the legacy storage isn't deployed
-      // at all we record that, too, because the spec drift is strictly
-      // worse (no batch event possible).
+      // the PRD expects V10 publish to fan out an audit-shaped record
+      // through it for indexer symmetry with V8/V9. Bot review PR #229
+      // (post-round-5): the emitted event is deliberately NOT named
+      // `KnowledgeBatchCreated` (that would trick legacy V8/V9 indexers
+      // into calling `getBatchPublisher(batchId)` which has no data for
+      // V10 publishes). A dedicated `V10KnowledgeBatchEmitted` topic
+      // preserves the batch-shaped payload while signalling that it is
+      // a V10 shim record, not a real V8/V9 batch.
       if (KASStorage == null) {
         throw new Error(
-          'KnowledgeAssetsStorage not deployed — V10 publish cannot dual-emit as the spec requires (BUGS_FOUND.md#E-9)',
+          'KnowledgeAssetsStorage not deployed — V10 publish cannot surface a batch-shaped audit record (BUGS_FOUND.md#E-9)',
         );
       }
 
@@ -829,20 +833,54 @@ describe('@unit v10 KnowledgeAssetsV10 audit', () => {
       expect(kcsCreated.length).to.equal(1);
 
       const kasAddr = (KASStorage.target as string).toLowerCase();
-      const batchCreatedTopic = KASStorage.interface.getEvent(
+
+      // Bot review PR #229 (post-round-5): V10 publish MUST NOT emit
+      // `KnowledgeBatchCreated` from KAS — that would mislead legacy
+      // V8/V9 indexers into calling `getBatchPublisher(batchId)` for a
+      // batch that never gets written to `knowledgeBatches` /
+      // `kaIdToBatch` / `_batchCounter`. Pin both facts:
+      //   (a) no `KnowledgeBatchCreated` from the KAS address;
+      //   (b) exactly one `V10KnowledgeBatchEmitted` carrying the V10
+      //       publisher + merkleRoot payload.
+      const legacyBatchTopic = KASStorage.interface.getEvent(
         'KnowledgeBatchCreated',
       ).topicHash;
-      const batchCreated = receipt!.logs.filter(
+      const legacyBatches = receipt!.logs.filter(
         (l) =>
           l.address.toLowerCase() === kasAddr &&
-          l.topics[0] === batchCreatedTopic,
+          l.topics[0] === legacyBatchTopic,
       );
-      // Current V10 publish does NOT touch KnowledgeAssetsStorage, so this
-      // fails until the spec gap is closed. Intentionally RED.
       expect(
-        batchCreated.length,
-        'spec requires KnowledgeBatchCreated dual-emit (BUGS_FOUND.md#E-9)',
+        legacyBatches.length,
+        'V10 publish must NOT emit legacy KnowledgeBatchCreated from KAS (legacy getters would return BatchNotFound)',
+      ).to.equal(0);
+
+      const v10ShimTopic = KASStorage.interface.getEvent(
+        'V10KnowledgeBatchEmitted',
+      ).topicHash;
+      const v10ShimEvents = receipt!.logs.filter(
+        (l) =>
+          l.address.toLowerCase() === kasAddr &&
+          l.topics[0] === v10ShimTopic,
+      );
+      expect(
+        v10ShimEvents.length,
+        'spec requires V10 batch-shaped audit emit from KAS via V10KnowledgeBatchEmitted (BUGS_FOUND.md#E-9)',
       ).to.equal(1);
+
+      // Decode the payload and pin publisher + merkle root so any drift
+      // in the event shape is caught deterministically.
+      const decoded = KASStorage.interface.decodeEventLog(
+        'V10KnowledgeBatchEmitted',
+        v10ShimEvents[0].data,
+        v10ShimEvents[0].topics,
+      );
+      expect(decoded.merkleRoot).to.equal(merkleRoot);
+      expect(String(decoded.publisher).toLowerCase()).to.equal(
+        (await creator.getAddress()).toLowerCase(),
+      );
+      expect(decoded.knowledgeAssetsCount).to.equal(10n);
+      expect(decoded.publicByteSize).to.equal(1000n);
     });
   });
 });

@@ -26,6 +26,7 @@ import {
   type PublishResult, type PhaseCallback, type KAMetadata, type CASCondition,
   type CollectedACK,
 } from '@origintrail-official/dkg-publisher';
+import { randomBytes } from 'node:crypto';
 import { ethers } from 'ethers';
 import {
   DKGQueryEngine, QueryHandler,
@@ -1859,26 +1860,74 @@ export class DKGAgent {
   }
 
   /**
-   * Static challenge string used to authenticate a working-memory query.
-   * The caller signs `${WM_AUTH_CHALLENGE_PREFIX}${agentAddress}` with the
-   * agent's private key; the agent layer recovers the signer and compares
-   * against the requested address. Spec §04 / RFC-29.
+   * Challenge-message prefix used to authenticate a working-memory
+   * query. Spec §04 / RFC-29.
+   *
+   * Bot review PR #229 (post-round-5): the v1 challenge was the fixed
+   * string `dkg-wm-auth:<addr>` which the caller signed once — making
+   * the resulting signature a permanent bearer credential for that
+   * address. Anyone who ever observed the signature (HTTP logs,
+   * browser devtools, co-hosted process, backup) could replay it
+   * forever to read that agent's working memory on any multi-agent
+   * node. The challenge is now bound to a millisecond timestamp and a
+   * per-request nonce, and the wire format carries both explicitly so
+   * the verifier can freshness-check and replay-check before recovering
+   * the signer. The legacy (prefix-only) signature format is rejected.
    */
-  static readonly WM_AUTH_CHALLENGE_PREFIX = 'dkg-wm-auth:';
+  static readonly WM_AUTH_CHALLENGE_PREFIX = 'dkg-wm-auth:v2:';
 
   /**
-   * Compute the canonical WM-auth message a caller must sign to query a
-   * given agent's working memory on a multi-agent node.
+   * Freshness window for a signed WM-auth challenge. ±60 s balances
+   * clock drift against the replay window an attacker can practically
+   * exploit.
    */
-  static wmAuthChallenge(agentAddress: string): string {
-    return `${DKGAgent.WM_AUTH_CHALLENGE_PREFIX}${agentAddress.toLowerCase()}`;
+  static readonly WM_AUTH_MAX_AGE_MS = 60_000;
+
+  /**
+   * Per-node in-memory replay cache for WM-auth nonces. Entry value is
+   * the expiry timestamp (ms) after which the nonce record can be
+   * pruned. Scoped to an instance so tests can spawn independent nodes
+   * without cross-contamination.
+   */
+  private readonly _wmAuthSeenNonces = new Map<string, number>();
+  private _wmAuthLastPrune = 0;
+
+  private pruneWmAuthNonces(now: number): void {
+    // Cheap periodic prune (every ~5 s). Fine-grained per-call pruning
+    // is unnecessary — nonce records are tiny and expire inside
+    // WM_AUTH_MAX_AGE_MS anyway.
+    if (now - this._wmAuthLastPrune < 5_000) return;
+    this._wmAuthLastPrune = now;
+    for (const [k, expiry] of this._wmAuthSeenNonces) {
+      if (expiry <= now) this._wmAuthSeenNonces.delete(k);
+    }
   }
 
   /**
-   * Sign the WM-auth challenge for a locally-registered agent, returning
-   * a signature accepted by `query({ view: 'working-memory', agentAuthSignature })`.
-   * Returns undefined if the agent is not registered locally (callers
-   * outside the node have to sign with their own private key).
+   * Canonical WM-auth message bound to an address, a millisecond
+   * timestamp, and a caller-provided nonce. Both the client and the
+   * verifier derive the exact same string from the fields carried in
+   * the signature token, which closes the replay vector that the fixed
+   * v1 challenge had.
+   */
+  static wmAuthChallenge(
+    agentAddress: string,
+    timestampMs: number,
+    nonce: string,
+  ): string {
+    return `${DKGAgent.WM_AUTH_CHALLENGE_PREFIX}${agentAddress.toLowerCase()}:${timestampMs}:${nonce}`;
+  }
+
+  /**
+   * Sign a fresh WM-auth challenge for a locally-registered agent.
+   * Returns a single opaque token of the form
+   * `<timestampMs>.<nonceHex>.<sigHex>` so callers never have to
+   * construct the challenge message themselves. Returns undefined if
+   * the agent is not registered locally (callers outside the node have
+   * to sign with their own private key).
+   *
+   * The returned token is single-use: the verifier records the nonce on
+   * success and rejects any subsequent token carrying the same nonce.
    */
   signWmAuthChallenge(agentAddress: string): string | undefined {
     const want = agentAddress.toLowerCase();
@@ -1892,23 +1941,68 @@ export class DKGAgent {
     if (!rec || !rec.privateKey) return undefined;
     try {
       const wallet = new ethers.Wallet(rec.privateKey);
-      return wallet.signMessageSync(DKGAgent.wmAuthChallenge(agentAddress));
+      const timestampMs = Date.now();
+      const nonce = randomBytes(16).toString('hex');
+      const sig = wallet.signMessageSync(
+        DKGAgent.wmAuthChallenge(agentAddress, timestampMs, nonce),
+      );
+      return `${timestampMs}.${nonce}.${sig}`;
     } catch {
       return undefined;
     }
   }
 
+  /**
+   * Verify a WM-auth token of the form `<timestampMs>.<nonceHex>.<sigHex>`.
+   *
+   * The verifier:
+   *   1. Parses the three segments; rejects malformed / legacy tokens.
+   *   2. Freshness-checks the timestamp against
+   *      {@link WM_AUTH_MAX_AGE_MS}.
+   *   3. Rejects any nonce that was already used for this address
+   *      (replay defence).
+   *   4. Recovers the signer from `wmAuthChallenge(addr, ts, nonce)`
+   *      and compares it against `agentAddress`.
+   *   5. On success, records the nonce so the token cannot be reused.
+   */
   private verifyWmAuthSignature(
     agentAddress: string,
-    signature: string | undefined,
+    token: string | undefined,
   ): boolean {
-    if (!signature) return false;
+    if (!token || typeof token !== 'string') return false;
+    // Exactly two dots — segments are always non-empty because a valid
+    // timestamp, nonce, and signature each contain no dots.
+    const firstDot = token.indexOf('.');
+    const lastDot = token.lastIndexOf('.');
+    if (firstDot < 0 || lastDot <= firstDot) return false;
+    const tsStr = token.slice(0, firstDot);
+    const nonceStr = token.slice(firstDot + 1, lastDot);
+    const sig = token.slice(lastDot + 1);
+    if (tsStr.length === 0 || nonceStr.length === 0 || sig.length === 0) {
+      return false;
+    }
+    const ts = Number(tsStr);
+    if (!Number.isFinite(ts) || !Number.isInteger(ts) || ts <= 0) return false;
+    const now = Date.now();
+    if (Math.abs(now - ts) > DKGAgent.WM_AUTH_MAX_AGE_MS) return false;
+    // Nonce format: caller-provided hex string of reasonable length so
+    // an attacker can't flood the replay cache with trivial collisions.
+    if (!/^[0-9a-fA-F]{16,128}$/.test(nonceStr)) return false;
+
+    this.pruneWmAuthNonces(now);
+    const cacheKey = `${agentAddress.toLowerCase()}:${nonceStr}`;
+    if (this._wmAuthSeenNonces.has(cacheKey)) return false;
+
     try {
       const recovered = ethers.verifyMessage(
-        DKGAgent.wmAuthChallenge(agentAddress),
-        signature,
+        DKGAgent.wmAuthChallenge(agentAddress, ts, nonceStr),
+        sig,
       );
-      return recovered.toLowerCase() === agentAddress.toLowerCase();
+      if (recovered.toLowerCase() !== agentAddress.toLowerCase()) return false;
+      // Record the nonce so the exact same token cannot be reused
+      // within the freshness window.
+      this._wmAuthSeenNonces.set(cacheKey, now + DKGAgent.WM_AUTH_MAX_AGE_MS);
+      return true;
     } catch {
       return false;
     }

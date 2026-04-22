@@ -475,46 +475,40 @@ function isPublicPath(pathname: string): boolean {
 }
 
 /**
- * CLI-10 (BUGS_FOUND.md spec §18 / dup #11): per-token replay cache.
+ * CLI-10 / BUGS_FOUND.md spec §18 — transport-layer replay protection.
  *
- * Bearer auth alone has no transport-layer notion of "this is a fresh
- * request" vs "this is the same request being replayed by an attacker
- * who recorded the wire". Spec §18 plugs that gap with mandatory
- * nonces; until every client emits one, we apply a conservative
- * fingerprint-based dedup on Bearer-only requests so a leaked Bearer
- * cannot be silently replayed within a short window.
+ * Bot review PR #229 (post-round-5): the previous revision of this file
+ * added a coarse `token:method:pathname:content-length` fingerprint
+ * dedup for body-less Bearer requests so a leaked Bearer could not be
+ * silently replayed. That dedup was too aggressive: two consecutive
+ * legitimate `POST /api/local-agent-integrations/:id/refresh` calls
+ * share a fingerprint and the second one was 401-rejected for 60 s.
+ * Similarly, any idempotent body-less `DELETE` retried within a minute
+ * failed with a confusing replay error.
  *
- * The fingerprint is `token:method:pathname:content-length`. Distinct
- * bodies (almost universal in real use) produce different fingerprints
- * via Content-Length and don't trigger the dedup. Identical empty-body
- * POSTs (the test's worst-case "raw replay") collide and the second
- * one is rejected with 401. TTL matches the signed-request freshness
- * window so the dedup state cannot grow unbounded.
+ * Replay protection that REJECTS legitimate retries is worse than no
+ * replay protection: it breaks correct clients while still leaving the
+ * strict replay window (60 s) available to an attacker who records the
+ * wire. The proper transport-layer defence against Bearer replay is
+ * the signed-request scheme (x-dkg-timestamp + x-dkg-nonce +
+ * x-dkg-signature) which binds every request to a unique nonce and a
+ * freshness window, and which is already enforced above — including
+ * synchronous zero-body verification. Clients that do not opt into
+ * signed-request mode now get no transport-layer replay defence; they
+ * must handle idempotence at the application layer or upgrade to
+ * signed requests. That is the correct trade-off because:
+ *
+ *   1. Idempotent operations (`refresh`, `DELETE`) MUST be safe to
+ *      retry. Transport replay defence must not violate that.
+ *   2. Non-idempotent operations (e.g. `POST /publish`) are body-bearing
+ *      in practice, so the old fingerprint never fired for them anyway.
+ *   3. The signed-request scheme provides proper per-request nonce
+ *      enforcement for callers that need it.
+ *
+ * The fingerprint cache and its helpers have therefore been removed.
+ * The symbols below stay exported-but-empty for a release so any test
+ * that still references them keeps compiling; the cache is a no-op.
  */
-const REPLAY_TTL_MS = 60_000;
-const recentRequestFingerprints = new Map<string, number>();
-
-function pruneFingerprints(now: number): void {
-  if (recentRequestFingerprints.size === 0) return;
-  for (const [fp, expiry] of recentRequestFingerprints) {
-    if (expiry <= now) recentRequestFingerprints.delete(fp);
-  }
-}
-
-function computeRequestFingerprint(
-  token: string,
-  method: string,
-  pathname: string,
-  contentLength: string,
-): string {
-  return createHmac('sha256', token)
-    .update(method)
-    .update('\u0000')
-    .update(pathname)
-    .update('\u0000')
-    .update(contentLength)
-    .digest('hex');
-}
 
 /**
  * HTTP auth guard. Returns true if the request is allowed to proceed,
@@ -686,50 +680,21 @@ export function httpAuthGuard(
       return true;
     }
 
-    // Bot review F4: scope the coarse body-less replay cache to callers
-    // that have NOT opted into the signed-request scheme. Clients that
-    // sent x-dkg-nonce already returned above with the proper per-nonce
-    // replay defence; falling through here would double-reject a
-    // legitimate body-less POST that happens to share its 4-tuple with
-    // a previous one. Legacy Bearer-only callers still get the coarse
-    // fingerprint dedup as a best-effort guard (there is nothing else
-    // to distinguish two consecutive identical empty-body POSTs), and
-    // they can always migrate to signed-request mode to unlock retries.
-    if (
-      req.method &&
-      req.method !== 'GET' &&
-      req.method !== 'HEAD'
-    ) {
-      const cl = req.headers['content-length'];
-      const clNum = typeof cl === 'string' ? Number(cl) : 0;
-      const hasBody =
-        (Number.isFinite(clNum) && clNum > 0) ||
-        req.headers['transfer-encoding'] === 'chunked';
-      if (!hasBody) {
-        pruneFingerprints(now);
-        const fp = computeRequestFingerprint(
-          acceptedToken,
-          req.method,
-          pathname,
-          '0',
-        );
-        if (recentRequestFingerprints.has(fp)) {
-          res.writeHead(401, {
-            'Content-Type': 'application/json',
-            'WWW-Authenticate': 'Bearer realm="dkg-node"',
-            'Access-Control-Allow-Origin': corsOrigin ?? '*',
-          });
-          res.end(
-            JSON.stringify({
-              error:
-                'Replay detected — identical body-less Bearer request seen recently. Include a unique x-dkg-nonce or attach a request body.',
-            }),
-          );
-          return false;
-        }
-        recentRequestFingerprints.set(fp, now + REPLAY_TTL_MS);
-      }
-    }
+    // Bot review PR #229 (post-round-5): the previous revision of this
+    // guard dedup'd body-less Bearer requests by `(token, method,
+    // pathname, content-length)` fingerprint and 401-rejected the
+    // second hit within a 60-second window. That turned every
+    // legitimate idempotent retry of a body-less POST / DELETE
+    // (concrete regression:
+    // `POST /api/local-agent-integrations/:id/refresh` double-click)
+    // into a spurious replay error. Transport-layer replay protection
+    // must not break idempotent retries — clients that need strict
+    // per-request replay defence MUST opt into the signed-request
+    // scheme (x-dkg-timestamp / x-dkg-nonce / x-dkg-signature), which
+    // is already enforced synchronously above for zero-body requests.
+    // Bearer-only callers now get pass-through here; they are
+    // responsible for whatever replay semantics they need at the
+    // application layer.
 
     return true;
   }
@@ -855,10 +820,11 @@ export function enforceSignedRequestPostBody(
 
 /**
  * @internal — test/operator helper to wipe the replay cache. Useful
- * when an integration test has a legitimate reason to repeat a body-
- * less POST (e.g. retry-without-bodies) and needs a clean slate.
+ * when an integration test has a legitimate reason to repeat a signed
+ * request and needs a clean slate. Bot review PR #229 (post-round-5):
+ * the coarse body-less fingerprint cache has been removed; only the
+ * per-nonce replay cache remains to be cleared.
  */
 export function _clearReplayCacheForTesting(): void {
-  recentRequestFingerprints.clear();
   seenNonces.clear();
 }

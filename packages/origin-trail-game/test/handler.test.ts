@@ -3583,3 +3583,79 @@ describe('Lobby chat', () => {
     expect(msgs[0].displayName.length).toBe(50);
   });
 });
+
+describe('forceResolveTurn idempotence is keyed to the exact turn (PR #229 post-round-5)', () => {
+  async function setupSoloSwarm() {
+    const { OriginTrailGameCoordinator } = await import('../src/dkg/coordinator.js');
+    const logs: string[] = [];
+    const agent = createInProcessAgent('solo-leader');
+    agent.query = async () => ({ bindings: [] });
+    const coordinator = new OriginTrailGameCoordinator(
+      agent as any,
+      { contextGraphId: 'force-resolve-idemp' },
+      (msg) => logs.push(msg),
+    );
+    const swarm = await coordinator.createSwarm('Solo', 'IdempSwarm', 1);
+    await coordinator.launchExpedition(swarm.id);
+    return { coordinator, swarm, logs };
+  }
+
+  it('idempotent retry: same expectedTurn on a turn already in history is a silent no-op', async () => {
+    const { coordinator, swarm } = await setupSoloSwarm();
+    await coordinator.castVote(swarm.id, 'advance');
+    // In solo M-of-1, castVote auto-resolves turn 1 and advances currentTurn to 2.
+    const beforeHist = coordinator.getSwarm(swarm.id)!.turnHistory.length;
+    expect(beforeHist).toBeGreaterThanOrEqual(1);
+
+    const resolvedTurn = coordinator.getSwarm(swarm.id)!.turnHistory[0].turn;
+
+    // Caller retries force-resolve for the SAME turn that was auto-resolved.
+    // MUST be an idempotent no-op; turnHistory length must not change.
+    await coordinator.forceResolveTurn(swarm.id, { expectedTurn: resolvedTurn });
+    const afterHist = coordinator.getSwarm(swarm.id)!.turnHistory.length;
+    expect(afterHist).toBe(beforeHist);
+  });
+
+  it('legitimate force-resolve of the NEXT turn within the old 3-s window now succeeds (bot review PR #229)', async () => {
+    const { coordinator, swarm } = await setupSoloSwarm();
+    await coordinator.castVote(swarm.id, 'advance');
+    // solo auto-resolved turn 1, currentTurn is now 2
+    const state = coordinator.getSwarm(swarm.id)!;
+    const histBefore = state.turnHistory.length;
+    const currentTurn = state.currentTurn;
+    expect(currentTurn).toBeGreaterThan(state.turnHistory[histBefore - 1].turn);
+
+    // Caller explicitly asks to force-resolve the CURRENT (next) turn.
+    // Under the previous heuristic this was silently no-op'd because
+    // `last.turn === currentTurn - 1 && Date.now() - last.timestamp < 3000`.
+    // The fix must now process this request and append a new history entry.
+    await coordinator.forceResolveTurn(swarm.id, { expectedTurn: currentTurn });
+    const histAfter = coordinator.getSwarm(swarm.id)!.turnHistory.length;
+    expect(histAfter).toBe(histBefore + 1);
+    expect(
+      coordinator.getSwarm(swarm.id)!.turnHistory[histAfter - 1].turn,
+    ).toBe(currentTurn);
+  });
+
+  it('throws when expectedTurn does not match the swarm state (prevents silent drift)', async () => {
+    const { coordinator, swarm } = await setupSoloSwarm();
+    await coordinator.castVote(swarm.id, 'advance');
+    const wrongTurn = coordinator.getSwarm(swarm.id)!.currentTurn + 5;
+    await expect(
+      coordinator.forceResolveTurn(swarm.id, { expectedTurn: wrongTurn }),
+    ).rejects.toThrow(/force-resolve requested for turn/);
+  });
+
+  it('legacy callers (no expectedTurn) still get the 3-s guard against duplicate solo-mode calls', async () => {
+    const { coordinator, swarm } = await setupSoloSwarm();
+    await coordinator.castVote(swarm.id, 'advance');
+    const histBefore = coordinator.getSwarm(swarm.id)!.turnHistory.length;
+
+    // No expectedTurn → legacy behaviour is preserved: within 3 s of the
+    // auto-resolve, a no-op force-resolve is swallowed so existing e2e
+    // flows that call `castVote(); forceResolveTurn(id)` don't double-advance.
+    await coordinator.forceResolveTurn(swarm.id);
+    const histAfter = coordinator.getSwarm(swarm.id)!.turnHistory.length;
+    expect(histAfter).toBe(histBefore);
+  });
+});

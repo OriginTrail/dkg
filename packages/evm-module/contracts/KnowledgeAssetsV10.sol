@@ -149,11 +149,16 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
     ParanetsRegistry public paranetsRegistry;
     KnowledgeCollectionStorage public knowledgeCollectionStorage;
     /// @notice Legacy V8/V9 batch storage. KAV10 invokes
-    /// `emitV10KnowledgeBatchCreated` here so V8/V9 indexers keep
-    /// receiving a `KnowledgeBatchCreated` event for every V10 publish
-    /// (BUGS_FOUND.md#E-9). Resolved best-effort in `initialize` — if
-    /// the legacy storage is not Hub-registered the dual-emit is
-    /// silently skipped (graceful degrade for V10-only deploys).
+    /// `emitV10KnowledgeBatchCreated` here so V10-aware indexers can
+    /// subscribe to a batch-shaped audit record from the KAS address
+    /// for every V10 publish (BUGS_FOUND.md#E-9). The emitted event is
+    /// `V10KnowledgeBatchEmitted`, NOT the legacy `KnowledgeBatchCreated`
+    /// — see bot review PR #229 (post-round-5) and the comment in
+    /// `KnowledgeAssetsStorage.sol` for why: reusing the legacy event
+    /// would trick V8/V9 indexers into calling legacy getters that have
+    /// no V10 data. Resolved best-effort in `initialize` — if the legacy
+    /// storage is not Hub-registered the shim emit is silently skipped
+    /// (graceful degrade for V10-only deploys).
     KnowledgeAssetsStorage public knowledgeAssetsStorage;
     Chronos public chronos;
     IERC20 public tokenContract;
@@ -172,9 +177,12 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
     /// the publish without having to join `KnowledgeCollectionCreated`
     /// + `registerKnowledgeCollection`. Distinct from the V8/V9
     /// `KnowledgeAssetsStorage.KnowledgeBatchCreated` (different
-    /// signature → different topic hash); KAV10 ALSO triggers the
-    /// legacy event via `KnowledgeAssetsStorage.emitV10KnowledgeBatchCreated`
-    /// so dual-indexer support is preserved (BUGS_FOUND.md#E-9).
+    /// signature → different topic hash); KAV10 ALSO triggers a
+    /// batch-shaped audit emit on the legacy storage via
+    /// `KnowledgeAssetsStorage.emitV10KnowledgeBatchCreated`, which now
+    /// emits `V10KnowledgeBatchEmitted` (NOT `KnowledgeBatchCreated`)
+    /// so V8/V9 indexers are not fooled into calling legacy getters for
+    /// data that lives only in V10 (BUGS_FOUND.md#E-9).
     event KnowledgeBatchCreated(
         uint256 indexed batchId,
         uint256 contextGraphId,

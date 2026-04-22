@@ -854,9 +854,17 @@ export class EVMChainAdapter implements ChainAdapter {
         // (KnowledgeCollectionStorage.KnowledgeCollectionCreated emits
         // `merkleRoot` and `KnowledgeAssetsMinted` carries publisher +
         // startId/endId), so re-emitting from KAV10 was both redundant and
-        // broken. The dual-indexer guarantee from H1 is now provided by
-        // KAS.emitV10KnowledgeBatchCreated() (legacy-shaped event) on
-        // deployments that have KAS, and by KCCreated everywhere else.
+        // broken.
+        //
+        // Bot review PR #229 (post-round-5): V10 publishes now surface a
+        // batch-shaped audit record via `V10KnowledgeBatchEmitted`
+        // (distinct topic from legacy `KnowledgeBatchCreated`) so this
+        // subscription path does NOT pick them up. Legacy V8/V9 indexers
+        // that subscribe here continue to see only real V8/V9 batches
+        // (where the backing state is actually populated). V10-aware
+        // indexers subscribe to KCCreated above and/or to the
+        // `V10KnowledgeBatchEmitted` topic directly if they want the
+        // batch-shaped projection.
       }
 
       if (eventType === 'ContextGraphExpanded') {

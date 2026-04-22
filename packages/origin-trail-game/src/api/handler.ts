@@ -187,9 +187,15 @@ export default function createHandler(agent?: any, config?: any, _options?: unkn
       }
 
       if (subpath === '/force-resolve') {
-        const { swarmId } = body;
+        const { swarmId, expectedTurn } = body;
         if (!swarmId) return json(res, 400, { error: 'Missing swarmId' });
-        const wagon = await coordinator.forceResolveTurn(swarmId);
+        // Bot review PR #229 (post-round-5): callers can pass
+        // `expectedTurn` so idempotent retries of a specific turn
+        // are detected semantically instead of by wall-clock proximity.
+        const expected = typeof expectedTurn === 'number' && Number.isFinite(expectedTurn)
+          ? expectedTurn
+          : undefined;
+        const wagon = await coordinator.forceResolveTurn(swarmId, { expectedTurn: expected });
         return json(res, 200, coordinator.formatSwarmState(wagon));
       }
 

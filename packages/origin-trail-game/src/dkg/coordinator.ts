@@ -1287,7 +1287,10 @@ export class OriginTrailGameCoordinator {
     }
   }
 
-  async forceResolveTurn(swarmId: string): Promise<SwarmState> {
+  async forceResolveTurn(
+    swarmId: string,
+    opts?: { expectedTurn?: number },
+  ): Promise<SwarmState> {
     const swarm = this.swarms.get(swarmId);
     if (!swarm) throw new Error('Swarm not found');
     if (swarm.status !== 'traveling') throw new Error('Swarm is not traveling');
@@ -1299,29 +1302,56 @@ export class OriginTrailGameCoordinator {
       }
     }
 
-    // Force-resolve is meant to push through votes that did not reach
-    // quorum on their own — it is NOT meant to manufacture an empty
-    // turn when the previous turn auto-resolved moments ago (e.g.
-    // solo mode where a single vote satisfies M-of-1 immediately, or
-    // an M-of-N game where the last approval just landed). Without
-    // this guard the caller would advance the turn counter twice for
-    // one user action and deadlock e2e flows that wait `sleep(N)` for
-    // state to settle (G-3).
+    // Bot review PR #229 (post-round-5): force-resolve idempotence is
+    // now keyed to the EXACT turn being retried, not a wall-clock
+    // heuristic. The previous revision suppressed any force-resolve
+    // within 3 s of an auto-resolve when there were no open votes —
+    // which ALSO suppressed a legitimate force-resolve of the NEXT
+    // turn in fast/solo flows (e.g. turn N auto-resolves, user
+    // immediately tries to force-resolve turn N+1 because it is stuck
+    // on leader output → the 3-s guard silently no-ops the attempt).
     //
-    // Heuristic: if there are no open votes, no pending proposal, and
-    // we just finalised the previous turn (`turnHistory[last]` was
-    // appended in the recent past), the user already saw a resolution
-    // — treat the force-resolve as idempotent. The 3-s window covers
-    // the worst-case `sleep(1000)` between vote+force-resolve in the
-    // e2e suite while staying well below realistic "user got bored
-    // waiting for a real consensus" intervals (default turn deadline
-    // is 30 s).
-    if (swarm.votes.length === 0 && !swarm.pendingProposal) {
-      const last = swarm.turnHistory[swarm.turnHistory.length - 1];
-      if (last && last.turn === swarm.currentTurn - 1 && Date.now() - last.timestamp < 3000) {
-        this.log(`force-resolve no-op for ${swarmId} turn ${swarm.currentTurn}: previous turn just resolved`);
+    // Idempotence is now semantic:
+    //   - If the caller passes `expectedTurn` and that turn is already
+    //     in `turnHistory`, the request is treated as an idempotent
+    //     retry (silent no-op). This is the clean case for any UI or
+    //     test that knows which turn it meant to resolve.
+    //   - If the caller omits `expectedTurn` AND we just auto-resolved
+    //     the previous turn AND there are no open votes or pending
+    //     proposals, we fall back to the legacy "treat as duplicate"
+    //     behaviour to preserve existing e2e flows that call
+    //     `castVote(); sleep(1000); forceResolveTurn(id)` for a solo /
+    //     fast M-of-1 flow. Callers that want deterministic behaviour
+    //     SHOULD pass `expectedTurn`.
+    const lastEntry = swarm.turnHistory[swarm.turnHistory.length - 1];
+    if (typeof opts?.expectedTurn === 'number') {
+      const exp = opts.expectedTurn;
+      if (swarm.turnHistory.some(t => t.turn === exp)) {
+        this.log(
+          `force-resolve idempotent no-op for ${swarmId} turn ${exp}: already in turnHistory`,
+        );
         return swarm;
       }
+      if (exp !== swarm.currentTurn) {
+        throw new Error(
+          `force-resolve requested for turn ${exp} but swarm is on turn ${swarm.currentTurn}`,
+        );
+      }
+      // Falls through: expectedTurn === currentTurn and not yet resolved.
+    } else if (
+      swarm.votes.length === 0
+      && !swarm.pendingProposal
+      && lastEntry
+      && lastEntry.turn === swarm.currentTurn - 1
+      && Date.now() - lastEntry.timestamp < 3000
+    ) {
+      // Legacy time-window fallback for callers that did not pass
+      // expectedTurn. Documented as best-effort only — pass
+      // `expectedTurn` if you want deterministic behaviour.
+      this.log(
+        `force-resolve legacy no-op for ${swarmId} turn ${swarm.currentTurn}: previous turn just resolved and caller did not pass expectedTurn`,
+      );
+      return swarm;
     }
 
     if (swarm.votes.length === 0) {
