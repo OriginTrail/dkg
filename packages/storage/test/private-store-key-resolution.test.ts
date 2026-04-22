@@ -363,6 +363,176 @@ describe('r12-2: per-node persisted key isolates unconfigured nodes from each ot
   });
 });
 
+// -------------------------------------------------------------------------
+// PR #229 bot review round 15 (r15-1): when the r12-2 flip switched the
+// preferred unconfigured-node key from `sha256(DEFAULT_KEY_DOMAIN)` to a
+// per-node persisted key, every node that previously ran without
+// `DKG_PRIVATE_STORE_KEY` had its existing private ciphertext stranded.
+// The fix adds the legacy deterministic key as a DECRYPT-ONLY fallback
+// so old data remains readable after upgrade while new writes still go
+// to the unique per-node key.
+// -------------------------------------------------------------------------
+describe('r15-1: legacy DEFAULT_KEY_DOMAIN fallback keeps pre-r12 private ciphertext readable after upgrade', () => {
+  const savedEnv = {
+    DKG_PRIVATE_STORE_KEY: process.env.DKG_PRIVATE_STORE_KEY,
+    DKG_PRIVATE_STORE_KEY_FILE: process.env.DKG_PRIVATE_STORE_KEY_FILE,
+    DKG_PRIVATE_STORE_STRICT_KEY: process.env.DKG_PRIVATE_STORE_STRICT_KEY,
+  };
+
+  beforeEach(() => {
+    delete process.env.DKG_PRIVATE_STORE_KEY;
+    delete process.env.DKG_PRIVATE_STORE_KEY_FILE;
+    delete process.env.DKG_PRIVATE_STORE_STRICT_KEY;
+    __resetPrivateStoreKeyCacheForTests();
+  });
+
+  afterEach(() => {
+    for (const [k, v] of Object.entries(savedEnv)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    __resetPrivateStoreKeyCacheForTests();
+  });
+
+  it('legacy-sealed ciphertext (written under sha256(DEFAULT_KEY_DOMAIN)) is still readable after upgrade to a persisted key', async () => {
+    const { store, cleanup } = makeFreshStore();
+    const keyDir = mkdtempSync(join(tmpdir(), 'dkg-ps-r15-'));
+    const keyFile = join(keyDir, 'private-store.key');
+    try {
+      // Step 1: simulate pre-r12 node behaviour by explicitly sealing with
+      // the deterministic legacy key. We pass `DEFAULT_KEY_DOMAIN` as a
+      // passphrase — the constructor SHA-256-stretches it, reproducing
+      // the exact bytes `resolveEncryptionKey` used as the legacy
+      // fallback in r12-2 and earlier.
+      const gm = new ContextGraphManager(store);
+      await gm.ensureContextGraph('cg-legacy');
+      const legacyWriter = new PrivateContentStore(store, gm, {
+        encryptionKey: 'dkg-v10/private-store/default-key/v1',
+      });
+      await legacyWriter.storePrivateTriples('cg-legacy', 'did:dkg:agent:L', [
+        { subject: 'did:dkg:agent:L', predicate: 'http://example.org/p', object: '"legacy-payload"', graph: '' },
+      ] as Quad[]);
+
+      // Step 2: upgrade — new instance has no explicit key but has a
+      // fresh per-node persisted key file. This mirrors what a v10 node
+      // sees on first boot after pulling the r12-2 change.
+      process.env.DKG_PRIVATE_STORE_KEY_FILE = keyFile;
+      __resetPrivateStoreKeyCacheForTests();
+      const upgradedReader = new PrivateContentStore(store, gm);
+      const read = await upgradedReader.getPrivateTriples('cg-legacy', 'did:dkg:agent:L');
+
+      // Step 3: the fallback chain finds the legacy key and recovers
+      // the plaintext — without r15-1 this returned the envelope
+      // unchanged (data stranded).
+      expect(read).toHaveLength(1);
+      expect(read[0].object).toBe('"legacy-payload"');
+      // The persisted file must have been created with 32 bytes —
+      // proves we're genuinely on a post-r12-2 instance, not falling
+      // back to the legacy path for writes.
+      expect(existsSync(keyFile)).toBe(true);
+      expect(readFileSync(keyFile).length).toBe(32);
+    } finally {
+      rmSync(keyDir, { recursive: true, force: true });
+      cleanup();
+    }
+  });
+
+  it('new writes always use the per-node persisted key, not the legacy fallback (fallback is decrypt-only)', async () => {
+    const { store, cleanup } = makeFreshStore();
+    const keyDir = mkdtempSync(join(tmpdir(), 'dkg-ps-r15-writes-'));
+    const keyFile = join(keyDir, 'private-store.key');
+    try {
+      process.env.DKG_PRIVATE_STORE_KEY_FILE = keyFile;
+      __resetPrivateStoreKeyCacheForTests();
+      const gm = new ContextGraphManager(store);
+      await gm.ensureContextGraph('cg-write');
+      const ps = new PrivateContentStore(store, gm);
+      await ps.storePrivateTriples('cg-write', 'did:dkg:agent:N', [
+        { subject: 'did:dkg:agent:N', predicate: 'http://example.org/p', object: '"new-write"', graph: '' },
+      ] as Quad[]);
+
+      // Grab the ciphertext.
+      const result = await store.query(`SELECT ?o WHERE { GRAPH ?g { ?s ?p ?o } } LIMIT 1`);
+      const ciphertext = (result as any).bindings[0].o as string;
+      expect(ciphertext.startsWith('"enc:gcm:v1:')).toBe(true);
+
+      // Verify a store that ONLY knows the legacy deterministic key
+      // cannot decrypt the new write — if r15-1 were mis-applied
+      // (e.g. flipping encryption to also try the legacy key) this
+      // would leak plaintext.
+      const legacyOnlyReader = new PrivateContentStore(store, gm, {
+        encryptionKey: 'dkg-v10/private-store/default-key/v1',
+      });
+      const legacyRead = await legacyOnlyReader.getPrivateTriples('cg-write', 'did:dkg:agent:N');
+      expect(legacyRead).toHaveLength(1);
+      // Under a legacy-only key the new ciphertext is unreadable — the
+      // envelope is returned verbatim, plaintext is NOT exposed.
+      expect(legacyRead[0].object).toBe(ciphertext);
+      expect(legacyRead[0].object).not.toBe('"new-write"');
+    } finally {
+      rmSync(keyDir, { recursive: true, force: true });
+      cleanup();
+    }
+  });
+
+  it('decryptPrivateLiteral (standalone) also falls back to the legacy key for pre-r12 ciphertext', async () => {
+    const { store, cleanup } = makeFreshStore();
+    const keyDir = mkdtempSync(join(tmpdir(), 'dkg-ps-r15-export-'));
+    const keyFile = join(keyDir, 'private-store.key');
+    try {
+      // Write with the legacy key.
+      const gm = new ContextGraphManager(store);
+      await gm.ensureContextGraph('cg-export');
+      const writer = new PrivateContentStore(store, gm, {
+        encryptionKey: 'dkg-v10/private-store/default-key/v1',
+      });
+      await writer.storePrivateTriples('cg-export', 'did:dkg:agent:X', [
+        { subject: 'did:dkg:agent:X', predicate: 'http://example.org/p', object: '"exported-legacy"', graph: '' },
+      ] as Quad[]);
+      const result = await store.query(`SELECT ?o WHERE { GRAPH ?g { ?s ?p ?o } } LIMIT 1`);
+      const legacyCiphertext = (result as any).bindings[0].o as string;
+
+      // Upgrade: no explicit key, new per-node key file. The standalone
+      // `decryptPrivateLiteral` export (used by publisher subtraction
+      // etc.) must still recover the plaintext via the legacy fallback.
+      process.env.DKG_PRIVATE_STORE_KEY_FILE = keyFile;
+      __resetPrivateStoreKeyCacheForTests();
+      const recovered = decryptPrivateLiteral(legacyCiphertext);
+      expect(recovered).toBe('"exported-legacy"');
+    } finally {
+      rmSync(keyDir, { recursive: true, force: true });
+      cleanup();
+    }
+  });
+
+  it('ciphertext under a TRULY unknown key (neither primary nor legacy) still returns the envelope (no silent leak)', async () => {
+    const { store, cleanup } = makeFreshStore();
+    try {
+      const gm = new ContextGraphManager(store);
+      await gm.ensureContextGraph('cg-unknown');
+      const writer = new PrivateContentStore(store, gm, {
+        encryptionKey: 'A'.repeat(64), // 32 hex bytes of 0xAA — not legacy, not the reader's key
+      });
+      await writer.storePrivateTriples('cg-unknown', 'did:dkg:agent:U', [
+        { subject: 'did:dkg:agent:U', predicate: 'http://example.org/p', object: '"unrecoverable"', graph: '' },
+      ] as Quad[]);
+
+      // Reader with a different explicit key — neither key in the
+      // chain (primary = reader key, legacy fallback = sha256 default)
+      // authenticates this ciphertext. Must NOT leak plaintext.
+      const reader = new PrivateContentStore(store, gm, {
+        encryptionKey: 'B'.repeat(64),
+      });
+      const read = await reader.getPrivateTriples('cg-unknown', 'did:dkg:agent:U');
+      expect(read).toHaveLength(1);
+      expect(read[0].object.startsWith('"enc:gcm:v1:')).toBe(true);
+      expect(read[0].object).not.toBe('"unrecoverable"');
+    } finally {
+      cleanup();
+    }
+  });
+});
+
 describe('PrivateContentStore.decryptLiteral — returns envelope on bad key (defence-in-depth)', () => {
   it('wrong key: the instance decrypt method leaves the envelope visible so callers can detect the failure', async () => {
     const { store, cleanup } = makeFreshStore();

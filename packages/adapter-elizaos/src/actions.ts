@@ -851,9 +851,42 @@ export async function persistChatTurnImpl(
       // `dkg:replyTo` edge that the regular `buildAssistantMessageQuads`
       // adds (there is no real user message to reply to here — the
       // stub is a placeholder, not a user turn).
+      //
+      // PR #229 bot review round 15 (r15-2): the stub MUST NOT share
+      // the canonical user-message URI (`msg:user:${turnKey}`). Under
+      // the r14-2 default (`userTurnPersisted=false` when the caller
+      // does not assert otherwise) we will enter the headless branch
+      // EVEN IF `onChatTurn` already persisted the real user message —
+      // the flag is opt-in precisely because the handler boundary has
+      // no visibility into onChatTurn's outcome. If we then wrote the
+      // stub quads onto the real user-message URI we would stack a
+      // second `schema:author = agent:system` + empty `schema:text`
+      // onto the real subject and corrupt the chat history (both
+      // predicates are multi-valued in RDF, so the store keeps BOTH
+      // the real user's author/text AND the stub's).
+      //
+      // Fix: key the stub on a DEDICATED `msg:user-stub:` namespace
+      // AND on the assistant memory id (when available) — the real
+      // user-message URI uses `msg:user:` + the user memory id's
+      // turnKey, so the two paths can never share a subject. The
+      // headless turn envelope still points `dkg:hasUserMessage` at
+      // the stub (not the real user msg); readers that care about
+      // the distinction filter on `dkg:headlessUserMessage "true"`
+      // (set by `buildHeadlessUserStubQuads`) or on the `user-stub:`
+      // prefix.
+      //
+      // We also build a distinct `stubTurnKey` so the stub URI never
+      // accidentally matches a turn URI the reader resolves as the
+      // canonical turn for a legitimate user-id-keyed turnKey.
+      const stubSourceId =
+        typeof rawMemoryId === 'string' && rawMemoryId.length > 0
+          ? rawMemoryId
+          : turnSourceId;
+      const stubTurnKey = `${encodeIriSegment(roomId)}:${encodeIriSegment(stubSourceId)}`;
+      const userStubUri = `${CHAT_NS}msg:user-stub:${stubTurnKey}`;
       const assistantQuads = buildAssistantMessageQuads(
         assistantMsgUri,
-        userMsgUri,
+        userStubUri,
         sessionUri,
         assistantTs,
         assistantText,
@@ -861,14 +894,14 @@ export async function persistChatTurnImpl(
       ).filter((q) => q.predicate !== `${DKG_ONT_NS}replyTo`);
       quads = [
         ...buildSessionEntityQuads(sessionUri, sessionId),
-        ...buildHeadlessUserStubQuads(userMsgUri, sessionUri, ts, turnKey),
+        ...buildHeadlessUserStubQuads(userStubUri, sessionUri, ts, turnKey),
         ...assistantQuads,
         ...buildHeadlessAssistantTurnEnvelopeQuads(
           turnUri,
           sessionUri,
           turnKey,
           ts,
-          userMsgUri,
+          userStubUri,
           assistantMsgUri,
           characterName,
           userId,

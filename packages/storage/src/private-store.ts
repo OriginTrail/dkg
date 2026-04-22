@@ -159,6 +159,63 @@ function decodeKeyOrPassphrase(s: string): Buffer {
 }
 
 /**
+ * Compute the deterministic legacy fallback key.
+ *
+ * Pre-r12 nodes (no `DKG_PRIVATE_STORE_KEY` configured) all shared
+ * `sha256(DEFAULT_KEY_DOMAIN)`. The r12-2 fix rightly stopped using
+ * that as the preferred key, but a straight flip would strand every
+ * private triple written before the upgrade — the fresh per-node key
+ * cannot decrypt ciphertext sealed under the deterministic key.
+ *
+ * PR #229 bot review round 15 (r15-1): keep the legacy key around as
+ * a **decrypt-only** fallback so existing data remains readable after
+ * upgrade. New writes always use the primary key. The legacy key is
+ * never used to encrypt anything (the confidentiality regression that
+ * r12-2 fixed is preserved — no one sharing a public constant for
+ * fresh data). Once all legacy ciphertext has been re-encrypted or
+ * deleted, operators can drop the fallback entirely by setting
+ * `DKG_PRIVATE_STORE_STRICT_KEY=1` (which disables unconfigured-key
+ * fallbacks altogether).
+ */
+function computeLegacyDefaultDomainKey(): Buffer {
+  return createHash('sha256').update(DEFAULT_KEY_DOMAIN).digest();
+}
+
+/**
+ * Try to decrypt an AES-GCM envelope against a primary key, falling
+ * back to a list of legacy keys if the primary fails.
+ *
+ * AES-GCM authenticates every ciphertext with a 128-bit tag, so a
+ * wrong key surfaces as a `decipher.final()` throw (Error: Unsupported
+ * state or unable to authenticate data) — no silent plaintext
+ * corruption. That lets us safely try keys in order and return the
+ * first that authenticates.
+ *
+ * Returns `null` if NO key in the chain authenticates the ciphertext;
+ * callers turn that into "leave the envelope visible so the operator
+ * can detect the failure".
+ */
+function tryDecryptWithKeyChain(
+  iv: Buffer,
+  tag: Buffer,
+  ct: Buffer,
+  primary: Buffer,
+  legacyKeys: readonly Buffer[],
+): string | null {
+  const chain = [primary, ...legacyKeys];
+  for (const key of chain) {
+    try {
+      const decipher = createDecipheriv('aes-256-gcm', key, iv);
+      decipher.setAuthTag(tag);
+      return Buffer.concat([decipher.update(ct), decipher.final()]).toString('utf8');
+    } catch {
+      // try next key
+    }
+  }
+  return null;
+}
+
+/**
  * Stateless mirror of {@link PrivateContentStore}'s seal — used by
  * pipelines that read private quads back from the underlying store via
  * raw SPARQL (and therefore see ciphertext envelopes) but want to
@@ -172,6 +229,12 @@ function decodeKeyOrPassphrase(s: string): Buffer {
  * or the deterministic default-domain hash) so every consumer in the
  * process round-trips to identical bytes. Non-encrypted literals,
  * URIs, and blank nodes are returned unchanged.
+ *
+ * PR #229 bot review round 15 (r15-1): when the primary key can't
+ * decrypt (typical on nodes just upgraded past r12-2 that still hold
+ * pre-r12 private triples sealed under the legacy default-domain
+ * key), fall back to the legacy `sha256(DEFAULT_KEY_DOMAIN)` key so
+ * old data remains readable.
  */
 export function decryptPrivateLiteral(
   serialized: string,
@@ -180,15 +243,15 @@ export function decryptPrivateLiteral(
   if (!serialized.startsWith(`"${ENC_PREFIX}`)) return serialized;
   const m = serialized.match(/^"enc:gcm:v1:([^"]+)"$/);
   if (!m) return serialized;
-  const key = resolveEncryptionKey(options.encryptionKey);
+  const primary = resolveEncryptionKey(options.encryptionKey);
+  const legacyKeys = resolveLegacyDecryptionKeys(primary);
   try {
     const buf = Buffer.from(m[1], 'base64');
     const iv = buf.subarray(0, 12);
     const tag = buf.subarray(12, 28);
     const ct = buf.subarray(28);
-    const decipher = createDecipheriv('aes-256-gcm', key, iv);
-    decipher.setAuthTag(tag);
-    const plain = Buffer.concat([decipher.update(ct), decipher.final()]).toString('utf8');
+    const plain = tryDecryptWithKeyChain(Buffer.from(iv), Buffer.from(tag), Buffer.from(ct), primary, legacyKeys);
+    if (plain === null) return serialized;
     // Strip r6 type-tag prefix (`L|` literal / `I|` IRI). Legacy
     // envelopes without the tag are returned verbatim for backwards
     // compatibility — see `PrivateContentStore#decryptLiteral`.
@@ -197,6 +260,24 @@ export function decryptPrivateLiteral(
   } catch {
     return serialized;
   }
+}
+
+/**
+ * Build the decrypt-only fallback-key list.
+ *
+ * Rules:
+ *   - Always include `sha256(DEFAULT_KEY_DOMAIN)` unless it IS the
+ *     primary (no point trying the same key twice — and that happens
+ *     naturally on a read-only/sandbox node whose persisted-key
+ *     creation failed and fell through to the legacy last-resort key
+ *     anyway).
+ *   - Never return an entry that would encrypt. This list is consumed
+ *     by `tryDecryptWithKeyChain` only.
+ */
+function resolveLegacyDecryptionKeys(primary: Buffer): Buffer[] {
+  const legacy = computeLegacyDefaultDomainKey();
+  if (primary.equals(legacy)) return [];
+  return [legacy];
 }
 
 function resolveEncryptionKey(
@@ -340,13 +421,27 @@ export class PrivateContentStore {
       const iv = buf.subarray(0, 12);
       const tag = buf.subarray(12, 28);
       const ct = buf.subarray(28);
-      const decipher = createDecipheriv(
-        'aes-256-gcm',
+      // PR #229 bot review round 15 (r15-1): fall back to the legacy
+      // `sha256(DEFAULT_KEY_DOMAIN)` key when the primary key fails
+      // to authenticate. This is decrypt-only — `encryptLiteral`
+      // always uses `this.encryptionKey` — so a freshly-upgraded node
+      // whose pre-r12 private triples were sealed under the legacy
+      // deterministic key can still read them, while every new write
+      // goes to the unique per-node key.
+      const legacyKeys = resolveLegacyDecryptionKeys(this.encryptionKey);
+      const plain = tryDecryptWithKeyChain(
+        Buffer.from(iv),
+        Buffer.from(tag),
+        Buffer.from(ct),
         this.encryptionKey,
-        iv,
+        legacyKeys,
       );
-      decipher.setAuthTag(tag);
-      const plain = Buffer.concat([decipher.update(ct), decipher.final()]).toString('utf8');
+      if (plain === null) {
+        // Wrong key or corrupted ciphertext — leave the envelope
+        // visible so callers can detect the failure rather than
+        // silently dropping to "no result".
+        return serialized;
+      }
       // Legacy (pre-r6) envelopes contained the literal bytes verbatim
       // with no type tag. Detect them by the absence of the `L|` / `I|`
       // prefix and return them unchanged so previously-written data
@@ -354,9 +449,6 @@ export class PrivateContentStore {
       if (plain.length < 2 || plain[1] !== '|') return plain;
       return plain.slice(2);
     } catch {
-      // Wrong key or corrupted ciphertext — leave the envelope visible
-      // so callers can detect the failure rather than silently dropping
-      // to "no result".
       return serialized;
     }
   }
