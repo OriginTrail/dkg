@@ -519,6 +519,7 @@ function injectMinTrustFilter(sparql: string, minTrust: number): string | null {
   const statements = trimmedInner.split(/\.(?=\s|$)/).map(s => s.trim()).filter(Boolean);
 
   const subjectVars = new Set<string>();
+  const subjectIris = new Set<string>();
   for (const stmt of statements) {
     // First non-whitespace token is the subject.
     const m = stmt.match(/^\s*([?$]([A-Za-z_]\w*)|<[^>]+>|_:[A-Za-z_]\w*|"[^"]*"(?:\^\^<[^>]+>|@[A-Za-z-]+)?)/);
@@ -528,12 +529,21 @@ function injectMinTrustFilter(sparql: string, minTrust: number): string | null {
       subjectVars.add(subj);
       continue;
     }
-    // Constant subject — we cannot attach a trustLevel filter to it
-    // without changing semantics, and silently letting it through
-    // would bypass `_minTrust` (bot review L1/L3). Refuse the rewrite.
+    // Bot review (PR #229 follow-up, dkg-query-engine.ts:534):
+    // exact-entity lookups like `SELECT ?o WHERE { <e> <p> ?o }` are
+    // the most common SPARQL shape in DKG and must NOT fail closed on
+    // `_minTrust`. The threshold is perfectly enforceable against a
+    // concrete IRI: attach `<iri> <trustLevel> ?t . FILTER(?t >= N)`
+    // to the rewritten WHERE. Blank-node and literal subjects remain
+    // refused — neither can carry trust metadata in our ontology.
+    if (subj.startsWith('<') && subj.endsWith('>')) {
+      subjectIris.add(subj);
+      continue;
+    }
+    // Blank-node / literal subject — cannot attach a trust filter.
     return null;
   }
-  if (subjectVars.size === 0) return null;
+  if (subjectVars.size === 0 && subjectIris.size === 0) return null;
 
   const extraClauses: string[] = [];
   let i = 0;
@@ -541,6 +551,13 @@ function injectMinTrustFilter(sparql: string, minTrust: number): string | null {
     const trustVar = `?__dkgTrust${i++}`;
     extraClauses.push(
       `${subjectVar} <http://dkg.io/ontology/trustLevel> ${trustVar} . ` +
+        `FILTER(<http://www.w3.org/2001/XMLSchema#integer>(STR(${trustVar})) >= ${minTrust})`,
+    );
+  }
+  for (const subjectIri of subjectIris) {
+    const trustVar = `?__dkgTrust${i++}`;
+    extraClauses.push(
+      `${subjectIri} <http://dkg.io/ontology/trustLevel> ${trustVar} . ` +
         `FILTER(<http://www.w3.org/2001/XMLSchema#integer>(STR(${trustVar})) >= ${minTrust})`,
     );
   }

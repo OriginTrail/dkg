@@ -29,19 +29,40 @@ interface SimConfig {
 }
 
 /**
+ * Weak marker we tag onto a seeded rng closure so `rndId()` can detect
+ * that the caller has supplied a seeded RNG and take the deterministic
+ * path (no `Date.now()`, per-run counter managed on the closure). Using
+ * a Symbol means the tag is invisible to user code and doesn't collide
+ * with anything on the function prototype.
+ */
+const SEEDED_RNG_MARK = Symbol.for('dkg.network-sim.seededRng');
+const SEEDED_RNG_COUNTER = Symbol.for('dkg.network-sim.seededRngCounter');
+
+type SeededRng = (() => number) & {
+  [SEEDED_RNG_MARK]?: true;
+  [SEEDED_RNG_COUNTER]?: number;
+};
+
+/**
  * Minimal mulberry32 seeded RNG (K-4). Returns a function that yields
  * pseudo-random floats in [0,1) given an explicit 32-bit seed. Used to
  * make sim runs reproducible when `SimConfig.seed` is set.
  */
 export function createSeededRng(seed: number): () => number {
   let state = seed >>> 0;
-  return function mulberry32() {
+  const mulberry32: SeededRng = (function mulberry32() {
     state = (state + 0x6d2b79f5) >>> 0;
     let t = state;
     t = Math.imul(t ^ (t >>> 15), t | 1);
     t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
+  }) as SeededRng;
+  // Bot review (PR #229 follow-up): brand the returned RNG so `rndId()`
+  // takes the deterministic, no-wall-clock path. Same seed → same
+  // sequence of ids regardless of when the sim runs.
+  mulberry32[SEEDED_RNG_MARK] = true;
+  mulberry32[SEEDED_RNG_COUNTER] = 0;
+  return mulberry32;
 }
 
 interface OpEvent {
@@ -90,26 +111,62 @@ interface NodeInfo {
 // ---------------------------------------------------------------------------
 
 /**
- * Monotonic counter used alongside an rng-derived suffix so rndId()
- * stays unique even when two calls land inside the same Date.now()
- * millisecond under a seeded RNG (the suffix length is fixed so the
- * RNG alone cannot guarantee uniqueness).
+ * Process-global counter used for UNSEEDED calls only (Math.random
+ * fallback). Seeded runs maintain their own per-run counter inside the
+ * closure returned by `makeSeededRndId(rng)` so two simulations started
+ * with the same seed produce byte-identical URIs regardless of when or
+ * in what order they ran.
  */
-let rndIdCounter = 0;
+let globalRndIdCounter = 0;
 
 /**
- * Bot review J1: previously rndId() used Math.random() unconditionally,
- * so two sim runs started with the same seed still produced different
- * entity URIs and query LIMITs. Now every random-using helper takes an
- * explicit `rng` callback. runSimulation() creates a seeded RNG from
- * `config.seed` at the start of the run and threads it through every
- * executor; Math.random() is only used as the fallback when no seed is
- * provided.
+ * Bot review (PR #229 follow-up, sim-engine.ts:112): the previous
+ * implementation concatenated `Date.now()` and a process-global
+ * counter even when called with a seeded RNG. Two sim runs started
+ * with the same seed/config at different wall-clock times therefore
+ * produced DIFFERENT `sim-<id>` URIs and thus different CONSTRUCT
+ * results, defeating the whole reproducibility contract. Now:
+ *   - if `rng` is branded by `makeSeededRng()`, we derive the id from
+ *     ONLY the RNG + an rng-local counter — no Date.now(), no global
+ *     counter. Same seed → same sequence of ids across runs.
+ *   - if `rng` is the default `Math.random`, we fall back to the old
+ *     wall-clock-plus-global-counter shape (legacy behaviour preserved
+ *     for callers that did NOT opt into reproducibility).
  */
-function rndId(rng: () => number = Math.random): string {
-  rndIdCounter = (rndIdCounter + 1) >>> 0;
+// Exported for the sim-engine reproducibility unit tests only. NOT part
+// of the public API of this package — bot review PR #229 follow-up
+// pinned this as the primary place where seeded runs were broken, so
+// the test needs a handle on it.
+export function _rndIdForTesting(rng?: () => number): string {
+  return rndId(rng);
+}
+
+/**
+ * Reset the seeded counter embedded in the closure returned by
+ * `createSeededRng(seed)`. Useful in tests that want to start two
+ * reproducibility probes from the same RNG state.
+ */
+export function _resetSeededRngCounterForTesting(rng: () => number): void {
+  const r = rng as SeededRng;
+  if (r[SEEDED_RNG_MARK] === true) r[SEEDED_RNG_COUNTER] = 0;
+}
+
+function rndId(rng: (() => number) | SeededRng = Math.random): string {
+  const seeded = (rng as SeededRng)[SEEDED_RNG_MARK] === true;
+  if (seeded) {
+    const r = rng as SeededRng;
+    const c = ((r[SEEDED_RNG_COUNTER] ?? 0) + 1) >>> 0;
+    r[SEEDED_RNG_COUNTER] = c;
+    // Two 8-character rng draws give 64 bits of entropy; combined with
+    // the per-run counter the risk of a collision inside a single run
+    // is negligible while keeping the output purely seed-driven.
+    const rand1 = rng().toString(36).slice(2, 10).padEnd(8, '0');
+    const rand2 = rng().toString(36).slice(2, 10).padEnd(8, '0');
+    return 's-' + rand1 + rand2 + '-' + c.toString(36);
+  }
+  globalRndIdCounter = (globalRndIdCounter + 1) >>> 0;
   const rand = rng().toString(36).slice(2, 10).padEnd(8, '0');
-  return Date.now().toString(36) + '-' + rand + '-' + rndIdCounter.toString(36);
+  return Date.now().toString(36) + '-' + rand + '-' + globalRndIdCounter.toString(36);
 }
 
 /** Devnet auth token path for a node (node1, node2, … not node-1). Used by loadNodeTokens; exported for tests. */

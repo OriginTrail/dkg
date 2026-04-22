@@ -30,7 +30,13 @@ import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { Readable } from 'node:stream';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { handleSimRequest, fmtError } from '../src/server/sim-engine.js';
+import {
+  handleSimRequest,
+  fmtError,
+  createSeededRng,
+  _rndIdForTesting,
+  _resetSeededRngCounterForTesting,
+} from '../src/server/sim-engine.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PROD_SRC = resolve(HERE, '..', 'src', 'server', 'sim-engine.ts');
@@ -103,6 +109,64 @@ describe('[K-4] sim engine — determinism / seeded RNG (RED until implemented)'
       hasSeededRng: true,
       hasDeterminismFlag: true,
     });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Bot review (PR #229 follow-up, sim-engine.ts:112): seeded runs were
+  // still non-reproducible because `rndId()` baked `Date.now()` and a
+  // process-global counter into every id. Two runs with the same seed
+  // and config produced DIFFERENT sim-<id> URIs and therefore
+  // irreproducible results. The fix: when a seeded RNG (branded by
+  // `createSeededRng`) is passed to `rndId`, ids come purely from the
+  // rng sequence and a per-run counter — no Date.now(), no globals.
+  // Pin both reproducibility (same seed → identical id sequence) and
+  // non-determinism for the unseeded fallback.
+  // ─────────────────────────────────────────────────────────────────────────
+  it('rndId(rng) is REPRODUCIBLE when rng is a seeded mulberry32 (same seed → identical id sequence)', () => {
+    const rngA = createSeededRng(42);
+    const rngB = createSeededRng(42);
+    const seqA = Array.from({ length: 5 }, () => _rndIdForTesting(rngA));
+    const seqB = Array.from({ length: 5 }, () => _rndIdForTesting(rngB));
+    expect(seqA).toEqual(seqB);
+    // And the ids do NOT embed a wall-clock timestamp — they're pure
+    // `s-<rng-draws>-<counter>` now, so different machines / runtimes
+    // can still compare snapshots across the wire.
+    for (const id of seqA) {
+      expect(id).toMatch(/^s-[0-9a-z]{16}-[0-9a-z]+$/);
+    }
+  });
+
+  it('rndId(rng) with the SAME seed produces a STABLE sequence across a reset of the per-rng counter', () => {
+    const rng = createSeededRng(100);
+    const first = [_rndIdForTesting(rng), _rndIdForTesting(rng)];
+    // If a caller exceptionally wants to replay from the start of the
+    // counter (e.g. scenario recorder restart), the reset helper gives
+    // them a byte-identical second pass from the SAME rng — as long as
+    // the underlying rng is also reset (which is the caller's job).
+    const rng2 = createSeededRng(100);
+    _resetSeededRngCounterForTesting(rng2);
+    const second = [_rndIdForTesting(rng2), _rndIdForTesting(rng2)];
+    expect(first).toEqual(second);
+  });
+
+  it('rndId() without a seeded rng (Math.random default) still produces unique ids (legacy fallback)', () => {
+    const ids = Array.from({ length: 50 }, () => _rndIdForTesting());
+    expect(new Set(ids).size).toBe(50);
+    // Legacy shape carries a wall-clock timestamp component.
+    for (const id of ids) {
+      expect(id).toMatch(/^[0-9a-z]+-[0-9a-z]+-[0-9a-z]+$/);
+    }
+  });
+
+  it('two seeded runs at DIFFERENT wall-clock times still produce the SAME id sequence (the point of the fix)', async () => {
+    const rngA = createSeededRng(7);
+    const seqA = Array.from({ length: 3 }, () => _rndIdForTesting(rngA));
+    // Simulate the "same seed, different time" scenario — the previous
+    // implementation baked Date.now() into each id and would fail here.
+    await new Promise((r) => setTimeout(r, 10));
+    const rngB = createSeededRng(7);
+    const seqB = Array.from({ length: 3 }, () => _rndIdForTesting(rngB));
+    expect(seqA).toEqual(seqB);
   });
 
   it('SimConfig includes a `seed` field visible on POST /sim/start (fails until exposed)', async () => {

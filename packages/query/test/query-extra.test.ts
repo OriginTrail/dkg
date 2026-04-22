@@ -104,6 +104,79 @@ describe('[Q-1] DKGQueryEngine._minTrust is unused — PROD-BUG', () => {
     // Today, _minTrust is ignored — this assertion fails and documents Q-1.
     expect(names).toEqual(['"HighTrust"']);
   });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Bot review (PR #229 follow-up, dkg-query-engine.ts:534): concrete-
+  // subject queries like `SELECT ?o WHERE { <entity> <p> ?o }` are the
+  // most common SPARQL shape for exact lookups and MUST honor `_minTrust`
+  // (not fail closed with an empty result). The fix attaches
+  // `<entity> <trustLevel> ?t . FILTER(?t >= N)` to the rewritten WHERE.
+  // ─────────────────────────────────────────────────────────────────────────
+  it('honors _minTrust on CONCRETE-SUBJECT queries (exact-entity lookup)', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const consensusGraph = contextGraphVerifiedMemoryUri(CG, 'consensus-verified');
+    await store.insert([
+      quad('urn:e1', 'http://schema.org/name', '"Alice"', consensusGraph),
+      quad('urn:e1', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.ConsensusVerified}"`, consensusGraph),
+    ]);
+
+    // Exact-entity lookup MUST succeed when the entity meets the threshold.
+    const ok = await engine.query(
+      'SELECT ?n WHERE { <urn:e1> <http://schema.org/name> ?n }',
+      { contextGraphId: CG, view: 'verified-memory', _minTrust: TrustLevel.ConsensusVerified },
+    );
+    expect(ok.bindings.map((b) => b['n'])).toEqual(['"Alice"']);
+  });
+
+  it('fails CLOSED on a concrete-subject lookup whose entity is BELOW the trust threshold', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const selfAttestedGraph = contextGraphVerifiedMemoryUri(CG, 'self-attested');
+    await store.insert([
+      quad('urn:low', 'http://schema.org/name', '"Bob"', selfAttestedGraph),
+      quad('urn:low', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.SelfAttested}"`, selfAttestedGraph),
+    ]);
+
+    const result = await engine.query(
+      'SELECT ?n WHERE { <urn:low> <http://schema.org/name> ?n }',
+      { contextGraphId: CG, view: 'verified-memory', _minTrust: TrustLevel.ConsensusVerified },
+    );
+    // Below threshold → empty (the trust filter eliminates the row).
+    expect(result.bindings).toEqual([]);
+  });
+
+  it('fails CLOSED on a concrete-subject lookup whose entity has NO trust metadata at all', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const verifiedGraph = contextGraphVerifiedMemoryUri(CG, 'consensus-verified');
+    await store.insert([
+      quad('urn:bare', 'http://schema.org/name', '"Ghost"', verifiedGraph),
+      // deliberately NO trustLevel quad for <urn:bare>
+    ]);
+    const result = await engine.query(
+      'SELECT ?n WHERE { <urn:bare> <http://schema.org/name> ?n }',
+      { contextGraphId: CG, view: 'verified-memory', _minTrust: TrustLevel.ConsensusVerified },
+    );
+    expect(result.bindings).toEqual([]);
+  });
+
+  it('honors _minTrust on MIXED concrete + variable subjects in a single BGP', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const consensus = contextGraphVerifiedMemoryUri(CG, 'consensus-verified');
+    await store.insert([
+      quad('urn:p', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.ConsensusVerified}"`, consensus),
+      quad('urn:q', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.ConsensusVerified}"`, consensus),
+      quad('urn:p', 'http://schema.org/relatedTo', 'urn:q', consensus),
+      quad('urn:q', 'http://schema.org/name', '"q-name"', consensus),
+    ]);
+    const result = await engine.query(
+      'SELECT ?name WHERE { <urn:p> <http://schema.org/relatedTo> ?t . ?t <http://schema.org/name> ?name }',
+      { contextGraphId: CG, view: 'verified-memory', _minTrust: TrustLevel.ConsensusVerified },
+    );
+    expect(result.bindings.map((b) => b['name'])).toEqual(['"q-name"']);
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

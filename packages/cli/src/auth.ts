@@ -296,6 +296,48 @@ export type SignedRequestOutcome =
  * Callers that still compute HMAC over the legacy `timestamp + body`
  * payload will fail verification — this is intentional (bot review F3).
  */
+/**
+ * Strict lowercase-or-mixed-case hex validation.
+ *
+ * Bot review (PR #229 follow-up, auth.ts:376): `Buffer.from(hex, 'hex')`
+ * silently truncates at the first non-hex character, so a header like
+ * `<valid-hmac>zz` decodes to the original valid bytes and then passes
+ * `timingSafeEqual`. Validate the string is purely hex and of the
+ * exact expected length BEFORE handing it to `Buffer.from`.
+ *
+ * @param s                 the string to validate
+ * @param expectedCharLen   the required length in hex characters
+ *                          (typically 2 × HMAC-SHA256 byte length = 64)
+ */
+function isStrictHexOfLength(s: unknown, expectedCharLen: number): boolean {
+  if (typeof s !== 'string') return false;
+  if (s.length !== expectedCharLen) return false;
+  // Must be even-length (handled above via expected length) AND all
+  // characters hex. We allow both lowercase and uppercase so a client
+  // that emits `A-F` is accepted, but no whitespace, no 0x prefix, no
+  // punctuation. `/^[0-9a-f]+$/i` also rejects empty strings.
+  return /^[0-9a-f]+$/i.test(s);
+}
+
+/**
+ * Derive the canonical request path bound into the signed-request HMAC.
+ *
+ * Bot review (PR #229 follow-up, auth.ts:741): binding only `pathname`
+ * left query parameters unsigned — an attacker could swap
+ * `/api/query?graph=...` for `/api/query?graph=...&poison=...` without
+ * invalidating the signature. Several protected daemon routes read
+ * `url.searchParams`, so this was a real tamper surface.
+ *
+ * Now binds `pathname + search` (including the leading `?` when present).
+ * Clients computing the HMAC MUST use this exact representation. The
+ * helper is exported so callers can share it instead of re-implementing
+ * the canonicalisation and drifting.
+ */
+export function canonicalRequestPath(req: IncomingMessage): string {
+  const u = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+  return `${u.pathname}${u.search}`;
+}
+
 export function canonicalSignedRequestPayload(
   method: string,
   path: string,
@@ -368,6 +410,17 @@ export function verifySignedRequest(input: SignedRequestInput): SignedRequestOut
     input.body,
   );
   const expected = createHmac('sha256', input.token).update(payload).digest('hex');
+
+  // Bot review (PR #229 follow-up): `Buffer.from(hex, 'hex')` does NOT
+  // reject malformed hex — Node silently truncates at the first non-hex
+  // character. `<valid-hmac>zz` decodes to the original valid bytes,
+  // which then passes length + timingSafeEqual. Validate the supplied
+  // signature is a pure, even-length hex string of the expected length
+  // BEFORE decoding. Reject everything else with `bad-signature`.
+  if (!isStrictHexOfLength(input.signature, expected.length)) {
+    return { ok: false, reason: 'bad-signature' };
+  }
+
   // Constant-time comparison so a partial-match attacker can't
   // distinguish "first byte wrong" from "all bytes wrong" via timing.
   let supplied: Buffer;
@@ -735,10 +788,12 @@ export function verifyHttpSignedRequestAfterBody(
 ): SignedRequestOutcome {
   const pending = (req as unknown as { __dkgSignedAuth?: SignedAuthPending }).__dkgSignedAuth;
   if (!pending) return { ok: true };
-  const pathname = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`).pathname;
+  // Bot review (PR #229 follow-up): bind the FULL request path
+  // (pathname + search), not just pathname, so query-param tampering
+  // invalidates the signature. See `canonicalRequestPath` for details.
   return verifySignedRequest({
     method: req.method ?? 'GET',
-    path: pathname,
+    path: canonicalRequestPath(req),
     body,
     timestamp: pending.timestamp,
     nonce: pending.nonce,

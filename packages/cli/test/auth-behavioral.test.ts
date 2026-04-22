@@ -32,6 +32,7 @@ import {
   enforceSignedRequestPostBody,
   SignedRequestRejectedError,
   verifyHttpSignedRequestAfterBody,
+  canonicalRequestPath,
 } from '../src/auth.js';
 
 function sigFor(
@@ -681,5 +682,200 @@ describe('httpAuthGuard — signed GET/HEAD requests verify HMAC synchronously',
     } finally {
       await new Promise<void>(r => s2.close(() => r()));
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PR #229 follow-up: signed HMAC must bind the FULL request path
+// (pathname + search), not just pathname. Previously an attacker could
+// swap query parameters after signing and the signature stayed valid.
+// ---------------------------------------------------------------------------
+
+describe('httpAuthGuard — signed-request HMAC binds path+query (pathname + search)', () => {
+  const VALID = 'query-bind-tok';
+  let validTokens: Set<string>;
+  let server: Server;
+  let baseUrl: string;
+  let handlerCallCount: number;
+
+  beforeEach(async () => {
+    _clearReplayCacheForTesting();
+    validTokens = new Set([VALID]);
+    handlerCallCount = 0;
+    server = createServer((req: IncomingMessage, res: ServerResponse) => {
+      if (!httpAuthGuard(req, res, true, validTokens, null)) return;
+      handlerCallCount++;
+      res.writeHead(200);
+      res.end();
+    });
+    await new Promise<void>(r => server.listen(0, '127.0.0.1', r));
+    const addr = server.address() as { port: number };
+    baseUrl = `http://127.0.0.1:${addr.port}`;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>(r => server.close(() => r()));
+  });
+
+  it('canonicalRequestPath returns pathname + search (with the ? literal)', () => {
+    const req = {
+      method: 'GET',
+      url: '/api/query?graph=abc&name=Bob',
+      headers: { host: 'localhost' },
+    } as unknown as IncomingMessage;
+    expect(canonicalRequestPath(req)).toBe('/api/query?graph=abc&name=Bob');
+  });
+
+  it('canonicalRequestPath returns pathname only when no query string is present', () => {
+    const req = {
+      method: 'GET',
+      url: '/api/agents',
+      headers: { host: 'localhost' },
+    } as unknown as IncomingMessage;
+    expect(canonicalRequestPath(req)).toBe('/api/agents');
+  });
+
+  it('rejects a signed GET when the query string differs from the signed one', async () => {
+    const ts = String(Date.now());
+    const nonce = `n-${randomBytes(8).toString('hex')}`;
+    // Sign `/api/agents?only=abc`, but send `/api/agents?only=abc&poison=1`.
+    const sigForOriginal = sigFor(VALID, 'GET', '/api/agents?only=abc', ts, nonce, '');
+    const res = await fetch(`${baseUrl}/api/agents?only=abc&poison=1`, {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${VALID}`,
+        'x-dkg-timestamp': ts,
+        'x-dkg-nonce': nonce,
+        'x-dkg-signature': sigForOriginal,
+      },
+    });
+    expect(res.status).toBe(401);
+    expect(handlerCallCount).toBe(0);
+    const body = await res.json();
+    expect(body.error).toMatch(/bad-signature/);
+  });
+
+  it('accepts a signed GET whose signature was computed over pathname + search', async () => {
+    const ts = String(Date.now());
+    const nonce = `n-${randomBytes(8).toString('hex')}`;
+    const fullPath = '/api/agents?only=abc';
+    const sig = sigFor(VALID, 'GET', fullPath, ts, nonce, '');
+    const res = await fetch(`${baseUrl}${fullPath}`, {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${VALID}`,
+        'x-dkg-timestamp': ts,
+        'x-dkg-nonce': nonce,
+        'x-dkg-signature': sig,
+      },
+    });
+    expect(res.status).toBe(200);
+    expect(handlerCallCount).toBe(1);
+  });
+
+  it('rejects a signed GET where the order of query params differs (signature covers the literal)', async () => {
+    // The canonicalisation is deliberately literal — `?a=1&b=2` and
+    // `?b=2&a=1` are DIFFERENT signed paths. Clients MUST send the same
+    // query string they signed. Any re-ordering by a proxy invalidates
+    // the signature — which is the safe default.
+    const ts = String(Date.now());
+    const nonce = `n-${randomBytes(8).toString('hex')}`;
+    const sig = sigFor(VALID, 'GET', '/api/agents?a=1&b=2', ts, nonce, '');
+    const res = await fetch(`${baseUrl}/api/agents?b=2&a=1`, {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${VALID}`,
+        'x-dkg-timestamp': ts,
+        'x-dkg-nonce': nonce,
+        'x-dkg-signature': sig,
+      },
+    });
+    expect(res.status).toBe(401);
+    expect(handlerCallCount).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PR #229 follow-up: strict hex validation for x-dkg-signature.
+// `Buffer.from(hex, 'hex')` silently truncates at the first non-hex
+// character, so `<valid-hmac>zz` decoded to the valid bytes and then
+// passed timingSafeEqual. Must reject malformed hex up front.
+// ---------------------------------------------------------------------------
+
+describe('verifySignedRequest — strict hex validation of x-dkg-signature', () => {
+  const TOKEN = 'hex-strict-tok';
+  const freshNonce = () => `n-${randomBytes(8).toString('hex')}`;
+  const ts = () => new Date().toISOString();
+
+  function validInput() {
+    const t = ts();
+    const n = freshNonce();
+    const sig = sigFor(TOKEN, 'POST', '/api/x', t, n, 'body');
+    return { sig, timestamp: t, nonce: n };
+  }
+
+  it('accepts a correctly-formed 64-char hex signature', () => {
+    const { sig, timestamp, nonce } = validInput();
+    _clearReplayCacheForTesting();
+    const out = verifySignedRequest({
+      method: 'POST', path: '/api/x', body: 'body',
+      timestamp, signature: sig, token: TOKEN, nonce,
+    });
+    expect(out).toEqual({ ok: true });
+  });
+
+  it('rejects a signature with non-hex characters (even if a valid hex prefix is present)', () => {
+    // Classic Buffer.from('abcdefZZ...', 'hex') truncation attack.
+    const { sig, timestamp, nonce } = validInput();
+    _clearReplayCacheForTesting();
+    // Replace the last 2 chars of a valid 64-hex-char sig with `zz`
+    // (non-hex). With strict validation this MUST be rejected.
+    const tampered = sig.slice(0, -2) + 'zz';
+    const out = verifySignedRequest({
+      method: 'POST', path: '/api/x', body: 'body',
+      timestamp, signature: tampered, token: TOKEN, nonce,
+    });
+    expect(out).toEqual({ ok: false, reason: 'bad-signature' });
+  });
+
+  it('rejects a signature whose length is not 64 hex characters', () => {
+    _clearReplayCacheForTesting();
+    const { timestamp, nonce } = validInput();
+    const tooShort = 'abcdef';
+    const tooLong = 'a'.repeat(128);
+    for (const candidate of [tooShort, tooLong]) {
+      const out = verifySignedRequest({
+        method: 'POST', path: '/api/x', body: 'body',
+        timestamp, signature: candidate, token: TOKEN, nonce,
+      });
+      expect(out).toEqual({ ok: false, reason: 'bad-signature' });
+    }
+  });
+
+  it('rejects a signature containing whitespace or 0x prefix', () => {
+    _clearReplayCacheForTesting();
+    const { sig, timestamp, nonce } = validInput();
+    // Inject a leading `0x` — valid hex prefix but not our format.
+    const withPrefix = '0x' + sig.slice(2);
+    // Inject a space.
+    const withSpace = sig.slice(0, 10) + ' ' + sig.slice(11);
+    for (const candidate of [withPrefix, withSpace]) {
+      const out = verifySignedRequest({
+        method: 'POST', path: '/api/x', body: 'body',
+        timestamp, signature: candidate, token: TOKEN, nonce,
+      });
+      expect(out).toEqual({ ok: false, reason: 'bad-signature' });
+    }
+  });
+
+  it('accepts uppercase hex (clients that emit A-F instead of a-f still work)', () => {
+    _clearReplayCacheForTesting();
+    const { sig, timestamp, nonce } = validInput();
+    const upper = sig.toUpperCase();
+    const out = verifySignedRequest({
+      method: 'POST', path: '/api/x', body: 'body',
+      timestamp, signature: upper, token: TOKEN, nonce,
+    });
+    expect(out).toEqual({ ok: true });
   });
 });
