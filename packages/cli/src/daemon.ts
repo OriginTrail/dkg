@@ -2833,8 +2833,10 @@ export async function connectLocalAgentIntegrationFromUi(
  * `mergeOpenClawConfig` and writes a `.bak.<ts>` backup.
  */
 export type ReverseLocalAgentSetupDeps = {
-  unmergeOpenClawConfig?: (configPath: string) => void;
+  unmergeOpenClawConfig?: (configPath: string) => unknown;
   verifyUnmergeInvariants?: (configPath: string) => string | null;
+  removeCanonicalNodeSkill?: (workspaceDir: string) => void;
+  verifySkillRemoved?: (installedWorkspace: string) => string | null;
 };
 
 export async function reverseLocalAgentSetupForUi(
@@ -2845,11 +2847,81 @@ export async function reverseLocalAgentSetupForUi(
   const resolvedPath = openclawConfigPath && openclawConfigPath.trim()
     ? openclawConfigPath
     : localOpenclawConfigPath();
-  const adapter = (deps.unmergeOpenClawConfig && deps.verifyUnmergeInvariants)
-    ? { unmergeOpenClawConfig: deps.unmergeOpenClawConfig, verifyUnmergeInvariants: deps.verifyUnmergeInvariants }
+
+  // Defer to the adapter for every helper we need so install (setup) and
+  // removal (Disconnect) agree on the same primitives. Codex R1-1 shared
+  // the workspace resolver; R2-1/R2-2 persisted the authoritative install
+  // path on `entry.config.installedWorkspace`; R3-2 now reorders so the skill
+  // cleanup runs BEFORE the config-level unmerge — a failed cleanup leaves
+  // both `entry.config.installedWorkspace` AND the openclaw.json wiring intact,
+  // so the user can retry Disconnect and we still know where to look.
+  const adapter = (
+    deps.unmergeOpenClawConfig
+    && deps.verifyUnmergeInvariants
+    && deps.removeCanonicalNodeSkill
+    && deps.verifySkillRemoved
+  )
+    ? {
+        unmergeOpenClawConfig: deps.unmergeOpenClawConfig,
+        verifyUnmergeInvariants: deps.verifyUnmergeInvariants,
+        removeCanonicalNodeSkill: deps.removeCanonicalNodeSkill,
+        verifySkillRemoved: deps.verifySkillRemoved,
+      }
     : await import('@origintrail-official/dkg-adapter-openclaw');
   const unmergeOpenClawConfig = deps.unmergeOpenClawConfig ?? adapter.unmergeOpenClawConfig;
   const verifyUnmergeInvariants = deps.verifyUnmergeInvariants ?? adapter.verifyUnmergeInvariants;
+  const removeCanonicalNodeSkill = deps.removeCanonicalNodeSkill ?? adapter.removeCanonicalNodeSkill;
+  const verifySkillRemoved = deps.verifySkillRemoved ?? adapter.verifySkillRemoved;
+
+  // Step 1 — discover the workspace to clean up, reading openclaw.json once.
+  // Authoritative source is `plugins.entries['adapter-openclaw'].config.installedWorkspace`
+  // persisted at merge time (R2-1, hotfixed to live inside `entry.config`
+  // because OpenClaw's gateway schema strict-rejects unknown keys at the
+  // entry root). No legacy fallback via `resolveWorkspaceDirFromConfig`:
+  // pre-R2 configs don't exist outside local testing, and the config-
+  // derived workspace isn't guaranteed to be where an earlier
+  // `--workspace`-overridden install actually put SKILL.md (R11-2 decline
+  // of destructive best-guess). A missing pointer simply means no skill
+  // cleanup runs — the config unmerge below still completes.
+  let workspaceDir: string | null = null;
+  if (existsSync(resolvedPath)) {
+    try {
+      const raw = JSON.parse(readFileSync(resolvedPath, 'utf-8'));
+      const entry = raw?.plugins?.entries?.['adapter-openclaw'];
+      if (entry && typeof entry === 'object') {
+        const installedFromConfig = typeof entry.config?.installedWorkspace === 'string'
+          && entry.config.installedWorkspace.trim()
+          ? entry.config.installedWorkspace.trim()
+          : undefined;
+        if (installedFromConfig) {
+          workspaceDir = installedFromConfig;
+        }
+      }
+      // else: entry already absent → workspaceDir stays null → skill cleanup
+      // is skipped. The config-level unmerge below is a no-op in that case.
+    } catch {
+      // Unparseable openclaw.json — leave null. The config-level unmerge
+      // below short-circuits on the same condition and no skill file path
+      // is recoverable, so skill cleanup is implicitly skipped too.
+    }
+  }
+
+  // Step 2 — retire the adapter-owned SKILL.md BEFORE touching the config.
+  // Failures here throw out of the function; the outer PUT handler surfaces
+  // them as `runtime.lastError`. Because the config is untouched,
+  // `entry.config.installedWorkspace` is still on disk, so a retry re-enters this
+  // same branch with the same workspace target (R3-2).
+  if (workspaceDir) {
+    removeCanonicalNodeSkill(workspaceDir);
+    const skillFailure = verifySkillRemoved(workspaceDir);
+    if (skillFailure) {
+      throw new Error(skillFailure);
+    }
+  }
+
+  // Step 3 — now commit to the config-level unmerge. Safe to do after the
+  // skill has been retired because the config no longer carries an authority
+  // pointer to a file we haven't cleaned up.
   unmergeOpenClawConfig(resolvedPath);
   const failure = verifyUnmergeInvariants(resolvedPath);
   if (failure) {
