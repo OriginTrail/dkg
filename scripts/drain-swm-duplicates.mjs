@@ -19,13 +19,14 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '..');
 
 const args = parseArgs();
-const API_BASE = (args.api ?? process.env.DEVNET_API ?? 'http://localhost:9201').replace(/\/$/, '');
+const API_BASE = (args.api ?? process.env.DEVNET_API ?? 'http://localhost:9200').replace(/\/$/, '');
 const PROJECT_ID = args.project ?? 'dkg-code-project';
 const BATCH = Number(args.batch ?? 40);
 const SUB_GRAPHS = ['code', 'github', 'decisions', 'tasks'];
 
 const token = resolveToken(REPO_ROOT);
 const client = makeClient({ apiBase: API_BASE, token });
+const cgId = await client.toCanonicalCgId(PROJECT_ID);
 
 function bv(v) {
   if (v == null) return undefined;
@@ -33,7 +34,7 @@ function bv(v) {
   return raw.startsWith('"') ? raw.replace(/^"|"$/g, '') : raw;
 }
 async function select(sparql) {
-  const r = await client.query({ contextGraphId: PROJECT_ID, sparql });
+  const r = await client.query({ contextGraphId: cgId, sparql });
   return r?.result?.bindings ?? [];
 }
 
@@ -43,8 +44,8 @@ async function select(sparql) {
 async function enumerateDuplicates(sg) {
   const rows = await select(`
     SELECT DISTINCT ?s WHERE {
-      GRAPH <did:dkg:context-graph:${PROJECT_ID}/${sg}/_shared_memory> { ?s ?p1 ?o1 }
-      GRAPH <did:dkg:context-graph:${PROJECT_ID}/${sg}>                 { ?s ?p2 ?o2 }
+      GRAPH <did:dkg:context-graph:${cgId}/${sg}/_shared_memory> { ?s ?p1 ?o1 }
+      GRAPH <did:dkg:context-graph:${cgId}/${sg}>                 { ?s ?p2 ?o2 }
     }
   `);
   return rows.map(r => bv(r.s)).filter(Boolean);
@@ -63,7 +64,7 @@ for (const sg of SUB_GRAPHS) {
     const batchN = Math.floor(i / BATCH) + 1;
     try {
       const r = await client.request('POST', '/api/shared-memory/publish', {
-        contextGraphId: PROJECT_ID,
+        contextGraphId: cgId,
         subGraphName: sg,
         selection: slice,
         clearAfter: true,
@@ -79,7 +80,7 @@ async function countLayer(filterExpr) {
   const rows = await select(
     `SELECT (COUNT(*) AS ?n) WHERE {
        GRAPH ?g { ?s ?p ?o }
-       FILTER(STRSTARTS(STR(?g), "did:dkg:context-graph:${PROJECT_ID}") && ${filterExpr})
+       FILTER(STRSTARTS(STR(?g), "did:dkg:context-graph:${cgId}") && ${filterExpr})
      }`,
   );
   const raw = typeof rows[0]?.n === 'string' ? rows[0].n : (rows[0]?.n?.value ?? '0');

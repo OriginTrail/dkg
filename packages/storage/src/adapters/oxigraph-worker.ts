@@ -1,21 +1,9 @@
 import { Worker } from 'node:worker_threads';
-import { fileURLToPath } from 'node:url';
 import { existsSync } from 'node:fs';
+import { sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { TripleStore, Quad, QueryResult } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
-
-// Resolve the compiled worker impl. At production runtime (dist/adapters/
-// oxigraph-worker.js) the sibling `./oxigraph-worker-impl.js` exists. When
-// running under vitest against src/ the sibling is `.ts`, so fall back to
-// `../../dist/adapters/oxigraph-worker-impl.js` (compiled by `pnpm build`)
-// instead of throwing `Cannot find module`.
-function resolveWorkerImplPath(): string {
-  const sibling = new URL('./oxigraph-worker-impl.js', import.meta.url);
-  const siblingPath = fileURLToPath(sibling);
-  if (existsSync(siblingPath)) return siblingPath;
-  const distFromSrc = new URL('../../dist/adapters/oxigraph-worker-impl.js', import.meta.url);
-  return fileURLToPath(distFromSrc);
-}
 
 export class OxigraphWorkerStore implements TripleStore {
   private worker: Worker;
@@ -23,7 +11,42 @@ export class OxigraphWorkerStore implements TripleStore {
   private pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
 
   constructor(persistPath?: string) {
-    this.worker = new Worker(resolveWorkerImplPath(), {
+    // Resolve the worker impl with a small search path so this keeps
+    // working in all three deployment shapes we actually run in:
+    //
+    //   1. Production / npm install / built monorepo — this module is
+    //      loaded from `dist/adapters/oxigraph-worker.js`, so the
+    //      sibling `./oxigraph-worker-impl.js` resolves correctly.
+    //   2. vitest against raw source — this module is loaded from
+    //      `src/adapters/oxigraph-worker.ts`, so the sibling
+    //      `./oxigraph-worker-impl.js` does NOT exist, but its compiled
+    //      twin in `dist/adapters/` does as long as the caller ran
+    //      `pnpm --filter ...dkg-storage build` first. Redirect to
+    //      that path so the adapter is runnable in dev loops.
+    //   3. Neither file exists — genuinely unbuilt tree. Throw a loud,
+    //      actionable error explaining the fix (`pnpm build`), matching
+    //      the expectation in `test/storage.test.ts`.
+    const siblingJsUrl = new URL('./oxigraph-worker-impl.js', import.meta.url);
+    const siblingJsPath = fileURLToPath(siblingJsUrl);
+    let workerPath: string | null = existsSync(siblingJsPath) ? siblingJsPath : null;
+    if (!workerPath) {
+      const srcAdapters = `${sep}src${sep}adapters${sep}`;
+      const distAdapters = `${sep}dist${sep}adapters${sep}`;
+      if (siblingJsPath.includes(srcAdapters)) {
+        const candidate = siblingJsPath.replace(srcAdapters, distAdapters);
+        if (existsSync(candidate)) workerPath = candidate;
+      }
+    }
+    if (!workerPath) {
+      throw new Error(
+        `oxigraph-worker adapter: compiled worker artefact ` +
+          `\`oxigraph-worker-impl.js\` was not found next to ` +
+          `${siblingJsPath} or in the sibling \`dist/adapters/\` ` +
+          `directory. Run \`pnpm --filter @origintrail-official/dkg-storage build\` ` +
+          `before using this adapter.`,
+      );
+    }
+    this.worker = new Worker(workerPath, {
       workerData: { persistPath },
     });
     this.worker.on('message', (msg: { id: number; result?: unknown; error?: string }) => {

@@ -26,6 +26,15 @@ interface DurableSyncContext {
   remotePeerId: string;
   contextGraphIds: string[];
   onPhase?: PhaseCallback;
+  /**
+   * Invoked with the specific `contextGraphId` that was denied by the
+   * remote peer (i.e. the remote responded with an `access-denied`
+   * sync-protocol error for that CG). Callers use this to distinguish
+   * "peer refused to serve this graph" from "sync completed but there
+   * was nothing to send" — the two look identical at the summary level
+   * but have very different operator meanings.
+   */
+  onAccessDenied?: (contextGraphId: string) => void;
   createContextGraphSyncDeadline: (remainingContextGraphs: number) => number;
   fetchSyncPages: (
     ctx: OperationContext,
@@ -60,6 +69,7 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
     remotePeerId,
     contextGraphIds,
     onPhase,
+    onAccessDenied,
     createContextGraphSyncDeadline,
     fetchSyncPages,
     processDurableBatchInWorker,
@@ -108,8 +118,26 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
       onPhase?.('fetch', 'start');
       const fetchStartedAt = Date.now();
 
-      const metaResult = await fetchSyncPages(ctx, remotePeerId, pid, false, 'meta', metaGraph, deadline);
-      const dataResult = await fetchSyncPages(ctx, remotePeerId, pid, false, 'data', dataGraph, deadline);
+      let metaResult;
+      let dataResult;
+      try {
+        metaResult = await fetchSyncPages(ctx, remotePeerId, pid, false, 'meta', metaGraph, deadline);
+        dataResult = await fetchSyncPages(ctx, remotePeerId, pid, false, 'data', dataGraph, deadline);
+      } catch (pidErr) {
+        // `runDurableSync` has a catch-all below that sets `deniedPhases`
+        // when a sync is rejected, but it collapses "which CG was
+        // denied?" into a single counter. The `onAccessDenied` callback
+        // exists precisely so callers (notably the daemon's subscribe
+        // route) can tell "peer refused to serve this CG" apart from
+        // "peer had nothing to send" per-graph. Re-throw so the outer
+        // catch-all still records the denial in the summary and we don't
+        // paper over genuine errors.
+        if ((pidErr as Error & { syncDenied?: boolean }).syncDenied) {
+          onPhase?.('fetch', 'end');
+          onAccessDenied?.(pid);
+        }
+        throw pidErr;
+      }
 
       onPhase?.('fetch', 'end');
       const fetchDurationMs = Date.now() - fetchStartedAt;

@@ -31,6 +31,11 @@ export const NS = {
   tasks: 'http://dkg.io/ontology/tasks/',
   profile: 'http://dkg.io/ontology/profile/',
   agent: 'http://dkg.io/ontology/agent/',
+  // Conversation capture — chat turns produced by coding assistants
+  // (Cursor, Claude Code, etc.) that agents promote to SWM so the
+  // team can search/summarise across sessions. Deliberately thin so
+  // any MCP-capable tool can emit compatible triples.
+  chat: 'http://dkg.io/ontology/chat/',
   rdf: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#',
   rdfs: 'http://www.w3.org/2000/01/rdf-schema#',
   xsd: 'http://www.w3.org/2001/XMLSchema#',
@@ -255,6 +260,86 @@ export const Agent = {
   },
 };
 
+// ── Chat ──────────────────────────────────────────────────────
+/**
+ * Captured chat conversations between a human operator and their coding
+ * assistant (Cursor, Claude Code, …). A `Session` groups `Turn`s;
+ * each Turn is one user↔assistant exchange with optional tool calls.
+ *
+ * We keep this ontology intentionally thin so other agent frameworks
+ * can emit compatible triples with minimal code:
+ *
+ *   <session> a chat:Session ;
+ *             chat:speakerTool "cursor" ;
+ *             schema:name "Refactor DaemonService" ;
+ *             dcterms:created "2026-04-18T14:22:00Z"^^xsd:dateTime ;
+ *             prov:wasAttributedTo <agent:branarakic> .
+ *
+ *   <turn-001> a chat:Turn ;
+ *              chat:inSession <session> ;
+ *              chat:turnIndex 1 ;
+ *              chat:userPrompt "make the hook fail open"
+ *              chat:assistantResponse "…" ;
+ *              dcterms:created "…"^^xsd:dateTime ;
+ *              prov:wasAttributedTo <agent:claude-code-branarakic> .
+ *
+ * The markdown body of each Turn is the assertion payload so the text
+ * layer stays human-readable; triples describe structure + links.
+ *
+ * URIs:
+ *   urn:dkg:chat:session:{slug}
+ *   urn:dkg:chat:session:{slug}#turn:{index}
+ */
+export const Chat = {
+  T: {
+    Session: NS.chat + 'Session',
+    Turn: NS.chat + 'Turn',
+    ToolCall: NS.chat + 'ToolCall',
+  },
+  P: {
+    // Which tool/framework produced this session — "cursor",
+    // "claude-code", "aider", … UI picks the glyph. Identical in
+    // purpose to agent:framework but lives on Session/Turn so a
+    // single agent can drive multiple tools.
+    speakerTool: NS.chat + 'speakerTool',
+    // Session ↔ Turn link.
+    inSession: NS.chat + 'inSession',
+    // 1-based ordinal within a Session so UIs can render the thread.
+    turnIndex: NS.chat + 'turnIndex',
+    // Raw user prompt and assistant response text (truncated / summarised
+    // according to the session's privacy setting). The full conversation
+    // lives in the markdown assertion body; these predicates are the
+    // query-friendly snapshot.
+    userPrompt: NS.chat + 'userPrompt',
+    assistantResponse: NS.chat + 'assistantResponse',
+    // Optional tool calls issued during this turn (subject is Turn).
+    hasToolCall: NS.chat + 'hasToolCall',
+    // ToolCall details.
+    toolName: NS.chat + 'toolName',
+    toolInput: NS.chat + 'toolInput',
+    toolOutputHash: NS.chat + 'toolOutputHash',
+    // Which project / file / decision the turn was *about*. Powers the
+    // "agents have been chatting about this file" pill in entity detail.
+    aboutEntity: NS.chat + 'aboutEntity',            // Turn/Session -> any URI
+    // "private" | "team" | "public". Agents flip this to "team" when
+    // auto-promoting to SWM so the UI knows whether to show a session
+    // in the shared-with-me feed.
+    privacy: NS.chat + 'privacy',
+    // Content fingerprint — used to dedupe duplicate captures emitted
+    // by the hook (e.g. retries after transient failures).
+    contentHash: NS.chat + 'contentHash',
+    // Free-form summary when one side of the turn is compressed.
+    summary: NS.chat + 'summary',
+  },
+  uri: {
+    session: (slug) => `urn:dkg:chat:session:${encodeURIComponent(slug)}`,
+    turn: (sessionSlug, index) =>
+      `urn:dkg:chat:session:${encodeURIComponent(sessionSlug)}#turn:${index}`,
+    toolCall: (sessionSlug, turnIndex, callIndex) =>
+      `urn:dkg:chat:session:${encodeURIComponent(sessionSlug)}#turn:${turnIndex}:call:${callIndex}`,
+  },
+};
+
 // ── Profile ───────────────────────────────────────────────────
 /**
  * The profile ontology is how a project declares to any DKG-aware UI how
@@ -336,6 +421,14 @@ export const Profile = {
     // + a selection). Declaring it on the SubGraphBinding lets any
     // future importer wire itself up without touching UI code.
     sourceAssertion: NS.profile + 'sourceAssertion', // SubGraphBinding -> literal assertion name
+    // ── Chat capture policy (Profile-level) ────────────────────────
+    // When the capture hook wakes up for this project, should the
+    // session's turns be written straight to WM (private) or auto-
+    // promoted to SWM (visible to teammates on the same CG)? The
+    // sentinel values are "wm" and "swm"; the default is "swm" to
+    // match the agent-autonomy story. Humans still need to publish
+    // to VM by hand.
+    defaultChatLayer: NS.profile + 'defaultChatLayer', // Profile -> "wm" | "swm"
   },
   uri: {
     profile: (projectId) => `urn:dkg:profile:${encodeURIComponent(projectId)}`,

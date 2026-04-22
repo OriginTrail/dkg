@@ -25,6 +25,17 @@ interface FetchSyncPagesParams {
   syncPageRetryAttempts: number;
   syncPageSize: number;
   syncDeniedResponse: string;
+  /**
+   * Additional response-body sentinels that also mean "ACL denied". Exists so
+   * this requester keeps recognising the legacy `#DKG-SYNC-ACCESS-DENIED`
+   * marker emitted by older (pre-sync-refactor) responders while they are
+   * still around during a rolling upgrade. Without this, a legacy denial
+   * would be parsed as N-quads, yield 0 triples, and silently get classified
+   * as "peer had nothing to send" instead of flipping `deniedPhases`. Empty
+   * / unset means only `syncDeniedResponse` is treated as a denial. Callers
+   * that don't care about legacy compatibility can omit this. (tier-4 G1)
+   */
+  extraDeniedResponses?: readonly string[];
   debugSyncProgress: boolean;
   protocolSync: string;
   checkpointStore: SyncCheckpointStore;
@@ -50,6 +61,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
     syncPageRetryAttempts,
     syncPageSize,
     syncDeniedResponse,
+    extraDeniedResponses,
     debugSyncProgress,
     protocolSync,
     checkpointStore,
@@ -101,7 +113,10 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
     const nquadsText = new TextDecoder().decode(responseBytes).trim();
     const decodeDurationMs = Date.now() - decodeStartedAt;
     bytesReceived += responseBytes.byteLength;
-    if (nquadsText === syncDeniedResponse) {
+    if (
+      nquadsText === syncDeniedResponse ||
+      (extraDeniedResponses && extraDeniedResponses.includes(nquadsText))
+    ) {
       const error = new Error(`Sync denied by ${remotePeerId} for "${contextGraphId}" (${phase})`);
       (error as Error & { syncDenied?: boolean }).syncDenied = true;
       throw error;

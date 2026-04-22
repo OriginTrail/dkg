@@ -3,6 +3,9 @@ import { createContextGraph, fetchContextGraphs, fetchCurrentAgent } from '../..
 import { useProjectsStore } from '../../stores/projects.js';
 import { useTabsStore } from '../../stores/tabs.js';
 import { useJourneyStore } from '../../stores/journey.js';
+import { installOntology, listStarters } from '../../lib/ontologyInstall.js';
+import { publishProjectManifest } from '../../lib/projectManifest.js';
+import { WireWorkspacePanel } from '../Workspace/WireWorkspacePanel.js';
 
 function slugify(str: string): string {
   return str
@@ -21,7 +24,11 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
   const [description, setDescription] = useState('');
   const [access, setAccess] = useState<'curated' | 'public'>('curated');
   const [publishPolicy, setPublishPolicy] = useState<'curator-only' | 'open'>('curator-only');
-  const [ontology, setOntology] = useState<'agent' | 'upload' | 'community'>('agent');
+  const [ontology, setOntology] = useState<'agent' | 'upload' | 'community'>('community');
+  // Which starter to install when ontology mode is 'community' (or 'agent' v1 default).
+  // Source: packages/mcp-dkg/templates/ontologies/<slug>/ — bundled by Vite.
+  const starters = listStarters();
+  const [starterSlug, setStarterSlug] = useState<string>(starters[0]?.slug ?? 'coding-project');
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [quorum, setQuorum] = useState('off');
   const [swmTtl, setSwmTtl] = useState('7d');
@@ -30,6 +37,17 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
   const [progress, setProgress] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [agentAddress, setAgentAddress] = useState<string | null>(null);
+  // Phase 8: after CG + ontology + manifest publish, transition into a
+  // wire-workspace step so the curator can populate their own workspace
+  // (and thus use dkg_add_task etc. from their own Cursor agent)
+  // without dropping to the terminal. `wiredCgId` flips the modal body
+  // into the WireWorkspacePanel; `wiredProjectName` lets the panel
+  // suggest a default workspace path like `~/code/<projectSlug>`.
+  const [wiredCgId, setWiredCgId] = useState<string | null>(null);
+  const [wiredProjectName, setWiredProjectName] = useState<string>('');
+  // Agent-identity load state drives the Retry affordance + the Create
+  // button copy; added on v10-rc alongside the private-CG fix so the
+  // modal degrades gracefully when /api/agent/current 401s during boot.
   const [identityLoading, setIdentityLoading] = useState(false);
   const [identityError, setIdentityError] = useState(false);
 
@@ -83,6 +101,38 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
       const result = await createContextGraph(cgId, trimmedName, description.trim() || undefined, opts);
       clearTimeout(slowTimer);
 
+      // Phase 7: install the chosen ontology into meta/project-ontology so
+      // the agent has the project's predicate vocabulary and URI patterns
+      // from turn #1. Both `community` (operator picked a starter) and
+      // `agent` (v1 = default to the closest starter; v2 will let the
+      // agent customise based on the project description) install one
+      // here. `upload` is deferred — the picker is disabled for that mode.
+      if (ontology === 'community' || ontology === 'agent') {
+        try {
+          setProgress(`Installing '${starterSlug}' ontology…`);
+          await installOntology(result.created, starterSlug);
+        } catch (ontoErr: any) {
+          // Don't roll back the CG — log the warning, surface a hint, and
+          // let the operator re-run installation later if they want.
+          console.warn('[CreateProjectModal] ontology install failed:', ontoErr);
+          setProgress(`Project created, but ontology install failed: ${ontoErr?.message ?? ontoErr}`);
+        }
+      }
+
+      // Phase 8: publish the project manifest so any joiner can
+      // bootstrap their own Cursor wiring from the graph alone. Same
+      // fail-open posture as ontology install — a missing manifest
+      // doesn't invalidate the CG; the curator can re-publish later.
+      let manifestPublished = true;
+      try {
+        setProgress('Publishing project manifest…');
+        await publishProjectManifest(result.created, {});
+      } catch (manifestErr: any) {
+        manifestPublished = false;
+        console.warn('[CreateProjectModal] manifest publish failed:', manifestErr);
+        setProgress(`Project created, but manifest publish failed: ${manifestErr?.message ?? manifestErr}`);
+      }
+
       setProgress('Refreshing project list…');
       const { contextGraphs: freshList } = await fetchContextGraphs();
       setContextGraphs(freshList ?? []);
@@ -91,10 +141,30 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
       openTab({ id: `project:${result.created}`, label: trimmedName, closable: true });
       if (stage < 2) setStage(2);
 
-      setName('');
-      setDescription('');
-      setProgress('');
-      onClose();
+      // Phase 8: transition into the wire-workspace step ONLY if the
+      // manifest publish succeeded. `WireWorkspacePanel`'s preview/
+      // install flow depends on `fetchManifest()` returning the
+      // just-published manifest out of the graph — if publish failed
+      // (e.g. standalone/npm install without a template bundle), the
+      // panel can only ever error out on the very next step. Close
+      // the modal with the warning already visible in `progress`
+      // instead, so the curator can see that project creation itself
+      // succeeded and they can re-publish the manifest later. Codex
+      // tier-4j finding on CreateProjectModal.tsx:147.
+      if (manifestPublished) {
+        setWiredProjectName(trimmedName);
+        setWiredCgId(result.created);
+        setProgress('');
+      } else {
+        // Leave `progress` showing the manifest-publish warning and
+        // defer closing by a short beat so the user sees the message.
+        setTimeout(() => {
+          setName('');
+          setDescription('');
+          setProgress('');
+          onClose();
+        }, 2500);
+      }
     } catch (err: any) {
       const msg = err?.message || 'Failed to create project';
       if (msg.includes('already exists') || msg.includes('409')) {
@@ -111,6 +181,40 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
   };
 
   const isFirstProject = contextGraphs.length === 0;
+
+  // Phase 8: after CG creation succeeds we drop the create form and
+  // render the WireWorkspacePanel inline. The modal stays open and
+  // remains "the create flow" until the operator clicks Done or Skip.
+  function handleWireDone() {
+    setWiredCgId(null);
+    setWiredProjectName('');
+    setName('');
+    setDescription('');
+    onClose();
+  }
+
+  if (wiredCgId) {
+    return (
+      <div className="v10-modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) handleWireDone(); }}>
+        <div className="v10-modal-box">
+          <div className="v10-modal-header">
+            <div className="v10-modal-title">Wire workspace for {wiredProjectName}</div>
+            <div className="v10-modal-subtitle">
+              Project created. Now wire a local workspace so you can plan it from your own Cursor.
+            </div>
+          </div>
+          <div className="v10-modal-body">
+            <WireWorkspacePanel
+              contextGraphId={wiredCgId}
+              projectName={wiredProjectName}
+              variant="create"
+              onDone={handleWireDone}
+            />
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="v10-modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
@@ -194,23 +298,43 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
             </div>
           </div>
 
-          <div className="v10-form-group" style={{ opacity: 0.5, pointerEvents: 'none' }}>
-            <label className="v10-form-label">Ontology <span style={{ fontSize: 10, fontWeight: 400, color: 'var(--text-tertiary)' }}>(coming soon)</span></label>
+          <div className="v10-form-group">
+            <label className="v10-form-label">Ontology</label>
             <div className="v10-form-radio-group">
               <label className="v10-form-radio">
-                <input type="radio" checked={ontology === 'agent'} readOnly disabled />
-                Let agent decide — your agent will choose the best vocabulary
+                <input type="radio" checked={ontology === 'community'} onChange={() => setOntology('community')} />
+                Choose a starter — install one of the bundled project-type ontologies
               </label>
-              <div className="v10-form-radio-desc">
-                Your agent will query community ontologies and select the most relevant one.
-              </div>
+              {ontology === 'community' && (
+                <div style={{ marginLeft: 24, marginTop: 4, marginBottom: 8 }}>
+                  <select
+                    className="v10-form-select"
+                    value={starterSlug}
+                    onChange={(e) => setStarterSlug(e.target.value)}
+                  >
+                    {starters.map((s) => (
+                      <option key={s.slug} value={s.slug}>{s.displayName}</option>
+                    ))}
+                  </select>
+                  <div style={{ marginTop: 6, fontSize: 11, color: 'var(--text-tertiary)' }}>
+                    {starters.find((s) => s.slug === starterSlug)?.description}
+                  </div>
+                </div>
+              )}
               <label className="v10-form-radio">
-                <input type="radio" checked={ontology === 'upload'} readOnly disabled />
-                Upload an ontology file (.ttl, .owl, .rdf)
+                <input type="radio" checked={ontology === 'agent'} onChange={() => setOntology('agent')} />
+                Let agent decide — defaults to the closest starter (v1)
               </label>
-              <label className="v10-form-radio">
-                <input type="radio" checked={ontology === 'community'} readOnly disabled />
-                Choose from community ontologies
+              {ontology === 'agent' && (
+                <div className="v10-form-radio-desc" style={{ marginLeft: 24, marginTop: 4, marginBottom: 8 }}>
+                  v1 installs the <code>{starterSlug}</code> starter as a sensible default. A future
+                  release will have the agent draft a project-specific ontology by extending the closest
+                  starter from the project description.
+                </div>
+              )}
+              <label className="v10-form-radio" style={{ opacity: 0.5 }}>
+                <input type="radio" checked={ontology === 'upload'} onChange={() => setOntology('upload')} disabled />
+                Upload an ontology file (.ttl, .owl, .rdf) <span style={{ fontSize: 10, fontWeight: 400, color: 'var(--text-tertiary)' }}>(coming soon)</span>
               </label>
             </div>
           </div>

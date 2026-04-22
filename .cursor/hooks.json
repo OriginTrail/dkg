@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "_comment": "DKG chat-capture hooks. When you open dkg-v9 as a Cursor workspace, every conversation turn is auto-promoted to the chat sub-graph of the project pinned in .dkg/config.yaml. The underlying script lives at packages/mcp-dkg/hooks/capture-chat.mjs — this file is just the Cursor wiring. See packages/mcp-dkg/README.md for details on .dkg/config.yaml and claude-code mirror setup.",
+  "hooks": {
+    "sessionStart": [
+      {
+        "command": "node packages/mcp-dkg/hooks/capture-chat.mjs sessionStart",
+        "failClosed": false
+      }
+    ],
+    "sessionEnd": [
+      {
+        "command": "node packages/mcp-dkg/hooks/capture-chat.mjs sessionEnd",
+        "failClosed": false
+      }
+    ],
+    "beforeSubmitPrompt": [
+      {
+        "command": "node packages/mcp-dkg/hooks/capture-chat.mjs beforeSubmitPrompt",
+        "failClosed": false
+      }
+    ],
+    "afterAgentResponse": [
+      {
+        "command": "node packages/mcp-dkg/hooks/capture-chat.mjs afterAgentResponse",
+        "failClosed": false
+      }
+    ]
+  }
+}

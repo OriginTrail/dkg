@@ -22,6 +22,7 @@ import {
   Github,
   Decisions,
   Tasks,
+  Chat,
   Common,
   XSD,
   NS,
@@ -56,6 +57,10 @@ emit(uri(profileId), uri(Common.description), lit(
 ));
 emit(uri(profileId), uri(Profile.P.primaryColor), lit('#a855f7'));
 emit(uri(profileId), uri(Profile.P.accentColor), lit('#22c55e'));
+// Agents auto-promote their captured chat turns to SWM so teammates
+// can see what assistants have been working on. Humans still publish
+// to VM by hand.
+emit(uri(profileId), uri(Profile.P.defaultChatLayer), lit('swm'));
 
 // ── SubGraph bindings ─────────────────────────────────────────
 // Per-sub-graph display metadata. Two extension fields beyond the
@@ -72,6 +77,7 @@ const subGraphs = [
   { slug: 'decisions', icon: '◆',  color: '#ef4444', displayName: 'Decisions', description: 'Architectural decisions with context and consequences.',     rank: 3, timeline: Decisions.P.date,  sourceAssertion: 'decision-log' },
   { slug: 'tasks',     icon: '✓',  color: '#06b6d4', displayName: 'Tasks',     description: 'Planned and in-flight work, cross-linked to decisions + PRs.', rank: 4, timeline: Tasks.P.dueDate,   sourceAssertion: 'task-board' },
   { slug: 'meta',      icon: 'ⓘ',  color: '#64748b', displayName: 'Meta',      description: 'Project self-description (the profile you are reading now).', rank: 5, sourceAssertion: 'project-profile' },
+  { slug: 'chat',      icon: '💬', color: '#8b5cf6', displayName: 'Chat',      description: 'Conversations between operators and their coding assistants (Cursor, Claude Code) — auto-promoted to shared memory.', rank: 6, timeline: Common.created, sourceAssertion: 'chat-log' },
 ];
 for (const sg of subGraphs) {
   const id = Profile.uri.binding(PROJECT_ID, `sg-${sg.slug}`);
@@ -157,6 +163,27 @@ const bindings = [
     publishLabel: 'Ratify decision on-chain',
     publishHint:
       'Anchors the ratified decision on-chain as a verifiable Knowledge Asset — its context, outcome, and consequences become tamper-evident.',
+  },
+  // Chat
+  {
+    slug: 'chat-session', type: Chat.T.Session,
+    icon: '💬', color: '#8b5cf6', label: 'Chat Session',
+    hint: 'Render a ChatSessionCard: session name + started-at + speakerTool glyph (Cursor/Claude Code) + participating agents. Follow with a CrossRefList of chat:inSession turns in order (turnIndex). If any chat:aboutEntity triples exist, render them as a CrossRefList of "what this chat was about".',
+    // Sessions are usually auto-created as SWM. Promote would convert
+    // private → team, publish would anchor the session transcript
+    // on-chain (rare: only for sessions that produced a notable
+    // artifact and the operator wants the provenance anchored).
+    promoteLabel: 'Share session with team',
+    promoteHint:
+      'Makes this chat session visible to everyone on the shared context graph so they can catch up on what you and your assistant were working on.',
+    publishLabel: 'Anchor session on-chain',
+    publishHint:
+      'Records a permanent, verifiable reference to this conversation. Use for sessions that contain notable reasoning you want to cite from a decision or task.',
+  },
+  {
+    slug: 'chat-turn', type: Chat.T.Turn,
+    icon: '↳', color: '#c084fc', label: 'Chat Turn',
+    hint: 'Render a ChatTurnCard: operator prompt as a quoted paragraph, then the assistant response as markdown; AgentChip above each side showing who spoke (prov:wasAttributedTo). If the turn has chat:hasToolCall triples, render them as a compact list (tool name + truncated input).',
   },
   // Tasks
   {
@@ -245,6 +272,10 @@ const chips = [
     label: 'Priority', values: ['p0', 'p1', 'p2', 'p3'] },
   { slug: 'gh-pr-state',     sg: 'github',    type: Github.T.PullRequest, predicate: Github.P.state,
     label: 'State', values: ['open', 'closed'] },
+  { slug: 'chat-privacy',    sg: 'chat',      type: Chat.T.Session,       predicate: Chat.P.privacy,
+    label: 'Privacy', values: ['private', 'team', 'public'] },
+  { slug: 'chat-tool',       sg: 'chat',      type: Chat.T.Session,       predicate: Chat.P.speakerTool,
+    label: 'Tool', values: ['cursor', 'claude-code', 'aider'] },
 ];
 for (const c of chips) {
   const id = Profile.uri.chip(PROJECT_ID, c.slug);
@@ -308,6 +339,21 @@ SELECT DISTINCT ?pr WHERE {
 }`.trim(),
   },
   {
+    slug: 'chat-shared-with-me',
+    sg: 'chat',
+    name: 'Chat shared with me',
+    description: 'Recent SWM-visible chat sessions from other participants — what are your teammates\' assistants working on?',
+    resultColumn: 'session',
+    sparql: `
+SELECT DISTINCT ?session WHERE {
+  GRAPH ?g {
+    ?session a <${Chat.T.Session}> ;
+             <${Chat.P.privacy}> ?priv .
+    FILTER(?priv IN ("team", "public"))
+  }
+}`.trim(),
+  },
+  {
     slug: 'decisions-with-open-tasks',
     sg: 'decisions',
     name: 'Decisions with open tasks',
@@ -348,19 +394,19 @@ if (DRY_RUN) {
 
 const token = resolveToken(REPO_ROOT);
 const client = makeClient({ apiBase: API_BASE, token });
-await client.ensureProject({
+const { cgId } = await client.ensureProject({
   id: PROJECT_ID,
   name: args.name ?? 'DKG Code memory',
   description: 'Shared context graph for the dkg-v9 monorepo itself.',
 });
-await client.ensureSubGraph(PROJECT_ID, SUBGRAPH);
+await client.ensureSubGraph(cgId, SUBGRAPH);
 await client.writeAssertion(
   {
-    contextGraphId: PROJECT_ID,
+    contextGraphId: cgId,
     assertionName: ASSERTION_NAME,
     subGraphName: SUBGRAPH,
     triples: sink.triples,
   },
   { label: 'profile' },
 );
-console.log(`[profile] Done. Wrote profile for ${PROJECT_ID} into ${SUBGRAPH}/${ASSERTION_NAME}.`);
+console.log(`[profile] Done. Wrote profile for ${cgId} into ${SUBGRAPH}/${ASSERTION_NAME}.`);

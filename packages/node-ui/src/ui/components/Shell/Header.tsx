@@ -84,7 +84,11 @@ export function Header() {
   }, [loadNotifs]);
 
   useNodeEvents(useCallback((event) => {
-    if (event.type === 'join_request' || event.type === 'join_approved') {
+    if (
+      event.type === 'join_request' ||
+      event.type === 'join_approved' ||
+      event.type === 'join_rejected'
+    ) {
       loadNotifs();
     }
   }, [loadNotifs]));
@@ -164,11 +168,14 @@ export function Header() {
                 const meta = n.meta ? (() => { try { return JSON.parse(n.meta); } catch { return null; } })() : null;
                 const isJoinReq = n.type === 'join_request';
                 const isJoinApproved = n.type === 'join_approved';
+                const isJoinRejected = n.type === 'join_rejected';
+                // A rejection doesn't correspond to a project the invitee
+                // has access to, so there's nothing useful to open on click.
                 const clickable = (isJoinReq || isJoinApproved) && meta?.contextGraphId;
                 return (
                   <div
                     key={i}
-                    className={`v10-header-notif-item ${isJoinReq ? 'v10-notif-join' : ''} ${isJoinApproved ? 'v10-notif-approved' : ''} ${clickable ? 'v10-notif-clickable' : ''}`}
+                    className={`v10-header-notif-item ${isJoinReq ? 'v10-notif-join' : ''} ${isJoinApproved ? 'v10-notif-approved' : ''} ${isJoinRejected ? 'v10-notif-rejected' : ''} ${clickable ? 'v10-notif-clickable' : ''}`}
                     onClick={clickable ? () => {
                       setActiveProject(meta.contextGraphId);
                       openTab({ id: `project:${meta.contextGraphId}`, label: meta.contextGraphId.slice(0, 16), closable: true });
@@ -178,6 +185,7 @@ export function Header() {
                   >
                     {isJoinReq && <span className="v10-notif-join-icon">🔑</span>}
                     {isJoinApproved && <span className="v10-notif-join-icon">✓</span>}
+                    {isJoinRejected && <span className="v10-notif-join-icon">✕</span>}
                     <div className="v10-header-notif-item-text">{n.message ?? n.title ?? 'Notification'}</div>
                     {n.ts && <div className="v10-header-notif-item-time">{new Date(n.ts).toLocaleTimeString()}</div>}
                   </div>

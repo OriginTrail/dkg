@@ -11,6 +11,7 @@
     { "path": "../agent" },
     { "path": "../epcis" },
     { "path": "../node-ui" },
-    { "path": "../adapter-openclaw" }
+    { "path": "../adapter-openclaw" },
+    { "path": "../mcp-dkg" }
   ]
 }

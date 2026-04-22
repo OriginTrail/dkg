@@ -414,8 +414,109 @@ export interface AssertionInfo {
   tripleCount?: number;
 }
 
-/** Discover assertions in WM by querying named graphs that match the assertion pattern. */
-export async function listAssertions(contextGraphId: string): Promise<AssertionInfo[]> {
+/**
+ * Discover assertions in a given memory layer.
+ *
+ * WM uses a cheap graph-listing query: the assertion graph URI shape is
+ * `did:dkg:context-graph:<cg>/assertion/<agent>/<name>` and a WM assertion
+ * still carries its triples there.
+ *
+ * SWM is different. When an assertion is promoted its triples move into
+ * the single `/_shared_memory` graph, so the assertion graph itself becomes
+ * empty and the WM-style listing returns nothing. The authoring node's
+ * `_meta` graph also records full lifecycle entities (`dkg:state`,
+ * `dkg:memoryLayer`, `prov:Activity` events), but `_meta` is NOT replicated
+ * between peers — only the context graph's data graphs and the
+ * `_shared_memory_meta` partitions propagate over sync.
+ *
+ * What DOES land on every replica is one `dkg:ShareTransition` entity per
+ * promote, authored by `generateShareTransitionMetadata()` in
+ * `@origintrail-official/dkg-publisher`:
+ *
+ *   GRAPH <did:dkg:context-graph:<cg>[/<sg>]/_shared_memory_meta> {
+ *     <urn:dkg:share:<opId>> a dkg:ShareTransition ;
+ *                            dkg:source   "assertion/<agent>/<name>" ;
+ *                            dkg:agent    did:dkg:agent:<address> ;
+ *                            dkg:timestamp "…"^^xsd:dateTime .
+ *   }
+ *
+ * So on every node — authoring or replica — we can enumerate promoted
+ * assertions by listing ShareTransitions and reconstructing the lifecycle
+ * URN that the UI already uses as `graphUri` elsewhere. We parse the
+ * sub-graph suffix (if any) from the meta graph IRI itself so this keeps
+ * working for sub-graph-scoped shares.
+ */
+export async function listAssertions(
+  contextGraphId: string,
+  layer: 'wm' | 'swm' = 'wm',
+): Promise<AssertionInfo[]> {
+  if (layer === 'swm') {
+    const DKG = 'http://dkg.io/ontology/';
+    const swmMetaPrefix = `did:dkg:context-graph:${contextGraphId}`;
+    // Mirrors the pattern `useSwmAttributions.ts` uses to read
+    // `_shared_memory_meta` graphs — the explicit `GRAPH ?g { … }`
+    // plus `FILTER(STRSTARTS … STRENDS)` pair makes the query
+    // self-scoping: the query engine's `wrapWithGraph` early-returns
+    // when the SPARQL already contains `graph `, so the query runs
+    // raw over the store and the FILTER pins it to *this* CG's
+    // `_shared_memory_meta` partitions (root + each sub-graph) only.
+    // Codex tier-4m flagged this as "runs against the default WM
+    // view", which is incorrect for this shape of SPARQL; keeping
+    // the same shape as `useSwmAttributions` — which is already in
+    // production for the SWM agent-attribution badge — keeps both
+    // call sites consistent and provably working on the same path.
+    const sparql = `SELECT DISTINCT ?g ?source ?agent WHERE {
+      GRAPH ?g {
+        ?s a <${DKG}ShareTransition> ;
+           <${DKG}source> ?source ;
+           <${DKG}agent> ?agent .
+      }
+      FILTER(STRSTARTS(STR(?g), "${swmMetaPrefix}"))
+      FILTER(STRENDS(STR(?g), "/_shared_memory_meta"))
+    }`;
+    const data = await executeQuery(sparql, contextGraphId);
+    const bindings: any[] = data?.result?.bindings ?? [];
+    const seen = new Set<string>();
+    const result: AssertionInfo[] = [];
+    for (const b of bindings) {
+      const g = typeof b.g === 'string' ? b.g : b.g?.value;
+      const source = typeof b.source === 'string' ? b.source : b.source?.value;
+      const agentUri = typeof b.agent === 'string' ? b.agent : b.agent?.value;
+      if (!g || !source || !agentUri) continue;
+
+      // `dkg:source` literal is `assertion/<agent>/<name>`. The agent
+      // segment is a 0x EVM address (no slashes, no colons), but `<name>`
+      // is only slash/whitespace-free — it CAN contain `:` — so split on
+      // the first two `/` rather than a blind last-segment parse.
+      const m = source.match(/^assertion\/([^/]+)\/(.+)$/);
+      if (!m) continue;
+      const name = m[2];
+
+      // `dkg:agent` is `did:dkg:agent:<address>`; pull the address so we
+      // rebuild the exact lifecycle URN shape used on the authoring node.
+      const addrMatch = /^did:dkg:agent:(.+)$/.exec(agentUri);
+      const address = addrMatch ? addrMatch[1] : null;
+      if (!address) continue;
+
+      // Recover optional sub-graph segment from `?g`:
+      //   did:dkg:context-graph:<cg>/_shared_memory_meta          → none
+      //   did:dkg:context-graph:<cg>/<sg>/_shared_memory_meta     → <sg>
+      const tail = g.slice(swmMetaPrefix.length); // "/<sg?>/_shared_memory_meta"
+      const inner = tail.replace(/\/_shared_memory_meta$/, '').replace(/^\//, '');
+      const subGraphName = inner.length > 0 ? inner : undefined;
+
+      const lifecycle = subGraphName
+        ? `urn:dkg:assertion:${contextGraphId}:${subGraphName}:${address}:${name}`
+        : `urn:dkg:assertion:${contextGraphId}:${address}:${name}`;
+
+      if (seen.has(lifecycle)) continue;
+      seen.add(lifecycle);
+      result.push({ name, graphUri: lifecycle });
+    }
+    return result;
+  }
+
+  // layer === 'wm'
   const sparql = `SELECT DISTINCT ?g (COUNT(?s) AS ?cnt) WHERE { GRAPH ?g { ?s ?p ?o } } GROUP BY ?g`;
   const data = await executeQuery(sparql, contextGraphId);
   const bindings: any[] = data?.result?.bindings ?? [];
