@@ -1291,17 +1291,28 @@ export class OriginTrailGameCoordinator {
     }
 
     // Force-resolve is meant to push through votes that did not reach
-    // quorum on their own — it is NOT meant to manufacture an empty turn
-    // when the previous turn already resolved (e.g. solo mode where a
-    // single vote satisfies M-of-1 immediately, or M-of-N games where
-    // gossip already promoted the proposal). Without this guard the
-    // caller would advance the turn counter twice for one user action
-    // and deadlock e2e flows that wait `sleep(N)` for state to settle
-    // (G-3). When there are no votes AND no pending proposal there is
-    // nothing to force, so return the current state unchanged.
+    // quorum on their own — it is NOT meant to manufacture an empty
+    // turn when the previous turn auto-resolved moments ago (e.g.
+    // solo mode where a single vote satisfies M-of-1 immediately, or
+    // an M-of-N game where the last approval just landed). Without
+    // this guard the caller would advance the turn counter twice for
+    // one user action and deadlock e2e flows that wait `sleep(N)` for
+    // state to settle (G-3).
+    //
+    // Heuristic: if there are no open votes, no pending proposal, and
+    // we just finalised the previous turn (`turnHistory[last]` was
+    // appended in the recent past), the user already saw a resolution
+    // — treat the force-resolve as idempotent. The 3-s window covers
+    // the worst-case `sleep(1000)` between vote+force-resolve in the
+    // e2e suite while staying well below realistic "user got bored
+    // waiting for a real consensus" intervals (default turn deadline
+    // is 30 s).
     if (swarm.votes.length === 0 && !swarm.pendingProposal) {
-      this.log(`force-resolve no-op for ${swarmId} turn ${swarm.currentTurn}: no open votes or pending proposal`);
-      return swarm;
+      const last = swarm.turnHistory[swarm.turnHistory.length - 1];
+      if (last && last.turn === swarm.currentTurn - 1 && Date.now() - last.timestamp < 3000) {
+        this.log(`force-resolve no-op for ${swarmId} turn ${swarm.currentTurn}: previous turn just resolved`);
+        return swarm;
+      }
     }
 
     if (swarm.votes.length === 0) {
