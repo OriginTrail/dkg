@@ -26,9 +26,9 @@ import {
 } from './actions.js';
 
 export const dkgPlugin: Plugin = {
-  name: 'dkg-v9',
+  name: 'dkg',
   description:
-    'Turns this ElizaOS agent into a DKG V9 node — publish knowledge, ' +
+    'Turns this ElizaOS agent into a DKG node — publish knowledge, ' +
     'query the graph, discover agents, and invoke remote skills over a ' +
     'decentralized P2P network.',
   actions: [dkgPublish, dkgQuery, dkgFindAgents, dkgSendMessage, dkgInvokeSkill],

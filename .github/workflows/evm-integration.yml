@@ -30,8 +30,12 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # All three matrix scopes (chain, publisher, agent) are TORNADO-tier per
+  # `dkgv10-spec/CRITICALITY_CATEGORIZATION.md` §1 — this workflow drives
+  # them against a real Hardhat node to catch EVM-side regressions the
+  # unit-test lanes in `ci.yml` can't reach.
   evm-integration:
-    name: EVM Integration (${{ matrix.scope }})
+    name: "Tornado EVM integration: ${{ matrix.scope }}"
     runs-on: ubuntu-latest
     timeout-minutes: 30
 

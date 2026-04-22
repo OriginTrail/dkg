@@ -227,7 +227,61 @@ describe('V10 PUBLISH Protocol (spec §9.0)', () => {
         rootEntities: ['urn:entity:alpha'],
         requiredACKs: 3,
       });
+      // Count is necessary but not sufficient: the old `>= 3` by itself
+      // would be green for three *junk* ACKs. Assert every ACK is
+      // (a) a real ECDSA signature that ecrecovers to one of the
+      // expected core wallets, (b) carries the expected merkleRoot,
+      // and (c) has a distinct positive nodeIdentityId — i.e. the
+      // handshake actually produced M-of-N signed agreement, not a
+      // replay of one peer's ACK.
       expect(result.acks.length).toBeGreaterThanOrEqual(3);
+      // Enclosing result carries the merkleRoot that every surviving
+      // ACK must have matched (verified inside collector). Pin it so
+      // a future refactor that returns a different root would fail.
+      expect(result.merkleRoot).toEqual(merkleRoot);
+
+      const seenIdentityIds = new Set<string>();
+      const coreAddrs = new Set(
+        coreWallets.map((w) => w.address.toLowerCase()),
+      );
+      // Test simulators use `signACK` above, which signs the 8-field
+      // `computePublishACKDigest` — same digest the collector verifies
+      // against. We MUST use the same here or recovery drifts and the
+      // assertion produces a false positive.
+      const digest = computePublishACKDigest(
+        TEST_CHAIN_ID,
+        TEST_KAV10_ADDR,
+        cgIdBigInt,
+        merkleRoot,
+        1n, // kaCount passed to collect({ kaCount: 1 })
+        500n, // publicByteSize passed to collect({ publicByteSize: 500n })
+        1n, // epochs default
+        0n, // tokenAmount default
+      );
+      const prefixedHash = ethers.hashMessage(digest);
+      for (const ack of result.acks) {
+        expect(ack.nodeIdentityId, 'ACK nodeIdentityId must be > 0').toBeGreaterThan(0n);
+        const idKey = String(ack.nodeIdentityId);
+        expect(
+          seenIdentityIds.has(idKey),
+          `duplicate nodeIdentityId ${idKey} — collector accepted a replay`,
+        ).toBe(false);
+        seenIdentityIds.add(idKey);
+        // `CollectedACK` exposes `signatureR` / `signatureVS` (no
+        // `coreNode` prefix) — ecrecover each against the 2-field
+        // H5 digest and require the signer to be one of the simulated
+        // core wallets. This catches both a forged ACK (wrong signer)
+        // and a digest-drift bug (signer recovers to garbage).
+        const recovered = ethers.recoverAddress(prefixedHash, {
+          r: ethers.hexlify(ack.signatureR),
+          yParityAndS: ethers.hexlify(ack.signatureVS),
+        });
+        expect(
+          coreAddrs.has(recovered.toLowerCase()),
+          `ACK signature recovers to ${recovered} which is NOT one of the ` +
+            `simulated core wallets — collector accepted a forged ACK`,
+        ).toBe(true);
+      }
     });
   });
 
@@ -465,6 +519,12 @@ describe('V10 ACK Edge Cases', () => {
     };
 
     const collector = new ACKCollector(deps);
+    // Bare `rejects.toThrow()` would accept ANY rejection — including a
+    // regression where the collector threw on an orthogonal code path
+    // (e.g. signature verify) before it ever got to the dedup check.
+    // Pin the exact storage_ack_insufficient error so we know dedup
+    // collapsed same-peer ACKs to a single distinct entry and THEN
+    // failed the count threshold.
     await expect(
       collector.collect({
         merkleRoot,
@@ -478,7 +538,7 @@ describe('V10 ACK Edge Cases', () => {
         kaCount: 1,
         rootEntities: [],
       }),
-    ).rejects.toThrow();
+    ).rejects.toThrow(/storage_ack_insufficient/);
   });
 
   it('deduplicates ACKs from same nodeIdentityId', async () => {
@@ -499,6 +559,11 @@ describe('V10 ACK Edge Cases', () => {
     };
 
     const collector = new ACKCollector(deps);
+    // Same reasoning as the same-peer dedup test above: bare
+    // `rejects.toThrow()` is satisfied by ANY throw and would hide a
+    // regression where the collector rejects for a non-dedup reason
+    // before the identityId collapse even runs. Pin the expected
+    // storage_ack_insufficient shape.
     await expect(
       collector.collect({
         merkleRoot,
@@ -512,7 +577,7 @@ describe('V10 ACK Edge Cases', () => {
         kaCount: 1,
         rootEntities: [],
       }),
-    ).rejects.toThrow();
+    ).rejects.toThrow(/storage_ack_insufficient/);
   });
 
   it('handles nodeIdentityId > Number.MAX_SAFE_INTEGER (uint64 high/low encoding)', () => {
@@ -894,9 +959,16 @@ describe('V10 StorageACKHandler round-trip', () => {
       stagingQuads: stagingBytes,
     });
 
-    // Empty staging bytes have length 0, which takes the SWM fallback path;
-    // with no SWM data either, it will fail on "No data found in SWM"
-    await expect(handler.handler(intent, fakePeerId)).rejects.toThrow();
+    // Empty staging bytes have length 0, which takes the SWM fallback
+    // path; with no SWM data either, the handler rejects with "No data
+    // found in SWM" (or an equivalent empty-input rejection). Pin the
+    // rejection vocabulary — a bare `rejects.toThrow()` would also be
+    // satisfied by a setup crash (e.g. protobuf decode failure) which
+    // would hide a real regression where empty input is silently
+    // accepted and an empty commit is broadcast.
+    await expect(handler.handler(intent, fakePeerId)).rejects.toThrow(
+      /no data found in swm|empty|no.*staging|no.*quads/i,
+    );
   });
 
   it('handler rejects stagingQuads > 4MB', async () => {

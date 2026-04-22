@@ -21,6 +21,7 @@ PUBLISHER_TESTS=(
 )
 AGENT_TESTS=(
   "packages/agent/test/e2e-chain.test.ts"
+  "packages/agent/test/e2e-finalization.test.ts"
 )
 
 files=()

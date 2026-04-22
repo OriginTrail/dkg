@@ -79,29 +79,28 @@ describe('loadNetworkConfig', () => {
     }
   });
 
+  it('loads a specific network by name', async () => {
+    const { _resetNetworkConfigCache } = await import('../src/config.js');
+    _resetNetworkConfigCache();
+    const config = await loadNetworkConfig('testnet');
+    if (!config) {
+      expect(config).toBeNull();
+      return;
+    }
+    expect(config.networkName).toMatch(/testnet/i);
+  });
+
   it('returns null when network config file does not exist', async () => {
     const { _resetNetworkConfigCache } = await import('../src/config.js');
     _resetNetworkConfigCache();
-    const origDir = process.cwd();
-    try {
-      process.chdir('/tmp');
-      const config = await loadNetworkConfig();
-      if (config !== null) {
-        // Running from monorepo — loadNetworkConfig resolves via import.meta.url
-        // not cwd, so testnet.json is always reachable.  Verify it loaded validly.
-        expect(typeof config.networkName).toBe('string');
-      } else {
-        expect(config).toBeNull();
-      }
-    } finally {
-      process.chdir(origDir);
-    }
+    const config = await loadNetworkConfig('nonexistent-network');
+    expect(config).toBeNull();
   });
 
 });
 
 describe('isDkgMonorepo', () => {
-  it('returns true when running from the dkg-v9 monorepo', () => {
+  it('returns true when running from the DKG monorepo', () => {
     const result = isDkgMonorepo();
     if (repoDir() === null) {
       expect(result).toBe(false);

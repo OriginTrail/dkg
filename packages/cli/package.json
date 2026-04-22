@@ -1,13 +1,16 @@
 {
   "name": "@origintrail-official/dkg",
-  "version": "9.0.0-beta.6",
+  "version": "10.0.0-rc.1",
   "type": "module",
   "main": "dist/cli.js",
   "bin": {
     "dkg": "./dist/cli.js"
   },
   "scripts": {
-    "build": "tsc && node -e \"const fs=require('fs');fs.mkdirSync('network',{recursive:true});fs.copyFileSync('../../network/testnet.json','network/testnet.json')\"",
+    "prebuild": "pnpm --filter @origintrail-official/dkg-adapter-openclaw run build",
+    "build": "tsc && node -e \"const fs=require('fs');const p=require('path');fs.mkdirSync('network',{recursive:true});for(const f of fs.readdirSync('../../network')){if(f.endsWith('.json'))fs.copyFileSync(p.join('../../network',f),p.join('network',f))};fs.copyFileSync('../../project.json','project.json')\"",
+    "benchmark:catchup-runner": "node scripts/catchup-runner-benchmark.cjs",
+    "benchmark:daemon-responsiveness": "node scripts/daemon-responsiveness-benchmark.cjs",
     "postinstall": "node ./scripts/bundle-markitdown-binaries.mjs --quiet --current-platform --best-effort",
     "markitdown:build": "node ./scripts/bundle-markitdown-binaries.mjs --build-current-platform",
     "test": "vitest run",
@@ -15,6 +18,7 @@
     "clean": "node -e \"const fs=require('fs');for(const d of['dist','network']){fs.rmSync(d,{recursive:true,force:true})};fs.rmSync('tsconfig.tsbuildinfo',{force:true})\""
   },
   "dependencies": {
+    "@origintrail-official/dkg-adapter-openclaw": "workspace:*",
     "@origintrail-official/dkg-agent": "workspace:*",
     "@origintrail-official/dkg-app-origin-trail-game": "workspace:*",
     "@origintrail-official/dkg-chain": "workspace:*",
@@ -43,6 +47,7 @@
   "files": [
     "dist",
     "network",
+    "project.json",
     "markitdown-build-info.json",
     "markitdown-targets.json",
     "scripts",

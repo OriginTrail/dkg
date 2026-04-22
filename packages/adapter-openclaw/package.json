@@ -1,6 +1,6 @@
 {
   "name": "@origintrail-official/dkg-adapter-openclaw",
-  "version": "0.0.1",
+  "version": "10.0.0-rc.1",
   "description": "OpenClaw plugin adapter for connecting a DKG V10 node and chat bridge to an OpenClaw agent",
   "type": "module",
   "main": "dist/index.js",
@@ -9,7 +9,8 @@
     ".": {
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
-    }
+    },
+    "./package.json": "./package.json"
   },
   "files": [
     "dist",
@@ -25,12 +26,8 @@
     "test:coverage": "vitest run --coverage --passWithNoTests",
     "clean": "node -e \"const fs=require('fs'); for (const p of ['dist','tsconfig.tsbuildinfo']) fs.rmSync(p,{recursive:true,force:true});\""
   },
-  "bin": {
-    "dkg-openclaw": "./dist/setup-cli.js"
-  },
   "dependencies": {
-    "@origintrail-official/dkg-core": "workspace:*",
-    "commander": "^13"
+    "@origintrail-official/dkg-core": "workspace:*"
   },
   "openclaw": {
     "extensions": [

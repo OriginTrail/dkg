@@ -1,15 +1,15 @@
-# Automatically publish all public packages to NPM on every push to main.
-# Uses a dev pre-release suffix (e.g. 9.0.0-beta.5-dev.1710412800)
-# and publishes as `latest` so all NPM-installed nodes auto-update.
+# Automatically publish all public packages to NPM on every push to the
+# release branch. Uses a dev pre-release suffix so each push gets a unique
+# version (e.g. 10.0.0-rc.1-dev.1774300000.abc1234) tagged as `latest`.
 #
+# To switch the release branch: change the branches list below.
 # To disable: remove the NPM_TOKEN secret from the repo settings.
-# After that, only manual `npm publish` will push new versions.
 
 name: Continuous NPM Publish
 
 on:
   push:
-    branches: [main]
+    branches: [v10-rc]  # ← change this when the release branch moves
 
 permissions:
   contents: read
@@ -46,8 +46,23 @@ jobs:
       - name: Build all packages
         run: pnpm build
 
-      - name: Run tests
-        run: pnpm turbo test --filter='!@origintrail-official/dkg-evm-module'
+      - name: Build Vite UI bundles (node-ui + origin-trail-game)
+        # `build` was split from full (tsc + vite) into tsc-only in CI for a
+        # ~2 min wall-clock reduction (see ci.yml). Dev pre-releases still
+        # need the Vite-produced `dist-ui/` bundles shipped to npm, so
+        # rebuild them here before publishing.
+        run: pnpm turbo run build:ui
+
+      # NOTE: tests are intentionally NOT re-run here. The main `ci.yml`
+      # workflow runs the full TORNADO / BURA / KOSAVA matrix in parallel on
+      # the same commit and is the authoritative test gate (enforced via
+      # branch protection on merges to v10-rc). Re-running `pnpm turbo test`
+      # in this publish workflow was redundant with `ci.yml` AND incompatible
+      # with the `accept-red-ci` policy on v10-rc: a deliberately-red
+      # PROD-BUG sentinel test (e.g. network-sim K-4/K-5 — no seeded RNG, no
+      # libp2p-parity harness) would fail this step and block every dev
+      # pre-release, even though CI was already reporting the same red state
+      # as documented bug evidence. See .test-audit/BUGS_FOUND.md.
 
       - name: Compute dev version suffix
         id: version

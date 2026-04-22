@@ -17,9 +17,46 @@ const CLI_JS = join(DKG_V9_ROOT, 'packages', 'cli', 'dist', 'cli.js');
 const EVM_MODULE = join(DKG_V9_ROOT, 'packages', 'evm-module');
 const TEST_DIR = join(__dirname, '..', '..', '.test-nodes');
 
-const API_PORT_BASE = 19200;
-const LIBP2P_PORT_BASE = 19300;
-const HARDHAT_E2E_PORT = 18545;
+// Ports are picked at cluster-start time from a per-process random window to
+// eliminate CI-2 (`EADDRINUSE: 0.0.0.0:19301` on 2-core ubuntu-latest runners).
+// With hard-coded 19200/19300/18545 the test relies on those ports being free
+// at boot AND never being grabbed by a concurrent process; on CI the supervisor
+// → worker handoff in `dkg start --foreground` opens a ~6-8 s window where the
+// kernel hasn't released the libp2p port yet. Randomizing into the 20000-30000
+// private range AND probing each port as free via `net.createServer` before we
+// commit makes port contention structurally impossible.
+let API_PORT_BASE = 0;
+let LIBP2P_PORT_BASE = 0;
+let HARDHAT_E2E_PORT = 0;
+
+/**
+ * Pick a free contiguous TCP port window and probe every port in it to make
+ * sure nothing else is listening. Returns the starting port.
+ *
+ * We intentionally stay in `20000-30000` — well above the ephemeral range on
+ * both Linux (`net.ipv4.ip_local_port_range` default 32768-60999) and macOS
+ * (49152-65535), so the OS won't randomly assign one of our ports to a client
+ * socket mid-run.
+ */
+async function pickFreePortRange(count: number, attempts = 40): Promise<number> {
+  const net = await import('node:net');
+  const isFree = (port: number): Promise<boolean> =>
+    new Promise(resolve => {
+      const srv = net.createServer();
+      srv.once('error', () => resolve(false));
+      srv.once('listening', () => srv.close(() => resolve(true)));
+      srv.listen(port, '0.0.0.0');
+    });
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    // 20000..29000 base + up to `count` slots, so max allocated port < 30000.
+    const base = 20000 + Math.floor(Math.random() * (9000 - count));
+    const checks = await Promise.all(
+      Array.from({ length: count }, (_, i) => isFree(base + i)),
+    );
+    if (checks.every(Boolean)) return base;
+  }
+  throw new Error(`pickFreePortRange: could not find ${count} consecutive free ports in 20000-30000 after ${attempts} tries`);
+}
 
 // Hardhat well-known accounts 5-9 (accounts 0-4 reserved for devnet)
 const HARDHAT_WALLETS = [
@@ -60,7 +97,7 @@ async function httpPost(url: string, body: any, token?: string): Promise<any> {
   return res.json();
 }
 
-async function waitForReady(port: number, maxWaitMs = 60_000): Promise<void> {
+async function waitForReady(port: number, maxWaitMs = 120_000, homeDir?: string): Promise<void> {
   const start = Date.now();
   while (Date.now() - start < maxWaitMs) {
     try {
@@ -69,7 +106,33 @@ async function waitForReady(port: number, maxWaitMs = 60_000): Promise<void> {
     } catch { /* not ready */ }
     await sleep(500);
   }
-  throw new Error(`Node on port ${port} did not become ready within ${maxWaitMs}ms`);
+  // Include daemon log tail so CI failures are actually diagnosable instead
+  // of just "did not become ready".
+  let tail = '';
+  if (homeDir) {
+    const logFile = join(homeDir, 'test-daemon.log');
+    if (existsSync(logFile)) {
+      try {
+        const full = readFileSync(logFile, 'utf-8');
+        tail = '\n--- test-daemon.log (last 100 lines) ---\n' +
+          full.split('\n').slice(-100).join('\n');
+      } catch { /* best-effort */ }
+    }
+  }
+  throw new Error(`Node on port ${port} did not become ready within ${maxWaitMs}ms${tail}`);
+}
+
+async function safeRemoveTestDir(): Promise<void> {
+  if (!existsSync(TEST_DIR)) return;
+  for (let attempt = 0; attempt < 20; attempt++) {
+    try {
+      rmSync(TEST_DIR, { recursive: true, force: true, maxRetries: 5, retryDelay: 300 });
+      if (!existsSync(TEST_DIR)) return;
+    } catch (err) {
+      if (attempt === 19) throw err;
+    }
+    await sleep(500);
+  }
 }
 
 export function sleep(ms: number): Promise<void> {
@@ -190,10 +253,20 @@ function fundWallet(rpcUrl: string, address: string): void {
 }
 
 export async function startTestCluster(nodeCount: number, options?: ClusterOptions): Promise<TestNode[]> {
-  if (existsSync(TEST_DIR)) {
-    rmSync(TEST_DIR, { recursive: true, maxRetries: 3, retryDelay: 200 });
-  }
+  // Retry the dir wipe — in CI, a previous test file's daemon process may
+  // still be finalising log flushes when we try to rmSync here, which
+  // surfaces as ENOTEMPTY. safeRemoveTestDir polls until the directory is
+  // genuinely gone before we rebuild it.
+  await safeRemoveTestDir();
   mkdirSync(TEST_DIR, { recursive: true });
+
+  // Allocate a fresh, probed-free port window for this cluster run. This is
+  // the structural fix for CI-2: we never reuse the same ports across CI
+  // shards or local re-runs, and we never commit to a port that the kernel
+  // already holds a socket on.
+  API_PORT_BASE = await pickFreePortRange(nodeCount);
+  LIBP2P_PORT_BASE = await pickFreePortRange(nodeCount);
+  HARDHAT_E2E_PORT = (await pickFreePortRange(1));
 
   const authToken = 'test-token-for-e2e';
 
@@ -219,7 +292,19 @@ export async function startTestCluster(nodeCount: number, options?: ClusterOptio
       name: `test-node-${i + 1}`,
       apiPort,
       listenPort: libp2pPort,
-      nodeRole: isRelay ? 'core' : 'edge',
+      // All game-e2e nodes run as `core`. Previously only node 0 was `core`
+      // and nodes 1-2 were `edge`, which broke every e2e test: `dkg-agent`
+      // skips on-chain profile creation and StorageACK handler registration
+      // for edge nodes (see `packages/agent/src/dkg-agent.ts:483` +
+      // `:508`), so edge nodes never log `identityId=<n>` (breaking the
+      // `all nodes registered on-chain identities` assertion) and never
+      // participate in M-of-N ACK collection (breaking the `on-chain
+      // publishes succeed (no MinSignaturesRequirementNotMet)` assertion).
+      // The game spec requires every participant to be a full signing peer
+      // with on-chain stake, so `core` is the correct role. This was
+      // masked by CI-2 failing first in `beforeAll`; once port contention
+      // was fixed the harness misconfiguration surfaced.
+      nodeRole: 'core',
       contextGraphs: ['origin-trail-game'],
       auth: { enabled: true, tokens: [authToken] },
     };
@@ -253,14 +338,26 @@ export async function startTestCluster(nodeCount: number, options?: ClusterOptio
 
   // Start node 1 (relay) first
   nodes[0].process = startDaemon(nodes[0]);
-  await waitForReady(nodes[0].apiPort);
+  // Internal timeout must be strictly LESS than the outer beforeAll's
+  // hookTimeout so our diagnostic "did not become ready + daemon log tail"
+  // error materialises before vitest's generic "Hook timed out" kicks in
+  // and unmounts the error with no useful context. Individual test files
+  // use a 10-minute beforeAll; a 4-minute boot window per node is plenty.
+  await waitForReady(nodes[0].apiPort, 240_000, nodes[0].homeDir);
 
   // Get node 1's multiaddr for other nodes to use as relay
   const status = await httpGet(`http://127.0.0.1:${nodes[0].apiPort}/api/status`);
   const relayAddr = status.multiaddrs?.find((a: string) => a.includes('127.0.0.1'))
     ?? `/ip4/127.0.0.1/tcp/${nodes[0].libp2pPort}/p2p/${status.peerId}`;
 
-  // Start remaining nodes bootstrapped to node 1
+  // Start remaining nodes bootstrapped to node 1, ONE AT A TIME.
+  // Concurrent boot of nodes 2 + 3 on 2-core ubuntu-latest CI runners
+  // reliably triggers an `EADDRINUSE: 0.0.0.0:19301` race inside the
+  // `dkg start --foreground` supervisor→worker handoff where the
+  // first worker briefly holds the libp2p port after a silent
+  // restart. Serializing boot (node 2 fully ready before node 3
+  // spawns) sidesteps the race without touching production code.
+  // Documented as CI-2 in `.test-audit/BUGS_FOUND.md`.
   for (let i = 1; i < nodeCount; i++) {
     const configPath = join(nodes[i].homeDir, 'config.json');
     const cfg = JSON.parse(readFileSync(configPath, 'utf-8'));
@@ -270,10 +367,8 @@ export async function startTestCluster(nodeCount: number, options?: ClusterOptio
     writeFileSync(configPath, JSON.stringify(cfg, null, 2));
 
     nodes[i].process = startDaemon(nodes[i]);
+    await waitForReady(nodes[i].apiPort, 240_000, nodes[i].homeDir);
   }
-
-  // Wait for all nodes to be ready
-  await Promise.all(nodes.slice(1).map(n => waitForReady(n.apiPort)));
 
   // Set default ask price for node identities (otherwise stakeWeightedAverageAsk = 0
   // and publish tokenAmount calculates to 0 which the contract rejects).
@@ -293,7 +388,16 @@ export async function startTestCluster(nodeCount: number, options?: ClusterOptio
           let identityId = i + 1;
           if (identityStorageAddr) {
             try {
-              const callData = '0xd7236ebf' + hw.address.slice(2).padStart(64, '0');
+              // selector: 0x867a4680 (getIdentityId(address)) — from
+              // `ethers.id('getIdentityId(address)').slice(0,10)` against
+              // contracts/storage/IdentityStorage.sol:108. The previous
+              // value `0xd7236ebf` was stale and always reverted with
+              // "function selector was not recognized", which meant this
+              // `try` block fell through to the sequential `i+1` fallback
+              // and the updateAsk below was applied to the WRONG identity
+              // ID for every node — silently, because execSync swallows
+              // non-2xx RPC responses.
+              const callData = '0x867a4680' + hw.address.slice(2).padStart(64, '0');
               const callBody = JSON.stringify({
                 jsonrpc: '2.0', id: 1, method: 'eth_call',
                 params: [{ to: identityStorageAddr, data: callData }, 'latest'],
@@ -323,20 +427,83 @@ export async function startTestCluster(nodeCount: number, options?: ClusterOptio
     } catch { /* best-effort */ }
   }
 
-  // Wait for gossipsub mesh to form (extra time with chain for identity creation)
-  await sleep(chain ? 8000 : 3000);
+  // Wait for gossipsub mesh to form.
+  await sleep(3000);
+
+  // When running with a chain, each node's DKGAgent registers an on-chain
+  // profile asynchronously AFTER its HTTP `/api/status` endpoint reports
+  // ready, so `waitForReady` isn't sufficient — we also need to see either
+  // `identityId=<n>` (success) or `No valid on-chain identity` (definitive
+  // failure) in the daemon log before returning, otherwise the first
+  // assertion in `context-graph.test.ts` and friends races with a slow
+  // 2-core CI runner. A fixed sleep(8000) here was enough locally but
+  // surfaced intermittently on CI after CI-2 was resolved.
+  if (chain) {
+    await Promise.all(nodes.map(n => waitForOnChainIdentity(n, 180_000)));
+  }
 
   return nodes;
 }
 
+async function waitForOnChainIdentity(node: TestNode, maxWaitMs: number): Promise<void> {
+  const deadline = Date.now() + maxWaitMs;
+  const logFile = join(node.homeDir, 'test-daemon.log');
+  while (Date.now() < deadline) {
+    try {
+      const log = readFileSync(logFile, 'utf-8');
+      if (/identityId=\d+/.test(log)) return;
+      if (log.includes('No valid on-chain identity')) {
+        throw new Error(
+          `node ${node.index + 1} (port ${node.apiPort}) reported "No valid on-chain identity" — ` +
+          `chain is up but on-chain profile creation failed. See ${logFile}.`,
+        );
+      }
+    } catch (err: any) {
+      if (err?.code !== 'ENOENT' && !err?.message?.includes('No valid on-chain identity')) {
+        if (err?.message?.startsWith(`node ${node.index + 1}`)) throw err;
+      }
+    }
+    await sleep(500);
+  }
+  throw new Error(
+    `node ${node.index + 1} (port ${node.apiPort}) did not register an on-chain identityId within ${maxWaitMs}ms`,
+  );
+}
+
 function startDaemon(node: TestNode): ChildProcess {
+  // `dkg start --foreground` runs a foreground supervisor that spawns a
+  // separate worker process which owns the pidfile + network ports.
+  // `SIGTERM` to the supervisor propagates to the worker, but `SIGKILL`
+  // does NOT — so if our cleanup ever has to force-kill (slow-shutdown
+  // race on 2-core CI runners) the worker is orphaned and the next
+  // test file's `startTestCluster` trips over:
+  //
+  //   Daemon already running (PID N). Use "dkg stop" first.
+  //   EADDRINUSE: address already in use 0.0.0.0:19301
+  //
+  // Putting the supervisor in its own process group (`detached: true`)
+  // lets us signal the WHOLE group via `process.kill(-pid, sig)` in
+  // stopTestCluster, so supervisor + worker die together even under
+  // SIGKILL.
+  // `DKG_NO_BLUE_GREEN=1` skips the blue-green release-slot migration
+  // (`migrateToBlueGreen` in `packages/cli/src/migration.ts`), which in a
+  // real deployment clones + `pnpm install` + `pnpm build:runtime` the
+  // repo into `<DKG_HOME>/releases/a` + `b` to enable hot-swap upgrades.
+  // For tests that is pure waste: each daemon boot adds ~2-3 min of git
+  // clone + pnpm install that we don't need because we already have the
+  // built monorepo on disk. `resolveDaemonEntryPoint()` in cli.ts
+  // specifically honours this flag and uses the current cli.js entry
+  // instead of the slot. Without this, each of 3 test daemons pays ~3
+  // min of migration tax before they even try to bind their listen
+  // port, causing 5-min beforeAll timeouts on 2-core CI runners.
   const child = spawn(
     process.execPath,
     [CLI_JS, 'start', '--foreground'],
     {
       cwd: DKG_V9_ROOT,
-      env: { ...process.env, DKG_HOME: node.homeDir },
+      env: { ...process.env, DKG_HOME: node.homeDir, DKG_NO_BLUE_GREEN: '1' },
       stdio: ['ignore', 'pipe', 'pipe'],
+      detached: true,
     },
   );
 
@@ -348,23 +515,73 @@ function startDaemon(node: TestNode): ChildProcess {
   return child;
 }
 
+function killProcessGroup(pid: number | undefined, signal: NodeJS.Signals): void {
+  if (pid === undefined) return;
+  try {
+    // Negative pid targets the whole process group (requires detached spawn).
+    process.kill(-pid, signal);
+  } catch {
+    // ESRCH if group is already gone; EPERM if it was spawned without a
+    // session leader. Fall back to signalling only the direct child.
+    try { process.kill(pid, signal); } catch { /* already dead */ }
+  }
+}
+
 export async function stopTestCluster(nodes: TestNode[]): Promise<void> {
   const alive = nodes.filter(n => n.process && n.process.exitCode === null);
   for (const node of alive) {
-    node.process!.kill('SIGTERM');
-  }
-  await sleep(2000);
-  for (const node of alive) {
-    if (node.process!.exitCode === null) {
-      node.process!.kill('SIGKILL');
-    }
+    killProcessGroup(node.process!.pid, 'SIGTERM');
   }
 
-  // Stop Hardhat if it was started for this cluster
+  // Wait up to 5s for clean shutdown, then force-kill any stragglers.
+  const waitExit = (n: TestNode, timeoutMs: number): Promise<boolean> =>
+    Promise.race([
+      new Promise<boolean>(resolve => n.process!.once('exit', () => resolve(true))),
+      sleep(timeoutMs).then(() => false),
+    ]);
+  await Promise.all(alive.map(n => waitExit(n, 5000)));
+
+  const stillAlive = alive.filter(n => n.process!.exitCode === null);
+  for (const node of stillAlive) {
+    killProcessGroup(node.process!.pid, 'SIGKILL');
+  }
+  // Give SIGKILL'd processes a moment to release file handles so the next
+  // test file's `rmSync(TEST_DIR)` doesn't race with a writing daemon.
+  await Promise.all(stillAlive.map(n => waitExit(n, 3000)));
+
+  // Belt-and-braces: make sure nothing is still listening on our API or
+  // libp2p ports before we return. If a worker survived both SIGTERM and
+  // a SIGKILL'd process-group (very rare, but observed on overloaded
+  // 2-core CI runners), the next test file would fail with EADDRINUSE.
+  await waitForPortsFree(nodes.flatMap(n => [n.apiPort, n.libp2pPort]), 5000);
+
   const chain = (globalThis as any).__e2eHardhat as HardhatChain | undefined;
   if (chain) {
     await stopHardhat(chain);
     (globalThis as any).__e2eHardhat = undefined;
+    await waitForPortsFree([HARDHAT_E2E_PORT], 3000);
+  }
+}
+
+async function waitForPortsFree(ports: number[], timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  const net = await import('node:net');
+  const isFree = (port: number): Promise<boolean> =>
+    new Promise(resolve => {
+      const srv = net.createServer();
+      srv.once('error', () => resolve(false));
+      srv.once('listening', () => srv.close(() => resolve(true)));
+      srv.listen(port, '127.0.0.1');
+    });
+  while (Date.now() < deadline) {
+    const results = await Promise.all(ports.map(isFree));
+    if (results.every(Boolean)) return;
+    // Best-effort: try to kill anything holding these ports (linux `fuser`).
+    try {
+      const { execSync } = await import('node:child_process');
+      execSync(`fuser -k -n tcp ${ports.join(' ')} 2>/dev/null || true`, { timeout: 2000 });
+    } catch { /* best-effort */ }
+    await sleep(300);
   }
 }
 

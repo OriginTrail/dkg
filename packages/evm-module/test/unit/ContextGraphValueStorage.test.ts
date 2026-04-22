@@ -290,6 +290,10 @@ describe('@unit ContextGraphValueStorage', () => {
   it('onlyContracts: non-Hub-registered EOA cannot call addCGValueForEpochRange', async () => {
     const currentEpoch = await ChronosCtr.getCurrentEpoch();
     // accounts[1] is not the Hub owner nor registered as a Hub contract.
+    // HubDependent._checkHubContract reverts via
+    // `HubLib.UnauthorizedAccess("Only Contracts in Hub")`. Pinning the
+    // error + arg catches regressions that drop the modifier or widen the
+    // caller set to any EOA.
     const stranger = accounts[1];
     await expect(
       CGV.connect(stranger).addCGValueForEpochRange(
@@ -298,7 +302,9 @@ describe('@unit ContextGraphValueStorage', () => {
         1,
         1000,
       ),
-    ).to.be.reverted;
+    )
+      .to.be.revertedWithCustomError(CGV, 'UnauthorizedAccess')
+      .withArgs('Only Contracts in Hub');
   });
 
   it('Reverts on zero lifetime and zero value', async () => {
@@ -492,12 +498,19 @@ describe('@unit ContextGraphValueStorage', () => {
     const nowEpoch = await ChronosCtr.getCurrentEpoch();
     expect(nowEpoch).to.be.gt(epoch1);
 
+    // Same pin as the addCGValueForEpochRange test: `onlyContracts` →
+    // `HubLib.UnauthorizedAccess("Only Contracts in Hub")`. Two separate
+    // assertions to make sure both finalizer entry points stay gated.
     await expect(
       CGV.connect(stranger).finalizeCGValueUpTo(1n, epoch1),
-    ).to.be.reverted;
+    )
+      .to.be.revertedWithCustomError(CGV, 'UnauthorizedAccess')
+      .withArgs('Only Contracts in Hub');
     await expect(
       CGV.connect(stranger).finalizeGlobalValueUpTo(epoch1),
-    ).to.be.reverted;
+    )
+      .to.be.revertedWithCustomError(CGV, 'UnauthorizedAccess')
+      .withArgs('Only Contracts in Hub');
   });
 
   it('finalizeCGValueUpTo reverts FutureOrCurrentEpoch on current epoch', async () => {

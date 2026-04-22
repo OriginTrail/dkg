@@ -286,9 +286,22 @@ describe('Async Lift Publisher Queue — Full Lifecycle', () => {
 
     const jobId = await pub.lift(makeLiftRequest());
 
+    // Jumping 'accepted' → 'broadcast' without first going through
+    // 'claimed' + 'validated' is a double fail-closed: the state
+    // machine rejects the illegal transition
+    //   "Invalid LiftJob transition: accepted -> broadcast. Allowed: …"
+    // AND the metadata guard would have rejected with
+    //   "Broadcast LiftJob requires claim, validation, and broadcast
+    //    metadata"
+    // even if the transition were allowed. Either vocabulary pins the
+    // structural guard. A bare `rejects.toThrow()` would also be
+    // satisfied by e.g. a store crash or timeout — the regex below
+    // fails closed on both guard layers only.
     await expect(pub.update(jobId, 'broadcast', {
       broadcast: { txHash: '0xabc', walletId: 'wallet-1' },
-    })).rejects.toThrow();
+    })).rejects.toThrow(
+      /Invalid LiftJob transition|Broadcast LiftJob requires claim, validation, and broadcast metadata/,
+    );
   });
 });
 

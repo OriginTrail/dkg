@@ -6,7 +6,6 @@ process.env.HARDHAT_PORT = '9545';
 export default defineConfig({
   test: {
     include: ['test/**/*.test.ts'],
-    exclude: ['test/evm-adapter.test.ts', 'test/evm-e2e.test.ts'],
     testTimeout: 120_000,
     globalSetup: ['test/hardhat-global-setup.ts'],
     maxWorkers: 1,

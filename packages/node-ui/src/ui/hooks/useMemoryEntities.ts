@@ -9,6 +9,8 @@ export interface MemoryEntity {
   types: string[];
   trustLevel: TrustLevel;
   layers: Set<TrustLevel>;
+  /** All sub-graph slugs this entity has triples in (usually one). */
+  subGraphs: Set<string>;
   properties: Map<string, string[]>;
   connections: Array<{ predicate: string; targetUri: string; targetLabel: string }>;
 }
@@ -17,6 +19,8 @@ export interface Triple {
   subject: string;
   predicate: string;
   object: string;
+  /** Sub-graph slug this triple was sourced from, if known (WM triples only). */
+  subGraph?: string;
 }
 
 export interface LayeredTriple extends Triple {
@@ -63,22 +67,106 @@ function shortPredicate(uri: string): string {
   return s.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/_/g, ' ');
 }
 
+// All three layer queries walk the named-graph space directly with a
+// FILTER on the graph URI, rather than going through the daemon's
+// built-in `view` helpers. Two wins from this:
+//   1. Coverage of per-sub-graph SWM/VM partitions (the built-in views
+//      only resolve to top-level graphs).
+//   2. `?g` projection — every triple comes back tagged with its
+//      source graph so we can assign the sub-graph slug, which drives
+//      SubGraphBar filtering and the Graph Overview grid across all
+//      three layers.
+//
+// The V10 named-graph layout we rely on (see `resolveViewGraphs`
+// in `@origintrail-official/dkg-query` and `publishFromSharedMemory`):
+//
+//   WM  (drafts)    : did:dkg:context-graph:<cg>/<sg>/assertion/<addr>/<name>
+//   SWM (proposed)  : did:dkg:context-graph:<cg>/<sg>/_shared_memory
+//                     did:dkg:context-graph:<cg>/_shared_memory     (default)
+//   VM  (committed) : did:dkg:context-graph:<cg>/<sg>              (per-sg)
+//                     did:dkg:context-graph:<cg>                   (root)
+//                     did:dkg:context-graph:<cg>/_verified_memory/*
+//
+// Key insight: in V10 the plain `<cg>/<sg>` graph IS the committed
+// (chain-attested) view of a sub-graph — that's where
+// `/api/shared-memory/publish` deposits KAs after on-chain registration.
+// We treat it as VM, not WM. Pre-publish writes only exist in
+// `assertion/<addr>/<name>` graphs.
+//
+// 50k triples comfortably fits realistic PoC projects in full (our
+// seeded `dkg-code-project` WM has ~28k); SWM/VM stay smaller by
+// design (hundreds of triples each).
+const WM_LIMIT = 50_000;
+const SWM_LIMIT = 20_000;
+const VM_LIMIT = 20_000;
+
 function wmSparql(cgId: string) {
   const cgUri = `did:dkg:context-graph:${cgId}`;
-  return `SELECT ?s ?p ?o WHERE {
+  // WM = every per-agent assertion under the project, regardless of
+  // sub-graph. We match any graph whose path contains `/assertion/`.
+  return `SELECT ?s ?p ?o ?g WHERE {
     GRAPH ?g { ?s ?p ?o }
     FILTER(
       STRSTARTS(STR(?g), "${cgUri}/") &&
+      CONTAINS(STR(?g), "/assertion/")
+    )
+  } LIMIT ${WM_LIMIT}`;
+}
+
+function swmSparql(cgId: string) {
+  const cgUri = `did:dkg:context-graph:${cgId}`;
+  // Any graph whose tail ends in `_shared_memory` (excluding the sibling
+  // `_shared_memory_meta` bookkeeping graphs which carry lifecycle
+  // provenance rather than user data).
+  return `SELECT ?s ?p ?o ?g WHERE {
+    GRAPH ?g { ?s ?p ?o }
+    FILTER(
+      STRSTARTS(STR(?g), "${cgUri}") &&
+      STRENDS(STR(?g), "/_shared_memory")
+    )
+  } LIMIT ${SWM_LIMIT}`;
+}
+
+function vmSparql(cgId: string) {
+  const cgUri = `did:dkg:context-graph:${cgId}`;
+  // VM covers three named-graph shapes:
+  //   • Root content graph       `<cgUri>`        — finalised VM
+  //   • Per-sub-graph data graph `<cgUri>/<sg>`   — post-publish VM view
+  //   • Per-sub-graph VM bucket  `<cgUri>/<sg>/_verified_memory(/*)`
+  // We exclude:
+  //   • `_shared_memory*`        — belongs to SWM
+  //   • `assertion/*`            — belongs to WM
+  //   • `_meta`, `_private`, `_rules`, any `_verified_memory_meta`
+  //     — bookkeeping graphs, not user data.
+  return `SELECT ?s ?p ?o ?g WHERE {
+    GRAPH ?g { ?s ?p ?o }
+    FILTER(
+      STRSTARTS(STR(?g), "${cgUri}") &&
+      !CONTAINS(STR(?g), "/assertion/") &&
+      !CONTAINS(STR(?g), "/_shared_memory") &&
+      !CONTAINS(STR(?g), "_verified_memory_meta") &&
       !STRENDS(STR(?g), "/_meta") &&
       !CONTAINS(STR(?g), "/_private") &&
-      !CONTAINS(STR(?g), "/_shared_memory") &&
-      !CONTAINS(STR(?g), "/_verified_memory") &&
       !CONTAINS(STR(?g), "/_rules")
     )
-  } LIMIT 1500`;
+  } LIMIT ${VM_LIMIT}`;
 }
-const SPARQL_SWM = `SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 500`;
-const SPARQL_VM = `SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 500`;
+
+/**
+ * Extract the sub-graph slug from a named-graph URI of the shape
+ *   did:dkg:context-graph:<cg>/<subGraph>(/...)?
+ * Returns undefined for graph URIs outside the expected project scope
+ * (e.g. _meta, _shared_memory) so those triples stay un-bucketed.
+ */
+function subGraphOf(gUri: string, cgId: string): string | undefined {
+  const prefix = `did:dkg:context-graph:${cgId}/`;
+  if (!gUri.startsWith(prefix)) return undefined;
+  const tail = gUri.slice(prefix.length);
+  const slash = tail.indexOf('/');
+  const seg = slash >= 0 ? tail.slice(0, slash) : tail;
+  if (!seg || seg.startsWith('_')) return undefined;
+  return seg;
+}
 
 async function queryLayer(
   sparql: string,
@@ -96,11 +184,15 @@ async function queryLayer(
     const data = await res.json();
     const bindings = data?.result?.bindings ?? data?.results?.bindings ?? [];
     return bindings
-      .map((row: any) => ({
-        subject: bv(row.s) ?? '',
-        predicate: bv(row.p) ?? '',
-        object: bv(row.o) ?? '',
-      }))
+      .map((row: any) => {
+        const g = bv(row.g);
+        return {
+          subject: bv(row.s) ?? '',
+          predicate: bv(row.p) ?? '',
+          object: bv(row.o) ?? '',
+          subGraph: g ? subGraphOf(g, contextGraphId) : undefined,
+        };
+      })
       .filter((t: Triple) => t.subject && t.predicate && t.object);
   } catch {
     return [];
@@ -119,6 +211,7 @@ function buildEntities(layered: LayeredTriple[]): Map<string, MemoryEntity> {
         types: [],
         trustLevel: 'working',
         layers: new Set(),
+        subGraphs: new Set(),
         properties: new Map(),
         connections: [],
       };
@@ -130,6 +223,7 @@ function buildEntities(layered: LayeredTriple[]): Map<string, MemoryEntity> {
   for (const t of layered) {
     const entity = getOrCreate(t.subject);
     entity.layers.add(t.layer);
+    if (t.subGraph) entity.subGraphs.add(t.subGraph);
 
     if (t.predicate === RDF_TYPE) {
       if (!entity.types.includes(t.object)) {
@@ -138,6 +232,7 @@ function buildEntities(layered: LayeredTriple[]): Map<string, MemoryEntity> {
     } else if (isUri(t.object)) {
       const targetEntity = getOrCreate(t.object);
       targetEntity.layers.add(t.layer);
+      if (t.subGraph) targetEntity.subGraphs.add(t.subGraph);
       entity.connections.push({
         predicate: t.predicate,
         targetUri: t.object,
@@ -192,8 +287,8 @@ export function useMemoryEntities(contextGraphId: string): MemoryData {
     try {
       const [wmTriples, swmTriples, vmTriples] = await Promise.all([
         queryLayer(wmSparql(contextGraphId), contextGraphId),
-        queryLayer(SPARQL_SWM, contextGraphId, { view: 'shared-working-memory' }),
-        queryLayer(SPARQL_VM, contextGraphId, { view: 'verified-memory' }),
+        queryLayer(swmSparql(contextGraphId), contextGraphId),
+        queryLayer(vmSparql(contextGraphId), contextGraphId),
       ]);
 
       if (version !== versionRef.current) return;
@@ -240,7 +335,7 @@ export function useMemoryEntities(contextGraphId: string): MemoryData {
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
-    }).map(({ subject, predicate, object }) => ({ subject, predicate, object }));
+    }).map(({ subject, predicate, object, subGraph }) => ({ subject, predicate, object, subGraph }));
   }, [layeredTriples]);
 
   const trustMap = useMemo(() => {

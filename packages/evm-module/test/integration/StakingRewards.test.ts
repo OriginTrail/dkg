@@ -1005,13 +1005,17 @@ describe('rewards tests', () => {
   it('D1 cannot claim the newest finalised epoch while older remain unclaimed', async () => {
     const { Staking, EpochStorage, delegators, nodes } = env;
     const newestFinalised = await EpochStorage.lastFinalizedEpoch(1); //  == 3
+    // Matches the exact require() string used elsewhere in this suite.
+    // Catches regression where the claim-order guard is removed and the
+    // newest epoch is claimable before older ones (would silently succeed or
+    // revert with a different reason).
     await expect(
       Staking.connect(delegators[0]).claimDelegatorRewards(
         nodes[0].identityId,
         newestFinalised,
         delegators[0].address,
       ),
-    ).to.be.reverted;
+    ).to.be.revertedWith('Must claim older epochs first');
   });
 
   /* 2️⃣  Operator-fee sanity (all nodes @ 1000 ‱). */

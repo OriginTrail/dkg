@@ -1,6 +1,6 @@
 {
   "name": "@origintrail-official/dkg-app-origin-trail-game",
-  "version": "0.1.0",
+  "version": "10.0.0-rc.1",
   "description": "OriginTrail Game — a multiplayer game on the DKG. Installable DKG app.",
   "type": "module",
   "main": "dist/index.js",
@@ -12,9 +12,10 @@
     "staticDir": "./dist-ui"
   },
   "scripts": {
-    "build": "tsc && pnpm build:ui",
+    "build": "tsc",
     "build:api": "tsc",
     "build:ui": "cross-env NODE_OPTIONS=--max-old-space-size=4096 vite build",
+    "build:full": "pnpm build && pnpm build:ui",
     "dev:ui": "vite",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",

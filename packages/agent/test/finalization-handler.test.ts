@@ -120,11 +120,22 @@ describe('FinalizationHandler', () => {
     expect(insertCalled).toBe(false);
   });
 
-  it('promotes workspace data to canonical when merkle matches (no chain adapter)', async () => {
+  it('refuses to promote when no chain adapter is wired even if local merkle matches', async () => {
+    // Regression guard: a finalization message whose merkle root matches
+    // the local SWM contents MUST still be rejected when the handler was
+    // constructed without a chain adapter (`new FinalizationHandler(store,
+    // undefined)` in `beforeEach`). On-chain verification is NOT optional
+    // — trusting a matching local merkle without checking the KCCreated
+    // event would let any peer forge finalizations for their own forged
+    // SWM state. The canonical data graph must stay empty.
+    //
+    // The positive "merkle matches AND chain verification passes →
+    // promotes" path is covered by `agent-audit-extra.test.ts [A-4]` and
+    // the e2e-publish-protocol round-trip, both of which wire in a real
+    // EVMChainAdapter against the shared Hardhat node.
     const entity = 'urn:test:entity';
     const wsGraph = `did:dkg:context-graph:${PARANET}/_shared_memory`;
     const dataGraph = `did:dkg:context-graph:${PARANET}`;
-    const metaGraph = `did:dkg:context-graph:${PARANET}/_meta`;
 
     await store.insert([
       { subject: entity, predicate: 'http://schema.org/name', object: '"Alice"', graph: wsGraph },

@@ -212,9 +212,18 @@ describe('ProtocolRouter', () => {
 
     await connectNodes(node1, node2);
 
+    // When the receiver's `maxReadBytes` is exceeded, the libp2p stream
+    // must tear down with a size-limit error. A bare `rejects.toThrow()`
+    // would also accept unrelated setup failures (e.g. "peer not
+    // connected", "protocol not registered") which would HIDE a real
+    // regression where the limit was silently removed and the handler
+    // received the oversize payload. Pin the error vocabulary AND keep
+    // the strong behavioural invariant below (`handlerCalled === false`).
     await expect(
       router1.send(node2.peerId, '/test/big-request/1.0.0', new Uint8Array(tinyLimit + 100)),
-    ).rejects.toThrow();
+    ).rejects.toThrow(
+      /too large|exceed|max.*byte|size.*limit|reset|aborted|closed|stream/i,
+    );
     expect(handlerCalled).toBe(false);
   }, 15000);
 

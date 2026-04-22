@@ -1075,6 +1075,9 @@ describe('import-file orchestration — happy paths', () => {
     expect(result.extraction.status).toBe('completed');
     expect(result.extraction.pipelineUsed).toBe('application/pdf');
     expect(result.extraction.mdIntermediateHash).toBeDefined();
+    // Pin format the same way the sibling test ~1040 does so `mdIntermediateHash`
+    // is not satisfied by a truthy-but-malformed value (e.g. '' or 'todo').
+    expect(result.extraction.mdIntermediateHash).toMatch(/^keccak256:[0-9a-f]{64}$/);
   });
 
   it('passes ontologyRef through to the converter and Phase 2 extractor', async () => {

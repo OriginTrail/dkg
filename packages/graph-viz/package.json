@@ -1,6 +1,6 @@
 {
   "name": "@origintrail-official/dkg-graph-viz",
-  "version": "0.0.1",
+  "version": "10.0.0-rc.1",
   "description": "RDF Knowledge Graph Visualizer — force-directed graph rendering with hexagonal nodes, declarative view configs, RDF-native data loading, and SPARQL-driven views",
   "type": "module",
   "main": "./dist/index.cjs",

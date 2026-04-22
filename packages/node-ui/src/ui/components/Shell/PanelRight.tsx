@@ -17,6 +17,7 @@ import {
   getDefaultLocalAgentSessionId,
   fetchLocalAgentHistory,
   fetchLocalAgentIntegrations,
+  refreshLocalAgentIntegration,
   streamLocalAgentChat,
 } from '../../api.js';
 import { api } from '../../api-wrapper.js';
@@ -528,8 +529,9 @@ export function ConnectedAgentsTab(props: {
   onSelectIntegration: (id: string, opts?: { preserveSession?: boolean; sessionId?: string | null }) => void;
   onConnectIntegration: (id: string) => void;
   onDisconnectIntegration: (id: string) => void;
-  onRefreshIntegrations: () => void;
+  onRefreshIntegration: (id: string) => void;
   connectBusyId: string | null;
+  refreshBusyId: string | null;
   connectNotice: string | null;
   connectError: string | null;
   localMessages: LocalAgentMessage[];
@@ -557,8 +559,9 @@ export function ConnectedAgentsTab(props: {
     onSelectIntegration,
     onConnectIntegration,
     onDisconnectIntegration,
-    onRefreshIntegrations,
+    onRefreshIntegration,
     connectBusyId,
+    refreshBusyId,
     connectNotice,
     connectError,
     localMessages,
@@ -701,8 +704,13 @@ export function ConnectedAgentsTab(props: {
                 {localAgentToolbarLabel(selected, showingSessionHistory)}
               </span>
               <div className="v10-local-agent-chat-actions">
-                <button className="v10-agents-refresh" onClick={onRefreshIntegrations} title={`Refresh ${selected.name}`}>
-                  Refresh
+                <button
+                  className="v10-agents-refresh"
+                  onClick={() => onRefreshIntegration(selected.id)}
+                  disabled={refreshBusyId === selected.id}
+                  title={`Refresh ${selected.name}`}
+                >
+                  {refreshBusyId === selected.id ? 'Refreshing...' : 'Refresh'}
                 </button>
                 {selected.persistentChat && (
                 <button
@@ -1035,6 +1043,7 @@ export function PanelRight() {
   const [connectBusyId, setConnectBusyId] = useState<string | null>(null);
   const [connectNotice, setConnectNotice] = useState<string | null>(null);
   const [connectError, setConnectError] = useState<string | null>(null);
+  const [refreshBusyId, setRefreshBusyId] = useState<string | null>(null);
 
   const [localMessagesByConversation, setLocalMessagesByConversation] = useState<Record<string, LocalAgentMessage[]>>({});
   const [localInputByConversation, setLocalInputByConversation] = useState<Record<string, string>>({});
@@ -1549,6 +1558,45 @@ export function PanelRight() {
     }
   }, [refreshLocalIntegrations, selectedIntegrationId, setSelectedIntegration]);
 
+  const refreshIntegration = useCallback(async (integrationId: string) => {
+    if (refreshBusyId === integrationId) return;
+    setRefreshBusyId(integrationId);
+    setConnectError(null);
+    setConnectNotice(null);
+    const conversation = resolveLocalAgentConversation({
+      integrationId,
+      sessionId: selectedIntegrationId === integrationId ? selectedSessionIdRef.current : null,
+    });
+    const [refreshOutcome, historyOutcome] = await Promise.allSettled([
+      refreshLocalAgentIntegration(integrationId),
+      fetchLocalAgentHistory(integrationId, 100, {
+        sessionId: conversation.sessionId ?? undefined,
+      }),
+    ]);
+    try {
+      if (refreshOutcome.status === 'fulfilled') {
+        setIntegrations((prev) => upsertLocalAgentIntegrationState(prev, refreshOutcome.value.integration));
+        if (refreshOutcome.value.notice) {
+          setConnectNotice(refreshOutcome.value.notice);
+        }
+      } else {
+        setConnectError((refreshOutcome.reason as Error)?.message ?? 'Failed to refresh integration.');
+      }
+      if (historyOutcome.status === 'fulfilled') {
+        const loaded = historyOutcome.value.map(mapHistoryMessage);
+        updateLocalMessages(conversation.stateKey, (prev) => mergeLocalAgentMessages(prev, loaded));
+        setLocalHistoryLoadedByConversation((prev) => ({
+          ...prev,
+          [conversation.stateKey]: true,
+        }));
+      } else if (refreshOutcome.status === 'fulfilled') {
+        setConnectError((historyOutcome.reason as Error)?.message ?? 'Failed to refresh conversation.');
+      }
+    } finally {
+      setRefreshBusyId(null);
+    }
+  }, [refreshBusyId, selectedIntegrationId, updateLocalMessages]);
+
   const openSession = useCallback((session: LocalAgentSessionSummary) => {
     setSelectedIntegration(session.integrationId, { sessionId: session.sessionId });
     setMode('agents');
@@ -1602,8 +1650,9 @@ export function PanelRight() {
           onSelectIntegration={setSelectedIntegration}
           onConnectIntegration={connectIntegration}
           onDisconnectIntegration={disconnectIntegration}
-          onRefreshIntegrations={refreshLocalIntegrations}
+          onRefreshIntegration={refreshIntegration}
           connectBusyId={connectBusyId}
+          refreshBusyId={refreshBusyId}
           connectNotice={connectNotice}
           connectError={connectError}
           localMessages={selectedLocalMessages}

@@ -123,7 +123,12 @@ describe('@unit Identity contract', function () {
     const getIdentityId = await createIdentity(operationalKey, adminKey);
     const deleteIdentity = await Identity.deleteIdentity(getIdentityId);
 
-    await expect(deleteIdentity).to.emit(Identity, 'IdentityDeleted');
+    // Pin the indexed identityId so a regression that emits the event for
+    // the wrong id (or a stale one) fails. Event: IdentityDeleted(uint72
+    // indexed identityId).
+    await expect(deleteIdentity)
+      .to.emit(Identity, 'IdentityDeleted')
+      .withArgs(getIdentityId);
   });
 
   it('Add an admin key to existing identity, expect to pass', async () => {

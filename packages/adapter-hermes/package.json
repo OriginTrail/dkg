@@ -1,6 +1,6 @@
 {
   "name": "@origintrail-official/dkg-adapter-hermes",
-  "version": "0.0.1",
+  "version": "10.0.0-rc.1",
   "description": "Hermes Agent adapter — connects Hermes AI agents to a DKG V10 node for verifiable shared memory",
   "type": "module",
   "main": "dist/index.js",

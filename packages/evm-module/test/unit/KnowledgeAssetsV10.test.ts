@@ -1028,9 +1028,15 @@ describe('@unit KnowledgeAssetsV10', () => {
         // the signatures built against count = 1, recovering the wrong
         // signer. The revert comes from `_verifySignature` /
         // `_verifySignatures`, not a dedicated error.
+        //
+        // Tightened: a valid ECDSA over the wrong digest still recovers a
+        // non-zero address, so the contract trips the operator-key check and
+        // raises `SignerIsNotNodeOperator` from KnowledgeCollectionLib. This
+        // catches regressions where replay is silently accepted or the wrong
+        // branch (InvalidSignature/TokenAmount) masks the real bug.
         await expect(
           KAV10.connect(base.creator).updateDirect(up1, ethers.ZeroAddress),
-        ).to.be.reverted;
+        ).to.be.revertedWithCustomError(KAV10, 'SignerIsNotNodeOperator');
       });
 
       // -- T1.7f: conviction-path update() happy path --

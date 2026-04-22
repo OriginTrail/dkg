@@ -55,7 +55,9 @@ describe('publisher wallets', () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'dkg-publisher-wallets-'));
     await writeFile(publisherWalletsPath(dataDir), '{bad json\n', 'utf-8');
 
-    await expect(loadPublisherWallets(dataDir)).rejects.toThrow();
+    await expect(loadPublisherWallets(dataDir)).rejects.toThrow(
+      /json|parse|parsing|malformed|unexpected|invalid|syntax/i,
+    );
   });
 
   it('rejects address/private-key mismatches in publisher-wallets.json', async () => {
@@ -260,7 +262,7 @@ describe('publisher wallets', () => {
           hubAddress: '0x1111111111111111111111111111111111111111',
         },
       }),
-    ).rejects.toThrow();
+    ).rejects.toThrow(/connect|refused|ECONNREFUSED|rpc|provider|network|fetch|timeout|url|unreachable|chain/i);
 
     await store.close();
   });

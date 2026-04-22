@@ -1178,9 +1178,13 @@ describe('@unit RandomSamplingStorage', function () {
     it('Should revert when accessing invalid index', async () => {
       const length =
         await RandomSamplingStorage.getProofingPeriodDurationsLength();
+      // Pin Solidity panic 0x32 (array out-of-bounds). Catching
+      // any-revert here would also accept a silent ACL misfire or a
+      // wrong-contract stub; panic code 0x32 specifically proves the
+      // bounds check itself fired.
       await expect(
         RandomSamplingStorage.getProofingPeriodDurationFromIndex(length),
-      ).to.be.reverted; // Array out of bounds
+      ).to.be.revertedWithPanic(0x32);
     });
   });
 

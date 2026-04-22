@@ -494,7 +494,11 @@ describe('DKGPublisher', () => {
       // (the daemon-equivalent bypass path).
       await store.insert([...reservedQuads, legitQuad]);
       // Ensure an assertion graph exists by calling assertion.create
-      // through the publisher API (idempotent).
+      // through the publisher API (idempotent). A bare empty catch here
+      // was swallowing ANY failure mode of assertionWrite — including
+      // real regressions (schema validation, permission check, store
+      // error). Narrow to the specific "already-exists / duplicate"
+      // class that this setup step is allowed to absorb.
       try {
         await publisher.assertionWrite(
           PARANET,
@@ -502,10 +506,11 @@ describe('DKGPublisher', () => {
           TEST_PUBLISHER_ADDRESS,
           [legitQuad],
         );
-      } catch {
-        // Ignore — the legitQuad is already in the store from the
-        // direct insert above, so assertionWrite may no-op or
-        // duplicate. Either way the data graph is populated.
+      } catch (err) {
+        const msg = String((err as Error)?.message ?? err);
+        if (!/already|exist|duplicate|idempotent|no[- ]op/i.test(msg)) {
+          throw err;
+        }
       }
       const result = await publisher.assertionPromote(
         PARANET,
@@ -615,11 +620,18 @@ describe('DKGPublisher', () => {
         ];
         const legit: Quad = { subject: ENTITY, predicate: 'http://schema.org/name', object: '"legit"', graph: dataGraph };
         await store.insert([...mixedCaseReserved, legit]);
+        // Same reasoning as Bug 35 test — assertionWrite may reject
+        // with an "already-exists" / idempotent error because the data
+        // graph was populated by the direct `store.insert` above. Any
+        // OTHER error class (schema, permission, store failure) is a
+        // real regression and must re-throw instead of being absorbed.
         try {
           await publisher.assertionWrite(PARANET, 'bug41-promote', TEST_PUBLISHER_ADDRESS, [legit]);
-        } catch {
-          // Same reasoning as Bug 35 test — may no-op if data graph
-          // already has content from the direct insert above.
+        } catch (err) {
+          const msg = String((err as Error)?.message ?? err);
+          if (!/already|exist|duplicate|idempotent|no[- ]op/i.test(msg)) {
+            throw err;
+          }
         }
 
         const result = await publisher.assertionPromote(
@@ -646,24 +658,39 @@ describe('DKGPublisher', () => {
         // match on `file:`, so `urn:dkg:filesystem:foo` must NOT
         // match even as a byte sequence. Verify with a concrete
         // near-miss subject that shares a prefix substring.
-        await expect(
-          publisher.publish({
-            contextGraphId: PARANET,
-            quads: [q('urn:dkg:filesystem:foo', 'http://schema.org/name', '"near-miss"')],
-          }),
-        ).resolves.toBeDefined();
+        //
+        // `.resolves.toBeDefined()` alone is too weak: it is also
+        // satisfied by `publish()` returning a junk default object
+        // or a `status: 'failed'` result. Pin BOTH invariants:
+        //   1. The promise resolves (the scope guard did NOT throw).
+        //   2. The result shape is a real `PublishResult` with a
+        //      non-empty UAL — i.e. the quad was accepted and a KC
+        //      was created, not silently dropped.
+        const result = await publisher.publish({
+          contextGraphId: PARANET,
+          quads: [q('urn:dkg:filesystem:foo', 'http://schema.org/name', '"near-miss"')],
+        });
+        expect(result.ual).toMatch(/^did:dkg:/);
+        expect(result.kcId).toBeGreaterThan(0n);
+        expect(result.status === 'confirmed' || result.status === 'tentative').toBe(true);
       });
 
       it('scope guard: plain `http://` subjects are NOT rejected by the case-insensitive helper', async () => {
         // Make sure lowercasing the subject doesn't accidentally
         // match a non-reserved scheme. Regression guard against a
         // future edit that might over-broaden the check.
-        await expect(
-          publisher.publish({
-            contextGraphId: PARANET,
-            quads: [q('http://example.com/bug41-notreserved', 'http://schema.org/name', '"legit"')],
-          }),
-        ).resolves.toBeDefined();
+        //
+        // Same shape-assertion tightening as the `filesystem:` case
+        // above — `toBeDefined()` alone could hide a regression that
+        // returns a skeleton failed-result shape while still being
+        // "defined".
+        const result = await publisher.publish({
+          contextGraphId: PARANET,
+          quads: [q('http://example.com/bug41-notreserved', 'http://schema.org/name', '"legit"')],
+        });
+        expect(result.ual).toMatch(/^did:dkg:/);
+        expect(result.kcId).toBeGreaterThan(0n);
+        expect(result.status === 'confirmed' || result.status === 'tentative').toBe(true);
       });
     });
   });
@@ -686,13 +713,19 @@ describe('DKGPublisher', () => {
     });
 
     it('allows SWM write without sub-graph (root CG)', async () => {
-      await expect(
-        publisher.share(PARANET, [
-          q('urn:test:new-entity', 'http://schema.org/name', '"Fresh Write"'),
-        ], {
-          publisherPeerId: 'QmTestPeer',
-        }),
-      ).resolves.toBeDefined();
+      // `share()` returns a `ShareResult` with `{ shareOperationId,
+      // message }`. `toBeDefined()` alone would accept `{}` or a
+      // skeleton object; pin both fields so a regression that
+      // silently swallows the write (and returns a dummy shape) is
+      // caught.
+      const result = await publisher.share(PARANET, [
+        q('urn:test:new-entity', 'http://schema.org/name', '"Fresh Write"'),
+      ], {
+        publisherPeerId: 'QmTestPeer',
+      });
+      expect(result.shareOperationId).toMatch(/.+/);
+      expect(result.message).toBeInstanceOf(Uint8Array);
+      expect(result.message.length).toBeGreaterThan(0);
     });
   });
 });

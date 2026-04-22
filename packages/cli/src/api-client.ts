@@ -56,6 +56,21 @@ export class ApiClient {
     return this.get('/api/agents');
   }
 
+  async peerInfo(peerId: string): Promise<{
+    peerId: string;
+    connected: boolean;
+    connectionCount: number;
+    transports: string[];
+    directions: string[];
+    remoteAddrs: Array<string | null>;
+    protocols: string[];
+    syncCapable: boolean;
+    lastSeen: number | null;
+    latencyMs: number | null;
+  }> {
+    return this.get(`/api/peer-info?peerId=${encodeURIComponent(peerId)}`);
+  }
+
   async skills(): Promise<{
     skills: Array<{
       agentName: string; skillType: string;
@@ -252,6 +267,7 @@ export class ApiClient {
         peersTried: number;
         dataSynced: number;
         sharedMemorySynced: number;
+        denied: boolean;
         diagnostics?: {
           noProtocolPeers: number;
           durable: {
@@ -259,6 +275,8 @@ export class ApiClient {
             fetchedDataTriples: number;
             insertedMetaTriples: number;
             insertedDataTriples: number;
+            bytesReceived: number;
+            resumedPhases: number;
             emptyResponses: number;
             metaOnlyResponses: number;
             dataRejectedMissingMeta: number;
@@ -270,6 +288,8 @@ export class ApiClient {
             fetchedDataTriples: number;
             insertedMetaTriples: number;
             insertedDataTriples: number;
+            bytesReceived: number;
+            resumedPhases: number;
             emptyResponses: number;
             droppedDataTriples: number;
             failedPeers: number;
@@ -295,6 +315,7 @@ export class ApiClient {
         peersTried: number;
         dataSynced: number;
         sharedMemorySynced: number;
+        denied: boolean;
         diagnostics?: {
           noProtocolPeers: number;
           durable: {
@@ -302,6 +323,8 @@ export class ApiClient {
             fetchedDataTriples: number;
             insertedMetaTriples: number;
             insertedDataTriples: number;
+            bytesReceived: number;
+            resumedPhases: number;
             emptyResponses: number;
             metaOnlyResponses: number;
             dataRejectedMissingMeta: number;
@@ -313,6 +336,8 @@ export class ApiClient {
             fetchedDataTriples: number;
             insertedMetaTriples: number;
             insertedDataTriples: number;
+            bytesReceived: number;
+            resumedPhases: number;
             emptyResponses: number;
             droppedDataTriples: number;
             failedPeers: number;
@@ -342,6 +367,7 @@ export class ApiClient {
       peersTried: number;
       dataSynced: number;
       sharedMemorySynced: number;
+      denied: boolean;
       diagnostics?: {
         noProtocolPeers: number;
         durable: {
@@ -349,6 +375,8 @@ export class ApiClient {
           fetchedDataTriples: number;
           insertedMetaTriples: number;
           insertedDataTriples: number;
+          bytesReceived: number;
+          resumedPhases: number;
           emptyResponses: number;
           metaOnlyResponses: number;
           dataRejectedMissingMeta: number;
@@ -360,6 +388,8 @@ export class ApiClient {
           fetchedDataTriples: number;
           insertedMetaTriples: number;
           insertedDataTriples: number;
+          bytesReceived: number;
+          resumedPhases: number;
           emptyResponses: number;
           droppedDataTriples: number;
           failedPeers: number;

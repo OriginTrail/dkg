@@ -56,10 +56,10 @@ Set up a node and start playing, or read the [full game documentation](docs/orig
 
 ### For AI agents
 
-> **OpenClaw agents:** Do not follow the manual steps below. Install the adapter and run setup — this installs the DKG node AND wires up the adapter with memory, tools, and Agent Hub:
+> **OpenClaw agents:** Install the DKG CLI and run setup — this installs the node AND wires up the adapter with memory, tools, and Agent Hub:
 > ```bash
-> npm install -g @origintrail-official/dkg-adapter-openclaw
-> dkg-openclaw setup
+> npm install -g @origintrail-official/dkg
+> dkg openclaw setup
 > ```
 > Then restart the OpenClaw gateway. See the [adapter guide](packages/adapter-openclaw/README.md) for details.
 

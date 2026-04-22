@@ -2,7 +2,7 @@ import { existsSync, lstatSync } from 'node:fs';
 import { mkdir, rm, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { execSync, execFileSync } from 'node:child_process';
-import { releasesDir, repoDir, swapSlot, loadConfig, loadNetworkConfig, gitCommandEnv, gitCommandArgs, slotEntryPoint } from './config.js';
+import { releasesDir, repoDir, swapSlot, loadConfig, loadNetworkConfig, loadProjectConfig, gitCommandEnv, gitCommandArgs, slotEntryPoint } from './config.js';
 
 export const _migrationIo = {
   execSync: execSync as (...args: any[]) => any,
@@ -55,18 +55,19 @@ export async function migrateToBlueGreen(
   let sourceRepo = localRepo ?? '';
   let sourceBranch = process.env.DKG_BRANCH?.trim() || 'main';
   if (!hasLocalRepo) {
+    const proj = loadProjectConfig();
     sourceRepo = normalizeCloneRepo(
       process.env.DKG_REPO
         ?? config?.autoUpdate?.repo
         ?? network?.autoUpdate?.repo
-        ?? 'https://github.com/OriginTrail/dkg-v9.git',
+        ?? `${proj.githubUrl}.git`,
     );
     sourceBranch = (
       process.env.DKG_BRANCH
       ?? config?.autoUpdate?.branch
       ?? network?.autoUpdate?.branch
-      ?? 'main'
-    ).trim() || 'main';
+      ?? proj.defaultBranch
+    ).trim() || proj.defaultBranch;
     if (!opts.allowRemoteBootstrap) {
       log('Migration: no local checkout with .git; skipping remote bootstrap in this mode.');
       return;

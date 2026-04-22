@@ -707,8 +707,14 @@ describe('Context Graph Integration', () => {
       leaderInject(agent, topic, voteB, 'peer-B');
       await new Promise(r => setTimeout(r, 20));
 
-      // Simulate a turn proposal being created by triggering the leader flow
-      if (!swarm.pendingProposal) return; // skip if proposal already resolved
+      // A vacuous `if (!swarm.pendingProposal) return;` would silently pass
+      // the test without ever exercising the spoofed-identity rejection path.
+      // The turn-proposal must exist for the test to have any meaning — if
+      // it doesn't, that itself is a bug in the leader flow we should surface.
+      expect(
+        swarm.pendingProposal,
+        'turn proposal must exist after vote injection; if null, leader flow regressed',
+      ).toBeDefined();
 
       // Inject approval from peer-B claiming peer-C's identityId (spoofed)
       const spoofedApproval = proto.encode({
@@ -721,12 +727,17 @@ describe('Context Graph Integration', () => {
       leaderInject(agent, topic, spoofedApproval, 'peer-B');
       await new Promise(r => setTimeout(r, 20));
 
-      // The spoofed sig should NOT be counted
+      // The spoofed sig should NOT be counted. Guarding this behind
+      // `if (sigs)` would vacuously pass if `participantSignatures` got
+      // renamed / dropped; make the precondition explicit so shape changes
+      // surface here instead of silently disabling the assertion.
       const sigs = swarm.pendingProposal?.participantSignatures;
-      if (sigs) {
-        const peerBSig = sigs.get('peer-B');
-        expect(peerBSig).toBeUndefined();
-      }
+      expect(
+        sigs,
+        'participantSignatures must exist after a vote/approval exchange; nil → shape regression',
+      ).toBeDefined();
+      const peerBSig = sigs!.get('peer-B');
+      expect(peerBSig).toBeUndefined();
 
       coord.destroy();
     });

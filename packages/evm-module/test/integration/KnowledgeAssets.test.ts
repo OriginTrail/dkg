@@ -467,12 +467,14 @@ describe('@integration KnowledgeAssets V9', () => {
     const sigs2 = await buildSignatures(publishingNode, pubId, receivingNodes, merkleRoot2, publicByteSize);
     const tokenAmount2 = (ask * BigInt(publicByteSize) * BigInt(epochs)) / 1024n;
 
+    // Catches regression where KA ID reuse (1..3 already used, 1..5 overlaps) silently
+    // passes without `KAIdAlreadyUsed` being raised by KnowledgeAssetsLib.
     await expect(
       KnowledgeAssets.connect(kcCreator).batchMintKnowledgeAssets(
         pubId, merkleRoot2, 1, 5, publicByteSize, epochs, tokenAmount2, ethers.ZeroAddress,
         sigs2.pubR, sigs2.pubVS, receiverIds, sigs2.receiverRs, sigs2.receiverVSs,
       )
-    ).to.be.reverted;
+    ).to.be.revertedWithCustomError(KnowledgeAssets, 'KAIdAlreadyUsed');
   });
 
   // ========================================================================
@@ -602,25 +604,33 @@ describe('@integration KnowledgeAssets V9', () => {
     const ctx = await mintTestBatch({ withAsk: true });
     const stranger = accounts[15];
 
+    // Catches regression where ACL check (`batch.publisherAddress != msg.sender`)
+    // is weakened and non-publisher updates succeed or revert with a different error.
     await expect(
       KnowledgeAssets.connect(stranger).updateKnowledgeAssets(
         ctx.batchId,
         ethers.keccak256(ethers.toUtf8Bytes('evil-root')),
         1000,
       )
-    ).to.be.reverted;
+    )
+      .to.be.revertedWithCustomError(KnowledgeAssets, 'NotBatchPublisher')
+      .withArgs(ctx.batchId, stranger.address);
   });
 
   it('Should reject update on non-existent batch', async () => {
     const kcCreator = getDefaultKCCreator(accounts);
 
+    // Catches regression where missing-batch sentinel check is lost and the
+    // call either no-ops or reverts with a misleading error.
     await expect(
       KnowledgeAssets.connect(kcCreator).updateKnowledgeAssets(
         999,
         ethers.keccak256(ethers.toUtf8Bytes('ghost')),
         1000,
       )
-    ).to.be.reverted;
+    )
+      .to.be.revertedWithCustomError(KnowledgeAssets, 'BatchNotFound')
+      .withArgs(999);
   });
 
   // ========================================================================
@@ -650,21 +660,27 @@ describe('@integration KnowledgeAssets V9', () => {
     const ask = await AskStorage.getStakeWeightedAverageAsk();
     const insufficientAmount = (ask * BigInt(ctx.byteSize) * 5n) / 1024n / 2n;
 
+    // Catches regression where `_validateTokenAmount` pricing check is
+    // softened and under-payment slips through instead of reverting.
     await expect(
       KnowledgeAssets.connect(ctx.kcCreator).extendStorage(
         ctx.batchId, 5, insufficientAmount, ethers.ZeroAddress,
       )
-    ).to.be.reverted;
+    ).to.be.revertedWithCustomError(KnowledgeAssets, 'InvalidTokenAmount');
   });
 
   it('Should reject extendStorage on non-existent batch', async () => {
     const kcCreator = getDefaultKCCreator(accounts);
 
+    // Catches regression where extendStorage silently no-ops or reverts
+    // elsewhere for unknown batch IDs.
     await expect(
       KnowledgeAssets.connect(kcCreator).extendStorage(
         999, 5, 0, ethers.ZeroAddress,
       )
-    ).to.be.reverted;
+    )
+      .to.be.revertedWithCustomError(KnowledgeAssets, 'BatchNotFound')
+      .withArgs(999);
   });
 
   // ========================================================================
@@ -711,12 +727,15 @@ describe('@integration KnowledgeAssets V9', () => {
       receiverVSs.push(vs);
     }
 
+    // wrongSigner recovers successfully (non-zero) but is not attached as an
+    // operational key on `pubId`, so the signer-not-operator branch must trip.
+    // Catches regression where the operator-key check is removed.
     await expect(
       KnowledgeAssets.connect(kcCreator).batchMintKnowledgeAssets(
         pubId, merkleRoot, 1, 3, publicByteSize, epochs, tokenAmount, ethers.ZeroAddress,
         badR, badVS, receiverIds, receiverRs, receiverVSs,
       )
-    ).to.be.reverted;
+    ).to.be.revertedWithCustomError(KnowledgeAssets, 'SignerIsNotNodeOperator');
   });
 
   it('Should reject batchMint with invalid receiver signature', async () => {
@@ -757,12 +776,14 @@ describe('@integration KnowledgeAssets V9', () => {
       receiverVSs.push(vs);
     }
 
+    // Same rationale as the publisher-signature case: wrongSigner isn't
+    // attached as operational key on any receiver identity.
     await expect(
       KnowledgeAssets.connect(kcCreator).batchMintKnowledgeAssets(
         pubId, merkleRoot, 1, 3, publicByteSize, epochs, tokenAmount, ethers.ZeroAddress,
         pubR, pubVS, receiverIds, receiverRs, receiverVSs,
       )
-    ).to.be.reverted;
+    ).to.be.revertedWithCustomError(KnowledgeAssets, 'SignerIsNotNodeOperator');
   });
 
   it('Should reject batchMint with insufficient token amount', async () => {
@@ -794,12 +815,14 @@ describe('@integration KnowledgeAssets V9', () => {
 
     const lowTokenAmount = requiredAmount > 1n ? requiredAmount - 1n : 0n;
 
+    // Catches regression where `_validateTokenAmount` cost floor is removed
+    // and under-priced publishes slip through.
     await expect(
       KnowledgeAssets.connect(kcCreator).batchMintKnowledgeAssets(
         pubId, merkleRoot, 1, 3, byteSize, epochs, lowTokenAmount, ethers.ZeroAddress,
         pubR, pubVS, receiverIds, receiverRs, receiverVSs,
       )
-    ).to.be.reverted;
+    ).to.be.revertedWithCustomError(KnowledgeAssets, 'InvalidTokenAmount');
   });
 
   // ========================================================================
@@ -1082,14 +1105,18 @@ describe('@integration KnowledgeAssets V9', () => {
     const batchAfterExtend = await KnowledgeAssetsStorage.getBatch(batchId);
     expect(batchAfterExtend.endEpoch).to.equal(batchAfterUpdate.endEpoch + 3n);
 
-    // A cannot update anymore
+    // A cannot update anymore — after `transferNamespace`, the batch publisher
+    // must be accountB, so accountA's call must hit `NotBatchPublisher`.
+    // Catches regression where namespace transfer fails to rewrite publisher.
     await expect(
       KnowledgeAssets.connect(accountA).updateKnowledgeAssets(
         batchId,
         ethers.keccak256(ethers.toUtf8Bytes('old-owner-attempt')),
         byteSize,
       )
-    ).to.be.reverted;
+    )
+      .to.be.revertedWithCustomError(KnowledgeAssets, 'NotBatchPublisher')
+      .withArgs(batchId, accountA.address);
   });
 
   // ========================================================================

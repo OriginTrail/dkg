@@ -2246,16 +2246,16 @@ describe('Workspace lineage tracking', () => {
     expect((coordinator as unknown as { topologyTimer: unknown }).topologyTimer).toBeNull();
   });
 
-  // NOTE: the three `it.skip` tests below assert behaviour of
-  // `writeLineageFromSnapshot` on successful publish paths — a code path that
-  // is NOT yet wired up in `coordinator.ts` (see TODO_UNRESOLVED_PR_COMMENTS).
-  // Leaving these as `skip` (not deleted) so the contract is preserved as
-  // executable documentation of what lineage-on-success must eventually do:
-  // un-skip these three when the feature lands and they become the
-  // regression gate. The surrounding `describe` was previously `describe.skip`
-  // which silently hid the three sibling tests that already work — those now
-  // run correctly.
-  it.skip('writes lineage quads after normal consensus turn resolution', async () => {
+  // The three tests below cover `writeLineageFromSnapshot` on successful
+  // publish paths. That code path is NOT yet wired up in `coordinator.ts`
+  // (see TODO_UNRESOLVED_PR_COMMENTS), so these tests intentionally run
+  // RED. Per QA policy in `.test-audit/BUGS_FOUND.md`: production code is
+  // not modified, and the failing test IS the bug evidence. DO NOT
+  // `it.skip` these — a skip hides the gap from the reporter. A failing
+  // assertion is what makes the missing feature visible every CI run.
+  // When `writeLineageFromSnapshot` lands in coordinator.ts, these go
+  // green on their own; no test-side change is needed.
+  it('writes lineage quads after normal consensus turn resolution', async () => {
     const leaderPeerId = 'consensus-leader';
     const p2 = 'consensus-p2';
     const p3 = 'consensus-p3';
@@ -2329,7 +2329,7 @@ describe('Workspace lineage tracking', () => {
     expect(lineageLogs.length).toBeGreaterThanOrEqual(1);
   });
 
-  it.skip('lineage entries are shared-memory-only when publish returns no UAL', async () => {
+  it('lineage entries are shared-memory-only when publish returns no UAL', async () => {
     const leaderPeerId = 'lineage-noul-leader';
     let opCounter = 0;
     const noUalAgent = createInProcessAgent(leaderPeerId);
@@ -2373,7 +2373,7 @@ describe('Workspace lineage tracking', () => {
     expect(lineageQuads.some((q: any) => q.predicate?.includes?.('publishedUal'))).toBe(false);
   });
 
-  it.skip('publish failure drops lineage ops instead of carrying them to the next turn', async () => {
+  it('publish failure drops lineage ops instead of carrying them to the next turn', async () => {
     const leaderPeerId = 'lineage-fail-leader';
     const logs: string[] = [];
     let publishCallCount = 0;

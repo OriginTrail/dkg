@@ -391,12 +391,15 @@ describe('handleEventsQuery — validation', () => {
   it('does not call query engine when date range validation fails', async () => {
     const { engine, calls } = createTrackingQueryEngine();
 
+    // Pin to date-range validation vocabulary. A bare `rejects.toThrow()`
+    // would pass if the handler rejected for unrelated reasons (e.g. query
+    // engine crashed, URL parse failure), masking a real validation bug.
     await expect(
       handleEventsQuery(
         new URLSearchParams('epc=urn:test&from=2024-12-31T00:00:00Z&to=2024-01-01T00:00:00Z'),
         { contextGraphId: CONTEXT_GRAPH_ID, queryEngine: engine, basePath: BASE_PATH },
       ),
-    ).rejects.toThrow();
+    ).rejects.toThrow(/date|range|from|to|invalid|validation|before|after|order/i);
 
     expect(calls).toHaveLength(0);
   });

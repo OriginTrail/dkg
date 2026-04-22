@@ -1,2 +1,6 @@
-# Build artifact: copied from repo root during build for NPM packaging
+# Build artifacts: copied from repo root during build for NPM packaging
+# (see the `build` script in package.json). Kept out of source control
+# so builds don't dirty the worktree and so the root copies stay the
+# single source of truth.
 network/
+project.json

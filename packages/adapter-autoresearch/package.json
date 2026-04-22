@@ -1,6 +1,6 @@
 {
   "name": "@origintrail-official/dkg-adapter-autoresearch",
-  "version": "0.0.1",
+  "version": "10.0.0-rc.1",
   "description": "Autoresearch adapter — collaborative autonomous ML research over the Decentralized Knowledge Graph",
   "type": "module",
   "main": "dist/index.js",

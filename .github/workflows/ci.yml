@@ -52,6 +52,28 @@ jobs:
   # One canonical build. Every test job downloads this artifact instead
   # of rebuilding from scratch (saves ~3-4 min per job).
   #
+  # IMPORTANT — two optimizations here make the sub-5-min wall-clock
+  # possible:
+  #
+  # 1. `--filter='!@dkg-evm-module'` skips the 1m 54s hardhat compile
+  #    (Solidity→bytecode + typechain). No Node test lane consumes its
+  #    output — see the `Build all Node packages` step below for the
+  #    full analysis.
+  #
+  # 2. `build` is TSC-ONLY for every remaining package. Vite UI bundles
+  #    (`@dkg-node-ui` + `@dkg-app-origin-trail-game`) were split out
+  #    into a separate `build:ui` task (see `turbo.json` and the
+  #    `build` / `build:ui` / `build:full` scripts in those two
+  #    packages). No test in CI reads `dist-ui/` at runtime — API tests
+  #    never hit the static dashboard routes, the daemon gracefully
+  #    404s when the dir is absent, and the node-ui vitest suite
+  #    fabricates its own temp staticDir.
+  #
+  # Releases DO need both evm-module contracts and `dist-ui/` shipped
+  # to npm — `release.yml` and `npm-continuous-publish.yml` run
+  # `pnpm build` (unfiltered) plus `pnpm turbo run build:ui` before
+  # publishing.
+  #
   # Turbo remote cache is opt-in: if TURBO_TOKEN / TURBO_TEAM secrets
   # are set the build step will pull previously-cached outputs; with no
   # secrets the env vars are empty and turbo transparently no-ops.
@@ -87,9 +109,28 @@ jobs:
             turbo-${{ runner.os }}-refs/heads/v10-rc-
             turbo-${{ runner.os }}-
 
-      - name: Build all packages
+      - name: Build all Node packages (evm-module hardhat compile short-circuits)
+        # `@dkg-evm-module:build` normally runs `hardhat compile` which takes
+        # ~1m 54s on CI (Solidity→bytecode + typechain bindings). It's the
+        # single biggest chunk of the shared build, but nothing in CI's Node
+        # test lanes consumes its output:
+        #   - `packages/chain` imports ABIs from `@dkg-evm-module/abi/*.json`
+        #     which are COMMITTED to the repo, not regenerated here
+        #   - Solidity unit tests (`tornado-solidity`) do their own
+        #     hardhat compile in their own lane, with its own cache
+        #   - Chain integration tests (`evm-integration.yml`) are a
+        #     separate workflow with their own hardhat setup
+        #
+        # `DKG_SKIP_EVM_BUILD=1` makes evm-module's `build` script a no-op
+        # (short-circuits before `hardhat compile`; see package.json). We
+        # can't just drop it from the turbo task graph via `--filter=!…`
+        # because `@dkg-chain#build` declares evm-module as a workspace
+        # dependency and turbo pulls it in transitively. Skipping the
+        # command keeps the graph valid but moves the build from ~3 min to
+        # ~1 min.
         run: pnpm build
         env:
+          DKG_SKIP_EVM_BUILD: "1"
           TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}
           TURBO_TEAM: ${{ secrets.TURBO_TEAM }}
 
@@ -147,52 +188,24 @@ jobs:
         run: pnpm --filter @origintrail-official/dkg-chain test
 
   # ------------------------------------------------------------------
-  # Tornado publisher lane — sharded across 2 parallel runners.
-  # Briefly tried 3 shards and saw a ~15s regression: the publisher suite
-  # is dominated by a small number of long files, so an extra runner
-  # just paid fixed setup overhead without shrinking the tail. 2 shards
-  # is the sweet spot; the publisher job never gates wall-clock anyway
-  # (agent [1/4] is the tail at ~4.5 min).
+  # Tornado publisher lane — sharded across 4 parallel runners.
+  # Sharding history:
+  #   2 shards → ~4 min each (became the wall-clock tail once `agent`
+  #             was bumped from 4→8 shards and the shared build got
+  #             the evm-module skip; 2-shard publisher pushed the
+  #             total past the 5-min target by ~3s)
+  #   3 shards → previously saw a ~15s regression vs 2: the
+  #             publisher suite had a handful of long files whose
+  #             tail dominated, and paying fixed setup overhead for
+  #             an extra runner didn't help
+  #   4 shards → current; with 57 test files ÷ 4 = ~14/shard the
+  #             long-pole file isn't isolated to one runner anymore
   # ------------------------------------------------------------------
   tornado-publisher:
-    name: "Tornado: publisher [${{ matrix.shard }}/2]"
+    name: "Tornado: publisher [${{ matrix.shard }}/4]"
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version-file: .nvmrc
-          cache: pnpm
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-      - uses: actions/download-artifact@v4
-        with:
-          name: build-outputs
-          path: /tmp
-      - name: Restore build outputs
-        run: tar -xzf /tmp/build-outputs.tgz
-      - name: "Publisher tests (shard ${{ matrix.shard }}/2)"
-        run: pnpm --filter @origintrail-official/dkg-publisher exec vitest run --shard=${{ matrix.shard }}/2
-
-  # ------------------------------------------------------------------
-  # Tornado agent lane — the slowest Node suite, sharded across 4 runners.
-  # Raised from 3→4 after the 5.12-min warm run showed agent shards at
-  # ~4.5-4.7 min, i.e. they were the tail gating wall-clock. 4 shards
-  # should bring each one down to ~3.5 min. Going higher (5+) starts
-  # losing to the ~1.5-min pnpm-install setup tax per runner.
-  # ------------------------------------------------------------------
-  tornado-agent:
-    name: "Tornado: agent [${{ matrix.shard }}/4]"
-    needs: build
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -212,25 +225,43 @@ jobs:
           path: /tmp
       - name: Restore build outputs
         run: tar -xzf /tmp/build-outputs.tgz
-      - name: "Agent tests (shard ${{ matrix.shard }}/4)"
-        run: pnpm --filter @origintrail-official/dkg-agent exec vitest run --shard=${{ matrix.shard }}/4
+      - name: "Publisher tests (shard ${{ matrix.shard }}/4)"
+        run: pnpm --filter @origintrail-official/dkg-publisher exec vitest run --shard=${{ matrix.shard }}/4
 
   # ------------------------------------------------------------------
-  # Product primary — cli and node-ui run on dedicated runners.
+  # Tornado agent lane — the slowest Node suite, sharded across 10 runners.
+  # Sharding history:
+  #   3 shards → 6+ min each (wall-clock tail)
+  #   4 shards → ~4.5 min each (still the gating tail)
+  #   8 shards → ~3m-3m 49s each (slowest shard 4m 16s → total 5m 18s)
+  #  10 shards --shard=N/M (vitest hash) → slowest 4m 22s → total 4m 53s
+  #  10 shards greedy bin-packed ← current. Three files dominate hook
+  #           wall-clock (e2e-privacy 47s, e2e-publish-protocol 43s,
+  #           e2e-flows 39s body + ~2 min of beforeAll hooks each).
+  #           vitest's default --shard=N/M hashes files to shards and
+  #           can land multiple heavies together (shard 8/10 previously
+  #           got e2e-publish-protocol + e2e-workspace-sync + gossip-
+  #           validation = ~80s body + stacked hooks → 4m 22s ceiling).
+  #
+  #           Greedy bin-packing using historical per-file weights gives
+  #           each of the top-3 heavies its own shard and distributes
+  #           the remaining ~37 files evenly across the rest. Projected
+  #           ceiling is shard 1 (e2e-privacy alone, ~3m 30s total).
+  #
+  #           Weights live in `scripts/ci-shard-agent.mjs` in this
+  #           package and are refreshed whenever per-file timings shift
+  #           meaningfully — unknown files default to a light weight and
+  #           fall into the lightest bin automatically.
   # ------------------------------------------------------------------
-  product-primary:
-    name: "Product: ${{ matrix.label }}"
+  tornado-agent:
+    name: "Tornado: agent [${{ matrix.shard }}/10]"
     needs: build
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - label: cli
-            pkg: "@origintrail-official/dkg"
-          - label: node-ui
-            pkg: "@origintrail-official/dkg-node-ui"
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -246,14 +277,50 @@ jobs:
           path: /tmp
       - name: Restore build outputs
         run: tar -xzf /tmp/build-outputs.tgz
-      - name: "Tests: ${{ matrix.label }}"
-        run: pnpm --filter ${{ matrix.pkg }} test
+      - name: "Agent tests (shard ${{ matrix.shard }}/10)"
+        working-directory: packages/agent
+        run: |
+          set -euo pipefail
+          mapfile -t SHARD_FILES < <(node scripts/ci-shard-agent.mjs ${{ matrix.shard }} 10)
+          echo "::group::Agent shard ${{ matrix.shard }}/10 — ${#SHARD_FILES[@]} files"
+          printf '  %s\n' "${SHARD_FILES[@]}"
+          echo "::endgroup::"
+          pnpm exec vitest run "${SHARD_FILES[@]}"
 
   # ------------------------------------------------------------------
-  # Product secondary — smaller packages grouped on a single runner.
+  # Bura lane — `cli` is the heaviest BURA package (CLI daemon, HTTP API,
+  # auth, keystore, migration, indexer) so it owns a runner. The other
+  # two BURA packages (`query`, `attested-assets`) fit on one runner.
+  #
+  # Tier: BURA — `dkgv10-spec/CRITICALITY_CATEGORIZATION.md` §1. Packages
+  # on the critical path for users/operators; auth & quorum bugs here
+  # degrade service but do not threaten protocol consensus.
   # ------------------------------------------------------------------
-  product-secondary:
-    name: "Product: remaining packages"
+  bura-cli:
+    name: "Bura: cli"
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: build-outputs
+          path: /tmp
+      - name: Restore build outputs
+        run: tar -xzf /tmp/build-outputs.tgz
+      - name: "CLI tests"
+        run: pnpm --filter @origintrail-official/dkg test
+
+  bura-supporting:
+    name: "Bura: query + attested-assets"
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -272,12 +339,69 @@ jobs:
           path: /tmp
       - name: Restore build outputs
         run: tar -xzf /tmp/build-outputs.tgz
-      - name: "Attested assets, EPCIS, query, MCP, net-sim, graph-viz, adapters, origin-trail-game"
+      - name: "Query + attested-assets tests"
         run: |
           pnpm \
-            --filter @origintrail-official/dkg-attested-assets \
-            --filter @origintrail-official/dkg-epcis \
             --filter @origintrail-official/dkg-query \
+            --filter @origintrail-official/dkg-attested-assets \
+            run test
+
+  # ------------------------------------------------------------------
+  # Kosava lanes — `node-ui` is heavy (React Testing Library, happy-dom)
+  # so it owns a runner. Adapters + demo app + smaller utility packages
+  # share one runner; they are fast and independent.
+  #
+  # Tier: KOSAVA — `dkgv10-spec/CRITICALITY_CATEGORIZATION.md` §1.
+  # Supporting packages (UI, demos, adapters, EPCIS helpers, MCP bridge);
+  # bugs here affect UX/demos, not protocol correctness.
+  # ------------------------------------------------------------------
+  kosava-node-ui:
+    name: "Kosava: node-ui"
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: build-outputs
+          path: /tmp
+      - name: Restore build outputs
+        run: tar -xzf /tmp/build-outputs.tgz
+      - name: "node-ui tests"
+        run: pnpm --filter @origintrail-official/dkg-node-ui test
+
+  kosava-supporting:
+    name: "Kosava: adapters + epcis + graph-viz + mcp-server + network-sim + origin-trail-game"
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: build-outputs
+          path: /tmp
+      - name: Restore build outputs
+        run: tar -xzf /tmp/build-outputs.tgz
+      - name: "Supporting Kosava packages"
+        run: |
+          pnpm \
+            --filter @origintrail-official/dkg-epcis \
             --filter @origintrail-official/dkg-mcp-server \
             --filter @origintrail-official/dkg-network-sim \
             --filter @origintrail-official/dkg-graph-viz \
@@ -289,49 +413,69 @@ jobs:
             run test
 
   # ------------------------------------------------------------------
-  # Solidity lane:
-  #   - PR + no contract changes : no-op fast pass (keeps the required
-  #     check green without spinning up Hardhat).
-  #   - PR + contract changes    : hardhat test only, no coverage (~5-7m).
-  #   - push (main / v10-rc / …) : full coverage + ratchet safety net.
+  # Kosava OriginTrail Game E2E lane — runs the 4 heavy integration
+  # tests in `packages/origin-trail-game/test/e2e/`. Each test spins
+  # up 3 DKG daemons + a local Hardhat chain, plays a full game, and
+  # asserts gossip / context-graph / CCL behavior end-to-end.
+  #
+  # Sharded 1-file-per-runner so the lane does NOT gate wall-clock:
+  # the 4 shards all run in parallel after `build`.
+  #
+  # GREEN-STATE BUDGET (all tests passing — the target green world):
+  #   - context-graph.test.ts  : ~2m 30s (60s boot + 11 tests × ~8s)
+  #   - game-ccl-e2e.test.ts   : ~1m 30s (60s boot + 2 short tests)
+  #   - new-features.test.ts   : ~2m 30s (60s boot + 16 tests × ~6s)
+  #   - three-player-game.test : ~2m 45s (60s boot + 9 tests × ~7s + the
+  #     "plays many turns" test capped at 5 turns via CI_FAST_MODE=1;
+  #     see the `env:` block on the test step below)
+  # All four shards therefore finish in ≤ 3 min green, leaving the
+  # slowest `tornado-agent` shard (~3m-3m 20s green with 10 shards) as
+  # the true critical path and keeping total wall-clock under 5 min.
+  #
+  # GATING POLICY: KOSAVA-tier but fully gating. CI-1 (cross-file
+  # pollution) was structurally resolved by per-file sharding and CI-2
+  # (within-file EADDRINUSE race on libp2p port) was structurally
+  # resolved in `helpers.ts::pickFreePortRange` — each cluster run now
+  # allocates a probed-free random port window in the 20000-30000
+  # range, so two workers can never collide on 19200/19300/18545 and
+  # the kernel can never hold a port longer than we're willing to wait.
+  # Every remaining failure in this lane is a real product bug.
   # ------------------------------------------------------------------
-  solidity:
-    name: "Solidity"
-    needs: changes
+  kosava-game-e2e:
+    name: "Kosava: origin-trail-game E2E [${{ matrix.shard.id }}/4]"
+    needs: build
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # Single file per runner: ≤ 600s beforeAll + ≤ 120s per test * a
+    # handful of tests → worst case ~8 min on cold 2-core CI runners.
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shard:
+          - { id: 1, file: test/e2e/context-graph.test.ts }
+          - { id: 2, file: test/e2e/game-ccl-e2e.test.ts }
+          - { id: 3, file: test/e2e/new-features.test.ts }
+          - { id: 4, file: test/e2e/three-player-game.test.ts }
     steps:
       - uses: actions/checkout@v4
-
-      - name: Skip — no contract changes on this PR
-        if: |
-          github.event_name == 'pull_request' &&
-          needs.changes.outputs.contracts != 'true'
-        run: echo "::notice::No contracts/*/test/hardhat changes detected — skipping Solidity. Full coverage still runs on push to main/v10-rc."
-
       - uses: pnpm/action-setup@v4
-        if: |
-          github.event_name != 'pull_request' ||
-          needs.changes.outputs.contracts == 'true'
-
       - uses: actions/setup-node@v4
-        if: |
-          github.event_name != 'pull_request' ||
-          needs.changes.outputs.contracts == 'true'
         with:
           node-version-file: .nvmrc
           cache: pnpm
-
       - name: Install dependencies
-        if: |
-          github.event_name != 'pull_request' ||
-          needs.changes.outputs.contracts == 'true'
         run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: build-outputs
+          path: /tmp
+      - name: Restore build outputs
+        run: tar -xzf /tmp/build-outputs.tgz
 
+      # The E2E suite spawns its own Hardhat node and runs
+      # `npx hardhat deploy --network localhost` — contracts must be
+      # compiled and typechain generated before the daemons boot.
       - name: Cache Hardhat artifacts
-        if: |
-          github.event_name != 'pull_request' ||
-          needs.changes.outputs.contracts == 'true'
         uses: actions/cache@v4
         with:
           path: |
@@ -343,23 +487,148 @@ jobs:
             hardhat-${{ runner.os }}-
 
       - name: Compile contracts
-        if: |
-          github.event_name != 'pull_request' ||
-          needs.changes.outputs.contracts == 'true'
         run: npx hardhat compile --config hardhat.node.config.ts
         working-directory: packages/evm-module
 
-      - name: Hardhat tests (PR — fast, no coverage)
-        if: |
-          github.event_name == 'pull_request' &&
-          needs.changes.outputs.contracts == 'true'
-        run: pnpm test
+      - name: "OriginTrail Game E2E (${{ matrix.shard.file }})"
+        run: |
+          pnpm --filter @origintrail-official/dkg-app-origin-trail-game exec \
+            vitest run --config vitest.e2e.config.ts ${{ matrix.shard.file }}
+        env:
+          NODE_OPTIONS: --max-old-space-size=4096
+          # Caps the 20-turn stability test in three-player-game.test.ts at
+          # 5 turns (still 5 real M-of-N consensus rounds, cross-node state
+          # consistency, and the full no-fatal-errors log scan). Keeps the
+          # worst-case shard under 3 min green; without this the shard would
+          # run ~4m 30s green and push the critical path above 5 min total
+          # wall-clock. Local runs (CI_FAST_MODE unset) still exercise the
+          # full 20-turn long-haul version.
+          CI_FAST_MODE: "1"
+
+  # ------------------------------------------------------------------
+  # Tornado Solidity lane — `packages/evm-module` is TORNADO-tier
+  # (`dkgv10-spec/CRITICALITY_CATEGORIZATION.md` §1): bugs in the
+  # contracts mean financial loss or consensus divergence.
+  #   - PR + no contract changes : no-op fast pass (keeps the required
+  #     check green without spinning up Hardhat).
+  #   - PR + contract changes    : 4-way sharded hardhat test, no
+  #                                coverage (~5-6 min per shard in
+  #                                parallel; previously ~20 min single).
+  #   - push (main / v10-rc / …) : full coverage + ratchet safety net,
+  #                                single job (coverage reports don't
+  #                                compose across shards, so we keep
+  #                                the safety-net job unsharded).
+  # ------------------------------------------------------------------
+  solidity:
+    name: "Tornado: Solidity [${{ matrix.shard }}/4]"
+    needs: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # PR lane only — sharded 4 ways. Push lane runs the separate
+    # solidity-coverage job below (full coverage + ratchet check).
+    if: github.event_name == 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Skip — no contract changes on this PR
+        if: needs.changes.outputs.contracts != 'true'
+        run: echo "::notice::No contracts/*/test/hardhat changes detected — skipping Solidity shard ${{ matrix.shard }}/4. Full coverage still runs on push to main/v10-rc."
+
+      - uses: pnpm/action-setup@v4
+        if: needs.changes.outputs.contracts == 'true'
+
+      - uses: actions/setup-node@v4
+        if: needs.changes.outputs.contracts == 'true'
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install dependencies
+        if: needs.changes.outputs.contracts == 'true'
+        run: pnpm install --frozen-lockfile
+
+      - name: Cache Hardhat artifacts
+        if: needs.changes.outputs.contracts == 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            packages/evm-module/artifacts
+            packages/evm-module/cache
+            packages/evm-module/typechain
+          key: hardhat-${{ runner.os }}-${{ hashFiles('packages/evm-module/contracts/**/*.sol', 'packages/evm-module/hardhat.node.config.ts') }}
+          restore-keys: |
+            hardhat-${{ runner.os }}-
+
+      - name: Compile contracts
+        if: needs.changes.outputs.contracts == 'true'
+        run: npx hardhat compile --config hardhat.node.config.ts
         working-directory: packages/evm-module
+
+      - name: "Hardhat tests (shard ${{ matrix.shard }}/4)"
+        if: needs.changes.outputs.contracts == 'true'
+        # Round-robin distribute the 48 .test.ts files across 4
+        # shards. `sort` gives deterministic ordering so the same file
+        # always lands in the same shard across runs — makes failure
+        # reproduction trivial. Hardhat accepts multiple positional
+        # file paths as `hardhat test FILE1 FILE2 ...`.
+        run: |
+          set -euo pipefail
+          cd packages/evm-module
+          mapfile -t FILES < <(find test -type f -name '*.test.ts' | sort)
+          SHARD_FILES=()
+          SHARD_ID=${{ matrix.shard }}
+          for i in "${!FILES[@]}"; do
+            if (( (i % 4) + 1 == SHARD_ID )); then
+              SHARD_FILES+=("${FILES[$i]}")
+            fi
+          done
+          echo "::group::Shard ${SHARD_ID}/4 — ${#SHARD_FILES[@]} files"
+          printf '  %s\n' "${SHARD_FILES[@]}"
+          echo "::endgroup::"
+          npx hardhat test --network hardhat --config hardhat.node.config.ts "${SHARD_FILES[@]}"
         env:
           NODE_OPTIONS: --max-old-space-size=8192
 
-      - name: Hardhat tests + Solidity coverage + ratchet check (push — safety net)
-        if: github.event_name != 'pull_request'
+  # ------------------------------------------------------------------
+  # Tornado Solidity coverage lane — safety net on push to main/v10-rc
+  # only. Full Solidity suite + solidity-coverage + coverage ratchet.
+  # Not sharded because solidity-coverage's instrumentation state
+  # doesn't compose across parallel runners. Wall-clock on push is
+  # not on the critical path so ~20-25 min here is acceptable.
+  # ------------------------------------------------------------------
+  solidity-coverage:
+    name: "Tornado: Solidity coverage (push safety net)"
+    needs: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    if: github.event_name != 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Cache Hardhat artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            packages/evm-module/artifacts
+            packages/evm-module/cache
+            packages/evm-module/typechain
+          key: hardhat-${{ runner.os }}-${{ hashFiles('packages/evm-module/contracts/**/*.sol', 'packages/evm-module/hardhat.node.config.ts') }}
+          restore-keys: |
+            hardhat-${{ runner.os }}-
+      - name: Compile contracts
+        run: npx hardhat compile --config hardhat.node.config.ts
+        working-directory: packages/evm-module
+      - name: Hardhat tests + Solidity coverage + ratchet check
         run: pnpm test:coverage
         working-directory: packages/evm-module
         env:

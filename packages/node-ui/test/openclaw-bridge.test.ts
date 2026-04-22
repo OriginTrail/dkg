@@ -63,6 +63,8 @@ describe('OpenClaw bridge API contract', () => {
     expect(apiSrc).toContain('connectLocalAgentIntegration');
     expect(apiSrc).toContain('fetchLocalAgentHistory');
     expect(apiSrc).toContain('streamLocalAgentChat');
+    expect(apiSrc).toContain('refreshLocalAgentIntegration');
+    expect(apiSrc).toMatch(/\/api\/local-agent-integrations\/\$\{encodeURIComponent\(normalizedId\)\}\/refresh/);
   });
 
   it('keeps the local-agent contract attachment-aware', () => {
@@ -1261,6 +1263,39 @@ describe('OpenClaw bridge behavioral tests', () => {
       expect(calls).toHaveLength(2);
       expect(calls[0].url).toContain('/api/local-agent-integrations/connect');
       expect(calls[1].url).toContain('/api/openclaw-channel/health');
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it('refreshLocalAgentIntegration posts to the per-integration refresh endpoint and returns the refreshed record', async () => {
+    const { fetch, calls } = createTrackingFetch([
+      {
+        ok: true,
+        json: async () => ({
+          ok: true,
+          integration: {
+            id: 'openclaw',
+            name: 'OpenClaw',
+            description: 'OpenClaw framework adapter',
+            enabled: true,
+            capabilities: { localChat: true, connectFromUi: true },
+            runtime: { status: 'ready', ready: true },
+            transport: { bridgeUrl: 'http://127.0.0.1:9201' },
+          },
+        }),
+      },
+      { ok: true, json: async () => ({ ok: true, target: 'bridge' }) },
+    ]);
+    const original = globalThis.fetch;
+    globalThis.fetch = fetch;
+    try {
+      const { refreshLocalAgentIntegration } = await import('../src/ui/api.js');
+      const result = await refreshLocalAgentIntegration('openclaw');
+      expect(calls[0].url).toContain('/api/local-agent-integrations/openclaw/refresh');
+      expect(calls[0].opts?.method).toBe('POST');
+      expect(result.integration.id).toBe('openclaw');
+      expect(result.integration.chatReady).toBe(true);
     } finally {
       globalThis.fetch = original;
     }

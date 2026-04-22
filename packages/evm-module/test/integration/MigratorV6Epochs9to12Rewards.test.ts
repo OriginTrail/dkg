@@ -177,6 +177,9 @@ describe('MigratorV6Epochs9to12Rewards Integration Tests', function () {
   });
 
   it('allows only owner/multisig owner to set reward amounts', async function () {
+    // V6-epochs9..12 migrator gate is the same as the other migrators:
+    // `HubLib.UnauthorizedAccess("Only Hub Owner or Multisig Owner")`.
+    // Pin the custom error + arg to catch regressions that weaken the ACL.
     await expect(
       contracts.migrator
         .connect(accounts.delegator2)
@@ -185,12 +188,22 @@ describe('MigratorV6Epochs9to12Rewards Integration Tests', function () {
           accounts.delegator1.address,
           toTRAC(1_000),
         ),
-    ).to.be.reverted;
+    )
+      .to.be.revertedWithCustomError(
+        contracts.migrator,
+        'UnauthorizedAccess',
+      )
+      .withArgs('Only Hub Owner or Multisig Owner');
 
     await expect(
       contracts.migrator
         .connect(accounts.delegator2)
         .setOperatorRewardAmount(node1Id, toTRAC(1_000)),
-    ).to.be.reverted;
+    )
+      .to.be.revertedWithCustomError(
+        contracts.migrator,
+        'UnauthorizedAccess',
+      )
+      .withArgs('Only Hub Owner or Multisig Owner');
   });
 });

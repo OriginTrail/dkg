@@ -1,6 +1,6 @@
 {
   "name": "@origintrail-official/dkg-evm-module",
-  "version": "9.0.0-beta.6",
+  "version": "10.0.0-rc.1",
   "description": "DKG V9 smart contracts (forked from V8 dkg-evm-module)",
   "license": "Apache-2.0",
   "private": true,
@@ -10,7 +10,7 @@
   "scripts": {
     "clean": "hardhat clean",
     "compile": "hardhat compile --config hardhat.node.config.ts",
-    "build": "hardhat compile --config hardhat.node.config.ts",
+    "build": "node scripts/maybe-compile.mjs",
     "test": "node scripts/run-tests.js",
     "test:coverage": "node scripts/run-coverage.js && node ../../scripts/check-evm-coverage.mjs",
     "test:unit": "hardhat test --network hardhat --config hardhat.node.config.ts --grep '@unit'",
