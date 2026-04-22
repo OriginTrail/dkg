@@ -102,9 +102,10 @@ active:
      option.
    - **Q2 (single-select, "Action?"):** `approve`, `show_json`,
      `edit_globs`, `widen`, `narrow`, `cancel`, `custom_instruction`.
-5. On `approve` + the Q1 package selection: print the **exact** command
-   for the user to run in their terminal (do NOT run it yourself —
-   see the warning below):
+5. On `approve` + the Q1 package selection: **run the command yourself**
+   via your shell tool, then continue with the actual work in the same
+   turn. The command's `--allowed` flags must match Q1 verbatim (the user
+   approved a specific scope — altering it is a protocol violation):
 
    ```bash
    pnpm task create <id> \
@@ -115,13 +116,23 @@ active:
      --activate
    ```
 
-   Wait for them to confirm ("done" / "go"), then begin the actual work.
+   If the command fails, surface the error and re-ask via AskQuestion
+   instead of retrying blindly.
 
-> ⚠️ **Why YOU don't run `pnpm task create`** — on Cursor / Claude Code the
-> `afterShellExecution` / PostToolUse Bash hook deletes any new file you
-> create inside `agent-scope/tasks/**` (it's a protected path). Codex CLI
-> doesn't have that hook so the file would persist there, but you should
-> still defer to the user for consistency across agents.
+> 🛈 **On Cursor / Claude Code the `afterShellExecution` / PostToolUse Bash
+> hook has a narrow allowlist** so this one invocation can persist the
+> new `agent-scope/tasks/<id>.json` and `agent-scope/active` files. The
+> hook recognises only the canonical shapes:
+>
+> - `pnpm task create <id> ...`
+> - `pnpm run task create <id> ...`
+> - `node agent-scope/bin/task.mjs create <id> ...`
+>
+> Any other write to `agent-scope/tasks/**` or `agent-scope/active` (e.g.
+> `echo ... > agent-scope/tasks/evil.json`, `cp`, Write/Edit tool, opaque
+> evaluators) is still reverted/deleted as before. Agents without hooks
+> (Codex CLI, Gemini CLI, etc.) have no hook gate to worry about; just
+> follow the protocol.
 
 ## Plan-mode denial protocol
 
@@ -159,7 +170,7 @@ pnpm task show                    # show the active task and its scope
 pnpm task set <id>                # set the active task
 pnpm task clear                   # clear the active task
 pnpm task check <path>            # check a path against the active task
-pnpm task create <id> [flags]     # create a manifest non-interactively (USER runs)
+pnpm task create <id> [flags]     # create a manifest non-interactively (agent runs on approve, allowlisted by hooks)
 pnpm task validate                # validate all manifests
 pnpm task audit [--since N]       # show recent denials
 pnpm task resolve                 # debug: show how the active task is resolved

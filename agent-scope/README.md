@@ -34,9 +34,11 @@ You engage the system in one of four ways:
    one-shot marker that embeds that description and copies the trigger
    text to your clipboard. The agent reads your description, explores
    the repo semantically, and proposes a scope via a rich two-part
-   `AskQuestion` (multi-select packages + single-select action), then
-   prints the exact `pnpm task create` command for you to run. Use this
-   when you want the agent to do the thinking.
+   `AskQuestion` (multi-select packages + single-select action), and on
+   `approve` runs `pnpm task create` itself (the `afterShellExecution`
+   hook has a narrow allowlist for the canonical invocation — see
+   "Architecture / approved-task-create allowlist" below). Use this when
+   you want the agent to do the thinking.
 3. **Explicit** — `pnpm task set <existing-id>` activates a manifest you
    already have.
 4. **Direct** — `pnpm task create <id> --description "..." --allowed "..." --activate`
@@ -62,6 +64,40 @@ All four agent-facing layers use the same library
 (`agent-scope/tasks/*.json`). The pre-shell and after-shell layers back each
 other up, so destructive commands that slip past the pre-check get reverted
 or deleted afterwards.
+
+### Approved-task-create allowlist
+
+The after-shell hooks include a narrow, audited allowlist so the agent
+can finish the smart-onboarding flow itself — i.e. on plan-mode
+`approve`, the agent runs `pnpm task create <id> ...` and the hook lets
+the resulting `agent-scope/tasks/<id>.json` plus `agent-scope/active`
+persist.
+
+The allowlist is:
+
+- **Deterministic** — `agent-scope/lib/shell-parse.mjs` (`extractTaskCreateId`)
+  tokenises the command and only matches canonical shapes:
+  `pnpm task create <id>`, `pnpm run task create <id>`, or
+  `node agent-scope/bin/task.mjs create <id>`. Impostors like
+  `echo ... > agent-scope/tasks/evil.json`, `cp`, opaque evaluators
+  (`node -e`, `python -c`), `npm`/`yarn`/`bun` wrappers, or ids with
+  path-escape chars (`..`, `/`, `.`, spaces) return `null` and fall back
+  to the default revert/delete behaviour.
+- **Narrow** — even with a valid id, only two paths are waived:
+  `agent-scope/tasks/<id>.json` (that specific id) and `agent-scope/active`.
+  Other files written inside `agent-scope/tasks/**` in the same turn
+  (including other task manifests) are still reverted/deleted.
+- **Audited** — every approved write is logged to
+  `agent-scope/logs/denials.jsonl` as an `afterShell.approved-create`
+  event alongside the command and task id.
+- **Validated** — the CLI itself rejects invalid ids and schema errors,
+  so a syntactically-invalid manifest never reaches disk for the hook to
+  allow.
+
+This keeps the smart-onboarding UX one-step (agent runs the command
+after you click Approve) without weakening protection: every non-matching
+write to `agent-scope/tasks/**` and `agent-scope/active` is still
+immediately reverted.
 
 ## Concepts
 
@@ -268,12 +304,13 @@ The agent then follows a fixed protocol (defined in
      already decided to include are pre-selected.
    - **Q2 — action (single-select):** `approve`, `show_json`,
      `edit_globs`, `widen`, `narrow`, `cancel`, `custom_instruction`.
-4. On `approve`, prints the exact `pnpm task create` command for you to
-   run.
-5. You run it in your terminal (not the agent — otherwise the
-   `afterShellExecution` hook would delete the new manifest as an
-   untracked file in a protected path).
-6. The agent starts the real work.
+4. On `approve`, the agent itself runs `pnpm task create <id> ...` via
+   the shell tool. The `afterShellExecution` / PostToolUse-Bash hooks
+   recognise the canonical task-create invocation and allow its two
+   specific writes (`agent-scope/tasks/<id>.json` and `agent-scope/active`)
+   to persist; every other write to those paths is still reverted. See
+   the "approved-task-create allowlist" section for details.
+5. The agent starts the real work in the same turn.
 
 From here, every attempted write to an out-of-scope file triggers a
 plan-mode AskQuestion menu — see **Escalation** below.

@@ -24,11 +24,13 @@ const __dirname = dirname(__filename);
 const scopeUrl  = pathToFileURL(resolve(__dirname, '../../agent-scope/lib/scope.mjs')).href;
 const logUrl    = pathToFileURL(resolve(__dirname, '../../agent-scope/lib/log.mjs')).href;
 const denialUrl = pathToFileURL(resolve(__dirname, '../../agent-scope/lib/denial.mjs')).href;
+const parseUrl  = pathToFileURL(resolve(__dirname, '../../agent-scope/lib/shell-parse.mjs')).href;
 const {
   resolveRepoRoot, resolveActiveTaskId, loadTask, checkPath, checkNodeVersion,
 } = await import(scopeUrl);
 const { logDenial } = await import(logUrl);
 const { buildAfterShellContext } = await import(denialUrl);
+const { extractTaskCreateId, approvedTaskCreateWrites } = await import(parseUrl);
 
 try { checkNodeVersion(); } catch (e) {
   process.stderr.write(e.message + '\n');
@@ -83,12 +85,39 @@ async function main() {
   const porcelain = gitPorcelain(root);
   if (porcelain === null) return emit({});
 
+  // Approved-task-create allowlist: if the command that just ran was
+  // `pnpm task create <id>` (or the canonical node equivalent), allow
+  // the two specific files that command legitimately writes —
+  //   agent-scope/tasks/<id>.json
+  //   agent-scope/active
+  // Every other protected-path write still gets reverted/deleted.
+  const approvedId = extractTaskCreateId(command);
+  const approvedWrites = approvedTaskCreateWrites(approvedId);
+  const approved = [];
+
   const entries = parsePorcelain(porcelain);
   const outOfScope = entries.filter(({ path }) => {
     if (!path) return false;
     const d = checkPath(task, path, root);
-    return d === 'deny' || d === 'protected';
+    if (d !== 'deny' && d !== 'protected') return false;
+    if (approvedWrites.has(path)) { approved.push(path); return false; }
+    return true;
   });
+
+  if (approved.length) {
+    for (const p of approved) {
+      logDenial(root, {
+        event: 'afterShell.approved-create',
+        tool: 'Bash',
+        path: p,
+        task: approvedId,
+        command,
+        sessionId,
+        agent: 'claude-code',
+      });
+    }
+  }
+
   if (outOfScope.length === 0) return emit({});
 
   const reverted = [];

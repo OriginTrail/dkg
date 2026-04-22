@@ -280,10 +280,14 @@ protocol below.
      match exactly): `approve`, `show_json`, `edit_globs`, `widen`,
      `narrow`, `cancel`, `custom_instruction`. Recommend `approve` in the
      prompt.
-5. **On `approve`** + the Q1 package selection, print a fenced bash block
-   with the **exact** command for the user to run in their terminal (not
-   you — the `afterShellExecution` hook would delete a new manifest file
-   you created yourself):
+5. **On `approve`** + the Q1 package selection, **YOU (the agent) run the
+   command yourself** via the Shell tool. The `afterShellExecution` hook
+   has a narrow allowlist for exactly this invocation: a canonical
+   `pnpm task create <id> ...` or
+   `node agent-scope/bin/task.mjs create <id> ...` is the ONLY shape that
+   may persist new files under `agent-scope/tasks/` and `agent-scope/active`.
+   The command must match Q1's package selection verbatim (any deviation
+   is a protocol violation — the user approved a specific scope):
 
    ```bash
    pnpm task create <id> \
@@ -294,7 +298,11 @@ protocol below.
      --activate
    ```
 
-   Wait for them to confirm ("done"/"go"), then start the actual work.
+   After the command succeeds (exit 0, manifest shown), continue with the
+   actual work in the same turn. Do NOT bounce the command back to the
+   user — they already approved it via the AskQuestion. If the command
+   fails for any reason (schema error, collision, etc.), surface the
+   error and re-ask via AskQuestion instead of retrying blindly.
 6. **On `show_json`**, print the drafted manifest, then re-ask both
    questions.
 7. **On `edit_globs` / `widen` / `narrow`**, ask one targeted follow-up in
@@ -366,7 +374,7 @@ AskQuestion prompt (see below).
 ```
 pnpm task start                   # interactive wizard (default) — user runs this; writes + activates manifest directly
 pnpm task start --smart           # user pastes description in CLI; agent proposes scope in chat
-pnpm task create <id> [flags]     # non-interactive manifest build — USER runs this
+pnpm task create <id> [flags]     # non-interactive manifest build — agent runs this on approve (allowlisted)
 pnpm task list | show | set <id> | clear | check <path> | audit | resolve
 pnpm scope:status | scope:validate | scope:test
 ```

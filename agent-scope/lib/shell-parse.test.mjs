@@ -7,6 +7,7 @@ import {
   splitCommands, tokenize, extractRedirections, extractDestructiveTargets,
   extractFindTargets, extractXargsTarget, extractNestedShellBody,
   extractOpaqueBody, bodyHasWriteIntent, bodyTouchesProtected,
+  extractTaskCreateId, approvedTaskCreateWrites,
 } from './shell-parse.mjs';
 import { PROTECTED_PATTERNS } from './scope.mjs';
 
@@ -245,4 +246,137 @@ test('scenario: benign node command (read-only) is not flagged', () => {
   assert.ok(opaque);
   // Body references protected path but has no write intent → not flagged.
   assert.equal(bodyHasWriteIntent(opaque.body), false);
+});
+
+// --- extractTaskCreateId + approvedTaskCreateWrites ----------------------
+// The afterShell hook uses these to allow the ONE specific write that a
+// `pnpm task create <id>` invocation legitimately produces. Everything
+// else under agent-scope/** still gets reverted.
+
+test('extractTaskCreateId: pnpm task create <id> returns the id', () => {
+  assert.equal(
+    extractTaskCreateId('pnpm task create peer-sync-auth --inherits base --activate'),
+    'peer-sync-auth',
+  );
+});
+
+test('extractTaskCreateId: pnpm run task create <id> returns the id', () => {
+  assert.equal(
+    extractTaskCreateId('pnpm run task create my-id'),
+    'my-id',
+  );
+});
+
+test('extractTaskCreateId: node agent-scope/bin/task.mjs create <id>', () => {
+  assert.equal(
+    extractTaskCreateId('node agent-scope/bin/task.mjs create my-id --activate'),
+    'my-id',
+  );
+});
+
+test('extractTaskCreateId: node ./agent-scope/bin/task.mjs create <id>', () => {
+  assert.equal(
+    extractTaskCreateId('node ./agent-scope/bin/task.mjs create my-id'),
+    'my-id',
+  );
+});
+
+test('extractTaskCreateId: absolute node path works', () => {
+  assert.equal(
+    extractTaskCreateId('/usr/local/bin/node agent-scope/bin/task.mjs create my-id'),
+    'my-id',
+  );
+});
+
+test('extractTaskCreateId: absolute pnpm path works', () => {
+  assert.equal(
+    extractTaskCreateId('/opt/homebrew/bin/pnpm task create my-id --activate'),
+    'my-id',
+  );
+});
+
+test('extractTaskCreateId: quoted id is accepted', () => {
+  assert.equal(
+    extractTaskCreateId('pnpm task create "my-id" --description "x"'),
+    'my-id',
+  );
+});
+
+test('extractTaskCreateId: chained command — picks up the create sub-command', () => {
+  assert.equal(
+    extractTaskCreateId('git add . && pnpm task create my-id --activate'),
+    'my-id',
+  );
+  assert.equal(
+    extractTaskCreateId('pnpm task create my-id --activate && pnpm task show'),
+    'my-id',
+  );
+});
+
+test('extractTaskCreateId: pnpm task list / set / clear / show → null', () => {
+  assert.equal(extractTaskCreateId('pnpm task list'), null);
+  assert.equal(extractTaskCreateId('pnpm task set my-id'), null);
+  assert.equal(extractTaskCreateId('pnpm task clear'), null);
+  assert.equal(extractTaskCreateId('pnpm task show'), null);
+});
+
+test('extractTaskCreateId: missing id → null', () => {
+  assert.equal(extractTaskCreateId('pnpm task create'), null);
+  assert.equal(extractTaskCreateId('pnpm task create --activate'), null);
+});
+
+test('extractTaskCreateId: id starts with hyphen (flag-like) → null', () => {
+  assert.equal(extractTaskCreateId('pnpm task create --my-id'), null);
+  assert.equal(extractTaskCreateId('pnpm task create -foo'), null);
+});
+
+test('extractTaskCreateId: id with path-escape / special chars → null', () => {
+  assert.equal(extractTaskCreateId('pnpm task create ../evil'), null);
+  assert.equal(extractTaskCreateId('pnpm task create my/id'), null);
+  assert.equal(extractTaskCreateId('pnpm task create "my id"'), null);
+  assert.equal(extractTaskCreateId('pnpm task create my.id'), null);
+  assert.equal(extractTaskCreateId('pnpm task create $(whoami)'), null);
+});
+
+test('extractTaskCreateId: impostor that writes to tasks/ directly → null', () => {
+  assert.equal(
+    extractTaskCreateId('echo \'{"id":"evil"}\' > agent-scope/tasks/evil.json'),
+    null,
+  );
+  assert.equal(
+    extractTaskCreateId('cp /tmp/m.json agent-scope/tasks/evil.json'),
+    null,
+  );
+  assert.equal(
+    extractTaskCreateId("node -e \"require('fs').writeFileSync('agent-scope/tasks/evil.json', '{}')\""),
+    null,
+  );
+});
+
+test('extractTaskCreateId: non-canonical scripts → null (forces bootstrap)', () => {
+  assert.equal(extractTaskCreateId('npm run task create my-id'), null);
+  assert.equal(extractTaskCreateId('yarn task create my-id'), null);
+  assert.equal(extractTaskCreateId('bun task create my-id'), null);
+});
+
+test('extractTaskCreateId: non-string / empty → null', () => {
+  assert.equal(extractTaskCreateId(''), null);
+  assert.equal(extractTaskCreateId(null), null);
+  assert.equal(extractTaskCreateId(undefined), null);
+  assert.equal(extractTaskCreateId(42), null);
+  assert.equal(extractTaskCreateId('   '), null);
+});
+
+test('approvedTaskCreateWrites: returns manifest + active paths for valid id', () => {
+  const s = approvedTaskCreateWrites('peer-sync-auth');
+  assert.equal(s.size, 2);
+  assert.ok(s.has('agent-scope/tasks/peer-sync-auth.json'));
+  assert.ok(s.has('agent-scope/active'));
+});
+
+test('approvedTaskCreateWrites: invalid / empty id → empty set', () => {
+  assert.equal(approvedTaskCreateWrites(null).size, 0);
+  assert.equal(approvedTaskCreateWrites('').size, 0);
+  assert.equal(approvedTaskCreateWrites('../evil').size, 0);
+  assert.equal(approvedTaskCreateWrites('a/b').size, 0);
 });

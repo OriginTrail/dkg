@@ -183,3 +183,106 @@ export function bodyTouchesProtected(body, protectedPatterns) {
   const literals = literalsFromProtected(protectedPatterns);
   return literals.some(lit => lit && body.includes(lit));
 }
+
+// ---------------------------------------------------------------------------
+// Approved-task-create detector
+// ---------------------------------------------------------------------------
+//
+// The afterShell hook normally reverts / deletes any writes to protected
+// paths (including `agent-scope/tasks/**`). That's the right default — we
+// don't want the agent to silently mint itself a wider task scope.
+//
+// BUT: the smart-onboarding protocol ends with a plan-mode `AskQuestion`
+// where the USER explicitly approves the proposed scope. Post-approval,
+// the agent should be able to run `pnpm task create <id> ...` directly
+// without bouncing the command back to the user to copy-paste.
+//
+// This function extracts the task id from the command IFF the command
+// invokes the canonical task-create CLI. The hook uses that id to
+// allowlist only two specific files:
+//
+//   - agent-scope/tasks/<id>.json   (the manifest the CLI just wrote)
+//   - agent-scope/active            (set when --activate was passed)
+//
+// Everything else in `agent-scope/**` (hooks, library, bin, other tasks)
+// stays hard-protected. Writes to ANY other path still get reverted.
+//
+// Supported invocations:
+//   pnpm task create <id> [flags]
+//   pnpm run task create <id> [flags]
+//   node agent-scope/bin/task.mjs create <id> [flags]
+//   node ./agent-scope/bin/task.mjs create <id> [flags]
+//
+// Returns: the task id string, or null if the command is not a valid
+// task-create invocation. Task id validation matches the JSON schema
+// (kebab-case, alphanumerics + hyphens/underscores, 1-64 chars).
+
+const TASK_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
+
+function looksLikePnpm(t) {
+  if (!t) return false;
+  const tail = t.split('/').pop();
+  return tail === 'pnpm';
+}
+
+function looksLikeNode(t) {
+  if (!t) return false;
+  const tail = t.split('/').pop();
+  return tail === 'node' || tail === 'node.exe';
+}
+
+function looksLikeTaskJs(t) {
+  if (!t) return false;
+  const norm = t.replace(/^\.\//, '');
+  return (
+    norm === 'agent-scope/bin/task.mjs' ||
+    norm.endsWith('/agent-scope/bin/task.mjs')
+  );
+}
+
+// Extract the id from a single tokenized subcommand, or null.
+function extractIdFromTokens(tokens) {
+  if (!tokens?.length) return null;
+
+  if (looksLikePnpm(tokens[0])) {
+    let i = 1;
+    if (tokens[i] === 'run') i++;
+    if (tokens[i] !== 'task') return null;
+    if (tokens[i + 1] !== 'create') return null;
+    const id = tokens[i + 2];
+    return id && TASK_ID_RE.test(id) ? id : null;
+  }
+
+  if (looksLikeNode(tokens[0])) {
+    if (!looksLikeTaskJs(tokens[1])) return null;
+    if (tokens[2] !== 'create') return null;
+    const id = tokens[3];
+    return id && TASK_ID_RE.test(id) ? id : null;
+  }
+
+  return null;
+}
+
+// Scan the full command (which may contain multiple sub-commands joined
+// with `&&` / `||` / `;` / `|`) and return the FIRST approved task-create
+// id we find, or null.
+export function extractTaskCreateId(command) {
+  if (typeof command !== 'string' || !command.trim()) return null;
+  for (const sub of splitCommands(command)) {
+    const tokens = tokenize(sub);
+    const id = extractIdFromTokens(tokens);
+    if (id) return id;
+  }
+  return null;
+}
+
+// Given a task id, return the POSIX relative paths the afterShell hook
+// should allow past protection. Always includes the manifest and the
+// `active` file. Stable sort / lowercase for comparison callers.
+export function approvedTaskCreateWrites(id) {
+  if (!id || !TASK_ID_RE.test(id)) return new Set();
+  return new Set([
+    `agent-scope/tasks/${id}.json`,
+    'agent-scope/active',
+  ]);
+}

@@ -144,10 +144,13 @@ Follow these steps exactly:
    - Your recommendation should appear inline in the prompt
      ("I recommend `approve`").
 
-5. **On `approve` + the Q1 package selection:** print a fenced bash block
-   with the **exact** command for the user to run in their own terminal.
-   The user must run it (not you) because the `afterShellExecution` hook
-   would delete an untracked file in `agent-scope/tasks/` if you did.
+5. **On `approve` + the Q1 package selection:** **YOU (the agent) run the
+   command directly** via the Shell tool. The `afterShellExecution` hook
+   has a narrow allowlist for the canonical task-create invocation:
+   `pnpm task create <id> ...` and `node agent-scope/bin/task.mjs create
+   <id> ...` are the ONLY shapes whose writes to `agent-scope/tasks/<id>.json`
+   and `agent-scope/active` may persist. The command's `--allowed` flags
+   must match Q1 verbatim (any divergence is a protocol violation):
 
    ```bash
    pnpm task create <id> \
@@ -159,8 +162,10 @@ Follow these steps exactly:
      --activate
    ```
 
-   Then say "Let me know when you've run that and I'll start." Wait for
-   the user to confirm with any short acknowledgement ("done", "go", "ok").
+   After the command succeeds, continue with the actual work in the same
+   turn. Do NOT bounce the command back to the user — they already
+   approved the scope via AskQuestion. If the command fails, surface the
+   error and re-ask via AskQuestion instead of retrying blindly.
 
 6. **On `show_json`:** print the drafted manifest JSON, then re-ask the
    same two questions.
