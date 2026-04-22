@@ -230,11 +230,23 @@ jobs:
         # error rather than a separate red lane.
         run: |
           set -e
-          curl -sf -X POST -H 'Content-Type: text/plain' \
-            --data-binary $'com.bigdata.rdf.store.AbstractTripleStore.quads=true\ncom.bigdata.rdf.sail.truthMaintenance=false\ncom.bigdata.rdf.sail.namespace=dkgq\ncom.bigdata.rdf.store.AbstractTripleStore.statementIdentifiers=false' \
+          # Quads mode requires disabling inference (NoAxioms) and truth
+          # maintenance — Blazegraph rejects the namespace creation
+          # otherwise with: "com.bigdata.rdf.store.AbstractTripleStore.quads
+          # does not support inference".
+          {
+            echo 'com.bigdata.rdf.store.AbstractTripleStore.quads=true'
+            echo 'com.bigdata.rdf.store.AbstractTripleStore.statementIdentifiers=false'
+            echo 'com.bigdata.rdf.store.AbstractTripleStore.axiomsClass=com.bigdata.rdf.axioms.NoAxioms'
+            echo 'com.bigdata.rdf.sail.truthMaintenance=false'
+            echo 'com.bigdata.rdf.sail.namespace=dkgq'
+          } > /tmp/dkgq.props
+          echo '--- /tmp/dkgq.props ---' && cat /tmp/dkgq.props && echo '---'
+          curl -fsS -X POST -H 'Content-Type: text/plain' \
+            --data-binary @/tmp/dkgq.props \
             http://localhost:9999/bigdata/namespace
           # Verify the namespace responds to SPARQL.
-          curl -sf "http://localhost:9999/bigdata/namespace/dkgq/sparql?query=ASK%20%7B%7D" >/dev/null
+          curl -fsS "http://localhost:9999/bigdata/namespace/dkgq/sparql?query=ASK%20%7B%7D" >/dev/null
           echo "blazegraph dkgq (quads) namespace ready"
         continue-on-error: true
 
