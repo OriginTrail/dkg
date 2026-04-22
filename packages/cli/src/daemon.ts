@@ -2650,7 +2650,7 @@ export async function reverseLocalAgentSetupForUi(
       if (entry && typeof entry === 'object') {
         const installedFromConfig = typeof entry.config?.installedWorkspace === 'string'
           && entry.config.installedWorkspace.trim()
-          ? entry.config.installedWorkspace
+          ? entry.config.installedWorkspace.trim()
           : undefined;
         if (installedFromConfig) {
           workspaceDir = installedFromConfig;

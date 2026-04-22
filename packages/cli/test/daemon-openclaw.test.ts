@@ -1934,6 +1934,43 @@ describe('OpenClaw UI Connect/Disconnect/Refresh fresh-HOME integration (issue #
     expect(readFileSync(userSkillPath, 'utf-8')).toBe(userBytes);
   });
 
+  it('scenario 2h: whitespace-padded entry.config.installedWorkspace is trimmed before skill cleanup (Codex R12-1)', async () => {
+    // Regression for https://github.com/OriginTrail/dkg-v9/pull/234#discussion_r3123147766
+    // Prior to the fix, the daemon's installedWorkspace read returned the
+    // raw JSON value after a truthy `.trim()` check — whitespace-padded
+    // strings passed validation but were then handed to
+    // `removeCanonicalNodeSkill` / `verifySkillRemoved` verbatim, producing
+    // a wrong (non-existent) path. Disconnect silently succeeded, the real
+    // SKILL.md stayed orphaned. Now we trim at the read site.
+
+    const paddedInstalledWorkspace = `  ${workspaceDir}  `;
+    mergeOpenClawConfig(openclawConfigPath, adapterPath, testEntryConfig, workspaceDir);
+    const merged = JSON.parse(readFileSync(openclawConfigPath, 'utf-8'));
+    // Inject whitespace around the authoritative pointer to simulate a
+    // hand-edited or externally-written config value.
+    merged.plugins.entries['adapter-openclaw'].config.installedWorkspace = paddedInstalledWorkspace;
+    writeFileSync(openclawConfigPath, JSON.stringify(merged, null, 2));
+
+    const removeSkillSpy = vi.fn();
+    const verifySkillRemovedSpy = vi.fn(() => null);
+
+    const config = makeConfig();
+    await reverseLocalAgentSetupForUi(config, openclawConfigPath, {
+      removeCanonicalNodeSkill: removeSkillSpy,
+      verifySkillRemoved: verifySkillRemovedSpy,
+    });
+
+    // Both skill helpers must receive the TRIMMED path, not the raw
+    // whitespace-padded value — otherwise the resolved SKILL.md path
+    // (`<padded>/skills/dkg-node/SKILL.md`) wouldn't exist on disk and the
+    // cleanup would silently no-op against the wrong location.
+    expect(removeSkillSpy).toHaveBeenCalledTimes(1);
+    expect(removeSkillSpy.mock.calls[0][0]).toBe(workspaceDir);
+    expect(removeSkillSpy.mock.calls[0][0]).not.toBe(paddedInstalledWorkspace);
+    expect(verifySkillRemovedSpy).toHaveBeenCalledTimes(1);
+    expect(verifySkillRemovedSpy.mock.calls[0][0]).toBe(workspaceDir);
+  });
+
   it('scenario 3a: refresh endpoint moves a bridge-ok integration to ready', async () => {
     const config = makeConfig({
       localAgentIntegrations: {
