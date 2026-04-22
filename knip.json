@@ -34,9 +34,8 @@
         "utils/**/*.ts",
         "test/**/*.{ts,tsx}"
       ],
-      "ignoreDependencies": [
-        "@types/mocha",
-        "hardhat-tracer"
+      "ignore": [
+        ".solcover.js"
       ]
     },
     "packages/network-sim": {
