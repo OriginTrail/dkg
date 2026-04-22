@@ -60,7 +60,7 @@ interface DKGAgent {
   registerContextGraphOnChain(params: {
     participantIdentityIds: bigint[];
     requiredSignatures: number;
-  }): Promise<{ contextGraphId: bigint; txHash?: string; blockNumber?: number }>;
+  }): Promise<{ contextGraphId: bigint; txHash?: string; blockNumber?: number; success?: boolean }>;
   signContextGraphDigest(
     contextGraphId: bigint,
     merkleRoot: Uint8Array,
