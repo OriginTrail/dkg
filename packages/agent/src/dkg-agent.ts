@@ -265,6 +265,21 @@ export interface DKGAgentConfig {
    * empty results. Can also be enabled via `DKG_STRICT_WM_AUTH=1`.
    */
   strictWmCrossAgentAuth?: boolean;
+  /**
+   * When true, ingress gossip on context-graph topics MUST arrive wrapped
+   * in a signed `GossipEnvelope` whose (a) signature recovers, (b) type
+   * matches the subscription label, and (c) `contextGraphId` matches the
+   * subscription's context graph. Raw (un-enveloped) bytes are dropped.
+   *
+   * Default (false) mirrors the rolling-upgrade strategy used for
+   * `strictWmCrossAgentAuth`: raw gossip is still accepted so peers mid
+   * upgrade don't go dark, but every raw message is logged and counted,
+   * and forged/tampered envelopes are always rejected regardless of this
+   * flag. Enable via config or `DKG_STRICT_GOSSIP_ENVELOPE=1` once every
+   * peer in the mesh has been upgraded (spec §08_PROTOCOL_WIRE, PR #229
+   * bot review round 6).
+   */
+  strictGossipEnvelope?: boolean;
 }
 
 /**
@@ -2390,7 +2405,10 @@ export class DKGAgent {
           operationId: ctx.operationId,
         });
         const topic = paranetUpdateTopic(contextGraphId);
-        await this.gossip.publish(topic, message);
+        // Signed-envelope wrap (PR #229 bot review round 6): update messages
+        // must carry a recoverable signer so subscribers can reject envelopes
+        // whose recovered signer does not match the KC's publisher.
+        await this.signedGossipPublish(topic, 'KA_UPDATE', contextGraphId, message);
         this.log.info(ctx, `Broadcast KA update for batchId=${kcId} on ${topic}`);
       } catch (err) {
         this.log.warn(ctx, `Failed to broadcast KA update: ${err instanceof Error ? err.message : String(err)}`);
@@ -2536,7 +2554,13 @@ export class DKGAgent {
 
       const topic = paranetFinalizationTopic(contextGraphId);
       try {
-        await this.gossip.publish(topic, encodeFinalizationMessage(msg));
+        // Sign the FinalizationMessage envelope so subscribers can verify
+        // the signer is the expected publisher and reject forged/replayed
+        // envelopes. Pre-r6 this was published raw, which made the new
+        // ingress-side `classifyGossipBytes()` path fall through as 'raw'
+        // and bypass the envelope-signing hardening entirely
+        // (PR #229 bot review round 6 — signed-gossip envelope bypass).
+        await this.signedGossipPublish(topic, 'FINALIZATION', contextGraphId, encodeFinalizationMessage(msg));
         this.log.info(ctx, `Broadcast finalization for ${result.ual} to ${topic}${ctxGraphIdStr ? ` (contextGraph=${ctxGraphIdStr})` : ''}${result.contextGraphError ? ' (ctx-graph registration failed, omitting contextGraphId)' : ''}`);
       } catch {
         this.log.warn(ctx, `No peers subscribed to ${topic} yet`);
@@ -2943,6 +2967,23 @@ export class DKGAgent {
     //                  the new signing layer strictly weaker than no
     //                  envelope (a tampered envelope would still be
     //                  processed as legacy gossip).
+    // Map subscription label → set of envelope `type` values accepted on
+    // that topic. Keeps subscribers from accidentally processing an
+    // envelope whose declared type belongs to a different topic
+    // (PR #229 bot review round 6 — subscription/type mismatch).
+    const ACCEPTED_ENVELOPE_TYPES: Record<string, ReadonlySet<string>> = {
+      publish: new Set(['PUBLISH_REQUEST']),
+      swm: new Set(['SHARE', 'SHARE_CAS', 'ASSERTION_PROMOTE']),
+      update: new Set(['KA_UPDATE']),
+      finalization: new Set(['FINALIZATION']),
+    };
+
+    const strictEnvelope = this.config.strictGossipEnvelope === true
+      || (() => {
+        const v = (process.env.DKG_STRICT_GOSSIP_ENVELOPE ?? '').toLowerCase();
+        return v === '1' || v === 'true' || v === 'yes';
+      })();
+
     const dispatchIngress = (label: string, data: Uint8Array): {
       payload: Uint8Array;
       recoveredSigner: string | undefined;
@@ -2955,7 +2996,43 @@ export class DKGAgent {
       }
       if (kind === 'verified') {
         const env = tryUnwrapSignedEnvelope(data)!;
+        // Defence-in-depth: the signature only authenticates the
+        // (type, contextGraphId, timestamp, payload) tuple the publisher
+        // signed. A malicious peer could still take a legitimately signed
+        // envelope from one topic (e.g. FINALIZATION on cg=A) and
+        // re-broadcast it on a different topic (e.g. SHARE on cg=A, or
+        // FINALIZATION on cg=B) — the signature stays valid but the
+        // dispatcher would treat it as a different message class. Reject
+        // when either dimension disagrees with the subscription context.
+        const accepted = ACCEPTED_ENVELOPE_TYPES[label];
+        if (accepted && !accepted.has(env.envelope.type)) {
+          const ctx = createOperationContext('system');
+          this.log.warn(
+            ctx,
+            `rejected ${label} envelope with mismatched type=${env.envelope.type} on cg=${contextGraphId}`,
+          );
+          return undefined;
+        }
+        if (env.envelope.contextGraphId && env.envelope.contextGraphId !== contextGraphId) {
+          const ctx = createOperationContext('system');
+          this.log.warn(
+            ctx,
+            `rejected ${label} envelope for cg=${env.envelope.contextGraphId} delivered on cg=${contextGraphId}`,
+          );
+          return undefined;
+        }
         return { payload: env.envelope.payload, recoveredSigner: env.recoveredSigner };
+      }
+      // `kind === 'raw'`: bytes were not an envelope at all (legacy
+      // pre-r6 gossip). When the mesh has been fully upgraded, enable
+      // `strictGossipEnvelope` (or `DKG_STRICT_GOSSIP_ENVELOPE=1`) to
+      // drop raw gossip entirely. During rolling upgrade we still accept
+      // raw so legacy peers don't fall off the mesh, but we log each one
+      // so operators can see who still needs upgrading.
+      if (strictEnvelope) {
+        const ctx = createOperationContext('system');
+        this.log.warn(ctx, `rejected raw ${label} gossip on cg=${contextGraphId} (strictGossipEnvelope)`);
+        return undefined;
       }
       return { payload: data, recoveredSigner: undefined };
     };
@@ -6553,7 +6630,10 @@ export class DKGAgent {
         if (gossipMessage) {
           const topic = paranetWorkspaceTopic(contextGraphId);
           try {
-            await agent.gossip.publish(topic, gossipMessage);
+            // Wrap in signed envelope so subscribers can verify the
+            // promote broadcast's signer matches an allowed CG member
+            // (PR #229 bot review round 6 — signed-gossip envelope bypass).
+            await agent.signedGossipPublish(topic, 'ASSERTION_PROMOTE', contextGraphId, gossipMessage);
           } catch (err: any) {
             agent.log.warn(createOperationContext('share'), `Promote gossip failed (local SWM committed): ${err?.message ?? err}`);
           }

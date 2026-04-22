@@ -84,8 +84,15 @@ export async function loadTokens(authConfig?: AuthConfig): Promise<Set<string>> 
   // leave stale file tokens alive forever (the very rotation bug
   // CLI-11 documents).
   try {
-    const mtimeMs = statSync(filePath).mtimeMs;
-    lastFileSnapshot.set(tokens, { mtimeMs, fileTokens });
+    const st = statSync(filePath);
+    const raw = readFileSync(filePath);
+    const contentHash = createHash('sha256').update(raw).digest('hex');
+    lastFileSnapshot.set(tokens, {
+      mtimeMs: st.mtimeMs,
+      size: st.size,
+      contentHash,
+      fileTokens,
+    });
   } catch {
     /* file vanished mid-load — next verifyToken call will reconcile */
   }
@@ -109,10 +116,21 @@ export async function loadTokens(authConfig?: AuthConfig): Promise<Set<string>> 
  *
  * We now reconcile the in-memory `validTokens` set with the on-disk
  * `auth.token` file every time `verifyToken` runs, but only when the
- * file's mtime has changed since the last reconciliation. The cost is
- * one `statSync` per call, which is in the same order of magnitude as
- * the existing `Set.has` and well below the cost of every other path
+ * file's size, mtime, OR content hash has changed since the last
+ * reconciliation. The cost is one `statSync` per call plus a cheap
+ * short-circuit on size+mtime; the sha256 is only recomputed when
+ * those differ, which is in the same order of magnitude as the
+ * existing `Set.has` and well below the cost of every other path
  * the daemon executes per request.
+ *
+ * Why not `mtimeMs` alone: on coarse filesystems (or when
+ * `dkg auth rotate` runs twice in the same millisecond — rare but
+ * observable in CI on fast disks) two consecutive rewrites can share
+ * the same mtime, and a `stat`-only guard would silently skip the
+ * second reconciliation and leave the previous token valid. Atomic
+ * `rename(tmp, auth.token)` also preserves the destination mtime on
+ * some platforms. Hashing the bytes closes the hole unconditionally
+ * (PR #229 bot review round 6 — mtime-only rotation bypass).
  *
  * Tokens added programmatically (e.g. via the future `rotateToken`
  * API or pinned in `config.auth.tokens`) are preserved across
@@ -122,27 +140,47 @@ export async function loadTokens(authConfig?: AuthConfig): Promise<Set<string>> 
  */
 const lastFileSnapshot = new WeakMap<
   Set<string>,
-  { mtimeMs: number; fileTokens: Set<string> }
+  { mtimeMs: number; size: number; contentHash: string; fileTokens: Set<string> }
 >();
 
 function reconcileFileTokens(validTokens: Set<string>): void {
   const filePath = tokenFilePath();
   let mtimeMs = -1;
-  let raw: string | null = null;
+  let size = -1;
   try {
-    mtimeMs = statSync(filePath).mtimeMs;
+    const st = statSync(filePath);
+    mtimeMs = st.mtimeMs;
+    size = st.size;
   } catch {
     return;
   }
   const snapshot = lastFileSnapshot.get(validTokens);
-  if (snapshot && snapshot.mtimeMs === mtimeMs) return;
+  // Cheap short-circuit: if size+mtime are identical, the bytes almost
+  // certainly are too (and the fallback below will prove it by hashing).
+  // Reading/hashing on every call would defeat the "one statSync per
+  // request" design goal.
+  if (snapshot && snapshot.mtimeMs === mtimeMs && snapshot.size === size) return;
+  let rawBuf: Buffer;
   try {
-    raw = readFileSync(filePath, 'utf-8');
+    rawBuf = readFileSync(filePath);
   } catch {
     return;
   }
+  const contentHash = createHash('sha256').update(rawBuf).digest('hex');
+  if (snapshot && snapshot.contentHash === contentHash) {
+    // mtime/size drifted but bytes are unchanged (e.g. atomic replace
+    // with identical content, or `touch`). Refresh the fast-path
+    // metadata so we don't re-hash on every request.
+    lastFileSnapshot.set(validTokens, {
+      mtimeMs,
+      size,
+      contentHash,
+      fileTokens: snapshot.fileTokens,
+    });
+    return;
+  }
   const newFileTokens = new Set<string>();
-  for (const line of raw.split('\n')) {
+  for (const line of rawBuf.toString('utf-8').split('\n')) {
     const t = line.trim();
     if (t.length > 0 && !t.startsWith('#')) newFileTokens.add(t);
   }
@@ -152,7 +190,7 @@ function reconcileFileTokens(validTokens: Set<string>): void {
     }
   }
   for (const t of newFileTokens) validTokens.add(t);
-  lastFileSnapshot.set(validTokens, { mtimeMs, fileTokens: newFileTokens });
+  lastFileSnapshot.set(validTokens, { mtimeMs, size, contentHash, fileTokens: newFileTokens });
 }
 
 /**

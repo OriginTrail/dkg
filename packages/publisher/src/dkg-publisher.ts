@@ -26,8 +26,39 @@ import {
   type KAMetadata,
 } from './metadata.js';
 import { ethers } from 'ethers';
+import { openSync, writeSync, fsyncSync, closeSync, mkdirSync } from 'node:fs';
+import { dirname } from 'node:path';
 
 export { RESERVED_SUBJECT_PREFIXES, findReservedSubjectPrefix, isReservedSubject } from './reserved-subjects.js';
+
+/**
+ * Append `entry` as an NDJSON record to `filePath`, fsync to platter, then
+ * close the fd. Designed to be called synchronously between the publisher
+ * digest signature and the `eth_sendRawTransaction` broadcast so a crash
+ * in that window leaves a recoverable record. Throws on I/O failure —
+ * callers MUST NOT broadcast without a durable entry.
+ */
+function appendWalEntrySync(filePath: string, entry: PreBroadcastJournalEntry): void {
+  try {
+    mkdirSync(dirname(filePath), { recursive: true });
+  } catch {
+    /* best-effort; openSync below will surface the real error */
+  }
+  const line = JSON.stringify(entry) + '\n';
+  // `a` = append, creating if missing. Permissions 0o600 keep the log
+  // readable only by the node operator — WAL entries expose pubkeys,
+  // merkle roots and token amounts.
+  const fd = openSync(filePath, 'a', 0o600);
+  try {
+    writeSync(fd, line);
+    // fsync to force the journal page to disk, otherwise a kernel
+    // panic between `write` and OS buffer flush would replay the bug
+    // the in-memory journal already had.
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
 
 /**
  * Pre-broadcast write-ahead journal entry (BUGS_FOUND.md P-1).
@@ -84,6 +115,21 @@ export interface DKGPublisherConfig {
   knownBatchContextGraphs?: Map<string, string>;
   /** Shared write lock map. Pass to SharedMemoryHandler so gossip writes serialize against CAS writes. */
   writeLocks?: Map<string, Promise<void>>;
+  /**
+   * Absolute path to an append-only write-ahead-log file. When set, each
+   * `PreBroadcastJournalEntry` is fsync'd to disk BEFORE the on-chain
+   * `eth_sendRawTransaction` is broadcast. Required for P-1 durability:
+   * the in-memory `preBroadcastJournal` is wiped by a process crash, so
+   * without the file the publisher loses every "we signed and were
+   * about to send" record the recovery routine needs to reconcile
+   * against chain events (PR #229 bot review round 6 — WAL durability).
+   *
+   * When undefined the journal is still appended in memory (existing
+   * behaviour) so the phase event stays observable; this preserves the
+   * invariant for tests / single-process harnesses that don't mount a
+   * persistent dkgDir.
+   */
+  publishWalFilePath?: string;
 }
 
 export interface ShareOptions {
@@ -256,12 +302,14 @@ export class DKGPublisher implements Publisher {
    *  at 1024 entries (most-recent kept). */
   readonly preBroadcastJournal: PreBroadcastJournalEntry[] = [];
   readonly writeLocks: Map<string, Promise<void>>;
+  private readonly publishWalFilePath: string | undefined;
 
   constructor(config: DKGPublisherConfig) {
     this.store = config.store;
     this.chain = config.chain;
     this.eventBus = config.eventBus;
     this.keypair = config.keypair;
+    this.publishWalFilePath = config.publishWalFilePath;
     this.publisherNodeIdentityId = config.publisherNodeIdentityId ?? 0n;
 
     if (config.publisherPrivateKey) {
@@ -1253,7 +1301,14 @@ export class DKGPublisher implements Publisher {
     // BEFORE the self-sign fallback and BEFORE the on-chain tx is built.
     const perCgRequired = options.perCgRequiredSignatures ?? 0;
     const collectedAckCount = v10ACKs?.length ?? 0;
-    const perCgQuorumUnmet = perCgRequired > 1 && collectedAckCount < perCgRequired;
+    // NOTE: must be `> 0` (not `> 1`). Setting `perCgRequiredSignatures = 1`
+    // is a legitimate single-ACK requirement — e.g. a curated CG that
+    // insists on at least one peer ACK before accepting chain finality. The
+    // old `> 1` guard silently bypassed that floor because it allowed the
+    // `collectedAckCount === 0` path to proceed straight into the
+    // self-sign fallback below, publishing without any peer ACK at all
+    // (PR #229 bot review round 6 — per-CG quorum bypass).
+    const perCgQuorumUnmet = perCgRequired > 0 && collectedAckCount < perCgRequired;
     if (perCgQuorumUnmet) {
       this.log.warn(
         ctx,
@@ -1392,6 +1447,24 @@ export class DKGPublisher implements Publisher {
           this.preBroadcastJournal.push(writeAheadEntry);
           if (this.preBroadcastJournal.length > 1024) {
             this.preBroadcastJournal.splice(0, this.preBroadcastJournal.length - 1024);
+          }
+          // Durable copy — when a WAL file path is configured, fsync the
+          // entry BEFORE releasing the `journal:writeahead` phase. The
+          // `writeSync + fsyncSync` call is synchronous by design: the
+          // whole point of P-1 is that the on-chain broadcast below MUST
+          // NOT happen until the intent is on stable storage, so this
+          // cannot be `setImmediate` or a background flush
+          // (PR #229 bot review round 6 — in-memory WAL bypass).
+          if (this.publishWalFilePath) {
+            try {
+              appendWalEntrySync(this.publishWalFilePath, writeAheadEntry);
+            } catch (walErr) {
+              this.log.error(
+                ctx,
+                `WAL persistence FAILED for op=${writeAheadEntry.publishOperationId}: ${walErr instanceof Error ? walErr.message : String(walErr)}. Aborting pre-broadcast.`,
+              );
+              throw walErr;
+            }
           }
         } finally {
           onPhase?.('journal:writeahead', 'end');

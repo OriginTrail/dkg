@@ -38,6 +38,14 @@ function makeRuntime(settings: Record<string, string> = {}, characterName?: stri
 function makeMessage(text: string, overrides: Partial<Memory> & { id?: string } = {}): Memory {
   return {
     content: { text },
+    // Bot review PR #229 round 6 (actions.ts:635) — persistChatTurnImpl
+    // now REQUIRES a stable `message.id` and will throw if it's missing
+    // (instead of fabricating a Date.now() fallback that broke retry
+    // idempotence). Keep a deterministic default here so existing tests
+    // that don't care about the id still exercise the happy path; tests
+    // that need to specifically probe the missing-id contract pass
+    // `overrides.id` explicitly (and can `delete` it afterwards).
+    id: overrides.id ?? 'mem-default',
     userId: overrides.userId ?? 'alice',
     roomId: overrides.roomId ?? 'room-1',
     agentId: overrides.agentId ?? 'agent-eliza',
@@ -94,6 +102,90 @@ describe('persistChatTurnImpl — canonical user-turn shape (matches node-ui Cha
     const { agent, publishes } = makeCapturingAgent();
     await persistChatTurnImpl(agent, makeRuntime({ DKG_CHAT_CG: 'custom-cg' }), makeMessage('hi'), {} as State, {});
     expect(publishes[0].cgId).toBe('custom-cg');
+  });
+
+  it('assistant message timestamp sorts strictly AFTER the user message timestamp on the same turn', async () => {
+    // Bot review PR #229 round 6, actions.ts:662 — `schema:dateCreated`
+    // on the assistant message MUST be > the user message timestamp so
+    // downstream readers that order by timestamp always see user → agent.
+    // The previous code reused the same `ts` for both, leaving the
+    // ordering undefined when two messages shared a subject position.
+    const { agent, publishes } = makeCapturingAgent();
+    const fixedTs = '2026-01-02T03:04:05.000Z';
+    await persistChatTurnImpl(
+      agent, makeRuntime(),
+      makeMessage('hi', { id: 'order-1', roomId: 'r' } as any),
+      {} as State,
+      { ts: fixedTs, assistantText: 'hello back' },
+    );
+    const quads = publishes[0].quads;
+    const userTs = quads.find(
+      (q) => q.subject === 'urn:dkg:chat:msg:user:r:order-1' && q.predicate === `${SCHEMA}dateCreated`,
+    )!;
+    const asstTs = quads.find(
+      (q) => q.subject === 'urn:dkg:chat:msg:agent:r:order-1' && q.predicate === `${SCHEMA}dateCreated`,
+    )!;
+    expect(userTs.object).toBe(`"${fixedTs}"^^<${XSD_DATETIME}>`);
+    expect(asstTs.object).toBe(`"2026-01-02T03:04:05.001Z"^^<${XSD_DATETIME}>`);
+  });
+
+  it('user + assistant message subjects both carry dkg:turnId so readers can join without walking the turn envelope', async () => {
+    // Bot review PR #229 round 6 — the canonical `dkg:turnId` edge was
+    // only on the turn envelope, which forced every join query to walk
+    // `schema:isPartOf → ^dkg:hasUserMessage → dkg:turnId`. Emit it on
+    // the message subjects too so `?msg dkg:turnId ?t` is a 1-hop join.
+    const { agent, publishes } = makeCapturingAgent();
+    await persistChatTurnImpl(
+      agent, makeRuntime(),
+      makeMessage('q', { id: 'turnId-msg', roomId: 'r' } as any),
+      {} as State,
+      { assistantText: 'a' },
+    );
+    const quads = publishes[0].quads;
+    const userTurnIdQuad = quads.find(
+      (q) => q.subject === 'urn:dkg:chat:msg:user:r:turnId-msg' && q.predicate === `${DKG_ONT}turnId`,
+    );
+    const asstTurnIdQuad = quads.find(
+      (q) => q.subject === 'urn:dkg:chat:msg:agent:r:turnId-msg' && q.predicate === `${DKG_ONT}turnId`,
+    );
+    expect(userTurnIdQuad, 'user msg must carry dkg:turnId').toBeDefined();
+    expect(asstTurnIdQuad, 'assistant msg must carry dkg:turnId').toBeDefined();
+    expect(userTurnIdQuad!.object).toBe('"r:turnId-msg"');
+    expect(asstTurnIdQuad!.object).toBe('"r:turnId-msg"');
+  });
+
+  it('keeps the canonical session URI unencoded (roomId drops in verbatim so node-ui reads match)', async () => {
+    // Bot review PR #229 round 6, actions.ts:649 — the canonical
+    // `${CHAT_NS}session:${sessionId}` URI must be byte-identical to
+    // what `ChatMemoryManager` reads. Running roomId through
+    // encodeURIComponent mangles common shapes (e.g. `room:alpha` →
+    // `room%3Aalpha`) and silently forks the graph.
+    const { agent, publishes } = makeCapturingAgent();
+    await persistChatTurnImpl(
+      agent, makeRuntime(),
+      makeMessage('hi', { id: 'sess-1', roomId: 'room:alpha' } as any),
+      {} as State, {},
+    );
+    const sessionTypeQuad = publishes[0].quads.find(
+      (q) => q.predicate === RDF_TYPE && q.object === `${SCHEMA}Conversation`,
+    )!;
+    expect(sessionTypeQuad.subject).toBe('urn:dkg:chat:session:room:alpha');
+  });
+
+  it('REJECTS roomIds that would corrupt the N-Quads serializer (whitespace, angle brackets, quotes)', async () => {
+    // Bot review PR #229 round 6, actions.ts:649 — because the
+    // canonical session URI drops the raw roomId into an IRI position
+    // verbatim, unsafe characters must be refused at the boundary.
+    const { agent } = makeCapturingAgent();
+    for (const bad of ['room a', 'room<a>', 'room"a"', 'room\\a']) {
+      await expect(
+        persistChatTurnImpl(
+          agent, makeRuntime(),
+          makeMessage('hi', { id: 'mem-x', roomId: bad } as any),
+          {} as State, {},
+        ),
+      ).rejects.toThrow(/forbidden/i);
+    }
   });
 
   it('respects opts.contextGraphId over DKG_CHAT_CG and the default', async () => {
@@ -372,12 +464,19 @@ describe('persistChatTurnImpl — turnUri reversible encoding (bot review A5)', 
     expect(out2.turnUri).toContain(encodeURIComponent('mem:1'));
   });
 
-  it('uses a timestamp-based memId fallback when message.id is missing', async () => {
+  it('REJECTS calls without a stable message.id instead of fabricating a timestamp fallback', async () => {
+    // Bot review PR #229 round 6, actions.ts:635 — a `mem-${Date.now()}`
+    // fallback silently broke idempotence across retries (every call
+    // got a different turnUri). The new contract is: require a stable
+    // id from the caller and throw loudly when it's missing, so the
+    // upstream gap surfaces at the adapter boundary rather than
+    // corrupting the chat graph.
     const { agent } = makeCapturingAgent();
     const msg = makeMessage('hi', { roomId: 'r' } as any);
     delete (msg as any).id;
-    const out = await persistChatTurnImpl(agent, makeRuntime(), msg, {} as State, {});
-    expect(out.turnUri).toMatch(/^urn:dkg:chat:turn:r:mem-\d+$/);
+    await expect(
+      persistChatTurnImpl(agent, makeRuntime(), msg, {} as State, {}),
+    ).rejects.toThrow(/missing stable message identifier/i);
   });
 
   it('uses "anonymous" / "default" fallbacks for userId / roomId in the turn envelope', async () => {

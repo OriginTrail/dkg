@@ -385,13 +385,26 @@ function buildSessionEntityQuads(sessionUri: string, sessionId: string): ChatQua
   ];
 }
 
-function buildUserMessageQuads(userMsgUri: string, sessionUri: string, ts: string, userText: string): ChatQuad[] {
+function buildUserMessageQuads(
+  userMsgUri: string,
+  sessionUri: string,
+  ts: string,
+  userText: string,
+  turnKey: string,
+): ChatQuad[] {
   return [
     { subject: userMsgUri, predicate: RDF_TYPE_IRI, object: `${SCHEMA_NS}Message`, graph: '' },
     { subject: userMsgUri, predicate: `${SCHEMA_NS}isPartOf`, object: sessionUri, graph: '' },
     { subject: userMsgUri, predicate: `${SCHEMA_NS}author`, object: CHAT_USER_ACTOR, graph: '' },
     { subject: userMsgUri, predicate: `${SCHEMA_NS}dateCreated`, object: `${rdfString(ts)}^^<${XSD_DATETIME_IRI}>`, graph: '' },
     { subject: userMsgUri, predicate: `${SCHEMA_NS}text`, object: rdfString(userText), graph: '' },
+    // Bot review PR #229 round 6, actions.ts:388 — message subjects
+    // carry the canonical `dkg:turnId` too so SPARQL readers that join
+    // `?msg dkg:turnId ?t . ?turn dkg:turnId ?t` (instead of walking
+    // `schema:isPartOf` + inverse `dkg:hasUserMessage`) can locate the
+    // enclosing turn without an extra hop. Keeps the RDF shape flat
+    // and round-trippable against ChatMemoryManager queries.
+    { subject: userMsgUri, predicate: `${DKG_ONT_NS}turnId`, object: rdfString(turnKey), graph: '' },
   ];
 }
 
@@ -401,6 +414,7 @@ function buildAssistantMessageQuads(
   sessionUri: string,
   ts: string,
   assistantText: string,
+  turnKey: string,
 ): ChatQuad[] {
   return [
     { subject: assistantMsgUri, predicate: RDF_TYPE_IRI, object: `${SCHEMA_NS}Message`, graph: '' },
@@ -409,6 +423,9 @@ function buildAssistantMessageQuads(
     { subject: assistantMsgUri, predicate: `${SCHEMA_NS}dateCreated`, object: `${rdfString(ts)}^^<${XSD_DATETIME_IRI}>`, graph: '' },
     { subject: assistantMsgUri, predicate: `${SCHEMA_NS}text`, object: rdfString(assistantText), graph: '' },
     { subject: assistantMsgUri, predicate: `${DKG_ONT_NS}replyTo`, object: userMsgUri, graph: '' },
+    // See `buildUserMessageQuads` — same `dkg:turnId` shape so reader
+    // joins work for both sides of a turn (bot review round 6).
+    { subject: assistantMsgUri, predicate: `${DKG_ONT_NS}turnId`, object: rdfString(turnKey), graph: '' },
   ];
 }
 
@@ -630,9 +647,27 @@ export async function persistChatTurnImpl(
   // fallback so the write path below can emit the turn envelope.
   const headlessAssistantReply =
     mode === 'assistant-reply' && !optsAny.userMessageId;
-  const turnSourceId = mode === 'assistant-reply' && optsAny.userMessageId
-    ? optsAny.userMessageId
-    : ((message as any).id ?? `mem-${Date.now()}`);
+  // Bot review PR #229 round 6, actions.ts:635 — a `mem-${Date.now()}`
+  // fallback is NOT stable: two separate calls for the same logical
+  // message (e.g. retry, rebroadcast) would fabricate different turn
+  // source ids, produce different `turnUri`s, and defeat the whole
+  // idempotence contract this function advertises. Require a stable
+  // id from the caller — explicit `userMessageId` for the assistant
+  // path or `message.id` for the user-turn path. Throw loudly if
+  // neither is present so the adapter boundary surfaces the missing
+  // upstream contract instead of silently corrupting the chat graph.
+  const rawMemoryId = (message as any)?.id;
+  const explicitUserMessageId = mode === 'assistant-reply' ? optsAny.userMessageId : undefined;
+  const turnSourceId = explicitUserMessageId
+    ?? (typeof rawMemoryId === 'string' && rawMemoryId.length > 0 ? rawMemoryId : undefined);
+  if (!turnSourceId) {
+    throw new Error(
+      'persistChatTurnImpl: missing stable message identifier — ' +
+      'either options.userMessageId (assistant-reply path) or message.id ' +
+      '(user-turn path) MUST be provided. Refusing to fabricate a time-based ' +
+      'id because it would break idempotence across retries.',
+    );
+  }
   const characterName = runtime.character?.name ?? runtime.getSetting('DKG_AGENT_NAME') ?? 'elizaos-agent';
   const contextGraphId = optsAny.contextGraphId
     ?? runtime.getSetting('DKG_CHAT_CG')
@@ -646,7 +681,18 @@ export async function persistChatTurnImpl(
   // assistantMsgUri the user-turn hook produced.
   const turnKey = `${encodeIriSegment(roomId)}:${encodeIriSegment(turnSourceId)}`;
   const sessionId = String(roomId);
-  const sessionUri = `${CHAT_NS}session:${encodeIriSegment(sessionId)}`;
+  // Bot review PR #229 round 6, actions.ts:649 — keep the *canonical*
+  // session URI byte-identical to what `ChatMemoryManager` / node-ui
+  // read. That reader composes `${CHAT_NS}session:${sessionId}` with
+  // the raw session id (roomId) and filters SPARQL binding comparisons
+  // against that exact string. `encodeIriSegment` (which is
+  // `encodeURIComponent` under the hood) mutates common room id shapes
+  // like `room:a` → `room%3Aa` and would silently fork the graph into
+  // two disjoint session subjects depending on whether the writer or
+  // reader encoded first. We still run the same sessionId through
+  // assertSafeSessionId below so a hostile roomId (angle brackets,
+  // quotes, whitespace) does NOT reach the N-Quads serializer.
+  const sessionUri = `${CHAT_NS}session:${assertSafeSessionId(sessionId)}`;
   const userMsgUri = `${CHAT_NS}msg:user:${turnKey}`;
   const assistantMsgUri = `${CHAT_NS}msg:agent:${turnKey}`;
   const turnUri = `${CHAT_NS}turn:${turnKey}`;
@@ -660,6 +706,15 @@ export async function persistChatTurnImpl(
   // from the turnSourceId so a retry is byte-identical with the
   // original write.
   const ts = resolveStableTurnTimestamp(message, optsAny, turnSourceId);
+  // Bot review PR #229 round 6, actions.ts:662 — assistant timestamp
+  // MUST sort strictly after the user message timestamp so clients
+  // that order a turn by `schema:dateCreated` always see `user → agent`.
+  // Adding +1ms is sufficient because we only store ISO-8601 with ms
+  // precision and users don't produce >1 message per millisecond in
+  // the same room. If the deterministic source timestamp is already at
+  // the end of the representable range (extremely unlikely but cheap
+  // to guard) we just reuse the user ts rather than wrap.
+  const assistantTs = deriveAssistantTimestamp(ts);
 
   let quads: ChatQuad[];
 
@@ -687,7 +742,7 @@ export async function persistChatTurnImpl(
     if (headlessAssistantReply) {
       quads = [
         ...buildSessionEntityQuads(sessionUri, sessionId),
-        ...buildAssistantMessageQuads(assistantMsgUri, userMsgUri, sessionUri, ts, assistantText),
+        ...buildAssistantMessageQuads(assistantMsgUri, userMsgUri, sessionUri, assistantTs, assistantText, turnKey),
         ...buildHeadlessAssistantTurnEnvelopeQuads(
           turnUri,
           sessionUri,
@@ -701,7 +756,7 @@ export async function persistChatTurnImpl(
       ];
     } else {
       quads = [
-        ...buildAssistantMessageQuads(assistantMsgUri, userMsgUri, sessionUri, ts, assistantText),
+        ...buildAssistantMessageQuads(assistantMsgUri, userMsgUri, sessionUri, assistantTs, assistantText, turnKey),
         { subject: turnUri, predicate: `${DKG_ONT_NS}hasAssistantMessage`, object: assistantMsgUri, graph: '' },
       ];
     }
@@ -718,10 +773,10 @@ export async function persistChatTurnImpl(
 
     quads = [
       ...buildSessionEntityQuads(sessionUri, sessionId),
-      ...buildUserMessageQuads(userMsgUri, sessionUri, ts, userText),
+      ...buildUserMessageQuads(userMsgUri, sessionUri, ts, userText, turnKey),
     ];
     if (assistantText) {
-      quads.push(...buildAssistantMessageQuads(assistantMsgUri, userMsgUri, sessionUri, ts, assistantText));
+      quads.push(...buildAssistantMessageQuads(assistantMsgUri, userMsgUri, sessionUri, assistantTs, assistantText, turnKey));
     }
     quads.push(
       ...buildTurnEnvelopeQuads(
@@ -772,6 +827,56 @@ function encodeIriSegment(s: string): string {
   // Keep `.`, `-`, `_` unescaped (they're safe in our URN scheme);
   // everything else goes through encodeURIComponent.
   return encodeURIComponent(String(s));
+}
+
+/**
+ * Bot review PR #229 round 6, actions.ts:649 companion — validate a
+ * raw session id (roomId) before it's dropped verbatim into the
+ * canonical `urn:dkg:chat:session:<id>` IRI. We MUST NOT run it
+ * through `encodeURIComponent` (that forks the graph from readers),
+ * but we also MUST NOT trust it blindly — characters forbidden in
+ * N-Quads subjects would corrupt the N-Quads serializer downstream
+ * and could smuggle a second triple onto the same line. Reject
+ * whitespace, angle brackets, quotes, and control characters; pass
+ * everything else through unchanged so colons / slashes / dots in
+ * natural room ids (e.g. `room:alpha`, `org/room`) round-trip.
+ */
+function assertSafeSessionId(sessionId: string): string {
+  const s = String(sessionId);
+  if (s.length === 0) {
+    throw new Error('persistChatTurnImpl: sessionId (roomId) must be non-empty');
+  }
+  if (/[\s<>"\\`\u0000-\u001f\u007f]/.test(s)) {
+    throw new Error(
+      `persistChatTurnImpl: sessionId "${s}" contains characters forbidden ` +
+      'in an N-Quads IRI segment (whitespace, angle brackets, quotes, or ' +
+      'controls). Choose a room id that is safe to drop verbatim into a ' +
+      '`urn:dkg:chat:session:` URI.',
+    );
+  }
+  return s;
+}
+
+/**
+ * Bot review PR #229 round 6, actions.ts:662 — assistant reply
+ * timestamp MUST sort strictly after the user message timestamp on
+ * the same turn so downstream readers that order by
+ * `schema:dateCreated` always observe `user → agent`. We add +1ms.
+ * If the parsed user timestamp is unparseable or would overflow the
+ * JS Date range, fall back to the user timestamp verbatim so the
+ * write still succeeds (the overall RDF remains queryable even if
+ * the relative order is unstable in that extreme edge case).
+ */
+function deriveAssistantTimestamp(userTs: string): string {
+  const ms = Date.parse(userTs);
+  if (!Number.isFinite(ms)) return userTs;
+  const bumped = ms + 1;
+  if (!Number.isFinite(bumped)) return userTs;
+  try {
+    return new Date(bumped).toISOString();
+  } catch {
+    return userTs;
+  }
 }
 
 function escapeIri(s: string): string {

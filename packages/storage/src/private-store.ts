@@ -102,8 +102,12 @@ export function decryptPrivateLiteral(
     const ct = buf.subarray(28);
     const decipher = createDecipheriv('aes-256-gcm', key, iv);
     decipher.setAuthTag(tag);
-    const plain = Buffer.concat([decipher.update(ct), decipher.final()]);
-    return plain.toString('utf8');
+    const plain = Buffer.concat([decipher.update(ct), decipher.final()]).toString('utf8');
+    // Strip r6 type-tag prefix (`L|` literal / `I|` IRI). Legacy
+    // envelopes without the tag are returned verbatim for backwards
+    // compatibility — see `PrivateContentStore#decryptLiteral`.
+    if (plain.length >= 2 && plain[1] === '|') return plain.slice(2);
+    return plain;
   } catch {
     return serialized;
   }
@@ -198,15 +202,35 @@ export class PrivateContentStore {
    * non-deterministic ciphertext does not break it.
    */
   private encryptLiteral(serialized: string): string {
-    if (!serialized.startsWith('"')) return serialized;
+    // Blank nodes are node-local and carry no externally-meaningful
+    // identity, so sealing them would only break dedup — leave as-is.
+    if (serialized.startsWith('_:')) return serialized;
+    // Seal IRI objects in the SAME envelope as literals (PR #229 bot
+    // review round 6 — IRI objects leaking from private graphs). Prior
+    // to this fix `encryptLiteral` only wrapped values starting with `"`
+    // and passed IRI objects through unchanged, so the N-Quads dump of
+    // a private graph leaked every outgoing edge's target IRI (e.g.
+    // `ex:ssn`, `http://foo/creditCard`). We mark the wrapped term with
+    // an extra `TAG|` byte inside the ciphertext so the decrypt side
+    // can restore the original term shape (IRI vs literal vs blank).
+    //
+    // Tag values:
+    //   L = original term was a literal (starts with `"`)
+    //   I = original term was an IRI (anything else non-blank)
+    //
+    // The outer envelope is always a valid N-Triples literal so the
+    // underlying TripleStore stays syntactically happy regardless of
+    // the original term kind.
+    const tag = serialized.startsWith('"') ? 'L' : 'I';
+    const plaintext = `${tag}|${serialized}`;
     const iv = randomBytes(12);
     const cipher = createCipheriv('aes-256-gcm', this.encryptionKey, iv);
     const ct = Buffer.concat([
-      cipher.update(serialized, 'utf8'),
+      cipher.update(plaintext, 'utf8'),
       cipher.final(),
     ]);
-    const tag = cipher.getAuthTag();
-    const payload = Buffer.concat([iv, tag, ct]).toString('base64');
+    const authTag = cipher.getAuthTag();
+    const payload = Buffer.concat([iv, authTag, ct]).toString('base64');
     return `"${ENC_PREFIX}${payload}"`;
   }
 
@@ -225,8 +249,13 @@ export class PrivateContentStore {
         iv,
       );
       decipher.setAuthTag(tag);
-      const plain = Buffer.concat([decipher.update(ct), decipher.final()]);
-      return plain.toString('utf8');
+      const plain = Buffer.concat([decipher.update(ct), decipher.final()]).toString('utf8');
+      // Legacy (pre-r6) envelopes contained the literal bytes verbatim
+      // with no type tag. Detect them by the absence of the `L|` / `I|`
+      // prefix and return them unchanged so previously-written data
+      // stays readable after the seal-IRI upgrade.
+      if (plain.length < 2 || plain[1] !== '|') return plain;
+      return plain.slice(2);
     } catch {
       // Wrong key or corrupted ciphertext — leave the envelope visible
       // so callers can detect the failure rather than silently dropping
