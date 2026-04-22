@@ -410,7 +410,7 @@ export class DKGPublisher implements Publisher {
             : recovered;
           this.preBroadcastJournal.push(...retained);
           this.log.info(
-            createOperationContext('DKGPublisher.init'),
+            createOperationContext('init'),
             `WAL recovery: loaded ${retained.length} pre-broadcast journal entries from ${this.publishWalFilePath} (oldest=${retained[0]?.publishOperationId}, newest=${retained[retained.length - 1]?.publishOperationId})`,
           );
         }
@@ -420,7 +420,7 @@ export class DKGPublisher implements Publisher {
         // treat the same as "no surviving intent", i.e. the worst
         // case degrades to the pre-r6 behaviour.
         this.log.warn(
-          createOperationContext('DKGPublisher.init'),
+          createOperationContext('init'),
           `WAL recovery SKIPPED (${this.publishWalFilePath}): ${walErr instanceof Error ? walErr.message : String(walErr)}`,
         );
       }
