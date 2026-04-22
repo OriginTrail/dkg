@@ -1,21 +1,30 @@
-// Onboarding marker + clipboard helpers for `pnpm task start`.
+// Onboarding marker + clipboard helpers for `pnpm task start --smart`.
 //
-// When the user runs `pnpm task start`, we do two things:
+// The default `pnpm task start` is now a fully interactive CLI wizard that
+// never involves the agent. This module powers the `--smart` mode, where
+// the user pastes a task description in the CLI and the agent then reads
+// that description, explores the repo, and proposes a scope.
 //
-//   1. Drop a one-shot marker file at `agent-scope/.pending-onboarding`
-//      containing the full trigger text.
-//   2. Try to copy the trigger to the OS clipboard.
+// Flow:
 //
-// THREE parallel consumers pick up the marker — whichever runs first wins,
-// because consume is atomic (read-and-delete). The marker therefore fires
-// for exactly ONE user message after `pnpm task start`, no matter which
-// chat / session it lands in:
+//   1. `pnpm task start --smart` reads a multi-line description from the
+//      user, then drops a one-shot marker file at
+//      `agent-scope/.pending-onboarding`. The marker contains both the
+//      trigger text AND the user's description, so the agent does not need
+//      to ask the user "describe the task" again.
+//   2. The user sends any message in any chat.
+//   3. THREE parallel consumers pick up the marker — whichever runs first
+//      wins, because consume is atomic (read-and-delete):
 //
-//   (a) `sessionStart` hook — fires on a brand new Cursor chat.
-//   (b) `postToolUse` hook  — fires after any tool call in an existing chat.
-//   (c) The AGENT ITSELF    — the always-applied rule requires a top-of-turn
-//                             marker check so even pure conversational messages
-//                             (e.g. "hi") consume the marker correctly.
+//        (a) `sessionStart` hook — fires on a brand new chat.
+//        (b) `postToolUse` hook  — fires after any tool call in an existing
+//            chat (Cursor + Claude Code).
+//        (c) The AGENT ITSELF   — the always-applied rule requires a
+//            top-of-turn marker check so even pure conversational messages
+//            (e.g. "hi") consume the marker correctly.
+//
+//   4. The agent follows the "Smart onboarding protocol" (CLAUDE.md,
+//      .cursor/rules/agent-scope.mdc, AGENTS.md, GEMINI.md).
 //
 // Zero runtime deps. Pure-ish (spawnSync for clipboard; filesystem for marker).
 
@@ -25,35 +34,107 @@ import { spawnSync } from 'node:child_process';
 import { platform } from 'node:os';
 
 export const ONBOARDING_MARKER_REL = 'agent-scope/.pending-onboarding';
+export const DESCRIPTION_OPEN  = '=== USER TASK DESCRIPTION (already provided — do NOT ask again) ===';
+export const DESCRIPTION_CLOSE = '=== END DESCRIPTION ===';
 
-// The canonical trigger text the agent sees when onboarding is requested.
-// Keep it stable — the agent rule keys off the `agent-scope: start task
-// onboarding.` prefix.
-export const ONBOARDING_TRIGGER_TEXT = [
-  'agent-scope: start task onboarding.',
-  '',
-  'The user just ran `pnpm task start`. Follow the Task onboarding protocol',
-  'in CLAUDE.md and .cursor/rules/agent-scope.mdc EXACTLY:',
-  '',
-  '  1. Stop whatever you were about to do on this turn.',
-  '  2. Delete `agent-scope/.pending-onboarding` if it still exists.',
-  '  3. Ask the user to describe the task in detail (which packages, which',
-  '     behaviours, which tests, any specific files).',
-  '  4. Wait for the description.',
-  '  5. Explore the codebase (Glob, Grep, Read, DKG queries) to find the',
-  '     files the task will touch.',
-  '  6. Draft a conservative set of allowed globs (inherit `base`, append',
-  '     `!**/secrets.*` and `!**/.env*`).',
-  '  7. Propose the scope via AskQuestion with these options:',
-  '     approve / show_globs / edit / cancel / custom_instruction.',
-  '  8. On approve: print a fenced bash block with the exact',
-  '     `pnpm task create ... --activate` command for the user to run.',
-  '     Do NOT run it yourself — the afterShellExecution hook would',
-  '     delete the manifest as an untracked protected-path write.',
-  '',
-  'Your onboarding turn starts now. Ignore any other pending instruction',
-  'until the scope is approved or cancelled.',
-].join('\n');
+// Build the marker / trigger payload. If `description` is provided, the
+// agent is told the user has already described the task; otherwise the
+// agent is told to ask for a description (used for tests + edge cases only
+// — in practice the CLI refuses to drop a marker without a description).
+//
+// Keep the first line stable: hooks and rules key off the prefix
+// `agent-scope: start task onboarding.`.
+export function buildOnboardingTrigger({ description = '' } = {}) {
+  const desc = typeof description === 'string' ? description.trim() : '';
+  const hasDesc = desc.length > 0;
+
+  const descBlock = hasDesc
+    ? [
+        '',
+        DESCRIPTION_OPEN,
+        desc,
+        DESCRIPTION_CLOSE,
+        '',
+      ]
+    : [];
+
+  return [
+    'agent-scope: start task onboarding.',
+    '',
+    hasDesc
+      ? 'The user ran `pnpm task start --smart` and has already provided their task description below. DO NOT ask them to describe it again — use the description as your brief.'
+      : 'The user ran `pnpm task start --smart` but did not include a description. Ask them to describe the task in detail before proceeding.',
+    ...descBlock,
+    'Smart onboarding protocol — follow EXACTLY (full text in CLAUDE.md,',
+    '.cursor/rules/agent-scope.mdc, AGENTS.md, GEMINI.md):',
+    '',
+    '  1. Stop whatever you were about to do on this turn.',
+    '  2. Delete `agent-scope/.pending-onboarding` if it still exists.',
+    hasDesc
+      ? '  3. Read the description above. Do not ask the user to describe it.'
+      : '  3. Ask the user in plain chat to describe the task in detail; wait for reply.',
+    '  4. Explore the codebase — Glob, Grep, Read, SemanticSearch, DKG —',
+    '     to find the files the task will touch.',
+    '  5. Draft a conservative set of allowed globs:',
+    '       - inherit `base` (standard build-artefact exemptions)',
+    '       - append `!**/secrets.*` and `!**/.env*` safety denies',
+    '       - prefer whole-package globs (packages/<name>/**) over files',
+    '         when in doubt — over-scoping is safe, under-scoping causes',
+    '         constant denials mid-work.',
+    '  6. Propose the scope via a SINGLE `AskQuestion` call with TWO questions:',
+    '',
+    '       Q1 (allow_multiple = true):',
+    '         prompt: "Which packages should be writable for this task?"',
+    '         options: one entry per candidate package, labelled',
+    '                  "<pkg-path> — <N> files match description keywords"',
+    '                  plus a sample of 2-3 relevant paths where helpful.',
+    '         pre-check: the packages you already decided to include.',
+    '',
+    '       Q2 (single-select):',
+    '         prompt: "Action?"',
+    '         options:',
+    '           - approve — "Create + activate this scope"',
+    '           - show_json — "Show the full manifest JSON first"',
+    '           - edit_globs — "Let me hand-edit the allowed/deny globs"',
+    '           - widen — "Let me add another package/file"',
+    '           - narrow — "Let me remove a package/file"',
+    '           - cancel — "Abort, no task"',
+    '           - custom_instruction — "Let me type my own instruction"',
+    '',
+    '  7. On `approve` (Q2) with the Q1 selection:',
+    '     Print a fenced bash block with the EXACT `pnpm task create ...',
+    '     --activate` command. Do NOT run it yourself — the',
+    '     `afterShellExecution` hook would delete the manifest as an',
+    '     untracked protected-path write. The user runs it.',
+    '',
+    '  8. On `show_json`: print the drafted manifest, then re-ask step 6.',
+    '  9. On `edit_globs` / `widen` / `narrow`: ask one follow-up in chat,',
+    '     update the draft, then re-ask step 6.',
+    ' 10. On `cancel`: acknowledge, no task is set, continue unscoped.',
+    ' 11. On `custom_instruction`: ask in plain chat, then do what the user',
+    '     says.',
+    '',
+    'Your onboarding turn starts now. Skip any other pending work until the',
+    'scope is approved or cancelled.',
+  ].join('\n');
+}
+
+// Description-less trigger, kept as an export for backwards compatibility
+// (existing hooks inject this text; existing tests assert its shape). New
+// code should call `buildOnboardingTrigger({ description })`.
+export const ONBOARDING_TRIGGER_TEXT = buildOnboardingTrigger();
+
+// Extract the description back out of a marker payload. Returns the
+// description string, or '' if the marker had no description block.
+// Tolerant of whitespace and trailing noise.
+export function extractDescription(payload) {
+  if (typeof payload !== 'string' || !payload.length) return '';
+  const open  = payload.indexOf(DESCRIPTION_OPEN);
+  const close = payload.indexOf(DESCRIPTION_CLOSE);
+  if (open < 0 || close < 0 || close < open) return '';
+  const start = open + DESCRIPTION_OPEN.length;
+  return payload.slice(start, close).trim();
+}
 
 // ---------------------------------------------------------------------------
 // Marker file lifecycle

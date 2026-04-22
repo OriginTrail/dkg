@@ -23,10 +23,12 @@ Quick summary:
 - The user's default onboarding is `pnpm task start` — an interactive CLI
   wizard that writes the manifest itself. You see nothing; an active task
   may just be set when you start talking.
-- If the user runs `pnpm task start --chat`, a one-shot marker at
-  `agent-scope/.pending-onboarding` is dropped. On your first action of any
-  turn with no active task, check the marker — if present, delete it and
-  pivot to the onboarding protocol in `AGENTS.md`.
+- If the user runs `pnpm task start --smart`, a one-shot marker at
+  `agent-scope/.pending-onboarding` is dropped. The marker already
+  embeds the user's task description in a `=== USER TASK DESCRIPTION ===`
+  block — do NOT ask them to describe it again. On your first action of
+  any turn with no active task, check the marker — if present, delete it
+  and pivot to the smart-onboarding protocol in `AGENTS.md`.
 - Never invent menu options when surfacing a denial; reuse the JSON
   `options` array verbatim and add your reasoning + recommendation.
 - Hook-supporting agents (Cursor, Claude Code) physically block out-of-scope

@@ -9,6 +9,10 @@ import { tmpdir } from 'node:os';
 import {
   ONBOARDING_MARKER_REL,
   ONBOARDING_TRIGGER_TEXT,
+  DESCRIPTION_OPEN,
+  DESCRIPTION_CLOSE,
+  buildOnboardingTrigger,
+  extractDescription,
   onboardingMarkerPath,
   writeOnboardingMarker,
   hasOnboardingMarker,
@@ -34,9 +38,63 @@ test('ONBOARDING_TRIGGER_TEXT starts with the canonical prefix and covers the pr
     ONBOARDING_TRIGGER_TEXT.startsWith('agent-scope: start task onboarding'),
     'trigger must begin with the documented prefix',
   );
-  assert.ok(ONBOARDING_TRIGGER_TEXT.includes('Task onboarding protocol'));
+  assert.ok(ONBOARDING_TRIGGER_TEXT.includes('Smart onboarding protocol'));
   assert.ok(ONBOARDING_TRIGGER_TEXT.includes('AskQuestion'));
   assert.ok(ONBOARDING_TRIGGER_TEXT.includes('pnpm task create'));
+});
+
+test('buildOnboardingTrigger: without description → description-less trigger', () => {
+  const t = buildOnboardingTrigger();
+  assert.equal(t, ONBOARDING_TRIGGER_TEXT);
+  assert.ok(!t.includes(DESCRIPTION_OPEN));
+});
+
+test('buildOnboardingTrigger: embeds the description in a fenced block', () => {
+  const desc = 'Refactor peer sync in agent + core packages.';
+  const t = buildOnboardingTrigger({ description: desc });
+  assert.ok(t.includes(DESCRIPTION_OPEN));
+  assert.ok(t.includes(DESCRIPTION_CLOSE));
+  assert.ok(t.includes(desc));
+  assert.ok(t.includes('DO NOT ask them to describe it again'));
+});
+
+test('buildOnboardingTrigger: preserves multi-line descriptions verbatim', () => {
+  const desc = 'line one\nline two\n\nline four';
+  const t = buildOnboardingTrigger({ description: desc });
+  assert.ok(t.includes(desc));
+});
+
+test('buildOnboardingTrigger: trims leading/trailing whitespace on description', () => {
+  const t = buildOnboardingTrigger({ description: '   hello   \n' });
+  assert.ok(t.includes('hello'));
+  assert.ok(!t.includes('   hello'), 'leading spaces should be trimmed');
+});
+
+test('buildOnboardingTrigger: empty string description → treated as missing', () => {
+  const t = buildOnboardingTrigger({ description: '   \n  ' });
+  assert.equal(t, ONBOARDING_TRIGGER_TEXT);
+});
+
+test('extractDescription: round-trips through a smart trigger', () => {
+  const desc = 'Refactor peer sync\nwith workspace auth.';
+  const t = buildOnboardingTrigger({ description: desc });
+  assert.equal(extractDescription(t), desc);
+});
+
+test('extractDescription: returns empty string for a description-less trigger', () => {
+  assert.equal(extractDescription(ONBOARDING_TRIGGER_TEXT), '');
+});
+
+test('extractDescription: tolerates nulls and non-strings', () => {
+  assert.equal(extractDescription(null), '');
+  assert.equal(extractDescription(undefined), '');
+  assert.equal(extractDescription(''), '');
+  assert.equal(extractDescription({}), '');
+});
+
+test('extractDescription: returns empty when markers are malformed (close before open)', () => {
+  const bad = `${DESCRIPTION_CLOSE} text ${DESCRIPTION_OPEN}`;
+  assert.equal(extractDescription(bad), '');
 });
 
 test('onboardingMarkerPath joins repo root with the relative marker path', () => {

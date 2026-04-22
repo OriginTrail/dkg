@@ -29,11 +29,14 @@ You engage the system in one of four ways:
    drafts a manifest, shows a preview, and activates it. No agent round-trip
    needed; works identically in every agent (Cursor, Claude Code, Codex,
    Gemini, …) and even with no agent at all.
-2. **Agent-guided (`pnpm task start --chat`)** — legacy flow. Drops a
-   one-shot marker and copies the trigger text to your clipboard. The agent
-   explores the repo, proposes a scope via `AskQuestion`, and prints the
-   exact `pnpm task create` command for you to run. Use this when you want
-   the agent to do the thinking.
+2. **Smart onboarding (`pnpm task start --smart`)** — agent-guided flow.
+   The CLI asks you for a multi-line task description, then drops a
+   one-shot marker that embeds that description and copies the trigger
+   text to your clipboard. The agent reads your description, explores
+   the repo semantically, and proposes a scope via a rich two-part
+   `AskQuestion` (multi-select packages + single-select action), then
+   prints the exact `pnpm task create` command for you to run. Use this
+   when you want the agent to do the thinking.
 3. **Explicit** — `pnpm task set <existing-id>` activates a manifest you
    already have.
 4. **Direct** — `pnpm task create <id> --description "..." --allowed "..." --activate`
@@ -160,8 +163,8 @@ pnpm scope:validate      # validates every manifest
 # Interactive wizard (default) — asks a few questions, drafts + activates a manifest
 pnpm task start
 
-# Agent-guided flow (legacy) — hands off onboarding to the agent via chat
-pnpm task start --chat
+# Smart onboarding — paste a description in the CLI, agent proposes scope in chat
+pnpm task start --smart
 
 # Non-interactive manifest creation (flags)
 pnpm task create my-task \
@@ -199,9 +202,10 @@ pnpm task clear
 
 ## Onboarding flow
 
-There are two onboarding flows. The **interactive wizard** is the default;
-the **agent-guided flow** (`--chat`) is an alternative when you want the
-agent to do the thinking.
+There are two onboarding flows. The **interactive wizard** is the default
+— fully deterministic, no agent involvement. The **smart flow**
+(`--smart`) is an AI-driven alternative when you want the agent to
+understand your task description semantically and propose a scope.
 
 ### Flow 1 — interactive wizard (default)
 
@@ -229,16 +233,21 @@ Run `pnpm task start`. The CLI walks you through a short questionnaire:
 No chat round-trip, no agent needed, runs in under a second, works
 identically in every agent. This is the recommended path.
 
-If `stdin` is not a TTY (CI, piped input), `pnpm task start` auto-falls-back
-to the agent-guided flow so nothing hangs. You can also force the legacy
-flow with `pnpm task start --chat`.
+If `stdin` is not a TTY (CI, piped input), `pnpm task start` errors out
+with guidance to use `pnpm task create <id> --flags...` directly. Both
+onboarding modes need interactive input.
 
-### Flow 2 — agent-guided (`pnpm task start --chat`)
+### Flow 2 — smart onboarding (`pnpm task start --smart`)
 
-Drops a one-shot marker at `agent-scope/.pending-onboarding` (gitignored)
-and copies the trigger to your clipboard. Your NEXT message in any chat
-(new or existing) makes the agent pivot to onboarding. Three parallel
-consumers compete for the marker so it fires exactly once:
+The CLI prompts you for a multi-line task description (finish with an
+empty line), then drops a one-shot marker at
+`agent-scope/.pending-onboarding` (gitignored) that *already embeds* your
+description inside a `=== USER TASK DESCRIPTION ===` block. The trigger
+text is also copied to your clipboard.
+
+Your NEXT message in any chat (new or existing) makes the agent pivot to
+smart onboarding. Three parallel consumers compete for the marker so it
+fires exactly once:
 
 - **New chat (Cmd+L)** — the `sessionStart` hook injects the trigger.
 - **Current chat, any message** — the agent's top-of-turn rule reads the
@@ -247,23 +256,30 @@ consumers compete for the marker so it fires exactly once:
 - **Manual paste** — the trigger is already in your clipboard.
 
 The agent then follows a fixed protocol (defined in
-`.cursor/rules/agent-scope.mdc` and `CLAUDE.md`):
+`.cursor/rules/agent-scope.mdc`, `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`):
 
-1. Asks you to describe what you're building or fixing.
-2. Explores the codebase (Grep / Glob / DKG) to find relevant files.
-3. Proposes a set of globs via `AskQuestion` in plan-mode style — approve,
-   show JSON, edit, cancel, or type a custom instruction.
-4. On approve, prints the exact `pnpm task create` command for you to run.
+1. Reads your description from the marker (does NOT ask you again).
+2. Explores the codebase (Grep / Glob / SemanticSearch / DKG) to find
+   relevant files. Counts matching files per candidate package.
+3. Proposes a scope via a **two-part `AskQuestion`**:
+   - **Q1 — packages (multi-select):** pick which packages should be
+     writable. Each option shows the package path, file-match count, and
+     (where helpful) 2-3 sample file paths. The packages the agent
+     already decided to include are pre-selected.
+   - **Q2 — action (single-select):** `approve`, `show_json`,
+     `edit_globs`, `widen`, `narrow`, `cancel`, `custom_instruction`.
+4. On `approve`, prints the exact `pnpm task create` command for you to
+   run.
 5. You run it in your terminal (not the agent — otherwise the
-   `afterShellExecution` hook would delete the new manifest as an untracked
-   file in a protected path).
+   `afterShellExecution` hook would delete the new manifest as an
+   untracked file in a protected path).
 6. The agent starts the real work.
 
-From here, every attempted write to an out-of-scope file triggers a plan-mode
-AskQuestion menu — see **Escalation** below.
+From here, every attempted write to an out-of-scope file triggers a
+plan-mode AskQuestion menu — see **Escalation** below.
 
-The marker is one-shot: the first hook that consumes it also deletes it, so
-the trigger fires exactly once per `pnpm task start`.
+The marker is one-shot: the first hook that consumes it also deletes it,
+so the trigger fires exactly once per `pnpm task start --smart`.
 
 ## Manifest format
 

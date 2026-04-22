@@ -193,23 +193,27 @@ kicks in when:
 1. The user runs `pnpm task start` (interactive wizard — most common; by
    the time they message you, an active task is already set and the
    session-start hook has injected the context block), OR
-2. The user runs `pnpm task start --chat` and the trigger line
+2. The user runs `pnpm task start --smart` and the trigger line
    `agent-scope: start task onboarding` appears in your context (marker
-   consumed by a hook or by your top-of-turn check), OR
+   consumed by a hook or by your top-of-turn check). The marker already
+   embeds the user's task description — do NOT ask them to describe it
+   again, OR
 3. An active task is set (session-start hook injects a context block naming
    it), OR
 4. You try to touch one of the hardcoded protected paths that defend the
    guard itself — those are always blocked unless the user has enabled
    bootstrap mode.
 
-### Task onboarding protocol (triggered by `pnpm task start --chat` / "start a scoped task")
+### Smart onboarding protocol (triggered by `pnpm task start --smart` / "start a scoped task")
 
-`pnpm task start --chat` drops `agent-scope/.pending-onboarding` (gitignored)
-and copies the trigger to the user's clipboard. (The default
-`pnpm task start` without `--chat` is the interactive CLI wizard — it
-writes the manifest itself and never reaches you.) The marker is one-shot:
-the first thing that consumes it also deletes it, so it fires for **exactly
-one** user message no matter which chat that message lands in.
+`pnpm task start --smart` asks the user for a multi-line task description
+in the terminal, then drops `agent-scope/.pending-onboarding` (gitignored)
+with that description already embedded, and copies the trigger to the
+user's clipboard. (The default `pnpm task start` without `--smart` is the
+interactive CLI wizard — it writes the manifest itself and never reaches
+you.) The marker is one-shot: the first thing that consumes it also
+deletes it, so it fires for **exactly one** user message no matter which
+chat that message lands in.
 
 Three parallel consumers — whichever runs first wins:
 
@@ -234,9 +238,10 @@ active task** (`agent-scope/active` is absent), your FIRST action MUST be:
    b. IGNORE the user's actual message (whatever they typed, even if it
       was a specific instruction — they knew onboarding was pending when
       they sent it).
-   c. Pivot to the **Task onboarding protocol** below: acknowledge that
-      onboarding was queued via `pnpm task start --chat`, and immediately
-      ask the user to describe the task in detail.
+   c. Pivot to the **Smart onboarding protocol** below: parse the marker
+      payload for a `=== USER TASK DESCRIPTION ===` block. If present, use
+      it as the brief and skip step 1 below. Otherwise, ask the user to
+      describe the task.
 
 Skip this check only when `agent-scope/active` exists (a task is already
 set — no onboarding needed) or when this is a multi-turn conversation
@@ -247,20 +252,38 @@ When you receive additional_context / initial context beginning with
 like the marker was present: STOP your current plan and run the onboarding
 protocol below.
 
-1. Acknowledge in plain chat and ask the user to describe the task in detail
-   (which packages, which behaviours, which tests, any specific files).
-2. Wait for the description.
-3. Explore the codebase with DKG queries + `Glob` + `Grep` + `Read` to find
-   the files the task will touch.
-4. Draft a set of globs that covers those files plus their tests. Err
-   slightly broad; inherit `base`; always append `!**/secrets.*`,
+1. **Get the task description.**
+   - If the trigger / marker contains a `=== USER TASK DESCRIPTION ===`
+     block (the `--smart` flow), use that verbatim. DO NOT ask the user to
+     describe the task again — they already typed it into the CLI.
+   - Otherwise, ask them in plain chat: "OK, let's scope a new task.
+     Describe in detail what we're building or fixing — packages,
+     behaviours, tests, any files you already know about." Wait for
+     reply.
+2. **Explore the codebase** with `Glob`, `Grep`, `SemanticSearch`, `Read`,
+   and the DKG SPARQL queries to find the files the task will touch.
+   Count matching files per candidate package.
+3. **Draft a set of globs** that covers those files plus their tests. Err
+   slightly broad; prefer whole-package globs (`packages/<name>/**`) over
+   file-level globs; inherit `base`; always append `!**/secrets.*`,
    `!**/.env*`.
-5. Propose the scope via `AskQuestion`. The prompt must include a one-line
-   rephrase of the task, the list of proposed globs, and your recommendation.
-   Options: `approve`, `show_globs`, `edit`, `cancel`, `custom_instruction`.
-6. On `approve`, print a fenced bash block with the **exact** command for the
-   user to run in their terminal (not you — the `afterShellExecution` hook
-   would delete a new manifest file you created yourself):
+4. **Propose the scope via a SINGLE `AskQuestion` call with TWO questions.**
+   - **Q1 — packages (multi-select).** `id: "packages"`,
+     `allow_multiple: true`, `prompt: "Which packages should be writable
+     for this task?"` Include a one-line rephrase of the description and
+     the suggested task id in the prompt. Options: one per candidate
+     package labelled `"<pkg-path> — <N> files match"`, with a sample of
+     relevant paths in the label where helpful. List the recommended
+     packages first and say so in the prompt.
+   - **Q2 — action (single-select).** `id: "action"`,
+     `allow_multiple: false`, `prompt: "Action?"`. Options (IDs must
+     match exactly): `approve`, `show_json`, `edit_globs`, `widen`,
+     `narrow`, `cancel`, `custom_instruction`. Recommend `approve` in the
+     prompt.
+5. **On `approve`** + the Q1 package selection, print a fenced bash block
+   with the **exact** command for the user to run in their terminal (not
+   you — the `afterShellExecution` hook would delete a new manifest file
+   you created yourself):
 
    ```bash
    pnpm task create <id> \
@@ -272,10 +295,12 @@ protocol below.
    ```
 
    Wait for them to confirm ("done"/"go"), then start the actual work.
-7. On `show_globs`, print the manifest JSON, then re-ask with the same options.
-8. On `edit`, ask which globs to change, loop back to step 5.
-9. On `cancel`, acknowledge and keep working without a task.
-10. On `custom_instruction`, ask in plain chat what they want instead.
+6. **On `show_json`**, print the drafted manifest, then re-ask both
+   questions.
+7. **On `edit_globs` / `widen` / `narrow`**, ask one targeted follow-up in
+   chat, update the draft, then re-ask both questions.
+8. **On `cancel`**, acknowledge and keep working without a task.
+9. **On `custom_instruction`**, ask in plain chat what they want instead.
 
 ### Plan-mode denial protocol (runs for every agent-scope denial)
 
@@ -340,7 +365,7 @@ AskQuestion prompt (see below).
 
 ```
 pnpm task start                   # interactive wizard (default) — user runs this; writes + activates manifest directly
-pnpm task start --chat            # legacy: hand off onboarding to you via chat
+pnpm task start --smart           # user pastes description in CLI; agent proposes scope in chat
 pnpm task create <id> [flags]     # non-interactive manifest build — USER runs this
 pnpm task list | show | set <id> | clear | check <path> | audit | resolve
 pnpm scope:status | scope:validate | scope:test

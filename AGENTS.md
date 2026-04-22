@@ -19,9 +19,11 @@ through `.cursor/rules/agent-scope.mdc` and `CLAUDE.md`.
 
 The guard is **invisible by default**. It only activates when:
 
-1. The user runs `pnpm task start --chat` and the trigger line
+1. The user runs `pnpm task start --smart` and the trigger line
    `agent-scope: start task onboarding.` reaches you (via a hook or via
-   your own top-of-turn marker check). The default `pnpm task start`
+   your own top-of-turn marker check). The marker already embeds the
+   user's task description in a `=== USER TASK DESCRIPTION ===` block —
+   do NOT ask the user to describe it again. The default `pnpm task start`
    without `--chat` is an interactive CLI wizard that writes a manifest
    itself and never reaches you, so most users will skip this flow, OR
 2. An active task is set (`agent-scope/active` exists; the session-start
@@ -53,14 +55,16 @@ terminal:
 touch agent-scope/.bootstrap-token
 ```
 
-## Task onboarding (when the user runs `pnpm task start --chat`)
+## Smart onboarding (when the user runs `pnpm task start --smart`)
 
-`pnpm task start --chat` drops a one-shot marker file at
-`agent-scope/.pending-onboarding` containing trigger text. (The default
-`pnpm task start` without `--chat` is an interactive CLI wizard that never
-involves you — by the time the user messages you, the manifest is already
-written and activated.) The marker is
-consumed atomically the first time anything reads it.
+`pnpm task start --smart` captures a multi-line task description from the
+user in the terminal, then drops a one-shot marker file at
+`agent-scope/.pending-onboarding` containing trigger text *and* the
+user's description embedded in a `=== USER TASK DESCRIPTION ===` block.
+(The default `pnpm task start` without `--smart` is an interactive CLI
+wizard that never involves you — by the time the user messages you, the
+manifest is already written and activated.) The marker is consumed
+atomically the first time anything reads it.
 
 For Codex CLI and other agents without hook support, you should **proactively
 check for this marker on the first action of every turn** when no task is
@@ -74,23 +78,33 @@ active:
 
 ### Onboarding protocol
 
-1. Acknowledge in plain chat. Ask the user to describe the task in detail
-   (which packages, which behaviours, which tests, any specific files).
-2. Wait for the description.
-3. Explore the codebase to find the files the task will touch. Use
-   whatever exploration tools you have (file listing, grep, the DKG MCP
-   server if available).
-4. Draft a conservative set of allowed globs. Inherit from `base`. Always
-   append `!**/secrets.*` and `!**/.env*`.
-5. Propose the scope to the user (a one-line task summary, the proposed
-   globs, your recommendation). Ask whether to:
-   - approve
-   - show full globs
-   - edit the globs
-   - cancel
-   - give a custom instruction
-6. On approve: print the **exact** command for the user to run in their
-   terminal (do NOT run it yourself — see the warning below):
+1. **Get the task description.**
+   - If the marker contains a `=== USER TASK DESCRIPTION ===` block
+     (the `--smart` flow), use that verbatim as the brief. DO NOT ask
+     the user to describe the task again.
+   - Otherwise, ask them in chat: "Describe the task in detail —
+     packages, behaviours, tests, any files you already know about."
+     Wait for reply.
+2. Explore the codebase to find the files the task will touch. Use
+   whatever exploration tools you have (file listing, grep, semantic
+   search, the DKG MCP server if available). Count matching files per
+   candidate package.
+3. Draft a conservative set of allowed globs. Prefer whole-package
+   globs (`packages/<name>/**`). Inherit from `base`. Always append
+   `!**/secrets.*` and `!**/.env*`.
+4. Propose the scope to the user as a **two-part question** (use
+   whatever multi-select + single-select UI your client supports):
+   - **Q1 (multi-select, "Which packages should be writable?"):** one
+     option per candidate package labelled
+     `<pkg-path> — <N> files match`, with 2-3 sample paths inline where
+     helpful. Pre-select the packages you already decided to include.
+     Include a `None of the above / I'll specify manually` escape
+     option.
+   - **Q2 (single-select, "Action?"):** `approve`, `show_json`,
+     `edit_globs`, `widen`, `narrow`, `cancel`, `custom_instruction`.
+5. On `approve` + the Q1 package selection: print the **exact** command
+   for the user to run in their terminal (do NOT run it yourself —
+   see the warning below):
 
    ```bash
    pnpm task create <id> \
@@ -139,7 +153,7 @@ an option that wasn't listed.
 
 ```
 pnpm task start                   # interactive wizard (default, preferred)
-pnpm task start --chat            # legacy: hand off onboarding to the agent
+pnpm task start --smart           # user pastes description; agent proposes scope
 pnpm task list                    # list available task manifests
 pnpm task show                    # show the active task and its scope
 pnpm task set <id>                # set the active task

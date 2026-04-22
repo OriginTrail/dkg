@@ -14,6 +14,7 @@ import {
 } from '../lib/scope.mjs';
 import {
   ONBOARDING_TRIGGER_TEXT,
+  buildOnboardingTrigger,
   writeOnboardingMarker,
   copyToClipboard,
 } from '../lib/onboarding.mjs';
@@ -200,20 +201,25 @@ async function init(id) {
 // Task onboarding
 // ---------------------------------------------------------------------------
 //
-// There are two independent ways to start a task:
+// Two independent ways to start a task:
 //
 //   (1) `pnpm task start` — default. Interactive CLI wizard that asks a few
-//       questions, drafts a manifest, previews it, and saves + activates it.
-//       No agent round-trip; works identically in every agent (Cursor,
-//       Claude Code, Codex, Gemini, …) and even with no agent at all.
+//       questions (description, packages, extras), drafts a manifest,
+//       previews it, and saves + activates it. No agent round-trip; works
+//       identically in every agent and with no agent at all. Deterministic
+//       keyword match.
 //
-//   (2) `pnpm task start --chat` — legacy flow. Drops a one-shot marker and
-//       copies the trigger text to the clipboard so the agent picks up
-//       onboarding on the user's next message. Use this when you want the
-//       agent to explore the repo and propose a scope for you.
+//   (2) `pnpm task start --smart` — agent-guided mode. The CLI prompts
+//       once for a multi-line task description, then drops a marker that
+//       embeds that description + the Smart onboarding protocol. The next
+//       message the user sends in any chat makes the agent read the
+//       description, explore the repo, and propose a scope via a rich
+//       AskQuestion (two questions: multi-select packages + action). The
+//       agent prints a `pnpm task create ...` command for the user to run.
 //
-// Non-interactive shell (no TTY / piped stdin) auto-falls-back to --chat so
-// CI / non-interactive harnesses don't hang on a prompt.
+// If stdin is not a TTY we refuse — both modes need interactive input.
+// For CI / scripts use `pnpm task create <id> --description ... --allowed
+// ... --activate` directly.
 // ---------------------------------------------------------------------------
 
 async function start(argv = []) {
@@ -226,47 +232,108 @@ async function start(argv = []) {
     return;
   }
 
-  const chatMode = argv.includes('--chat') || argv.includes('-c');
+  // Accept both --smart (canonical) and --chat (old name we're migrating
+  // away from). If someone still has `--chat` in muscle memory, warn and
+  // continue — don't make the rename a paper cut.
+  const smartMode = argv.includes('--smart') || argv.includes('-s');
+  const legacyChat = argv.includes('--chat') || argv.includes('-c');
   const forceInteractive = argv.includes('--interactive') || argv.includes('-i');
-  const ttyOk = Boolean(process.stdin.isTTY);
+  const ttyOk = Boolean(process.stdin.isTTY) || forceInteractive;
 
-  if (chatMode || (!forceInteractive && !ttyOk)) {
-    return startChat({ reason: chatMode ? 'flag' : 'no-tty' });
+  if (legacyChat) {
+    console.error('warning: --chat was renamed to --smart; proceeding as --smart.');
   }
+
+  if (!ttyOk) {
+    console.error('error: `pnpm task start` requires an interactive terminal.');
+    console.error('');
+    console.error('For non-interactive / CI use, call `pnpm task create` directly:');
+    console.error('  pnpm task create <id> --description "..." \\');
+    console.error('    --allowed "packages/foo/**" --inherits base --activate');
+    process.exit(2);
+  }
+
+  if (smartMode || legacyChat) return startSmart();
   await startInteractive();
 }
 
-function startChat({ reason } = {}) {
-  const markerPath = writeOnboardingMarker(root);
-  const clip = copyToClipboard(ONBOARDING_TRIGGER_TEXT);
-
-  console.log('agent-scope: task onboarding primed (chat mode).');
-  if (reason === 'no-tty') {
-    console.log('(stdin is not a TTY — falling back to chat mode so nothing hangs.)');
-  }
+async function startSmart() {
+  console.log('agent-scope: smart task scoping');
+  console.log('  (the agent will read your description, explore the repo, and propose a scope)');
+  console.log('  (tip: `pnpm task start` without --smart runs the deterministic wizard instead)');
   console.log('');
-  console.log('Your NEXT message in any chat (new or existing) will pivot the');
-  console.log('agent into onboarding. The marker is then consumed, so it only');
-  console.log('fires once.');
+
+  const prompter = createPrompter();
+  let description = '';
+  try {
+    console.log('Describe the task in detail — what to build or fix, which packages / behaviours');
+    console.log('/ tests, and any files you already know about. Multi-line OK.');
+    console.log('Finish with an empty line.');
+    console.log('');
+    description = await readMultilineDescription(prompter);
+  } finally {
+    prompter.close();
+  }
+
+  const trimmed = description.trim();
+  if (!trimmed || trimmed.length < 10) {
+    bail('description is too short — smart mode needs at least a sentence of context');
+  }
+
+  const trigger = buildOnboardingTrigger({ description: trimmed });
+  const markerPath = writeOnboardingMarker(root, trigger);
+  const clip = copyToClipboard(trigger);
+
+  console.log('');
+  console.log(`agent-scope: captured ${trimmed.split(/\s+/).length} words.`);
+  console.log('');
+  console.log('Next step — exchange ONE short message with your agent:');
+  console.log('');
+  console.log('  1. Go to your Cursor / Claude Code / Codex / Gemini chat.');
+  console.log('     Any chat works — new or existing.');
+  console.log('  2. Send any message ("go", "hi", whatever).');
+  console.log('  3. The agent reads your description, explores the repo, and');
+  console.log('     proposes a scope via a plan-mode AskQuestion. One click to');
+  console.log('     approve (or edit) the scope.');
+  console.log('  4. Paste the generated `pnpm task create` command back here.');
   console.log('');
   if (clip.ok) {
-    console.log(`The trigger is already in your clipboard (via ${clip.method}).`);
-    console.log('Just send any message in your current chat — or paste (Cmd+V)');
-    console.log('and send, for maximum reliability.');
+    console.log(`(Trigger also copied to clipboard via ${clip.method} — pasting works too.)`);
   } else {
-    console.log(`Clipboard copy unavailable (${clip.reason}). Paste this manually:`);
-    console.log('');
-    for (const line of ONBOARDING_TRIGGER_TEXT.split('\n')) {
-      console.log('  ' + line);
-    }
+    console.log(`(Clipboard copy unavailable: ${clip.reason}. Paste is optional —`);
+    console.log(` any message will trigger onboarding because of the marker file.)`);
   }
   console.log('');
   console.log(`Marker file: ${markerPath}`);
+  console.log('(Auto-deleted the moment the agent reads it; one-shot.)');
   console.log('');
-  console.log('Prefer to skip the chat round-trip? Run `pnpm task start` without');
-  console.log('--chat for the interactive wizard (default), or use');
-  console.log('`pnpm task create <id> --description "..." --allowed "<glob>" ...` directly.');
+  console.log('Change your mind? `rm agent-scope/.pending-onboarding` and run');
+  console.log('`pnpm task start` for the deterministic wizard instead.');
   bootstrapWarning();
+}
+
+async function readMultilineDescription(prompter) {
+  // Read lines until we see a single empty line AFTER at least one non-
+  // empty line. Lets the user paste multi-paragraph text (paste usually
+  // ends with a blank line) or type naturally and hit Enter twice.
+  //
+  // Safety rails: cap iterations and stop on consecutive blanks before
+  // any content (prevents runaway loops when stdin is closed / EOF).
+  const lines = [];
+  let seenContent = false;
+  let blankRun = 0;
+  for (let i = 0; i < 2000; i++) {
+    const line = await prompter.ask('> ');
+    if (!line || !line.trim()) {
+      if (seenContent) break;
+      if (++blankRun >= 3) break;
+      continue;
+    }
+    blankRun = 0;
+    lines.push(line);
+    seenContent = true;
+  }
+  return lines.join('\n');
 }
 
 async function startInteractive() {
@@ -700,7 +767,7 @@ try {
         'usage: task <command> [args]',
         '',
         '  start              interactive wizard: draft a manifest + activate',
-        '  start --chat       legacy flow: hand off onboarding to the agent',
+        '  start --smart      paste a description, agent proposes scope in chat',
         '  list               list available task manifests',
         '  show               show the active task and its scope',
         '  set <id>           set the active task',
