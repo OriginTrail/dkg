@@ -211,6 +211,45 @@ describe('A-1: WM is per-agent — two agents co-hosted on one node', () => {
   });
 
   it(
+    'A-1 (Codex PR #242 iter-8): omitted agentAddress on an authenticated WM read defaults ' +
+      'to callerAgentAddress — an agent-bound caller cannot escape isolation by just not ' +
+      'supplying agentAddress and falling through to the node-default peerId WM.',
+    async () => {
+      const cgId = freshCgId('wm-iso-omit');
+      await node!.createContextGraph({ id: cgId, name: 'WM Iso omit', description: '' });
+
+      // Seed B's WM directly via the publisher API (agent.assertion
+      // captures the default agent's address in a closure, so we
+      // bypass it to write as B).
+      const assertionName = 'b-secret';
+      await node!.publisher.assertionCreate(cgId, assertionName, agentB.agentAddress);
+      await node!.publisher.assertionWrite(cgId, assertionName, agentB.agentAddress, [
+        {
+          subject: 'urn:wm:bob:only',
+          predicate: 'http://schema.org/description',
+          object: '"B-private"',
+          graph: '',
+        },
+      ]);
+
+      // B authenticates (callerAgentAddress=B) but OMITS agentAddress.
+      // Previously this silently fell through to the `peerId` (node
+      // default) namespace, leaking a different agent's WM to B. With
+      // the omission-default fix, the query must resolve B's own WM.
+      const resB = await node!.query(
+        `SELECT ?s ?o WHERE { ?s <http://schema.org/description> ?o }`,
+        {
+          contextGraphId: cgId,
+          view: 'working-memory',
+          callerAgentAddress: agentB.agentAddress,
+          // agentAddress intentionally omitted
+        },
+      );
+      expect(resB.bindings.length).toBe(1);
+    },
+  );
+
+  it(
     'A-1 (Codex PR #242 iter-4): cross-agent WM mutation is REJECTED, not silently swallowed ' +
       'as a 0-binding deny. The access-denied fast-path used to return before ' +
       '`validateReadOnlySparql` ran, so `INSERT DATA { ... }` over another agent\'s WM ' +

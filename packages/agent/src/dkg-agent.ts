@@ -2745,7 +2745,12 @@ export class DKGAgent {
        * from trusted code). Backwards-compatible with callers that
        * predate A-1 — they bypass the isolation check.
        *
-       * See BUGS_FOUND.md A-1 and spec §04 / RFC-29.
+       * Invariant: on a `view: 'working-memory'` read, the agent layer
+       * rejects (silently, with an empty-per-kind result) any
+       * `agentAddress` that differs from `callerAgentAddress`. If
+       * `agentAddress` is omitted, it defaults to `callerAgentAddress`
+       * so an authenticated caller cannot escape isolation by omission.
+       * See spec §04 / RFC-29 for the policy source.
        */
       callerAgentAddress?: string;
     },
@@ -2761,16 +2766,16 @@ export class DKGAgent {
     const viewLabel = opts.view ? ` view=${opts.view}` : '';
     this.log.info(ctx, `Query on contextGraph="${opts.contextGraphId ?? 'all'}"${sgLabel}${viewLabel} sparql="${sparql.slice(0, 80)}"`);
 
-    // A-1 review (iter-4): validate the SPARQL query is read-only BEFORE
-    // any access-denied fast-path. `DKGQueryEngine.query` runs this
-    // guard too, but the three early returns below (canReadContextGraph
-    // deny, A-1 cross-agent WM deny, private-CG deny) short-circuit
-    // before reaching it. Without this check, a caller can send
-    // `INSERT DATA { ... }` through a cross-agent WM request and get a
-    // 200 empty result instead of the 400 rejection that plain queries
-    // receive — effectively silently swallowing a mutation attempt.
-    // Run it once here so the deny path and the engine path share the
-    // same input contract.
+    // Validate the SPARQL query is read-only BEFORE any access-denied
+    // fast-path. `DKGQueryEngine.query` runs this guard too, but the
+    // three early returns below (canReadContextGraph deny, WM
+    // isolation deny, private-CG deny) short-circuit before reaching
+    // it. Without this check, a caller can send `INSERT DATA { ... }`
+    // through a cross-agent WM request and get a 200 empty result
+    // instead of the 400 rejection that plain queries receive —
+    // effectively silently swallowing a mutation attempt. Run it
+    // once here so the deny path and the engine path share the same
+    // input contract.
     const readOnlyGuard = validateReadOnlySparql(sparql);
     if (!readOnlyGuard.safe) {
       throw new Error(`SPARQL rejected: ${readOnlyGuard.reason}`);
@@ -2821,7 +2826,20 @@ export class DKGAgent {
       );
     }
     const callerAgentAddressStr = opts.callerAgentAddress;
-    const agentAddressStr = opts.agentAddress;
+    // An authenticated (agent-bound) /api/query call could previously
+    // OMIT `agentAddress` and fall through to the `this.peerId`
+    // fallback at the engine call below, reading the node-default WM
+    // namespace instead of the caller's own. Default an omitted
+    // `agentAddress` to `callerAgentAddress` on working-memory reads
+    // so an agent-bound caller cannot escape its own WM by just not
+    // supplying the field. The isolation check below then becomes a
+    // tautology for that case — which is exactly what we want
+    // (caller == target, no cross-read possible).
+    const agentAddressStr =
+      opts.agentAddress
+      ?? (opts.view === 'working-memory' && callerAgentAddressStr
+        ? callerAgentAddressStr
+        : undefined);
     if (
       opts.view === 'working-memory' &&
       callerAgentAddressStr &&

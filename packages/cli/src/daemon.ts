@@ -6651,7 +6651,24 @@ async function handleRequest(
       // Gate the 403 on "not a known admin token" (i.e. the caller is
       // not in `validTokens`), which fails closed for (b) regardless of
       // what garbage they put in the header, and leaves (a) alone.
-      const isAdminToken = !!requestToken && validTokens.has(requestToken);
+      //
+      // Codex PR #242 iter-8: `validTokens` contains BOTH the
+      // node-level admin token (`~/.dkg/auth.token`) AND any
+      // per-agent tokens the node has issued. Treating every
+      // validToken as "admin" means an authenticated agent could
+      // use its OWN token to skip the A-1 guard and read another
+      // local agent's WM via `agentAddress`. Restrict the admin
+      // bypass to tokens that are NOT bound to a specific agent
+      // (`resolveAgentByToken(token) === undefined`), which is the
+      // current signal for "node-level / admin-scoped". Agent-bound
+      // tokens still flow through the isolation check below —
+      // `DKGAgent.query` will reject any mismatch between
+      // `callerAgentAddress` and `agentAddress` on a working-memory
+      // read.
+      const isAdminToken =
+        !!requestToken
+        && validTokens.has(requestToken)
+        && callerAgentAddress === undefined;
       if (
         !isAdminToken &&
         view === 'working-memory' &&
