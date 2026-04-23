@@ -4468,8 +4468,17 @@ export class DKGAgent {
     agentAddress?: string;
   }): Promise<PublishResult> {
     const { buildEndorsementQuads } = await import('./endorse.js');
+    // A-12: spec §03 / §22 require the endorser DID to be the
+    // Ethereum-address form. Passing a libp2p peer id here produced
+    // a `did:dkg:agent:${peerId}` URI (12D3KooW-prefixed in practice),
+    // which is non-spec. Prefer the
+    // per-call agentAddress, then the node's default agent address,
+    // then fall back to the peer id only if no EVM identity is known
+    // (kept for backward compatibility with test harnesses; runtime
+    // always has a defaultAgentAddress after auto-registration).
+    const endorser = opts.agentAddress ?? this.defaultAgentAddress ?? this.peerId;
     const quads = buildEndorsementQuads(
-      this.peerId,
+      endorser,
       opts.knowledgeAssetUal,
       opts.contextGraphId,
     );

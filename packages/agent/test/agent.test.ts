@@ -163,8 +163,11 @@ describe('AgentWallet', () => {
 
 describe('Profile Builder', () => {
   it('builds agent profile quads', () => {
+    // A-12 migration: profile DIDs are the EVM-address form, not peer-id.
+    const addr = '0x' + '1'.repeat(40);
     const { quads, rootEntity } = buildAgentProfile({
       peerId: 'QmTest123',
+      agentAddress: addr,
       name: 'TestBot',
       description: 'A test agent',
       framework: 'OpenClaw',
@@ -179,12 +182,12 @@ describe('Profile Builder', () => {
       ],
     });
 
-    expect(rootEntity).toBe('did:dkg:agent:QmTest123');
+    expect(rootEntity).toBe(`did:dkg:agent:${addr}`);
     expect(quads.length).toBeGreaterThanOrEqual(8);
 
     const subjects = quads.map(q => q.subject);
-    expect(subjects).toContain('did:dkg:agent:QmTest123');
-    expect(subjects).toContain('did:dkg:agent:QmTest123/.well-known/genid/offering1');
+    expect(subjects).toContain(`did:dkg:agent:${addr}`);
+    expect(subjects).toContain(`did:dkg:agent:${addr}/.well-known/genid/offering1`);
 
     const predicates = quads.map(q => q.predicate);
     expect(predicates).toContain('https://schema.org/name');

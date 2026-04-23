@@ -39,14 +39,26 @@ export interface AgentProfileConfig {
 
 /**
  * Builds RDF quads for an agent profile KA using the ERC-8004 aligned ontology.
- * The agent's rootEntity is `did:dkg:agent:{peerId}`.
- * Uses three vocabulary layers: erc8004: (identity), prov: (provenance), dkg: (P2P).
+ *
+ * Spec §03_AGENTS.md / §22_AGENT_ONBOARDING.md require the agent DID to be
+ * the Ethereum-address form `did:dkg:agent:0x<40hex>`. When an
+ * `agentAddress` is supplied (which is always the case at runtime — the
+ * node auto-registers a default agent and passes its address through
+ * `DKGAgent.publishProfile`) the root entity uses that spec form. We
+ * keep the legacy `did:dkg:agent:<peerId>` fallback only for test
+ * harnesses that still construct profiles without an agent address;
+ * the A-12 drift-scan test enforces that no production fixtures rely
+ * on it.
+ *
+ * Uses three vocabulary layers: erc8004: (identity), prov: (provenance),
+ * dkg: (P2P).
  */
 export function buildAgentProfile(config: AgentProfileConfig): {
   quads: Quad[];
   rootEntity: string;
 } {
-  const entity = `did:dkg:agent:${config.peerId}`;
+  const didSubject = config.agentAddress ?? config.peerId;
+  const entity = `did:dkg:agent:${didSubject}`;
   const quads: Quad[] = [];
   const role = config.nodeRole ?? 'edge';
 

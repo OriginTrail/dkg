@@ -170,7 +170,7 @@ describe('GossipPublishHandler', () => {
 
   it('rejects forged ontology policy approvals from non-owners', async () => {
     const { store, handler } = createHandler(undefined, {
-      getContextGraphOwner: async (id) => id === 'ops-policy' ? 'did:dkg:agent:owner' : null,
+      getContextGraphOwner: async (id) => id === 'ops-policy' ? 'did:dkg:agent:0x1111111111111111111111111111111111111111' : null,
     });
 
     const data = makePublishMessage({
@@ -180,7 +180,7 @@ describe('GossipPublishHandler', () => {
         '<did:dkg:policy-binding:ops-policy:incident-review:default:1> <https://dkg.network/ontology#appliesToParanet> <did:dkg:context-graph:ops-policy> <did:dkg:context-graph:ontology> .',
         '<did:dkg:policy-binding:ops-policy:incident-review:default:1> <https://schema.org/name> "incident-review" <did:dkg:context-graph:ontology> .',
         '<did:dkg:policy-binding:ops-policy:incident-review:default:1> <https://dkg.network/ontology#activePolicy> <did:dkg:policy:ops-policy:sha256-fake> <did:dkg:context-graph:ontology> .',
-        '<did:dkg:policy-binding:ops-policy:incident-review:default:1> <https://dkg.network/ontology#approvedBy> <did:dkg:agent:attacker> <did:dkg:context-graph:ontology> .',
+        '<did:dkg:policy-binding:ops-policy:incident-review:default:1> <https://dkg.network/ontology#approvedBy> <did:dkg:agent:0x2222222222222222222222222222222222222222> <did:dkg:context-graph:ontology> .',
         '<did:dkg:policy-binding:ops-policy:incident-review:default:1> <https://dkg.network/ontology#approvedAt> "2026-03-24T00:00:00.000Z" <did:dkg:context-graph:ontology> .',
       ].join('\n'),
     });
@@ -196,7 +196,7 @@ describe('GossipPublishHandler', () => {
 
   it('rejects ontology policy approvals that omit approvedBy', async () => {
     const { store, handler } = createHandler(undefined, {
-      getContextGraphOwner: async (id) => id === 'ops-policy' ? 'did:dkg:agent:owner' : null,
+      getContextGraphOwner: async (id) => id === 'ops-policy' ? 'did:dkg:agent:0x1111111111111111111111111111111111111111' : null,
     });
 
     const data = makePublishMessage({
@@ -221,7 +221,7 @@ describe('GossipPublishHandler', () => {
 
   it('rejects ontology policy revocations that omit revokedBy', async () => {
     const { store, handler } = createHandler(undefined, {
-      getContextGraphOwner: async (id) => id === 'ops-policy' ? 'did:dkg:agent:owner' : null,
+      getContextGraphOwner: async (id) => id === 'ops-policy' ? 'did:dkg:agent:0x1111111111111111111111111111111111111111' : null,
     });
 
     const data = makePublishMessage({
@@ -231,7 +231,7 @@ describe('GossipPublishHandler', () => {
         '<did:dkg:policy-binding:ops-policy:incident-review:default:missing-revoked-by> <https://dkg.network/ontology#appliesToParanet> <did:dkg:context-graph:ops-policy> <did:dkg:context-graph:ontology> .',
         '<did:dkg:policy-binding:ops-policy:incident-review:default:missing-revoked-by> <https://schema.org/name> "incident-review" <did:dkg:context-graph:ontology> .',
         '<did:dkg:policy-binding:ops-policy:incident-review:default:missing-revoked-by> <https://dkg.network/ontology#activePolicy> <did:dkg:policy:ops-policy:sha256-missing-revoked-by> <did:dkg:context-graph:ontology> .',
-        '<did:dkg:policy-binding:ops-policy:incident-review:default:missing-revoked-by> <https://dkg.network/ontology#approvedBy> <did:dkg:agent:owner> <did:dkg:context-graph:ontology> .',
+        '<did:dkg:policy-binding:ops-policy:incident-review:default:missing-revoked-by> <https://dkg.network/ontology#approvedBy> <did:dkg:agent:0x1111111111111111111111111111111111111111> <did:dkg:context-graph:ontology> .',
         '<did:dkg:policy-binding:ops-policy:incident-review:default:missing-revoked-by> <https://dkg.network/ontology#approvedAt> "2026-03-24T00:00:00.000Z" <did:dkg:context-graph:ontology> .',
         '<did:dkg:policy-binding:ops-policy:incident-review:default:missing-revoked-by> <https://dkg.network/ontology#revokedAt> "2026-03-25T00:00:00.000Z" <did:dkg:context-graph:ontology> .',
       ].join('\n'),
@@ -248,7 +248,7 @@ describe('GossipPublishHandler', () => {
 
   it('accepts ontology policy approvals from the current paranet owner', async () => {
     const { store, handler } = createHandler(undefined, {
-      getContextGraphOwner: async (id) => id === 'ops-policy' ? 'did:dkg:agent:owner' : null,
+      getContextGraphOwner: async (id) => id === 'ops-policy' ? 'did:dkg:agent:0x1111111111111111111111111111111111111111' : null,
     });
 
     const data = makePublishMessage({
@@ -258,7 +258,7 @@ describe('GossipPublishHandler', () => {
         '<did:dkg:policy-binding:ops-policy:incident-review:default:1> <https://dkg.network/ontology#appliesToParanet> <did:dkg:context-graph:ops-policy> <did:dkg:context-graph:ontology> .',
         '<did:dkg:policy-binding:ops-policy:incident-review:default:1> <https://schema.org/name> "incident-review" <did:dkg:context-graph:ontology> .',
         '<did:dkg:policy-binding:ops-policy:incident-review:default:1> <https://dkg.network/ontology#activePolicy> <did:dkg:policy:ops-policy:sha256-real> <did:dkg:context-graph:ontology> .',
-        '<did:dkg:policy-binding:ops-policy:incident-review:default:1> <https://dkg.network/ontology#approvedBy> <did:dkg:agent:owner> <did:dkg:context-graph:ontology> .',
+        '<did:dkg:policy-binding:ops-policy:incident-review:default:1> <https://dkg.network/ontology#approvedBy> <did:dkg:agent:0x1111111111111111111111111111111111111111> <did:dkg:context-graph:ontology> .',
         '<did:dkg:policy-binding:ops-policy:incident-review:default:1> <https://dkg.network/ontology#approvedAt> "2026-03-24T00:00:00.000Z" <did:dkg:context-graph:ontology> .',
       ].join('\n'),
     });
