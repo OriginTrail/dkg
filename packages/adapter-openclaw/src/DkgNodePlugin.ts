@@ -25,6 +25,7 @@ import { HookSurface } from './HookSurface.js';
 import { ChatTurnWriter } from './ChatTurnWriter.js';
 import {
   DkgMemoryPlugin,
+  DkgMemorySearchManager,
   type DkgMemorySession,
   type DkgMemorySessionResolver,
 } from './DkgMemoryPlugin.js';
@@ -356,6 +357,26 @@ export class DkgNodePlugin {
     // W4b — non-LLM channel capture via internal-hook map (PR #216 mechanism)
     this.hookSurface.install('internal', 'message:received', (ev) => this.chatTurnWriter!.onMessageReceived(ev));
     this.hookSurface.install('internal', 'message:sent',     (ev) => this.chatTurnWriter!.onMessageSent(ev));
+
+    // I8 — tool-selection guidance injected into the system prompt every turn.
+    // Reaches the agent model directly (unlike SKILL.md which only reaches
+    // doc-readers). Feature-detected: no-op on gateways that haven't wired it.
+    const registerPromptSection = (api as any).registerMemoryPromptSection as
+      | ((section: { title: string; body: string }) => void)
+      | undefined;
+    if (typeof registerPromptSection === 'function') {
+      try {
+        registerPromptSection({
+          title: 'DKG Memory',
+          body:
+            'Prefer `memory_search` for free-text recall across your DKG memory ' +
+            '(fan-outs WM/SWM/VM, trust-weighted, deduped). Use `dkg_query` only ' +
+            'when you need precise SPARQL control over a known graph pattern.',
+        });
+      } catch (err: any) {
+        api.logger.debug?.(`[dkg] registerMemoryPromptSection failed: ${err?.message ?? err}`);
+      }
+    }
   }
 
   /**
@@ -1173,6 +1194,31 @@ export class DkgNodePlugin {
         execute: async (_toolCallId, args) =>
           this.handleContextGraphCreate({ ...args, id: args.paranet_id ?? args.id }),
       },
+      {
+        name: 'memory_search',
+        description:
+          'Search your DKG-backed memory across all trust tiers (Working Memory drafts, ' +
+          'Shared Working Memory, and on-chain Verified Memory) in both your agent-context ' +
+          'graph and the currently-selected project context graph. Returns the top-N most ' +
+          'relevant memory snippets with trust-weighted ranking (VM > SWM > WM). Prefer this ' +
+          'over dkg_query for free-text recall; use dkg_query only when you need precise ' +
+          'SPARQL control over a known graph pattern.',
+        parameters: {
+          type: 'object',
+          properties: {
+            query: {
+              type: 'string',
+              description: 'Free-text search query. Case-insensitive keyword match (≥2 chars).',
+            },
+            limit: {
+              type: ['number', 'string'],
+              description: 'Max hits to return. Integer in [1, 100]. Default 10.',
+            },
+          },
+          required: ['query'],
+        },
+        execute: async (_toolCallId, args) => this.handleMemorySearch(args),
+      },
     ];
   }
 
@@ -1187,6 +1233,49 @@ export class DkgNodePlugin {
         this.client.getWallets().catch(() => ({ wallets: [] })),
       ]);
       return this.json({ ...status, walletAddresses: wallets.wallets });
+    } catch (err: any) {
+      return this.daemonError(err);
+    }
+  }
+
+  /**
+   * Agent-callable recall button. Runs the full 6-layer SPARQL fan-out
+   * (agent-context WM/SWM/VM + project CG WM/SWM/VM when resolved) via
+   * `DkgMemorySearchManager`, returns trust-weighted ranked hits.
+   */
+  private async handleMemorySearch(args: Record<string, unknown>): Promise<OpenClawToolResult> {
+    if (!this.memoryPlugin) {
+      return this.error('memory_search unavailable: memory module is disabled in adapter config');
+    }
+    const query = typeof args.query === 'string' ? args.query.trim() : '';
+    if (!query) {
+      return this.error('"query" is required (non-empty string, ≥2 chars)');
+    }
+    const rawLimit = typeof args.limit === 'string' ? Number(args.limit) : args.limit;
+    const limit = Number.isFinite(rawLimit)
+      ? Math.floor(Math.max(1, Math.min(100, rawLimit as number)))
+      : 10;
+
+    try {
+      const manager = new DkgMemorySearchManager({
+        client: this.client,
+        resolver: this.memorySessionResolver,
+        logger: this.memoryResolverApi?.logger,
+      });
+      const hits = await manager.search(query, { maxResults: limit });
+      const session = this.memorySessionResolver.getSession(undefined);
+      return this.json({
+        query,
+        count: hits.length,
+        scope: session?.projectContextGraphId ?? null,
+        hits: hits.map((h) => ({
+          snippet: h.snippet,
+          layer: h.layer,
+          source: h.source,
+          score: h.score,
+          path: h.path,
+        })),
+      });
     } catch (err: any) {
       return this.daemonError(err);
     }

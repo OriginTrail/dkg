@@ -48,7 +48,8 @@ describe('DkgNodePlugin', () => {
     expect(toolNames).toContain('dkg_invoke_skill');
     expect(toolNames).toContain('dkg_list_paranets');
     expect(toolNames).toContain('dkg_paranet_create');
-    expect(registeredTools.length).toBe(13);
+    expect(toolNames).toContain('memory_search');
+    expect(registeredTools.length).toBe(14);
   });
 
   it('all tools have name, description, parameters, and execute', () => {
