@@ -3422,43 +3422,34 @@ export class DKGAgent {
       metaSynced: true,
     });
 
-    // Auto-register on-chain (V10 ContextGraphs contract) when the chain
-    // adapter supports it and the node has an on-chain identity. This gives
-    // the context graph a numeric on-chain ID required by publishDirect and
-    // enables Verified Memory (publishFromSWM).
-    if (
-      this.chain.chainId !== 'none' &&
-      !this.chain.chainId.startsWith('mock') &&
-      creatorIdentityId > 0n &&
-      typeof this.chain.createOnChainContextGraph === 'function'
-    ) {
-      try {
-        const sortedParticipants = [...participantIdentityIds].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
-        const result = await this.chain.createOnChainContextGraph({
-          participantIdentityIds: sortedParticipants,
-          requiredSignatures: opts.requiredSignatures ?? 1,
-          publishPolicy: 1,
-        });
-        const numericId = result.contextGraphId.toString();
-        const sub = this.subscribedContextGraphs.get(opts.id);
-        if (sub) sub.onChainId = numericId;
-
-        const cgMetaGraph = paranetMetaGraphUri(opts.id);
-        const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
-        await this.store.deleteByPattern({
-          graph: cgMetaGraph,
-          subject: paranetUri,
-          predicate: DKG_ONTOLOGY.DKG_REGISTRATION_STATUS,
-        });
-        await this.store.insert([
-          { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_REGISTRATION_STATUS, object: `"registered"`, graph: cgMetaGraph },
-          { subject: paranetUri, predicate: `${DKG_ONTOLOGY.DKG_PARANET}OnChainId`, object: `"${numericId}"`, graph: ontologyGraph },
-        ]);
-        this.log.info(ctx, `Auto-registered context graph "${opts.id}" on-chain (V10 id=${numericId})`);
-      } catch (err) {
-        this.log.warn(ctx, `Auto-register on-chain skipped: ${err instanceof Error ? err.message : String(err)}`);
-      }
-    }
+    // On-chain registration is intentionally NOT done here — per v10 spec
+    // §2.2 / §2.3 Context Graphs are a local-first primitive. A CG exists
+    // the moment its definition triples land in the store; it can be
+    // shared with peers over gossip (SWM writes/reads work across the
+    // subscriber set), joined, sub-graphed, and queried without ever
+    // touching chain state. Verified Memory is the value-add layer that
+    // requires chain registration, and earlier revisions silently minted
+    // a `ContextGraphs.createContextGraph` tx from inside this method
+    // whenever the adapter supported it. That broke the "free CG"
+    // contract the API advertises (HTTP caller opts in via
+    // `register: true` on `/api/context-graph/create`), caused surprise
+    // TRAC spend, and made test §27e's "VM publish on unregistered CG
+    // should fail" impossible to satisfy — the CG was always already
+    // registered by the time the test ran.
+    //
+    // Callers that want on-chain registration MUST now take the
+    // explicit path: either `POST /api/context-graph/create` with
+    // `register: true` (daemon chains a `registerContextGraph` call
+    // after this method returns) or `POST /api/context-graph/register`
+    // on an existing local CG. Both paths go through
+    // {@link registerContextGraph}, which preserves the creator /
+    // curator checks and writes the V10 `onChainId` + flips
+    // `dkg:registrationStatus` to `"registered"`. Until then the CG
+    // carries the `unregistered` marker inserted above, and
+    // `dkg-publisher`'s `publishFromSharedMemory` guard
+    // (`packages/publisher/src/dkg-publisher.ts:569-594`) throws
+    // `Context graph "<id>" is not registered on-chain` on any VM
+    // publish attempt.
 
     if (!opts.private) {
       this.subscribeToContextGraph(opts.id);
