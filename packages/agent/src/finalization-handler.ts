@@ -29,7 +29,20 @@ export class FinalizationHandler {
     this.chain = chain;
   }
 
-  async handleFinalizationMessage(data: Uint8Array, contextGraphId: string): Promise<void> {
+  async handleFinalizationMessage(
+    data: Uint8Array,
+    contextGraphId: string,
+    /**
+     * r23-4 (PR #229 bot review round 23): EVM address recovered from
+     * the outer GossipEnvelope signature. When present, MUST equal the
+     * inner `msg.publisherAddress`; otherwise a peer with a legitimate
+     * wallet could wrap a forged finalization claiming another
+     * operator's publisher address. The subsequent `verifyOnChain`
+     * catches forged tx attribution, but cross-checking here rejects
+     * before doing RPC.
+     */
+    envelopeSigner?: string,
+  ): Promise<void> {
     let ctx = createOperationContext('gossip');
     try {
       const msg = decodeFinalizationMessage(data);
@@ -39,6 +52,28 @@ export class FinalizationHandler {
 
       if (msg.paranetId && msg.paranetId !== contextGraphId) {
         this.log.warn(ctx, `Finalization: contextGraphId "${msg.paranetId}" does not match topic "${contextGraphId}", ignoring`);
+        return;
+      }
+
+      // r23-4: reject forged-attribution finalizations before chain RPC.
+      if (envelopeSigner && msg.publisherAddress) {
+        const claimed = msg.publisherAddress.toLowerCase();
+        const recovered = envelopeSigner.toLowerCase();
+        if (claimed !== recovered) {
+          this.log.warn(
+            ctx,
+            `Finalization rejected: envelope signer ${envelopeSigner} ` +
+              `does not match claimed publisherAddress ${msg.publisherAddress} ` +
+              `(forged-attribution defence, r23-4)`,
+          );
+          return;
+        }
+      } else if (envelopeSigner && !msg.publisherAddress) {
+        this.log.warn(
+          ctx,
+          `Finalization rejected: envelope is signed by ${envelopeSigner} ` +
+            `but FinalizationMessage.publisherAddress is empty (r23-4)`,
+        );
         return;
       }
 

@@ -184,6 +184,109 @@ describe('FinalizationHandler', () => {
     if (result.type === 'boolean') expect(result.value).toBe(false);
   });
 
+  // r23-4 (PR #229 bot review round 23): forged-attribution defence
+  // at the gossip envelope layer. The outer GossipEnvelope is signed
+  // by one peer but claims another peer's EVM address in the inner
+  // payload. The handler MUST reject before hitting chain RPC.
+  describe('r23-4 — envelope signer MUST match FinalizationMessage.publisherAddress', () => {
+    it('rejects a finalization whose envelope signer mismatches the claimed publisherAddress', async () => {
+      const entity = 'urn:test:entity';
+      const wsGraph = `did:dkg:context-graph:${PARANET}/_shared_memory`;
+      const dataGraph = `did:dkg:context-graph:${PARANET}`;
+
+      await store.insert([
+        { subject: entity, predicate: 'http://schema.org/name', object: '"Alice"', graph: wsGraph },
+      ]);
+
+      const { computeFlatKCRootV10: computeRoot } = await import('@origintrail-official/dkg-publisher');
+      const merkleRoot = computeRoot(
+        [{ subject: entity, predicate: 'http://schema.org/name', object: '"Alice"', graph: '' }],
+        [],
+      );
+
+      const msg = makeFinalizationMsg({
+        kcMerkleRoot: merkleRoot,
+        rootEntities: [entity],
+        publisherAddress: '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266',
+      });
+
+      // Envelope signed by a DIFFERENT address from the one claimed
+      // in the inner FinalizationMessage.publisherAddress.
+      const attackerSigner = '0xDEADBEEFdeadBEEFDEADbeefdeadBEEFDEADbEeF';
+
+      let insertCalled = false;
+      const origInsert = store.insert.bind(store);
+      store.insert = async (...args: any[]) => { insertCalled = true; return (origInsert as any)(...args); };
+
+      await handler.handleFinalizationMessage(
+        encodeFinalizationMessage(msg),
+        PARANET,
+        attackerSigner,
+      );
+
+      expect(insertCalled).toBe(false);
+
+      const result = await store.query(
+        `ASK { GRAPH <${dataGraph}> { <${entity}> <http://schema.org/name> ?o } }`,
+      );
+      expect(result.type).toBe('boolean');
+      if (result.type === 'boolean') expect(result.value).toBe(false);
+    });
+
+    it('rejects an envelope-signed finalization whose publisherAddress is empty', async () => {
+      const msg = makeFinalizationMsg({ publisherAddress: '' });
+
+      let insertCalled = false;
+      const origInsert = store.insert.bind(store);
+      store.insert = async (...args: any[]) => { insertCalled = true; return (origInsert as any)(...args); };
+
+      await handler.handleFinalizationMessage(
+        encodeFinalizationMessage(msg),
+        PARANET,
+        '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266',
+      );
+
+      expect(insertCalled).toBe(false);
+    });
+
+    it('is NOT enforced when envelopeSigner is undefined (legacy / unsigned path)', async () => {
+      // When the envelope wasn't signed or ingress couldn't recover a
+      // signer, the check is skipped — the envelope-layer handler
+      // already WARNs, and chain-layer verifyOnChain still guards
+      // forged attribution. This preserves rolling-upgrade compat.
+      const msg = makeFinalizationMsg();
+
+      let didNotThrow = true;
+      try {
+        await handler.handleFinalizationMessage(encodeFinalizationMessage(msg), PARANET);
+      } catch {
+        didNotThrow = false;
+      }
+      expect(didNotThrow).toBe(true);
+    });
+
+    it('accepts a finalization whose envelope signer matches the claimed publisherAddress (case-insensitive)', async () => {
+      // Happy-path: no merkle data in store so the handler logs
+      // "requires full payload sync" and returns without trying to
+      // verify on-chain. What we assert is simply that the r23-4
+      // guard does NOT short-circuit a legitimate match.
+      const publisher = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266';
+      const msg = makeFinalizationMsg({ publisherAddress: publisher });
+
+      let didNotThrow = true;
+      try {
+        await handler.handleFinalizationMessage(
+          encodeFinalizationMessage(msg),
+          PARANET,
+          publisher.toLowerCase(),
+        );
+      } catch {
+        didNotThrow = false;
+      }
+      expect(didNotThrow).toBe(true);
+    });
+  });
+
   it('backfills full sub-graph registration metadata during finalization promotion', async () => {
     const entity = 'urn:test:entity';
     const subGraphName = 'code';

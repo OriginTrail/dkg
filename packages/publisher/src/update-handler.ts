@@ -57,7 +57,23 @@ export class UpdateHandler {
     this.knownBatchContextGraphs = options?.knownBatchContextGraphs ?? new Map();
   }
 
-  async handle(data: Uint8Array, fromPeerId: string): Promise<void> {
+  async handle(
+    data: Uint8Array,
+    fromPeerId: string,
+    /**
+     * r23-4 (PR #229 bot review round 23): EVM address recovered from
+     * the outer GossipEnvelope signature, if ingress came via a signed
+     * envelope. Must equal the inner `publisherAddress`; otherwise a
+     * peer with a legitimate wallet could wrap a forged KA update
+     * claiming another operator's publisher address. The chain-layer
+     * `verifyKAUpdate` ultimately catches forged tx attribution, but
+     * cross-checking here rejects earlier (before RPC round-trips)
+     * and closes the hole when chainId='none'. Undefined means no
+     * envelope was present (rolling-upgrade path) and the check is
+     * skipped — the envelope-layer warning already covers that risk.
+     */
+    envelopeSigner?: string,
+  ): Promise<void> {
     let ctx = createOperationContext('ka-update');
     try {
       const request = decodeKAUpdateRequest(data);
@@ -72,6 +88,28 @@ export class UpdateHandler {
         publisherAddress,
         txHash,
       } = request;
+
+      // r23-4: reject forged-attribution updates before chain RPC.
+      if (envelopeSigner && publisherAddress) {
+        const claimed = publisherAddress.toLowerCase();
+        const recovered = envelopeSigner.toLowerCase();
+        if (claimed !== recovered) {
+          this.log.warn(
+            ctx,
+            `KA update rejected: envelope signer ${envelopeSigner} ` +
+              `does not match claimed publisherAddress ${publisherAddress} ` +
+              `(forged-attribution defence, r23-4)`,
+          );
+          return;
+        }
+      } else if (envelopeSigner && !publisherAddress) {
+        this.log.warn(
+          ctx,
+          `KA update rejected: envelope is signed by ${envelopeSigner} ` +
+            `but KAUpdateRequest.publisherAddress is empty (r23-4)`,
+        );
+        return;
+      }
 
       this.log.info(
         ctx,

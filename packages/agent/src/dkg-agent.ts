@@ -3713,7 +3713,9 @@ export class DKGAgent {
       const ing = dispatchIngress('update', data);
       if (!ing) return;
       const uh = this.getOrCreateUpdateHandler();
-      await uh.handle(ing.payload, from);
+      // r23-4: thread envelope signer so UpdateHandler can enforce the
+      // publisher-attribution link before hitting chain RPC.
+      await uh.handle(ing.payload, from, ing.recoveredSigner);
     });
 
     const finalizationTopic = paranetFinalizationTopic(contextGraphId);
@@ -3722,7 +3724,9 @@ export class DKGAgent {
       const ing = dispatchIngress('finalization', data);
       if (!ing) return;
       const fh = this.getOrCreateFinalizationHandler();
-      await fh.handleFinalizationMessage(ing.payload, contextGraphId);
+      // r23-4: thread envelope signer so FinalizationHandler can
+      // enforce attribution before chain RPC.
+      await fh.handleFinalizationMessage(ing.payload, contextGraphId, ing.recoveredSigner);
     });
   }
 
