@@ -66,9 +66,9 @@ describe('@unit ConvictionStakingStorage', () => {
 
   it('Should have correct name and version', async () => {
     expect(await ConvictionStakingStorage.name()).to.equal('ConvictionStakingStorage');
-    // Phase 5 — 1.2.0 adds increaseRaw + V10-native pendingWithdrawals
-    // storage on top of the 1.1.0 split-bucket model.
-    expect(await ConvictionStakingStorage.version()).to.equal('2.0.0');
+    // v2.1.0 promotes the D20 tier ladder from hardcoded constants to a
+    // mutable, on-chain registry (`_tiers` + `addTier` / `deactivateTier`).
+    expect(await ConvictionStakingStorage.version()).to.equal('2.1.0');
   });
 
   // ------------------------------------------------------------
@@ -89,7 +89,7 @@ describe('@unit ConvictionStakingStorage', () => {
       for (const invalid of [2, 4, 5, 7, 8, 9, 10, 11, 13, 24, 100]) {
         await expect(
           ConvictionStakingStorage.expectedMultiplier18(invalid),
-        ).to.be.revertedWith('Invalid lock');
+        ).to.be.revertedWith('Invalid tier');
       }
     });
   });
@@ -199,7 +199,7 @@ describe('@unit ConvictionStakingStorage', () => {
       // priority.
       await expect(
         ConvictionStakingStorage.createPosition(99, ALICE_ID, 1000, 5, TWO_X, 0),
-      ).to.be.revertedWith('Invalid lock');
+      ).to.be.revertedWith('Invalid tier');
 
       await ConvictionStakingStorage.createPosition(1, ALICE_ID, 1000, 12, SIX_X, 0);
       await expect(
@@ -364,10 +364,10 @@ describe('@unit ConvictionStakingStorage', () => {
       // fires inside `expectedMultiplier18`, not in the tier-match check.
       await expect(
         ConvictionStakingStorage.updateOnRelock(1, 5, TWO_X),
-      ).to.be.revertedWith('Invalid lock');
+      ).to.be.revertedWith('Invalid tier');
       await expect(
         ConvictionStakingStorage.updateOnRelock(1, 11, THREE_AND_HALF_X),
-      ).to.be.revertedWith('Invalid lock');
+      ).to.be.revertedWith('Invalid tier');
     });
 
     it('Allows lock=0 (rest state) as a valid post-expiry relock target', async () => {
@@ -1008,6 +1008,194 @@ describe('@unit ConvictionStakingStorage', () => {
         await ConvictionStakingStorage.deletePendingWithdrawal(1);
         expect((await ConvictionStakingStorage.getPendingWithdrawal(1)).amount).to.equal(0);
         expect((await ConvictionStakingStorage.getPendingWithdrawal(2)).amount).to.equal(500);
+      });
+    });
+  });
+
+  // ------------------------------------------------------------
+  // D20 v2.1.0 — Mutable tier ladder
+  // ------------------------------------------------------------
+
+  describe('Mutable tier ladder (v2.1.0)', () => {
+    // Helper: expected baseline durations embed a 12h BLOCK_DRIFT_BUFFER
+    // padding on top of the quoted commitment. The 360d tier uses 366d
+    // to absorb leap years, matching the v2.0.0 constants.
+    const DAY = 24n * 60n * 60n;
+    const BUFFER = 12n * 60n * 60n;
+    const TIER_DURATIONS: Record<number, bigint> = {
+      0: 0n,
+      1: 30n * DAY + BUFFER,
+      3: 90n * DAY + BUFFER,
+      6: 180n * DAY + BUFFER,
+      12: 366n * DAY + BUFFER,
+    };
+    const TIER_MULTIPLIERS: Record<number, bigint> = {
+      0: ONE_X,
+      1: ONE_AND_HALF_X,
+      3: TWO_X,
+      6: THREE_AND_HALF_X,
+      12: SIX_X,
+    };
+
+    describe('baseline seeding (initialize)', () => {
+      it('seeds the full baseline ladder {0,1,3,6,12}', async () => {
+        const ids = await ConvictionStakingStorage.allTierIds();
+        expect(ids.map((i) => Number(i)).sort((a, b) => a - b)).to.deep.equal([
+          0, 1, 3, 6, 12,
+        ]);
+        expect(await ConvictionStakingStorage.tierCount()).to.equal(5);
+
+        for (const tier of [0, 1, 3, 6, 12]) {
+          const tc = await ConvictionStakingStorage.getTier(tier);
+          expect(tc.exists).to.equal(true);
+          expect(tc.active).to.equal(true);
+          expect(tc.duration).to.equal(TIER_DURATIONS[tier]);
+          expect(tc.multiplier18).to.equal(TIER_MULTIPLIERS[tier]);
+        }
+      });
+
+      it('getTier returns the zero struct for an unregistered id', async () => {
+        const tc = await ConvictionStakingStorage.getTier(7);
+        expect(tc.exists).to.equal(false);
+        expect(tc.active).to.equal(false);
+        expect(tc.duration).to.equal(0);
+        expect(tc.multiplier18).to.equal(0);
+      });
+    });
+
+    describe('addTier — HubOwner path', () => {
+      it('HubOwner can append a new tier; TierAdded is emitted', async () => {
+        const newTier = 24; // 24-month / 2-year lock (hypothetical future tier)
+        const newDuration = 2n * 366n * DAY + BUFFER;
+        const newMult = 12n * SCALE18; // 12x
+
+        await expect(
+          ConvictionStakingStorage.addTier(newTier, newDuration, newMult),
+        )
+          .to.emit(ConvictionStakingStorage, 'TierAdded')
+          .withArgs(newTier, newDuration, newMult);
+
+        const tc = await ConvictionStakingStorage.getTier(newTier);
+        expect(tc.exists).to.equal(true);
+        expect(tc.active).to.equal(true);
+        expect(tc.duration).to.equal(newDuration);
+        expect(tc.multiplier18).to.equal(newMult);
+
+        expect(await ConvictionStakingStorage.tierCount()).to.equal(6);
+      });
+
+      it('expectedMultiplier18 / tierDuration pick up the new tier', async () => {
+        const newMult = 12n * SCALE18;
+        const newDuration = 2n * 366n * DAY + BUFFER;
+        await ConvictionStakingStorage.addTier(24, newDuration, newMult);
+        expect(await ConvictionStakingStorage.expectedMultiplier18(24)).to.equal(newMult);
+        expect(await ConvictionStakingStorage.tierDuration(24)).to.equal(newDuration);
+      });
+
+      it('re-adding an existing tier id reverts "Tier exists"', async () => {
+        await expect(
+          ConvictionStakingStorage.addTier(1, 30n * DAY, ONE_AND_HALF_X),
+        ).to.be.revertedWith('Tier exists');
+      });
+
+      it('rejects multiplier below 1x (non-contractive invariant)', async () => {
+        const subOne = SCALE18 / 2n; // 0.5x
+        await expect(
+          ConvictionStakingStorage.addTier(24, 2n * 366n * DAY, subOne),
+        ).to.be.revertedWith('Multiplier < 1x');
+      });
+    });
+
+    describe('addTier / deactivateTier — access control', () => {
+      it('reverts when called by a non-owner/non-multisig signer', async () => {
+        // Matches the E-3 pattern in v10-random-sampling-multisig-audit:
+        // with an EOA Hub owner the outer UnauthorizedAccess revert may or
+        // may not bubble up through the try/catch depending on compiler
+        // quirks, so we only assert the call reverts.
+        await expect(
+          ConvictionStakingStorage.connect(accounts[1]).addTier(24, 100n, ONE_AND_HALF_X),
+        ).to.be.reverted;
+
+        await expect(
+          ConvictionStakingStorage.connect(accounts[1]).deactivateTier(1),
+        ).to.be.reverted;
+      });
+    });
+
+    describe('deactivateTier', () => {
+      it('HubOwner can deactivate an existing tier; TierDeactivated is emitted', async () => {
+        await expect(ConvictionStakingStorage.deactivateTier(1))
+          .to.emit(ConvictionStakingStorage, 'TierDeactivated')
+          .withArgs(1);
+
+        const tc = await ConvictionStakingStorage.getTier(1);
+        expect(tc.exists).to.equal(true);
+        expect(tc.active).to.equal(false);
+        // Deactivation does NOT remove the id from enumeration (additive-only).
+        expect(await ConvictionStakingStorage.tierCount()).to.equal(5);
+      });
+
+      it('double-deactivate reverts "Already inactive"', async () => {
+        await ConvictionStakingStorage.deactivateTier(1);
+        await expect(ConvictionStakingStorage.deactivateTier(1)).to.be.revertedWith(
+          'Already inactive',
+        );
+      });
+
+      it('deactivating a never-added tier reverts "Invalid tier"', async () => {
+        await expect(ConvictionStakingStorage.deactivateTier(99)).to.be.revertedWith(
+          'Invalid tier',
+        );
+      });
+    });
+
+    describe('active-tier gating on fresh stakes vs reuse', () => {
+      it('createPosition with migrationEpoch==0 rejects an inactive tier', async () => {
+        await ConvictionStakingStorage.deactivateTier(1);
+        await expect(
+          ConvictionStakingStorage.createPosition(1, ALICE_ID, 1000, 1, ONE_AND_HALF_X, 0),
+        ).to.be.revertedWith('Tier inactive');
+      });
+
+      it('createPosition with migrationEpoch>0 bypasses the active-tier gate (straggler migration)', async () => {
+        await ConvictionStakingStorage.deactivateTier(1);
+        // migrationEpoch = 1 marks this as a V8→V10 migration — existence-only check.
+        await expect(
+          ConvictionStakingStorage.createPosition(
+            1,
+            ALICE_ID,
+            1000,
+            1,
+            ONE_AND_HALF_X,
+            1,
+          ),
+        ).to.not.be.reverted;
+
+        const pos = await ConvictionStakingStorage.getPosition(1);
+        expect(pos.lockTier).to.equal(1);
+        expect(pos.multiplier18).to.equal(ONE_AND_HALF_X);
+      });
+
+      it('updateOnRelock honors a deactivated tier (original-commitment renewal)', async () => {
+        await ConvictionStakingStorage.createPosition(1, ALICE_ID, 1000, 3, TWO_X, 0);
+        await advanceEpochs(3);
+        // Deactivate the target tier AFTER the position has been created.
+        // Under Q2=A the user can still relock into the deactivated tier.
+        await ConvictionStakingStorage.deactivateTier(3);
+        await expect(ConvictionStakingStorage.updateOnRelock(1, 3, TWO_X)).to.not
+          .be.reverted;
+      });
+
+      it('createPosition can mint a NEW position on a freshly-added active tier', async () => {
+        // Add a 2-year tier and confirm a new stake lands on it.
+        const newMult = 12n * SCALE18;
+        await ConvictionStakingStorage.addTier(24, 2n * 366n * DAY + BUFFER, newMult);
+        await expect(
+          ConvictionStakingStorage.createPosition(1, ALICE_ID, 1000, 24, newMult, 0),
+        ).to.not.be.reverted;
+        const pos = await ConvictionStakingStorage.getPosition(1);
+        expect(pos.lockTier).to.equal(24);
+        expect(pos.multiplier18).to.equal(newMult);
       });
     });
   });

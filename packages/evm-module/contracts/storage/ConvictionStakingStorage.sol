@@ -4,8 +4,10 @@ pragma solidity ^0.8.20;
 
 import {Chronos} from "./Chronos.sol";
 import {HubDependent} from "../abstract/HubDependent.sol";
+import {ICustodian} from "../interfaces/ICustodian.sol";
 import {INamed} from "../interfaces/INamed.sol";
 import {IVersioned} from "../interfaces/IVersioned.sol";
+import {HubLib} from "../libraries/HubLib.sol";
 
 /**
  * @title ConvictionStakingStorage
@@ -27,14 +29,19 @@ import {IVersioned} from "../interfaces/IVersioned.sol";
  *   - `cumulativeRewardsClaimed` is now a statistic-only counter for
  *     UI/indexer consumption; it never enters effective-stake math.
  *
- * Tier model (D20 — hardcoded wall-clock tiers):
- *   - Tier durations are expressed as real-time seconds and decoupled
- *     from epoch length: `_tierDuration(lockTier)` returns
- *     {0, 30d, 90d, 180d, 360d} for `lockTier ∈ {0, 1, 3, 6, 12}`.
+ * Tier model (D20 — mutable wall-clock tier ladder):
+ *   - Tier durations and multipliers are stored in `_tiers` (keyed by
+ *     `lockTier` id). The baseline ladder seeded at `initialize()` is
+ *     {0→(0s, 1x), 1→(30d, 1.5x), 3→(90d, 2x), 6→(180d, 3.5x), 12→(360d, 6x)},
+ *     mirroring the original D20 set.
  *   - `expiryEpoch = epochAtTimestamp(block.timestamp + duration +
  *     BLOCK_DRIFT_BUFFER)` so users always get AT LEAST their committed
  *     duration across epoch boundaries.
- *   - Multipliers remain on the {1x, 1.5x, 2x, 3.5x, 6x} ladder.
+ *   - New tiers can be appended via `addTier` (HubOwner or multisig owner).
+ *     Existing tiers can be deactivated via `deactivateTier` to stop
+ *     accepting NEW fresh stakes, but relock / migration paths still
+ *     honor the original commitment (existence-only check). The model is
+ *     additive-only: once added a tier id cannot be removed.
  */
 contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
     string private constant _NAME = "ConvictionStakingStorage";
@@ -49,7 +56,16 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
     //           * Hardcoded tier constants + _tierDuration/_tierMultiplier (D20).
     //           * Removed: nodeV10BaseStake (D4), split-bucket rewards mutators (D19),
     //                      PendingWithdrawal.rewardsPortion (D19).
-    string private constant _VERSION = "2.0.0";
+    //   2.1.0 — Mutable D20 tier ladder:
+    //           * `Position.lockEpochs` → `Position.lockTier` rename.
+    //           * Hardcoded TIER_* / MULT_LOCK_* constants removed.
+    //           * New `_tiers` mapping + `tierIds` enumeration, baseline
+    //             seeded in `initialize()`.
+    //           * `addTier` / `deactivateTier` admin surface gated by
+    //             `onlyOwnerOrMultiSigOwner`.
+    //           * Fresh stakes reject inactive tiers; relock / migration
+    //             honor original commitment via existence-only check.
+    string private constant _VERSION = "2.1.0";
 
     // Multiplier scale, matches DKGStakingConvictionNFT._convictionMultiplier
     // (returns 1e18-scaled values so fractional tiers like 1.5x and 3.5x
@@ -57,29 +73,30 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
     uint256 internal constant SCALE18 = 1e18;
 
     // ============================================================
-    //                 D20 — Hardcoded tier constants
+    //                 D20 — Mutable tier ladder
     // ============================================================
 
-       // Extra slack added when converting `expiryTime → expiryEpoch` so the
+    // Extra slack added when converting `expiryTime → expiryEpoch` so the
     // user always gets AT LEAST their committed duration across a block-
-    // timing/epoch-boundary boundary. 12h is comfortably less than any
-    // sane epoch length and more than any plausible block drift.
+    // timing / epoch-boundary. 12h is comfortably less than any sane
+    // epoch length and more than any plausible block drift.
     uint256 public constant BLOCK_DRIFT_BUFFER = 12 hours;
 
-    // Wall-clock durations (decoupled from epoch length), + BLOCK_DRIFT_BUFFER hours to account for potential block drift.
-    uint256 public constant TIER_30D = 30 days + BLOCK_DRIFT_BUFFER;
-    uint256 public constant TIER_90D = 90 days + BLOCK_DRIFT_BUFFER;
-    uint256 public constant TIER_180D = 180 days + BLOCK_DRIFT_BUFFER;
-    uint256 public constant TIER_360D = 366 days + BLOCK_DRIFT_BUFFER; // to account for leap years
-
- 
-
-    // Multiplier ladder (1e18-scaled).
-    uint64 public constant MULT_LOCK_0 = uint64(SCALE18);              // 1.0x
-    uint64 public constant MULT_LOCK_30D = uint64((15 * SCALE18) / 10); // 1.5x
-    uint64 public constant MULT_LOCK_90D = uint64(2 * SCALE18);         // 2.0x
-    uint64 public constant MULT_LOCK_180D = uint64((35 * SCALE18) / 10);// 3.5x
-    uint64 public constant MULT_LOCK_360D = uint64(6 * SCALE18);        // 6.0x
+    // Tier definition. `duration` is the committed wall-clock lock
+    // (seconds) passed to `_computeExpiryEpoch`. `multiplier18` is the
+    // 1e18-scaled effective-stake multiplier applied pre-expiry.
+    //
+    // `active` gates NEW fresh stakes (createPosition with migrationEpoch==0).
+    // Relock and migration paths take the existence-only path so the user's
+    // original commitment is honored even if a tier has since been retired.
+    //
+    // `exists` distinguishes a never-added tier id from a deactivated one.
+    struct TierConfig {
+        uint256 duration;
+        uint64 multiplier18;
+        bool active;
+        bool exists;
+    }
 
     // Position layout (two storage slots — V10 compound-into-raw model):
     //   slot 1: raw(96) + lockTier(40) + expiryEpoch(40) + identityId(72) = 248 bits
@@ -91,9 +108,12 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
     //                                pre-expiry, earns `multiplier18` pre-expiry,
     //                                drops back to 1x on `expiryEpoch`.
     //                                Claim compounds TRAC into this field.
-    //   lockTier                 — tier index ∈ {0, 1, 3, 6, 12}. Storage-
-    //                                compatible integer that maps to
-    //                                `_tierDuration` / `_tierMultiplier`.
+    //   lockTier                 — tier identifier from the mutable ladder
+    //                                in `_tiers`. Valid ids are whatever has
+    //                                been added via `addTier`; the baseline
+    //                                set seeded at `initialize()` is
+    //                                {0, 1, 3, 6, 12} (30d / 90d / 180d /
+    //                                360d wall-clock locks).
     //   expiryEpoch                — Chronos epoch at which the boost expires.
     //                                0 iff lockTier == 0 (rest state).
     //   identityId                 — the node this position delegates to.
@@ -271,10 +291,58 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
     // entry point.
     uint256 public v10LaunchEpoch;
 
+    // ============================================================
+    //           D20 (v2.1.0) — Mutable tier-ladder storage
+    // ============================================================
+    //
+    // `_tiers` is the source of truth for both `_tierDuration` and
+    // `_tierMultiplier`. `tierIds` is an append-only enumeration of every
+    // tier id that has ever been added (active OR deactivated) so off-chain
+    // tooling can discover the full ladder without external indexing.
+    //
+    // Deactivation flips `_tiers[id].active` to false but does NOT remove
+    // the id from `tierIds`. This preserves the additive-only invariant.
+    mapping(uint40 => TierConfig) internal _tiers;
+    uint40[] public tierIds;
+
+    // ============================================================
+    //          Tier admin events (v2.1.0)
+    // ============================================================
+    event TierAdded(uint40 indexed lockTier, uint256 duration, uint64 multiplier18);
+    event TierDeactivated(uint40 indexed lockTier);
+
     constructor(address hubAddress) HubDependent(hubAddress) {}
 
     function initialize() public onlyHub {
         chronos = Chronos(hub.getContractAddress("Chronos"));
+
+        // Seed the baseline D20 ladder on the first call. Idempotent across
+        // re-invocations (post-upgrade redeploys) because `_addTierInternal`
+        // short-circuits when the tier id already exists.
+        _seedBaselineTiers();
+    }
+
+    /// @dev Baseline durations embed a 12h `BLOCK_DRIFT_BUFFER` padding on
+    ///      top of the quoted commitment, matching the v2.0.0 hardcoded
+    ///      constants (30d/90d/180d/~365d with +12h, lock=12 uses 366d to
+    ///      absorb leap years). `_computeExpiryEpoch` adds another buffer
+    ///      on top of this so users always get AT LEAST their commitment.
+    function _seedBaselineTiers() internal {
+        if (!_tiers[0].exists) {
+            _addTierInternal(0, 0, uint64(SCALE18)); // rest state (1x)
+        }
+        if (!_tiers[1].exists) {
+            _addTierInternal(1, 30 days + BLOCK_DRIFT_BUFFER, uint64((15 * SCALE18) / 10));
+        }
+        if (!_tiers[3].exists) {
+            _addTierInternal(3, 90 days + BLOCK_DRIFT_BUFFER, uint64(2 * SCALE18));
+        }
+        if (!_tiers[6].exists) {
+            _addTierInternal(6, 180 days + BLOCK_DRIFT_BUFFER, uint64((35 * SCALE18) / 10));
+        }
+        if (!_tiers[12].exists) {
+            _addTierInternal(12, 366 days + BLOCK_DRIFT_BUFFER, uint64(6 * SCALE18));
+        }
     }
 
     function name() external pure virtual override returns (string memory) {
@@ -286,43 +354,145 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
     }
 
     // ============================================================
-    //                 D20 — Tier helpers
+    //                 D20 — Tier helpers (storage-backed)
     // ============================================================
 
     /**
      * @notice Wall-clock duration (seconds) for a given tier id.
-     * @dev `lockTier` is a tier identifier (not an epoch count).
-     *      The D20 baseline ladder accepts {0, 1, 3, 6, 12}.
+     * @dev Existence-only check. Callers that need the stricter
+     *      "tier must be active for NEW stakes" guarantee go through
+     *      `_requireActiveTier` (see `createPosition`).
      */
-    function _tierDuration(uint40 lockTier) internal pure returns (uint256) {
-        if (lockTier == 0) return 0;
-        if (lockTier == 1) return TIER_30D;
-        if (lockTier == 3) return TIER_90D;
-        if (lockTier == 6) return TIER_180D;
-        if (lockTier == 12) return TIER_360D;
-        revert("Invalid lock");
+    function _tierDuration(uint40 lockTier) internal view returns (uint256) {
+        TierConfig memory tc = _tiers[lockTier];
+        require(tc.exists, "Invalid tier");
+        return tc.duration;
     }
 
     /**
-     * @notice 1e18-scaled multiplier for a given tier index.
+     * @notice 1e18-scaled multiplier for a given tier id.
+     * @dev Existence-only check (matches `_tierDuration`). Used by all
+     *      mutators for the `multiplier18 == _tierMultiplier(lockTier)`
+     *      consistency assertion, INCLUDING relock and migration paths
+     *      — so users can relock under the tier they originally committed
+     *      to even if that tier has since been deactivated (Q2 design).
      */
-    function _tierMultiplier(uint40 lockTier) internal pure returns (uint64) {
-        if (lockTier == 0) return MULT_LOCK_0;
-        if (lockTier == 1) return MULT_LOCK_30D;
-        if (lockTier == 3) return MULT_LOCK_90D;
-        if (lockTier == 6) return MULT_LOCK_180D;
-        if (lockTier == 12) return MULT_LOCK_360D;
-        revert("Invalid lock");
+    function _tierMultiplier(uint40 lockTier) internal view returns (uint64) {
+        TierConfig memory tc = _tiers[lockTier];
+        require(tc.exists, "Invalid tier");
+        return tc.multiplier18;
+    }
+
+    /// @dev Gates fresh stakes: tier must exist AND be active. Relock /
+    ///      migration paths deliberately skip this check.
+    function _requireActiveTier(uint40 lockTier) internal view {
+        TierConfig memory tc = _tiers[lockTier];
+        require(tc.exists, "Invalid tier");
+        require(tc.active, "Tier inactive");
     }
 
     /// @notice External view; mirrors `_tierMultiplier` for callers that need the ladder value.
-    function expectedMultiplier18(uint40 lockTier) public pure returns (uint64) {
+    function expectedMultiplier18(uint40 lockTier) public view returns (uint64) {
         return _tierMultiplier(lockTier);
     }
 
     /// @notice External view; mirrors `_tierDuration` for callers that need the real-time duration.
-    function tierDuration(uint40 lockTier) external pure returns (uint256) {
+    function tierDuration(uint40 lockTier) external view returns (uint256) {
         return _tierDuration(lockTier);
+    }
+
+    /// @notice Full TierConfig for a given lockTier id (zero struct if
+    ///         never added; check `.exists` to distinguish).
+    function getTier(uint40 lockTier) external view returns (TierConfig memory) {
+        return _tiers[lockTier];
+    }
+
+    /// @notice Append-only enumeration of every tier id that has ever
+    ///         been added (active or deactivated). Off-chain tooling
+    ///         should filter by `getTier(id).active` to get the set
+    ///         currently acceptable for fresh stakes.
+    function allTierIds() external view returns (uint40[] memory) {
+        return tierIds;
+    }
+
+    function tierCount() external view returns (uint256) {
+        return tierIds.length;
+    }
+
+    // ============================================================
+    //         D20 — Tier admin (v2.1.0, Q4=B multisig gate)
+    // ============================================================
+
+    /// @notice Append a new tier to the ladder. Only callable by the Hub
+    ///         owner or a multisig whose owners include `msg.sender`.
+    ///         Tier id is permanent once added (additive-only); to retire
+    ///         a tier, call `deactivateTier` instead.
+    ///
+    /// @param lockTier        Tier identifier. MUST NOT already exist.
+    /// @param duration        Wall-clock commitment in seconds (may be 0
+    ///                        for rest-state style tiers). The caller is
+    ///                        expected to include any `BLOCK_DRIFT_BUFFER`
+    ///                        padding the policy wants; `_computeExpiryEpoch`
+    ///                        also adds `BLOCK_DRIFT_BUFFER` on top.
+    /// @param multiplier18    1e18-scaled effective-stake multiplier. Must be
+    ///                        >= 1e18 (1x) so the boost is non-contractive.
+    function addTier(
+        uint40 lockTier,
+        uint256 duration,
+        uint64 multiplier18
+    ) external onlyOwnerOrMultiSigOwner {
+        require(!_tiers[lockTier].exists, "Tier exists");
+        require(multiplier18 >= uint64(SCALE18), "Multiplier < 1x");
+        _addTierInternal(lockTier, duration, multiplier18);
+    }
+
+    /// @notice Flip a tier's `active` flag off. Existing positions under
+    ///         that tier continue to earn their boost until expiry; users
+    ///         can still relock or migrate into the deactivated tier
+    ///         (Q2 — original-commitment renewal is honored). Only new
+    ///         fresh-stake `createPosition` paths reject inactive tiers.
+    function deactivateTier(uint40 lockTier) external onlyOwnerOrMultiSigOwner {
+        TierConfig storage tc = _tiers[lockTier];
+        require(tc.exists, "Invalid tier");
+        require(tc.active, "Already inactive");
+        tc.active = false;
+        emit TierDeactivated(lockTier);
+    }
+
+    function _addTierInternal(
+        uint40 lockTier,
+        uint256 duration,
+        uint64 multiplier18
+    ) internal {
+        _tiers[lockTier] = TierConfig({
+            duration: duration,
+            multiplier18: multiplier18,
+            active: true,
+            exists: true
+        });
+        tierIds.push(lockTier);
+        emit TierAdded(lockTier, duration, multiplier18);
+    }
+
+    // --- Admin access control (mirrors DKGStakingConvictionNFT) ---
+
+    modifier onlyOwnerOrMultiSigOwner() {
+        address hubOwner = hub.owner();
+        if (msg.sender != hubOwner && !_isMultiSigOwner(hubOwner)) {
+            revert HubLib.UnauthorizedAccess("Only Hub Owner or Multisig Owner");
+        }
+        _;
+    }
+
+    function _isMultiSigOwner(address multiSigAddress) internal view returns (bool) {
+        try ICustodian(multiSigAddress).getOwners() returns (address[] memory owners) {
+            for (uint256 i = 0; i < owners.length; i++) {
+                if (msg.sender == owners[i]) return true;
+            }
+        } catch {
+            // Not a multisig or call reverted; treat as not an owner.
+        }
+        return false;
     }
 
     // ============================================================
@@ -349,6 +519,13 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
         // ladder defines exactly one valid multiplier for every lock value
         // (including lock == 0 → 1x), so any deviation is a tier mismatch.
         require(multiplier18 == _tierMultiplier(lockTier), "Tier mismatch");
+        // Fresh stakes (migrationEpoch == 0) must target an ACTIVE tier.
+        // V8→V10 migration paths pass migrationEpoch > 0 and bypass this
+        // check so stragglers can still be onboarded under the tier they
+        // originally committed to, even if the tier has since been retired.
+        if (migrationEpoch == 0) {
+            _requireActiveTier(lockTier);
+        }
 
         uint256 currentEpoch = chronos.getCurrentEpoch();
         uint40 expiryEpoch = _computeExpiryEpoch(lockTier);

@@ -269,45 +269,50 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
     }
 
     // ========================================================================
-    // Conviction multiplier tier ladder
+    // Conviction multiplier tier ladder — delegates to CSS (v2.1.0)
     // ========================================================================
     //
-    // Roadmap-authoritative tier set, per `04_TOKEN_ECONOMICS §4.1`
-    // ("no lockup / 1 / 3 / 6 / 12 months"): {0, 1, 3, 6, 12}. After the
-    // Phase 5 P2 hotfix (commit `e7528d38`),
-    // `ConvictionStakingStorage.expectedMultiplier18` matches this set
-    // exactly, so the NFT-side helper and the storage-side tier check
-    // are now aligned — `createConviction(_, _, 1)` maps to the 1.5x
-    // tier on both sides.
+    // Source of truth is `ConvictionStakingStorage._tiers`. The baseline
+    // ladder seeded at `CSS.initialize()` is {0, 1, 3, 6, 12} mapping to
+    // {1x, 1.5x, 2x, 3.5x, 6x} and {0, 30d, 90d, 180d, 360d} wall-clock
+    // lock durations — matching the roadmap in `04_TOKEN_ECONOMICS §4.1`.
+    // New tiers can be appended by the HubOwner via `CSS.addTier`; this
+    // helper picks them up automatically via the storage read.
     //
-    // Discrete, exact-match tier table — no snap-down semantics. Values
-    // that don't land on one of the tiers revert. `createConviction` /
-    // `convertToNFT` are the only entry points that invoke this function
-    // with a user-supplied `lockTier`, and any value outside the valid
-    // set is an API error that must not round down silently to a lower
-    // tier (a user passing 4 silently snapping to tier 3 would commit
-    // the user to a different lock than they intended).
+    // Discrete, exact-match semantics — no snap-down. An unregistered
+    // `lockTier` reverts `InvalidLockTier()`.
     //
-    // Why `0 → SCALE18` rather than a revert at the helper level:
+    // Why `0 → 1x` rather than a revert at the helper level:
     //   The post-expiry rest state in `ConvictionStakingStorage` is
-    //   encoded as `lockTier == 0 → 1x`, and reward-math callers may
-    //   re-invoke this helper with a position's current `lockTier`
-    //   after expiry has driven the tier back to the rest state. See
-    //   Phase 5 decisions doc Q5 for the full reasoning. The
-    //   `lockTier == 0` *policy* check lives in `createConviction` /
-    //   `convertToNFT` themselves — they MUST reject `lockTier == 0`
-    //   via their own validation, but the helper stays tolerant for
-    //   reward-math callers.
+    //   encoded as `lockTier == 0 → 1x`, and reward-math / relock /
+    //   migration callers legitimately invoke this helper with tier 0:
+    //     - relock(_, 0)          : post-expiry opt-out to permanent 1x.
+    //     - _convertToNFT(_, _, 0): V8 migrants landing at rest state
+    //                               (they never chose conviction staking).
+    //     - any caller reading a live position's current tier after its
+    //       lock has expired back to the rest state.
+    //   See Phase 5 decisions doc Q5 for the full reasoning.
     //
-    // @param lockTier Lock duration in epochs.
+    //   The only entry point that forbids tier 0 is `createConviction`
+    //   (fresh mint): a brand-new conviction NFT must commit to a real
+    //   lock (tier ∈ {1, 3, 6, 12}). That policy is enforced by
+    //   `StakingV10.stake` — see the fail-fast note there.
+    //
+    //   Additionally, `createConviction` rejects DEACTIVATED tiers at
+    //   the CSS layer: `CSS.createPosition` requires `active == true`
+    //   whenever `migrationEpoch == 0`. Relock and V8→V10 migration
+    //   paths bypass that check (existence only) so users can renew
+    //   under a tier they originally committed to.
+    //
+    // @param lockTier Tier id; must exist in `CSS._tiers`. Maps to the
+    //                 wall-clock duration registered there. NOT a Chronos
+    //                 epoch count.
     // @return multiplier18 1e18-scaled tier multiplier.
-    function _convictionMultiplier(uint256 lockTier) internal pure returns (uint256) {
-        if (lockTier == 0) return SCALE18;             // rest state: 1.0x
-        if (lockTier == 1) return (15 * SCALE18) / 10; // 1.5x (1 month)
-        if (lockTier == 3) return 2 * SCALE18;         // 2.0x (3 months)
-        if (lockTier == 6) return (35 * SCALE18) / 10; // 3.5x (6 months)
-        if (lockTier == 12) return 6 * SCALE18;        // 6.0x (12 months)
-        revert InvalidLockTier();
+    function _convictionMultiplier(uint256 lockTier) internal view returns (uint256) {
+        ConvictionStakingStorage.TierConfig memory tc =
+            convictionStakingStorage.getTier(uint40(lockTier));
+        if (!tc.exists) revert InvalidLockTier();
+        return uint256(tc.multiplier18);
     }
 
     // ========================================================================
@@ -340,18 +345,24 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
     // subagents fill the StakingV10 bodies.
 
     /// @notice Mint a fresh NFT-backed staking position on `identityId` with
-    ///         `amount` TRAC locked for `lockTier` epochs.
+    ///         `amount` TRAC locked under the `lockTier` tier (tier index
+    ///         ∈ {1, 3, 6, 12} → wall-clock durations {30d, 90d, 180d, 360d};
+    ///         tier 0 is rejected — no rest-state mints).
     function createConviction(
         uint72 identityId,
         uint96 amount,
         uint8 lockTier
     ) external returns (uint256 tokenId) {
         if (amount == 0) revert ZeroAmount();
-        // Fail-fast on invalid tier: `_convictionMultiplier` reverts
-        // `InvalidLockTier()` for any value outside {0,1,3,6,12}. Note
-        // that `StakingV10.stake` is expected to additionally reject
-        // `lockTier == 0` once its body is filled in (createConviction
-        // must never mint at the rest-state tier).
+        // Fail-fast on off-ladder tier values (e.g. 2, 4, 7):
+        // `_convictionMultiplier` reverts `InvalidLockTier()` for any value
+        // outside {0, 1, 3, 6, 12}. This does NOT reject tier 0 — the helper
+        // is intentionally tolerant of the rest state because relock and
+        // migration legitimately pass tier 0. The "no fresh mint at rest
+        // state" policy is enforced downstream by `StakingV10.stake`, which
+        // reverts `InvalidLockTier()` if `lockTier == 0`. A fresh conviction
+        // NFT must commit to a real lock (tier ∈ {1, 3, 6, 12}); a user who
+        // wants no lock has no business minting a conviction position.
         _convictionMultiplier(lockTier);
 
         tokenId = nextTokenId++;
