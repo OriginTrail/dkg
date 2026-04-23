@@ -175,8 +175,8 @@ describe('Publish ordering & RPC spy — P-1 / P-6 / P-7', () => {
   }, 180_000);
 
   it(
-    'PROD-BUG: P-1 write-ahead txHash — no phase event emits a txHash before the tx is broadcast. ' +
-      'See BUGS_FOUND.md P-1.',
+    'P-1 write-ahead txHash — a phase event carrying the pre-broadcast tx hash ' +
+      'must fire BEFORE `eth_sendRawTransaction` (PR #241 Codex iter-5: fixed).',
     async () => {
       const phaseLog: string[] = [];
       const rpcCalls: RpcCallRecord[] = [];
@@ -203,15 +203,40 @@ describe('Publish ordering & RPC spy — P-1 / P-6 / P-7', () => {
         expect(rpcCalls.length).toBeGreaterThan(0);
 
         // Spec axiom 4 requires a `txHash persisted` / `journal write-ahead`
-        // event that includes the pre-broadcast tx hash. The publisher
-        // currently does not emit any such event; its phase API stops at
-        // `chain:submit:start`. The assertion below is RED today.
-        const snapshot = rpcCalls[0].phaseLogSnapshot;
-        const hasTxHashPreSend = snapshot.some((p) =>
-          /tx(hash)?|journal|writeahead|write-ahead|pre-?send/i.test(p),
+        // event that includes the pre-broadcast tx hash. Codex review on
+        // PR #241 pointed out that a plain `chain:writeahead:start` /
+        // `chain:writeahead:end` boundary (emitted around the adapter
+        // send) does NOT satisfy this requirement — the phase name alone
+        // cannot carry the hash.
+        //
+        // PR #241 Codex iter-5 closes this gap: the EVM adapter's
+        // publishDirect flow is now split into populate → sign → hook
+        // → broadcast, and the publisher's `onBroadcast` callback
+        // receives `{ txHash }` and emits a
+        // `chain:txsigned:tx-0x<hash>:start`/`:end` breadcrumb BEFORE
+        // `chain:writeahead:start`. This test therefore flips from
+        // RED to GREEN on PR #241 and permanently locks the WAL
+        // contract: any regression that loses the hash breadcrumb
+        // will surface here.
+        //
+        // Note: when the publisher needs to top up the TRAC allowance,
+        // the first `eth_sendRawTransaction` is the `approve()` tx,
+        // which fires BEFORE `chain:writeahead:start` by design (the
+        // WAL window must only cover the actual publish tx, not
+        // preflight approvals — see evm-adapter.ts iter-5 comment).
+        // We therefore look for the `eth_sendRawTransaction` whose
+        // snapshot already contains `chain:writeahead:start`, i.e.
+        // the publish tx itself, and assert the hash breadcrumb
+        // precedes it in the same snapshot.
+        const publishRpcCall = rpcCalls.find((call) =>
+          call.phaseLogSnapshot.includes('chain:writeahead:start'),
         );
-        // PROD-BUG: expected `true`, currently `false` → write-ahead missing.
-        expect(hasTxHashPreSend).toBe(true);
+        expect(publishRpcCall, 'expected a publish-tx eth_sendRawTransaction with chain:writeahead:start in its snapshot').toBeDefined();
+        const snapshot = publishRpcCall!.phaseLogSnapshot;
+        const hasTxHashPreSend = snapshot.some((p) =>
+          /^chain:txsigned:tx-0x[0-9a-f]+:start$/i.test(p),
+        );
+        expect(hasTxHashPreSend, 'expected a pre-broadcast chain:txsigned:tx-0x<hash>:start event; got: ' + snapshot.join(', ')).toBe(true);
       } finally {
         ourProvider.send = origSend;
       }

@@ -1292,27 +1292,87 @@ export class DKGPublisher implements Publisher {
         const pubSig = ethers.Signature.from(
           await this.publisherWallet.signMessage(pubMsgHash),
         );
-        onChainResult = await this.chain.createKnowledgeAssetsV10!({
-          publishOperationId: `${this.sessionId}-${tentativeSeq}`,
-          contextGraphId: v10CgId,
-          merkleRoot: kcMerkleRoot,
-          knowledgeAssetsAmount: kaCount,
-          byteSize: publicByteSize,
-          epochs: 1,
-          tokenAmount,
-          isImmutable: false,
-          paymaster: ethers.ZeroAddress,
-          publisherNodeIdentityId: identityId,
-          publisherSignature: {
-            r: ethers.getBytes(pubSig.r),
-            vs: ethers.getBytes(pubSig.yParityAndS),
-          },
-          ackSignatures: v10ACKs.map(ack => ({
-            identityId: ack.nodeIdentityId,
-            r: ack.signatureR,
-            vs: ack.signatureVS,
-          })),
-        });
+        // P-1 review (iter-2): `chain:writeahead:start` now fires
+        // *from inside* the adapter via the `onBroadcast` callback,
+        // which the adapter invokes immediately before the real
+        // `publishDirect` broadcast — after any TRAC `approve()` tx
+        // and allowance top-up. Listeners that checkpoint on
+        // `:start` therefore only record recovery state for a
+        // publish tx that is actually about to hit the wire.
+        //
+        // The surrounding `try/finally` still guarantees
+        // `:end` always pairs with `:start`: if the adapter throws
+        // BEFORE invoking `onBroadcast` (e.g. revert during
+        // `approve()`, `estimateGas`, ACK preflight) neither
+        // `:start` nor `:end` fires, so listeners see no WAL
+        // boundary for a broadcast that never happened. If the
+        // adapter throws AFTER invoking `onBroadcast` (revert on
+        // the publish tx itself), `:start` has fired and the
+        // `finally` emits `:end` — this is the recoverable-crash
+        // window spec axiom 4 / §06 asks nodes to persist.
+        //
+        // Spec axiom 4 / §06: nodes persist a "publish attempt
+        // about to hit the wire" record BEFORE any
+        // `eth_sendRawTransaction` RPC so that a crash between
+        // "tx on wire" and "receipt observed" can be recovered
+        // without a double-submit. Older adapters that don't
+        // invoke `onBroadcast` fall back to the previous behaviour
+        // (no `:start` / `:end` on that path) — the publisher
+        // emits neither and listeners simply see the parent `chain`
+        // phase; adapters upgrading to the new hook regain the
+        // precise boundary. See P-1 / P-1.2 in BUGS_FOUND.md.
+        let wroteAhead = false;
+        const emitWriteAheadStart = (info?: { txHash?: string }) => {
+          if (wroteAhead) return;
+          wroteAhead = true;
+          // PR #241 Codex iter-5: emit a hash-bearing phase BEFORE the
+          // generic `chain:writeahead:start` so WAL listeners can
+          // persist the signed-but-not-yet-broadcast tx identity
+          // (spec axiom 4 / §06 "txHash persisted" requirement, P-1.2
+          // in BUGS_FOUND.md). The phase name encodes the hash because
+          // `PhaseCallback` is a 2-arg function; adding a detail
+          // parameter would be a source-level break for existing
+          // onPhase consumers. Listeners can regex the phase string
+          // to recover the hash, or legacy consumers can ignore it.
+          //
+          // Emit balanced `start` + `end` back-to-back: the phase is a
+          // single-shot breadcrumb (the actual broadcast window is
+          // already bracketed by `chain:writeahead`), and keeping
+          // starts balanced by ends preserves the "every start has a
+          // matching end" golden-sequence invariant.
+          if (info?.txHash) {
+            const phase = `chain:txsigned:tx-${info.txHash}`;
+            onPhase?.(phase, 'start');
+            onPhase?.(phase, 'end');
+          }
+          onPhase?.('chain:writeahead', 'start');
+        };
+        try {
+          onChainResult = await this.chain.createKnowledgeAssetsV10!({
+            publishOperationId: `${this.sessionId}-${tentativeSeq}`,
+            contextGraphId: v10CgId,
+            merkleRoot: kcMerkleRoot,
+            knowledgeAssetsAmount: kaCount,
+            byteSize: publicByteSize,
+            epochs: 1,
+            tokenAmount,
+            isImmutable: false,
+            paymaster: ethers.ZeroAddress,
+            publisherNodeIdentityId: identityId,
+            publisherSignature: {
+              r: ethers.getBytes(pubSig.r),
+              vs: ethers.getBytes(pubSig.yParityAndS),
+            },
+            ackSignatures: v10ACKs.map(ack => ({
+              identityId: ack.nodeIdentityId,
+              r: ack.signatureR,
+              vs: ack.signatureVS,
+            })),
+            onBroadcast: emitWriteAheadStart,
+          });
+        } finally {
+          if (wroteAhead) onPhase?.('chain:writeahead', 'end');
+        }
 
         onChainResult.tokenAmount = tokenAmount;
 
@@ -1512,7 +1572,9 @@ export class DKGPublisher implements Publisher {
     onPhase?.('chain', 'start');
     onPhase?.('chain:submit', 'start');
 
-    // Compute real serialized byte size — must match the publish path serializer
+    // Compute real serialized byte size — must match the publish path serializer.
+    // Done BEFORE `chain:writeahead:start` so any error during serialization
+    // does not leave an unmatched write-ahead boundary.
     const updateNquadsStr = allSkolemizedQuads
       .map(
         (q: { subject: string; predicate: string; object: string; graph?: string }) =>
@@ -1521,62 +1583,113 @@ export class DKGPublisher implements Publisher {
       .join('\n');
     const updateByteSize = BigInt(new TextEncoder().encode(updateNquadsStr).length);
 
+    // P-1 review (iter-2): `chain:writeahead:start` fires from inside
+    // the V10 adapter via `onBroadcast` — i.e. AFTER allowance +
+    // `approve()`, RIGHT BEFORE the real `updateDirect` broadcast.
+    // This keeps the WAL boundary precise (listeners only record
+    // recovery state when a concrete update tx is imminent) while the
+    // outer try/finally still guarantees balanced `:start`/`:end`
+    // when the adapter throws after invoking `onBroadcast`. The V9
+    // fallback path (`updateKnowledgeAssets`) does not yet support
+    // the hook — it retains the coarse phase boundary that brackets
+    // the whole adapter call. See the equivalent marker in the
+    // publish path above for the full rationale.
     let txResult: { success: boolean; hash: string; blockNumber?: number };
-    if (typeof this.chain.updateKnowledgeCollectionV10 === 'function') {
-      try {
-        txResult = await this.chain.updateKnowledgeCollectionV10({
-          kcId,
-          newMerkleRoot: kcMerkleRoot,
-          newByteSize: updateByteSize,
-          mintAmount: 0,
-          publisherAddress: this.publisherAddress,
-          v10Origin: true,
-        });
-      } catch (v10Err) {
-        const errorName = enrichEvmError(v10Err);
-        const V10_DEFINITIVE_ERRORS = [
-          'NotBatchPublisher', 'KnowledgeCollectionExpired',
-          'CannotUpdateImmutableKnowledgeCollection', 'ExceededKnowledgeCollectionMaxSize',
-        ];
-        if (errorName && V10_DEFINITIVE_ERRORS.includes(errorName)) {
-          this.log.warn(ctx, `V10 update rejected (${errorName}): ${v10Err instanceof Error ? v10Err.message : String(v10Err)}`);
-          onPhase?.('chain:submit', 'end');
-          onPhase?.('chain', 'end');
-          return {
-            kcId,
-            ual: `did:dkg:${this.chain.chainId}/${this.publisherAddress}/${kcId}`,
-            merkleRoot: kcMerkleRoot,
-            kaManifest: manifestEntries,
-            status: 'failed',
-            publicQuads: allSkolemizedQuads,
-          };
-        }
-        if (typeof this.chain.updateKnowledgeAssets === 'function') {
-          this.log.info(ctx, `V10 update failed (${errorName ?? 'unknown'}), trying V9 path: ${v10Err instanceof Error ? v10Err.message : String(v10Err)}`);
-          try {
-            txResult = await this.chain.updateKnowledgeAssets({
-              batchId: kcId,
-              newMerkleRoot: kcMerkleRoot,
-              newPublicByteSize: updateByteSize,
-              publisherAddress: this.publisherAddress,
-            });
-          } catch (v9Err) {
-            enrichEvmError(v9Err);
-            throw v9Err;
-          }
-        } else {
-          throw v10Err;
-        }
+    let earlyReturn: PublishResult | undefined;
+    let wroteAhead = false;
+    const emitWriteAheadStart = (info?: { txHash?: string }) => {
+      if (wroteAhead) return;
+      wroteAhead = true;
+      // Mirror the publish path (above): emit a balanced, hash-bearing
+      // phase first so WAL listeners record the signed-but-not-yet-
+      // broadcast update tx identity, then the generic
+      // `chain:writeahead:start` for legacy consumers.
+      if (info?.txHash) {
+        const phase = `chain:txsigned:tx-${info.txHash}`;
+        onPhase?.(phase, 'start');
+        onPhase?.(phase, 'end');
       }
-    } else if (typeof this.chain.updateKnowledgeAssets === 'function') {
-      txResult = await this.chain.updateKnowledgeAssets({
-        batchId: kcId,
-        newMerkleRoot: kcMerkleRoot,
-        newPublicByteSize: updateByteSize,
-        publisherAddress: this.publisherAddress,
-      });
-    } else {
-      throw new Error('Chain adapter does not support updates (no V10 or V9 update method available)');
+      onPhase?.('chain:writeahead', 'start');
+    };
+    try {
+      if (typeof this.chain.updateKnowledgeCollectionV10 === 'function') {
+        try {
+          txResult = await this.chain.updateKnowledgeCollectionV10({
+            kcId,
+            newMerkleRoot: kcMerkleRoot,
+            newByteSize: updateByteSize,
+            mintAmount: 0,
+            publisherAddress: this.publisherAddress,
+            v10Origin: true,
+            onBroadcast: emitWriteAheadStart,
+          });
+        } catch (v10Err) {
+          const errorName = enrichEvmError(v10Err);
+          const V10_DEFINITIVE_ERRORS = [
+            'NotBatchPublisher', 'KnowledgeCollectionExpired',
+            'CannotUpdateImmutableKnowledgeCollection', 'ExceededKnowledgeCollectionMaxSize',
+          ];
+          if (errorName && V10_DEFINITIVE_ERRORS.includes(errorName)) {
+            this.log.warn(ctx, `V10 update rejected (${errorName}): ${v10Err instanceof Error ? v10Err.message : String(v10Err)}`);
+            earlyReturn = {
+              kcId,
+              ual: `did:dkg:${this.chain.chainId}/${this.publisherAddress}/${kcId}`,
+              merkleRoot: kcMerkleRoot,
+              kaManifest: manifestEntries,
+              status: 'failed',
+              publicQuads: allSkolemizedQuads,
+            };
+            txResult = { success: false, hash: '' };
+          } else if (typeof this.chain.updateKnowledgeAssets === 'function') {
+            this.log.info(ctx, `V10 update failed (${errorName ?? 'unknown'}), trying V9 path: ${v10Err instanceof Error ? v10Err.message : String(v10Err)}`);
+            // Codex PR #241 iter-6: The V9 `updateKnowledgeAssets()`
+            // adapter path has NO `onBroadcast` hook, so we cannot emit
+            // a true "tx signed, about to broadcast" WAL checkpoint
+            // here. Previously we emitted `chain:writeahead:start`
+            // unconditionally before the adapter call, but that
+            // re-introduced exactly the false-positive WAL boundary
+            // this PR is removing: preflight/estimateGas can throw
+            // before any tx hits the wire, leaving listeners with a
+            // checkpoint for a publish that never broadcast. Safer to
+            // skip the phase entirely on V9 — callers relying on WAL
+            // semantics must upgrade to a V10 adapter that provides
+            // `onBroadcast`.
+            try {
+              txResult = await this.chain.updateKnowledgeAssets({
+                batchId: kcId,
+                newMerkleRoot: kcMerkleRoot,
+                newPublicByteSize: updateByteSize,
+                publisherAddress: this.publisherAddress,
+              });
+            } catch (v9Err) {
+              enrichEvmError(v9Err);
+              throw v9Err;
+            }
+          } else {
+            throw v10Err;
+          }
+        }
+      } else if (typeof this.chain.updateKnowledgeAssets === 'function') {
+        // Codex PR #241 iter-6: same rationale as the V9 fallback above
+        // — no `onBroadcast` hook means no sound WAL boundary, so we
+        // skip the phase on this legacy V9-only path.
+        txResult = await this.chain.updateKnowledgeAssets({
+          batchId: kcId,
+          newMerkleRoot: kcMerkleRoot,
+          newPublicByteSize: updateByteSize,
+          publisherAddress: this.publisherAddress,
+        });
+      } else {
+        throw new Error('Chain adapter does not support updates (no V10 or V9 update method available)');
+      }
+    } finally {
+      if (wroteAhead) onPhase?.('chain:writeahead', 'end');
+    }
+
+    if (earlyReturn) {
+      onPhase?.('chain:submit', 'end');
+      onPhase?.('chain', 'end');
+      return earlyReturn;
     }
 
     if (!txResult.success) {

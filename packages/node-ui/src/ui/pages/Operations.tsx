@@ -9,30 +9,14 @@ import {
   fetchOperationStats, fetchStatus, fetchErrorHotspots, fetchFailedOperations,
   fetchSuccessRates, fetchPerTypeStats, fetchMetricsHistory,
 } from '../api.js';
-
-const PHASE_COLORS: Record<string, string> = {
-  prepare: '#3b82f6',
-  'prepare:ensureContextGraph': '#60a5fa',
-  'prepare:partition': '#2563eb',
-  'prepare:manifest': '#93c5fd',
-  'prepare:validate': '#1d4ed8',
-  'prepare:merkle': '#7dd3fc',
-  store: '#8b5cf6',
-  chain: '#f59e0b',
-  'chain:sign': '#fbbf24',
-  'chain:submit': '#d97706',
-  'chain:metadata': '#f97316',
-  broadcast: '#22c55e',
-  decode: '#14b8a6',
-  validate: '#2dd4bf',
-  'read-shared-memory': '#06b6d4',
-  parse: '#3b82f6',
-  execute: '#8b5cf6',
-  transfer: '#60a5fa',
-  verify: '#22c55e',
-};
-
-const PHASE_FALLBACK_COLOR = '#a78bfa';
+// P-1 review: shared phase palette — single source of truth for
+// phase → colour AND the Operations legend. Previously Dashboard
+// and Operations kept two independent maps that drifted.
+import {
+  PHASE_COLORS,
+  PHASE_FALLBACK_COLOR,
+  PHASE_LEGEND_ENTRIES,
+} from '../phase-colors.js';
 
 const STATUS_COLORS: Record<string, string> = {
   success: '#22c55e',
@@ -44,6 +28,12 @@ const PHASE_DESCRIPTIONS: Record<string, string> = {
   prepare: 'Partitioning triples, computing Merkle hashes, validating & signing.',
   store: 'Inserting triples into the local triple store and data graph.',
   chain: 'Submitting on-chain tx and waiting for confirmation.',
+  // Codex PR #241 review (iter-2): the legend renders one row per
+  // entry in `PHASE_LEGEND_ENTRIES`, including the sub-phase
+  // `chain:writeahead`. Without a matching description here the
+  // hover tooltip came back empty. Describe the boundary explicitly
+  // so operators can see what recovery state the WAL entry covers.
+  'chain:writeahead': 'Publish/update tx about to hit the wire — recovery window for "broadcast without receipt" crashes.',
   broadcast: 'Broadcasting to network peers via GossipSub.',
   parse: 'Validating and parsing the SPARQL query syntax.',
   execute: 'Running the SPARQL query against the local triple store.',
@@ -72,19 +62,6 @@ const OP_TYPE_DESCRIPTIONS: Record<string, string> = {
   gossip: 'Propagate updates across the peer-to-peer network',
   system: 'Internal system maintenance operation',
 };
-
-const PHASE_LEGEND_ENTRIES = [
-  { phase: 'prepare', label: 'Prepare', color: '#3b82f6' },
-  { phase: 'store', label: 'Store', color: '#8b5cf6' },
-  { phase: 'chain', label: 'Chain', color: '#f59e0b' },
-  { phase: 'broadcast', label: 'Broadcast', color: '#22c55e' },
-  { phase: 'parse', label: 'Parse', color: '#3b82f6' },
-  { phase: 'execute', label: 'Execute', color: '#8b5cf6' },
-  { phase: 'transfer', label: 'Transfer', color: '#60a5fa' },
-  { phase: 'verify', label: 'Verify', color: '#22c55e' },
-  { phase: 'decode', label: 'Decode', color: '#14b8a6' },
-  { phase: 'validate', label: 'Validate', color: '#2dd4bf' },
-];
 
 const TOOLTIP_STYLE = { background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 6, fontSize: 12, color: 'var(--text)' };
 
@@ -674,8 +651,13 @@ function MiniGantt({ phases, totalMs }: { phases: any[]; totalMs: number }) {
       </div>
       {hover !== null && phases[hover] && (() => {
         const hoveredPhase = phases[hover].phase;
+        // Codex PR #241 iter-6: look up the exact phase first
+        // (so `chain:writeahead` gets its dedicated description)
+        // and only fall back to the top-level phase when no exact
+        // entry exists. Without this, every sub-phase was reduced
+        // to its top-level and the specific WAL tooltip was dead.
         const topLevel = hoveredPhase.includes(':') ? hoveredPhase.split(':')[0] : hoveredPhase;
-        const desc = PHASE_DESCRIPTIONS[topLevel];
+        const desc = PHASE_DESCRIPTIONS[hoveredPhase] ?? PHASE_DESCRIPTIONS[topLevel];
         return (
           <div style={{
             position: 'absolute', bottom: '100%', left: '50%', transform: 'translateX(-50%)',
@@ -1069,7 +1051,12 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
               {phases.map((p: any, i: number) => {
                 const color = PHASE_COLORS[p.phase] ?? PHASE_FALLBACK_COLOR;
                 const topLevel = p.phase.includes(':') ? p.phase.split(':')[0] : p.phase;
-                const desc = PHASE_DESCRIPTIONS[topLevel];
+                // Codex PR #241 iter-6: exact-match first, then fall back
+                // to the top-level phase. Same rationale as the bar-hover
+                // lookup above — sub-phases like `chain:writeahead` need
+                // to surface their own description instead of reducing
+                // to the umbrella `chain` entry.
+                const desc = PHASE_DESCRIPTIONS[p.phase] ?? PHASE_DESCRIPTIONS[topLevel];
                 return (
                   <div key={`${p.phase}-${i}`} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', background: 'rgba(255,255,255,.02)', borderRadius: 6, borderLeft: `3px solid ${p.status === 'error' ? 'var(--red)' : color}` }}>
                     <span style={{ fontWeight: 600, fontSize: 12, color, minWidth: 65 }} title={desc ?? ''}>{p.phase}</span>
