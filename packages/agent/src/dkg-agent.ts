@@ -2778,15 +2778,27 @@ export class DKGAgent {
     // daemon process) and leave the legacy behaviour intact. Those
     // call sites are tracked as follow-up A-1.2 for migration to an
     // authenticated scoped handle.
+    // A-1 review: `/api/query` passes the raw JSON body through, so
+    // `agentAddress` / `callerAgentAddress` can arrive as any JSON type
+    // (number, array, object, null). Narrow both to strings before
+    // comparing — otherwise `.toLowerCase()` throws and a malformed
+    // request turns into a 500 instead of a clean 400 / deny. Types
+    // that survive the narrow are safe to compare case-insensitively;
+    // anything else is treated as "no authenticated caller" for the
+    // purpose of the working-memory guard.
+    const callerAgentAddressStr =
+      typeof opts.callerAgentAddress === 'string' ? opts.callerAgentAddress : undefined;
+    const agentAddressStr =
+      typeof opts.agentAddress === 'string' ? opts.agentAddress : undefined;
     if (
       opts.view === 'working-memory' &&
-      opts.callerAgentAddress &&
-      opts.agentAddress &&
-      opts.callerAgentAddress.toLowerCase() !== opts.agentAddress.toLowerCase()
+      callerAgentAddressStr &&
+      agentAddressStr &&
+      callerAgentAddressStr.toLowerCase() !== agentAddressStr.toLowerCase()
     ) {
       this.log.info(
         ctx,
-        `WM query denied: caller=${opts.callerAgentAddress} cannot read agentAddress=${opts.agentAddress} — A-1 isolation`,
+        `WM query denied: caller=${callerAgentAddressStr} cannot read agentAddress=${agentAddressStr} — A-1 isolation`,
       );
       return { bindings: [] };
     }
@@ -2812,7 +2824,7 @@ export class DKGAgent {
       graphSuffix: opts.graphSuffix,
       includeSharedMemory: opts.includeSharedMemory,
       view: opts.view,
-      agentAddress: opts.agentAddress ?? (opts.view === 'working-memory' ? this.peerId : undefined),
+      agentAddress: agentAddressStr ?? (opts.view === 'working-memory' ? this.peerId : undefined),
       verifiedGraph: opts.verifiedGraph,
       assertionName: opts.assertionName,
       subGraphName: opts.subGraphName,

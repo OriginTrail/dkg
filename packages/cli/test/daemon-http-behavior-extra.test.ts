@@ -672,6 +672,140 @@ describe('CLI-17 — api-client round-trip against live daemon', () => {
 });
 
 // ---------------------------------------------------------------------------
+// A-1 — Working-Memory isolation at the HTTP boundary
+// ---------------------------------------------------------------------------
+//
+// PR #242 added an A-1 guard inside `DKGAgent.query()` that denies a
+// cross-agent working-memory read when `callerAgentAddress` is supplied
+// and does not match `agentAddress`. Codex review on that PR flagged
+// that the agent-level test bypasses the actual production path by
+// injecting `callerAgentAddress` directly, so a regression in
+// `packages/cli/src/daemon.ts` (e.g. /api/query forgetting to forward
+// `requestAgentAddress`) would silently re-open the leak. This block is
+// the HTTP-level regression: two agents registered on one daemon, each
+// with a distinct auth token, querying `view=working-memory` against
+// each other through real /api/query requests.
+//
+describe('A-1 — /api/query enforces working-memory isolation across agent tokens', () => {
+  interface RegisteredAgent {
+    agentAddress: string;
+    authToken: string;
+  }
+
+  async function registerAgent(
+    d: Daemon,
+    name: string,
+  ): Promise<RegisteredAgent> {
+    const res = await fetch(urlFor(d, '/api/agent/register'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders(d) },
+      body: JSON.stringify({ name }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.agentAddress).toMatch(/^0x[0-9a-fA-F]{40}$/);
+    expect(typeof body.authToken).toBe('string');
+    return { agentAddress: body.agentAddress, authToken: body.authToken };
+  }
+
+  async function queryAsAgent(
+    d: Daemon,
+    agent: RegisteredAgent,
+    body: Record<string, unknown>,
+  ): Promise<{ status: number; body: any }> {
+    const res = await fetch(urlFor(d, '/api/query'), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${agent.authToken}`,
+      },
+      body: JSON.stringify(body),
+    });
+    return { status: res.status, body: await res.json().catch(() => ({})) };
+  }
+
+  it(
+    'authenticated cross-agent WM read returns 200 with empty bindings ' +
+      '(caller=B cannot read agentAddress=A)',
+    async () => {
+      const d = daemon!;
+      const cgId = 'a1-wm-http-' + Math.random().toString(36).slice(2, 8);
+      const create = await fetch(urlFor(d, '/api/context-graph/create'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders(d) },
+        body: JSON.stringify({ id: cgId, name: cgId }),
+      });
+      expect([200, 201]).toContain(create.status);
+
+      const agentA = await registerAgent(d, 'a1-http-agent-a');
+      const agentB = await registerAgent(d, 'a1-http-agent-b');
+      expect(agentA.agentAddress).not.toBe(agentB.agentAddress);
+      expect(agentA.authToken).not.toBe(agentB.authToken);
+
+      // B authenticates with its own bearer token but asks for A's
+      // working-memory by setting `agentAddress: <A>`. The /api/query
+      // route resolves `requestAgentAddress` from B's token and forwards
+      // it as `callerAgentAddress`. DKGAgent.query must see the
+      // caller/target mismatch and return empty bindings (A-1).
+      const cross = await queryAsAgent(d, agentB, {
+        sparql: 'SELECT ?s ?p ?o WHERE { ?s ?p ?o }',
+        contextGraphId: cgId,
+        view: 'working-memory',
+        agentAddress: agentA.agentAddress,
+      });
+      expect(cross.status).toBe(200);
+      expect(cross.body?.result?.bindings ?? []).toEqual([]);
+
+      // Sanity: B reading B's own WM is still allowed (no leak, but also
+      // not over-blocked). Should return 200 with an empty array for a
+      // fresh context graph — the point is the request does not error
+      // and does not get mis-denied by the A-1 guard.
+      const own = await queryAsAgent(d, agentB, {
+        sparql: 'SELECT ?s ?p ?o WHERE { ?s ?p ?o }',
+        contextGraphId: cgId,
+        view: 'working-memory',
+        agentAddress: agentB.agentAddress,
+      });
+      expect(own.status).toBe(200);
+    },
+    60_000,
+  );
+
+  it('rejects /api/query when agentAddress is not a string (400, not 500)', async () => {
+    const d = daemon!;
+    const cgId = 'a1-wm-badtype-' + Math.random().toString(36).slice(2, 8);
+    const create = await fetch(urlFor(d, '/api/context-graph/create'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders(d) },
+      body: JSON.stringify({ id: cgId, name: cgId }),
+    });
+    expect([200, 201]).toContain(create.status);
+
+    // Codex review on PR #242: the original A-1 guard called
+    // `opts.agentAddress.toLowerCase()` without checking the type, so a
+    // caller sending `{ agentAddress: 123 }` would trigger a TypeError
+    // and turn bad input into a 500. The narrowed guard must either
+    // reject at the view resolver (400, "agentAddress is required")
+    // OR succeed cleanly with empty bindings — either way, NOT 500.
+    for (const badValue of [123, true, null, { nested: 'x' }, ['arr']]) {
+      const res = await fetch(urlFor(d, '/api/query'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders(d) },
+        body: JSON.stringify({
+          sparql: 'SELECT ?s ?p ?o WHERE { ?s ?p ?o }',
+          contextGraphId: cgId,
+          view: 'working-memory',
+          agentAddress: badValue,
+        }),
+      });
+      expect(res.status, `agentAddress=${JSON.stringify(badValue)} produced ${res.status}`).not.toBe(500);
+      expect(res.status).toBeGreaterThanOrEqual(200);
+      expect(res.status).toBeLessThan(500);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // CLI-13 / CLI-14 — shutdown signal → exit code mapping & timer cleanup
 // ---------------------------------------------------------------------------
 //
