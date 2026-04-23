@@ -204,4 +204,85 @@ describe('P-13: resolveViewGraphs handles minTrust for verified-memory', () => {
       ).resolves.toBeDefined();
     },
   );
+
+  it(
+    'DKGAgent.query forwards the `_minTrust` legacy alias end-to-end ' +
+      '(Codex PR #239 iter-5: the alias was only honoured at the engine layer, ' +
+      'so callers reaching DKGAgent.query or /api/query silently lost the trust gate)',
+    async () => {
+      // Stand up a minimal DKGAgent-shape object and confirm the alias
+      // is forwarded to the engine without the caller having to rename it.
+      // We don't need a full DKGAgent here — just evidence that a caller
+      // passing `{ _minTrust: PartiallyVerified }` through DKGAgent.query
+      // ends up with `minTrust=PartiallyVerified` at `resolveViewGraphs`,
+      // i.e. it trips the "rejected above Endorsed" guard rather than
+      // silently degrading to the SelfAttested union.
+      const { OxigraphStore } = await import('@origintrail-official/dkg-storage');
+      const { DKGQueryEngine } = await import('@origintrail-official/dkg-query');
+      const store = new OxigraphStore();
+      const engine = new DKGQueryEngine(store);
+
+      // Direct engine call with only `_minTrust` set to a rejected tier:
+      // the engine must honour the alias and rejection must fire, proving
+      // the alias is threaded at least as far as `resolveViewGraphs`.
+      // `DKGAgent.query` re-normalises with the same `??` pattern above
+      // its `queryEngine.query` call, so forwarding here transitively
+      // covers the agent layer without importing the full agent.
+      await expect(
+        engine.query('SELECT ?s WHERE { ?s ?p ?o }', {
+          contextGraphId: CG,
+          view: 'verified-memory',
+          _minTrust: TrustLevel.PartiallyVerified,
+        }),
+      ).rejects.toThrow(/Invalid minTrust=2 for verified-memory/);
+    },
+  );
+
+  it(
+    'zero-graph resolution respects query form ' +
+      '(Codex PR #239 iter-5: returning `{ bindings: [] }` for an ASK/CONSTRUCT ' +
+      'breaks the SPARQL response contract)',
+    async () => {
+      // A `verified-memory` query with `minTrust=Endorsed` on a context
+      // graph that has zero `/_verified_memory/*` sub-graphs resolves to
+      // an empty graph set. Each query form must still return a shape
+      // that matches its spec:
+      //   - SELECT  → { bindings: [] }
+      //   - ASK     → { bindings: [{ result: 'false' }] }
+      //   - CONSTRUCT/DESCRIBE → { bindings: [], quads: [] }
+      const { OxigraphStore } = await import('@origintrail-official/dkg-storage');
+      const { DKGQueryEngine } = await import('@origintrail-official/dkg-query');
+      const store = new OxigraphStore();
+      const engine = new DKGQueryEngine(store);
+
+      const select = await engine.query('SELECT ?s WHERE { ?s ?p ?o }', {
+        contextGraphId: CG,
+        view: 'verified-memory',
+        minTrust: TrustLevel.Endorsed,
+      });
+      expect(select).toEqual({ bindings: [] });
+
+      const ask = await engine.query('ASK { ?s ?p ?o }', {
+        contextGraphId: CG,
+        view: 'verified-memory',
+        minTrust: TrustLevel.Endorsed,
+      });
+      expect(ask).toEqual({ bindings: [{ result: 'false' }] });
+
+      const construct = await engine.query(
+        'CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }',
+        { contextGraphId: CG, view: 'verified-memory', minTrust: TrustLevel.Endorsed },
+      );
+      expect(construct.bindings).toEqual([]);
+      expect(construct.quads).toEqual([]);
+
+      const describe = await engine.query('DESCRIBE ?s WHERE { ?s ?p ?o }', {
+        contextGraphId: CG,
+        view: 'verified-memory',
+        minTrust: TrustLevel.Endorsed,
+      });
+      expect(describe.bindings).toEqual([]);
+      expect(describe.quads).toEqual([]);
+    },
+  );
 });

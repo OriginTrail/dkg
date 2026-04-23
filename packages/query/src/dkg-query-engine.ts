@@ -9,7 +9,7 @@ import {
   REMOVED_VIEWS,
   TrustLevel,
 } from '@origintrail-official/dkg-core';
-import { validateReadOnlySparql } from './sparql-guard.js';
+import { emptyQueryResultForKind, validateReadOnlySparql } from './sparql-guard.js';
 
 /**
  * Result of resolving a V10 GET view to concrete graph targets.
@@ -290,7 +290,15 @@ export class DKGQueryEngine implements QueryEngine {
     }
 
     if (allGraphs.length === 0) {
-      return { bindings: [] };
+      // PR #239 Codex iter-5: a zero-graph resolution (e.g. a
+      // `verified-memory` query with `minTrust=Endorsed` on a context graph
+      // that has not been populated with any `/_verified_memory/*`
+      // sub-graphs yet) must still respect the requested query form.
+      // Returning `{ bindings: [] }` for an ASK would look like a SELECT
+      // result and break clients that rely on ASK's boolean binding;
+      // CONSTRUCT/DESCRIBE must carry `quads: []`. Delegate to the shared
+      // kind-aware empty-result helper.
+      return emptyQueryResultForKind(sparql);
     }
 
     if (allGraphs.length === 1) {

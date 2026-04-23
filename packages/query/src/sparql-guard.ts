@@ -6,7 +6,9 @@
  * This module rejects any SPARQL that attempts mutation operations.
  */
 
+import type { Quad } from '@origintrail-official/dkg-storage';
 import { stripLiteralsAndComments } from './sparql-utils.js';
+import type { QueryResult } from './query-engine.js';
 
 const MUTATING_KEYWORDS = [
   'INSERT',
@@ -59,5 +61,42 @@ export function validateReadOnlySparql(sparql: string): SparqlGuardResult {
   }
 
   return { safe: true };
+}
+
+export type SparqlForm = 'SELECT' | 'CONSTRUCT' | 'ASK' | 'DESCRIBE';
+
+/**
+ * Classify the query form of a SPARQL string. Used by engines that need to
+ * short-circuit a query (e.g. "no graphs resolved") while still returning a
+ * result shape that matches the requested form — `QueryResult.bindings: []`
+ * is not a valid ASK response (ASK must return a boolean binding) and is not
+ * a valid CONSTRUCT/DESCRIBE response either (those must carry `quads: []`).
+ */
+export function classifySparqlForm(sparql: string): SparqlForm {
+  const stripped = stripLiteralsAndComments(sparql);
+  const match = READ_ONLY_FORMS.exec(stripped);
+  const form = (match?.[1] ?? 'SELECT').toUpperCase();
+  if (form === 'ASK' || form === 'CONSTRUCT' || form === 'DESCRIBE') {
+    return form;
+  }
+  return 'SELECT';
+}
+
+/**
+ * Produce an empty `QueryResult` that matches the requested query form.
+ * Centralising this keeps every "nothing to query" short-circuit
+ * (access-denied synthetic response, zero-graph resolution, etc.) aligned
+ * on a single well-typed contract instead of returning `{ bindings: [] }`
+ * for every form.
+ */
+export function emptyQueryResultForKind(sparql: string): QueryResult {
+  const form = classifySparqlForm(sparql);
+  if (form === 'ASK') {
+    return { bindings: [{ result: 'false' }] };
+  }
+  if (form === 'CONSTRUCT' || form === 'DESCRIBE') {
+    return { bindings: [], quads: [] as Quad[] };
+  }
+  return { bindings: [] };
 }
 

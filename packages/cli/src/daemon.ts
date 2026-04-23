@@ -6605,17 +6605,25 @@ async function handleRequest(
       partiallyverified: 2,
       consensusverified: 3,
     };
+    // PR #239 Codex iter-5: also accept the legacy `_minTrust` underscore
+    // form as a deprecation-window alias, so SDK consumers that adopted
+    // the underscore shape before the rename get the same trust gate the
+    // canonical `minTrust` does. `minTrust` wins if both are present.
+    const rawMinTrust = parsed.minTrust ?? parsed._minTrust;
+    const minTrustSrcField = parsed.minTrust !== undefined && parsed.minTrust !== null
+      ? 'minTrust'
+      : '_minTrust';
     let minTrust: number | undefined;
-    if (parsed.minTrust !== undefined && parsed.minTrust !== null) {
-      if (typeof parsed.minTrust === 'number' && Number.isInteger(parsed.minTrust) && parsed.minTrust >= 0 && parsed.minTrust <= 3) {
-        minTrust = parsed.minTrust;
-      } else if (typeof parsed.minTrust === 'string') {
-        const canon = parsed.minTrust.toLowerCase().replace(/[_-]/g, '');
+    if (rawMinTrust !== undefined && rawMinTrust !== null) {
+      if (typeof rawMinTrust === 'number' && Number.isInteger(rawMinTrust) && rawMinTrust >= 0 && rawMinTrust <= 3) {
+        minTrust = rawMinTrust;
+      } else if (typeof rawMinTrust === 'string') {
+        const canon = rawMinTrust.toLowerCase().replace(/[_-]/g, '');
         if (canon in TRUST_LEVELS) minTrust = TRUST_LEVELS[canon];
       }
       if (minTrust === undefined) {
         return jsonResponse(res, 400, {
-          error: `Invalid minTrust "${parsed.minTrust}". Expected one of: SelfAttested, Endorsed, PartiallyVerified, ConsensusVerified (or integer 0..3).`,
+          error: `Invalid ${minTrustSrcField} "${rawMinTrust}". Expected one of: SelfAttested, Endorsed, PartiallyVerified, ConsensusVerified (or integer 0..3).`,
         });
       }
     }

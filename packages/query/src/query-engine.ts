@@ -50,12 +50,21 @@ export interface QueryOptions {
    *     populated by the quorum's verified-memory write path; the quorum
    *     identifier itself is the trust provenance.
    *
-   * Semantics:
+   * Semantics (PR #239 Codex iter-5):
    *   - undefined or `SelfAttested`: union root + `/_verified_memory/*`.
-   *   - Any value above `SelfAttested` (`Endorsed`, `PartiallyVerified`,
-   *     `ConsensusVerified`): drop the root data graph, keep only
+   *   - `Endorsed` (1): drop the root data graph, keep only
    *     `/_verified_memory/*` sub-graphs. This prevents SelfAttested
-   *     chain data from bleeding into a high-trust query.
+   *     chain data from bleeding into a quorum-verified query.
+   *   - `PartiallyVerified` (2) / `ConsensusVerified` (3): **rejected**
+   *     with a client error until Q-1 lands per-graph trust tagging.
+   *     The engine cannot currently prove that a given
+   *     `/_verified_memory/<quorum>` sub-graph satisfies these higher
+   *     tiers, and silently downgrading to `Endorsed` would leak
+   *     merely-endorsed data into a caller asking for stronger trust.
+   *     Callers must either drop `minTrust` to `Endorsed` (1), or pin
+   *     a specific `verifiedGraph` whose trust tier they already trust
+   *     out-of-band (and in that case `minTrust` must stay at
+   *     `SelfAttested`).
    *
    * Known gap (tracked as Q-1): surviving `/_verified_memory/*` graphs
    * are not filtered per-triple against a `dkg:trustLevel` predicate.

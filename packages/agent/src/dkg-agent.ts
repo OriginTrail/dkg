@@ -2735,11 +2735,21 @@ export class DKGAgent {
       subGraphName?: string;
       /**
        * Minimum trust level for the verified-memory view (spec §14, P-13).
-       * When set above `TrustLevel.SelfAttested`, the root content graph is
+       * When set to `TrustLevel.Endorsed`, the root content graph is
        * excluded from resolution so only quorum-verified sub-graphs survive.
+       * Values above `Endorsed` (`PartiallyVerified`, `ConsensusVerified`)
+       * are currently rejected — see `QueryOptions.minTrust` in
+       * `packages/query/src/query-engine.ts` for the full rationale and
+       * the Q-1 gap tracking per-graph trust tagging.
        * Ignored for views other than `verified-memory`.
        */
       minTrust?: TrustLevel;
+      /**
+       * @deprecated Use `minTrust`. Legacy underscore alias preserved for
+       * V10-rc SDK consumers. When both are supplied, `minTrust` wins.
+       * See QueryOptions._minTrust for the deprecation policy.
+       */
+      _minTrust?: TrustLevel;
     },
   ) {
     const rawOpts = typeof options === 'string' ? { contextGraphId: options } : options ?? {};
@@ -2783,7 +2793,11 @@ export class DKGAgent {
       verifiedGraph: opts.verifiedGraph,
       assertionName: opts.assertionName,
       subGraphName: opts.subGraphName,
-      minTrust: opts.minTrust,
+      // PR #239 Codex iter-5: fall back to the deprecated underscore alias
+      // here (and only here — we do not propagate both fields further) so
+      // callers on the legacy shape still get the trust gate without
+      // engines needing to know about both names.
+      minTrust: opts.minTrust ?? opts._minTrust,
     });
     this.log.info(ctx, `Query returned ${result.bindings?.length ?? 0} bindings`);
     return result;
