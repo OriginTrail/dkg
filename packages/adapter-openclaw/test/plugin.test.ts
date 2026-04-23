@@ -63,7 +63,7 @@ describe('DkgNodePlugin', () => {
     expect(toolNames).not.toContain('dkg_paranet_create');
     // memory_search added by this feature branch (W2 — agent-callable recall button).
     expect(toolNames).toContain('memory_search');
-    // 11 originals - 2 retired paranets + 10 assertion/subgraph/publish + 1 memory_search = 22
+    // 13 originals (incl. paranets) - 2 retired paranets + 10 assertion/subgraph/publish + 1 memory_search = 22
     expect(registeredTools.length).toBe(22);
   });
 
