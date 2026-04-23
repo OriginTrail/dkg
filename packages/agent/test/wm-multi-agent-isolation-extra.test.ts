@@ -210,6 +210,32 @@ describe('A-1: WM is per-agent — two agents co-hosted on one node', () => {
     expect(own.bindings.length).toBe(1);
   });
 
+  it(
+    'A-1 (Codex PR #242 iter-4): cross-agent WM mutation is REJECTED, not silently swallowed ' +
+      'as a 0-binding deny. The access-denied fast-path used to return before ' +
+      '`validateReadOnlySparql` ran, so `INSERT DATA { ... }` over another agent\'s WM ' +
+      'would come back as an empty result (200 OK) instead of the 400 rejection ' +
+      'that a SELECT cross-agent request would receive. This test pins the ' +
+      'mutation path so the deny-shape and the guard-shape stay in sync.',
+    async () => {
+      const cgId = freshCgId('wm-iso-mutation');
+      await node!.createContextGraph({ id: cgId, name: 'WM Iso mutation', description: '' });
+
+      const defaultA = node!.getDefaultAgentAddress()!;
+      await expect(
+        node!.query(
+          'INSERT DATA { GRAPH <urn:dkg:test> { <urn:s> <urn:p> "injected" } }',
+          {
+            contextGraphId: cgId,
+            view: 'working-memory',
+            agentAddress: defaultA,
+            callerAgentAddress: agentB.agentAddress, // would-be impersonator
+          },
+        ),
+      ).rejects.toThrow(/SPARQL rejected/);
+    },
+  );
+
   it('assertion graph URI encodes the agentAddress (structural isolation invariant)', () => {
     const cgId = 'structural-check';
     const a = contextGraphAssertionUri(cgId, '0x1111111111111111111111111111111111111111', 'chat');

@@ -30,6 +30,7 @@ import { ethers } from 'ethers';
 import {
   DKGQueryEngine, QueryHandler,
   emptyQueryResultForKind,
+  validateReadOnlySparql,
   type QueryRequest, type QueryResponse, type QueryAccessConfig, type LookupType,
 } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
@@ -2759,6 +2760,21 @@ export class DKGAgent {
     const sgLabel = opts.subGraphName ? `/${opts.subGraphName}` : '';
     const viewLabel = opts.view ? ` view=${opts.view}` : '';
     this.log.info(ctx, `Query on contextGraph="${opts.contextGraphId ?? 'all'}"${sgLabel}${viewLabel} sparql="${sparql.slice(0, 80)}"`);
+
+    // A-1 review (iter-4): validate the SPARQL query is read-only BEFORE
+    // any access-denied fast-path. `DKGQueryEngine.query` runs this
+    // guard too, but the three early returns below (canReadContextGraph
+    // deny, A-1 cross-agent WM deny, private-CG deny) short-circuit
+    // before reaching it. Without this check, a caller can send
+    // `INSERT DATA { ... }` through a cross-agent WM request and get a
+    // 200 empty result instead of the 400 rejection that plain queries
+    // receive — effectively silently swallowing a mutation attempt.
+    // Run it once here so the deny path and the engine path share the
+    // same input contract.
+    const readOnlyGuard = validateReadOnlySparql(sparql);
+    if (!readOnlyGuard.safe) {
+      throw new Error(`SPARQL rejected: ${readOnlyGuard.reason}`);
+    }
 
     if (opts.contextGraphId && !(await this.canReadContextGraph(opts.contextGraphId))) {
       this.log.info(ctx, `Query denied for private context graph "${opts.contextGraphId}"`);

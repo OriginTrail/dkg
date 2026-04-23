@@ -1159,39 +1159,30 @@ describe('A-1 follow-up: auth-disabled /api/query fails closed on foreign WM', (
       'auth-disabled self-read via that alias must still be allowed)',
     async () => {
       const daem = d!;
-      // The daemon exposes its own peerId via /api/host/info; fall back to
-      // /api/agent/identity (exposes { peerId }) if that route isn't
-      // wired in this fixture. We only need *some* path that reveals the
-      // daemon's peerId so we can assert the guard accepts it as self.
-      let peerId: string | undefined;
-      try {
-        const hostRes = await fetch(urlFor(daem, '/api/host/info'));
-        if (hostRes.ok) {
-          const host = (await hostRes.json()) as { peerId?: string };
-          peerId = host.peerId;
-        }
-      } catch {
-        // fall through
-      }
-      if (!peerId) {
-        const identityRes = await fetch(urlFor(daem, '/api/agent/identity'));
-        const identity = (await identityRes.json()) as { peerId?: string };
-        peerId = identity.peerId;
-      }
-      if (!peerId) {
-        // If neither route surfaces peerId this fixture can't exercise
-        // the legacy alias. Skip silently rather than fail — the guard
-        // is already covered by the defaultAgentAddress happy-path test
-        // above and the bogus-bearer 403 test below.
-        return;
-      }
+      // Codex PR #242 iter-4 feedback: the earlier version of this test
+      // had a silent `return` when neither `/api/host/info` nor
+      // `/api/agent/identity` exposed a peerId, which meant a 400/500
+      // regression would still make the test pass green. Resolve the
+      // peerId deterministically from `/api/agent/identity` (this
+      // fixture always wires it — no token needed since auth is
+      // disabled in this harness, and the route falls back to the
+      // default-agent identity), and fail loudly if it is missing.
+      const identityRes = await fetch(urlFor(daem, '/api/agent/identity'));
+      expect(identityRes.status).toBe(200);
+      const identity = (await identityRes.json()) as { peerId?: string };
+      expect(
+        identity.peerId,
+        '`/api/agent/identity` must return a peerId for this fixture — the test cannot exercise the A-1 legacy-alias guard without it',
+      ).toBeTruthy();
+      const peerId = identity.peerId!;
 
       const cgId = 'a1-self-alias-' + Math.random().toString(36).slice(2, 8);
-      await fetch(urlFor(daem, '/api/context-graph/create'), {
+      const cgRes = await fetch(urlFor(daem, '/api/context-graph/create'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id: cgId, name: cgId }),
       });
+      expect([200, 201]).toContain(cgRes.status);
 
       const res = await fetch(urlFor(daem, '/api/query'), {
         method: 'POST',
@@ -1203,11 +1194,26 @@ describe('A-1 follow-up: auth-disabled /api/query fails closed on foreign WM', (
           agentAddress: peerId,
         }),
       });
-      // The legacy self-alias must not be rejected. 200 is the happy
-      // path; 4xx other than 403 would indicate a different input error
-      // (e.g. the daemon does not accept a peerId as an agentAddress at
-      // all). Only 403 would indicate the guard lost the alias.
-      expect(res.status).not.toBe(403);
+      // Codex PR #242 iter-4 follow-up: a regression elsewhere in the
+      // WM query path (schema validation, context-graph lookup, etc.)
+      // could turn this case into a 400/404/500 while the A-1 guard
+      // itself works correctly, and a plain `not.toBe(403)` would
+      // still go green. Assert the happy-path 200 so the test really
+      // exercises the peerId-alias-allowed branch.
+      expect(res.status).toBe(200);
+      // Sanity check: the response is SPARQL-shaped. `/api/query`
+      // wraps the engine result under a `result` key and echoes the
+      // context graph id, so tolerate both `{ bindings }` and
+      // `{ result: { bindings } }` to stay robust against the route
+      // wrapper shape drifting independently of the guard under test.
+      const body = (await res.json()) as
+        | { bindings?: unknown[] }
+        | { result?: { bindings?: unknown[] } };
+      const bindings =
+        'bindings' in body
+          ? body.bindings
+          : (body as { result?: { bindings?: unknown[] } }).result?.bindings;
+      expect(Array.isArray(bindings)).toBe(true);
     },
     60_000,
   );
