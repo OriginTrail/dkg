@@ -136,6 +136,13 @@ export class DkgDaemonClient {
       assertionName?: string;
       subGraphName?: string;
       verifiedGraph?: string;
+      /**
+       * P-13: minimum trust level. Only meaningful for
+       * `view: "verified-memory"`; ignored (silently) on WM/SWM views.
+       * Accepts the string form or an integer 0..3. See
+       * `packages/query/src/query-engine.ts QueryOptions.minTrust`.
+       */
+      minTrust?: 'SelfAttested' | 'Endorsed' | 'PartiallyVerified' | 'ConsensusVerified' | number;
     },
   ): Promise<any> {
     return this.post('/api/query', {
@@ -148,6 +155,7 @@ export class DkgDaemonClient {
       assertionName: opts?.assertionName,
       subGraphName: opts?.subGraphName,
       verifiedGraph: opts?.verifiedGraph,
+      minTrust: opts?.minTrust,
     });
   }
 

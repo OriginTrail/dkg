@@ -6613,8 +6613,23 @@ async function handleRequest(
     const minTrustSrcField = parsed.minTrust !== undefined && parsed.minTrust !== null
       ? 'minTrust'
       : '_minTrust';
+    if (!sparql || !String(sparql).trim())
+      return jsonResponse(res, 400, { error: 'Missing "sparql"' });
+    if (view && !(GET_VIEWS as readonly string[]).includes(view)) {
+      return jsonResponse(res, 400, {
+        error: `Invalid view "${view}". Supported: ${GET_VIEWS.join(", ")}`,
+      });
+    }
+    // PR #239 Codex iter-7: gate minTrust normalization/validation behind
+    // view === 'verified-memory'. Upstream `resolveViewGraphs()` already
+    // ignores `minTrust` outside VM, so the HTTP layer must match that —
+    // otherwise a reused options object like
+    //   { view: "working-memory", minTrust: 99 }
+    // would 400 on a request where the field is semantically irrelevant.
+    // Keep view === undefined NOT rejecting either: resolveViewGraphs
+    // treats "no view" as implicit working-memory semantics.
     let minTrust: number | undefined;
-    if (rawMinTrust !== undefined && rawMinTrust !== null) {
+    if (view === 'verified-memory' && rawMinTrust !== undefined && rawMinTrust !== null) {
       if (typeof rawMinTrust === 'number' && Number.isInteger(rawMinTrust) && rawMinTrust >= 0 && rawMinTrust <= 3) {
         minTrust = rawMinTrust;
       } else if (typeof rawMinTrust === 'string') {
@@ -6626,13 +6641,6 @@ async function handleRequest(
           error: `Invalid ${minTrustSrcField} "${rawMinTrust}". Expected one of: SelfAttested, Endorsed, PartiallyVerified, ConsensusVerified (or integer 0..3).`,
         });
       }
-    }
-    if (!sparql || !String(sparql).trim())
-      return jsonResponse(res, 400, { error: 'Missing "sparql"' });
-    if (view && !(GET_VIEWS as readonly string[]).includes(view)) {
-      return jsonResponse(res, 400, {
-        error: `Invalid view "${view}". Supported: ${GET_VIEWS.join(", ")}`,
-      });
     }
     const ctx = createOperationContext("query");
     tracker.start(ctx, {

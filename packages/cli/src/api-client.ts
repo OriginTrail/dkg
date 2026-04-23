@@ -231,8 +231,40 @@ export class ApiClient {
     return this.post('/api/publisher/clear', { status });
   }
 
-  async query(sparql: string, contextGraphId?: string): Promise<{ result: QueryResult }> {
-    return this.post('/api/query', { sparql, contextGraphId });
+  /**
+   * Run SPARQL via the daemon. `opts` covers the full /api/query surface —
+   * memory-layer routing (`view`, `graphSuffix`, `verifiedGraph`,
+   * `subGraphName`, `includeSharedMemory`, `agentAddress`,
+   * `assertionName`), and P-13's `minTrust` (only meaningful on
+   * `view: "verified-memory"`; ignored elsewhere). `contextGraphId` stays
+   * in the 2nd positional slot for backwards compatibility.
+   */
+  async query(
+    sparql: string,
+    contextGraphId?: string,
+    opts?: {
+      graphSuffix?: string;
+      includeSharedMemory?: boolean;
+      view?: 'working-memory' | 'shared-working-memory' | 'verified-memory';
+      agentAddress?: string;
+      assertionName?: string;
+      subGraphName?: string;
+      verifiedGraph?: string;
+      minTrust?: 'SelfAttested' | 'Endorsed' | 'PartiallyVerified' | 'ConsensusVerified' | number;
+    },
+  ): Promise<{ result: QueryResult }> {
+    return this.post('/api/query', {
+      sparql,
+      contextGraphId,
+      graphSuffix: opts?.graphSuffix,
+      includeSharedMemory: opts?.includeSharedMemory,
+      view: opts?.view,
+      agentAddress: opts?.agentAddress,
+      assertionName: opts?.assertionName,
+      subGraphName: opts?.subGraphName,
+      verifiedGraph: opts?.verifiedGraph,
+      minTrust: opts?.minTrust,
+    });
   }
 
   async queryRemote(peerId: string, request: {

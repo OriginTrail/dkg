@@ -155,6 +155,14 @@ export class DkgClient {
     view?: 'working-memory' | 'shared-working-memory' | 'verified-memory';
     verifiedGraph?: string;
     assertionName?: string;
+    /**
+     * P-13: minimum trust level to admit into results. Only meaningful for
+     * `view: "verified-memory"`. Accepts either the string form
+     * (`"SelfAttested" | "Endorsed" | "PartiallyVerified" | "ConsensusVerified"`)
+     * or the matching integer (0..3). Values above `Endorsed` are currently
+     * rejected by the daemon — see P-13 notes in `packages/query`.
+     */
+    minTrust?: 'SelfAttested' | 'Endorsed' | 'PartiallyVerified' | 'ConsensusVerified' | number;
   }): Promise<SparqlResult> {
     const body: Record<string, unknown> = { sparql: args.sparql };
     if (args.contextGraphId) body.contextGraphId = args.contextGraphId;
@@ -164,6 +172,7 @@ export class DkgClient {
     if (args.view != null) body.view = args.view;
     if (args.verifiedGraph != null) body.verifiedGraph = args.verifiedGraph;
     if (args.assertionName) body.assertionName = args.assertionName;
+    if (args.minTrust != null) body.minTrust = args.minTrust;
 
     const r = await this.request<QueryResponse>('POST', '/api/query', body);
     return r.result ?? { bindings: [] };
