@@ -651,8 +651,13 @@ function MiniGantt({ phases, totalMs }: { phases: any[]; totalMs: number }) {
       </div>
       {hover !== null && phases[hover] && (() => {
         const hoveredPhase = phases[hover].phase;
+        // Codex PR #241 iter-6: look up the exact phase first
+        // (so `chain:writeahead` gets its dedicated description)
+        // and only fall back to the top-level phase when no exact
+        // entry exists. Without this, every sub-phase was reduced
+        // to its top-level and the specific WAL tooltip was dead.
         const topLevel = hoveredPhase.includes(':') ? hoveredPhase.split(':')[0] : hoveredPhase;
-        const desc = PHASE_DESCRIPTIONS[topLevel];
+        const desc = PHASE_DESCRIPTIONS[hoveredPhase] ?? PHASE_DESCRIPTIONS[topLevel];
         return (
           <div style={{
             position: 'absolute', bottom: '100%', left: '50%', transform: 'translateX(-50%)',
@@ -1046,7 +1051,12 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
               {phases.map((p: any, i: number) => {
                 const color = PHASE_COLORS[p.phase] ?? PHASE_FALLBACK_COLOR;
                 const topLevel = p.phase.includes(':') ? p.phase.split(':')[0] : p.phase;
-                const desc = PHASE_DESCRIPTIONS[topLevel];
+                // Codex PR #241 iter-6: exact-match first, then fall back
+                // to the top-level phase. Same rationale as the bar-hover
+                // lookup above — sub-phases like `chain:writeahead` need
+                // to surface their own description instead of reducing
+                // to the umbrella `chain` entry.
+                const desc = PHASE_DESCRIPTIONS[p.phase] ?? PHASE_DESCRIPTIONS[topLevel];
                 return (
                   <div key={`${p.phase}-${i}`} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', background: 'rgba(255,255,255,.02)', borderRadius: 6, borderLeft: `3px solid ${p.status === 'error' ? 'var(--red)' : color}` }}>
                     <span style={{ fontWeight: 600, fontSize: 12, color, minWidth: 65 }} title={desc ?? ''}>{p.phase}</span>

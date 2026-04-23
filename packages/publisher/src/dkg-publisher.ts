@@ -1642,10 +1642,18 @@ export class DKGPublisher implements Publisher {
             txResult = { success: false, hash: '' };
           } else if (typeof this.chain.updateKnowledgeAssets === 'function') {
             this.log.info(ctx, `V10 update failed (${errorName ?? 'unknown'}), trying V9 path: ${v10Err instanceof Error ? v10Err.message : String(v10Err)}`);
-            // V9 fallback has no `onBroadcast` hook — emit
-            // `:start` unconditionally so the legacy path still
-            // brackets the broadcast window with balanced events.
-            emitWriteAheadStart();
+            // Codex PR #241 iter-6: The V9 `updateKnowledgeAssets()`
+            // adapter path has NO `onBroadcast` hook, so we cannot emit
+            // a true "tx signed, about to broadcast" WAL checkpoint
+            // here. Previously we emitted `chain:writeahead:start`
+            // unconditionally before the adapter call, but that
+            // re-introduced exactly the false-positive WAL boundary
+            // this PR is removing: preflight/estimateGas can throw
+            // before any tx hits the wire, leaving listeners with a
+            // checkpoint for a publish that never broadcast. Safer to
+            // skip the phase entirely on V9 — callers relying on WAL
+            // semantics must upgrade to a V10 adapter that provides
+            // `onBroadcast`.
             try {
               txResult = await this.chain.updateKnowledgeAssets({
                 batchId: kcId,
@@ -1662,9 +1670,9 @@ export class DKGPublisher implements Publisher {
           }
         }
       } else if (typeof this.chain.updateKnowledgeAssets === 'function') {
-        // Legacy V9-only adapter path — same "no hook, emit coarsely"
-        // semantic as the fallback above.
-        emitWriteAheadStart();
+        // Codex PR #241 iter-6: same rationale as the V9 fallback above
+        // — no `onBroadcast` hook means no sound WAL boundary, so we
+        // skip the phase on this legacy V9-only path.
         txResult = await this.chain.updateKnowledgeAssets({
           batchId: kcId,
           newMerkleRoot: kcMerkleRoot,
