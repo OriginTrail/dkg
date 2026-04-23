@@ -47,7 +47,7 @@ describe('DkgNodePlugin', () => {
     expect(toolNames).toContain('dkg_send_message');
     expect(toolNames).toContain('dkg_read_messages');
     expect(toolNames).toContain('dkg_invoke_skill');
-    // 9 new tools (assertion lifecycle + sub-graph management)
+    // 10 new tools (assertion lifecycle + sub-graph management + SWM→VM publish)
     expect(toolNames).toContain('dkg_assertion_create');
     expect(toolNames).toContain('dkg_assertion_write');
     expect(toolNames).toContain('dkg_assertion_promote');
@@ -57,10 +57,11 @@ describe('DkgNodePlugin', () => {
     expect(toolNames).toContain('dkg_assertion_history');
     expect(toolNames).toContain('dkg_sub_graph_create');
     expect(toolNames).toContain('dkg_sub_graph_list');
+    expect(toolNames).toContain('dkg_shared_memory_publish');
     // Legacy V9 paranet aliases are removed as of v10-rc (`dkg_list_paranets`, `dkg_paranet_create`).
     expect(toolNames).not.toContain('dkg_list_paranets');
     expect(toolNames).not.toContain('dkg_paranet_create');
-    expect(registeredTools.length).toBe(20);
+    expect(registeredTools.length).toBe(21);
   });
 
   it('new dkg_assertion_* and dkg_sub_graph_* tools have the expected schema shape', () => {
@@ -98,15 +99,20 @@ describe('DkgNodePlugin', () => {
     expectRequired('dkg_assertion_history', ['context_graph_id', 'name']);
     expectRequired('dkg_sub_graph_create', ['context_graph_id', 'sub_graph_name']);
     expectRequired('dkg_sub_graph_list', ['context_graph_id']);
+    expectRequired('dkg_shared_memory_publish', ['context_graph_id']);
 
     // dkg_assertion_write.quads is an array of {subject,predicate,object}
     const writeTool = byName.get('dkg_assertion_write')!;
     expect(writeTool.parameters.properties.quads.type).toBe('array');
     expect(writeTool.parameters.properties.quads.items).toBeDefined();
 
-    // dkg_subscribe / dkg_query include_shared_memory is a boolean, not a string
-    expect(byName.get('dkg_subscribe')!.parameters.properties.include_shared_memory.type).toBe('boolean');
-    expect(byName.get('dkg_query')!.parameters.properties.include_shared_memory.type).toBe('boolean');
+    // dkg_subscribe / dkg_query `include_shared_memory` is `['boolean', 'string']` —
+    // schema matches the handler's dual-type acceptance so strict JSON-schema validators
+    // accept both `true`/`false` and the legacy `"true"`/`"false"` string forms.
+    const subSchema = byName.get('dkg_subscribe')!.parameters.properties.include_shared_memory.type;
+    const querySchema = byName.get('dkg_query')!.parameters.properties.include_shared_memory.type;
+    expect(subSchema).toEqual(['boolean', 'string']);
+    expect(querySchema).toEqual(['boolean', 'string']);
   });
 
   // ---------------------------------------------------------------------------
@@ -264,7 +270,7 @@ describe('DkgNodePlugin', () => {
       expect(init.body).toBeUndefined();
     });
 
-    it('dkg_assertion_import_file reads the file and forwards camelCase multipart fields', async () => {
+    it('dkg_assertion_import_file reads the file and forwards camelCase multipart fields (.md → text/markdown)', async () => {
       const { fetchMock, byName } = setupPluginWithFetch({ assertionUri: 'urn:x' });
       const { writeFileSync, mkdtempSync } = await import('node:fs');
       const { join } = await import('node:path');
@@ -293,6 +299,54 @@ describe('DkgNodePlugin', () => {
       expect((form.get('file') as File).name).toBe('doc.md');
     });
 
+    it('dkg_assertion_import_file infers content-type for .pdf, .docx, .html, .txt, .csv', async () => {
+      const { writeFileSync, mkdtempSync } = await import('node:fs');
+      const { join } = await import('node:path');
+      const { tmpdir } = await import('node:os');
+
+      const cases: Array<[string, string]> = [
+        ['doc.pdf', 'application/pdf'],
+        ['doc.docx', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
+        ['page.html', 'text/html'],
+        ['page.htm', 'text/html'],
+        ['notes.txt', 'text/plain'],
+        ['data.csv', 'text/csv'],
+      ];
+
+      for (const [fileName, expectedMime] of cases) {
+        const { fetchMock, byName } = setupPluginWithFetch({ assertionUri: 'urn:x' });
+        const tmpDir = mkdtempSync(join(tmpdir(), 'dkg-mime-'));
+        const filePath = join(tmpDir, fileName);
+        writeFileSync(filePath, 'dummy');
+        await byName.get('dkg_assertion_import_file')!.execute('tc', {
+          context_graph_id: 'ctx',
+          name: 'notes',
+          file_path: filePath,
+        });
+        const form = fetchMock.mock.calls[0][1]?.body as FormData;
+        expect(form.get('contentType'), `${fileName} should infer ${expectedMime}`).toBe(expectedMime);
+      }
+    });
+
+    it('dkg_assertion_import_file falls through to octet-stream for unknown extensions (no contentType form field)', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ assertionUri: 'urn:x' });
+      const { writeFileSync, mkdtempSync } = await import('node:fs');
+      const { join } = await import('node:path');
+      const { tmpdir } = await import('node:os');
+      const tmpDir = mkdtempSync(join(tmpdir(), 'dkg-unknown-'));
+      const filePath = join(tmpDir, 'blob.xyz');
+      writeFileSync(filePath, 'dummy');
+      await byName.get('dkg_assertion_import_file')!.execute('tc', {
+        context_graph_id: 'ctx',
+        name: 'notes',
+        file_path: filePath,
+      });
+      const form = fetchMock.mock.calls[0][1]?.body as FormData;
+      // Handler left contentType undefined → client does NOT append the form field,
+      // daemon falls through to the Blob's default 'application/octet-stream' type.
+      expect(form.has('contentType')).toBe(false);
+    });
+
     it('dkg_sub_graph_create forwards snake_case → camelCase body', async () => {
       const { fetchMock, byName } = setupPluginWithFetch({ created: 'protocols', contextGraphId: 'ctx' });
       await byName.get('dkg_sub_graph_create')!.execute('tc', {
@@ -315,6 +369,173 @@ describe('DkgNodePlugin', () => {
       expect(parsed.pathname).toBe('/api/sub-graph/list');
       expect(parsed.searchParams.get('contextGraphId')).toBe('ctx');
       expect(init.body).toBeUndefined();
+    });
+
+    it('dkg_shared_memory_publish forwards snake_case → camelCase body with selection="all" when omitted', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ kcId: 'kc-1', status: 'ok', kas: [] });
+      await byName.get('dkg_shared_memory_publish')!.execute('tc', { context_graph_id: 'ctx' });
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('http://localhost:9200/api/shared-memory/publish');
+      expect(init.method).toBe('POST');
+      const body = JSON.parse(init.body as string);
+      expect(body).toEqual({ contextGraphId: 'ctx', selection: 'all', clearAfter: true });
+    });
+
+    it('dkg_shared_memory_publish forwards explicit root_entities as selection array', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ kcId: 'kc-2', status: 'ok', kas: [] });
+      await byName.get('dkg_shared_memory_publish')!.execute('tc', {
+        context_graph_id: 'ctx',
+        root_entities: ['urn:a', 'urn:b'],
+      });
+      const body = JSON.parse(fetchMock.mock.calls[0][1]?.body as string);
+      expect(body).toEqual({ contextGraphId: 'ctx', selection: ['urn:a', 'urn:b'], clearAfter: true });
+    });
+
+    it('dkg_shared_memory_publish rejects non-array / empty / non-string root_entities locally', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({});
+      const bad = await byName.get('dkg_shared_memory_publish')!.execute('tc', {
+        context_graph_id: 'ctx',
+        root_entities: 'all', // Agents must send an array, never a bare string.
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(bad.content[0].text).toContain('root_entities');
+      expect(bad.content[0].text).toContain('non-empty array');
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // `include_shared_memory` dual-type coercion — schema advertises
+  // `['boolean', 'string']`; handlers must accept both. Cover all four boolean
+  // inputs (true, "true", false, "false") across both callers and assert the
+  // daemon body has the expected `includeSharedMemory` boolean.
+  // ---------------------------------------------------------------------------
+
+  describe('include_shared_memory dual-type handler coercion', () => {
+    const originalFetch = globalThis.fetch;
+    afterEach(() => {
+      globalThis.fetch = originalFetch;
+    });
+
+    const build = () => {
+      const fetchMock = vi.fn(async () =>
+        new Response(JSON.stringify({ subscribed: 'x', catchup: { jobId: 'j', status: 's', includeSharedMemory: false } }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      );
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      const plugin = new DkgNodePlugin({ daemonUrl: 'http://localhost:9200' });
+      const tools: OpenClawTool[] = [];
+      plugin.register({
+        config: {},
+        registerTool: (t) => tools.push(t),
+        registerHook: () => {},
+        on: () => {},
+        logger: {},
+      });
+      const byName = new Map(tools.map((t) => [t.name, t] as const));
+      return { fetchMock, byName };
+    };
+
+    const extractBodyField = (fetchMock: any, field: string) => {
+      const init = fetchMock.mock.calls[0][1] as RequestInit;
+      const body = JSON.parse(init.body as string);
+      return body[field];
+    };
+
+    it('dkg_subscribe accepts `true` boolean', async () => {
+      const { fetchMock, byName } = build();
+      await byName.get('dkg_subscribe')!.execute('tc', { context_graph_id: 'ctx', include_shared_memory: true });
+      expect(extractBodyField(fetchMock, 'includeSharedMemory')).toBe(true);
+    });
+
+    it('dkg_subscribe accepts `"true"` string (legacy)', async () => {
+      const { fetchMock, byName } = build();
+      await byName.get('dkg_subscribe')!.execute('tc', { context_graph_id: 'ctx', include_shared_memory: 'true' });
+      expect(extractBodyField(fetchMock, 'includeSharedMemory')).toBe(true);
+    });
+
+    it('dkg_subscribe accepts `false` boolean', async () => {
+      const { fetchMock, byName } = build();
+      await byName.get('dkg_subscribe')!.execute('tc', { context_graph_id: 'ctx', include_shared_memory: false });
+      expect(extractBodyField(fetchMock, 'includeSharedMemory')).toBe(false);
+    });
+
+    it('dkg_subscribe accepts `"false"` string (legacy)', async () => {
+      const { fetchMock, byName } = build();
+      await byName.get('dkg_subscribe')!.execute('tc', { context_graph_id: 'ctx', include_shared_memory: 'false' });
+      expect(extractBodyField(fetchMock, 'includeSharedMemory')).toBe(false);
+    });
+
+    it('dkg_query accepts both boolean `true` and legacy `"true"` string', async () => {
+      {
+        const { fetchMock, byName } = build();
+        await byName.get('dkg_query')!.execute('tc', { sparql: 'ASK {}', include_shared_memory: true });
+        expect(extractBodyField(fetchMock, 'includeSharedMemory')).toBe(true);
+      }
+      {
+        const { fetchMock, byName } = build();
+        await byName.get('dkg_query')!.execute('tc', { sparql: 'ASK {}', include_shared_memory: 'true' });
+        expect(extractBodyField(fetchMock, 'includeSharedMemory')).toBe(true);
+      }
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Handlers must no longer accept the legacy `paranet_id` alias. Passing
+  // `paranet_id` without `context_graph_id` must surface a missing-field error;
+  // the daemon is never called. Guards against accidental re-introduction.
+  // ---------------------------------------------------------------------------
+
+  describe('paranet_id legacy alias removed from handlers', () => {
+    const originalFetch = globalThis.fetch;
+    afterEach(() => {
+      globalThis.fetch = originalFetch;
+    });
+
+    const build = () => {
+      const fetchMock = vi.fn(async () => new Response('{}', { status: 200 }));
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+      const plugin = new DkgNodePlugin({ daemonUrl: 'http://localhost:9200' });
+      const tools: OpenClawTool[] = [];
+      plugin.register({
+        config: {},
+        registerTool: (t) => tools.push(t),
+        registerHook: () => {},
+        on: () => {},
+        logger: {},
+      });
+      return { fetchMock, byName: new Map(tools.map((t) => [t.name, t] as const)) };
+    };
+
+    it('dkg_subscribe rejects lone paranet_id without context_graph_id', async () => {
+      const { fetchMock, byName } = build();
+      const result = await byName.get('dkg_subscribe')!.execute('tc', { paranet_id: 'legacy' });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(result.content[0].text).toContain('context_graph_id');
+    });
+
+    it('dkg_publish short-circuits with missing-field error when only paranet_id is supplied', async () => {
+      // Handler no longer coerces `paranet_id` into `context_graph_id` and no longer silently
+      // sends `contextGraphId: ''` to the daemon. Lone `paranet_id` triggers the explicit
+      // required-field guard. Covers permissive MCP hosts that don't enforce required fields
+      // at the schema layer.
+      const { fetchMock, byName } = build();
+      const result = await byName.get('dkg_publish')!.execute('tc', {
+        paranet_id: 'legacy',
+        quads: [{ subject: 'urn:a', predicate: 'urn:b', object: 'urn:c' }],
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(result.content[0].text).toContain('context_graph_id');
+    });
+
+    it('dkg_query ignores paranet_id (contextGraphId is undefined when only paranet_id supplied)', async () => {
+      const { fetchMock, byName } = build();
+      await byName.get('dkg_query')!.execute('tc', { sparql: 'ASK {}', paranet_id: 'legacy' });
+      const init = fetchMock.mock.calls[0][1] as RequestInit;
+      const body = JSON.parse(init.body as string);
+      expect(body.contextGraphId).toBeUndefined();
     });
   });
 

@@ -532,6 +532,27 @@ export class DkgDaemonClient {
     });
   }
 
+  /**
+   * Final canonical-flow step: publish the current contents of a context graph's
+   * Shared Working Memory to Verified Memory (on-chain) and clear SWM. The daemon
+   * route accepts `selection` as either the literal `"all"` or an array of root
+   * entity URIs — this wrapper exposes the latter as a friendlier `rootEntities`
+   * option and translates the omit-case to `"all"` server-side.
+   *
+   * Returns the daemon's publish descriptor: `{ kcId, status, kas: [{tokenId, rootEntity}],
+   * txHash?, blockNumber?, ... }`.
+   */
+  async publishSharedMemory(
+    contextGraphId: string,
+    opts?: { rootEntities?: string[]; clearAfter?: boolean },
+  ): Promise<Record<string, unknown>> {
+    return this.post('/api/shared-memory/publish', {
+      contextGraphId,
+      selection: opts?.rootEntities ?? 'all',
+      clearAfter: opts?.clearAfter ?? true,
+    });
+  }
+
   // ---------------------------------------------------------------------------
   // Context Graphs
   // ---------------------------------------------------------------------------

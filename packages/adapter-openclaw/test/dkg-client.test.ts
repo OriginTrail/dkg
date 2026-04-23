@@ -380,6 +380,30 @@ describe('DkgDaemonClient', () => {
     expect(opts?.body).toBeUndefined();
   });
 
+  it('publishSharedMemory hits /api/shared-memory/publish with selection="all" default and clearAfter=true', async () => {
+    fetchResponses.push(new Response(JSON.stringify({ kcId: 'kc-1', status: 'ok', kas: [] }), { status: 200 }));
+
+    await client.publishSharedMemory('ctx');
+
+    const [url, opts] = fetchCalls[0];
+    expect(url).toBe('http://localhost:9200/api/shared-memory/publish');
+    expect(opts?.method).toBe('POST');
+    const body = JSON.parse(opts?.body as string);
+    expect(body).toEqual({ contextGraphId: 'ctx', selection: 'all', clearAfter: true });
+  });
+
+  it('publishSharedMemory forwards rootEntities as selection array and honors clearAfter:false', async () => {
+    fetchResponses.push(new Response(JSON.stringify({ kcId: 'kc-2', status: 'ok', kas: [] }), { status: 200 }));
+
+    await client.publishSharedMemory('ctx', {
+      rootEntities: ['urn:a', 'urn:b'],
+      clearAfter: false,
+    });
+
+    const body = JSON.parse(fetchCalls[0][1]?.body as string);
+    expect(body).toEqual({ contextGraphId: 'ctx', selection: ['urn:a', 'urn:b'], clearAfter: false });
+  });
+
   // ---------------------------------------------------------------------------
   // Chat turn persistence
   // ---------------------------------------------------------------------------

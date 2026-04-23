@@ -1072,12 +1072,20 @@ export class DkgNodePlugin {
         name: 'dkg_subscribe',
         description:
           'Subscribe to a context graph to receive its data from peers. Call once before querying or publishing ' +
-          'a remotely-authored CG. Accepts `paranet_id` as a deprecated V9 alias for `context_graph_id`.',
+          'a remotely-authored CG. v9 `paranet_id` alias removed; use `context_graph_id`.',
         parameters: {
           type: 'object',
           properties: {
             context_graph_id: { type: 'string', description: 'Context graph ID (e.g. "my-research").' },
-            include_shared_memory: { type: 'boolean', description: 'Also sync Shared Working Memory. Default: true.' },
+            include_shared_memory: {
+              // `['boolean', 'string']` lets strict JSON-schema hosts accept either the preferred boolean
+              // or the legacy "true" / "false" string form without rejecting the call at the schema layer.
+              // Handler coerces both to a boolean. Same precedent as the dkg_memory_search numeric fields
+              // noted in Codex Bug B35.
+              type: ['boolean', 'string'],
+              description:
+                'Also sync Shared Working Memory. Boolean preferred; legacy "true"/"false" strings accepted. Default: true.',
+            },
           },
           required: ['context_graph_id'],
         },
@@ -1086,9 +1094,10 @@ export class DkgNodePlugin {
       {
         name: 'dkg_publish',
         description:
-          'Publish a curated quad set to a CG in one shot: writes to Shared Working Memory, then publishes all ' +
-          'SWM to Verified Memory (on-chain) and clears SWM. For the stepwise flow, use the dkg_assertion_* ' +
-          'tools plus this one. Accepts `paranet_id` as a deprecated V9 alias for `context_graph_id`.',
+          'One-shot write + publish helper: writes the supplied quads to Shared Working Memory, then publishes ' +
+          'all SWM in the CG to Verified Memory (on-chain) and clears SWM. For the canonical stepwise flow ' +
+          '(write → promote → publish) use `dkg_assertion_create/write/promote` followed by ' +
+          '`dkg_shared_memory_publish`. v9 `paranet_id` alias removed; use `context_graph_id`.',
         parameters: {
           type: 'object',
           properties: {
@@ -1118,13 +1127,18 @@ export class DkgNodePlugin {
         name: 'dkg_query',
         description:
           'Read-only SPARQL query against the local triple store (cross-assertion / cross-CG). Use ' +
-          '`GRAPH ?g { ... }` for named graphs. Accepts `paranet_id` as a deprecated V9 alias for `context_graph_id`.',
+          '`GRAPH ?g { ... }` for named graphs. v9 `paranet_id` alias removed; use `context_graph_id`.',
         parameters: {
           type: 'object',
           properties: {
             sparql: { type: 'string', description: 'SPARQL SELECT, CONSTRUCT, ASK, or DESCRIBE.' },
             context_graph_id: { type: 'string', description: 'Optional CG scope — omit to query all subscribed CGs.' },
-            include_shared_memory: { type: 'boolean', description: 'Also search Shared Working Memory. Default: false.' },
+            include_shared_memory: {
+              // See `dkg_subscribe.include_shared_memory` for rationale on the dual-type schema.
+              type: ['boolean', 'string'],
+              description:
+                'Also search Shared Working Memory. Boolean preferred; legacy "true"/"false" strings accepted. Default: false.',
+            },
           },
           required: ['sparql'],
         },
@@ -1289,7 +1303,7 @@ export class DkgNodePlugin {
             context_graph_id: { type: 'string', description: 'Target context graph ID.' },
             name: { type: 'string', description: 'Target assertion name.' },
             file_path: { type: 'string', description: 'Absolute local path to the file to import.' },
-            content_type: { type: 'string', description: 'MIME override (e.g. "text/markdown", "application/pdf"). Inferred from extension when omitted.' },
+            content_type: { type: 'string', description: 'MIME override (e.g. "text/markdown", "application/pdf"). Inferred from extension when omitted — covers .md/.markdown/.pdf/.docx/.html/.htm/.txt/.csv; other extensions fall through to application/octet-stream.' },
             ontology_ref: { type: 'string', description: "Optional ontology URI to guide extraction (e.g. the CG's `_ontology`)." },
             sub_graph_name: { type: 'string', description: 'Optional sub-graph (must be pre-registered).' },
           },
@@ -1359,6 +1373,27 @@ export class DkgNodePlugin {
         },
         execute: async (_toolCallId, args) => this.handleSubGraphList(args),
       },
+
+      // ── Shared Working Memory → Verified Memory publish (canonical step 4) ─
+      {
+        name: 'dkg_shared_memory_publish',
+        description:
+          'Final step of the canonical flow. Publish all Shared Working Memory in a context graph to Verified ' +
+          'Memory (on-chain) and clear SWM. Use after `dkg_assertion_promote` to finalize promoted data.',
+        parameters: {
+          type: 'object',
+          properties: {
+            context_graph_id: { type: 'string', description: 'Target context graph ID.' },
+            root_entities: {
+              type: 'array',
+              items: { type: 'string', description: 'Root entity URI to publish.' },
+              description: 'Optional filter — publish only these root entities. Omit to publish all SWM in the CG.',
+            },
+          },
+          required: ['context_graph_id'],
+        },
+        execute: async (_toolCallId, args) => this.handleSharedMemoryPublish(args),
+      },
     ];
   }
 
@@ -1390,7 +1425,10 @@ export class DkgNodePlugin {
 
   private async handlePublish(args: Record<string, unknown>): Promise<OpenClawToolResult> {
     try {
-      const contextGraphId = String(args.context_graph_id ?? args.paranet_id ?? '');
+      const contextGraphId = String(args.context_graph_id ?? '').trim();
+      if (!contextGraphId) {
+        return this.error('"context_graph_id" is required.');
+      }
       const rawQuads = args.quads;
 
       if (!Array.isArray(rawQuads) || rawQuads.length === 0) {
@@ -1420,7 +1458,7 @@ export class DkgNodePlugin {
   private async handleQuery(args: Record<string, unknown>): Promise<OpenClawToolResult> {
     try {
       const sparql = String(args.sparql);
-      const contextGraphId = (args.context_graph_id ?? args.paranet_id) ? String(args.context_graph_id ?? args.paranet_id) : undefined;
+      const contextGraphId = args.context_graph_id ? String(args.context_graph_id) : undefined;
       // Accept both boolean (new schema) and "true"/"false" string (legacy callers).
       const raw = args.include_shared_memory;
       const includeSharedMemory = raw === true || raw === 'true';
@@ -1514,7 +1552,7 @@ export class DkgNodePlugin {
 
   private async handleSubscribe(args: Record<string, unknown>): Promise<OpenClawToolResult> {
     try {
-      const contextGraphId = String(args.context_graph_id ?? args.paranet_id ?? '').trim();
+      const contextGraphId = String(args.context_graph_id ?? '').trim();
       if (!contextGraphId) {
         return this.error('"context_graph_id" is required.');
       }
@@ -1639,14 +1677,14 @@ export class DkgNodePlugin {
       const ontologyRef = args.ontology_ref ? String(args.ontology_ref) : undefined;
       const subGraphName = args.sub_graph_name ? String(args.sub_graph_name) : undefined;
 
-      // Extension-based inference for the common markdown case so an agent can
-      // pass a `.md` path without thinking about MIME types. Without this, the
-      // daemon receives `application/octet-stream`, finds no converter, and
-      // returns `extraction.status: "skipped"` with no triples written — a
-      // silent-looking success. Broader extension → MIME mapping is the
-      // daemon's job; we just unblock markdown, which is the in-tree converter.
-      if (!contentType && /\.(md|markdown)$/i.test(filePath)) {
-        contentType = 'text/markdown';
+      // Extension-based MIME inference so agents can pass a path without thinking about
+      // MIME types. Without this, the daemon receives `application/octet-stream`, finds no
+      // converter for that type, and returns `extraction.status: "skipped"` with no
+      // triples written — a silent-looking success. Covers the common document formats
+      // the daemon has (or is likely to register) converters for. Unmatched extensions
+      // fall through to octet-stream; callers can still override via `content_type`.
+      if (!contentType) {
+        contentType = inferContentTypeFromExtension(filePath);
       }
 
       let buffer: Buffer;
@@ -1723,6 +1761,29 @@ export class DkgNodePlugin {
       return this.daemonError(err);
     }
   }
+
+  private async handleSharedMemoryPublish(args: Record<string, unknown>): Promise<OpenClawToolResult> {
+    try {
+      const contextGraphId = String(args.context_graph_id ?? '').trim();
+      if (!contextGraphId) return this.error('"context_graph_id" is required.');
+      // Mirror handleAssertionPromote's `entities` validation shape: omit → daemon-side default
+      // (selection="all"), explicit array → must be non-empty and all strings. No other values
+      // allowed; a bogus scalar would silently 400 at the daemon.
+      const raw = args.root_entities;
+      let rootEntities: string[] | undefined;
+      if (raw === undefined || raw === null) {
+        rootEntities = undefined;
+      } else if (Array.isArray(raw) && raw.length > 0 && raw.every((e) => typeof e === 'string')) {
+        rootEntities = raw.map((e) => String(e));
+      } else {
+        return this.error('"root_entities" must be omitted or a non-empty array of root entity URIs.');
+      }
+      const result = await this.client.publishSharedMemory(contextGraphId, { rootEntities });
+      return this.json(result);
+    } catch (err: any) {
+      return this.daemonError(err);
+    }
+  }
 }
 
 /** Convert a human-readable name into a URL-safe slug (e.g. "My Research Context Graph" → "my-research-context-graph"). */
@@ -1736,4 +1797,25 @@ function slugify(name: string): string {
 /** Check if a value looks like a URI (starts with a known scheme). */
 function isUri(value: string): boolean {
   return /^(?:https?:\/\/|urn:|did:)/i.test(value);
+}
+
+/**
+ * Infer the MIME type from a file path's extension. Covers the common document
+ * formats the daemon's import-file pipeline has (or is likely to register)
+ * converters for. Returns `undefined` for anything else — callers should fall
+ * through to `application/octet-stream` in that case, which the daemon accepts
+ * and degrades to `extraction.status: "skipped"`.
+ *
+ * Mirrors the extension → MIME lookup in `packages/node-ui/src/ui/api.ts`
+ * (`detectContentType`), which the UI uses for the same reason.
+ */
+function inferContentTypeFromExtension(filePath: string): string | undefined {
+  const lower = filePath.toLowerCase();
+  if (/\.(md|markdown)$/.test(lower)) return 'text/markdown';
+  if (/\.pdf$/.test(lower)) return 'application/pdf';
+  if (/\.docx$/.test(lower)) return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+  if (/\.html?$/.test(lower)) return 'text/html';
+  if (/\.txt$/.test(lower)) return 'text/plain';
+  if (/\.csv$/.test(lower)) return 'text/csv';
+  return undefined;
 }

@@ -26,12 +26,12 @@ echo "  OpenClaw: $OPENCLAW_DIR"
 echo "  Results:  $RESULTS_DIR"
 echo ""
 
-DKG_PREAMBLE='You have access to DKG MCP tools (dkg_query, dkg_publish, dkg_list_paranets, dkg_find_agents, dkg_status). The OpenClaw codebase has been indexed into a code graph in the dev-coordination paranet. BEFORE exploring files with Read/Grep/Glob, query the code graph using dkg_query with paranetId="dev-coordination" to find relevant modules, functions, classes, and packages. Examples:
+DKG_PREAMBLE='You have access to DKG MCP tools (dkg_query, dkg_publish, dkg_list_context_graphs, dkg_find_agents, dkg_status). The OpenClaw codebase has been indexed into a code graph in the dev-coordination context graph. BEFORE exploring files with Read/Grep/Glob, query the code graph using dkg_query with context_graph_id: "dev-coordination" to find relevant modules, functions, classes, and packages. Examples:
 - Find modules by keyword: SELECT ?path ?lineCount WHERE { ?m a <https://ontology.dkg.io/devgraph#CodeModule> ; <https://ontology.dkg.io/devgraph#path> ?path ; <https://ontology.dkg.io/devgraph#lineCount> ?lineCount . FILTER(CONTAINS(LCASE(?path), "keyword")) }
 - Find functions: SELECT ?name ?sig WHERE { ?f a <https://ontology.dkg.io/devgraph#Function> ; <https://ontology.dkg.io/devgraph#name> ?name ; <https://ontology.dkg.io/devgraph#definedIn> ?mod . ?mod <https://ontology.dkg.io/devgraph#path> ?path . OPTIONAL { ?f <https://ontology.dkg.io/devgraph#signature> ?sig } FILTER(CONTAINS(?name, "keyword")) } LIMIT 20
 - Find packages and deps: SELECT ?pkg ?dep WHERE { ?p a <https://ontology.dkg.io/devgraph#Package> ; <https://ontology.dkg.io/devgraph#name> ?pkg ; <https://ontology.dkg.io/devgraph#dependsOn> ?d . ?d <https://ontology.dkg.io/devgraph#name> ?dep }
 - Find classes: SELECT ?name ?path WHERE { ?c a <https://ontology.dkg.io/devgraph#Class> ; <https://ontology.dkg.io/devgraph#name> ?name ; <https://ontology.dkg.io/devgraph#definedIn> ?mod . ?mod <https://ontology.dkg.io/devgraph#path> ?path }
-This saves exploration tokens by letting you jump directly to relevant files. Always set paranetId="dev-coordination" in dkg_query calls.'
+This saves exploration tokens by letting you jump directly to relevant files. Always set context_graph_id: "dev-coordination" in dkg_query calls.'
 
 run_feature() {
   local round="$1" feature_id="$2" prompt="$3"
