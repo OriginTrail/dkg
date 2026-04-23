@@ -111,13 +111,13 @@ describe('P-13: resolveViewGraphs handles minTrust for verified-memory', () => {
           verifiedGraph: VM_QUORUM_A,
           minTrust: TrustLevel.ConsensusVerified,
         }),
-      ).toThrow(/cannot combine a specific verifiedGraph with minTrust above SelfAttested/);
+      ).toThrow(/verifiedGraph cannot be combined with minTrust above SelfAttested/);
       expect(() =>
         resolveViewGraphs('verified-memory', CG, {
           verifiedGraph: VM_QUORUM_A,
           minTrust: TrustLevel.Endorsed,
         }),
-      ).toThrow(/cannot combine a specific verifiedGraph with minTrust above SelfAttested/);
+      ).toThrow(/verifiedGraph cannot be combined with minTrust above SelfAttested/);
     },
   );
 });

@@ -88,8 +88,12 @@ export function resolveViewGraphs(
         // ConsensusVerified and receive whatever trust level happens to
         // live under that `_verified_memory/<id>` graph. Reject instead.
         if (requireHighTrust) {
+          // Use the exact phrase "cannot be combined with" so the
+          // daemon's `/api/query` error classifier maps this to HTTP
+          // 400 (see packages/cli/src/daemon.ts). Without that
+          // wording the error escapes as a 500.
           throw new Error(
-            `verified-memory: cannot combine a specific verifiedGraph with minTrust above SelfAttested ` +
+            `verified-memory: verifiedGraph cannot be combined with minTrust above SelfAttested ` +
             `(got minTrust=${opts!.minTrust}). The engine cannot yet prove a named sub-graph satisfies ` +
             `the trust threshold; drop verifiedGraph to union across all quorum-verified sub-graphs, or ` +
             `drop minTrust to read the specific sub-graph verbatim.`,

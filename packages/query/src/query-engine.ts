@@ -40,17 +40,30 @@ export interface QueryOptions {
    */
   excludeGraphPrefixes?: string[];
   /**
-   * Minimum trust level for triples returned by a `verified-memory` view.
+   * Graph-level trust scope for a `verified-memory` view. This is **not**
+   * a per-triple filter — it selects which *named graphs* are unioned
+   * into the query, relying on the invariant that each named graph is
+   * populated by a single trust-tier write path:
    *
-   * When set above `TrustLevel.SelfAttested` the resolver drops the root
-   * data graph — which holds only chain-confirmed SelfAttested triples —
-   * so that low-trust data cannot leak into a high-trust query. Only
-   * quorum-verified sub-graphs under `/_verified_memory/{quorum}` survive.
+   *   - root `did:dkg:context-graph:{id}` — chain-confirmed, SelfAttested.
+   *   - `did:dkg:context-graph:{id}/_verified_memory/{quorum}` —
+   *     populated by the quorum's verified-memory write path; the quorum
+   *     identifier itself is the trust provenance.
    *
-   * Note: per-quad trust filtering inside the surviving sub-graphs (based
-   * on a `dkg:trustLevel` predicate carried on each triple) is tracked
-   * separately as Q-1 and is not yet implemented; this field only affects
-   * which NAMED graphs are unioned.
+   * Semantics:
+   *   - undefined or `SelfAttested`: union root + `/_verified_memory/*`.
+   *   - Any value above `SelfAttested` (`Endorsed`, `PartiallyVerified`,
+   *     `ConsensusVerified`): drop the root data graph, keep only
+   *     `/_verified_memory/*` sub-graphs. This prevents SelfAttested
+   *     chain data from bleeding into a high-trust query.
+   *
+   * Known gap (tracked as Q-1): surviving `/_verified_memory/*` graphs
+   * are not filtered per-triple against a `dkg:trustLevel` predicate.
+   * If upstream writers respect the one-trust-tier-per-graph invariant
+   * this is safe; if a future writer stamps mixed-trust triples into a
+   * single sub-graph the graph-scope filter will not catch it. Do not
+   * rely on `minTrust` alone for a compliance-grade trust guarantee
+   * until Q-1 lands.
    */
   minTrust?: TrustLevel;
   /**
