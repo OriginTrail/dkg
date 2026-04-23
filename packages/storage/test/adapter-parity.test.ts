@@ -37,6 +37,32 @@ describe('TripleStore adapter parity (Oxigraph vs test-server Blazegraph)', () =
             }));
             return;
           }
+          // `BlazegraphStore.deleteByPattern({ graph, subject })` now
+          // materialises matching bindings via a SELECT before issuing
+          // `DELETE DATA` per row — the form that round-trips reliably
+          // on real Blazegraph 2.1.5 (see `blazegraph.ts:54-100` for
+          // why). This stub echoes a single binding for the one
+          // subject the test deletes so the dummy-server parity suite
+          // still drives the same code path as the real CI job
+          // (`adapter-parity-extra.test.ts`).
+          if (
+            decoded.startsWith('SELECT') &&
+            decoded.includes('http://parity.test/s1')
+          ) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+              head: { vars: ['p', 'o'] },
+              results: {
+                bindings: [
+                  {
+                    p: { type: 'uri', value: 'http://parity.test/p' },
+                    o: { type: 'literal', value: 'a' },
+                  },
+                ],
+              },
+            }));
+            return;
+          }
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ head: { vars: [] }, results: { bindings: [] } }));
         });

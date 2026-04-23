@@ -57,19 +57,47 @@ export class BlazegraphStore implements TripleStore {
     const o = pattern.object ? formatTerm(pattern.object) : '?o';
     const triple = `${s} ${p} ${o}`;
     if (pattern.graph) {
-      // Single-graph case: countQuads(graphUri) is reliable
-      // (`SELECT (COUNT(*) AS ?c) WHERE { GRAPH <g> { ?s ?p ?o } }`
-      // never double-counts), so the before/after delta gives us
-      // the correct removed count even when bindings round-trip
-      // unreliably. Use the standard SPARQL-1.1 graph-template
-      // delete here — this form works on Blazegraph when the graph
-      // is concrete.
-      const before = await this.countQuads(pattern.graph);
-      await this.sparqlUpdate(
-        `DELETE { GRAPH <${escapeUri(pattern.graph)}> { ${triple} } } WHERE { GRAPH <${escapeUri(pattern.graph)}> { ${triple} } }`,
-      );
-      const after = await this.countQuads(pattern.graph);
-      return Math.max(0, before - after);
+      // Single-graph case. The intuitive SPARQL-1.1 form
+      //   `DELETE { GRAPH <g> { ?s <p> ?o } } WHERE { GRAPH <g> { ?s <p> ?o } }`
+      // PARSES on Blazegraph 2.1.5 but silently fails to remove
+      // anything through its REST endpoint when the DELETE template
+      // contains variables in the subject/predicate/object position
+      // (the no-graph branch below documents the same issue; the
+      // Oxigraph ↔ Blazegraph parity test `adapter-parity-extra.test.ts`
+      // catches this regression — CI run 24809773517 job 72612008748).
+      //
+      // Mirror the no-graph branch: SELECT every matching tuple first
+      // and issue one `DELETE DATA` per row. That's the ONE form that
+      // round-trips reliably on Blazegraph 2.1.5, matches the
+      // Oxigraph behaviour bit-for-bit, AND gives us an accurate
+      // removed count without having to trust a before/after countQuads
+      // delta (which is itself untrustworthy if the DELETE silently
+      // no-ops and countQuads rounds differently).
+      const projVars: string[] = [];
+      if (!pattern.subject) projVars.push('?s');
+      if (!pattern.predicate) projVars.push('?p');
+      if (!pattern.object) projVars.push('?o');
+      const proj = projVars.length > 0 ? projVars.join(' ') : '*';
+      const selectQ = `SELECT ${proj} WHERE { GRAPH <${escapeUri(pattern.graph)}> { ${triple} } }`;
+      const sel = await this.query(selectQ);
+      if (sel.type !== 'bindings') return 0;
+      let removed = 0;
+      const seen = new Set<string>();
+      for (const row of sel.bindings) {
+        const sx = pattern.subject ?? row['s'];
+        const px = pattern.predicate ?? row['p'];
+        const ox = pattern.object ?? row['o'];
+        if (!sx || !px || !ox) continue;
+        const key = `${sx}\u0001${px}\u0001${ox}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const tripleData = `<${escapeUri(sx)}> <${escapeUri(px)}> ${formatTerm(ox)} .`;
+        await this.sparqlUpdate(
+          `DELETE DATA { GRAPH <${escapeUri(pattern.graph)}> { ${tripleData} } }`,
+        );
+        removed++;
+      }
+      return removed;
     }
 
     // No graph filter: enumerate every matching tuple (named graphs

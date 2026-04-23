@@ -165,16 +165,33 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     ).rejects.toThrow(/Blazegraph update failed/);
   });
 
-  it('deleteByPattern returns count delta from before/after COUNT', async () => {
-    let call = 0;
+  // Pre-v10-rc-merge follow-up (storage/blazegraph.ts:54-100). The old
+  // single-graph `deleteByPattern` used a before/after `countQuads` delta
+  // behind a `DELETE { GRAPH <g> { ... } } WHERE { ... }` template, which
+  // silently no-oped on real Blazegraph 2.1.5 REST endpoints (caught by
+  // `adapter-parity-extra.test.ts` against the live service in CI). The
+  // adapter now materialises matching bindings via SELECT and issues one
+  // `DELETE DATA` per row, mirroring the no-graph path. This test pins
+  // that contract: 3 SELECT rows → 3 DELETE DATA calls → removed === 3.
+  it('deleteByPattern (single graph) materialises bindings and issues one DELETE DATA per row', async () => {
+    const updateBodies: string[] = [];
     setFetch(async (_url, init) => {
       const body = String(init?.body ?? '');
+      if (body.startsWith('update=')) {
+        updateBodies.push(decodeURIComponent(body.slice('update='.length)));
+        return new Response(null, { status: 200 });
+      }
       if (body.startsWith('query=')) {
-        call++;
         return new Response(
           JSON.stringify({
-            head: { vars: ['c'] },
-            results: { bindings: [{ c: { type: 'literal', value: call === 1 ? '5' : '2' } }] },
+            head: { vars: ['p', 'o'] },
+            results: {
+              bindings: [
+                { p: { type: 'uri', value: 'http://ex/p1' }, o: { type: 'literal', value: 'a' } },
+                { p: { type: 'uri', value: 'http://ex/p2' }, o: { type: 'literal', value: 'b' } },
+                { p: { type: 'uri', value: 'http://ex/p3' }, o: { type: 'literal', value: 'c' } },
+              ],
+            },
           }),
           { status: 200, headers: { 'Content-Type': 'application/json' } },
         );
@@ -184,6 +201,39 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     const s = new BlazegraphStore(baseUrl);
     const removed = await s.deleteByPattern({ graph: 'http://g', subject: 'http://s' });
     expect(removed).toBe(3);
+    expect(updateBodies).toHaveLength(3);
+    for (const u of updateBodies) {
+      expect(u).toMatch(/DELETE DATA \{ GRAPH <http:\/\/g> \{ <http:\/\/s> <http:\/\/ex\/p\d> "[abc]" \. \} \}/);
+    }
+  });
+
+  // Regression: a SELECT that finds no matching rows must return 0 and
+  // issue ZERO `DELETE DATA` calls. The previous before/after-COUNT
+  // implementation could return a non-zero delta here if countQuads
+  // fluctuated across the two calls for unrelated reasons.
+  it('deleteByPattern (single graph) returns 0 and issues no DELETE DATA when no rows match', async () => {
+    const updateBodies: string[] = [];
+    setFetch(async (_url, init) => {
+      const body = String(init?.body ?? '');
+      if (body.startsWith('update=')) {
+        updateBodies.push(decodeURIComponent(body.slice('update='.length)));
+        return new Response(null, { status: 200 });
+      }
+      if (body.startsWith('query=')) {
+        return new Response(
+          JSON.stringify({
+            head: { vars: ['p', 'o'] },
+            results: { bindings: [] },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      return new Response(null, { status: 200 });
+    });
+    const s = new BlazegraphStore(baseUrl);
+    const removed = await s.deleteByPattern({ graph: 'http://g', subject: 'http://unknown' });
+    expect(removed).toBe(0);
+    expect(updateBodies).toHaveLength(0);
   });
 
   // Bot review (PR #229 follow-up, blazegraph.ts:131): the previous
