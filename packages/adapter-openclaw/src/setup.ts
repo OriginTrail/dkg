@@ -651,35 +651,66 @@ export function mergeOpenClawConfig(
   // `CORE_TOOL_PROFILES` allowlist (applied at registry resolution) filters
   // plugin-registered tools out of the default `"coding"` profile, making
   // `dkg_*` invisible to the agent even when the plugin loads in full mode.
+  //
+  // Capture the pre-merge profile onto the adapter entry so `unmergeOpenClawConfig`
+  // can restore it on disconnect. First-wins: once captured, re-running merge
+  // does not clobber the original (matches the `previousMemorySlotOwner` pattern).
+  // `null` sentinel = "absent before merge" → disconnect should delete the key.
+  const adapterEntryForCapture = config.plugins.entries[pluginId] as Record<string, any>;
   if (!config.tools.profile) {
+    if (adapterEntryForCapture && !('previousToolsProfile' in adapterEntryForCapture)) {
+      adapterEntryForCapture.previousToolsProfile = null;
+    }
     config.tools.profile = 'full';
     log('Set tools.profile = "full" to expose plugin tools');
   } else if (config.tools.profile === 'coding') {
+    if (adapterEntryForCapture && !('previousToolsProfile' in adapterEntryForCapture)) {
+      adapterEntryForCapture.previousToolsProfile = 'coding';
+    }
     config.tools.profile = 'full';
     log('Upgraded tools.profile from "coding" to "full" to expose plugin tools');
   }
   // If the user explicitly set "minimal" or "messaging", respect that — they may
   // have restricted the profile intentionally and can re-expand with alsoAllow.
+  // No capture because we didn't mutate.
 
   // Ensure channels.dkg-ui has at least one non-`enabled` key so OpenClaw's
   // loader keeps the plugin in `full` runtime mode (not `setup-runtime`, where
   // api.registerTool is a noop — see openclaw/src/plugins/loader.ts:816 and
   // openclaw/src/config/channel-configured-shared.ts:21 for the check).
+  //
+  // Port derivation: prefer the adapter's own configured channel port from
+  // `entryConfig.channel.port` so this top-level entry stays in sync with
+  // `plugins.entries.adapter-openclaw.config.channel.port`. Falls back to the
+  // openclaw.plugin.json configSchema default (9201) when unspecified.
+  const entryChannelPort = (entryConfig?.channel as { port?: unknown } | undefined)?.port;
+  const adapterChannelPort = typeof entryChannelPort === 'number' && Number.isInteger(entryChannelPort)
+    ? entryChannelPort
+    : 9201;
   if (!config.channels || typeof config.channels !== 'object') {
     config.channels = {};
   }
   const dkgUiChannel = config.channels['dkg-ui'];
   if (!dkgUiChannel || typeof dkgUiChannel !== 'object') {
-    config.channels['dkg-ui'] = { enabled: true, port: 9201 };
-    log('Created channels.dkg-ui with port 9201 to keep plugin in full runtime mode');
+    // Channel absent before merge → on disconnect, delete it.
+    if (adapterEntryForCapture && !('previousChannelsDkgUi' in adapterEntryForCapture)) {
+      adapterEntryForCapture.previousChannelsDkgUi = null;
+    }
+    config.channels['dkg-ui'] = { enabled: true, port: adapterChannelPort };
+    log(`Created channels.dkg-ui with port ${adapterChannelPort} to keep plugin in full runtime mode`);
   } else {
     // Check whether the existing entry has any non-`enabled` key.
     const hasNonEnabledKey = Object.keys(dkgUiChannel).some((k) => k !== 'enabled');
     if (!hasNonEnabledKey) {
-      config.channels['dkg-ui'] = { ...dkgUiChannel, port: 9201 };
-      log('Added port 9201 to channels.dkg-ui to keep plugin in full runtime mode');
+      // Capture the degenerate shape so disconnect can restore it verbatim.
+      if (adapterEntryForCapture && !('previousChannelsDkgUi' in adapterEntryForCapture)) {
+        adapterEntryForCapture.previousChannelsDkgUi = { ...dkgUiChannel };
+      }
+      config.channels['dkg-ui'] = { ...dkgUiChannel, port: adapterChannelPort };
+      log(`Added port ${adapterChannelPort} to channels.dkg-ui to keep plugin in full runtime mode`);
     }
-    // Otherwise leave the user's customizations alone.
+    // Otherwise leave the user's customizations alone. No capture because we
+    // didn't mutate — disconnect must not touch a user-owned channel.
   }
 
   // Elect the adapter into OpenClaw's memory slot. Combined with
@@ -820,9 +851,21 @@ export function unmergeOpenClawConfig(openclawConfigPath: string): UnmergeResult
   // That ordering lets a failed skill cleanup retry against the still-present
   // authority pointer instead of relying on a return value we discard on crash.
   let previousMemorySlotOwner: string | undefined;
+  // `null` sentinel (captured from merge) = key was absent before merge → delete it.
+  // Defined string / object = restore verbatim. `undefined` = no capture, leave as-is.
+  let previousToolsProfile: string | null | undefined;
+  let previousChannelsDkgUi: Record<string, unknown> | null | undefined;
   const entry = config.plugins?.entries?.[pluginId];
-  if (entry && typeof entry === 'object' && typeof entry.previousMemorySlotOwner === 'string') {
-    previousMemorySlotOwner = entry.previousMemorySlotOwner;
+  if (entry && typeof entry === 'object') {
+    if (typeof entry.previousMemorySlotOwner === 'string') {
+      previousMemorySlotOwner = entry.previousMemorySlotOwner;
+    }
+    if ('previousToolsProfile' in entry) {
+      previousToolsProfile = entry.previousToolsProfile;
+    }
+    if ('previousChannelsDkgUi' in entry) {
+      previousChannelsDkgUi = entry.previousChannelsDkgUi;
+    }
   }
 
   // Delete the adapter entry entirely. The adapter owns this entry — all of
@@ -845,6 +888,43 @@ export function unmergeOpenClawConfig(openclawConfigPath: string): UnmergeResult
     } else {
       delete config.plugins.slots.memory;
       log(`Cleared plugins.slots.memory (was "${pluginId}")`);
+    }
+  }
+
+  // Restore or clear tools.profile iff it still holds the "full" value we wrote.
+  // If the user changed it since the merge, leave their value untouched — we
+  // only reverse the adapter's own claim on the slot, matching the slots.memory
+  // semantics above.
+  if (previousToolsProfile === null) {
+    if (config.tools && typeof config.tools === 'object' && 'profile' in config.tools && config.tools.profile === 'full') {
+      delete config.tools.profile;
+      log('Removed tools.profile (set to "full" by merge)');
+    }
+  } else if (typeof previousToolsProfile === 'string') {
+    if (config.tools && typeof config.tools === 'object' && config.tools.profile === 'full') {
+      config.tools.profile = previousToolsProfile;
+      log(`Restored tools.profile to "${previousToolsProfile}"`);
+    }
+  }
+
+  // Restore or clear channels.dkg-ui iff it still holds the shape merge produced.
+  // If the user has re-customized the channel since merge, leave their value
+  // untouched. We detect "merge-produced" by checking that the current channel
+  // is an object with at least a `port` key (since merge always writes `port`).
+  const currentChannel = config.channels && typeof config.channels === 'object'
+    ? (config.channels['dkg-ui'] as Record<string, unknown> | undefined)
+    : undefined;
+  const currentChannelLooksMergeShaped =
+    !!currentChannel && typeof currentChannel === 'object' && 'port' in currentChannel;
+  if (previousChannelsDkgUi === null) {
+    if (currentChannelLooksMergeShaped) {
+      delete config.channels['dkg-ui'];
+      log('Removed channels.dkg-ui (created by merge)');
+    }
+  } else if (previousChannelsDkgUi && typeof previousChannelsDkgUi === 'object') {
+    if (currentChannelLooksMergeShaped) {
+      config.channels['dkg-ui'] = { ...previousChannelsDkgUi };
+      log('Restored channels.dkg-ui to pre-merge state');
     }
   }
 

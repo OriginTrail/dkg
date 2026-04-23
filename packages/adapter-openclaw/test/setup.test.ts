@@ -633,6 +633,23 @@ describe('mergeOpenClawConfig', () => {
     expect(secondRun).toBe(firstRun);
     expect(secondBackupCount).toBe(firstBackupCount);
   });
+
+  // PR #250 review comment 2 — keep top-level channels.dkg-ui.port in sync with
+  // the adapter entry's own config.channel.port so the plugin doesn't end up
+  // looking at two different ports in two different places.
+  it('channels.dkg-ui.port: derives from entryConfig.channel.port when provided', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({ plugins: {} }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', {
+      daemonUrl: 'http://127.0.0.1:9200',
+      memory: { enabled: true },
+      channel: { enabled: true, port: 9300 },
+    } as AdapterEntryConfig, defaultInstalledWorkspace);
+
+    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(config.channels['dkg-ui']).toEqual({ enabled: true, port: 9300 });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -861,6 +878,91 @@ describe('unmergeOpenClawConfig', () => {
     const result = unmergeOpenClawConfig(configPath);
 
     expect(result.previousMemorySlotOwner).toBeUndefined();
+  });
+
+  // PR #250 review comment 1 — round-trip restoration of tools.profile +
+  // channels.dkg-ui. Without these, a connect→disconnect cycle would leave
+  // openclaw.json permanently widened.
+  it('round-trip: absent tools.profile + absent channels.dkg-ui → merge → unmerge restores absent', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({ plugins: {} }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+
+    // After merge: both keys are now present.
+    const afterMerge = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterMerge.tools.profile).toBe('full');
+    expect(afterMerge.channels['dkg-ui']).toEqual({ enabled: true, port: 9201 });
+
+    unmergeOpenClawConfig(configPath);
+
+    // After unmerge: both keys are gone.
+    const afterUnmerge = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterUnmerge.tools?.profile).toBeUndefined();
+    expect(afterUnmerge.channels?.['dkg-ui']).toBeUndefined();
+  });
+
+  it('round-trip: "coding" profile + degenerate { enabled: true } channel → merge → unmerge restores prior values', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({
+      plugins: {},
+      tools: { profile: 'coding' },
+      channels: { 'dkg-ui': { enabled: true } },
+    }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+
+    // After merge: profile upgraded, channel port added.
+    const afterMerge = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterMerge.tools.profile).toBe('full');
+    expect(afterMerge.channels['dkg-ui']).toEqual({ enabled: true, port: 9201 });
+
+    unmergeOpenClawConfig(configPath);
+
+    // After unmerge: both restored to pre-merge shape.
+    const afterUnmerge = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterUnmerge.tools.profile).toBe('coding');
+    expect(afterUnmerge.channels['dkg-ui']).toEqual({ enabled: true });
+  });
+
+  it('round-trip: explicit "minimal" profile preserved through merge + unmerge', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({
+      plugins: {},
+      tools: { profile: 'minimal' },
+    }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+
+    // Merge leaves "minimal" alone — no capture, no mutation.
+    const afterMerge = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterMerge.tools.profile).toBe('minimal');
+
+    unmergeOpenClawConfig(configPath);
+
+    // Unmerge still leaves "minimal" alone — nothing to restore, we never captured.
+    const afterUnmerge = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterUnmerge.tools.profile).toBe('minimal');
+  });
+
+  it('round-trip: user-customized channels.dkg-ui (non-enabled key) preserved through merge + unmerge', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({
+      plugins: {},
+      channels: { 'dkg-ui': { enabled: true, port: 9999, customField: 'user-owned' } },
+    }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+
+    // Merge leaves the user channel alone — no capture, no mutation.
+    const afterMerge = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterMerge.channels['dkg-ui']).toEqual({ enabled: true, port: 9999, customField: 'user-owned' });
+
+    unmergeOpenClawConfig(configPath);
+
+    // Unmerge still leaves it alone.
+    const afterUnmerge = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterUnmerge.channels['dkg-ui']).toEqual({ enabled: true, port: 9999, customField: 'user-owned' });
   });
 });
 
