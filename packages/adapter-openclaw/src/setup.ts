@@ -19,6 +19,7 @@ import { createRequire } from 'node:module';
 import { join, dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { isDeepStrictEqual } from 'node:util';
 import type { DkgOpenClawConfig } from './types.js';
 
 // ---------------------------------------------------------------------------
@@ -679,34 +680,47 @@ export function mergeOpenClawConfig(
   // api.registerTool is a noop — see openclaw/src/plugins/loader.ts:816 and
   // openclaw/src/config/channel-configured-shared.ts:21 for the check).
   //
-  // Port derivation: prefer the adapter's own configured channel port from
-  // `entryConfig.channel.port` so this top-level entry stays in sync with
-  // `plugins.entries.adapter-openclaw.config.channel.port`. Falls back to the
-  // openclaw.plugin.json configSchema default (9201) when unspecified.
-  const entryChannelPort = (entryConfig?.channel as { port?: unknown } | undefined)?.port;
-  const adapterChannelPort = typeof entryChannelPort === 'number' && Number.isInteger(entryChannelPort)
-    ? entryChannelPort
+  // Port derivation reads from the POST-MERGE `plugins.entries.adapter-openclaw
+  // .config.channel.port`, not the incoming `entryConfig.channel.port`. The
+  // entry-config merge above applies first-wins semantics: when the user
+  // already has a custom adapter port (e.g. 9300), it's preserved on the entry
+  // even if the caller passed a default `entryConfig`. Reading the post-merge
+  // state keeps the top-level `channels.dkg-ui.port` in sync with whatever the
+  // adapter entry actually resolved to. Falls back to the openclaw.plugin.json
+  // configSchema default (9201) when no port is set anywhere.
+  const mergedChannel = entryForConfig.config?.channel as { port?: unknown } | undefined;
+  const mergedChannelPort = mergedChannel?.port;
+  const adapterChannelPort = typeof mergedChannelPort === 'number' && Number.isInteger(mergedChannelPort)
+    ? mergedChannelPort
     : 9201;
   if (!config.channels || typeof config.channels !== 'object') {
     config.channels = {};
   }
   const dkgUiChannel = config.channels['dkg-ui'];
   if (!dkgUiChannel || typeof dkgUiChannel !== 'object') {
-    // Channel absent before merge → on disconnect, delete it.
+    // Channel absent before merge → on disconnect, delete it (only if still
+    // matches the shape we wrote). Capture both the prior absence (`null`) and
+    // the exact value we're about to write so unmerge can deep-equal-compare
+    // and leave user post-merge edits alone.
+    const created = { enabled: true, port: adapterChannelPort };
     if (adapterEntryForCapture && !('previousChannelsDkgUi' in adapterEntryForCapture)) {
       adapterEntryForCapture.previousChannelsDkgUi = null;
+      adapterEntryForCapture.mergedChannelsDkgUi = { ...created };
     }
-    config.channels['dkg-ui'] = { enabled: true, port: adapterChannelPort };
+    config.channels['dkg-ui'] = created;
     log(`Created channels.dkg-ui with port ${adapterChannelPort} to keep plugin in full runtime mode`);
   } else {
     // Check whether the existing entry has any non-`enabled` key.
     const hasNonEnabledKey = Object.keys(dkgUiChannel).some((k) => k !== 'enabled');
     if (!hasNonEnabledKey) {
-      // Capture the degenerate shape so disconnect can restore it verbatim.
+      // Capture the degenerate shape + exact merge output so disconnect can
+      // restore verbatim iff the channel hasn't been edited since.
+      const upgraded = { ...dkgUiChannel, port: adapterChannelPort };
       if (adapterEntryForCapture && !('previousChannelsDkgUi' in adapterEntryForCapture)) {
         adapterEntryForCapture.previousChannelsDkgUi = { ...dkgUiChannel };
+        adapterEntryForCapture.mergedChannelsDkgUi = { ...upgraded };
       }
-      config.channels['dkg-ui'] = { ...dkgUiChannel, port: adapterChannelPort };
+      config.channels['dkg-ui'] = upgraded;
       log(`Added port ${adapterChannelPort} to channels.dkg-ui to keep plugin in full runtime mode`);
     }
     // Otherwise leave the user's customizations alone. No capture because we
@@ -855,6 +869,11 @@ export function unmergeOpenClawConfig(openclawConfigPath: string): UnmergeResult
   // Defined string / object = restore verbatim. `undefined` = no capture, leave as-is.
   let previousToolsProfile: string | null | undefined;
   let previousChannelsDkgUi: Record<string, unknown> | null | undefined;
+  // Exact merge-produced shape of channels.dkg-ui, captured at merge time.
+  // Used as a deep-equal ownership check on unmerge — a loose "has a port key"
+  // guard would also match post-merge user edits (auth tokens, custom fields,
+  // port changes) and clobber them on disconnect.
+  let mergedChannelsDkgUi: Record<string, unknown> | undefined;
   const entry = config.plugins?.entries?.[pluginId];
   if (entry && typeof entry === 'object') {
     if (typeof entry.previousMemorySlotOwner === 'string') {
@@ -865,6 +884,9 @@ export function unmergeOpenClawConfig(openclawConfigPath: string): UnmergeResult
     }
     if ('previousChannelsDkgUi' in entry) {
       previousChannelsDkgUi = entry.previousChannelsDkgUi;
+    }
+    if (entry.mergedChannelsDkgUi && typeof entry.mergedChannelsDkgUi === 'object') {
+      mergedChannelsDkgUi = entry.mergedChannelsDkgUi as Record<string, unknown>;
     }
   }
 
@@ -907,24 +929,33 @@ export function unmergeOpenClawConfig(openclawConfigPath: string): UnmergeResult
     }
   }
 
-  // Restore or clear channels.dkg-ui iff it still holds the shape merge produced.
-  // If the user has re-customized the channel since merge, leave their value
-  // untouched. We detect "merge-produced" by checking that the current channel
-  // is an object with at least a `port` key (since merge always writes `port`).
+  // Restore or clear channels.dkg-ui iff the current value DEEP-EQUALS the exact
+  // shape merge wrote. A loose "has a port key" check would also match user edits
+  // made after install (post-merge port change, added auth/custom fields) and
+  // clobber them on disconnect. Using `isDeepStrictEqual` against the captured
+  // `mergedChannelsDkgUi` is strict ownership: any divergence from the merge
+  // output — including the user re-customizing the port — means the user now
+  // owns this channel, and we leave it alone.
   const currentChannel = config.channels && typeof config.channels === 'object'
     ? (config.channels['dkg-ui'] as Record<string, unknown> | undefined)
     : undefined;
-  const currentChannelLooksMergeShaped =
-    !!currentChannel && typeof currentChannel === 'object' && 'port' in currentChannel;
+  const currentMatchesMerge =
+    !!currentChannel
+    && !!mergedChannelsDkgUi
+    && isDeepStrictEqual(currentChannel, mergedChannelsDkgUi);
   if (previousChannelsDkgUi === null) {
-    if (currentChannelLooksMergeShaped) {
+    if (currentMatchesMerge) {
       delete config.channels['dkg-ui'];
-      log('Removed channels.dkg-ui (created by merge)');
+      log('Removed channels.dkg-ui (created by merge, unchanged since)');
+    } else if (currentChannel) {
+      log('Preserving channels.dkg-ui — user-modified since merge');
     }
   } else if (previousChannelsDkgUi && typeof previousChannelsDkgUi === 'object') {
-    if (currentChannelLooksMergeShaped) {
+    if (currentMatchesMerge) {
       config.channels['dkg-ui'] = { ...previousChannelsDkgUi };
       log('Restored channels.dkg-ui to pre-merge state');
+    } else if (currentChannel) {
+      log('Preserving channels.dkg-ui — user-modified since merge');
     }
   }
 

@@ -650,6 +650,39 @@ describe('mergeOpenClawConfig', () => {
     const config = JSON.parse(readFileSync(configPath, 'utf-8'));
     expect(config.channels['dkg-ui']).toEqual({ enabled: true, port: 9300 });
   });
+
+  // PR #250 review comment 6 — on re-runs, the adapter entry's existing port
+  // wins (first-wins) over the incoming default. The top-level channel must
+  // match the preserved entry port, not the incoming fallback 9201.
+  it('channels.dkg-ui.port: uses preserved entry.config.channel.port on re-merge even when incoming entryConfig has no port', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({
+      plugins: {
+        entries: {
+          'adapter-openclaw': {
+            enabled: true,
+            config: {
+              daemonUrl: 'http://127.0.0.1:9200',
+              memory: { enabled: true },
+              channel: { enabled: true, port: 9300 },
+            },
+          },
+        },
+      },
+    }));
+
+    // Incoming entryConfig has no port — first-wins preserves the existing 9300
+    // on the adapter entry, and the top-level channel should inherit it.
+    mergeOpenClawConfig(configPath, '/path/to/adapter', {
+      daemonUrl: 'http://127.0.0.1:9200',
+      memory: { enabled: true },
+      channel: { enabled: true },
+    } as AdapterEntryConfig, defaultInstalledWorkspace);
+
+    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(config.plugins.entries['adapter-openclaw'].config.channel.port).toBe(9300);
+    expect(config.channels['dkg-ui']).toEqual({ enabled: true, port: 9300 });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -963,6 +996,93 @@ describe('unmergeOpenClawConfig', () => {
     // Unmerge still leaves it alone.
     const afterUnmerge = JSON.parse(readFileSync(configPath, 'utf-8'));
     expect(afterUnmerge.channels['dkg-ui']).toEqual({ enabled: true, port: 9999, customField: 'user-owned' });
+  });
+
+  // PR #250 review comment 3 — post-merge user edits must be preserved by
+  // unmerge. The ownership check is strict deep-equal against the exact shape
+  // merge wrote; any divergence means the user now owns the channel.
+  it('round-trip: user adds field to merge-created channel → unmerge preserves user edit', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    // Seed: no channels.dkg-ui at all.
+    writeFileSync(configPath, JSON.stringify({ plugins: {} }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+    const afterMerge = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterMerge.channels['dkg-ui']).toEqual({ enabled: true, port: 9201 });
+
+    // Simulate the user adding an auth block after merge.
+    const userEdited = {
+      ...afterMerge,
+      channels: {
+        ...afterMerge.channels,
+        'dkg-ui': { ...afterMerge.channels['dkg-ui'], auth: { token: 'xyz' } },
+      },
+    };
+    writeFileSync(configPath, JSON.stringify(userEdited, null, 2) + '\n');
+
+    unmergeOpenClawConfig(configPath);
+
+    // User's edit survives — disconnect saw that the channel no longer matches
+    // what merge wrote, so it left the channel entirely alone.
+    const afterUnmerge = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterUnmerge.channels['dkg-ui']).toEqual({
+      enabled: true,
+      port: 9201,
+      auth: { token: 'xyz' },
+    });
+  });
+
+  it('round-trip: user changes port on merge-created channel → unmerge preserves user port', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({ plugins: {} }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+    const afterMerge = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterMerge.channels['dkg-ui']).toEqual({ enabled: true, port: 9201 });
+
+    // User changes the port.
+    const userEdited = {
+      ...afterMerge,
+      channels: { ...afterMerge.channels, 'dkg-ui': { enabled: true, port: 9500 } },
+    };
+    writeFileSync(configPath, JSON.stringify(userEdited, null, 2) + '\n');
+
+    unmergeOpenClawConfig(configPath);
+
+    // Port 9500 survives — it's not the shape merge wrote.
+    const afterUnmerge = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterUnmerge.channels['dkg-ui']).toEqual({ enabled: true, port: 9500 });
+  });
+
+  it('round-trip: user edits degenerate-upgraded channel → unmerge preserves user edit', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    // Seed: degenerate channel that merge upgrades by adding a port.
+    writeFileSync(configPath, JSON.stringify({
+      plugins: {},
+      channels: { 'dkg-ui': { enabled: true } },
+    }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+    const afterMerge = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterMerge.channels['dkg-ui']).toEqual({ enabled: true, port: 9201 });
+
+    // User edits post-merge — changes port and adds a field.
+    const userEdited = {
+      ...afterMerge,
+      channels: {
+        ...afterMerge.channels,
+        'dkg-ui': { enabled: true, port: 9500, foo: 'bar' },
+      },
+    };
+    writeFileSync(configPath, JSON.stringify(userEdited, null, 2) + '\n');
+
+    unmergeOpenClawConfig(configPath);
+
+    // The user's shape survives — disconnect did NOT restore the original
+    // `{ enabled: true }` because the current channel diverges from the merge
+    // output.
+    const afterUnmerge = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterUnmerge.channels['dkg-ui']).toEqual({ enabled: true, port: 9500, foo: 'bar' });
   });
 });
 
