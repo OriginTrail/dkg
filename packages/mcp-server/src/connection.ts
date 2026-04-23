@@ -288,14 +288,65 @@ export async function resolveDaemonEndpoint(options: {
   let token = envToken;
   let tokenSource: 'env' | 'file' | 'none' = envToken ? 'env' : 'none';
   if (!token) {
-    const fileToken = (await loadAuthToken()) ?? '';
-    if (fileToken) {
-      token = fileToken;
-      tokenSource = 'file';
+    // PR #229 bot review round 25 (r25-3, connection.ts). Before r25-3
+    // we unconditionally fell back to `loadAuthToken()` when the env
+    // didn't supply a bearer. That file is the LOCAL daemon's admin
+    // credential (persisted next to the local pid / port files by
+    // `dkg start`) — forwarding it to a REMOTE daemon means an
+    // operator who merely pointed `DKG_NODE_URL` at some remote
+    // endpoint (their own hosted node, a sandbox, a malicious URL
+    // pasted into their shell) would hand that remote the admin
+    // credential that unlocks their LOCAL box. The remote would see
+    // a valid `Authorization: Bearer …` header on every request and
+    // could replay it against the operator's local daemon over
+    // `127.0.0.1` if it ever got the chance. Classic credential-
+    // confused-deputy exfiltration.
+    //
+    // Fix: only consult the local token file when the resolved
+    // endpoint points at the local machine (either `urlSource ===
+    // 'file'`, i.e. we discovered the port from the shared state
+    // dir, or `DKG_NODE_URL` resolves to a loopback hostname). For
+    // remote targets leave the token empty; the user can set
+    // `DKG_NODE_TOKEN` to the *remote's* credential if they need
+    // authenticated access, which is the only safe channel.
+    const isLocalEndpoint = urlSource === 'file' || isLoopbackBaseUrl(baseOrPort);
+    if (isLocalEndpoint) {
+      const fileToken = (await loadAuthToken()) ?? '';
+      if (fileToken) {
+        token = fileToken;
+        tokenSource = 'file';
+      }
     }
   }
 
   return { baseOrPort, displayUrl, token, tokenSource, urlSource };
+}
+
+/**
+ * PR #229 bot review round 25 (r25-3). True iff the resolved base URL
+ * (or numeric port, which is always `http://127.0.0.1:<port>` from
+ * {@link DkgClient}'s constructor) points at the local machine.
+ *
+ * Loopback is recognised by WHATWG URL parsing — `localhost`,
+ * `127.0.0.0/8`, `::1`, or any `[::1]`-bracketed form. Anything else
+ * is considered remote, and the caller MUST NOT forward local
+ * credentials to it.
+ */
+function isLoopbackBaseUrl(baseOrPort: string | number): boolean {
+  if (typeof baseOrPort === 'number') return true;
+  try {
+    const u = new URL(baseOrPort);
+    const host = u.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+    if (host === 'localhost') return true;
+    if (host === '::1') return true;
+    if (host === '0:0:0:0:0:0:0:1') return true;
+    // IPv4 loopback: 127.0.0.0/8
+    const v4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+    if (v4 && Number(v4[1]) === 127) return true;
+    return false;
+  } catch {
+    return false;
+  }
 }
 
 /**

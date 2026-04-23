@@ -416,6 +416,104 @@ describe('DkgClient', () => {
       expect(r.daemonDown).toBeUndefined();
       expect(r.baseOrPort).toBe(9201);
     });
+
+    // -----------------------------------------------------------------
+    // PR #229 bot review round 25 (r25-3, mcp-server/connection.ts).
+    //
+    // When `DKG_NODE_URL` is set (so `urlSource === 'env'`) and
+    // `DKG_NODE_TOKEN` is unset, the pre-r25-3 code fell back to
+    // `loadAuthToken()` — the LOCAL daemon's admin credential. An
+    // operator pointing their MCP at `https://some.remote.node`
+    // would therefore send the local admin bearer to that remote,
+    // which is a textbook confused-deputy credential exfiltration.
+    //
+    // Post-r25-3 the local-token fallback is scoped to endpoints
+    // that demonstrably point AT the local machine (either
+    // `urlSource === 'file'` or a loopback host in `DKG_NODE_URL`).
+    // Remote targets with no explicit `DKG_NODE_TOKEN` must get an
+    // empty bearer — the operator can set `DKG_NODE_TOKEN` to the
+    // remote's credential if they need authenticated access.
+    // -----------------------------------------------------------------
+    it('r25-3: remote DKG_NODE_URL + unset DKG_NODE_TOKEN MUST NOT forward the local auth.token', async () => {
+      process.env.DKG_NODE_URL = 'https://remote.example:8443';
+      delete process.env.DKG_NODE_TOKEN;
+      // Plant a LOCAL auth token. The pre-r25-3 code would have
+      // read this file and returned it as the remote's credential.
+      await writeFile(join(tempDir, 'auth.token'), 'local-admin-token\n');
+
+      const r = await resolveDaemonEndpoint({ requireReachable: true });
+      expect(r.baseOrPort).toBe('https://remote.example:8443');
+      expect(r.urlSource).toBe('env');
+      expect(r.token).toBe('');
+      expect(r.tokenSource).toBe('none');
+    });
+
+    it('r25-3: remote DKG_NODE_URL + explicit DKG_NODE_TOKEN passes the ENV token (not the local file)', async () => {
+      process.env.DKG_NODE_URL = 'https://remote.example:8443';
+      process.env.DKG_NODE_TOKEN = 'remote-specific-token';
+      await writeFile(join(tempDir, 'auth.token'), 'local-admin-token\n');
+
+      const r = await resolveDaemonEndpoint({ requireReachable: true });
+      expect(r.token).toBe('remote-specific-token');
+      expect(r.tokenSource).toBe('env');
+    });
+
+    it('r25-3: loopback DKG_NODE_URL (127.0.0.1) WITH unset DKG_NODE_TOKEN still uses the local auth.token', async () => {
+      // Loopback overrides are equivalent to the implicit local
+      // daemon path — forwarding `auth.token` to `127.0.0.1` is
+      // safe because it IS the local daemon. We MUST NOT regress
+      // that ergonomics.
+      process.env.DKG_NODE_URL = 'http://127.0.0.1:9201';
+      delete process.env.DKG_NODE_TOKEN;
+      await writeFile(join(tempDir, 'auth.token'), 'loopback-ok-tok\n');
+
+      const r = await resolveDaemonEndpoint({ requireReachable: true });
+      expect(r.token).toBe('loopback-ok-tok');
+      expect(r.tokenSource).toBe('file');
+    });
+
+    it('r25-3: localhost DKG_NODE_URL is also treated as local for the token fallback', async () => {
+      process.env.DKG_NODE_URL = 'http://localhost:9201';
+      delete process.env.DKG_NODE_TOKEN;
+      await writeFile(join(tempDir, 'auth.token'), 'localhost-ok-tok\n');
+
+      const r = await resolveDaemonEndpoint({ requireReachable: true });
+      expect(r.token).toBe('localhost-ok-tok');
+      expect(r.tokenSource).toBe('file');
+    });
+
+    it('r25-3: IPv6 loopback [::1] is treated as local for the token fallback', async () => {
+      process.env.DKG_NODE_URL = 'http://[::1]:9201';
+      delete process.env.DKG_NODE_TOKEN;
+      await writeFile(join(tempDir, 'auth.token'), 'ipv6-ok-tok\n');
+
+      const r = await resolveDaemonEndpoint({ requireReachable: true });
+      expect(r.token).toBe('ipv6-ok-tok');
+      expect(r.tokenSource).toBe('file');
+    });
+
+    it('r25-3: public IP like 8.8.8.8 is NOT misclassified as local even if the first octet is not 127', async () => {
+      process.env.DKG_NODE_URL = 'http://8.8.8.8:443';
+      delete process.env.DKG_NODE_TOKEN;
+      await writeFile(join(tempDir, 'auth.token'), 'should-not-leak\n');
+
+      const r = await resolveDaemonEndpoint({ requireReachable: true });
+      expect(r.token).toBe('');
+      expect(r.tokenSource).toBe('none');
+    });
+
+    it('r25-3: a 127.0.0.2 address (valid /8 loopback) is treated as local', async () => {
+      // Defensive: `127.0.0.0/8` is the RFC-1122 loopback block,
+      // not just `127.0.0.1`. We honour the full block so operators
+      // binding an alias on `127.0.0.2` get the same ergonomics.
+      process.env.DKG_NODE_URL = 'http://127.0.0.2:9201';
+      delete process.env.DKG_NODE_TOKEN;
+      await writeFile(join(tempDir, 'auth.token'), 'loopback-8-tok\n');
+
+      const r = await resolveDaemonEndpoint({ requireReachable: true });
+      expect(r.token).toBe('loopback-8-tok');
+      expect(r.tokenSource).toBe('file');
+    });
   });
 
   describe('extractPortFromUrl (bot review r9-2)', () => {

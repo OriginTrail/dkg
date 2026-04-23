@@ -136,3 +136,99 @@ describe('ChainEventPoller.poll() — r24-4 early-return gate must include onUnm
     expect(chain.listenForEventsCalls).toBe(1);
   });
 });
+
+/**
+ * PR #229 bot review round 25 (r25-1): the near-tip seed that runs on
+ * first successful head fetch MUST be skipped when WAL recovery is
+ * active, otherwise a surviving WAL entry older than 500 blocks is
+ * silently unreachable via KnowledgeBatchCreated scanning and its
+ * tentative KC never gets confirmed.
+ */
+describe('ChainEventPoller.poll() — r25-1 MUST NOT seed near head when WAL recovery is active', () => {
+  it('a WAL-recovery poller (onUnmatchedBatchCreated wired) leaves lastBlock at 0, scanning from genesis', async () => {
+    const chain = makeMockChain();
+    // Move head far enough past 500 blocks that the near-tip seed
+    // would absolutely land AFTER any realistic WAL entry. 1_000_000
+    // is a realistic testnet head; the seed would move `lastBlock`
+    // to 999_500.
+    chain.getBlockNumber = async () => 1_000_000;
+    const handler = makeHandler();
+    expect(handler.hasPendingPublishes).toBe(false);
+
+    const poller = new ChainEventPoller({
+      chain: chain as unknown as ChainAdapter,
+      publishHandler: handler,
+      intervalMs: 1_000_000,
+      onUnmatchedBatchCreated: async () => {
+        // never invoked because listenForEvents yields nothing
+      },
+    });
+
+    await callPollDirectly(poller);
+
+    // Before r25-1 this assertion would have failed: `lastBlock`
+    // would have been seeded to 999_500 and every block below that
+    // (including any WAL entry older than 500 blocks) would be
+    // permanently un-scanned.
+    const lastBlock = (poller as unknown as { lastBlock: number }).lastBlock;
+    // After one poll, `lastBlock` advances to `upperBound` which is
+    // `Math.min(fromBlock + MAX_RANGE - 1, head)` = min(0 + 9000 - 1, 1_000_000)
+    // = 8999. So the scan actually started at block 1 (fromBlock = lastBlock + 1).
+    expect(lastBlock).toBeLessThan(9001);
+    expect(lastBlock).toBeGreaterThan(0);
+  });
+
+  it('a classic poller (no WAL recovery callback, no pending publishes) still seeds near head', async () => {
+    const chain = makeMockChain();
+    chain.getBlockNumber = async () => 1_000_000;
+    const handler = makeHandler();
+
+    const poller = new ChainEventPoller({
+      chain: chain as unknown as ChainAdapter,
+      publishHandler: handler,
+      intervalMs: 1_000_000,
+      // Use a ContextGraph watcher to ensure the early-return gate
+      // lets us into poll() without needing WAL recovery or pending
+      // publishes. We're specifically pinning the old seeding
+      // behaviour for non-WAL pollers — it MUST NOT regress as a
+      // side-effect of the r25-1 fix.
+      onContextGraphCreated: async () => {},
+    });
+
+    await callPollDirectly(poller);
+
+    const lastBlock = (poller as unknown as { lastBlock: number }).lastBlock;
+    // Seed should have landed around head - 500, then the poll
+    // advanced it to `upperBound = min(head-500 + 9000 - 1 + 1, head)`.
+    // Either way `lastBlock` must be much closer to head than to genesis.
+    expect(lastBlock).toBeGreaterThan(500_000);
+  });
+
+  it('a persisted cursor WINS over both the seed and the genesis scan — WAL recovery just refuses the seed, not a real checkpoint', async () => {
+    const chain = makeMockChain();
+    chain.getBlockNumber = async () => 1_000_000;
+    const handler = makeHandler();
+
+    const poller = new ChainEventPoller({
+      chain: chain as unknown as ChainAdapter,
+      publishHandler: handler,
+      intervalMs: 1_000_000,
+      onUnmatchedBatchCreated: async () => {},
+    });
+
+    // Simulate what `start()` does after loading from CursorPersistence:
+    // populate `lastBlock` BEFORE the first `poll()` call.
+    (poller as unknown as { lastBlock: number }).lastBlock = 750_000;
+
+    await callPollDirectly(poller);
+
+    const lastBlock = (poller as unknown as { lastBlock: number }).lastBlock;
+    // Cursor advances from 750_000 by up to MAX_RANGE=9000 — but the
+    // important assertion is that the r25-1 fix did NOT clobber the
+    // persisted checkpoint back to 0 in a misguided "scan from
+    // genesis" gesture. Producers that already have a real cursor
+    // MUST keep it.
+    expect(lastBlock).toBeGreaterThan(750_000);
+    expect(lastBlock).toBeLessThanOrEqual(750_000 + 9_000);
+  });
+});

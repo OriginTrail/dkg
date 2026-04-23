@@ -293,11 +293,36 @@ export class ChainEventPoller {
     // On first successful head fetch, seed cursor near the tip — but only
     // when there are no pending publishes whose confirmations we might skip.
     // Full-history context graph discovery is handled by discoverContextGraphsFromChain().
+    //
+    // PR #229 bot review round 25 (r25-1). WAL recovery is ALSO a reason
+    // not to seed near the tip: on restart the in-memory pending map is
+    // empty by construction, but the unmatched-batch reconciler
+    // (`onUnmatchedBatchCreated`, installed by the agent for WAL drain)
+    // is what actually resurrects pre-crash publishes from the
+    // write-ahead log. If the surviving WAL entry is older than 500
+    // blocks the near-tip seed would silently skip its on-chain
+    // confirmation event forever, and the WAL would never drain.
+    //
+    // When the callback is present we therefore refuse to seed —
+    // `lastBlock = 0` means "scan from genesis" (bounded per-poll by
+    // `MAX_RANGE = 9000`, so even a long-running testnet drains in
+    // finite ticks). An operator whose cursor persistence layer
+    // already has a valid checkpoint still benefits: `this.lastBlock`
+    // is populated from persistence BEFORE the first `poll()` call in
+    // `start()`, so the `this.lastBlock === 0` gate below does NOT
+    // fire and no scanning is wasted.
     if (head != null && !this.headKnown) {
       this.headKnown = true;
-      if (this.lastBlock === 0 && !hasPending) {
+      if (this.lastBlock === 0 && !hasPending && !watchUnmatchedBatches) {
         this.lastBlock = Math.max(0, head - 500);
         this.log.info(ctx, `Seeded poller cursor near chain head: ${head} → scanning from ${this.lastBlock}`);
+      } else if (this.lastBlock === 0 && watchUnmatchedBatches) {
+        this.log.info(
+          ctx,
+          `WAL recovery active — NOT seeding poller cursor near head; ` +
+            `scanning from genesis to drain any pre-crash WAL entries ` +
+            `(head=${head}, r25-1)`,
+        );
       }
     }
 

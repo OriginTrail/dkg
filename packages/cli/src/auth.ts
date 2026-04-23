@@ -1104,7 +1104,77 @@ function installSignedRequestResponseGuard(
   // payload into a socket we've already closed.
   let spent = false;
 
-  const failClosed = (): void => {
+  // PR #229 bot review round 25 (r25-2). Legitimate clients can send a
+  // signed request with `Transfer-Encoding: chunked` + an immediately-
+  // terminating body (`0\r\n\r\n`) — for example a refresh/revoke POST
+  // whose semantics don't need a payload but whose framing still opts
+  // into chunked transfer. The handler for such routes correctly
+  // ignores the body. Before r25-2 that combination would hit the
+  // fail-closed arm below and emit 401, because `pending.verified`
+  // is only flipped by `enforceSignedRequestPostBody`, which needs
+  // the handler to explicitly call `readBody*()`.
+  //
+  // Fix: if the handler emits a response without verifying the
+  // HMAC, DEFER its response while we drain whatever body remains
+  // on the wire, then finish the verification ourselves and either
+  //   (a) replay the handler's intended response on success, or
+  //   (b) rewrite it to 401 on any failure.
+  //
+  // The drain is bounded by `MAX_BODY_BYTES` so a signed request
+  // with a never-ending chunked body can't keep us in the
+  // reader loop forever. We explicitly DO NOT resume until
+  // verification is required, so body-carrying handlers that
+  // call `readBody*()` themselves continue to take the
+  // synchronous verification path in `enforceSignedRequestPostBody`
+  // and the guard collapses into a transparent pass-through.
+  const MAX_DRAIN_BYTES = 10 * 1024 * 1024;
+  let drainedChunks: Buffer[] = [];
+  let drainedBytes = 0;
+  let drainAttached = false;
+  let drainOverflow = false;
+
+  const attachDrainListeners = (): void => {
+    if (drainAttached) return;
+    drainAttached = true;
+    const onData = (chunk: Buffer | string): void => {
+      const buf = typeof chunk === 'string' ? Buffer.from(chunk) : chunk;
+      drainedBytes += buf.length;
+      if (drainedBytes > MAX_DRAIN_BYTES) {
+        drainOverflow = true;
+        drainedChunks = [];
+        return;
+      }
+      if (!drainOverflow) drainedChunks.push(buf);
+    };
+    (req as IncomingMessage).on('data', onData);
+  };
+
+  const waitForRequestEnd = (): Promise<void> =>
+    new Promise((resolve) => {
+      const reqAny = req as IncomingMessage & { complete?: boolean; readableEnded?: boolean };
+      if (reqAny.complete || reqAny.readableEnded) { resolve(); return; }
+      const done = (): void => resolve();
+      req.once('end', done);
+      req.once('close', done);
+      req.once('error', done);
+      req.resume();
+    });
+
+  const tryPassiveEmptyBodyVerification = (): boolean => {
+    const pending = (req as unknown as {
+      __dkgSignedAuth?: SignedAuthPending & { verified?: boolean };
+    }).__dkgSignedAuth;
+    if (!pending || pending.verified) return true;
+    const reqAny = req as IncomingMessage & { complete?: boolean; readableEnded?: boolean };
+    const ended = Boolean(reqAny.complete) || Boolean(reqAny.readableEnded);
+    if (!ended || drainedBytes !== 0) return false;
+    const outcome = verifyHttpSignedRequestAfterBody(req, '');
+    if (!outcome.ok) return false;
+    pending.verified = true;
+    return true;
+  };
+
+  const failClosed = (reason = 'HMAC verification never completed (handler did not read request body)'): void => {
     spent = true;
     try {
       origWriteHead.call(res, 401, {
@@ -1113,32 +1183,88 @@ function installSignedRequestResponseGuard(
         'Access-Control-Allow-Origin': corsOrigin ?? '*',
       });
       (origEnd as (chunk?: string) => ServerResponse)(
-        JSON.stringify({
-          error: 'Signed request rejected: HMAC verification never completed (handler did not read request body)',
-        }),
+        JSON.stringify({ error: `Signed request rejected: ${reason}` }),
       );
     } catch {
       // res already destroyed — nothing else we can do.
     }
   };
 
-  const shouldIntercept = (): boolean => {
-    if (spent) return true;
-    const pending = (req as unknown as {
-      __dkgSignedAuth?: SignedAuthPending & { verified?: boolean };
-    }).__dkgSignedAuth;
-    if (!pending || pending.verified) return false;
-    failClosed();
-    return true;
+  // A queued writeHead / end emission whose fate depends on the
+  // async drain-and-verify. We hold at most ONE writeHead and
+  // chain end() after. When the handler calls both in quick
+  // succession we must replay them in order so the status
+  // arrives before the payload, preserving the semantics the
+  // handler intended.
+  type Queued =
+    | { kind: 'writeHead'; args: Parameters<ServerResponse['writeHead']> }
+    | { kind: 'end'; args: Parameters<ServerResponse['end']> };
+  const queue: Queued[] = [];
+
+  const flushQueue = (): void => {
+    for (const q of queue) {
+      try {
+        if (q.kind === 'writeHead') origWriteHead(...q.args);
+        else origEnd(...q.args);
+      } catch {
+        // res destroyed mid-flush; give up gracefully.
+      }
+    }
+    queue.length = 0;
   };
 
+  let deferred = false;
+  const deferAndResolve = (): void => {
+    if (deferred) return;
+    deferred = true;
+    void (async () => {
+      try {
+        attachDrainListeners();
+        await waitForRequestEnd();
+        if (drainOverflow) { failClosed('request body exceeded maximum drain size'); return; }
+        const body = Buffer.concat(drainedChunks);
+        const outcome = verifyHttpSignedRequestAfterBody(req, body);
+        if (!outcome.ok) { failClosed(outcome.reason); return; }
+        const pending = (req as unknown as {
+          __dkgSignedAuth?: SignedAuthPending & { verified?: boolean };
+        }).__dkgSignedAuth;
+        if (pending) pending.verified = true;
+        flushQueue();
+      } catch {
+        failClosed('verification failed');
+      }
+    })();
+  };
+
+  const pending = (): SignedAuthPending & { verified?: boolean } | undefined =>
+    (req as unknown as {
+      __dkgSignedAuth?: SignedAuthPending & { verified?: boolean };
+    }).__dkgSignedAuth;
+
   (res as ServerResponse).writeHead = ((...args: Parameters<ServerResponse['writeHead']>) => {
-    if (shouldIntercept()) return res;
-    return origWriteHead(...args);
+    if (spent) return res;
+    const p = pending();
+    if (!p || p.verified) return origWriteHead(...args);
+    // Try the cheap path first: chunked empty bodies that have
+    // already been parsed by Node by the time the handler emits
+    // writeHead fall through here (complete && observed 0 bytes).
+    if (tryPassiveEmptyBodyVerification()) return origWriteHead(...args);
+    // Otherwise queue this writeHead and kick off the async
+    // drain-and-verify. The queued call is replayed once the
+    // signature has been confirmed against whatever the wire
+    // actually delivered.
+    queue.push({ kind: 'writeHead', args });
+    deferAndResolve();
+    return res;
   }) as ServerResponse['writeHead'];
 
   (res as ServerResponse).end = ((...args: Parameters<ServerResponse['end']>) => {
-    if (shouldIntercept()) return res;
-    return origEnd(...args);
+    if (spent) return res;
+    const p = pending();
+    if (!p || p.verified) return origEnd(...args);
+    if (tryPassiveEmptyBodyVerification()) return origEnd(...args);
+    queue.push({ kind: 'end', args });
+    deferAndResolve();
+    return res;
   }) as ServerResponse['end'];
 }
