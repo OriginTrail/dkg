@@ -297,13 +297,13 @@ describe('dkg_query tool', () => {
     expect(body.contextGraphId).toBeUndefined();
   });
 
-  it('passes includeSharedMemory when include_shared_memory is "true"', async () => {
+  it('passes includeSharedMemory when include_shared_memory is true', async () => {
     ft.addResponses(
       new Response(JSON.stringify({ result: { bindings: [] } }), { status: 200 }),
     );
 
     const tool = findTool('dkg_query');
-    await tool.execute('call-3', { sparql: 'SELECT * WHERE { ?s ?p ?o }', include_shared_memory: 'true' });
+    await tool.execute('call-3', { sparql: 'SELECT * WHERE { ?s ?p ?o }', include_shared_memory: true });
 
     const body = JSON.parse(ft.calls[0][1]?.body as string);
     expect(body.includeSharedMemory).toBe(true);
@@ -495,7 +495,7 @@ describe('dkg_subscribe tool', () => {
     );
 
     const tool = findTool('dkg_subscribe');
-    await tool.execute('call-3', { context_graph_id: 'p1', include_shared_memory: 'false' });
+    await tool.execute('call-3', { context_graph_id: 'p1', include_shared_memory: false });
 
     const body = JSON.parse(ft.calls[0][1]?.body as string);
     expect(body.includeSharedMemory).toBe(false);

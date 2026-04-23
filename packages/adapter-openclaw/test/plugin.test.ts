@@ -113,13 +113,13 @@ describe('DkgNodePlugin', () => {
     expect(writeTool.parameters.properties.quads.type).toBe('array');
     expect(writeTool.parameters.properties.quads.items).toBeDefined();
 
-    // dkg_subscribe / dkg_query `include_shared_memory` is `['boolean', 'string']` —
-    // schema matches the handler's dual-type acceptance so strict JSON-schema validators
-    // accept both `true`/`false` and the legacy `"true"`/`"false"` string forms.
+    // dkg_subscribe / dkg_query `include_shared_memory` is boolean-only.
+    // V10-rc is the first product release — no v9 back-compat in the public
+    // tool surface, so the schema and handler only accept the boolean form.
     const subSchema = byName.get('dkg_subscribe')!.parameters.properties.include_shared_memory.type;
     const querySchema = byName.get('dkg_query')!.parameters.properties.include_shared_memory.type;
-    expect(subSchema).toEqual(['boolean', 'string']);
-    expect(querySchema).toEqual(['boolean', 'string']);
+    expect(subSchema).toBe('boolean');
+    expect(querySchema).toBe('boolean');
   });
 
   // ---------------------------------------------------------------------------
@@ -429,17 +429,19 @@ describe('DkgNodePlugin', () => {
       expect(bad.content[0].text).toContain('non-empty array');
     });
 
-    it('dkg_query normalizes lone paranet_id into contextGraphId so v9 callers keep working', async () => {
-      // Previously a lone `paranet_id` either silently widened the query (bug)
-      // or was rejected outright (breaks v9 callers). The handler now
-      // normalizes it via the shared resolver — scoped query preserved.
+    it('dkg_query ignores the v9 paranet_id field — only context_graph_id scopes the query', async () => {
+      // V10-rc is the first product release; there is no v9 back-compat on the
+      // public tool surface. A stray `paranet_id` is silently ignored by the
+      // handler (it's not in the schema), and `context_graph_id` is the single
+      // source of truth. An agent that supplies only `paranet_id` produces an
+      // unscoped query — that's the correct outcome for a non-supported field.
       const { fetchMock, byName } = setupPluginWithFetch({ ok: true });
       await byName.get('dkg_query')!.execute('tc', {
         sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1',
         paranet_id: 'my-cg',
       });
       const body = JSON.parse(fetchMock.mock.calls[0][1]?.body as string);
-      expect(body.contextGraphId).toBe('my-cg');
+      expect(body.contextGraphId).toBeUndefined();
     });
 
     it('dkg_assertion_write escapes N-Triples control characters in literal objects', async () => {
@@ -465,177 +467,30 @@ describe('DkgNodePlugin', () => {
   });
 
   // ---------------------------------------------------------------------------
-  // `include_shared_memory` dual-type coercion — schema advertises
-  // `['boolean', 'string']`; handlers must accept both. Cover all four boolean
-  // inputs (true, "true", false, "false") across both callers and assert the
-  // daemon body has the expected `includeSharedMemory` boolean.
+  // No v9 back-compat: v10-rc is the first product release. Any v9-era field
+  // (`paranet_id`, stringified `include_shared_memory`, etc.) is out of scope
+  // for the public tool surface. Handlers and schemas only accept the V10
+  // shape. Strict JSON-schema validators and permissive hosts behave the
+  // same: a stray legacy field is simply ignored (not a special-cased error),
+  // and `context_graph_id` is the single source of truth on every tool that
+  // needs it.
   // ---------------------------------------------------------------------------
 
-  describe('include_shared_memory dual-type handler coercion', () => {
-    const originalFetch = globalThis.fetch;
-    afterEach(() => {
-      globalThis.fetch = originalFetch;
+  it('dkg_subscribe / dkg_publish / dkg_query do not advertise or honor the v9 paranet_id alias', () => {
+    const plugin = new DkgNodePlugin();
+    const tools: OpenClawTool[] = [];
+    plugin.register({
+      config: {},
+      registerTool: (t) => tools.push(t),
+      registerHook: () => {},
+      on: () => {},
+      logger: {},
     });
-
-    const build = () => {
-      const fetchMock = vi.fn(async () =>
-        new Response(JSON.stringify({ subscribed: 'x', catchup: { jobId: 'j', status: 's', includeSharedMemory: false } }), {
-          status: 200,
-          headers: { 'Content-Type': 'application/json' },
-        }),
-      );
-      globalThis.fetch = fetchMock as unknown as typeof fetch;
-
-      const plugin = new DkgNodePlugin({ daemonUrl: 'http://localhost:9200' });
-      const tools: OpenClawTool[] = [];
-      plugin.register({
-        config: {},
-        registerTool: (t) => tools.push(t),
-        registerHook: () => {},
-        on: () => {},
-        logger: {},
-      });
-      const byName = new Map(tools.map((t) => [t.name, t] as const));
-      return { fetchMock, byName };
-    };
-
-    const extractBodyField = (fetchMock: any, field: string) => {
-      const init = fetchMock.mock.calls[0][1] as RequestInit;
-      const body = JSON.parse(init.body as string);
-      return body[field];
-    };
-
-    it('dkg_subscribe accepts `true` boolean', async () => {
-      const { fetchMock, byName } = build();
-      await byName.get('dkg_subscribe')!.execute('tc', { context_graph_id: 'ctx', include_shared_memory: true });
-      expect(extractBodyField(fetchMock, 'includeSharedMemory')).toBe(true);
-    });
-
-    it('dkg_subscribe accepts `"true"` string (legacy)', async () => {
-      const { fetchMock, byName } = build();
-      await byName.get('dkg_subscribe')!.execute('tc', { context_graph_id: 'ctx', include_shared_memory: 'true' });
-      expect(extractBodyField(fetchMock, 'includeSharedMemory')).toBe(true);
-    });
-
-    it('dkg_subscribe accepts `false` boolean', async () => {
-      const { fetchMock, byName } = build();
-      await byName.get('dkg_subscribe')!.execute('tc', { context_graph_id: 'ctx', include_shared_memory: false });
-      expect(extractBodyField(fetchMock, 'includeSharedMemory')).toBe(false);
-    });
-
-    it('dkg_subscribe accepts `"false"` string (legacy)', async () => {
-      const { fetchMock, byName } = build();
-      await byName.get('dkg_subscribe')!.execute('tc', { context_graph_id: 'ctx', include_shared_memory: 'false' });
-      expect(extractBodyField(fetchMock, 'includeSharedMemory')).toBe(false);
-    });
-
-    it('dkg_query accepts both boolean `true` and legacy `"true"` string', async () => {
-      {
-        const { fetchMock, byName } = build();
-        await byName.get('dkg_query')!.execute('tc', { sparql: 'ASK {}', include_shared_memory: true });
-        expect(extractBodyField(fetchMock, 'includeSharedMemory')).toBe(true);
-      }
-      {
-        const { fetchMock, byName } = build();
-        await byName.get('dkg_query')!.execute('tc', { sparql: 'ASK {}', include_shared_memory: 'true' });
-        expect(extractBodyField(fetchMock, 'includeSharedMemory')).toBe(true);
-      }
-    });
-  });
-
-  // ---------------------------------------------------------------------------
-  // Handlers must no longer accept the legacy `paranet_id` alias. Passing
-  // `paranet_id` without `context_graph_id` must surface a missing-field error;
-  // the daemon is never called. Guards against accidental re-introduction.
-  // ---------------------------------------------------------------------------
-
-  describe('paranet_id v9 alias normalization (back-compat via shared resolver)', () => {
-    const originalFetch = globalThis.fetch;
-    afterEach(() => {
-      globalThis.fetch = originalFetch;
-    });
-
-    const build = () => {
-      const fetchMock = vi.fn(async () => new Response('{"ok":true}', { status: 200 }));
-      globalThis.fetch = fetchMock as unknown as typeof fetch;
-      const plugin = new DkgNodePlugin({ daemonUrl: 'http://localhost:9200' });
-      const tools: OpenClawTool[] = [];
-      plugin.register({
-        config: {},
-        registerTool: (t) => tools.push(t),
-        registerHook: () => {},
-        on: () => {},
-        logger: {},
-      });
-      return { fetchMock, byName: new Map(tools.map((t) => [t.name, t] as const)) };
-    };
-
-    it('dkg_subscribe normalizes lone paranet_id into contextGraphId', async () => {
-      const { fetchMock, byName } = build();
-      await byName.get('dkg_subscribe')!.execute('tc', { paranet_id: 'legacy' });
-      // The subscribe client sends `{ paranetId, ... }` in the POST body
-      // (historical wire name); what matters is the adapter successfully
-      // resolved the legacy input and handed a non-empty CG id downstream
-      // instead of short-circuiting with a missing-field error.
-      const init = fetchMock.mock.calls[0][1] as RequestInit;
-      const body = JSON.parse(init.body as string);
-      expect(body.paranetId ?? body.contextGraphId).toBe('legacy');
-    });
-
-    it('dkg_publish normalizes lone paranet_id and reaches the daemon', async () => {
-      const { fetchMock, byName } = build();
-      await byName.get('dkg_publish')!.execute('tc', {
-        paranet_id: 'legacy',
-        quads: [{ subject: 'urn:a', predicate: 'urn:b', object: 'urn:c' }],
-      });
-      expect(fetchMock).toHaveBeenCalled();
-    });
-
-    it('dkg_query normalizes lone paranet_id into a scoped query, not an unscoped one', async () => {
-      const { fetchMock, byName } = build();
-      await byName.get('dkg_query')!.execute('tc', { sparql: 'ASK {}', paranet_id: 'legacy' });
-      const body = JSON.parse(fetchMock.mock.calls[0][1]?.body as string);
-      expect(body.contextGraphId).toBe('legacy');
-    });
-
-    it('dkg_query normalizes paranet_id when context_graph_id is empty/whitespace (fixes silent-widening bug)', async () => {
-      const { fetchMock, byName } = build();
-      for (const blank of ['', '   ', '\t\n']) {
-        fetchMock.mockClear();
-        await byName.get('dkg_query')!.execute('tc', {
-          sparql: 'ASK {}',
-          context_graph_id: blank,
-          paranet_id: 'legacy',
-        });
-        const body = JSON.parse(fetchMock.mock.calls[0][1]?.body as string);
-        // Blank CG + populated paranet_id → query scoped to the paranet_id value,
-        // NOT silently unscoped across every subscribed CG.
-        expect(body.contextGraphId).toBe('legacy');
-      }
-    });
-
-    it('dkg_query errors when context_graph_id and paranet_id are supplied but disagree', async () => {
-      const { fetchMock, byName } = build();
-      const result = await byName.get('dkg_query')!.execute('tc', {
-        sparql: 'ASK {}',
-        context_graph_id: 'new-name',
-        paranet_id: 'different-legacy',
-      });
-      expect(fetchMock).not.toHaveBeenCalled();
-      expect(result.content[0].text).toContain('paranet_id');
-      expect(result.content[0].text).toContain('conflict');
-    });
-
-    it('dkg_publish errors when context_graph_id and paranet_id disagree (shared resolver)', async () => {
-      const { fetchMock, byName } = build();
-      const result = await byName.get('dkg_publish')!.execute('tc', {
-        context_graph_id: 'new-name',
-        paranet_id: 'different-legacy',
-        quads: [{ subject: 'urn:a', predicate: 'urn:b', object: 'urn:c' }],
-      });
-      expect(fetchMock).not.toHaveBeenCalled();
-      expect(result.content[0].text).toContain('paranet_id');
-    });
+    const byName = new Map(tools.map((t) => [t.name, t] as const));
+    for (const name of ['dkg_subscribe', 'dkg_publish', 'dkg_query'] as const) {
+      const props = byName.get(name)!.parameters.properties;
+      expect(props).not.toHaveProperty('paranet_id');
+    }
   });
 
   it('all tools have name, description, parameters, and execute', () => {

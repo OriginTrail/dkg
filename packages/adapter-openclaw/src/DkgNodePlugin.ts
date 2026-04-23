@@ -1072,20 +1072,14 @@ export class DkgNodePlugin {
         name: 'dkg_subscribe',
         description:
           'Subscribe to a context graph to receive its data from peers. Call once before querying or publishing ' +
-          'a remotely-authored CG. Accepts `paranet_id` as a deprecated v9 alias for `context_graph_id` (normalized ' +
-          'at the handler; errors only when both are supplied and disagree).',
+          'a remotely-authored CG.',
         parameters: {
           type: 'object',
           properties: {
             context_graph_id: { type: 'string', description: 'Context graph ID (e.g. "my-research").' },
             include_shared_memory: {
-              // `['boolean', 'string']` lets strict JSON-schema hosts accept either the preferred boolean
-              // or the legacy "true" / "false" string form without rejecting the call at the schema layer.
-              // Handler coerces both to a boolean. Same precedent as the dkg_memory_search numeric fields
-              // noted in Codex Bug B35.
-              type: ['boolean', 'string'],
-              description:
-                'Also sync Shared Working Memory. Boolean preferred; legacy "true"/"false" strings accepted. Default: true.',
+              type: 'boolean',
+              description: 'Also sync Shared Working Memory. Default: true.',
             },
           },
           required: ['context_graph_id'],
@@ -1098,7 +1092,7 @@ export class DkgNodePlugin {
           'One-shot write + publish helper: writes the supplied quads to Shared Working Memory, then publishes ' +
           'all SWM in the CG to Verified Memory (on-chain) and clears SWM. For the canonical stepwise flow ' +
           '(write → promote → publish) use `dkg_assertion_create/write/promote` followed by ' +
-          '`dkg_shared_memory_publish`. Accepts `paranet_id` as a deprecated v9 alias for `context_graph_id`.',
+          '`dkg_shared_memory_publish`.',
         parameters: {
           type: 'object',
           properties: {
@@ -1128,18 +1122,15 @@ export class DkgNodePlugin {
         name: 'dkg_query',
         description:
           'Read-only SPARQL query against the local triple store (cross-assertion / cross-CG). Use ' +
-          '`GRAPH ?g { ... }` for named graphs. Accepts `paranet_id` as a deprecated v9 alias for ' +
-          '`context_graph_id`; errors only when both are supplied and disagree.',
+          '`GRAPH ?g { ... }` for named graphs.',
         parameters: {
           type: 'object',
           properties: {
             sparql: { type: 'string', description: 'SPARQL SELECT, CONSTRUCT, ASK, or DESCRIBE.' },
             context_graph_id: { type: 'string', description: 'Optional CG scope — omit to query all subscribed CGs.' },
             include_shared_memory: {
-              // See `dkg_subscribe.include_shared_memory` for rationale on the dual-type schema.
-              type: ['boolean', 'string'],
-              description:
-                'Also search Shared Working Memory. Boolean preferred; legacy "true"/"false" strings accepted. Default: false.',
+              type: 'boolean',
+              description: 'Also search Shared Working Memory. Default: false.',
             },
           },
           required: ['sparql'],
@@ -1434,9 +1425,7 @@ export class DkgNodePlugin {
 
   private async handlePublish(args: Record<string, unknown>): Promise<OpenClawToolResult> {
     try {
-      const resolved = resolveContextGraphId(args);
-      if (resolved.error) return this.error(resolved.error);
-      const contextGraphId = resolved.value;
+      const contextGraphId = typeof args.context_graph_id === 'string' ? args.context_graph_id.trim() : '';
       if (!contextGraphId) {
         return this.error('"context_graph_id" is required.');
       }
@@ -1469,20 +1458,13 @@ export class DkgNodePlugin {
   private async handleQuery(args: Record<string, unknown>): Promise<OpenClawToolResult> {
     try {
       const sparql = String(args.sparql);
-      // `context_graph_id` is optional on this tool (omit → unscoped query across
-      // all subscribed CGs). The shared resolver normalizes the legacy
-      // `paranet_id` alias: if only `paranet_id` is supplied, scope the query to
-      // it (preserving v9 caller compat); if both are supplied they must agree.
-      // The silent-widening bug the normalized empty-check fix targeted is
-      // still closed — a blank `context_graph_id` with a populated
-      // `paranet_id` now correctly falls through to a scoped query on the
-      // `paranet_id` value, not an unscoped one.
-      const resolved = resolveContextGraphId(args);
-      if (resolved.error) return this.error(resolved.error);
-      const contextGraphId = resolved.value;
-      // Accept both boolean (new schema) and "true"/"false" string (legacy callers).
-      const raw = args.include_shared_memory;
-      const includeSharedMemory = raw === true || raw === 'true';
+      // `context_graph_id` is optional on this tool (omit → unscoped query
+      // across all subscribed CGs). Trim whitespace so that
+      // `{ context_graph_id: "   " }` behaves like an omission rather than
+      // matching a CG whose id is the literal whitespace string.
+      const trimmed = typeof args.context_graph_id === 'string' ? args.context_graph_id.trim() : '';
+      const contextGraphId = trimmed || undefined;
+      const includeSharedMemory = args.include_shared_memory === true;
       const result = await this.client.query(sparql, {
         contextGraphId,
         includeSharedMemory: includeSharedMemory || undefined,
@@ -1573,17 +1555,12 @@ export class DkgNodePlugin {
 
   private async handleSubscribe(args: Record<string, unknown>): Promise<OpenClawToolResult> {
     try {
-      const resolved = resolveContextGraphId(args);
-      if (resolved.error) return this.error(resolved.error);
-      const contextGraphId = resolved.value;
+      const contextGraphId = typeof args.context_graph_id === 'string' ? args.context_graph_id.trim() : '';
       if (!contextGraphId) {
         return this.error('"context_graph_id" is required.');
       }
-      // Accept both the new boolean schema and legacy "false"/"true" string forms
-      // so v1 callers and upgraded v2 callers both work without agent-side changes.
       const raw = args.include_shared_memory;
-      const includeSharedMemory =
-        raw === false || raw === 'false' ? false : raw === true || raw === 'true' ? true : undefined;
+      const includeSharedMemory = raw === false ? false : raw === true ? true : undefined;
       const result = await this.client.subscribe(contextGraphId, {
         includeSharedMemory,
       });
@@ -1821,33 +1798,6 @@ function slugify(name: string): string {
 /** Check if a value looks like a URI (starts with a known scheme). */
 function isUri(value: string): boolean {
   return /^(?:https?:\/\/|urn:|did:)/i.test(value);
-}
-
-/**
- * Normalize the `context_graph_id` / `paranet_id` pair into a single resolved
- * value without breaking v9 callers.
- *
- * - Trims both fields and discards empty / whitespace values.
- * - If only one is populated → return that value.
- * - If both are populated and AGREE → return the shared value.
- * - If both are populated and DISAGREE → return an `error` so the caller can
- *   surface a clear "values conflict" message instead of silently picking one.
- * - If neither is populated → return `{ value: undefined }`. Whether that's a
- *   fatal error depends on the tool (required for publish/subscribe, optional
- *   for query's unscoped mode) — the caller decides.
- */
-function resolveContextGraphId(args: Record<string, unknown>): { value?: string; error?: string } {
-  const normalize = (raw: unknown): string => (typeof raw === 'string' ? raw.trim() : '');
-  const contextGraph = normalize(args.context_graph_id);
-  const paranet = normalize(args.paranet_id);
-  if (contextGraph && paranet && contextGraph !== paranet) {
-    return {
-      error:
-        '"paranet_id" (deprecated v9 alias) and "context_graph_id" conflict — both were supplied with different values. Remove the duplicate or align them.',
-    };
-  }
-  const value = contextGraph || paranet || undefined;
-  return { value };
 }
 
 /**
