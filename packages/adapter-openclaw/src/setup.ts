@@ -697,11 +697,19 @@ export function mergeOpenClawConfig(
   // state keeps the top-level `channels.dkg-ui.port` in sync with whatever the
   // adapter entry actually resolved to. Falls back to the openclaw.plugin.json
   // configSchema default (9201) when no port is set anywhere.
-  const mergedChannel = entryForConfig.config?.channel as { port?: unknown } | undefined;
+  const mergedChannel = entryForConfig.config?.channel as { port?: unknown; enabled?: unknown } | undefined;
   const mergedChannelPort = mergedChannel?.port;
   const adapterChannelPort = typeof mergedChannelPort === 'number' && Number.isInteger(mergedChannelPort)
     ? mergedChannelPort
     : 9201;
+  // Preserve the user's explicit `enabled` value from the adapter entry. If they
+  // set `plugins.entries.adapter-openclaw.config.channel.enabled = false`, we
+  // must not silently re-enable the channel here — even though the top-level
+  // `channels.dkg-ui` entry still needs a non-`enabled` key (the `port` below)
+  // to satisfy OpenClaw's meaningful-config check and keep the plugin in full
+  // runtime mode.
+  const adapterChannelEnabled =
+    typeof mergedChannel?.enabled === 'boolean' ? mergedChannel.enabled : true;
   if (!config.channels || typeof config.channels !== 'object') {
     config.channels = {};
   }
@@ -717,7 +725,7 @@ export function mergeOpenClawConfig(
   if (!dkgUiChannel || typeof dkgUiChannel !== 'object') {
     // Channel absent before merge → on disconnect, delete it (only if still
     // matches the shape we wrote).
-    const created = { enabled: true, port: adapterChannelPort };
+    const created = { enabled: adapterChannelEnabled, port: adapterChannelPort };
     if (adapterEntryForCapture) {
       if (!('previousChannelsDkgUi' in adapterEntryForCapture)) {
         adapterEntryForCapture.previousChannelsDkgUi = null; // first-wins

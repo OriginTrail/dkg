@@ -1078,6 +1078,30 @@ describe('unmergeOpenClawConfig', () => {
     expect(afterUnmerge.channels?.telegram).toEqual({ enabled: true, botToken: 'abc' });
   });
 
+  it('merge: respects user-disabled channel on adapter entry (does not silently re-enable)', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    // User has explicitly disabled the channel on the adapter entry.
+    writeFileSync(configPath, JSON.stringify({
+      plugins: {
+        entries: {
+          'adapter-openclaw': {
+            enabled: true,
+            config: { channel: { enabled: false, port: 9201 } },
+          },
+        },
+      },
+    }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+
+    const afterMerge = JSON.parse(readFileSync(configPath, 'utf-8'));
+    // Entry-level enabled=false is preserved by first-wins merge.
+    expect(afterMerge.plugins.entries['adapter-openclaw'].config.channel.enabled).toBe(false);
+    // Top-level channels.dkg-ui MUST honor the user's disable — we only add the
+    // `port` key here so OpenClaw's meaningful-config check still fires.
+    expect(afterMerge.channels['dkg-ui']).toEqual({ enabled: false, port: 9201 });
+  });
+
   it('round-trip: "coding" profile + degenerate { enabled: true } channel → merge → unmerge restores prior values', () => {
     const configPath = join(testDir, 'openclaw.json');
     writeFileSync(configPath, JSON.stringify({
