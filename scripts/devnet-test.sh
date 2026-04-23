@@ -423,14 +423,15 @@ http_post_capture "http://127.0.0.1:9202/api/shared-memory/publish" \
 NON_CURATOR_ST=$(json_get "$NON_CURATOR_BODY" status)
 if [[ "$NON_CURATOR_CODE" =~ ^[45] ]]; then
   ok "Non-curator VM publish rejected (HTTP $NON_CURATOR_CODE)"
-elif [[ "$NON_CURATOR_ST" == "tentative" ]]; then
-  # Contract reverted → publisher fell back to tentative. Spec §2.3
-  # says the node SHOULD return `403 PUBLISH_NOT_AUTHORIZED`; today's
-  # node returns 200 + tentative. Record a WARN so we track the gap
-  # without breaking CI until the explicit 403 lands.
-  warn "Non-curator VM publish returned status=tentative (spec §2.3 says 403; tracked as docs/enforcement gap)"
 else
-  fail "Non-curator publish should fail, got HTTP $NON_CURATOR_CODE status=$NON_CURATOR_ST: ${NON_CURATOR_BODY:0:200}"
+  # Spec §2.2 conformance: the publish-authority guard must produce an
+  # explicit rejection (4xx). Anything else — 200 with status=tentative,
+  # 200 with status=confirmed, etc. — means the guard was bypassed or
+  # silently degraded, which is exactly the regression this section
+  # exists to catch. Tracking the underlying daemon work as a separate
+  # TODO is fine, but this assertion has to fail or the conformance
+  # signal is lost.
+  fail "Non-curator publish should be rejected with 4xx, got HTTP $NON_CURATOR_CODE status=$NON_CURATOR_ST: ${NON_CURATOR_BODY:0:200}"
 fi
 
 # Aggregated promote: Node1 (the curator / publishAuthority) picks up

@@ -730,23 +730,78 @@ cmd_start() {
   log "Registering context graphs on-chain via node 1 API..."
   local register_endpoint="http://127.0.0.1:$API_PORT_BASE/api/context-graph/register"
   local register_auth_header="Authorization: Bearer $shared_token"
+  local register_failures=0
   for cg in devnet-test origin-trail-game; do
-    local reg_resp
-    reg_resp=$(curl -sS --max-time 30 -X POST \
-      -H "$register_auth_header" \
-      -H "Content-Type: application/json" \
-      -d "{\"id\":\"$cg\"}" \
-      "$register_endpoint" 2>&1 || true)
-    if echo "$reg_resp" | grep -q '"onChainId"'; then
-      local on_chain_id
-      on_chain_id=$(echo "$reg_resp" | python3 -c "import sys,json;print(json.load(sys.stdin).get('onChainId','?'))" 2>/dev/null || echo '?')
-      log "Registered context graph: $cg (v10Id=$on_chain_id)"
-    elif echo "$reg_resp" | grep -q 'already registered'; then
-      log "Context graph already registered: $cg"
-    else
-      log "Failed to register $cg: $reg_resp"
+    local on_chain_id=""
+    local attempt
+    for attempt in 1 2 3; do
+      local reg_resp
+      reg_resp=$(curl -sS --max-time 30 -X POST \
+        -H "$register_auth_header" \
+        -H "Content-Type: application/json" \
+        -d "{\"id\":\"$cg\"}" \
+        "$register_endpoint" 2>&1 || true)
+      if echo "$reg_resp" | grep -q '"onChainId"'; then
+        on_chain_id=$(echo "$reg_resp" | python3 -c "import sys,json;print(json.load(sys.stdin).get('onChainId',''))" 2>/dev/null || echo '')
+        log "Registered context graph: $cg (v10Id=$on_chain_id)"
+        break
+      elif echo "$reg_resp" | grep -q 'already registered'; then
+        # Recover the existing onChainId from node 1's local view so the
+        # cross-node visibility wait below has something to compare to.
+        on_chain_id=$(curl -sS --max-time 10 \
+          -H "$register_auth_header" \
+          "http://127.0.0.1:$API_PORT_BASE/api/context-graph/list" \
+          | python3 -c "import sys,json;d=json.load(sys.stdin);print(next((g.get('onChainId','') for g in d.get('contextGraphs',[]) if g.get('id')=='$cg'), ''))" \
+          2>/dev/null || echo '')
+        log "Context graph already registered: $cg (v10Id=${on_chain_id:-unknown})"
+        break
+      else
+        log "Register attempt $attempt for $cg failed: $reg_resp"
+        sleep 2
+      fi
+    done
+    if [ -z "$on_chain_id" ]; then
+      log "ERROR: failed to register $cg after 3 attempts; devnet is half-configured."
+      register_failures=$((register_failures + 1))
+      continue
     fi
+
+    # The on-chain id propagates to other nodes via ONTOLOGY gossip
+    # (`registerContextGraph` writes the `dkg:paranetOnChainId` triple +
+    # immediately broadcasts it). Wait until every node's local view
+    # surfaces the same id before declaring the devnet ready — without
+    # this wait, the next VM publish on node 2+ races the gossip and
+    # rejects with "context graph is not registered on-chain".
+    log "Waiting for $cg (v10Id=$on_chain_id) to be visible on all $NUM_NODES nodes..."
+    local node_idx
+    for node_idx in $(seq 1 "$NUM_NODES"); do
+      local node_port=$((API_PORT_BASE + node_idx - 1))
+      local seen_id=""
+      local poll
+      for poll in $(seq 1 30); do
+        seen_id=$(curl -sS --max-time 5 \
+          -H "$register_auth_header" \
+          "http://127.0.0.1:$node_port/api/context-graph/list" 2>/dev/null \
+          | python3 -c "import sys,json;d=json.load(sys.stdin);print(next((g.get('onChainId','') for g in d.get('contextGraphs',[]) if g.get('id')=='$cg'), ''))" \
+          2>/dev/null || echo '')
+        if [ "$seen_id" = "$on_chain_id" ]; then
+          break
+        fi
+        sleep 1
+      done
+      if [ "$seen_id" = "$on_chain_id" ]; then
+        log "  node $node_idx sees $cg v10Id=$seen_id"
+      else
+        log "  ERROR: node $node_idx never observed v10Id=$on_chain_id for $cg (last seen='$seen_id')"
+        register_failures=$((register_failures + 1))
+      fi
+    done
   done
+  if [ "$register_failures" -gt 0 ]; then
+    log "FATAL: $register_failures context-graph registration step(s) failed; aborting devnet start."
+    log "Run \`./scripts/devnet.sh logs <n>\` for per-node detail. The devnet is left running for inspection — stop with \`./scripts/devnet.sh stop\`."
+    return 1
+  fi
 
   log ""
   log "=== Devnet Ready ==="
