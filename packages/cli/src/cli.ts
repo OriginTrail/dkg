@@ -858,6 +858,7 @@ program
   .description('Run a SPARQL query against a context graph (or all)')
   .option('-q, --sparql <query>', 'SPARQL query string')
   .option('-f, --file <path>', 'File containing SPARQL query')
+  .option('--include-shared-memory', 'Include shared (unpublished) memory in the query — use for data written via `dkg index` / `dkg shared-memory write` before on-chain registration')
   .action(async (contextGraph: string | undefined, opts: ActionOpts) => {
     try {
       const client = await ApiClient.connect();
@@ -872,7 +873,9 @@ program
         process.exit(1);
       }
 
-      const { result } = await client.query(sparql, contextGraph);
+      const { result } = await client.query(sparql, contextGraph, {
+        includeSharedMemory: Boolean(opts.includeSharedMemory),
+      });
 
       if (result?.type === 'bindings' && result.bindings) {
         const { bindings } = result;
@@ -1882,6 +1885,7 @@ program
   .option('--shared-memory', 'Write indexed quads to shared memory instead of publishing')
   .option('--workspace', 'Write indexed quads to shared memory instead of publishing (legacy alias)')
   .option('--include-content', 'Index docs/content files in addition to source code')
+  .option('--solidity-ast', 'Use Hardhat build-info ASTs for Solidity indexing (adds StateVariable/Event/Error/Modifier and a call-graph). Falls back to regex for packages without artifacts/build-info/.')
   .option('--dry-run', 'Print statistics without publishing')
   .option('--output <file>', 'Write quads to a JSON file instead of publishing')
   .action(async (directory: string | undefined, opts: ActionOpts) => {
@@ -1895,6 +1899,8 @@ program
       const { indexRepository } = await import('./indexer.js');
       const result = await indexRepository(repoRoot, {
         includeContent: Boolean(opts.includeContent),
+        solidityAst: Boolean(opts.solidityAst),
+        contextGraphId: targetContextGraph,
       });
 
       console.log(`\n  Packages:  ${result.packageCount}`);

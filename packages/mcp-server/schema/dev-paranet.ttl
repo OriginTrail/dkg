@@ -237,7 +237,7 @@ devgraph:implements a rdf:Property ;
 devgraph:Contract a rdfs:Class ;
   rdfs:subClassOf devgraph:Class ;
   rdfs:label "Contract" ;
-  rdfs:comment "A Solidity smart contract." .
+  rdfs:comment "A Solidity smart contract (contract | library | interface)." .
 
 devgraph:inherits a rdf:Property ;
   rdfs:domain devgraph:Contract ;
@@ -247,4 +247,87 @@ devgraph:inherits a rdf:Property ;
 devgraph:emitsEvent a rdf:Property ;
   rdfs:domain devgraph:Contract ;
   rdfs:range xsd:string ;
-  rdfs:comment "Name of an event emitted by this contract." .
+  rdfs:comment "Name of an event emitted by this contract (legacy; AST indexer emits devgraph:Event nodes instead)." .
+
+devgraph:contractKind a rdf:Property ;
+  rdfs:domain devgraph:Contract ;
+  rdfs:range xsd:string ;
+  rdfs:comment "'contract', 'library', or 'interface'." .
+
+devgraph:isAbstract a rdf:Property ;
+  rdfs:range xsd:boolean ;
+  rdfs:comment "True if the contract is declared abstract." .
+
+devgraph:license a rdf:Property ;
+  rdfs:range xsd:string ;
+  rdfs:comment "SPDX license identifier from the source file." .
+
+devgraph:solidityVersion a rdf:Property ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Solidity pragma or compiler version for the enclosing source." .
+
+devgraph:docstring a rdf:Property ;
+  rdfs:range xsd:string ;
+  rdfs:comment "NatSpec documentation text attached to a contract / function / event / error / modifier / state variable." .
+
+# --- StateVariable (Solidity) ---
+
+devgraph:StateVariable a rdfs:Class ;
+  rdfs:label "StateVariable" ;
+  rdfs:comment "A Solidity contract-level variable declaration (storage slot, constant, or immutable)." .
+
+devgraph:variableType a rdf:Property ;
+  rdfs:domain devgraph:StateVariable ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Canonical Solidity type string (e.g. 'mapping(uint256 => uint96)')." .
+
+devgraph:isConstant a rdf:Property ;
+  rdfs:domain devgraph:StateVariable ;
+  rdfs:range xsd:boolean ;
+  rdfs:comment "True if declared 'constant'." .
+
+devgraph:isImmutable a rdf:Property ;
+  rdfs:domain devgraph:StateVariable ;
+  rdfs:range xsd:boolean ;
+  rdfs:comment "True if declared 'immutable'." .
+
+# --- Event / Error / Modifier (Solidity AST-first) ---
+
+devgraph:Event a rdfs:Class ;
+  rdfs:label "Event" ;
+  rdfs:comment "A Solidity event definition." .
+
+devgraph:Error a rdfs:Class ;
+  rdfs:label "Error" ;
+  rdfs:comment "A Solidity custom error definition." .
+
+devgraph:Modifier a rdfs:Class ;
+  rdfs:label "Modifier" ;
+  rdfs:comment "A Solidity modifier definition." .
+
+# --- Function refinements (Solidity AST) ---
+
+devgraph:visibility a rdf:Property ;
+  rdfs:domain devgraph:Function ;
+  rdfs:range xsd:string ;
+  rdfs:comment "'public' | 'external' | 'internal' | 'private'." .
+
+devgraph:stateMutability a rdf:Property ;
+  rdfs:domain devgraph:Function ;
+  rdfs:range xsd:string ;
+  rdfs:comment "'pure' | 'view' | 'nonpayable' | 'payable'." .
+
+devgraph:functionKind a rdf:Property ;
+  rdfs:domain devgraph:Function ;
+  rdfs:range xsd:string ;
+  rdfs:comment "'function' | 'constructor' | 'fallback' | 'receive' | 'freeFunction'." .
+
+devgraph:isVirtual a rdf:Property ;
+  rdfs:domain devgraph:Function ;
+  rdfs:range xsd:boolean ;
+  rdfs:comment "True if the function is declared virtual." .
+
+devgraph:usesModifier a rdf:Property ;
+  rdfs:domain devgraph:Function ;
+  rdfs:range devgraph:Modifier ;
+  rdfs:comment "Modifier applied to this function (as an attached Modifier node, not a raw name)." .

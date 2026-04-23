@@ -216,8 +216,16 @@ export class ApiClient {
     return this.post('/api/publisher/clear', { status });
   }
 
-  async query(sparql: string, contextGraphId?: string): Promise<{ result: QueryResult }> {
-    return this.post('/api/query', { sparql, contextGraphId });
+  async query(
+    sparql: string,
+    contextGraphId?: string,
+    opts?: { includeSharedMemory?: boolean },
+  ): Promise<{ result: QueryResult }> {
+    return this.post('/api/query', {
+      sparql,
+      contextGraphId,
+      includeSharedMemory: opts?.includeSharedMemory,
+    });
   }
 
   async queryRemote(peerId: string, request: {
