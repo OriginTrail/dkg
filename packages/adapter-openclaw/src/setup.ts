@@ -697,6 +697,7 @@ export function mergeOpenClawConfig(
     config.channels = {};
   }
   const dkgUiChannel = config.channels['dkg-ui'];
+  const lastMergedChannel = adapterEntryForCapture?.mergedChannelsDkgUi as Record<string, unknown> | undefined;
   if (!dkgUiChannel || typeof dkgUiChannel !== 'object') {
     // Channel absent before merge → on disconnect, delete it (only if still
     // matches the shape we wrote). Capture both the prior absence (`null`) and
@@ -722,9 +723,40 @@ export function mergeOpenClawConfig(
       }
       config.channels['dkg-ui'] = upgraded;
       log(`Added port ${adapterChannelPort} to channels.dkg-ui to keep plugin in full runtime mode`);
+    } else if (lastMergedChannel && isDeepStrictEqual(dkgUiChannel, lastMergedChannel)) {
+      // Channel is byte-identical to what we wrote last time → still adapter-
+      // owned. Refresh it with the current `adapterChannelPort` so a re-run
+      // after the user edits `plugins.entries.adapter-openclaw.config.channel.port`
+      // (or passes a different port via entryConfig) propagates to the top-level
+      // channel instead of leaving the old adapter-written port in place.
+      // `previousChannelsDkgUi` is first-wins (keeps the original user state),
+      // but `mergedChannelsDkgUi` tracks the latest adapter output so the
+      // unmerge ownership check sees the refreshed value.
+      const refreshed: Record<string, unknown> = { ...dkgUiChannel, port: adapterChannelPort };
+      if (!isDeepStrictEqual(refreshed, lastMergedChannel)) {
+        if (adapterEntryForCapture) {
+          adapterEntryForCapture.mergedChannelsDkgUi = { ...refreshed };
+        }
+        config.channels['dkg-ui'] = refreshed;
+        log(`Refreshed channels.dkg-ui.port to ${adapterChannelPort} (last merge output preserved)`);
+      }
+      // else: already up to date — no-op keeps idempotency on successive re-runs.
     }
-    // Otherwise leave the user's customizations alone. No capture because we
+    // Otherwise the user has modified channels.dkg-ui since install (or created
+    // it themselves with non-enabled keys). Leave alone. No capture because we
     // didn't mutate — disconnect must not touch a user-owned channel.
+  }
+
+  // Capture the full `config.tools` shape AFTER all merge mutations (profile +
+  // alsoAllow). Unmerge uses this as a deep-equal ownership check: if the user
+  // has edited anything under `tools` since our merge, we leave our mutations
+  // alone rather than risk clobbering the surrounding section. Always overwrite
+  // on re-merge — unlike `previousToolsProfile` (first-wins to preserve the
+  // ORIGINAL user value), this snapshot tracks our LATEST output, so re-running
+  // stays idempotent because merge always produces the same post-merge shape
+  // from the same inputs.
+  if (adapterEntryForCapture) {
+    adapterEntryForCapture.mergedToolsShape = structuredClone(config.tools);
   }
 
   // Elect the adapter into OpenClaw's memory slot. Combined with
@@ -869,11 +901,13 @@ export function unmergeOpenClawConfig(openclawConfigPath: string): UnmergeResult
   // Defined string / object = restore verbatim. `undefined` = no capture, leave as-is.
   let previousToolsProfile: string | null | undefined;
   let previousChannelsDkgUi: Record<string, unknown> | null | undefined;
-  // Exact merge-produced shape of channels.dkg-ui, captured at merge time.
-  // Used as a deep-equal ownership check on unmerge — a loose "has a port key"
-  // guard would also match post-merge user edits (auth tokens, custom fields,
-  // port changes) and clobber them on disconnect.
+  // Exact merge-produced shapes, captured at merge time. Used as deep-equal
+  // ownership checks on unmerge — a loose "holds our string" / "has a port key"
+  // guard would also match post-merge user edits (custom fields under `tools`,
+  // auth tokens / port changes on `channels.dkg-ui`) and clobber them on
+  // disconnect.
   let mergedChannelsDkgUi: Record<string, unknown> | undefined;
+  let mergedToolsShape: Record<string, unknown> | undefined;
   const entry = config.plugins?.entries?.[pluginId];
   if (entry && typeof entry === 'object') {
     if (typeof entry.previousMemorySlotOwner === 'string') {
@@ -887,6 +921,9 @@ export function unmergeOpenClawConfig(openclawConfigPath: string): UnmergeResult
     }
     if (entry.mergedChannelsDkgUi && typeof entry.mergedChannelsDkgUi === 'object') {
       mergedChannelsDkgUi = entry.mergedChannelsDkgUi as Record<string, unknown>;
+    }
+    if (entry.mergedToolsShape && typeof entry.mergedToolsShape === 'object') {
+      mergedToolsShape = entry.mergedToolsShape as Record<string, unknown>;
     }
   }
 
@@ -913,20 +950,33 @@ export function unmergeOpenClawConfig(openclawConfigPath: string): UnmergeResult
     }
   }
 
-  // Restore or clear tools.profile iff it still holds the "full" value we wrote.
-  // If the user changed it since the merge, leave their value untouched — we
-  // only reverse the adapter's own claim on the slot, matching the slots.memory
-  // semantics above.
-  if (previousToolsProfile === null) {
-    if (config.tools && typeof config.tools === 'object' && 'profile' in config.tools && config.tools.profile === 'full') {
-      delete config.tools.profile;
-      log('Removed tools.profile (set to "full" by merge)');
-    }
-  } else if (typeof previousToolsProfile === 'string') {
-    if (config.tools && typeof config.tools === 'object' && config.tools.profile === 'full') {
-      config.tools.profile = previousToolsProfile;
+  // Restore or clear tools.profile iff the current `config.tools` DEEP-EQUALS
+  // the exact shape merge wrote. The bare `=== 'full'` check would fire even
+  // after the user added unrelated fields under `tools` (e.g. tools.web), so
+  // we'd quietly revert their profile alongside a section they're actively
+  // using. Matching the channels.dkg-ui pattern: compare the whole `tools`
+  // object against the captured `mergedToolsShape` snapshot — any divergence
+  // (added field, removed field, changed value anywhere under `tools`) means
+  // the user now owns this section and we leave the profile alone.
+  const currentTools = config.tools && typeof config.tools === 'object'
+    ? (config.tools as Record<string, unknown>)
+    : undefined;
+  const toolsMatchMerge =
+    !!currentTools
+    && !!mergedToolsShape
+    && isDeepStrictEqual(currentTools, mergedToolsShape);
+  if (toolsMatchMerge) {
+    if (previousToolsProfile === null) {
+      if ('profile' in currentTools) {
+        delete currentTools.profile;
+        log('Removed tools.profile (set to "full" by merge, unchanged since)');
+      }
+    } else if (typeof previousToolsProfile === 'string') {
+      currentTools.profile = previousToolsProfile;
       log(`Restored tools.profile to "${previousToolsProfile}"`);
     }
+  } else if (previousToolsProfile !== undefined && currentTools) {
+    log('Preserving tools.profile — tools section user-modified since merge');
   }
 
   // Restore or clear channels.dkg-ui iff the current value DEEP-EQUALS the exact

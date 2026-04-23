@@ -683,6 +683,54 @@ describe('mergeOpenClawConfig', () => {
     expect(config.plugins.entries['adapter-openclaw'].config.channel.port).toBe(9300);
     expect(config.channels['dkg-ui']).toEqual({ enabled: true, port: 9300 });
   });
+
+  // PR #250 review comment 7 — after a first merge, the channel is strictly
+  // adapter-owned (byte-identical to mergedChannelsDkgUi). A re-run with a
+  // different port must refresh the top-level channel, not leave the stale
+  // port in place. The strict user-edit guard from comment 3 shouldn't
+  // prevent adapter-owned refresh.
+  it('re-merge refreshes channels.dkg-ui.port when the channel still matches last merge output', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({ plugins: {} }));
+
+    // First merge with default entryConfig → creates { enabled: true, port: 9201 }.
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+    const afterFirst = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterFirst.channels['dkg-ui']).toEqual({ enabled: true, port: 9201 });
+    expect(afterFirst.plugins.entries['adapter-openclaw'].mergedChannelsDkgUi).toEqual({ enabled: true, port: 9201 });
+
+    // Simulate the user (or a later setup run) updating the adapter entry's
+    // channel port to 9300 directly on the entry config.
+    afterFirst.plugins.entries['adapter-openclaw'].config.channel.port = 9300;
+    writeFileSync(configPath, JSON.stringify(afterFirst, null, 2) + '\n');
+
+    // Re-merge with default entryConfig (no port) — first-wins preserves 9300
+    // on the entry, and the adapter-owned channel should refresh to match.
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+
+    const afterSecond = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterSecond.plugins.entries['adapter-openclaw'].config.channel.port).toBe(9300);
+    expect(afterSecond.channels['dkg-ui']).toEqual({ enabled: true, port: 9300 });
+    // mergedChannelsDkgUi tracks the latest adapter output.
+    expect(afterSecond.plugins.entries['adapter-openclaw'].mergedChannelsDkgUi).toEqual({ enabled: true, port: 9300 });
+  });
+
+  it('re-merge idempotency: unchanged adapter-owned channel produces byte-identical JSON', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({ plugins: {} }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+    const firstRun = readFileSync(configPath, 'utf-8');
+    const firstBackups = readdirSync(testDir).filter((f: string) => f.startsWith('openclaw.json.bak.')).length;
+
+    // Re-run with identical state — the refresh branch must be a no-op.
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+    const secondRun = readFileSync(configPath, 'utf-8');
+    const secondBackups = readdirSync(testDir).filter((f: string) => f.startsWith('openclaw.json.bak.')).length;
+
+    expect(secondRun).toBe(firstRun);
+    expect(secondBackups).toBe(firstBackups);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1083,6 +1131,51 @@ describe('unmergeOpenClawConfig', () => {
     // output.
     const afterUnmerge = JSON.parse(readFileSync(configPath, 'utf-8'));
     expect(afterUnmerge.channels['dkg-ui']).toEqual({ enabled: true, port: 9500, foo: 'bar' });
+  });
+
+  // PR #250 review comment 8 — mergedToolsShape snapshot gates tools.profile
+  // revert on the full `tools` section being untouched. User edits anywhere
+  // under `tools` mean the whole section is user-owned; we leave it alone.
+  it('round-trip: user adds unrelated tools field post-merge → unmerge preserves profile', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({ plugins: {} }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+    const afterMerge = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterMerge.tools.profile).toBe('full');
+
+    // Simulate user adding an unrelated tools field — profile stays "full".
+    const userEdited = {
+      ...afterMerge,
+      tools: { ...afterMerge.tools, web: { enabled: false } },
+    };
+    writeFileSync(configPath, JSON.stringify(userEdited, null, 2) + '\n');
+
+    unmergeOpenClawConfig(configPath);
+
+    // Profile stays "full" — the tools section diverges from mergedToolsShape
+    // (it has a new `web` field), so we treat the whole section as user-owned.
+    const afterUnmerge = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterUnmerge.tools.profile).toBe('full');
+    expect(afterUnmerge.tools.web).toEqual({ enabled: false });
+  });
+
+  it('round-trip: unchanged tools section → unmerge reverts "coding" profile', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({
+      plugins: {},
+      tools: { profile: 'coding' },
+    }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+    const afterMerge = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterMerge.tools.profile).toBe('full');
+
+    // No post-merge edits — tools matches mergedToolsShape → revert runs.
+    unmergeOpenClawConfig(configPath);
+
+    const afterUnmerge = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterUnmerge.tools.profile).toBe('coding');
   });
 });
 
