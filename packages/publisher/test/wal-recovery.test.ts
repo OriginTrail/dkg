@@ -340,6 +340,117 @@ describe('DKGPublisher.recoverFromWalByMerkleRoot (r21-5)', () => {
     expect(after).toBe(before);
   });
 
+  // ---------------------------------------------------------------------------
+  // PR #229 bot review round 26 (r26-4): if two WAL entries share the same
+  // `merkleRoot` AND the same publisher, we must refuse auto-recovery rather
+  // than silently promoting whichever happens to come first in the journal.
+  // Identical content can legitimately produce the same KC merkle root on
+  // multiple publish attempts (retries, republishes). Picking the wrong one
+  // would leave the real outstanding intent behind or promote the wrong KC.
+  // ---------------------------------------------------------------------------
+  it('r26-4: REFUSES auto-recovery and emits `publisher.walRecoveryAmbiguous` when two WAL entries share the same merkleRoot AND publisher', async () => {
+    const merkleRoot = '0x' + 'ba'.repeat(32);
+    const publisherAddr = '0xcafe000000000000000000000000000000000001';
+    const first = makeEntry({
+      publishOperationId: 'op-first-attempt',
+      publisherAddress: publisherAddr,
+      merkleRoot,
+    });
+    const retry = makeEntry({
+      publishOperationId: 'op-retry-attempt',
+      publisherAddress: publisherAddr,
+      merkleRoot,
+    });
+    await writeFile(
+      walPath,
+      JSON.stringify(first) + '\n' + JSON.stringify(retry) + '\n',
+      'utf-8',
+    );
+    const beforeContents = await readFile(walPath, 'utf-8');
+
+    const observed: Array<Record<string, unknown>> = [];
+    const ee = new EventEmitter();
+    ee.on('publisher.walRecoveryAmbiguous', (data: Record<string, unknown>) => {
+      observed.push(data);
+    });
+    const matchObserved: Array<Record<string, unknown>> = [];
+    ee.on('publisher.walRecoveryMatch', (data: Record<string, unknown>) => {
+      matchObserved.push(data);
+    });
+    const eventBus = ee as unknown as EventBus;
+
+    const publisher = new DKGPublisher({
+      store: {} as unknown as TripleStore,
+      chain: { chainId: 'none' } as unknown as ChainAdapter,
+      eventBus,
+      keypair: { publicKey: new Uint8Array(32), privateKey: new Uint8Array(64) },
+      publishWalFilePath: walPath,
+    });
+    expect(publisher.preBroadcastJournal).toHaveLength(2);
+
+    const recovered = await publisher.recoverFromWalByMerkleRoot(merkleRoot, {
+      publisherAddress: publisherAddr,
+      startKAId: 10n,
+      endKAId: 10n,
+    });
+
+    // Neither entry is promoted/dropped — both survive for manual reconciliation.
+    expect(recovered).toBeUndefined();
+    expect(publisher.preBroadcastJournal.map((e) => e.publishOperationId).sort()).toEqual([
+      'op-first-attempt',
+      'op-retry-attempt',
+    ]);
+    // The on-disk WAL is NOT rewritten (so a restart still sees both).
+    const afterContents = await readFile(walPath, 'utf-8');
+    expect(afterContents).toBe(beforeContents);
+
+    // Observability event fires with the ambiguous op list.
+    expect(matchObserved).toHaveLength(0);
+    expect(observed).toHaveLength(1);
+    const payload = observed[0];
+    expect(payload.merkleRoot).toBe(merkleRoot);
+    expect(payload.publisherAddress).toBe(publisherAddr);
+    expect((payload.matchingOps as string[]).sort()).toEqual([
+      'op-first-attempt',
+      'op-retry-attempt',
+    ]);
+    expect(payload.startKAId).toBe('10');
+    expect(payload.endKAId).toBe('10');
+  });
+
+  it('r26-4: a single WAL match STILL recovers normally when another collision belongs to a DIFFERENT publisher (cross-publisher collision is the legacy path)', async () => {
+    const merkleRoot = '0x' + 'cd'.repeat(32);
+    const mine = makeEntry({
+      publishOperationId: 'op-mine',
+      publisherAddress: '0x1111111111111111111111111111111111111111',
+      merkleRoot,
+    });
+    const theirs = makeEntry({
+      publishOperationId: 'op-theirs',
+      publisherAddress: '0x2222222222222222222222222222222222222222',
+      merkleRoot,
+    });
+    await writeFile(
+      walPath,
+      JSON.stringify(mine) + '\n' + JSON.stringify(theirs) + '\n',
+      'utf-8',
+    );
+
+    const publisher = makePublisher(walPath);
+    // The on-chain event says the publisher is the "mine" address —
+    // there's only one same-signer match, so we take the normal path.
+    const recovered = await publisher.recoverFromWalByMerkleRoot(merkleRoot, {
+      publisherAddress: mine.publisherAddress,
+      startKAId: 11n,
+      endKAId: 11n,
+    });
+    expect(recovered?.publishOperationId).toBe('op-mine');
+    // The other publisher's entry is retained — we don't touch it.
+    expect(publisher.preBroadcastJournal.map((e) => e.publishOperationId)).toEqual([
+      'op-theirs',
+    ]);
+  });
+
   it('emits a `publisher.walRecoveryMatch` event so operators can observe the recovery stream', async () => {
     const target = makeEntry({
       publishOperationId: 'op-observable',

@@ -27,6 +27,7 @@ import {
   type CollectedACK,
 } from '@origintrail-official/dkg-publisher';
 import { randomBytes } from 'node:crypto';
+import { join as pathJoin } from 'node:path';
 import { ethers } from 'ethers';
 import {
   DKGQueryEngine, QueryHandler,
@@ -658,6 +659,18 @@ export class DKGAgent {
       publisherPrivateKey: opKeys?.[0],
       sharedMemoryOwnedEntities: workspaceOwnedEntities,
       writeLocks,
+      // PR #229 bot review round 26 (r26-3, dkg-agent.ts). Thread a
+      // persistent WAL path through from `config.dataDir` so the
+      // pre-broadcast journal is actually durable across restarts.
+      // Without this, the write-ahead-log recovery added for
+      // BUGS_FOUND.md P-1 was dead code in production — every agent
+      // crash between the sign step and the chain confirmation
+      // left the tentative KC unrecoverable, and the ChainEvent-
+      // Poller's WAL-drain path (r24-4 / r25-1) had nothing to
+      // match against. When `dataDir` is unset (pure in-memory
+      // agents, integration fixtures) we leave it `undefined` and
+      // fall back to the in-memory journal as before.
+      publishWalFilePath: config.dataDir ? pathJoin(config.dataDir, 'publish-wal', 'agent.jsonl') : undefined,
     });
 
     try {
@@ -2899,6 +2912,28 @@ export class DKGAgent {
 
     const onChainId = await this.getContextGraphOnChainId(contextGraphId);
 
+    // PR #229 bot review round 26 (r26-1, dkg-agent.ts:_publish). The
+    // per-CG quorum resolution below mirrors `publishFromSharedMemory()`
+    // (spec §06 / A-5): direct `agent.publish()` on an on-chain CG
+    // MUST wait for the CG's M-of-N signatures, not the global
+    // ParametersStorage minimum. Before r26-1 the direct path skipped
+    // this resolution entirely, so `DKGPublisher.publish()` saw
+    // `perCgRequiredSignatures === undefined` and fell back to the
+    // global default — a CG that required 3 core-node ACKs could
+    // confirm on-chain with just 1 via the self-sign fallback.
+    let perCgRequiredSignatures: number | undefined;
+    if (onChainId && typeof this.chain.getContextGraphRequiredSignatures === 'function') {
+      try {
+        const id = BigInt(onChainId);
+        if (id > 0n) {
+          const n = await this.chain.getContextGraphRequiredSignatures(id);
+          if (Number.isFinite(n) && n > 0) perCgRequiredSignatures = n;
+        }
+      } catch {
+        // non-numeric on-chain id (mock-only graph) → skip per-CG gate.
+      }
+    }
+
     const result = await this.publisher.publish({
       contextGraphId,
       quads,
@@ -2911,6 +2946,7 @@ export class DKGAgent {
       onPhase,
       v10ACKProvider,
       publishContextGraphId: onChainId ?? undefined,
+      perCgRequiredSignatures,
     });
 
     onPhase?.('broadcast', 'start');

@@ -192,6 +192,17 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
         keypair: args.keypair,
         publisherNodeIdentityId: identityId,
         publisherPrivateKey: wallet.privateKey,
+        // PR #229 bot review round 26 (r26-3, publisher-runner.ts).
+        // The WAL durability path added in BUGS_FOUND.md P-1 was
+        // dead code in production because no caller wired
+        // `publishWalFilePath`; every publisher fell back to an
+        // in-memory journal that evaporated on restart. Persist one
+        // WAL file per publisher wallet under the data dir so a
+        // crash between `sign` and `confirm` leaves enough state on
+        // disk for the ChainEventPoller → onUnmatchedBatchCreated
+        // reconciler (r24-4 / r25-1) to promote the tentative KC
+        // once the transaction is mined.
+        publishWalFilePath: join(args.dataDir, 'publish-wal', `${wallet.address.toLowerCase()}.jsonl`),
       }),
     );
   }

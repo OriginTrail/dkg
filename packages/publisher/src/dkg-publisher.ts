@@ -627,6 +627,29 @@ export class DKGPublisher implements Publisher {
   }
 
   /**
+   * PR #229 bot review round 26 (r26-4, dkg-publisher.ts). Previously
+   * WAL recovery keyed off `merkleRoot` alone, but identical content
+   * can legitimately produce the same KC merkle root on multiple
+   * publish attempts (retries, republishes, idempotent lifts). The
+   * first confirmation event would then drop whichever matching
+   * entry the backwards scan hit first, leaving the real outstanding
+   * intent behind or promoting the wrong tentative KC.
+   *
+   * This helper returns EVERY surviving WAL entry that matches the
+   * given merkleRoot (case-insensitive). Callers must treat multiple
+   * hits as ambiguous and refuse auto-recovery — see
+   * `recoverFromWalByMerkleRoot`'s r26-4 branch.
+   */
+  findAllWalEntriesByMerkleRoot(merkleRootHex: string): PreBroadcastJournalEntry[] {
+    const needle = merkleRootHex.toLowerCase();
+    const matches: PreBroadcastJournalEntry[] = [];
+    for (const entry of this.preBroadcastJournal) {
+      if (entry.merkleRoot.toLowerCase() === needle) matches.push(entry);
+    }
+    return matches;
+  }
+
+  /**
    * PR #229 bot review (post-v10-rc-merge, r21-5): runtime caller of
    * the recovered WAL. The previous round (r6/r8) added the WAL
    * fsync + reload but left the in-memory `preBroadcastJournal`
@@ -682,9 +705,56 @@ export class DKGPublisher implements Publisher {
     ctx?: OperationContext,
   ): Promise<PreBroadcastJournalEntry | undefined> {
     const opCtx = ctx ?? createOperationContext('publish');
-    const entry = this.findWalEntryByMerkleRoot(merkleRootHex);
-    if (!entry) return undefined;
+
+    // PR #229 bot review round 26 (r26-4, dkg-publisher.ts).
+    // Refuse auto-recovery when more than one WAL entry shares the
+    // same merkleRoot. Identical content can legitimately produce
+    // the same KC merkle root across multiple publish attempts
+    // (retries, republishes, idempotent lifts). Picking the wrong
+    // one here would leave the real outstanding intent behind and
+    // may even promote the wrong tentative KC. We filter by
+    // `publisherAddress` first so a cross-publisher collision does
+    // NOT force a local ambiguity gate — different publishers were
+    // already handled by the mismatch branch below.
     const onChainAddr = onChainData.publisherAddress.toLowerCase();
+    const allMatching = this.findAllWalEntriesByMerkleRoot(merkleRootHex);
+    const sameSignerMatches = allMatching.filter(
+      (e) => e.publisherAddress.toLowerCase() === onChainAddr,
+    );
+    if (sameSignerMatches.length > 1) {
+      this.log.warn(
+        opCtx,
+        `WAL_RECOVERY_AMBIGUOUS merkleRoot=${merkleRootHex} ` +
+          `publisher=${onChainData.publisherAddress} ` +
+          `matching=${sameSignerMatches.length} — refusing auto-recovery; ` +
+          `ops=[${sameSignerMatches.map((e) => e.publishOperationId).join(',')}] ` +
+          `startKAId=${onChainData.startKAId} endKAId=${onChainData.endKAId} (r26-4). ` +
+          `All matching WAL entries retained; manual reconciliation required.`,
+      );
+      try {
+        this.eventBus.emit('publisher.walRecoveryAmbiguous', {
+          merkleRoot: merkleRootHex,
+          publisherAddress: onChainData.publisherAddress,
+          startKAId: onChainData.startKAId.toString(),
+          endKAId: onChainData.endKAId.toString(),
+          matchingOps: sameSignerMatches.map((e) => e.publishOperationId),
+        });
+      } catch {
+        // Observability only; never let an emit failure abort the event loop.
+      }
+      return undefined;
+    }
+
+    // r26-4: prefer the same-signer match when one exists so a
+    // cross-publisher collision (different publisher with identical
+    // merkleRoot) doesn't bury our real surviving entry. When there
+    // is no same-signer match, fall back to the (potentially
+    // cross-publisher) last-write-wins scan so the legacy
+    // `WAL_RECOVERY_PUBLISHER_MISMATCH` branch still fires and logs.
+    const entry = sameSignerMatches.length === 1
+      ? sameSignerMatches[0]
+      : this.findWalEntryByMerkleRoot(merkleRootHex);
+    if (!entry) return undefined;
     const persistedAddr = entry.publisherAddress.toLowerCase();
     if (onChainAddr !== persistedAddr) {
       // A different publisher confirmed a batch with our merkle root.
@@ -1832,6 +1902,26 @@ export class DKGPublisher implements Publisher {
     // contract not deployed); we preserve the historical lenient
     // path by treating the answer as unknown.
     let publisherIsCgParticipant: boolean | undefined;
+    // PR #229 bot review round 26 (r26-2, dkg-publisher.ts). The
+    // participant set is authoritative for BOTH the self-sign
+    // eligibility decision AND the peer-ACK accounting. Pre-r26-2 we
+    // only consulted it for the publisher's own ACK; any peer ACK
+    // from a non-participant identity was still counted toward
+    // `perCgRequiredSignatures`, so:
+    //   - an attacker (or a misconfigured sidecar) could submit an
+    //     ACK from a random identity and push `collectedAckCount`
+    //     over the per-CG quorum, gating the on-chain tx;
+    //   - the tx would then immediately revert with
+    //     `InvalidSignerNotParticipant`, burning gas and leaving a
+    //     tentative publish stuck in the WAL until manual cleanup.
+    // Fix: when the chain returns a concrete participant set, keep
+    // only ACKs whose `nodeIdentityId` is in that set BEFORE we
+    // hand the array to `computePerCgQuorumState`. Callers that
+    // can't resolve participants (adapter lacks the RPC, mock
+    // chains, v10CgId === 0n, transient lookup failure) preserve
+    // the historical lenient path — the V10 contract is still the
+    // ultimate authority.
+    let participantSet: Set<bigint> | undefined;
     if (
       this.publisherNodeIdentityId > 0n &&
       v10CgId > 0n &&
@@ -1840,9 +1930,8 @@ export class DKGPublisher implements Publisher {
       try {
         const participants = await this.chain.getContextGraphParticipants(v10CgId);
         if (participants) {
-          publisherIsCgParticipant = participants.some(
-            (id) => id === this.publisherNodeIdentityId,
-          );
+          participantSet = new Set(participants);
+          publisherIsCgParticipant = participantSet.has(this.publisherNodeIdentityId);
         }
       } catch (lookupErr) {
         // Lookup failures must not promote a false-positive quorum.
@@ -1856,6 +1945,23 @@ export class DKGPublisher implements Publisher {
             `— self-sign eligibility falls back to legacy behaviour (V10 contract is the final authority)`,
         );
       }
+    }
+
+    // r26-2: filter peer ACKs to participants-only before quorum math.
+    // Keep the original count for the diagnostic so operators can see
+    // when someone was submitting rogue ACKs against this CG.
+    if (v10ACKs && participantSet) {
+      const originalCount = v10ACKs.length;
+      const filtered = v10ACKs.filter((a) => participantSet!.has(a.nodeIdentityId));
+      if (filtered.length !== originalCount) {
+        this.log.warn(
+          ctx,
+          `Filtered ${originalCount - filtered.length}/${originalCount} peer ACK(s) whose nodeIdentityId is NOT ` +
+            `in the on-chain participant set for CG ${v10CgId} (r26-2) — on-chain tx would have reverted with ` +
+            `InvalidSignerNotParticipant.`,
+        );
+      }
+      v10ACKs = filtered;
     }
 
     const { perCgRequired, collectedAckCount, selfSignEligible, effectiveAckCount, perCgQuorumUnmet } =
