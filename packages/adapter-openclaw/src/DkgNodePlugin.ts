@@ -1458,6 +1458,13 @@ export class DkgNodePlugin {
   private async handleQuery(args: Record<string, unknown>): Promise<OpenClawToolResult> {
     try {
       const sparql = String(args.sparql);
+      // V10 is the first product launch — no v9 back-compat. Reject `paranet_id`
+      // explicitly rather than silently widening it to `context_graph_id`, so
+      // stale v9 agent code surfaces its wrong assumption instead of sending
+      // an empty/garbage value that the daemon would then ignore.
+      if (args.paranet_id !== undefined) {
+        return this.error('"paranet_id" is not a supported parameter. Use "context_graph_id".');
+      }
       // `context_graph_id` is optional on this tool (omit → unscoped query
       // across all subscribed CGs). Trim whitespace so that
       // `{ context_graph_id: "   " }` behaves like an omission rather than
@@ -1802,10 +1809,13 @@ function isUri(value: string): boolean {
 
 /**
  * Escape a plain-text string for use as an RDF/N-Triples literal body.
- * Covers the five mandatory escapes from the N-Triples spec (\\, ", \n, \r, \t);
- * returns only the escaped body (caller wraps in `"..."`).
- * Without tab/CR/LF handling, agents writing multi-line strings would produce
- * malformed RDF literals that the triple store rejects.
+ * Covers every ECHAR escape the N-Triples spec defines (\\, ", \n, \r, \t,
+ * \b, \f); returns only the escaped body (caller wraps in `"..."`).
+ * Without these, agents writing strings that happen to contain a raw
+ * form-feed, backspace, or tab would produce malformed RDF literals that
+ * strict triple-store parsers reject.
+ * Backslash MUST be replaced first so the later inserted escape sequences
+ * don't get re-escaped on subsequent passes.
  */
 function escapeRdfLiteral(value: string): string {
   return value
@@ -1813,7 +1823,9 @@ function escapeRdfLiteral(value: string): string {
     .replace(/"/g, '\\"')
     .replace(/\n/g, '\\n')
     .replace(/\r/g, '\\r')
-    .replace(/\t/g, '\\t');
+    .replace(/\t/g, '\\t')
+    .replace(/\f/g, '\\f')
+    .replace(/\x08/g, '\\b');
 }
 
 /**

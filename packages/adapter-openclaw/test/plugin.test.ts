@@ -429,22 +429,23 @@ describe('DkgNodePlugin', () => {
       expect(bad.content[0].text).toContain('non-empty array');
     });
 
-    it('dkg_query ignores the v9 paranet_id field — only context_graph_id scopes the query', async () => {
+    it('dkg_query explicitly rejects the v9 paranet_id field with a clear error', async () => {
       // V10-rc is the first product release; there is no v9 back-compat on the
-      // public tool surface. A stray `paranet_id` is silently ignored by the
-      // handler (it's not in the schema), and `context_graph_id` is the single
-      // source of truth. An agent that supplies only `paranet_id` produces an
-      // unscoped query — that's the correct outcome for a non-supported field.
+      // public tool surface. Silently ignoring `paranet_id` would let stale v9
+      // agent code run unscoped queries thinking it was scoping them — a
+      // dangerous failure mode. The handler rejects the field explicitly so
+      // the caller's wrong assumption surfaces instead of producing garbage.
       const { fetchMock, byName } = setupPluginWithFetch({ ok: true });
-      await byName.get('dkg_query')!.execute('tc', {
+      const result = await byName.get('dkg_query')!.execute('tc', {
         sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1',
         paranet_id: 'my-cg',
       });
-      const body = JSON.parse(fetchMock.mock.calls[0][1]?.body as string);
-      expect(body.contextGraphId).toBeUndefined();
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(result.content[0].text).toContain('paranet_id');
+      expect(result.content[0].text).toContain('context_graph_id');
     });
 
-    it('dkg_assertion_write escapes N-Triples control characters in literal objects', async () => {
+    it('dkg_assertion_write escapes every N-Triples ECHAR control character in literal objects', async () => {
       const { fetchMock, byName } = setupPluginWithFetch({ written: 1 });
       await byName.get('dkg_assertion_write')!.execute('tc', {
         context_graph_id: 'ctx',
@@ -453,15 +454,17 @@ describe('DkgNodePlugin', () => {
           {
             subject: 'https://example.org/a',
             predicate: 'https://schema.org/text',
-            object: 'line1\nline2\tcol\rend"with quote\\and backslash',
+            // Includes: \n, \t, \r, ", \, \f (form-feed), \b (backspace).
+            // Missing \f / \b escapes would leave raw 0x0C / 0x08 bytes in
+            // the JSON body and cause strict triple-store parsers to reject
+            // the literal.
+            object: 'line1\nline2\tcol\rend"with quote\\and backslash\fff\bbb',
           },
         ],
       });
       const body = JSON.parse(fetchMock.mock.calls[0][1]?.body as string);
-      // Must escape \n \r \t " \ per N-Triples spec; unescaped control chars
-      // would produce malformed RDF the triple store rejects.
       expect(body.quads[0].object).toBe(
-        '"line1\\nline2\\tcol\\rend\\"with quote\\\\and backslash"',
+        '"line1\\nline2\\tcol\\rend\\"with quote\\\\and backslash\\fff\\bbb"',
       );
     });
   });
