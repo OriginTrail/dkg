@@ -515,6 +515,45 @@ describe('DkgNodePlugin', () => {
       expect(body.agentAddress).toBe('0xabc123');
     });
 
+    it('dkg_query rejects a whitespace-only agent_address (same silent-namespace-swap risk as non-string)', async () => {
+      // An explicitly-supplied whitespace string is still "caller meant
+      // something here" — treating `"   "` as "missing" and defaulting
+      // to `this.nodePeerId` would silently swap a cross-agent read for
+      // a self-read, same failure mode as the non-string case.
+      const { fetchMock, byName } = setupPluginWithFetch({ ok: true });
+      const result = await byName.get('dkg_query')!.execute('tc', {
+        sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1',
+        context_graph_id: 'my-cg',
+        view: 'working-memory',
+        agent_address: '   ',
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(result.content[0].text).toContain('agent_address');
+      expect(result.content[0].text).toMatch(/non-empty|empty/i);
+    });
+
+    it('dkg_query `view` validation uses the shared GET_VIEWS from dkg-core (no local mirror)', async () => {
+      // Guard against the local VALID_VIEWS mirror being reintroduced.
+      // When a view is added to core's GET_VIEWS but the adapter
+      // maintains its own list, the tool silently rejects the new
+      // view before the daemon can serve it. The handler must use
+      // the shared constant so this class of drift can't happen.
+      //
+      // We verify behavior (not import graph): the error message lists
+      // exactly the three views core publishes today, and a v9-removed
+      // view is rejected.
+      const { fetchMock, byName } = setupPluginWithFetch({ ok: true });
+      const result = await byName.get('dkg_query')!.execute('tc', {
+        sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1',
+        view: 'authoritative', // a REMOVED_VIEWS entry from core
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+      const text = result.content[0].text;
+      expect(text).toContain('working-memory');
+      expect(text).toContain('shared-working-memory');
+      expect(text).toContain('verified-memory');
+    });
+
     it('dkg_query rejects a non-string agent_address instead of silently falling back to the node peerId', async () => {
       // Permissive hosts can pass through non-string values. If the
       // handler treated those as "missing", `view: "working-memory"`

@@ -15,6 +15,7 @@
  *     (`POST /api/assertion/create` + `POST /api/assertion/:name/write`),
  *     which the agent reads from `GET /.well-known/skill.md` on startup.
  */
+import { GET_VIEWS, type GetView } from '@origintrail-official/dkg-core';
 import {
   DkgDaemonClient,
   type LocalAgentIntegrationRecord,
@@ -1517,18 +1518,18 @@ export class DkgNodePlugin {
       const trimmed = typeof args.context_graph_id === 'string' ? args.context_graph_id.trim() : '';
       const contextGraphId = trimmed || undefined;
       // Handler-side view validation (no JSON-schema enum, so strict-schema
-      // hosts surface these tailored errors). Valid values mirror the three
-      // layers of the daemon's GET_VIEWS.
-      const VALID_VIEWS = ['working-memory', 'shared-working-memory', 'verified-memory'] as const;
-      type View = (typeof VALID_VIEWS)[number];
-      let view: View | undefined;
+      // hosts still surface these tailored errors). Use the shared
+      // `GET_VIEWS` constant from `@origintrail-official/dkg-core` as the
+      // single source of truth — maintaining a local mirror invited drift
+      // whenever a view was added/removed upstream.
+      let view: GetView | undefined;
       if (args.view !== undefined) {
-        if (typeof args.view !== 'string' || !(VALID_VIEWS as readonly string[]).includes(args.view)) {
+        if (typeof args.view !== 'string' || !(GET_VIEWS as readonly string[]).includes(args.view)) {
           return this.error(
-            `"view" must be one of: ${VALID_VIEWS.join(', ')}.`,
+            `"view" must be one of: ${GET_VIEWS.join(', ')}.`,
           );
         }
-        view = args.view as View;
+        view = args.view as GetView;
       }
       // When a `view` is requested, the daemon requires `context_graph_id`
       // to scope the view resolution (`DKGQueryEngine.query` throws
@@ -1556,17 +1557,21 @@ export class DkgNodePlugin {
       // namespace and returns empty bindings. Apply to both the explicit
       // arg and the node-peerId fallback (the latter is typically already
       // bare, but normalize defensively in case the source ever changes).
-      // Strict type check on `agent_address`: a non-string (e.g. number
-      // passed through by a permissive host) must fail fast, not silently
-      // fall through to the node-peerId default. Otherwise a caller
-      // intending a cross-agent WM read but with a malformed value would
-      // get the node's own WM back — wrong namespace, wrong data, no
-      // error. Only distinguish "absent" from "malformed": undefined means
-      // "use the default"; any other non-string is a caller bug.
-      if (args.agent_address !== undefined && typeof args.agent_address !== 'string') {
-        return this.error('"agent_address" must be a string.');
+      // Strict validation on `agent_address`: anything *present but bogus*
+      // (non-string, or empty/whitespace-only) must fail fast, not silently
+      // fall through to the node-peerId default. A caller intending a
+      // cross-agent WM read with a malformed value would otherwise get the
+      // node's own WM back — wrong namespace, wrong data, no error.
+      // `undefined` (field genuinely absent) still takes the default.
+      if (args.agent_address !== undefined) {
+        if (typeof args.agent_address !== 'string') {
+          return this.error('"agent_address" must be a string.');
+        }
+        if (args.agent_address.trim() === '') {
+          return this.error('"agent_address" must be a non-empty string.');
+        }
       }
-      let agentAddress = typeof args.agent_address === 'string' && args.agent_address.trim() !== ''
+      let agentAddress = typeof args.agent_address === 'string'
         ? args.agent_address.trim()
         : undefined;
       if (view === 'working-memory' && agentAddress === undefined) {
