@@ -14,10 +14,11 @@
  *     (b) Positive — A writes, B reads using B's own `agentAddress` →
  *         data is INVISIBLE. (graph-URI scoping holds.)
  *     (c) Isolation stress — B deliberately impersonates A by passing
- *         `agentAddress: A.address, view: 'working-memory'` in `query()`.
- *         Per spec §04 and RFC-29 this MUST be rejected — the agent layer
- *         has no per-request agent authentication, so this test documents
- *         the current behaviour: the data is returned. PROD-BUG surface.
+ *         `agentAddress: A.address, view: 'working-memory'` in `query()`,
+ *         while authenticated as B (the HTTP route plumbs the caller
+ *         identity as `callerAgentAddress`). Per spec §04 and RFC-29
+ *         this MUST be rejected — DKGAgent.query enforces the per-
+ *         request agent authentication and returns 0 bindings.
  *
  *     (d) Hygiene — an attacker who gets a chat-name guess cannot read
  *         another agent's WM via `agent.assertion.query` because the bound
@@ -145,7 +146,7 @@ describe('A-1: WM is per-agent — two agents co-hosted on one node', () => {
     expect(aWmUri).not.toBe(bWmUri);
   });
 
-  it('PROD-BUG: query(view:"working-memory", agentAddress: OTHER) returns the other agent\'s WM with no authn check', async () => {
+  it('A-1: authenticated cross-agent WM read is denied (caller=B cannot read agentAddress=A)', async () => {
     const cgId = freshCgId('wm-iso-c');
     await node!.createContextGraph({ id: cgId, name: 'WM Iso C', description: '' });
 
@@ -159,28 +160,191 @@ describe('A-1: WM is per-agent — two agents co-hosted on one node', () => {
       },
     ]);
 
-    // B supplies A's address in the query options — the agent layer has
-    // no per-request authentication, so this impersonation currently
-    // succeeds. Per spec §04 and RFC-29 this should return 0 bindings
-    // (cross-agent WM read denied). See BUGS_FOUND.md A-1.
+    // B supplies A's address in the query options while authenticated
+    // as B. The HTTP route plumbs the caller identity through
+    // `callerAgentAddress` — see packages/cli/src/daemon.ts /api/query.
+    // Per spec §04 and RFC-29 this impersonation attempt MUST be
+    // denied at the DKGAgent.query boundary (0 bindings, no data
+    // leakage). Tracks BUGS_FOUND.md A-1.
     const defaultA = node!.getDefaultAgentAddress()!;
     const leak = await node!.query(
       `SELECT ?s ?o WHERE { ?s <http://schema.org/description> ?o }`,
       {
         contextGraphId: cgId,
         view: 'working-memory',
-        agentAddress: defaultA, // impersonation
+        agentAddress: defaultA, // impersonation: target A's WM graph
+        callerAgentAddress: agentB.agentAddress, // authenticated as B
       },
     );
 
-    // PROD-BUG: this expectation pins the spec. With no authn gate in
-    // `DKGAgent#query`, the current implementation returns A's secret to
-    // any caller that guesses/knows A's address. Expected to go RED.
     expect(
       leak.bindings.length,
-      'cross-agent WM access (spec §04/RFC-29 violation) — BUGS_FOUND.md A-1',
+      'cross-agent WM access must be denied when callerAgentAddress mismatches agentAddress (A-1)',
     ).toBe(0);
   });
+
+  it('A-1: same-agent authenticated WM read still works (caller=A reads agentAddress=A)', async () => {
+    const cgId = freshCgId('wm-iso-c2');
+    await node!.createContextGraph({ id: cgId, name: 'WM Iso C2', description: '' });
+
+    await node!.assertion.create(cgId, 'journal');
+    await node!.assertion.write(cgId, 'journal', [
+      {
+        subject: 'urn:wm:alice:own-note',
+        predicate: 'http://schema.org/description',
+        object: '"A reads A"',
+        graph: '',
+      },
+    ]);
+
+    const defaultA = node!.getDefaultAgentAddress()!;
+    const own = await node!.query(
+      `SELECT ?s ?o WHERE { ?s <http://schema.org/description> ?o }`,
+      {
+        contextGraphId: cgId,
+        view: 'working-memory',
+        agentAddress: defaultA,
+        callerAgentAddress: defaultA, // authenticated as A, targeting A's WM
+      },
+    );
+    expect(own.bindings.length).toBe(1);
+  });
+
+  it(
+    'A-1 (Codex PR #242 iter-8): omitted agentAddress on an authenticated WM read defaults ' +
+      'to callerAgentAddress — an agent-bound caller cannot escape isolation by just not ' +
+      'supplying agentAddress and falling through to the node-default peerId WM.',
+    async () => {
+      const cgId = freshCgId('wm-iso-omit');
+      await node!.createContextGraph({ id: cgId, name: 'WM Iso omit', description: '' });
+
+      // Seed B's WM directly via the publisher API (agent.assertion
+      // captures the default agent's address in a closure, so we
+      // bypass it to write as B).
+      const assertionName = 'b-secret';
+      await node!.publisher.assertionCreate(cgId, assertionName, agentB.agentAddress);
+      await node!.publisher.assertionWrite(cgId, assertionName, agentB.agentAddress, [
+        {
+          subject: 'urn:wm:bob:only',
+          predicate: 'http://schema.org/description',
+          object: '"B-private"',
+          graph: '',
+        },
+      ]);
+
+      // B authenticates (callerAgentAddress=B) but OMITS agentAddress.
+      // Previously this silently fell through to the `peerId` (node
+      // default) namespace, leaking a different agent's WM to B. With
+      // the omission-default fix, the query must resolve B's own WM.
+      const resB = await node!.query(
+        `SELECT ?s ?o WHERE { ?s <http://schema.org/description> ?o }`,
+        {
+          contextGraphId: cgId,
+          view: 'working-memory',
+          callerAgentAddress: agentB.agentAddress,
+          // agentAddress intentionally omitted
+        },
+      );
+      expect(resB.bindings.length).toBe(1);
+    },
+  );
+
+  it(
+    'A-1 (Codex PR #242 iter-9 re-review): default-agent self-reads via peerId alias ' +
+      'must resolve to the same canonical identity. Legacy WM callers ' +
+      '(ChatMemoryManager, SKILL.md examples) use `agentAddress=<peerId>` — an ' +
+      'agent-scoped token whose callerAgentAddress is the default agent\'s EVM ' +
+      'address must be able to read that legacy namespace without falling into ' +
+      "the A-1 mismatch deny branch.",
+    async () => {
+      const cgId = freshCgId('wm-iso-peerid');
+      await node!.createContextGraph({ id: cgId, name: 'WM Iso peerId', description: '' });
+
+      const defaultA = node!.getDefaultAgentAddress()!;
+      const peerId = node!.peerId;
+      expect(
+        peerId,
+        'this test needs the node to expose a peerId — otherwise the ' +
+          'alias case we are pinning does not exist',
+      ).toBeTruthy();
+
+      // Seed the legacy peerId-keyed WM namespace for the default
+      // agent (this is the path ChatMemoryManager still writes to).
+      const assertionName = 'legacy-peerid-wm';
+      await node!.publisher.assertionCreate(cgId, assertionName, peerId!);
+      await node!.publisher.assertionWrite(cgId, assertionName, peerId!, [
+        {
+          subject: 'urn:wm:legacy:peerid-note',
+          predicate: 'http://schema.org/description',
+          object: '"legacy peerId-keyed WM"',
+          graph: '',
+        },
+      ]);
+
+      // Authenticated as the default agent (EVM), read with the
+      // peerId alias. Pre-iter-9 this fell into
+      // `callerAddr.toLowerCase() !== targetAddr.toLowerCase()` and
+      // returned 0 bindings even though both identifiers point at
+      // the same identity.
+      const viaPeerId = await node!.query(
+        `SELECT ?s ?o WHERE { ?s <http://schema.org/description> ?o }`,
+        {
+          contextGraphId: cgId,
+          view: 'working-memory',
+          agentAddress: peerId!,
+          callerAgentAddress: defaultA,
+        },
+      );
+      expect(
+        viaPeerId.bindings.length,
+        'default-agent read with agentAddress=peerId must resolve to the same WM namespace',
+      ).toBe(1);
+
+      // And the omitted-agentAddress case: if the caller is the
+      // default agent, the iter-9 default preserves legacy peerId
+      // semantics so pre-existing peerId-keyed data stays
+      // accessible.
+      const viaOmit = await node!.query(
+        `SELECT ?s ?o WHERE { ?s <http://schema.org/description> ?o }`,
+        {
+          contextGraphId: cgId,
+          view: 'working-memory',
+          callerAgentAddress: defaultA,
+          // agentAddress intentionally omitted
+        },
+      );
+      expect(
+        viaOmit.bindings.length,
+        'default-agent omitted-agentAddress must default to peerId-keyed WM for legacy data access',
+      ).toBe(1);
+    },
+  );
+
+  it(
+    'A-1 (Codex PR #242 iter-4): cross-agent WM mutation is REJECTED, not silently swallowed ' +
+      'as a 0-binding deny. The access-denied fast-path used to return before ' +
+      '`validateReadOnlySparql` ran, so `INSERT DATA { ... }` over another agent\'s WM ' +
+      'would come back as an empty result (200 OK) instead of the 400 rejection ' +
+      'that a SELECT cross-agent request would receive. This test pins the ' +
+      'mutation path so the deny-shape and the guard-shape stay in sync.',
+    async () => {
+      const cgId = freshCgId('wm-iso-mutation');
+      await node!.createContextGraph({ id: cgId, name: 'WM Iso mutation', description: '' });
+
+      const defaultA = node!.getDefaultAgentAddress()!;
+      await expect(
+        node!.query(
+          'INSERT DATA { GRAPH <urn:dkg:test> { <urn:s> <urn:p> "injected" } }',
+          {
+            contextGraphId: cgId,
+            view: 'working-memory',
+            agentAddress: defaultA,
+            callerAgentAddress: agentB.agentAddress, // would-be impersonator
+          },
+        ),
+      ).rejects.toThrow(/SPARQL rejected/);
+    },
+  );
 
   it('assertion graph URI encodes the agentAddress (structural isolation invariant)', () => {
     const cgId = 'structural-check';

@@ -6652,6 +6652,102 @@ async function handleRequest(
       tracker.completePhase(ctx, "parse");
       tracker.startPhase(ctx, "execute");
       const execT0 = Date.now();
+      // A-1 review: `callerAgentAddress` must come from an
+      // *agent-scoped* bearer token, not the node-level default.
+      // `resolveAgentAddress(token)` silently falls back to
+      // `defaultAgentAddress` / `peerId` for node-level tokens, which
+      // would make every node-level `/api/query` look like an
+      // agent-scoped WM read and deny legitimate cross-agent reads
+      // (e.g. OpenClaw sessions authenticating with
+      // `~/.dkg/auth.token` and supplying a different `agentAddress`
+      // in the body). `resolveAgentByToken` returns `undefined` for
+      // node-level tokens, so only genuine agent-scoped identities
+      // ever reach the A-1 guard.
+      const callerAgentAddress = requestToken
+        ? agent.resolveAgentByToken(requestToken)
+        : undefined;
+      // A-1 follow-up review (iteration 2): close the auth-disabled WM
+      // hole WITHOUT regressing existing node-token clients.
+      //
+      // When we reach this line with `callerAgentAddress === undefined`,
+      // the caller is one of:
+      //
+      //   (a) node-level admin (`~/.dkg/auth.token`, a token present in
+      //       `validTokens`). Admin is already trusted to run as any
+      //       local agent — `packages/adapter-openclaw` relies on this
+      //       by passing a session-specific `agentAddress` alongside the
+      //       admin token. Keep the legacy "skip the A-1 guard" here.
+      //
+      //   (b) unauthenticated (auth disabled at daemon level, OR no
+      //       Authorization header, OR a bogus / mismatched bearer that
+      //       the auth middleware never validated because `authEnabled`
+      //       is false). This is the hole Codex flagged: a raw
+      //       `Authorization: Bearer junk` used to set `requestToken`
+      //       truthy, sliding past a `!requestToken` check and letting
+      //       foreign WM reads through.
+      //
+      //   (c) auth-enabled + rejected — we never reach this line
+      //       because `httpAuthGuard` has already 401'd the request.
+      //
+      // Gate the 403 on "not a known admin token" (i.e. the caller is
+      // not in `validTokens`), which fails closed for (b) regardless of
+      // what garbage they put in the header, and leaves (a) alone.
+      //
+      // Codex PR #242 iter-8: `validTokens` contains BOTH the
+      // node-level admin token (`~/.dkg/auth.token`) AND any
+      // per-agent tokens the node has issued. Treating every
+      // validToken as "admin" means an authenticated agent could
+      // use its OWN token to skip the A-1 guard and read another
+      // local agent's WM via `agentAddress`. Restrict the admin
+      // bypass to tokens that are NOT bound to a specific agent
+      // (`resolveAgentByToken(token) === undefined`), which is the
+      // current signal for "node-level / admin-scoped".
+      //
+      // Codex PR #242 iter-8 re-review: the A-1 fallback 403 must
+      // also NOT fire for authenticated agent callers. An agent
+      // querying its OWN WM (`callerAgentAddress === agentAddress`)
+      // was previously being rejected here unless the target happened
+      // to be the node default / peerId alias, and genuine cross-agent
+      // reads were surfacing as a 403 (leaking existence) instead of
+      // the intended silent empty-per-kind result from
+      // `DKGAgent.query`. Only gate the self-alias fallback when the
+      // caller has no recognised identity at all — neither a
+      // node-level admin token nor an agent-scoped bearer. Authenticated
+      // agent callers flow straight into `agent.query()` below, which
+      // enforces the isolation invariant by returning an empty-per-kind
+      // result for any target that is not `callerAgentAddress`.
+      const isAdminToken =
+        !!requestToken
+        && validTokens.has(requestToken)
+        && callerAgentAddress === undefined;
+      const hasRecognisedIdentity = isAdminToken || callerAgentAddress !== undefined;
+      if (
+        !hasRecognisedIdentity &&
+        view === 'working-memory' &&
+        typeof agentAddress === 'string'
+      ) {
+        // Codex (iteration 4): the daemon's canonical "own WM" identity is
+        // whatever `agent.resolveAgentAddress(undefined)` returns — i.e.
+        // `defaultAgentAddress ?? peerId`. Several in-repo paths still
+        // authenticate under the legacy peerId alias (node-level tokens,
+        // auth-disabled self-reads before a default agent was configured),
+        // so we must accept both the default agent address *and* the bare
+        // peerId as self, otherwise an auth-disabled self-read via the
+        // legacy alias now 403s where it used to return the node's own WM.
+        const targetLower = agentAddress.toLowerCase();
+        const selfAliasesLower = new Set<string>();
+        const defaultAgent = agent.getDefaultAgentAddress();
+        if (defaultAgent) selfAliasesLower.add(defaultAgent.toLowerCase());
+        if (agent.peerId) selfAliasesLower.add(agent.peerId.toLowerCase());
+        if (selfAliasesLower.size === 0 || !selfAliasesLower.has(targetLower)) {
+          return jsonResponse(res, 403, {
+            error:
+              `working-memory reads for agentAddress=${agentAddress} require authentication. ` +
+              `An unauthenticated / auth-disabled caller may only read the node-default agent's WM ` +
+              `(accepted self-aliases: defaultAgentAddress and the node's peerId).`,
+          });
+        }
+      }
       const result = await agent.query(sparql, {
         contextGraphId,
         graphSuffix,
@@ -6661,6 +6757,7 @@ async function handleRequest(
         verifiedGraph,
         assertionName,
         subGraphName,
+        callerAgentAddress,
         minTrust: minTrust as TrustLevel | undefined,
         operationCtx: ctx,
       });
@@ -6682,6 +6779,12 @@ async function handleRequest(
         msg.includes("agentAddress is required") ||
         msg.includes("requires a contextGraphId") ||
         msg.includes("cannot be combined with") ||
+        // A-1 review: DKGAgent.query throws these when the caller sends
+        // a non-string `agentAddress` / `callerAgentAddress` in the
+        // body. Classify as 400 so malformed input is a clean client
+        // error instead of a 500.
+        msg.startsWith("query: 'agentAddress' must be a string") ||
+        msg.startsWith("query: 'callerAgentAddress' must be a string") ||
         // P-13 review: `resolveViewGraphs` validates `minTrust` now,
         // so direct callers that forward a string / out-of-range
         // value get a 400 instead of a 500.
