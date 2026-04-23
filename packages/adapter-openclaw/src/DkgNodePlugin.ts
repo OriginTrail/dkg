@@ -1071,22 +1071,13 @@ export class DkgNodePlugin {
       {
         name: 'dkg_subscribe',
         description:
-          'Subscribe to a context graph to receive its data and updates from connected peers. ' +
-          'Call this once before querying or publishing to a remotely-authored context graph. ' +
-          'Subscription is immediate; peer catch-up runs in the background — use dkg_list_context_graphs to ' +
-          'check sync status afterward. Returns `{ subscribed, catchup: { jobId, status, includeSharedMemory } }`. ' +
-          'Accepts `paranet_id` as a deprecated V9 alias for `context_graph_id` (removal planned in a future cleanup).',
+          'Subscribe to a context graph to receive its data from peers. Call once before querying or publishing ' +
+          'a remotely-authored CG. Accepts `paranet_id` as a deprecated V9 alias for `context_graph_id`.',
         parameters: {
           type: 'object',
           properties: {
-            context_graph_id: {
-              type: 'string',
-              description: 'Context Graph ID to subscribe to (lowercase slug, hyphens allowed, e.g. "my-research").',
-            },
-            include_shared_memory: {
-              type: 'boolean',
-              description: 'Whether to also catch up Shared Working Memory data from peers. Default: true (both SWM and Verified Memory sync).',
-            },
+            context_graph_id: { type: 'string', description: 'Context graph ID (e.g. "my-research").' },
+            include_shared_memory: { type: 'boolean', description: 'Also sync Shared Working Memory. Default: true.' },
           },
           required: ['context_graph_id'],
         },
@@ -1095,31 +1086,28 @@ export class DkgNodePlugin {
       {
         name: 'dkg_publish',
         description:
-          'Publish knowledge quads to a DKG context graph. Use this when you already have a curated quad set ' +
-          'you want pushed to Verified Memory (on-chain) in one shot — it writes to Shared Working Memory first, ' +
-          'then publishes all SWM content and clears it. Returns `{ kcId, kaCount, quadsPublished }`. ' +
-          'For the canonical stepwise flow (create assertion → write → promote → publish) use the dkg_assertion_* ' +
+          'Publish a curated quad set to a CG in one shot: writes to Shared Working Memory, then publishes all ' +
+          'SWM to Verified Memory (on-chain) and clears SWM. For the stepwise flow, use the dkg_assertion_* ' +
           'tools plus this one. Accepts `paranet_id` as a deprecated V9 alias for `context_graph_id`.',
         parameters: {
           type: 'object',
           properties: {
-            context_graph_id: { type: 'string', description: 'Target context graph ID (e.g. "testing", "my-research").' },
+            context_graph_id: { type: 'string', description: 'Target context graph ID.' },
             quads: {
               type: 'array',
               items: {
                 type: 'object',
                 properties: {
-                  subject: { type: 'string', description: 'Subject URI (e.g. "https://example.org/wine/cabernet").' },
-                  predicate: { type: 'string', description: 'Predicate URI (e.g. "https://schema.org/name").' },
-                  object: { type: 'string', description: 'Object — URI or plain literal value (e.g. "Cabernet Sauvignon" or "https://schema.org/Product").' },
+                  subject: { type: 'string', description: 'Subject URI.' },
+                  predicate: { type: 'string', description: 'Predicate URI.' },
+                  object: { type: 'string', description: 'Object — URI or literal (URI auto-detected by prefix).' },
                   graph: { type: 'string', description: 'Optional named graph URI.' },
                 },
                 required: ['subject', 'predicate', 'object'],
               },
               description:
-                'Array of quads to publish. Each quad is `{subject, predicate, object, graph?}`. ' +
-                'URIs are auto-detected by prefix (http://, https://, urn:, did:); anything else becomes a string literal. ' +
-                'Example: `[{ subject: "https://example.org/a", predicate: "https://schema.org/name", object: "Alpha" }]`.',
+                'Quads to publish. Example: `[{ subject: "https://example.org/a", predicate: "https://schema.org/name", object: "Alpha" }]`. ' +
+                'Object values starting with http://, https://, urn:, did: are passed as URIs; anything else becomes a literal.',
             },
           },
           required: ['context_graph_id', 'quads'],
@@ -1129,17 +1117,14 @@ export class DkgNodePlugin {
       {
         name: 'dkg_query',
         description:
-          'Run a read-only SPARQL query (SELECT, CONSTRUCT, ASK, DESCRIBE) against the local DKG triple store. ' +
-          'Use this for cross-assertion or cross-context-graph queries. Use `GRAPH ?g { ... }` to match across ' +
-          'named graphs. Queries are local and fast — no network round-trip. Returns the raw query result ' +
-          '(bindings for SELECT, quads for CONSTRUCT, etc.). Accepts `paranet_id` as a deprecated V9 alias ' +
-          'for `context_graph_id`.',
+          'Read-only SPARQL query against the local triple store (cross-assertion / cross-CG). Use ' +
+          '`GRAPH ?g { ... }` for named graphs. Accepts `paranet_id` as a deprecated V9 alias for `context_graph_id`.',
         parameters: {
           type: 'object',
           properties: {
-            sparql: { type: 'string', description: 'SPARQL query string (SELECT, CONSTRUCT, ASK, or DESCRIBE).' },
-            context_graph_id: { type: 'string', description: 'Optional context graph scope — omit to query all data across all subscribed CGs.' },
-            include_shared_memory: { type: 'boolean', description: 'Whether to also search Shared Working Memory data in addition to Verified Memory. Default: false.' },
+            sparql: { type: 'string', description: 'SPARQL SELECT, CONSTRUCT, ASK, or DESCRIBE.' },
+            context_graph_id: { type: 'string', description: 'Optional CG scope — omit to query all subscribed CGs.' },
+            include_shared_memory: { type: 'boolean', description: 'Also search Shared Working Memory. Default: false.' },
           },
           required: ['sparql'],
         },
@@ -1148,14 +1133,12 @@ export class DkgNodePlugin {
       {
         name: 'dkg_find_agents',
         description:
-          'Discover DKG agents on the P2P network. Call with no parameters to list all known agents, or filter ' +
-          'by framework or skill_type URI. Returns `{ agents: [...] }`. ' +
-          'Requires a live P2P network — returns an empty list when the node has no peers. ' +
-          'Non-fatal when the network is unreachable; errors from the daemon are surfaced as a tool error.',
+          'Discover DKG agents on the P2P network. Requires a live P2P network — returns an empty list when ' +
+          'no peers are reachable.',
         parameters: {
           type: 'object',
           properties: {
-            framework: { type: 'string', description: 'Filter by framework name (e.g. "OpenClaw", "ElizaOS").' },
+            framework: { type: 'string', description: 'Filter by framework (e.g. "OpenClaw", "ElizaOS").' },
             skill_type: { type: 'string', description: 'Filter by skill type URI (e.g. "ImageAnalysis").' },
           },
           required: [],
@@ -1165,15 +1148,13 @@ export class DkgNodePlugin {
       {
         name: 'dkg_send_message',
         description:
-          'Send an end-to-end encrypted chat message to another DKG agent by peer ID or name. ' +
-          'Use dkg_find_agents first to discover peer IDs. Returns the daemon\'s delivery receipt. ' +
-          'Requires a live P2P connection to the target peer — fails with a clear error when the target is ' +
-          'offline, unreachable, or when this node has no P2P network available.',
+          'Send an end-to-end encrypted chat message to another DKG agent. Use dkg_find_agents first to ' +
+          'discover peer IDs. Fails when the target is offline or the P2P network is unavailable.',
         parameters: {
           type: 'object',
           properties: {
-            peer_id: { type: 'string', description: 'Recipient peer ID (starts with 12D3KooW...) or agent name.' },
-            text: { type: 'string', description: 'Message text to send (UTF-8).' },
+            peer_id: { type: 'string', description: 'Recipient peer ID (12D3KooW…) or agent name.' },
+            text: { type: 'string', description: 'Message text.' },
           },
           required: ['peer_id', 'text'],
         },
@@ -1182,17 +1163,13 @@ export class DkgNodePlugin {
       {
         name: 'dkg_read_messages',
         description:
-          'Read P2P chat messages exchanged with other DKG agents (both sent and received). ' +
-          'Use this after dkg_send_message to retrieve replies, or to audit recent DM history. ' +
-          'Returns `{ messages: [...] }`. ' +
-          'Requires the P2P network subsystem to be up — returns an empty list when the node has no peers ' +
-          'or messaging is unavailable; does not throw on transient network issues.',
+          'Read P2P chat messages (sent + received). Returns an empty list when the P2P network is unavailable.',
         parameters: {
           type: 'object',
           properties: {
-            peer: { type: 'string', description: 'Filter by peer ID or agent name (optional).' },
-            limit: { type: 'string', description: 'Maximum number of messages to return (default: 100, max 1000).' },
-            since: { type: 'string', description: 'Only return messages after this Unix-ms timestamp (optional).' },
+            peer: { type: 'string', description: 'Filter by peer ID or agent name.' },
+            limit: { type: 'string', description: 'Max messages (default 100, max 1000).' },
+            since: { type: 'string', description: 'Only messages after this Unix-ms timestamp.' },
           },
           required: [],
         },
@@ -1201,16 +1178,14 @@ export class DkgNodePlugin {
       {
         name: 'dkg_invoke_skill',
         description:
-          "Invoke a remote agent's skill over the DKG network. Use dkg_find_agents with skill_type first to " +
-          'discover which agents offer the skill. Returns the remote agent\'s response. ' +
-          'Requires an active P2P connection to the target peer — fails with a clear error when the peer is ' +
-          'offline, does not advertise the skill, or when this node has no P2P network available.',
+          "Invoke a remote agent's skill over the DKG network. Use dkg_find_agents with skill_type first. " +
+          'Fails when the peer is offline or the P2P network is unavailable.',
         parameters: {
           type: 'object',
           properties: {
-            peer_id: { type: 'string', description: 'Target agent peer ID (starts with 12D3KooW...) or agent name.' },
-            skill_uri: { type: 'string', description: 'Skill URI to invoke (e.g. "ImageAnalysis").' },
-            input: { type: 'string', description: 'Input data as UTF-8 text (semantics are skill-specific).' },
+            peer_id: { type: 'string', description: 'Target peer ID (12D3KooW…) or agent name.' },
+            skill_uri: { type: 'string', description: 'Skill URI (e.g. "ImageAnalysis").' },
+            input: { type: 'string', description: 'UTF-8 input (skill-specific semantics).' },
           },
           required: ['peer_id', 'skill_uri', 'input'],
         },
@@ -1221,16 +1196,14 @@ export class DkgNodePlugin {
       {
         name: 'dkg_assertion_create',
         description:
-          'Create a per-agent Working Memory assertion graph inside a context graph. This is step 1 of the ' +
-          'canonical write flow (create → write → promote → publish). Returns `{ assertionUri, alreadyExists }` — ' +
-          'idempotent: a duplicate name returns `{ assertionUri: null, alreadyExists: true }` instead of erroring. ' +
-          'The assertion is private to this agent until promoted to Shared Working Memory.',
+          'Step 1 of the canonical flow. Create a per-agent Working Memory assertion graph. Idempotent: a ' +
+          'duplicate name returns `{ assertionUri: null, alreadyExists: true }`.',
         parameters: {
           type: 'object',
           properties: {
-            context_graph_id: { type: 'string', description: 'Target context graph ID (e.g. "my-research").' },
-            name: { type: 'string', description: 'Assertion name — lowercase letters, digits, and hyphens (e.g. "chat-turns", "notes-2026-04").' },
-            sub_graph_name: { type: 'string', description: 'Optional sub-graph name inside the context graph (the sub-graph must be pre-registered via dkg_sub_graph_create).' },
+            context_graph_id: { type: 'string', description: 'Target context graph ID.' },
+            name: { type: 'string', description: 'Assertion name (lowercase letters, digits, hyphens).' },
+            sub_graph_name: { type: 'string', description: 'Optional sub-graph (must be pre-registered).' },
           },
           required: ['context_graph_id', 'name'],
         },
@@ -1239,16 +1212,13 @@ export class DkgNodePlugin {
       {
         name: 'dkg_assertion_write',
         description:
-          'Append quads into an existing Working Memory assertion. Step 2 of the canonical write flow — the ' +
-          'assertion must have been created first via dkg_assertion_create (idempotent). Returns `{ written }` ' +
-          'with the number of quads accepted by the daemon. Object values that look like URIs ' +
-          '(http://, https://, urn:, did:) are passed as URIs; anything else is wrapped as a string literal. ' +
-          'Example quad: `{ subject: "https://example.org/a", predicate: "https://schema.org/name", object: "Alpha" }`.',
+          'Step 2 of the canonical flow. Append quads to an existing assertion. Object values are auto-typed as ' +
+          'URI or literal. Example: `{ subject: "https://example.org/a", predicate: "https://schema.org/name", object: "Alpha" }`.',
         parameters: {
           type: 'object',
           properties: {
             context_graph_id: { type: 'string', description: 'Target context graph ID.' },
-            name: { type: 'string', description: 'Assertion name (must already exist — call dkg_assertion_create first).' },
+            name: { type: 'string', description: 'Assertion name (must already exist).' },
             quads: {
               type: 'array',
               items: {
@@ -1256,14 +1226,14 @@ export class DkgNodePlugin {
                 properties: {
                   subject: { type: 'string', description: 'Subject URI.' },
                   predicate: { type: 'string', description: 'Predicate URI.' },
-                  object: { type: 'string', description: 'Object — URI or plain literal value (URI auto-detected by prefix).' },
+                  object: { type: 'string', description: 'Object URI or literal.' },
                   graph: { type: 'string', description: 'Optional named graph URI.' },
                 },
                 required: ['subject', 'predicate', 'object'],
               },
-              description: 'Array of quads to append. Non-empty.',
+              description: 'Non-empty array of quads to append.',
             },
-            sub_graph_name: { type: 'string', description: 'Optional sub-graph name (must match the one used at create time).' },
+            sub_graph_name: { type: 'string', description: 'Must match the one used at create time.' },
           },
           required: ['context_graph_id', 'name', 'quads'],
         },
@@ -1272,11 +1242,8 @@ export class DkgNodePlugin {
       {
         name: 'dkg_assertion_promote',
         description:
-          'Promote a Working Memory assertion (or selected root entities from it) into Shared Working Memory. ' +
-          'Step 3 of the canonical flow — after promotion the data is visible to other agents in the context ' +
-          'graph and is eligible for dkg_publish. Returns the daemon promotion result (promoted entities + ' +
-          'diagnostics). Fails with 400 if the assertion is empty, the name is invalid, or a selected entity ' +
-          "isn't present in the assertion.",
+          'Step 3 of the canonical flow. Promote an assertion (or selected root entities) from Working Memory ' +
+          'into Shared Working Memory, making it eligible for dkg_publish.',
         parameters: {
           type: 'object',
           properties: {
@@ -1284,10 +1251,10 @@ export class DkgNodePlugin {
             name: { type: 'string', description: 'Assertion name to promote.' },
             entities: {
               type: 'array',
-              items: { type: 'string', description: 'Root entity URI to promote.' },
-              description: 'Which entities to promote: omit or pass the string "all" to promote every root entity in the assertion; or pass an array of root entity URIs to promote only those. Default: "all".',
+              items: { type: 'string', description: 'Root entity URI.' },
+              description: 'Root entity URIs to promote, or omit / pass `"all"` to promote every root entity. Default: "all".',
             },
-            sub_graph_name: { type: 'string', description: 'Optional sub-graph name (must match the one used at write time).' },
+            sub_graph_name: { type: 'string', description: 'Must match the one used at write time.' },
           },
           required: ['context_graph_id', 'name'],
         },
@@ -1296,15 +1263,13 @@ export class DkgNodePlugin {
       {
         name: 'dkg_assertion_discard',
         description:
-          'Discard a Working Memory assertion without promoting it. Use this for lifecycle cleanup when you ' +
-          'no longer want the WM data (e.g., aborted draft, failed extraction). Returns `{ discarded: true }`. ' +
-          'Idempotent-friendly but errors (400) if the assertion does not exist or the name/context graph is invalid.',
+          'Discard a Working Memory assertion without promoting it. Errors (400) if the assertion is missing.',
         parameters: {
           type: 'object',
           properties: {
             context_graph_id: { type: 'string', description: 'Target context graph ID.' },
             name: { type: 'string', description: 'Assertion name to discard.' },
-            sub_graph_name: { type: 'string', description: 'Optional sub-graph name (must match the one used at create time).' },
+            sub_graph_name: { type: 'string', description: 'Must match the one used at create time.' },
           },
           required: ['context_graph_id', 'name'],
         },
@@ -1313,20 +1278,18 @@ export class DkgNodePlugin {
       {
         name: 'dkg_assertion_import_file',
         description:
-          'Import a local document (markdown, PDF, etc.) into a Working Memory assertion. The daemon reads the ' +
-          'file, runs its extraction pipeline (Phase 1 conversion → Phase 2 markdown triple extraction), and ' +
-          'writes the resulting triples into the named assertion graph. text/markdown skips Phase 1; other ' +
-          'content types require a registered converter (otherwise extraction returns status "skipped"). ' +
-          'Returns `{ assertionUri, fileHash, rootEntity?, detectedContentType, extraction: { status, tripleCount, ... } }`.',
+          'Import a local document (markdown, PDF, etc.) into an assertion: the daemon runs its extraction ' +
+          'pipeline and writes the resulting triples. text/markdown is native; other types need a registered ' +
+          'converter (extraction returns `status: "skipped"` if none).',
         parameters: {
           type: 'object',
           properties: {
             context_graph_id: { type: 'string', description: 'Target context graph ID.' },
-            name: { type: 'string', description: 'Assertion name to write into (will be created if it doesn\'t exist — but you can also pre-create it with dkg_assertion_create for explicitness).' },
-            file_path: { type: 'string', description: 'Absolute local path to the file to import. The tool reads the file and streams it as multipart/form-data to the daemon.' },
-            content_type: { type: 'string', description: 'Optional MIME type override (e.g. "text/markdown", "application/pdf"). If omitted, the daemon infers from the file extension / filename.' },
-            ontology_ref: { type: 'string', description: 'Optional ontology URI to guide Phase 2 extraction (e.g. the CG\'s `_ontology` URI).' },
-            sub_graph_name: { type: 'string', description: 'Optional sub-graph name (must be pre-registered via dkg_sub_graph_create).' },
+            name: { type: 'string', description: 'Target assertion name.' },
+            file_path: { type: 'string', description: 'Absolute local path to the file to import.' },
+            content_type: { type: 'string', description: 'MIME override (e.g. "text/markdown", "application/pdf"). Inferred from extension when omitted.' },
+            ontology_ref: { type: 'string', description: "Optional ontology URI to guide extraction (e.g. the CG's `_ontology`)." },
+            sub_graph_name: { type: 'string', description: 'Optional sub-graph (must be pre-registered).' },
           },
           required: ['context_graph_id', 'name', 'file_path'],
         },
@@ -1335,16 +1298,14 @@ export class DkgNodePlugin {
       {
         name: 'dkg_assertion_query',
         description:
-          'Dump all quads currently stored in a single Working Memory assertion\'s graph. Use this to read ' +
-          'back what was just written before promoting, or to inspect an in-flight extraction. This is NOT a ' +
-          'SPARQL endpoint — it returns every quad in the assertion. For ad-hoc SPARQL across assertions or ' +
-          'context graphs, use dkg_query instead. Returns `{ quads, count }`.',
+          'Dump every quad in an assertion as `{ quads, count }`. NOT a SPARQL endpoint — use dkg_query for ' +
+          'ad-hoc SPARQL.',
         parameters: {
           type: 'object',
           properties: {
             context_graph_id: { type: 'string', description: 'Target context graph ID.' },
-            name: { type: 'string', description: 'Assertion name to dump quads from.' },
-            sub_graph_name: { type: 'string', description: 'Optional sub-graph name (must match the one used at write time).' },
+            name: { type: 'string', description: 'Assertion name to dump.' },
+            sub_graph_name: { type: 'string', description: 'Must match the one used at write time.' },
           },
           required: ['context_graph_id', 'name'],
         },
@@ -1353,17 +1314,15 @@ export class DkgNodePlugin {
       {
         name: 'dkg_assertion_history',
         description:
-          'Fetch the lifecycle descriptor for a Working Memory assertion — creation time, author, latest ' +
-          'extraction status, promotion state, etc. Use this to audit what happened to an assertion after an ' +
-          'import, or to check whether a promotion has been committed. Returns the daemon descriptor, or 404 ' +
-          'if no lifecycle record exists for the assertion under the given agent address.',
+          'Fetch an assertion\'s lifecycle descriptor (author, extraction status, promotion state). ' +
+          'Returns 404 if no record exists.',
         parameters: {
           type: 'object',
           properties: {
             context_graph_id: { type: 'string', description: 'Target context graph ID.' },
-            name: { type: 'string', description: 'Assertion name to fetch history for.' },
-            agent_address: { type: 'string', description: 'Optional author agent address (defaults to this node\'s default agent address when omitted).' },
-            sub_graph_name: { type: 'string', description: 'Optional sub-graph name (must match the one used at write time).' },
+            name: { type: 'string', description: 'Assertion name.' },
+            agent_address: { type: 'string', description: "Optional author — defaults to this node's agent address." },
+            sub_graph_name: { type: 'string', description: 'Must match the one used at write time.' },
           },
           required: ['context_graph_id', 'name'],
         },
@@ -1374,14 +1333,12 @@ export class DkgNodePlugin {
       {
         name: 'dkg_sub_graph_create',
         description:
-          'Create a named sub-graph inside a context graph. Sub-graphs are optional organizational partitions ' +
-          'that let assertions be committed into a scoped region of the CG. Returns `{ created, contextGraphId }`. ' +
-          'Fails with 400 if the sub-graph name is invalid, already exists, or the context graph is not found.',
+          'Create a named sub-graph inside a context graph (optional partition for scoped assertions).',
         parameters: {
           type: 'object',
           properties: {
             context_graph_id: { type: 'string', description: 'Parent context graph ID.' },
-            sub_graph_name: { type: 'string', description: 'Sub-graph name (lowercase letters, digits, hyphens; must not start with "_" — reserved for daemon-internal graphs).' },
+            sub_graph_name: { type: 'string', description: 'Sub-graph name (lowercase letters, digits, hyphens; must not start with "_").' },
           },
           required: ['context_graph_id', 'sub_graph_name'],
         },
@@ -1390,14 +1347,11 @@ export class DkgNodePlugin {
       {
         name: 'dkg_sub_graph_list',
         description:
-          'List all registered sub-graphs for a context graph, with per-sub-graph entity and triple counts. ' +
-          'Use this to discover what sub-graphs exist before writing assertions into one. Returns ' +
-          '`{ contextGraphId, subGraphs: [{ name, uri, description, createdBy, createdAt, entityCount, tripleCount }] }`. ' +
-          'Counts are best-effort — they degrade to zero on transient query failure without erroring.',
+          'List sub-graphs in a context graph with best-effort entity / triple counts.',
         parameters: {
           type: 'object',
           properties: {
-            context_graph_id: { type: 'string', description: 'Context graph ID to list sub-graphs for.' },
+            context_graph_id: { type: 'string', description: 'Parent context graph ID.' },
           },
           required: ['context_graph_id'],
         },
