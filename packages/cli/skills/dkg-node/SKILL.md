@@ -118,6 +118,24 @@ requests without an explicit caller fall back to the node's default agent.
 **Public endpoints (no auth):** `GET /api/status`, `GET /api/chain/rpc-health`,
 `GET /.well-known/skill.md`.
 
+### Token discovery
+
+**Co-located agents (running on the same machine as the daemon).** The daemon writes its admin token to `~/.dkg/auth.token` on first start. If your adapter provides a DKG client (e.g. the OpenClaw adapter's `DkgDaemonClient`), **prefer the adapter's high-level tools** (`createContextGraph`, `createAssertion`, `promoteAssertion`, etc.) — they load this file automatically and you never need to handle `$TOKEN` yourself. Only fall back to raw HTTP if no adapter tool covers what you need, in which case:
+
+```bash
+TOKEN=$(cat ~/.dkg/auth.token)
+```
+
+**Remote agents (not on the daemon host).** Register your own agent via `POST /api/agent/register` and use the returned `authToken` — see "Agent identity" below. Do not ask the user to paste `~/.dkg/auth.token` from another machine; that's the node's admin credential and should stay on the host that owns the daemon.
+
+**If you get 401 or 403 on a protected route, diagnose in this order:**
+
+1. **Is there a token on the request?** A missing `Authorization` header → 401. If you tried to build a `curl` command without discovering the token first, the adapter's built-in tools should have been your first choice.
+2. **Does the token correspond to an agent the node knows?** Call `GET /api/agent/identity` — the response tells you who the server sees as the caller. If it doesn't match who you think you are, you're holding the wrong token.
+3. **Do you have CG-level access?** A valid token + recognized agent can still get 403 on context-graph operations if the agent isn't a participant / creator of that CG. Check the CG's participant list or use an invite / join flow (§6).
+
+Never guess — `GET /api/agent/identity` is free and definitive. Call it first.
+
 **Agent identity:**
 
 - `POST /api/agent/register` — register a new agent on this node.
