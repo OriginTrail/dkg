@@ -160,7 +160,7 @@ Drop to HTTP when the operation isn't in the table — participant admin (§6), 
 | `dkg_status` | `GET /api/status` | Node health and subscribed CGs |
 | `dkg_wallet_balances` | `GET /api/wallets/balances` | TRAC / ETH balances |
 | `dkg_list_context_graphs` | `GET /api/context-graph/list` | List subscribed projects |
-| `dkg_context_graph_create` | `POST /api/context-graph/create` | Create a project (simple or multi-sig) |
+| `dkg_context_graph_create` | `POST /api/context-graph/create` | Create a simple (local) context graph. Multi-sig / on-chain registration is HTTP-only — see §6 |
 | `dkg_subscribe` | `POST /api/context-graph/subscribe` | Subscribe + catch up an existing CG |
 | `dkg_assertion_create` | `POST /api/assertion/create` | Start a WM assertion |
 | `dkg_assertion_write` | `POST /api/assertion/{name}/write` | Append triples to a WM assertion |
@@ -169,7 +169,7 @@ Drop to HTTP when the operation isn't in the table — participant admin (§6), 
 | `dkg_assertion_import_file` | `POST /api/assertion/{name}/import-file` | Multipart upload a document + extract triples |
 | `dkg_assertion_query` | `POST /api/assertion/{name}/query` | Dump every quad in a single assertion (not SPARQL) |
 | `dkg_assertion_history` | `GET /api/assertion/{name}/history` | Read an assertion's lifecycle descriptor |
-| `dkg_publish` | `POST /api/shared-memory/publish` | **One-shot**: write supplied quads to SWM, then publish SWM → VM (TRAC) |
+| `dkg_publish` | `POST /api/shared-memory/write` + `POST /api/shared-memory/publish` | **Two-call helper**: first writes supplied quads to SWM via `/write`, then publishes all SWM → VM (TRAC). Calling only the `/publish` route skips the write — if dropping to raw HTTP, use both calls in order |
 | `dkg_shared_memory_publish` | `POST /api/shared-memory/publish` | **Canonical finalizer** after `dkg_assertion_promote`: publish SWM → VM, no fresh quads |
 | `dkg_sub_graph_create` | `POST /api/sub-graph/create` | Register a sub-graph inside a CG |
 | `dkg_sub_graph_list` | `GET /api/sub-graph/list` | List sub-graphs in a CG |
@@ -179,7 +179,7 @@ Drop to HTTP when the operation isn't in the table — participant admin (§6), 
 | `dkg_read_messages` | `GET /api/messages` | Read inbound messages |
 | `dkg_invoke_skill` | `POST /api/invoke-skill` | Call another agent's skill (best-effort P2P) |
 
-P2P tools fail gracefully when the peer is offline. `dkg_publish` and `dkg_shared_memory_publish` both map to the same HTTP route but differ in intent: use the one-shot for "I have quads, publish now"; use the canonical finalizer as step 4 of the stepwise write → promote → publish flow.
+P2P tools fail gracefully when the peer is offline. `dkg_publish` (fresh quads + write + publish, two HTTP calls) and `dkg_shared_memory_publish` (publish existing SWM, one HTTP call) differ in intent: use the two-call helper for "I have quads, publish now"; use the canonical finalizer as step 4 of the stepwise write → promote → publish flow.
 
 > **Migration note on `dkg_query`.** An earlier draft accepted `include_shared_memory: true`, which unioned the legacy data-graph path with SWM; that parameter has been removed and no single `view` value reproduces that exact union. Closest intents: omit `view` for the legacy data-graph path, `view: "shared-working-memory"` for SWM-only, `view: "verified-memory"` for on-chain. If you need the exact legacy union, call `POST /api/query` directly with `includeSharedMemory: true`.
 
@@ -294,7 +294,9 @@ Implications:
 ### Core CG routes
 
 - `POST /api/context-graph/create` — create a context graph.
-  Body: `{ id, name, description?, accessPolicy? (0=open, 1=private), allowedAgents?: [...], allowedPeers?: [...], private?, register?, participantIdentityIds?, requiredSignatures? }`. Local-only by default; pass `register: true` to also register on-chain (failures leave the CG local and return `registerError` + retry hint).
+  Body: `{ id, name, description?, accessPolicy? (0=open, 1=private), allowedAgents?: [...], allowedPeers?: [...], private?, register?, participantIdentityIds?, requiredSignatures? }`.
+
+  Whether the CG stays local depends on the node's chain configuration. On a chain-disabled node (`chainId: 'none'` or a mock), the CG is local-only until a `/api/context-graph/register` call promotes it. On a chain-enabled node with an on-chain identity, `createContextGraph()` auto-registers on-chain as a best-effort side-effect — the CG is created locally first, then a registration is attempted; failures are logged as warnings (not surfaced as a `registerError` on the create response) and the CG remains local. The explicit `register: true` flag forces an additional registration attempt after create and can return `409 already registered` when the auto-register path already succeeded — so `register: true` is mainly useful on chain-disabled nodes (where it's a no-op unless the node operator reconfigures the chain adapter) or as a retry hook.
   - **Simple CG** (default): pass `{ id, name }`. Creator alone publishes to VM. Add `accessPolicy: 1` + `allowedAgents` for a curated CG.
   - **Multi-sig CG**: pass `participantIdentityIds: [...]` + `requiredSignatures: M`. Use `register: true` so the participant set and threshold are anchored on-chain. `requiredSignatures` is optional when `private: true`.
 - `POST /api/context-graph/register` — register a previously-created local CG on-chain (two-phase creation). Body: `{ id, revealOnChain?, accessPolicy? }`. Use this to promote a free CG to an on-chain identity before publishing to Verified Memory.
@@ -328,7 +330,7 @@ To put an assertion in a sub-graph, pass `subGraphName` on `/api/assertion/creat
 | `GET`  | `/api/context-graph/{id}/join-requests` | — | List pending join requests (curator view). |
 | `POST` | `/api/context-graph/{id}/approve-join` | `{ agentAddress }` | Approve a pending request. |
 | `POST` | `/api/context-graph/{id}/reject-join` | `{ agentAddress }` | Reject a pending request. |
-| `POST` | `/api/context-graph/{id}/sign-join` | — | Sign a join request as the caller and forward to the curator via P2P (multi-sig CGs). Signature is derived from the caller's token; no body required. |
+| `POST` | `/api/context-graph/{id}/sign-join` | — | Sign a join request as the caller and forward to the curator via P2P (multi-sig CGs). Signs `(contextGraphId, agentAddress, timestamp)` with the caller's private key; the bearer token only resolves which local agent is signing — external agents without a locally-stored private key cannot use this route. No body required. |
 
 ## 7. File Ingestion
 
@@ -407,22 +409,29 @@ curl $BASE_URL/api/assertion/climate-report/extraction-status?contextGraphId=res
   -H "Authorization: Bearer $TOKEN"
 ```
 
-Returns the flattened `extraction` block:
+Returns:
 
 | Field | Type | Notes |
 |---|---|---|
-| `status` | `"completed"` \| `"skipped"` \| `"failed"` | Terminal state |
+| `assertionUri` | string | The fully-qualified WM assertion URI the record belongs to |
+| `status` | `"in_progress"` \| `"completed"` \| `"skipped"` \| `"failed"` | Job state. Synchronous extractions return `completed` immediately on the import-file response; async flows may return `in_progress` until the pipeline finishes. Poll until terminal |
 | `fileHash` | string | Content hash (e.g. `keccak256:…`) |
-| `pipelineUsed` | string \| `null` | Pipeline id, or `null` when `skipped` |
-| `tripleCount` | number | Structural triples written (`0` when `skipped`/`failed`) |
-| `mdIntermediateHash` | string, optional | Present only when Phase 1 ran (PDF/DOCX) |
-| `error` | string, optional | Present only when `status === "failed"` |
+| `detectedContentType` | string | MIME type the daemon resolved for the uploaded bytes |
+| `pipelineUsed` | string \| `null` | Registered pipeline identifier (e.g. `application/pdf`), or `null` when `skipped` |
+| `tripleCount` | number | Structural triples written to the assertion graph. May be non-zero on `failed` when the failure happened after partial triple assembly — do not interpret as "rolled back" |
+| `rootEntity` | string, optional | Phase 2 root entity URI when the extractor produced one |
+| `mdIntermediateHash` | string, optional | Hash of the Phase 1 markdown intermediate (present only when a converter ran — PDF/DOCX/etc.) |
+| `error` | string, optional | Present only when `status === "failed"`; short message |
+| `startedAt` | string (ISO-8601) | When the extraction job started |
+| `completedAt` | string (ISO-8601), optional | When the extraction job reached a terminal state |
 
-`404` if no import-file has run for that assertion (tracker is TTL-pruned). `assertionUri`, `detectedContentType`, and `rootEntity` only appear on the original import-file response, not here.
+`404` if no import-file has run for that assertion (tracker is TTL-pruned).
 
 ### Retrieving stored files
 
-- `GET /api/file/{fileHash}` — fetch a previously-imported file. Accepts `sha256:<hex>`, `keccak256:<hex>`, or bare `<hex>` (treated as sha256) — pass whatever prefix the import response returned. Optional `?contentType=...` overrides the response content-type; unsafe types are downgraded to `application/octet-stream` with `Content-Disposition: attachment`.
+- `GET /api/file/{fileHash}` — fetch a previously-imported file. Accepts `sha256:<hex>`, `keccak256:<hex>`, or bare `<hex>` (treated as sha256) — pass whatever prefix the import response returned.
+
+  The daemon does NOT persist the original content-type. Pass `?contentType=...` to supply it at request time — only types in the safe-preview allowlist (PDF, JSON, plain text, CSV, Markdown, PNG/JPEG/GIF/WEBP) render inline; anything else (including an omitted `?contentType=`) serves as `application/octet-stream` with `Content-Disposition: attachment`. Callers that need inline rendering must remember and re-supply the content-type themselves.
 
 ## 8. Node Administration
 
