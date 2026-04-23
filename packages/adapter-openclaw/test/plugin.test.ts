@@ -118,23 +118,31 @@ describe('DkgNodePlugin', () => {
     const subSchema = byName.get('dkg_subscribe')!.parameters.properties.include_shared_memory.type;
     expect(subSchema).toBe('boolean');
 
-    // dkg_query: `view` is an enum covering the two tool-safe layers of
-    // the daemon's GET_VIEWS. Working-memory is intentionally EXCLUDED —
-    // WM reads need an `agentAddress` this tool has no way to plumb
-    // safely (admitting WM would silently fall back to the node peerId
-    // namespace and return the wrong agent's data). Callers needing WM
-    // use HTTP `/api/query` directly. The legacy `include_shared_memory`
-    // boolean has been removed — there is no exact replacement because
-    // the old `true` path queried the data graph ∪ SWM (union), which
-    // no single `view` reproduces.
+    // dkg_query: `view` is a plain string — validation lives in the
+    // handler, not as a JSON-schema enum. Rationale: strict-schema
+    // hosts would reject invalid values (including `working-memory`,
+    // which we DO want to reach the handler so callers see the
+    // tailored "use HTTP for WM" guidance). Description enumerates
+    // accepted values for discoverability; handler enforces them.
+    // Working-memory is intentionally excluded from the accepted list
+    // — it needs an `agentAddress` this tool has no way to plumb
+    // safely (admitting WM would silently fall back to the node
+    // peerId namespace and return the wrong agent's data). Callers
+    // needing WM use HTTP `/api/query` directly. The legacy
+    // `include_shared_memory` boolean has been removed — there is
+    // no exact replacement because the old `true` path queried the
+    // data graph ∪ SWM (union), which no single `view` reproduces.
     const queryProps = byName.get('dkg_query')!.parameters.properties;
     expect(queryProps).not.toHaveProperty('include_shared_memory');
     expect(queryProps.view.type).toBe('string');
-    expect(queryProps.view.enum).toEqual([
-      'shared-working-memory',
-      'verified-memory',
-    ]);
-    expect(queryProps.view.enum).not.toContain('working-memory');
+    expect(queryProps.view).not.toHaveProperty('enum');
+    // Description must still advertise the accepted values + the WM
+    // escape hatch, so discoverability doesn't regress when the enum
+    // is dropped from the schema.
+    expect(queryProps.view.description).toContain('shared-working-memory');
+    expect(queryProps.view.description).toContain('verified-memory');
+    expect(queryProps.view.description).toContain('working-memory');
+    expect(queryProps.view.description).toContain('/api/query');
   });
 
   // ---------------------------------------------------------------------------

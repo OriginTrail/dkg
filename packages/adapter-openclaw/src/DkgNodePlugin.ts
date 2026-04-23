@@ -1141,12 +1141,14 @@ export class DkgNodePlugin {
             },
             view: {
               type: 'string',
-              enum: ['shared-working-memory', 'verified-memory'],
               description:
-                'Memory layer to read. `shared-working-memory` reads provisional gossip-replicated ' +
-                'data; `verified-memory` reads on-chain anchored data. Omit to use the legacy cross-' +
-                'graph data-path routing (not layer-scoped). Working-memory is intentionally not in ' +
-                'this enum — it needs an agentAddress not exposed on this tool; use HTTP for WM.',
+                'Memory layer to read. Accepted values: `shared-working-memory` (provisional, ' +
+                'gossip-replicated) or `verified-memory` (on-chain anchored). Omit to use the legacy ' +
+                'cross-graph data-path routing (not layer-scoped). `working-memory` is intentionally ' +
+                'not accepted here — it needs an `agentAddress` this tool has no way to plumb safely; ' +
+                'use HTTP POST /api/query with an agent-scoped bearer token for WM reads. ' +
+                'Validation is handler-side (not a JSON-schema enum) so strict-schema hosts still ' +
+                'surface the tailored migration guidance on invalid values.',
             },
           },
           required: ['sparql'],
