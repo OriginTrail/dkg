@@ -29,6 +29,7 @@ import {
 import { ethers } from 'ethers';
 import {
   DKGQueryEngine, QueryHandler,
+  emptyQueryResultForKind,
   type QueryRequest, type QueryResponse, type QueryAccessConfig, type LookupType,
 } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
@@ -2761,7 +2762,10 @@ export class DKGAgent {
 
     if (opts.contextGraphId && !(await this.canReadContextGraph(opts.contextGraphId))) {
       this.log.info(ctx, `Query denied for private context graph "${opts.contextGraphId}"`);
-      return { bindings: [] };
+      // A-1 follow-up review: synthetic deny must match the SPARQL form
+      // so ASK / CONSTRUCT / DESCRIBE clients get `false` / empty-quads
+      // instead of a SELECT-shaped `{ bindings: [] }`.
+      return emptyQueryResultForKind(sparql);
     }
 
     // A-1: Working-Memory isolation. When the caller is authenticated
@@ -2812,7 +2816,13 @@ export class DKGAgent {
         ctx,
         `WM query denied: caller=${callerAgentAddressStr} cannot read agentAddress=${agentAddressStr} — A-1 isolation`,
       );
-      return { bindings: [] };
+      // A-1 follow-up review: preserve the SPARQL query-form shape on
+      // denial so ASK clients see `{ bindings: [{ result: 'false' }] }`
+      // and CONSTRUCT / DESCRIBE clients see `{ bindings: [], quads: [] }`.
+      // Returning a SELECT-shaped `{ bindings: [] }` on every form leaks
+      // the fact that access was denied (versus an empty match) via the
+      // changed response shape.
+      return emptyQueryResultForKind(sparql);
     }
 
     // When no context graph is specified, exclude private CGs the caller cannot
@@ -2826,7 +2836,7 @@ export class DKGAgent {
       // aggregates (ASK, COUNT) or projections that omit graph/subject.
       if (excludeGraphPrefixes.length > 0 && this.sparqlReferencesPrivateGraphs(sparql, excludeGraphPrefixes)) {
         this.log.info(ctx, 'Query denied: SPARQL references private context graphs the caller cannot read');
-        return { bindings: [] };
+        return emptyQueryResultForKind(sparql);
       }
     }
 

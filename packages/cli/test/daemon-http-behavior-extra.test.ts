@@ -828,6 +828,124 @@ describe('A-1 — /api/query enforces working-memory isolation across agent toke
         adminBindings.length,
         `seed triple should be visible under its owning agent via the node-level admin path — got ${JSON.stringify(adminBindings)}`,
       ).toBeGreaterThan(0);
+
+      // A-1 follow-up review: the node-level admin token MUST NOT be
+      // able to impersonate a *different* registered agent and read
+      // that agent's WM. The previous implementation let the request
+      // fall through because `callerAgentAddress` was undefined; the
+      // daemon now returns 403 explicitly when view='working-memory'
+      // points at a foreign agentAddress without an agent-scoped token.
+      const adminCrossRes = await fetch(urlFor(d, '/api/query'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders(d) },
+        body: JSON.stringify({
+          sparql: `SELECT ?s ?p ?o WHERE { ?s ?p ?o FILTER(?s = <${seedSubject}>) }`,
+          contextGraphId: cgId,
+          view: 'working-memory',
+          agentAddress: agentB.agentAddress,
+        }),
+      });
+      expect(adminCrossRes.status).toBe(403);
+      const adminCrossBody = await adminCrossRes.json().catch(() => ({}) as any);
+      expect(adminCrossBody?.error ?? '').toMatch(/agent-scoped bearer token/);
+    },
+    60_000,
+  );
+
+  it(
+    'A-1 follow-up: access-denied synthetic response preserves SPARQL query form ' +
+      '(ASK → {result:"false"}, CONSTRUCT → quads:[])',
+    async () => {
+      const d = daemon!;
+      const cgId = 'a1-deny-shape-' + Math.random().toString(36).slice(2, 8);
+      const create = await fetch(urlFor(d, '/api/context-graph/create'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders(d) },
+        body: JSON.stringify({ id: cgId, name: cgId }),
+      });
+      expect([200, 201]).toContain(create.status);
+
+      const identityRes = await fetch(urlFor(d, '/api/agent/identity'), {
+        headers: authHeaders(d),
+      });
+      const identity = await identityRes.json();
+      const defaultAgentAddress: string = identity.agentAddress;
+
+      // Seed one WM triple under the default agent so an unrestricted
+      // query would return bindings if access control didn't apply.
+      const assertionName = 'a1-denyshape-' + Math.random().toString(36).slice(2, 8);
+      const createAssertionRes = await fetch(urlFor(d, '/api/assertion/create'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders(d) },
+        body: JSON.stringify({ contextGraphId: cgId, name: assertionName }),
+      });
+      expect([200, 201]).toContain(createAssertionRes.status);
+      const seedSubject = 'urn:a1-denyshape:seed-' + Math.random().toString(36).slice(2, 8);
+      const writeRes = await fetch(
+        urlFor(d, `/api/assertion/${encodeURIComponent(assertionName)}/write`),
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeaders(d) },
+          body: JSON.stringify({
+            contextGraphId: cgId,
+            quads: [
+              {
+                subject: seedSubject,
+                predicate: 'https://schema.org/name',
+                object: '"seed-deny"',
+              },
+            ],
+          }),
+        },
+      );
+      expect(writeRes.status).toBe(200);
+
+      // Register agent B on the same daemon and use B's scoped token
+      // to cross-read A's WM — this triggers the A-1 deny branch.
+      const agentB = await registerAgent(d, 'a1-denyshape-b');
+      expect(agentB.agentAddress).not.toBe(defaultAgentAddress);
+
+      // ASK form — a successful query would return
+      // `{ result: 'true' }`. Access denied must return
+      // `{ result: 'false' }`, not `{ bindings: [] }`.
+      const askRes = await queryAsAgent(d, agentB, {
+        sparql: `ASK WHERE { <${seedSubject}> ?p ?o }`,
+        contextGraphId: cgId,
+        view: 'working-memory',
+        agentAddress: defaultAgentAddress,
+      });
+      expect(askRes.status).toBe(200);
+      expect(
+        askRes.body?.result?.bindings,
+        `ASK deny should be shaped as [{result:'false'}] — got ${JSON.stringify(askRes.body?.result)}`,
+      ).toEqual([{ result: 'false' }]);
+
+      // CONSTRUCT form — a successful query returns
+      // `{ bindings: [], quads: [...] }`. Deny must carry `quads: []`
+      // alongside the empty bindings so clients can still destructure
+      // `result.quads` without a type error.
+      const constructRes = await queryAsAgent(d, agentB, {
+        sparql: `CONSTRUCT { ?s ?p ?o } WHERE { <${seedSubject}> ?p ?o . BIND(<${seedSubject}> AS ?s) }`,
+        contextGraphId: cgId,
+        view: 'working-memory',
+        agentAddress: defaultAgentAddress,
+      });
+      expect(constructRes.status).toBe(200);
+      expect(constructRes.body?.result?.bindings ?? []).toEqual([]);
+      expect(
+        constructRes.body?.result?.quads,
+        `CONSTRUCT deny must expose an empty quads[] array — got ${JSON.stringify(constructRes.body?.result)}`,
+      ).toEqual([]);
+
+      // SELECT form — still `{ bindings: [] }`, same as before.
+      const selectRes = await queryAsAgent(d, agentB, {
+        sparql: `SELECT ?o WHERE { <${seedSubject}> ?p ?o }`,
+        contextGraphId: cgId,
+        view: 'working-memory',
+        agentAddress: defaultAgentAddress,
+      });
+      expect(selectRes.status).toBe(200);
+      expect(selectRes.body?.result?.bindings ?? null).toEqual([]);
     },
     60_000,
   );

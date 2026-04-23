@@ -6625,6 +6625,29 @@ async function handleRequest(
       const callerAgentAddress = requestToken
         ? agent.resolveAgentByToken(requestToken)
         : undefined;
+      // A-1 follow-up review: close the auth-disabled / node-token hole.
+      // The guard above only fires for agent-scoped tokens. Requests
+      // from the node-level admin token — or any daemon started with
+      // `auth.enabled=false` — arrive here with
+      // `callerAgentAddress=undefined`, at which point
+      // `view: 'working-memory'` + a foreign `agentAddress` used to
+      // fall through and hit the query engine with the impersonation
+      // intact. Fail closed at the HTTP boundary: WM reads for an
+      // agent *other than* the node-default require an agent-scoped
+      // bearer token. Reading the node-default WM (which the admin
+      // effectively owns) is still allowed without agent scope, so
+      // admin + service scripts keep working.
+      if (view === 'working-memory' && typeof agentAddress === 'string' && !callerAgentAddress) {
+        const targetLower = agentAddress.toLowerCase();
+        const defaultLower = (agent.getDefaultAgentAddress() ?? '').toLowerCase();
+        if (!defaultLower || targetLower !== defaultLower) {
+          return jsonResponse(res, 403, {
+            error:
+              `working-memory reads for agentAddress=${agentAddress} require an agent-scoped bearer token. ` +
+              `Node-level / unauthenticated callers may only read the node-default agent's WM.`,
+          });
+        }
+      }
       const result = await agent.query(sparql, {
         contextGraphId,
         graphSuffix,
