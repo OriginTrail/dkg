@@ -6625,37 +6625,35 @@ async function handleRequest(
       const callerAgentAddress = requestToken
         ? agent.resolveAgentByToken(requestToken)
         : undefined;
-      // A-1 follow-up review: close the auth-disabled WM hole WITHOUT
-      // regressing existing node-token clients.
+      // A-1 follow-up review (iteration 2): close the auth-disabled WM
+      // hole WITHOUT regressing existing node-token clients.
       //
-      // Three cases land here with `callerAgentAddress === undefined`:
+      // When we reach this line with `callerAgentAddress === undefined`,
+      // the caller is one of:
       //
-      //   (a) `requestToken` is set but did not resolve to an
-      //       agent-scoped identity — that is the node-level admin
-      //       token (`~/.dkg/auth.token`). Admin is already trusted
-      //       to run as any local agent — `packages/adapter-openclaw`
-      //       relies on this: it uses the admin token AND passes a
-      //       session-specific `agentAddress` for each local agent.
-      //       Keep the legacy "skip the A-1 guard" behaviour here.
+      //   (a) node-level admin (`~/.dkg/auth.token`, a token present in
+      //       `validTokens`). Admin is already trusted to run as any
+      //       local agent — `packages/adapter-openclaw` relies on this
+      //       by passing a session-specific `agentAddress` alongside the
+      //       admin token. Keep the legacy "skip the A-1 guard" here.
       //
-      //   (b) `requestToken` is falsy because auth is DISABLED at
-      //       the daemon level. There is no bearer identity to
-      //       distinguish admin from attacker — this is the hole
-      //       Codex flagged: `view: 'working-memory'` + a foreign
-      //       `agentAddress` used to silently fall through. Fail
-      //       closed: an unauthenticated caller may only read the
-      //       node-default agent's WM. Foreign WM reads require at
-      //       least a bearer token (admin or agent-scoped).
+      //   (b) unauthenticated (auth disabled at daemon level, OR no
+      //       Authorization header, OR a bogus / mismatched bearer that
+      //       the auth middleware never validated because `authEnabled`
+      //       is false). This is the hole Codex flagged: a raw
+      //       `Authorization: Bearer junk` used to set `requestToken`
+      //       truthy, sliding past a `!requestToken` check and letting
+      //       foreign WM reads through.
       //
-      //   (c) `requestToken` is falsy because auth is enabled but
-      //       the middleware rejected the caller — we never reach
-      //       this line in that case.
+      //   (c) auth-enabled + rejected — we never reach this line
+      //       because `httpAuthGuard` has already 401'd the request.
       //
-      // So gate the 403 on `!requestToken` (case b); leave the admin
-      // path (case a) alone to preserve adapter-openclaw and other
-      // node-token clients.
+      // Gate the 403 on "not a known admin token" (i.e. the caller is
+      // not in `validTokens`), which fails closed for (b) regardless of
+      // what garbage they put in the header, and leaves (a) alone.
+      const isAdminToken = !!requestToken && validTokens.has(requestToken);
       if (
-        !requestToken &&
+        !isAdminToken &&
         view === 'working-memory' &&
         typeof agentAddress === 'string'
       ) {

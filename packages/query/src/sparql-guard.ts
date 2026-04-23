@@ -6,6 +6,7 @@
  * This module rejects any SPARQL that attempts mutation operations.
  */
 
+import type { QueryResult } from './query-engine.js';
 import { stripLiteralsAndComments } from './sparql-utils.js';
 
 const MUTATING_KEYWORDS = [
@@ -93,9 +94,7 @@ export function detectSparqlQueryKind(sparql: string): SparqlQueryKind {
  * an access-denied synthetic response is indistinguishable from a real
  * empty result at the wire level.
  */
-export function emptyQueryResultForKind(
-  sparql: string,
-): { bindings: Array<Record<string, string>>; quads?: unknown[] } {
+export function emptyQueryResultForKind(sparql: string): QueryResult {
   const kind = detectSparqlQueryKind(sparql);
   if (kind === 'ASK') return { bindings: [{ result: 'false' }] };
   if (kind === 'CONSTRUCT' || kind === 'DESCRIBE') return { bindings: [], quads: [] };

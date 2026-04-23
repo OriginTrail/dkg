@@ -1100,6 +1100,56 @@ describe('A-1 follow-up: auth-disabled /api/query fails closed on foreign WM', (
     },
     60_000,
   );
+
+  it(
+    'bogus `Authorization: Bearer junk` does NOT bypass the A-1 guard ' +
+      '(Codex PR #242 iter-2 regression: `!requestToken` was too permissive ' +
+      'because auth-disabled still populates requestToken from the header)',
+    async () => {
+      const daem = d!;
+      const identityRes = await fetch(urlFor(daem, '/api/agent/identity'));
+      const identity = await identityRes.json();
+      const defaultAgentAddress: string = identity.agentAddress;
+
+      const regRes = await fetch(urlFor(daem, '/api/agent/register'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: 'a1-bogus-bearer-' + Math.random().toString(36).slice(2, 6),
+        }),
+      });
+      expect([200, 201]).toContain(regRes.status);
+      const bAddr: string = (await regRes.json()).agentAddress;
+      expect(bAddr.toLowerCase()).not.toBe(defaultAgentAddress.toLowerCase());
+
+      const cgId = 'a1-bogus-' + Math.random().toString(36).slice(2, 8);
+      await fetch(urlFor(daem, '/api/context-graph/create'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: cgId, name: cgId }),
+      });
+
+      const res = await fetch(urlFor(daem, '/api/query'), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          // With auth disabled `httpAuthGuard` never validates this
+          // token — the old guard would see a truthy `requestToken`
+          // and skip the 403. The new guard must verify the token is
+          // actually in `validTokens` before granting the admin bypass.
+          Authorization: 'Bearer junk-token-not-in-validtokens',
+        },
+        body: JSON.stringify({
+          sparql: 'SELECT ?s WHERE { ?s ?p ?o } LIMIT 1',
+          contextGraphId: cgId,
+          view: 'working-memory',
+          agentAddress: bAddr,
+        }),
+      });
+      expect(res.status).toBe(403);
+    },
+    60_000,
+  );
 });
 
 // ---------------------------------------------------------------------------
