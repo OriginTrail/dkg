@@ -1,7 +1,13 @@
-import type { Logger } from "@node-llm/logger";
 import * as fs from "fs";
 import * as path from "path";
 import { createHash } from "crypto";
+
+interface Logger {
+  info?: (...args: unknown[]) => void;
+  warn?: (...args: unknown[]) => void;
+  error?: (...args: unknown[]) => void;
+  debug?: (...args: unknown[]) => void;
+}
 
 export interface ChatTurnMessage {
   role: "user" | "assistant" | "system" | "tool";
@@ -32,7 +38,7 @@ export class ChatTurnWriter {
     this.client = options.client;
     this.logger = options.logger;
     this.stateDir = options.stateDir;
-    this.watermarkFilePath = path.join(stateDir, "dkg-adapter", "chat-turn-watermarks.json");
+    this.watermarkFilePath = path.join(this.stateDir, "dkg-adapter", "chat-turn-watermarks.json");
     this.initFromFile();
   }
 
@@ -54,7 +60,7 @@ export class ChatTurnWriter {
         }
       }
     } catch (err) {
-      this.logger.warn("[ChatTurnWriter] Failed to load watermarks, starting fresh", { err });
+      this.logger.warn?.("[ChatTurnWriter] Failed to load watermarks, starting fresh", { err });
     }
   }
 
@@ -66,23 +72,23 @@ export class ChatTurnWriter {
       if (user || assistant) {
         const turnId = this.deterministicTurnId(sessionId, user, assistant);
         this.persistOne(sessionId, user, assistant, turnId).catch((err) => {
-          this.logger.error("[ChatTurnWriter.onAgentEnd] Persist failed", { err });
+          this.logger.error?.("[ChatTurnWriter.onAgentEnd] Persist failed", { err });
         });
       }
     } catch (err) {
-      this.logger.error("[ChatTurnWriter.onAgentEnd] Error", { err });
+      this.logger.error?.("[ChatTurnWriter.onAgentEnd] Error", { err });
     }
   }
 
   onBeforeCompaction(event: any, ctx?: any): void {
     try { this.flushSync(); } catch (err) {
-      this.logger.error("[ChatTurnWriter.onBeforeCompaction] Error", { err });
+      this.logger.error?.("[ChatTurnWriter.onBeforeCompaction] Error", { err });
     }
   }
 
   onBeforeReset(event: any, ctx?: any): void {
     try { this.flushSync(); } catch (err) {
-      this.logger.error("[ChatTurnWriter.onBeforeReset] Error", { err });
+      this.logger.error?.("[ChatTurnWriter.onBeforeReset] Error", { err });
     }
   }
 
@@ -92,7 +98,7 @@ export class ChatTurnWriter {
       if (!conversationKey) return;
       this.pendingUserMessages.set(conversationKey, ev.text);
     } catch (err) {
-      this.logger.error("[ChatTurnWriter.onMessageReceived] Error", { err });
+      this.logger.error?.("[ChatTurnWriter.onMessageReceived] Error", { err });
     }
   }
 
@@ -106,12 +112,12 @@ export class ChatTurnWriter {
       if (userText || assistantText) {
         const turnId = this.deterministicTurnId(sessionId, userText, assistantText);
         this.persistOne(sessionId, userText, assistantText, turnId).catch((err) => {
-          this.logger.error("[ChatTurnWriter.onMessageSent] Persist failed", { err });
+          this.logger.error?.("[ChatTurnWriter.onMessageSent] Persist failed", { err });
         });
       }
       this.pendingUserMessages.delete(conversationKey);
     } catch (err) {
-      this.logger.error("[ChatTurnWriter.onMessageSent] Error", { err });
+      this.logger.error?.("[ChatTurnWriter.onMessageSent] Error", { err });
     }
   }
 
@@ -169,7 +175,7 @@ export class ChatTurnWriter {
 
   private conversationKeyFromInternalEvent(ev: InternalMessageEvent): string {
     if (!ev.sessionKey) {
-      this.logger.warn("[ChatTurnWriter] No sessionKey in internal event");
+      this.logger.warn?.("[ChatTurnWriter] No sessionKey in internal event");
       return "";
     }
     return `openclaw:unknown:${this.sanitize(ev.sessionKey)}`;
@@ -212,7 +218,7 @@ export class ChatTurnWriter {
         await this.client.persistChatTurn({ sessionId, turnId, user, assistant });
         const currentIndex = this.loadWatermark(sessionId);
         this.saveWatermark(sessionId, currentIndex + 1);
-        this.logger.debug("[ChatTurnWriter] Persisted turn", { sessionId, turnId });
+        this.logger.debug?.("[ChatTurnWriter] Persisted turn", { sessionId, turnId });
         return;
       } catch (err) {
         attempt++;
@@ -233,7 +239,7 @@ export class ChatTurnWriter {
       fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2), "utf-8");
       fs.renameSync(tmpPath, this.watermarkFilePath);
     } catch (err) {
-      this.logger.error("[ChatTurnWriter] Failed to write watermark file", { err });
+      this.logger.error?.("[ChatTurnWriter] Failed to write watermark file", { err });
     }
   }
 }

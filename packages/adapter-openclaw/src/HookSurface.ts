@@ -288,9 +288,9 @@ export class HookSurface {
     const hookMap = existing as Map<string, HookHandler[]>;
     if (!hookMap.has(event)) hookMap.set(event, []);
 
-    const wrapped: HookHandler = (...args: unknown[]) => {
+    const wrapped: HookHandler = (...args: any[]) => {
       this.recordFire(key);
-      return (handler as (...a: unknown[]) => unknown)(...args);
+      return handler(...args);
     };
 
     hookMap.get(event)!.push(wrapped);

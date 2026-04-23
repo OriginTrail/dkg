@@ -310,7 +310,10 @@ export class DkgNodePlugin {
     const daemonUrl = this.config.daemonUrl ?? 'http://127.0.0.1:9200';
     this.client = new DkgDaemonClient({ baseUrl: daemonUrl });
     this.initialized = true;
-    this.chatTurnWriter = new ChatTurnWriter({ client: this.client, logger: api.logger, stateDir: api.runtime.state.resolveStateDir() });
+    const stateDir = (api as any)?.runtime?.state?.resolveStateDir?.()
+      ?? process.env.OPENCLAW_STATE_DIR
+      ?? require('os').homedir() + '/.openclaw';
+    this.chatTurnWriter = new ChatTurnWriter({ client: this.client, logger: api.logger, stateDir });
 
     api.registerHook('session_end', () => this.stop(), { name: 'dkg-node-stop' });
 
