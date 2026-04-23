@@ -113,7 +113,13 @@ Acceptance criteria per route module:
 - Same wire format and status codes (snapshot the full `daemon.ts` behaviour with a CDC test before splitting; the existing playwright + node-ui tests should keep passing).
 - Auth resolution (`requestAgentAddress`) is performed by `http/auth.ts`, not the route module.
 - Phase events (`tracker.start/startPhase/completePhase/complete`) stay at the route boundary so the journal contract doesn't change.
-- **Every existing legacy path stays wired.** The refactor is a pure file move, not an API break. Before merging any route split, grep the monorepo for the route string (including `/api/subscribe`, `/api/paranet/create|list|rename|exists`, and any other legacy aliases over `/api/context-graph/*`) and confirm in-repo clients (`packages/mcp-server`, `packages/mcp-dkg`, `packages/node-ui`) resolve against the new location.
+- **Every existing legacy path stays wired.** The refactor is a pure file move, not an API break. Before merging any route split, grep the monorepo for the route string and confirm in-repo clients (`packages/mcp-server`, `packages/mcp-dkg`, `packages/node-ui`) resolve against the new location. The known legacy aliases that must survive the move (verified against `packages/cli/src/daemon.ts` at the time of writing) are:
+  - `/api/subscribe` → V10 `/api/context-graph/subscribe`
+  - `/api/paranet/create | list | rename | exists` → V10 `/api/context-graph/*` (see the paranet caveat below; `paranet/create` is a narrower legacy shim, not a pure alias)
+  - `/api/workspace/write` → V10 `/api/shared-memory/write` (dual-wired at `daemon.ts:4646-4650`)
+  - `/api/workspace/enshrine` → V10 `/api/shared-memory/publish` (dual-wired at `daemon.ts:4706-4710`)
+
+  A route split that omits any of these aliases silently breaks older CLI builds, older `mcp-server` releases, and any user automation that hit the V9 surface.
 
 Recommended PR ordering (smallest → largest, each is independently mergeable):
 
@@ -125,7 +131,7 @@ Recommended PR ordering (smallest → largest, each is independently mergeable):
 6. Extract `routes/context-graph.ts` and `routes/sub-graph.ts` (paired — sub-graph routes share the private-CG gating helpers that live with context-graph), then `routes/paranet.ts` (V10 create/register multiplexing lives here — see note below), `routes/assertion.ts`, `routes/query.ts`, `routes/query-remote.ts`, `routes/shared-memory.ts`, `routes/sync.ts`, `routes/local-agent-integrations.ts`, `routes/verify.ts`, `routes/ccl.ts`, `routes/memory.ts`, `routes/epcis.ts`, `routes/connect.ts`, `routes/genui.ts`.
 7. Move helpers into `manifest/`, `markitdown/`, `mcp-version.ts`, `catchup.ts`.
 
-> **`/api/paranet/create` is NOT a pure alias over `/api/context-graph/create`.** The V10 paranet route additionally multiplexes the on‑chain create/register flow and accepts fields the legacy context‑graph route ignores (`register`, `allowedPeers`, `participantIdentityIds`, `requiredSignatures`, paranet curator + ACL parameters). Treat it as a separate compatibility route during the split. If consolidation ever happens, it is its own semver‑breaking PR with a dedicated migration note — not part of this "lift, don't rewrite" phase.
+> **`/api/paranet/create` is the narrower legacy shim, NOT the richer route.** Actual wiring in `packages/cli/src/daemon.ts:4955-5081` has the V10 `/api/context-graph/create` handler own the richer flow — when the body carries `participantIdentityIds` (with or without `id`/`name`) it multiplexes the on‑chain create/register path, and it is the route that understands `register`, `allowedPeers`, `participantIdentityIds`, `requiredSignatures`, plus paranet curator + ACL parameters. `/api/paranet/create` (`daemon.ts:7623-7701`) is the legacy shim: it takes only `{ id, name, description, allowedAgents, accessPolicy }` and delegates into the local‑create code path. The split must keep both handlers, but follow‑up PRs MUST NOT "consolidate" by moving the richer behaviour onto the legacy route — the contract in the tree today is that the V10 context‑graph handler is canonical and the paranet one is a compatibility stub. Any consolidation is its own semver‑breaking PR with a dedicated migration note, not part of this "lift, don't rewrite" phase.
 
 End state: `daemon.ts` ≤ 1 kLOC; no single route module > 800 LOC.
 
@@ -214,7 +220,7 @@ End state: `dkg-agent.ts` ≤ 1.5 kLOC; no sub‑module > 1.2 kLOC. The implemen
   - `packages/publisher` (phase-sequences + publish/update regression)
   - `packages/cli` (daemon HTTP behaviour + CLI integration)
   - `packages/node-ui` (chat-memory, operations view)
-  - `packages/mcp-server` (MCP tool schema + integration — the MCP server is an in-repo `/api/query`, `/api/context-graph/list`, `/api/subscribe`, and `/api/publisher/*` client; a route move that breaks its calls would otherwise slip through the daemon-only tests)
+  - `packages/mcp-server` (MCP tool schema + integration — the MCP server is an in-repo client of `/api/query`, `/api/shared-memory/write`, `/api/shared-memory/publish`, `/api/context-graph/list`, and `/api/context-graph/create` as wired in `packages/mcp-server/src/connection.ts`; a route move that breaks any of those calls would otherwise slip through the daemon-only tests. The list must be re‑grepped before any PR that touches routes — if this file falls out of sync with `connection.ts`, the verification checklist stops catching MCP‑publish regressions)
   - `packages/mcp-dkg` (the DKG-flavoured MCP bundle; same rationale)
 
   A repo‑wide `typecheck` script per package is itself a Phase‑2 follow‑up, not a prerequisite.
