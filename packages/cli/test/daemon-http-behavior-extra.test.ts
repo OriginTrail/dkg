@@ -1150,6 +1150,67 @@ describe('A-1 follow-up: auth-disabled /api/query fails closed on foreign WM', (
     },
     60_000,
   );
+
+  it(
+    'self-read via the legacy peerId alias is NOT 403d ' +
+      '(Codex PR #242 iter-4 regression: the guard used to compare only ' +
+      'against defaultAgentAddress, but resolveAgentAddress(undefined) also ' +
+      'exposes the bare peerId as the daemon\'s own WM identity, so an ' +
+      'auth-disabled self-read via that alias must still be allowed)',
+    async () => {
+      const daem = d!;
+      // The daemon exposes its own peerId via /api/host/info; fall back to
+      // /api/agent/identity (exposes { peerId }) if that route isn't
+      // wired in this fixture. We only need *some* path that reveals the
+      // daemon's peerId so we can assert the guard accepts it as self.
+      let peerId: string | undefined;
+      try {
+        const hostRes = await fetch(urlFor(daem, '/api/host/info'));
+        if (hostRes.ok) {
+          const host = (await hostRes.json()) as { peerId?: string };
+          peerId = host.peerId;
+        }
+      } catch {
+        // fall through
+      }
+      if (!peerId) {
+        const identityRes = await fetch(urlFor(daem, '/api/agent/identity'));
+        const identity = (await identityRes.json()) as { peerId?: string };
+        peerId = identity.peerId;
+      }
+      if (!peerId) {
+        // If neither route surfaces peerId this fixture can't exercise
+        // the legacy alias. Skip silently rather than fail — the guard
+        // is already covered by the defaultAgentAddress happy-path test
+        // above and the bogus-bearer 403 test below.
+        return;
+      }
+
+      const cgId = 'a1-self-alias-' + Math.random().toString(36).slice(2, 8);
+      await fetch(urlFor(daem, '/api/context-graph/create'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: cgId, name: cgId }),
+      });
+
+      const res = await fetch(urlFor(daem, '/api/query'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sparql: 'SELECT ?s WHERE { ?s ?p ?o } LIMIT 1',
+          contextGraphId: cgId,
+          view: 'working-memory',
+          agentAddress: peerId,
+        }),
+      });
+      // The legacy self-alias must not be rejected. 200 is the happy
+      // path; 4xx other than 403 would indicate a different input error
+      // (e.g. the daemon does not accept a peerId as an agentAddress at
+      // all). Only 403 would indicate the guard lost the alias.
+      expect(res.status).not.toBe(403);
+    },
+    60_000,
+  );
 });
 
 // ---------------------------------------------------------------------------

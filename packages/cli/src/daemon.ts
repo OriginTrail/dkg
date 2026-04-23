@@ -6657,13 +6657,25 @@ async function handleRequest(
         view === 'working-memory' &&
         typeof agentAddress === 'string'
       ) {
+        // Codex (iteration 4): the daemon's canonical "own WM" identity is
+        // whatever `agent.resolveAgentAddress(undefined)` returns — i.e.
+        // `defaultAgentAddress ?? peerId`. Several in-repo paths still
+        // authenticate under the legacy peerId alias (node-level tokens,
+        // auth-disabled self-reads before a default agent was configured),
+        // so we must accept both the default agent address *and* the bare
+        // peerId as self, otherwise an auth-disabled self-read via the
+        // legacy alias now 403s where it used to return the node's own WM.
         const targetLower = agentAddress.toLowerCase();
-        const defaultLower = (agent.getDefaultAgentAddress() ?? '').toLowerCase();
-        if (!defaultLower || targetLower !== defaultLower) {
+        const selfAliasesLower = new Set<string>();
+        const defaultAgent = agent.getDefaultAgentAddress();
+        if (defaultAgent) selfAliasesLower.add(defaultAgent.toLowerCase());
+        if (agent.peerId) selfAliasesLower.add(agent.peerId.toLowerCase());
+        if (selfAliasesLower.size === 0 || !selfAliasesLower.has(targetLower)) {
           return jsonResponse(res, 403, {
             error:
               `working-memory reads for agentAddress=${agentAddress} require authentication. ` +
-              `An unauthenticated / auth-disabled caller may only read the node-default agent's WM.`,
+              `An unauthenticated / auth-disabled caller may only read the node-default agent's WM ` +
+              `(accepted self-aliases: defaultAgentAddress and the node's peerId).`,
           });
         }
       }
