@@ -6665,7 +6665,11 @@ async function handleRequest(
         msg.includes("was removed in V10") ||
         msg.includes("agentAddress is required") ||
         msg.includes("requires a contextGraphId") ||
-        msg.includes("cannot be combined with")
+        msg.includes("cannot be combined with") ||
+        // P-13 review: `resolveViewGraphs` validates `minTrust` now,
+        // so direct callers that forward a string / out-of-range
+        // value get a 400 instead of a 500.
+        msg.startsWith("Invalid minTrust")
       ) {
         return jsonResponse(res, 400, { error: msg });
       }

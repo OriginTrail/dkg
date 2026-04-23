@@ -55,6 +55,33 @@ export function resolveViewGraphs(
       `See migration guide for details.`,
     );
   }
+  // P-13 review: the /api/query route normalises string minTrust values
+  // (e.g. "ConsensusVerified") to the numeric TrustLevel enum, but
+  // direct callers (DKGAgent.query, DKGQueryEngine.query, SDK users)
+  // could otherwise pass anything here. A value like '99' or the string
+  // 'ConsensusVerified' would be compared numerically against
+  // `TrustLevel.SelfAttested` via JS coercion and silently mis-route
+  // the query. Validate once, at the shared entry point, so every
+  // code path fails closed with a 400-mappable error.
+  if (opts?.minTrust !== undefined) {
+    const mt: unknown = opts.minTrust;
+    const validLevels = [
+      TrustLevel.SelfAttested,
+      TrustLevel.Endorsed,
+      TrustLevel.PartiallyVerified,
+      TrustLevel.ConsensusVerified,
+    ];
+    if (typeof mt !== 'number' || !Number.isInteger(mt) || !validLevels.includes(mt as TrustLevel)) {
+      // "minTrust" + "must be one of" mirrors the daemon's 400
+      // classifier wording so the HTTP path maps to a client error.
+      throw new Error(
+        `Invalid minTrust ${JSON.stringify(mt)}: must be one of TrustLevel.SelfAttested (0), ` +
+        `Endorsed (1), PartiallyVerified (2), ConsensusVerified (3). The HTTP /api/query route ` +
+        `accepts the string forms "SelfAttested" | "Endorsed" | "PartiallyVerified" | ` +
+        `"ConsensusVerified" and normalises them; in-process callers must pass the numeric enum.`,
+      );
+    }
+  }
   switch (view) {
     case 'working-memory': {
       if (!opts?.agentAddress) {

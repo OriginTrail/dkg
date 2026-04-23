@@ -120,4 +120,43 @@ describe('P-13: resolveViewGraphs handles minTrust for verified-memory', () => {
       ).toThrow(/verifiedGraph cannot be combined with minTrust above SelfAttested/);
     },
   );
+
+  it(
+    'rejects non-numeric / out-of-range minTrust values at the engine entry so direct ' +
+      'callers (DKGAgent.query, SDK users) fail closed instead of JS-coerced comparison',
+    () => {
+      // Codex review on PR #239: the daemon normalises string "ConsensusVerified"
+      // to the numeric enum, but direct in-process callers could pass
+      // anything and `minTrust > TrustLevel.SelfAttested` would silently
+      // coerce. Validate at `resolveViewGraphs` so every entry point
+      // fails closed with a 400-mappable "Invalid minTrust" error.
+      const bad: Array<unknown> = [
+        'ConsensusVerified',
+        '0',
+        null,
+        true,
+        -1,
+        4,
+        99,
+        1.5,
+        {},
+      ];
+      for (const mt of bad) {
+        expect(() =>
+          resolveViewGraphs('verified-memory', CG, { minTrust: mt as TrustLevel }),
+        ).toThrow(/Invalid minTrust/);
+      }
+      // All four legal enum values are accepted.
+      for (const mt of [
+        TrustLevel.SelfAttested,
+        TrustLevel.Endorsed,
+        TrustLevel.PartiallyVerified,
+        TrustLevel.ConsensusVerified,
+      ]) {
+        expect(() =>
+          resolveViewGraphs('verified-memory', CG, { minTrust: mt }),
+        ).not.toThrow();
+      }
+    },
+  );
 });
