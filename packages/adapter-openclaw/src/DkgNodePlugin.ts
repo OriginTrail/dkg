@@ -261,8 +261,13 @@ export class DkgNodePlugin {
     // daemon is not yet healthy.
     const runtimeEnabled = fullRuntime || setupRuntime;
 
-    // Only expose the DKG agent tool surface during full runtime.
-    if (fullRuntime) {
+    // Expose the DKG agent tool surface whenever runtime is enabled
+    // (full OR setup-runtime). External/npm-installed plugins only ever
+    // receive setup-runtime mode, so gating on `fullRuntime` alone means
+    // the 13 dkg_* tools never register for them — agents then fall
+    // back to raw HTTP and fail on auth. Same gate as every other
+    // runtime integration in this function.
+    if (runtimeEnabled) {
       for (const tool of this.tools()) {
         api.registerTool(tool);
       }

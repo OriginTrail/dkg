@@ -1274,6 +1274,38 @@ describe('DkgNodePlugin', () => {
     expect(String(warnCalls[0]?.[0])).toContain('dkg-node.game.enabled');
   });
 
+  it('registers the full dkg_* tool surface in setup-runtime mode (npm-installed gateways)', () => {
+    // External/npm-installed OpenClaw plugins only ever receive
+    // registrationMode: 'setup-runtime' from the gateway. Regression guard
+    // for the bug where tool registration was gated on `fullRuntime` alone,
+    // leaving npm-installed gateways with zero dkg_* tools and forcing
+    // agents into a broken raw-HTTP fallback.
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      memory: { enabled: false },
+      channel: { enabled: false },
+    });
+
+    const registeredTools: OpenClawTool[] = [];
+    const mockApi: OpenClawPluginApi = {
+      config: {},
+      registrationMode: 'setup-runtime',
+      registerTool: (tool) => registeredTools.push(tool),
+      registerHook: () => {},
+      on: () => {},
+      logger: {},
+    };
+
+    plugin.register(mockApi);
+
+    expect(registeredTools.length).toBe(13);
+    const toolNames = registeredTools.map((t) => t.name);
+    expect(toolNames).toContain('dkg_context_graph_create');
+    expect(toolNames).toContain('dkg_publish');
+    expect(toolNames).toContain('dkg_query');
+    expect(toolNames).toContain('dkg_find_agents');
+  });
+
   it('upgrades from setup-runtime to full runtime and registers the memory slot capability', () => {
     const plugin = new DkgNodePlugin({
       daemonUrl: 'http://localhost:9200',
@@ -1292,7 +1324,13 @@ describe('DkgNodePlugin', () => {
       workspaceDir: 'C:/tmp/openclaw-upgrade-test',
     };
     plugin.register(setupRuntimeApi);
-    expect(setupRuntimeTools).toHaveLength(0);
+    // setup-runtime IS a runtime mode: external/npm-installed plugins only
+    // ever receive setup-runtime from the gateway, so the dkg_* tool surface
+    // must register here or agents see no tools at all.
+    const setupRuntimeToolNames = setupRuntimeTools.map((t) => t.name);
+    expect(setupRuntimeToolNames).toContain('dkg_context_graph_create');
+    expect(setupRuntimeToolNames).toContain('dkg_publish');
+    expect(setupRuntimeToolNames).toContain('dkg_query');
 
     const fullRuntimeTools: OpenClawTool[] = [];
     const registerMemoryCapability = vi.fn();
