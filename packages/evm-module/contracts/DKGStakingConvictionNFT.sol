@@ -130,7 +130,7 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
         uint256 indexed tokenId,
         uint72 indexed identityId,
         uint96 amount,
-        uint8 lockEpochs
+        uint8 lockTier
     );
 
     /// @notice Emitted by `relock` after the old NFT is burned and a fresh
@@ -141,7 +141,7 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
     event PositionRelocked(
         uint256 indexed oldTokenId,
         uint256 indexed newTokenId,
-        uint8 newLockEpochs
+        uint8 newLockTier
     );
 
     /// @notice Emitted by `redelegate` after the old NFT is burned and a
@@ -186,7 +186,7 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
         address indexed delegator,
         uint256 indexed tokenId,
         uint72 indexed identityId,
-        uint8 lockEpochs,
+        uint8 lockTier,
         bool isAdmin
     );
 
@@ -206,7 +206,7 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
     // declared there. Keeping the NFT layer's error surface minimal avoids
     // dead code at the wrapper and prevents the wrapper layer from drifting
     // into business-rule decisions.
-    error InvalidLockEpochs();
+    error InvalidLockTier();
     error NotPositionOwner();
     error ZeroAmount();
     /// @notice Thrown by `adminMigrateV8Batch` when the input array is empty.
@@ -283,31 +283,31 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
     // Discrete, exact-match tier table — no snap-down semantics. Values
     // that don't land on one of the tiers revert. `createConviction` /
     // `convertToNFT` are the only entry points that invoke this function
-    // with a user-supplied `lockEpochs`, and any value outside the valid
+    // with a user-supplied `lockTier`, and any value outside the valid
     // set is an API error that must not round down silently to a lower
     // tier (a user passing 4 silently snapping to tier 3 would commit
     // the user to a different lock than they intended).
     //
     // Why `0 → SCALE18` rather than a revert at the helper level:
     //   The post-expiry rest state in `ConvictionStakingStorage` is
-    //   encoded as `lockEpochs == 0 → 1x`, and reward-math callers may
-    //   re-invoke this helper with a position's current `lockEpochs`
+    //   encoded as `lockTier == 0 → 1x`, and reward-math callers may
+    //   re-invoke this helper with a position's current `lockTier`
     //   after expiry has driven the tier back to the rest state. See
     //   Phase 5 decisions doc Q5 for the full reasoning. The
-    //   `lockEpochs == 0` *policy* check lives in `createConviction` /
-    //   `convertToNFT` themselves — they MUST reject `lockEpochs == 0`
+    //   `lockTier == 0` *policy* check lives in `createConviction` /
+    //   `convertToNFT` themselves — they MUST reject `lockTier == 0`
     //   via their own validation, but the helper stays tolerant for
     //   reward-math callers.
     //
-    // @param lockEpochs Lock duration in epochs.
+    // @param lockTier Lock duration in epochs.
     // @return multiplier18 1e18-scaled tier multiplier.
-    function _convictionMultiplier(uint256 lockEpochs) internal pure returns (uint256) {
-        if (lockEpochs == 0) return SCALE18;             // rest state: 1.0x
-        if (lockEpochs == 1) return (15 * SCALE18) / 10; // 1.5x (1 month)
-        if (lockEpochs == 3) return 2 * SCALE18;         // 2.0x (3 months)
-        if (lockEpochs == 6) return (35 * SCALE18) / 10; // 3.5x (6 months)
-        if (lockEpochs == 12) return 6 * SCALE18;        // 6.0x (12 months)
-        revert InvalidLockEpochs();
+    function _convictionMultiplier(uint256 lockTier) internal pure returns (uint256) {
+        if (lockTier == 0) return SCALE18;             // rest state: 1.0x
+        if (lockTier == 1) return (15 * SCALE18) / 10; // 1.5x (1 month)
+        if (lockTier == 3) return 2 * SCALE18;         // 2.0x (3 months)
+        if (lockTier == 6) return (35 * SCALE18) / 10; // 3.5x (6 months)
+        if (lockTier == 12) return 6 * SCALE18;        // 6.0x (12 months)
+        revert InvalidLockTier();
     }
 
     // ========================================================================
@@ -320,7 +320,7 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
     // `onlyConvictionNFT` so only this contract can invoke it. Each wrapper:
     //
     //   1. Validates ownership (`ownerOf == msg.sender`) on mutating calls.
-    //   2. For mint paths, fails fast on `lockEpochs` via `_convictionMultiplier`.
+    //   2. For mint paths, fails fast on `lockTier` via `_convictionMultiplier`.
     //   3. Mints / burns the ERC-721 token as needed.
     //   4. Forwards to the matching `StakingV10` method with `msg.sender`
     //      passed explicitly as the `staker` argument (StakingV10 never
@@ -340,25 +340,25 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
     // subagents fill the StakingV10 bodies.
 
     /// @notice Mint a fresh NFT-backed staking position on `identityId` with
-    ///         `amount` TRAC locked for `lockEpochs` epochs.
+    ///         `amount` TRAC locked for `lockTier` epochs.
     function createConviction(
         uint72 identityId,
         uint96 amount,
-        uint8 lockEpochs
+        uint8 lockTier
     ) external returns (uint256 tokenId) {
         if (amount == 0) revert ZeroAmount();
         // Fail-fast on invalid tier: `_convictionMultiplier` reverts
-        // `InvalidLockEpochs()` for any value outside {0,1,3,6,12}. Note
+        // `InvalidLockTier()` for any value outside {0,1,3,6,12}. Note
         // that `StakingV10.stake` is expected to additionally reject
-        // `lockEpochs == 0` once its body is filled in (createConviction
+        // `lockTier == 0` once its body is filled in (createConviction
         // must never mint at the rest-state tier).
-        _convictionMultiplier(lockEpochs);
+        _convictionMultiplier(lockTier);
 
         tokenId = nextTokenId++;
         _mint(msg.sender, tokenId);
-        stakingV10.stake(msg.sender, tokenId, identityId, amount, lockEpochs);
+        stakingV10.stake(msg.sender, tokenId, identityId, amount, lockTier);
 
-        emit PositionCreated(msg.sender, tokenId, identityId, amount, lockEpochs);
+        emit PositionCreated(msg.sender, tokenId, identityId, amount, lockTier);
     }
 
     /// @notice Post-expiry re-commit of an existing position to a new lock
@@ -382,18 +382,18 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
     ///      Burn-after-forward: we burn `oldTokenId` AFTER CSS has moved
     ///      the position across, so a mid-call revert leaves BOTH NFT and
     ///      position state intact at the old tokenId.
-    function relock(uint256 oldTokenId, uint8 newLockEpochs) external returns (uint256 newTokenId) {
+    function relock(uint256 oldTokenId, uint8 newLockTier) external returns (uint256 newTokenId) {
         if (ownerOf(oldTokenId) != msg.sender) revert NotPositionOwner();
         // Fail-fast on invalid tier. Same note as createConviction: the
-        // `lockEpochs == 0` policy check lives in `StakingV10.relock`.
-        _convictionMultiplier(newLockEpochs);
+        // `lockTier == 0` policy check lives in `StakingV10.relock`.
+        _convictionMultiplier(newLockTier);
 
         newTokenId = nextTokenId++;
         _mint(msg.sender, newTokenId);
-        stakingV10.relock(msg.sender, oldTokenId, newTokenId, newLockEpochs);
+        stakingV10.relock(msg.sender, oldTokenId, newTokenId, newLockTier);
         _burn(oldTokenId);
 
-        emit PositionRelocked(oldTokenId, newTokenId, newLockEpochs);
+        emit PositionRelocked(oldTokenId, newTokenId, newLockTier);
     }
 
     /// @notice Move a position from its current node to `newIdentityId`.
@@ -474,14 +474,14 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
     // ========================================================================
     //
     // D7 — dual migration paths:
-    //   - `selfMigrateV8(identityId, lockEpochs)`: user-driven. The V8
+    //   - `selfMigrateV8(identityId, lockTier)`: user-driven. The V8
     //     address-keyed delegation on `identityId` belonging to `msg.sender`
     //     is drained and a fresh V10 NFT is minted to them.
-    //   - `adminMigrateV8(delegator, identityId, lockEpochs)`: admin-driven
+    //   - `adminMigrateV8(delegator, identityId, lockTier)`: admin-driven
     //     straggler rescue. A V8 delegator who missed the self-migration
     //     window is rescued by admin; NFT minted to the delegator, not
     //     to the admin caller.
-    //   - `adminMigrateV8Batch(delegators[], identityId, lockEpochs)`: D11
+    //   - `adminMigrateV8Batch(delegators[], identityId, lockTier)`: D11
     //     batched admin migration for gas-efficient mass rescue.
     //
     // D8 — both paths absorb `stakeBase + pendingWithdrawal` into the V10
@@ -491,17 +491,17 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
     ///         and drains their V8 address-keyed delegation on `identityId`.
     function selfMigrateV8(
         uint72 identityId,
-        uint8 lockEpochs
+        uint8 lockTier
     ) external returns (uint256 tokenId) {
-        // Fail-fast on invalid tier. `lockEpochs == 0` policy check lives
+        // Fail-fast on invalid tier. `lockTier == 0` policy check lives
         // in `StakingV10.selfConvertToNFT`.
-        _convictionMultiplier(lockEpochs);
+        _convictionMultiplier(lockTier);
 
         tokenId = nextTokenId++;
         _mint(msg.sender, tokenId);
-        stakingV10.selfConvertToNFT(msg.sender, tokenId, identityId, lockEpochs);
+        stakingV10.selfConvertToNFT(msg.sender, tokenId, identityId, lockTier);
 
-        emit ConvertedFromV8(msg.sender, tokenId, identityId, lockEpochs, false);
+        emit ConvertedFromV8(msg.sender, tokenId, identityId, lockTier, false);
     }
 
     /// @notice Admin straggler-rescue V8→V10 migration for a single
@@ -510,14 +510,14 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
     function adminMigrateV8(
         address delegator,
         uint72 identityId,
-        uint8 lockEpochs
+        uint8 lockTier
     ) external onlyOwnerOrMultiSigOwner returns (uint256 tokenId) {
-        tokenId = _adminMigrateV8Single(delegator, identityId, lockEpochs);
+        tokenId = _adminMigrateV8Single(delegator, identityId, lockTier);
     }
 
     /// @notice Admin batch V8→V10 migration — D11. Iterates over
     ///         `delegators`, migrating each with the same `identityId` /
-    ///         `lockEpochs`. One NFT minted per delegator. Gate:
+    ///         `lockTier`. One NFT minted per delegator. Gate:
     ///         `onlyOwnerOrMultiSigOwner`.
     ///
     /// @dev A per-delegator `_convertToNFT` revert (e.g. `NoV8StakeToConvert`
@@ -529,16 +529,16 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
     function adminMigrateV8Batch(
         address[] calldata delegators,
         uint72 identityId,
-        uint8 lockEpochs
+        uint8 lockTier
     ) external onlyOwnerOrMultiSigOwner returns (uint256[] memory tokenIds) {
         uint256 n = delegators.length;
         if (n == 0) revert EmptyBatch();
         // Fail-fast on invalid tier BEFORE the loop so we don't half-mint.
-        _convictionMultiplier(lockEpochs);
+        _convictionMultiplier(lockTier);
 
         tokenIds = new uint256[](n);
         for (uint256 i = 0; i < n; i++) {
-            tokenIds[i] = _adminMigrateV8Single(delegators[i], identityId, lockEpochs);
+            tokenIds[i] = _adminMigrateV8Single(delegators[i], identityId, lockTier);
         }
     }
 
@@ -558,13 +558,13 @@ contract DKGStakingConvictionNFT is INamed, IVersioned, ContractStatus, IInitial
     function _adminMigrateV8Single(
         address delegator,
         uint72 identityId,
-        uint8 lockEpochs
+        uint8 lockTier
     ) internal returns (uint256 tokenId) {
-        _convictionMultiplier(lockEpochs);
+        _convictionMultiplier(lockTier);
         tokenId = nextTokenId++;
         _mint(delegator, tokenId);
-        stakingV10.adminConvertToNFT(delegator, tokenId, identityId, lockEpochs);
-        emit ConvertedFromV8(delegator, tokenId, identityId, lockEpochs, true);
+        stakingV10.adminConvertToNFT(delegator, tokenId, identityId, lockTier);
+        emit ConvertedFromV8(delegator, tokenId, identityId, lockTier, true);
     }
 
     // ========================================================================

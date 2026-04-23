@@ -29,8 +29,8 @@ import {IVersioned} from "../interfaces/IVersioned.sol";
  *
  * Tier model (D20 — hardcoded wall-clock tiers):
  *   - Tier durations are expressed as real-time seconds and decoupled
- *     from epoch length: `_tierDuration(lockEpochs)` returns
- *     {0, 30d, 90d, 180d, 360d} for `lockEpochs ∈ {0, 1, 3, 6, 12}`.
+ *     from epoch length: `_tierDuration(lockTier)` returns
+ *     {0, 30d, 90d, 180d, 360d} for `lockTier ∈ {0, 1, 3, 6, 12}`.
  *   - `expiryEpoch = epochAtTimestamp(block.timestamp + duration +
  *     BLOCK_DRIFT_BUFFER)` so users always get AT LEAST their committed
  *     duration across epoch boundaries.
@@ -60,17 +60,19 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
     //                 D20 — Hardcoded tier constants
     // ============================================================
 
-    // Wall-clock durations (decoupled from epoch length).
-    uint256 public constant TIER_30D = 30 days;
-    uint256 public constant TIER_90D = 90 days;
-    uint256 public constant TIER_180D = 180 days;
-    uint256 public constant TIER_360D = 360 days;
-
-    // Extra slack added when converting `expiryTime → expiryEpoch` so the
+       // Extra slack added when converting `expiryTime → expiryEpoch` so the
     // user always gets AT LEAST their committed duration across a block-
     // timing/epoch-boundary boundary. 12h is comfortably less than any
     // sane epoch length and more than any plausible block drift.
     uint256 public constant BLOCK_DRIFT_BUFFER = 12 hours;
+
+    // Wall-clock durations (decoupled from epoch length), + BLOCK_DRIFT_BUFFER hours to account for potential block drift.
+    uint256 public constant TIER_30D = 30 days + BLOCK_DRIFT_BUFFER;
+    uint256 public constant TIER_90D = 90 days + BLOCK_DRIFT_BUFFER;
+    uint256 public constant TIER_180D = 180 days + BLOCK_DRIFT_BUFFER;
+    uint256 public constant TIER_360D = 366 days + BLOCK_DRIFT_BUFFER; // to account for leap years
+
+ 
 
     // Multiplier ladder (1e18-scaled).
     uint64 public constant MULT_LOCK_0 = uint64(SCALE18);              // 1.0x
@@ -80,7 +82,7 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
     uint64 public constant MULT_LOCK_360D = uint64(6 * SCALE18);        // 6.0x
 
     // Position layout (two storage slots — V10 compound-into-raw model):
-    //   slot 1: raw(96) + lockEpochs(40) + expiryEpoch(40) + identityId(72) = 248 bits
+    //   slot 1: raw(96) + lockTier(40) + expiryEpoch(40) + identityId(72) = 248 bits
     //   slot 2: cumulativeRewardsClaimed(96) + multiplier18(64)
     //           + lastClaimedEpoch(32) + migrationEpoch(32)             = 224 bits
     //
@@ -89,18 +91,18 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
     //                                pre-expiry, earns `multiplier18` pre-expiry,
     //                                drops back to 1x on `expiryEpoch`.
     //                                Claim compounds TRAC into this field.
-    //   lockEpochs                 — tier index ∈ {0, 1, 3, 6, 12}. Storage-
+    //   lockTier                 — tier index ∈ {0, 1, 3, 6, 12}. Storage-
     //                                compatible integer that maps to
     //                                `_tierDuration` / `_tierMultiplier`.
     //   expiryEpoch                — Chronos epoch at which the boost expires.
-    //                                0 iff lockEpochs == 0 (rest state).
+    //                                0 iff lockTier == 0 (rest state).
     //   identityId                 — the node this position delegates to.
     //   cumulativeRewardsClaimed   — D19 statistic: total TRAC ever compounded
     //                                into `raw` via claim for this NFT. Never
     //                                decreases, never enters effective-stake
     //                                math. UI/indexer-only.
-    //   multiplier18               — materialized copy of `_tierMultiplier(lockEpochs)`.
-    //                                Exactly one valid multiplier per lockEpochs
+    //   multiplier18               — materialized copy of `_tierMultiplier(lockTier)`.
+    //                                Exactly one valid multiplier per lockTier
     //                                value; mismatch reverts at write time.
     //   lastClaimedEpoch           — Chronos epoch of the last successful claim.
     //                                uint32 holds ~4.3e9 epochs; plenty.
@@ -113,7 +115,7 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
     //                                "fresh V10 stake, never migrated".
     struct Position {
         uint96 raw;
-        uint40 lockEpochs;
+        uint40 lockTier;
         uint40 expiryEpoch;
         uint72 identityId;
         // slot 2
@@ -142,14 +144,14 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
         uint256 indexed tokenId,
         uint72 indexed identityId,
         uint96 raw,
-        uint40 lockEpochs,
+        uint40 lockTier,
         uint40 expiryEpoch,
         uint64 multiplier18,
         uint32 migrationEpoch
     );
     event PositionRelocked(
         uint256 indexed tokenId,
-        uint40 newLockEpochs,
+        uint40 newLockTier,
         uint40 newExpiryEpoch,
         uint64 newMultiplier18
     );
@@ -169,7 +171,7 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
         uint256 indexed newTokenId,
         uint72 indexed newIdentityId,
         uint96 raw,
-        uint40 newLockEpochs,
+        uint40 newLockTier,
         uint40 newExpiryEpoch,
         uint64 newMultiplier18
     );
@@ -288,40 +290,39 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
     // ============================================================
 
     /**
-     * @notice Wall-clock duration (seconds) for a given tier index.
-     * @dev `lockEpochs` here is a tier INDEX, not an epoch count. Valid set:
-     *      {0, 1, 3, 6, 12}. The field name `lockEpochs` is retained for
-     *      storage-layout continuity only.
+     * @notice Wall-clock duration (seconds) for a given tier id.
+     * @dev `lockTier` is a tier identifier (not an epoch count).
+     *      The D20 baseline ladder accepts {0, 1, 3, 6, 12}.
      */
-    function _tierDuration(uint40 lockEpochs) internal pure returns (uint256) {
-        if (lockEpochs == 0) return 0;
-        if (lockEpochs == 1) return TIER_30D;
-        if (lockEpochs == 3) return TIER_90D;
-        if (lockEpochs == 6) return TIER_180D;
-        if (lockEpochs == 12) return TIER_360D;
+    function _tierDuration(uint40 lockTier) internal pure returns (uint256) {
+        if (lockTier == 0) return 0;
+        if (lockTier == 1) return TIER_30D;
+        if (lockTier == 3) return TIER_90D;
+        if (lockTier == 6) return TIER_180D;
+        if (lockTier == 12) return TIER_360D;
         revert("Invalid lock");
     }
 
     /**
      * @notice 1e18-scaled multiplier for a given tier index.
      */
-    function _tierMultiplier(uint40 lockEpochs) internal pure returns (uint64) {
-        if (lockEpochs == 0) return MULT_LOCK_0;
-        if (lockEpochs == 1) return MULT_LOCK_30D;
-        if (lockEpochs == 3) return MULT_LOCK_90D;
-        if (lockEpochs == 6) return MULT_LOCK_180D;
-        if (lockEpochs == 12) return MULT_LOCK_360D;
+    function _tierMultiplier(uint40 lockTier) internal pure returns (uint64) {
+        if (lockTier == 0) return MULT_LOCK_0;
+        if (lockTier == 1) return MULT_LOCK_30D;
+        if (lockTier == 3) return MULT_LOCK_90D;
+        if (lockTier == 6) return MULT_LOCK_180D;
+        if (lockTier == 12) return MULT_LOCK_360D;
         revert("Invalid lock");
     }
 
     /// @notice External view; mirrors `_tierMultiplier` for callers that need the ladder value.
-    function expectedMultiplier18(uint40 lockEpochs) public pure returns (uint64) {
-        return _tierMultiplier(lockEpochs);
+    function expectedMultiplier18(uint40 lockTier) public pure returns (uint64) {
+        return _tierMultiplier(lockTier);
     }
 
     /// @notice External view; mirrors `_tierDuration` for callers that need the real-time duration.
-    function tierDuration(uint40 lockEpochs) external pure returns (uint256) {
-        return _tierDuration(lockEpochs);
+    function tierDuration(uint40 lockTier) external pure returns (uint256) {
+        return _tierDuration(lockTier);
     }
 
     // ============================================================
@@ -337,7 +338,7 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
         uint256 tokenId,
         uint72 identityId,
         uint96 raw,
-        uint40 lockEpochs,
+        uint40 lockTier,
         uint64 multiplier18,
         uint32 migrationEpoch
     ) external onlyContracts {
@@ -347,14 +348,14 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
         // Tier check subsumes "Bad multiplier" and "Lock0 must be 1x": the
         // ladder defines exactly one valid multiplier for every lock value
         // (including lock == 0 → 1x), so any deviation is a tier mismatch.
-        require(multiplier18 == _tierMultiplier(lockEpochs), "Tier mismatch");
+        require(multiplier18 == _tierMultiplier(lockTier), "Tier mismatch");
 
         uint256 currentEpoch = chronos.getCurrentEpoch();
-        uint40 expiryEpoch = _computeExpiryEpoch(lockEpochs);
+        uint40 expiryEpoch = _computeExpiryEpoch(lockTier);
 
         positions[tokenId] = Position({
             raw: raw,
-            lockEpochs: lockEpochs,
+            lockTier: lockTier,
             expiryEpoch: expiryEpoch,
             identityId: identityId,
             cumulativeRewardsClaimed: 0,
@@ -379,7 +380,7 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
 
         // On expiry, the multiplier boost drops away; principal remains at 1x.
         // boost = raw * (multiplier18 - 1e18) / 1e18
-        if (lockEpochs > 0 && multiplier18 > SCALE18) {
+        if (lockTier > 0 && multiplier18 > SCALE18) {
             int256 expiryDelta = (int256(uint256(raw)) * int256(uint256(multiplier18) - SCALE18)) / int256(SCALE18);
             effectiveStakeDiff[expiryEpoch] -= expiryDelta;
             nodeEffectiveStakeDiff[identityId][expiryEpoch] -= expiryDelta;
@@ -390,17 +391,17 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
             _finalizeNodeEffectiveStakeUpTo(identityId, currentEpoch - 1);
         }
 
-        emit PositionCreated(tokenId, identityId, raw, lockEpochs, expiryEpoch, multiplier18, migrationEpoch);
+        emit PositionCreated(tokenId, identityId, raw, lockTier, expiryEpoch, multiplier18, migrationEpoch);
     }
 
     function updateOnRelock(
         uint256 tokenId,
-        uint40 newLockEpochs,
+        uint40 newLockTier,
         uint64 newMultiplier18
     ) external onlyContracts {
         Position storage pos = positions[tokenId];
         require(pos.identityId != 0, "No position");
-        require(newMultiplier18 == _tierMultiplier(newLockEpochs), "Tier mismatch");
+        require(newMultiplier18 == _tierMultiplier(newLockTier), "Tier mismatch");
 
         uint256 currentEpoch = chronos.getCurrentEpoch();
         // Relock is a post-expiry re-commit: prior lock must be done (or never existed)
@@ -418,14 +419,14 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
         _markGlobalDirty(currentEpoch);
         _markNodeDirty(identityId, currentEpoch);
 
-        uint40 newExpiry = _computeExpiryEpoch(newLockEpochs);
-        if (newLockEpochs > 0 && newMultiplier18 > SCALE18) {
+        uint40 newExpiry = _computeExpiryEpoch(newLockTier);
+        if (newLockTier > 0 && newMultiplier18 > SCALE18) {
             effectiveStakeDiff[newExpiry] -= boost;
             nodeEffectiveStakeDiff[identityId][newExpiry] -= boost;
         }
 
         pos.expiryEpoch = newExpiry;
-        pos.lockEpochs = newLockEpochs;
+        pos.lockTier = newLockTier;
         pos.multiplier18 = newMultiplier18;
 
         if (currentEpoch > 1) {
@@ -433,7 +434,7 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
             _finalizeNodeEffectiveStakeUpTo(identityId, currentEpoch - 1);
         }
 
-        emit PositionRelocked(tokenId, newLockEpochs, newExpiry, newMultiplier18);
+        emit PositionRelocked(tokenId, newLockTier, newExpiry, newMultiplier18);
     }
 
     function updateOnRedelegate(uint256 tokenId, uint72 newIdentityId) external onlyContracts {
@@ -514,7 +515,7 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
      *        - No pending withdrawal on `oldTokenId` — the withdrawal is keyed
      *          by tokenId and the new tokenId must start clean; callers must
      *          cancel first.
-     *        - `newIdentityId != 0`, `newMultiplier18 == _tierMultiplier(newLockEpochs)`.
+     *        - `newIdentityId != 0`, `newMultiplier18 == _tierMultiplier(newLockTier)`.
      *
      *      Side effects (all atomic):
      *        1. Unwind old-identity effective-stake contribution at
@@ -545,11 +546,11 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
         uint256 oldTokenId,
         uint256 newTokenId,
         uint72 newIdentityId,
-        uint40 newLockEpochs,
+        uint40 newLockTier,
         uint64 newMultiplier18
     ) external onlyContracts {
         require(newIdentityId != 0, "Zero node");
-        require(newMultiplier18 == _tierMultiplier(newLockEpochs), "Tier mismatch");
+        require(newMultiplier18 == _tierMultiplier(newLockTier), "Tier mismatch");
         require(positions[newTokenId].identityId == 0, "New token used");
         require(oldTokenId != newTokenId, "Same tokenId");
         require(pendingWithdrawals[oldTokenId].amount == 0, "Has pending");
@@ -589,9 +590,9 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
         nodeEffectiveStakeDiff[newIdentityId][currentEpoch] += signedNew;
         _markNodeDirty(newIdentityId, currentEpoch);
 
-        uint40 newExpiryEpoch = _computeExpiryEpoch(newLockEpochs);
+        uint40 newExpiryEpoch = _computeExpiryEpoch(newLockTier);
         int256 newExpiryDelta;
-        if (newLockEpochs > 0 && newMultiplier18 > SCALE18) {
+        if (newLockTier > 0 && newMultiplier18 > SCALE18) {
             newExpiryDelta =
                 (int256(uint256(raw)) * int256(uint256(newMultiplier18) - SCALE18)) / int256(SCALE18);
             nodeEffectiveStakeDiff[newIdentityId][newExpiryEpoch] -= newExpiryDelta;
@@ -613,7 +614,7 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
         // --- 4. Write new position preserving stats; delete old. ---
         positions[newTokenId] = Position({
             raw: raw,
-            lockEpochs: newLockEpochs,
+            lockTier: newLockTier,
             expiryEpoch: newExpiryEpoch,
             identityId: newIdentityId,
             cumulativeRewardsClaimed: old.cumulativeRewardsClaimed,
@@ -653,7 +654,7 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
             newTokenId,
             newIdentityId,
             raw,
-            newLockEpochs,
+            newLockTier,
             newExpiryEpoch,
             newMultiplier18
         );
@@ -1021,9 +1022,9 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
      *      committed duration across epoch boundaries. Returns 0 for
      *      tier-0 (permanent rest state).
      */
-    function _computeExpiryEpoch(uint40 lockEpochs) internal view returns (uint40) {
-        if (lockEpochs == 0) return 0;
-        uint256 duration = _tierDuration(lockEpochs);
+    function _computeExpiryEpoch(uint40 lockTier) internal view returns (uint40) {
+        if (lockTier == 0) return 0;
+        uint256 duration = _tierDuration(lockTier);
         uint256 exp = chronos.epochAtTimestamp(block.timestamp + duration + BLOCK_DRIFT_BUFFER);
         require(exp <= type(uint40).max, "Expiry overflow");
         return uint40(exp);

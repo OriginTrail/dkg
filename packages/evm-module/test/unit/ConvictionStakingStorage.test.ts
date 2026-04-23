@@ -26,7 +26,7 @@ const THREE_AND_HALF_X = (35n * SCALE18) / 10n;
 const SIX_X = 6n * SCALE18;
 
 // Canonical Phase 5 tier ladder (valid lock set = {0, 1, 3, 6, 12}).
-// Any lockEpochs outside this set reverts. Ladder:
+// Any lockTier outside this set reverts. Ladder:
 //   lock 0  → 1.0x (permanent rest state — post-expiry / convertToNFT default)
 //   lock 1  → 1.5x  (1 month)
 //   lock 3  → 2.0x  (3 months)
@@ -109,7 +109,7 @@ describe('@unit ConvictionStakingStorage', () => {
       // `raw`. `cumulativeRewardsClaimed` is a statistic-only counter and
       // defaults to 0 on create.
       expect(pos.cumulativeRewardsClaimed).to.equal(0);
-      expect(pos.lockEpochs).to.equal(0);
+      expect(pos.lockTier).to.equal(0);
       expect(pos.expiryEpoch).to.equal(0);
       expect(pos.multiplier18).to.equal(ONE_X);
       expect(pos.identityId).to.equal(ALICE_ID);
@@ -300,7 +300,7 @@ describe('@unit ConvictionStakingStorage', () => {
       // Relock: lock=12, mult=6x → new expiry = 16, adds raw*(6-1)=5000 at e=4, -5000 at e=16
       await ConvictionStakingStorage.updateOnRelock(1, 12, SIX_X);
       const pos = await ConvictionStakingStorage.getPosition(1);
-      expect(pos.lockEpochs).to.equal(12);
+      expect(pos.lockTier).to.equal(12);
       expect(pos.multiplier18).to.equal(SIX_X);
       expect(pos.expiryEpoch).to.equal(16);
 
@@ -320,7 +320,7 @@ describe('@unit ConvictionStakingStorage', () => {
 
       await ConvictionStakingStorage.updateOnRelock(1, 12, SIX_X);
       const pos = await ConvictionStakingStorage.getPosition(1);
-      expect(pos.lockEpochs).to.equal(12);
+      expect(pos.lockTier).to.equal(12);
       expect(pos.multiplier18).to.equal(SIX_X);
       expect(pos.expiryEpoch).to.equal(15); // currentEpoch(3) + 12
 
@@ -390,7 +390,7 @@ describe('@unit ConvictionStakingStorage', () => {
       await ConvictionStakingStorage.updateOnRelock(1, 0, ONE_X);
 
       const pos = await ConvictionStakingStorage.getPosition(1);
-      expect(pos.lockEpochs).to.equal(0);
+      expect(pos.lockTier).to.equal(0);
       expect(pos.multiplier18).to.equal(ONE_X);
       // D20: `_computeExpiryEpoch(0)` returns 0 — the rest-state sentinel
       // is consistent between `createPosition` and `updateOnRelock`, and

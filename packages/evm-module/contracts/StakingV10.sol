@@ -107,9 +107,9 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         address indexed staker,
         uint72 indexed identityId,
         uint96 amount,
-        uint8 lockEpochs
+        uint8 lockTier
     );
-    event Relocked(uint256 indexed tokenId, uint8 newLockEpochs, uint64 newExpiryEpoch);
+    event Relocked(uint256 indexed tokenId, uint8 newLockTier, uint64 newExpiryEpoch);
     event Redelegated(uint256 indexed tokenId, uint72 indexed oldIdentityId, uint72 indexed newIdentityId);
     event WithdrawalCreated(uint256 indexed tokenId, uint96 amount, uint64 releaseAt);
     event WithdrawalCancelled(uint256 indexed tokenId);
@@ -126,7 +126,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         uint72 indexed identityId,
         uint96 stakeBaseAbsorbed,
         uint96 pendingAbsorbed,
-        uint8 lockEpochs,
+        uint8 lockTier,
         bool isAdmin
     );
 
@@ -134,7 +134,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     // Errors
     // ========================================================================
 
-    error InvalidLockEpochs();
+    error InvalidLockTier();
     error LockStillActive();
     error NotPositionOwner();
     error WithdrawalAlreadyRequested();
@@ -221,7 +221,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
 
     /**
      * @notice Mint a fresh NFT-backed staking position on `identityId` with
-     *         `amount` TRAC locked for `lockEpochs` epochs.
+     *         `amount` TRAC locked for `lockTier` epochs.
      *
      * @dev V10 flow (D15 — CSS-only accounting):
      *        1. Amount + tier validation.
@@ -241,13 +241,13 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         uint256 tokenId,
         uint72 identityId,
         uint96 amount,
-        uint8 lockEpochs
+        uint8 lockTier
     ) external onlyConvictionNFT {
         if (amount == 0) revert ZeroAmount();
         if (!profileStorage.profileExists(identityId)) revert ProfileDoesNotExist();
 
-        if (lockEpochs == 0) revert InvalidLockEpochs();
-        uint64 multiplier18 = convictionStorage.expectedMultiplier18(uint40(lockEpochs));
+        if (lockTier == 0) revert InvalidLockTier();
+        uint64 multiplier18 = convictionStorage.expectedMultiplier18(uint40(lockTier));
 
         uint256 maxStake = uint256(parametersStorage.maximumStake());
         uint256 totalNodeStakeAfter = convictionStorage.getNodeStakeV10(identityId) + uint256(amount);
@@ -264,7 +264,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
             tokenId,
             identityId,
             amount,
-            uint40(lockEpochs),
+            uint40(lockTier),
             multiplier18,
             0 // fresh V10 stake: no migrationEpoch
         );
@@ -278,7 +278,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
 
         ask.recalculateActiveSet();
 
-        emit Staked(tokenId, staker, identityId, amount, lockEpochs);
+        emit Staked(tokenId, staker, identityId, amount, lockTier);
     }
 
     /**
@@ -295,7 +295,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
      *        - `lastClaimedEpoch` (reward cursor — prevents double-claim).
      *        - `migrationEpoch` (D6 retroactive-claim marker).
      *      Re-initialized on the new tokenId:
-     *        - `lockEpochs`, `multiplier18`, `expiryEpoch` (the whole point
+     *        - `lockTier`, `multiplier18`, `expiryEpoch` (the whole point
      *          of relock).
      *      `identityId` is held constant — this is relock, not redelegate.
      */
@@ -303,7 +303,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         address staker,
         uint256 oldTokenId,
         uint256 newTokenId,
-        uint8 newLockEpochs
+        uint8 newLockTier
     ) external onlyConvictionNFT {
         staker; // unused — see file-header rationale.
 
@@ -316,7 +316,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
 
         _prepareForStakeChangeV10(currentEpoch, oldTokenId, pos.identityId);
 
-        uint64 newMultiplier18 = convictionStorage.expectedMultiplier18(uint40(newLockEpochs));
+        uint64 newMultiplier18 = convictionStorage.expectedMultiplier18(uint40(newLockTier));
 
         // D23 — atomic replace. Same identity, new tier/multiplier/expiry.
         // CSS preserves `cumulativeRewardsClaimed`, `lastClaimedEpoch`,
@@ -325,12 +325,12 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
             oldTokenId,
             newTokenId,
             pos.identityId,
-            uint40(newLockEpochs),
+            uint40(newLockTier),
             newMultiplier18
         );
 
         ConvictionStakingStorage.Position memory posAfter = convictionStorage.getPosition(newTokenId);
-        emit Relocked(newTokenId, newLockEpochs, uint64(posAfter.expiryEpoch));
+        emit Relocked(newTokenId, newLockTier, uint64(posAfter.expiryEpoch));
     }
 
     /**
@@ -346,7 +346,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
      *      multiplier — effectively the lock "follows" the delegator to
      *      the new node, expiring at the same wall-clock boundary the
      *      caller originally committed to (the primitive re-derives
-     *      `expiryEpoch` from `newLockEpochs = pos.lockEpochs`, which
+     *      `expiryEpoch` from `newLockTier = pos.lockTier`, which
      *      lengthens the remaining lock. This is a conscious UX choice:
      *      redelegation resets the clock. Operators wanting a clean
      *      pre-expiry move must cancel + re-stake explicitly).
@@ -396,7 +396,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
             oldTokenId,
             newTokenId,
             newIdentityId,
-            pos.lockEpochs,
+            pos.lockTier,
             pos.multiplier18
         );
 
@@ -724,9 +724,9 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         address staker,
         uint256 tokenId,
         uint72 identityId,
-        uint8 lockEpochs
+        uint8 lockTier
     ) external onlyConvictionNFT {
-        _convertToNFT(staker, tokenId, identityId, lockEpochs, false);
+        _convertToNFT(staker, tokenId, identityId, lockTier, false);
     }
 
     /**
@@ -737,16 +737,16 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
      *
      * @dev D7 — stragglers are delegators who haven't migrated by
      *      `v10LaunchEpoch`. Admin is responsible for picking a sensible
-     *      default `lockEpochs` (typically `0` — the rest-state tier — so
+     *      default `lockTier` (typically `0` — the rest-state tier — so
      *      the user gets their full balance with no lock surprise).
      */
     function adminConvertToNFT(
         address delegator,
         uint256 tokenId,
         uint72 identityId,
-        uint8 lockEpochs
+        uint8 lockTier
     ) external onlyConvictionNFT {
-        _convertToNFT(delegator, tokenId, identityId, lockEpochs, true);
+        _convertToNFT(delegator, tokenId, identityId, lockTier, true);
     }
 
     /**
@@ -780,7 +780,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
      *   - `decreaseTotalStake(stakeBase)` — same reasoning.
      *
      * V10-side state seed:
-     *   - `cs.createPosition(tokenId, id, stakeBase + pending, lockEpochs,
+     *   - `cs.createPosition(tokenId, id, stakeBase + pending, lockTier,
      *     multiplier18, migrationEpoch = currentEpoch)`. This also pushes
      *     the tokenId into `nodeTokens[id]` and increments nodeStakeV10 +
      *     totalStakeV10 in the same call (D5 + D15).
@@ -801,7 +801,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         address delegator,
         uint256 tokenId,
         uint72 identityId,
-        uint8 lockEpochs,
+        uint8 lockTier,
         bool isAdmin
     ) internal {
         uint256 currentEpoch = chronos.getCurrentEpoch();
@@ -838,12 +838,12 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
             if (v10NodeAfter > maxStake) revert MaxStakeExceeded();
         }
 
-        uint64 multiplier18 = convictionStorage.expectedMultiplier18(uint40(lockEpochs));
+        uint64 multiplier18 = convictionStorage.expectedMultiplier18(uint40(lockTier));
         convictionStorage.createPosition(
             tokenId,
             identityId,
             total,
-            uint40(lockEpochs),
+            uint40(lockTier),
             multiplier18,
             uint32(currentEpoch) // D6 — retroactive claim boundary
         );
@@ -868,7 +868,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
 
         ask.recalculateActiveSet();
 
-        emit ConvertedFromV8(delegator, tokenId, identityId, stakeBase, pending, lockEpochs, isAdmin);
+        emit ConvertedFromV8(delegator, tokenId, identityId, stakeBase, pending, lockTier, isAdmin);
     }
 
     // ========================================================================

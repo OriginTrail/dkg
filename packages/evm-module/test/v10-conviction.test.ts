@@ -263,7 +263,7 @@ describe('@integration V10 Phase 5 — NFT-backed staking', function () {
     const pos = await ConvictionStakingStorageContract.getPosition(0);
     expect(pos.identityId).to.equal(identityId);
     expect(pos.raw).to.equal(amount);
-    expect(pos.lockEpochs).to.equal(12);
+    expect(pos.lockTier).to.equal(12);
     expect(pos.multiplier18).to.equal(SIX_X);
   });
 
@@ -445,7 +445,7 @@ describe('@integration V10 Phase 5 — NFT-backed staking', function () {
   // End-to-end V8-to-V10 migration smoke: set up a V8 address-keyed
   // delegator position directly (faster + decoupled from V8 `stake()`
   // correctness — `test/unit/Staking.test.ts` owns that), then call
-  // `NFT.selfMigrateV8(identityId, lockEpochs)` and verify:
+  // `NFT.selfMigrateV8(identityId, lockTier)` and verify:
   //   - V8 bucket drained
   //   - V10 position created with `raw = stakeBaseAbsorbed + pendingAbsorbed` (D8)
   //   - V10 aggregates (`totalStakeV10`, `nodeStakeV10`) grow by the migrated
@@ -521,7 +521,7 @@ describe('@integration V10 Phase 5 — NFT-backed staking', function () {
     // aggregates live on CSS.
     const pos = await ConvictionStakingStorageContract.getPosition(0);
     expect(pos.raw).to.equal(amount);
-    expect(pos.lockEpochs).to.equal(12);
+    expect(pos.lockTier).to.equal(12);
     expect(pos.multiplier18).to.equal(SIX_X);
 
     // V10 aggregates grow by the migrated amount (D15).

@@ -17,7 +17,7 @@
   },
   {
     "inputs": [],
-    "name": "InvalidLockEpochs",
+    "name": "InvalidLockTier",
     "type": "error"
   },
   {
@@ -142,7 +142,7 @@
       {
         "indexed": false,
         "internalType": "uint8",
-        "name": "lockEpochs",
+        "name": "lockTier",
         "type": "uint8"
       },
       {
@@ -192,7 +192,7 @@
       {
         "indexed": false,
         "internalType": "uint8",
-        "name": "newLockEpochs",
+        "name": "newLockTier",
         "type": "uint8"
       },
       {
@@ -254,7 +254,7 @@
       {
         "indexed": false,
         "internalType": "uint8",
-        "name": "lockEpochs",
+        "name": "lockTier",
         "type": "uint8"
       }
     ],
@@ -363,7 +363,7 @@
       },
       {
         "internalType": "uint8",
-        "name": "lockEpochs",
+        "name": "lockTier",
         "type": "uint8"
       }
     ],
@@ -620,7 +620,7 @@
       },
       {
         "internalType": "uint8",
-        "name": "newLockEpochs",
+        "name": "newLockTier",
         "type": "uint8"
       }
     ],
@@ -648,7 +648,7 @@
       },
       {
         "internalType": "uint8",
-        "name": "lockEpochs",
+        "name": "lockTier",
         "type": "uint8"
       }
     ],
@@ -733,7 +733,7 @@
       },
       {
         "internalType": "uint8",
-        "name": "lockEpochs",
+        "name": "lockTier",
         "type": "uint8"
       }
     ],

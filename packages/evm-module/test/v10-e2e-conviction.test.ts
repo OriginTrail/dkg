@@ -194,7 +194,7 @@ describe('V10 E2E Conviction System', function () {
       expect(info.admin).to.equal(publisher.address);
       expect(info.balance).to.equal(LOCK_AMOUNT);
       expect(info.initialDeposit).to.equal(LOCK_AMOUNT);
-      expect(info.lockEpochs).to.equal(LOCK_EPOCHS);
+      expect(info.lockTier).to.equal(LOCK_EPOCHS);
 
       const expectedConviction = BigInt(LOCK_AMOUNT) * BigInt(LOCK_EPOCHS);
       expect(info.conviction).to.equal(expectedConviction);
@@ -240,7 +240,7 @@ describe('V10 E2E Conviction System', function () {
       await PCA.connect(publisher).extendLock(1, 6);
       const infoAfter = await PCA.getAccountInfo(1);
 
-      expect(infoAfter.lockEpochs).to.equal(12);
+      expect(infoAfter.lockTier).to.equal(12);
       expect(infoAfter.conviction).to.be.greaterThan(infoBefore.conviction);
       expect(infoAfter.conviction).to.equal(BigInt(LOCK_AMOUNT) * 12n);
     });

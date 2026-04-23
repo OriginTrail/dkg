@@ -175,14 +175,14 @@ describe('@unit DKGStakingConvictionNFT', () => {
       // `_convictionMultiplier` now rejects it at the wrapper layer.
       await expect(
         NFT.connect(accounts[0]).createConviction(identityId, 1_000n, 2),
-      ).to.be.revertedWithCustomError(NFT, 'InvalidLockEpochs');
+      ).to.be.revertedWithCustomError(NFT, 'InvalidLockTier');
     });
 
     it('reverts on invalid lock tier (13)', async () => {
       const { identityId } = await createProfile();
       await expect(
         NFT.connect(accounts[0]).createConviction(identityId, 1_000n, 13),
-      ).to.be.revertedWithCustomError(NFT, 'InvalidLockEpochs');
+      ).to.be.revertedWithCustomError(NFT, 'InvalidLockTier');
     });
 
     it('reverts on invalid lock tier (0 — rest state, not a valid create target)', async () => {
@@ -192,10 +192,10 @@ describe('@unit DKGStakingConvictionNFT', () => {
       // lock=0 is the post-expiry rest state in ConvictionStakingStorage;
       // new positions must never enter at the rest tier. The wrapper's
       // `_convictionMultiplier` accepts 0 (for reward-math callers) but
-      // StakingV10.stake rejects it via `InvalidLockEpochs`.
+      // StakingV10.stake rejects it via `InvalidLockTier`.
       await expect(
         NFT.connect(accounts[0]).createConviction(identityId, amount, 0),
-      ).to.be.revertedWithCustomError(StakingV10Contract, 'InvalidLockEpochs');
+      ).to.be.revertedWithCustomError(StakingV10Contract, 'InvalidLockTier');
     });
 
     it('reverts on non-existent profile', async () => {
@@ -285,7 +285,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       const pos = await ConvictionStakingStorageContract.getPosition(0);
       expect(pos.identityId).to.equal(identityId);
       expect(pos.raw).to.equal(amount);
-      expect(pos.lockEpochs).to.equal(12);
+      expect(pos.lockTier).to.equal(12);
       expect(pos.multiplier18).to.equal(SIX_X);
     });
 
@@ -300,17 +300,17 @@ describe('@unit DKGStakingConvictionNFT', () => {
       [12, SIX_X],
     ];
 
-    for (const [lockEpochs, expectedMult] of happyTiers) {
-      it(`happy path: tier ${lockEpochs} writes multiplier18 = ${expectedMult.toString()}`, async () => {
+    for (const [lockTier, expectedMult] of happyTiers) {
+      it(`happy path: tier ${lockTier} writes multiplier18 = ${expectedMult.toString()}`, async () => {
         const { identityId } = await createProfile();
         const amount = hre.ethers.parseEther('1000');
         await mintAndApprove(accounts[0], amount);
 
-        await NFT.connect(accounts[0]).createConviction(identityId, amount, lockEpochs);
+        await NFT.connect(accounts[0]).createConviction(identityId, amount, lockTier);
 
         const pos = await ConvictionStakingStorageContract.getPosition(0);
         expect(pos.multiplier18).to.equal(expectedMult);
-        expect(pos.lockEpochs).to.equal(lockEpochs);
+        expect(pos.lockTier).to.equal(lockTier);
         expect(pos.raw).to.equal(amount);
       });
     }
@@ -471,7 +471,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       // via `_convictionMultiplier` before forwarding to StakingV10.
       await expect(
         NFT.connect(accounts[0]).relock(0, 2),
-      ).to.be.revertedWithCustomError(NFT, 'InvalidLockEpochs');
+      ).to.be.revertedWithCustomError(NFT, 'InvalidLockTier');
     });
 
     it('reverts on invalid new lock tier (13) at the NFT wrapper layer', async () => {
@@ -482,7 +482,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await advanceEpochs(2);
       await expect(
         NFT.connect(accounts[0]).relock(0, 13),
-      ).to.be.revertedWithCustomError(NFT, 'InvalidLockEpochs');
+      ).to.be.revertedWithCustomError(NFT, 'InvalidLockTier');
     });
 
     it('reverts if lock still active (pre-expiry)', async () => {
@@ -539,7 +539,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       const pos = await ConvictionStakingStorageContract.getPosition(newTokenId);
       expect(pos.identityId).to.equal(identityId);
       expect(pos.raw).to.equal(amount); // principal migrated to new tokenId
-      expect(pos.lockEpochs).to.equal(12);
+      expect(pos.lockTier).to.equal(12);
       expect(pos.multiplier18).to.equal(SIX_X);
       expect(pos.expiryEpoch).to.equal(beforeEpoch + 12n);
     });
@@ -565,13 +565,13 @@ describe('@unit DKGStakingConvictionNFT', () => {
 
       const pos = await ConvictionStakingStorageContract.getPosition(newTokenId);
       expect(pos.raw).to.equal(amount);
-      expect(pos.lockEpochs).to.equal(0);
+      expect(pos.lockTier).to.equal(0);
       expect(pos.multiplier18).to.equal(ONE_X);
       // D20: `_computeExpiryEpoch(0)` returns 0 (rest-state sentinel).
       expect(pos.expiryEpoch).to.equal(0);
     });
 
-    it('happy path: relock updates expiryEpoch to currentEpoch + newLockEpochs', async () => {
+    it('happy path: relock updates expiryEpoch to currentEpoch + newLockTier', async () => {
       const { identityId } = await createProfile();
       const amount = hre.ethers.parseEther('1000');
       await mintAndApprove(accounts[0], amount);
@@ -596,7 +596,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       await advanceEpochs(2);
 
       // The gate pins the caller to the Hub-registered NFT contract.
-      // D21: `StakingV10.relock(address staker, uint256 oldTokenId, uint256 newTokenId, uint8 newLockEpochs)`.
+      // D21: `StakingV10.relock(address staker, uint256 oldTokenId, uint256 newTokenId, uint8 newLockTier)`.
       await expect(
         StakingV10Contract.connect(accounts[0]).relock(accounts[0].address, 0, 1, 6),
       ).to.be.revertedWithCustomError(StakingV10Contract, 'OnlyConvictionNFT');
@@ -616,7 +616,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       const newTokenId = await NFT.connect(accounts[0]).relock.staticCall(0, 6);
       await NFT.connect(accounts[0]).relock(0, 6);
       const pos = await ConvictionStakingStorageContract.getPosition(newTokenId);
-      expect(pos.lockEpochs).to.equal(6);
+      expect(pos.lockTier).to.equal(6);
       expect(pos.multiplier18).to.equal(THREE_AND_HALF_X);
     });
 
@@ -789,11 +789,11 @@ describe('@unit DKGStakingConvictionNFT', () => {
       expect(await NFT.ownerOf(newTokenId)).to.equal(accounts[0].address);
 
       // ConvictionStakingStorage position now points at the new node.
-      // Raw, lockEpochs, multiplier18, expiryEpoch all untouched.
+      // Raw, lockTier, multiplier18, expiryEpoch all untouched.
       const pos = await ConvictionStakingStorageContract.getPosition(newTokenId);
       expect(pos.identityId).to.equal(toId);
       expect(pos.raw).to.equal(amount);
-      expect(pos.lockEpochs).to.equal(12);
+      expect(pos.lockTier).to.equal(12);
       expect(pos.multiplier18).to.equal(SIX_X);
     });
 
@@ -821,7 +821,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       expect(pos.raw).to.equal(amount);
       // Raw lock state on the position stays as it was pre-redelegate
       // (CSS `updateOnRedelegate` only mutates identityId + per-node diffs).
-      expect(pos.lockEpochs).to.equal(1);
+      expect(pos.lockTier).to.equal(1);
       expect(pos.multiplier18).to.equal(ONE_AND_HALF_X);
     });
 
@@ -2486,7 +2486,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       // to StakingV10 — no V8 state is touched.
       await expect(
         NFT.connect(accounts[0]).selfMigrateV8(identityId, 2),
-      ).to.be.revertedWithCustomError(NFT, 'InvalidLockEpochs');
+      ).to.be.revertedWithCustomError(NFT, 'InvalidLockTier');
     });
 
     it('reverts on invalid lock tier (4)', async () => {
@@ -2496,7 +2496,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
 
       await expect(
         NFT.connect(accounts[0]).selfMigrateV8(identityId, 4),
-      ).to.be.revertedWithCustomError(NFT, 'InvalidLockEpochs');
+      ).to.be.revertedWithCustomError(NFT, 'InvalidLockTier');
     });
 
     it('reverts on invalid lock tier (13)', async () => {
@@ -2506,7 +2506,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
 
       await expect(
         NFT.connect(accounts[0]).selfMigrateV8(identityId, 13),
-      ).to.be.revertedWithCustomError(NFT, 'InvalidLockEpochs');
+      ).to.be.revertedWithCustomError(NFT, 'InvalidLockTier');
     });
 
     it('direct StakingV10.convertToNFT call from non-NFT caller reverts via onlyConvictionNFT gate', async () => {
@@ -2552,7 +2552,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
         .to.emit(NFT, 'ConvertedFromV8')
         .withArgs(accounts[0].address, 0n, identityId, 12, false);
       // D8: stakeBaseAbsorbed=amount, pendingAbsorbed=0 (no pending in this
-      //     fixture), lockEpochs=12, isAdmin=false.
+      //     fixture), lockTier=12, isAdmin=false.
       await expect(tx)
         .to.emit(StakingV10Contract, 'ConvertedFromV8')
         .withArgs(accounts[0].address, 0n, identityId, amount, 0n, 12, false);
@@ -2573,7 +2573,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       const pos = await ConvictionStakingStorageContract.getPosition(0);
       expect(pos.identityId).to.equal(identityId);
       expect(pos.raw).to.equal(amount);
-      expect(pos.lockEpochs).to.equal(12);
+      expect(pos.lockTier).to.equal(12);
       expect(pos.multiplier18).to.equal(SIX_X);
 
       // NFT ownership.
@@ -2605,7 +2605,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       // ConvictionStakingStorage.createPosition at :153-154.
       const pos = await ConvictionStakingStorageContract.getPosition(0);
       expect(pos.raw).to.equal(amount);
-      expect(pos.lockEpochs).to.equal(0);
+      expect(pos.lockTier).to.equal(0);
       expect(pos.multiplier18).to.equal(ONE_X);
       expect(pos.expiryEpoch).to.equal(0);
 
@@ -2664,7 +2664,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
   // Phase 5 transfer semantics: when Alice transfers tokenId to Bob mid-lock,
   // the underlying `ConvictionStakingStorage.Position` is NOT mutated. No
   // rewards are settled, `lastClaimedEpoch` does not reset, the raw /
-  // rewards / identityId / lockEpochs / expiryEpoch / multiplier18 fields
+  // rewards / identityId / lockTier / expiryEpoch / multiplier18 fields
   // all stay with the tokenId. Bob now owns the tokenId and can exercise
   // every NFT entry point (claim, relock, redelegate, createWithdrawal,
   // cancelWithdrawal, finalizeWithdrawal) that gates on
@@ -2815,7 +2815,7 @@ describe('@unit DKGStakingConvictionNFT', () => {
       // Position state byte-identical — not a single field touched.
       const posAfter = await ConvictionStakingStorageContract.getPosition(0);
       expect(posAfter.raw).to.equal(posBefore.raw);
-      expect(posAfter.lockEpochs).to.equal(posBefore.lockEpochs);
+      expect(posAfter.lockTier).to.equal(posBefore.lockTier);
       expect(posAfter.expiryEpoch).to.equal(posBefore.expiryEpoch);
       expect(posAfter.identityId).to.equal(posBefore.identityId);
       expect(posAfter.multiplier18).to.equal(posBefore.multiplier18);
@@ -3053,9 +3053,9 @@ describe('@unit DKGStakingConvictionNFT', () => {
 
       const pos = await ConvictionStakingStorageContract.getPosition(newTokenId);
       expect(pos.identityId).to.equal(toId);
-      // Raw, lockEpochs, multiplier18 migrated to the new tokenId intact.
+      // Raw, lockTier, multiplier18 migrated to the new tokenId intact.
       expect(pos.raw).to.equal(amount);
-      expect(pos.lockEpochs).to.equal(12);
+      expect(pos.lockTier).to.equal(12);
       expect(pos.multiplier18).to.equal(SIX_X);
 
       // New NFT is owned by Bob; old NFT was burned.
