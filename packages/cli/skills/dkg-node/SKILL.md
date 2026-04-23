@@ -43,21 +43,7 @@ discover other agents on the network.
 
 ## 3. Quick Start
 
-## Turn Context Override
-
-When the chat turn includes injected context with `target_context_graph`, treat that value as BOTH:
-
-1. **The authoritative target context graph for tool routing on this turn** — default all DKG reads, writes, imports, promotions, publishes, and queries in that turn to this value unless the user explicitly overrides it in the same message.
-2. **The user's currently-selected project in the UI** — when the user asks introspective questions like "which project am I on?", "what is currently selected?", "do you see that I have X selected?", answer directly from this field. Do not claim you cannot see the UI state. The field IS the UI state: the right-side panel project dropdown stamps it onto every turn envelope before the turn reaches you, so its presence means the user has that project selected and its absence means they have nothing selected.
-
-Implications:
-
-- If `target_context_graph` is present, the user is on that project. State this explicitly when asked.
-- If it is absent, the user has no project selected. Try to deduce the target project from the conversation context (e.g., "add this to my research project" → look up "research" via `GET /api/context-graph/list`). If the project is ambiguous or you are not confident, ask the user which project to use. Only suggest the right-side panel project dropdown if the user is chatting through the DKG UI — users on other channels (Telegram, API, etc.) do not have a panel to select from. When no project can be determined, route reads and writes to `agent-context` only.
-- Default all DKG reads, writes, imports, promotions, publishes, and queries in that turn to the injected target context graph.
-- Do not keep using an older conversational context graph when a newer injected `target_context_graph` is present.
-- If the injected value includes both display name and ID, prefer the ID when calling tools or APIs, and reference the display name when answering the user.
-- If the user explicitly says to use a different context graph in the same turn, follow the user's explicit instruction instead.
+> Before writing in production, read §6 "Routing: Turn Context Override" — it governs which context graph each turn's operations target.
 
 **Step 1 — Create a Context Graph (project):**
 
@@ -181,13 +167,15 @@ before promoting it to SWM (team) or through to VM (chain-anchored).
 
 SWM is for knowledge you've promoted from WM and want peers to see. Data arrives here via `POST /api/assertion/{name}/promote` (from WM) or via direct SWM writes (escape hatch for team-visible data that doesn't need a WM staging step).
 
-- `POST /api/shared-memory/write` — write triples directly to SWM (gossip-replicated). Use the WM → promote path for most workflows; direct SWM writes are for bulk team data that skips the private draft stage.
+- `POST /api/shared-memory/write` — write triples directly to SWM (gossip-replicated). Body: `{ contextGraphId, quads, subGraphName? }`. Use the WM → promote path for most workflows; direct SWM writes are for bulk team data that skips the private draft stage.
+- `POST /api/shared-memory/conditional-write` — compare-and-swap write. Body: `{ contextGraphId, quads, conditions: [...], subGraphName? }`. Checks each condition atomically before writing; throws `StaleWriteError` on mismatch and leaves SWM unchanged. Use for concurrent multi-agent writes to the same root entity.
 - `POST /api/shared-memory/publish` — promote SWM triples to Verified Memory (costs TRAC)
 
 ### Verified Memory (VM) — Permanent, on-chain
 
-> All publishing goes through SWM first. The chain transaction is a finality
-> signal — it seals data that peers already hold.
+> **All VM publishing goes through SWM.** The HTTP API exposes no direct
+> WM → VM route — always promote to SWM first, then publish from there.
+> The on-chain transaction is a finality signal that seals data peers already hold.
 
 - `POST /api/shared-memory/publish` — promote SWM data to Verified Memory (costs TRAC)
 - `POST /api/update` — update an existing Knowledge Asset (reads new data from SWM)
@@ -196,8 +184,27 @@ SWM is for knowledge you've promoted from WM and want peers to see. Data arrives
 
 ### Querying
 
-- `POST /api/query` — SPARQL query with optional `contextGraphId`, `view` (`working-memory`, `shared-working-memory`, `verified-memory`), `agentAddress` (required for WM view), `assertionName`, `verifiedGraph` parameters
-- `POST /api/query-remote` — query a remote peer via P2P
+- `POST /api/query` — SPARQL query. Body parameters:
+  - `sparql` (required) — the query string
+  - `contextGraphId` — scope query to one CG (recommended)
+  - `view` — `working-memory` | `shared-working-memory` | `verified-memory`
+  - `agentAddress` — required when `view: "working-memory"` (WM is per-agent)
+  - `assertionName` — scope to a specific WM assertion graph
+  - `subGraphName` — scope to a specific sub-graph
+  - `graphSuffix` — advanced: target a specific internal graph (e.g. `_shared_memory`, `_meta`)
+  - `includeSharedMemory` / `includeWorkspace` — merge SWM into the result set
+  - `verifiedGraph` — target a specific VM (on-chain) named graph
+- `POST /api/query-remote` — query a remote peer via P2P. Body: `{ peerId, lookupType, contextGraphId, ual?, entityUri?, rdfType?, sparql?, limit?, timeout? }`. `lookupType` picks the strategy (e.g. `sparql`, `entity`, `rdf-type`). Remote peer ACL is enforced.
+
+### Operational constraints
+
+Respect these when producing writes — they're enforced at the node and produce errors rather than silent truncation.
+
+- **Reorganizing assertions.** There is no rename-assertion or move-between-sub-graphs endpoint. To reorganize, create a new assertion (with `subGraphName?` for a different partition), copy the triples over via `/write`, then `/discard` the original. A new assertion starts a fresh lifecycle record in `_meta`.
+- **Reserved subject IRIs.** Subjects matching `urn:dkg:file:*` or `urn:dkg:extraction:*` are reserved for internal file/extraction metadata and are rejected at write time. Use a different subject IRI.
+- **SWM gossip size cap (512 KB).** A single promote or SWM write must fit in one 512 KB gossip message. Split large assertions by root entity before promoting — use the `entities` parameter on `/promote` to promote subsets.
+- **SWM entity ownership (first-writer-wins).** The first peer to write a root entity in SWM becomes its owner; other peers' promotes or writes against that same root entity are rejected with an ownership error. Partition work by agent-owned root entities to avoid conflicts.
+- **Blank nodes are auto-skolemized.** Any `_:b0`-style blank nodes you submit are deterministically rewritten to UUID-backed URIs before storage, so IDs stay stable across sync and on-chain anchoring. Prefer explicit IRIs in production data.
 
 ### Automatic recall
 
@@ -205,19 +212,61 @@ SWM is for knowledge you've promoted from WM and want peers to see. Data arrives
 
 ## 6. Context Graphs
 
-Context Graphs are scoped knowledge domains with configurable access and governance. In the node UI, context graphs are called **projects** — when a user says "my project" or selects a project in the right-panel dropdown, they mean a context graph. The `target_context_graph` field injected on each turn (see §3 Turn Context Override) carries the context graph ID of the user's currently-selected project.
+Context Graphs are scoped knowledge domains with configurable access and governance. In the node UI, context graphs are called **projects** — when a user says "my project" or selects a project in the right-panel dropdown, they mean a context graph.
+
+### Routing: Turn Context Override
+
+When the chat turn includes injected context with `target_context_graph`, treat that value as BOTH:
+
+1. **The authoritative target context graph for tool routing on this turn** — default all DKG reads, writes, imports, promotions, publishes, and queries in that turn to this value unless the user explicitly overrides it in the same message.
+2. **The user's currently-selected project in the UI** — when the user asks introspective questions like "which project am I on?", "what is currently selected?", "do you see that I have X selected?", answer directly from this field. Do not claim you cannot see the UI state. The field IS the UI state: the right-side panel project dropdown stamps it onto every turn envelope before the turn reaches you, so its presence means the user has that project selected and its absence means they have nothing selected.
+
+Implications:
+
+- If `target_context_graph` is present, the user is on that project. State this explicitly when asked.
+- If it is absent, the user has no project selected. Try to deduce the target project from the conversation context (e.g., "add this to my research project" → look up "research" via `GET /api/context-graph/list`). If the project is ambiguous or you are not confident, ask the user which project to use. Only suggest the right-side panel project dropdown if the user is chatting through the DKG UI — users on other channels (Telegram, API, etc.) do not have a panel to select from. When no project can be determined, route reads and writes to `agent-context` only.
+- Default all DKG reads, writes, imports, promotions, publishes, and queries in that turn to the injected target context graph.
+- Do not keep using an older conversational context graph when a newer injected `target_context_graph` is present.
+- If the injected value includes both display name and ID, prefer the ID when calling tools or APIs, and reference the display name when answering the user.
+- If the user explicitly says to use a different context graph in the same turn, follow the user's explicit instruction instead.
+
+### Core CG routes
 
 - `POST /api/context-graph/create` — create a context graph.
   Body: `{ id, name, description?, accessPolicy? (0=open, 1=private), allowedAgents?: [...], allowedPeers?: [...], private?, register?, participantIdentityIds?, requiredSignatures? }`.
   By default the CG stays local-only. Pass `register: true` to also register on-chain in the same call; if that fails, the CG is still created locally and the response carries a `registerError` + retry hint. For private CGs (`private: true`), `requiredSignatures` is optional.
 - `POST /api/context-graph/register` — register a previously-created local CG on-chain (two-phase creation). Body: `{ id, revealOnChain?, accessPolicy? }`. Use this to promote a free CG to an on-chain identity before publishing to Verified Memory.
-- `POST /api/context-graph/invite` — invite a peer to a context graph. Body: `{ contextGraphId, peerId }`. Only the CG creator can invite; others get 403.
-- `GET /api/context-graph/list` — list subscribed context graphs
+- `POST /api/context-graph/rename` — rename a CG (human-readable name only; the ID is immutable). Body: `{ contextGraphId, name }`.
 - `POST /api/context-graph/subscribe` — subscribe to a context graph
+- `GET /api/context-graph/list` — list subscribed context graphs
 - `GET /api/context-graph/exists` — check if a context graph exists
+- `GET /api/sync/catchup-status?contextGraphId=...` — poll CG sync progress after subscribing
 - 🚧 `GET /api/context-graph/{id}` — CG details *(planned)*
 - 🚧 `POST /api/context-graph/{id}/ontology` — add ontology *(planned)*
 - 🚧 `GET /api/context-graph/{id}/ontology` — list ontologies *(planned)*
+
+### Sub-Graphs — partitions within a CG
+
+A **sub-graph** is a named partition inside a context graph. Use them to organize assertions by topic, source, or any other axis. Sub-graphs are optional — by default assertions live at the CG root. A sub-graph must be registered before any assertion op passes `subGraphName`; otherwise those ops fail with `Sub-graph "{name}" has not been registered in context graph "{id}". Call createSubGraph() first.`
+
+- `POST /api/sub-graph/create` — register a new sub-graph. Body: `{ contextGraphId, subGraphName }`.
+- `GET /api/sub-graph/list?contextGraphId=...` — list all sub-graphs registered in a CG.
+
+To put an assertion in a sub-graph, pass `subGraphName` on `/api/assertion/create`, `/write`, `/query`, `/promote`, `/discard`, `/import-file`, `/history`, and on `/api/query` when scoping queries.
+
+### Participants and join flow
+
+| Method | Route | Purpose |
+|---|---|---|
+| `POST` | `/api/context-graph/invite` | Invite a peer. Body: `{ contextGraphId, peerId }`. CG creator only. |
+| `POST` | `/api/context-graph/{id}/add-participant` | Directly add a participant (creator only). |
+| `POST` | `/api/context-graph/{id}/remove-participant` | Remove a participant. |
+| `GET`  | `/api/context-graph/{id}/participants` | List current participants. |
+| `POST` | `/api/context-graph/{id}/request-join` | Signed request from an invitee to join. |
+| `GET`  | `/api/context-graph/{id}/join-requests` | List pending join requests (curator view). |
+| `POST` | `/api/context-graph/{id}/approve-join` | Approve a pending request. |
+| `POST` | `/api/context-graph/{id}/reject-join` | Reject a pending request. |
+| `POST` | `/api/context-graph/{id}/sign-join` | Sign a join request and forward to the curator via P2P (multi-sig CGs). |
 
 ## 7. File Ingestion
 
@@ -298,6 +347,10 @@ curl $BASE_URL/api/assertion/climate-report/extraction-status?contextGraphId=res
 
 Returns the same `{ status, fileHash, pipelineUsed, tripleCount, ... }` shape from the in-memory extraction status tracker, or 404 if no import-file has been run for that assertion.
 
+### Retrieving stored files
+
+- `GET /api/file/{fileHash}` — fetch a previously-imported file by its content hash. The hash in the URL is just the hex portion (the `keccak256:` prefix returned by the import response is for ontology use). Returns the original bytes with the stored `Content-Type`. Use this when you need to re-reference or re-process the source document after import.
+
 ## 8. Node Administration
 
 - `GET /api/status` (PUBLIC) — node status, peer ID, version, connections
@@ -309,6 +362,21 @@ Returns the same `{ status, fileHash, pipelineUsed, tripleCount, ... }` shape fr
 - `GET /api/identity` — node identity (DID, identity ID)
 - `GET /api/events` — SSE stream for real-time notifications (`text/event-stream`). Emits `join_request`, `join_approved`, `project_synced` events with a `: heartbeat` comment every 30 s. Use it to watch for inbound invitations and project sync completions without polling.
 - 🚧 `GET /api/agent/profile` — your agent profile *(planned)*
+
+### Async publishing (job queue)
+
+Use the job queue for bulk or long-running publishes, publishes that must survive the client session, or when the daemon should hold its own signing wallet. For small interactive publishes, use synchronous `/api/shared-memory/publish` instead.
+
+| Method | Route | Purpose |
+|---|---|---|
+| `POST` | `/api/publisher/enqueue` | Enqueue a publish job. Body: `{ contextGraphId, selection?, ... }` (same shape as `/shared-memory/publish`). Returns `{ jobId }`. |
+| `GET`  | `/api/publisher/jobs?status=...` | List jobs, optionally filtered by status. |
+| `GET`  | `/api/publisher/job?id=...` | Fetch one job's status. |
+| `GET`  | `/api/publisher/job-payload?id=...` | Fetch a job's payload. |
+| `GET`  | `/api/publisher/stats` | Queue statistics (running / pending / completed / failed). |
+| `POST` | `/api/publisher/cancel` | Cancel a job. Body: `{ jobId }`. |
+| `POST` | `/api/publisher/retry` | Retry a failed job. Body: `{ jobId }`. |
+| `POST` | `/api/publisher/clear` | Clear completed/failed jobs. |
 
 ## 9. Error Reference
 
@@ -345,3 +413,20 @@ Returns the same `{ status, fileHash, pipelineUsed, tripleCount, ... }` shape fr
 - Working memory: `{"sparql": "...", "view": "working-memory", "agentAddress": "...", "contextGraphId": "..."}`
 - Shared memory: `{"sparql": "...", "contextGraphId": "...", "view": "shared-working-memory"}`
 - Verified memory: `{"sparql": "...", "contextGraphId": "...", "view": "verified-memory"}`
+
+**List and inspect your assertions:**
+
+There is no dedicated list endpoint. Assertion lifecycle records live in the CG's `_meta` graph as `dkg:Assertion` entities (namespace `http://dkg.io/ontology/`), with `dkg:state` (`created` | `promoted` | `published` | `finalized` | `discarded`) and `dkg:memoryLayer` (`WM` | `SWM` | `VM`). Query them via `/api/query` with `graphSuffix: "_meta"`:
+
+```bash
+curl -X POST $BASE_URL/api/query \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "sparql": "PREFIX dkg: <http://dkg.io/ontology/> SELECT ?assertion ?name ?state ?layer WHERE { ?assertion a dkg:Assertion ; dkg:assertionName ?name ; dkg:state ?state ; dkg:memoryLayer ?layer }",
+    "contextGraphId": "my-project",
+    "graphSuffix": "_meta"
+  }'
+```
+
+Then call `GET /api/assertion/{name}/history?contextGraphId=...&agentAddress=...` for the full event history of a single assertion.

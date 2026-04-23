@@ -1,6 +1,6 @@
 # @origintrail-official/dkg
 
-Command-line interface and daemon for DKG V9. This is the main entry point for running a DKG node — it manages the node lifecycle, exposes a local HTTP API, and provides commands for publishing, querying, and interacting with the network.
+Command-line interface and daemon for DKG V10. This is the main entry point for running a DKG node — it manages the node lifecycle, exposes a local HTTP API, and provides commands for publishing, querying, and interacting with the network.
 
 ## Installation
 
@@ -36,54 +36,77 @@ dkg start
 # Check node status
 dkg status
 
-# Publish data to a paranet
-dkg publish --paranet urn:paranet:example --file data.nq
+# Create a context graph (project), write RDF, promote to SWM, publish to VM
+dkg context-graph create my-project
+dkg assertion import-file notes -f data.md -c my-project
+dkg assertion promote notes -c my-project
+dkg shared-memory publish my-project
 
 # Query the knowledge graph
-dkg query "SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 10"
+dkg query my-project -q "SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 10"
 ```
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `dkg init` | Initialize node config, generate keys, set up storage |
-| `dkg start` | Start the node daemon (HTTP API + P2P) |
-| `dkg stop` | Stop a running daemon |
-| `dkg status` | Show node status, connected peers, synced paranets |
-| `dkg auth` | Generate or display API authentication token |
-| `dkg publish` | Publish RDF data as Knowledge Assets to a paranet |
-| `dkg query` | Run a SPARQL query against the local store |
-| `dkg query-remote` | Forward a SPARQL query to a remote peer |
-| `dkg peers` | List connected peers |
-| `dkg send` | Send an encrypted message to another agent |
-| `dkg chat` | Start an interactive chat session with a remote agent |
-| `dkg subscribe` | Subscribe to a paranet and sync its data |
-| `dkg paranet` | Create, list, or inspect paranets |
-| `dkg workspace publish` | Publish from a local workspace (feeless mode) |
-| `dkg index` | Index a local code repository into the knowledge graph |
-| `dkg wallet` | Show wallet addresses and balances |
-| `dkg set-ask` | Set the token ask price for serving data |
-| `dkg logs` | Stream daemon logs |
+| `dkg init` | Interactive setup — node name, role, relay |
+| `dkg start [-f]` | Start the node daemon (HTTP API + P2P); `-f` runs in foreground |
+| `dkg stop` | Graceful daemon shutdown |
+| `dkg status` | Node health, peer count, identity |
+| `dkg logs` | Tail the daemon log |
+| `dkg peers` | List connected peers and transport info |
+| `dkg peer info <peer-id>` | Inspect a peer's identity and addresses |
+| `dkg send <name> <msg>` | Encrypted direct message to a peer |
+| `dkg chat <name>` | Interactive chat with a peer |
+| `dkg context-graph create <id>` | Create a local context graph (project) |
+| `dkg context-graph register <id>` | Register an existing CG on-chain (unlocks Verified Memory) |
+| `dkg context-graph list` | List subscribed context graphs |
+| `dkg context-graph invite <id> <peer>` | Invite a peer to a curated CG |
+| `dkg context-graph subscribe <id>` | Subscribe to a CG without creating it |
+| `dkg assertion import-file <name> -f <file> -c <cg>` | Import a document into Working Memory |
+| `dkg assertion promote <name> -c <cg>` | Promote a WM assertion to Shared Working Memory |
+| `dkg assertion query <name> -c <cg>` | Read assertion quads from WM |
+| `dkg shared-memory write <cg>` | Write triples directly to Shared Working Memory |
+| `dkg shared-memory publish <cg>` | Publish from SWM to Verified Memory (costs TRAC) |
+| `dkg publish <cg>` | One-shot RDF publish to a context graph |
+| `dkg verify <batchId>` | Propose M-of-N verification for a published batch |
+| `dkg endorse <ual>` | Endorse a published Knowledge Asset |
+| `dkg query [cg] -q <sparql>` | SPARQL query against the local store |
+| `dkg query-remote <peer>` | Query a remote peer's knowledge store |
+| `dkg subscribe <cg>` | Subscribe to a context graph and sync its data |
+| `dkg sync` | Catch up on data from peers |
+| `dkg index [directory]` | Index a code repository into the dev-coordination CG |
+| `dkg publisher ...` | Inspect and control the async publisher (jobs, wallets, stats) |
+| `dkg auth show` | Display the current API auth token |
+| `dkg auth rotate` | Generate a new API auth token |
+| `dkg wallet` | Show operational wallet addresses and balances |
+| `dkg set-ask <amount>` | Set the node's on-chain ask (TRAC per KB·epoch) |
+| `dkg openclaw setup` | Install and configure the OpenClaw adapter |
+| `dkg update` | Update the node software (blue-green slots) |
+| `dkg rollback` | Roll back to the previous software slot |
+
+Run `dkg <command> --help` for per-command options.
 
 ## HTTP API
 
-When the daemon is running, it exposes a local HTTP API (default: `http://localhost:9200`). Endpoints include:
+When the daemon is running, it exposes a local HTTP API (default: `http://localhost:9200`). Key endpoint groups:
 
-- `POST /api/publish` — publish RDF data
-- `POST /api/query` — execute SPARQL queries
-- `GET /api/peers` — list connected peers
-- `GET /api/status` — node status
-- `POST /api/sessions` — create AKA sessions (experimental)
-- `POST /api/context-graphs` — create a Context Graph (M/N signature-gated subgraph)
-- `GET /api/context-graphs/:id` — get Context Graph metadata
-- `POST /api/context-graphs/:id/publish` — publish KAs into a Context Graph
-- `GET /api/oracle/:contextGraphId/entity` — entity lookup with Merkle inclusion proofs
-- `POST /api/oracle/:contextGraphId/query` — SPARQL query with proofs
-- `POST /api/oracle/:contextGraphId/prove` — single triple existence proof
+- `GET /api/status`, `GET /api/info` — node status and health
+- `POST /api/agent/register`, `GET /api/agent/identity` — agent identity
+- `POST /api/context-graph/create`, `/register`, `/invite`, `GET /api/context-graph/list` — context graph management
+- `POST /api/assertion/create`, `/{name}/write`, `/{name}/promote`, `/{name}/discard`, `/{name}/import-file`, `GET /api/assertion/{name}/history` — Working Memory assertions
+- `POST /api/shared-memory/write`, `/publish` — Shared Working Memory and publishing to Verified Memory
+- `POST /api/query`, `POST /api/query-remote` — SPARQL querying
+- `POST /api/endorse`, `POST /api/verify`, `POST /api/update` — Verified Memory trust operations
+- `GET /api/peers`, `GET /api/connections`, `GET /api/agents` — network introspection
+- `GET /api/wallets/balances`, `GET /api/chain/rpc-health` — wallet and chain health
+- `GET /api/events` — Server-Sent Events stream for real-time notifications
 - `GET /api/apps` — list installed DKG apps
 
-All endpoints (except public paths and oracle endpoints) require an API token via `Authorization: Bearer <token>` header.
+All endpoints (except public paths like `/api/status`, `/api/chain/rpc-health`, and `/.well-known/skill.md`) require an API token via `Authorization: Bearer <token>` header.
+
+The full API surface — including request bodies, response shapes, and error codes — is documented in [`skills/dkg-node/SKILL.md`](./skills/dkg-node/SKILL.md).
 
 ## Installable Apps
 
@@ -93,10 +116,13 @@ The daemon includes a generic app loader that discovers and serves third-party D
 2. **Loads** each app's API handler and invokes it for requests under `/api/apps/:appId/*`.
 3. **Serves** each app's built UI (static assets) at `/apps/:appId/`.
 
-Node runners install an app (`pnpm add dkg-app-my-game`), restart, and it appears in the Node UI sidebar. See [`docs/plans/DKG_APPS_INSTALLABLE.md`](../../docs/plans/DKG_APPS_INSTALLABLE.md) for the full design.
+Node runners install an app (`pnpm add <dkg-app-package>`), restart, and it appears in the Node UI sidebar. See [`docs/plans/DKG_APPS_INSTALLABLE.md`](../../docs/plans/DKG_APPS_INSTALLABLE.md) for the full design.
 
 ## Internal Dependencies
 
 - `@origintrail-official/dkg-agent` — agent runtime, wallet, publishing, querying
-- `@origintrail-official/dkg-core` — P2P node, event bus
+- `@origintrail-official/dkg-core` — P2P node, memory model, event bus
+- `@origintrail-official/dkg-publisher` — publish pipeline (SWM → VM)
+- `@origintrail-official/dkg-storage` — triple-store adapters
+- `@origintrail-official/dkg-chain` — blockchain abstraction
 - `@origintrail-official/dkg-node-ui` — web dashboard serving
