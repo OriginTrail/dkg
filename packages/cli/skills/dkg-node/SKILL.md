@@ -181,8 +181,6 @@ Drop to HTTP when the operation isn't in the table — participant admin (§6), 
 
 P2P tools fail gracefully when the peer is offline. `dkg_publish` (fresh quads + write + publish, two HTTP calls) and `dkg_shared_memory_publish` (publish existing SWM, one HTTP call) differ in intent: use the two-call helper for "I have quads, publish now"; use the canonical finalizer as step 4 of the stepwise write → promote → publish flow.
 
-> **Migration note on `dkg_query`.** An earlier draft accepted `include_shared_memory: true`, which unioned the legacy data-graph path with SWM; that parameter has been removed and no single `view` value reproduces that exact union. Closest intents: omit `view` for the legacy data-graph path, `view: "shared-working-memory"` for SWM-only, `view: "verified-memory"` for on-chain. If you need the exact legacy union, call `POST /api/query` directly with `includeSharedMemory: true`.
-
 ### HTTP-only operations (no tool wrapper)
 
 - **Participants and join flow** — see §6.
