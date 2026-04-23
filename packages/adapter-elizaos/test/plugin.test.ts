@@ -435,3 +435,129 @@ describe('dkgPlugin.hooks — r17-1: persisted-user-turn cache is per-runtime', 
     }
   });
 });
+
+// -----------------------------------------------------------------------
+// PR #229 bot review round 24 — r24-2: the onChatTurn → onAssistantReply
+// in-process cache MUST scope by the destination `(contextGraphId,
+// assertionName)` tuple as well as `(roomId, userMsgId)`.
+//
+// Before this fix: a successful onChatTurn in context graph A silently
+// short-circuited an onAssistantReply in context graph B for the same
+// (roomId, userMsgId), leaving graph B with only `hasAssistantMessage`
+// and no user-turn envelope / session root. That violates the contract
+// "a successful persistChatTurn call lands a complete turn in the
+// destination".
+// -----------------------------------------------------------------------
+describe('dkgPlugin.hooks — r24-2: cache is scoped by destination assertion graph', () => {
+  beforeEach(() => {
+    __resetPersistedUserTurnCacheForTests();
+  });
+
+  it('onChatTurn into CG A does NOT mark the turn as persisted for CG B', async () => {
+    const spy = vi.spyOn(dkgService, 'persistChatTurn' as any)
+      .mockResolvedValue({ tripleCount: 0, turnUri: '', kcId: '' } as any);
+    try {
+      const runtime = { getSetting: () => undefined, character: { name: 'x' } } as any;
+      const userMsg = { content: { text: 'hello' }, id: 'user-1', userId: 'u', roomId: 'room-r24-2' } as any;
+      const assistantMsg = {
+        content: { text: 'reply' }, id: 'asst-1', userId: 'a', roomId: 'room-r24-2',
+        replyTo: 'user-1',
+      } as any;
+
+      // onChatTurn lands in graph-a / chat-turns
+      await (dkgPlugin as any).hooks.onChatTurn(runtime, userMsg, {}, {
+        contextGraphId: 'graph-a',
+        assertionName: 'chat-turns',
+      });
+
+      // onAssistantReply targets graph-b (DIFFERENT destination)
+      await (dkgPlugin as any).hooks.onAssistantReply(runtime, assistantMsg, {}, {
+        contextGraphId: 'graph-b',
+        assertionName: 'chat-turns',
+      });
+
+      const replyOpts = spy.mock.calls[1][3] as any;
+      expect(replyOpts.mode).toBe('assistant-reply');
+      // Before r24-2 this would have been true (cache hit from the
+      // graph-a onChatTurn) and graph-b would have only received
+      // the append-only assistant quads — no user-turn envelope, no
+      // session root.
+      expect(replyOpts.userTurnPersisted).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('onChatTurn into CG A does NOT mark the turn as persisted for assertion "b" in CG A', async () => {
+    const spy = vi.spyOn(dkgService, 'persistChatTurn' as any)
+      .mockResolvedValue({ tripleCount: 0, turnUri: '', kcId: '' } as any);
+    try {
+      const runtime = { getSetting: () => undefined, character: { name: 'x' } } as any;
+      const userMsg = { content: { text: 'hello' }, id: 'user-a1', userId: 'u', roomId: 'room-r24-2-a' } as any;
+      const assistantMsg = {
+        content: { text: 'reply' }, id: 'asst-a1', userId: 'a', roomId: 'room-r24-2-a',
+        replyTo: 'user-a1',
+      } as any;
+
+      await (dkgPlugin as any).hooks.onChatTurn(runtime, userMsg, {}, {
+        contextGraphId: 'agent-context',
+        assertionName: 'assertion-alpha',
+      });
+
+      await (dkgPlugin as any).hooks.onAssistantReply(runtime, assistantMsg, {}, {
+        contextGraphId: 'agent-context',
+        assertionName: 'assertion-beta',
+      });
+
+      const replyOpts = spy.mock.calls[1][3] as any;
+      expect(replyOpts.userTurnPersisted).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('onChatTurn + onAssistantReply in the SAME destination STILL hit the append-only path (the r16-2 invariant survives)', async () => {
+    const spy = vi.spyOn(dkgService, 'persistChatTurn' as any)
+      .mockResolvedValue({ tripleCount: 0, turnUri: '', kcId: '' } as any);
+    try {
+      const runtime = { getSetting: () => undefined, character: { name: 'x' } } as any;
+      const userMsg = { content: { text: 'hello' }, id: 'user-same', userId: 'u', roomId: 'room-r24-2-same' } as any;
+      const assistantMsg = {
+        content: { text: 'reply' }, id: 'asst-same', userId: 'a', roomId: 'room-r24-2-same',
+        replyTo: 'user-same',
+      } as any;
+
+      const dest = { contextGraphId: 'agent-context', assertionName: 'chat-turns' };
+      await (dkgPlugin as any).hooks.onChatTurn(runtime, userMsg, {}, dest);
+      await (dkgPlugin as any).hooks.onAssistantReply(runtime, assistantMsg, {}, dest);
+
+      const replyOpts = spy.mock.calls[1][3] as any;
+      expect(replyOpts.userTurnPersisted).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('default destination (no explicit contextGraphId / assertionName) matches the same defaults persistChatTurnImpl uses', async () => {
+    const spy = vi.spyOn(dkgService, 'persistChatTurn' as any)
+      .mockResolvedValue({ tripleCount: 0, turnUri: '', kcId: '' } as any);
+    try {
+      const runtime = { getSetting: () => undefined, character: { name: 'x' } } as any;
+      const userMsg = { content: { text: 'hi' }, id: 'user-def', userId: 'u', roomId: 'room-r24-2-def' } as any;
+      const assistantMsg = {
+        content: { text: 'reply' }, id: 'asst-def', userId: 'a', roomId: 'room-r24-2-def',
+        replyTo: 'user-def',
+      } as any;
+
+      // Both calls omit the destination → both resolve to the
+      // plugin defaults → cache hit should still fire.
+      await (dkgPlugin as any).hooks.onChatTurn(runtime, userMsg, {}, {});
+      await (dkgPlugin as any).hooks.onAssistantReply(runtime, assistantMsg, {}, {});
+
+      const replyOpts = spy.mock.calls[1][3] as any;
+      expect(replyOpts.userTurnPersisted).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});

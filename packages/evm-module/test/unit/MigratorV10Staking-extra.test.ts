@@ -120,6 +120,35 @@ describe('@unit MigratorV10Staking — extra audit coverage (E-11)', () => {
     expect(unknownIdErr!.inputs![0].type).to.equal('uint72');
   });
 
+  // PR #229 bot review round 24 (r24-3). Before this fix,
+  // `markNodeMigrated()` flipped `nodeMigrated[id] = true` but
+  // `migrateDelegator()` never re-checked the flag. A snapshot
+  // replay that landed AFTER markNodeMigrated would therefore
+  // silently extend `delegatorsInfo`, `stakingStorage.nodeStake`,
+  // `stakingStorage.totalStake` and `migratedTotalStake` past the
+  // value that markNodeMigrated had already validated against
+  // the V8 snapshot's `expectedTotalStake` — corrupting the
+  // V10 staking base without reverting anywhere.
+  // The fix adds `if (nodeMigrated[id]) revert NodeAlreadyFrozen(id)`
+  // at the top of `migrateDelegator`. Pin the new custom error at
+  // the ABI layer so a refactor that drops the guard also breaks
+  // this test.
+  it('bot review r24-3: NodeAlreadyFrozen error is present in the compiled ABI', () => {
+    const artifact = JSON.parse(fs.readFileSync(artifactPath, 'utf8')) as {
+      abi: Array<{ type: string; name?: string; inputs?: Array<{ type: string; name?: string }> }>;
+    };
+
+    const frozenErr = artifact.abi.find(
+      (entry) => entry.type === 'error' && entry.name === 'NodeAlreadyFrozen',
+    );
+    expect(
+      frozenErr,
+      'MigratorV10Staking ABI must expose the NodeAlreadyFrozen error (bot review r24-3)',
+    ).to.not.equal(undefined);
+    expect(frozenErr!.inputs).to.have.length(1);
+    expect(frozenErr!.inputs![0].type).to.equal('uint72');
+  });
+
   it('baseline sanity: other historical migrators DO exist (pins detection)', () => {
     // If this assertion ever fails the detection path is broken, not the
     // product — flags false-positive risk in the two tests above.

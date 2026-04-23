@@ -366,8 +366,8 @@ export interface ChatTurnPersistenceAgent {
  *   SCHEMA                   -> 'http://schema.org/'
  *   DKG_ONT                  -> 'http://dkg.io/ontology/'
  */
-const CHAT_AGENT_CONTEXT_GRAPH = 'agent-context';
-const CHAT_TURNS_ASSERTION = 'chat-turns';
+export const CHAT_AGENT_CONTEXT_GRAPH = 'agent-context';
+export const CHAT_TURNS_ASSERTION = 'chat-turns';
 const CHAT_NS = 'urn:dkg:chat:';
 const SCHEMA_NS = 'http://schema.org/';
 const DKG_ONT_NS = 'http://dkg.io/ontology/';
@@ -402,7 +402,42 @@ type ChatQuad = { subject: string; predicate: string; object: string; graph: str
 let emittedSessionRootsByRuntime: WeakMap<object, Set<string>> = new WeakMap();
 let emittedSessionRootsAnon: Set<string> = new Set();
 
-function shouldEmitSessionRoot(runtime: unknown, sessionUri: string): boolean {
+/**
+ * Bot review PR #229 round 24 (r24-1): the per-runtime cache MUST key
+ * by the destination assertion graph as well as the session URI.
+ *
+ * Before this fix the cache used only `(runtime, sessionUri)`. That
+ * suppressed `?session rdf:type schema:Conversation` on the FIRST
+ * write of a given session and then happily dropped it from every
+ * other destination this same runtime subsequently wrote the same
+ * session to (e.g. a second context graph, a second assertion name,
+ * or an operator rotating `DKG_CHAT_CG`). Readers like
+ * `ChatMemoryManager` enumerate sessions by the `schema:Conversation`
+ * type triple in the destination graph, so the second store became
+ * invisible even though the message quads landed there.
+ *
+ * The fix composes the destination `(contextGraphId, assertionName)`
+ * into the cache key so each (runtime, cg, assertion, sessionUri)
+ * tuple emits its own root exactly once. The WM Rule-4 guard we
+ * originally installed this cache for is ALSO still satisfied:
+ * re-emitting the root within the SAME destination still short-circuits
+ * on every subsequent turn.
+ */
+function sessionRootCacheKey(
+  destContextGraphId: string,
+  destAssertionName: string,
+  sessionUri: string,
+): string {
+  return `${destContextGraphId}\u0000${destAssertionName}\u0000${sessionUri}`;
+}
+
+function shouldEmitSessionRoot(
+  runtime: unknown,
+  sessionUri: string,
+  destContextGraphId: string,
+  destAssertionName: string,
+): boolean {
+  const key = sessionRootCacheKey(destContextGraphId, destAssertionName, sessionUri);
   let seen: Set<string>;
   if (runtime !== null && typeof runtime === 'object') {
     let s = emittedSessionRootsByRuntime.get(runtime as object);
@@ -414,8 +449,8 @@ function shouldEmitSessionRoot(runtime: unknown, sessionUri: string): boolean {
   } else {
     seen = emittedSessionRootsAnon;
   }
-  if (seen.has(sessionUri)) return false;
-  seen.add(sessionUri);
+  if (seen.has(key)) return false;
+  seen.add(key);
   return true;
 }
 
@@ -1008,7 +1043,11 @@ export async function persistChatTurnImpl(
         // Re-emitting `?session rdf:type schema:Conversation`
         // on every turn trips DKG WM Rule 4 (entity exclusivity)
         // and fails the second persisted turn in the same room.
-        ...(shouldEmitSessionRoot(runtime, sessionUri)
+        // r24-1: scope by the destination (contextGraphId,
+        // assertionName) so writing the same session into two
+        // different stores still emits a `schema:Conversation`
+        // root in BOTH places.
+        ...(shouldEmitSessionRoot(runtime, sessionUri, contextGraphId, assertionName)
           ? buildSessionEntityQuads(sessionUri, sessionId)
           : []),
         ...buildHeadlessUserStubQuads(userStubUri, sessionUri, ts, turnKey),
@@ -1053,7 +1092,10 @@ export async function persistChatTurnImpl(
       // Re-emitting `?session rdf:type schema:Conversation` on
       // every turn trips DKG WM Rule 4 and rejects the second
       // persisted turn in the same room.
-      ...(shouldEmitSessionRoot(runtime, sessionUri)
+      // r24-1: scope by the destination (contextGraphId,
+      // assertionName) so the root re-emits in a second
+      // store that has not yet received it.
+      ...(shouldEmitSessionRoot(runtime, sessionUri, contextGraphId, assertionName)
         ? buildSessionEntityQuads(sessionUri, sessionId)
         : []),
       ...buildUserMessageQuads(userMsgUri, sessionUri, ts, userText, turnKey),

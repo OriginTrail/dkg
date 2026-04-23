@@ -50,6 +50,17 @@ contract MigratorV10Staking is ContractStatus, INamed, IVersioned, IInitializabl
     error MigrationAlreadyFinalized();
     error DelegatorAlreadyMigrated(uint72 identityId, address delegator);
     error NodeAlreadyMigrated(uint72 identityId);
+    /// PR #229 bot review round 24 (r24-3): raised when
+    /// `migrateDelegator` is called for an identity that has ALREADY
+    /// been marked migrated via `markNodeMigrated`. The previous
+    /// implementation only guarded `delegatorMigrated[id][d]`, so a
+    /// replay of an older snapshot row could still extend
+    /// `delegatorsInfo`, `nodeStake` and `totalStake` past the value
+    /// that `markNodeMigrated` already validated against
+    /// `expectedTotalStake`. The integrity gate assumed `nodeStake`
+    /// was frozen after a successful `markNodeMigrated` — this error
+    /// makes that invariant explicit on chain.
+    error NodeAlreadyFrozen(uint72 identityId);
     error InvalidIdentityId();
     /// PR #229 bot review round 10 (MigratorV10Staking.sol:137).
     /// Raised when the supplied `identityId` is non-zero but does not
@@ -158,6 +169,18 @@ contract MigratorV10Staking is ContractStatus, INamed, IVersioned, IInitializabl
         if (!profileStorage.profileExists(identityId)) {
             revert UnknownIdentityId(identityId);
         }
+        // PR #229 bot review round 24 (r24-3). Once
+        // `markNodeMigrated` has flipped `nodeMigrated[identityId]`
+        // to true, the integrity check for THIS identity has been
+        // satisfied against `expectedTotalStake` and downstream
+        // bookkeeping assumes the aggregate is frozen. Accepting a
+        // late replay of `migrateDelegator` for the same identity
+        // would silently push `nodeStake[identityId]`,
+        // `totalStake`, `migratedTotalStake`, and `delegatorsInfo`
+        // past the already-asserted value — without ever revisiting
+        // the expected-vs-actual equality. We refuse instead of
+        // silently inflating.
+        if (nodeMigrated[identityId]) revert NodeAlreadyFrozen(identityId);
         if (delegator == address(0)) revert InvalidDelegator();
         if (delegatorMigrated[identityId][delegator]) {
             revert DelegatorAlreadyMigrated(identityId, delegator);

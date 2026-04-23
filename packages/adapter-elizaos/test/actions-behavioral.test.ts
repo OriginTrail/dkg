@@ -1272,6 +1272,93 @@ describe('persistChatTurnImpl — r21-3: schema:Conversation session root emitte
     expect(conv(publishes[1].quads, 'session-B')).toHaveLength(1);
   });
 
+  // ===========================================================================
+  // PR #229 round 24 — r24-1: the per-runtime session-root cache MUST include
+  // the destination assertion graph. A runtime that writes the same session
+  // into two different `(contextGraphId, assertionName)` targets MUST emit
+  // `?session rdf:type schema:Conversation` in BOTH destinations, otherwise
+  // the second store has no `schema:Conversation` root and readers like
+  // `ChatMemoryManager` enumerating by type triple surface zero sessions.
+  // ===========================================================================
+  it('r24-1: same (runtime, session) routed into TWO different context graphs emits a session root in BOTH', async () => {
+    __resetEmittedSessionRootsForTests();
+    const { agent, publishes } = makeCapturingAgent();
+    const runtime = makeRuntime();
+    await persistChatTurnImpl(
+      agent, runtime,
+      makeMessage('to CG A', { id: 'r24-1-a1', roomId: 'room-r24-1' } as any),
+      {} as State,
+      { contextGraphId: 'graph-a', assertionName: 'chat-turns' },
+    );
+    await persistChatTurnImpl(
+      agent, runtime,
+      makeMessage('to CG B', { id: 'r24-1-b1', roomId: 'room-r24-1' } as any),
+      {} as State,
+      { contextGraphId: 'graph-b', assertionName: 'chat-turns' },
+    );
+    expect(publishes[0].cgId).toBe('graph-a');
+    expect(publishes[1].cgId).toBe('graph-b');
+    const convRoot = (qs: any[]) => qs.filter(
+      (q) => q.subject === 'urn:dkg:chat:session:room-r24-1'
+        && q.predicate === RDF_TYPE
+        && q.object === `${SCHEMA}Conversation`,
+    );
+    // Before r24-1 this second publish would have ZERO session-root
+    // quads because the cache was keyed only by (runtime, sessionUri).
+    expect(convRoot(publishes[0].quads)).toHaveLength(1);
+    expect(convRoot(publishes[1].quads)).toHaveLength(1);
+  });
+
+  it('r24-1: same (runtime, session, contextGraphId) but DIFFERENT assertionName still emits in both assertions', async () => {
+    __resetEmittedSessionRootsForTests();
+    const { agent, publishes } = makeCapturingAgent();
+    const runtime = makeRuntime();
+    await persistChatTurnImpl(
+      agent, runtime,
+      makeMessage('to assertion-1', { id: 'r24-1-an1', roomId: 'room-r24-1-an' } as any),
+      {} as State,
+      { contextGraphId: 'agent-context', assertionName: 'assertion-1' },
+    );
+    await persistChatTurnImpl(
+      agent, runtime,
+      makeMessage('to assertion-2', { id: 'r24-1-an2', roomId: 'room-r24-1-an' } as any),
+      {} as State,
+      { contextGraphId: 'agent-context', assertionName: 'assertion-2' },
+    );
+    const convRoot = (qs: any[]) => qs.filter(
+      (q) => q.subject === 'urn:dkg:chat:session:room-r24-1-an'
+        && q.predicate === RDF_TYPE
+        && q.object === `${SCHEMA}Conversation`,
+    );
+    expect(convRoot(publishes[0].quads)).toHaveLength(1);
+    expect(convRoot(publishes[1].quads)).toHaveLength(1);
+  });
+
+  it('r24-1: second turn into the SAME destination still de-dupes the session root (the WM-Rule-4 invariant survives)', async () => {
+    __resetEmittedSessionRootsForTests();
+    const { agent, publishes } = makeCapturingAgent();
+    const runtime = makeRuntime();
+    await persistChatTurnImpl(
+      agent, runtime,
+      makeMessage('first', { id: 'r24-1-dedup-1', roomId: 'room-r24-1-dedup' } as any),
+      {} as State,
+      { contextGraphId: 'agent-context', assertionName: 'chat-turns' },
+    );
+    await persistChatTurnImpl(
+      agent, runtime,
+      makeMessage('second', { id: 'r24-1-dedup-2', roomId: 'room-r24-1-dedup' } as any),
+      {} as State,
+      { contextGraphId: 'agent-context', assertionName: 'chat-turns' },
+    );
+    const convRoot = (qs: any[]) => qs.filter(
+      (q) => q.subject === 'urn:dkg:chat:session:room-r24-1-dedup'
+        && q.predicate === RDF_TYPE
+        && q.object === `${SCHEMA}Conversation`,
+    );
+    expect(convRoot(publishes[0].quads)).toHaveLength(1);
+    expect(convRoot(publishes[1].quads)).toHaveLength(0);
+  });
+
   it('non-session quads (user message, turn envelope) STILL get emitted on every turn — only the session-root quad is gated', async () => {
     // Regression guard: the gate must NOT accidentally short-circuit
     // the rest of the user-turn quads. We assert the second turn

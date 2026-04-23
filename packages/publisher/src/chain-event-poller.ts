@@ -261,7 +261,25 @@ export class ChainEventPoller {
     const watchUpdates = !!this.onCollectionUpdated;
     const watchAllowList = !!this.onAllowListUpdated;
     const watchProfiles = !!this.onProfileEvent;
-    if (!hasPending && !watchContextGraphs && !watchUpdates && !watchAllowList && !watchProfiles) return;
+    // PR #229 bot review round 24 (r24-4). The unmatched-batch
+    // reconciler (`onUnmatchedBatchCreated`) is the durable path that
+    // drains the WAL after a restart — the in-memory pending map is
+    // empty by construction at that point, so relying solely on
+    // `hasPending` here would leave recovered WAL entries un-scanned
+    // forever. A poller wired ONLY for WAL recovery (no publishes
+    // queued locally, no CG/update/allowlist/profile watchers) still
+    // needs every tick to scan `KnowledgeBatchCreated` / `KCCreated`
+    // so the recovered entry can be matched. Treat the callback as
+    // an active watcher in the early-return gate too.
+    const watchUnmatchedBatches = !!this.onUnmatchedBatchCreated;
+    if (
+      !hasPending
+      && !watchContextGraphs
+      && !watchUpdates
+      && !watchAllowList
+      && !watchProfiles
+      && !watchUnmatchedBatches
+    ) return;
 
     const ctx = createOperationContext('publish');
 

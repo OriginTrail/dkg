@@ -24,6 +24,8 @@ import {
   dkgSendMessage,
   dkgInvokeSkill,
   dkgPersistChatTurn,
+  CHAT_AGENT_CONTEXT_GRAPH,
+  CHAT_TURNS_ASSERTION,
 } from './actions.js';
 
 /**
@@ -104,19 +106,75 @@ function resolveRuntimeCache(runtime: unknown): Map<string, true> {
   return persistedUserTurnsAnon;
 }
 
-function persistedUserTurnKey(roomId: unknown, userMsgId: unknown): string | null {
+/**
+ * Bot review PR #229 round 24 (r24-2): the persisted-user-turn cache
+ * MUST key by the destination assertion graph as well as
+ * `(roomId, userMsgId)`.
+ *
+ * Before: key was `${roomId}\u0000${userMsgId}`. A caller that routed
+ * the same `(roomId, userMsgId)` into two different stores — by
+ * varying `options.contextGraphId` / `options.assertionName` between
+ * `onChatTurn` and `onAssistantReply` — would see the second store's
+ * `onAssistantReply` silently take the append-only path (because the
+ * runtime-global cache hit from the FIRST store's successful turn
+ * write tricked `hasUserTurnBeenPersisted` into returning `true`),
+ * leaving the second store with only `hasAssistantMessage` and no
+ * user/session envelope.
+ *
+ * After: the key includes the resolved destination tuple
+ * `(contextGraphId, assertionName)`, matching exactly the
+ * `(contextGraphId, assertionName)` that `persistChatTurnImpl` will
+ * use when it finally calls `agent.assertion.write(...)`. When the
+ * caller does not override either, we resolve the same defaults
+ * `persistChatTurnImpl` would (settings → env → constants) so the
+ * two code paths agree.
+ *
+ * Implementation note: we intentionally do NOT add the destination
+ * to `persistedUserTurnKey`'s arity; we instead compose
+ * `resolveDestination` from the runtime + options and prefix the
+ * key. This keeps the public helpers backward-compatible and the
+ * change localised.
+ */
+function resolveDestinationFromOptions(
+  runtime: unknown,
+  options: unknown,
+): { contextGraphId: string; assertionName: string } {
+  const optsAny = (options as Record<string, unknown>) ?? {};
+  const rt = (runtime as {
+    getSetting?: (k: string) => unknown;
+  }) ?? {};
+  const getSetting = typeof rt.getSetting === 'function' ? rt.getSetting.bind(rt) : () => undefined;
+  const contextGraphId =
+    (typeof optsAny.contextGraphId === 'string' && optsAny.contextGraphId) ||
+    (typeof getSetting('DKG_CHAT_CG') === 'string' && (getSetting('DKG_CHAT_CG') as string)) ||
+    CHAT_AGENT_CONTEXT_GRAPH;
+  const assertionName =
+    (typeof optsAny.assertionName === 'string' && optsAny.assertionName) ||
+    (typeof getSetting('DKG_CHAT_ASSERTION') === 'string' && (getSetting('DKG_CHAT_ASSERTION') as string)) ||
+    CHAT_TURNS_ASSERTION;
+  return { contextGraphId, assertionName };
+}
+
+function persistedUserTurnKey(
+  roomId: unknown,
+  userMsgId: unknown,
+  destContextGraphId: string,
+  destAssertionName: string,
+): string | null {
   const r = typeof roomId === 'string' ? roomId : '';
   const u = typeof userMsgId === 'string' ? userMsgId : '';
   if (!u) return null; // no user message id → cannot correlate
-  return `${r}\u0000${u}`;
+  return `${destContextGraphId}\u0000${destAssertionName}\u0000${r}\u0000${u}`;
 }
 
 function markUserTurnPersisted(
   runtime: unknown,
   roomId: unknown,
   userMsgId: unknown,
+  destContextGraphId: string,
+  destAssertionName: string,
 ): void {
-  const k = persistedUserTurnKey(roomId, userMsgId);
+  const k = persistedUserTurnKey(roomId, userMsgId, destContextGraphId, destAssertionName);
   if (!k) return;
   const m = resolveRuntimeCache(runtime);
   // Refresh LRU ordering: remove + re-insert so the entry moves to
@@ -133,8 +191,10 @@ function hasUserTurnBeenPersisted(
   runtime: unknown,
   roomId: unknown,
   userMsgId: unknown,
+  destContextGraphId: string,
+  destAssertionName: string,
 ): boolean {
-  const k = persistedUserTurnKey(roomId, userMsgId);
+  const k = persistedUserTurnKey(roomId, userMsgId, destContextGraphId, destAssertionName);
   if (k === null) return false;
   // For object runtimes, a WeakMap miss means "this runtime has
   // never recorded ANY user turn" — no need to materialize an
@@ -244,7 +304,19 @@ async function onAssistantReplyHandler(
     // other's user-turn writes, otherwise runtime B's
     // onAssistantReply would take the append-only path for a
     // turn envelope that only exists in runtime A's graph.
-    opts.userTurnPersisted = hasUserTurnBeenPersisted(runtime, roomId, userMessageId);
+    // r24-2: look up cache under the RESOLVED destination tuple
+    // (contextGraphId, assertionName) — same defaulting chain as
+    // `persistChatTurnImpl`. Prevents a successful onChatTurn in
+    // store A from silently short-circuiting onAssistantReply in
+    // store B for the same (roomId, userMsgId) pair.
+    const dest = resolveDestinationFromOptions(runtime, opts);
+    opts.userTurnPersisted = hasUserTurnBeenPersisted(
+      runtime,
+      roomId,
+      userMessageId,
+      dest.contextGraphId,
+      dest.assertionName,
+    );
   }
   return dkgService.persistChatTurn(runtime, message, state, opts);
 }
@@ -267,10 +339,13 @@ async function onChatTurnHandler(
   // Only mark AFTER the write resolved — if it throws we never
   // reach this line and the cache stays clean. r17-1: scope the
   // record by the runtime identity so runtime B never sees
-  // runtime A's successful user-turn writes.
+  // runtime A's successful user-turn writes. r24-2: ALSO scope
+  // by the destination tuple so the same (roomId, userMsgId)
+  // routed into a second store re-emits the full envelope there.
   const roomId = (message as any)?.roomId;
   const userMsgId = (message as any)?.id;
-  markUserTurnPersisted(runtime, roomId, userMsgId);
+  const dest = resolveDestinationFromOptions(runtime, options);
+  markUserTurnPersisted(runtime, roomId, userMsgId, dest.contextGraphId, dest.assertionName);
   return result;
 }
 
