@@ -266,6 +266,140 @@ describe('Phase-sequence contracts', () => {
     }
   });
 
+  // -- Error-path invariant for P-1 -------------------------------------
+  //
+  // Codex review on PR #241: the happy-path snapshot tests only prove
+  // `chain:writeahead:start` pairs with `:end` when the adapter
+  // returns normally. The P-1 regression was that if the adapter
+  // throws mid-broadcast, `:start` fires but `:end` never does,
+  // leaving the operation journal with an open write-ahead entry
+  // the UI cannot close.
+  //
+  // Publish intentionally SWALLOWS adapter throws and degrades to
+  // the tentative path (see packages/publisher/src/dkg-publisher.ts
+  // around `on-chain tx failed`). Update intentionally RE-THROWS.
+  // Both paths must still emit balanced `chain:writeahead:start` +
+  // `:end` so the UI operations journal can close the entry.
+  // Force an internal throw and assert the balance explicitly.
+
+  it(
+    'publish: chain:writeahead pairs start with end even when the adapter throws ' +
+      'mid-broadcast (P-1 regression — publish degrades to tentative)',
+    async () => {
+      const store = new OxigraphStore();
+      const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+      const keypair = await generateEd25519Keypair();
+
+      const publisher = new DKGPublisher({
+        store, chain, eventBus: new TypedEventBus(), keypair,
+        publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+        publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
+      });
+
+      // Stub the adapter call so it throws after chain:writeahead:start
+      // should have fired. We do NOT touch anything upstream of the
+      // write-ahead boundary — preflight (isV10Ready, signMessage,
+      // ACK self-sign) must still succeed so the boundary is
+      // actually reached. Assign *after* the publisher is constructed.
+      (chain as unknown as { createKnowledgeAssetsV10: (...a: unknown[]) => Promise<never> }).createKnowledgeAssetsV10 =
+        async () => {
+          throw new Error('simulated publish broadcast failure');
+        };
+
+      const quads = [q(ENTITY, 'http://schema.org/name', '"Throws"')];
+      const { calls, fn } = recorder();
+      // Publish swallows the chain error and returns tentative.
+      const result = await publisher.publish({ contextGraphId: PARANET, quads, onPhase: fn });
+      expect(result.status).toBe('tentative');
+
+      const startIdx = calls.findIndex(
+        ([p, s]) => p === 'chain:writeahead' && s === 'start',
+      );
+      const endIdx = calls.findIndex(
+        ([p, s]) => p === 'chain:writeahead' && s === 'end',
+      );
+      expect(startIdx, 'chain:writeahead:start must fire before the throw').toBeGreaterThanOrEqual(0);
+      expect(endIdx, 'chain:writeahead:end must fire even on adapter throw').toBeGreaterThan(startIdx);
+
+      // Exactly once — the `finally` must not double-fire.
+      const writeaheadStartCount = calls.filter(
+        ([p, s]) => p === 'chain:writeahead' && s === 'start',
+      ).length;
+      const writeaheadEndCount = calls.filter(
+        ([p, s]) => p === 'chain:writeahead' && s === 'end',
+      ).length;
+      expect(writeaheadStartCount).toBe(1);
+      expect(writeaheadEndCount).toBe(1);
+    },
+  );
+
+  it(
+    'update: chain:writeahead pairs start with end even when the adapter throws ' +
+      'mid-broadcast (P-1 regression — update re-throws)',
+    async () => {
+      const store = new OxigraphStore();
+      const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+      const keypair = await generateEd25519Keypair();
+
+      const publisher = new DKGPublisher({
+        store, chain, eventBus: new TypedEventBus(), keypair,
+        publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+        publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
+      });
+
+      // Real publish first so the kcId is on-chain and the update
+      // path can reach the write-ahead phase.
+      const origQuads = [q(ENTITY, 'http://schema.org/name', '"Seed"')];
+      const pub = await publisher.publish({ contextGraphId: PARANET, quads: origQuads });
+      expect(pub.status).toBe('confirmed');
+
+      // Now replace only the update path so the previous publish
+      // used the real adapter call. Update does NOT swallow — it
+      // re-throws, so we catch manually and still inspect phases.
+      // Stub BOTH the V10 and legacy V9 update methods, otherwise
+      // the publisher silently falls back from V10 to V9 when the
+      // V10 error isn't one of its "definitive" classes (see
+      // packages/publisher/src/dkg-publisher.ts `V10_DEFINITIVE_ERRORS`).
+      (chain as unknown as { updateKnowledgeCollectionV10: (...a: unknown[]) => Promise<never> }).updateKnowledgeCollectionV10 =
+        async () => {
+          throw new Error('simulated update broadcast failure');
+        };
+      if (typeof (chain as { updateKnowledgeAssets?: unknown }).updateKnowledgeAssets === 'function') {
+        (chain as unknown as { updateKnowledgeAssets: (...a: unknown[]) => Promise<never> }).updateKnowledgeAssets =
+          async () => {
+            throw new Error('simulated update broadcast failure');
+          };
+      }
+
+      const newQuads = [q(ENTITY, 'http://schema.org/name', '"Revised"')];
+      const { calls, fn } = recorder();
+      let threw: unknown = null;
+      try {
+        await publisher.update(pub.kcId, {
+          contextGraphId: PARANET,
+          quads: newQuads,
+          onPhase: fn,
+        });
+      } catch (err) {
+        threw = err;
+      }
+      expect(threw).toBeInstanceOf(Error);
+      expect((threw as Error).message).toMatch(/simulated update broadcast failure/);
+
+      const startIdx = calls.findIndex(
+        ([p, s]) => p === 'chain:writeahead' && s === 'start',
+      );
+      const endIdx = calls.findIndex(
+        ([p, s]) => p === 'chain:writeahead' && s === 'end',
+      );
+      expect(startIdx, 'update chain:writeahead:start must fire before the throw').toBeGreaterThanOrEqual(0);
+      expect(endIdx, 'update chain:writeahead:end must fire even on adapter throw').toBeGreaterThan(startIdx);
+
+      expect(calls.filter(([p, s]) => p === 'chain:writeahead' && s === 'start').length).toBe(1);
+      expect(calls.filter(([p, s]) => p === 'chain:writeahead' && s === 'end').length).toBe(1);
+    },
+  );
+
   it('sub-phases are nested inside their parent', async () => {
     const store = new OxigraphStore();
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
