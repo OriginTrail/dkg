@@ -515,6 +515,42 @@ describe('DkgNodePlugin', () => {
       expect(body.agentAddress).toBe('0xabc123');
     });
 
+    it('dkg_query normalizes DID-form agent_address for WM reads (Bug B43)', async () => {
+      // The daemon's WM view scopes graphs by the bare peer ID. A
+      // DID-prefixed value (`did:dkg:agent:<peerId>`) lands the query
+      // in a non-existent namespace and returns empty bindings. The
+      // handler must strip the prefix before forwarding — same B43
+      // normalization `DkgMemoryPlugin` applies at its boundary.
+      const { fetchMock, byName } = setupPluginWithFetch({ ok: true });
+      await byName.get('dkg_query')!.execute('tc', {
+        sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1',
+        context_graph_id: 'my-cg',
+        view: 'working-memory',
+        agent_address: 'did:dkg:agent:12D3KooWExamplePeerId',
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const body = JSON.parse(fetchMock.mock.calls[0][1]?.body as string);
+      expect(body.agentAddress).toBe('12D3KooWExamplePeerId');
+      // Bare peer IDs must pass through unchanged (no double-stripping).
+      expect(body.agentAddress).not.toContain('did:dkg:agent:');
+    });
+
+    it('dkg_query does NOT normalize agent_address on non-WM views (it only matters for WM routing)', async () => {
+      // Non-WM views don't use `agentAddress` for graph resolution —
+      // leave the value untouched so other downstream uses (e.g. audit
+      // logging at the daemon) see the caller's original input.
+      const { fetchMock, byName } = setupPluginWithFetch({ ok: true });
+      await byName.get('dkg_query')!.execute('tc', {
+        sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1',
+        context_graph_id: 'my-cg',
+        view: 'shared-working-memory',
+        agent_address: 'did:dkg:agent:12D3KooWExamplePeerId',
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const body = JSON.parse(fetchMock.mock.calls[0][1]?.body as string);
+      expect(body.agentAddress).toBe('did:dkg:agent:12D3KooWExamplePeerId');
+    });
+
     it('dkg_query rejects an invalid `view` string with the list of valid layers', async () => {
       const { fetchMock, byName } = setupPluginWithFetch({ ok: true });
       const result = await byName.get('dkg_query')!.execute('tc', {

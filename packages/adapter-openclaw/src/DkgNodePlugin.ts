@@ -23,6 +23,7 @@ import {
 import { DkgChannelPlugin } from './DkgChannelPlugin.js';
 import {
   DkgMemoryPlugin,
+  toAgentPeerId,
   type DkgMemorySession,
   type DkgMemorySessionResolver,
 } from './DkgMemoryPlugin.js';
@@ -1547,6 +1548,14 @@ export class DkgNodePlugin {
       // `memorySessionResolver.getDefaultAgentAddress` above). Without the
       // fallback, callers without an explicit address would get "agentAddress
       // is required for the working-memory view" from the engine.
+      //
+      // B43: normalize DID-form addresses (`did:dkg:agent:<peerId>`) to raw
+      // peer IDs for WM routing, same as `DkgMemoryPlugin` does at its
+      // boundary. The daemon's WM view scopes graphs by the bare peer ID;
+      // forwarding a DID-prefixed value lands the query in a non-existent
+      // namespace and returns empty bindings. Apply to both the explicit
+      // arg and the node-peerId fallback (the latter is typically already
+      // bare, but normalize defensively in case the source ever changes).
       let agentAddress = typeof args.agent_address === 'string' && args.agent_address.trim() !== ''
         ? args.agent_address.trim()
         : undefined;
@@ -1561,6 +1570,9 @@ export class DkgNodePlugin {
               "or retry once the node's agent address is available.",
           );
         }
+      }
+      if (view === 'working-memory' && agentAddress !== undefined) {
+        agentAddress = toAgentPeerId(agentAddress);
       }
       const result = await this.client.query(sparql, {
         contextGraphId,

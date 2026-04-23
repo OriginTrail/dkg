@@ -673,10 +673,16 @@ function errorMessage(err: unknown): string {
  * string and finds nothing. Normalize once at the boundary and use
  * the correct form at each consumption site. Codex Bug B43.
  */
-const AGENT_DID_PREFIX = 'did:dkg:agent:';
+export const AGENT_DID_PREFIX = 'did:dkg:agent:';
 
-/** Return the raw peer-ID form used for WM view routing. */
-function toAgentPeerId(agentAddress: string): string {
+/**
+ * Return the raw peer-ID form used for WM view routing. Exported so
+ * `DkgNodePlugin.handleQuery` can apply the same B43 normalization
+ * before forwarding `agent_address` / the node peerId fallback to the
+ * daemon (DID-form values otherwise route to a non-existent namespace
+ * and return empty results).
+ */
+export function toAgentPeerId(agentAddress: string): string {
   return agentAddress.startsWith(AGENT_DID_PREFIX)
     ? agentAddress.slice(AGENT_DID_PREFIX.length)
     : agentAddress;
