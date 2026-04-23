@@ -120,29 +120,31 @@ describe('DkgNodePlugin', () => {
 
     // dkg_query: `view` is a plain string — validation lives in the
     // handler, not as a JSON-schema enum. Rationale: strict-schema
-    // hosts would reject invalid values (including `working-memory`,
-    // which we DO want to reach the handler so callers see the
-    // tailored "use HTTP for WM" guidance). Description enumerates
-    // accepted values for discoverability; handler enforces them.
-    // Working-memory is intentionally excluded from the accepted list
-    // — it needs an `agentAddress` this tool has no way to plumb
-    // safely (admitting WM would silently fall back to the node
-    // peerId namespace and return the wrong agent's data). Callers
-    // needing WM use HTTP `/api/query` directly. The legacy
-    // `include_shared_memory` boolean has been removed — there is
-    // no exact replacement because the old `true` path queried the
-    // data graph ∪ SWM (union), which no single `view` reproduces.
+    // hosts would otherwise reject typos at the boundary before the
+    // handler can surface the valid-list error. Description
+    // enumerates accepted values for discoverability; handler
+    // enforces them.
+    //
+    // WM reads are supported: the handler defaults `agent_address` to
+    // this node's peerId (matches the memory plugin's default from
+    // `memorySessionResolver.getDefaultAgentAddress`). Callers in
+    // multi-agent deployments can override with an explicit
+    // `agent_address`.
+    //
+    // The legacy `include_shared_memory` boolean is removed — there
+    // is no exact replacement because the old `true` path queried
+    // the data graph ∪ SWM (union), which no single `view` reproduces.
     const queryProps = byName.get('dkg_query')!.parameters.properties;
     expect(queryProps).not.toHaveProperty('include_shared_memory');
     expect(queryProps.view.type).toBe('string');
     expect(queryProps.view).not.toHaveProperty('enum');
-    // Description must still advertise the accepted values + the WM
-    // escape hatch, so discoverability doesn't regress when the enum
-    // is dropped from the schema.
+    // Description advertises all three layers.
+    expect(queryProps.view.description).toContain('working-memory');
     expect(queryProps.view.description).toContain('shared-working-memory');
     expect(queryProps.view.description).toContain('verified-memory');
-    expect(queryProps.view.description).toContain('working-memory');
-    expect(queryProps.view.description).toContain('/api/query');
+    // agent_address is exposed as an optional tool param for WM targeting.
+    expect(queryProps.agent_address.type).toBe('string');
+    expect(queryProps.agent_address.description).toMatch(/working-memory/i);
   });
 
   // ---------------------------------------------------------------------------
@@ -496,25 +498,24 @@ describe('DkgNodePlugin', () => {
       expect(msg).toMatch(/omit/i);
     });
 
-    it('dkg_query rejects `view: "working-memory"` with a pointer to HTTP for agent-scoped WM reads', async () => {
-      // WM reads require an `agentAddress` the tool has no way to plumb
-      // safely. Admitting WM would silently fall back to the node
-      // peerId namespace and return data from the wrong agent. Close
-      // the hole at the tool boundary.
+    it('dkg_query forwards an explicit agent_address to the daemon body for WM reads', async () => {
+      // WM reads are agent-scoped; the daemon requires an agentAddress.
+      // The tool exposes `agent_address` so multi-agent callers can
+      // target another agent's WM namespace.
       const { fetchMock, byName } = setupPluginWithFetch({ ok: true });
-      const result = await byName.get('dkg_query')!.execute('tc', {
+      await byName.get('dkg_query')!.execute('tc', {
         sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1',
         context_graph_id: 'my-cg',
         view: 'working-memory',
+        agent_address: '0xabc123',
       });
-      expect(fetchMock).not.toHaveBeenCalled();
-      const msg = result.content[0].text;
-      expect(msg).toContain('working-memory');
-      expect(msg).toContain('agentAddress');
-      expect(msg).toContain('/api/query');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const body = JSON.parse(fetchMock.mock.calls[0][1]?.body as string);
+      expect(body.view).toBe('working-memory');
+      expect(body.agentAddress).toBe('0xabc123');
     });
 
-    it('dkg_query rejects an invalid `view` string with the list of valid layers (working-memory excluded)', async () => {
+    it('dkg_query rejects an invalid `view` string with the list of valid layers', async () => {
       const { fetchMock, byName } = setupPluginWithFetch({ ok: true });
       const result = await byName.get('dkg_query')!.execute('tc', {
         sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1',
@@ -523,15 +524,9 @@ describe('DkgNodePlugin', () => {
       expect(fetchMock).not.toHaveBeenCalled();
       const text = result.content[0].text;
       expect(text).toContain('view');
+      expect(text).toContain('working-memory');
       expect(text).toContain('shared-working-memory');
       expect(text).toContain('verified-memory');
-      // Error must NOT advertise bare `working-memory` as an accepted value
-      // from this tool. Use a word-boundary regex (negative lookaround) so
-      // substrings inside `shared-working-memory` don't spoof the check,
-      // and so wording-only refactors of the error prefix don't break this
-      // test. The contract is "bare working-memory does not appear anywhere
-      // in the error" — regardless of how the list is framed.
-      expect(text).not.toMatch(/(?<![-a-z])working-memory(?![-a-z])/);
     });
 
     it('dkg_query rejects a `view` without `context_graph_id` locally (no daemon round-trip)', async () => {

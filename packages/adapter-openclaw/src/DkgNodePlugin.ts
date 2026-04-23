@@ -1122,13 +1122,13 @@ export class DkgNodePlugin {
         name: 'dkg_query',
         description:
           'Read-only SPARQL query against the local triple store. Pass `view` to pick which memory ' +
-          'layer to read: `shared-working-memory` (SWM — gossip-replicated) or `verified-memory` (VM ' +
-          '— on-chain anchored); when `view` is supplied, `context_graph_id` is also required. Omit ' +
-          '`view` for a cross-graph query routed via the legacy data-graph path (unscoped, or scoped ' +
-          'when `context_graph_id` is set); use `GRAPH ?g { ... }` for named-graph targeting in that ' +
-          'mode. Working-memory (WM) reads are per-agent and require an `agentAddress` the tool has ' +
-          'no way to plumb safely — call POST `/api/query` directly with `view: "working-memory"` ' +
-          'and the caller identity if you need WM.',
+          'layer to read: `working-memory` (WM — per-agent), `shared-working-memory` (SWM — gossip-' +
+          'replicated), or `verified-memory` (VM — on-chain anchored); when `view` is supplied, ' +
+          '`context_graph_id` is also required. For WM reads, `agent_address` selects whose WM to ' +
+          'read — it defaults to this node\'s agent address (the same default the adapter uses for ' +
+          'memory-plugin reads). Omit `view` for a cross-graph query routed via the legacy data-' +
+          'graph path (unscoped, or scoped when `context_graph_id` is set); use `GRAPH ?g { ... }` ' +
+          'for named-graph targeting in that mode.',
         parameters: {
           type: 'object',
           properties: {
@@ -1142,13 +1142,20 @@ export class DkgNodePlugin {
             view: {
               type: 'string',
               description:
-                'Memory layer to read. Accepted values: `shared-working-memory` (provisional, ' +
-                'gossip-replicated) or `verified-memory` (on-chain anchored). Omit to use the legacy ' +
-                'cross-graph data-path routing (not layer-scoped). `working-memory` is intentionally ' +
-                'not accepted here — it needs an `agentAddress` this tool has no way to plumb safely; ' +
-                'use HTTP POST /api/query with an agent-scoped bearer token for WM reads. ' +
-                'Validation is handler-side (not a JSON-schema enum) so strict-schema hosts still ' +
-                'surface the tailored migration guidance on invalid values.',
+                'Memory layer to read. Accepted values: `working-memory` (per-agent WM; uses ' +
+                '`agent_address` or falls back to this node\'s agent address), `shared-working-memory` ' +
+                '(provisional, gossip-replicated), or `verified-memory` (on-chain anchored). Omit to ' +
+                'use the legacy cross-graph data-path routing (not layer-scoped). Validation is ' +
+                'handler-side (not a JSON-schema enum) so strict-schema hosts still surface the ' +
+                'tailored migration guidance on invalid values.',
+            },
+            agent_address: {
+              type: 'string',
+              description:
+                "Optional target for `view: \"working-memory\"` reads — defaults to this node's " +
+                'agent address (matches the default the memory plugin uses for its own WM reads). ' +
+                'Ignored for non-WM views. Supply an explicit value to read another local agent\'s ' +
+                'WM namespace in multi-agent deployments.',
             },
           },
           required: ['sparql'],
@@ -1508,26 +1515,13 @@ export class DkgNodePlugin {
       // matching a CG whose id is the literal whitespace string.
       const trimmed = typeof args.context_graph_id === 'string' ? args.context_graph_id.trim() : '';
       const contextGraphId = trimmed || undefined;
-      // Schema declares `view` as an enum. Accept only the two valid layer
-      // strings — anything else is a typo/misuse and rejected with the list
-      // of valid options. `working-memory` is intentionally NOT accepted
-      // here: the daemon requires `agentAddress` for WM reads (see
-      // `resolveViewGraphs`), and this tool has no safe way to plumb caller
-      // identity — so admitting WM would silently fall back to the node's
-      // peerId namespace and return the wrong agent's data. Callers who
-      // truly need WM must use HTTP `/api/query` with an explicit
-      // `agentAddress` + agent-scoped bearer token.
-      const VALID_VIEWS = ['shared-working-memory', 'verified-memory'] as const;
+      // Handler-side view validation (no JSON-schema enum, so strict-schema
+      // hosts surface these tailored errors). Valid values mirror the three
+      // layers of the daemon's GET_VIEWS.
+      const VALID_VIEWS = ['working-memory', 'shared-working-memory', 'verified-memory'] as const;
       type View = (typeof VALID_VIEWS)[number];
       let view: View | undefined;
       if (args.view !== undefined) {
-        if (args.view === 'working-memory') {
-          return this.error(
-            '"view: working-memory" is not supported by this tool. WM reads require an explicit ' +
-              '`agentAddress` to target the right agent namespace — use HTTP POST /api/query ' +
-              'directly with `view: "working-memory"` and `agentAddress`.',
-          );
-        }
         if (typeof args.view !== 'string' || !(VALID_VIEWS as readonly string[]).includes(args.view)) {
           return this.error(
             `"view" must be one of: ${VALID_VIEWS.join(', ')}.`,
@@ -1546,9 +1540,32 @@ export class DkgNodePlugin {
             'single CG; omit `view` for an unscoped cross-graph query.',
         );
       }
+      // For WM reads the daemon requires an agentAddress (see
+      // `resolveViewGraphs:60`). Accept an explicit `agent_address` on the
+      // tool and fall back to this node's agent address — the same default
+      // the memory plugin uses for its own WM reads (see
+      // `memorySessionResolver.getDefaultAgentAddress` above). Without the
+      // fallback, callers without an explicit address would get "agentAddress
+      // is required for the working-memory view" from the engine.
+      let agentAddress = typeof args.agent_address === 'string' && args.agent_address.trim() !== ''
+        ? args.agent_address.trim()
+        : undefined;
+      if (view === 'working-memory' && agentAddress === undefined) {
+        if (this.nodePeerId === undefined) {
+          await this.ensureNodePeerId().catch(() => {});
+        }
+        agentAddress = this.nodePeerId;
+        if (agentAddress === undefined) {
+          return this.error(
+            '"view: working-memory" requires an agent identity. Supply `agent_address` explicitly, ' +
+              "or retry once the node's agent address is available.",
+          );
+        }
+      }
       const result = await this.client.query(sparql, {
         contextGraphId,
         view,
+        agentAddress,
       });
       return this.json(result);
     } catch (err: any) {
