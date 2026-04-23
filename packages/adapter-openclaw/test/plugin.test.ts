@@ -101,6 +101,13 @@ describe('DkgNodePlugin', () => {
     expectRequired('dkg_sub_graph_list', ['context_graph_id']);
     expectRequired('dkg_shared_memory_publish', ['context_graph_id']);
 
+    // dkg_shared_memory_publish must declare `sub_graph_name` so agents that
+    // create/write/promote into a sub-graph can publish the promoted data
+    // through the same sub-graph instead of hitting the root SWM graph.
+    const publishProps = byName.get('dkg_shared_memory_publish')!.parameters.properties;
+    expect(publishProps).toHaveProperty('sub_graph_name');
+    expect(publishProps.sub_graph_name.type).toBe('string');
+
     // dkg_assertion_write.quads is an array of {subject,predicate,object}
     const writeTool = byName.get('dkg_assertion_write')!;
     expect(writeTool.parameters.properties.quads.type).toBe('array');
@@ -395,6 +402,19 @@ describe('DkgNodePlugin', () => {
       // Subset publishes default to clearAfter=false so roots NOT in `selection`
       // aren't clobbered as a side-effect of publishing a subset.
       expect(body).toEqual({ contextGraphId: 'ctx', selection: ['urn:a', 'urn:b'], clearAfter: false });
+    });
+
+    it('dkg_shared_memory_publish plumbs sub_graph_name through to subGraphName for sub-graph-scoped publishes', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ kcId: 'kc-5', status: 'ok', kas: [] });
+      await byName.get('dkg_shared_memory_publish')!.execute('tc', {
+        context_graph_id: 'ctx',
+        sub_graph_name: 'protocols',
+      });
+      const body = JSON.parse(fetchMock.mock.calls[0][1]?.body as string);
+      // Without this, an agent that created/wrote/promoted into a sub-graph
+      // would publish to the root shared-memory graph instead of the sub-graph.
+      expect(body.subGraphName).toBe('protocols');
+      expect(body.contextGraphId).toBe('ctx');
     });
 
     it('dkg_shared_memory_publish rejects non-array / empty / non-string root_entities locally', async () => {

@@ -422,6 +422,15 @@ describe('DkgDaemonClient', () => {
     expect(body.clearAfter).toBe(true);
   });
 
+  it('publishSharedMemory forwards subGraphName into the request body when provided', async () => {
+    fetchResponses.push(new Response(JSON.stringify({ kcId: 'kc-5', status: 'ok', kas: [] }), { status: 200 }));
+
+    await client.publishSharedMemory('ctx', { subGraphName: 'protocols' });
+
+    const body = JSON.parse(fetchCalls[0][1]?.body as string);
+    expect(body.subGraphName).toBe('protocols');
+  });
+
   // ---------------------------------------------------------------------------
   // Chat turn persistence
   // ---------------------------------------------------------------------------

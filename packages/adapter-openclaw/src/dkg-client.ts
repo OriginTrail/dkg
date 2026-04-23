@@ -544,7 +544,7 @@ export class DkgDaemonClient {
    */
   async publishSharedMemory(
     contextGraphId: string,
-    opts?: { rootEntities?: string[]; clearAfter?: boolean },
+    opts?: { rootEntities?: string[]; clearAfter?: boolean; subGraphName?: string },
   ): Promise<Record<string, unknown>> {
     // Default `clearAfter` to `false` for subset publishes so unpublished root
     // entities aren't dropped from SWM as a side-effect of publishing a few.
@@ -556,6 +556,7 @@ export class DkgDaemonClient {
       contextGraphId,
       selection: opts?.rootEntities ?? 'all',
       clearAfter,
+      subGraphName: opts?.subGraphName,
     });
   }
 

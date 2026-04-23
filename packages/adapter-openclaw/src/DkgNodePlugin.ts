@@ -1389,6 +1389,10 @@ export class DkgNodePlugin {
               items: { type: 'string', description: 'Root entity URI to publish.' },
               description: 'Optional filter — publish only these root entities. Omit to publish all SWM in the CG.',
             },
+            sub_graph_name: {
+              type: 'string',
+              description: 'Optional sub-graph scope. Must match the sub-graph used during create/write/promote. Cannot be combined with a cross-CG publish target.',
+            },
           },
           required: ['context_graph_id'],
         },
@@ -1788,7 +1792,8 @@ export class DkgNodePlugin {
       } else {
         return this.error('"root_entities" must be omitted or a non-empty array of root entity URIs.');
       }
-      const result = await this.client.publishSharedMemory(contextGraphId, { rootEntities });
+      const subGraphName = args.sub_graph_name ? String(args.sub_graph_name) : undefined;
+      const result = await this.client.publishSharedMemory(contextGraphId, { rootEntities, subGraphName });
       return this.json(result);
     } catch (err: any) {
       return this.daemonError(err);
