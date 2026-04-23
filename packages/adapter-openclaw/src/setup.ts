@@ -1021,6 +1021,18 @@ export function unmergeOpenClawConfig(openclawConfigPath: string): UnmergeResult
     if (currentMatchesMerge) {
       delete config.channels['dkg-ui'];
       log('Removed channels.dkg-ui (created by merge, unchanged since)');
+      // If the container is now empty AND we created the channel (inferred from
+      // previousChannelsDkgUi === null), remove the empty `channels: {}` orphan
+      // so a connect → disconnect round trip returns the config to its
+      // pre-merge shape byte-for-byte.
+      if (
+        config.channels
+        && typeof config.channels === 'object'
+        && Object.keys(config.channels).length === 0
+      ) {
+        delete config.channels;
+        log('Removed empty channels container (no other channels remaining)');
+      }
     } else if (currentChannel) {
       log('Preserving channels.dkg-ui — user-modified since merge');
     }

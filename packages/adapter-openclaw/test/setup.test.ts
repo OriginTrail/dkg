@@ -1048,10 +1048,34 @@ describe('unmergeOpenClawConfig', () => {
 
     unmergeOpenClawConfig(configPath);
 
-    // After unmerge: both keys are gone.
+    // After unmerge: both keys are gone, and the channels container is also
+    // removed (not left as `channels: {}`) so the round-trip returns the
+    // config to its pre-merge shape.
     const afterUnmerge = JSON.parse(readFileSync(configPath, 'utf-8'));
     expect(afterUnmerge.tools?.profile).toBeUndefined();
+    expect(afterUnmerge.channels).toBeUndefined();
+  });
+
+  it('round-trip: pre-existing sibling channel preserved when channels.dkg-ui is removed on unmerge', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({
+      plugins: {},
+      channels: { telegram: { enabled: true, botToken: 'abc' } },
+    }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+
+    // After merge: telegram still present, dkg-ui added.
+    const afterMerge = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(afterMerge.channels.telegram).toEqual({ enabled: true, botToken: 'abc' });
+    expect(afterMerge.channels['dkg-ui']).toEqual({ enabled: true, port: 9201 });
+
+    unmergeOpenClawConfig(configPath);
+
+    // After unmerge: dkg-ui gone, telegram preserved, channels container retained.
+    const afterUnmerge = JSON.parse(readFileSync(configPath, 'utf-8'));
     expect(afterUnmerge.channels?.['dkg-ui']).toBeUndefined();
+    expect(afterUnmerge.channels?.telegram).toEqual({ enabled: true, botToken: 'abc' });
   });
 
   it('round-trip: "coding" profile + degenerate { enabled: true } channel → merge → unmerge restores prior values', () => {
