@@ -1121,10 +1121,12 @@ export class DkgNodePlugin {
       {
         name: 'dkg_query',
         description:
-          'Read-only SPARQL query against the local triple store (cross-assertion / cross-CG). Use ' +
-          '`GRAPH ?g { ... }` for named graphs. Pass `view` to pick which memory layer to read: ' +
-          '`working-memory` (WM — per-agent), `shared-working-memory` (SWM — gossip-replicated), ' +
-          'or `verified-memory` (VM — on-chain anchored). Omit `view` for the default (WM semantics).',
+          'Read-only SPARQL query against the local triple store. Pass `view` to pick which memory ' +
+          'layer to read: `working-memory` (WM — per-agent), `shared-working-memory` (SWM — gossip-' +
+          'replicated), or `verified-memory` (VM — on-chain anchored); when `view` is supplied, ' +
+          '`context_graph_id` is required. Omit `view` for a cross-graph query routed via the legacy ' +
+          'data-graph path (unscoped, or scoped when `context_graph_id` is set); use `GRAPH ?g { ... }` ' +
+          'for named-graph targeting in that mode.',
         parameters: {
           type: 'object',
           properties: {
@@ -1134,9 +1136,10 @@ export class DkgNodePlugin {
               type: 'string',
               enum: ['working-memory', 'shared-working-memory', 'verified-memory'],
               description:
-                'Memory layer to read. `working-memory` is the default when omitted; ' +
-                '`shared-working-memory` reads provisional gossip-replicated data; ' +
-                '`verified-memory` reads on-chain anchored data.',
+                'Memory layer to read. `working-memory` is per-agent WM (requires the daemon to ' +
+                'resolve caller identity); `shared-working-memory` reads provisional gossip-replicated ' +
+                'data; `verified-memory` reads on-chain anchored data. Omit to use the legacy cross-' +
+                'graph data-path routing (not layer-scoped).',
             },
           },
           required: ['sparql'],
@@ -1477,10 +1480,17 @@ export class DkgNodePlugin {
       // explicit layers) and gives callers access to VM reads, which the old
       // boolean could never express. Reject the legacy field loudly rather
       // than silently ignoring it, so stale code surfaces the rename instead
-      // of quietly dropping its intent.
+      // of quietly dropping its intent. The error message doesn't recommend a
+      // specific view: the old `true` maps to SWM reads while `false` mapped
+      // to the legacy data-graph routing (omit `view` entirely), so a single
+      // replacement string would flip semantics for half of callers. Name all
+      // three layers and let the caller pick the one matching their intent.
       if (args.include_shared_memory !== undefined) {
         return this.error(
-          '"include_shared_memory" is no longer supported. Use `view: "shared-working-memory"` instead.',
+          '"include_shared_memory" is no longer supported. Pick a memory layer explicitly with ' +
+            '`view`: "working-memory" | "shared-working-memory" | "verified-memory". To preserve ' +
+            'the legacy `include_shared_memory: true` behavior, use `view: "shared-working-memory"`; ' +
+            'to preserve `include_shared_memory: false`, omit `view` entirely.',
         );
       }
       // `context_graph_id` is optional on this tool (omit → unscoped query

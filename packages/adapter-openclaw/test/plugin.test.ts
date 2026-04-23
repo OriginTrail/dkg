@@ -454,20 +454,33 @@ describe('DkgNodePlugin', () => {
       expect(result.content[0].text).toContain('context_graph_id');
     });
 
-    it('dkg_query rejects the legacy include_shared_memory field and points callers at `view`', async () => {
-      // The boolean was removed in favor of `view` (mirrors the HTTP surface
-      // and exposes VM reads, which the boolean could never express). Stale
-      // callers get a hard error naming the replacement instead of a silent
-      // drop that would quietly alter query results.
+    it('dkg_query rejects the legacy include_shared_memory field with a migration hint covering BOTH true and false cases', async () => {
+      // The boolean was removed in favor of `view`. A single replacement
+      // suggestion is unsafe: `include_shared_memory: true` mapped to
+      // "data-graph ∪ SWM" (closest to `view: "shared-working-memory"`),
+      // while `include_shared_memory: false` mapped to the legacy data-
+      // graph path (no view at all). A one-line hint that named only
+      // `shared-working-memory` would silently flip semantics for
+      // callers who previously sent `false`. Name all three layers AND
+      // the omit-entirely option, so callers with either legacy intent
+      // can migrate without changing behavior.
       const { fetchMock, byName } = setupPluginWithFetch({ ok: true });
       const result = await byName.get('dkg_query')!.execute('tc', {
         sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1',
         include_shared_memory: true,
       });
       expect(fetchMock).not.toHaveBeenCalled();
-      expect(result.content[0].text).toContain('include_shared_memory');
-      expect(result.content[0].text).toContain('view');
-      expect(result.content[0].text).toContain('shared-working-memory');
+      const msg = result.content[0].text;
+      expect(msg).toContain('include_shared_memory');
+      expect(msg).toContain('view');
+      // All three layers named so the caller can pick.
+      expect(msg).toContain('working-memory');
+      expect(msg).toContain('shared-working-memory');
+      expect(msg).toContain('verified-memory');
+      // Must also document the omit-`view` path for the former `false` case —
+      // otherwise callers who passed `include_shared_memory: false` will be
+      // steered toward `shared-working-memory` and get a different result.
+      expect(msg).toMatch(/omit/i);
     });
 
     it('dkg_query rejects an invalid `view` string with the list of valid layers', async () => {
@@ -481,6 +494,29 @@ describe('DkgNodePlugin', () => {
       expect(result.content[0].text).toContain('working-memory');
       expect(result.content[0].text).toContain('shared-working-memory');
       expect(result.content[0].text).toContain('verified-memory');
+    });
+
+    it('dkg_query description accurately describes the no-`view` routing (legacy path, not WM)', () => {
+      // Documented-vs-actual: when `view` is omitted, the daemon +
+      // DKGQueryEngine route through the legacy V9 data-graph path
+      // (`DKGQueryEngine.query` → the `if (options?.view)` branch is
+      // SKIPPED and falls through to "Legacy routing (V9 compat)"). It
+      // is NOT implicit working-memory semantics, despite some stale
+      // comments in the daemon hinting otherwise. This test guards the
+      // tool description against re-introducing the misleading "omit
+      // for WM" claim.
+      const plugin = new DkgNodePlugin();
+      const tools: OpenClawTool[] = [];
+      plugin.register({
+        config: {},
+        registerTool: (t) => tools.push(t),
+        registerHook: () => {},
+        on: () => {},
+        logger: {},
+      });
+      const query = tools.find((t) => t.name === 'dkg_query')!;
+      expect(query.description).not.toMatch(/omit.*WM|omit.*working-memory|default.*WM.*semantics|default.*working-memory/i);
+      expect(query.description).toMatch(/legacy/i);
     });
 
     it('dkg_query forwards the `view` field to the daemon body verbatim', async () => {
