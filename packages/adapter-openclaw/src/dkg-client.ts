@@ -323,10 +323,7 @@ export class DkgDaemonClient {
     opts?: { contentType?: string; ontologyRef?: string; subGraphName?: string },
   ): Promise<Record<string, unknown>> {
     const form = new FormData();
-    // Copy into a fresh ArrayBuffer so TypeScript's BlobPart union is satisfied
-    // regardless of whether `fileBuffer` is a Node `Buffer` (ArrayBufferLike) or
-    // a `Uint8Array` over a `SharedArrayBuffer`. The extra copy is a bounded
-    // allocation of the uploaded file's bytes — fine for the import-file path.
+    // Copy into a fresh Uint8Array to satisfy TS's BlobPart union across Node Buffer / SharedArrayBuffer.
     const bytes = new Uint8Array(fileBuffer.byteLength);
     bytes.set(fileBuffer);
     const blob = new Blob([bytes], { type: opts?.contentType ?? 'application/octet-stream' });

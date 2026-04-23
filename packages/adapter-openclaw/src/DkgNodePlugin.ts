@@ -1252,7 +1252,9 @@ export class DkgNodePlugin {
             entities: {
               type: 'array',
               items: { type: 'string', description: 'Root entity URI.' },
-              description: 'Root entity URIs to promote, or omit / pass `"all"` to promote every root entity. Default: "all".',
+              description:
+                'Root entity URIs to promote. Omit to promote every root entity in the assertion (default). ' +
+                'When provided, must be a non-empty array of URIs that already exist in the assertion.',
             },
             sub_graph_name: { type: 'string', description: 'Must match the one used at write time.' },
           },
@@ -1591,15 +1593,18 @@ export class DkgNodePlugin {
       if (!contextGraphId) return this.error('"context_graph_id" is required.');
       if (!name) return this.error('"name" is required.');
       const subGraphName = args.sub_graph_name ? String(args.sub_graph_name) : undefined;
-      // Accept the string "all", an explicit array of URIs, or `undefined` → defaults to "all" in daemon.
-      let entities: string[] | 'all' | undefined;
+      // Public contract: omit `entities` → promote everything (daemon defaults `entities ?? "all"`).
+      // Provided → must be a non-empty array of URIs. The previous string-"all" shortcut was dropped
+      // because strict JSON-schema validators rejected it (schema says `type: 'array'`) while
+      // `entities: ["all"]` would silently 400 at the daemon — a confusing no-signal failure mode.
+      let entities: string[] | undefined;
       const raw = args.entities;
-      if (raw === undefined || raw === null || raw === 'all') {
+      if (raw === undefined || raw === null) {
         entities = undefined;
-      } else if (Array.isArray(raw)) {
-        entities = raw.map((e: any) => String(e));
+      } else if (Array.isArray(raw) && raw.length > 0 && raw.every((e) => typeof e === 'string')) {
+        entities = raw.map((e) => String(e));
       } else {
-        return this.error('"entities" must be the string "all" or an array of root entity URIs.');
+        return this.error('"entities" must be omitted or a non-empty array of root entity URIs.');
       }
       const result = await this.client.promoteAssertion(contextGraphId, name, { entities, subGraphName });
       return this.json(result);
@@ -1630,9 +1635,19 @@ export class DkgNodePlugin {
       if (!contextGraphId) return this.error('"context_graph_id" is required.');
       if (!name) return this.error('"name" is required.');
       if (!filePath) return this.error('"file_path" is required.');
-      const contentType = args.content_type ? String(args.content_type) : undefined;
+      let contentType = args.content_type ? String(args.content_type) : undefined;
       const ontologyRef = args.ontology_ref ? String(args.ontology_ref) : undefined;
       const subGraphName = args.sub_graph_name ? String(args.sub_graph_name) : undefined;
+
+      // Extension-based inference for the common markdown case so an agent can
+      // pass a `.md` path without thinking about MIME types. Without this, the
+      // daemon receives `application/octet-stream`, finds no converter, and
+      // returns `extraction.status: "skipped"` with no triples written — a
+      // silent-looking success. Broader extension → MIME mapping is the
+      // daemon's job; we just unblock markdown, which is the in-tree converter.
+      if (!contentType && /\.(md|markdown)$/i.test(filePath)) {
+        contentType = 'text/markdown';
+      }
 
       let buffer: Buffer;
       let fileName: string;

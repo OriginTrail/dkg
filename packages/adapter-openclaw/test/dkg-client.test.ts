@@ -244,6 +244,143 @@ describe('DkgDaemonClient', () => {
   });
 
   // ---------------------------------------------------------------------------
+  // Parameter-name drift guards for the new assertion lifecycle + sub-graph
+  // client methods. Each test asserts the daemon receives the exact camelCase
+  // body / query-string keys the route handlers in packages/cli/src/daemon.ts
+  // destructure, plus URL-encodes the assertion name.
+  // ---------------------------------------------------------------------------
+
+  it('promoteAssertion hits /api/assertion/:name/promote with camelCase body', async () => {
+    fetchResponses.push(new Response(JSON.stringify({ promoted: 1 }), { status: 200 }));
+
+    await client.promoteAssertion('ctx', 'chat-turns', {
+      entities: ['urn:a', 'urn:b'],
+      subGraphName: 'protocols',
+    });
+
+    const [url, opts] = fetchCalls[0];
+    expect(url).toBe('http://localhost:9200/api/assertion/chat-turns/promote');
+    expect(opts?.method).toBe('POST');
+    const body = JSON.parse(opts?.body as string);
+    expect(body).toEqual({
+      contextGraphId: 'ctx',
+      entities: ['urn:a', 'urn:b'],
+      subGraphName: 'protocols',
+    });
+  });
+
+  it('promoteAssertion URL-encodes assertion names containing slashes or spaces', async () => {
+    fetchResponses.push(new Response(JSON.stringify({}), { status: 200 }));
+    await client.promoteAssertion('ctx', 'weird name/with slash');
+    expect(String(fetchCalls[0][0])).toBe('http://localhost:9200/api/assertion/weird%20name%2Fwith%20slash/promote');
+  });
+
+  it('discardAssertion hits /api/assertion/:name/discard with camelCase body', async () => {
+    fetchResponses.push(new Response(JSON.stringify({ discarded: true }), { status: 200 }));
+
+    await client.discardAssertion('ctx', 'draft', { subGraphName: 'scratch' });
+
+    const [url, opts] = fetchCalls[0];
+    expect(url).toBe('http://localhost:9200/api/assertion/draft/discard');
+    expect(opts?.method).toBe('POST');
+    const body = JSON.parse(opts?.body as string);
+    expect(body).toEqual({ contextGraphId: 'ctx', subGraphName: 'scratch' });
+  });
+
+  it('queryAssertion hits /api/assertion/:name/query as POST with { contextGraphId, subGraphName } only', async () => {
+    fetchResponses.push(new Response(JSON.stringify({ quads: [], count: 0 }), { status: 200 }));
+
+    await client.queryAssertion('ctx', 'chat-turns', { subGraphName: 'protocols' });
+
+    const [url, opts] = fetchCalls[0];
+    expect(url).toBe('http://localhost:9200/api/assertion/chat-turns/query');
+    expect(opts?.method).toBe('POST');
+    const body = JSON.parse(opts?.body as string);
+    expect(body).toEqual({ contextGraphId: 'ctx', subGraphName: 'protocols' });
+    expect(body).not.toHaveProperty('sparql');
+  });
+
+  it('getAssertionHistory hits /api/assertion/:name/history as GET with camelCase query params', async () => {
+    fetchResponses.push(new Response(JSON.stringify({ createdAt: 't' }), { status: 200 }));
+
+    await client.getAssertionHistory('ctx', 'chat-turns', {
+      agentAddress: '0xabc',
+      subGraphName: 'protocols',
+    });
+
+    const [url, opts] = fetchCalls[0];
+    expect(opts?.method ?? 'GET').toBe('GET');
+    const parsed = new URL(String(url));
+    expect(parsed.pathname).toBe('/api/assertion/chat-turns/history');
+    expect(parsed.searchParams.get('contextGraphId')).toBe('ctx');
+    expect(parsed.searchParams.get('agentAddress')).toBe('0xabc');
+    expect(parsed.searchParams.get('subGraphName')).toBe('protocols');
+    expect(opts?.body).toBeUndefined();
+  });
+
+  it('importAssertionFile hits /api/assertion/:name/import-file as POST multipart with camelCase form fields', async () => {
+    fetchResponses.push(new Response(JSON.stringify({ assertionUri: 'urn:x' }), { status: 200 }));
+
+    const buf = new Uint8Array([1, 2, 3, 4]);
+    await client.importAssertionFile('ctx', 'notes', buf, 'doc.md', {
+      contentType: 'text/markdown',
+      ontologyRef: 'urn:onto',
+      subGraphName: 'protocols',
+    });
+
+    const [url, opts] = fetchCalls[0];
+    expect(url).toBe('http://localhost:9200/api/assertion/notes/import-file');
+    expect(opts?.method).toBe('POST');
+    // `body` must be a FormData — Node's fetch sets the multipart boundary automatically.
+    expect(opts?.body).toBeInstanceOf(FormData);
+    const form = opts?.body as FormData;
+    expect(form.get('contextGraphId')).toBe('ctx');
+    expect(form.get('contentType')).toBe('text/markdown');
+    expect(form.get('ontologyRef')).toBe('urn:onto');
+    expect(form.get('subGraphName')).toBe('protocols');
+    const filePart = form.get('file');
+    expect(filePart).toBeInstanceOf(Blob);
+    expect((filePart as File).name).toBe('doc.md');
+  });
+
+  it('importAssertionFile omits optional form fields when not supplied', async () => {
+    fetchResponses.push(new Response(JSON.stringify({}), { status: 200 }));
+
+    await client.importAssertionFile('ctx', 'notes', new Uint8Array([1]), 'x.bin');
+
+    const form = fetchCalls[0][1]?.body as FormData;
+    expect(form.get('contextGraphId')).toBe('ctx');
+    expect(form.has('contentType')).toBe(false);
+    expect(form.has('ontologyRef')).toBe(false);
+    expect(form.has('subGraphName')).toBe(false);
+  });
+
+  it('createSubGraph hits /api/sub-graph/create with camelCase body', async () => {
+    fetchResponses.push(new Response(JSON.stringify({ created: 'protocols', contextGraphId: 'ctx' }), { status: 200 }));
+
+    await client.createSubGraph('ctx', 'protocols');
+
+    const [url, opts] = fetchCalls[0];
+    expect(url).toBe('http://localhost:9200/api/sub-graph/create');
+    expect(opts?.method).toBe('POST');
+    const body = JSON.parse(opts?.body as string);
+    expect(body).toEqual({ contextGraphId: 'ctx', subGraphName: 'protocols' });
+  });
+
+  it('listSubGraphs hits /api/sub-graph/list as GET with contextGraphId query param', async () => {
+    fetchResponses.push(new Response(JSON.stringify({ contextGraphId: 'ctx', subGraphs: [] }), { status: 200 }));
+
+    await client.listSubGraphs('ctx');
+
+    const [url, opts] = fetchCalls[0];
+    expect(opts?.method ?? 'GET').toBe('GET');
+    const parsed = new URL(String(url));
+    expect(parsed.pathname).toBe('/api/sub-graph/list');
+    expect(parsed.searchParams.get('contextGraphId')).toBe('ctx');
+    expect(opts?.body).toBeUndefined();
+  });
+
+  // ---------------------------------------------------------------------------
   // Chat turn persistence
   // ---------------------------------------------------------------------------
 
