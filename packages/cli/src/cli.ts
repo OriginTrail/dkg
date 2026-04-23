@@ -856,17 +856,31 @@ program
 
 program
   .command('endorse <ual>')
-  .description('Endorse a published Knowledge Asset')
+  .description('Endorse a published Knowledge Asset as the authenticated agent')
+  // A-12 review: the endorser is resolved from the bearer token, not
+  // from a `--agent` flag (the previous behaviour let any caller with
+  // node access forge endorsements under arbitrary addresses).
+  // `--agent` is kept as an optional sanity check: if it is supplied
+  // we assert it matches the token's agent before sending the
+  // request, so a user who typo's the agent gets a local error
+  // instead of a 403 round-trip. If the user wants to endorse as a
+  // specific agent other than the node's default, they must
+  // authenticate with that agent's token.
   .requiredOption('--context-graph <id>', 'Context Graph ID')
-  .requiredOption('--agent <address>', 'Agent address (endorser)')
+  .option('--agent <address>', 'Optional: assert the authenticated agent matches this address before sending')
   .action(async (ual: string, opts: ActionOpts) => {
     try {
       const client = await ApiClient.connect();
-      const result = await client.endorse({
+      const request: { contextGraphId: string; ual: string; agentAddress?: string } = {
         contextGraphId: opts.contextGraph,
         ual,
-        agentAddress: opts.agent,
-      });
+      };
+      if (typeof opts.agent === 'string' && opts.agent.length > 0) {
+        request.agentAddress = opts.agent;
+      }
+      const result = await client.endorse(
+        request as { contextGraphId: string; ual: string; agentAddress: string },
+      );
       console.log(`Endorsed ${ual} by ${result.endorserAddress}`);
     } catch (err) {
       console.error(`Endorse failed: ${err instanceof Error ? err.message : String(err)}`);

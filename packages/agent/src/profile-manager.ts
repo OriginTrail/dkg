@@ -36,14 +36,26 @@ export class ProfileManager {
     // `did:dkg:agent:<peerId>` must drop the legacy subject alongside
     // the new EVM-form subject, otherwise discovery returns the same
     // node twice and the local data graph no longer matches the
-    // updated manifest. We clean up three possible prior roots:
-    //   1. the remembered `lastRootEntity` (most precise — covers the
-    //      "user rotated their wallet address" case);
-    //   2. the legacy peer-id-form subject (always present on nodes
-    //      that published under v9/v10-rc before A-12);
-    //   3. the address-form subject for the current wallet (handles
-    //      the case where the address shape stayed the same but the
-    //      casing or payload changed between publishes).
+    // updated manifest.
+    //
+    // Codex flagged that `lastRootEntity` is only in memory — a
+    // daemon restart after a wallet rotation would forget the
+    // previous address-form root. Mitigate by combining a static
+    // set of "obvious" prefixes with a one-shot SPARQL scan for
+    // any agent subject in the registry graph that claims THIS
+    // peerId (`dkg:peerId "<peerId>"`). That covers:
+    //   1. legacy peer-id form (`did:dkg:agent:<peerId>`) — always
+    //      present on v9/v10-rc nodes before A-12;
+    //   2. the canonicalised address form for the current wallet —
+    //      handles casing / payload changes between publishes;
+    //   3. any OTHER address the same peerId previously published
+    //      under — covers the "operator switched wallet + daemon
+    //      restart" path that in-memory `lastRootEntity` misses;
+    //   4. the remembered `lastRootEntity` — a best-effort fast
+    //      path that saves the scan round trip when the prior
+    //      address is already known in process;
+    //   5. the new `rootEntity` itself — idempotent cleanup when
+    //      the publish is a pure content refresh.
     const dataGraph = paranetDataGraphUri(AGENT_REGISTRY_CONTEXT_GRAPH);
     const prefixesToClean = new Set<string>();
     if (this.lastRootEntity) prefixesToClean.add(this.lastRootEntity);
@@ -54,6 +66,32 @@ export class ProfileManager {
       );
     }
     prefixesToClean.add(rootEntity);
+
+    // Discover any OTHER subject in the registry graph that
+    // published with this peerId. SPARQL escape of the peerId
+    // literal: the config.peerId is a libp2p base58 peer id (no
+    // quotes, no backslashes) but we still guard defensively.
+    const escapedPeerId = config.peerId
+      .replace(/\\/g, '\\\\')
+      .replace(/"/g, '\\"');
+    try {
+      const discovered = await this.store.query(
+        `SELECT DISTINCT ?s WHERE { GRAPH <${dataGraph}> { ?s <https://dkg.network/ontology#peerId> "${escapedPeerId}" } }`,
+      );
+      if (discovered.type === 'bindings') {
+        for (const row of discovered.bindings) {
+          const subject = row['s'];
+          if (subject && subject.startsWith('did:dkg:agent:')) {
+            prefixesToClean.add(subject);
+          }
+        }
+      }
+    } catch {
+      // Non-fatal: fall back to the static prefix set. Any
+      // orphaned legacy subject will still be cleaned on the
+      // next publish where the scan succeeds.
+    }
+
     for (const prefix of prefixesToClean) {
       await this.store.deleteBySubjectPrefix(dataGraph, prefix);
     }

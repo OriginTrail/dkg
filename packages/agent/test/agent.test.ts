@@ -361,6 +361,95 @@ describe('ProfileManager', () => {
   );
 
   it(
+    'A-12 wallet rotation + restart: peerId-scan reaches profiles from a prior wallet even with a fresh ProfileManager',
+    async () => {
+      // Codex review on PR #243: `lastRootEntity` is only in memory.
+      // If an operator publishes under wallet A, the daemon restarts,
+      // they reconfigure to wallet B, and publish again, the in-memory
+      // cleanup path sees only the new canonical address (B) and the
+      // peerId fallback — wallet A's profile would be orphaned.
+      //
+      // The mitigation is the SPARQL scan in
+      // `ProfileManager.publishProfile` that discovers every subject
+      // in the registry graph that claims this peerId. This test
+      // simulates the restart by constructing a fresh ProfileManager
+      // for the second publish, proving the scan — not
+      // `lastRootEntity` — is what cleans up wallet A.
+      const store = new OxigraphStore();
+      const { DKGPublisher } = await import('@origintrail-official/dkg-publisher');
+      const { TypedEventBus, generateEd25519Keypair } = await import('@origintrail-official/dkg-core');
+      const eventBus = new TypedEventBus();
+      const keypair = await generateEd25519Keypair();
+
+      const peerId = 'QmRotatedWallet';
+      const walletA = '0x' + 'aa'.repeat(20);
+      const walletB = '0x' + 'bb'.repeat(20);
+
+      // Publish under wallet A.
+      const publisher1 = new DKGPublisher({ store, chain: createEVMAdapter(HARDHAT_KEYS.CORE_OP), eventBus, keypair });
+      const managerA = new ProfileManager(publisher1, store);
+      await managerA.publishProfile({
+        peerId,
+        agentAddress: walletA,
+        name: 'WalletA',
+        skills: [],
+      });
+
+      const graph = 'did:dkg:context-graph:agents';
+      const subjectA = `did:dkg:agent:${walletA}`;
+      const subjectB = `did:dkg:agent:${walletB}`;
+
+      // Sanity: wallet A's subject is present.
+      const afterA = await store.query(
+        `SELECT ?p ?o WHERE { GRAPH <${graph}> { <${subjectA}> ?p ?o } }`,
+      );
+      expect(afterA.type).toBe('bindings');
+      if (afterA.type === 'bindings') {
+        expect(afterA.bindings.length).toBeGreaterThan(0);
+      }
+
+      // Simulate a daemon restart + wallet rotation — brand new
+      // ProfileManager with NO lastRootEntity memory, but the same
+      // store + peerId + a NEW wallet.
+      const publisher2 = new DKGPublisher({ store, chain: createEVMAdapter(HARDHAT_KEYS.CORE_OP), eventBus, keypair });
+      const managerB = new ProfileManager(publisher2, store);
+      await managerB.publishProfile({
+        peerId,
+        agentAddress: walletB,
+        name: 'WalletB',
+        skills: [],
+      });
+
+      // Wallet A's subject must be gone even though ProfileManager
+      // had no in-memory record of it.
+      const stillA = await store.query(
+        `SELECT ?p ?o WHERE { GRAPH <${graph}> { <${subjectA}> ?p ?o } }`,
+      );
+      expect(stillA.type).toBe('bindings');
+      if (stillA.type === 'bindings') {
+        expect(
+          stillA.bindings.length,
+          'peerId-scan must remove wallet A profile across a ProfileManager restart',
+        ).toBe(0);
+      }
+
+      // Wallet B's subject is the sole remaining profile root for
+      // this peerId.
+      const afterB = await store.query(
+        `SELECT ?p ?o WHERE { GRAPH <${graph}> { <${subjectB}> ?p ?o } }`,
+      );
+      expect(afterB.type).toBe('bindings');
+      if (afterB.type === 'bindings') {
+        expect(afterB.bindings.length).toBeGreaterThan(0);
+        const nameTriples = afterB.bindings.filter((b) =>
+          b['p']?.includes('schema.org/name'),
+        );
+        expect(nameTriples.some((b) => b['o'] === '"WalletB"')).toBe(true);
+      }
+    },
+  );
+
+  it(
     'A-12 casing: checksum-case and lowercase agentAddress converge to the same DID subject',
     () => {
       const checksum = '0xAb5801a7D398351b8bE11C439e05C5B3259aec9B';

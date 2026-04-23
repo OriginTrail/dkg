@@ -582,7 +582,13 @@ export class ApiClient {
   async endorse(request: {
     contextGraphId: string;
     ual: string;
-    agentAddress: string;
+    /**
+     * Optional. If supplied it MUST match the address resolved from
+     * the bearer token; the daemon rejects any mismatch with 403.
+     * Prefer omitting and relying on the token — see A-12 review on
+     * /api/endorse for the provenance-forgery rationale.
+     */
+    agentAddress?: string;
   }): Promise<{ endorsed: boolean; endorserAddress: string }> {
     return this.post('/api/endorse', request);
   }
