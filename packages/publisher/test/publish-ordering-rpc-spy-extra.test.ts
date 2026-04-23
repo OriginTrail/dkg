@@ -203,12 +203,23 @@ describe('Publish ordering & RPC spy — P-1 / P-6 / P-7', () => {
         expect(rpcCalls.length).toBeGreaterThan(0);
 
         // Spec axiom 4 requires a `txHash persisted` / `journal write-ahead`
-        // event that includes the pre-broadcast tx hash. The publisher
-        // currently does not emit any such event; its phase API stops at
-        // `chain:submit:start`. The assertion below is RED today.
+        // event that includes the pre-broadcast tx hash. Codex review on
+        // PR #241 pointed out that a plain `chain:writeahead:start` /
+        // `chain:writeahead:end` boundary (emitted around the adapter
+        // send) does NOT satisfy this requirement — the phase name alone
+        // cannot carry the hash — so the regex here is intentionally
+        // txHash-/journal-specific to prevent the coarse boundary from
+        // masquerading as a real write-ahead log entry.
+        //
+        // To flip this assertion green, the publisher needs to plumb a
+        // real pre-broadcast hook (P-1.2): split the EVM adapter's
+        // sign/broadcast flow and emit e.g. `chain:txsigned` with the
+        // signed txHash BEFORE `eth_sendRawTransaction`. Until that
+        // ships, this test stays RED and the bug remains documented in
+        // BUGS_FOUND.md P-1.
         const snapshot = rpcCalls[0].phaseLogSnapshot;
         const hasTxHashPreSend = snapshot.some((p) =>
-          /tx(hash)?|journal|writeahead|write-ahead|pre-?send/i.test(p),
+          /tx(hash|signed)|journal:write-?ahead|pre-?send/i.test(p),
         );
         // PROD-BUG: expected `true`, currently `false` → write-ahead missing.
         expect(hasTxHashPreSend).toBe(true);

@@ -1308,27 +1308,37 @@ export class DKGPublisher implements Publisher {
         const pubSig = ethers.Signature.from(
           await this.publisherWallet.signMessage(pubMsgHash),
         );
-        onChainResult = await this.chain.createKnowledgeAssetsV10!({
-          publishOperationId: `${this.sessionId}-${tentativeSeq}`,
-          contextGraphId: v10CgId,
-          merkleRoot: kcMerkleRoot,
-          knowledgeAssetsAmount: kaCount,
-          byteSize: publicByteSize,
-          epochs: 1,
-          tokenAmount,
-          isImmutable: false,
-          paymaster: ethers.ZeroAddress,
-          publisherNodeIdentityId: identityId,
-          publisherSignature: {
-            r: ethers.getBytes(pubSig.r),
-            vs: ethers.getBytes(pubSig.yParityAndS),
-          },
-          ackSignatures: v10ACKs.map(ack => ({
-            identityId: ack.nodeIdentityId,
-            r: ack.signatureR,
-            vs: ack.signatureVS,
-          })),
-        });
+        // P-1 review: `chain:writeahead:end` must bracket only the
+        // adapter send/wait call so phase listeners actually observe
+        // "tx hit the wire boundary". The previous placement delayed
+        // the `end` marker until after the local confirmed-metadata
+        // and authorship-proof inserts completed, which made the
+        // reported phase duration measure unrelated local work.
+        try {
+          onChainResult = await this.chain.createKnowledgeAssetsV10!({
+            publishOperationId: `${this.sessionId}-${tentativeSeq}`,
+            contextGraphId: v10CgId,
+            merkleRoot: kcMerkleRoot,
+            knowledgeAssetsAmount: kaCount,
+            byteSize: publicByteSize,
+            epochs: 1,
+            tokenAmount,
+            isImmutable: false,
+            paymaster: ethers.ZeroAddress,
+            publisherNodeIdentityId: identityId,
+            publisherSignature: {
+              r: ethers.getBytes(pubSig.r),
+              vs: ethers.getBytes(pubSig.yParityAndS),
+            },
+            ackSignatures: v10ACKs.map(ack => ({
+              identityId: ack.nodeIdentityId,
+              r: ack.signatureR,
+              vs: ack.signatureVS,
+            })),
+          });
+        } finally {
+          onPhase?.('chain:writeahead', 'end');
+        }
 
         onChainResult.tokenAmount = tokenAmount;
 
@@ -1396,12 +1406,10 @@ export class DKGPublisher implements Publisher {
         }
 
         status = 'confirmed';
-        onPhase?.('chain:writeahead', 'end');
         onPhase?.('chain:submit', 'end');
         onPhase?.('chain:metadata', 'start');
         this.log.info(ctx, `On-chain confirmed: UAL=${ual} batchId=${onChainResult.batchId} tx=${onChainResult.txHash}`);
       } catch (err) {
-        onPhase?.('chain:writeahead', 'end');
         onPhase?.('chain:submit', 'end');
         this.log.warn(ctx, `On-chain tx failed: ${err instanceof Error ? err.message : String(err)}`);
       }
@@ -1544,67 +1552,77 @@ export class DKGPublisher implements Publisher {
       .join('\n');
     const updateByteSize = BigInt(new TextEncoder().encode(updateNquadsStr).length);
 
+    // P-1 review: bracket the adapter send/wait with a single try/finally so
+    // `chain:writeahead:end` fires exactly once when the on-chain call
+    // returns or throws — never after the local store writes that follow.
     let txResult: { success: boolean; hash: string; blockNumber?: number };
-    if (typeof this.chain.updateKnowledgeCollectionV10 === 'function') {
-      try {
-        txResult = await this.chain.updateKnowledgeCollectionV10({
-          kcId,
-          newMerkleRoot: kcMerkleRoot,
-          newByteSize: updateByteSize,
-          mintAmount: 0,
-          publisherAddress: this.publisherAddress,
-          v10Origin: true,
-        });
-      } catch (v10Err) {
-        const errorName = enrichEvmError(v10Err);
-        const V10_DEFINITIVE_ERRORS = [
-          'NotBatchPublisher', 'KnowledgeCollectionExpired',
-          'CannotUpdateImmutableKnowledgeCollection', 'ExceededKnowledgeCollectionMaxSize',
-        ];
-        if (errorName && V10_DEFINITIVE_ERRORS.includes(errorName)) {
-          this.log.warn(ctx, `V10 update rejected (${errorName}): ${v10Err instanceof Error ? v10Err.message : String(v10Err)}`);
-          onPhase?.('chain:writeahead', 'end');
-          onPhase?.('chain:submit', 'end');
-          onPhase?.('chain', 'end');
-          return {
+    let earlyReturn: PublishResult | undefined;
+    try {
+      if (typeof this.chain.updateKnowledgeCollectionV10 === 'function') {
+        try {
+          txResult = await this.chain.updateKnowledgeCollectionV10({
             kcId,
-            ual: `did:dkg:${this.chain.chainId}/${this.publisherAddress}/${kcId}`,
-            merkleRoot: kcMerkleRoot,
-            kaManifest: manifestEntries,
-            status: 'failed',
-            publicQuads: allSkolemizedQuads,
-          };
-        }
-        if (typeof this.chain.updateKnowledgeAssets === 'function') {
-          this.log.info(ctx, `V10 update failed (${errorName ?? 'unknown'}), trying V9 path: ${v10Err instanceof Error ? v10Err.message : String(v10Err)}`);
-          try {
-            txResult = await this.chain.updateKnowledgeAssets({
-              batchId: kcId,
-              newMerkleRoot: kcMerkleRoot,
-              newPublicByteSize: updateByteSize,
-              publisherAddress: this.publisherAddress,
-            });
-          } catch (v9Err) {
-            enrichEvmError(v9Err);
-            throw v9Err;
+            newMerkleRoot: kcMerkleRoot,
+            newByteSize: updateByteSize,
+            mintAmount: 0,
+            publisherAddress: this.publisherAddress,
+            v10Origin: true,
+          });
+        } catch (v10Err) {
+          const errorName = enrichEvmError(v10Err);
+          const V10_DEFINITIVE_ERRORS = [
+            'NotBatchPublisher', 'KnowledgeCollectionExpired',
+            'CannotUpdateImmutableKnowledgeCollection', 'ExceededKnowledgeCollectionMaxSize',
+          ];
+          if (errorName && V10_DEFINITIVE_ERRORS.includes(errorName)) {
+            this.log.warn(ctx, `V10 update rejected (${errorName}): ${v10Err instanceof Error ? v10Err.message : String(v10Err)}`);
+            earlyReturn = {
+              kcId,
+              ual: `did:dkg:${this.chain.chainId}/${this.publisherAddress}/${kcId}`,
+              merkleRoot: kcMerkleRoot,
+              kaManifest: manifestEntries,
+              status: 'failed',
+              publicQuads: allSkolemizedQuads,
+            };
+            txResult = { success: false, hash: '' };
+          } else if (typeof this.chain.updateKnowledgeAssets === 'function') {
+            this.log.info(ctx, `V10 update failed (${errorName ?? 'unknown'}), trying V9 path: ${v10Err instanceof Error ? v10Err.message : String(v10Err)}`);
+            try {
+              txResult = await this.chain.updateKnowledgeAssets({
+                batchId: kcId,
+                newMerkleRoot: kcMerkleRoot,
+                newPublicByteSize: updateByteSize,
+                publisherAddress: this.publisherAddress,
+              });
+            } catch (v9Err) {
+              enrichEvmError(v9Err);
+              throw v9Err;
+            }
+          } else {
+            throw v10Err;
           }
-        } else {
-          throw v10Err;
         }
+      } else if (typeof this.chain.updateKnowledgeAssets === 'function') {
+        txResult = await this.chain.updateKnowledgeAssets({
+          batchId: kcId,
+          newMerkleRoot: kcMerkleRoot,
+          newPublicByteSize: updateByteSize,
+          publisherAddress: this.publisherAddress,
+        });
+      } else {
+        throw new Error('Chain adapter does not support updates (no V10 or V9 update method available)');
       }
-    } else if (typeof this.chain.updateKnowledgeAssets === 'function') {
-      txResult = await this.chain.updateKnowledgeAssets({
-        batchId: kcId,
-        newMerkleRoot: kcMerkleRoot,
-        newPublicByteSize: updateByteSize,
-        publisherAddress: this.publisherAddress,
-      });
-    } else {
-      throw new Error('Chain adapter does not support updates (no V10 or V9 update method available)');
+    } finally {
+      onPhase?.('chain:writeahead', 'end');
+    }
+
+    if (earlyReturn) {
+      onPhase?.('chain:submit', 'end');
+      onPhase?.('chain', 'end');
+      return earlyReturn;
     }
 
     if (!txResult.success) {
-      onPhase?.('chain:writeahead', 'end');
       onPhase?.('chain:submit', 'end');
       onPhase?.('chain', 'end');
       return {
@@ -1616,7 +1634,6 @@ export class DKGPublisher implements Publisher {
         publicQuads: allSkolemizedQuads,
       };
     }
-    onPhase?.('chain:writeahead', 'end');
     onPhase?.('chain:submit', 'end');
     onPhase?.('chain', 'end');
 
