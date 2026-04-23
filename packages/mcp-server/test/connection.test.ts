@@ -282,6 +282,26 @@ describe('DkgClient', () => {
       expect(normalizeBaseUrl('file:///etc/passwd')).toBeUndefined();
       expect(normalizeBaseUrl('ftp://node.example:21')).toBeUndefined();
     });
+
+    // PR #229 bot review round 22 (r22-4, connection.ts:327). The
+    // pre-r22-4 code composed `${u.hostname}:${u.port}`, which strips
+    // the square brackets IPv6 literals require in a URL. The result
+    // was `http://::1:9200` — malformed and rejected by `fetch`. Pin
+    // that brackets round-trip through normalization for both the
+    // explicit-port and implicit-port paths.
+    it('r22-4: preserves IPv6 literal brackets (explicit port)', () => {
+      expect(normalizeBaseUrl('http://[::1]:9200')).toBe('http://[::1]:9200');
+      expect(normalizeBaseUrl('https://[2001:db8::1]:8443')).toBe(
+        'https://[2001:db8::1]:8443',
+      );
+    });
+
+    it('r22-4: synthesises the default port for IPv6 while preserving brackets', () => {
+      // `http://[::1]` with no port must normalize to `http://[::1]:80`
+      // (not `http://::1:80`, which `fetch` cannot parse).
+      expect(normalizeBaseUrl('http://[::1]')).toBe('http://[::1]:80');
+      expect(normalizeBaseUrl('https://[::1]')).toBe('https://[::1]:443');
+    });
   });
 
   // PR #229 bot review round 10 (mcp-server/index.ts:449). `mcp_auth
@@ -368,6 +388,34 @@ describe('DkgClient', () => {
       expect(typeof r.baseOrPort === 'number').toBe(true);
       expect(r.displayUrl).toContain('daemon not running');
     });
+
+    // PR #229 bot review round 22 (r22-3, mcp-server/index.ts:497).
+    // The synthetic 127.0.0.1:7777 placeholder returned when the
+    // daemon is down could be probed by `mcp_auth status`, and if
+    // any unrelated service happened to listen on 7777 the tool
+    // reported "OK" even with no DKG daemon running. Flag the
+    // placeholder with `daemonDown: true` so callers can skip the
+    // probe and report the real state.
+    it('r22-3: non-reachable branch sets daemonDown=true so callers can skip probing the synthetic endpoint', async () => {
+      delete process.env.DKG_NODE_URL;
+      delete process.env.DKG_API_PORT;
+      const r = await resolveDaemonEndpoint({ requireReachable: false });
+      expect(r.daemonDown).toBe(true);
+      // Display string still names the synthetic endpoint for
+      // visibility, but the explicit flag is what callers MUST
+      // check before probing — a string-contains check is brittle
+      // and has already been a footgun (see the probeUrl comment
+      // at mcp-server/index.ts:497).
+      expect(r.baseOrPort).toBe(7777);
+    });
+
+    it('r22-3: a live daemon (DKG_API_PORT set + port file present) does NOT set daemonDown', async () => {
+      process.env.DKG_API_PORT = '9201';
+      await writeFile(join(tempDir, 'auth.token'), 'file-tok\n');
+      const r = await resolveDaemonEndpoint({ requireReachable: false });
+      expect(r.daemonDown).toBeUndefined();
+      expect(r.baseOrPort).toBe(9201);
+    });
   });
 
   describe('extractPortFromUrl (bot review r9-2)', () => {
@@ -445,6 +493,74 @@ describe('DkgClient', () => {
       globalThis.fetch = fn;
       const c = new DkgClient(9200);
       await expect(c.query('x')).rejects.toThrow('bad query');
+    });
+
+    // -----------------------------------------------------------------
+    // PR #229 bot review round 22 (r22-2, connection.ts:27).
+    //
+    // Pre-r22-2 the string-form constructor kept an arbitrary pathname
+    // verbatim, so `new DkgClient('https://host/dkg')` produced
+    // `https://host/dkg/api/status` and `new DkgClient('https://host/api')`
+    // produced the double-prefixed `https://host/api/api/status`.
+    // Every per-request helper hard-codes `/api/...` (status / query /
+    // publish / agents / …) — the base must be origin-only.
+    // -----------------------------------------------------------------
+    it('r22-2: normalises an origin-only string base URL (no path segment, no double /api)', async () => {
+      const { fn, calls } = createTrackingFetch([
+        jsonRes({
+          name: 'n', peerId: 'p', uptimeMs: 1,
+          connectedPeers: 0, relayConnected: false, multiaddrs: [],
+        }),
+      ]);
+      globalThis.fetch = fn;
+      const c = new DkgClient('https://host.example:9443', 'tk');
+      await c.status();
+      expect(calls[0].url).toBe('https://host.example:9443/api/status');
+    });
+
+    it('r22-2: rejects a base URL with a non-root path segment instead of double-appending /api', () => {
+      // These are the exact regressions the bot flagged on PR #229.
+      expect(() => new DkgClient('https://host.example/dkg')).toThrow(
+        /invalid or unsupported base URL.*\/dkg/i,
+      );
+      expect(() => new DkgClient('https://host.example/api')).toThrow(
+        /invalid or unsupported base URL.*\/api/i,
+      );
+      expect(() => new DkgClient('https://host.example/dkg/api')).toThrow(
+        /invalid or unsupported base URL/i,
+      );
+    });
+
+    it('r22-2: rejects empty / non-http(s) base URLs with a diagnostic error', () => {
+      expect(() => new DkgClient('')).toThrow(/invalid or unsupported/i);
+      expect(() => new DkgClient('not-a-url')).toThrow(/invalid or unsupported/i);
+      expect(() => new DkgClient('ftp://host.example:21')).toThrow(/invalid or unsupported/i);
+    });
+
+    it('r22-2: tolerates a single trailing slash (pathname=`/` is origin-only)', async () => {
+      const { fn, calls } = createTrackingFetch([
+        jsonRes({
+          name: 'n', peerId: 'p', uptimeMs: 1,
+          connectedPeers: 0, relayConnected: false, multiaddrs: [],
+        }),
+      ]);
+      globalThis.fetch = fn;
+      const c = new DkgClient('http://host.example:9999/');
+      await c.status();
+      expect(calls[0].url).toBe('http://host.example:9999/api/status');
+    });
+
+    it('r22-2: the numeric-port form still works (backwards compatible local-daemon path)', async () => {
+      const { fn, calls } = createTrackingFetch([
+        jsonRes({
+          name: 'n', peerId: 'p', uptimeMs: 1,
+          connectedPeers: 0, relayConnected: false, multiaddrs: [],
+        }),
+      ]);
+      globalThis.fetch = fn;
+      const c = new DkgClient(9201);
+      await c.status();
+      expect(calls[0].url).toBe('http://127.0.0.1:9201/api/status');
     });
 
     it('covers publish, listContextGraphs, createContextGraph, agents, subscribe', async () => {

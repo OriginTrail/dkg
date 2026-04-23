@@ -19,12 +19,33 @@ export class DkgClient {
     // non-root API prefix. The numeric-port form is preserved for
     // backwards compatibility (local daemons discovered via
     // `readDkgApiPort()`).
+    //
+    // PR #229 bot review round 22 (r22-2, connection.ts:27). The
+    // initial r10 implementation kept any pathname verbatim, so
+    // `new DkgClient('https://host/dkg')` produced `.../dkg/api/status`
+    // and `new DkgClient('https://host/api')` the double-prefixed
+    // `.../api/api/status`. Every request helper hard-codes the
+    // `/api/...` path (see `status`/`query`/`publish` below), matching
+    // the daemon's fixed mount point. Enforce origin-only base URLs so
+    // the two encodings stay in sync — the caller sees a clear error
+    // instead of a mysterious 404. `normalizeBaseUrl` already
+    // implements the canonical "origin + explicit :port" form we want;
+    // route the string branch through it so DkgClient shares a single
+    // invariant with `resolveDaemonEndpoint`.
     if (typeof portOrBaseUrl === 'number') {
       this.baseUrl = `http://127.0.0.1:${portOrBaseUrl}`;
     } else {
-      // Strip trailing slash so path concatenation stays clean:
-      // base `http://host:p/api` + path `/status` → `http://host:p/api/status`.
-      this.baseUrl = portOrBaseUrl.replace(/\/+$/, '');
+      const normalized = normalizeBaseUrl(portOrBaseUrl);
+      if (!normalized) {
+        throw new Error(
+          `DkgClient: invalid or unsupported base URL: ${portOrBaseUrl}. ` +
+            `Expected an origin-only URL like http(s)://host:port — a path ` +
+            `segment (e.g. /api or /dkg) is NOT supported because per-request ` +
+            `routes already hard-code /api/... . Strip any path (and trailing ` +
+            `slash) before constructing the client.`,
+        );
+      }
+      this.baseUrl = normalized;
     }
     this.token = token;
   }
@@ -169,6 +190,17 @@ export interface ResolvedDaemonEndpoint {
   readonly tokenSource: 'env' | 'file' | 'none';
   /** Where `baseOrPort` came from — `'env'` or `'file'`. */
   readonly urlSource: 'env' | 'file';
+  /**
+   * True when `resolveDaemonEndpoint({ requireReachable: false })`
+   * returned a SYNTHETIC fallback because the daemon is not running
+   * (no port file / dead pid). Callers must NOT probe the
+   * `baseOrPort` in this state — it's a placeholder, and any
+   * unrelated process happening to listen on `127.0.0.1:7777` would
+   * otherwise make `mcp_auth status` lie about liveness.
+   *
+   * PR #229 bot review round 22 (r22-3, mcp-server/index.ts:497).
+   */
+  readonly daemonDown?: boolean;
 }
 
 export async function resolveDaemonEndpoint(options: {
@@ -236,12 +268,16 @@ export async function resolveDaemonEndpoint(options: {
       }
       // Best-effort fallback for display so `mcp_auth status` can
       // still render something useful when the daemon is not up.
+      // r22-3: flag the endpoint as `daemonDown` so callers skip
+      // probing the synthetic 127.0.0.1:7777 placeholder — a probe
+      // there could hit an unrelated service and falsely report OK.
       return {
         baseOrPort: 7777,
         displayUrl: 'http://127.0.0.1:7777 (daemon not running)',
         token: envToken,
         tokenSource: envToken ? 'env' : 'none',
         urlSource: 'file',
+        daemonDown: true,
       };
     }
     baseOrPort = port;
@@ -323,9 +359,32 @@ export function normalizeBaseUrl(raw: string): string | undefined {
   // Preserve the explicit host:port even when the port is the
   // protocol default — keeping the shape deterministic makes logs
   // and test assertions easier to reason about.
-  const hostPart = u.port
-    ? `${u.hostname}:${u.port}`
-    : `${u.hostname}:${explicitPort}`;
+  //
+  // PR #229 bot review round 22 (r22-4, connection.ts:327). The
+  // previous revision composed `${u.hostname}:${u.port}`, which
+  // silently dropped the square brackets that IPv6 literals require
+  // in a URL: `http://[::1]:9200` normalized to `http://::1:9200`, a
+  // malformed URL that `fetch` rejects. `URL.host` preserves the
+  // brackets, so prefer that and only synthesise `hostname:port` for
+  // the default-port case (where `u.host` would elide the port and
+  // the r17-4 contract says we keep it explicit). For IPv6 literals
+  // the hostname is returned unbracketed by WHATWG URL, so re-wrap
+  // when composing manually.
+  // WHATWG URL preserves the brackets on `u.hostname` for IPv6
+  // literals in Node ≥ 18 (`http://[::1]:9200` ⇒ `hostname === '[::1]'`).
+  // Detect the bracketed form (and the unbracketed raw IPv6 form as
+  // a belt-and-braces against future runtime variations) so we only
+  // add brackets when they are actually missing.
+  const hasBrackets = u.hostname.startsWith('[') && u.hostname.endsWith(']');
+  const isRawIpv6 = !hasBrackets && u.hostname.includes(':');
+  let hostPart: string;
+  if (u.port) {
+    // u.host already contains the brackets for IPv6 literals.
+    hostPart = u.host;
+  } else {
+    const hostForCompose = isRawIpv6 ? `[${u.hostname}]` : u.hostname;
+    hostPart = `${hostForCompose}:${explicitPort}`;
+  }
 
   // Origin-only: DkgClient's per-request paths hard-code the
   // `/api/...` prefix (see r11-2 / r17-4 rationale above).

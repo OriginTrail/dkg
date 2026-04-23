@@ -165,13 +165,51 @@ dkg:
     expect(() => parseAgentsMdFrontmatter('# No frontmatter here')).toThrow(/dkg-config/);
   });
 
-  it('throws when frontmatter exists but lacks a `dkg:` key', () => {
+  // Bot review (PR #229 r22-5, workspace-config.ts:125): the earlier
+  // "frontmatter-present ⇒ must have `dkg`" contract silently blocked
+  // the documented fenced-block fallback for any AGENTS.md that uses
+  // frontmatter for OTHER tooling (tags, owner, prompt metadata, …).
+  // Post-r22-5 the parser falls through to the fence; we only throw
+  // when NEITHER carrier produced a config. Pin BOTH halves:
+  //   a) frontmatter-without-`dkg` + NO fence ⇒ descriptive error that
+  //      names both expected carriers (so an adopter sees they need
+  //      either the frontmatter key or the fence info-string).
+  //   b) frontmatter-without-`dkg` + a valid fence ⇒ fence wins.
+  it('r22-5: frontmatter lacking `dkg:` AND no fenced block → descriptive error naming both carriers', () => {
     const md = `---
 title: just a title
+owner: platform-team
 ---
 body
 `;
-    expect(() => parseAgentsMdFrontmatter(md)).toThrow(/missing `dkg` key/);
+    expect(() => parseAgentsMdFrontmatter(md)).toThrow(/frontmatter is present but has no top-level `dkg:`/);
+    expect(() => parseAgentsMdFrontmatter(md)).toThrow(/dkg-config/);
+  });
+
+  it('r22-5: frontmatter lacking `dkg:` FALLS THROUGH to a fenced `dkg-config` block', () => {
+    // Canonical regression for the r22-5 finding: the most common
+    // real-world AGENTS.md shape keeps unrelated frontmatter (tags,
+    // slug, prompt version, …) AND puts the DKG config in a fence.
+    // Pre-r22-5 the frontmatter short-circuit threw before the fence
+    // parser ran; post-r22-5 the fence body round-trips.
+    const md = [
+      '---',
+      'title: Project Agents',
+      'tags: [workspace, dkg]',
+      '---',
+      '',
+      '# body',
+      '',
+      '```dkg-config',
+      'contextGraph: from-fence',
+      'node: n',
+      'extractionPolicy: semantic-required',
+      '```',
+      '',
+    ].join('\n');
+    const cfg = parseAgentsMdFrontmatter(md);
+    expect(cfg.contextGraph).toBe('from-fence');
+    expect(cfg.node).toBe('n');
   });
 
   // -------------------------------------------------------------------

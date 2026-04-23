@@ -124,6 +124,13 @@ export class DkgDaemonClient {
    * `agentAddress` (required for WM reads), `assertionName` (scopes WM reads
    * to a single per-agent assertion), `subGraphName`, `verifiedGraph`,
    * `graphSuffix`, `includeSharedMemory`.
+   *
+   * PR #229 bot review round 22 (r22-1): when the daemon runs with more
+   * than one co-hosted local agent, `view: 'working-memory'` reads are
+   * gated by a fail-closed `agentAuthSignature` check (RFC-29 / spec §04
+   * isolation). Forward the signature when the caller provides one so
+   * multi-agent nodes can satisfy the gate without operators having to
+   * explicitly set `DKG_STRICT_WM_AUTH=0`.
    */
   async query(
     sparql: string,
@@ -133,6 +140,7 @@ export class DkgDaemonClient {
       includeSharedMemory?: boolean;
       view?: 'working-memory' | 'shared-working-memory' | 'verified-memory';
       agentAddress?: string;
+      agentAuthSignature?: string;
       assertionName?: string;
       subGraphName?: string;
       verifiedGraph?: string;
@@ -145,6 +153,7 @@ export class DkgDaemonClient {
       includeSharedMemory: opts?.includeSharedMemory,
       view: opts?.view,
       agentAddress: opts?.agentAddress,
+      agentAuthSignature: opts?.agentAuthSignature,
       assertionName: opts?.assertionName,
       subGraphName: opts?.subGraphName,
       verifiedGraph: opts?.verifiedGraph,

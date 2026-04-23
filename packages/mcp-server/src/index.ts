@@ -498,8 +498,20 @@ server.registerTool(
         typeof resolved.baseOrPort === 'number'
           ? `http://127.0.0.1:${resolved.baseOrPort}`
           : resolved.baseOrPort;
-      const status = await probeStatus(probeUrl, cred);
-      const authProbe = await probeAuth(probeUrl, cred);
+      // PR #229 bot review round 22 (r22-3, mcp-server/index.ts:497):
+      // when the resolver explicitly reports `daemonDown`, the
+      // `baseOrPort` is a SYNTHETIC 127.0.0.1:7777 placeholder and
+      // anything listening on that port belongs to a different
+      // service. Probing it would make `mcp_auth status` lie
+      // ("liveness = OK" on a dead daemon). Skip both probes in that
+      // case and surface the real state — the synthetic displayUrl
+      // already says "(daemon not running)".
+      const status = resolved.daemonDown
+        ? { ok: false, code: 0, body: '' }
+        : await probeStatus(probeUrl, cred);
+      const authProbe = resolved.daemonDown
+        ? { ok: false, code: 0, body: '', authDisabled: false }
+        : await probeAuth(probeUrl, cred);
       // PR #229 bot review round 7 (auth-probe.ts:69): when no
       // credential is configured AND the daemon accepts the
       // unauthenticated `/api/agents` probe, surface that as a

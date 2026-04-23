@@ -6618,6 +6618,18 @@ async function handleRequest(
       parsed.includeSharedMemory ?? parsed.includeWorkspace;
     const view = parsed.view;
     const agentAddress = parsed.agentAddress;
+    // PR #229 bot review round 22 (r22-1, dkg-agent.ts:3226): the
+    // RFC-29 multi-agent WM isolation gate is fail-closed by default.
+    // For cross-agent `view: 'working-memory'` reads on nodes with
+    // more than one local agent, the caller MUST supply
+    // `agentAuthSignature` (a signature over a canonical challenge
+    // proving ownership of the agent's private key). Before this the
+    // daemon's `/api/query` endpoint only forwarded `agentAddress`,
+    // so any multi-agent caller got `[]` back from a strict-default
+    // node — effectively downgrading every /api/query hit to
+    // "denied". Plumb the signature through so clients that DO sign
+    // (mcp_auth / OpenClaw adapters after r22-1) can pass the gate.
+    const agentAuthSignature = parsed.agentAuthSignature;
     const verifiedGraph = parsed.verifiedGraph;
     const assertionName = parsed.assertionName;
     const subGraphName = parsed.subGraphName;
@@ -6644,6 +6656,7 @@ async function handleRequest(
         includeSharedMemory,
         view,
         agentAddress,
+        agentAuthSignature,
         verifiedGraph,
         assertionName,
         subGraphName,

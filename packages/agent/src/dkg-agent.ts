@@ -138,6 +138,46 @@ class SyncAccessDeniedError extends Error {
     this.contextGraphId = contextGraphId;
   }
 }
+
+/**
+ * Thrown by `signedGossipPublish` when we cannot produce a signed
+ * `GossipEnvelope` — either the default publisher wallet is absent (and
+ * the operator has not opted into the legacy `DKG_GOSSIP_ALLOW_UNSIGNED_EGRESS=1`
+ * escape hatch) or envelope construction fails outright.
+ *
+ * PR #229 bot review (r22-6, dkg-agent.ts:7411): every call site of
+ * `signedGossipPublish()` was previously wrapped with a blanket
+ * `catch { log.warn('No peers subscribed to …') }`. On observer /
+ * self-sovereign nodes that silently turned a real correctness
+ * failure — "this node cannot sign; strict peers (r14-1 default) will
+ * DROP the gossip" — into a fake "no peers subscribed" warning, so
+ * publishes looked successful while never reaching the mesh.
+ *
+ * Exporting a dedicated error type lets every call site distinguish
+ * "we could not sign" from "libp2p had no subscribers" and react
+ * appropriately (log loud, propagate, or re-raise) instead of
+ * swallowing silently.
+ */
+export class SignedGossipSigningError extends Error {
+  constructor(message: string, options?: { cause?: Error }) {
+    super(message, options);
+    this.name = 'SignedGossipSigningError';
+  }
+}
+
+/**
+ * Classify an error thrown from `signedGossipPublish`. Used by the
+ * call-site catches that intentionally degrade gracefully on "no
+ * subscribers yet" (a routine libp2p condition during startup /
+ * partitioned networks) but MUST surface signing/envelope failures
+ * (a correctness bug that would otherwise be hidden).
+ */
+function isSignedGossipSigningError(err: unknown): err is SignedGossipSigningError {
+  return (
+    err instanceof SignedGossipSigningError
+    || (typeof err === 'object' && err !== null && (err as { name?: string }).name === 'SignedGossipSigningError')
+  );
+}
 const META_REFRESH_COOLDOWN_MS = 30_000;
 const SYNC_MIN_GRAPH_BUDGET_MS = 10_000;
 const DEBUG_SYNC_PROGRESS = process.env.DKG_DEBUG_SYNC_PROGRESS === '1';
@@ -2368,7 +2408,7 @@ export class DKGAgent {
         await this.gossip.publish(topic, payload);
         return;
       }
-      throw new Error(
+      throw new SignedGossipSigningError(
         `[signedGossipPublish] No signing wallet available for topic=${topic} ` +
           `type=${type} cg=${contextGraphId}. Cannot publish signed gossip ` +
           `envelope. Provision a publisher wallet (the standard path on ` +
@@ -2380,12 +2420,27 @@ export class DKGAgent {
           `stop without any visible error.`,
       );
     }
-    const wire = buildSignedGossipEnvelope({
-      type,
-      contextGraphId,
-      payload,
-      signerWallet: wallet,
-    });
+    let wire: Uint8Array;
+    try {
+      wire = buildSignedGossipEnvelope({
+        type,
+        contextGraphId,
+        payload,
+        signerWallet: wallet,
+      });
+    } catch (err) {
+      // Bot review (PR #229 r22-6): envelope-building failures (e.g.
+      // wallet that can't sign, malformed payload encoding) are
+      // correctness bugs, NOT "no peers subscribed" situations. Tag
+      // them so call-site catches can distinguish and surface them
+      // loudly instead of masking them as transport blips.
+      throw new SignedGossipSigningError(
+        `[signedGossipPublish] Failed to build signed envelope for ` +
+          `topic=${topic} type=${type} cg=${contextGraphId}: ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+        { cause: err instanceof Error ? err : undefined },
+      );
+    }
     await this.gossip.publish(topic, wire);
   }
 
@@ -2866,6 +2921,13 @@ export class DKGAgent {
         await this.signedGossipPublish(topic, 'KA_UPDATE', contextGraphId, message);
         this.log.info(ctx, `Broadcast KA update for batchId=${kcId} on ${topic}`);
       } catch (err) {
+        // r22-6: re-raise signing failures — "Failed to broadcast"
+        // was previously logged as a WARN for BOTH transport blips
+        // and unsignable envelopes, so wallet-less observer nodes
+        // could not tell the two apart.
+        if (isSignedGossipSigningError(err)) {
+          throw err;
+        }
         this.log.warn(ctx, `Failed to broadcast KA update: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
@@ -2892,7 +2954,15 @@ export class DKGAgent {
       const topic = paranetWorkspaceTopic(contextGraphId);
       try {
         await this.signedGossipPublish(topic, 'SHARE', contextGraphId, message);
-      } catch {
+      } catch (err) {
+        // Bot review (PR #229 r22-6): only swallow the benign
+        // "no subscribers" case. Signing/envelope failures are real
+        // correctness bugs that must propagate (otherwise observer /
+        // wallet-less nodes falsely report "SHARE delivered" while
+        // every strict peer silently dropped the gossip).
+        if (isSignedGossipSigningError(err)) {
+          throw err;
+        }
         this.log.warn(ctx, `No peers subscribed to ${topic} yet`);
       }
     }
@@ -2923,7 +2993,11 @@ export class DKGAgent {
       const topic = paranetWorkspaceTopic(contextGraphId);
       try {
         await this.signedGossipPublish(topic, 'SHARE_CAS', contextGraphId, message);
-      } catch {
+      } catch (err) {
+        // r22-6: see SHARE catch above for rationale.
+        if (isSignedGossipSigningError(err)) {
+          throw err;
+        }
         this.log.warn(ctx, `No peers subscribed to ${topic} yet`);
       }
     }
@@ -3017,7 +3091,11 @@ export class DKGAgent {
         // (PR #229 bot review round 6 — signed-gossip envelope bypass).
         await this.signedGossipPublish(topic, 'FINALIZATION', contextGraphId, encodeFinalizationMessage(msg));
         this.log.info(ctx, `Broadcast finalization for ${result.ual} to ${topic}${ctxGraphIdStr ? ` (contextGraph=${ctxGraphIdStr})` : ''}${result.contextGraphError ? ' (ctx-graph registration failed, omitting contextGraphId)' : ''}`);
-      } catch {
+      } catch (err) {
+        // r22-6: signing failures must not be disguised as "no peers".
+        if (isSignedGossipSigningError(err)) {
+          throw err;
+        }
         this.log.warn(ctx, `No peers subscribed to ${topic} yet`);
       }
     }
@@ -3927,7 +4005,12 @@ export class DKGAgent {
 
         try {
           await this.signedGossipPublish(ontologyTopic, 'PUBLISH_REQUEST', SYSTEM_PARANETS.ONTOLOGY, msg);
-        } catch {
+        } catch (err) {
+          // r22-6: surface signing failures; only the "no subscribers"
+          // case is expected during local-only / pre-bootstrap flows.
+          if (isSignedGossipSigningError(err)) {
+            throw err;
+          }
           // No peers subscribed — ok for now
         }
       }
@@ -4123,6 +4206,12 @@ export class DKGAgent {
       });
       await this.signedGossipPublish(ontologyTopic, 'PUBLISH_REQUEST', SYSTEM_PARANETS.ONTOLOGY, regMsg);
     } catch (err) {
+      // r22-6: signing failures must surface; log.debug would hide
+      // a correctness bug behind a message that implies the network
+      // is merely quiet.
+      if (isSignedGossipSigningError(err)) {
+        throw err;
+      }
       this.log.debug(ctx, `Registration gossip broadcast failed (peers may not be subscribed yet): ${err instanceof Error ? err.message : String(err)}`);
     }
 
@@ -6870,7 +6959,12 @@ export class DKGAgent {
 
     try {
       await this.signedGossipPublish(ontologyTopic, 'PUBLISH_REQUEST', SYSTEM_PARANETS.ONTOLOGY, msg);
-    } catch {
+    } catch (err) {
+      // r22-6: propagate signing/envelope failures so the caller
+      // sees a real error instead of "peers not ready yet".
+      if (isSignedGossipSigningError(err)) {
+        throw err;
+      }
       // No peers subscribed — ok for local-only operation
     }
   }
@@ -7409,7 +7503,17 @@ export class DKGAgent {
     this.log.info(ctx, `Broadcasting to topic ${topic}`);
     try {
       await this.signedGossipPublish(topic, 'PUBLISH_REQUEST', contextGraphId, msg);
-    } catch {
+    } catch (err) {
+      // Bot review (PR #229 r22-6, dkg-agent.ts:7411): observer /
+      // wallet-less nodes previously saw `signedGossipPublish`
+      // throwing a SignedGossipSigningError and the blanket
+      // `catch { log.warn("no subscribers") }` reported a successful
+      // publish — while strict peers dropped the raw gossip. Re-raise
+      // the signing error so the caller's operation fails loudly; only
+      // the genuine "no subscribers" case remains benign.
+      if (isSignedGossipSigningError(err)) {
+        throw err;
+      }
       this.log.warn(ctx, `No peers subscribed to ${topic} yet`);
     }
   }
@@ -7465,6 +7569,13 @@ export class DKGAgent {
             // (PR #229 bot review round 6 — signed-gossip envelope bypass).
             await agent.signedGossipPublish(topic, 'ASSERTION_PROMOTE', contextGraphId, gossipMessage);
           } catch (err: any) {
+            // r22-6: local SWM mutation already succeeded, but a signing
+            // failure means the promote WILL NOT be propagated to any
+            // strict peer. Propagate so callers can decide whether to
+            // retry / roll back / alert the operator.
+            if (isSignedGossipSigningError(err)) {
+              throw err;
+            }
             agent.log.warn(createOperationContext('share'), `Promote gossip failed (local SWM committed): ${err?.message ?? err}`);
           }
         }

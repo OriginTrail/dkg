@@ -119,13 +119,21 @@ const DKG_CONFIG_FENCE_RE =
  * configuration found".
  */
 export function parseAgentsMdFrontmatter(src: string): WorkspaceConfig {
+  // Bot review (PR #229 r22-5, workspace-config.ts:125): the previous
+  // revision threw as soon as YAML frontmatter existed without a top-
+  // level `dkg:` key, which meant any AGENTS.md that already uses
+  // frontmatter for OTHER tooling (tags, owner, prompt metadata —
+  // extremely common in the AI-agent ecosystem we're integrating with)
+  // could never use the documented ```dkg-config``` fence fallback.
+  // The contract from the JSDoc above is "frontmatter OR fence";
+  // honour it by treating frontmatter-without-`dkg` as "keep looking"
+  // and only erroring after BOTH carriers have been checked.
   const fm = FRONTMATTER_RE.exec(src);
   if (fm) {
     const parsed = yaml.load(fm[1]) as Record<string, unknown> | null;
-    if (!parsed || typeof parsed !== 'object' || !('dkg' in parsed)) {
-      throw new Error('AGENTS.md frontmatter: missing `dkg` key');
+    if (parsed && typeof parsed === 'object' && 'dkg' in parsed) {
+      return parseWorkspaceConfig(parsed.dkg);
     }
-    return parseWorkspaceConfig(parsed.dkg);
   }
   const fence = DKG_CONFIG_FENCE_RE.exec(src);
   if (fence) {
@@ -145,6 +153,19 @@ export function parseAgentsMdFrontmatter(src: string): WorkspaceConfig {
       );
     }
     return parseWorkspaceConfig(parsed);
+  }
+  if (fm) {
+    // Frontmatter was present but did not carry `dkg:`, and no fenced
+    // fallback exists either. Surface a diagnostic that tells the
+    // adopter exactly which carriers we tried so they don't have to
+    // guess whether the fence info-string or the frontmatter key is
+    // the mistyped one.
+    throw new Error(
+      'AGENTS.md: frontmatter is present but has no top-level `dkg:` '
+        + 'key, and no fenced code block tagged ```dkg-config``` was '
+        + 'found either — add one of those two carriers to expose the '
+        + 'workspace config.',
+    );
   }
   throw new Error(
     'AGENTS.md: no workspace config found — expected either YAML '

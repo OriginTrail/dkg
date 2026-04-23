@@ -8,7 +8,8 @@
  * here we verify the boundary contract).
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { DKGAgent } from '../src/dkg-agent.js';
+import { ethers } from 'ethers';
+import { DKGAgent, SignedGossipSigningError } from '../src/dkg-agent.js';
 
 function makeFakeAgent(overrides: {
   wallet?: unknown;
@@ -88,5 +89,62 @@ describe('DKGAgent#signedGossipPublish — r16-1 egress invariant', () => {
         agent.signedGossipPublish('t', 'PUBLISH_REQUEST', 'cg-5', new Uint8Array([0])),
       ).rejects.toThrow(/No signing wallet/i);
     }
+  });
+
+  // ---------------------------------------------------------------------
+  // PR #229 round 22 — r22-6: the wallet-unavailable error MUST be a
+  // *typed* `SignedGossipSigningError` so upstream `catch { log.warn(
+  // 'no peers subscribed') }` blocks can discriminate "I cannot sign"
+  // (a real correctness failure on strict-default meshes) from "libp2p
+  // has no subscribers yet" (a benign warm-up state). Before this, BOTH
+  // cases surfaced as a plain `Error` and got collapsed into the
+  // misleading "no peers subscribed" path.
+  // ---------------------------------------------------------------------
+  it('r22-6: wallet-unavailable throws a typed SignedGossipSigningError (name + instanceof)', async () => {
+    const { agent } = makeFakeAgent({ wallet: undefined });
+    try {
+      await agent.signedGossipPublish('topic-sg', 'PUBLISH_REQUEST', 'cg-sg', new Uint8Array([1]));
+      expect.fail('signedGossipPublish must reject when no wallet is available');
+    } catch (err) {
+      expect(err).toBeInstanceOf(SignedGossipSigningError);
+      expect((err as Error).name).toBe('SignedGossipSigningError');
+    }
+  });
+
+  it('r22-6: transport (gossip.publish) errors pass through as the underlying Error, NOT SignedGossipSigningError', async () => {
+    // A functional wallet is present; the envelope builds fine; only
+    // the outbound libp2p publish fails. That error must remain the
+    // native `Error` instance so the call-site catch can handle it as
+    // the benign "no peers subscribed" path.
+    const wallet = ethers.Wallet.createRandom();
+    const transportErr = new Error('PublishError: no peers subscribed to topic');
+    const { agent } = makeFakeAgent({
+      wallet,
+      gossipPublish: async () => { throw transportErr; },
+    });
+    await expect(
+      agent.signedGossipPublish('topic-t', 'SHARE', 'cg-t', new Uint8Array([2])),
+    ).rejects.toBe(transportErr);
+  });
+
+  it('r22-6: envelope-build failures are wrapped in SignedGossipSigningError (preserves `cause`)', async () => {
+    // Simulate a wallet missing the signing API expected by
+    // `buildSignedGossipEnvelope` — the adapter must wrap the thrown
+    // TypeError in a SignedGossipSigningError so downstream catches
+    // see the correctness-bug tag, not a bare Error that they swallow
+    // as "no peers subscribed".
+    const brokenWallet = {
+      address: '0x' + '22'.repeat(20),
+      // No signMessageSync / signingKey — envelope builder will throw.
+    };
+    const { agent, publishes } = makeFakeAgent({ wallet: brokenWallet });
+    try {
+      await agent.signedGossipPublish('topic-b', 'FINALIZATION', 'cg-b', new Uint8Array([3]));
+      expect.fail('must reject when envelope-build fails');
+    } catch (err) {
+      expect(err).toBeInstanceOf(SignedGossipSigningError);
+      expect((err as Error).message).toMatch(/Failed to build signed envelope/i);
+    }
+    expect(publishes).toHaveLength(0);
   });
 });
