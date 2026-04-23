@@ -17,7 +17,6 @@ Memory writes are not exposed as an adapter tool. The agent persists memory thro
 
 - it is not the source of truth for `SKILL.md`
 - it does not copy workspace skill files during setup
-- it does not enable OriginTrail Game behavior in the default OpenClaw path
 - it does not try to be the product-level owner of the DKG install and UI experience
 
 ## Quick Start
