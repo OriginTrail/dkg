@@ -243,6 +243,20 @@ SWM is for knowledge you've promoted from WM and want peers to see. Data arrives
 
 ### Querying
 
+**Agent-initiated free-text recall: `memory_search` tool.**
+
+The `memory_search` tool is the recommended entry point for free-text memory recall. It fans out across all trust tiers (WM drafts, SWM consolidated, VM on-chain) in both the `agent-context` graph AND the currently-selected project context graph, then returns trust-weighted ranked snippets.
+
+- Input: `{ query: string, limit?: number }` — a natural-language query; limit is a hint (default 10, capped at 100).
+- Output: `{ query, count, scope, hits: [{ snippet, layer, source, score, path }] }`. `layer` is one of `agent-context-wm | agent-context-swm | agent-context-vm | project-wm | project-swm | project-vm`. Higher-trust layers outrank lower-trust ones on the same content (VM ×1.3, SWM ×1.15, WM ×1.0).
+
+**When to prefer `memory_search` vs `dkg_query`:**
+
+- **`memory_search`** — free-text recall across all memory layers. Use when you want "what does my memory have on topic X". No SPARQL required.
+- **`dkg_query`** — precise SPARQL control over a known graph pattern, specific predicates, or named graphs. Use when `memory_search` gives you too much or you want to ask a structured question (e.g. "give me every `schema:name` under this project's WM").
+
+**Raw HTTP surface:**
+
 - `POST /api/query` — SPARQL query. Body parameters:
   - `sparql` (required) — the query string
   - `contextGraphId` — scope query to one CG (recommended)
@@ -268,6 +282,13 @@ Respect these when producing writes — they're enforced at the node and produce
 ### Automatic recall
 
 **Making memories recallable.** Any literal content of 20+ characters written under a project or `agent-context` context graph is automatically searchable by slot-backed recall on future turns — no specific assertion name or predicate is required. Write RDF shapes that fit your domain (use `schema:description`, `rdfs:comment`, a custom ontology predicate, anything semantically appropriate). Slot-backed recall performs a permissive keyword-substring match across all literals in the working-memory, shared-working-memory, and verified-memory views of both the `agent-context` graph and the user's selected project context graph on every turn.
+
+**Per-turn `<recalled-memory>` block.** On every turn, the adapter's `before_prompt_build` hook runs a narrow recall (agent-context WM + project WM if selected, top 3-5 hits, 250ms budget) using your latest user message as the query, and injects the results as a `<recalled-memory>` block into the system context. You do NOT need to call `memory_search` to see these — they're already in the prompt before you start reasoning. Call `memory_search` only when:
+
+1. The narrow auto-recall didn't surface what you needed (broader fan-out across SWM/VM layers), OR
+2. You want to search for something unrelated to the user's current message.
+
+The `<recalled-memory>` block is stripped from outgoing assistant text before turns are persisted, so recalled context does not boomerang into future-turn queries.
 
 ## 6. Context Graphs
 
