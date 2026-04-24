@@ -403,7 +403,7 @@ export class MockChainAdapter implements ChainAdapter {
     }
   }
 
-  // --- Context Graphs (V9 Registry) ---
+  // --- Context Graphs (name-hash commitment via ContextGraphNameRegistry) ---
 
   async createContextGraph(params: CreateContextGraphParams): Promise<TxResult> {
     const name = params.name ?? 'mock-context-graph';
@@ -416,7 +416,7 @@ export class MockChainAdapter implements ChainAdapter {
       throw new Error(`Context graph "${id}" already exists on chain`);
     }
     this.contextGraphRegistry.set(id, meta);
-    this.pushEvent('ParanetCreated', { paranetId: id, creator: 'mock-creator', accessPolicy: params.accessPolicy ?? 0 });
+    this.pushEvent('NameClaimed', { contextGraphId: id, creator: 'mock-creator', accessPolicy: params.accessPolicy ?? 0 });
     const result = this.txResult(true);
     return { ...result, contextGraphId: id };
   }
@@ -430,7 +430,7 @@ export class MockChainAdapter implements ChainAdapter {
     const meta = this.contextGraphRegistry.get(contextGraphId);
     if (!meta) throw new Error(`Context graph "${contextGraphId}" not found`);
     this.contextGraphRegistry.set(contextGraphId, { ...meta, name, description, revealed: 'true' });
-    this.pushEvent('ParanetMetadataRevealed', { paranetId: contextGraphId, name, description });
+    this.pushEvent('NameMetadataRevealed', { contextGraphId, name, description });
     return this.txResult(true);
   }
 

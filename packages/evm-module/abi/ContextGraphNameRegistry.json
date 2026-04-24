@@ -17,6 +17,16 @@
   },
   {
     "inputs": [],
+    "name": "NameAlreadyClaimed",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "NameClaimNotFound",
+    "type": "error"
+  },
+  {
+    "inputs": [],
     "name": "NameHashMismatch",
     "type": "error"
   },
@@ -31,14 +41,17 @@
     "type": "error"
   },
   {
-    "inputs": [],
-    "name": "ParanetAlreadyExists",
-    "type": "error"
-  },
-  {
-    "inputs": [],
-    "name": "ParanetNotFound",
-    "type": "error"
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "bytes32",
+        "name": "nameHash",
+        "type": "bytes32"
+      }
+    ],
+    "name": "NameClaimDeactivated",
+    "type": "event"
   },
   {
     "anonymous": false,
@@ -46,7 +59,7 @@
       {
         "indexed": true,
         "internalType": "bytes32",
-        "name": "paranetId",
+        "name": "nameHash",
         "type": "bytes32"
       },
       {
@@ -62,7 +75,7 @@
         "type": "uint8"
       }
     ],
-    "name": "ParanetCreated",
+    "name": "NameClaimed",
     "type": "event"
   },
   {
@@ -71,20 +84,7 @@
       {
         "indexed": true,
         "internalType": "bytes32",
-        "name": "paranetId",
-        "type": "bytes32"
-      }
-    ],
-    "name": "ParanetDeactivated",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": true,
-        "internalType": "bytes32",
-        "name": "paranetId",
+        "name": "nameHash",
         "type": "bytes32"
       },
       {
@@ -100,7 +100,7 @@
         "type": "string"
       }
     ],
-    "name": "ParanetMetadataRevealed",
+    "name": "NameMetadataRevealed",
     "type": "event"
   },
   {
@@ -146,7 +146,7 @@
     "inputs": [
       {
         "internalType": "bytes32",
-        "name": "paranetId_",
+        "name": "nameHash_",
         "type": "bytes32"
       },
       {
@@ -155,7 +155,7 @@
         "type": "uint8"
       }
     ],
-    "name": "createParanetV9",
+    "name": "claimName",
     "outputs": [
       {
         "internalType": "bytes32",
@@ -170,7 +170,7 @@
     "inputs": [
       {
         "internalType": "bytes32",
-        "name": "paranetId_",
+        "name": "nameHash_",
         "type": "bytes32"
       },
       {
@@ -179,7 +179,7 @@
         "type": "uint8"
       }
     ],
-    "name": "createSystemParanetV9",
+    "name": "claimSystemName",
     "outputs": [
       {
         "internalType": "bytes32",
@@ -194,11 +194,11 @@
     "inputs": [
       {
         "internalType": "bytes32",
-        "name": "paranetId_",
+        "name": "nameHash_",
         "type": "bytes32"
       }
     ],
-    "name": "deactivateParanet",
+    "name": "deactivateNameClaim",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
@@ -207,11 +207,11 @@
     "inputs": [
       {
         "internalType": "bytes32",
-        "name": "paranetId_",
+        "name": "nameHash_",
         "type": "bytes32"
       }
     ],
-    "name": "getParanet",
+    "name": "getNameClaim",
     "outputs": [
       {
         "internalType": "address",
@@ -260,7 +260,7 @@
         "type": "bytes32"
       }
     ],
-    "name": "paranets",
+    "name": "nameClaims",
     "outputs": [
       {
         "internalType": "address",
@@ -305,7 +305,7 @@
     "inputs": [
       {
         "internalType": "bytes32",
-        "name": "paranetId_",
+        "name": "nameHash_",
         "type": "bytes32"
       },
       {
@@ -328,7 +328,7 @@
     "inputs": [
       {
         "internalType": "bytes32",
-        "name": "paranetId_",
+        "name": "nameHash_",
         "type": "bytes32"
       },
       {
@@ -337,7 +337,7 @@
         "type": "string"
       }
     ],
-    "name": "updateParanetMetadata",
+    "name": "updateNameMetadata",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"

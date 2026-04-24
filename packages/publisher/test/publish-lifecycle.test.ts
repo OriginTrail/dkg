@@ -673,7 +673,7 @@ describe('Tentative data and chain event confirmation', () => {
     expect(handler.hasPendingPublishes).toBe(false);
   }, 10000);
 
-  it('ChainEventPoller invokes onContextGraphCreated for ParanetCreated events', async () => {
+  it('ChainEventPoller invokes onContextGraphCreated for NameClaimed events', async () => {
     const store = new OxigraphStore();
     const bus = new TypedEventBus();
     const handler = new PublishHandler(store, bus);

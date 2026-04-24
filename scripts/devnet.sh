@@ -607,20 +607,19 @@ cmd_start() {
       const provider = new ethers.JsonRpcProvider('http://127.0.0.1:$HARDHAT_PORT');
       const deployer = await provider.getSigner(0);
       const contracts = JSON.parse(fs.readFileSync('$contracts_json', 'utf8'));
-      const registryAddr = contracts.contracts.ParanetV9Registry?.evmAddress;
-      if (!registryAddr) { console.log('ParanetV9Registry not deployed, skipping'); return; }
-      const abi = JSON.parse(fs.readFileSync('$REPO_ROOT/packages/evm-module/abi/ParanetV9Registry.json', 'utf8'));
+      const registryAddr = contracts.contracts.ContextGraphNameRegistry?.evmAddress;
+      if (!registryAddr) { console.log('ContextGraphNameRegistry not deployed, skipping'); return; }
+      const abi = JSON.parse(fs.readFileSync('$REPO_ROOT/packages/evm-module/abi/ContextGraphNameRegistry.json', 'utf8'));
       const registry = new ethers.Contract(registryAddr, abi, deployer);
       const contextGraphs = ['devnet-test', 'origin-trail-game'];
       for (const name of contextGraphs) {
-        const onChainId = ethers.keccak256(ethers.toUtf8Bytes(name));
+        const nameHash = ethers.keccak256(ethers.toUtf8Bytes(name));
         try {
-          const tx = await registry.createParanetV9(onChainId, 0);
+          const tx = await registry.claimName(nameHash, 0);
           await tx.wait();
-          console.log('Registered context graph: ' + name + ' (' + onChainId.slice(0, 16) + '...)');
+          console.log('Registered context graph: ' + name + ' (' + nameHash.slice(0, 16) + '...)');
         } catch (e) {
-          const data = e.data || e.message?.match(/data=\"(0x[0-9a-f]+)\"/)?.[1];
-          if (data === '0x8f53dc71' || e.message?.includes('ParanetAlreadyExists')) {
+          if (e.message?.includes('NameAlreadyClaimed')) {
             console.log('Context graph already exists: ' + name);
           } else {
             console.log('Failed to register ' + name + ': ' + e.message);

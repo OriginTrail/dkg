@@ -44,7 +44,7 @@ function loadAbi(contractName: string): ethers.InterfaceAbi {
 const ERROR_ABI_CONTRACTS = [
   'KnowledgeAssets', 'KnowledgeAssetsV10', 'KnowledgeAssetsStorage', 'KnowledgeCollection',
   'KnowledgeCollectionStorage', 'ContextGraphs', 'ContextGraphStorage',
-  'ParanetV9Registry', 'Profile', 'Identity', 'IdentityStorage',
+  'ContextGraphNameRegistry', 'Profile', 'Identity', 'IdentityStorage',
   'Staking', 'StakingStorage', 'Hub', 'Token', 'Ask', 'AskStorage',
   'Paymaster', 'ShardingTable', 'ParametersStorage',
   'PublishingConvictionAccount',
@@ -120,7 +120,7 @@ interface ContractCache {
   knowledgeCollection?: Contract;
   knowledgeCollectionStorage?: Contract;
   staking?: Contract;
-  paranetV9Registry?: Contract;
+  contextGraphNameRegistry?: Contract;
   token?: Contract;
   parametersStorage?: Contract;
   askStorage?: Contract;
@@ -245,9 +245,9 @@ export class EVMChainAdapter implements ChainAdapter {
     }
 
     try {
-      this.contracts.paranetV9Registry = await this.resolveContract('ParanetV9Registry');
+      this.contracts.contextGraphNameRegistry = await this.resolveContract('ContextGraphNameRegistry');
     } catch {
-      // ParanetV9Registry not registered in Hub — createContextGraph/listContextGraphsFromChain unavailable
+      // ContextGraphNameRegistry not registered in Hub — createContextGraph/listContextGraphsFromChain unavailable
     }
 
     try {
@@ -879,19 +879,19 @@ export class EVMChainAdapter implements ChainAdapter {
         }
       }
 
-      if (eventType === 'ParanetCreated') {
-        const v9Registry = this.contracts.paranetV9Registry;
-        if (v9Registry) {
-          const eventFilter = v9Registry.filters.ParanetCreated();
-          const logs = await v9Registry.queryFilter(eventFilter, filter.fromBlock ?? 0, filter.toBlock);
+      if (eventType === 'NameClaimed' || eventType === 'ContextGraphNameClaimed') {
+        const registry = this.contracts.contextGraphNameRegistry;
+        if (registry) {
+          const eventFilter = registry.filters.NameClaimed();
+          const logs = await registry.queryFilter(eventFilter, filter.fromBlock ?? 0, filter.toBlock);
           for (const log of logs) {
-            const parsed = v9Registry.interface.parseLog({ topics: [...log.topics], data: log.data });
+            const parsed = registry.interface.parseLog({ topics: [...log.topics], data: log.data });
             if (parsed) {
               yield {
-                type: 'ParanetCreated',
+                type: 'NameClaimed',
                 blockNumber: log.blockNumber,
                 data: {
-                  paranetId: parsed.args.paranetId?.toString() ?? '',
+                  contextGraphId: parsed.args.nameHash?.toString() ?? '',
                   creator: parsed.args.creator?.toString() ?? '',
                   accessPolicy: Number(parsed.args.accessPolicy ?? 0),
                   txHash: log.transactionHash,
@@ -926,30 +926,35 @@ export class EVMChainAdapter implements ChainAdapter {
   }
 
   // =====================================================================
-  // Context Graphs (V9: ParanetV9Registry when deployed)
+  // Context Graphs (name-hash commitment via ContextGraphNameRegistry)
+  //
+  // Thin transitional affordance — reserves a bytes32 name-hash with an
+  // optional cleartext metadata reveal. Governance for the context graph
+  // itself (hosting nodes, publish policy, participants, quorum) lives in
+  // `ContextGraphs` / `ContextGraphStorage` — see createOnChainContextGraph.
   // =====================================================================
 
   async createContextGraph(params: CreateContextGraphParams): Promise<TxResult> {
     await this.init();
-    const registry = this.contracts.paranetV9Registry;
+    const registry = this.contracts.contextGraphNameRegistry;
     const name = params.name ?? params.metadata?.['name'];
     if (!registry || !name) {
       throw new Error(
-        'createContextGraph: V9 requires ParanetV9Registry in Hub and params.name (or metadata.name). ' +
-          'Deploy ParanetV9Registry and register it in the Hub, or provide name.',
+        'createContextGraph: requires ContextGraphNameRegistry in Hub and params.name (or metadata.name). ' +
+          'Deploy ContextGraphNameRegistry and register it in the Hub, or provide name.',
       );
     }
     const accessPolicy = params.accessPolicy ?? 0;
-    const onChainId = ethers.keccak256(ethers.toUtf8Bytes(name));
-    const tx = await registry.createParanetV9(onChainId, accessPolicy);
+    const nameHash = ethers.keccak256(ethers.toUtf8Bytes(name));
+    const tx = await registry.claimName(nameHash, accessPolicy);
     const receipt = await tx.wait();
     if (!receipt) throw new Error('createContextGraph: no receipt');
     let contextGraphIdHex: string | undefined;
     for (const log of receipt.logs) {
       try {
         const parsed = registry.interface.parseLog({ topics: [...log.topics], data: log.data });
-        if (parsed?.name === 'ParanetCreated') {
-          contextGraphIdHex = String(parsed.args.paranetId);
+        if (parsed?.name === 'NameClaimed') {
+          contextGraphIdHex = String(parsed.args.nameHash);
           break;
         }
       } catch { /* not this contract */ }
@@ -958,14 +963,14 @@ export class EVMChainAdapter implements ChainAdapter {
     // Optionally reveal cleartext metadata on-chain
     if (params.revealOnChain) {
       const description = params.description ?? params.metadata?.['description'] ?? '';
-      await this.revealContextGraphMetadata(onChainId, name, description);
+      await this.revealContextGraphMetadata(nameHash, name, description);
     }
 
     return {
       hash: receipt.hash,
       blockNumber: receipt.blockNumber,
       success: true,
-      contextGraphId: contextGraphIdHex ?? onChainId,
+      contextGraphId: contextGraphIdHex ?? nameHash,
     };
   }
 
@@ -975,8 +980,8 @@ export class EVMChainAdapter implements ChainAdapter {
 
   async revealContextGraphMetadata(contextGraphId: string, name: string, description: string): Promise<TxResult> {
     await this.init();
-    const registry = this.contracts.paranetV9Registry;
-    if (!registry) throw new Error('revealContextGraphMetadata: ParanetV9Registry not available');
+    const registry = this.contracts.contextGraphNameRegistry;
+    if (!registry) throw new Error('revealContextGraphMetadata: ContextGraphNameRegistry not available');
     const tx = await registry.revealMetadata(contextGraphId, name, description);
     const receipt = await tx.wait();
     if (!receipt) throw new Error('revealContextGraphMetadata: no receipt');
@@ -985,9 +990,9 @@ export class EVMChainAdapter implements ChainAdapter {
 
   async listContextGraphsFromChain(fromBlock?: number): Promise<ContextGraphOnChain[]> {
     await this.init();
-    const registry = this.contracts.paranetV9Registry;
+    const registry = this.contracts.contextGraphNameRegistry;
     if (!registry) return [];
-    const eventFilter = registry.filters.ParanetCreated();
+    const eventFilter = registry.filters.NameClaimed();
     const head = await this.provider.getBlockNumber();
     const PAGE = 9_000;
     const start = fromBlock ?? 0;
@@ -999,9 +1004,9 @@ export class EVMChainAdapter implements ChainAdapter {
       const logs = await registry.queryFilter(eventFilter, lo, hi);
       for (const log of logs) {
         const parsed = registry.interface.parseLog({ topics: [...log.topics], data: log.data });
-        if (!parsed || parsed.name !== 'ParanetCreated') continue;
+        if (!parsed || parsed.name !== 'NameClaimed') continue;
         results.push({
-          contextGraphId: String(parsed.args.paranetId),
+          contextGraphId: String(parsed.args.nameHash),
           creator: String(parsed.args.creator),
           accessPolicy: Number(parsed.args.accessPolicy),
           blockNumber: log.blockNumber,
