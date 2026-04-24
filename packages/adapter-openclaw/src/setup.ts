@@ -238,11 +238,45 @@ export function discoverAgentName(workspaceDir: string, override?: string): stri
     }
   }
 
+  // Before falling back to a fresh random name, honor an already-persisted
+  // `~/.dkg/config.json.name` from a prior setup run. `writeDkgConfig` uses
+  // the same first-wins semantics for this field (existing.name wins unless
+  // --name is passed); mirroring that here keeps re-runs on an
+  // IDENTITY.md-absent workspace stable across invocations, which in turn
+  // keeps the faucet `callerId` and `Idempotency-Key` stable so retries
+  // don't create duplicate faucet requests.
+  const persistedName = readPersistedAgentName();
+  if (persistedName) {
+    log(`Using persisted agent name "${persistedName}" from ${join(dkgDir(), 'config.json')}`);
+    return persistedName;
+  }
+
   // Fallback: generate a unique name
   const id = Math.random().toString(36).slice(2, 7);
   const name = `openclaw-agent-${id}`;
   warn(`Could not determine agent name from IDENTITY.md — using "${name}"`);
   return name;
+}
+
+/**
+ * Read `name` from `~/.dkg/config.json` if the file exists and contains a
+ * non-empty string. Missing file, unparseable JSON, or non-string `name`
+ * all return `undefined` — the caller falls through to its next discovery
+ * step (random fallback in `discoverAgentName`).
+ */
+function readPersistedAgentName(): string | undefined {
+  const configPath = join(dkgDir(), 'config.json');
+  if (!existsSync(configPath)) return undefined;
+  try {
+    const raw = JSON.parse(readFileSync(configPath, 'utf-8'));
+    if (typeof raw?.name === 'string' && raw.name.trim()) {
+      return raw.name.trim();
+    }
+  } catch {
+    // Intentionally swallow — `writeDkgConfig` handles its own corruption
+    // warning when the same file is unparseable; no reason to double-warn.
+  }
+  return undefined;
 }
 
 // ---------------------------------------------------------------------------

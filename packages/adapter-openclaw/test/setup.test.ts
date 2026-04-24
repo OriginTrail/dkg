@@ -84,6 +84,24 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('discoverAgentName', () => {
+  // Point DKG_HOME at a fresh tmp dir per test so the persisted-name
+  // branch (C8) sees no ~/.dkg/config.json unless the test explicitly
+  // seeds one. Otherwise, a dev-machine `~/.dkg/config.json.name`
+  // would leak into these tests and break the fallback assertions.
+  let originalDkg: string | undefined;
+  let dkgHome: string;
+
+  beforeEach(() => {
+    originalDkg = process.env.DKG_HOME;
+    dkgHome = join(testDir, '.dkg');
+    mkdirSync(dkgHome, { recursive: true });
+    process.env.DKG_HOME = dkgHome;
+  });
+
+  afterEach(() => {
+    process.env.DKG_HOME = originalDkg;
+  });
+
   it('returns override when provided', () => {
     expect(discoverAgentName('/nonexistent', 'my-agent')).toBe('my-agent');
   });
@@ -102,18 +120,83 @@ describe('discoverAgentName', () => {
     expect(discoverAgentName(ws)).toBe('Bob');
   });
 
-  it('falls back to generated name when IDENTITY.md has no Name field', () => {
+  it('falls back to generated name when IDENTITY.md has no Name field and no persisted config', () => {
     const ws = join(testDir, 'workspace');
     mkdirSync(ws, { recursive: true });
     writeFileSync(join(ws, 'IDENTITY.md'), '# Identity\nJust some text\n');
     expect(discoverAgentName(ws)).toMatch(/^openclaw-agent-[a-z0-9]+$/);
   });
 
-  it('falls back to generated name when IDENTITY.md is missing', () => {
+  it('falls back to generated name when IDENTITY.md is missing and no persisted config', () => {
     const ws = join(testDir, 'my-workspace');
     mkdirSync(ws, { recursive: true });
     const name = discoverAgentName(ws);
     expect(name).toMatch(/^openclaw-agent-[a-z0-9]+$/);
+  });
+
+  // C8: persisted name stability. On re-runs where IDENTITY.md is absent
+  // (or has no Name: field), the faucet Idempotency-Key must stay stable
+  // across invocations to avoid duplicate requests. Honoring
+  // `~/.dkg/config.json.name` (written by a prior setup run via
+  // writeDkgConfig's first-wins semantics) achieves this without
+  // introducing a new source of truth.
+  it('returns the persisted name from ~/.dkg/config.json when IDENTITY.md is missing', () => {
+    const ws = join(testDir, 'workspace');
+    mkdirSync(ws, { recursive: true });
+    writeFileSync(join(dkgHome, 'config.json'), JSON.stringify({ name: 'persisted-agent' }));
+    expect(discoverAgentName(ws)).toBe('persisted-agent');
+  });
+
+  it('returns the persisted name when IDENTITY.md has no Name: field', () => {
+    const ws = join(testDir, 'workspace');
+    mkdirSync(ws, { recursive: true });
+    writeFileSync(join(ws, 'IDENTITY.md'), '# Identity\nJust some text\n');
+    writeFileSync(join(dkgHome, 'config.json'), JSON.stringify({ name: 'persisted-agent' }));
+    expect(discoverAgentName(ws)).toBe('persisted-agent');
+  });
+
+  it('prefers IDENTITY.md over persisted name when both are present', () => {
+    const ws = join(testDir, 'workspace');
+    mkdirSync(ws, { recursive: true });
+    writeFileSync(join(ws, 'IDENTITY.md'), '# Identity\nName: Alice\n');
+    writeFileSync(join(dkgHome, 'config.json'), JSON.stringify({ name: 'persisted-agent' }));
+    expect(discoverAgentName(ws)).toBe('Alice');
+  });
+
+  it('prefers the override arg over both IDENTITY.md and persisted name', () => {
+    const ws = join(testDir, 'workspace');
+    mkdirSync(ws, { recursive: true });
+    writeFileSync(join(ws, 'IDENTITY.md'), '# Identity\nName: Alice\n');
+    writeFileSync(join(dkgHome, 'config.json'), JSON.stringify({ name: 'persisted-agent' }));
+    expect(discoverAgentName(ws, 'override-agent')).toBe('override-agent');
+  });
+
+  it('falls through to random when persisted config.json exists but lacks a name field', () => {
+    const ws = join(testDir, 'workspace');
+    mkdirSync(ws, { recursive: true });
+    writeFileSync(join(dkgHome, 'config.json'), JSON.stringify({ apiPort: 9200 }));
+    expect(discoverAgentName(ws)).toMatch(/^openclaw-agent-[a-z0-9]+$/);
+  });
+
+  it('falls through to random when persisted config.json is unparseable', () => {
+    const ws = join(testDir, 'workspace');
+    mkdirSync(ws, { recursive: true });
+    writeFileSync(join(dkgHome, 'config.json'), '{not-json');
+    expect(discoverAgentName(ws)).toMatch(/^openclaw-agent-[a-z0-9]+$/);
+  });
+
+  it('falls through to random when persisted config.json has a non-string name', () => {
+    const ws = join(testDir, 'workspace');
+    mkdirSync(ws, { recursive: true });
+    writeFileSync(join(dkgHome, 'config.json'), JSON.stringify({ name: 42 }));
+    expect(discoverAgentName(ws)).toMatch(/^openclaw-agent-[a-z0-9]+$/);
+  });
+
+  it('falls through to random when persisted config.json has an empty-string name', () => {
+    const ws = join(testDir, 'workspace');
+    mkdirSync(ws, { recursive: true });
+    writeFileSync(join(dkgHome, 'config.json'), JSON.stringify({ name: '   ' }));
+    expect(discoverAgentName(ws)).toMatch(/^openclaw-agent-[a-z0-9]+$/);
   });
 });
 
