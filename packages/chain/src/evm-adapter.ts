@@ -44,7 +44,7 @@ function loadAbi(contractName: string): ethers.InterfaceAbi {
 const ERROR_ABI_CONTRACTS = [
   'KnowledgeAssets', 'KnowledgeAssetsV10', 'KnowledgeAssetsStorage', 'KnowledgeCollection',
   'KnowledgeCollectionStorage', 'ContextGraphs', 'ContextGraphStorage',
-  'ParanetV9Registry', 'Paranet', 'Profile', 'Identity', 'IdentityStorage',
+  'ParanetV9Registry', 'Profile', 'Identity', 'IdentityStorage',
   'Staking', 'StakingStorage', 'Hub', 'Token', 'Ask', 'AskStorage',
   'Paymaster', 'ShardingTable', 'ParametersStorage',
   'PublishingConvictionAccount',
@@ -120,7 +120,6 @@ interface ContractCache {
   knowledgeCollection?: Contract;
   knowledgeCollectionStorage?: Contract;
   staking?: Contract;
-  paranet?: Contract;
   paranetV9Registry?: Contract;
   token?: Contract;
   parametersStorage?: Contract;
@@ -230,7 +229,6 @@ export class EVMChainAdapter implements ChainAdapter {
     this.contracts.identity = await this.resolveContract('Identity');
     this.contracts.profile = await this.resolveContract('Profile');
     this.contracts.staking = await this.resolveContract('Staking');
-    this.contracts.paranet = await this.resolveContract('Paranet');
     this.contracts.parametersStorage = await this.resolveContract('ParametersStorage');
 
     // V8 legacy contracts

@@ -6,7 +6,6 @@ import {ParanetsRegistry} from "./ParanetsRegistry.sol";
 import {HubDependent} from "../../abstract/HubDependent.sol";
 import {INamed} from "../../interfaces/INamed.sol";
 import {IVersioned} from "../../interfaces/IVersioned.sol";
-import {IParanetIncentivesPool} from "../../interfaces/IParanetIncentivesPool.sol";
 import {ParanetLib} from "../../libraries/ParanetLib.sol";
 
 contract ParanetKnowledgeMinersRegistry is INamed, IVersioned, HubDependent {
@@ -380,14 +379,13 @@ contract ParanetKnowledgeMinersRegistry is INamed, IVersioned, HubDependent {
         knowledgeMiners[miner].cumulativeAwardedToken[paranetId] -= subtractedcumulativeAwardedToken;
     }
 
+    // V10 note: the V9 `IParanetIncentivesPool` escape hatch was removed with
+    // the ParanetIncentivesPool* contracts. This modifier now behaves like a
+    // plain `onlyContracts` — the on-chain incentives-pool list on
+    // `ParanetsRegistry` is frozen at whatever state the V8→V10 migration
+    // left it in and cannot grow.
     function _checkSender(bytes32 paranetId) internal view virtual {
-        require(
-            hub.isContract(msg.sender) ||
-                paranetsRegistry.hasIncentivesPoolByStorageAddress(
-                    paranetId,
-                    IParanetIncentivesPool(msg.sender).getParanetIncentivesPoolStorage()
-                ),
-            "Hub/IncentivesPool function"
-        );
+        paranetId; // silence unused-parameter warning; preserved in modifier ABI
+        require(hub.isContract(msg.sender), "Hub contracts only");
     }
 }
