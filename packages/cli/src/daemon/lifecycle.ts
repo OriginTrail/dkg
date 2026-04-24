@@ -1411,6 +1411,31 @@ export async function runDaemonInner(
       )
         return;
 
+      // Retired installable apps framework (V9): respond with 410 Gone so upgraded
+      // nodes give a clear migration hint for both the JSON API and any bookmarked
+      // app URLs, instead of an opaque 404. The replacement surface is the
+      // `dkg integration` CLI (see packages/cli/src/integrations/).
+      if (
+        reqUrl.pathname === "/api/apps" ||
+        reqUrl.pathname.startsWith("/api/apps/") ||
+        reqUrl.pathname === "/apps" ||
+        reqUrl.pathname.startsWith("/apps/")
+      ) {
+        res.writeHead(410, {
+          "Content-Type": "application/json",
+          ...corsHeaders(reqCorsOrigin),
+        });
+        res.end(
+          JSON.stringify({
+            error: "Gone",
+            reason:
+              "The installable DKG apps framework was retired in V10. Use the `dkg integration` CLI instead.",
+            docs: "https://github.com/OriginTrail/dkg/tree/main/packages/cli#extending-the-node",
+          }),
+        );
+        return;
+      }
+
       // GET /api/events — SSE stream for real-time UI updates
       if (req.method === "GET" && reqUrl.pathname === "/api/events") {
         res.writeHead(200, {

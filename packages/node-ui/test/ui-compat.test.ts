@@ -205,6 +205,25 @@ describe('backward-compatible URL redirects (V10 consolidation)', () => {
   });
 });
 
+describe('retired installable apps framework (V10)', () => {
+  // The daemon must not silently 404 the V9 apps surface on upgrade; it should
+  // respond with 410 Gone and point operators at the replacement (`dkg integration`).
+  const daemon = readDaemonSources();
+
+  it('daemon returns 410 Gone for /api/apps and /apps/* paths', () => {
+    expect(daemon).toMatch(/reqUrl\.pathname === "\/api\/apps"/);
+    expect(daemon).toMatch(/reqUrl\.pathname\.startsWith\("\/api\/apps\/"\)/);
+    expect(daemon).toMatch(/reqUrl\.pathname === "\/apps"/);
+    expect(daemon).toMatch(/reqUrl\.pathname\.startsWith\("\/apps\/"\)/);
+    expect(daemon).toMatch(/res\.writeHead\(410/);
+  });
+
+  it('410 response points operators at the replacement integration CLI', () => {
+    expect(daemon).toContain('retired in V10');
+    expect(daemon).toContain('dkg integration');
+  });
+});
+
 describe('synced status logic', () => {
   const header = readFileSync(resolve(UI_DIR, 'components', 'Shell', 'Header.tsx'), 'utf-8');
 

@@ -102,7 +102,10 @@ When the daemon is running, it exposes a local HTTP API (default: `http://localh
 - `GET /api/peers`, `GET /api/connections`, `GET /api/agents` — network introspection
 - `GET /api/wallets/balances`, `GET /api/chain/rpc-health` — wallet and chain health
 - `GET /api/events` — Server-Sent Events stream for real-time notifications
-- `GET /api/apps` — list installed DKG apps
+
+> The V9 `GET /api/apps` endpoint (and the `/apps/*` iframe host) was retired in
+> V10 along with the installable apps framework — the daemon now returns
+> `410 Gone` on those paths. See [Extending the Node](#extending-the-node) below.
 
 All endpoints (except public paths like `/api/status`, `/api/chain/rpc-health`, and `/.well-known/skill.md`) require an API token via `Authorization: Bearer <token>` header.
 
