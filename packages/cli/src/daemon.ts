@@ -897,6 +897,7 @@ function toCatchupStatusResponse(job: CatchupJob) {
 type PublishAccessPolicy = "public" | "ownerOnly" | "allowList";
 
 let daemonCatchupRunner: CatchupRunner | null = null;
+const DEBUG_SYNC_TRACE = process.env.DKG_DEBUG_SYNC_PROGRESS === '1' || process.env.DKG_DEBUG_SYNC === '1';
 
 interface PublishQuad {
   subject: string;
@@ -7574,7 +7575,7 @@ async function handleRequest(
     void (async () => {
       job.status = "running";
       job.startedAt = Date.now();
-      console.log(`[catchup] job=${jobId} contextGraph=${paranetId} started`);
+      if (DEBUG_SYNC_TRACE) console.log(`[catchup] job=${jobId} contextGraph=${paranetId} started`);
       try {
         const result = await daemonCatchupRunner!.run({
           contextGraphId: paranetId,
@@ -7583,22 +7584,6 @@ async function handleRequest(
         job.result = result;
         job.status = "done";
 
-        // Compute the "at least one peer gave us a clean response"
-        // signal once, up front. We use it for two different gates:
-        //
-        //   (1) the "denied" gate below — a mixed pool of one denying
-        //       peer + one authorised-but-empty peer is NOT a denial,
-        //       so we must NOT flip to `denied` if ANY peer sent a
-        //       clean empty/meta-only response.
-        //   (2) the "synced" flip further down — we only promote the
-        //       subscription to `synced=true` on concrete evidence,
-        //       never on "no peer threw" (transport death is silent).
-        //
-        // "Clean response" = we either ingested triples, or at least
-        // one peer responded with the empty-result / meta-only signal
-        // (`emptyResponses`, `metaOnlyResponses`). Non-ACL failures
-        // (timeout, reset) land in `diagnostics.durable.failedPeers`
-        // and do NOT qualify as clean here.
         const d = result.diagnostics?.durable;
         const s = result.diagnostics?.sharedMemory;
         const cleanResponse =
@@ -7607,53 +7592,6 @@ async function handleRequest(
           (d?.emptyResponses ?? 0) > 0 ||
           (d?.metaOnlyResponses ?? 0) > 0 ||
           (s?.emptyResponses ?? 0) > 0;
-
-        // Authoritative ACL denial: at least one peer explicitly denied
-        // the sync (via the `syncDenied` sentinel surfaced by the new
-        // `runDurableSync` worker — see `sync/requester/page-fetch.ts`
-        // which flips `deniedPhases`, which `runCatchupOverPeers` then
-        // rolls up into the single `denied` boolean we read here). The
-        // boolean replaces HEAD's per-peer `accessDeniedPeers` counter
-        // that was removed by the v10-rc sync refactor; we no longer
-        // need the count because we gate on `cleanResponse` to handle
-        // mixed pools. Transport timeouts / unreachable peers do NOT
-        // set `syncDenied`, so an open CG with slow/offline peers won't
-        // be misclassified as denied.
-        //
-        // Corner case the earlier guard missed: an authorised peer that
-        // responded empty or meta-only (legitimate — CG exists but has
-        // no durable data yet) alongside a denying peer on the same CG.
-        // With the previous `dataSynced===0 && sharedMemorySynced===0`
-        // test, that pool would flip to "denied" even though we heard
-        // from a peer that's happy to serve us. Gating on
-        // `cleanResponse` makes the classification symmetric with the
-        // synced-flip below.
-        //
-        // Codex tier-4g (curated CG catch-up, 15:14:16) and tier-4h/4i
-        // (N12 / N17, on this line): for curated context graphs,
-        // `cleanResponse` is NOT proof of authorisation — a non-curator
-        // peer that simply doesn't have this graph yet returns
-        // `emptyResponses=1` legitimately, so a requester who genuinely
-        // isn't on the allowlist could land on `done` alongside
-        // `denied=true` and silently think they synced. Any explicit
-        // `denied` must therefore win unless we have positive evidence
-        // a peer actually served us this CG.
-        //
-        // Earlier attempts — `localAllowed.length > 0` (4g) and
-        // `agent.contextGraphIsCurated(paranetId)` (4h) — both keyed off
-        // *local* knowledge of the CG's access policy. Codex 4i rightly
-        // pointed out that for a first-time invitee neither source is
-        // populated yet: a curator can deny us while another peer
-        // returns a clean empty response, `isCurated` stays false,
-        // `cleanResponse` stays true, and the denial slips through.
-        //
-        // Flip the test: denial is authoritative by default, and only
-        // the presence of a peer that actually served this CG (i.e. we
-        // have triples from them, not just "I don't know this graph"
-        // empty responses) rescues the job to "done". Meta-only
-        // responses count as served because they prove a peer knew the
-        // CG and chose to share its _meta graph with us. `d`/`s` are
-        // already captured for `cleanResponse` above.
         const servedByPeer =
           result.dataSynced > 0 ||
           result.sharedMemorySynced > 0 ||
@@ -7662,31 +7600,10 @@ async function handleRequest(
           (d?.metaOnlyResponses ?? 0) > 0;
         if (result.denied && !servedByPeer) {
           job.status = "denied";
-          job.error = "Sync denied by peers — you may not be on the allowlist for this curated project.";
-          // Only unsubscribe if the CG was only known via auto-discovery
-          // (N13): `contextGraphExists()` flips to true the moment we
-          // have the CG's ontology/_meta declaration, which is ALSO
-          // true for auto-discovered projects, so the earlier guard
-          // never cleaned them up. Use `contextGraphHasLocalContent`
-          // instead — that's only true when we've stored actual data
-          // for the CG (local creation or a prior legitimate sync),
-          // which is the "the operator actually wanted this project"
-          // signal we meant all along.
-          const hasLocal = await agent.contextGraphHasLocalContent(paranetId).catch(() => false);
-          if (!hasLocal) {
-            (agent as any).subscribedContextGraphs?.delete(paranetId);
-          }
+          job.error = result.deniedPeers > 1 ? `Sync denied by ${result.deniedPeers} remote peers` : "Sync denied by remote peer";
+          if (DEBUG_SYNC_TRACE) console.log(`[catchup] job=${jobId} contextGraph=${paranetId} denied by remote peer(s): ${result.deniedPeers}`);
         }
 
-        // If catch-up ended in "done", flip the subscription's synced
-        // flag ONLY when at least one peer actually returned a clean
-        // response — i.e. we have concrete evidence sync worked.
-        //
-        // The earlier implementation flipped synced=true whenever the
-        // job didn't throw, which is wrong: if every peer's transport
-        // died mid-sync (timeout, reset, truncated stream), the agent
-        // catches the errors internally, returns dataSynced=0, and the
-        // UI ends up showing "synced" with an empty graph.
         if (job.status === "done") {
           if (cleanResponse) {
             const subMap = (agent as any).subscribedContextGraphs as
@@ -7695,36 +7612,29 @@ async function handleRequest(
             const sub = subMap?.get(paranetId);
             if (sub) {
               sub.synced = true;
-              // Meta is considered synced iff we have _any_ local content;
-              // otherwise we might have talked to peers that hold the CG's
-              // declaration but couldn't give us the _meta graph yet.
               const hasContent = await agent.contextGraphHasLocalContent(paranetId).catch(() => false);
               if (hasContent) sub.metaSynced = true;
             }
           } else if (result.peersTried > 0) {
-            // Every peer we talked to errored out. Surface this as a
-            // failure so the UI doesn't pretend the sync succeeded.
             job.status = "failed";
             job.error = "Sync did not complete — all reachable peers failed (timeouts or transport errors). Retry once the network is healthier.";
           } else if (result.connectedPeers > 0 && result.syncCapablePeers === 0) {
-            // v10-rc surfaces this explicitly: peers are connected but
-            // none advertise the sync protocol yet. Not "our sync failed",
-            // just "no one can serve us right now" — surface as failure
-            // so the UI retries instead of declaring "synced".
             job.status = "failed";
             job.error = "No sync-capable peers found for catch-up";
           }
 
-          console.log(
-            `[catchup] job=${jobId} contextGraph=${paranetId} status=${job.status} ` +
-              `peers=${result.peersTried}/${result.syncCapablePeers} connected=${result.connectedPeers} ` +
-              `data=${result.dataSynced} swm=${result.sharedMemorySynced} denied=${result.denied}`,
-          );
+          if (DEBUG_SYNC_TRACE) {
+            console.log(
+              `[catchup] job=${jobId} contextGraph=${paranetId} status=${job.status} ` +
+                `peers=${result.peersTried}/${result.syncCapablePeers} connected=${result.connectedPeers} ` +
+                `data=${result.dataSynced} swm=${result.sharedMemorySynced} denied=${result.denied}`,
+            );
+          }
         }
       } catch (err) {
         job.error = err instanceof Error ? err.message : String(err);
         job.status = "failed";
-        console.log(`[catchup] job=${jobId} contextGraph=${paranetId} threw: ${job.error}`);
+        if (DEBUG_SYNC_TRACE) console.log(`[catchup] job=${jobId} contextGraph=${paranetId} threw: ${job.error}`);
       } finally {
         job.finishedAt = Date.now();
       }

@@ -305,6 +305,7 @@ export class ApiClient {
         dataSynced: number;
         sharedMemorySynced: number;
         denied: boolean;
+        deniedPeers: number;
         diagnostics?: {
           noProtocolPeers: number;
           durable: {
@@ -353,6 +354,7 @@ export class ApiClient {
         dataSynced: number;
         sharedMemorySynced: number;
         denied: boolean;
+        deniedPeers: number;
         diagnostics?: {
           noProtocolPeers: number;
           durable: {
@@ -405,6 +407,7 @@ export class ApiClient {
       dataSynced: number;
       sharedMemorySynced: number;
       denied: boolean;
+      deniedPeers: number;
       diagnostics?: {
         noProtocolPeers: number;
         durable: {
