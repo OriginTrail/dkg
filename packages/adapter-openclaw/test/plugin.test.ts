@@ -121,6 +121,12 @@ describe('DkgNodePlugin', () => {
     const publishProps = byName.get('dkg_shared_memory_publish')!.parameters.properties;
     expect(publishProps).toHaveProperty('sub_graph_name');
     expect(publishProps.sub_graph_name.type).toBe('string');
+    expect(publishProps).toHaveProperty('register_if_needed');
+    expect(publishProps.register_if_needed.type).toBe('boolean');
+    expect(publishProps).toHaveProperty('reveal_on_chain');
+    expect(publishProps.reveal_on_chain.type).toBe('boolean');
+    expect(publishProps).toHaveProperty('access_policy');
+    expect(publishProps.access_policy.type).toBe('number');
 
     // dkg_assertion_write.quads is an array of {subject,predicate,object}
     const writeTool = byName.get('dkg_assertion_write')!;
@@ -573,6 +579,99 @@ describe('DkgNodePlugin', () => {
       // would publish to the root shared-memory graph instead of the sub-graph.
       expect(body.subGraphName).toBe('protocols');
       expect(body.contextGraphId).toBe('ctx');
+    });
+
+    it('dkg_shared_memory_publish can register the context graph before publish when requested', async () => {
+      const fetchMock = vi.fn(async (url: string) => {
+        if (url === 'http://localhost:9200/api/context-graph/register') {
+          return new Response(JSON.stringify({ registered: 'ctx', onChainId: '42', txHash: '0xabc' }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        return new Response(JSON.stringify({ kcId: 'kc-7', status: 'ok', kas: [] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      });
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+      const plugin = new DkgNodePlugin({ daemonUrl: 'http://localhost:9200' });
+      const tools: OpenClawTool[] = [];
+      plugin.register({
+        config: {},
+        registerTool: (t) => tools.push(t),
+        registerHook: () => {},
+        on: () => {},
+        logger: {},
+      });
+      const byName = new Map(tools.map((t) => [t.name, t] as const));
+
+      const result = await byName.get('dkg_shared_memory_publish')!.execute('tc', {
+        context_graph_id: 'ctx',
+        register_if_needed: true,
+        reveal_on_chain: true,
+        access_policy: 1,
+      });
+
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(fetchMock.mock.calls[0]?.[0]).toBe('http://localhost:9200/api/context-graph/register');
+      expect(JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string)).toEqual({
+        id: 'ctx',
+        revealOnChain: true,
+        accessPolicy: 1,
+      });
+      expect(fetchMock.mock.calls[1]?.[0]).toBe('http://localhost:9200/api/shared-memory/publish');
+      const body = JSON.parse(result.content[0].text);
+      expect(body.registration).toEqual({ registered: 'ctx', onChainId: '42', txHash: '0xabc' });
+      expect(body.kcId).toBe('kc-7');
+    });
+
+    it('dkg_shared_memory_publish ignores already-registered conflicts and still publishes', async () => {
+      const fetchMock = vi.fn(async (url: string) => {
+        if (url === 'http://localhost:9200/api/context-graph/register') {
+          return new Response(JSON.stringify({ error: 'Context graph "ctx" is already registered on-chain (42)' }), {
+            status: 409,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        return new Response(JSON.stringify({ kcId: 'kc-8', status: 'ok', kas: [] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      });
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+      const plugin = new DkgNodePlugin({ daemonUrl: 'http://localhost:9200' });
+      const tools: OpenClawTool[] = [];
+      plugin.register({
+        config: {},
+        registerTool: (t) => tools.push(t),
+        registerHook: () => {},
+        on: () => {},
+        logger: {},
+      });
+      const byName = new Map(tools.map((t) => [t.name, t] as const));
+
+      const result = await byName.get('dkg_shared_memory_publish')!.execute('tc', {
+        context_graph_id: 'ctx',
+        register_if_needed: true,
+      });
+
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      const body = JSON.parse(result.content[0].text);
+      expect(body.registration).toBeUndefined();
+      expect(body.kcId).toBe('kc-8');
+    });
+
+    it('dkg_shared_memory_publish validates register_if_needed and registration options locally', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({});
+      const bad = await byName.get('dkg_shared_memory_publish')!.execute('tc', {
+        context_graph_id: 'ctx',
+        register_if_needed: 'yes',
+        reveal_on_chain: 'true',
+        access_policy: 3,
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(bad.content[0].text).toContain('register_if_needed');
     });
 
     it('dkg_shared_memory_publish rejects non-array / empty / non-string root_entities locally', async () => {
