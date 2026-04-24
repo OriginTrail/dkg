@@ -50,6 +50,8 @@ import { runDurableSync } from './sync/requester/durable-sync.js';
 import { runSharedMemorySync } from './sync/requester/shared-memory-sync.js';
 import { buildSyncRequestEnvelope } from './sync/auth/request-build.js';
 import { authorizePrivateSyncRequest } from './sync/auth/request-authorize.js';
+import { registerSyncHandler } from './sync/responder/sync-handler.js';
+import { runSyncOnConnect } from './sync/on-connect/sync-on-connect.js';
 import {
   generateCustodialAgent, registerSelfSovereignAgent, agentFromPrivateKey,
   hashAgentToken,
@@ -738,226 +740,18 @@ export class DKGAgent {
       }
     }
 
-    // Register sync handler: responds with a page of data OR meta triples.
-    // Request: JSON SyncRequestEnvelope (authenticated for private CGs) or
-    //          pipe-delimited "contextGraphId|offset|limit[|meta]".
-    // The "phase" field ('data' or 'meta') controls which graph is queried.
-    // Meta is fetched separately (paginated) to avoid exceeding the 10 MB
-    // stream read limit that occurred when the full meta graph was bundled
-    // with the first data page.
-    this.router.register(PROTOCOL_SYNC, async (data, peerId) => {
-      const handlerStartedAt = Date.now();
-      const request = this.parseSyncRequest(data);
-      const offset = Math.max(0, Math.min(Number.isSafeInteger(Number(request.offset)) ? Number(request.offset) : 0, 1_000_000));
-      const limit = Math.max(1, Math.min(Number.isSafeInteger(Number(request.limit)) ? Number(request.limit) : SYNC_PAGE_SIZE, SYNC_PAGE_SIZE));
-      const phase = request.phase ?? 'data';
-      const isWorkspace = request.includeSharedMemory;
-      const contextGraphId = request.contextGraphId;
-      if (!contextGraphId || typeof contextGraphId !== 'string') {
-        return new TextEncoder().encode('');
-      }
-      const nquads: string[] = [];
-
-      const authStartedAt = Date.now();
-      const authorized = await this.authorizeSyncRequest(request, peerId.toString());
-      const authDurationMs = Date.now() - authStartedAt;
-      if (!authorized) {
-        this.log.warn(createOperationContext('sync'), `Denied sync request for "${contextGraphId}" from peer ${peerId} (phase=${phase})`);
-        // Emit the explicit denial sentinel (vs. empty body which would
-        // be indistinguishable from "peer has no data for this CG").
-        return new TextEncoder().encode(`${SYNC_ACCESS_DENIED_MARKER}\n`);
-      }
-
-      if (isWorkspace) {
-        const wsGraph = paranetWorkspaceGraphUri(contextGraphId);
-        const wsMetaGraph = paranetWorkspaceMetaGraphUri(contextGraphId);
-        const wsTtl = this.config.sharedMemoryTtlMs ?? DEFAULT_SWM_TTL_MS;
-        const cutoff = wsTtl > 0 ? new Date(Date.now() - wsTtl).toISOString() : null;
-
-        if (phase === 'meta') {
-          const metaQuery = cutoff != null
-            ? `SELECT ?s ?p ?o WHERE {
-                GRAPH <${wsMetaGraph}> { ?s ?p ?o }
-                FILTER EXISTS {
-                  GRAPH <${wsMetaGraph}> {
-                    ?s <http://dkg.io/ontology/publishedAt> ?ts .
-                    FILTER(?ts >= "${cutoff}"^^<http://www.w3.org/2001/XMLSchema#dateTime>)
-                  }
-                }
-              } ORDER BY ?s ?p ?o OFFSET ${offset} LIMIT ${limit}`
-            : `SELECT ?s ?p ?o WHERE { GRAPH <${wsMetaGraph}> { ?s ?p ?o } } ORDER BY ?s ?p ?o OFFSET ${offset} LIMIT ${limit}`;
-
-          const queryStartedAt = Date.now();
-          const metaResult = await this.store.query(metaQuery);
-          const queryDurationMs = Date.now() - queryStartedAt;
-          const serializeStartedAt = Date.now();
-          if (metaResult.type === 'bindings') {
-            for (const b of metaResult.bindings) {
-              const obj = b['o'].startsWith('"') ? b['o'] : `<${b['o']}>`;
-              nquads.push(`<${b['s']}> <${b['p']}> ${obj} <${wsMetaGraph}> .`);
-            }
-          }
-          const serializeDurationMs = Date.now() - serializeStartedAt;
-          this.log.debug(createOperationContext('sync'), `Sync responder SWM meta for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
-        } else {
-          // Apply TTL/root-entity filter inside SPARQL before pagination so that
-          // we return the first N non-expired triples. Only include exact root subject
-          // or skolemized children (/.well-known/genid/...) to avoid pulling unrelated
-          // entities that share a URI prefix (e.g. urn:x vs urn:x/other).
-          const wsQuery =
-            cutoff != null
-              ? `SELECT DISTINCT ?s ?p ?o WHERE {
-  GRAPH <${wsMetaGraph}> {
-    ?op <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dkg.io/ontology/WorkspaceOperation> .
-    ?op <http://dkg.io/ontology/publishedAt> ?ts .
-    ?op <http://dkg.io/ontology/rootEntity> ?re .
-    FILTER(?ts >= "${cutoff}"^^<http://www.w3.org/2001/XMLSchema#dateTime>)
-  }
-  GRAPH <${wsGraph}> { ?s ?p ?o }
-  FILTER(?s = ?re || STRSTARTS(STR(?s), CONCAT(STR(?re), "/.well-known/genid/")))
-} ORDER BY ?s ?p ?o OFFSET ${offset} LIMIT ${limit}`
-              : `SELECT ?s ?p ?o WHERE { GRAPH <${wsGraph}> { ?s ?p ?o } } ORDER BY ?s ?p ?o OFFSET ${offset} LIMIT ${limit}`;
-
-          const queryStartedAt = Date.now();
-          const wsResult = await this.store.query(wsQuery);
-          const queryDurationMs = Date.now() - queryStartedAt;
-          if (wsResult.type !== 'bindings' || wsResult.bindings.length === 0) {
-            return new TextEncoder().encode('');
-          }
-          const serializeStartedAt = Date.now();
-          for (const b of wsResult.bindings) {
-            const obj = b['o'].startsWith('"') ? b['o'] : `<${b['o']}>`;
-            nquads.push(`<${b['s']}> <${b['p']}> ${obj} <${wsGraph}> .`);
-          }
-          const serializeDurationMs = Date.now() - serializeStartedAt;
-          this.log.debug(createOperationContext('sync'), `Sync responder SWM data for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
-        }
-
-        if (nquads.length === 0) return new TextEncoder().encode('');
-      } else {
-        const dataGraph = paranetDataGraphUri(contextGraphId);
-        const metaGraph = paranetMetaGraphUri(contextGraphId);
-
-        if (phase === 'meta') {
-          // Whitelist approach: only sync _meta triples that are either
-          // CG-level metadata (always safe) or assertion metadata for
-          // assertions that have been promoted out of WM.
-          //
-          // CG-level subjects (always included):
-          //  - did:dkg:context-graph:{id}  (CG definition)
-          //  - did:dkg:activity:*           (CG creation provenance)
-          //  - did:dkg:join-request:*       (access control)
-          //
-          // Assertion-level subjects (only if memoryLayer != WM):
-          //  - urn:dkg:assertion:*          (lifecycle entities)
-          //  - urn:dkg:assertion:*/event/*  (event entities)
-          //  - */assertion/*                (import metadata)
-          //
-          // Everything else is excluded by default.
-          const DKG_NS = 'http://dkg.io/ontology/';
-          const cgEntity = `did:dkg:context-graph:${contextGraphId}`;
-          const queryStartedAt = Date.now();
-          const metaResult = await this.store.query(
-            `SELECT ?s ?p ?o WHERE {
-              GRAPH <${metaGraph}> { ?s ?p ?o }
-              FILTER(
-                STR(?s) = "${cgEntity}" ||
-                STRSTARTS(STR(?s), "did:dkg:activity:") ||
-                STRSTARTS(STR(?s), "did:dkg:join-request:") ||
-                EXISTS {
-                  GRAPH <${metaGraph}> {
-                    ?lc <${DKG_NS}memoryLayer> ?layer .
-                    FILTER(?layer != "${MemoryLayer.WorkingMemory}")
-                    {
-                      FILTER(?lc = ?s)
-                    } UNION {
-                      ?lc <${DKG_NS}assertionGraph> ?s .
-                    } UNION {
-                      ?lc <${DKG_NS}assertionName> ?aname .
-                      FILTER(
-                        CONTAINS(STR(?s), "/assertion/") &&
-                        STRENDS(STR(?s), CONCAT("/", STR(?aname)))
-                      )
-                    }
-                  }
-                } ||
-                EXISTS {
-                  GRAPH <${metaGraph}> {
-                    { ?evt_src <http://www.w3.org/ns/prov#generated> ?parent }
-                    UNION
-                    { ?evt_src <http://www.w3.org/ns/prov#used> ?parent }
-                    FILTER(?evt_src = ?s)
-                    ?parent <${DKG_NS}memoryLayer> ?elayer .
-                    FILTER(?elayer != "${MemoryLayer.WorkingMemory}")
-                  }
-                }
-              )
-            } ORDER BY ?s ?p ?o OFFSET ${offset} LIMIT ${limit}`,
-          );
-          const queryDurationMs = Date.now() - queryStartedAt;
-          const serializeStartedAt = Date.now();
-          if (metaResult.type === 'bindings') {
-            for (const b of metaResult.bindings) {
-              const obj = b['o'].startsWith('"') ? b['o'] : `<${b['o']}>`;
-              nquads.push(`<${b['s']}> <${b['p']}> ${obj} <${metaGraph}> .`);
-            }
-          }
-          const serializeDurationMs = Date.now() - serializeStartedAt;
-          this.log.debug(createOperationContext('sync'), `Sync responder durable meta for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
-        } else {
-          // Sync all graphs under the CG prefix EXCEPT:
-          //  - _meta graphs (bookkeeping, synced in the meta phase)
-          //  - _private graphs (never shared)
-          //  - assertion graphs still in Working Memory (WM)
-          //
-          // Assertions promoted to SWM or VM ARE included. The lifecycle
-          // entity links to the graph via dkg:assertionGraph and tracks
-          // the current layer via dkg:memoryLayer. Assertion graphs with
-          // no lifecycle record are treated as WM (safe default).
-          const cgUriPrefix = `did:dkg:context-graph:${contextGraphId}`;
-          const metaGraph = `${cgUriPrefix}/_meta`;
-          const DKG_NS = 'http://dkg.io/ontology/';
-          const queryStartedAt = Date.now();
-          const dataResult = await this.store.query(
-            `SELECT ?s ?p ?o ?g WHERE {
-              GRAPH ?g { ?s ?p ?o }
-              FILTER(
-                (STR(?g) = "${cgUriPrefix}" || STRSTARTS(STR(?g), "${cgUriPrefix}/")) &&
-                !STRENDS(STR(?g), "/_meta") &&
-                !CONTAINS(STR(?g), "/_private")
-              )
-              FILTER(
-                !CONTAINS(STR(?g), "/assertion/") ||
-                EXISTS {
-                  GRAPH <${metaGraph}> {
-                    ?lifecycle <${DKG_NS}assertionGraph> ?g .
-                    ?lifecycle <${DKG_NS}memoryLayer> ?layer .
-                    FILTER(?layer != "${MemoryLayer.WorkingMemory}")
-                  }
-                }
-              )
-            } ORDER BY ?g ?s ?p ?o OFFSET ${offset} LIMIT ${limit}`,
-          );
-          const queryDurationMs = Date.now() - queryStartedAt;
-          if (dataResult.type !== 'bindings' || dataResult.bindings.length === 0) {
-            return new TextEncoder().encode('');
-          }
-          const serializeStartedAt = Date.now();
-          for (const b of dataResult.bindings) {
-            const obj = b['o'].startsWith('"') ? b['o'] : `<${b['o']}>`;
-            const graph = b['g'] ?? dataGraph;
-            nquads.push(`<${b['s']}> <${b['p']}> ${obj} <${graph}> .`);
-          }
-          const serializeDurationMs = Date.now() - serializeStartedAt;
-          this.log.debug(createOperationContext('sync'), `Sync responder durable data for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
-        }
-      }
-
-      const totalDurationMs = Date.now() - handlerStartedAt;
-      if (totalDurationMs > 100) {
-        this.log.debug(createOperationContext('sync'), `Sync responder total for "${contextGraphId}" (phase=${phase}, workspace=${isWorkspace}): ${totalDurationMs}ms`);
-      }
-      return new TextEncoder().encode(nquads.join('\n'));
+    registerSyncHandler({
+      router: this.router,
+      protocolSync: PROTOCOL_SYNC,
+      syncDeniedResponse: SYNC_DENIED_RESPONSE,
+      syncPageSize: SYNC_PAGE_SIZE,
+      sharedMemoryTtlMs: this.config.sharedMemoryTtlMs ?? DEFAULT_SWM_TTL_MS,
+      store: this.store,
+      peerId: this.peerId,
+      parseSyncRequest: this.parseSyncRequest.bind(this),
+      authorizeSyncRequest: this.authorizeSyncRequest.bind(this),
+      logWarn: (ctx, message) => this.log.warn(ctx, message),
+      logDebug: (ctx, message) => this.log.debug(ctx, message),
     });
 
     // Join-request protocol: receives signed join requests forwarded by peers.
@@ -1187,69 +981,21 @@ export class DKGAgent {
    * with a per-peer guard to avoid overlapping sync storms.
    */
   private async trySyncFromPeer(remotePeer: string): Promise<void> {
-    const ctx = createOperationContext('sync');
-    const shortPeer = remotePeer.slice(-8);
-
-    if (this.syncingPeers.has(remotePeer)) return;
-    this.syncingPeers.add(remotePeer);
-
-    try {
-      const { peerIdFromString } = await import('@libp2p/peer-id');
-      const pid = peerIdFromString(remotePeer);
-      const peer = await this.node.libp2p.peerStore.get(pid);
-      const protocols = peer.protocols ?? [];
-
-      // Track which peers are core nodes by checking StorageACK protocol
-      // support. Only core nodes register this protocol, so its presence
-      // is a reliable role indicator. Used by getConnectedCorePeers().
-      if (protocols.includes(PROTOCOL_STORAGE_ACK)) {
-        this.knownCorePeerIds.add(remotePeer);
-      } else {
-        this.knownCorePeerIds.delete(remotePeer);
-      }
-
-      const hasSync = protocols.includes(PROTOCOL_SYNC);
-      if (!hasSync) {
-        this.log.info(ctx, `Peer ${shortPeer} does not support sync protocol (protocols: ${protocols.join(', ')})`);
-        return;
-      }
-
-      this.log.info(ctx, `Syncing from peer ${shortPeer}...`);
-      const knownCgsBefore = new Set(this.config.syncContextGraphs ?? []);
-      const synced = await this.syncFromPeer(remotePeer);
-      this.log.info(ctx, `Synced ${synced} data triples from peer ${shortPeer}`);
-
-      const syncScope = new Set<string>([
-        SYSTEM_PARANETS.AGENTS,
-        SYSTEM_PARANETS.ONTOLOGY,
-        ...(this.config.syncContextGraphs ?? []),
-      ]);
-      await this.refreshMetaSyncedFlags(syncScope);
-
-      // After syncing ONTOLOGY, discover and auto-subscribe to any new context graphs
-      await this.discoverContextGraphsFromStore();
-
-      // Sync durable data for any CGs discovered after the initial sync pass.
-      // Without this, newly discovered private CGs would only sync on the next
-      // peer connection since they weren't in syncContextGraphs during the
-      // first syncFromPeer call.
-      const allCgsAfter = this.config.syncContextGraphs ?? [];
-      const newlyDiscovered = allCgsAfter.filter((id) => !knownCgsBefore.has(id));
-      if (newlyDiscovered.length > 0) {
-        this.log.info(ctx, `Discovered ${newlyDiscovered.length} new CG(s) — syncing durable data from ${shortPeer}`);
-        const discoverSynced = await this.syncFromPeer(remotePeer, newlyDiscovered);
-        this.log.info(ctx, `Synced ${discoverSynced} durable triples for newly discovered CG(s) from ${shortPeer}`);
-        await this.refreshMetaSyncedFlags(newlyDiscovered);
-      }
-
-      const wsContextGraphIds = this.config.syncContextGraphs ?? [];
-      if (wsContextGraphIds.length > 0) {
-        const wsSynced = await this.syncSharedMemoryFromPeer(remotePeer, wsContextGraphIds);
-        this.log.info(ctx, `Synced ${wsSynced} shared memory triples from peer ${shortPeer}`);
-      }
-    } finally {
-      this.syncingPeers.delete(remotePeer);
+    if (!this.started) {
+      return;
     }
+    return runSyncOnConnect({
+      remotePeer,
+      syncingPeers: this.syncingPeers,
+      getPeerProtocols: (peerId) => this.getPeerProtocols(peerId),
+      knownCorePeerIds: this.knownCorePeerIds,
+      getSyncContextGraphs: () => this.config.syncContextGraphs ?? [],
+      syncFromPeer: (peerId, contextGraphIds) => this.syncFromPeer(peerId, contextGraphIds),
+      refreshMetaSyncedFlags: (contextGraphIds) => this.refreshMetaSyncedFlags(contextGraphIds),
+      discoverContextGraphsFromStore: () => this.discoverContextGraphsFromStore(),
+      syncSharedMemoryFromPeer: (peerId, contextGraphIds) => this.syncSharedMemoryFromPeer(peerId, contextGraphIds),
+      logInfo: (ctx, message) => this.log.info(ctx, message),
+    });
   }
 
   /**
@@ -1564,10 +1310,12 @@ export class DKGAgent {
       },
     };
 
-    this.log.info(
-      ctx,
-      `Catch-up peer set for "${contextGraphId}": ${peers.map((peer) => peer.toString()).join(', ') || 'none'}`,
-    );
+    if (DEBUG_SYNC_PROGRESS) {
+      this.log.info(
+        ctx,
+        `Catch-up peer set for "${contextGraphId}": ${peers.map((peer) => peer.toString()).join(', ') || 'none'}`,
+      );
+    }
 
     // Phase 1: probe all peers for PROTOCOL_SYNC support serially. This is
     // cheap (peerStore lookup / waitForPeerProtocol), but we keep it a
@@ -1576,11 +1324,15 @@ export class DKGAgent {
     // no gain. See the "Run per-peer syncs in parallel" comment below.
     const syncCapable: string[] = [];
     for (const pid of peers) {
-      this.log.info(ctx, `Checking sync protocol for peer ${pid.toString()} in catch-up for "${contextGraphId}"`);
+      if (DEBUG_SYNC_PROGRESS) {
+        this.log.info(ctx, `Checking sync protocol for peer ${pid.toString()} in catch-up for "${contextGraphId}"`);
+      }
       const hasSync = await this.waitForSyncProtocol(pid);
       if (!hasSync) {
         noProtocolPeers++;
-        this.log.warn(ctx, `Peer ${pid.toString()} is connected but not sync-capable for "${contextGraphId}"`);
+        if (DEBUG_SYNC_PROGRESS) {
+          this.log.warn(ctx, `Peer ${pid.toString()} is connected but not sync-capable for "${contextGraphId}"`);
+        }
         continue;
       }
       syncCapable.push(pid.toString());
@@ -3422,43 +3174,34 @@ export class DKGAgent {
       metaSynced: true,
     });
 
-    // Auto-register on-chain (V10 ContextGraphs contract) when the chain
-    // adapter supports it and the node has an on-chain identity. This gives
-    // the context graph a numeric on-chain ID required by publishDirect and
-    // enables Verified Memory (publishFromSWM).
-    if (
-      this.chain.chainId !== 'none' &&
-      !this.chain.chainId.startsWith('mock') &&
-      creatorIdentityId > 0n &&
-      typeof this.chain.createOnChainContextGraph === 'function'
-    ) {
-      try {
-        const sortedParticipants = [...participantIdentityIds].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
-        const result = await this.chain.createOnChainContextGraph({
-          participantIdentityIds: sortedParticipants,
-          requiredSignatures: opts.requiredSignatures ?? 1,
-          publishPolicy: 1,
-        });
-        const numericId = result.contextGraphId.toString();
-        const sub = this.subscribedContextGraphs.get(opts.id);
-        if (sub) sub.onChainId = numericId;
-
-        const cgMetaGraph = paranetMetaGraphUri(opts.id);
-        const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
-        await this.store.deleteByPattern({
-          graph: cgMetaGraph,
-          subject: paranetUri,
-          predicate: DKG_ONTOLOGY.DKG_REGISTRATION_STATUS,
-        });
-        await this.store.insert([
-          { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_REGISTRATION_STATUS, object: `"registered"`, graph: cgMetaGraph },
-          { subject: paranetUri, predicate: `${DKG_ONTOLOGY.DKG_PARANET}OnChainId`, object: `"${numericId}"`, graph: ontologyGraph },
-        ]);
-        this.log.info(ctx, `Auto-registered context graph "${opts.id}" on-chain (V10 id=${numericId})`);
-      } catch (err) {
-        this.log.warn(ctx, `Auto-register on-chain skipped: ${err instanceof Error ? err.message : String(err)}`);
-      }
-    }
+    // On-chain registration is intentionally NOT done here — per v10 spec
+    // §2.2 / §2.3 Context Graphs are a local-first primitive. A CG exists
+    // the moment its definition triples land in the store; it can be
+    // shared with peers over gossip (SWM writes/reads work across the
+    // subscriber set), joined, sub-graphed, and queried without ever
+    // touching chain state. Verified Memory is the value-add layer that
+    // requires chain registration, and earlier revisions silently minted
+    // a `ContextGraphs.createContextGraph` tx from inside this method
+    // whenever the adapter supported it. That broke the "free CG"
+    // contract the API advertises (HTTP caller opts in via
+    // `register: true` on `/api/context-graph/create`), caused surprise
+    // TRAC spend, and made test §27e's "VM publish on unregistered CG
+    // should fail" impossible to satisfy — the CG was always already
+    // registered by the time the test ran.
+    //
+    // Callers that want on-chain registration MUST now take the
+    // explicit path: either `POST /api/context-graph/create` with
+    // `register: true` (daemon chains a `registerContextGraph` call
+    // after this method returns) or `POST /api/context-graph/register`
+    // on an existing local CG. Both paths go through
+    // {@link registerContextGraph}, which preserves the creator /
+    // curator checks and writes the V10 `onChainId` + flips
+    // `dkg:registrationStatus` to `"registered"`. Until then the CG
+    // carries the `unregistered` marker inserted above, and
+    // `dkg-publisher`'s `publishFromSharedMemory` guard
+    // (`packages/publisher/src/dkg-publisher.ts:569-594`) throws
+    // `Context graph "<id>" is not registered on-chain` on any VM
+    // publish attempt.
 
     if (!opts.private) {
       this.subscribeToContextGraph(opts.id);
@@ -3520,12 +3263,44 @@ export class DKGAgent {
 
     // Only the curator/creator can register a CG on-chain.
     // The owner DID may be peerId-based or agent-address-based, so check both.
-    const owner = await this.getContextGraphOwner(id);
+    //
+    // If no owner triple exists yet (bootstrap CGs created via
+    // `ensureContextGraphLocal` deliberately do not stamp ownership), the
+    // calling node lazily becomes both creator and curator here. This is
+    // the "node that explicitly registered the CG" — exactly the
+    // semantics other code paths consult `getContextGraphOwner` for, and
+    // it keeps the stamp single-writer (no race over `LIMIT 1`).
+    let owner = await this.getContextGraphOwner(id);
     if (!owner) {
-      throw new Error(
-        `Context graph "${id}" has no known creator. ` +
-        `Wait for sync to complete or create it locally first.`,
+      const cgMetaGraph = paranetMetaGraphUri(id);
+      const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
+      const paranetUri = `did:dkg:context-graph:${id}`;
+      const accessPolicyResult = await this.store.query(
+        `SELECT ?ap WHERE {
+          { GRAPH <${ontologyGraph}> { <${paranetUri}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?ap } }
+          UNION
+          { GRAPH <${cgMetaGraph}> { <${paranetUri}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?ap } }
+        } LIMIT 1`,
       );
+      const apValue = accessPolicyResult.type === 'bindings'
+        ? accessPolicyResult.bindings[0]?.['ap']?.replace(/^"|"$/g, '')
+        : undefined;
+      const isCurated = apValue === 'private';
+      const defGraph = isCurated ? cgMetaGraph : ontologyGraph;
+      const creatorPeerDid = `did:dkg:agent:${this.peerId}`;
+      const curatorDid = `did:dkg:agent:${opts?.callerAgentAddress ?? this.defaultAgentAddress ?? this.peerId}`;
+      // Defensive: replace any stray creator/curator triples (e.g. from
+      // a previous build that backfilled per node) so this register call
+      // becomes the single source of truth.
+      await this.store.deleteByPattern({ graph: defGraph, subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CREATOR });
+      await this.store.deleteByPattern({ graph: cgMetaGraph, subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CREATOR });
+      await this.store.deleteByPattern({ graph: cgMetaGraph, subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CURATOR });
+      await this.store.insert([
+        { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CREATOR, object: creatorPeerDid, graph: defGraph },
+        { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CURATOR, object: curatorDid, graph: cgMetaGraph },
+      ]);
+      this.log.info(ctx, `Stamped local node as creator/curator for "${id}" (registration-time lazy stamp)`);
+      owner = curatorDid;
     }
     if (!this.isCallerOrNodeOwner(owner, opts?.callerAgentAddress)) {
       throw new Error(
@@ -4561,6 +4336,13 @@ export class DKGAgent {
 
     const exists = await this.contextGraphExists(opts.id);
     if (exists) {
+      // Bootstrap is a subscriber path: do NOT mint or backfill ownership
+      // here. Creator/curator are stamped by `createContextGraph` (explicit
+      // create) and `registerContextGraph` (explicit on-chain mint). When
+      // every node backfilled itself on boot the `_meta` graph accumulated
+      // one curator triple per node and `getContextGraphOwner`'s
+      // `LIMIT 1` made ownership nondeterministic — any subscriber could
+      // win the unordered query and look like the curator.
       this.subscribeToContextGraph(opts.id);
       this.subscribedContextGraphs.set(opts.id, {
         name: opts.name,
@@ -4583,22 +4365,29 @@ export class DKGAgent {
     // network-wide discovery.
     const defGraph = opts.curated ? cgMetaGraph : ontologyGraph;
 
+    // No creator/curator triples here — bootstrap is a subscriber-style
+    // path. Ownership is established only when a node explicitly calls
+    // `createContextGraph` (UI flow) or `registerContextGraph` (on-chain
+    // mint), which both stamp the calling node. Stamping every booting
+    // node would let `getContextGraphOwner` ("LIMIT 1" over `dkg:curator`)
+    // resolve to an arbitrary subscriber and create a registration race
+    // where node B mints a second V10 CG before node A's `onChainId`
+    // propagates.
     const quads: Quad[] = [
       { subject: paranetUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_PARANET, graph: defGraph },
       { subject: paranetUri, predicate: DKG_ONTOLOGY.SCHEMA_NAME, object: `"${opts.name}"`, graph: defGraph },
       { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CREATED_AT, object: `"${now}"`, graph: defGraph },
       { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_GOSSIP_TOPIC, object: `"${paranetPublishTopic(opts.id)}"`, graph: defGraph },
       { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_REPLICATION_POLICY, object: `"full"`, graph: defGraph },
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY, object: `"${opts.curated ? 'private' : 'public'}"`, graph: defGraph },
     ];
 
-    if (opts.curated) {
-      quads.push({
-        subject: paranetUri,
-        predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
-        object: `"private"`,
-        graph: defGraph,
-      });
-    }
+    // _meta triples: only registration status. `dkg:curator` is written
+    // by `registerContextGraph` (or `createContextGraph` for the UI
+    // create path) so exactly one node owns the graph locally.
+    quads.push(
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_REGISTRATION_STATUS, object: `"unregistered"`, graph: cgMetaGraph },
+    );
 
     if (opts.description) {
       quads.push({
@@ -5882,6 +5671,7 @@ export class DKGAgent {
     isSystem: boolean;
     subscribed: boolean;
     synced: boolean;
+    onChainId?: string;
   }>> {
     const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
     const agentsGraph = paranetDataGraphUri(SYSTEM_PARANETS.AGENTS);
@@ -5913,7 +5703,7 @@ export class DKGAgent {
     const seen = new Map<string, {
       id: string; uri: string; name: string; description?: string;
       creator?: string; createdAt?: string; isSystem: boolean;
-      subscribed: boolean; synced: boolean;
+      subscribed: boolean; synced: boolean; onChainId?: string;
     }>();
 
     if (result.type === 'bindings') {
@@ -5922,6 +5712,7 @@ export class DKGAgent {
         if (seen.has(uri)) continue;
         const id = uri.startsWith(prefix) ? uri.slice(prefix.length) : uri;
         const sub = this.subscribedContextGraphs.get(id);
+        const onChainId = sub?.onChainId ?? (await this.getContextGraphOnChainId(id)) ?? undefined;
         seen.set(uri, {
           id,
           uri,
@@ -5932,6 +5723,7 @@ export class DKGAgent {
           isSystem: !!row['isSystem'],
           subscribed: sub?.subscribed ?? false,
           synced: true,
+          ...(onChainId ? { onChainId } : {}),
         });
       }
     }
@@ -5959,6 +5751,7 @@ export class DKGAgent {
 
       if (metaResult.type === 'bindings' && metaResult.bindings.length > 0) {
         const row = metaResult.bindings[0] as Record<string, string>;
+        const onChainId = sub.onChainId ?? (await this.getContextGraphOnChainId(id)) ?? undefined;
         seen.set(uri, {
           id,
           uri,
@@ -5969,6 +5762,7 @@ export class DKGAgent {
           isSystem: false,
           subscribed: sub.subscribed,
           synced: sub.synced,
+          ...(onChainId ? { onChainId } : {}),
         });
         continue;
       }
@@ -6008,6 +5802,7 @@ export class DKGAgent {
         isSystem: false,
         subscribed: sub.subscribed,
         synced: sub.synced,
+        ...(sub.onChainId ? { onChainId: sub.onChainId } : {}),
       });
     }
 
@@ -6019,6 +5814,7 @@ export class DKGAgent {
       if (id === SYSTEM_PARANETS.AGENTS || id === SYSTEM_PARANETS.ONTOLOGY) continue;
 
       const sub = this.subscribedContextGraphs.get(id);
+      const onChainId = sub?.onChainId ?? (await this.getContextGraphOnChainId(id)) ?? undefined;
       seen.set(uri, {
         id,
         uri,
@@ -6026,6 +5822,7 @@ export class DKGAgent {
         isSystem: false,
         subscribed: sub?.subscribed ?? false,
         synced: sub?.synced ?? false,
+        ...(onChainId ? { onChainId } : {}),
       });
     }
 

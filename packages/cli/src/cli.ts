@@ -51,6 +51,7 @@ import {
   DAEMON_EXIT_CODE_RESTART,
 } from './daemon.js';
 import { migrateToBlueGreen } from './migration.js';
+import { registerIntegrationCommands } from './integrations/commands.js';
 
 /** Commander action callbacks receive parsed .option() values with loose types. */
 type ActionOpts = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -2988,5 +2989,9 @@ program
     console.log(`Rolled back: current → slot ${target}`);
     console.log('Daemon stopped. Run "dkg start" to start with the rolled-back version.');
   });
+
+// ─── dkg integration ─────────────────────────────────────────────────
+
+registerIntegrationCommands(program);
 
 program.parse();

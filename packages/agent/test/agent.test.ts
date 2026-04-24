@@ -1701,6 +1701,39 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     }
   });
 
+  it('sync-on-connect re-reads sync scope after discovery for a second durable pass', async () => {
+    const agent = await DKGAgent.create({
+      name: 'SyncOnConnectDiscoveryRefresh',
+      listenHost: '127.0.0.1',
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+    });
+
+    try {
+      await agent.start();
+      const remotePeer = agent.node.peerId.toString();
+      const seenCalls: string[][] = [];
+
+      (agent as any).getPeerProtocols = async () => ['/dkg/10.0.0/sync'];
+      (agent as any).syncFromPeer = async (_peerId: string, contextGraphIds?: string[]) => {
+        seenCalls.push([...(contextGraphIds ?? [SYSTEM_PARANETS.AGENTS, SYSTEM_PARANETS.ONTOLOGY, ...((agent as any).config.syncContextGraphs ?? [])])]);
+        return 0;
+      };
+      (agent as any).refreshMetaSyncedFlags = async () => undefined;
+      (agent as any).discoverContextGraphsFromStore = async () => {
+        (agent as any).config.syncContextGraphs = ['new-private-cg'];
+        return 1;
+      };
+      (agent as any).syncSharedMemoryFromPeer = async () => 0;
+
+      await (agent as any).trySyncFromPeer(remotePeer);
+
+      expect(seenCalls.length).toBe(2);
+      expect(seenCalls[1]).toEqual(['new-private-cg']);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
   it('reports no-protocol peers in catchup diagnostics', async () => {
     const agent = await DKGAgent.create({
       name: 'RuntimeCatchupNoProtocolDiagnostics',

@@ -56,6 +56,21 @@ export const AGENT_CONTEXT_GRAPH = 'agent-context';
 export const CHAT_TURNS_ASSERTION = 'chat-turns';
 export const PROJECT_MEMORY_ASSERTION = 'memory';
 
+function buildDkgMemoryPromptSections(): string[] {
+  return [
+    'DKG memory rules:',
+    '- To inspect whether a project has data, check all three layers explicitly: `working-memory`, `shared-working-memory`, and `verified-memory`.',
+    '- If the user asks to share a private project with a friend, prefer the full join UX: generate an invite code first, then add the friend to the allowlist when you have their agent address.',
+    '- If you have both a peer ID and an agent address for a private-project share, do both automatically: return the invite code and add the participant.',
+    '- If you only have an agent address, explain that allowlisting is not the full UI join flow and ask for the peer ID if the user wants a paste-into-Join invite code.',
+    '- For `working-memory`, prefer the injected `current_agent_address` from the turn context when present.',
+    '- If `current_agent_address` is absent, use the local node\'s default `agent_address` fallback.',
+    '- Do not assume a libp2p peer ID is the correct WM identity unless the tool or graph naming proves it.',
+    '- If a WM read comes back empty but the user expects data, retry with alternate identity forms before concluding the project is empty: wallet/address form first, then DID form, then peer ID if needed.',
+    '- Do not claim a project is empty until you have exhausted WM identity variants and also checked SWM and VM.',
+  ];
+}
+
 const NS = {
   schema: 'http://schema.org/',
 };
@@ -611,6 +626,7 @@ export class DkgMemoryPlugin {
     }
 
     const capability: MemoryPluginCapability = {
+      promptBuilder: () => buildDkgMemoryPromptSections(),
       runtime: buildDkgMemoryRuntime(this.client, this.resolver, api.logger),
     };
     api.registerMemoryCapability(capability);

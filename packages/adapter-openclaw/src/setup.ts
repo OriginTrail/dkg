@@ -19,7 +19,7 @@
  * Every step is idempotent — re-running is safe.
  */
 
-import { execSync } from 'node:child_process';
+import { execSync, spawnSync } from 'node:child_process';
 import { accessSync, constants as fsConstants, copyFileSync, existsSync, readFileSync, realpathSync, writeFileSync, mkdirSync, rmdirSync, statSync, unlinkSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join, dirname, resolve } from 'node:path';
@@ -28,6 +28,7 @@ import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 import { requestFaucetFunding } from '@origintrail-official/dkg-core';
 import type { DkgOpenClawConfig } from './types.js';
+import { resolveDkgCli } from './resolve-dkg-cli.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -508,8 +509,20 @@ export async function startDaemon(apiPort: number): Promise<void> {
 
   log('Starting DKG daemon...');
   try {
-    // Use dkg start which handles the daemon lifecycle
-    execSync('dkg start', { stdio: 'inherit', timeout: 30_000 });
+    // Resolve the CLI entrypoint as an absolute path and spawn via
+    // process.execPath so we don't depend on `dkg` being on PATH — which
+    // `pnpm dkg openclaw setup` does not guarantee in a cloned monorepo.
+    const { node, cliPath } = resolveDkgCli();
+    const result = spawnSync(node, [cliPath, 'start'], {
+      stdio: 'inherit',
+      timeout: 30_000,
+    });
+    if (result.error) throw result.error;
+    if (result.status !== 0) {
+      throw new Error(
+        `dkg start exited with ${result.status ?? `signal ${result.signal}`}`,
+      );
+    }
   } catch (err: any) {
     throw new Error(`Failed to start DKG daemon: ${err.message}`);
   }

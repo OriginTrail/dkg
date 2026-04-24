@@ -50,7 +50,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
   let peersTried = 0;
   let dataSynced = 0;
   let sharedMemorySynced = 0;
-  let denied = false;
+  let deniedPeers = 0;
   let noProtocolPeers = 0;
 
   const diagnostics: NonNullable<CatchupJobResult['diagnostics']> = {
@@ -107,15 +107,8 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
   syncCapablePeers = syncCapable.length;
   peersTried = syncCapable.length;
 
-  // Isolate per-peer failures: if one peer's `syncDurable` or
-  // `syncSharedMemory` throws (timeout, reset, bad payload), we still
-  // want to aggregate what we got from the other peers — otherwise a
-  // single flaky peer in a 10-peer pool would fail
-  // `/api/context-graph/subscribe` outright. This mirrors the inline
-  // runner in `packages/agent/src/dkg-agent.ts`, which already wraps
-  // each peer with `.catch(emptyDurable)`. A bare `Promise.all` without
-  // the per-peer catch would reject on the first error and discard all
-  // the other peers' results. Codex tier-4j finding N24.
+  // Isolate per-peer failures: if one peer's sync steps throw, aggregate what we can
+  // from the other peers instead of failing the entire subscribe/catch-up immediately.
   const emptyDurable = () => ({
     insertedTriples: 0,
     fetchedMetaTriples: 0,
@@ -146,18 +139,15 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
   });
   const perPeerResults = await Promise.all(
     syncCapable.map(async (peerId) => {
-      const durable = await invoke<any>('syncDurable', peerId, request.contextGraphId).catch(
-        () => emptyDurable(),
-      );
+      const durable = await invoke<any>('syncDurable', peerId, request.contextGraphId).catch(() => emptyDurable());
       const shared = request.includeSharedMemory
-        ? await invoke<any>('syncSharedMemory', peerId, request.contextGraphId).catch(
-            () => emptyShared(),
-          )
+        ? await invoke<any>('syncSharedMemory', peerId, request.contextGraphId).catch(() => emptyShared())
         : null;
       return { durable, shared };
     }),
   );
   for (const { durable, shared } of perPeerResults) {
+    let peerDenied = false;
     dataSynced += durable.insertedTriples;
     diagnostics.durable.fetchedMetaTriples += durable.fetchedMetaTriples;
     diagnostics.durable.fetchedDataTriples += durable.fetchedDataTriples;
@@ -170,7 +160,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     diagnostics.durable.dataRejectedMissingMeta += durable.dataRejectedMissingMeta;
     diagnostics.durable.rejectedKcs += durable.rejectedKcs;
     diagnostics.durable.failedPeers += durable.failedPeers;
-    denied = denied || durable.deniedPhases > 0;
+    peerDenied = peerDenied || durable.deniedPhases > 0;
 
     if (shared) {
       sharedMemorySynced += shared.insertedTriples;
@@ -183,12 +173,23 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       diagnostics.sharedMemory.emptyResponses += shared.emptyResponses;
       diagnostics.sharedMemory.droppedDataTriples += shared.droppedDataTriples;
       diagnostics.sharedMemory.failedPeers += shared.failedPeers;
-      denied = denied || shared.deniedPhases > 0;
+      peerDenied = peerDenied || shared.deniedPhases > 0;
+    }
+
+    if (peerDenied) {
+      deniedPeers += 1;
     }
   }
 
   diagnostics.noProtocolPeers = noProtocolPeers;
   await invoke('finalizeCatchup', request.contextGraphId, dataSynced, sharedMemorySynced);
+
+  const servedByPeer =
+    dataSynced > 0 ||
+    sharedMemorySynced > 0 ||
+    diagnostics.durable.insertedMetaTriples > 0 ||
+    diagnostics.sharedMemory.insertedMetaTriples > 0 ||
+    diagnostics.durable.metaOnlyResponses > 0;
 
   return {
     connectedPeers: prepared.connectedPeers,
@@ -196,7 +197,8 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     peersTried,
     dataSynced,
     sharedMemorySynced,
-    denied,
+    denied: deniedPeers > 0 && !servedByPeer,
+    deniedPeers,
     diagnostics,
   };
 }

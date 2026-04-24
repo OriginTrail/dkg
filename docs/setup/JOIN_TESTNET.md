@@ -124,6 +124,36 @@ pnpm dkg start -f
 pnpm dkg start
 ```
 
+> **WSL2 users:** WSL2 suspends background processes when no terminal is attached and kills them when `wsl --shutdown` is run or Windows sleeps. If the Node UI (`http://127.0.0.1:9200/ui`) becomes unreachable after closing your terminal, the daemon has been suspended.
+>
+> **Quick fix — run in tmux:**
+> ```bash
+> tmux new-session -d -s dkg 'pnpm dkg start -f'
+> ```
+>
+> **Persistent fix — systemd user service** (requires WSL2 with systemd enabled; check with `wsl --version`):
+> ```bash
+> mkdir -p ~/.config/systemd/user
+> cat > ~/.config/systemd/user/dkg-node.service << 'EOF'
+> [Unit]
+> Description=OriginTrail DKG V10 Node
+> After=network-online.target
+>
+> [Service]
+> Type=simple
+> ExecStart=<path-to-dkg-binary> start -f
+> ExecStop=<path-to-dkg-binary> stop
+> Restart=on-failure
+> RestartSec=10
+>
+> [Install]
+> WantedBy=default.target
+> EOF
+> systemctl --user daemon-reload
+> systemctl --user enable --now dkg-node
+> ```
+> Replace `<path-to-dkg-binary>` with the output of `which dkg` (or `which pnpm` + the repo path for monorepo setups). With systemd, the node starts automatically on WSL boot and restarts on crash.
+
 You should see:
 
 ```
@@ -544,6 +574,11 @@ Without a `dataDir`, a fresh ephemeral identity is generated every time (useful 
 - Check logs: `cat ~/.dkg/daemon.log`
 - Kill stale daemon: check `~/.dkg/daemon.pid` and `kill <pid>`
 - Rebuild: `pnpm build` in the repo root
+
+**Node UI unreachable on WSL2 (`127.0.0.1 refused to connect`)**
+- WSL2 kills background processes when terminals close or Windows sleeps
+- Restart the daemon: `pnpm dkg start` (or `dkg start` for global install)
+- For persistent operation: use tmux or install as a systemd user service (see [Start](#start) section above)
 
 **Messages not delivering**
 - Both nodes must be online simultaneously (no offline message queue yet)

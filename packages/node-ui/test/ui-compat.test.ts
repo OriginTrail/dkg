@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { readDaemonSources } from './helpers/read-cli-daemon';
 
 const UI_DIR = resolve(__dirname, '..', 'src', 'ui');
 const CLI_DIR = resolve(__dirname, '..', '..', 'cli', 'src');
@@ -212,7 +213,7 @@ describe('iframe app hosting', () => {
 });
 
 describe('daemon.ts app token injection', () => {
-  const daemon = readFileSync(resolve(CLI_DIR, 'daemon.ts'), 'utf-8');
+  const daemon = readDaemonSources();
 
   it('does not use req.socket.remoteAddress for localhost/auth detection (rate-limit use is OK)', () => {
     const authSection = daemon.slice(daemon.indexOf('boundToLoopback'), daemon.indexOf('boundToLoopback') + 500);
@@ -416,7 +417,7 @@ describe('dashboard import target uses explicit selection', () => {
 });
 
 describe('file serving security (daemon)', () => {
-  const daemon = readFileSync(resolve(CLI_DIR, 'daemon.ts'), 'utf-8');
+  const daemon = readDaemonSources();
 
   it('uses SAFE_PREVIEW_TYPES allowlist for content types', () => {
     expect(daemon).toContain('SAFE_PREVIEW_TYPES');

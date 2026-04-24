@@ -75,6 +75,7 @@ describe('Sub-graph gossip replication (2 nodes)', () => {
     await sleep(2000);
 
     await nodeA.createContextGraph({ id: CG_ID, name: 'Sub-graph Gossip E2E' });
+    await nodeA.registerContextGraph(CG_ID);
     nodeA.subscribeToContextGraph(CG_ID);
     nodeB.subscribeToContextGraph(CG_ID);
     await sleep(1500);

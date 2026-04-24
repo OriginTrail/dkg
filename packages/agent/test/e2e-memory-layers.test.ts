@@ -129,6 +129,7 @@ describe('WM → SWM → VM pipeline (single agent)', () => {
   it('promotes assertion to SWM, then publishes SWM to verified memory', async () => {
     const agent = await createAgent('PipelineBot');
     await agent.createContextGraph({ id: CG_ID, name: 'Pipeline E2E' });
+    await agent.registerContextGraph(CG_ID);
 
     // Step 1: Write to working memory
     await agent.assertion.create(CG_ID, 'pipeline');
@@ -167,6 +168,7 @@ describe('WM → SWM → VM pipeline (single agent)', () => {
   it('WM is empty after promote; SWM clear after publishFromSWM with flag', async () => {
     const agent = await createAgent('CleanupBot');
     await agent.createContextGraph({ id: CG_ID, name: 'Cleanup E2E' });
+    await agent.registerContextGraph(CG_ID);
 
     await agent.assertion.create(CG_ID, 'cleanup');
     await agent.assertion.write(CG_ID, 'cleanup', [
@@ -240,6 +242,7 @@ describe('WM → SWM gossip → VM (2 nodes)', () => {
     await sleep(2000);
 
     await nodeA.createContextGraph({ id: CG_ID, name: 'Two-Node Memory Layers' });
+    await nodeA.registerContextGraph(CG_ID);
     nodeA.subscribeToContextGraph(CG_ID);
     nodeB.subscribeToContextGraph(CG_ID);
     await sleep(1500);

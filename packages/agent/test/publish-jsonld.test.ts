@@ -48,6 +48,7 @@ describe('publishJsonLd', () => {
   it('bare JSON-LD doc defaults to private quads (with synthetic public anchor)', async () => {
     const { agent, store } = await createAgent('BarePrivateBot');
     await agent.createContextGraph({ id: 'bare-priv', name: 'BP', description: '' });
+    await agent.registerContextGraph('bare-priv');
 
     const result = await agent.publish('bare-priv', {
       '@context': 'http://schema.org/',
@@ -69,6 +70,7 @@ describe('publishJsonLd', () => {
   it('envelope { public } puts quads in public set', async () => {
     const { agent, store } = await createAgent('PubEnvBot');
     await agent.createContextGraph({ id: 'pub-env', name: 'PE', description: '' });
+    await agent.registerContextGraph('pub-env');
 
     const result = await agent.publish('pub-env', {
       public: {
@@ -92,6 +94,7 @@ describe('publishJsonLd', () => {
   it('envelope { public, private } splits quads correctly', async () => {
     const { agent, store } = await createAgent('SplitBot');
     await agent.createContextGraph({ id: 'split-test', name: 'Split', description: '' });
+    await agent.registerContextGraph('split-test');
 
     const result = await agent.publish('split-test', {
       public: {
@@ -125,6 +128,7 @@ describe('publishJsonLd', () => {
   it('private-only envelope generates synthetic public anchor', async () => {
     const { agent, store } = await createAgent('PrivOnlyBot');
     await agent.createContextGraph({ id: 'priv-only', name: 'PO', description: '' });
+    await agent.registerContextGraph('priv-only');
 
     const result = await agent.publish('priv-only', {
       private: {
@@ -184,6 +188,7 @@ describe('publishJsonLd', () => {
   it('existing Quad[] publish still works unchanged', async () => {
     const { agent } = await createAgent('QuadBot');
     await agent.createContextGraph({ id: 'quad-test', name: 'QT', description: '' });
+    await agent.registerContextGraph('quad-test');
 
     const result = await agent.publish('quad-test', [
       { subject: 'did:dkg:test:X', predicate: 'http://schema.org/name', object: '"X"', graph: '' },
