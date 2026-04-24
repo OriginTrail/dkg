@@ -9,7 +9,7 @@ name: Continuous NPM Publish
 
 on:
   push:
-    branches: [v10-rc]  # ← change this when the release branch moves
+    branches: [main]  # ← change this when the release branch moves
 
 permissions:
   contents: read

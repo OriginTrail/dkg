@@ -15,7 +15,7 @@ import yaml from 'js-yaml';
 import {
   loadConfig, saveConfig, configExists, configPath,
   readPid, readApiPort, isProcessRunning, dkgDir, logPath, ensureDkgDir,
-  loadNetworkConfig, loadProjectConfig, releasesDir, activeSlot, swapSlot,
+  loadNetworkConfig, loadProjectConfig, resolveAutoUpdateConfig, releasesDir, activeSlot, swapSlot,
   slotEntryPoint, isStandaloneInstall,
   resolveContextGraphs, resolveNetworkDefaultContextGraphs,
 } from './config.js';
@@ -288,8 +288,16 @@ program
 
     let autoUpdate = existing.autoUpdate;
     if (enableAutoUpdate) {
-      const defaultRepo = existing.autoUpdate?.repo ?? network?.autoUpdate?.repo;
-      const defaultBranch = existing.autoUpdate?.branch ?? network?.autoUpdate?.branch ?? 'main';
+      // Effective upstream defaults — what the node would use if nothing were
+      // persisted in ~/.dkg/config.json. Network config beats project.json.
+      // We persist repo/branch only when they differ from these, so future
+      // changes to the shipped network or project config propagate on the
+      // next daemon run without requiring a config rewrite.
+      const proj = loadProjectConfig();
+      const effectiveRepo = network?.autoUpdate?.repo ?? proj.repo;
+      const effectiveBranch = network?.autoUpdate?.branch ?? proj.defaultBranch;
+      const defaultRepo = existing.autoUpdate?.repo ?? effectiveRepo;
+      const defaultBranch = existing.autoUpdate?.branch ?? effectiveBranch;
       const defaultAllowPrerelease = existing.autoUpdate?.allowPrerelease ?? network?.autoUpdate?.allowPrerelease ?? true;
       const defaultSshKeyPath = existing.autoUpdate?.sshKeyPath ?? network?.autoUpdate?.sshKeyPath ?? '';
       const defaultInterval = existing.autoUpdate?.checkIntervalMinutes ?? network?.autoUpdate?.checkIntervalMinutes ?? 5;
@@ -303,8 +311,8 @@ program
       const interval = parseInt(await ask('Check interval (minutes)', String(defaultInterval)), 10);
       autoUpdate = {
         enabled: true,
-        repo,
-        branch,
+        ...(repo && repo !== effectiveRepo ? { repo } : {}),
+        ...(branch && branch !== effectiveBranch ? { branch } : {}),
         allowPrerelease,
         sshKeyPath: sshKeyPath || undefined,
         checkIntervalMinutes: interval,
@@ -372,15 +380,18 @@ program
     console.log(`  context graphs: ${contextGraphs.length ? contextGraphs.join(', ') : '(none)'}`);
     console.log(`  apiPort:    ${config.apiPort}`);
     console.log(`  auth:       ${enableAuth ? 'enabled (token in ~/.dkg/auth.token)' : 'disabled'}`);
-    console.log(
-      `  autoUpdate: ${
-        config.autoUpdate?.enabled
-          ? `${config.autoUpdate.repo}@${config.autoUpdate.branch}` +
-            `${config.autoUpdate.allowPrerelease ? ' (pre-release allowed)' : ''}` +
-            `${config.autoUpdate.sshKeyPath ? ` (ssh key: ${config.autoUpdate.sshKeyPath})` : ''}`
-          : 'disabled'
-      }`,
-    );
+    {
+      const resolved = resolveAutoUpdateConfig(config, network);
+      console.log(
+        `  autoUpdate: ${
+          resolved
+            ? `${resolved.repo}@${resolved.branch}` +
+              `${resolved.allowPrerelease ? ' (pre-release allowed)' : ''}` +
+              `${resolved.sshKeyPath ? ` (ssh key: ${resolved.sshKeyPath})` : ''}`
+            : 'disabled'
+        }`,
+      );
+    }
     console.log(`  chain:      ${config.chain ? `${config.chain.rpcUrl} (hub: ${config.chain.hubAddress?.slice(0, 10)}...)` : '(not configured)'}`);
     if (network) {
       console.log(`  network:    ${network.networkName}`);
@@ -2794,14 +2805,18 @@ program
   .action(async (versionOrRef: string | undefined, opts: ActionOpts) => {
     const config = await loadConfig();
     const net = await loadNetworkConfig();
-    const proj = loadProjectConfig();
-    const au = config.autoUpdate ?? net?.autoUpdate ?? {
-      enabled: true,
-      repo: proj.repo,
-      branch: proj.defaultBranch,
-      allowPrerelease: true,
-      checkIntervalMinutes: 30,
-    };
+    // Resolve field-by-field across local/network/project so defaults flow
+    // through even when the local config omits repo/branch.
+    const au = resolveAutoUpdateConfig(config, net) ?? (() => {
+      const proj = loadProjectConfig();
+      return {
+        enabled: true,
+        repo: proj.repo,
+        branch: proj.defaultBranch,
+        allowPrerelease: true,
+        checkIntervalMinutes: 30,
+      };
+    })();
     const standalone = isStandaloneInstall();
     const allowPre = opts.allowPrerelease === true ? true : (au.allowPrerelease ?? true);
 

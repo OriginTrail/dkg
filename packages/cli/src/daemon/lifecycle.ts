@@ -69,6 +69,7 @@ import {
   loadConfig,
   saveConfig,
   loadNetworkConfig,
+  resolveAutoUpdateConfig,
   dkgDir,
   writePid,
   removePid,
@@ -711,23 +712,27 @@ export async function runDaemonInner(
   }, PING_INTERVAL_MS);
   if (pingTimer.unref) pingTimer.unref();
 
-  // Version check + auto-update
+  // Version check + auto-update.
+  // The resolver merges repo/branch/interval field-by-field across
+  // ~/.dkg/config.json → network/<env>.json → project.json, so defaults
+  // in the shipped configs take effect even when the local config
+  // omits the field (the common case after `dkg init` with default answers).
   let updateInterval: ReturnType<typeof setInterval> | null = null;
-  const au = config.autoUpdate;
+  const au = resolveAutoUpdateConfig(config, network);
   const standalone = isStandaloneInstall();
-  const hasGitConfig = !!(au?.repo && au?.branch);
+  const hasGitConfig = !!au;
 
   if (standalone || hasGitConfig) {
-    const checkIntervalMs = (au?.checkIntervalMinutes || 30) * 60_000;
+    const checkIntervalMs = (au?.checkIntervalMinutes ?? 30) * 60_000;
     const allowPre = au?.allowPrerelease ?? true;
 
     if (standalone) {
       log(
-        `Auto-update (npm): ${au?.enabled !== false ? "enabled" : "disabled — version check only"} (every ${au?.checkIntervalMinutes ?? 30}min)`,
+        `Auto-update (npm): ${au ? "enabled" : "disabled — version check only"} (every ${au?.checkIntervalMinutes ?? 30}min)`,
       );
-    } else if (hasGitConfig) {
+    } else if (au) {
       log(
-        `Auto-update ${au!.enabled ? "enabled" : "disabled — version check only"}: ${au!.repo}@${au!.branch} (every ${au!.checkIntervalMinutes}min)`,
+        `Auto-update enabled: ${au.repo}@${au.branch} (every ${au.checkIntervalMinutes}min)`,
       );
     }
 
@@ -747,8 +752,8 @@ export async function runDaemonInner(
           updateAvailable = true;
           targetNpmVersion = npmStatus.version;
         }
-      } else if (hasGitConfig) {
-        const commitStatus = await checkForNewCommitWithStatus(au!, log);
+      } else if (au) {
+        const commitStatus = await checkForNewCommitWithStatus(au, log);
         if (commitStatus.status !== "error") {
           daemonState.lastUpdateCheck.upToDate = commitStatus.status === "up-to-date";
           daemonState.lastUpdateCheck.checkedAt = Date.now();
@@ -758,14 +763,14 @@ export async function runDaemonInner(
         updateAvailable = commitStatus.status === "available";
       }
 
-      if (au?.enabled !== false && updateAvailable) {
+      if (au && updateAvailable) {
         daemonState.isUpdating = true;
         let updated = false;
         if (standalone && targetNpmVersion) {
           const status = await performNpmUpdate(targetNpmVersion, log);
           updated = status === "updated";
-        } else if (hasGitConfig) {
-          updated = await checkForUpdate(au!, log);
+        } else {
+          updated = await checkForUpdate(au, log);
         }
         daemonState.isUpdating = false;
         if (updated) {

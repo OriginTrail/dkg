@@ -48,7 +48,7 @@ function loadDefaultReleaseRepo() {
       if (proj.repo) return proj.repo;
     } catch { /* try next */ }
   }
-  return 'OriginTrail/dkg-v9';
+  return 'OriginTrail/dkg';
 }
 export const DEFAULT_RELEASE_REPO = loadDefaultReleaseRepo();
 const DEFAULT_PACKAGE_DIR = resolve(__dirname, '..');

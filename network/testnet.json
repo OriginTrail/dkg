@@ -12,8 +12,8 @@
   "defaultNodeRole": "edge",
   "autoUpdate": {
     "enabled": true,
-    "repo": "OriginTrail/dkg-v9",
-    "branch": "v10-rc",
+    "repo": "OriginTrail/dkg",
+    "branch": "main",
     "checkIntervalMinutes": 5
   },
   "chain": {
