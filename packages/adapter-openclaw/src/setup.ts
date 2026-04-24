@@ -5,10 +5,12 @@
  *  1. Discover OpenClaw workspace and agent name
  *  2. Write ~/.dkg/config.json with testnet defaults
  *  3. Start the DKG daemon
- *  4. Merge adapter plugin into ~/.openclaw/openclaw.json (including
- *     plugins.entries.adapter-openclaw.config with feature flags)
+ *  4. Read wallets and fund the first three via the testnet faucet
+ *     (skippable with `--no-fund`; non-fatal on failure)
  *  5. Copy the canonical DKG node skill into the OpenClaw workspace
- *  6. Verify setup
+ *  6. Merge adapter plugin into ~/.openclaw/openclaw.json (including
+ *     plugins.entries.adapter-openclaw.config with feature flags)
+ *  7. Verify setup
  *
  * Every step is idempotent — re-running is safe.
  */
@@ -20,6 +22,7 @@ import { join, dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
+import { requestFaucetFunding } from '@origintrail-official/dkg-core';
 import type { DkgOpenClawConfig } from './types.js';
 
 // ---------------------------------------------------------------------------
@@ -33,6 +36,13 @@ export interface SetupOptions {
   verify?: boolean;
   start?: boolean;
   dryRun?: boolean;
+  /**
+   * Fund the first three node wallets via the testnet faucet on first setup.
+   * Defaults to `true`; the adapter treats `fund === false` (set by
+   * `--no-fund`) as the only opt-out. Faucet failures are non-fatal — a
+   * failed call logs manual `curl` instructions and setup continues.
+   */
+  fund?: boolean;
   /**
    * Abort signal for cooperative cancellation. Checked at each step boundary
    * so an aborted job stops between steps without further filesystem writes
@@ -61,6 +71,10 @@ interface NetworkConfig {
     rpcUrl: string;
     hubAddress: string;
     chainId: string;
+  };
+  faucet?: {
+    url: string;
+    mode: string;
   };
 }
 
@@ -492,7 +506,63 @@ function isProcessRunning(pid: number): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Step 5: Merge adapter into openclaw.json
+// Step 5: Read wallets and fund via testnet faucet
+// ---------------------------------------------------------------------------
+
+/**
+ * Read the wallet addresses the daemon has written to `~/.dkg/wallets.json`.
+ *
+ * Returns an empty list (with a warning) when the file is missing or
+ * malformed. `runSetup` retries a few times after daemon start because the
+ * daemon writes `wallets.json` asynchronously and may not have flushed it
+ * by the time the health check passes.
+ */
+export function readWallets(): string[] {
+  const walletsPath = join(dkgDir(), 'wallets.json');
+  if (!existsSync(walletsPath)) {
+    warn('wallets.json not found — daemon may not have started yet');
+    return [];
+  }
+
+  let raw: any;
+  try {
+    raw = JSON.parse(readFileSync(walletsPath, 'utf-8'));
+  } catch {
+    warn('wallets.json is malformed or still being written — skipping');
+    return [];
+  }
+  // The daemon writes { wallets: [{ address, privateKey }] }.
+  // Handle this shape first, then fall back to other formats.
+  const walletList: any[] = Array.isArray(raw?.wallets) ? raw.wallets
+    : Array.isArray(raw) ? raw
+    : [];
+  const addresses: string[] = [];
+  for (const w of walletList) {
+    if (w?.address) addresses.push(w.address);
+  }
+
+  if (addresses.length) {
+    log(`Wallets: ${addresses.join(', ')}`);
+  }
+  return addresses;
+}
+
+/**
+ * Print a ready-to-paste `curl` block for manual faucet funding. Called
+ * only on faucet failure; the caller is expected to continue (funding is
+ * best-effort / non-fatal).
+ */
+export function logManualFundingInstructions(addresses: string[], faucetUrl: string, mode: string): void {
+  console.log('\nTo fund wallets manually, run:');
+  console.log(`  curl -X POST "${faucetUrl}" \\`);
+  console.log(`    -H "Content-Type: application/json" \\`);
+  console.log(`    -H "Idempotency-Key: $(date +%s)" \\`);
+  console.log(`    --data-raw '{"mode":"${mode}","wallets":${JSON.stringify(addresses)}}'`);
+  console.log('');
+}
+
+// ---------------------------------------------------------------------------
+// Step 7: Merge adapter into openclaw.json
 // ---------------------------------------------------------------------------
 
 const ADAPTER_PLUGIN_ID = 'adapter-openclaw';
@@ -1196,7 +1266,7 @@ export function verifySkillRemoved(installedWorkspace: string): string | null {
 }
 
 // ---------------------------------------------------------------------------
-// Step 7: Verify
+// Step 8: Verify
 // ---------------------------------------------------------------------------
 
 export async function verifySetup(
@@ -1385,7 +1455,55 @@ export async function runSetup(options: SetupOptions): Promise<void> {
     log('Skipping daemon start (--no-start)');
   }
 
-  // Step 5: Merge adapter into openclaw.json
+  // Step 5: Read wallets and fund via testnet faucet.
+  // Delegates to the shared `requestFaucetFunding` in `@origintrail-official/dkg-core`,
+  // which is the same implementation the `dkg init` CLI path uses. The
+  // faucet URL and mode come from `network.faucet.*`; a missing
+  // `network.faucet.url` logs and skips (matches the CLI parity decision).
+  // Faucet failures (HTTP error, thrown exception, `success === false`) log
+  // a manual `curl` block and continue — setup is non-fatal on funding.
+  // Wallet read retries 5×1s because the daemon writes `wallets.json`
+  // asynchronously after the health check passes.
+  throwIfAborted();
+  const shouldFund = options.fund !== false;
+  if (!dryRun && shouldFund) {
+    const faucetUrl = network?.faucet?.url;
+    const faucetMode = network?.faucet?.mode;
+    if (!faucetUrl || !faucetMode) {
+      log('Skipping wallet funding (no faucet configured in network config)');
+    } else {
+      let walletAddresses = readWallets();
+      if (!walletAddresses.length && shouldStart) {
+        for (let i = 0; i < 5 && !walletAddresses.length; i++) {
+          await sleep(1_000);
+          walletAddresses = readWallets();
+        }
+      }
+      if (walletAddresses.length > 0) {
+        log('Funding wallets via testnet faucet...');
+        try {
+          const result = await requestFaucetFunding(faucetUrl, faucetMode, walletAddresses, agentName);
+          if (result.success) {
+            log(`Funded: ${result.funded.join(', ')}`);
+          } else {
+            warn(`Faucet request did not fund any wallets${result.error ? ` (${result.error})` : ''}`);
+            logManualFundingInstructions(walletAddresses, faucetUrl, faucetMode);
+          }
+        } catch (err: any) {
+          warn(`Faucet call failed: ${err?.message ?? String(err)}`);
+          logManualFundingInstructions(walletAddresses, faucetUrl, faucetMode);
+        }
+      } else {
+        warn('No wallet addresses available to fund (daemon did not produce wallets.json)');
+      }
+    }
+  } else if (!dryRun && !shouldFund) {
+    log('Skipping wallet funding (--no-fund)');
+  } else {
+    log('[dry-run] Would read wallets and fund via faucet');
+  }
+
+  // Steps 6–7: Install canonical skill + merge adapter into openclaw.json.
   // Use the script's own location as the adapter path — always correct for
   // the currently running code. Warn if the path looks ephemeral (npx cache).
   throwIfAborted();
@@ -1407,18 +1525,18 @@ export async function runSetup(options: SetupOptions): Promise<void> {
   // Codex PR #234 R3-3 / R4-2 / R5-2 / R5-3 / R6-2: workspace migration and
   // preflight. If a prior install targeted a different workspace (e.g.
   // `dkg openclaw setup --workspace /dir-a` then `--workspace /dir-b`),
-  // step 6b below retires the old SKILL.md — but only AFTER the new install
+  // step 7b below retires the old SKILL.md — but only AFTER the new install
   // has fully landed (install-new → merge → cleanup-old). Canary-deploy
   // ordering: if install-new throws, openclaw.json still points at the
   // OLD workspace, which IS the real install, so a retry sees OLD as the
   // prior and migrates normally (R5-3).
   //
-  // R6-2 + R8-2 preflight: before step 5 writes SKILL.md to disk, validate
-  // that openclaw.json is usable by `mergeOpenClawConfig` at step 6 —
+  // R6-2 + R8-2 preflight: before step 6 writes SKILL.md to disk, validate
+  // that openclaw.json is usable by `mergeOpenClawConfig` at step 7 —
   // exists, parses as JSON, is writable, and doesn't have the adapter
   // mis-wired into `plugins.slots.contextEngine` (wrong-slot guard). If any
   // check fails we throw BEFORE `installCanonicalNodeSkill` runs, so step
-  // 6's failure on a deterministic, statically-checkable condition can
+  // 7's failure on a deterministic, statically-checkable condition can
   // never leave an orphaned SKILL.md on disk. The parsed config is reused
   // for migration discovery.
   //
@@ -1454,7 +1572,7 @@ export async function runSetup(options: SetupOptions): Promise<void> {
     // R11-3: `mergeOpenClawConfig` creates `openclaw.json.bak.<ts>` as a
     // sibling of the config file. A writable config file inside a read-only
     // directory would pass the file-level check above and then fail at
-    // backup creation AFTER step 5 has already written SKILL.md — the exact
+    // backup creation AFTER step 6 has already written SKILL.md — the exact
     // orphan scenario R6-2 was designed to prevent. Check the directory
     // too.
     const configDir = dirname(effectiveConfigPathForMigration);
@@ -1468,13 +1586,13 @@ export async function runSetup(options: SetupOptions): Promise<void> {
 
     // R8-2: also pre-validate the wrong-slot guard `mergeOpenClawConfig`
     // runs at setup.ts:646. Without this, a misconfigured
-    // `plugins.slots.contextEngine === "adapter-openclaw"` would let step 5
-    // write SKILL.md to disk before step 6 threw. Running the same check
+    // `plugins.slots.contextEngine === "adapter-openclaw"` would let step 6
+    // write SKILL.md to disk before step 7 threw. Running the same check
     // against `rawExisting` here fails fast with no disk mutation. Note:
     // unpreventable failure modes (disk-full on write, backup rename
-    // failure, abort between step 5 and 6) remain covered by the canary
+    // failure, abort between step 6 and 7) remain covered by the canary
     // ordering + `openclaw-entry.mjs` sync-on-load self-heal — the worst
-    // case is a retry where step 6b's migration cleans up any orphan.
+    // case is a retry where step 7b's migration cleans up any orphan.
     if (rawExisting?.plugins?.slots?.contextEngine === ADAPTER_PLUGIN_ID) {
       throw new Error(
         `Refusing to install: plugins.slots.contextEngine is set to "${ADAPTER_PLUGIN_ID}" ` +
@@ -1501,10 +1619,10 @@ export async function runSetup(options: SetupOptions): Promise<void> {
     }
   }
 
-  // Step 5: Install the canonical DKG node skill into the OpenClaw workspace
+  // Step 6: Install the canonical DKG node skill into the OpenClaw workspace
   // FIRST (canary). If this throws, openclaw.json is untouched and still
   // points at whatever the prior install was — user keeps a working install.
-  // Preflight above guarantees step 6 won't then fail on an easily-detectable
+  // Preflight above guarantees step 7 won't then fail on an easily-detectable
   // config-level problem (missing / invalid-JSON / non-writable), so the
   // install→merge sequence is robust against the Codex R6-2 failure modes.
   throwIfAborted();
@@ -1514,7 +1632,7 @@ export async function runSetup(options: SetupOptions): Promise<void> {
     log('[dry-run] Would copy the canonical DKG node skill into the OpenClaw workspace');
   }
 
-  // Step 6: Merge adapter wiring into openclaw.json. Flips `entry.config.installedWorkspace`
+  // Step 7: Merge adapter wiring into openclaw.json. Flips `entry.config.installedWorkspace`
   // to the new workspace — safe now that the new SKILL.md is on disk (R5-3).
   throwIfAborted();
   if (!dryRun) {
@@ -1525,7 +1643,7 @@ export async function runSetup(options: SetupOptions): Promise<void> {
     log(`[dry-run] Would merge adapter (${resolvedAdapterPath}) into openclaw.json`);
   }
 
-  // Step 6b: Workspace-migration cleanup — runs AFTER install-new + merge.
+  // Step 7b: Workspace-migration cleanup — runs AFTER install-new + merge.
   // Strictly-additive install sequence (R4-2): if any earlier step throws,
   // the prior install's SKILL.md is still on disk, which is strictly better
   // than leaving the user with no install at all. A failure here still
@@ -1576,7 +1694,7 @@ export async function runSetup(options: SetupOptions): Promise<void> {
   // after config changes, but manual restart remains the safe fallback.
   log('Reload the OpenClaw gateway if it does not auto-restart after the config update');
 
-  // Step 7: Verify
+  // Step 8: Verify
   throwIfAborted();
   if (shouldVerify && !dryRun) {
     await verifySetup(effectivePort, { openclawConfigPath });
