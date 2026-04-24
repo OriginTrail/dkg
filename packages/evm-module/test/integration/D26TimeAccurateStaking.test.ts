@@ -64,8 +64,6 @@ describe('@integration D26 — time-accurate staking accounting', () => {
     // Hub stack including Chronos, which the RSS constructor needs.
     await hre.deployments.fixture([
       'Token',
-      'ParanetKnowledgeCollectionsRegistry',
-      'ParanetKnowledgeMinersRegistry',
       'KnowledgeCollectionStorage',
       'KnowledgeCollection',
       'RandomSamplingStorage',

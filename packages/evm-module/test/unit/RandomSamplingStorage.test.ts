@@ -88,8 +88,6 @@ describe('@unit RandomSamplingStorage', function () {
   async function deployRandomSamplingFixture(): Promise<RandomStorageFixture> {
     await hre.deployments.fixture([
       'Token',
-      'ParanetKnowledgeCollectionsRegistry',
-      'ParanetKnowledgeMinersRegistry',
       'KnowledgeCollectionStorage',
       'KnowledgeCollection',
       'RandomSamplingStorage',

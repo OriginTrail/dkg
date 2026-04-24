@@ -53,8 +53,6 @@ describe('@unit v10 RandomSampling multisig audit (E-3)', () => {
   async function deployFixture(): Promise<Fixture> {
     await hre.deployments.fixture([
       'Token',
-      'ParanetKnowledgeCollectionsRegistry',
-      'ParanetKnowledgeMinersRegistry',
       'KnowledgeCollectionStorage',
       'KnowledgeCollection',
       'RandomSamplingStorage',

@@ -21,8 +21,6 @@ import {
   Hub,
   Token,
   KnowledgeCollection,
-  ParanetKnowledgeMinersRegistry,
-  ParanetKnowledgeCollectionsRegistry,
   Staking,
   ShardingTableStorage,
   ShardingTable,
@@ -75,8 +73,6 @@ type RandomSamplingFixture = {
   Hub: Hub;
   KnowledgeCollection: KnowledgeCollection;
   Token: Token;
-  ParanetKnowledgeMinersRegistry: ParanetKnowledgeMinersRegistry;
-  ParanetKnowledgeCollectionsRegistry: ParanetKnowledgeCollectionsRegistry;
   Staking: Staking;
   ShardingTableStorage: ShardingTableStorage;
   ShardingTable: ShardingTable;
@@ -215,8 +211,6 @@ describe.skip('@integration RandomSampling (OBSOLETE: V8 stake pipeline)', () =>
   let ShardingTableStorage: ShardingTableStorage;
   let ShardingTable: ShardingTable;
   let ParametersStorage: ParametersStorage;
-  let ParanetKnowledgeMinersRegistry: ParanetKnowledgeMinersRegistry;
-  let ParanetKnowledgeCollectionsRegistry: ParanetKnowledgeCollectionsRegistry;
   let ContextGraphStorage: ContextGraphStorage;
   let ContextGraphValueStorage: ContextGraphValueStorage;
   // Phase 10's value-weighted picker requires every challengeable KC to live
@@ -244,8 +238,6 @@ describe.skip('@integration RandomSampling (OBSOLETE: V8 stake pipeline)', () =>
       'ContextGraphValueStorage',
       'ContextGraphStorage',
       'RandomSampling',
-      'ParanetKnowledgeMinersRegistry',
-      'ParanetKnowledgeCollectionsRegistry',
       'Staking',
       'Ask',
     ]);
@@ -267,14 +259,6 @@ describe.skip('@integration RandomSampling (OBSOLETE: V8 stake pipeline)', () =>
       'KnowledgeCollection',
     );
     Token = await hre.ethers.getContract<Token>('Token');
-    ParanetKnowledgeMinersRegistry =
-      await hre.ethers.getContract<ParanetKnowledgeMinersRegistry>(
-        'ParanetKnowledgeMinersRegistry',
-      );
-    ParanetKnowledgeCollectionsRegistry =
-      await hre.ethers.getContract<ParanetKnowledgeCollectionsRegistry>(
-        'ParanetKnowledgeCollectionsRegistry',
-      );
     IdentityStorage =
       await hre.ethers.getContract<IdentityStorage>('IdentityStorage');
     StakingStorage =
@@ -334,8 +318,6 @@ describe.skip('@integration RandomSampling (OBSOLETE: V8 stake pipeline)', () =>
       Hub,
       KnowledgeCollection,
       Token,
-      ParanetKnowledgeMinersRegistry,
-      ParanetKnowledgeCollectionsRegistry,
       Staking,
       ShardingTableStorage,
       ShardingTable,
@@ -363,8 +345,6 @@ describe.skip('@integration RandomSampling (OBSOLETE: V8 stake pipeline)', () =>
       Hub,
       RandomSampling,
       RandomSamplingStorage,
-      ParanetKnowledgeMinersRegistry,
-      ParanetKnowledgeCollectionsRegistry,
       Staking,
       ShardingTableStorage,
       ShardingTable,

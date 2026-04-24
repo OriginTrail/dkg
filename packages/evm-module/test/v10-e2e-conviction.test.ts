@@ -66,9 +66,6 @@ async function deployE2EFixture(): Promise<E2EFixture> {
     'DelegatorsInfo',
     'KnowledgeAssetsV10',
     'PublishingConvictionAccount',
-    'ParanetKnowledgeCollectionsRegistry',
-    'ParanetKnowledgeMinersRegistry',
-    'ParanetsRegistry',
     // V10 Phase 8 stack — required by the new `KnowledgeAssetsV10.initialize()`
     // fail-fast Hub lookups (commit e89ecb75). Flow 3 (V10 publish via NFT)
     // depends on the full V10 stack being deployed in the same fixture.
