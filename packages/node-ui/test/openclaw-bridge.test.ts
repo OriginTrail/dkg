@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { readDaemonSources } from './helpers/read-cli-daemon';
 
 const UI_DIR = resolve(__dirname, '..', 'src', 'ui');
 const CLI_DIR = resolve(__dirname, '..', '..', 'cli', 'src');
@@ -9,7 +10,11 @@ function readUiFile(rel: string): string {
   return readFileSync(resolve(UI_DIR, rel), 'utf-8');
 }
 
+// Sub-module sources (daemon.ts was split into daemon/*.ts + daemon/routes/*.ts in PR #258/#259).
+// `readCliFile('daemon.ts')` callers below go through `readDaemonSources()` to preserve the
+// pre-split "does this pattern exist in the daemon?" semantics without coupling to the layout.
 function readCliFile(rel: string): string {
+  if (rel === 'daemon.ts') return readDaemonSources();
   return readFileSync(resolve(CLI_DIR, rel), 'utf-8');
 }
 
