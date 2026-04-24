@@ -10,10 +10,6 @@
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
     },
-    "./setup": {
-      "import": "./dist/setup-command.js",
-      "types": "./dist/setup-command.d.ts"
-    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -30,12 +26,8 @@
     "test:coverage": "vitest run --coverage --passWithNoTests",
     "clean": "node -e \"const fs=require('fs'); for (const p of ['dist','tsconfig.tsbuildinfo']) fs.rmSync(p,{recursive:true,force:true});\""
   },
-  "bin": {
-    "dkg-openclaw": "./dist/setup-cli.js"
-  },
   "dependencies": {
-    "@origintrail-official/dkg-core": "workspace:*",
-    "commander": "^13"
+    "@origintrail-official/dkg-core": "workspace:*"
   },
   "openclaw": {
     "extensions": [

@@ -124,7 +124,7 @@ export interface SessionGraphDeltaResult {
   triples: Array<{ subject: string; predicate: string; object: string }>;
 }
 
-export const IMPORT_SOURCES = ['claude', 'chatgpt', 'gemini', 'other'] as const;
+const IMPORT_SOURCES = ['claude', 'chatgpt', 'gemini', 'other'] as const;
 export type ImportSource = (typeof IMPORT_SOURCES)[number];
 
 export interface ImportResultQuad {
@@ -161,8 +161,8 @@ export interface ImportResult {
  * extraction). v1 of the openclaw-dkg-primary-memory work intentionally
  * defers that migration; follow-up work tracks it.
  */
-export const AGENT_CONTEXT_GRAPH = 'agent-context';
-export const CHAT_TURNS_ASSERTION = 'chat-turns';
+const AGENT_CONTEXT_GRAPH = 'agent-context';
+const CHAT_TURNS_ASSERTION = 'chat-turns';
 const OPENCLAW_LOCAL_SESSION_ID = 'openclaw:dkg-ui';
 
 const CHAT_NS = 'urn:dkg:chat:';

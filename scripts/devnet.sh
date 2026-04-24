@@ -3,15 +3,23 @@
 # Local DKG Devnet — spins up a Hardhat chain + N DKG nodes for local testing.
 #
 # Usage:
-#   ./scripts/devnet.sh start [N]   Start devnet with N nodes (default 6)
-#   ./scripts/devnet.sh stop         Stop all devnet processes
-#   ./scripts/devnet.sh status       Show running devnet processes
-#   ./scripts/devnet.sh logs [N]     Tail logs for node N (1-based)
-#   ./scripts/devnet.sh clean        Stop and wipe all devnet data
+#   ./scripts/devnet.sh start [N]      Start devnet with N nodes (default 6)
+#   ./scripts/devnet.sh stop            Stop all devnet processes (incl. UI)
+#   ./scripts/devnet.sh status          Show running devnet processes (incl. UI)
+#   ./scripts/devnet.sh logs [N]        Tail logs for node N (1-based)
+#   ./scripts/devnet.sh clean           Stop and wipe all devnet data
+#   ./scripts/devnet.sh ui {start|stop|restart|status|logs}
+#                                       Control the node-ui Vite dev server
+#                                       (detached from any TTY via nohup so it
+#                                       survives shell restarts; this is the
+#                                       fix for "Vite dies whenever the Cursor
+#                                       agent terminal recycles" SIGHUP issue.)
 #
 # Environment:
 #   DEVNET_DIR    Base directory for devnet data (default: .devnet)
 #   HARDHAT_PORT  Hardhat node port (default: 8545)
+#   UI_PORT       node-ui Vite port (default: 5173)
+#   UI_NODE_ID    Which devnet node the UI talks to (default: 1)
 #
 set -euo pipefail
 
@@ -19,8 +27,12 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DEVNET_DIR="${DEVNET_DIR:-$REPO_ROOT/.devnet}"
 HARDHAT_PORT="${HARDHAT_PORT:-8545}"
 NUM_NODES="${2:-6}"
-API_PORT_BASE=9201
+API_PORT_BASE="${API_PORT_BASE:-9201}"
 LIBP2P_PORT_BASE=10001
+UI_PORT="${UI_PORT:-5173}"
+UI_NODE_ID="${UI_NODE_ID:-1}"
+UI_PIDFILE="$DEVNET_DIR/node-ui.pid"
+UI_LOGFILE="$DEVNET_DIR/node-ui.log"
 NUM_OP_WALLETS=3
 BLAZEGRAPH_PORT=9999
 BLAZEGRAPH_CONTAINER="devnet-blazegraph"
@@ -435,11 +447,19 @@ start_node() {
   # Wait for API to be ready — relay node (1) gets extra time since first boot
   # compiles Solidity contracts which is CPU-intensive.
   local api_port=$((API_PORT_BASE + node_num - 1))
+  local auth_token=""
+  local -a auth_args=()
+  if [ -f "$DEVNET_DIR/node1/auth.token" ]; then
+    auth_token=$(tail -1 "$DEVNET_DIR/node1/auth.token" 2>/dev/null || echo "")
+    if [ -n "$auth_token" ]; then
+      auth_args=(-H "Authorization: Bearer $auth_token")
+    fi
+  fi
   local max_wait=30
   [ "$node_num" -eq 1 ] && max_wait=120
   local ready=false
   for i in $(seq 1 "$max_wait"); do
-    if curl -s "http://127.0.0.1:$api_port/api/status" > /dev/null 2>&1; then
+    if curl -sf "${auth_args[@]}" "http://127.0.0.1:$api_port/api/status" > /dev/null 2>&1; then
       log "Node $node_num ready (PID $node_pid, API http://127.0.0.1:$api_port)"
       ready=true
       break
@@ -457,7 +477,7 @@ start_node() {
     local peer_id=""
     for attempt in $(seq 1 10); do
       local peer_info
-      peer_info=$(curl -s "http://127.0.0.1:$api_port/api/status" 2>/dev/null || echo "{}")
+      peer_info=$(curl -sf "${auth_args[@]}" "http://127.0.0.1:$api_port/api/status" 2>/dev/null || echo "{}")
       peer_id=$(echo "$peer_info" | node -e "
         let d=''; process.stdin.on('data',c=>d+=c);
         process.stdin.on('end',()=>{
@@ -492,6 +512,94 @@ stop_devnet_nodes_only() {
     fi
     rm -f "$pidfile"
   done
+}
+
+start_ui() {
+  if [ -f "$UI_PIDFILE" ] && kill -0 "$(cat "$UI_PIDFILE")" 2>/dev/null; then
+    log "node-ui already running (PID $(cat "$UI_PIDFILE"), http://127.0.0.1:$UI_PORT/ui/)"
+    return 0
+  fi
+  rm -f "$UI_PIDFILE"
+  mkdir -p "$DEVNET_DIR"
+
+  log "Starting node-ui Vite dev server on port $UI_PORT (talks to devnet node $UI_NODE_ID)..."
+
+  # Detach with nohup + setsid-equivalent (`bash -c 'exec ...' &` + disown so
+  # SIGHUP from a dying parent shell can't reach it). The UI process group is
+  # its own from this point on. This is the fix for the "Vite dies when the
+  # Cursor agent terminal recycles" SIGHUP cascade we observed.
+  (
+    cd "$REPO_ROOT/packages/node-ui"
+    nohup env DEVNET_NODE="$UI_NODE_ID" pnpm dev:ui \
+      > "$UI_LOGFILE" 2>&1 < /dev/null &
+    echo $! > "$UI_PIDFILE"
+    disown
+  )
+
+  # Poll until Vite reports ready or we hit the budget. Vite v6 binds to
+  # `localhost` only by default, which on macOS resolves to ::1 first, so we
+  # probe `localhost` (browsers do too) — `127.0.0.1` would miss the ::1 bind.
+  for i in $(seq 1 30); do
+    if curl -sI "http://localhost:$UI_PORT/ui/" 2>/dev/null | grep -q "200 OK"; then
+      log "node-ui ready (PID $(cat "$UI_PIDFILE"), http://localhost:$UI_PORT/ui/)"
+      return 0
+    fi
+    sleep 1
+  done
+
+  log "WARNING: node-ui did not respond to HTTP within 30s (check $UI_LOGFILE)"
+  return 1
+}
+
+stop_ui() {
+  if [ -f "$UI_PIDFILE" ]; then
+    local pid
+    pid=$(cat "$UI_PIDFILE")
+    if kill -0 "$pid" 2>/dev/null; then
+      # Kill the whole process group so the nohup'd Vite + its esbuild/vite
+      # workers all go down cleanly. macOS bash doesn't always set up a fresh
+      # pgid for the child, so we fall back to killing the leader pid.
+      local pgid
+      pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')
+      if [ -n "$pgid" ] && [ "$pgid" != "0" ]; then
+        kill -TERM "-$pgid" 2>/dev/null || kill "$pid" 2>/dev/null || true
+      else
+        kill "$pid" 2>/dev/null || true
+      fi
+      log "Stopped node-ui (PID $pid)"
+    fi
+    rm -f "$UI_PIDFILE"
+  fi
+}
+
+cmd_ui() {
+  local sub="${2:-status}"
+  case "$sub" in
+    start)   start_ui ;;
+    stop)    stop_ui ;;
+    restart) stop_ui; start_ui ;;
+    status)
+      if [ -f "$UI_PIDFILE" ] && kill -0 "$(cat "$UI_PIDFILE")" 2>/dev/null; then
+        local pid
+        pid=$(cat "$UI_PIDFILE")
+        local http_status="DOWN"
+        if curl -sI "http://localhost:$UI_PORT/ui/" 2>/dev/null | grep -q "200 OK"; then
+          http_status="OK"
+        fi
+        echo "node-ui: RUNNING (PID $pid, port $UI_PORT, HTTP $http_status, log $UI_LOGFILE)"
+      else
+        echo "node-ui: STOPPED"
+      fi
+      ;;
+    logs)
+      [ -f "$UI_LOGFILE" ] || { log "No log file at $UI_LOGFILE"; return 1; }
+      tail -f "$UI_LOGFILE"
+      ;;
+    *)
+      echo "Usage: $0 ui {start|stop|restart|status|logs}"
+      exit 1
+      ;;
+  esac
 }
 
 cmd_start() {
@@ -598,36 +706,102 @@ cmd_start() {
     })();
   " 2>&1 | while read -r line; do log "$line"; done
 
-  # Register context graphs once from the deployer account so nodes don't each attempt it
-  log "Registering context graphs on-chain..."
-  cd "$REPO_ROOT/packages/evm-module" && node -e "
-    const { ethers } = require('ethers');
-    const fs = require('fs');
-    (async () => {
-      const provider = new ethers.JsonRpcProvider('http://127.0.0.1:$HARDHAT_PORT');
-      const deployer = await provider.getSigner(0);
-      const contracts = JSON.parse(fs.readFileSync('$contracts_json', 'utf8'));
-      const registryAddr = contracts.contracts.ContextGraphNameRegistry?.evmAddress;
-      if (!registryAddr) { console.log('ContextGraphNameRegistry not deployed, skipping'); return; }
-      const abi = JSON.parse(fs.readFileSync('$REPO_ROOT/packages/evm-module/abi/ContextGraphNameRegistry.json', 'utf8'));
-      const registry = new ethers.Contract(registryAddr, abi, deployer);
-      const contextGraphs = ['devnet-test', 'origin-trail-game'];
-      for (const name of contextGraphs) {
-        const nameHash = ethers.keccak256(ethers.toUtf8Bytes(name));
-        try {
-          const tx = await registry.claimName(nameHash, 0);
-          await tx.wait();
-          console.log('Registered context graph: ' + name + ' (' + nameHash.slice(0, 16) + '...)');
-        } catch (e) {
-          if (e.message?.includes('NameAlreadyClaimed')) {
-            console.log('Context graph already exists: ' + name);
-          } else {
-            console.log('Failed to register ' + name + ': ' + e.message);
-          }
-        }
-      }
-    })();
-  " 2>&1 | while read -r line; do log "$line"; done
+  # Register context graphs on-chain by going through node 1's public API.
+  #
+  # History: this block used to call `ParanetV9Registry.createParanetV9(...)`
+  # directly from the deployer account. That is the legacy V9 paranet
+  # registry — V10 publish paths consult `ContextGraphs` + `ContextGraphStorage`
+  # and surface the resulting uint256 id as `v10Id` in the API. Registering
+  # on the V9 contract left nodes with no V10 record to look up, so every
+  # VM publish in scripts/devnet-test.sh failed with
+  # "Context graph \"devnet-test\" is not registered on-chain".
+  #
+  # We now delegate to `POST /api/context-graph/register` on node 1, which
+  # runs the same `agent.registerContextGraph` path production nodes use
+  # (calls `ContextGraphs.createContextGraph`, reads the `ContextGraphCreated`
+  # event, writes `dkg:onChainId` + `status="registered"` to _meta). Every
+  # node locally bootstraps the CG on boot via the `contextGraphs` config
+  # array, so node 1 already has it; the on-chain id then propagates to
+  # the rest via the periodic `discoverContextGraphsFromChain` sweep.
+  #
+  # Prerequisite: node 1 must have a staked identity (we ran that above),
+  # otherwise `registerContextGraph` bails with "cannot be registered
+  # on-chain without an on-chain identity".
+  log "Registering context graphs on-chain via node 1 API..."
+  local register_endpoint="http://127.0.0.1:$API_PORT_BASE/api/context-graph/register"
+  local register_auth_header="Authorization: Bearer $shared_token"
+  local register_failures=0
+  for cg in devnet-test origin-trail-game; do
+    local on_chain_id=""
+    local attempt
+    for attempt in 1 2 3; do
+      local reg_resp
+      reg_resp=$(curl -sS --max-time 30 -X POST \
+        -H "$register_auth_header" \
+        -H "Content-Type: application/json" \
+        -d "{\"id\":\"$cg\"}" \
+        "$register_endpoint" 2>&1 || true)
+      if echo "$reg_resp" | grep -q '"onChainId"'; then
+        on_chain_id=$(echo "$reg_resp" | python3 -c "import sys,json;print(json.load(sys.stdin).get('onChainId',''))" 2>/dev/null || echo '')
+        log "Registered context graph: $cg (v10Id=$on_chain_id)"
+        break
+      elif echo "$reg_resp" | grep -q 'already registered'; then
+        # Recover the existing onChainId from node 1's local view so the
+        # cross-node visibility wait below has something to compare to.
+        on_chain_id=$(curl -sS --max-time 10 \
+          -H "$register_auth_header" \
+          "http://127.0.0.1:$API_PORT_BASE/api/context-graph/list" \
+          | python3 -c "import sys,json;d=json.load(sys.stdin);print(next((g.get('onChainId','') for g in d.get('contextGraphs',[]) if g.get('id')=='$cg'), ''))" \
+          2>/dev/null || echo '')
+        log "Context graph already registered: $cg (v10Id=${on_chain_id:-unknown})"
+        break
+      else
+        log "Register attempt $attempt for $cg failed: $reg_resp"
+        sleep 2
+      fi
+    done
+    if [ -z "$on_chain_id" ]; then
+      log "ERROR: failed to register $cg after 3 attempts; devnet is half-configured."
+      register_failures=$((register_failures + 1))
+      continue
+    fi
+
+    # The on-chain id propagates to other nodes via ONTOLOGY gossip
+    # (`registerContextGraph` writes the `dkg:paranetOnChainId` triple +
+    # immediately broadcasts it). Wait until every node's local view
+    # surfaces the same id before declaring the devnet ready — without
+    # this wait, the next VM publish on node 2+ races the gossip and
+    # rejects with "context graph is not registered on-chain".
+    log "Waiting for $cg (v10Id=$on_chain_id) to be visible on all $NUM_NODES nodes..."
+    local node_idx
+    for node_idx in $(seq 1 "$NUM_NODES"); do
+      local node_port=$((API_PORT_BASE + node_idx - 1))
+      local seen_id=""
+      local poll
+      for poll in $(seq 1 30); do
+        seen_id=$(curl -sS --max-time 5 \
+          -H "$register_auth_header" \
+          "http://127.0.0.1:$node_port/api/context-graph/list" 2>/dev/null \
+          | python3 -c "import sys,json;d=json.load(sys.stdin);print(next((g.get('onChainId','') for g in d.get('contextGraphs',[]) if g.get('id')=='$cg'), ''))" \
+          2>/dev/null || echo '')
+        if [ "$seen_id" = "$on_chain_id" ]; then
+          break
+        fi
+        sleep 1
+      done
+      if [ "$seen_id" = "$on_chain_id" ]; then
+        log "  node $node_idx sees $cg v10Id=$seen_id"
+      else
+        log "  ERROR: node $node_idx never observed v10Id=$on_chain_id for $cg (last seen='$seen_id')"
+        register_failures=$((register_failures + 1))
+      fi
+    done
+  done
+  if [ "$register_failures" -gt 0 ]; then
+    log "FATAL: $register_failures context-graph registration step(s) failed; aborting devnet start."
+    log "Run \`./scripts/devnet.sh logs <n>\` for per-node detail. The devnet is left running for inspection — stop with \`./scripts/devnet.sh stop\`."
+    return 1
+  fi
 
   log ""
   log "=== Devnet Ready ==="
@@ -658,6 +832,8 @@ cmd_start() {
 
 cmd_stop() {
   log "Stopping devnet..."
+
+  stop_ui
 
   # Stop nodes
   for pidfile in "$DEVNET_DIR"/node*/devnet.pid; do
@@ -719,6 +895,16 @@ cmd_status() {
       echo "Node $node_num:   STOPPED"
     fi
   done
+
+  if [ -f "$UI_PIDFILE" ] && kill -0 "$(cat "$UI_PIDFILE")" 2>/dev/null; then
+    local http_status="DOWN"
+    if curl -sI "http://localhost:$UI_PORT/ui/" 2>/dev/null | grep -q "200 OK"; then
+      http_status="OK"
+    fi
+    echo "node-ui:  RUNNING (PID $(cat "$UI_PIDFILE"), http://localhost:$UI_PORT/ui/, HTTP $http_status)"
+  else
+    echo "node-ui:  STOPPED  (start with: $0 ui start)"
+  fi
 }
 
 cmd_logs() {
@@ -744,14 +930,20 @@ case "${1:-}" in
   status) cmd_status ;;
   logs)   cmd_logs "$@" ;;
   clean)  cmd_clean ;;
+  ui)     cmd_ui "$@" ;;
   *)
-    echo "Usage: $0 {start|stop|status|logs|clean} [args]"
+    echo "Usage: $0 {start|stop|status|logs|clean|ui} [args]"
     echo ""
     echo "  start [N]    Start devnet with N nodes (default 6)"
-    echo "  stop         Stop all devnet processes"
-    echo "  status       Show running nodes and their status"
+    echo "  stop         Stop all devnet processes (incl. UI)"
+    echo "  status       Show running nodes (incl. UI) and their status"
     echo "  logs [N]     Tail logs for node N (default 1)"
     echo "  clean        Stop and wipe all devnet data"
+    echo "  ui {start|stop|restart|status|logs}"
+    echo "               Control the node-ui Vite dev server (port \$UI_PORT,"
+    echo "               default 5173). Detached via nohup so it survives"
+    echo "               shell death (the SIGHUP cascade that kept killing"
+    echo "               the UI when run from a Cursor agent terminal)."
     exit 1
     ;;
 esac

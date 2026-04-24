@@ -124,6 +124,36 @@ pnpm dkg start -f
 pnpm dkg start
 ```
 
+> **WSL2 users:** WSL2 suspends background processes when no terminal is attached and kills them when `wsl --shutdown` is run or Windows sleeps. If the Node UI (`http://127.0.0.1:9200/ui`) becomes unreachable after closing your terminal, the daemon has been suspended.
+>
+> **Quick fix — run in tmux:**
+> ```bash
+> tmux new-session -d -s dkg 'pnpm dkg start -f'
+> ```
+>
+> **Persistent fix — systemd user service** (requires WSL2 with systemd enabled; check with `wsl --version`):
+> ```bash
+> mkdir -p ~/.config/systemd/user
+> cat > ~/.config/systemd/user/dkg-node.service << 'EOF'
+> [Unit]
+> Description=OriginTrail DKG V10 Node
+> After=network-online.target
+>
+> [Service]
+> Type=simple
+> ExecStart=<path-to-dkg-binary> start -f
+> ExecStop=<path-to-dkg-binary> stop
+> Restart=on-failure
+> RestartSec=10
+>
+> [Install]
+> WantedBy=default.target
+> EOF
+> systemctl --user daemon-reload
+> systemctl --user enable --now dkg-node
+> ```
+> Replace `<path-to-dkg-binary>` with the output of `which dkg` (or `which pnpm` + the repo path for monorepo setups). With systemd, the node starts automatically on WSL boot and restarts on crash.
+
 You should see:
 
 ```
@@ -238,62 +268,22 @@ Messages are end-to-end encrypted (X25519 + XChaCha20-Poly1305). The relay canno
 
 ## B) OpenClaw Agent
 
-If your machine runs an OpenClaw agent, add DKG as a plugin. Your agent gets DKG tools it can use in conversations.
+If your machine runs an OpenClaw agent, add DKG as a plugin. Your agent gets slot-backed memory on the DKG node plus a chat bridge to the node UI.
 
-### 1. Install
-
-Install inside your workspace directory (the path from `agents.defaults.workspace` in `~/.openclaw/openclaw.json`):
+### One-command setup
 
 ```bash
-cd WORKSPACE_DIR
-npm install @origintrail-official/dkg-adapter-openclaw
+npm install -g @origintrail-official/dkg
+dkg openclaw setup
 ```
 
-### 2. Enable the Plugin
+`dkg openclaw setup` is non-interactive and idempotent. It writes `~/.dkg/config.json`, merges the adapter into `~/.openclaw/openclaw.json` (including `plugins.entries.adapter-openclaw.config` with `daemonUrl`, `memory.enabled`, and `channel.enabled`), syncs the canonical DKG node skill into your OpenClaw workspace, starts the DKG daemon, and verifies the install. Re-running preserves any customizations you made to the plugin entry config.
 
-**Merge** these into the `plugins` section of `~/.openclaw/openclaw.json` (don't remove existing entries):
+Alternatively, the DKG node UI's right-panel "Connect OpenClaw" button runs the same setup flow in-process — clicking it from a fresh install is equivalent to running `dkg openclaw setup` on the command line.
 
-```json
-{
-  "plugins": {
-    "load": {
-      "paths": ["~/path/to/workspace/node_modules/@origintrail-official/dkg-adapter-openclaw"]
-    },
-    "entries": {
-      "adapter-openclaw": {
-        "enabled": true
-      }
-    }
-  }
-}
-```
+Once setup completes, restart the OpenClaw gateway if it doesn't auto-reload, then ask your agent about the DKG node to verify connectivity (e.g. `dkg_status`).
 
-- `load.paths` must use a `~/` prefix path (replace `$HOME` with `~` in your workspace path, append `/node_modules/@origintrail-official/dkg-adapter-openclaw`). Bare relative paths break across platforms.
-- The `entries` key must be `adapter-openclaw` (the plugin manifest ID), not the npm package name.
-- Only `enabled: boolean` is allowed in `plugins.entries` — no other keys.
-
-### 3. Configure the Node
-
-Add a `"dkg-node"` block to your workspace's `config.json`:
-
-```json
-{
-  "dkg-node": {
-    "name": "my-openclaw-agent",
-    "description": "An AI agent on the DKG testnet",
-    "dataDir": ".dkg/openclaw",
-    "relayPeers": [
-      "/ip4/167.71.33.105/tcp/9090/p2p/12D3KooWEpSGSVRZx3DqBijai85PLitzWjMzyFVMP4qeqSBUinxj"
-    ],
-    "chainConfig": {
-      "rpcUrl": "https://sepolia.base.org",
-      "hubAddress": "0xC056e67Da4F51377Ad1B01f50F655fFdcCD809F6"
-    }
-  }
-}
-```
-
-### 4. EVM Private Key
+### EVM Private Key
 
 Add your private key to `~/.openclaw/.env` (never in config files):
 
@@ -302,34 +292,6 @@ DKG_EVM_PRIVATE_KEY=0xYOUR_PRIVATE_KEY_HERE
 ```
 
 Without a key, P2P networking and queries still work. On-chain publishing requires a funded Base Sepolia wallet.
-
-### 5. SKILL.md
-
-Copy the skill file into your workspace (replace the path with your actual workspace directory):
-
-```bash
-mkdir -p /path/to/your/workspace/skills/dkg-node
-cp node_modules/@origintrail-official/dkg-adapter-openclaw/skills/dkg-node/SKILL.md /path/to/your/workspace/skills/dkg-node/SKILL.md
-```
-
-### 6. Restart and Verify
-
-```bash
-openclaw gateway restart
-```
-
-Ask your agent to call `dkg_status`. The DKG node starts lazily on the first tool call — no need for a new session.
-
-### Available Tools
-
-| Tool | What it does |
-|------|-------------|
-| `dkg_status` | Show node status: peer ID, connected peers, multiaddrs |
-| `dkg_publish` | Publish RDF triples to a DKG paranet |
-| `dkg_query` | Run a SPARQL query against the local knowledge graph |
-| `dkg_find_agents` | Discover agents by framework or skill type |
-| `dkg_send_message` | Send an encrypted chat message to another agent |
-| `dkg_invoke_skill` | Call a remote agent's skill over the network |
 
 ### Using the CLI Alongside
 
@@ -612,6 +574,11 @@ Without a `dataDir`, a fresh ephemeral identity is generated every time (useful 
 - Check logs: `cat ~/.dkg/daemon.log`
 - Kill stale daemon: check `~/.dkg/daemon.pid` and `kill <pid>`
 - Rebuild: `pnpm build` in the repo root
+
+**Node UI unreachable on WSL2 (`127.0.0.1 refused to connect`)**
+- WSL2 kills background processes when terminals close or Windows sleeps
+- Restart the daemon: `pnpm dkg start` (or `dkg start` for global install)
+- For persistent operation: use tmux or install as a systemd user service (see [Start](#start) section above)
 
 **Messages not delivering**
 - Both nodes must be online simultaneously (no offline message queue yet)

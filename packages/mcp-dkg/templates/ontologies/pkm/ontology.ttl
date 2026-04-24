@@ -1,0 +1,88 @@
+@prefix owl:     <http://www.w3.org/2002/07/owl#> .
+@prefix rdf:     <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
+@prefix dcterms: <http://purl.org/dc/terms/> .
+@prefix schema:  <http://schema.org/> .
+@prefix foaf:    <http://xmlns.com/foaf/0.1/> .
+@prefix prov:    <http://www.w3.org/ns/prov#> .
+@prefix skos:    <http://www.w3.org/2004/02/skos/core#> .
+@prefix time:    <http://www.w3.org/2006/time#> .
+
+@prefix chat: <http://dkg.io/ontology/chat/> .
+@prefix :     <http://dkg.io/ontology/pkm/> .
+
+<http://dkg.io/ontology/pkm/>
+  a owl:Ontology ;
+  dcterms:title "DKG Personal Knowledge Management Ontology (v1)" ;
+  dcterms:description """Starter for personal/team knowledge gardens.
+Notes, highlights, questions, insights — the daily-driver vocabulary
+of an Obsidian/Roam-style PKM workflow, but graph-native and shareable
+with teammates' agents.""" ;
+  owl:versionInfo "1.0.0" ;
+  dcterms:created "2026-04-18"^^xsd:date ;
+  owl:imports
+    <http://schema.org/> , <http://purl.org/dc/terms/> ,
+    <http://xmlns.com/foaf/0.1/> ,
+    <http://www.w3.org/2004/02/skos/core#> ,
+    <http://www.w3.org/2006/time#> .
+
+# ─── Universal annotation predicates ────────────────────────────────
+chat:topic    a owl:DatatypeProperty ; rdfs:domain chat:Turn ; rdfs:range xsd:string .
+chat:mentions a owl:ObjectProperty   ; rdfs:domain chat:Turn ; rdfs:subPropertyOf schema:mentions .
+chat:examines a owl:ObjectProperty   ; rdfs:domain chat:Turn .
+chat:proposes a owl:ObjectProperty   ; rdfs:domain chat:Turn .
+chat:concludes a owl:ObjectProperty  ; rdfs:domain chat:Turn ; rdfs:range :Insight .
+chat:asks     a owl:ObjectProperty   ; rdfs:domain chat:Turn ; rdfs:range :Question .
+
+# ─── Universal annotation entities ──────────────────────────────────
+:Concept rdfs:subClassOf skos:Concept .
+:Topic   rdfs:subClassOf skos:Concept .
+:Question rdfs:subClassOf schema:Question .
+:Finding  rdfs:subClassOf prov:Entity .
+
+# ─── PKM-specific ────────────────────────────────────────────────────
+
+:Note a owl:Class ;
+  rdfs:label "Note" ;
+  rdfs:comment "An atomic note — a single self-contained thought worth capturing. The fundamental unit of a PKM graph." ;
+  rdfs:subClassOf schema:CreativeWork .
+
+:Highlight a owl:Class ;
+  rdfs:label "Highlight" ;
+  rdfs:comment "A passage of text marked as significant from a source (article, book, transcript). Carries provenance back to the source." ;
+  rdfs:subClassOf schema:Quotation .
+
+:Insight a owl:Class ;
+  rdfs:label "Insight" ;
+  rdfs:comment "A connection or realisation that synthesises across multiple Notes/Highlights. Promotes from a chat turn via chat:concludes." ;
+  rdfs:subClassOf prov:Entity .
+
+:relatedTo a owl:ObjectProperty ;
+  rdfs:label "related to" ;
+  rdfs:subPropertyOf skos:related .
+
+:references a owl:ObjectProperty ;
+  rdfs:label "references" ;
+  rdfs:subPropertyOf dcterms:references .
+
+:source a owl:ObjectProperty ;
+  rdfs:label "source" ;
+  rdfs:domain :Highlight ;
+  rdfs:range schema:CreativeWork ;
+  rdfs:comment "Where a Highlight was extracted from." ;
+  rdfs:subPropertyOf dcterms:source .
+
+# ─── URI patterns ───────────────────────────────────────────────────
+:UriPattern rdfs:label "URI minting pattern" .
+
+:concept-pattern   a :UriPattern ; skos:notation "urn:dkg:concept:<slug>" .
+:topic-pattern     a :UriPattern ; skos:notation "urn:dkg:topic:<slug>" .
+:question-pattern  a :UriPattern ; skos:notation "urn:dkg:question:<slug>" .
+:finding-pattern   a :UriPattern ; skos:notation "urn:dkg:finding:<slug>" .
+:note-pattern      a :UriPattern ; skos:notation "urn:dkg:note:<slug>" .
+:highlight-pattern a :UriPattern ; skos:notation "urn:dkg:highlight:<slug>" .
+:insight-pattern   a :UriPattern ; skos:notation "urn:dkg:insight:<slug>" .
+
+:slug-normalisation a skos:Note ;
+  skos:definition "Lowercase → ASCII-fold → strip stopwords → hyphenate → ≤60 chars." .

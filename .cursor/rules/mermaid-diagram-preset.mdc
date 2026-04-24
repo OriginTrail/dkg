@@ -1,0 +1,66 @@
+---
+description: Mermaid sequence diagram preset for all Markdown docs in this repo. Gives rectangles and notes enough breathing room that they don't overlap the arrows around them.
+globs: **/*.md
+alwaysApply: false
+---
+
+# Mermaid Sequence Diagram Preset
+
+Every Mermaid **sequence diagram** in this repo MUST start with the shared init directive below. Mermaid's defaults are too tight: `rect` borders collide with adjacent arrows, stacked `Note` pills overlap each other, and multi-participant diagrams get cramped horizontally.
+
+## The preset
+
+```
+%%{init: { 'sequence': { 'messageMargin': 55, 'noteMargin': 15, 'boxMargin': 15, 'actorMargin': 70 } } }%%
+sequenceDiagram
+    ...
+```
+
+For diagrams with **nested `rect` blocks** (e.g., phase-based lifecycle diagrams), bump `boxMargin` to `20`:
+
+```
+%%{init: { 'sequence': { 'messageMargin': 55, 'noteMargin': 15, 'boxMargin': 20, 'actorMargin': 70 } } }%%
+```
+
+## Why these numbers
+
+| Setting         | Default | Preset | Effect |
+| --------------- | ------- | ------ | ------ |
+| `messageMargin` | 35      | **55** | Vertical spacing between arrows. Main anti-overlap lever. |
+| `noteMargin`    | 10      | **15** | Padding inside `Note` pills so text doesn't crowd borders. |
+| `boxMargin`     | 10      | **15** (20 for nested `rect`) | Space around `rect` blocks so they don't kiss neighboring arrows. |
+| `actorMargin`   | 50      | **70** | Horizontal spacing between participant columns. |
+
+## Companion rules (learned the hard way)
+
+These rules keep diagrams readable beyond the preset:
+
+- **Do not use `<br/>` inside notes.** Split into multiple `Note over X:` lines or collapse into a single sentence. `<br/>` works but produces hard-to-read dense pills.
+- **Avoid stacking 3+ consecutive `Note over X:` on the same participant.** Mermaid renders each as a separate pill; they frequently overlap neighboring `rect` borders. Collapse into one concise sentence, or intersperse with arrows.
+- **Do not indent multi-line math inside a `Note`** (e.g., `"                      = 840e18 · 1e18 / 8000"`). Mermaid preserves the whitespace and widens the pill, causing horizontal collisions. Put the math on one line or use a `pre`-style code block outside the diagram.
+
+- **Avoid `=` inside participant aliases.** `participant X as X (id=42)` throws a parse error because Mermaid interprets `=` as syntax. Either drop the `=` from the display label or quote the alias: `participant X as "X (id=42)"`. Parentheses alone (e.g., `Token (TRAC)`) are fine.
+- **Use `---` text decoration for phase separators**, not nested `rect` titles:
+
+  ```
+  Note over A,Z: --- PHASE 3 — lock expires, nothing happens on-chain ---
+  ```
+
+  Cleaner than `Note over A,Z: PHASE 3\nlock expires\nnothing happens on-chain`.
+
+- **Prefer `autonumber`** on sequence diagrams longer than ~6 arrows, and reference the autonumber indices in a line-by-line walk-through below the diagram.
+
+## Flowchart / graph diagrams
+
+These settings are sequence-specific. For `flowchart` / `graph` diagrams, the equivalent preset is:
+
+```
+%%{init: { 'flowchart': { 'nodeSpacing': 50, 'rankSpacing': 60, 'curve': 'basis' } } }%%
+flowchart TD
+    ...
+```
+
+## Reference
+
+- Canonical example in this repo: `packages/evm-module/docs/D26_TIME_ACCURATE_STAKING.md` §5.1-5.5.
+- Mermaid config docs: https://mermaid.js.org/config/schema-docs/config.html#sequencediagramconfig

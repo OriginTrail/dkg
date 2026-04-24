@@ -3,6 +3,7 @@ import { useJourneyStore } from '../../stores/journey.js';
 import { useProjectsStore, type ContextGraph } from '../../stores/projects.js';
 import {
   importFile,
+  type AgentIdentity,
   type ImportFileResult,
   type LocalAgentChatAttachmentRef,
   type LocalAgentChatContextEntry,
@@ -14,9 +15,11 @@ import {
   disconnectLocalAgentIntegration,
   fetchAgents,
   fetchConnections,
+  fetchCurrentAgent,
   getDefaultLocalAgentSessionId,
   fetchLocalAgentHistory,
   fetchLocalAgentIntegrations,
+  refreshLocalAgentIntegration,
   streamLocalAgentChat,
 } from '../../api.js';
 import { api } from '../../api-wrapper.js';
@@ -140,14 +143,42 @@ function draftToAttachmentRef(draft: LocalAgentAttachmentDraft): LocalAgentChatA
   };
 }
 
-function buildChatContextEntries(projects: ContextGraph[], activeProjectId: string | null): LocalAgentChatContextEntry[] {
-  if (!activeProjectId) return [];
-  const displayName = getProjectDisplayName(projects, activeProjectId);
-  return [{
-    key: 'target_context_graph',
-    label: 'Target context graph',
-    value: displayName === activeProjectId ? activeProjectId : `${displayName} (${activeProjectId})`,
-  }];
+function buildChatContextEntries(
+  projects: ContextGraph[],
+  activeProjectId: string | null,
+  currentAgent: AgentIdentity | null,
+): LocalAgentChatContextEntry[] {
+  const entries: LocalAgentChatContextEntry[] = [];
+  if (activeProjectId) {
+    const displayName = getProjectDisplayName(projects, activeProjectId);
+    entries.push({
+      key: 'target_context_graph',
+      label: 'Target context graph',
+      value: displayName === activeProjectId ? activeProjectId : `${displayName} (${activeProjectId})`,
+    });
+  }
+  if (currentAgent?.agentAddress) {
+    entries.push({
+      key: 'current_agent_address',
+      label: 'Current agent address',
+      value: currentAgent.agentAddress,
+    });
+  }
+  if (currentAgent?.agentDid) {
+    entries.push({
+      key: 'current_agent_did',
+      label: 'Current agent DID',
+      value: currentAgent.agentDid,
+    });
+  }
+  if (currentAgent?.peerId) {
+    entries.push({
+      key: 'current_agent_peer_id',
+      label: 'Current agent peer ID',
+      value: currentAgent.peerId,
+    });
+  }
+  return entries;
 }
 
 function mapHistoryMessage(message: LocalAgentHistoryMessage): LocalAgentMessage {
@@ -528,8 +559,9 @@ export function ConnectedAgentsTab(props: {
   onSelectIntegration: (id: string, opts?: { preserveSession?: boolean; sessionId?: string | null }) => void;
   onConnectIntegration: (id: string) => void;
   onDisconnectIntegration: (id: string) => void;
-  onRefreshIntegrations: () => void;
+  onRefreshIntegration: (id: string) => void;
   connectBusyId: string | null;
+  refreshBusyId: string | null;
   connectNotice: string | null;
   connectError: string | null;
   localMessages: LocalAgentMessage[];
@@ -557,8 +589,9 @@ export function ConnectedAgentsTab(props: {
     onSelectIntegration,
     onConnectIntegration,
     onDisconnectIntegration,
-    onRefreshIntegrations,
+    onRefreshIntegration,
     connectBusyId,
+    refreshBusyId,
     connectNotice,
     connectError,
     localMessages,
@@ -701,8 +734,13 @@ export function ConnectedAgentsTab(props: {
                 {localAgentToolbarLabel(selected, showingSessionHistory)}
               </span>
               <div className="v10-local-agent-chat-actions">
-                <button className="v10-agents-refresh" onClick={onRefreshIntegrations} title={`Refresh ${selected.name}`}>
-                  Refresh
+                <button
+                  className="v10-agents-refresh"
+                  onClick={() => onRefreshIntegration(selected.id)}
+                  disabled={refreshBusyId === selected.id}
+                  title={`Refresh ${selected.name}`}
+                >
+                  {refreshBusyId === selected.id ? 'Refreshing...' : 'Refresh'}
                 </button>
                 {selected.persistentChat && (
                 <button
@@ -1026,6 +1064,7 @@ export function PanelRight() {
   const [peerAgents, setPeerAgents] = useState<AgentInfo[]>([]);
   const [connections, setConnections] = useState<{ total: number; direct: number; relayed: number }>({ total: 0, direct: 0, relayed: 0 });
   const [peerLoading, setPeerLoading] = useState(true);
+  const [currentAgent, setCurrentAgent] = useState<AgentIdentity | null>(null);
 
   const [integrations, setIntegrations] = useState<LocalAgentIntegration[]>([]);
   const [selectedIntegrationId, setSelectedIntegrationId] = useState('openclaw');
@@ -1035,6 +1074,7 @@ export function PanelRight() {
   const [connectBusyId, setConnectBusyId] = useState<string | null>(null);
   const [connectNotice, setConnectNotice] = useState<string | null>(null);
   const [connectError, setConnectError] = useState<string | null>(null);
+  const [refreshBusyId, setRefreshBusyId] = useState<string | null>(null);
 
   const [localMessagesByConversation, setLocalMessagesByConversation] = useState<Record<string, LocalAgentMessage[]>>({});
   const [localInputByConversation, setLocalInputByConversation] = useState<Record<string, string>>({});
@@ -1336,6 +1376,17 @@ export function PanelRight() {
     refreshLocalIntegrations();
   }, [loadSessions, refreshPeers, refreshLocalIntegrations]);
 
+  // Mount-time hydrate from the stable openclaw session so chat history
+  // paints before the bridge probe completes (issue #255).
+  useEffect(() => {
+    void loadLocalHistory('openclaw', getDefaultLocalAgentSessionId('openclaw'));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    fetchCurrentAgent().then(setCurrentAgent).catch(() => {});
+  }, []);
+
   useEffect(() => {
     const intervalId = setInterval(() => {
       loadSessions();
@@ -1426,7 +1477,7 @@ export function PanelRight() {
 
       controller = new AbortController();
       localAbortRef.current = controller;
-      const contextEntries = buildChatContextEntries(availableProjects, activeProjectId);
+      const contextEntries = buildChatContextEntries(availableProjects, activeProjectId, currentAgent);
 
       const result = await streamLocalAgentChat(integrationId, text, {
         correlationId,
@@ -1488,6 +1539,7 @@ export function PanelRight() {
     activeProjectId,
     advance,
     availableProjects,
+    currentAgent,
     loadSessions,
     localInput,
     localSending,
@@ -1549,6 +1601,45 @@ export function PanelRight() {
     }
   }, [refreshLocalIntegrations, selectedIntegrationId, setSelectedIntegration]);
 
+  const refreshIntegration = useCallback(async (integrationId: string) => {
+    if (refreshBusyId === integrationId) return;
+    setRefreshBusyId(integrationId);
+    setConnectError(null);
+    setConnectNotice(null);
+    const conversation = resolveLocalAgentConversation({
+      integrationId,
+      sessionId: selectedIntegrationId === integrationId ? selectedSessionIdRef.current : null,
+    });
+    const [refreshOutcome, historyOutcome] = await Promise.allSettled([
+      refreshLocalAgentIntegration(integrationId),
+      fetchLocalAgentHistory(integrationId, 100, {
+        sessionId: conversation.sessionId ?? undefined,
+      }),
+    ]);
+    try {
+      if (refreshOutcome.status === 'fulfilled') {
+        setIntegrations((prev) => upsertLocalAgentIntegrationState(prev, refreshOutcome.value.integration));
+        if (refreshOutcome.value.notice) {
+          setConnectNotice(refreshOutcome.value.notice);
+        }
+      } else {
+        setConnectError((refreshOutcome.reason as Error)?.message ?? 'Failed to refresh integration.');
+      }
+      if (historyOutcome.status === 'fulfilled') {
+        const loaded = historyOutcome.value.map(mapHistoryMessage);
+        updateLocalMessages(conversation.stateKey, (prev) => mergeLocalAgentMessages(prev, loaded));
+        setLocalHistoryLoadedByConversation((prev) => ({
+          ...prev,
+          [conversation.stateKey]: true,
+        }));
+      } else if (refreshOutcome.status === 'fulfilled') {
+        setConnectError((historyOutcome.reason as Error)?.message ?? 'Failed to refresh conversation.');
+      }
+    } finally {
+      setRefreshBusyId(null);
+    }
+  }, [refreshBusyId, selectedIntegrationId, updateLocalMessages]);
+
   const openSession = useCallback((session: LocalAgentSessionSummary) => {
     setSelectedIntegration(session.integrationId, { sessionId: session.sessionId });
     setMode('agents');
@@ -1602,8 +1693,9 @@ export function PanelRight() {
           onSelectIntegration={setSelectedIntegration}
           onConnectIntegration={connectIntegration}
           onDisconnectIntegration={disconnectIntegration}
-          onRefreshIntegrations={refreshLocalIntegrations}
+          onRefreshIntegration={refreshIntegration}
           connectBusyId={connectBusyId}
+          refreshBusyId={refreshBusyId}
           connectNotice={connectNotice}
           connectError={connectError}
           localMessages={selectedLocalMessages}

@@ -1,28 +1,43 @@
 import { EventEmitter } from 'node:events';
-import { describe, expect, it, vi } from 'vitest';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   buildOpenClawChannelHeaders,
   cancelPendingLocalAgentAttachJob,
   connectLocalAgentIntegrationFromUi,
   connectLocalAgentIntegration,
-  getOpenClawUiSetupCommand,
   getLocalAgentIntegration,
   getOpenClawChannelTargets,
   hasConfiguredLocalAgentChat,
   hasOpenClawChatTurnContent,
   isLoopbackClientIp,
+  isOpenClawMemorySlotElected,
   normalizeOpenClawAttachmentRefs,
   isValidOpenClawPersistTurnPayload,
   listLocalAgentIntegrations,
   parseRequiredSignatures,
   pipeOpenClawStream,
   probeOpenClawChannelHealth,
+  refreshLocalAgentIntegrationFromUi,
+  reverseLocalAgentSetupForUi,
+  runOpenClawUiSetup,
   verifyOpenClawAttachmentRefsProvenance,
   normalizeExplicitLocalAgentDisconnectBody,
   shouldBypassRateLimitForLoopbackTraffic,
   updateLocalAgentIntegration,
 } from '../src/daemon.js';
+import { mergeOpenClawConfig, type AdapterEntryConfig } from '@origintrail-official/dkg-adapter-openclaw';
 import type { DkgConfig } from '../src/config.js';
+
+// Default entryConfig fixture matching the shape `runSetup` builds at
+// Step 5 — same values setup writes into plugins.entries.adapter-openclaw.config.
+const testEntryConfig: AdapterEntryConfig = {
+  daemonUrl: 'http://127.0.0.1:9200',
+  memory: { enabled: true },
+  channel: { enabled: true },
+};
 
 function makeConfig(overrides: Partial<DkgConfig> = {}): DkgConfig {
   return {
@@ -251,62 +266,6 @@ describe('OpenClaw channel routing helpers', () => {
     await proxyPromise;
 
     expect(secondReadCalled).toBe(true);
-  });
-});
-
-describe('OpenClaw UI setup command resolution', () => {
-  const runtimeModuleUrl = 'file:///C:/Projects/dkg-v9/packages/cli/dist/daemon.js';
-
-  it('prefers the local workspace adapter setup CLI when it exists', () => {
-    const command = getOpenClawUiSetupCommand(
-      '@origintrail-official/dkg-adapter-openclaw',
-      runtimeModuleUrl,
-      (path) => /packages[\\/]adapter-openclaw[\\/]dist[\\/]setup-cli\.js$/.test(path),
-    );
-
-    expect(command.source).toBe('workspace');
-    expect(command.command).toBe(process.execPath);
-    expect(command.args[0]).toMatch(/packages[\\/]adapter-openclaw[\\/]dist[\\/]setup-cli\.js$/);
-    expect(command.args.slice(1)).toEqual(['setup', '--no-fund', '--no-start', '--no-verify']);
-  });
-
-  it('falls back to npx when the local adapter build is unavailable', () => {
-    const command = getOpenClawUiSetupCommand(
-      '@origintrail-official/dkg-adapter-openclaw',
-      runtimeModuleUrl,
-      () => false,
-    );
-
-    expect(command).toEqual({
-      command: 'npx',
-      args: ['--yes', '@origintrail-official/dkg-adapter-openclaw', 'setup', '--no-fund', '--no-start', '--no-verify'],
-      source: 'npx',
-    });
-  });
-
-  it('resolves workspace package bins from the repo root instead of packages/packages', () => {
-    const command = getOpenClawUiSetupCommand(
-      '@origintrail-official/dkg-adapter-hermes',
-      runtimeModuleUrl,
-      () => true,
-      {
-        readDirNames: (path) => {
-          expect(path).toMatch(/dkg-v9[\\/]packages$/);
-          return ['adapter-hermes'];
-        },
-        readFileText: (path) => {
-          expect(path).toMatch(/packages[\\/]adapter-hermes[\\/]package\.json$/);
-          return JSON.stringify({
-            name: '@origintrail-official/dkg-adapter-hermes',
-            bin: 'dist/setup-cli.js',
-          });
-        },
-      },
-    );
-
-    expect(command.source).toBe('workspace');
-    expect(command.command).toBe(process.execPath);
-    expect(command.args[0]).toMatch(/packages[\\/]adapter-hermes[\\/]dist[\\/]setup-cli\.js$/);
   });
 });
 
@@ -998,6 +957,7 @@ describe('local agent integration registry helpers', () => {
         waitForReady,
         probeHealth,
         saveConfig,
+        verifyMemorySlot: () => true,
         onAttachScheduled: (_id, job) => { attachJob = job; },
       },
     );
@@ -1035,6 +995,7 @@ describe('local agent integration registry helpers', () => {
         waitForReady,
         probeHealth,
         saveConfig,
+        verifyMemorySlot: () => true,
         onAttachScheduled: (_id, job) => { attachJob = job; },
       },
     );
@@ -1085,6 +1046,7 @@ describe('local agent integration registry helpers', () => {
         waitForReady,
         probeHealth,
         saveConfig,
+        verifyMemorySlot: () => true,
         onAttachScheduled: (_id, job) => { attachJob = job; },
       },
     );
@@ -1132,6 +1094,7 @@ describe('local agent integration registry helpers', () => {
         waitForReady,
         probeHealth,
         saveConfig,
+        verifyMemorySlot: () => true,
         onAttachScheduled: (_id, job) => { attachJob = job; },
       },
     );
@@ -1142,7 +1105,8 @@ describe('local agent integration registry helpers', () => {
     if (!attachJob) throw new Error('Expected OpenClaw attach job to be scheduled');
     await attachJob;
 
-    expect(runSetupCalls[0]?.[0]).toBe('@origintrail-official/dkg-adapter-openclaw');
+    expect(runSetupCalls.length).toBe(1);
+    expect(runSetupCalls[0]?.[0]).toBeInstanceOf(AbortSignal);
     expect(restartGatewayCalls.length).toBe(1);
     expect(waitForReadyCalls.length).toBe(1);
     expect(probeHealthCalls.length).toBe(2);
@@ -1184,6 +1148,7 @@ describe('local agent integration registry helpers', () => {
         waitForReady,
         probeHealth,
         saveConfig,
+        verifyMemorySlot: () => true,
         onAttachScheduled: (_id, job) => { attachJob = job; },
       },
     );
@@ -1192,7 +1157,8 @@ describe('local agent integration registry helpers', () => {
     if (!attachJob) throw new Error('Expected OpenClaw attach job to be scheduled');
     await attachJob;
 
-    expect(runSetupCalls[0]?.[0]).toBe('@origintrail-official/dkg-adapter-openclaw');
+    expect(runSetupCalls.length).toBe(1);
+    expect(runSetupCalls[0]?.[0]).toBeInstanceOf(AbortSignal);
     expect(restartGatewayCalls.length).toBe(1);
     expect(waitForReadyCalls.length).toBe(1);
     const integration = getLocalAgentIntegration(config, 'openclaw');
@@ -1229,6 +1195,7 @@ describe('local agent integration registry helpers', () => {
         waitForReady,
         probeHealth,
         saveConfig,
+        verifyMemorySlot: () => true,
         onAttachScheduled: (_id, job) => { attachJob = job; },
       },
     );
@@ -1301,6 +1268,7 @@ describe('local agent integration registry helpers', () => {
         waitForReady,
         probeHealth,
         saveConfig,
+        verifyMemorySlot: () => true,
         onAttachScheduled: (_id, job) => { attachJob = job; },
       },
     );
@@ -1319,7 +1287,8 @@ describe('local agent integration registry helpers', () => {
     if (!attachJob) throw new Error('Expected OpenClaw attach job to be scheduled');
     await attachJob;
 
-    expect(runSetupCalls[0]?.[0]).toBe('@origintrail-official/dkg-adapter-openclaw');
+    expect(runSetupCalls.length).toBe(1);
+    expect(runSetupCalls[0]?.[0]).toBeInstanceOf(AbortSignal);
     expect(restartGatewayCalls.length).toBe(1);
     expect(waitForReadyCalls.length).toBe(1);
     const integration = getLocalAgentIntegration(config, 'openclaw');
@@ -1436,6 +1405,724 @@ describe('local agent integration registry helpers', () => {
     expect(integration.transport.gatewayUrl).toBeUndefined();
     expect((config as Record<string, unknown>).openclawAdapter).toBeUndefined();
     expect((config as Record<string, unknown>).openclawChannel).toBeUndefined();
+  });
+});
+
+describe('runOpenClawUiSetup AbortSignal forwarding (Codex #1)', () => {
+  // Regression test for https://github.com/OriginTrail/dkg-v9/pull/228#discussion_r3117710809
+  // The child-process path used to SIGKILL setup on abort; the in-process path must
+  // refuse to start on a pre-aborted signal and (via the adapter's step-boundary
+  // throwIfAborted helper) also stop cleanly if the signal fires mid-flow.
+  it('pre-aborted signal throws before importing the adapter (no config writes)', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    await expect(runOpenClawUiSetup(controller.signal)).rejects.toThrow(/OpenClaw attach cancelled/);
+  });
+});
+
+describe('isOpenClawMemorySlotElected honors OPENCLAW_HOME (Codex #6)', () => {
+  // Regression test for https://github.com/OriginTrail/dkg-v9/pull/228#discussion_r3117931371
+  // The previous implementation hardcoded `join(homedir(), '.openclaw', 'openclaw.json')`,
+  // so with a non-default OpenClaw home the post-setup invariant read the wrong file and
+  // reported false slot-election failures. The check now delegates to the adapter's
+  // `openclawConfigPath()` helper, which honors `process.env.OPENCLAW_HOME`.
+  let tempRoot: string;
+  const origOpenclawHome = process.env.OPENCLAW_HOME;
+
+  beforeEach(() => {
+    tempRoot = mkdtempSync(join(tmpdir(), 'dkg-openclaw-home-'));
+    process.env.OPENCLAW_HOME = tempRoot;
+  });
+
+  afterEach(() => {
+    if (origOpenclawHome === undefined) delete process.env.OPENCLAW_HOME;
+    else process.env.OPENCLAW_HOME = origOpenclawHome;
+    rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  it('reads openclaw.json from OPENCLAW_HOME and returns true when the slot is elected', () => {
+    const configPath = join(tempRoot, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({
+      plugins: { slots: { memory: 'adapter-openclaw' } },
+    }));
+    expect(isOpenClawMemorySlotElected()).toBe(true);
+  });
+
+  it('returns false when OPENCLAW_HOME points at a config with a different slot owner', () => {
+    const configPath = join(tempRoot, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({
+      plugins: { slots: { memory: 'some-other-plugin' } },
+    }));
+    expect(isOpenClawMemorySlotElected()).toBe(false);
+  });
+
+  it('returns false when OPENCLAW_HOME has no openclaw.json (fresh home)', () => {
+    // no file written
+    expect(isOpenClawMemorySlotElected()).toBe(false);
+  });
+});
+
+describe('OpenClaw UI Connect/Disconnect/Refresh fresh-HOME integration (issue #198)', () => {
+  let tempRoot: string;
+  let openclawDir: string;
+  let openclawConfigPath: string;
+  let workspaceDir: string;
+  let adapterPath: string;
+
+  beforeEach(() => {
+    tempRoot = mkdtempSync(join(tmpdir(), 'dkg-fresh-home-'));
+    openclawDir = join(tempRoot, '.openclaw');
+    workspaceDir = join(tempRoot, 'workspace');
+    openclawConfigPath = join(openclawDir, 'openclaw.json');
+    mkdirSync(openclawDir, { recursive: true });
+    mkdirSync(workspaceDir, { recursive: true });
+    // Simulate an installed adapter path under workspace node_modules.
+    // The merge routine uses isAdapterLoadPath() (matches .../@origintrail-official/dkg-adapter-openclaw
+    // or .../packages/adapter-openclaw/). Use a packages/ path so both forms work on Windows & POSIX.
+    adapterPath = join(tempRoot, 'packages', 'adapter-openclaw');
+    writeFileSync(openclawConfigPath, JSON.stringify({
+      plugins: {},
+      agents: { defaults: { workspace: workspaceDir } },
+    }, null, 2));
+  });
+
+  afterEach(() => {
+    rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  function seedOpenClawConfig(data: Record<string, unknown>): void {
+    writeFileSync(openclawConfigPath, JSON.stringify(data, null, 2) + '\n');
+  }
+
+  it('scenario 1: fresh-HOME UI Connect merges adapter-openclaw into plugins.slots.memory and marks integration ready', async () => {
+    // Fresh openclaw.json (no adapter wiring yet).
+    seedOpenClawConfig({ plugins: {}, agents: { defaults: { workspace: workspaceDir } } });
+
+    const config = makeConfig();
+    // DI stub: simulates runSetup by running the REAL mergeOpenClawConfig against
+    // the temp-HOME openclaw.json. This is the highest-fidelity stand-in we can
+    // get without spinning up a real daemon in the test.
+    const runSetup = async () => {
+      mergeOpenClawConfig(openclawConfigPath, adapterPath, testEntryConfig, workspaceDir);
+    };
+    const restartGateway = async () => {};
+    const waitForReady = async () => ({ ok: true as const, target: 'bridge' });
+    const probeResults: Array<{ ok: boolean; target?: string; error?: string }> = [
+      { ok: false, error: 'bridge offline' },
+      { ok: true, target: 'bridge' },
+    ];
+    let probeIdx = 0;
+    const probeHealth = async () => probeResults[probeIdx++] as any;
+    const saveConfig = async () => {};
+    // Real verifyMemorySlot reads the temp openclaw.json to confirm election.
+    const verifyMemorySlot = () => {
+      const raw = readFileSync(openclawConfigPath, 'utf-8');
+      return JSON.parse(raw)?.plugins?.slots?.memory === 'adapter-openclaw';
+    };
+    let attachJob: Promise<void> | null = null;
+
+    const result = await connectLocalAgentIntegrationFromUi(
+      config,
+      { id: 'openclaw', metadata: { source: 'node-ui' } },
+      'bridge-token',
+      {
+        runSetup,
+        restartGateway,
+        waitForReady,
+        probeHealth,
+        saveConfig,
+        verifyMemorySlot,
+        onAttachScheduled: (_id, job) => { attachJob = job; },
+      },
+    );
+
+    expect(result.integration.status).toBe('connecting');
+    if (!attachJob) throw new Error('Expected OpenClaw attach job to be scheduled');
+    await attachJob;
+
+    // Real openclaw.json on the temp filesystem now reflects the merge.
+    const mergedRaw = readFileSync(openclawConfigPath, 'utf-8');
+    const merged = JSON.parse(mergedRaw);
+    expect(merged.plugins.slots.memory).toBe('adapter-openclaw');
+    expect(merged.plugins.allow).toContain('adapter-openclaw');
+    const mergedEntry = merged.plugins.entries['adapter-openclaw'];
+    expect(mergedEntry.enabled).toBe(true);
+    // D2: adapter runtime config lives in the plugin entry now (was
+    // $WORKSPACE_DIR/config.json before PR #232). Full shape — daemonUrl,
+    // memory.enabled, channel.enabled — is what openclaw-entry.mjs reads.
+    expect(mergedEntry.config).toBeDefined();
+    expect(typeof mergedEntry.config.daemonUrl).toBe('string');
+    expect(mergedEntry.config.daemonUrl).toMatch(/^http:\/\/127\.0\.0\.1:/);
+    expect(mergedEntry.config.memory.enabled).toBe(true);
+    expect(mergedEntry.config.channel.enabled).toBe(true);
+    // Windows-path normalization assertion: mergeOpenClawConfig normalizes backslashes to
+    // forward slashes before storing the path.
+    const storedPaths = merged.plugins.load.paths as string[];
+    expect(storedPaths.length).toBeGreaterThan(0);
+    for (const p of storedPaths) {
+      expect(p).not.toContain('\\');
+    }
+    expect(storedPaths.some((p) => /packages\/adapter-openclaw/.test(p))).toBe(true);
+
+    // Integration record reflects ready state with no lastError.
+    const integration = getLocalAgentIntegration(config, 'openclaw');
+    expect(integration?.status).toBe('ready');
+    expect(integration?.runtime.ready).toBe(true);
+    expect(integration?.runtime.lastError).toBeFalsy();
+  });
+
+  it('scenario 2: post-Connect Disconnect reverse-merges adapter wiring, writes .bak.<ts>, and removes SKILL.md from the authoritative installedWorkspace', async () => {
+    // Seed a pre-merged openclaw.json (as if Connect already ran).
+    mergeOpenClawConfig(openclawConfigPath, adapterPath, testEntryConfig, workspaceDir);
+
+    // Codex R2-1: Disconnect MUST target `entry.config.installedWorkspace`, not the
+    // openclaw.json workspace keys. To prove that, mutate `installedWorkspace`
+    // to a DIFFERENT directory than `agents.defaults.workspace` — the two
+    // typically agree in production, but any drift (override flag used, or
+    // openclaw.json edited between Connect and Disconnect) must be resolved
+    // in favor of the authoritative install path setup actually wrote to.
+    const authoritativeInstallDir = join(tempRoot, 'authoritative-install');
+    mkdirSync(authoritativeInstallDir, { recursive: true });
+    const afterMerge = JSON.parse(readFileSync(openclawConfigPath, 'utf-8'));
+    afterMerge.plugins.entries['adapter-openclaw'].config.installedWorkspace = authoritativeInstallDir;
+    writeFileSync(openclawConfigPath, JSON.stringify(afterMerge, null, 2));
+
+    // Seed SKILL.md + a sibling `custom-note.md` at the AUTHORITATIVE path —
+    // where setup actually installed. Also seed a distinct SKILL.md at the
+    // config-derived workspaceDir to show Disconnect does NOT touch it when
+    // installedWorkspace is authoritative.
+    const installedSkillDir = join(authoritativeInstallDir, 'skills', 'dkg-node');
+    const installedSkillPath = join(installedSkillDir, 'SKILL.md');
+    const installedSiblingPath = join(installedSkillDir, 'custom-note.md');
+    mkdirSync(installedSkillDir, { recursive: true });
+    writeFileSync(installedSkillPath, '# Canonical DKG Node Skill (authoritative)\n');
+    writeFileSync(installedSiblingPath, '# User note alongside the adapter skill\n');
+
+    const driftSkillDir = join(workspaceDir, 'skills', 'dkg-node');
+    const driftSkillPath = join(driftSkillDir, 'SKILL.md');
+    mkdirSync(driftSkillDir, { recursive: true });
+    writeFileSync(driftSkillPath, '# Stale SKILL.md that Disconnect must NOT touch\n');
+
+    // Sanity: adapter is fully wired before disconnect.
+    const before = JSON.parse(readFileSync(openclawConfigPath, 'utf-8'));
+    expect(before.plugins.slots.memory).toBe('adapter-openclaw');
+    expect(before.plugins.allow).toContain('adapter-openclaw');
+    expect(before.plugins.entries['adapter-openclaw'].config.installedWorkspace).toBe(authoritativeInstallDir);
+
+    const config = makeConfig();
+    await reverseLocalAgentSetupForUi(config, openclawConfigPath);
+
+    const after = JSON.parse(readFileSync(openclawConfigPath, 'utf-8'));
+    expect(after.plugins.slots.memory).toBeUndefined();
+    expect(after.plugins.allow).not.toContain('adapter-openclaw');
+    // D1: adapter entry is removed entirely on unmerge (not just disabled).
+    expect(after.plugins.entries['adapter-openclaw']).toBeUndefined();
+    const remainingPaths = (after.plugins.load.paths ?? []) as string[];
+    expect(remainingPaths.some((p) => /packages[\\/]adapter-openclaw/.test(p))).toBe(false);
+    // tools.alsoAllow is intentionally NOT reverted (shared with other plugins per D1 decision).
+    expect(after.tools.alsoAllow).toContain('group:plugins');
+
+    // A .bak.<ts> snapshot sits next to the config.
+    const siblings = readdirSync(openclawDir);
+    expect(siblings.some((name) => /^openclaw\.json\.bak\.\d+$/.test(name))).toBe(true);
+
+    // Authoritative install: SKILL.md retired, sibling custom-note.md survives,
+    // outer skills/ parent untouched (other skills may live there).
+    expect(existsSync(installedSkillPath)).toBe(false);
+    expect(existsSync(installedSiblingPath)).toBe(true);
+    expect(existsSync(join(authoritativeInstallDir, 'skills'))).toBe(true);
+    // Drift directory: Disconnect did NOT target the config-derived path once
+    // installedWorkspace was populated — the stale SKILL.md stays where it is.
+    expect(existsSync(driftSkillPath)).toBe(true);
+  });
+
+  it('scenario 2b: bare { enabled: false } PUT payload still routes through the reverse-setup path (Codex #2)', async () => {
+    // Regression test for https://github.com/OriginTrail/dkg-v9/pull/228#discussion_r3117710814
+    // Background: an earlier draft of the PUT handler gated the reverse-merge on
+    // `parsed.enabled === false && parsed.runtime?.status === 'disconnected'`, which skipped
+    // bare `{ enabled: false }` payloads. Those clients still disabled the integration but left
+    // openclaw.json fully wired to adapter-openclaw. The handler now normalizes via
+    // `normalizeExplicitLocalAgentDisconnectBody` BEFORE computing `explicitDisconnect`.
+
+    // Seed a pre-merged openclaw.json (as if Connect already ran).
+    mergeOpenClawConfig(openclawConfigPath, adapterPath, testEntryConfig, workspaceDir);
+    const before = JSON.parse(readFileSync(openclawConfigPath, 'utf-8'));
+    expect(before.plugins.slots.memory).toBe('adapter-openclaw');
+
+    // Mirror the exact sequence the PUT handler uses (packages/cli/src/daemon.ts ~6362).
+    const parsed: Record<string, unknown> = { enabled: false };
+    const normalizedPatch = normalizeExplicitLocalAgentDisconnectBody(parsed);
+    const explicitDisconnect = normalizedPatch.enabled === false
+      && !!normalizedPatch.runtime
+      && (normalizedPatch.runtime as Record<string, unknown>).status === 'disconnected';
+    expect(explicitDisconnect).toBe(true);
+
+    // Same SKILL.md + sibling seeding as scenario 2 — the bare-body path must
+    // also retire the canonical skill and spare unrelated neighbors.
+    const skillDir = join(workspaceDir, 'skills', 'dkg-node');
+    const skillPath = join(skillDir, 'SKILL.md');
+    const siblingPath = join(skillDir, 'custom-note.md');
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(skillPath, '# Canonical DKG Node Skill\n');
+    writeFileSync(siblingPath, '# User note alongside the adapter skill\n');
+
+    const config = makeConfig();
+    await reverseLocalAgentSetupForUi(config, openclawConfigPath);
+
+    const after = JSON.parse(readFileSync(openclawConfigPath, 'utf-8'));
+    expect(after.plugins.slots.memory).toBeUndefined();
+    expect(after.plugins.allow).not.toContain('adapter-openclaw');
+    // D1: adapter entry is removed entirely on unmerge.
+    expect(after.plugins.entries['adapter-openclaw']).toBeUndefined();
+
+    expect(existsSync(skillPath)).toBe(false);
+    expect(existsSync(siblingPath)).toBe(true);
+  });
+
+  it('scenario 2c: reverse-setup surfaces non-slot invariant failures via verifyUnmergeInvariants (Codex N3)', async () => {
+    // Regression test for https://github.com/OriginTrail/dkg-v9/pull/228#discussion_r3118294850
+    // Earlier versions of reverseLocalAgentSetupForUi only post-checked
+    // `plugins.slots.memory !== 'adapter-openclaw'`. If a future regression in
+    // unmergeOpenClawConfig left the adapter in `plugins.allow`, `plugins.load.paths`, or
+    // `plugins.entries[...].enabled === true`, the daemon would still report a successful
+    // disconnect while the gateway kept loading the adapter on restart. The helper now
+    // defers to the adapter's `verifyUnmergeInvariants`, which covers all four invariants.
+
+    // Seed a pre-merged openclaw.json (as if Connect already ran).
+    mergeOpenClawConfig(openclawConfigPath, adapterPath, testEntryConfig, workspaceDir);
+    const before = JSON.parse(readFileSync(openclawConfigPath, 'utf-8'));
+    expect(before.plugins.slots.memory).toBe('adapter-openclaw');
+    expect(before.plugins.allow).toContain('adapter-openclaw');
+
+    // Stub unmergeOpenClawConfig to do a PARTIAL cleanup — clears the slot and the load
+    // path (so the old single-check invariant would pass) but leaves the adapter listed
+    // in plugins.allow. verifyUnmergeInvariants should flag the latter.
+    const partialUnmerge = (configPath: string) => {
+      const raw = readFileSync(configPath, 'utf-8');
+      const cfg = JSON.parse(raw);
+      if (cfg?.plugins?.slots?.memory === 'adapter-openclaw') {
+        delete cfg.plugins.slots.memory;
+      }
+      if (Array.isArray(cfg?.plugins?.load?.paths)) {
+        cfg.plugins.load.paths = cfg.plugins.load.paths.filter(
+          (p: string) => !/adapter-openclaw/.test(p),
+        );
+      }
+      if (cfg?.plugins?.entries?.['adapter-openclaw']) {
+        cfg.plugins.entries['adapter-openclaw'].enabled = false;
+      }
+      // Intentionally does NOT remove 'adapter-openclaw' from plugins.allow.
+      writeFileSync(configPath, JSON.stringify(cfg, null, 2));
+    };
+
+    // Load the real verifier from the adapter barrel so we exercise the actual invariant.
+    const { verifyUnmergeInvariants } = await import('@origintrail-official/dkg-adapter-openclaw');
+
+    // Seed a SKILL.md at the workspace `mergeOpenClawConfig` recorded above.
+    // Post-R3-2 the skill cleanup runs BEFORE the config-level unmerge; we
+    // stub the skill steps with passing no-ops so the flow reaches the
+    // partial-unmerge + invariant-failure path the test is actually about.
+    const skillDir = join(workspaceDir, 'skills', 'dkg-node');
+    const skillPath = join(skillDir, 'SKILL.md');
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(skillPath, '# Canonical DKG Node Skill\n');
+
+    const removeSkillStub = vi.fn();
+    const verifySkillRemovedStub = vi.fn(() => null);
+
+    const config = makeConfig();
+    await expect(
+      reverseLocalAgentSetupForUi(config, openclawConfigPath, {
+        unmergeOpenClawConfig: partialUnmerge,
+        verifyUnmergeInvariants,
+        removeCanonicalNodeSkill: removeSkillStub,
+        verifySkillRemoved: verifySkillRemovedStub,
+      }),
+    ).rejects.toThrow(/plugins\.allow still contains/);
+
+    // The partial cleanup did happen on disk — this asserts the invariant check fired
+    // specifically on the allow-list regression.
+    const after = JSON.parse(readFileSync(openclawConfigPath, 'utf-8'));
+    expect(after.plugins.slots.memory).toBeUndefined();
+    expect(after.plugins.allow).toContain('adapter-openclaw');
+
+    // Post-R3-2 ordering: skill cleanup ran BEFORE the unmerge, against the
+    // same workspaceDir `mergeOpenClawConfig` persisted on the entry.
+    expect(removeSkillStub).toHaveBeenCalledTimes(1);
+    expect(removeSkillStub.mock.calls[0][0]).toBe(workspaceDir);
+    expect(verifySkillRemovedStub).toHaveBeenCalledTimes(1);
+  });
+
+  it('scenario 2d: legacy (pre-R2) openclaw.json without installedWorkspace SKIPS skill cleanup but still unmerges the config (R11-2)', async () => {
+    // Per R11-2: Disconnect no longer falls back to a config-derived
+    // workspace when `entry.config.installedWorkspace` is missing. That
+    // fallback would have let Disconnect delete a SKILL.md at a
+    // `--workspace`-incongruent path. Instead, legacy entries simply skip
+    // the skill-cleanup step; the config-level unmerge still completes,
+    // and any pre-R2 SKILL.md the adapter owned stays on disk for the
+    // user to clean manually.
+
+    // Seed a legacy adapter entry (no `entry.config.installedWorkspace`).
+    writeFileSync(openclawConfigPath, JSON.stringify({
+      plugins: {},
+      agents: { defaults: { workspace: workspaceDir } },
+    }, null, 2));
+    mergeOpenClawConfig(openclawConfigPath, adapterPath, testEntryConfig, workspaceDir);
+    const mergedPre = JSON.parse(readFileSync(openclawConfigPath, 'utf-8'));
+    delete mergedPre.plugins.entries['adapter-openclaw'].config.installedWorkspace;
+    writeFileSync(openclawConfigPath, JSON.stringify(mergedPre, null, 2));
+
+    const removeSkillSpy = vi.fn();
+    const verifySkillRemovedStub = vi.fn(() => null);
+
+    const config = makeConfig();
+    await reverseLocalAgentSetupForUi(config, openclawConfigPath, {
+      removeCanonicalNodeSkill: removeSkillSpy,
+      verifySkillRemoved: verifySkillRemovedStub,
+    });
+
+    // No legacy-fallback guessing → skill cleanup is skipped entirely.
+    expect(removeSkillSpy).not.toHaveBeenCalled();
+    expect(verifySkillRemovedStub).not.toHaveBeenCalled();
+
+    // Config-level unmerge still completed — the adapter wiring is gone.
+    const after = JSON.parse(readFileSync(openclawConfigPath, 'utf-8'));
+    expect(after.plugins?.entries?.['adapter-openclaw']).toBeUndefined();
+    expect(after.plugins?.allow ?? []).not.toContain('adapter-openclaw');
+  });
+
+  it('scenario 2e: skill-removal failure propagates to runtime.lastError AND leaves openclaw.json untouched for retry (Codex R2-2 + R3-2)', async () => {
+    // Regression for https://github.com/OriginTrail/dkg-v9/pull/234#discussion_r3120159512
+    // (R2-2) and #discussion_r3120241631 (R3-2). R2-2 stopped swallowing skill-
+    // removal errors; R3-2 reordered the flow so skill cleanup runs BEFORE
+    // the config-level unmerge — a failure at the skill step must leave
+    // `entry.config.installedWorkspace` and the adapter wiring intact so the user
+    // can retry Disconnect and we still know which file to target.
+
+    mergeOpenClawConfig(openclawConfigPath, adapterPath, testEntryConfig, workspaceDir);
+    const beforeDisconnect = readFileSync(openclawConfigPath, 'utf-8');
+
+    // Stub removal to succeed (no-op) but have verifySkillRemoved claim the
+    // file is still present — as if the unlink raced with another writer, or
+    // a permission issue prevented the delete. The injected verifier mirrors
+    // the real contract: non-null string → failure.
+    const removeSkillNoop = vi.fn();
+    const verifySkillRemovedFail = vi.fn(
+      (ws: string) => `canonical node skill still present at ${join(ws, 'skills', 'dkg-node', 'SKILL.md')}`,
+    );
+    // Spies on the config-level ops — must NOT be invoked when the skill
+    // step fails. Provide passing stubs so the default dynamic-import path
+    // would still work if the code accidentally reached them, but the spy
+    // counts prove the reorder held.
+    const unmergeSpy = vi.fn();
+    const verifyInvariantsSpy = vi.fn(() => null);
+
+    const config = makeConfig();
+    await expect(
+      reverseLocalAgentSetupForUi(config, openclawConfigPath, {
+        removeCanonicalNodeSkill: removeSkillNoop,
+        verifySkillRemoved: verifySkillRemovedFail,
+        unmergeOpenClawConfig: unmergeSpy,
+        verifyUnmergeInvariants: verifyInvariantsSpy,
+      }),
+    ).rejects.toThrow(/SKILL\.md|still present/);
+
+    // Skill-step deps were exercised against the installedWorkspace
+    // recorded at merge time (workspaceDir is what the merge above passed).
+    expect(removeSkillNoop).toHaveBeenCalledTimes(1);
+    expect(removeSkillNoop.mock.calls[0][0]).toBe(workspaceDir);
+    expect(verifySkillRemovedFail).toHaveBeenCalledTimes(1);
+    expect(verifySkillRemovedFail.mock.calls[0][0]).toBe(workspaceDir);
+
+    // R3-2: the config-level unmerge + invariant check were never reached,
+    // so openclaw.json is byte-identical to its pre-Disconnect state. The
+    // adapter entry — including `installedWorkspace` — is still present,
+    // which is exactly what a retry needs.
+    expect(unmergeSpy).not.toHaveBeenCalled();
+    expect(verifyInvariantsSpy).not.toHaveBeenCalled();
+    expect(readFileSync(openclawConfigPath, 'utf-8')).toBe(beforeDisconnect);
+    const after = JSON.parse(readFileSync(openclawConfigPath, 'utf-8'));
+    expect(after.plugins.entries['adapter-openclaw']).toBeDefined();
+    expect(after.plugins.entries['adapter-openclaw'].config.installedWorkspace).toBe(workspaceDir);
+  });
+
+  it('scenario 2f: retry after a failed skill cleanup succeeds (Codex R3-2 recovery)', async () => {
+    // First Disconnect: skill cleanup fails, openclaw.json is untouched.
+    // Second Disconnect: real skill cleanup + real verify succeed, entry is removed.
+    // Proves `entry.config.installedWorkspace` is still readable on retry — the whole
+    // point of the R3-2 reorder.
+
+    mergeOpenClawConfig(openclawConfigPath, adapterPath, testEntryConfig, workspaceDir);
+    const skillDir = join(workspaceDir, 'skills', 'dkg-node');
+    const skillPath = join(skillDir, 'SKILL.md');
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(skillPath, '# Canonical DKG Node Skill\n');
+
+    // Attempt 1: removal fails (stubbed no-op that never actually unlinks).
+    // Real verifySkillRemoved then sees SKILL.md still on disk and throws.
+    const removeSkillNoop = vi.fn();
+    const config = makeConfig();
+    await expect(
+      reverseLocalAgentSetupForUi(config, openclawConfigPath, {
+        removeCanonicalNodeSkill: removeSkillNoop,
+        // verifySkillRemoved left as the real adapter helper — it observes
+        // the still-present SKILL.md and returns a failure string.
+      }),
+    ).rejects.toThrow(/still present/);
+
+    // Post-failure state: the adapter entry AND installedWorkspace survived.
+    const afterAttempt1 = JSON.parse(readFileSync(openclawConfigPath, 'utf-8'));
+    expect(afterAttempt1.plugins.entries['adapter-openclaw']).toBeDefined();
+    expect(afterAttempt1.plugins.entries['adapter-openclaw'].config.installedWorkspace).toBe(workspaceDir);
+    expect(afterAttempt1.plugins.slots.memory).toBe('adapter-openclaw');
+    expect(existsSync(skillPath)).toBe(true);
+
+    // Attempt 2: no stubs — run the real flow end-to-end. The
+    // `entry.config.installedWorkspace` left in place is what the real
+    // `reverseLocalAgentSetupForUi` reads to target SKILL.md.
+    await expect(reverseLocalAgentSetupForUi(config, openclawConfigPath)).resolves.toBeUndefined();
+
+    const afterAttempt2 = JSON.parse(readFileSync(openclawConfigPath, 'utf-8'));
+    expect(afterAttempt2.plugins.entries['adapter-openclaw']).toBeUndefined();
+    expect(afterAttempt2.plugins.slots.memory).toBeUndefined();
+    expect(existsSync(skillPath)).toBe(false);
+  });
+
+  it('scenario 2g: second Disconnect after a clean first Disconnect does NOT touch user-placed files at the config-derived workspace (Codex R5-4)', async () => {
+    // Regression for https://github.com/OriginTrail/dkg-v9/pull/234#discussion_r3120437829
+    // After a clean first Disconnect, the adapter entry is fully removed from
+    // openclaw.json. The old code still fell through to
+    // `resolveWorkspaceDirFromConfig` and would target SKILL.md at the
+    // config-derived workspace — clobbering any user-placed file there.
+    // Post-R5-4, an absent adapter entry gates skill cleanup entirely.
+
+    // Seed openclaw.json WITHOUT a `plugins.entries['adapter-openclaw']`
+    // entry (simulates the post-clean-Disconnect state) but with an
+    // `agents.defaults.workspace` the old fallback would have targeted.
+    writeFileSync(openclawConfigPath, JSON.stringify({
+      plugins: { allow: [], load: { paths: [] }, entries: {}, slots: {} },
+      agents: { defaults: { workspace: workspaceDir } },
+    }, null, 2));
+
+    // Seed a user-placed SKILL.md at the config-derived workspace. After a
+    // clean first Disconnect this could be something the user restored
+    // manually, or an unrelated file they placed under the same name.
+    const userSkillDir = join(workspaceDir, 'skills', 'dkg-node');
+    const userSkillPath = join(userSkillDir, 'SKILL.md');
+    mkdirSync(userSkillDir, { recursive: true });
+    writeFileSync(userSkillPath, '# User-placed SKILL.md — NOT adapter-owned\n');
+    const userBytes = readFileSync(userSkillPath, 'utf-8');
+
+    const removeSkillSpy = vi.fn();
+    const verifySkillRemovedSpy = vi.fn(() => null);
+
+    const config = makeConfig();
+    await expect(
+      reverseLocalAgentSetupForUi(config, openclawConfigPath, {
+        removeCanonicalNodeSkill: removeSkillSpy,
+        verifySkillRemoved: verifySkillRemovedSpy,
+      }),
+    ).resolves.toBeUndefined();
+
+    // R5-4: entry absent → skill cleanup path is never entered. Spies
+    // prove neither helper was invoked.
+    expect(removeSkillSpy).not.toHaveBeenCalled();
+    expect(verifySkillRemovedSpy).not.toHaveBeenCalled();
+
+    // User's SKILL.md is intact — byte-identical.
+    expect(existsSync(userSkillPath)).toBe(true);
+    expect(readFileSync(userSkillPath, 'utf-8')).toBe(userBytes);
+  });
+
+  it('scenario 2h: whitespace-padded entry.config.installedWorkspace is trimmed before skill cleanup (Codex R12-1)', async () => {
+    // Regression for https://github.com/OriginTrail/dkg-v9/pull/234#discussion_r3123147766
+    // Prior to the fix, the daemon's installedWorkspace read returned the
+    // raw JSON value after a truthy `.trim()` check — whitespace-padded
+    // strings passed validation but were then handed to
+    // `removeCanonicalNodeSkill` / `verifySkillRemoved` verbatim, producing
+    // a wrong (non-existent) path. Disconnect silently succeeded, the real
+    // SKILL.md stayed orphaned. Now we trim at the read site.
+
+    const paddedInstalledWorkspace = `  ${workspaceDir}  `;
+    mergeOpenClawConfig(openclawConfigPath, adapterPath, testEntryConfig, workspaceDir);
+    const merged = JSON.parse(readFileSync(openclawConfigPath, 'utf-8'));
+    // Inject whitespace around the authoritative pointer to simulate a
+    // hand-edited or externally-written config value.
+    merged.plugins.entries['adapter-openclaw'].config.installedWorkspace = paddedInstalledWorkspace;
+    writeFileSync(openclawConfigPath, JSON.stringify(merged, null, 2));
+
+    const removeSkillSpy = vi.fn();
+    const verifySkillRemovedSpy = vi.fn(() => null);
+
+    const config = makeConfig();
+    await reverseLocalAgentSetupForUi(config, openclawConfigPath, {
+      removeCanonicalNodeSkill: removeSkillSpy,
+      verifySkillRemoved: verifySkillRemovedSpy,
+    });
+
+    // Both skill helpers must receive the TRIMMED path, not the raw
+    // whitespace-padded value — otherwise the resolved SKILL.md path
+    // (`<padded>/skills/dkg-node/SKILL.md`) wouldn't exist on disk and the
+    // cleanup would silently no-op against the wrong location.
+    expect(removeSkillSpy).toHaveBeenCalledTimes(1);
+    expect(removeSkillSpy.mock.calls[0][0]).toBe(workspaceDir);
+    expect(removeSkillSpy.mock.calls[0][0]).not.toBe(paddedInstalledWorkspace);
+    expect(verifySkillRemovedSpy).toHaveBeenCalledTimes(1);
+    expect(verifySkillRemovedSpy.mock.calls[0][0]).toBe(workspaceDir);
+  });
+
+  it('scenario 3a: refresh endpoint moves a bridge-ok integration to ready', async () => {
+    const config = makeConfig({
+      localAgentIntegrations: {
+        openclaw: {
+          enabled: true,
+          transport: {
+            kind: 'openclaw-channel',
+            bridgeUrl: 'http://127.0.0.1:9201',
+          },
+          runtime: {
+            status: 'error',
+            ready: false,
+            lastError: 'bridge offline (stale)',
+          },
+        },
+      },
+    });
+
+    const origFetch = globalThis.fetch;
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => {
+      fetchCalls++;
+      return new Response(JSON.stringify({ ok: true, channel: 'dkg-ui' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as typeof fetch;
+
+    try {
+      const integration = await refreshLocalAgentIntegrationFromUi(config, 'openclaw', 'bridge-token');
+      expect(fetchCalls).toBeGreaterThan(0);
+      expect(integration.status).toBe('ready');
+      expect(integration.runtime.ready).toBe(true);
+      expect(integration.runtime.lastError).toBeFalsy();
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it('scenario 3b: refresh endpoint surfaces a 503 as runtime.status=error with lastError populated', async () => {
+    const config = makeConfig({
+      localAgentIntegrations: {
+        openclaw: {
+          enabled: true,
+          transport: {
+            kind: 'openclaw-channel',
+            bridgeUrl: 'http://127.0.0.1:9201',
+          },
+          runtime: {
+            status: 'ready',
+            ready: true,
+          },
+        },
+      },
+    });
+
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response('bridge offline', {
+      status: 503,
+      headers: { 'Content-Type': 'text/plain' },
+    })) as typeof fetch;
+
+    try {
+      const integration = await refreshLocalAgentIntegrationFromUi(config, 'openclaw', 'bridge-token');
+      expect(integration.status).toBe('error');
+      expect(integration.runtime.ready).toBe(false);
+      expect(integration.runtime.lastError).toBeTruthy();
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it('scenario 3c: refresh on a non-openclaw known integration (hermes) returns the record without probing bridge health (Codex #3)', async () => {
+    // Regression test for https://github.com/OriginTrail/dkg-v9/pull/228#discussion_r3117710821
+    // The refresh route accepts any known integration id, not just openclaw. For non-openclaw
+    // ids the helper short-circuits and returns the existing record without a health probe.
+    const config = makeConfig();
+
+    const origFetch = globalThis.fetch;
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => {
+      fetchCalls++;
+      return new Response('should not be reached', { status: 500 });
+    }) as typeof fetch;
+
+    try {
+      const integration = await refreshLocalAgentIntegrationFromUi(config, 'hermes', 'bridge-token');
+      expect(integration).toBeTruthy();
+      expect(integration.id).toBe('hermes');
+      expect(fetchCalls).toBe(0); // no bridge probe for non-openclaw
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it('scenario 3d: refresh on an unknown integration id throws (route maps to 404)', async () => {
+    const config = makeConfig();
+    await expect(
+      refreshLocalAgentIntegrationFromUi(config, 'does-not-exist', 'bridge-token'),
+    ).rejects.toThrow(/Unknown integration/);
+  });
+
+  it('scenario 4: post-setup invariant surfaces error when slot election silently fails', async () => {
+    // Stub runSetup so it does NOT write plugins.slots.memory — simulates the
+    // silent-no-op class of bug where mergeOpenClawConfig runs but leaves a
+    // conflicting slot in place.
+    seedOpenClawConfig({
+      plugins: {
+        slots: { memory: 'some-other-plugin' },
+        allow: ['adapter-openclaw'],
+        load: { paths: [] },
+        entries: { 'adapter-openclaw': { enabled: true } },
+      },
+    });
+
+    const config = makeConfig();
+    const runSetup = async () => {
+      // Intentionally no-op on the slot — the invariant check must catch this.
+    };
+    const restartGateway = async () => {};
+    const waitForReady = async () => ({ ok: true as const, target: 'bridge' });
+    const probeHealth = async () => ({ ok: false as const, error: 'bridge offline' });
+    const saveConfig = async () => {};
+    const verifyMemorySlot = () => {
+      const raw = readFileSync(openclawConfigPath, 'utf-8');
+      return JSON.parse(raw)?.plugins?.slots?.memory === 'adapter-openclaw';
+    };
+    let attachJob: Promise<void> | null = null;
+
+    const result = await connectLocalAgentIntegrationFromUi(
+      config,
+      { id: 'openclaw', metadata: { source: 'node-ui' } },
+      'bridge-token',
+      {
+        runSetup,
+        restartGateway,
+        waitForReady,
+        probeHealth,
+        saveConfig,
+        verifyMemorySlot,
+        onAttachScheduled: (_id, job) => { attachJob = job; },
+      },
+    );
+
+    expect(result.integration.status).toBe('connecting');
+    if (!attachJob) throw new Error('Expected OpenClaw attach job to be scheduled');
+    await attachJob;
+
+    const integration = getLocalAgentIntegration(config, 'openclaw');
+    expect(integration?.status).toBe('error');
+    expect(integration?.runtime.ready).toBe(false);
+    expect(integration?.runtime.lastError).toMatch(/slot election/i);
   });
 });
 

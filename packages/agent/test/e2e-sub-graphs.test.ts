@@ -255,6 +255,7 @@ describe('Sub-graph publish + query (single agent)', () => {
     await agent.start();
 
     await agent.createContextGraph({ id: 'sg-swm', name: 'SWM', description: '' });
+    await agent.registerContextGraph('sg-swm');
     await agent.createSubGraph('sg-swm', 'tasks');
 
     // Share to sub-graph SWM
@@ -506,6 +507,7 @@ describe('Sub-graph across memory layers (single agent)', () => {
     await agent.start();
 
     await agent.createContextGraph({ id: 'sg-pipeline', name: 'Pipeline', description: '' });
+    await agent.registerContextGraph('sg-pipeline');
     await agent.createSubGraph('sg-pipeline', 'code');
 
     // Step 1: Assertion in WM/code

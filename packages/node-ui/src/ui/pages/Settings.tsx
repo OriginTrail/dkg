@@ -634,8 +634,23 @@ function CatchupStatusSection() {
 
           {catchup.result && (
             <div style={{ fontSize: 12, color: 'var(--text)', marginBottom: 8 }}>
-              peers {catchup.result.peersTried}/{catchup.result.syncCapablePeers} (connected {catchup.result.connectedPeers}),
-              data {catchup.result.dataSynced}, shared memory {catchup.result.sharedMemorySynced}
+              <div>
+                peers {catchup.result.peersTried}/{catchup.result.syncCapablePeers} (connected {catchup.result.connectedPeers}),
+                data {catchup.result.dataSynced}, shared memory {catchup.result.sharedMemorySynced}
+              </div>
+              {catchup.result.diagnostics && (
+                <>
+                  <div style={{ marginTop: 4, color: 'var(--text-dim)' }}>
+                    no protocol {catchup.result.diagnostics.noProtocolPeers} · durable fetched meta/data {catchup.result.diagnostics.durable.fetchedMetaTriples}/{catchup.result.diagnostics.durable.fetchedDataTriples} · inserted meta/data {catchup.result.diagnostics.durable.insertedMetaTriples}/{catchup.result.diagnostics.durable.insertedDataTriples}
+                  </div>
+                  <div style={{ color: 'var(--text-dim)' }}>
+                    durable empty {catchup.result.diagnostics.durable.emptyResponses} · meta-only {catchup.result.diagnostics.durable.metaOnlyResponses} · no-meta rejects {catchup.result.diagnostics.durable.dataRejectedMissingMeta} · rejected KCs {catchup.result.diagnostics.durable.rejectedKcs}
+                  </div>
+                  <div style={{ color: 'var(--text-dim)' }}>
+                    swm fetched meta/data {catchup.result.diagnostics.sharedMemory.fetchedMetaTriples}/{catchup.result.diagnostics.sharedMemory.fetchedDataTriples} · inserted meta/data {catchup.result.diagnostics.sharedMemory.insertedMetaTriples}/{catchup.result.diagnostics.sharedMemory.insertedDataTriples} · empty {catchup.result.diagnostics.sharedMemory.emptyResponses} · dropped {catchup.result.diagnostics.sharedMemory.droppedDataTriples}
+                  </div>
+                </>
+              )}
             </div>
           )}
 

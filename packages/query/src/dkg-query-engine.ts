@@ -9,7 +9,7 @@ import {
   REMOVED_VIEWS,
   TrustLevel,
 } from '@origintrail-official/dkg-core';
-import { validateReadOnlySparql } from './sparql-guard.js';
+import { emptyQueryResultForKind, validateReadOnlySparql } from './sparql-guard.js';
 
 /**
  * Result of resolving a V10 GET view to concrete graph targets.
@@ -30,11 +30,24 @@ export interface ViewResolution {
  * prefixes) that the query engine should target.
  *
  * Spec reference: §12 GET — Declared State Views.
+ *
+ * Trust-level semantics for `verified-memory` (P-13):
+ *   The root content graph `did:dkg:context-graph:{id}` holds chain-confirmed
+ *   data at only `TrustLevel.SelfAttested` (on-chain anchoring proves the
+ *   publisher signed it, not that a quorum endorsed it). Higher-trust data
+ *   lives in per-quorum sub-graphs under `/_verified_memory/{quorum}`.
+ *   When `minTrust > SelfAttested`, the root data graph is excluded from
+ *   the resolution so low-trust triples cannot leak into a high-trust query.
  */
 export function resolveViewGraphs(
   view: GetView,
   contextGraphId: string,
-  opts?: { agentAddress?: string; verifiedGraph?: string; assertionName?: string },
+  opts?: {
+    agentAddress?: string;
+    verifiedGraph?: string;
+    assertionName?: string;
+    minTrust?: TrustLevel;
+  },
 ): ViewResolution {
   if (REMOVED_VIEWS.includes(view as string)) {
     throw new Error(
@@ -64,7 +77,60 @@ export function resolveViewGraphs(
         graphPrefixes: [],
       };
     case 'verified-memory': {
+      // P-13 review (iter-6): `minTrust` is a verified-memory concept
+      // — it is the only view whose graph resolution is actually
+      // gated by per-graph trust. The earlier iterations ran the
+      // numeric/enum validation at the top of `resolveViewGraphs`,
+      // but that meant a caller who passes a generic options object
+      // (e.g. `{ agentAddress, minTrust }`) across views would get
+      // a 400 on `working-memory`/`shared-working-memory` too,
+      // where the option is documented as ignored. Keep the
+      // validation here so only verified-memory consumers see it.
+      if (opts?.minTrust !== undefined) {
+        const mt: unknown = opts.minTrust;
+        const validLevels = [
+          TrustLevel.SelfAttested,
+          TrustLevel.Endorsed,
+          TrustLevel.PartiallyVerified,
+          TrustLevel.ConsensusVerified,
+        ];
+        if (typeof mt !== 'number' || !Number.isInteger(mt) || !validLevels.includes(mt as TrustLevel)) {
+          // "minTrust" + "must be one of" mirrors the daemon's 400
+          // classifier wording so the HTTP path maps to a client error.
+          throw new Error(
+            `Invalid minTrust ${JSON.stringify(mt)}: must be one of TrustLevel.SelfAttested (0), ` +
+            `Endorsed (1), PartiallyVerified (2), ConsensusVerified (3). The HTTP /api/query route ` +
+            `accepts the string forms "SelfAttested" | "Endorsed" | "PartiallyVerified" | ` +
+            `"ConsensusVerified" and normalises them; in-process callers must pass the numeric enum.`,
+          );
+        }
+      }
+
+      const requireHighTrust =
+        opts?.minTrust !== undefined && opts.minTrust > TrustLevel.SelfAttested;
       if (opts?.verifiedGraph) {
+        // P-13 review (iter-6): every `/_verified_memory/<id>` graph
+        // is populated only by quorum-verified write paths, so the
+        // floor for those sub-graphs is implicitly `Endorsed`. A
+        // caller pinning an exact `verifiedGraph` + `minTrust=Endorsed`
+        // therefore asks for the same data the engine would union
+        // from the prefix and must succeed. Only values ABOVE
+        // `Endorsed` need to be rejected — the engine still cannot
+        // prove a single named sub-graph satisfies
+        // `PartiallyVerified` / `ConsensusVerified` until per-graph
+        // trust metadata (Q-1) lands.
+        if (opts.minTrust !== undefined && opts.minTrust > TrustLevel.Endorsed) {
+          // Use the exact phrase "cannot be combined with" so the
+          // daemon's `/api/query` error classifier maps this to HTTP
+          // 400 (see packages/cli/src/daemon.ts). Without that
+          // wording the error escapes as a 500.
+          throw new Error(
+            `verified-memory: verifiedGraph cannot be combined with minTrust above Endorsed ` +
+            `(got minTrust=${opts.minTrust}). The engine cannot yet prove a named sub-graph satisfies ` +
+            `PartiallyVerified or ConsensusVerified; drop verifiedGraph to union across all ` +
+            `quorum-verified sub-graphs, or use minTrust=Endorsed to read the specific sub-graph.`,
+          );
+        }
         return {
           graphs: [contextGraphVerifiedMemoryUri(contextGraphId, opts.verifiedGraph)],
           graphPrefixes: [],
@@ -74,8 +140,34 @@ export function resolveViewGraphs(
       // Verified Memory content layer (chain-confirmed data lands here after
       // finalization).  Any quorum-specific verified-memory sub-graphs live
       // under `_verified_memory/` and are unioned in as well.
+      //
+      // P-13: when the caller demands more than SelfAttested, the root data
+      // graph is dropped — only quorum-verified sub-graphs survive.
+      //
+      // P-13 review follow-up: today the /_verified_memory/* sub-graphs
+      // carry no per-graph trust metadata — any graph in that prefix was
+      // populated by *some* quorum-verified write path, which we treat as
+      // at least `Endorsed`. We cannot yet distinguish `PartiallyVerified`
+      // vs `ConsensusVerified` without knowing the quorum size, so a caller
+      // asking for those higher tiers would silently receive merely
+      // Endorsed data. Reject such requests until Q-1 lands per-graph
+      // trust tagging; Endorsed itself remains honoured.
+      if (
+        opts?.minTrust !== undefined &&
+        opts.minTrust > TrustLevel.Endorsed
+      ) {
+        // Use the "Invalid minTrust" prefix so the daemon's /api/query
+        // classifier maps this rejection to HTTP 400 instead of 500.
+        throw new Error(
+          `Invalid minTrust=${opts.minTrust} for verified-memory: values above Endorsed are not yet ` +
+          `supported — the engine cannot currently prove a ` +
+          `\`/_verified_memory/<quorum>\` sub-graph satisfies PartiallyVerified or ConsensusVerified. ` +
+          `Use minTrust=Endorsed (1) to restrict to quorum-verified sub-graphs, or track Q-1 for ` +
+          `per-graph trust tagging. See packages/query/src/query-engine.ts QueryOptions.minTrust.`,
+        );
+      }
       return {
-        graphs: [contextGraphDataUri(contextGraphId)],
+        graphs: requireHighTrust ? [] : [contextGraphDataUri(contextGraphId)],
         graphPrefixes: [`did:dkg:context-graph:${contextGraphId}/_verified_memory/`],
       };
     }
@@ -190,6 +282,9 @@ export class DKGQueryEngine implements QueryEngine {
       agentAddress: options.agentAddress,
       verifiedGraph: options.verifiedGraph,
       assertionName: options.assertionName,
+      // Back-compat: accept the legacy `_minTrust` underscore form for a
+      // deprecation window. See QueryOptions._minTrust.
+      minTrust: options.minTrust ?? options._minTrust,
     });
 
     const allGraphs = [...resolution.graphs];
@@ -200,7 +295,15 @@ export class DKGQueryEngine implements QueryEngine {
     }
 
     if (allGraphs.length === 0) {
-      return { bindings: [] };
+      // PR #239 Codex iter-5: a zero-graph resolution (e.g. a
+      // `verified-memory` query with `minTrust=Endorsed` on a context graph
+      // that has not been populated with any `/_verified_memory/*`
+      // sub-graphs yet) must still respect the requested query form.
+      // Returning `{ bindings: [] }` for an ASK would look like a SELECT
+      // result and break clients that rely on ASK's boolean binding;
+      // CONSTRUCT/DESCRIBE must carry `quads: []`. Delegate to the shared
+      // kind-aware empty-result helper.
+      return emptyQueryResultForKind(sparql);
     }
 
     if (allGraphs.length === 1) {

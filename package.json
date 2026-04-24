@@ -32,6 +32,7 @@
   "devDependencies": {
     "@types/node": "^22",
     "@vitest/coverage-v8": "^4.0.18",
+    "knip": "^6.6.1",
     "tsx": "^4.21.0",
     "turbo": "^2",
     "typescript": "^5.7",

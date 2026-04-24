@@ -18,17 +18,14 @@
     "clean": "node -e \"const fs=require('fs'); ['dist','tsconfig.tsbuildinfo'].forEach((p)=>fs.rmSync(p,{recursive:true,force:true}))\""
   },
   "dependencies": {
+    "@openuidev/react-lang": "^0.2.3",
     "@origintrail-official/dkg-core": "workspace:*",
     "@origintrail-official/dkg-graph-viz": "workspace:*",
     "better-sqlite3": "^11",
+    "zod": "^3.25.76",
     "zustand": "^5.0.12"
   },
   "devDependencies": {
-    "@codemirror/lang-sql": "^6",
-    "@codemirror/language": "^6.12.2",
-    "@codemirror/state": "^6",
-    "@codemirror/view": "^6",
-    "@origintrail-official/dkg-graph-viz": "workspace:*",
     "@playwright/test": "^1.59.1",
     "@types/better-sqlite3": "^7",
     "@types/react": "^19",

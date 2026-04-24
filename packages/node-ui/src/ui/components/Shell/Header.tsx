@@ -52,6 +52,13 @@ const AGENT_PANEL_ICON = (
   </svg>
 );
 
+const SETTINGS_ICON = (
+  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <circle cx="12" cy="12" r="3" />
+    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+  </svg>
+);
+
 export function Header() {
   const { theme, setTheme, leftCollapsed, toggleLeft, rightCollapsed, toggleRight } = useLayoutStore();
   const nodeStatus = useAgentsStore((s) => s.nodeStatus);
@@ -77,7 +84,11 @@ export function Header() {
   }, [loadNotifs]);
 
   useNodeEvents(useCallback((event) => {
-    if (event.type === 'join_request' || event.type === 'join_approved') {
+    if (
+      event.type === 'join_request' ||
+      event.type === 'join_approved' ||
+      event.type === 'join_rejected'
+    ) {
       loadNotifs();
     }
   }, [loadNotifs]));
@@ -157,11 +168,14 @@ export function Header() {
                 const meta = n.meta ? (() => { try { return JSON.parse(n.meta); } catch { return null; } })() : null;
                 const isJoinReq = n.type === 'join_request';
                 const isJoinApproved = n.type === 'join_approved';
+                const isJoinRejected = n.type === 'join_rejected';
+                // A rejection doesn't correspond to a project the invitee
+                // has access to, so there's nothing useful to open on click.
                 const clickable = (isJoinReq || isJoinApproved) && meta?.contextGraphId;
                 return (
                   <div
                     key={i}
-                    className={`v10-header-notif-item ${isJoinReq ? 'v10-notif-join' : ''} ${isJoinApproved ? 'v10-notif-approved' : ''} ${clickable ? 'v10-notif-clickable' : ''}`}
+                    className={`v10-header-notif-item ${isJoinReq ? 'v10-notif-join' : ''} ${isJoinApproved ? 'v10-notif-approved' : ''} ${isJoinRejected ? 'v10-notif-rejected' : ''} ${clickable ? 'v10-notif-clickable' : ''}`}
                     onClick={clickable ? () => {
                       setActiveProject(meta.contextGraphId);
                       openTab({ id: `project:${meta.contextGraphId}`, label: meta.contextGraphId.slice(0, 16), closable: true });
@@ -171,6 +185,7 @@ export function Header() {
                   >
                     {isJoinReq && <span className="v10-notif-join-icon">🔑</span>}
                     {isJoinApproved && <span className="v10-notif-join-icon">✓</span>}
+                    {isJoinRejected && <span className="v10-notif-join-icon">✕</span>}
                     <div className="v10-header-notif-item-text">{n.message ?? n.title ?? 'Notification'}</div>
                     {n.ts && <div className="v10-header-notif-item-time">{new Date(n.ts).toLocaleTimeString()}</div>}
                   </div>
@@ -179,6 +194,14 @@ export function Header() {
             </div>
           )}
         </div>
+
+        <button
+          className="v10-header-icon-btn"
+          onClick={() => openTab({ id: 'settings', label: 'Settings', closable: true })}
+          title="Settings"
+        >
+          {SETTINGS_ICON}
+        </button>
 
         <button
           className="v10-header-icon-btn"

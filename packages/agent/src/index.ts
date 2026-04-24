@@ -6,6 +6,7 @@ export {
 } from './agent-keystore.js';
 export {
   buildAgentProfile,
+  canonicalAgentDidSubject,
   AGENT_REGISTRY_CONTEXT_GRAPH,
   AGENT_REGISTRY_PARANET,
   AGENT_REGISTRY_GRAPH,

@@ -33,6 +33,13 @@ const RELAY_WATCHDOG_BASE_INTERVAL_MS = 10_000;
 const RELAY_WATCHDOG_MAX_INTERVAL_MS = 5 * 60_000;
 /** Short delay before redialing a disconnected relay to avoid hammering (ms). */
 const RELAY_REDIAL_DELAY_MS = 1_500;
+/**
+ * How long to allow a fresh reservation negotiation to complete after a relay
+ * redial before the watchdog considers the relay unhealthy again. Circuit
+ * Relay v2 reservation setup is usually sub-second on a healthy link, but we
+ * give it a generous grace window to absorb transient latency.
+ */
+const RELAY_RESERVATION_GRACE_MS = 15_000;
 
 interface RelayTarget {
   peerId: ReturnType<typeof peerIdFromString>;
@@ -47,6 +54,13 @@ export class DKGNode {
   private relayWatchdogTimer: ReturnType<typeof setTimeout> | null = null;
   private relayTargets: RelayTarget[] = [];
   private relayWatchdogConsecutiveFailures = 0;
+  /**
+   * Per-relay timestamp of the last redial we issued specifically because the
+   * circuit reservation had lapsed. Used to suppress spurious "reservation
+   * missing" findings while a freshly re-dialed relay is still negotiating
+   * the new reservation on the wire.
+   */
+  private relayReservationRedialAt: Map<string, number> = new Map();
 
   constructor(config: DKGNodeConfig = {}) {
     this.config = config;
@@ -225,29 +239,151 @@ export class DKGNode {
 
     const ts = () => new Date().toISOString();
     const short = (id: string) => id.slice(-8);
-    let allConnected = true;
+    let allHealthy = true;
+    // `onlyWaitingOnGraceWindow` stays true as long as every reason we
+    // marked a relay unhealthy this tick was "we just redialed and are
+    // still inside the reservation grace window". That's a benign
+    // waiting state — we don't want to count it against the watchdog's
+    // exponential backoff, because doubling the next delay to 20s/40s/…
+    // for a ≤15s grace means a genuinely missing reservation can go
+    // unchecked for multiple minutes after a single forced redial.
+    // Codex tier-4g finding on the `allHealthy = false; continue` line
+    // a few blocks below.
+    let onlyWaitingOnGraceWindow = true;
+
+    // Snapshot advertised self-multiaddrs once per tick. The presence of
+    // *any* /p2p-circuit self-address is the authoritative signal that
+    // libp2p has at least one live circuit reservation somewhere. Recent
+    // js-libp2p circuit-relay-v2 defaults to holding a single reservation
+    // at a time, so we treat the reservation set as a pool, not per-relay.
+    // `haveAnyReservation` is evaluated per-iteration from a mutable
+    // snapshot (`refreshReservationSnapshot`), not once before the loop.
+    // A successful redial can restore a reservation mid-tick and every
+    // remaining relay must see that fresh state — otherwise a healthy
+    // idle relay gets torn down by the `transportUp && !haveAnyReservation`
+    // branch just because it was scanned after the recovery. Codex
+    // tier-4l finding at packages/core/src/node.ts:351. We keep the
+    // first snapshot so the "this relay currently holds the reservation"
+    // hint stays accurate within a single iteration.
+    let circuitSelfAddrs = node.getMultiaddrs().map(ma => ma.toString()).filter(a => a.includes('/p2p-circuit'));
+    let haveAnyReservation = circuitSelfAddrs.length > 0;
+    const refreshReservationSnapshot = () => {
+      circuitSelfAddrs = node.getMultiaddrs().map(ma => ma.toString()).filter(a => a.includes('/p2p-circuit'));
+      haveAnyReservation = circuitSelfAddrs.length > 0;
+    };
+    const now = Date.now();
 
     for (const { peerId, addr } of this.relayTargets) {
       if (peerId.equals(node.peerId)) continue;
 
+      const relayPidStr = peerId.toString();
       const conns = node.getConnections(peerId);
-      if (conns.length > 0) continue;
+      const transportUp = conns.length > 0;
 
-      allConnected = false;
-      console.log(`[${ts()}] Relay watchdog: ${short(peerId.toString())} disconnected, redialing…`);
-      // Brief delay before redial to avoid hammering the relay after a drop.
+      const thisRelayHasReservation = circuitSelfAddrs.some(a =>
+        a.includes(`/p2p/${relayPidStr}/p2p-circuit`),
+      );
+
+      // Happy path: transport is up AND either this relay is the one
+      // holding our reservation, OR we already have a reservation on some
+      // other relay (libp2p only requests one at a time by default, so
+      // "other relays are connected but idle" is the normal steady state).
+      if (transportUp && (thisRelayHasReservation || haveAnyReservation)) {
+        this.relayReservationRedialAt.delete(relayPidStr);
+        continue;
+      }
+
+      // Transport is up but we have ZERO reservations across all relays.
+      // Something has gone wrong in libp2p's reservation-pool management;
+      // force a re-listen on this relay by dropping + redialing.
+      if (transportUp && !haveAnyReservation) {
+        const lastForcedRedial = this.relayReservationRedialAt.get(relayPidStr) ?? 0;
+        if (now - lastForcedRedial < RELAY_RESERVATION_GRACE_MS) {
+          // We just redialed; give libp2p time to finish negotiating a new
+          // reservation before declaring failure. This is a benign wait,
+          // so do NOT clear `onlyWaitingOnGraceWindow` — keeping it true
+          // means the tail doesn't apply the exponential backoff, which
+          // would otherwise starve the next check well past the grace
+          // window itself.
+          allHealthy = false;
+          continue;
+        }
+
+        allHealthy = false;
+        // Actual corrective action below (drop + redial); this is a
+        // real failure the watchdog must back off on.
+        onlyWaitingOnGraceWindow = false;
+        console.log(
+          `[${ts()}] Relay watchdog: no circuit reservation anywhere (0 /p2p-circuit self-addrs); ` +
+          `dropping + redialing ${short(relayPidStr)} to force reserve`,
+        );
+        this.relayReservationRedialAt.set(relayPidStr, now);
+
+        for (const c of conns) {
+          try {
+            await c.close();
+          } catch {
+            // Best-effort: if the close call itself fails we still try to
+            // redial below; libp2p will reuse an existing connection if one
+            // somehow survived.
+          }
+        }
+        // Brief delay so the remote side has time to release the prior hop
+        // reservation slot before we ask for a new one.
+        const delayMs = RELAY_REDIAL_DELAY_MS + Math.floor(Math.random() * 1000);
+        await new Promise(r => setTimeout(r, delayMs));
+        let redialed = false;
+        try {
+          await node.dial(addr);
+          redialed = true;
+          console.log(`[${ts()}] Relay watchdog: redialed ${short(relayPidStr)} for fresh reservation`);
+        } catch (err: any) {
+          console.log(`[${ts()}] Relay watchdog: reservation-redial failed for ${short(relayPidStr)}: ${err.message}`);
+        }
+        // Stop after one reservation-recovery attempt per tick. libp2p's
+        // circuit-relay-v2 only holds one reservation at a time by default,
+        // so if this redial restored a reservation, every remaining relay
+        // in `this.relayTargets` would otherwise still see the stale
+        // `!haveAnyReservation` snapshot from line ~251 and tear-down +
+        // redial itself in the same tick, briefly dropping all relay paths
+        // at once. One recovery per tick is enough; the next tick re-reads
+        // multiaddrs and will handle any remaining unhealthy relays.
+        if (redialed) break;
+        continue;
+      }
+
+      // Transport is down — classic disconnect path. Count against
+      // backoff (this is a real failure, not a grace-window wait).
+      allHealthy = false;
+      onlyWaitingOnGraceWindow = false;
+      console.log(`[${ts()}] Relay watchdog: ${short(relayPidStr)} disconnected, redialing…`);
       const delayMs = RELAY_REDIAL_DELAY_MS + Math.floor(Math.random() * 1000);
       await new Promise(r => setTimeout(r, delayMs));
       try {
         await node.dial(addr);
-        console.log(`[${ts()}] Relay watchdog: reconnected to ${short(peerId.toString())}`);
+        console.log(`[${ts()}] Relay watchdog: reconnected to ${short(relayPidStr)}`);
+        // Reservation may have been restored by this dial; refresh the
+        // snapshot so the next iteration doesn't tear down another
+        // healthy relay on stale state.
+        refreshReservationSnapshot();
       } catch (err: any) {
-        console.log(`[${ts()}] Relay watchdog: redial failed for ${short(peerId.toString())}: ${err.message}`);
+        console.log(`[${ts()}] Relay watchdog: redial failed for ${short(relayPidStr)}: ${err.message}`);
       }
     }
 
-    if (allConnected) {
+    if (allHealthy) {
       this.relayWatchdogConsecutiveFailures = 0;
+    } else if (onlyWaitingOnGraceWindow) {
+      // Every unhealthy relay this tick was just the reservation
+      // grace window after a forced redial. Don't inflate the backoff
+      // — the next scheduled tick needs to actually arrive while the
+      // grace window is still the active state, otherwise a missing
+      // reservation can sit uncorrected for minutes.
+      const nextDelay = Math.min(
+        RELAY_WATCHDOG_BASE_INTERVAL_MS * Math.pow(2, this.relayWatchdogConsecutiveFailures),
+        RELAY_WATCHDOG_MAX_INTERVAL_MS,
+      );
+      console.log(`[${ts()}] Relay watchdog: reservation grace window pending; next check in ${Math.round(nextDelay / 1000)}s`);
     } else {
       this.relayWatchdogConsecutiveFailures++;
       const nextDelay = Math.min(
@@ -333,6 +469,7 @@ export class DKGNode {
     }
     this.relayTargets = [];
     this.relayWatchdogConsecutiveFailures = 0;
+    this.relayReservationRedialAt.clear();
     this.relayedPeers.clear();
     await this.node.stop();
     this.node = null;

@@ -410,10 +410,16 @@ describe('[A-12] DID format drift in agent.endorse', () => {
   });
 
   it('PROD-BUG: passing a libp2p PeerId to buildEndorsementQuads yields a non-spec did:dkg:agent: URI', () => {
-    // dkg-agent.ts:4056 passes `this.peerId` (a libp2p Peer ID string like
-    // `12D3KooW…`) into `buildEndorsementQuads`, producing
-    //   did:dkg:agent:12D3KooW…
-    // which violates spec §5 (agent DIDs MUST be the 0x-address form).
+    // Historical (pre-A-12): dkg-agent.ts passed `this.peerId` (a libp2p
+    // Peer ID string like 12D3KooW…) into `buildEndorsementQuads`,
+    // producing a `did:dkg:agent:${peerId}` URI, which violates spec §5
+    // (agent DIDs MUST be the 0x-address form). The caller has been
+    // migrated to pass `opts.agentAddress ?? this.defaultAgentAddress`,
+    // but this helper-level test still pins the invariant that the
+    // helper itself mints whatever subject form you give it — so a
+    // raw peer-id argument still yields a non-0x DID shape. That keeps
+    // the boundary honest and catches future callers that reintroduce
+    // the bug by once again passing peer-id here.
     // This test pins the prod-bug so any code change silently "fixing"
     // this path without updating the caller also flips this assertion.
     const peerIdStr = '12D3KooWFakePeerIdDoesNotMatterForShapeAssertion';
@@ -437,8 +443,18 @@ describe('[A-12] DID format drift in agent.endorse', () => {
     const testDir = fileURLToPath(new URL('.', import.meta.url));
     const entries = await readdir(testDir);
     const offenders: string[] = [];
+    // The following test files are exempt from the fixture scan
+    // because they intentionally carry peer-id-form DIDs as negative
+    // regex targets / comment diagnostics — their whole purpose is to
+    // document and assert against the non-spec form. Anything else in
+    // this folder must migrate to the 0x-address form.
+    const SCAN_EXEMPT = new Set([
+      'agent-audit-extra.test.ts',
+      'did-format-extra.test.ts',
+      'ack-eip191-agent-extra.test.ts',
+    ]);
     for (const f of entries) {
-      if (!f.endsWith('.ts') || f === 'agent-audit-extra.test.ts') continue;
+      if (!f.endsWith('.ts') || SCAN_EXEMPT.has(f)) continue;
       const body = await readFile(join(testDir, f), 'utf8');
       // Match `did:dkg:agent:X` where X is not `0x...` and not a template
       // expression like `${addr}`. Catches peer-ID form (Qm…, 12D3KooW…)

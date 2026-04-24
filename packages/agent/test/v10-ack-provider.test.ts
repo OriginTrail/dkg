@@ -46,6 +46,10 @@ describe('v10 ACK provider wiring', () => {
 
     const cgId = 'v10-ack-test-cg';
     await agent.createContextGraph({ id: cgId, name: 'V10 ACK Test CG' });
+    // PR #253: createContextGraph is a local-only primitive. On-chain
+    // registration must now be an explicit follow-up call — tests that
+    // publish need a numeric onChainId to exist first.
+    await agent.registerContextGraph(cgId);
 
     const result = await agent.publish(cgId, [
       { subject: 'urn:test:ack-provider', predicate: 'http://schema.org/name', object: '"ACK"', graph: '' },

@@ -23,8 +23,10 @@ beforeAll(async () => {
   _fileSnapshot = await takeSnapshot();
   const { hubAddress } = getSharedContext();
   const provider = createProvider();
-  const coreOp = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
-  await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, coreOp.address, ethers.parseEther('50000000'));
+  for (const key of [HARDHAT_KEYS.CORE_OP, HARDHAT_KEYS.REC1_OP, HARDHAT_KEYS.REC2_OP]) {
+    const w = new ethers.Wallet(key);
+    await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, w.address, ethers.parseEther('50000000'));
+  }
 });
 afterAll(async () => {
   await revertSnapshot(_fileSnapshot);
@@ -87,7 +89,11 @@ describe('Network E2E (3 nodes + relay)', () => {
         pricePerCall: 0.5,
         handler: async () => ({ success: true }),
       }],
-      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      // A-12: each node needs its own EVM key so its agent profile DID
+      // (`did:dkg:agent:0x<addr>`, per spec §03) is unique. Sharing
+      // CORE_OP across all 3 nodes collides their root entities and
+      // discovery dedups them down to a single agent.
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.REC1_OP),
     });
 
     nodeC = await DKGAgent.create({
@@ -96,7 +102,7 @@ describe('Network E2E (3 nodes + relay)', () => {
       listenPort: 0,
       relayPeers: [relayAddr],
       skills: [],
-      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.REC2_OP),
     });
 
     await nodeA.start();

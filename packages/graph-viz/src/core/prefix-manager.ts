@@ -100,7 +100,17 @@ export class PrefixManager {
   }
 
   /**
-   * Extract the local name from a URI (the part after the last # or /).
+   * Extract a short, human-readable local name from a URI.
+   *
+   * Strategy, in priority order:
+   *   1. Part after the last `#`   (RDF fragment: http://ex.org/ns#Foo → Foo)
+   *   2. Part after the last `/`   (HTTP path:   http://ex.org/foo/Bar → Bar)
+   *   3. If the URI contains URL-encoded slashes (%2F), decode them and
+   *      take the basename. This handles URIs like
+   *      `urn:dkg:code:file:packages%2Fnode-ui%2Fsrc%2Fui%2FApp.tsx`,
+   *      which previously returned the entire URI.
+   *   4. Part after the last `:`   (URN tail:    urn:dkg:task:my-slug → my-slug)
+   *   5. The URI itself (last resort).
    */
   static localName(uri: string): string {
     const hashIdx = uri.lastIndexOf('#');
@@ -108,6 +118,22 @@ export class PrefixManager {
 
     const slashIdx = uri.lastIndexOf('/');
     if (slashIdx !== -1) return uri.slice(slashIdx + 1);
+
+    // URL-encoded path: decode and take the last segment.
+    if (uri.includes('%2F') || uri.includes('%2f')) {
+      try {
+        const decoded = decodeURIComponent(uri);
+        const decodedSlash = decoded.lastIndexOf('/');
+        if (decodedSlash !== -1) return decoded.slice(decodedSlash + 1);
+      } catch {
+        // Malformed encoding — fall through to colon split.
+      }
+    }
+
+    const colonIdx = uri.lastIndexOf(':');
+    if (colonIdx !== -1 && colonIdx < uri.length - 1) {
+      return uri.slice(colonIdx + 1);
+    }
 
     return uri;
   }

@@ -199,6 +199,41 @@ export interface V10PublishDirectParams {
   publisherNodeIdentityId: bigint;
   publisherSignature: { r: Uint8Array; vs: Uint8Array };
   ackSignatures: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
+  /**
+   * Write-ahead hook invoked by the adapter *immediately before the
+   * concrete publish tx is broadcast* — i.e. after `approve()` and any
+   * allowance top-up, after gas estimation / populate / signing have
+   * succeeded, and right before `eth_sendRawTransaction` hits the wire.
+   * This is the cue phase listeners must use to persist WAL / recovery
+   * state: any error before this fires means no publish tx ever existed.
+   *
+   * The optional `info.txHash` argument carries the signed transaction
+   * hash so WAL consumers can log a specific (pre-broadcast) tx
+   * identity — critical for P-1 crash recovery. Adapters that can
+   * compute the hash (real EVM) SHOULD pass it; mocks MAY pass a
+   * synthetic hash that is still stable within a single test run.
+   *
+   * **Fail-closed contract**: if the hook throws, the adapter MUST
+   * NOT broadcast. The signed tx is still local to the adapter's
+   * stack frame at that point, so surfacing the error leaves no
+   * on-chain side effect and lets the caller retry cleanly.
+   *
+   * Optional; legacy callers that don't need a precise WAL boundary
+   * can omit it. Adapters SHOULD invoke it exactly once per successful
+   * broadcast; adapters that cannot provide tx-broadcast granularity
+   * (e.g. `NoChainAdapter`) SHOULD NOT invoke it at all.
+   *
+   * See P-1 / P-1.2 in BUGS_FOUND.md and the `chain:writeahead` phase
+   * in `packages/publisher/src/dkg-publisher.ts`.
+   *
+   * Return type is `Promise<void> | void` so async WAL writes
+   * (disk flush, remote gossip) can run to completion before the
+   * adapter proceeds to `eth_sendRawTransaction`. Adapters MUST
+   * `await` the hook — `() => void` alone does not force synchronous
+   * callers in TypeScript, so an `async () => ...` hook passed in
+   * here would otherwise race the broadcast.
+   */
+  onBroadcast?: (info: { txHash: string }) => Promise<void> | void;
 }
 
 export interface V10UpdateKCParams {
@@ -215,6 +250,13 @@ export interface V10UpdateKCParams {
   publisherNodeIdentityId?: bigint;
   publisherSignature?: { r: Uint8Array; vs: Uint8Array };
   ackSignatures?: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
+  /**
+   * Write-ahead hook fired just before the concrete update tx is
+   * broadcast, carrying the signed tx hash. See
+   * {@link V10PublishDirectParams.onBroadcast} for full semantics
+   * (fail-closed contract, exactly-once, Promise return, etc.).
+   */
+  onBroadcast?: (info: { txHash: string }) => Promise<void> | void;
 }
 
 // ----- V8 backward-compat types (used by mock adapter and legacy code) -----

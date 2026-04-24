@@ -163,8 +163,11 @@ describe('AgentWallet', () => {
 
 describe('Profile Builder', () => {
   it('builds agent profile quads', () => {
+    // A-12 migration: profile DIDs are the EVM-address form, not peer-id.
+    const addr = '0x' + '1'.repeat(40);
     const { quads, rootEntity } = buildAgentProfile({
       peerId: 'QmTest123',
+      agentAddress: addr,
       name: 'TestBot',
       description: 'A test agent',
       framework: 'OpenClaw',
@@ -179,12 +182,12 @@ describe('Profile Builder', () => {
       ],
     });
 
-    expect(rootEntity).toBe('did:dkg:agent:QmTest123');
+    expect(rootEntity).toBe(`did:dkg:agent:${addr}`);
     expect(quads.length).toBeGreaterThanOrEqual(8);
 
     const subjects = quads.map(q => q.subject);
-    expect(subjects).toContain('did:dkg:agent:QmTest123');
-    expect(subjects).toContain('did:dkg:agent:QmTest123/.well-known/genid/offering1');
+    expect(subjects).toContain(`did:dkg:agent:${addr}`);
+    expect(subjects).toContain(`did:dkg:agent:${addr}/.well-known/genid/offering1`);
 
     const predicates = quads.map(q => q.predicate);
     expect(predicates).toContain('https://schema.org/name');
@@ -278,6 +281,195 @@ describe('ProfileManager', () => {
     expect(result.kaManifest.length).toBeGreaterThan(0);
     expect(manager.profileKcId).toBe(result.kcId);
   });
+
+  it(
+    'A-12 upgrade: republishing after the DID form change drops the legacy ' +
+      'did:dkg:agent:<peerId> subject alongside the new address-form subject',
+    async () => {
+      // Codex review on PR #243: ProfileManager.publishProfile only
+      // deleted triples under the NEW rootEntity before publish, so an
+      // upgraded node that previously published
+      // `did:dkg:agent:<peerId>` would keep the old profile alongside
+      // the new `did:dkg:agent:0x...` profile. `findAgents` then
+      // returned the same node twice and the local data graph no
+      // longer matched the updated manifest. This test simulates the
+      // upgrade by publishing in legacy form first, then
+      // republishing in the new form, and asserting the legacy
+      // subject is gone.
+      const store = new OxigraphStore();
+      const { DKGPublisher } = await import('@origintrail-official/dkg-publisher');
+      const { TypedEventBus, generateEd25519Keypair } = await import('@origintrail-official/dkg-core');
+      const eventBus = new TypedEventBus();
+      const keypair = await generateEd25519Keypair();
+      const publisher = new DKGPublisher({ store, chain: createEVMAdapter(HARDHAT_KEYS.CORE_OP), eventBus, keypair });
+      const manager = new ProfileManager(publisher, store);
+
+      const peerId = 'QmLegacyUpgrade';
+      const addr = '0x' + 'ab'.repeat(20);
+
+      // Legacy publish (no agentAddress) → DID = did:dkg:agent:<peerId>
+      await manager.publishProfile({ peerId, name: 'Legacy', skills: [] });
+      const graph = 'did:dkg:context-graph:agents';
+      const legacyCount = await store.countQuads(graph);
+      expect(legacyCount).toBeGreaterThan(0);
+
+      const legacySubject = `did:dkg:agent:${peerId}`;
+      const newSubject = `did:dkg:agent:${addr}`;
+
+      // Sanity: legacy subject really was written.
+      const legacyRows = await store.query(
+        `SELECT ?p ?o WHERE { GRAPH <${graph}> { <${legacySubject}> ?p ?o } }`,
+      );
+      expect(legacyRows.type).toBe('bindings');
+      if (legacyRows.type === 'bindings') {
+        expect(legacyRows.bindings.length).toBeGreaterThan(0);
+      }
+
+      // Upgrade publish — same peerId, now with an agentAddress.
+      await manager.publishProfile({
+        peerId,
+        agentAddress: addr,
+        name: 'Upgraded',
+        skills: [],
+      });
+
+      // The legacy subject must no longer appear in the data graph.
+      const stillLegacy = await store.query(
+        `SELECT ?p ?o WHERE { GRAPH <${graph}> { <${legacySubject}> ?p ?o } }`,
+      );
+      expect(stillLegacy.type).toBe('bindings');
+      if (stillLegacy.type === 'bindings') {
+        expect(
+          stillLegacy.bindings.length,
+          'legacy did:dkg:agent:<peerId> subject must be removed on A-12 upgrade',
+        ).toBe(0);
+      }
+
+      // The new subject is the sole profile root in the data graph.
+      const newRows = await store.query(
+        `SELECT ?p ?o WHERE { GRAPH <${graph}> { <${newSubject}> ?p ?o } }`,
+      );
+      expect(newRows.type).toBe('bindings');
+      if (newRows.type === 'bindings') {
+        expect(newRows.bindings.length).toBeGreaterThan(0);
+        const nameTriples = newRows.bindings.filter((b) =>
+          b['p']?.includes('schema.org/name'),
+        );
+        expect(nameTriples.some((b) => b['o'] === '"Upgraded"')).toBe(true);
+      }
+    },
+  );
+
+  it(
+    'A-12 wallet rotation + restart: peerId-scan reaches profiles from a prior wallet even with a fresh ProfileManager',
+    async () => {
+      // Codex review on PR #243: `lastRootEntity` is only in memory.
+      // If an operator publishes under wallet A, the daemon restarts,
+      // they reconfigure to wallet B, and publish again, the in-memory
+      // cleanup path sees only the new canonical address (B) and the
+      // peerId fallback — wallet A's profile would be orphaned.
+      //
+      // The mitigation is the SPARQL scan in
+      // `ProfileManager.publishProfile` that discovers every subject
+      // in the registry graph that claims this peerId. This test
+      // simulates the restart by constructing a fresh ProfileManager
+      // for the second publish, proving the scan — not
+      // `lastRootEntity` — is what cleans up wallet A.
+      const store = new OxigraphStore();
+      const { DKGPublisher } = await import('@origintrail-official/dkg-publisher');
+      const { TypedEventBus, generateEd25519Keypair } = await import('@origintrail-official/dkg-core');
+      const eventBus = new TypedEventBus();
+      const keypair = await generateEd25519Keypair();
+
+      const peerId = 'QmRotatedWallet';
+      const walletA = '0x' + 'aa'.repeat(20);
+      const walletB = '0x' + 'bb'.repeat(20);
+
+      // Publish under wallet A.
+      const publisher1 = new DKGPublisher({ store, chain: createEVMAdapter(HARDHAT_KEYS.CORE_OP), eventBus, keypair });
+      const managerA = new ProfileManager(publisher1, store);
+      await managerA.publishProfile({
+        peerId,
+        agentAddress: walletA,
+        name: 'WalletA',
+        skills: [],
+      });
+
+      const graph = 'did:dkg:context-graph:agents';
+      const subjectA = `did:dkg:agent:${walletA}`;
+      const subjectB = `did:dkg:agent:${walletB}`;
+
+      // Sanity: wallet A's subject is present.
+      const afterA = await store.query(
+        `SELECT ?p ?o WHERE { GRAPH <${graph}> { <${subjectA}> ?p ?o } }`,
+      );
+      expect(afterA.type).toBe('bindings');
+      if (afterA.type === 'bindings') {
+        expect(afterA.bindings.length).toBeGreaterThan(0);
+      }
+
+      // Simulate a daemon restart + wallet rotation — brand new
+      // ProfileManager with NO lastRootEntity memory, but the same
+      // store + peerId + a NEW wallet.
+      const publisher2 = new DKGPublisher({ store, chain: createEVMAdapter(HARDHAT_KEYS.CORE_OP), eventBus, keypair });
+      const managerB = new ProfileManager(publisher2, store);
+      await managerB.publishProfile({
+        peerId,
+        agentAddress: walletB,
+        name: 'WalletB',
+        skills: [],
+      });
+
+      // Wallet A's subject must be gone even though ProfileManager
+      // had no in-memory record of it.
+      const stillA = await store.query(
+        `SELECT ?p ?o WHERE { GRAPH <${graph}> { <${subjectA}> ?p ?o } }`,
+      );
+      expect(stillA.type).toBe('bindings');
+      if (stillA.type === 'bindings') {
+        expect(
+          stillA.bindings.length,
+          'peerId-scan must remove wallet A profile across a ProfileManager restart',
+        ).toBe(0);
+      }
+
+      // Wallet B's subject is the sole remaining profile root for
+      // this peerId.
+      const afterB = await store.query(
+        `SELECT ?p ?o WHERE { GRAPH <${graph}> { <${subjectB}> ?p ?o } }`,
+      );
+      expect(afterB.type).toBe('bindings');
+      if (afterB.type === 'bindings') {
+        expect(afterB.bindings.length).toBeGreaterThan(0);
+        const nameTriples = afterB.bindings.filter((b) =>
+          b['p']?.includes('schema.org/name'),
+        );
+        expect(nameTriples.some((b) => b['o'] === '"WalletB"')).toBe(true);
+      }
+    },
+  );
+
+  it(
+    'A-12 casing: checksum-case and lowercase agentAddress converge to the same DID subject',
+    () => {
+      const checksum = '0xAb5801a7D398351b8bE11C439e05C5B3259aec9B';
+      const lower = checksum.toLowerCase();
+      const profileChecksum = buildAgentProfile({
+        peerId: 'QmNoOp',
+        agentAddress: checksum,
+        name: 'Checksum',
+        skills: [],
+      });
+      const profileLower = buildAgentProfile({
+        peerId: 'QmNoOp',
+        agentAddress: lower,
+        name: 'Lower',
+        skills: [],
+      });
+      expect(profileChecksum.rootEntity).toBe(profileLower.rootEntity);
+      expect(profileChecksum.rootEntity).toBe(`did:dkg:agent:${lower}`);
+    },
+  );
 
   it('cleans up stale profile triples before re-publishing', async () => {
     const store = new OxigraphStore();
@@ -1509,6 +1701,39 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     }
   });
 
+  it('sync-on-connect re-reads sync scope after discovery for a second durable pass', async () => {
+    const agent = await DKGAgent.create({
+      name: 'SyncOnConnectDiscoveryRefresh',
+      listenHost: '127.0.0.1',
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+    });
+
+    try {
+      await agent.start();
+      const remotePeer = agent.node.peerId.toString();
+      const seenCalls: string[][] = [];
+
+      (agent as any).getPeerProtocols = async () => ['/dkg/10.0.0/sync'];
+      (agent as any).syncFromPeer = async (_peerId: string, contextGraphIds?: string[]) => {
+        seenCalls.push([...(contextGraphIds ?? [SYSTEM_PARANETS.AGENTS, SYSTEM_PARANETS.ONTOLOGY, ...((agent as any).config.syncContextGraphs ?? [])])]);
+        return 0;
+      };
+      (agent as any).refreshMetaSyncedFlags = async () => undefined;
+      (agent as any).discoverContextGraphsFromStore = async () => {
+        (agent as any).config.syncContextGraphs = ['new-private-cg'];
+        return 1;
+      };
+      (agent as any).syncSharedMemoryFromPeer = async () => 0;
+
+      await (agent as any).trySyncFromPeer(remotePeer);
+
+      expect(seenCalls.length).toBe(2);
+      expect(seenCalls[1]).toEqual(['new-private-cg']);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
   it('reports no-protocol peers in catchup diagnostics', async () => {
     const agent = await DKGAgent.create({
       name: 'RuntimeCatchupNoProtocolDiagnostics',
@@ -2133,6 +2358,63 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       expect(result).toBe(true);
       expect(syncIdentityCalled).toBe(true);
       expect(ackIdentityCalled).toBe(false);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('authorizeSyncRequest denies when signer does not verify for claimed identityId', async () => {
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const wallet = ethers.Wallet.createRandom();
+    const agent = await DKGAgent.create({
+      name: 'SyncIdentityMismatchTest',
+      listenHost: '127.0.0.1',
+      chainAdapter: chain,
+    });
+    try {
+      await agent.start();
+      (agent as any).subscribedContextGraphs.set('private-cg', {
+        name: 'private-cg',
+        subscribed: false,
+        synced: true,
+        onChainId: '1',
+        participantIdentityIds: [108n],
+      });
+      (agent as any).isPrivateContextGraph = async () => true;
+      (agent as any).getPrivateContextGraphParticipants = async () => ['108', wallet.address];
+      (chain as any).verifySyncIdentity = async () => false;
+
+      const request = {
+        contextGraphId: 'private-cg',
+        offset: 0,
+        limit: 10,
+        includeSharedMemory: false,
+        targetPeerId: agent.peerId,
+        requesterPeerId: 'peer-req',
+        requestId: `req-${Date.now()}`,
+        issuedAtMs: Date.now(),
+        requesterIdentityId: '108',
+      };
+
+      const digest = (agent as any).computeSyncDigest(
+        request.contextGraphId,
+        request.offset,
+        request.limit,
+        request.includeSharedMemory,
+        request.targetPeerId,
+        request.requesterPeerId,
+        request.requestId,
+        request.issuedAtMs,
+      );
+      const sig = ethers.Signature.from(await wallet.signMessage(digest));
+      const signed = {
+        ...request,
+        requesterSignatureR: sig.r,
+        requesterSignatureVS: sig.yParityAndS,
+      };
+
+      const result = await (agent as any).authorizeSyncRequest(signed, 'peer-req');
+      expect(result).toBe(false);
     } finally {
       await agent.stop().catch(() => {});
     }

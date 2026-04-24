@@ -672,6 +672,601 @@ describe('CLI-17 — api-client round-trip against live daemon', () => {
 });
 
 // ---------------------------------------------------------------------------
+// A-1 — Working-Memory isolation at the HTTP boundary
+// ---------------------------------------------------------------------------
+//
+// PR #242 added an A-1 guard inside `DKGAgent.query()` that denies a
+// cross-agent working-memory read when `callerAgentAddress` is supplied
+// and does not match `agentAddress`. Codex review on that PR flagged
+// that the agent-level test bypasses the actual production path by
+// injecting `callerAgentAddress` directly, so a regression in
+// `packages/cli/src/daemon.ts` (e.g. /api/query forgetting to forward
+// `requestAgentAddress`) would silently re-open the leak. This block is
+// the HTTP-level regression: two agents registered on one daemon, each
+// with a distinct auth token, querying `view=working-memory` against
+// each other through real /api/query requests.
+//
+describe('A-1 — /api/query enforces working-memory isolation across agent tokens', () => {
+  interface RegisteredAgent {
+    agentAddress: string;
+    authToken: string;
+  }
+
+  async function registerAgent(
+    d: Daemon,
+    name: string,
+  ): Promise<RegisteredAgent> {
+    const res = await fetch(urlFor(d, '/api/agent/register'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders(d) },
+      body: JSON.stringify({ name }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.agentAddress).toMatch(/^0x[0-9a-fA-F]{40}$/);
+    expect(typeof body.authToken).toBe('string');
+    return { agentAddress: body.agentAddress, authToken: body.authToken };
+  }
+
+  async function queryAsAgent(
+    d: Daemon,
+    agent: RegisteredAgent,
+    body: Record<string, unknown>,
+  ): Promise<{ status: number; body: any }> {
+    const res = await fetch(urlFor(d, '/api/query'), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${agent.authToken}`,
+      },
+      body: JSON.stringify(body),
+    });
+    return { status: res.status, body: await res.json().catch(() => ({})) };
+  }
+
+  it(
+    'seeded-WM cross-agent read returns 200 with empty bindings while the ' +
+      'owning identity sees the seeded triple (proves A-1 isolation is active)',
+    async () => {
+      const d = daemon!;
+      const cgId = 'a1-wm-http-' + Math.random().toString(36).slice(2, 8);
+      const create = await fetch(urlFor(d, '/api/context-graph/create'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders(d) },
+        body: JSON.stringify({ id: cgId, name: cgId }),
+      });
+      expect([200, 201]).toContain(create.status);
+
+      // Codex review on PR #242: without seeded data in A's WM, an
+      // empty `cross.bindings` is meaningless — it'd pass even if
+      // /api/query stopped forwarding `callerAgentAddress` and the
+      // isolation guard was bypassed. Seed a triple into the default
+      // agent's WM (that's our "A"), then prove B (agent-scoped
+      // token) cannot read it while the node-level admin (no
+      // agent-scope, callerAgentAddress=undefined) can.
+
+      // Resolve the default agent's address via /api/agent/identity
+      // under the node-level token. This is "A".
+      const identityRes = await fetch(urlFor(d, '/api/agent/identity'), {
+        headers: authHeaders(d),
+      });
+      expect(identityRes.status).toBe(200);
+      const identity = await identityRes.json();
+      const defaultAgentAddress: string = identity.agentAddress;
+      expect(defaultAgentAddress).toMatch(/^0x[0-9a-fA-F]{40}$|^12D3/);
+
+      // Create a WM assertion for that default agent and write one
+      // triple into it. `agent.assertion.write` on the daemon uses
+      // defaultAgentAddress, so this lands in default ("A")'s WM
+      // namespace.
+      const assertionName = 'a1-probe-' + Math.random().toString(36).slice(2, 8);
+      const createAssertionRes = await fetch(urlFor(d, '/api/assertion/create'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders(d) },
+        body: JSON.stringify({ contextGraphId: cgId, name: assertionName }),
+      });
+      expect([200, 201]).toContain(createAssertionRes.status);
+
+      const seedSubject = 'urn:a1-seed:probe-' + Math.random().toString(36).slice(2, 8);
+      const writeRes = await fetch(
+        urlFor(d, `/api/assertion/${encodeURIComponent(assertionName)}/write`),
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeaders(d) },
+          body: JSON.stringify({
+            contextGraphId: cgId,
+            quads: [
+              {
+                subject: seedSubject,
+                predicate: 'https://schema.org/name',
+                object: '"seed-a"',
+              },
+            ],
+          }),
+        },
+      );
+      expect(writeRes.status).toBe(200);
+
+      // Register agent B on the same daemon (gets its own scoped token).
+      const agentB = await registerAgent(d, 'a1-http-agent-b');
+      expect(agentB.agentAddress).not.toBe(defaultAgentAddress);
+
+      // Cross-agent read: B (agent-scoped token) asks for the default
+      // agent's WM. /api/query resolves `callerAgentAddress=B` via the
+      // agent-token index and forwards it. DKGAgent.query sees
+      // caller≠target and returns empty bindings — even though the
+      // seed triple is physically present.
+      const cross = await queryAsAgent(d, agentB, {
+        sparql: `SELECT ?s ?p ?o WHERE { ?s ?p ?o FILTER(?s = <${seedSubject}>) }`,
+        contextGraphId: cgId,
+        view: 'working-memory',
+        agentAddress: defaultAgentAddress,
+      });
+      expect(cross.status).toBe(200);
+      expect(cross.body?.result?.bindings ?? []).toEqual([]);
+
+      // Sanity: the node-level admin token is NOT agent-scoped, so
+      // `requestToken` resolves through `resolveAgentByToken` to
+      // undefined and `callerAgentAddress` is not forwarded. The A-1
+      // guard is skipped and the seeded triple surfaces — proving
+      // `cross` above really was blocked by isolation, not by missing
+      // data.
+      const adminRes = await fetch(urlFor(d, '/api/query'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders(d) },
+        body: JSON.stringify({
+          sparql: `SELECT ?s ?p ?o WHERE { ?s ?p ?o FILTER(?s = <${seedSubject}>) }`,
+          contextGraphId: cgId,
+          view: 'working-memory',
+          agentAddress: defaultAgentAddress,
+        }),
+      });
+      expect(adminRes.status).toBe(200);
+      const adminBody = await adminRes.json();
+      const adminBindings = adminBody?.result?.bindings ?? [];
+      expect(
+        adminBindings.length,
+        `seed triple should be visible under its owning agent via the node-level admin path — got ${JSON.stringify(adminBindings)}`,
+      ).toBeGreaterThan(0);
+
+      // A-1 follow-up review (2nd iteration): the node-level admin
+      // token is the designated "admin bypass" for the WM isolation
+      // check. `packages/adapter-openclaw` relies on this: it
+      // authenticates `/api/query` with `~/.dkg/auth.token` and
+      // passes session-specific `agentAddress` for *each* local
+      // agent. So admin + foreign agentAddress must keep returning
+      // 200 (not 403) — the actual hole Codex flagged is the
+      // *unauthenticated* / auth-disabled case, which is covered by
+      // the new suite below (`A-1 follow-up: auth-disabled WM hole`).
+      const adminCrossRes = await fetch(urlFor(d, '/api/query'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders(d) },
+        body: JSON.stringify({
+          sparql: `SELECT ?s ?p ?o WHERE { ?s ?p ?o FILTER(?s = <${seedSubject}>) }`,
+          contextGraphId: cgId,
+          view: 'working-memory',
+          agentAddress: agentB.agentAddress,
+        }),
+      });
+      expect(
+        adminCrossRes.status,
+        'admin token must keep working as the bypass for cross-agent WM reads — 403 here would break adapter-openclaw',
+      ).toBe(200);
+    },
+    60_000,
+  );
+
+  it(
+    'A-1 (Codex PR #242 iter-8 re-review): an authenticated agent reading its ' +
+      'OWN WM with agentAddress=self must return 200 — the auth-disabled ' +
+      'fallback 403 must NOT fire for recognised agent identities, even when ' +
+      "the agent address is not one of the node's self-aliases",
+    async () => {
+      const d = daemon!;
+      const cgId = 'a1-wm-self-' + Math.random().toString(36).slice(2, 8);
+      const create = await fetch(urlFor(d, '/api/context-graph/create'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders(d) },
+        body: JSON.stringify({ id: cgId, name: cgId }),
+      });
+      expect([200, 201]).toContain(create.status);
+
+      // Register agent B with a scoped token. B's address is NOT the
+      // node default / peerId, so the self-alias fallback cannot
+      // rescue this case — only a properly-gated "authenticated agent
+      // identity bypasses the fallback" check makes the read succeed.
+      const agentB = await registerAgent(d, 'a1-self-b');
+
+      // B reads its OWN WM with its OWN token and agentAddress=B. We
+      // don't care whether the result has bindings (B hasn't written
+      // anything yet) — we only care that the daemon does NOT 403.
+      //
+      // Pre-iter-8-re-review the daemon's fallback treated
+      // `!isAdminToken` as "untrusted" and 403'd here because B's
+      // address is not a node self-alias. Post-fix, an authenticated
+      // agent identity (callerAgentAddress resolved from a valid
+      // agent-scoped bearer) skips the fallback entirely and
+      // DKGAgent.query takes over — caller===target so the isolation
+      // guard permits the read.
+      const selfRes = await queryAsAgent(d, agentB, {
+        sparql: `SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 1`,
+        contextGraphId: cgId,
+        view: 'working-memory',
+        agentAddress: agentB.agentAddress,
+      });
+      expect(
+        selfRes.status,
+        `authenticated agent reading its own WM must return 200 — got ` +
+          `${selfRes.status} (body=${JSON.stringify(selfRes.body)})`,
+      ).toBe(200);
+    },
+    60_000,
+  );
+
+  it(
+    'A-1 follow-up: access-denied synthetic response preserves SPARQL query form ' +
+      '(ASK → {result:"false"}, CONSTRUCT → quads:[])',
+    async () => {
+      const d = daemon!;
+      const cgId = 'a1-deny-shape-' + Math.random().toString(36).slice(2, 8);
+      const create = await fetch(urlFor(d, '/api/context-graph/create'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders(d) },
+        body: JSON.stringify({ id: cgId, name: cgId }),
+      });
+      expect([200, 201]).toContain(create.status);
+
+      const identityRes = await fetch(urlFor(d, '/api/agent/identity'), {
+        headers: authHeaders(d),
+      });
+      const identity = await identityRes.json();
+      const defaultAgentAddress: string = identity.agentAddress;
+
+      // Seed one WM triple under the default agent so an unrestricted
+      // query would return bindings if access control didn't apply.
+      const assertionName = 'a1-denyshape-' + Math.random().toString(36).slice(2, 8);
+      const createAssertionRes = await fetch(urlFor(d, '/api/assertion/create'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders(d) },
+        body: JSON.stringify({ contextGraphId: cgId, name: assertionName }),
+      });
+      expect([200, 201]).toContain(createAssertionRes.status);
+      const seedSubject = 'urn:a1-denyshape:seed-' + Math.random().toString(36).slice(2, 8);
+      const writeRes = await fetch(
+        urlFor(d, `/api/assertion/${encodeURIComponent(assertionName)}/write`),
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeaders(d) },
+          body: JSON.stringify({
+            contextGraphId: cgId,
+            quads: [
+              {
+                subject: seedSubject,
+                predicate: 'https://schema.org/name',
+                object: '"seed-deny"',
+              },
+            ],
+          }),
+        },
+      );
+      expect(writeRes.status).toBe(200);
+
+      // Register agent B on the same daemon and use B's scoped token
+      // to cross-read A's WM — this triggers the A-1 deny branch.
+      const agentB = await registerAgent(d, 'a1-denyshape-b');
+      expect(agentB.agentAddress).not.toBe(defaultAgentAddress);
+
+      // ASK form — a successful query would return
+      // `{ result: 'true' }`. Access denied must return
+      // `{ result: 'false' }`, not `{ bindings: [] }`.
+      const askRes = await queryAsAgent(d, agentB, {
+        sparql: `ASK WHERE { <${seedSubject}> ?p ?o }`,
+        contextGraphId: cgId,
+        view: 'working-memory',
+        agentAddress: defaultAgentAddress,
+      });
+      expect(askRes.status).toBe(200);
+      expect(
+        askRes.body?.result?.bindings,
+        `ASK deny should be shaped as [{result:'false'}] — got ${JSON.stringify(askRes.body?.result)}`,
+      ).toEqual([{ result: 'false' }]);
+
+      // CONSTRUCT form — a successful query returns
+      // `{ bindings: [], quads: [...] }`. Deny must carry `quads: []`
+      // alongside the empty bindings so clients can still destructure
+      // `result.quads` without a type error.
+      const constructRes = await queryAsAgent(d, agentB, {
+        sparql: `CONSTRUCT { ?s ?p ?o } WHERE { <${seedSubject}> ?p ?o . BIND(<${seedSubject}> AS ?s) }`,
+        contextGraphId: cgId,
+        view: 'working-memory',
+        agentAddress: defaultAgentAddress,
+      });
+      expect(constructRes.status).toBe(200);
+      expect(constructRes.body?.result?.bindings ?? []).toEqual([]);
+      expect(
+        constructRes.body?.result?.quads,
+        `CONSTRUCT deny must expose an empty quads[] array — got ${JSON.stringify(constructRes.body?.result)}`,
+      ).toEqual([]);
+
+      // SELECT form — still `{ bindings: [] }`, same as before.
+      const selectRes = await queryAsAgent(d, agentB, {
+        sparql: `SELECT ?o WHERE { <${seedSubject}> ?p ?o }`,
+        contextGraphId: cgId,
+        view: 'working-memory',
+        agentAddress: defaultAgentAddress,
+      });
+      expect(selectRes.status).toBe(200);
+      expect(selectRes.body?.result?.bindings ?? null).toEqual([]);
+    },
+    60_000,
+  );
+
+  it('rejects /api/query when agentAddress is not a string (400)', async () => {
+    const d = daemon!;
+    const cgId = 'a1-wm-badtype-' + Math.random().toString(36).slice(2, 8);
+    const create = await fetch(urlFor(d, '/api/context-graph/create'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders(d) },
+      body: JSON.stringify({ id: cgId, name: cgId }),
+    });
+    expect([200, 201]).toContain(create.status);
+
+    // Codex review on PR #242: the original A-1 guard called
+    // `opts.agentAddress.toLowerCase()` without checking the type, so a
+    // caller sending `{ agentAddress: 123 }` would trigger a TypeError
+    // and turn bad input into a 500. The current guard must reject
+    // non-string agentAddress up front AND be classified as 400 by
+    // the daemon — not just "anything but 500". Pin 400 explicitly.
+    for (const badValue of [123, true, null, { nested: 'x' }, ['arr']]) {
+      const res = await fetch(urlFor(d, '/api/query'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders(d) },
+        body: JSON.stringify({
+          sparql: 'SELECT ?s ?p ?o WHERE { ?s ?p ?o }',
+          contextGraphId: cgId,
+          view: 'working-memory',
+          agentAddress: badValue,
+        }),
+      });
+      const body = await res.json().catch(() => ({} as any));
+      expect(
+        res.status,
+        `agentAddress=${JSON.stringify(badValue)} produced ${res.status} ${JSON.stringify(body)}`,
+      ).toBe(400);
+      // Accept either wording:
+      //   - "agentAddress must be a string" — from DKGAgent.query's type guard
+      //   - "agentAddress is required" — from resolveViewGraphs if the bad
+      //     value was coerced to undefined upstream (e.g. null).
+      expect(
+        body?.error ?? '',
+        `error should mention agentAddress — got ${JSON.stringify(body)}`,
+      ).toMatch(/agentAddress/);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A-1 follow-up (Codex PR #242 iteration 2) — auth-disabled WM hole
+// ---------------------------------------------------------------------------
+//
+// The A-1 isolation guard rides on `callerAgentAddress`, which the daemon
+// only resolves from an agent-scoped bearer token. When auth is DISABLED
+// on the daemon, there is no token at all and any HTTP caller can point
+// `view: 'working-memory'` at any `agentAddress` and read that agent's
+// WM. Codex flagged this explicitly. The daemon now returns 403 in this
+// narrow case (no token + WM + foreign agentAddress), while preserving
+// the admin-token bypass for `packages/adapter-openclaw` and other
+// in-repo clients that use `~/.dkg/auth.token` to run as each local
+// agent in turn.
+//
+// Uses its own daemon fixture because it flips `auth.enabled=false`.
+
+describe('A-1 follow-up: auth-disabled /api/query fails closed on foreign WM', () => {
+  let d: Daemon | undefined;
+  beforeAll(async () => {
+    d = await startDaemon({ authEnabled: false });
+  }, 60_000);
+  afterAll(async () => {
+    if (d) await stopDaemon(d, 'SIGTERM', 10_000);
+  });
+
+  it(
+    'unauthenticated WM read of the node-default agent is allowed (200)',
+    async () => {
+      const daem = d!;
+      const identityRes = await fetch(urlFor(daem, '/api/agent/identity'));
+      expect(identityRes.status).toBe(200);
+      const identity = await identityRes.json();
+      const defaultAgentAddress: string = identity.agentAddress;
+
+      const cgId = 'a1-noauth-self-' + Math.random().toString(36).slice(2, 8);
+      const create = await fetch(urlFor(daem, '/api/context-graph/create'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: cgId, name: cgId }),
+      });
+      expect([200, 201]).toContain(create.status);
+
+      const res = await fetch(urlFor(daem, '/api/query'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sparql: 'SELECT ?s WHERE { ?s ?p ?o } LIMIT 1',
+          contextGraphId: cgId,
+          view: 'working-memory',
+          agentAddress: defaultAgentAddress,
+        }),
+      });
+      // Not 403 — the node-default WM is readable without auth.
+      expect(res.status).toBe(200);
+    },
+    60_000,
+  );
+
+  it(
+    'unauthenticated WM read of a *foreign* registered agent is rejected (403)',
+    async () => {
+      const daem = d!;
+      const identityRes = await fetch(urlFor(daem, '/api/agent/identity'));
+      const identity = await identityRes.json();
+      const defaultAgentAddress: string = identity.agentAddress;
+
+      // Register a second agent on the auth-disabled daemon so we
+      // have a real foreign address to aim at.
+      const regRes = await fetch(urlFor(daem, '/api/agent/register'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: 'a1-noauth-agent-b-' + Math.random().toString(36).slice(2, 6) }),
+      });
+      expect([200, 201]).toContain(regRes.status);
+      const regBody = await regRes.json();
+      const bAddr: string = regBody.agentAddress;
+      expect(bAddr.toLowerCase()).not.toBe(defaultAgentAddress.toLowerCase());
+
+      const cgId = 'a1-noauth-foreign-' + Math.random().toString(36).slice(2, 8);
+      const create = await fetch(urlFor(daem, '/api/context-graph/create'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: cgId, name: cgId }),
+      });
+      expect([200, 201]).toContain(create.status);
+
+      const res = await fetch(urlFor(daem, '/api/query'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sparql: 'SELECT ?s WHERE { ?s ?p ?o } LIMIT 1',
+          contextGraphId: cgId,
+          view: 'working-memory',
+          agentAddress: bAddr,
+        }),
+      });
+      expect(res.status).toBe(403);
+      const body = await res.json().catch(() => ({}) as any);
+      expect(body?.error ?? '').toMatch(/require authentication|auth-disabled/i);
+    },
+    60_000,
+  );
+
+  it(
+    'bogus `Authorization: Bearer junk` does NOT bypass the A-1 guard ' +
+      '(Codex PR #242 iter-2 regression: `!requestToken` was too permissive ' +
+      'because auth-disabled still populates requestToken from the header)',
+    async () => {
+      const daem = d!;
+      const identityRes = await fetch(urlFor(daem, '/api/agent/identity'));
+      const identity = await identityRes.json();
+      const defaultAgentAddress: string = identity.agentAddress;
+
+      const regRes = await fetch(urlFor(daem, '/api/agent/register'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: 'a1-bogus-bearer-' + Math.random().toString(36).slice(2, 6),
+        }),
+      });
+      expect([200, 201]).toContain(regRes.status);
+      const bAddr: string = (await regRes.json()).agentAddress;
+      expect(bAddr.toLowerCase()).not.toBe(defaultAgentAddress.toLowerCase());
+
+      const cgId = 'a1-bogus-' + Math.random().toString(36).slice(2, 8);
+      await fetch(urlFor(daem, '/api/context-graph/create'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: cgId, name: cgId }),
+      });
+
+      const res = await fetch(urlFor(daem, '/api/query'), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          // With auth disabled `httpAuthGuard` never validates this
+          // token — the old guard would see a truthy `requestToken`
+          // and skip the 403. The new guard must verify the token is
+          // actually in `validTokens` before granting the admin bypass.
+          Authorization: 'Bearer junk-token-not-in-validtokens',
+        },
+        body: JSON.stringify({
+          sparql: 'SELECT ?s WHERE { ?s ?p ?o } LIMIT 1',
+          contextGraphId: cgId,
+          view: 'working-memory',
+          agentAddress: bAddr,
+        }),
+      });
+      expect(res.status).toBe(403);
+    },
+    60_000,
+  );
+
+  it(
+    'self-read via the legacy peerId alias is NOT 403d ' +
+      '(Codex PR #242 iter-4 regression: the guard used to compare only ' +
+      'against defaultAgentAddress, but resolveAgentAddress(undefined) also ' +
+      'exposes the bare peerId as the daemon\'s own WM identity, so an ' +
+      'auth-disabled self-read via that alias must still be allowed)',
+    async () => {
+      const daem = d!;
+      // Codex PR #242 iter-4 feedback: the earlier version of this test
+      // had a silent `return` when neither `/api/host/info` nor
+      // `/api/agent/identity` exposed a peerId, which meant a 400/500
+      // regression would still make the test pass green. Resolve the
+      // peerId deterministically from `/api/agent/identity` (this
+      // fixture always wires it — no token needed since auth is
+      // disabled in this harness, and the route falls back to the
+      // default-agent identity), and fail loudly if it is missing.
+      const identityRes = await fetch(urlFor(daem, '/api/agent/identity'));
+      expect(identityRes.status).toBe(200);
+      const identity = (await identityRes.json()) as { peerId?: string };
+      expect(
+        identity.peerId,
+        '`/api/agent/identity` must return a peerId for this fixture — the test cannot exercise the A-1 legacy-alias guard without it',
+      ).toBeTruthy();
+      const peerId = identity.peerId!;
+
+      const cgId = 'a1-self-alias-' + Math.random().toString(36).slice(2, 8);
+      const cgRes = await fetch(urlFor(daem, '/api/context-graph/create'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: cgId, name: cgId }),
+      });
+      expect([200, 201]).toContain(cgRes.status);
+
+      const res = await fetch(urlFor(daem, '/api/query'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sparql: 'SELECT ?s WHERE { ?s ?p ?o } LIMIT 1',
+          contextGraphId: cgId,
+          view: 'working-memory',
+          agentAddress: peerId,
+        }),
+      });
+      // Codex PR #242 iter-4 follow-up: a regression elsewhere in the
+      // WM query path (schema validation, context-graph lookup, etc.)
+      // could turn this case into a 400/404/500 while the A-1 guard
+      // itself works correctly, and a plain `not.toBe(403)` would
+      // still go green. Assert the happy-path 200 so the test really
+      // exercises the peerId-alias-allowed branch.
+      expect(res.status).toBe(200);
+      // Sanity check: the response is SPARQL-shaped. `/api/query`
+      // wraps the engine result under a `result` key and echoes the
+      // context graph id, so tolerate both `{ bindings }` and
+      // `{ result: { bindings } }` to stay robust against the route
+      // wrapper shape drifting independently of the guard under test.
+      const body = (await res.json()) as
+        | { bindings?: unknown[] }
+        | { result?: { bindings?: unknown[] } };
+      const bindings =
+        'bindings' in body
+          ? body.bindings
+          : (body as { result?: { bindings?: unknown[] } }).result?.bindings;
+      expect(Array.isArray(bindings)).toBe(true);
+    },
+    60_000,
+  );
+});
+
+// ---------------------------------------------------------------------------
 // CLI-13 / CLI-14 — shutdown signal → exit code mapping & timer cleanup
 // ---------------------------------------------------------------------------
 //

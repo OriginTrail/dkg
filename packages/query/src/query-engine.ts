@@ -40,9 +40,59 @@ export interface QueryOptions {
    */
   excludeGraphPrefixes?: string[];
   /**
-   * @internal Reserved for future use — not yet enforced by DKGQueryEngine.
-   * Will filter verified-memory triples below this trust threshold once trust
-   * metadata is available in verified-memory graphs.
+   * Graph-level trust scope for a `verified-memory` view. This is **not**
+   * a per-triple filter — it selects which *named graphs* are unioned
+   * into the query, relying on the invariant that each named graph is
+   * populated by a single trust-tier write path:
+   *
+   *   - root `did:dkg:context-graph:{id}` — chain-confirmed, SelfAttested.
+   *   - `did:dkg:context-graph:{id}/_verified_memory/{quorum}` —
+   *     populated by the quorum's verified-memory write path; the quorum
+   *     identifier itself is the trust provenance.
+   *
+   * Semantics (PR #239 Codex iter-5):
+   *   - undefined or `SelfAttested`: union root + `/_verified_memory/*`.
+   *   - `Endorsed` (1): drop the root data graph, keep only
+   *     `/_verified_memory/*` sub-graphs. This prevents SelfAttested
+   *     chain data from bleeding into a quorum-verified query.
+   *   - `PartiallyVerified` (2) / `ConsensusVerified` (3): **rejected**
+   *     with a client error until Q-1 lands per-graph trust tagging.
+   *     The engine cannot currently prove that a given
+   *     `/_verified_memory/<quorum>` sub-graph satisfies these higher
+   *     tiers, and silently downgrading to `Endorsed` would leak
+   *     merely-endorsed data into a caller asking for stronger trust.
+   *     Callers must drop `minTrust` to `Endorsed` (1), or use the
+   *     exact-graph path below and accept `Endorsed` as the ceiling.
+   *
+   * View gating (iter-6): `minTrust` is **ignored** on the
+   * `working-memory` and `shared-working-memory` views — those views
+   * have their own access-control story and do not union across trust
+   * tiers. The validation therefore only fires on `verified-memory`
+   * queries, so callers who reuse a generic options object across
+   * views are not forced to strip the field on every call.
+   *
+   * Exact-graph path (iter-6): when `verifiedGraph` is set, the engine
+   * targets the single `_verified_memory/<id>` sub-graph. Because
+   * every graph in that prefix is populated only by quorum-verified
+   * write paths (implicit `Endorsed` floor), `minTrust=Endorsed` is
+   * honoured on this path. Values **above** `Endorsed` are still
+   * rejected for the same Q-1 reason as the union path.
+   *
+   * Known gap (tracked as Q-1): surviving `/_verified_memory/*` graphs
+   * are not filtered per-triple against a `dkg:trustLevel` predicate.
+   * If upstream writers respect the one-trust-tier-per-graph invariant
+   * this is safe; if a future writer stamps mixed-trust triples into a
+   * single sub-graph the graph-scope filter will not catch it. Do not
+   * rely on `minTrust` alone for a compliance-grade trust guarantee
+   * until Q-1 lands.
+   */
+  minTrust?: TrustLevel;
+  /**
+   * @deprecated Use `minTrust`. Legacy alias retained during V10-rc for
+   * SDK consumers that adopted the underscore form before we renamed the
+   * field. Engines MUST fall back to this value when `minTrust` is
+   * undefined (via `options.minTrust ?? options._minTrust`). This alias
+   * will be removed in a future V10 minor — migrate to `minTrust`.
    */
   _minTrust?: TrustLevel;
 }

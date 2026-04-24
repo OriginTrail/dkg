@@ -1,0 +1,47 @@
+name: Knip (dead-code baseline)
+
+# Warn-only dead-code scan. Runs on every PR and on pushes to protected
+# branches. Intentionally uses --no-exit-code so the job always reports
+# "success"; the point is to surface regressions in PR summaries, not to
+# block merges. Once the baseline is fully clean we can flip this to a
+# blocker by removing --no-exit-code and adding the job to the required
+# status checks.
+#
+# Config lives in knip.json at the repo root. Known false-positives (e.g.
+# Solidity-only deps that knip can't parse) belong in knip.json's
+# `ignoreDependencies`, not here.
+
+on:
+  push:
+    branches: [main, v10-rc]
+  pull_request:
+    branches: [main, v10-rc]
+  workflow_dispatch:
+
+concurrency:
+  group: knip-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  knip:
+    name: Knip dead-code report
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run knip (warn-only)
+        # --no-exit-code : never fail the job (warn-only while we burn
+        #                  down the baseline)
+        # --reporter     : compact, deterministic output, easy to diff
+        run: pnpm exec knip --no-exit-code --reporter compact

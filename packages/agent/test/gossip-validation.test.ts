@@ -136,7 +136,8 @@ describe('I-002: Gossip ingestion should not trust self-reported on-chain status
     // After the fix, all gossip data should be stored as tentative first.
     // We simulate what the gossip handler does and verify the output is tentative.
 
-    const entity = 'did:dkg:agent:QmGossipEntity';
+    // A-12 migration: agent DIDs are EVM-address form.
+    const entity = 'did:dkg:agent:0x' + 'aa'.repeat(20);
     const triples = [
       q(entity, 'http://schema.org/name', '"GossipBot"', `did:dkg:context-graph:${PARANET}`),
     ];
@@ -204,6 +205,7 @@ describe('I-002: Gossip ingestion should not trust self-reported on-chain status
 
     try {
       await agent.createContextGraph({ id: 'event-test', name: 'Event Test' });
+      await agent.registerContextGraph('event-test');
       agent.subscribeToContextGraph('event-test');
       await sleep(500);
 
@@ -232,7 +234,7 @@ describe('I-002: Gossip ingestion should not trust self-reported on-chain status
   }, 30000);
 
   it('proto round-trips full gossip message with on-chain proof fields', () => {
-    const entity = 'did:dkg:agent:QmRoundTrip';
+    const entity = 'did:dkg:agent:0x' + 'bb'.repeat(20);
     const ntriples = `<${entity}> <http://schema.org/name> "RoundTrip" .`;
     const txHash = '0x' + 'ff'.repeat(32);
 
@@ -288,6 +290,7 @@ describe('I-002: Gossip ingestion should not trust self-reported on-chain status
 
     try {
       await agent.createContextGraph({ id: 'event-filter', name: 'Event Filter' });
+      await agent.registerContextGraph('event-filter');
       agent.subscribeToContextGraph('event-filter');
       await sleep(500);
 
@@ -325,7 +328,7 @@ describe('I-002: Gossip ingestion should not trust self-reported on-chain status
   }, 30000);
 
   it('merkle verification detects tampered gossip data', () => {
-    const entity = 'did:dkg:agent:QmTampered';
+    const entity = 'did:dkg:agent:0x' + 'cc'.repeat(20);
     const legitimateTriples = [
       q(entity, 'http://schema.org/name', '"Legitimate"', `did:dkg:context-graph:${PARANET}`),
       q(entity, 'http://schema.org/version', '"1.0"', `did:dkg:context-graph:${PARANET}`),
@@ -395,6 +398,7 @@ describe('Integration: gossip ingestion verifies on-chain and promotes to confir
     await sleep(1000);
 
     await agentA.createContextGraph({ id: 'gossip-verify', name: 'GV', description: '' });
+    await agentA.registerContextGraph('gossip-verify');
     agentA.subscribeToContextGraph('gossip-verify');
     agentB.subscribeToContextGraph('gossip-verify');
     await sleep(500);
@@ -448,6 +452,7 @@ describe('Integration: gossip ingestion verifies on-chain and promotes to confir
     await sleep(1000);
 
     await agentA.createContextGraph({ id: 'gossip-tent', name: 'GT', description: '' });
+    await agentA.registerContextGraph('gossip-tent');
     agentA.subscribeToContextGraph('gossip-tent', { trackSyncScope: false });
     agentB.subscribeToContextGraph('gossip-tent', { trackSyncScope: false });
     await sleep(500);

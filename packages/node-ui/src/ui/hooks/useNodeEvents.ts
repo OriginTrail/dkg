@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { authHeaders } from '../api.js';
 
-export type NodeEventType = 'join_request' | 'join_approved' | 'project_synced' | 'connected';
+export type NodeEventType = 'join_request' | 'join_approved' | 'join_rejected' | 'project_synced' | 'connected';
 
 export interface NodeEvent {
   type: NodeEventType;
@@ -32,6 +32,7 @@ function connect() {
 
   source.addEventListener('join_request', handleEvent('join_request'));
   source.addEventListener('join_approved', handleEvent('join_approved'));
+  source.addEventListener('join_rejected', handleEvent('join_rejected'));
   source.addEventListener('project_synced', handleEvent('project_synced'));
   source.addEventListener('connected', handleEvent('connected'));
 

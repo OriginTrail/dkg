@@ -69,12 +69,6 @@ export function formatTime(ts: number | null | undefined): string {
   return new Date(ts).toLocaleTimeString();
 }
 
-/** Format a unix timestamp to local date+time. */
-export function formatDateTime(ts: number | null | undefined): string {
-  if (!ts) return '—';
-  return new Date(ts).toLocaleString();
-}
-
 /** Shorten a UUID or peer ID. */
 export function shortId(id: string | null | undefined, len = 8): string {
   if (!id) return '—';

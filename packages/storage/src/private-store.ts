@@ -41,6 +41,16 @@ export class PrivateContentStore {
   ): Promise<void> {
     if (quads.length === 0) return;
 
+    // Defence-in-depth (ST-7): reject unsafe IRIs at the entry point. The
+    // other private-store operations (`getPrivateTriples`,
+    // `hasPrivateTriplesInStore`, `deletePrivateTriples`) all route
+    // `rootEntity` through `assertSafeIri` as they build SPARQL, so a
+    // string like `did:dkg:agent:evil> <http://attacker/` that slipped in
+    // here would land fine in the in-memory tracker and blow up only on
+    // the first downstream query. Asserting at write time gives callers
+    // an immediate, consistent error shape and keeps the tracker clean.
+    assertSafeIri(rootEntity);
+
     const graphUri = this.privateGraph(contextGraphId, subGraphName);
     const normalized = quads.map((q) => ({ ...q, graph: graphUri }));
     await this.store.insert(normalized);

@@ -308,6 +308,28 @@ export class MockChainAdapter implements ChainAdapter {
       return this.txResult(false);
     }
 
+    // P-1 review (Codex iter-5/iter-6): match the real EVM adapter's
+    // "fail closed on hook error" contract — listeners are the durable
+    // WAL and must be able to abort broadcast by throwing.
+    //
+    // Codex iter-6: the breadcrumb MUST equal the tx hash the adapter
+    // eventually returns, otherwise recovery tests cannot reconcile
+    // "persisted before send" with "confirmed after send". Using
+    // `peekTxHash()` (same deterministic generator that feeds `txResult`
+    // below) guarantees the pre-broadcast hash === the post-broadcast
+    // hash, and naturally varies across repeated updates of the same
+    // `kcId` because `txIndexInBlock` advances per-tx.
+    const mockUpdateTxHash = this.peekTxHash();
+    try {
+      // Codex PR #241 iter-7: `await` an async WAL hook.
+      await params.onBroadcast?.({ txHash: mockUpdateTxHash });
+    } catch (hookErr) {
+      throw new Error(
+        `chain:writeahead hook failed before updateKnowledgeCollectionV10 broadcast (mock): ` +
+        `${hookErr instanceof Error ? hookErr.message : String(hookErr)}`,
+      );
+    }
+
     existing.merkleRoot = params.newMerkleRoot;
     const txIndex = this.txIndexInBlock;
     const blockNumber = this.nextBlock;
@@ -708,6 +730,33 @@ export class MockChainAdapter implements ChainAdapter {
     // flow without migrating every fixture to on-chain numeric ids.
     if (params.ackSignatures.length < this.minimumRequiredSignatures) {
       throw new Error('MinSignaturesRequirementNotMet');
+    }
+
+    // P-1 review (follow-up): mirror the EVM adapter's write-ahead
+    // hook so mock-backed publisher tests observe the same phase
+    // boundary contract (`chain:writeahead:start` fires only when a
+    // concrete broadcast is imminent).
+    //
+    // Codex iter-5/iter-6: fail closed on hook error — matching the
+    // real EVM adapter's refactored send path. WAL persistence
+    // failures MUST abort the broadcast.
+    //
+    // Codex iter-6: make the pre-broadcast hash equal the hash the
+    // adapter will eventually return in the result (via `txResult`)
+    // by deriving both from `peekTxHash()`. This lets recovery tests
+    // match "persisted before send" against "confirmed after send"
+    // without two separate hash namespaces, and gives each publish
+    // a unique breadcrumb (previously keyed only on `nextBatchId`).
+    const mockPublishTxHash = this.peekTxHash();
+    try {
+      // Codex PR #241 iter-7: `await` so async WAL writes run to
+      // completion before the mock "broadcasts".
+      await params.onBroadcast?.({ txHash: mockPublishTxHash });
+    } catch (hookErr) {
+      throw new Error(
+        `chain:writeahead hook failed before createKnowledgeAssetsV10 broadcast (mock): ` +
+        `${hookErr instanceof Error ? hookErr.message : String(hookErr)}`,
+      );
     }
 
     const kcId = this.nextBatchId++;

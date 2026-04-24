@@ -119,6 +119,7 @@ describe('A-4: e2e — agent.publish() data lands in canonical (verified-memory)
     const entity = `urn:a4:e2e:${ethers.hexlify(ethers.randomBytes(3)).slice(2)}`;
 
     await nodeA!.createContextGraph({ id: cgId, name: 'A4 E2E', description: '' });
+    await nodeA!.registerContextGraph(cgId);
 
     const pub = await nodeA!.publish(cgId, [
       { subject: entity, predicate: 'http://schema.org/name', object: '"E2E-A4"', graph: '' },

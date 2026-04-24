@@ -143,7 +143,7 @@ export interface ClusterOptions {
   chain?: boolean;
 }
 
-export async function startHardhatChain(): Promise<HardhatChain> {
+async function startHardhatChain(): Promise<HardhatChain> {
   const logDir = join(TEST_DIR, 'hardhat');
   mkdirSync(logDir, { recursive: true });
 
@@ -228,7 +228,7 @@ export async function startHardhatChain(): Promise<HardhatChain> {
   return { process: child, rpcUrl, hubAddress, port: HARDHAT_E2E_PORT };
 }
 
-export async function stopHardhat(chain: HardhatChain): Promise<void> {
+async function stopHardhat(chain: HardhatChain): Promise<void> {
   if (!chain.process || chain.process.exitCode !== null) return;
 
   chain.process.kill('SIGTERM');
@@ -669,7 +669,7 @@ export function nodeApi(node: TestNode) {
   };
 }
 
-export async function httpGetRaw(url: string, token?: string): Promise<Response> {
+async function httpGetRaw(url: string, token?: string): Promise<Response> {
   const headers: Record<string, string> = {};
   if (token) headers['Authorization'] = `Bearer ${token}`;
   return fetch(url, { headers });

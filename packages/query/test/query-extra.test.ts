@@ -3,12 +3,17 @@
  *
  * Findings covered (see .test-audit/BUGS_FOUND.md):
  *
- *   Q-1  PROD-BUG  `QueryOptions._minTrust` is declared in query-engine.ts:47
- *                  but never consumed by DKGQueryEngine. The trust-gradient
- *                  filter (spec §14) is decorative. Test inserts mixed-trust
- *                  quads in the verified-memory layer and asserts the engine
- *                  only returns HIGH-trust quads — the test STAYS RED until
- *                  the engine actually honours `_minTrust`.
+ *   Q-1  PROD-BUG  `QueryOptions.minTrust` on `verified-memory` view is a
+ *                  *graph-scope* filter, not a per-triple filter. P-13
+ *                  wired the graph-scope semantics end-to-end (drop root
+ *                  when `minTrust > SelfAttested`), but the spec §14
+ *                  trust-gradient guarantee also implies per-triple
+ *                  filtering against `dkg:trustLevel` inside the
+ *                  `/_verified_memory/*` sub-graphs. Test inserts mixed-
+ *                  trust quads in a single sub-graph and asserts the
+ *                  engine only returns HIGH-trust quads — the test
+ *                  STAYS RED until Q-1 lands. P-13 (graph-scope) is
+ *                  covered separately by publisher/test/views-min-trust-*.
  *
  *   Q-2  SPEC-GAP  `QueryHandler.executeSparql` only wires `result.bindings`
  *                  into the response JSON. CONSTRUCT / DESCRIBE queries return
@@ -65,28 +70,30 @@ function quad(s: string, p: string, o: string, g: string): Quad {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Q-1  _minTrust — PROD-BUG (stays RED until engine honours the flag)
+// Q-1  per-triple minTrust filtering — PROD-BUG (stays RED until engine honours
+//      `dkg:trustLevel` at the quad level inside /_verified_memory/*)
 // ─────────────────────────────────────────────────────────────────────────────
-describe('[Q-1] DKGQueryEngine._minTrust is unused — PROD-BUG', () => {
-  // PROD-BUG: QueryOptions._minTrust declared but unused by DKGQueryEngine.
-  // See BUGS_FOUND.md Q-1 and packages/query/src/query-engine.ts:47.
-  it('filters out sub-threshold trust quads on verified-memory view (EXPECTED to fail until Q-1 is fixed)', async () => {
+describe('[Q-1] DKGQueryEngine minTrust is graph-scope only — PROD-BUG', () => {
+  // P-13 closed the graph-scope half of minTrust (root is dropped when
+  // minTrust > SelfAttested). Q-1 is the remaining per-triple half: if a
+  // writer ever stamps mixed-trust quads into a single sub-graph, the
+  // graph-scope filter cannot catch it. This test pins that gap.
+  it('filters out sub-threshold trust quads WITHIN a verified-memory sub-graph (EXPECTED to fail until Q-1 is fixed)', async () => {
     const store = new OxigraphStore();
     const engine = new DKGQueryEngine(store);
 
-    // Put two quads in the root content graph (which §16.1 calls the
-    // Verified Memory content layer) with explicit trust metadata.
+    // All quads live in a single /_verified_memory/* sub-graph so graph-
+    // scope filtering cannot distinguish them. Only a per-triple filter
+    // can drop the low-trust quad.
+    const mixedGraph = contextGraphVerifiedMemoryUri(CG, 'mixed-trust-sub-graph');
     const rootGraph = contextGraphDataUri(CG);
-    const selfAttestedGraph = contextGraphVerifiedMemoryUri(CG, 'self-attested');
-    const consensusGraph = contextGraphVerifiedMemoryUri(CG, 'consensus-verified');
 
     await store.insert([
-      quad('urn:low', 'http://schema.org/name', '"LowTrust"', selfAttestedGraph),
-      quad('urn:low', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.SelfAttested}"`, selfAttestedGraph),
-      quad('urn:high', 'http://schema.org/name', '"HighTrust"', consensusGraph),
-      quad('urn:high', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.ConsensusVerified}"`, consensusGraph),
-      // Put a root-level quad that has NO trust metadata — also should be
-      // filtered out when _minTrust is set.
+      quad('urn:low', 'http://schema.org/name', '"LowTrust"', mixedGraph),
+      quad('urn:low', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.SelfAttested}"`, mixedGraph),
+      quad('urn:high', 'http://schema.org/name', '"HighTrust"', mixedGraph),
+      quad('urn:high', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.ConsensusVerified}"`, mixedGraph),
+      // Root-level quad — P-13 graph-scope filter already excludes this.
       quad('urn:unknown', 'http://schema.org/name', '"UnknownTrust"', rootGraph),
     ]);
 
@@ -95,13 +102,20 @@ describe('[Q-1] DKGQueryEngine._minTrust is unused — PROD-BUG', () => {
       {
         contextGraphId: CG,
         view: 'verified-memory',
-        _minTrust: TrustLevel.ConsensusVerified,
+        // Endorsed is the highest tier the engine currently accepts for
+        // union queries (P-13 review: `PartiallyVerified` / `ConsensusVerified`
+        // are rejected at the resolver until per-graph trust tagging lands
+        // under Q-1). The gap below — per-triple filtering within a
+        // /_verified_memory/* sub-graph — is orthogonal and still unmet.
+        minTrust: TrustLevel.Endorsed,
       },
     );
 
     const names = result.bindings.map((b) => b['name']);
-    // Spec §14: only consensus-verified triples should survive.
-    // Today, _minTrust is ignored — this assertion fails and documents Q-1.
+    // Spec §14: only triples at or above the requested trust tier should survive.
+    // Today, per-triple filtering inside a sub-graph is not implemented —
+    // this assertion fails and documents Q-1. P-13's graph-scope filter
+    // alone returns both LowTrust and HighTrust from the mixed sub-graph.
     expect(names).toEqual(['"HighTrust"']);
   });
 });

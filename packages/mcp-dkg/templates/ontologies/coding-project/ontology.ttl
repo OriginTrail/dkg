@@ -1,0 +1,337 @@
+@prefix owl:     <http://www.w3.org/2002/07/owl#> .
+@prefix rdf:     <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
+@prefix dcterms: <http://purl.org/dc/terms/> .
+@prefix schema:  <http://schema.org/> .
+@prefix foaf:    <http://xmlns.com/foaf/0.1/> .
+@prefix prov:    <http://www.w3.org/ns/prov#> .
+@prefix skos:    <http://www.w3.org/2004/02/skos/core#> .
+@prefix doap:    <http://usefulinc.com/ns/doap#> .
+
+# DKG project namespaces — v1 ontology for any "coding project"
+# context graph. Imports widely-adopted Linked Data vocabs first;
+# only declares extensions for genuinely net-new concepts.
+@prefix chat:      <http://dkg.io/ontology/chat/> .
+@prefix code:      <http://dkg.io/ontology/code/> .
+@prefix github:    <http://dkg.io/ontology/github/> .
+@prefix decisions: <http://dkg.io/ontology/decisions/> .
+@prefix tasks:     <http://dkg.io/ontology/tasks/> .
+@prefix agent:     <http://dkg.io/ontology/agent/> .
+@prefix dkg:       <http://dkg.io/ontology/> .
+
+@prefix : <http://dkg.io/ontology/coding-project/> .
+
+# ─── Ontology header ────────────────────────────────────────────────
+<http://dkg.io/ontology/coding-project/>
+  a owl:Ontology ;
+  dcterms:title "DKG Coding Project Ontology (v1)" ;
+  dcterms:description """The starter ontology for any DKG context graph that
+represents a software project — its decisions, tasks, code structure, GitHub
+activity, agents, and chat. Designed to be `owl:imports`-ed by per-project
+ontologies, which add their own extensions on top.
+
+Every predicate is either reused from a globally-adopted vocabulary
+(schema.org, DCTerms, PROV-O, FOAF, SKOS, DOAP) or declared here as a
+project-specific extension. Companion document `agent-guide.md` translates
+this formal model into operational instructions for AI coding agents.""" ;
+  dcterms:creator "branarakic" ;
+  owl:versionInfo "1.0.0" ;
+  dcterms:created "2026-04-18"^^xsd:date ;
+  owl:imports
+    <http://schema.org/> ,
+    <http://purl.org/dc/terms/> ,
+    <http://www.w3.org/ns/prov#> ,
+    <http://xmlns.com/foaf/0.1/> ,
+    <http://www.w3.org/2004/02/skos/core#> ,
+    <http://usefulinc.com/ns/doap#> .
+
+# ─── Section 1 — Universal annotation primitives ────────────────────
+# Used by `dkg_annotate_turn` to express what each chat turn was ABOUT.
+# These predicates apply to ANY project type, not just coding.
+
+chat:topic
+  a owl:DatatypeProperty ;
+  rdfs:label "topic" ;
+  rdfs:comment "Free-text topical bucket the chat turn lives under. Multiple per turn; emit liberally. Renderer can use these to cluster the activity feed." ;
+  rdfs:domain chat:Turn ;
+  rdfs:range xsd:string .
+
+chat:mentions
+  a owl:ObjectProperty ;
+  rdfs:label "mentions" ;
+  rdfs:comment "An entity the chat turn referenced. The most common edge in the graph. Use the look-before-mint protocol: query dkg_search first, reuse if a normalised-slug match exists." ;
+  rdfs:domain chat:Turn ;
+  rdfs:range owl:Thing ;
+  rdfs:subPropertyOf schema:mentions .
+
+chat:examines
+  a owl:ObjectProperty ;
+  rdfs:label "examines" ;
+  rdfs:comment "Entity the chat turn walked through in detail (vs just mentioning in passing). Implies the agent or operator is ANALYSING the entity, not merely citing it." ;
+  rdfs:domain chat:Turn ;
+  rdfs:range owl:Thing .
+
+chat:proposes
+  a owl:ObjectProperty ;
+  rdfs:label "proposes" ;
+  rdfs:comment "An idea/decision/task the chat turn put forward. Often points at a freshly-minted Decision or Task entity created in the same dkg_annotate_turn call." ;
+  rdfs:domain chat:Turn ;
+  rdfs:range owl:Thing .
+
+chat:concludes
+  a owl:ObjectProperty ;
+  rdfs:label "concludes" ;
+  rdfs:comment "A Finding entity the chat turn produced — a claim worth preserving as a first-class node, separate from the turn body." ;
+  rdfs:domain chat:Turn ;
+  rdfs:range :Finding .
+
+chat:asks
+  a owl:ObjectProperty ;
+  rdfs:label "asks" ;
+  rdfs:comment "A Question entity the chat turn left open. Tracking these lets a future query surface 'what did we never resolve?'." ;
+  rdfs:domain chat:Turn ;
+  rdfs:range :Question .
+
+# ─── Section 2 — Universal annotation entity classes ────────────────
+
+:Concept
+  a owl:Class ;
+  rdfs:label "Concept" ;
+  rdfs:comment "A free-text concept emerging from chat that doesn't fit into a more specific class. Aligned with skos:Concept so it composes with any knowledge organisation system." ;
+  rdfs:subClassOf skos:Concept .
+
+:Topic
+  a owl:Class ;
+  rdfs:label "Topic" ;
+  rdfs:comment "A broad topical bucket grouping related concepts/turns/entities. URI pattern: urn:dkg:topic:<slug>." ;
+  rdfs:subClassOf skos:Concept .
+
+:Question
+  a owl:Class ;
+  rdfs:label "Question" ;
+  rdfs:comment "An open question raised in chat that hasn't been answered yet. URI pattern: urn:dkg:question:<slug>. Resolved by linking a chat:Turn or :Finding via :answers." ;
+  rdfs:subClassOf schema:Question .
+
+:Finding
+  a owl:Class ;
+  rdfs:label "Finding" ;
+  rdfs:comment "A claim or observation worth preserving as a first-class entity, separate from the chat turn that produced it. URI pattern: urn:dkg:finding:<slug>. Findings can be cited by future Decisions, Tasks, and chat turns." ;
+  rdfs:subClassOf prov:Entity .
+
+:answers
+  a owl:ObjectProperty ;
+  rdfs:label "answers" ;
+  rdfs:comment "Links a Finding (or chat turn) to the Question it resolves." ;
+  rdfs:domain owl:Thing ;
+  rdfs:range :Question .
+
+:supersedes
+  a owl:ObjectProperty ;
+  rdfs:label "supersedes" ;
+  rdfs:comment "This entity replaces an older one (e.g. a revised Finding supersedes an earlier one)." ;
+  rdfs:range owl:Thing ;
+  owl:inverseOf prov:wasRevisionOf .
+
+# ─── Section 3 — Coding-project-specific classes ────────────────────
+# Formalises the predicates already used informally in
+# scripts/lib/ontology.mjs, anchoring them in PROV-O and schema.org.
+
+decisions:Decision
+  a owl:Class ;
+  rdfs:label "Decision" ;
+  rdfs:comment "An architectural decision the project made — context, outcome, consequences. Modelled as a prov:Activity because it represents a deliberate act of choosing." ;
+  rdfs:subClassOf prov:Activity, schema:Action .
+
+decisions:context
+  a owl:DatatypeProperty ;
+  rdfs:label "context" ;
+  rdfs:domain decisions:Decision ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Why this decision was being made — problem, constraints, alternatives considered." .
+
+decisions:outcome
+  a owl:DatatypeProperty ;
+  rdfs:label "outcome" ;
+  rdfs:domain decisions:Decision ;
+  rdfs:range xsd:string ;
+  rdfs:comment "The chosen direction — the decision itself, in one paragraph." .
+
+decisions:consequences
+  a owl:DatatypeProperty ;
+  rdfs:label "consequences" ;
+  rdfs:domain decisions:Decision ;
+  rdfs:range xsd:string ;
+  rdfs:comment "What this implies going forward — trade-offs, follow-ups." .
+
+decisions:status
+  a owl:DatatypeProperty ;
+  rdfs:label "status" ;
+  rdfs:domain decisions:Decision ;
+  rdfs:range xsd:string ;
+  rdfs:comment "One of: proposed | accepted | rejected | superseded." .
+
+tasks:Task
+  a owl:Class ;
+  rdfs:label "Task" ;
+  rdfs:comment "A piece of planned or in-flight work on the project." ;
+  rdfs:subClassOf schema:Action .
+
+tasks:status
+  a owl:DatatypeProperty ;
+  rdfs:label "status" ;
+  rdfs:domain tasks:Task ;
+  rdfs:range xsd:string ;
+  rdfs:comment "One of: todo | in_progress | blocked | done | cancelled." .
+
+tasks:priority
+  a owl:DatatypeProperty ;
+  rdfs:label "priority" ;
+  rdfs:domain tasks:Task ;
+  rdfs:range xsd:string ;
+  rdfs:comment "One of: p0 | p1 | p2 | p3." .
+
+tasks:relatedDecision
+  a owl:ObjectProperty ;
+  rdfs:label "related decision" ;
+  rdfs:domain tasks:Task ;
+  rdfs:range decisions:Decision ;
+  rdfs:comment "The Decision this task implements or follows from." .
+
+tasks:dependsOn
+  a owl:ObjectProperty ;
+  rdfs:label "depends on" ;
+  rdfs:domain tasks:Task ;
+  rdfs:range tasks:Task .
+
+tasks:touches
+  a owl:ObjectProperty ;
+  rdfs:label "touches" ;
+  rdfs:domain tasks:Task ;
+  rdfs:range owl:Thing ;
+  rdfs:comment "A code:File or code:Package this task edits." .
+
+# Code structure — aligned with schema:SoftwareSourceCode + DOAP.
+
+code:Package
+  a owl:Class ;
+  rdfs:label "Package" ;
+  rdfs:subClassOf doap:Project, schema:SoftwareApplication .
+
+code:File
+  a owl:Class ;
+  rdfs:label "Source file" ;
+  rdfs:subClassOf schema:SoftwareSourceCode .
+
+code:Function a owl:Class ; rdfs:label "Function" .
+code:Class    a owl:Class ; rdfs:label "Class" .
+code:Interface a owl:Class ; rdfs:label "Interface" .
+
+# GitHub — minimal aliasing onto schema.org where sensible.
+
+github:Repository
+  a owl:Class ;
+  rdfs:label "GitHub repository" ;
+  rdfs:subClassOf schema:SoftwareSourceCode, doap:Project .
+
+github:PullRequest
+  a owl:Class ;
+  rdfs:label "Pull request" ;
+  rdfs:subClassOf schema:CreativeWork .
+
+github:Issue
+  a owl:Class ;
+  rdfs:label "GitHub issue" ;
+  rdfs:subClassOf schema:Question, schema:CreativeWork .
+
+# ─── Section 4 — Chat sub-graph classes ─────────────────────────────
+
+chat:Session
+  a owl:Class ;
+  rdfs:label "Chat session" ;
+  rdfs:comment "One conversation between an operator and their coding assistant (Cursor window, Claude Code thread, etc.)." ;
+  rdfs:subClassOf schema:Conversation .
+
+chat:Turn
+  a owl:Class ;
+  rdfs:label "Chat turn" ;
+  rdfs:comment "One user-prompt + assistant-response pair within a Session. Carries provenance via prov:wasAttributedTo." ;
+  rdfs:subClassOf schema:Message, prov:Entity .
+
+chat:userPrompt    a owl:DatatypeProperty ; rdfs:domain chat:Turn ; rdfs:range xsd:string .
+chat:assistantResponse a owl:DatatypeProperty ; rdfs:domain chat:Turn ; rdfs:range xsd:string .
+chat:turnIndex     a owl:DatatypeProperty ; rdfs:domain chat:Turn ; rdfs:range xsd:integer .
+chat:inSession     a owl:ObjectProperty   ; rdfs:domain chat:Turn ; rdfs:range chat:Session .
+chat:speakerTool   a owl:DatatypeProperty ; rdfs:range xsd:string ;
+  rdfs:comment "Identifier of the coding assistant that produced the turn (e.g. 'cursor', 'claude-code')." .
+chat:privacy       a owl:DatatypeProperty ; rdfs:domain chat:Session ; rdfs:range xsd:string ;
+  rdfs:comment "One of: private | team | public. Controls auto-promote behaviour of the capture hook." .
+
+# ─── Section 5 — Agent identity ─────────────────────────────────────
+
+agent:Agent
+  a owl:Class ;
+  rdfs:label "Agent" ;
+  rdfs:subClassOf prov:Agent, foaf:Agent .
+
+agent:HumanAgent rdfs:subClassOf agent:Agent, foaf:Person .
+agent:AIAgent    rdfs:subClassOf agent:Agent, schema:SoftwareApplication .
+
+agent:framework
+  a owl:DatatypeProperty ;
+  rdfs:label "framework" ;
+  rdfs:domain agent:AIAgent ;
+  rdfs:range xsd:string ;
+  rdfs:comment "Name of the agent runtime — 'cursor', 'claude-code', 'openclaw', 'hermes', etc." .
+
+agent:operator
+  a owl:ObjectProperty ;
+  rdfs:label "operator" ;
+  rdfs:domain agent:AIAgent ;
+  rdfs:range agent:HumanAgent ;
+  rdfs:comment "The human operator who runs and is responsible for this AI agent." .
+
+# ─── Section 6 — URI minting conventions (machine-readable) ─────────
+# These are encoded as SKOS notes so an agent reading the ontology can
+# pull them out programmatically. The agent guide repeats them in
+# prose for human readability.
+
+:UriPattern
+  a owl:Class ;
+  rdfs:label "URI minting pattern" ;
+  rdfs:comment "Documents the URI shape the agent should produce when minting a new entity of a given type. Read by dkg_annotate_turn at runtime." .
+
+:concept-pattern a :UriPattern ;
+  skos:notation "urn:dkg:concept:<slug>" ;
+  skos:definition "Free-text concept; aligned with skos:Concept." .
+:topic-pattern a :UriPattern ;
+  skos:notation "urn:dkg:topic:<slug>" ;
+  skos:definition "Broad topical bucket grouping related entities." .
+:question-pattern a :UriPattern ;
+  skos:notation "urn:dkg:question:<slug>" ;
+  skos:definition "An open question awaiting an answer." .
+:finding-pattern a :UriPattern ;
+  skos:notation "urn:dkg:finding:<slug>" ;
+  skos:definition "A claim or observation worth preserving as a first-class node." .
+:decision-pattern a :UriPattern ;
+  skos:notation "urn:dkg:decision:<slug>" ;
+  skos:definition "An architectural decision (coding-project specific)." .
+:task-pattern a :UriPattern ;
+  skos:notation "urn:dkg:task:<slug>" ;
+  skos:definition "A piece of planned or in-flight work (coding-project specific)." .
+
+# ─── Section 7 — Slug normalisation rule (deterministic) ────────────
+
+:slug-normalisation a skos:Note ;
+  skos:prefLabel "slug normalisation" ;
+  skos:definition """To compute the canonical slug from a free-text label:
+1. Lowercase.
+2. Apply Unicode NFKD then strip combining marks (ASCII fold).
+3. Strip common stopwords (the / a / an / of / for / and / or / to / in / on / with).
+4. Replace any run of non-[a-z0-9] with a single hyphen.
+5. Trim leading/trailing hyphens.
+6. Truncate to 60 characters max.
+
+Example: "the Tree-Sitter library", "Tree sitter", "TREE_SITTER" all
+normalise to "tree-sitter". Always apply this BEFORE calling dkg_search
+in the look-before-mint protocol.""" .

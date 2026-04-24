@@ -136,6 +136,16 @@ export class DkgDaemonClient {
       assertionName?: string;
       subGraphName?: string;
       verifiedGraph?: string;
+      /**
+       * P-13: minimum trust level. Only meaningful for
+       * `view: "verified-memory"`; ignored (silently) on WM/SWM views.
+       *
+       * The daemon implements only `SelfAttested` / `Endorsed` today —
+       * higher tiers (Q-1 follow-up) are rejected with HTTP 400, so the
+       * public client surface only advertises the implementable values.
+       * See `packages/query/src/query-engine.ts QueryOptions.minTrust`.
+       */
+      minTrust?: 'SelfAttested' | 'Endorsed' | 0 | 1;
     },
   ): Promise<any> {
     return this.post('/api/query', {
@@ -148,6 +158,7 @@ export class DkgDaemonClient {
       assertionName: opts?.assertionName,
       subGraphName: opts?.subGraphName,
       verifiedGraph: opts?.verifiedGraph,
+      minTrust: opts?.minTrust,
     });
   }
 
@@ -222,6 +233,160 @@ export class DkgDaemonClient {
       quads,
       subGraphName: opts?.subGraphName,
     });
+  }
+
+  /**
+   * Promote a Working Memory assertion (or a subset of its root entities) to
+   * Shared Working Memory. `entities` defaults to `"all"` server-side when
+   * omitted; callers can pin specific root entity URIs via an array.
+   */
+  async promoteAssertion(
+    contextGraphId: string,
+    name: string,
+    opts?: { entities?: string[] | 'all'; subGraphName?: string },
+  ): Promise<Record<string, unknown>> {
+    return this.post(`/api/assertion/${encodeURIComponent(name)}/promote`, {
+      contextGraphId,
+      entities: opts?.entities,
+      subGraphName: opts?.subGraphName,
+    });
+  }
+
+  /**
+   * Discard a Working Memory assertion without promoting it. Returns
+   * `{ discarded: true }` on success; the daemon surfaces 400 for invalid
+   * names or missing assertions.
+   */
+  async discardAssertion(
+    contextGraphId: string,
+    name: string,
+    opts?: { subGraphName?: string },
+  ): Promise<{ discarded: boolean }> {
+    return this.post(`/api/assertion/${encodeURIComponent(name)}/discard`, {
+      contextGraphId,
+      subGraphName: opts?.subGraphName,
+    });
+  }
+
+  /**
+   * Dump all quads from a single Working Memory assertion's graph. This is
+   * not a SPARQL endpoint — the daemon returns every quad in the assertion
+   * as `{ quads, count }`. For ad-hoc SPARQL use `query()` with
+   * `view: 'working-memory'` + `assertionName` instead.
+   */
+  async queryAssertion(
+    contextGraphId: string,
+    name: string,
+    opts?: { subGraphName?: string },
+  ): Promise<{ quads: unknown[]; count: number }> {
+    return this.post(`/api/assertion/${encodeURIComponent(name)}/query`, {
+      contextGraphId,
+      subGraphName: opts?.subGraphName,
+    });
+  }
+
+  /**
+   * Fetch the lifecycle descriptor for an assertion (creation time, author,
+   * latest extraction status, promotion state). Throws a 404-bearing error
+   * when no record exists for the given (contextGraphId, name, agentAddress).
+   */
+  async getAssertionHistory(
+    contextGraphId: string,
+    name: string,
+    opts?: { agentAddress?: string; subGraphName?: string },
+  ): Promise<Record<string, unknown>> {
+    const params = new URLSearchParams({ contextGraphId });
+    if (opts?.agentAddress) params.set('agentAddress', opts.agentAddress);
+    if (opts?.subGraphName) params.set('subGraphName', opts.subGraphName);
+    return this.get(
+      `/api/assertion/${encodeURIComponent(name)}/history?${params.toString()}`,
+    );
+  }
+
+  /**
+   * Import a document (markdown, PDF, etc.) into a Working Memory assertion
+   * via multipart/form-data. The daemon runs its extraction pipeline and
+   * writes the resulting triples into the assertion's graph.
+   *
+   * Callers pass raw file bytes (Buffer/Uint8Array) and a filename; the
+   * client constructs the multipart form locally using Node 18+ globals
+   * (`FormData`, `Blob`). When `contentType` is supplied, the daemon's
+   * `normalizeDetectedContentType` picks it up from the explicit form field;
+   * otherwise the daemon falls back to the file part's Content-Type header
+   * (set here from the Blob's `type`).
+   */
+  async importAssertionFile(
+    contextGraphId: string,
+    name: string,
+    fileBuffer: Buffer | Uint8Array,
+    fileName: string,
+    opts?: { contentType?: string; ontologyRef?: string; subGraphName?: string },
+  ): Promise<Record<string, unknown>> {
+    const form = new FormData();
+    // Copy into a fresh Uint8Array to satisfy TS's BlobPart union across Node Buffer / SharedArrayBuffer.
+    const bytes = new Uint8Array(fileBuffer.byteLength);
+    bytes.set(fileBuffer);
+    const blob = new Blob([bytes], { type: opts?.contentType ?? 'application/octet-stream' });
+    form.append('file', blob, fileName);
+    form.append('contextGraphId', contextGraphId);
+    if (opts?.contentType) form.append('contentType', opts.contentType);
+    if (opts?.ontologyRef) form.append('ontologyRef', opts.ontologyRef);
+    if (opts?.subGraphName) form.append('subGraphName', opts.subGraphName);
+
+    const res = await fetch(
+      `${this.baseUrl}/api/assertion/${encodeURIComponent(name)}/import-file`,
+      {
+        method: 'POST',
+        headers: { Accept: 'application/json', ...this.authHeaders() },
+        body: form,
+        signal: AbortSignal.timeout(this.timeoutMs),
+      },
+    );
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new Error(
+        `DKG daemon /api/assertion/${name}/import-file responded ${res.status}: ${text}`,
+      );
+    }
+    return res.json() as Promise<Record<string, unknown>>;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Sub-graphs
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Create a named sub-graph inside a context graph. Sub-graphs partition a
+   * CG into organizational regions that assertions can target at
+   * create/write/import time.
+   */
+  async createSubGraph(
+    contextGraphId: string,
+    subGraphName: string,
+  ): Promise<{ created: string; contextGraphId: string }> {
+    return this.post('/api/sub-graph/create', { contextGraphId, subGraphName });
+  }
+
+  /**
+   * List all registered sub-graphs for a context graph, with best-effort
+   * per-sub-graph entity / triple counts.
+   */
+  async listSubGraphs(
+    contextGraphId: string,
+  ): Promise<{
+    contextGraphId: string;
+    subGraphs: Array<{
+      name: string;
+      uri: string;
+      description?: string;
+      createdBy?: string;
+      createdAt?: string;
+      entityCount: number;
+      tripleCount: number;
+    }>;
+  }> {
+    const params = new URLSearchParams({ contextGraphId });
+    return this.get(`/api/sub-graph/list?${params.toString()}`);
   }
 
   // ---------------------------------------------------------------------------
@@ -309,6 +474,65 @@ export class DkgDaemonClient {
   }
 
   // ---------------------------------------------------------------------------
+  // Context graph participant management
+  // ---------------------------------------------------------------------------
+
+  async inviteToContextGraph(
+    contextGraphId: string,
+    peerId: string,
+  ): Promise<{ invited: string; contextGraphId: string }> {
+    return this.post('/api/context-graph/invite', { contextGraphId, peerId });
+  }
+
+  async addParticipant(
+    contextGraphId: string,
+    agentAddress: string,
+  ): Promise<{ ok: boolean; contextGraphId: string; agentAddress: string }> {
+    return this.post(`/api/context-graph/${encodeURIComponent(contextGraphId)}/add-participant`, { agentAddress });
+  }
+
+  async removeParticipant(
+    contextGraphId: string,
+    agentAddress: string,
+  ): Promise<{ ok: boolean; contextGraphId: string; agentAddress: string }> {
+    return this.post(`/api/context-graph/${encodeURIComponent(contextGraphId)}/remove-participant`, { agentAddress });
+  }
+
+  async listParticipants(
+    contextGraphId: string,
+  ): Promise<{ contextGraphId: string; allowedAgents: string[] }> {
+    return this.get(`/api/context-graph/${encodeURIComponent(contextGraphId)}/participants`);
+  }
+
+  async listJoinRequests(
+    contextGraphId: string,
+  ): Promise<{
+    contextGraphId: string;
+    requests: Array<{
+      agentAddress: string;
+      status: string;
+      timestamp?: string;
+      agentName?: string;
+    }>;
+  }> {
+    return this.get(`/api/context-graph/${encodeURIComponent(contextGraphId)}/join-requests`);
+  }
+
+  async approveJoinRequest(
+    contextGraphId: string,
+    agentAddress: string,
+  ): Promise<{ ok: boolean; status: string; agentAddress: string }> {
+    return this.post(`/api/context-graph/${encodeURIComponent(contextGraphId)}/approve-join`, { agentAddress });
+  }
+
+  async rejectJoinRequest(
+    contextGraphId: string,
+    agentAddress: string,
+  ): Promise<{ ok: boolean; status: string; agentAddress: string }> {
+    return this.post(`/api/context-graph/${encodeURIComponent(contextGraphId)}/reject-join`, { agentAddress });
+  }
+
+  // ---------------------------------------------------------------------------
   // Agents & skills discovery
   // ---------------------------------------------------------------------------
 
@@ -364,6 +588,34 @@ export class DkgDaemonClient {
       contextGraphId,
       selection: 'all',
       clearAfter: true,
+    });
+  }
+
+  /**
+   * Final canonical-flow step: publish the current contents of a context graph's
+   * Shared Working Memory to Verified Memory (on-chain) and clear SWM. The daemon
+   * route accepts `selection` as either the literal `"all"` or an array of root
+   * entity URIs — this wrapper exposes the latter as a friendlier `rootEntities`
+   * option and translates the omit-case to `"all"` server-side.
+   *
+   * Returns the daemon's publish descriptor: `{ kcId, status, kas: [{tokenId, rootEntity}],
+   * txHash?, blockNumber?, ... }`.
+   */
+  async publishSharedMemory(
+    contextGraphId: string,
+    opts?: { rootEntities?: string[]; clearAfter?: boolean; subGraphName?: string },
+  ): Promise<Record<string, unknown>> {
+    // Default `clearAfter` to `false` for subset publishes so unpublished root
+    // entities aren't dropped from SWM as a side-effect of publishing a few.
+    // Full-publish callers (rootEntities omitted) keep the "publish + clear"
+    // semantic. Explicit `clearAfter` on the opts always wins.
+    const hasSubset = Array.isArray(opts?.rootEntities) && opts!.rootEntities!.length > 0;
+    const clearAfter = opts?.clearAfter ?? !hasSubset;
+    return this.post('/api/shared-memory/publish', {
+      contextGraphId,
+      selection: opts?.rootEntities ?? 'all',
+      clearAfter,
+      subGraphName: opts?.subGraphName,
     });
   }
 

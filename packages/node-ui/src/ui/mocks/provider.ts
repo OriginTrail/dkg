@@ -1,13 +1,7 @@
 import * as mock from './data.js';
 
-const IS_MOCK = true;
-
 function delay<T>(data: T, ms = 50): Promise<T> {
   return new Promise((r) => setTimeout(() => r(data), ms));
-}
-
-export function shouldUseMocks(): boolean {
-  return IS_MOCK;
 }
 
 export const mockApi = {

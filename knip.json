@@ -1,0 +1,101 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "ignore": [
+    "packages/app-autoresearch/demo/.venv/**",
+    "experiments/**/.venv/**",
+    "packages/*/.test-nodes/**",
+    "packages/**/typechain/**",
+    "packages/**/artifacts/**",
+    "packages/**/cache/**",
+    "packages/**/coverage/**",
+    "packages/**/deployments/**",
+    "ccl_v0_1/**",
+    "docs/plans/**/*.mjs",
+    "docs/experiments/**"
+  ],
+  "ignoreDependencies": [
+    "@openzeppelin/contracts",
+    "solady",
+    "@vitest/coverage-v8"
+  ],
+  "tags": ["-@internal"],
+  "workspaces": {
+    ".": {
+      "entry": [
+        "scripts/**/*.{ts,mjs,cjs,js}",
+        "vitest.*.ts"
+      ]
+    },
+    "demo": {
+      "entry": ["*.mjs"]
+    },
+    "packages/evm-module": {
+      "entry": [
+        "hardhat.config.ts",
+        "hardhat.node.config.ts",
+        "deploy/**/*.ts",
+        "scripts/**/*.ts",
+        "tasks/**/*.ts",
+        "utils/**/*.ts",
+        "test/**/*.{ts,tsx}"
+      ],
+      "ignore": [
+        ".solcover.js"
+      ]
+    },
+    "packages/network-sim": {
+      "entry": [
+        "src/**/*.{ts,tsx}",
+        "index.html"
+      ]
+    },
+    "packages/node-ui": {
+      "entry": [
+        "src/index.ts",
+        "src/ui/App.tsx",
+        "index.html",
+        "test/**/*.test.{ts,tsx}",
+        "vitest.config.ts",
+        "vite.config.ts",
+        "playwright.config.ts"
+      ]
+    },
+    "packages/origin-trail-game": {
+      "entry": [
+        "src/index.ts",
+        "src/main.tsx",
+        "src/ui/App.tsx",
+        "index.html",
+        "test/**/*.test.{ts,tsx}",
+        "vitest.config.ts",
+        "vitest.e2e.config.ts",
+        "vitest.ui.config.ts",
+        "vite.config.ts"
+      ]
+    },
+    "packages/graph-viz": {
+      "entry": [
+        "src/index.ts",
+        "src/react/index.ts",
+        "src/parsers/index.ts",
+        "test/**/*.test.{ts,tsx}",
+        "vitest.config.ts"
+      ]
+    },
+    "packages/agent": {
+      "entry": [
+        "scripts/ci-shard-agent.mjs"
+      ]
+    },
+    "packages/cli": {
+      "entry": [
+        "scripts/**/*.{mjs,mts,d.mts}"
+      ]
+    },
+    "packages/mcp-dkg": {
+      "entry": [
+        "scripts/smoke-*.mjs"
+      ]
+    }
+  }
+}

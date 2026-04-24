@@ -13,8 +13,15 @@ beforeAll(async () => {
   _fileSnapshot = await takeSnapshot();
   const { hubAddress } = getSharedContext();
   const provider = createProvider();
-  const coreOp = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
-  await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, coreOp.address, ethers.parseEther('50000000'));
+  // A-12: agent profile DIDs are now derived from the wallet address. Tests that
+  // expect to discover *two* distinct agents (via findAgents) must give each
+  // agent its own EVM key, otherwise both publish profiles under the same DID
+  // subject and findAgents collapses the result down to one entry. Mint to all
+  // keys we use below so create-on-chain operations can pay fees.
+  for (const key of [HARDHAT_KEYS.CORE_OP, HARDHAT_KEYS.REC1_OP]) {
+    const w = new ethers.Wallet(key);
+    await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, w.address, ethers.parseEther('50000000'));
+  }
 });
 afterAll(async () => {
   await revertSnapshot(_fileSnapshot);
@@ -66,7 +73,8 @@ describe('Two-Agent E2E', () => {
         pricePerCall: 0.5,
         handler: async () => ({ success: true }),
       }],
-      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      // A-12: distinct EVM key so agentB's profile DID differs from agentA's.
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.REC1_OP),
     });
     agents.push(agentB);
     await agentB.start();

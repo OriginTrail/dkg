@@ -1,10 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import {
-  subscribeToContextGraph, fetchContextGraphs, authHeaders,
+  subscribeToContextGraph, fetchContextGraphs,
   signJoinRequest, submitJoinRequest, fetchCurrentAgent, fetchCatchupStatus,
+  connectToPeerWithTimeout,
 } from '../../api.js';
 import { useProjectsStore } from '../../stores/projects.js';
 import { useTabsStore } from '../../stores/tabs.js';
+import { WireWorkspacePanel } from '../Workspace/WireWorkspacePanel.js';
 
 interface JoinProjectModalProps {
   open: boolean;
@@ -12,20 +14,44 @@ interface JoinProjectModalProps {
   initialContextGraphId?: string;
 }
 
-function parseInviteCode(raw: string): { cgId: string; multiaddr: string | null } {
+export function parseInviteCode(raw: string): { cgId: string; multiaddr: string | null } {
   const normalized = raw.trim().replace(/\\n/g, '\n');
-  const multiaddrMatch = normalized.match(/(?:^|\s)(\/(?:ip4|ip6|dns|dns4|dns6)\/\S+)/);
-  const multiaddr = multiaddrMatch?.[1] ?? null;
-  const cgId = (multiaddr
-    ? normalized.replace(multiaddr, '')
-    : normalized
-  ).split('\n').map(l => l.trim()).filter(Boolean)[0] ?? '';
+  const lines = normalized.split('\n').map((line) => line.trim()).filter(Boolean);
+  const multilineMultiaddr = lines.slice(1).join('').replace(/\s+/g, '');
+  const inlineMultiaddrMatch = normalized.match(/(?:^|\s)(\/(?:ip4|ip6|dns|dns4|dns6)\/\S+)/);
+  const inlineMultiaddr = inlineMultiaddrMatch?.[1]?.replace(/\s+/g, '') ?? null;
+  const multiaddr = multilineMultiaddr.startsWith('/') ? multilineMultiaddr : inlineMultiaddr;
+  const firstLine = lines[0] ?? '';
+  const cgId = inlineMultiaddr && firstLine.includes(inlineMultiaddr)
+    ? firstLine.replace(inlineMultiaddr, '').trim()
+    : firstLine;
   return { cgId, multiaddr };
 }
 
-async function pollCatchupStatus(cgId: string, maxAttempts = 10, intervalMs = 1500): Promise<{ status: string; error?: string }> {
+export function validateInvite(cgId: string, multiaddr: string | null): string | null {
+  if (!cgId) return 'Missing project ID';
+  if (!multiaddr) return null;
+  if (!multiaddr.startsWith('/')) return 'Invalid curator multiaddr';
+  if (!multiaddr.includes('/p2p/')) return 'Curator multiaddr is missing peer ID';
+  return null;
+}
+
+// Catchup iterates connected peers with a ~30s per-peer sync timeout. Even
+// with parallel per-peer sync on the backend, the slowest peer gates the
+// whole job, so we need a generous total wait to reliably observe denials
+// for curated projects before giving up. Timeout path is deliberately not
+// treated as success by the caller. (HEAD tier-4: raised from 10×1.5s to
+// 60×1.5s so denials on slow curators don't get misreported as transport
+// errors in the UI.)
+async function pollCatchupStatus(
+  cgId: string,
+  maxAttempts = 60,
+  intervalMs = 1500,
+  onProgress?: (attempt: number, total: number) => void,
+): Promise<{ status: string; error?: string }> {
   for (let i = 0; i < maxAttempts; i++) {
     await new Promise(r => setTimeout(r, intervalMs));
+    onProgress?.(i + 1, maxAttempts);
     try {
       const result = await fetchCatchupStatus(cgId);
       if (result.status === 'done' || result.status === 'denied' || result.status === 'failed') {
@@ -47,6 +73,13 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
   const [requestSent, setRequestSent] = useState(false);
   const [sendingRequest, setSendingRequest] = useState(false);
   const [accessDenied, setAccessDenied] = useState(false);
+  // Phase 8: after subscribe + catchup completes we transition into a
+  // wire-workspace step so the joiner can populate a local Cursor
+  // workspace from the project's manifest. `wiredCgId` flips the modal
+  // into the WireWorkspacePanel; the operator can also click Skip if
+  // they only want to subscribe (e.g. running a passive observer node).
+  const [wiredCgId, setWiredCgId] = useState<string | null>(null);
+  const [wiredProjectName, setWiredProjectName] = useState<string>('');
 
   const { setContextGraphs, setActiveProject } = useProjectsStore();
   const { openTab } = useTabsStore();
@@ -70,7 +103,11 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
 
   const handleJoin = async () => {
     const { cgId, multiaddr } = parseInviteCode(inviteCode);
-    if (!cgId) return;
+    const inviteError = validateInvite(cgId, multiaddr);
+    if (inviteError) {
+      setError(inviteError);
+      return;
+    }
 
     setJoining(true);
     setError(null);
@@ -82,14 +119,10 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
       if (multiaddr) {
         setProgress('Connecting to curator node…');
         try {
-          await fetch('/api/connect', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', ...authHeaders() },
-            body: JSON.stringify({ multiaddr }),
-          });
+          await connectToPeerWithTimeout(multiaddr);
           await new Promise(r => setTimeout(r, 1000));
         } catch {
-          // Non-fatal -- nodes may already be connected
+          // Non-fatal — subscribe/catch-up may still work via existing peers/relays.
         }
       }
 
@@ -98,8 +131,13 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
 
       setProgress('Syncing knowledge from peers…');
 
-      // Poll catchup status to detect denials
-      const catchup = await pollCatchupStatus(cgId);
+      // Poll catchup status to detect denials — the background job may take
+      // up to ~90s on curated projects because each peer's sync request is
+      // subject to the remote-side ACL timeout before we can conclude the
+      // CG is denied. Don't treat the poll timeout as success.
+      const catchup = await pollCatchupStatus(cgId, 60, 1500, (attempt, total) => {
+        setProgress(`Syncing knowledge from peers… (${attempt}/${total})`);
+      });
 
       if (catchup.status === 'denied') {
         setAccessDenied(true);
@@ -109,6 +147,29 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
 
       if (catchup.status === 'failed') {
         setError(catchup.error || 'Sync failed');
+        setProgress('');
+        return;
+      }
+
+      if (catchup.status === 'timeout') {
+        // A poll timeout is NOT evidence of ACL denial — it just means
+        // no peer finished the catchup within ~90s. Common reasons:
+        //   - project is public but peers are slow / offline,
+        //   - network path is congested,
+        //   - our subscribe hasn't reached a peer that holds the CG yet.
+        // Flipping `accessDenied` here used to push users of public
+        // projects straight into the "Access Restricted — send signed
+        // join request" flow, which is misleading and cuts them off
+        // from just retrying. Surface a neutral network error instead
+        // and let them retry; a real ACL denial lands in the `denied`
+        // branch above, or in the `err.message` check at the bottom
+        // of this function. (HEAD tier-4c G3; v10-rc's copy "syncing
+        // still in progress" was milder but still implied success —
+        // we'd rather the user retry explicitly than think the subscribe
+        // finished when the background sync never landed data.)
+        setError(
+          'Timed out waiting for peers to respond. The project may be slow to catch up, or no peer currently holds the data. Try again in a moment.',
+        );
         setProgress('');
         return;
       }
@@ -125,7 +186,11 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
 
       setSuccess(true);
       setProgress('');
-      setTimeout(() => onClose(), 1500);
+      // Phase 8: transition into wire-workspace step instead of
+      // auto-closing. The joiner can either install workspace files
+      // for Cursor or click Skip if they're only subscribing.
+      setWiredProjectName(joined?.name ?? cgId);
+      setWiredCgId(cgId);
     } catch (err: any) {
       const msg = err?.message || 'Failed to join project';
       if (msg.includes('already subscribed') || msg.includes('409')) {
@@ -143,7 +208,11 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
 
   const handleSendRequest = async () => {
     const { cgId, multiaddr } = parseInviteCode(inviteCode);
-    if (!cgId) return;
+    const inviteError = validateInvite(cgId, multiaddr);
+    if (inviteError) {
+      setError(inviteError);
+      return;
+    }
 
     setSendingRequest(true);
     setError(null);
@@ -151,14 +220,10 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
     try {
       if (multiaddr) {
         try {
-          await fetch('/api/connect', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', ...authHeaders() },
-            body: JSON.stringify({ multiaddr }),
-          });
+          await connectToPeerWithTimeout(multiaddr);
           await new Promise(r => setTimeout(r, 500));
         } catch {
-          // Non-fatal
+          // Non-fatal — signed join requests can still be delivered via existing peers.
         }
       }
 
@@ -180,6 +245,35 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
       setSendingRequest(false);
     }
   };
+
+  function handleWireDone() {
+    setWiredCgId(null);
+    setWiredProjectName('');
+    onClose();
+  }
+
+  if (wiredCgId) {
+    return (
+      <div className="v10-modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) handleWireDone(); }}>
+        <div className="v10-modal-box">
+          <div className="v10-modal-header">
+            <div className="v10-modal-title">Wire workspace for {wiredProjectName}</div>
+            <div className="v10-modal-subtitle">
+              Subscribed and synced. Now wire a local workspace so this Cursor can collaborate on the project.
+            </div>
+          </div>
+          <div className="v10-modal-body">
+            <WireWorkspacePanel
+              contextGraphId={wiredCgId}
+              projectName={wiredProjectName}
+              variant="join"
+              onDone={handleWireDone}
+            />
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="v10-modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
