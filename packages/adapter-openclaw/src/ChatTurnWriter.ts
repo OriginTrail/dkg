@@ -30,9 +30,18 @@ export class ChatTurnWriter {
   private logger: Logger;
   private stateDir: string;
   private cachedWatermarks: Map<string, number> = new Map();
-  private pendingUserMessages: Map<string, string> = new Map();
+  // FIFO queue per conversation key. Two inbound messages arriving before the
+  // first reply are both retained; `onMessageSent` consumes the oldest so the
+  // first outbound reply pairs with the first inbound, not the most recent.
+  private pendingUserMessages: Map<string, string[]> = new Map();
   private debounceTimers: Map<string, { timer: NodeJS.Timeout; pendingIndex: number }> = new Map();
   private watermarkFilePath: string;
+  // Cross-path dedup (W4a agent_end vs. W4b message:sent). The gateway fires
+  // both for ordinary LLM turns and the deterministic turnId is identical
+  // across paths, so the second persist would be a duplicate write. Daemon
+  // does not dedup (ADR-002), so we gate here before calling storeChatTurn.
+  private recentTurnIds: Map<string, number> = new Map();
+  private static readonly TURNID_TTL_MS = 60_000;
 
   constructor(options: { client: any; logger: Logger; stateDir: string }) {
     this.client = options.client;
@@ -72,13 +81,27 @@ export class ChatTurnWriter {
       if (ctx?.channelId === "dkg-ui") return;
       const sessionId = this.deriveSessionId(ctx);
       if (!sessionId) return;
-      const { user, assistant } = this.computeDelta(event.messages, this.loadWatermark(sessionId));
-      if (user || assistant) {
-        const turnId = this.deterministicTurnId(sessionId, user, assistant);
-        this.persistOne(sessionId, user, assistant, turnId).catch((err) => {
-          this.logger.error?.("[ChatTurnWriter.onAgentEnd] Persist failed", { err });
-        });
-      }
+      const pairs = this.computeDelta(event.messages, this.loadWatermark(sessionId));
+      if (pairs.length === 0) return;
+      // Persist sequentially so a transient failure on pair N leaves the
+      // watermark at N-1 and the next agent_end call retries from the same
+      // point. Without sequencing, a failed middle pair could be skipped
+      // when the tail succeeds.
+      (async () => {
+        for (const { user, assistant } of pairs) {
+          if (!user && !assistant) continue;
+          const turnId = this.deterministicTurnId(sessionId, user, assistant);
+          if (this.markTurnIdSeen(turnId)) continue; // cross-path dedup
+          try {
+            await this.persistOne(sessionId, user, assistant, turnId);
+          } catch (err) {
+            this.logger.error?.("[ChatTurnWriter.onAgentEnd] Persist failed", { err });
+            return; // leave watermark at last successful pair
+          }
+        }
+      })().catch(() => {
+        /* outer try-catch already covered; here only to satisfy floating-promise */
+      });
     } catch (err) {
       this.logger.error?.("[ChatTurnWriter.onAgentEnd] Error", { err });
     }
@@ -103,7 +126,9 @@ export class ChatTurnWriter {
       if (channelId === "dkg-ui") return;
       const conversationKey = this.conversationKeyFromInternalEvent(ev);
       if (!conversationKey) return;
-      this.pendingUserMessages.set(conversationKey, ev.text);
+      const queue = this.pendingUserMessages.get(conversationKey) ?? [];
+      queue.push(ev.text);
+      this.pendingUserMessages.set(conversationKey, queue);
     } catch (err) {
       this.logger.error?.("[ChatTurnWriter.onMessageReceived] Error", { err });
     }
@@ -119,27 +144,42 @@ export class ChatTurnWriter {
       const conversationKey = this.conversationKeyFromInternalEvent(ev);
       if (!conversationKey) return;
       // Drop failed outbound sends: chat history should not show replies the
-      // user never received. Still clear the pending user message so the next
-      // successful turn does not pair the assistant reply with a stale
-      // inbound from a different exchange.
+      // user never received. Still consume the oldest pending inbound so the
+      // next successful turn does not pair its reply with a stale inbound
+      // from the aborted exchange.
       const success = (ev as any)?.context?.success ?? (ev as any)?.success;
-      if (success === false) {
-        this.pendingUserMessages.delete(conversationKey);
-        return;
-      }
-      const userText = this.pendingUserMessages.get(conversationKey) || "";
+      const queue = this.pendingUserMessages.get(conversationKey);
+      const userText = queue && queue.length > 0 ? queue.shift()! : "";
+      if (queue && queue.length === 0) this.pendingUserMessages.delete(conversationKey);
+      if (success === false) return;
       const assistantText = ev.text;
       const sessionId = this.deriveSessionIdFromEvent(ev);
       if (userText || assistantText) {
         const turnId = this.deterministicTurnId(sessionId, userText, assistantText);
+        if (this.markTurnIdSeen(turnId)) return; // already written via agent_end path
         this.persistOne(sessionId, userText, assistantText, turnId).catch((err) => {
           this.logger.error?.("[ChatTurnWriter.onMessageSent] Persist failed", { err });
         });
       }
-      this.pendingUserMessages.delete(conversationKey);
     } catch (err) {
       this.logger.error?.("[ChatTurnWriter.onMessageSent] Error", { err });
     }
+  }
+
+  /**
+   * Cross-path dedup check. Returns `true` if `turnId` was already seen
+   * within TTL (caller should skip the persist); `false` and records the
+   * id otherwise. Evicts expired ids opportunistically on each call.
+   */
+  private markTurnIdSeen(turnId: string): boolean {
+    const now = Date.now();
+    const ttl = ChatTurnWriter.TURNID_TTL_MS;
+    for (const [id, ts] of this.recentTurnIds) {
+      if (now - ts > ttl) this.recentTurnIds.delete(id);
+    }
+    if (this.recentTurnIds.has(turnId)) return true;
+    this.recentTurnIds.set(turnId, now);
+    return false;
   }
 
   flushSync(): void {
@@ -155,18 +195,37 @@ export class ChatTurnWriter {
     }
   }
 
-  private computeDelta(messages: ChatTurnMessage[], savedUpTo: number): { user: string; assistant: string } {
-    let user = "";
-    let assistant = "";
-    for (let i = savedUpTo + 1; i < messages.length; i++) {
-      const msg = messages[i];
+  /**
+   * Return every unsaved (user, assistant) pair in order. `savedUpTo` is a
+   * pair-count watermark: -1 means nothing saved, 0 means the first pair
+   * has been saved, and so on. Iterates the full message array and emits
+   * pairs whose 0-indexed position exceeds the watermark — a transient
+   * failure during a previous call leaves earlier pairs unsaved, and the
+   * next `onAgentEnd` will backfill them rather than dropping everything
+   * except the most recent pair.
+   */
+  private computeDelta(
+    messages: ChatTurnMessage[],
+    savedUpTo: number,
+  ): Array<{ user: string; assistant: string }> {
+    const pairs: Array<{ user: string; assistant: string }> = [];
+    let currentUser = "";
+    let pairIndex = 0;
+    for (const msg of messages) {
       if (msg.role === "user") {
-        user = this.extractText(msg.content);
+        currentUser = this.extractText(msg.content);
       } else if (msg.role === "assistant") {
-        assistant = this.extractText(msg.content);
+        if (pairIndex > savedUpTo) {
+          pairs.push({
+            user: this.stripRecalledMemory(currentUser),
+            assistant: this.stripRecalledMemory(this.extractText(msg.content)),
+          });
+        }
+        pairIndex++;
+        currentUser = "";
       }
     }
-    return { user: this.stripRecalledMemory(user), assistant: this.stripRecalledMemory(assistant) };
+    return pairs;
   }
 
   /**

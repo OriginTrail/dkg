@@ -244,4 +244,100 @@ describe("ChatTurnWriter", () => {
     });
     expect(mockLogger.warn).toHaveBeenCalled();
   });
+
+  it("persists every unsaved pair when computeDelta sees multiple (R2.4 backfill)", async () => {
+    const event: AgentEndContext = {
+      sessionId: "test",
+      messages: [
+        { role: "user", content: "u1" },
+        { role: "assistant", content: "a1" },
+        { role: "user", content: "u2" },
+        { role: "assistant", content: "a2" },
+      ],
+    };
+    writer.onAgentEnd(event, { channelId: "ch", sessionKey: "sk" });
+    await flushMicrotasks();
+    // Both pairs must be written — not just the last one.
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(2);
+    const firstCall = mockClient.storeChatTurn.mock.calls[0];
+    const secondCall = mockClient.storeChatTurn.mock.calls[1];
+    expect(firstCall[1]).toBe("u1");
+    expect(firstCall[2]).toBe("a1");
+    expect(secondCall[1]).toBe("u2");
+    expect(secondCall[2]).toBe("a2");
+  });
+
+  it("FIFO pending queue pairs replies with the oldest unmatched inbound (R2.3)", async () => {
+    // Two inbound messages arrive back-to-back before any outbound reply.
+    writer.onMessageReceived({ sessionKey: "sk", direction: "inbound", text: "first" });
+    writer.onMessageReceived({ sessionKey: "sk", direction: "inbound", text: "second" });
+    // Two outbound replies go out in order.
+    writer.onMessageSent({ sessionKey: "sk", direction: "outbound", text: "reply-1" });
+    await flushMicrotasks();
+    writer.onMessageSent({ sessionKey: "sk", direction: "outbound", text: "reply-2" });
+    await flushMicrotasks();
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(2);
+    expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("first");
+    expect(mockClient.storeChatTurn.mock.calls[0][2]).toBe("reply-1");
+    expect(mockClient.storeChatTurn.mock.calls[1][1]).toBe("second");
+    expect(mockClient.storeChatTurn.mock.calls[1][2]).toBe("reply-2");
+  });
+
+  it("cross-path dedup: agent_end followed by message:sent with same content writes once (R2.2)", async () => {
+    // First W4a path persists a turn.
+    const event: AgentEndContext = {
+      sessionId: "test",
+      messages: [
+        { role: "user", content: "hi" },
+        { role: "assistant", content: "hello" },
+      ],
+    };
+    writer.onAgentEnd(event, { channelId: "tg", sessionKey: "sk" });
+    await flushMicrotasks();
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+
+    // Now the internal hook fires for the same exchange. Same sessionId
+    // derivation + same user/assistant text → same turnId → must not
+    // double-write.
+    writer.onMessageReceived({
+      sessionKey: "sk",
+      direction: "inbound",
+      text: "hi",
+      // channelId matching so deriveSessionIdFromEvent produces openclaw:tg:sk
+      // (same as deriveSessionId(ctx) above).
+      ...({ context: { channelId: "tg" } } as any),
+    } as any);
+    writer.onMessageSent({
+      sessionKey: "sk",
+      direction: "outbound",
+      text: "hello",
+      ...({ context: { channelId: "tg", success: true } } as any),
+    } as any);
+    await flushMicrotasks();
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+  });
+
+  it("drops failed outbound sends without persisting, still consumes pending (R1 failed sends)", async () => {
+    writer.onMessageReceived({ sessionKey: "sk", direction: "inbound", text: "hello" });
+    writer.onMessageSent({
+      sessionKey: "sk",
+      direction: "outbound",
+      text: "never-delivered",
+      ...({ context: { success: false } } as any),
+    } as any);
+    await flushMicrotasks();
+    expect(mockClient.storeChatTurn).not.toHaveBeenCalled();
+    // The pending inbound must have been consumed — a later successful turn
+    // should not re-pair with the stale "hello".
+    writer.onMessageReceived({ sessionKey: "sk", direction: "inbound", text: "retry" });
+    writer.onMessageSent({
+      sessionKey: "sk",
+      direction: "outbound",
+      text: "second-try",
+      ...({ context: { success: true } } as any),
+    } as any);
+    await flushMicrotasks();
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("retry");
+  });
 });

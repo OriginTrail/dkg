@@ -37,6 +37,7 @@ import type {
   OpenClawTool,
   OpenClawToolResult,
 } from './types.js';
+import { homedir } from 'node:os';
 
 const OPENCLAW_LOCAL_AGENT_CAPABILITIES = {
   localChat: true,
@@ -315,7 +316,7 @@ export class DkgNodePlugin {
     this.initialized = true;
     const stateDir = (api as any)?.runtime?.state?.resolveStateDir?.()
       ?? process.env.OPENCLAW_STATE_DIR
-      ?? require('os').homedir() + '/.openclaw';
+      ?? `${homedir()}/.openclaw`;
     this.chatTurnWriter = new ChatTurnWriter({ client: this.client, logger: api.logger, stateDir });
     this.installHooksIfNeeded(api);
 
