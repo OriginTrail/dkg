@@ -4,7 +4,7 @@
 // export every public symbol here. See `./daemon/index.ts` for the
 // per-module barrel used inside the refactor.
 
-export { daemonState, type CorsAllowlist } from './daemon/state.js';
+export { daemonState, resolveAutoUpdateEnabled, type CorsAllowlist } from './daemon/state.js';
 export * from './daemon/types.js';
 export * from './daemon/manifest.js';
 export * from './daemon/http-utils.js';

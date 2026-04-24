@@ -1,12 +1,16 @@
-// daemon/handle-request.ts
+// daemon/routes/epcis.ts
 //
-// The `handleRequest` HTTP router (~5,160 lines) extracted verbatim
-// from the legacy monolithic `daemon.ts`. Single switch over URL
-// pathnames; called per-request by the http server set up in
-// `./lifecycle.ts`.
+// Route handlers for EPCIS events + capture.
 //
-// Splitting this internally by route group is the next AI-DX win
-// and is queued as a follow-up PR.
+// Extracted verbatim from the legacy monolithic `handleRequest` —
+// every block is a contiguous slice of the original source with zero
+// edits to route bodies. Dispatch is driven by the surviving
+// `handle-request.ts` shell, which awaits each group handler in
+// sequence and uses `res.writableEnded` to short-circuit once a
+// route claims the request.
+//
+// See `packages/cli/scripts/split-handle-request.mjs` for the
+// extraction driver.
 
 import {
   createServer,
@@ -98,26 +102,26 @@ import {
   isStandaloneInstall,
   slotEntryPoint,
   CLI_NPM_PACKAGE,
-} from '../config.js';
-import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../publisher-runner.js';
-import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../catchup-runner.js';
-import { loadTokens, httpAuthGuard, extractBearerToken } from '../auth.js';
+} from '../../config.js';
+import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../../publisher-runner.js';
+import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
+import { loadTokens, httpAuthGuard, extractBearerToken } from '../../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
-import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../extraction/index.js';
+import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../../extraction/index.js';
 import {
   expectedBundledMarkItDownBuildMetadata,
   readCliPackageVersion,
   type BundledMarkItDownMetadata,
-} from "../extraction/markitdown-bundle-metadata.js";
+} from "../../extraction/markitdown-bundle-metadata.js";
 import {
   checksumPathFor as markItDownChecksumPath,
   hasVerifiedBundledBinary as hasVerifiedBundledMarkItDownBinary,
   metadataPathFor as markItDownMetadataPath,
-} from '../../scripts/markitdown-bundle-validation.mjs';
-import { type ExtractionStatusRecord, getExtractionStatusRecord, setExtractionStatusRecord } from '../extraction-status.js';
-import { FileStore } from '../file-store.js';
-import { VectorStore, OpenAIEmbeddingProvider, type EmbeddingProvider } from '../vector-store.js';
-import { parseBoundary, parseMultipart, MultipartParseError } from '../http/multipart.js';
+} from '../../../scripts/markitdown-bundle-validation.mjs';
+import { type ExtractionStatusRecord, getExtractionStatusRecord, setExtractionStatusRecord } from '../../extraction-status.js';
+import { FileStore } from '../../file-store.js';
+import { VectorStore, OpenAIEmbeddingProvider, type EmbeddingProvider } from '../../vector-store.js';
+import { parseBoundary, parseMultipart, MultipartParseError } from '../../http/multipart.js';
 import { handleCapture, EpcisValidationError, handleEventsQuery, EpcisQueryError, type Publisher as EpcisPublisher } from '@origintrail-official/dkg-epcis';
 // Phase 8 — project-manifest publish + install (UI-driven onboarding flow).
 // Daemon constructs a self-pointing DkgClient (localhost:listenPort) and
@@ -141,7 +145,7 @@ import {
   handleAppRequest,
   startAppStaticServer,
   type LoadedApp,
-} from "../app-loader.js";
+} from "../../app-loader.js";
 
 // Daemon sub-module imports — every public symbol from sibling
 // modules is pulled in here because the legacy monolithic file used
@@ -149,14 +153,16 @@ import {
 // the project's tsconfig (`noUnusedLocals` is off).
 import {
   daemonState,
+  DEBUG_SYNC_TRACE,
+  resolveAutoUpdateEnabled,
   type CorsAllowlist,
-} from './state.js';
+} from '../state.js';
 import {
   type CatchupJobState,
   type CatchupJob,
   type CatchupTracker,
   toCatchupStatusResponse,
-} from './types.js';
+} from '../types.js';
 import {
   type MarkItDownTarget,
   manifestRepoRoot,
@@ -186,7 +192,7 @@ import {
   currentBundledMarkItDownAssetName,
   bindingValue,
   carryForwardBundledMarkItDownBinary,
-} from './manifest.js';
+} from '../manifest.js';
 import {
   resolveNameToPeerId,
   isPublishQuad,
@@ -217,7 +223,7 @@ import {
   shortId,
   sleep,
   deriveBlockExplorerUrl,
-} from './http-utils.js';
+} from '../http-utils.js';
 import {
   normalizeRepo,
   parseTagName,
@@ -246,7 +252,7 @@ import {
   performUpdateWithStatus,
   performNpmUpdate,
   checkForUpdate,
-} from './auto-update.js';
+} from '../auto-update.js';
 import {
   OPENCLAW_UI_CONNECT_TIMEOUT_MS,
   OPENCLAW_UI_CONNECT_POLL_MS,
@@ -295,7 +301,7 @@ import {
   isOpenClawAttachmentAssertionUriForContextGraph,
   extractionRecordMatchesOpenClawAttachmentRef,
   verifyOpenClawAttachmentRefsProvenance,
-} from './openclaw.js';
+} from '../openclaw.js';
 import {
   type LocalAgentIntegrationDefinition,
   type LocalAgentIntegrationRecord,
@@ -325,59 +331,13 @@ import {
   type ReverseLocalAgentSetupDeps,
   reverseLocalAgentSetupForUi,
   refreshLocalAgentIntegrationFromUi,
-} from './local-agents.js';
-import type { RequestContext } from './routes/context.js';
-import { handleStatusRoutes } from './routes/status.js';
-import { handleAgentChatRoutes } from './routes/agent-chat.js';
-import { handleOpenclawRoutes } from './routes/openclaw.js';
-import { handleMemoryRoutes } from './routes/memory.js';
-import { handlePublisherRoutes } from './routes/publisher.js';
-import { handleContextGraphRoutes } from './routes/context-graph.js';
-import { handleAssertionRoutes } from './routes/assertion.js';
-import { handleQueryRoutes } from './routes/query.js';
-import { handleLocalAgentsRoutes } from './routes/local-agents.js';
-import { handleEpcisRoutes } from './routes/epcis.js';
+} from '../local-agents.js';
+
+import type { RequestContext } from './context.js';
 
 
-export async function handleRequest(
-  req: IncomingMessage,
-  res: ServerResponse,
-  agent: DKGAgent,
-  publisherControl: ReturnType<typeof createPublisherControlFromStore>,
-  config: DkgConfig,
-  startedAt: number,
-  dashDb: DashboardDB,
-  opWallets: import("@origintrail-official/dkg-agent").OpWalletsConfig,
-  network: Awaited<ReturnType<typeof loadNetworkConfig>>,
-  tracker: OperationTracker,
-  memoryManager: ChatMemoryManager,
-  bridgeAuthToken: string | undefined,
-  nodeVersion: string,
-  nodeCommit: string,
-  catchupTracker: CatchupTracker,
-  extractionRegistry: ExtractionPipelineRegistry,
-  fileStore: FileStore,
-  extractionStatus: Map<string, ExtractionStatusRecord>,
-  assertionImportLocks: Map<string, Promise<void>>,
-  vectorStore: VectorStore,
-  embeddingProvider: EmbeddingProvider | null,
-  validTokens: Set<string>,
-  // API socket identity — passed in from the outer daemon closure so
-  // `manifestSelfClient()` can build a self-pointing URL from trusted
-  // server state instead of request headers (SSRF defence).
-  apiHost: string,
-  apiPortRef: { value: number },
-): Promise<void> {
-  const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
-  const path = url.pathname;
-
-  // Resolve the requesting agent's address from the Bearer token.
-  // Agent tokens (dkg_at_...) resolve to their specific agent; node-level tokens
-  // fall back to the default owner agent.
-  const requestToken = extractBearerToken(req.headers.authorization);
-  const requestAgentAddress = agent.resolveAgentAddress(requestToken);
-
-  const ctx: RequestContext = {
+export async function handleEpcisRoutes(ctx: RequestContext): Promise<void> {
+  const {
     req,
     res,
     agent,
@@ -406,37 +366,97 @@ export async function handleRequest(
     path,
     requestToken,
     requestAgentAddress,
-  };
+  } = ctx;
 
-  await handleStatusRoutes(ctx);
-  if (res.writableEnded) return;
 
-  await handleAgentChatRoutes(ctx);
-  if (res.writableEnded) return;
+  // GET /api/epcis/events?epc=...&bizStep=...&from=...&to=...&limit=100&offset=0
+  if (req.method === "GET" && path === "/api/epcis/events") {
+    const epcisContextGraphId =
+      config.epcis?.contextGraphId ?? config.epcis?.paranetId;
+    if (!epcisContextGraphId) {
+      return jsonResponse(res, 503, {
+        error:
+          "EPCIS plugin is not configured (missing epcis.contextGraphId in config)",
+      });
+    }
+    const searchParams = new URL(req.url!, `http://${req.headers.host}`)
+      .searchParams;
+    const epcisQueryEngine = {
+      query: (sparql: string, opts?: { contextGraphId?: string }) =>
+        agent.query(sparql, opts),
+    };
+    try {
+      const result = await handleEventsQuery(searchParams, {
+        contextGraphId: epcisContextGraphId,
+        queryEngine: epcisQueryEngine,
+        basePath: "/api/epcis/events",
+      });
+      if (result.headers?.link) {
+        res.setHeader("Link", result.headers.link);
+      }
+      return jsonResponse(res, 200, result.body);
+    } catch (err) {
+      if (err instanceof EpcisQueryError) {
+        return jsonResponse(res, err.statusCode, { error: err.message });
+      }
+      throw err;
+    }
+  }
 
-  await handleOpenclawRoutes(ctx);
-  if (res.writableEnded) return;
-
-  await handleMemoryRoutes(ctx);
-  if (res.writableEnded) return;
-
-  await handlePublisherRoutes(ctx);
-  if (res.writableEnded) return;
-
-  await handleContextGraphRoutes(ctx);
-  if (res.writableEnded) return;
-
-  await handleAssertionRoutes(ctx);
-  if (res.writableEnded) return;
-
-  await handleQueryRoutes(ctx);
-  if (res.writableEnded) return;
-
-  await handleLocalAgentsRoutes(ctx);
-  if (res.writableEnded) return;
-
-  await handleEpcisRoutes(ctx);
-  if (res.writableEnded) return;
-
-  jsonResponse(res, 404, { error: 'Not found' });
+  // POST /api/epcis/capture  { epcisDocument: {...}, publishOptions?: { accessPolicy? } }
+  if (req.method === "POST" && path === "/api/epcis/capture") {
+    const captureContextGraphId =
+      config.epcis?.contextGraphId ?? config.epcis?.paranetId;
+    if (!captureContextGraphId) {
+      return jsonResponse(res, 503, {
+        error:
+          "EPCIS plugin is not configured (missing epcis.contextGraphId in config)",
+      });
+    }
+    const body = await readBody(req);
+    let parsed;
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      return jsonResponse(res, 400, { error: "Invalid JSON in request body" });
+    }
+    const { epcisDocument, publishOptions } = parsed;
+    if (!epcisDocument) {
+      return jsonResponse(res, 400, {
+        error: 'Missing "epcisDocument" in request body',
+      });
+    }
+    const epcisPublisher: EpcisPublisher = {
+      async publish(contextGraphId, content, opts) {
+        const result = await agent.publish(
+          contextGraphId,
+          { public: content } as Record<string, unknown>,
+          opts,
+        );
+        return {
+          ual: result.ual,
+          kcId: String(result.kcId),
+          status: result.status,
+        };
+      },
+    };
+    try {
+      const result = await handleCapture(
+        { epcisDocument, publishOptions },
+        { contextGraphId: captureContextGraphId, publisher: epcisPublisher },
+      );
+      // TODO: EPCIS 2.0 §12.6.1 requires 202 Accepted + captureID for async job tracking.
+      // Current sync model returns 200 with the full result. Switch to 202 + captureID +
+      // GET /capture/{captureID} polling endpoint when async capture is implemented (Phase 2).
+      return jsonResponse(res, 200, result);
+    } catch (err) {
+      if (err instanceof EpcisValidationError) {
+        return jsonResponse(res, 400, {
+          error: err.message,
+          details: err.errors,
+        });
+      }
+      throw err;
+    }
+  }
 }
