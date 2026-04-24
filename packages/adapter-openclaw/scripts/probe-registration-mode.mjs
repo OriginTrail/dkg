@@ -9,7 +9,7 @@
  */
 
 import { readFileSync } from 'node:fs';
-import { execSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 
 const BANNER = `
 ╔══════════════════════════════════════════════════════════════════════════════╗
@@ -41,34 +41,37 @@ SETUP:
        [dkg-probe] register() called: mode=... call#=... api.on=... api.registerHook=...
        [dkg-probe] HOOK FIRED: event=... via=... mode=...
 
-  5. Fill in results:
-     Copy all [dkg-probe] lines and paste them into:
-       agent-docs/notes/probe-results.md
-
-     Review decision matrix in agent-docs/memory-integration-plan.md §0.3
-     and record your decision: Branch A or No-Go.
+  5. Triage the output:
+     - mode=full and api.on=function confirms typed-hook dispatch
+       (Branch A — the adapter's HookSurface typed installs will fire).
+     - mode=setup-runtime and api.on=undefined means the gateway is not
+       running in full mode; re-check tools.profile and channels config.
+     - HOOK FIRED lines show which registration mechanism actually
+       delivered the event. Compare against HookSurface stats in
+       \`DkgNodePlugin.installHooksIfNeeded\` for dispatch coverage.
 
 NOTES:
 
   - The probe is silent if DKG_PROBE_REGISTRATION_MODE is not set.
   - Probe handlers log every time a hook fires, so gateway logs may grow.
   - This diagnostic has zero effect on normal agent operation.
-
-For details, see: agent-docs/memory-integration-plan.md §0.3
 `;
 
 console.log(BANNER);
 
-// Optional: tail gateway log if a path was provided
+// Optional: tail gateway log if a path was provided. Use `spawn` with an
+// argv array (no shell) so the log path cannot be interpreted as a shell
+// command — passing an adversarial path like `"; rm -rf ~"` would
+// previously run under a shell and execute the tail payload.
 const logPath = process.argv[2];
 if (logPath) {
   console.log(`\nTailing gateway log: ${logPath}\n`);
-  try {
-    // Use tail -f to follow the log (Ctrl+C to stop)
-    execSync(`tail -f "${logPath}"`, { stdio: 'inherit' });
-  } catch (err) {
-    if (err.code !== 130) { // 130 = SIGINT
-      console.error(`Error tailing log: ${err.message}`);
-    }
-  }
+  const child = spawn('tail', ['-f', logPath], { stdio: 'inherit' });
+  child.on('error', (err) => {
+    console.error(`Error tailing log: ${err.message}`);
+  });
+  child.on('exit', (code, signal) => {
+    if (signal === 'SIGINT' || code === 130) return;
+    if (code !== 0) console.error(`tail exited with code ${code}`);
+  });
 }

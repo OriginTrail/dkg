@@ -317,6 +317,78 @@ describe("ChatTurnWriter", () => {
     expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
   });
 
+  it("releases turnId reservation on persist failure so retry can succeed (R3.1)", async () => {
+    // First call: fails outright (no retry path exhausted).
+    mockClient.storeChatTurn = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("net down"))
+      .mockRejectedValueOnce(new Error("net down still"))
+      .mockResolvedValue(undefined);
+    writer = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
+
+    const event: AgentEndContext = {
+      sessionId: "t",
+      messages: [
+        { role: "user", content: "u" },
+        { role: "assistant", content: "a" },
+      ],
+    };
+    writer.onAgentEnd(event, { channelId: "ch", sessionKey: "sk" });
+    await new Promise((r) => setTimeout(r, 1400)); // wait through persistOne's 250+1000ms backoff
+    expect(mockClient.storeChatTurn.mock.calls.length).toBeGreaterThanOrEqual(2);
+
+    // Round 2: same content, different instance state — dedup map must have
+    // released the turnId on the failure, so the retry actually persists.
+    mockClient.storeChatTurn.mockClear();
+    mockClient.storeChatTurn.mockResolvedValue(undefined);
+    writer.onAgentEnd(event, { channelId: "ch", sessionKey: "sk" });
+    await flushMicrotasks();
+    // Would be 0 if the failed turnId was still in the dedup map.
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+  });
+
+  it("onMessageSent strips <recalled-memory> from assistant text only (R3.2)", async () => {
+    const echoed =
+      "sure — <recalled-memory>[1] (agent-context-wm) secret</recalled-memory> here is your answer";
+    writer.onMessageReceived({
+      sessionKey: "sk",
+      direction: "inbound",
+      text: "q",
+      ...({ context: { channelId: "tg" } } as any),
+    } as any);
+    writer.onMessageSent({
+      sessionKey: "sk",
+      direction: "outbound",
+      text: echoed,
+      ...({ context: { success: true, channelId: "tg" } } as any),
+    } as any);
+    await flushMicrotasks();
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    const [, persistedUser, persistedAssistant] = mockClient.storeChatTurn.mock.calls[0];
+    expect(persistedUser).toBe("q"); // user side NOT stripped
+    expect(persistedAssistant).not.toContain("recalled-memory");
+    expect(persistedAssistant).not.toContain("secret");
+    expect(persistedAssistant).toContain("sure");
+    expect(persistedAssistant).toContain("here is your answer");
+  });
+
+  it("computeDelta preserves user text containing <recalled-memory> tag (R3.4)", async () => {
+    const userWithTag =
+      "I'm trying to debug this log excerpt: <recalled-memory>something</recalled-memory>";
+    const event: AgentEndContext = {
+      sessionId: "t",
+      messages: [
+        { role: "user", content: userWithTag },
+        { role: "assistant", content: "that looks malformed" },
+      ],
+    };
+    writer.onAgentEnd(event, { channelId: "ch", sessionKey: "sk" });
+    await flushMicrotasks();
+    const [, u] = mockClient.storeChatTurn.mock.calls[0];
+    // User side preserves the raw tag content verbatim.
+    expect(u).toBe(userWithTag);
+  });
+
   it("drops failed outbound sends without persisting, still consumes pending (R1 failed sends)", async () => {
     writer.onMessageReceived({ sessionKey: "sk", direction: "inbound", text: "hello" });
     writer.onMessageSent({

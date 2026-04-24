@@ -95,6 +95,10 @@ export class ChatTurnWriter {
           try {
             await this.persistOne(sessionId, user, assistant, turnId);
           } catch (err) {
+            // Release the reservation so a retry (next agent_end or the
+            // paired internal hook) can re-attempt rather than silently
+            // skipping this turn for 60s.
+            this.releaseTurnIdReservation(turnId);
             this.logger.error?.("[ChatTurnWriter.onAgentEnd] Persist failed", { err });
             return; // leave watermark at last successful pair
           }
@@ -152,12 +156,19 @@ export class ChatTurnWriter {
       const userText = queue && queue.length > 0 ? queue.shift()! : "";
       if (queue && queue.length === 0) this.pendingUserMessages.delete(conversationKey);
       if (success === false) return;
-      const assistantText = ev.text;
+      // Strip injected `<recalled-memory>` from assistant text — the model may
+      // echo the auto-recall block, and if we persist the raw version here
+      // while the W4a path persists the stripped version, the two turnIds
+      // diverge and cross-path dedup misses. User text is NOT stripped:
+      // legitimate pastes (XML, logs) containing the tag would otherwise be
+      // silently corrupted.
+      const assistantText = this.stripRecalledMemory(ev.text);
       const sessionId = this.deriveSessionIdFromEvent(ev);
       if (userText || assistantText) {
         const turnId = this.deterministicTurnId(sessionId, userText, assistantText);
         if (this.markTurnIdSeen(turnId)) return; // already written via agent_end path
         this.persistOne(sessionId, userText, assistantText, turnId).catch((err) => {
+          this.releaseTurnIdReservation(turnId);
           this.logger.error?.("[ChatTurnWriter.onMessageSent] Persist failed", { err });
         });
       }
@@ -168,8 +179,10 @@ export class ChatTurnWriter {
 
   /**
    * Cross-path dedup check. Returns `true` if `turnId` was already seen
-   * within TTL (caller should skip the persist); `false` and records the
-   * id otherwise. Evicts expired ids opportunistically on each call.
+   * within TTL (caller should skip the persist); `false` and reserves the
+   * id otherwise. The reservation must be released via
+   * `releaseTurnIdReservation(turnId)` on persist failure so retries are
+   * not blocked by a stale mark. Evicts expired ids opportunistically.
    */
   private markTurnIdSeen(turnId: string): boolean {
     const now = Date.now();
@@ -180,6 +193,11 @@ export class ChatTurnWriter {
     if (this.recentTurnIds.has(turnId)) return true;
     this.recentTurnIds.set(turnId, now);
     return false;
+  }
+
+  /** Release a turnId reservation on persist failure so retries can proceed. */
+  private releaseTurnIdReservation(turnId: string): void {
+    this.recentTurnIds.delete(turnId);
   }
 
   flushSync(): void {
@@ -216,8 +234,12 @@ export class ChatTurnWriter {
         currentUser = this.extractText(msg.content);
       } else if (msg.role === "assistant") {
         if (pairIndex > savedUpTo) {
+          // Only strip `<recalled-memory>` from the assistant side. User text
+          // is untouched — a user pasting XML/log content that happens to
+          // contain the tag would otherwise be silently corrupted, while
+          // only the assistant-side text can echo the system-injected block.
           pairs.push({
-            user: this.stripRecalledMemory(currentUser),
+            user: currentUser,
             assistant: this.stripRecalledMemory(this.extractText(msg.content)),
           });
         }
