@@ -16,7 +16,6 @@ import type {
   OnChainPublishResult,
   ConvictionAccountInfo,
   PermanentPublishParams,
-  FairSwapPurchaseInfo,
   KAUpdateVerification,
   CreateOnChainContextGraphParams,
   CreateOnChainContextGraphResult,
@@ -426,7 +425,7 @@ export class MockChainAdapter implements ChainAdapter {
     }
   }
 
-  // --- Context Graphs (V9 Registry) ---
+  // --- Context Graphs (name-hash commitment via ContextGraphNameRegistry) ---
 
   async createContextGraph(params: CreateContextGraphParams): Promise<TxResult> {
     const name = params.name ?? 'mock-context-graph';
@@ -439,7 +438,7 @@ export class MockChainAdapter implements ChainAdapter {
       throw new Error(`Context graph "${id}" already exists on chain`);
     }
     this.contextGraphRegistry.set(id, meta);
-    this.pushEvent('ParanetCreated', { paranetId: id, creator: 'mock-creator', accessPolicy: params.accessPolicy ?? 0 });
+    this.pushEvent('NameClaimed', { contextGraphId: id, creator: 'mock-creator', accessPolicy: params.accessPolicy ?? 0 });
     const result = this.txResult(true);
     return { ...result, contextGraphId: id };
   }
@@ -453,7 +452,7 @@ export class MockChainAdapter implements ChainAdapter {
     const meta = this.contextGraphRegistry.get(contextGraphId);
     if (!meta) throw new Error(`Context graph "${contextGraphId}" not found`);
     this.contextGraphRegistry.set(contextGraphId, { ...meta, name, description, revealed: 'true' });
-    this.pushEvent('ParanetMetadataRevealed', { paranetId: contextGraphId, name, description });
+    this.pushEvent('NameMetadataRevealed', { contextGraphId, name, description });
     return this.txResult(true);
   }
 
@@ -523,90 +522,6 @@ export class MockChainAdapter implements ChainAdapter {
       lockEpochs: acct.lockEpochs,
       conviction: acct.conviction,
       discountBps,
-    };
-  }
-
-  // --- FairSwap Judge ---
-
-  private fairSwapPurchases = new Map<bigint, {
-    buyer: string;
-    seller: string;
-    kcId: bigint;
-    kaId: bigint;
-    price: bigint;
-    state: number;
-    encryptedDataRoot: Uint8Array;
-    keyCommitment: Uint8Array;
-    revealedKey: Uint8Array;
-  }>();
-  private nextFairSwapPurchaseId = 1n;
-
-  async initiatePurchase(seller: string, kcId: bigint, kaId: bigint, price: bigint): Promise<{ purchaseId: bigint } & TxResult> {
-    const purchaseId = this.nextFairSwapPurchaseId++;
-    this.fairSwapPurchases.set(purchaseId, {
-      buyer: this.signerAddress,
-      seller,
-      kcId,
-      kaId,
-      price,
-      state: 1, // Initiated
-      encryptedDataRoot: new Uint8Array(32),
-      keyCommitment: new Uint8Array(32),
-      revealedKey: new Uint8Array(32),
-    });
-    this.pushEvent('PurchaseInitiated', { purchaseId: purchaseId.toString(), buyer: this.signerAddress, seller });
-    return { ...this.txResult(true), purchaseId };
-  }
-
-  async fulfillPurchase(purchaseId: bigint, encryptedDataRoot: Uint8Array, keyCommitment: Uint8Array): Promise<TxResult> {
-    const p = this.fairSwapPurchases.get(purchaseId);
-    if (!p || p.state !== 1) return this.txResult(false);
-    p.encryptedDataRoot = encryptedDataRoot;
-    p.keyCommitment = keyCommitment;
-    p.state = 2; // Fulfilled
-    return this.txResult(true);
-  }
-
-  async revealKey(purchaseId: bigint, key: Uint8Array): Promise<TxResult> {
-    const p = this.fairSwapPurchases.get(purchaseId);
-    if (!p || p.state !== 2) return this.txResult(false);
-    p.revealedKey = key;
-    p.state = 3; // KeyRevealed
-    return this.txResult(true);
-  }
-
-  async disputeDelivery(purchaseId: bigint, _proof: Uint8Array): Promise<TxResult> {
-    const p = this.fairSwapPurchases.get(purchaseId);
-    if (!p || p.state !== 3) return this.txResult(false);
-    p.state = 5; // Disputed
-    return this.txResult(true);
-  }
-
-  async claimPayment(purchaseId: bigint): Promise<TxResult> {
-    const p = this.fairSwapPurchases.get(purchaseId);
-    if (!p || p.state !== 3) return this.txResult(false);
-    p.state = 4; // Completed
-    return this.txResult(true);
-  }
-
-  async claimRefund(purchaseId: bigint): Promise<TxResult> {
-    const p = this.fairSwapPurchases.get(purchaseId);
-    if (!p || (p.state !== 1 && p.state !== 2)) return this.txResult(false);
-    p.state = 7; // Expired
-    return this.txResult(true);
-  }
-
-  async getFairSwapPurchase(purchaseId: bigint): Promise<FairSwapPurchaseInfo | null> {
-    const p = this.fairSwapPurchases.get(purchaseId);
-    if (!p) return null;
-    return {
-      purchaseId,
-      buyer: p.buyer,
-      seller: p.seller,
-      kcId: p.kcId,
-      kaId: p.kaId,
-      price: p.price,
-      state: p.state,
     };
   }
 

@@ -14,9 +14,6 @@ import {ContextGraphs} from "./ContextGraphs.sol";
 import {ContextGraphStorage} from "./storage/ContextGraphStorage.sol";
 import {ContextGraphValueStorage} from "./storage/ContextGraphValueStorage.sol";
 import {KnowledgeAssetsLib} from "./libraries/KnowledgeAssetsLib.sol";
-import {ParanetKnowledgeCollectionsRegistry} from "./storage/paranets/ParanetKnowledgeCollectionsRegistry.sol";
-import {ParanetKnowledgeMinersRegistry} from "./storage/paranets/ParanetKnowledgeMinersRegistry.sol";
-import {ParanetsRegistry} from "./storage/paranets/ParanetsRegistry.sol";
 import {KnowledgeCollectionLib} from "./libraries/KnowledgeCollectionLib.sol";
 import {TokenLib} from "./libraries/TokenLib.sol";
 import {IdentityLib} from "./libraries/IdentityLib.sol";
@@ -92,7 +89,7 @@ import {ECDSA} from "solady/src/utils/ECDSA.sol";
  */
 contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializable {
     string private constant _NAME = "KnowledgeAssetsV10";
-    string private constant _VERSION = "10.0.0";
+    string private constant _VERSION = "10.1.0";
 
     // --- V10 publish input (grouped to bypass the 16-arg stack limit) ---
 
@@ -143,9 +140,6 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
     AskStorage public askStorage;
     EpochStorage public epochStorage;
     PaymasterManager public paymasterManager;
-    ParanetKnowledgeCollectionsRegistry public paranetKnowledgeCollectionsRegistry;
-    ParanetKnowledgeMinersRegistry public paranetKnowledgeMinersRegistry;
-    ParanetsRegistry public paranetsRegistry;
     KnowledgeCollectionStorage public knowledgeCollectionStorage;
     Chronos public chronos;
     IERC20 public tokenContract;
@@ -191,13 +185,6 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
         askStorage = AskStorage(hub.getContractAddress("AskStorage"));
         epochStorage = EpochStorage(hub.getContractAddress("EpochStorageV8"));
         paymasterManager = PaymasterManager(hub.getContractAddress("PaymasterManager"));
-        paranetKnowledgeCollectionsRegistry = ParanetKnowledgeCollectionsRegistry(
-            hub.getContractAddress("ParanetKnowledgeCollectionsRegistry")
-        );
-        paranetKnowledgeMinersRegistry = ParanetKnowledgeMinersRegistry(
-            hub.getContractAddress("ParanetKnowledgeMinersRegistry")
-        );
-        paranetsRegistry = ParanetsRegistry(hub.getContractAddress("ParanetsRegistry"));
         knowledgeCollectionStorage = KnowledgeCollectionStorage(
             hub.getAssetStorageAddress("KnowledgeCollectionStorage")
         );
@@ -494,20 +481,6 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
                     uint256(tokenAmount)
                 );
             }
-        }
-
-        ParanetKnowledgeCollectionsRegistry pkar = paranetKnowledgeCollectionsRegistry;
-
-        bytes32 knowledgeCollectionId = pkar.getParanetId(keccak256(abi.encodePacked(address(kcs), id)));
-        if (pkar.isParanetKnowledgeCollection(knowledgeCollectionId)) {
-            ParanetKnowledgeMinersRegistry pkmr = paranetKnowledgeMinersRegistry;
-            bytes32 paranetId = paranetKnowledgeCollectionsRegistry.getParanetId(knowledgeCollectionId);
-
-            paranetsRegistry.addCumulativeKnowledgeValue(paranetId, tokenAmount);
-
-            pkmr.addCumulativeTracSpent(msg.sender, paranetId, tokenAmount);
-            pkmr.addUnrewardedTracSpent(msg.sender, paranetId, tokenAmount);
-            pkmr.addTotalTracSpent(msg.sender, tokenAmount);
         }
     }
 

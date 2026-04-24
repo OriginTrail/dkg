@@ -17,6 +17,10 @@ func.dependencies = [
   'ProfileStorage',
   'WhitelistStorage',
   'Ask',
+  // D13 — Profile.initialize() reads `isOperatorFeeClaimedForEpoch` via CSS
+  // after the DelegatorsInfo redirect. DelegatorsInfo kept in deps for fresh
+  // chain bring-ups that still run the V6/V8 migrators (see 021 header).
+  'ConvictionStakingStorage',
   'DelegatorsInfo',
   'Chronos',
 ];

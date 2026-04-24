@@ -488,7 +488,36 @@ async function setupTestEnvironment(): Promise<{
   };
 }
 
-describe(`Full complex scenario`, function () {
+// ---------------------------------------------------------------------------
+// TOMBSTONE — V8 Delegator Scoring + Full-complex-scenario (skipped)
+// ---------------------------------------------------------------------------
+//
+// These suites drive V8 `Staking.stake()` → `claimDelegatorRewards()` →
+// `restakeRewards()` end-to-end and assert on the V8 delegator-scoring
+// rolling-rewards machinery (`DelegatorsInfo`, `StakingStorage.setNodeStake`,
+// `DelegatorLastStakeUpdateEpoch`, etc.).
+//
+// Two V10 (PR #97) decisions make every reward-earning path here a no-op:
+//
+//   1. User directive (post-PR97) + D18 — "there will only be V10 nodes.
+//      Migration is mandatory. `calculateNodeScore` reads V10 stake only."
+//      A V8 delegator on a V8 node earns score 0, reward 0. Every rolling-
+//      reward / proportional / redelegate assertion collapses.
+//
+//   2. D3 — `DelegatorsInfo` removed. Any test that inspects
+//      `isNodeDelegator` / `getDelegatorLastStakeUpdateEpoch` touches
+//      an API that no longer exists.
+//
+// V10-native equivalents live in:
+//   - `test/unit/RandomSampling.test.ts` (scoring)
+//   - `test/v10-conviction.test.ts` (end-to-end V10 flywheel)
+//   - `test/v10-e2e-conviction.test.ts` (8 passing scenarios)
+//
+// The V8 scenarios here (multi-delegator proportionality, redelegation,
+// operator-fee split, 20-epoch gap) would need a full port to V10
+// primitives (createConviction + multi-NFT per node via D5) to carry
+// signal. Skipped with tombstone pending that port.
+describe.skip(`Full complex scenario (OBSOLETE: V8 rewards pipeline)`, function () {
   let accounts: TestAccounts;
   let contracts: TestContracts;
   let nodeIds: { node1Id: bigint; node2Id: bigint };
@@ -2810,7 +2839,7 @@ describe(`Full complex scenario`, function () {
   });
 });
 
-describe(`Delegator Scoring`, function () {
+describe.skip(`Delegator Scoring (OBSOLETE: V8 rewards pipeline)`, function () {
   let accounts: TestAccounts;
   let contracts: TestContracts;
   let nodeIds: { node1Id: bigint; node2Id: bigint };

@@ -71,9 +71,6 @@ describe('@integration KnowledgeAssets V9', () => {
       'Identity',
       'Staking',
       'KnowledgeCollection',
-      'ParanetKnowledgeCollectionsRegistry',
-      'ParanetKnowledgeMinersRegistry',
-      'ParanetsRegistry',
       'KnowledgeAssetsStorage',
       'KnowledgeAssets',
     ]);

@@ -993,7 +993,31 @@ export async function buildInitialRewardsState() {
 
 /* ───────────────────────────── tests ───────────────────────────── */
 
-describe('rewards tests', () => {
+// ---------------------------------------------------------------------------
+// TOMBSTONE — V8 StakingRewards integration suites (skipped)
+// ---------------------------------------------------------------------------
+//
+// Every describe below drives V8 `Staking.stake()` → `claimDelegatorRewards()`
+// → `restakeRewards()` → V8 `requestWithdrawal()` against `StakingStorage` +
+// `DelegatorsInfo`. Under V10 (PR #97):
+//
+//   - User directive + D18: `calculateNodeScore` reads V10 stake only, so
+//     V8 delegators earn score 0 → reward 0. Every proportionality, rolling-
+//     rewards, and equal-reward assertion collapses.
+//   - D3: `DelegatorsInfo` removed.
+//   - D15: V10 aggregates live on `ConvictionStakingStorage`.
+//
+// V10 equivalents:
+//   - Unit: `test/unit/ConvictionStakingStorage.test.ts`,
+//           `test/unit/DKGStakingConvictionNFT.test.ts`
+//   - Integration: `test/v10-conviction.test.ts`,
+//                  `test/v10-e2e-conviction.test.ts`
+//
+// The withdrawal-timer / claim-order / operator-fee scenarios here would
+// require a full V10 port (createConviction + multi-NFT nodes + D14 zero-
+// delay finalize) to carry signal. Skipped with tombstone pending that
+// port.
+describe.skip('rewards tests (OBSOLETE: V8 rewards pipeline)', () => {
   /* fixture state visible to all tests in this describe-block */
   let env: Awaited<ReturnType<typeof buildInitialRewardsState>>;
 
@@ -1030,7 +1054,7 @@ describe('rewards tests', () => {
   /* Add more `it()` tests below using env.* contracts & objects. */
 });
 
-describe('Claim order enforcement tests', () => {
+describe.skip('Claim order enforcement tests (OBSOLETE: V8 rewards pipeline)', () => {
   /* fixture state visible to all tests in this describe-block */
   let env: Awaited<ReturnType<typeof buildInitialRewardsState>>;
 
@@ -2145,7 +2169,7 @@ describe('Claim order enforcement tests', () => {
   });
 });
 
-describe('Proportional rewards tests - Double stake = Double rewards', () => {
+describe.skip('Proportional rewards tests - Double stake = Double rewards (OBSOLETE: V8 rewards pipeline)', () => {
   /* fixture state visible to all tests in this describe-block */
   let env: Awaited<ReturnType<typeof buildInitialRewardsState>>;
 
@@ -3097,7 +3121,7 @@ describe('Proportional rewards tests - Double stake = Double rewards', () => {
   });
 });
 
-describe('Withdrawal request tests after further epochs', () => {
+describe.skip('Withdrawal request tests after further epochs (OBSOLETE: V8 rewards pipeline)', () => {
   let env: Awaited<ReturnType<typeof buildInitialRewardsState>>;
   let Staking: Staking,
     Chronos: Chronos,
@@ -3614,7 +3638,7 @@ describe('Withdrawal request tests after further epochs', () => {
   });
 });
 
-describe('Operator fee withdrawal tests', () => {
+describe.skip('Operator fee withdrawal tests (OBSOLETE: V8 rewards pipeline)', () => {
   let env: Awaited<ReturnType<typeof buildInitialRewardsState>>;
   let Staking: Staking,
     StakingStorage: StakingStorage,
@@ -3866,7 +3890,7 @@ describe('Operator fee withdrawal tests', () => {
   });
 });
 
-describe('Migration tests', () => {
+describe.skip('Migration tests (OBSOLETE: V8 rewards pipeline)', () => {
   let env: Awaited<ReturnType<typeof buildInitialRewardsState>>;
   let Staking: Staking,
     DelegatorsInfo: DelegatorsInfo,

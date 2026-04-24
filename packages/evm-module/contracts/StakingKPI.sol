@@ -5,7 +5,7 @@ pragma solidity ^0.8.20;
 import {IdentityStorage} from "./storage/IdentityStorage.sol";
 import {ProfileStorage} from "./storage/ProfileStorage.sol";
 import {StakingStorage} from "./storage/StakingStorage.sol";
-import {DelegatorsInfo} from "./storage/DelegatorsInfo.sol";
+import {ConvictionStakingStorage} from "./storage/ConvictionStakingStorage.sol";
 import {ContractStatus} from "./abstract/ContractStatus.sol";
 import {IInitializable} from "./interfaces/IInitializable.sol";
 import {INamed} from "./interfaces/INamed.sol";
@@ -24,7 +24,10 @@ contract StakingKPI is INamed, IVersioned, ContractStatus, IInitializable {
     IdentityStorage public identityStorage;
     ProfileStorage public profileStorage;
     StakingStorage public stakingStorage;
-    DelegatorsInfo public delegatorsInfo;
+    // D3+D13 — `DelegatorsInfo` unregistered in V10. The two per-epoch flags
+    // KPI needs (`isOperatorFeeClaimedForEpoch`, `netNodeEpochRewards`) now
+    // live on `ConvictionStakingStorage`.
+    ConvictionStakingStorage public convictionStakingStorage;
     RandomSamplingStorage public randomSamplingStorage;
     EpochStorage public epochStorage;
     ParametersStorage public parametersStorage;
@@ -50,7 +53,7 @@ contract StakingKPI is INamed, IVersioned, ContractStatus, IInitializable {
         identityStorage = IdentityStorage(hub.getContractAddress("IdentityStorage"));
         profileStorage = ProfileStorage(hub.getContractAddress("ProfileStorage"));
         stakingStorage = StakingStorage(hub.getContractAddress("StakingStorage"));
-        delegatorsInfo = DelegatorsInfo(hub.getContractAddress("DelegatorsInfo"));
+        convictionStakingStorage = ConvictionStakingStorage(hub.getContractAddress("ConvictionStakingStorage"));
         randomSamplingStorage = RandomSamplingStorage(hub.getContractAddress("RandomSamplingStorage"));
         epochStorage = EpochStorage(hub.getContractAddress("EpochStorageV8"));
         parametersStorage = ParametersStorage(hub.getContractAddress("ParametersStorage"));
@@ -132,7 +135,11 @@ contract StakingKPI is INamed, IVersioned, ContractStatus, IInitializable {
         uint256 epoch,
         address delegator
     ) external view profileExists(identityId) returns (uint256) {
-        require(delegatorsInfo.isNodeDelegator(identityId, delegator), "Delegator not found");
+        // D13 — `DelegatorsInfo.isNodeDelegator` is V8 address-keyed and
+        // unregistered in V10. Dropped here: KPI still returns 0 for a
+        // non-delegator through `_simulatePrepareForStakeChange` (stakeBase
+        // == 0 → early return 0), so the guard is redundant under the
+        // frozen-V8 archive model. V10 per-NFT KPI lives elsewhere.
 
         bytes32 delegatorKey = keccak256(abi.encodePacked(delegator));
 
@@ -162,9 +169,9 @@ contract StakingKPI is INamed, IVersioned, ContractStatus, IInitializable {
         uint72 identityId,
         uint256 epoch
     ) public view profileExists(identityId) returns (uint256) {
-        // If the operator fee has been claimed, return the net delegators rewards
-        if (delegatorsInfo.isOperatorFeeClaimedForEpoch(identityId, epoch)) {
-            return delegatorsInfo.getNetNodeEpochRewards(identityId, epoch);
+        // D3+D13 — post-V10 these flags live on ConvictionStakingStorage.
+        if (convictionStakingStorage.isOperatorFeeClaimedForEpoch(identityId, epoch)) {
+            return convictionStakingStorage.netNodeEpochRewards(identityId, epoch);
         }
 
         uint256 nodeScore18 = randomSamplingStorage.getNodeEpochScore(epoch, identityId);

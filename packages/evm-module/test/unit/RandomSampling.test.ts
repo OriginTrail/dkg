@@ -16,6 +16,7 @@ import {
   RandomSamplingStorage,
   IdentityStorage,
   StakingStorage,
+  ConvictionStakingStorage,
   ProfileStorage,
   AskStorage,
   EpochStorage,
@@ -35,6 +36,7 @@ type RandomSamplingFixture = {
   RandomSamplingStorage: RandomSamplingStorage;
   IdentityStorage: IdentityStorage;
   StakingStorage: StakingStorage;
+  ConvictionStakingStorage: ConvictionStakingStorage;
   ProfileStorage: ProfileStorage;
   AskStorage: AskStorage;
   EpochStorage: EpochStorage;
@@ -56,6 +58,7 @@ describe('@unit RandomSampling', () => {
   let RandomSamplingStorage: RandomSamplingStorage;
   let IdentityStorage: IdentityStorage;
   let StakingStorage: StakingStorage;
+  let ConvictionStakingStorage: ConvictionStakingStorage;
   let ProfileStorage: ProfileStorage;
   let AskStorage: AskStorage;
   let EpochStorage: EpochStorage;
@@ -109,6 +112,9 @@ describe('@unit RandomSampling', () => {
       await hre.ethers.getContract<IdentityStorage>('IdentityStorage');
     StakingStorage =
       await hre.ethers.getContract<StakingStorage>('StakingStorage');
+    ConvictionStakingStorage = await hre.ethers.getContract<ConvictionStakingStorage>(
+      'ConvictionStakingStorage',
+    );
     ProfileStorage =
       await hre.ethers.getContract<ProfileStorage>('ProfileStorage');
     AskStorage = await hre.ethers.getContract<AskStorage>('AskStorage');
@@ -145,6 +151,7 @@ describe('@unit RandomSampling', () => {
       RandomSamplingStorage,
       IdentityStorage,
       StakingStorage,
+      ConvictionStakingStorage,
       ProfileStorage,
       AskStorage,
       EpochStorage,
@@ -173,6 +180,7 @@ describe('@unit RandomSampling', () => {
       RandomSamplingStorage,
       IdentityStorage,
       StakingStorage,
+      ConvictionStakingStorage,
       ProfileStorage,
       AskStorage,
       EpochStorage,
@@ -207,8 +215,10 @@ describe('@unit RandomSampling', () => {
       expect(await newRandomSampling.randomSamplingStorage()).to.equal(
         await RandomSamplingStorage.getAddress(),
       );
-      expect(await newRandomSampling.stakingStorage()).to.equal(
-        await StakingStorage.getAddress(),
+      // D15: RandomSampling now reads V10 stake from ConvictionStakingStorage
+      //      (StakingStorage dropped as a direct dependency).
+      expect(await newRandomSampling.convictionStakingStorage()).to.equal(
+        await ConvictionStakingStorage.getAddress(),
       );
       expect(await newRandomSampling.profileStorage()).to.equal(
         await ProfileStorage.getAddress(),
@@ -365,8 +375,9 @@ describe('@unit RandomSampling', () => {
       expect(await RandomSampling.randomSamplingStorage()).to.equal(
         await RandomSamplingStorage.getAddress(),
       );
-      expect(await RandomSampling.stakingStorage()).to.equal(
-        await StakingStorage.getAddress(),
+      // D15: RandomSampling reads V10 stake from ConvictionStakingStorage.
+      expect(await RandomSampling.convictionStakingStorage()).to.equal(
+        await ConvictionStakingStorage.getAddress(),
       );
       expect(await RandomSampling.profileStorage()).to.equal(
         await ProfileStorage.getAddress(),

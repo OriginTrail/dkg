@@ -62,7 +62,6 @@ config.abiExporter = {
     'IERC4906.sol',
     'Ownable.sol',
     'IdentityLib.sol',
-    'ParanetLib.sol',
     'Permissions.sol',
     'ProfileLib.sol',
     'ShardingTableLib.sol',

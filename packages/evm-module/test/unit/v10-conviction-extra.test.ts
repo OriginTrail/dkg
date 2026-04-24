@@ -6,10 +6,10 @@
  *    staking NFT, no unstake). Only Flow 3 is strong."
  *
  * Flow 1/2 in the V10 conviction spec = user locks TRAC for N epochs via
- * `DKGStakingConvictionNFT.stake(identityId, amount, lockEpochs)` and
+ * `DKGStakingConvictionNFT.stake(identityId, amount, lockTier)` and
  * inherits a conviction multiplier from the 5-tier ladder:
  *
- *   lockEpochs  | multiplier
+ *   lockTier  | multiplier
  *   ------------|-----------
  *        0      |  0 (sentinel: "no lock")
  *        1      |  1.0x  (SCALE18)
@@ -18,7 +18,7 @@
  *        6..11  |  3.5x
  *      >=12     |  6.0x
  *
- * Conviction = stakedAmount * lockEpochs (the RAW amount, NOT multiplied —
+ * Conviction = stakedAmount * lockTier (the RAW amount, NOT multiplied —
  * the multiplier is a separate read via `getMultiplier`).
  *
  * This file pins every boundary of the ladder + snap-downs + the
@@ -62,9 +62,9 @@ describe('@unit V10 conviction lock-tier ladder — Flow 1/2 (E-14)', () => {
     ({ accounts, Hub: HubContract, NFT, Token: TokenContract } = await loadFixture(deployFixture));
   });
 
-  async function stakeLock(amount: bigint, lockEpochs: number) {
+  async function stakeLock(amount: bigint, lockTier: number) {
     await TokenContract.approve(await NFT.getAddress(), amount);
-    await NFT.stake(IDENTITY_ID, amount, lockEpochs);
+    await NFT.stake(IDENTITY_ID, amount, lockTier);
     return await NFT.totalSupply();
   }
 
@@ -95,20 +95,20 @@ describe('@unit V10 conviction lock-tier ladder — Flow 1/2 (E-14)', () => {
       });
     }
 
-    it('lock=0 is REJECTED at stake time (InvalidLockEpochs) — multiplier is only ever read after stake', async () => {
+    it('lock=0 is REJECTED at stake time (InvalidLockTier) — multiplier is only ever read after stake', async () => {
       const amount = hre.ethers.parseEther('1000');
       await TokenContract.approve(await NFT.getAddress(), amount);
       await expect(
         NFT.stake(IDENTITY_ID, amount, 0),
-      ).to.be.revertedWithCustomError(NFT, 'InvalidLockEpochs');
+      ).to.be.revertedWithCustomError(NFT, 'InvalidLockTier');
     });
   });
 
   // ======================================================================
-  // Conviction formula pin: conviction = stakedAmount * lockEpochs
+  // Conviction formula pin: conviction = stakedAmount * lockTier
   // (multiplier is NOT applied inside getConviction — it's a separate read).
   // ======================================================================
-  describe('getConviction: stakedAmount * lockEpochs (raw)', () => {
+  describe('getConviction: stakedAmount * lockTier (raw)', () => {
     const matrix: Array<[bigint, number]> = [
       [hre.ethers.parseEther('1000'), 1],
       [hre.ethers.parseEther('25000'), 3],
@@ -149,9 +149,9 @@ describe('@unit V10 conviction lock-tier ladder — Flow 1/2 (E-14)', () => {
     const posAInfo = await NFT.getPosition(posA);
     const posBInfo = await NFT.getPosition(posB);
     expect(posAInfo.stakedAmount).to.equal(a);
-    expect(posAInfo.lockEpochs).to.equal(2n);
+    expect(posAInfo.lockTier).to.equal(2n);
     expect(posBInfo.stakedAmount).to.equal(b);
-    expect(posBInfo.lockEpochs).to.equal(12n);
+    expect(posBInfo.lockTier).to.equal(12n);
   });
 
   // ======================================================================
@@ -165,7 +165,7 @@ describe('@unit V10 conviction lock-tier ladder — Flow 1/2 (E-14)', () => {
   describe('isLockExpired (Chronos-fallback path)', () => {
     it('lock=1 at fresh fixture → isLockExpired true (epoch 1 >= 1+1? actually 1 < 2, so false)', async () => {
       // _getCurrentEpoch falls back to 1 with no Chronos.
-      // expiresAt = createdAtEpoch(1) + lockEpochs(1) = 2.
+      // expiresAt = createdAtEpoch(1) + lockTier(1) = 2.
       // currentEpoch(1) >= 2 → false.
       const posId = await stakeLock(hre.ethers.parseEther('100'), 1);
       expect(await NFT.isLockExpired(posId)).to.equal(false);

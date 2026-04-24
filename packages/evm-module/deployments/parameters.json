@@ -13,7 +13,7 @@
             "v81ReleaseEpoch": "1"
         },
         "Chronos": {
-            "epochLength": "3600"
+            "epochLength": "2592000"
         },
         "KnowledgeCollectionStorage": {
             "knowledgeCollectionSize": "1000000",

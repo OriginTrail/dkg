@@ -10,9 +10,6 @@ import {KnowledgeAssetsStorage} from "./storage/KnowledgeAssetsStorage.sol";
 import {ShardingTableStorage} from "./storage/ShardingTableStorage.sol";
 import {IdentityStorage} from "./storage/IdentityStorage.sol";
 import {ParametersStorage} from "./storage/ParametersStorage.sol";
-import {ParanetKnowledgeCollectionsRegistry} from "./storage/paranets/ParanetKnowledgeCollectionsRegistry.sol";
-import {ParanetKnowledgeMinersRegistry} from "./storage/paranets/ParanetKnowledgeMinersRegistry.sol";
-import {ParanetsRegistry} from "./storage/paranets/ParanetsRegistry.sol";
 import {KnowledgeAssetsLib} from "./libraries/KnowledgeAssetsLib.sol";
 import {TokenLib} from "./libraries/TokenLib.sol";
 import {IdentityLib} from "./libraries/IdentityLib.sol";
@@ -35,14 +32,11 @@ import {ECDSA} from "solady/src/utils/ECDSA.sol";
  */
 contract KnowledgeAssets is INamed, IVersioned, ContractStatus, IInitializable {
     string private constant _NAME = "KnowledgeAssets";
-    string private constant _VERSION = "2.0.0";
+    string private constant _VERSION = "2.1.0";
 
     AskStorage public askStorage;
     EpochStorage public epochStorage;
     PaymasterManager public paymasterManager;
-    ParanetKnowledgeCollectionsRegistry public paranetKnowledgeCollectionsRegistry;
-    ParanetKnowledgeMinersRegistry public paranetKnowledgeMinersRegistry;
-    ParanetsRegistry public paranetsRegistry;
     KnowledgeAssetsStorage public knowledgeAssetsStorage;
     Chronos public chronos;
     ShardingTableStorage public shardingTableStorage;
@@ -56,13 +50,6 @@ contract KnowledgeAssets is INamed, IVersioned, ContractStatus, IInitializable {
         askStorage = AskStorage(hub.getContractAddress("AskStorage"));
         epochStorage = EpochStorage(hub.getContractAddress("EpochStorageV8"));
         paymasterManager = PaymasterManager(hub.getContractAddress("PaymasterManager"));
-        paranetKnowledgeCollectionsRegistry = ParanetKnowledgeCollectionsRegistry(
-            hub.getContractAddress("ParanetKnowledgeCollectionsRegistry")
-        );
-        paranetKnowledgeMinersRegistry = ParanetKnowledgeMinersRegistry(
-            hub.getContractAddress("ParanetKnowledgeMinersRegistry")
-        );
-        paranetsRegistry = ParanetsRegistry(hub.getContractAddress("ParanetsRegistry"));
         knowledgeAssetsStorage = KnowledgeAssetsStorage(
             hub.getAssetStorageAddress("KnowledgeAssetsStorage")
         );

@@ -103,8 +103,6 @@ const PINNED_DIGESTS: Record<string, string> = {
   Identity:                     '29d09dd97de53de69d5bf2282d2f3008044ab43fb86c812fc4912552c9288946',
   IdentityStorage:              'd7c58ba8ae28523dc1a6ff0bc228a3bceb9d327e53d258099dada656db262479',
   ParametersStorage:            'd8fbd96c9d4115c4d937bb11770c208af68f2b6b8ec1146379997ebdcf484b68',
-  // FairSwap — conditionally loaded by the adapter.
-  FairSwapJudge:                '66fc99121c76e5db7ebfb1ecf5a09fd0e44a23ca1fefe200c8ac78b4f3559cf9',
 };
 
 describe('ABI pin digest — detects silent contract surface drift [CH-5]', () => {

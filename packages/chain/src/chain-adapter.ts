@@ -103,7 +103,7 @@ export interface CreateContextGraphParams {
    */
   name?: string;
   description?: string;
-  /** 0 = open, 1 = permissioned (V9). */
+  /** 0 = open, 1 = permissioned. */
   accessPolicy?: number;
   /** If true, immediately reveal name+description on-chain after creation. Default: false. */
   revealOnChain?: boolean;
@@ -112,7 +112,7 @@ export interface CreateContextGraphParams {
   metadata?: Record<string, string>;
 }
 
-/** One context graph entry from chain (e.g. ParanetCreated events). */
+/** One context graph entry from chain (from `NameClaimed` events of ContextGraphNameRegistry). */
 export interface ContextGraphOnChain {
   /** bytes32 hex — keccak256(bytes(name)). */
   contextGraphId: string;
@@ -124,18 +124,6 @@ export interface ContextGraphOnChain {
   name?: string;
   /** Only set if metadata was revealed on-chain. */
   description?: string;
-}
-
-// ----- FairSwap types -----
-
-export interface FairSwapPurchaseInfo {
-  purchaseId: bigint;
-  buyer: string;
-  seller: string;
-  kcId: bigint;
-  kaId: bigint;
-  price: bigint;
-  state: number; // 0=None, 1=Initiated, 2=Fulfilled, 3=KeyRevealed, 4=Completed, 5=Disputed, 6=Refunded, 7=Expired
 }
 
 // ----- On-Chain Context Graph types (ContextGraphs contract) -----
@@ -350,12 +338,12 @@ export interface ChainAdapter {
   // Events
   listenForEvents(filter: EventFilter): AsyncIterable<ChainEvent>;
 
-  // Context Graphs (V9 Registry)
+  // Context Graphs (name-hash commitment via ContextGraphNameRegistry)
   createContextGraph(params: CreateContextGraphParams): Promise<TxResult>;
   submitToContextGraph(kcId: string, contextGraphId: string): Promise<TxResult>;
   /** Reveal cleartext name+description on-chain for a context graph you created. Optional. */
   revealContextGraphMetadata?(contextGraphId: string, name: string, description: string): Promise<TxResult>;
-  /** List context graphs from chain (V9 registry ParanetCreated events). Optional; not supported on no-chain/mock. */
+  /** List context graphs from chain via `NameClaimed` events. Optional; not supported on no-chain/mock. */
   listContextGraphsFromChain?(fromBlock?: number): Promise<ContextGraphOnChain[]>;
 
   // Publishing Conviction Accounts
@@ -364,15 +352,6 @@ export interface ChainAdapter {
   extendConvictionLock?(accountId: bigint, additionalEpochs: number): Promise<TxResult>;
   getConvictionDiscount?(accountId: bigint): Promise<{ discountBps: number; conviction: bigint }>;
   getConvictionAccountInfo?(accountId: bigint): Promise<ConvictionAccountInfo | null>;
-
-  // FairSwap (Private Knowledge Exchange)
-  initiatePurchase?(seller: string, kcId: bigint, kaId: bigint, price: bigint): Promise<{ purchaseId: bigint } & TxResult>;
-  fulfillPurchase?(purchaseId: bigint, encryptedDataRoot: Uint8Array, keyCommitment: Uint8Array): Promise<TxResult>;
-  revealKey?(purchaseId: bigint, key: Uint8Array): Promise<TxResult>;
-  disputeDelivery?(purchaseId: bigint, proof: Uint8Array): Promise<TxResult>;
-  claimPayment?(purchaseId: bigint): Promise<TxResult>;
-  claimRefund?(purchaseId: bigint): Promise<TxResult>;
-  getFairSwapPurchase?(purchaseId: bigint): Promise<FairSwapPurchaseInfo | null>;
 
   // Permanent Publishing
   publishKnowledgeAssetsPermanent?(params: PermanentPublishParams): Promise<OnChainPublishResult>;
@@ -464,12 +443,8 @@ export interface ChainAdapter {
   updateKnowledgeCollection?(params: UpdateKCParams): Promise<TxResult>;
 }
 
-// ----- Backward-compat deprecated aliases (V9 → V10 rename) -----
+// ----- Backward-compat deprecated aliases -----
 
-/** @deprecated Use CreateContextGraphParams instead. */
-export type CreateParanetParams = CreateContextGraphParams;
-/** @deprecated Use ContextGraphOnChain instead. */
-export type ParanetOnChain = ContextGraphOnChain;
 /** @deprecated Use VerifyParams instead. */
 export type AddBatchToContextGraphParams = VerifyParams;
 /** @deprecated Use CreateOnChainContextGraphParams instead. */

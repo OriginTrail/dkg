@@ -9,7 +9,7 @@ import {ParametersStorage} from "./storage/ParametersStorage.sol";
 import {ProfileStorage} from "./storage/ProfileStorage.sol";
 import {WhitelistStorage} from "./storage/WhitelistStorage.sol";
 import {Chronos} from "./storage/Chronos.sol";
-import {DelegatorsInfo} from "./storage/DelegatorsInfo.sol";
+import {ConvictionStakingStorage} from "./storage/ConvictionStakingStorage.sol";
 import {ContractStatus} from "./abstract/ContractStatus.sol";
 import {IInitializable} from "./interfaces/IInitializable.sol";
 import {INamed} from "./interfaces/INamed.sol";
@@ -29,7 +29,12 @@ contract Profile is INamed, IVersioned, ContractStatus, IInitializable {
     ProfileStorage public profileStorage;
     WhitelistStorage public whitelistStorage;
     Chronos public chronos;
-    DelegatorsInfo public delegatorsInfo;
+    // D3+D13 — `DelegatorsInfo` is unregistered in V10. The two per-node-
+    // per-epoch flags it used to expose (`isOperatorFeeClaimedForEpoch`,
+    // `netNodeEpochRewards`) were absorbed by `ConvictionStakingStorage`.
+    // Profile reads `isOperatorFeeClaimedForEpoch` in `updateOperatorFee`
+    // to gate fee changes on prior-epoch fee claims being fully settled.
+    ConvictionStakingStorage public convictionStakingStorage;
 
     // solhint-disable-next-line no-empty-blocks
     constructor(address hubAddress) ContractStatus(hubAddress) {}
@@ -62,7 +67,7 @@ contract Profile is INamed, IVersioned, ContractStatus, IInitializable {
         profileStorage = ProfileStorage(hub.getContractAddress("ProfileStorage"));
         whitelistStorage = WhitelistStorage(hub.getContractAddress("WhitelistStorage"));
         chronos = Chronos(hub.getContractAddress("Chronos"));
-        delegatorsInfo = DelegatorsInfo(hub.getContractAddress("DelegatorsInfo"));
+        convictionStakingStorage = ConvictionStakingStorage(hub.getContractAddress("ConvictionStakingStorage"));
     }
 
     function name() external pure virtual override returns (string memory) {
@@ -135,7 +140,7 @@ contract Profile is INamed, IVersioned, ContractStatus, IInitializable {
 
         if (currentEpoch > 1 && currentEpoch > parametersStorage.v81ReleaseEpoch()) {
             // All operator fees for previous epochs must be calculated and claimed before updating the operator fee
-            if (!delegatorsInfo.isOperatorFeeClaimedForEpoch(identityId, currentEpoch - 1)) {
+            if (!convictionStakingStorage.isOperatorFeeClaimedForEpoch(identityId, currentEpoch - 1)) {
                 revert(
                     "Cannot update operatorFee if operatorFee has not been calculated and claimed for previous epochs"
                 );

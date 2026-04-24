@@ -907,42 +907,6 @@ contract Staking is INamed, IVersioned, ContractStatus, IInitializable {
     }
 
     // ========================================================================
-    // V10 Conviction Multiplier — Discrete Tiers
-    // ========================================================================
-
-    /**
-     * @notice Compute the conviction multiplier for a delegator's lock duration.
-     * Discrete tiers (lockEpochs → multiplier):
-     *   0 = invalid (returns 0), 1 = 1.0x, ≥2 = 1.5x, ≥3 = 2.0x,
-     *   ≥6 = 3.5x, ≥12 = 6.0x.
-     * Values between tiers snap DOWN to the nearest tier.
-     * @param lockEpochs Lock duration in epochs (1 epoch ≈ 30 days)
-     * @return multiplier18 Multiplier scaled by 1e18 (e.g. 6e18 = 6x)
-     */
-    function convictionMultiplier(uint40 lockEpochs) public pure returns (uint256 multiplier18) {
-        if (lockEpochs == 0) return 0;
-        if (lockEpochs >= 12) return 6 * SCALE18;
-        if (lockEpochs >= 6) return 35 * SCALE18 / 10; // 3.5x
-        if (lockEpochs >= 3) return 2 * SCALE18;
-        if (lockEpochs >= 2) return 15 * SCALE18 / 10; // 1.5x
-        return SCALE18; // lockEpochs == 1 → 1.0x base
-    }
-
-    /**
-     * @notice Get the conviction multiplier for a specific delegator on a node.
-     * @dev Returns SCALE18 (1x) for all delegators. No per-delegator lock state
-     *      is currently tracked in `Staking`; callers requiring multiplier data
-     *      should read from the appropriate staking-position contract instead.
-     * @return multiplier18 SCALE18 (1x).
-     */
-    function getDelegatorConvictionMultiplier(
-        uint72 /* identityId */,
-        address /* delegator */
-    ) external pure returns (uint256 multiplier18) {
-        return SCALE18;
-    }
-
-    // ========================================================================
     // V10 Two-Layer Staking Wire — NFT-backed stake recording
     // ========================================================================
 

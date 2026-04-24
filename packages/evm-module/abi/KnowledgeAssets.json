@@ -602,45 +602,6 @@
   },
   {
     "inputs": [],
-    "name": "paranetKnowledgeCollectionsRegistry",
-    "outputs": [
-      {
-        "internalType": "contract ParanetKnowledgeCollectionsRegistry",
-        "name": "",
-        "type": "address"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "paranetKnowledgeMinersRegistry",
-    "outputs": [
-      {
-        "internalType": "contract ParanetKnowledgeMinersRegistry",
-        "name": "",
-        "type": "address"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "paranetsRegistry",
-    "outputs": [
-      {
-        "internalType": "contract ParanetsRegistry",
-        "name": "",
-        "type": "address"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
     "name": "paymasterManager",
     "outputs": [
       {

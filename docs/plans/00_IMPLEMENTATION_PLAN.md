@@ -217,10 +217,11 @@ so private triples are not re-sent over gossip.
 
 - **Spec**: [SPEC_IMPLEMENTATION_GAPS_AND_ISSUES.md §2.1](../archive/SPEC_IMPLEMENTATION_GAPS_AND_ISSUES.md)
 
-### 2.3 Paranet on-chain lifecycle — **DONE**
-On-chain paranet creation and discovery via `ParanetV9Registry.sol`. EVM adapter
-implements `createParanet(name, description, accessPolicy)` and
-`listParanetsFromChain(fromBlock?)` when the registry is registered in the Hub.
+### 2.3 Context graph on-chain name registry — **DONE**
+On-chain context graph name claims and discovery via `ContextGraphNameRegistry.sol`
+(renamed from the legacy `ParanetV9Registry` — see PR #240). The EVM adapter
+implements `createContextGraph({ name, accessPolicy })` and
+`listContextGraphsFromChain(fromBlock?)` when the registry is registered in the Hub.
 `submitToParanet` remains a stub (Milestone 5). Deploy script `042_deploy_paranet_v9_registry.ts`;
 chain types extended with `CreateParanetParams` (name/description/accessPolicy),
 `ParanetOnChain`, and optional `TxResult.paranetId`.

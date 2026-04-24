@@ -121,10 +121,10 @@ describe('@unit DKGStakingConvictionNFT — extra audit coverage (E-2, E-16)', (
   // E-2 — unstake matrix. None of this was previously covered.
   // ======================================================================
   describe('E-2: unstake full matrix', () => {
-    async function stakeAs(signer: SignerWithAddress, amount: bigint, lockEpochs: number) {
+    async function stakeAs(signer: SignerWithAddress, amount: bigint, lockTier: number) {
       await TokenContract.connect(accounts[0]).transfer(signer.address, amount);
       await TokenContract.connect(signer).approve(await NFT.getAddress(), amount);
-      await NFT.connect(signer).stake(IDENTITY_ID, amount, lockEpochs);
+      await NFT.connect(signer).stake(IDENTITY_ID, amount, lockTier);
       return await NFT.totalSupply();
     }
 
@@ -216,7 +216,7 @@ describe('@unit DKGStakingConvictionNFT — extra audit coverage (E-2, E-16)', (
       const raw = await NFT.positions(positionId);
       expect(raw.stakedAmount).to.equal(0n);
       expect(raw.identityId).to.equal(0n);
-      expect(raw.lockEpochs).to.equal(0n);
+      expect(raw.lockTier).to.equal(0n);
       expect(raw.createdAtEpoch).to.equal(0n);
     });
 

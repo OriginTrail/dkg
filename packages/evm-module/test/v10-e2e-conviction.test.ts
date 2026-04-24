@@ -66,9 +66,6 @@ async function deployE2EFixture(): Promise<E2EFixture> {
     'DelegatorsInfo',
     'KnowledgeAssetsV10',
     'PublishingConvictionAccount',
-    'ParanetKnowledgeCollectionsRegistry',
-    'ParanetKnowledgeMinersRegistry',
-    'ParanetsRegistry',
     // V10 Phase 8 stack — required by the new `KnowledgeAssetsV10.initialize()`
     // fail-fast Hub lookups (commit e89ecb75). Flow 3 (V10 publish via NFT)
     // depends on the full V10 stack being deployed in the same fixture.
@@ -162,24 +159,11 @@ describe('V10 E2E Conviction System', function () {
       await Token.connect(staker).approve(await Staking.getAddress(), STAKE_AMOUNT * 2n);
     });
 
-    it('stakes with no lock (1x multiplier, lockEpochs=1 default)', async () => {
+    it('stakes with no lock (1x multiplier)', async () => {
       await Staking.connect(staker).stake(identityId, STAKE_AMOUNT);
 
       const nodeStake = await StakingStorage.getNodeStake(identityId);
       expect(nodeStake).to.equal(STAKE_AMOUNT);
-
-      const multiplier = await Staking.getDelegatorConvictionMultiplier(identityId, staker.address);
-      expect(multiplier).to.equal(SCALE18);
-    });
-
-
-
-    it('verifies all conviction multiplier tiers', async () => {
-      expect(await Staking.convictionMultiplier(1)).to.equal(SCALE18);
-      expect(await Staking.convictionMultiplier(2)).to.equal(15n * SCALE18 / 10n);
-      expect(await Staking.convictionMultiplier(3)).to.equal(2n * SCALE18);
-      expect(await Staking.convictionMultiplier(6)).to.equal(35n * SCALE18 / 10n);
-      expect(await Staking.convictionMultiplier(12)).to.equal(6n * SCALE18);
     });
   });
 
