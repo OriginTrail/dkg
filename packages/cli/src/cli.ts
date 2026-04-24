@@ -9,8 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { writeFile, unlink } from 'node:fs/promises';
 import { ethers } from 'ethers';
-import { requestFaucetFunding } from './faucet.js';
-import { toErrorMessage, hasErrorCode } from '@origintrail-official/dkg-core';
+import { requestFaucetFunding, toErrorMessage, hasErrorCode } from '@origintrail-official/dkg-core';
 import yaml from 'js-yaml';
 import {
   loadConfig, saveConfig, configExists, configPath,
