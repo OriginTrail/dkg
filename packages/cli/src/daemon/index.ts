@@ -10,7 +10,7 @@
 // level of the old daemon.ts is kept in `./state.js` so the split
 // modules share one canonical instance.
 
-export { daemonState, type CorsAllowlist } from './state.js';
+export { daemonState, resolveAutoUpdateEnabled, type CorsAllowlist } from './state.js';
 export * from './types.js';
 export * from './manifest.js';
 export * from './http-utils.js';
