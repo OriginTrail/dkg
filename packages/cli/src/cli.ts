@@ -1671,12 +1671,8 @@ openclawCmd
   .option('--no-verify', 'Skip post-setup verification')
   .option('--no-start', 'Skip daemon start (configure only)')
   .option('--dry-run', 'Preview changes without writing anything')
-  // Deprecated flags kept for backwards compatibility with automation that
-  // shipped before faucet funding was removed from setup. Accepted as no-ops
-  // with a one-line warning so scripted `dkg openclaw setup --no-fund ...`
-  // invocations don't fail with `error: unknown option '--no-fund'`.
-  .option('--no-fund', 'Deprecated no-op — faucet funding has been removed')
-  .option('--fund', 'Deprecated no-op — faucet funding has been removed')
+  .option('--no-fund', 'Skip wallet funding via testnet faucet')
+  .option('--fund', 'Fund wallets via testnet faucet (default)')
   .action(async (opts, command) => {
     // Dynamic import + process.exit plumbing stay here; the deprecation-flag
     // bookkeeping and the actual `runSetup` call live in `openclawSetupAction`
