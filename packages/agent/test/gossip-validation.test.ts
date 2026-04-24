@@ -205,6 +205,7 @@ describe('I-002: Gossip ingestion should not trust self-reported on-chain status
 
     try {
       await agent.createContextGraph({ id: 'event-test', name: 'Event Test' });
+      await agent.registerContextGraph('event-test');
       agent.subscribeToContextGraph('event-test');
       await sleep(500);
 
@@ -289,6 +290,7 @@ describe('I-002: Gossip ingestion should not trust self-reported on-chain status
 
     try {
       await agent.createContextGraph({ id: 'event-filter', name: 'Event Filter' });
+      await agent.registerContextGraph('event-filter');
       agent.subscribeToContextGraph('event-filter');
       await sleep(500);
 
@@ -396,6 +398,7 @@ describe('Integration: gossip ingestion verifies on-chain and promotes to confir
     await sleep(1000);
 
     await agentA.createContextGraph({ id: 'gossip-verify', name: 'GV', description: '' });
+    await agentA.registerContextGraph('gossip-verify');
     agentA.subscribeToContextGraph('gossip-verify');
     agentB.subscribeToContextGraph('gossip-verify');
     await sleep(500);
@@ -449,6 +452,7 @@ describe('Integration: gossip ingestion verifies on-chain and promotes to confir
     await sleep(1000);
 
     await agentA.createContextGraph({ id: 'gossip-tent', name: 'GT', description: '' });
+    await agentA.registerContextGraph('gossip-tent');
     agentA.subscribeToContextGraph('gossip-tent', { trackSyncScope: false });
     agentB.subscribeToContextGraph('gossip-tent', { trackSyncScope: false });
     await sleep(500);

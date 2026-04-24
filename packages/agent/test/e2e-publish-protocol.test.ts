@@ -107,6 +107,7 @@ describe('E2E: Paranet publish with receiver signature collection', () => {
     expect(nodeA.node.libp2p.getPeers().length).toBeGreaterThanOrEqual(2);
 
     await nodeA.createContextGraph({ id: PARANET, name: 'Publish Protocol E2E', description: '' });
+    await nodeA.registerContextGraph(PARANET);
     nodeA.subscribeToContextGraph(PARANET);
     nodeB.subscribeToContextGraph(PARANET);
     nodeC.subscribeToContextGraph(PARANET);
@@ -349,6 +350,7 @@ describe('E2E: Publish KC directly to context graph', () => {
     await sleep(500);
 
     await nodeA.createContextGraph({ id: PARANET, name: 'Direct CG E2E', description: '' });
+    await nodeA.registerContextGraph(PARANET);
     nodeA.subscribeToContextGraph(PARANET);
     await sleep(500);
 
@@ -399,6 +401,7 @@ describe('E2E: Publish rejected with insufficient receiver signatures', () => {
     await sleep(500);
 
     await nodeA.createContextGraph({ id: PARANET, name: 'Lonely Paranet', description: '' });
+    await nodeA.registerContextGraph(PARANET);
     nodeA.subscribeToContextGraph(PARANET);
 
     await nodeA.share(PARANET, [

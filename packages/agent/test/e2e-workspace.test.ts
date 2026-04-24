@@ -72,6 +72,7 @@ describe('Workspace E2E (2 nodes)', () => {
       name: 'Workspace E2E Paranet',
       description: 'For workspace graph tests',
     });
+    await nodeA.registerContextGraph(PARANET);
 
     const exists = await nodeA.contextGraphExists(PARANET);
     expect(exists).toBe(true);

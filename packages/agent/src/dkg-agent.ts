@@ -3174,43 +3174,34 @@ export class DKGAgent {
       metaSynced: true,
     });
 
-    // Auto-register on-chain (V10 ContextGraphs contract) when the chain
-    // adapter supports it and the node has an on-chain identity. This gives
-    // the context graph a numeric on-chain ID required by publishDirect and
-    // enables Verified Memory (publishFromSWM).
-    if (
-      this.chain.chainId !== 'none' &&
-      !this.chain.chainId.startsWith('mock') &&
-      creatorIdentityId > 0n &&
-      typeof this.chain.createOnChainContextGraph === 'function'
-    ) {
-      try {
-        const sortedParticipants = [...participantIdentityIds].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
-        const result = await this.chain.createOnChainContextGraph({
-          participantIdentityIds: sortedParticipants,
-          requiredSignatures: opts.requiredSignatures ?? 1,
-          publishPolicy: 1,
-        });
-        const numericId = result.contextGraphId.toString();
-        const sub = this.subscribedContextGraphs.get(opts.id);
-        if (sub) sub.onChainId = numericId;
-
-        const cgMetaGraph = paranetMetaGraphUri(opts.id);
-        const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
-        await this.store.deleteByPattern({
-          graph: cgMetaGraph,
-          subject: paranetUri,
-          predicate: DKG_ONTOLOGY.DKG_REGISTRATION_STATUS,
-        });
-        await this.store.insert([
-          { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_REGISTRATION_STATUS, object: `"registered"`, graph: cgMetaGraph },
-          { subject: paranetUri, predicate: `${DKG_ONTOLOGY.DKG_PARANET}OnChainId`, object: `"${numericId}"`, graph: ontologyGraph },
-        ]);
-        this.log.info(ctx, `Auto-registered context graph "${opts.id}" on-chain (V10 id=${numericId})`);
-      } catch (err) {
-        this.log.warn(ctx, `Auto-register on-chain skipped: ${err instanceof Error ? err.message : String(err)}`);
-      }
-    }
+    // On-chain registration is intentionally NOT done here — per v10 spec
+    // §2.2 / §2.3 Context Graphs are a local-first primitive. A CG exists
+    // the moment its definition triples land in the store; it can be
+    // shared with peers over gossip (SWM writes/reads work across the
+    // subscriber set), joined, sub-graphed, and queried without ever
+    // touching chain state. Verified Memory is the value-add layer that
+    // requires chain registration, and earlier revisions silently minted
+    // a `ContextGraphs.createContextGraph` tx from inside this method
+    // whenever the adapter supported it. That broke the "free CG"
+    // contract the API advertises (HTTP caller opts in via
+    // `register: true` on `/api/context-graph/create`), caused surprise
+    // TRAC spend, and made test §27e's "VM publish on unregistered CG
+    // should fail" impossible to satisfy — the CG was always already
+    // registered by the time the test ran.
+    //
+    // Callers that want on-chain registration MUST now take the
+    // explicit path: either `POST /api/context-graph/create` with
+    // `register: true` (daemon chains a `registerContextGraph` call
+    // after this method returns) or `POST /api/context-graph/register`
+    // on an existing local CG. Both paths go through
+    // {@link registerContextGraph}, which preserves the creator /
+    // curator checks and writes the V10 `onChainId` + flips
+    // `dkg:registrationStatus` to `"registered"`. Until then the CG
+    // carries the `unregistered` marker inserted above, and
+    // `dkg-publisher`'s `publishFromSharedMemory` guard
+    // (`packages/publisher/src/dkg-publisher.ts:569-594`) throws
+    // `Context graph "<id>" is not registered on-chain` on any VM
+    // publish attempt.
 
     if (!opts.private) {
       this.subscribeToContextGraph(opts.id);
@@ -3272,12 +3263,44 @@ export class DKGAgent {
 
     // Only the curator/creator can register a CG on-chain.
     // The owner DID may be peerId-based or agent-address-based, so check both.
-    const owner = await this.getContextGraphOwner(id);
+    //
+    // If no owner triple exists yet (bootstrap CGs created via
+    // `ensureContextGraphLocal` deliberately do not stamp ownership), the
+    // calling node lazily becomes both creator and curator here. This is
+    // the "node that explicitly registered the CG" — exactly the
+    // semantics other code paths consult `getContextGraphOwner` for, and
+    // it keeps the stamp single-writer (no race over `LIMIT 1`).
+    let owner = await this.getContextGraphOwner(id);
     if (!owner) {
-      throw new Error(
-        `Context graph "${id}" has no known creator. ` +
-        `Wait for sync to complete or create it locally first.`,
+      const cgMetaGraph = paranetMetaGraphUri(id);
+      const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
+      const paranetUri = `did:dkg:context-graph:${id}`;
+      const accessPolicyResult = await this.store.query(
+        `SELECT ?ap WHERE {
+          { GRAPH <${ontologyGraph}> { <${paranetUri}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?ap } }
+          UNION
+          { GRAPH <${cgMetaGraph}> { <${paranetUri}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?ap } }
+        } LIMIT 1`,
       );
+      const apValue = accessPolicyResult.type === 'bindings'
+        ? accessPolicyResult.bindings[0]?.['ap']?.replace(/^"|"$/g, '')
+        : undefined;
+      const isCurated = apValue === 'private';
+      const defGraph = isCurated ? cgMetaGraph : ontologyGraph;
+      const creatorPeerDid = `did:dkg:agent:${this.peerId}`;
+      const curatorDid = `did:dkg:agent:${opts?.callerAgentAddress ?? this.defaultAgentAddress ?? this.peerId}`;
+      // Defensive: replace any stray creator/curator triples (e.g. from
+      // a previous build that backfilled per node) so this register call
+      // becomes the single source of truth.
+      await this.store.deleteByPattern({ graph: defGraph, subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CREATOR });
+      await this.store.deleteByPattern({ graph: cgMetaGraph, subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CREATOR });
+      await this.store.deleteByPattern({ graph: cgMetaGraph, subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CURATOR });
+      await this.store.insert([
+        { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CREATOR, object: creatorPeerDid, graph: defGraph },
+        { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CURATOR, object: curatorDid, graph: cgMetaGraph },
+      ]);
+      this.log.info(ctx, `Stamped local node as creator/curator for "${id}" (registration-time lazy stamp)`);
+      owner = curatorDid;
     }
     if (!this.isCallerOrNodeOwner(owner, opts?.callerAgentAddress)) {
       throw new Error(
@@ -4313,6 +4336,13 @@ export class DKGAgent {
 
     const exists = await this.contextGraphExists(opts.id);
     if (exists) {
+      // Bootstrap is a subscriber path: do NOT mint or backfill ownership
+      // here. Creator/curator are stamped by `createContextGraph` (explicit
+      // create) and `registerContextGraph` (explicit on-chain mint). When
+      // every node backfilled itself on boot the `_meta` graph accumulated
+      // one curator triple per node and `getContextGraphOwner`'s
+      // `LIMIT 1` made ownership nondeterministic — any subscriber could
+      // win the unordered query and look like the curator.
       this.subscribeToContextGraph(opts.id);
       this.subscribedContextGraphs.set(opts.id, {
         name: opts.name,
@@ -4335,22 +4365,29 @@ export class DKGAgent {
     // network-wide discovery.
     const defGraph = opts.curated ? cgMetaGraph : ontologyGraph;
 
+    // No creator/curator triples here — bootstrap is a subscriber-style
+    // path. Ownership is established only when a node explicitly calls
+    // `createContextGraph` (UI flow) or `registerContextGraph` (on-chain
+    // mint), which both stamp the calling node. Stamping every booting
+    // node would let `getContextGraphOwner` ("LIMIT 1" over `dkg:curator`)
+    // resolve to an arbitrary subscriber and create a registration race
+    // where node B mints a second V10 CG before node A's `onChainId`
+    // propagates.
     const quads: Quad[] = [
       { subject: paranetUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_PARANET, graph: defGraph },
       { subject: paranetUri, predicate: DKG_ONTOLOGY.SCHEMA_NAME, object: `"${opts.name}"`, graph: defGraph },
       { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CREATED_AT, object: `"${now}"`, graph: defGraph },
       { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_GOSSIP_TOPIC, object: `"${paranetPublishTopic(opts.id)}"`, graph: defGraph },
       { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_REPLICATION_POLICY, object: `"full"`, graph: defGraph },
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY, object: `"${opts.curated ? 'private' : 'public'}"`, graph: defGraph },
     ];
 
-    if (opts.curated) {
-      quads.push({
-        subject: paranetUri,
-        predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
-        object: `"private"`,
-        graph: defGraph,
-      });
-    }
+    // _meta triples: only registration status. `dkg:curator` is written
+    // by `registerContextGraph` (or `createContextGraph` for the UI
+    // create path) so exactly one node owns the graph locally.
+    quads.push(
+      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_REGISTRATION_STATUS, object: `"unregistered"`, graph: cgMetaGraph },
+    );
 
     if (opts.description) {
       quads.push({
@@ -5634,6 +5671,7 @@ export class DKGAgent {
     isSystem: boolean;
     subscribed: boolean;
     synced: boolean;
+    onChainId?: string;
   }>> {
     const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
     const agentsGraph = paranetDataGraphUri(SYSTEM_PARANETS.AGENTS);
@@ -5665,7 +5703,7 @@ export class DKGAgent {
     const seen = new Map<string, {
       id: string; uri: string; name: string; description?: string;
       creator?: string; createdAt?: string; isSystem: boolean;
-      subscribed: boolean; synced: boolean;
+      subscribed: boolean; synced: boolean; onChainId?: string;
     }>();
 
     if (result.type === 'bindings') {
@@ -5674,6 +5712,7 @@ export class DKGAgent {
         if (seen.has(uri)) continue;
         const id = uri.startsWith(prefix) ? uri.slice(prefix.length) : uri;
         const sub = this.subscribedContextGraphs.get(id);
+        const onChainId = sub?.onChainId ?? (await this.getContextGraphOnChainId(id)) ?? undefined;
         seen.set(uri, {
           id,
           uri,
@@ -5684,6 +5723,7 @@ export class DKGAgent {
           isSystem: !!row['isSystem'],
           subscribed: sub?.subscribed ?? false,
           synced: true,
+          ...(onChainId ? { onChainId } : {}),
         });
       }
     }
@@ -5711,6 +5751,7 @@ export class DKGAgent {
 
       if (metaResult.type === 'bindings' && metaResult.bindings.length > 0) {
         const row = metaResult.bindings[0] as Record<string, string>;
+        const onChainId = sub.onChainId ?? (await this.getContextGraphOnChainId(id)) ?? undefined;
         seen.set(uri, {
           id,
           uri,
@@ -5721,6 +5762,7 @@ export class DKGAgent {
           isSystem: false,
           subscribed: sub.subscribed,
           synced: sub.synced,
+          ...(onChainId ? { onChainId } : {}),
         });
         continue;
       }
@@ -5760,6 +5802,7 @@ export class DKGAgent {
         isSystem: false,
         subscribed: sub.subscribed,
         synced: sub.synced,
+        ...(sub.onChainId ? { onChainId: sub.onChainId } : {}),
       });
     }
 
@@ -5771,6 +5814,7 @@ export class DKGAgent {
       if (id === SYSTEM_PARANETS.AGENTS || id === SYSTEM_PARANETS.ONTOLOGY) continue;
 
       const sub = this.subscribedContextGraphs.get(id);
+      const onChainId = sub?.onChainId ?? (await this.getContextGraphOnChainId(id)) ?? undefined;
       seen.set(uri, {
         id,
         uri,
@@ -5778,6 +5822,7 @@ export class DKGAgent {
         isSystem: false,
         subscribed: sub?.subscribed ?? false,
         synced: sub?.synced ?? false,
+        ...(onChainId ? { onChainId } : {}),
       });
     }
 

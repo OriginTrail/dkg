@@ -110,6 +110,7 @@ describe('Publish → Query (single agent)', () => {
     await agent.start();
 
     await agent.createContextGraph({ id: 'pq-test', name: 'PQ', description: '' });
+    await agent.registerContextGraph('pq-test');
 
     const result = await agent.publish('pq-test', [
       { subject: 'did:dkg:test:Alice', predicate: 'http://schema.org/name', object: '"Alice"', graph: '' },
@@ -142,6 +143,7 @@ describe('Publish → Query (single agent)', () => {
     await agent.start();
 
     await agent.createContextGraph({ id: 'priv-test', name: 'Priv', description: '' });
+    await agent.registerContextGraph('priv-test');
 
     const result = await agent.publish(
       'priv-test',
@@ -317,6 +319,7 @@ describe('Update flow (agent level)', () => {
     await agent.start();
 
     await agent.createContextGraph({ id: 'upd-test', name: 'Upd', description: '' });
+    await agent.registerContextGraph('upd-test');
 
     const initial = await agent.publish('upd-test', [
       { subject: 'did:dkg:test:Doc', predicate: 'http://schema.org/name', object: '"Doc v1"', graph: '' },
@@ -367,6 +370,7 @@ describe('Update flow (agent level)', () => {
     await agent.start();
 
     await agent.createContextGraph({ id: 'priv-upd', name: 'PrivUpd', description: '' });
+    await agent.registerContextGraph('priv-upd');
 
     const initial = await agent.publish(
       'priv-upd',

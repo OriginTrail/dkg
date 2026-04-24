@@ -123,6 +123,7 @@ describe('bulletproof: PUBLISH contract (real chain, real ACK, real KC)', () => 
     await nodeA.start();
 
     await nodeA.createContextGraph({ id: cgId, name: 'Bulletproof Publish', description: '' });
+    await nodeA.registerContextGraph(cgId);
 
     const result = await nodeA.publish(cgId, [
       { subject: entity, predicate: 'http://schema.org/name', object: '"AliceBulletproof"', graph: '' },
