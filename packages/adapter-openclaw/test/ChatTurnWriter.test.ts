@@ -372,6 +372,80 @@ describe("ChatTurnWriter", () => {
     expect(persistedAssistant).toContain("here is your answer");
   });
 
+  it("two identical-content real turns outside dedup TTL both persist (R5.1)", async () => {
+    const event: AgentEndContext = {
+      sessionId: "t",
+      messages: [
+        { role: "user", content: "thanks" },
+        { role: "assistant", content: "you're welcome" },
+      ],
+    };
+    writer.onAgentEnd(event, { channelId: "ch", sessionKey: "sk" });
+    await flushMicrotasks();
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+
+    // Wait past the 3s dedup TTL; a second identical-content turn must
+    // persist rather than being eaten as a duplicate.
+    await new Promise((r) => setTimeout(r, 3100));
+
+    const event2: AgentEndContext = {
+      sessionId: "t",
+      messages: [
+        { role: "user", content: "thanks" },
+        { role: "assistant", content: "you're welcome" },
+        { role: "user", content: "thanks" },
+        { role: "assistant", content: "you're welcome" },
+      ],
+    };
+    writer.onAgentEnd(event2, { channelId: "ch", sessionKey: "sk" });
+    await flushMicrotasks();
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(2);
+  }, 10_000);
+
+  it("onBeforeCompaction clears the watermark so post-compaction turns persist (R5.2)", async () => {
+    // First: persist 3 turns so watermark advances to 2.
+    const preEvent: AgentEndContext = {
+      sessionId: "t",
+      messages: [
+        { role: "user", content: "u1" },
+        { role: "assistant", content: "a1" },
+        { role: "user", content: "u2" },
+        { role: "assistant", content: "a2" },
+        { role: "user", content: "u3" },
+        { role: "assistant", content: "a3" },
+      ],
+    };
+    writer.onAgentEnd(preEvent, { channelId: "ch", sessionKey: "sk" });
+    await flushMicrotasks();
+    await new Promise((r) => setTimeout(r, 70)); // let the 50ms debounce commit
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(3);
+
+    mockClient.storeChatTurn.mockClear();
+    writer.onBeforeCompaction({}, {});
+
+    // After compaction a shorter messages array arrives (representative of
+    // gateway summarization: old turns folded to a single summary pair).
+    // Without the watermark reset, the pair-count cursor at 2 would skip
+    // the first 3 pairs of this new array entirely.
+    // Also wait past the 3s dedup TTL so identical-text turns aren't
+    // blocked by the cross-path dedup map.
+    await new Promise((r) => setTimeout(r, 3100));
+    const postEvent: AgentEndContext = {
+      sessionId: "t",
+      messages: [
+        { role: "user", content: "summary" },
+        { role: "assistant", content: "ack" },
+        { role: "user", content: "follow-up" },
+        { role: "assistant", content: "reply" },
+      ],
+    };
+    writer.onAgentEnd(postEvent, { channelId: "ch", sessionKey: "sk" });
+    await flushMicrotasks();
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(2);
+    expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("summary");
+    expect(mockClient.storeChatTurn.mock.calls[1][1]).toBe("follow-up");
+  }, 10_000);
+
   it("distinct accountId/conversationId produce distinct sessionIds (R4.1 thread separation)", async () => {
     // Two events sharing sessionKey on the same channel but differing in
     // accountId must land under different DKG sessionIds — otherwise

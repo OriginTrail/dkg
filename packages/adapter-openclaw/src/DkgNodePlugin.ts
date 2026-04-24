@@ -333,23 +333,28 @@ export class DkgNodePlugin {
   /**
    * Install the 5 W4a/W4b hooks via HookSurface, supporting multi-phase
    * init. Rebuild the surface when:
-   *   (a) a prior install recorded a typed-hook failure (api.on was
-   *       undefined at first-call); OR
+   *   (a) ANY prior install recorded a failure (`installedVia === 'none'`),
+   *       whether typed (api.on was undefined at first-call) or internal
+   *       (globalThis hook map not created yet); OR
    *   (b) the gateway passed a new `api` instance on re-entry
    *       (`openclaw-entry.mjs` reuses the singleton across new
    *       registries, so typed hooks bound to the previous api object
    *       would otherwise never fire against the new one).
+   * Retrying on internal-hook failures too is load-bearing: if the first
+   * register() call runs before the gateway sets up the internal-hook map,
+   * cross-channel persistence (W4b) would otherwise stay dead forever
+   * even after the map appears on a later re-entry.
    */
   private installHooksIfNeeded(api: OpenClawPluginApi): void {
     if (!this.chatTurnWriter) return;
 
     if (this.hookSurface) {
       const stats = this.hookSurface.getDispatchStats();
-      const anyTypedFailed = Object.entries(stats).some(
-        ([key, stat]) => key.startsWith('typed:') && stat.installedVia === 'none',
+      const anyInstallFailed = Object.values(stats).some(
+        (stat) => stat.installedVia === 'none',
       );
       const apiChanged = this.hookSurfaceApi !== api;
-      if (!anyTypedFailed && !apiChanged) return;
+      if (!anyInstallFailed && !apiChanged) return;
       this.hookSurface.destroy();
       this.hookSurface = null;
       this.hookSurfaceApi = null;

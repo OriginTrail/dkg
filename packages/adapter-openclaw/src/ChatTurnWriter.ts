@@ -40,8 +40,14 @@ export class ChatTurnWriter {
   // both for ordinary LLM turns and the deterministic turnId is identical
   // across paths, so the second persist would be a duplicate write. Daemon
   // does not dedup (ADR-002), so we gate here before calling storeChatTurn.
+  //
+  // The TTL is intentionally short (3s). Cross-path double-fire happens in
+  // the same delivery cycle — typically milliseconds between `agent_end` and
+  // `message:sent`. A longer TTL would silently drop two legitimate real
+  // turns in a short window whose text happens to be identical (e.g.
+  // "thanks" / "you're welcome" said twice within a minute).
   private recentTurnIds: Map<string, number> = new Map();
-  private static readonly TURNID_TTL_MS = 60_000;
+  private static readonly TURNID_TTL_MS = 3_000;
 
   constructor(options: { client: any; logger: Logger; stateDir: string }) {
     this.client = options.client;
@@ -112,15 +118,39 @@ export class ChatTurnWriter {
   }
 
   onBeforeCompaction(event: any, ctx?: any): void {
-    try { this.flushSync(); } catch (err) {
+    try {
+      this.flushSync();
+      // Compaction shrinks or rewrites `messages`, but our pair-index
+      // watermark is relative to the current array. A stale N-pair
+      // watermark against a compacted 3-pair array would cause the next
+      // `onAgentEnd` to skip every pair as "already persisted" until the
+      // transcript grew past N — silently dropping post-compaction turns.
+      // Clear watermarks so the next scan persists whatever messages
+      // survived compaction; any duplicates against prior writes are
+      // then caught by cross-path turnId dedup.
+      this.resetWatermarks();
+    } catch (err) {
       this.logger.error?.("[ChatTurnWriter.onBeforeCompaction] Error", { err });
     }
   }
 
   onBeforeReset(event: any, ctx?: any): void {
-    try { this.flushSync(); } catch (err) {
+    try {
+      this.flushSync();
+      // Reset wipes conversation history; the pair-index watermark must
+      // start over too or new post-reset turns would be treated as
+      // already persisted.
+      this.resetWatermarks();
+    } catch (err) {
       this.logger.error?.("[ChatTurnWriter.onBeforeReset] Error", { err });
     }
+  }
+
+  private resetWatermarks(): void {
+    this.cachedWatermarks.clear();
+    for (const entry of this.debounceTimers.values()) clearTimeout(entry.timer);
+    this.debounceTimers.clear();
+    this.writeWatermarkFile();
   }
 
   onMessageReceived(ev: InternalMessageEvent): void {
