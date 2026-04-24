@@ -191,7 +191,7 @@ describe('right-rail agent shell replaces Agent Hub', () => {
 describe('backward-compatible URL redirects (V10 consolidation)', () => {
   const app = readFile('App.tsx');
 
-  for (const path of ['/agent', '/explorer', '/settings', '/messages']) {
+  for (const path of ['/agent', '/explorer', '/settings', '/messages', '/apps/*']) {
     it(`redirects ${path} to /`, () => {
       expect(app).toContain(`path="${path}"`);
       const pattern = new RegExp(`path="${path.replace('*', '\\*')}".*element=\\{<Navigate to="/"`);
