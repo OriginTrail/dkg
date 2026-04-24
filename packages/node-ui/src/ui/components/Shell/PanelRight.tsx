@@ -3,6 +3,7 @@ import { useJourneyStore } from '../../stores/journey.js';
 import { useProjectsStore, type ContextGraph } from '../../stores/projects.js';
 import {
   importFile,
+  type AgentIdentity,
   type ImportFileResult,
   type LocalAgentChatAttachmentRef,
   type LocalAgentChatContextEntry,
@@ -14,6 +15,7 @@ import {
   disconnectLocalAgentIntegration,
   fetchAgents,
   fetchConnections,
+  fetchCurrentAgent,
   getDefaultLocalAgentSessionId,
   fetchLocalAgentHistory,
   fetchLocalAgentIntegrations,
@@ -141,14 +143,42 @@ function draftToAttachmentRef(draft: LocalAgentAttachmentDraft): LocalAgentChatA
   };
 }
 
-function buildChatContextEntries(projects: ContextGraph[], activeProjectId: string | null): LocalAgentChatContextEntry[] {
-  if (!activeProjectId) return [];
-  const displayName = getProjectDisplayName(projects, activeProjectId);
-  return [{
-    key: 'target_context_graph',
-    label: 'Target context graph',
-    value: displayName === activeProjectId ? activeProjectId : `${displayName} (${activeProjectId})`,
-  }];
+function buildChatContextEntries(
+  projects: ContextGraph[],
+  activeProjectId: string | null,
+  currentAgent: AgentIdentity | null,
+): LocalAgentChatContextEntry[] {
+  const entries: LocalAgentChatContextEntry[] = [];
+  if (activeProjectId) {
+    const displayName = getProjectDisplayName(projects, activeProjectId);
+    entries.push({
+      key: 'target_context_graph',
+      label: 'Target context graph',
+      value: displayName === activeProjectId ? activeProjectId : `${displayName} (${activeProjectId})`,
+    });
+  }
+  if (currentAgent?.agentAddress) {
+    entries.push({
+      key: 'current_agent_address',
+      label: 'Current agent address',
+      value: currentAgent.agentAddress,
+    });
+  }
+  if (currentAgent?.agentDid) {
+    entries.push({
+      key: 'current_agent_did',
+      label: 'Current agent DID',
+      value: currentAgent.agentDid,
+    });
+  }
+  if (currentAgent?.peerId) {
+    entries.push({
+      key: 'current_agent_peer_id',
+      label: 'Current agent peer ID',
+      value: currentAgent.peerId,
+    });
+  }
+  return entries;
 }
 
 function mapHistoryMessage(message: LocalAgentHistoryMessage): LocalAgentMessage {
@@ -1034,6 +1064,7 @@ export function PanelRight() {
   const [peerAgents, setPeerAgents] = useState<AgentInfo[]>([]);
   const [connections, setConnections] = useState<{ total: number; direct: number; relayed: number }>({ total: 0, direct: 0, relayed: 0 });
   const [peerLoading, setPeerLoading] = useState(true);
+  const [currentAgent, setCurrentAgent] = useState<AgentIdentity | null>(null);
 
   const [integrations, setIntegrations] = useState<LocalAgentIntegration[]>([]);
   const [selectedIntegrationId, setSelectedIntegrationId] = useState('openclaw');
@@ -1346,6 +1377,10 @@ export function PanelRight() {
   }, [loadSessions, refreshPeers, refreshLocalIntegrations]);
 
   useEffect(() => {
+    fetchCurrentAgent().then(setCurrentAgent).catch(() => {});
+  }, []);
+
+  useEffect(() => {
     const intervalId = setInterval(() => {
       loadSessions();
       refreshPeers();
@@ -1435,7 +1470,7 @@ export function PanelRight() {
 
       controller = new AbortController();
       localAbortRef.current = controller;
-      const contextEntries = buildChatContextEntries(availableProjects, activeProjectId);
+      const contextEntries = buildChatContextEntries(availableProjects, activeProjectId, currentAgent);
 
       const result = await streamLocalAgentChat(integrationId, text, {
         correlationId,
@@ -1497,6 +1532,7 @@ export function PanelRight() {
     activeProjectId,
     advance,
     availableProjects,
+    currentAgent,
     loadSessions,
     localInput,
     localSending,

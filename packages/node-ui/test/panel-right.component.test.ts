@@ -18,6 +18,7 @@ const fetchAgentsMock = vi.fn();
 const fetchConnectionsMock = vi.fn();
 const fetchLocalAgentIntegrationsMock = vi.fn();
 const fetchLocalAgentHistoryMock = vi.fn();
+const fetchCurrentAgentMock = vi.fn();
 const streamLocalAgentChatMock = vi.fn();
 const connectLocalAgentIntegrationMock = vi.fn();
 const disconnectLocalAgentIntegrationMock = vi.fn();
@@ -31,6 +32,7 @@ vi.mock('../src/ui/api.js', async () => {
     fetchConnections: fetchConnectionsMock,
     fetchLocalAgentIntegrations: fetchLocalAgentIntegrationsMock,
     fetchLocalAgentHistory: fetchLocalAgentHistoryMock,
+    fetchCurrentAgent: fetchCurrentAgentMock,
     streamLocalAgentChat: streamLocalAgentChatMock,
     connectLocalAgentIntegration: connectLocalAgentIntegrationMock,
     disconnectLocalAgentIntegration: disconnectLocalAgentIntegrationMock,
@@ -76,6 +78,13 @@ describe('PanelRight component', () => {
       target: 'local',
     }] });
     fetchLocalAgentHistoryMock.mockResolvedValue([]);
+    fetchCurrentAgentMock.mockResolvedValue({
+      agentAddress: 'peer-self',
+      agentDid: 'did:dkg:agent:peer-self',
+      name: 'Self',
+      peerId: 'peer-self',
+      nodeIdentityId: 'node-self',
+    });
     streamLocalAgentChatMock.mockResolvedValue({ text: 'Roger that', correlationId: 'corr-1' });
     apiFetchMemorySessionsMock.mockResolvedValue({ sessions: [] });
   });
@@ -172,11 +181,28 @@ describe('PanelRight component', () => {
     });
 
     expect(streamLocalAgentChatMock).toHaveBeenCalledWith('openclaw', 'Check memory', expect.objectContaining({
-      contextEntries: [{
-        key: 'target_context_graph',
-        label: 'Target context graph',
-        value: 'Origin Trail Game (origin-trail-game)',
-      }],
+      contextEntries: [
+        {
+          key: 'target_context_graph',
+          label: 'Target context graph',
+          value: 'Origin Trail Game (origin-trail-game)',
+        },
+        {
+          key: 'current_agent_address',
+          label: 'Current agent address',
+          value: 'peer-self',
+        },
+        {
+          key: 'current_agent_did',
+          label: 'Current agent DID',
+          value: 'did:dkg:agent:peer-self',
+        },
+        {
+          key: 'current_agent_peer_id',
+          label: 'Current agent peer ID',
+          value: 'peer-self',
+        },
+      ],
     }));
     expect(container.textContent).toContain('Roger that');
 

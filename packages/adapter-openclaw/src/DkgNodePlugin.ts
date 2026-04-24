@@ -1127,7 +1127,9 @@ export class DkgNodePlugin {
           'layer to read: `working-memory` (WM — per-agent), `shared-working-memory` (SWM — gossip-' +
           'replicated), or `verified-memory` (VM — on-chain anchored); when `view` is supplied, ' +
           '`context_graph_id` is also required. For WM reads, `agent_address` selects whose WM to ' +
-          'read — it defaults to this node\'s agent address (the same default the adapter uses for ' +
+          'read; prefer the injected `current_agent_address` from turn context when present. If a WM ' +
+          'read looks unexpectedly empty, retry alternate identity forms before concluding there is no ' +
+          'WM data. It defaults to this node\'s agent address (the same default the adapter uses for ' +
           'memory-plugin reads). Omit `view` for a cross-graph query routed via the legacy data-' +
           'graph path (unscoped, or scoped when `context_graph_id` is set); use `GRAPH ?g { ... }` ' +
           'for named-graph targeting in that mode.',
@@ -1156,8 +1158,9 @@ export class DkgNodePlugin {
               description:
                 "Optional target for `view: \"working-memory\"` reads — defaults to this node's " +
                 'agent address (matches the default the memory plugin uses for its own WM reads). ' +
-                'Ignored for non-WM views. Supply an explicit value to read another local agent\'s ' +
-                'WM namespace in multi-agent deployments.',
+                'Prefer the injected `current_agent_address` from chat context when available. Accepts ' +
+                'wallet/address form, raw peer ID, or DID form. Ignored for non-WM views. Supply an ' +
+                'explicit value to read another local agent\'s WM namespace in multi-agent deployments.',
             },
           },
           required: ['sparql'],

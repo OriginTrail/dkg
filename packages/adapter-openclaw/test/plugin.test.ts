@@ -669,6 +669,25 @@ describe('DkgNodePlugin', () => {
       expect(query.description).not.toMatch(/Omit `?view`? for the default/i);
     });
 
+    it('dkg_query description steers WM reads toward current_agent_address and retries identity variants', () => {
+      const plugin = new DkgNodePlugin();
+      const tools: OpenClawTool[] = [];
+      plugin.register({
+        config: {},
+        registerTool: (t) => tools.push(t),
+        registerHook: () => {},
+        on: () => {},
+        logger: {},
+      });
+      const query = tools.find((t) => t.name === 'dkg_query')!;
+      const agentAddress = query.parameters.properties.agent_address as { description?: string };
+
+      expect(query.description).toContain('current_agent_address');
+      expect(query.description).toMatch(/retry alternate identity forms/i);
+      expect(agentAddress.description).toContain('current_agent_address');
+      expect(agentAddress.description).toMatch(/wallet\/address form, raw peer ID, or DID form/i);
+    });
+
     it('dkg_query forwards the `view` field to the daemon body verbatim', async () => {
       // Handler-level drift guard: the daemon's /api/query route destructures
       // `view` from the body. If we renamed the field in the handler, this
