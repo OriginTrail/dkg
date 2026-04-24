@@ -1508,7 +1508,9 @@ export class DkgNodePlugin {
         name: 'dkg_shared_memory_publish',
         description:
           'Final step of the canonical flow. Publish all Shared Working Memory in a context graph to Verified ' +
-          'Memory (on-chain) and clear SWM. Use after `dkg_assertion_promote` to finalize promoted data.',
+          'Memory (on-chain) and clear SWM. Use after `dkg_assertion_promote` to finalize promoted data. ' +
+          'If the context graph is still local-only/unregistered, set `register_if_needed: true` to explicitly ' +
+          'upgrade it to on-chain registration before publishing.',
         parameters: {
           type: 'object',
           properties: {
@@ -1521,6 +1523,18 @@ export class DkgNodePlugin {
             sub_graph_name: {
               type: 'string',
               description: 'Optional sub-graph scope. Must match the sub-graph used during create/write/promote. Cannot be combined with a cross-CG publish target.',
+            },
+            register_if_needed: {
+              type: 'boolean',
+              description: 'When true, explicitly register the context graph on-chain before publishing if needed. This may spend gas/TRAC; it is opt-in and not the default.',
+            },
+            reveal_on_chain: {
+              type: 'boolean',
+              description: 'Optional registration flag used only when `register_if_needed` is true. Controls whether CG metadata is revealed on-chain.',
+            },
+            access_policy: {
+              type: 'number',
+              description: 'Optional registration access policy used only when `register_if_needed` is true: `0` for open, `1` for private.',
             },
           },
           required: ['context_graph_id'],
@@ -2111,8 +2125,32 @@ export class DkgNodePlugin {
         return this.error('"root_entities" must be omitted or a non-empty array of root entity URIs.');
       }
       const subGraphName = args.sub_graph_name ? String(args.sub_graph_name) : undefined;
+      const registerIfNeeded = args.register_if_needed === true;
+      if (args.register_if_needed !== undefined && typeof args.register_if_needed !== 'boolean') {
+        return this.error('"register_if_needed" must be a boolean.');
+      }
+      if (args.reveal_on_chain !== undefined && typeof args.reveal_on_chain !== 'boolean') {
+        return this.error('"reveal_on_chain" must be a boolean.');
+      }
+      if (args.access_policy !== undefined && args.access_policy !== 0 && args.access_policy !== 1) {
+        return this.error('"access_policy" must be 0 (open) or 1 (private).');
+      }
+      let registration: Record<string, unknown> | undefined;
+      if (registerIfNeeded) {
+        try {
+          registration = await this.client.registerContextGraph(contextGraphId, {
+            revealOnChain: args.reveal_on_chain as boolean | undefined,
+            accessPolicy: args.access_policy as number | undefined,
+          });
+        } catch (err: any) {
+          const message = err?.message ?? String(err);
+          if (!message.includes('already registered')) {
+            throw err;
+          }
+        }
+      }
       const result = await this.client.publishSharedMemory(contextGraphId, { rootEntities, subGraphName });
-      return this.json(result);
+      return this.json(registration ? { ...result, registration } : result);
     } catch (err: any) {
       return this.daemonError(err);
     }

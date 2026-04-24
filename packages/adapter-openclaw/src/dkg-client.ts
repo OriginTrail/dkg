@@ -635,6 +635,13 @@ export class DkgDaemonClient {
     return this.post('/api/context-graph/create', { id, name, description });
   }
 
+  async registerContextGraph(
+    id: string,
+    opts?: { revealOnChain?: boolean; accessPolicy?: number },
+  ): Promise<{ registered: string; onChainId: string; txHash?: string; hint?: string }> {
+    return this.post('/api/context-graph/register', { id, ...opts });
+  }
+
   // ---------------------------------------------------------------------------
   // Subscription
   // ---------------------------------------------------------------------------
