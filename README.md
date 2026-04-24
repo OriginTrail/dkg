@@ -94,6 +94,20 @@ Once running, open the dashboard at [http://127.0.0.1:9200/ui](http://127.0.0.1:
 
 ---
 
+## Community integrations
+
+Beyond the first-party framework adapters above, DKG V10 supports **community-contributed integrations** — CLIs, MCP servers, agent plugins, and services that run against your local node through its public HTTP API, `dkg` CLI, or MCP interface. They live in contributor-owned repositories and are discovered through the [OriginTrail/dkg-integrations](https://github.com/OriginTrail/dkg-integrations) registry.
+
+```bash
+dkg integration list                 # browse the registry
+dkg integration info <slug>          # inspect a single integration
+dkg integration install <slug>       # install (with publish-time provenance verification for CLI-kind installs)
+```
+
+**Building one:** fork the minimal reference template at [OriginTrail/dkg-hello-world](https://github.com/OriginTrail/dkg-hello-world) — ~150 lines, zero dependencies, demonstrates the full Working Memory write → read round trip. Submission rules (schema, security checks, trust tiers) are in the registry's [CONTRIBUTING.md](https://github.com/OriginTrail/dkg-integrations/blob/main/CONTRIBUTING.md).
+
+---
+
 ## CLI commands
 
 ```bash
@@ -157,6 +171,11 @@ dkg auth status                          # show whether auth is enabled
 
 # Framework adapters
 dkg openclaw setup                       # install & configure the OpenClaw adapter
+
+# Community integrations (registry: OriginTrail/dkg-integrations)
+dkg integration list                     # browse registry entries
+dkg integration info <slug>              # show details for one entry
+dkg integration install <slug>           # install (CLI-kind installs verify npm provenance)
 
 # Update / rollback
 dkg update [--check] [--allow-prerelease]  # update node software
@@ -357,6 +376,7 @@ DKG V10 is a **release candidate** on the testnet. Core capabilities are impleme
 - Dashboard UI with chat memory, SPARQL explorer, project management
 - Framework adapters for OpenClaw, ElizaOS, Hermes, AutoResearch
 - MCP server for Cursor / Claude Code / other coding assistants
+- Community integrations registry (`dkg integration list|info|install`) with install-time provenance verification for CLI-kind installs
 - Blue-green update and rollback flow
 
 Expect rapid iteration and breaking changes. Not yet recommended for production workloads.
@@ -384,5 +404,6 @@ Tier-based thresholds (TORNADO / BURA / KOSAVA) and Solidity lcov checks are doc
 We welcome contributions — bug reports, feature ideas, and pull requests.
 
 - [Open an issue](https://github.com/OriginTrail/dkg-v9/issues) for bugs or feature requests
+- **Build a DKG integration** — submit to the [integrations registry](https://github.com/OriginTrail/dkg-integrations) (see [CONTRIBUTING.md](https://github.com/OriginTrail/dkg-integrations/blob/main/CONTRIBUTING.md) and the [dkg-hello-world](https://github.com/OriginTrail/dkg-hello-world) template)
 - [Join Discord](https://discord.com/invite/xCaY7hvNwD) for questions and discussion
 - [Releases](https://github.com/OriginTrail/dkg-v9/releases)
