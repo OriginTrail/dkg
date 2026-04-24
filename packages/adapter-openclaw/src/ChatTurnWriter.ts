@@ -123,12 +123,11 @@ export class ChatTurnWriter {
       // Compaction shrinks or rewrites `messages`, but our pair-index
       // watermark is relative to the current array. A stale N-pair
       // watermark against a compacted 3-pair array would cause the next
-      // `onAgentEnd` to skip every pair as "already persisted" until the
-      // transcript grew past N — silently dropping post-compaction turns.
-      // Clear watermarks so the next scan persists whatever messages
-      // survived compaction; any duplicates against prior writes are
-      // then caught by cross-path turnId dedup.
-      this.resetWatermarks();
+      // `onAgentEnd` to skip every pair as "already persisted".
+      // Reset is SESSION-SCOPED: clearing the whole map would wipe
+      // unrelated concurrent chats' cursors and cause them to replay
+      // historical turns on their next `agent_end`.
+      this.resetSessionWatermark(this.deriveSessionId(ctx));
     } catch (err) {
       this.logger.error?.("[ChatTurnWriter.onBeforeCompaction] Error", { err });
     }
@@ -137,19 +136,28 @@ export class ChatTurnWriter {
   onBeforeReset(event: any, ctx?: any): void {
     try {
       this.flushSync();
-      // Reset wipes conversation history; the pair-index watermark must
-      // start over too or new post-reset turns would be treated as
-      // already persisted.
-      this.resetWatermarks();
+      // Reset wipes this session's history; the pair-index watermark must
+      // start over for THIS session only (compaction/reset events are
+      // session-scoped per OpenClaw dispatch semantics).
+      this.resetSessionWatermark(this.deriveSessionId(ctx));
     } catch (err) {
       this.logger.error?.("[ChatTurnWriter.onBeforeReset] Error", { err });
     }
   }
 
-  private resetWatermarks(): void {
-    this.cachedWatermarks.clear();
-    for (const entry of this.debounceTimers.values()) clearTimeout(entry.timer);
-    this.debounceTimers.clear();
+  /**
+   * Clear watermark state for a single session and any pending debounce
+   * timer it owns. No-op when `sessionId` is empty (derivation failed —
+   * safer to leave state intact than wipe every session as a fallback).
+   */
+  private resetSessionWatermark(sessionId: string): void {
+    if (!sessionId) return;
+    this.cachedWatermarks.delete(sessionId);
+    const entry = this.debounceTimers.get(sessionId);
+    if (entry) {
+      clearTimeout(entry.timer);
+      this.debounceTimers.delete(sessionId);
+    }
     this.writeWatermarkFile();
   }
 

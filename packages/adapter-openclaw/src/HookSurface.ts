@@ -113,6 +113,7 @@ export class HookSurface {
 
   /** Timers for the I4 grace-period commit path. Cleared on first fire or destroy. */
   private readonly commitTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly rareFireKeys = new Set<string>();
 
   constructor(
     api: OpenClawPluginApi,
@@ -130,9 +131,21 @@ export class HookSurface {
    * Install a handler for a `(kind, event)` pair.
    * Returns an unsubscribe callback, or `null` when the install failed
    * (e.g. `api.on` absent for a typed hook). Never throws.
+   *
+   * `opts.rareFireExpected` marks hooks that normally don't fire during
+   * routine traffic (e.g. `before_compaction`, `before_reset`). Their
+   * 30s commit-by-timeout message downgrades to debug instead of warn —
+   * a healthy startup otherwise surfaces noise warnings that drown out
+   * real install failures.
    */
-  install(kind: HookKind, event: string, handler: HookHandler): Unsubscribe | null {
+  install(
+    kind: HookKind,
+    event: string,
+    handler: HookHandler,
+    opts: { rareFireExpected?: boolean } = {},
+  ): Unsubscribe | null {
     const key = `${kind}:${event}`;
+    if (opts.rareFireExpected) this.rareFireKeys.add(key);
 
     if (this.strategyOverride === 'off') {
       this.setStat(key, { installedVia: 'none', commitState: 'committed-by-timeout', installError: 'hookStrategy=off' });
@@ -184,10 +197,17 @@ export class HookSurface {
       const s = this.stats.get(key);
       if (s && s.commitState === 'pending') {
         this.stats.set(key, { ...s, commitState: 'committed-by-timeout' });
-        this.logger.warn?.(
+        const msg =
           `[hook-surface] commit-by-timeout: ${key} never fired within ${this.commitGraceMs}ms. ` +
-            `installedVia=${s.installedVia}, fireCount=0.`,
-        );
+          `installedVia=${s.installedVia}, fireCount=0.`;
+        // Rare-fire hooks (e.g. before_compaction, before_reset) don't
+        // fire in routine traffic; surface at debug so real install
+        // failures on frequent hooks aren't drowned out by startup noise.
+        if (this.rareFireKeys.has(key)) {
+          this.logger.debug?.(msg);
+        } else {
+          this.logger.warn?.(msg);
+        }
       }
       this.commitTimers.delete(key);
     }, this.commitGraceMs);

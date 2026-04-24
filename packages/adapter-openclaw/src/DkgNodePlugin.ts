@@ -350,14 +350,30 @@ export class DkgNodePlugin {
 
     if (this.hookSurface) {
       const stats = this.hookSurface.getDispatchStats();
-      const anyInstallFailed = Object.values(stats).some(
-        (stat) => stat.installedVia === 'none',
-      );
       const apiChanged = this.hookSurfaceApi !== api;
-      if (!anyInstallFailed && !apiChanged) return;
-      this.hookSurface.destroy();
-      this.hookSurface = null;
-      this.hookSurfaceApi = null;
+      if (apiChanged) {
+        // New api instance — typed hooks bound to the old api won't fire
+        // against it. Destroy and rebuild everything.
+        this.hookSurface.destroy();
+        this.hookSurface = null;
+        this.hookSurfaceApi = null;
+      } else {
+        // Same api. Only retry INTERNAL hook installs that previously
+        // failed (e.g. gateway hadn't created the internal-hook map yet
+        // at first register()). Do NOT re-run typed installs on the same
+        // api — `api.on(...)` has no unsubscribe, so a rebuild would
+        // leave the old typed handlers bound and `before_prompt_build` /
+        // `agent_end` would fire twice per turn.
+        const internalNeedsRetry = (event: string) =>
+          stats[`internal:${event}`]?.installedVia === 'none';
+        if (internalNeedsRetry('message:received')) {
+          this.hookSurface.install('internal', 'message:received', (ev) => this.chatTurnWriter!.onMessageReceived(ev));
+        }
+        if (internalNeedsRetry('message:sent')) {
+          this.hookSurface.install('internal', 'message:sent', (ev) => this.chatTurnWriter!.onMessageSent(ev));
+        }
+        return;
+      }
     }
 
     this.hookSurface = new HookSurface(api, api.logger);
@@ -366,10 +382,13 @@ export class DkgNodePlugin {
     // W3 — auto-recall every turn via before_prompt_build typed hook
     this.hookSurface.install('typed', 'before_prompt_build', (ev, ctx) => this.handleBeforePromptBuild(ev, ctx));
 
-    // W4a — LLM-driven turn capture via typed hooks
+    // W4a — LLM-driven turn capture via typed hooks. `before_compaction`
+    // and `before_reset` are rare on healthy gateways; tag them so the
+    // HookSurface commit-by-timeout warn downgrades to debug (otherwise
+    // they false-positive within 30s of startup every time).
     this.hookSurface.install('typed', 'agent_end',        (ev, ctx) => this.chatTurnWriter!.onAgentEnd(ev, ctx));
-    this.hookSurface.install('typed', 'before_compaction', (ev, ctx) => this.chatTurnWriter!.onBeforeCompaction(ev, ctx));
-    this.hookSurface.install('typed', 'before_reset',      (ev, ctx) => this.chatTurnWriter!.onBeforeReset(ev, ctx));
+    this.hookSurface.install('typed', 'before_compaction', (ev, ctx) => this.chatTurnWriter!.onBeforeCompaction(ev, ctx), { rareFireExpected: true });
+    this.hookSurface.install('typed', 'before_reset',      (ev, ctx) => this.chatTurnWriter!.onBeforeReset(ev, ctx), { rareFireExpected: true });
 
     // W4b — non-LLM channel capture via internal-hook map (PR #216 mechanism)
     this.hookSurface.install('internal', 'message:received', (ev) => this.chatTurnWriter!.onMessageReceived(ev));

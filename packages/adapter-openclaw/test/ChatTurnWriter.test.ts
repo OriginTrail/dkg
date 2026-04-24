@@ -421,7 +421,9 @@ describe("ChatTurnWriter", () => {
     expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(3);
 
     mockClient.storeChatTurn.mockClear();
-    writer.onBeforeCompaction({}, {});
+    // Session-scoped reset — must pass the same ctx so the correct
+    // session's watermark is cleared.
+    writer.onBeforeCompaction({}, { channelId: "ch", sessionKey: "sk" });
 
     // After compaction a shorter messages array arrives (representative of
     // gateway summarization: old turns folded to a single summary pair).
@@ -444,6 +446,50 @@ describe("ChatTurnWriter", () => {
     expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(2);
     expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("summary");
     expect(mockClient.storeChatTurn.mock.calls[1][1]).toBe("follow-up");
+  }, 10_000);
+
+  it("onBeforeCompaction resets only the affected session's watermark (R6.1)", async () => {
+    // Session A: persist 2 pairs → watermark advances to 1.
+    const eventA: AgentEndContext = {
+      sessionId: "t",
+      messages: [
+        { role: "user", content: "a-u1" },
+        { role: "assistant", content: "a-a1" },
+        { role: "user", content: "a-u2" },
+        { role: "assistant", content: "a-a2" },
+      ],
+    };
+    writer.onAgentEnd(eventA, { channelId: "chA", sessionKey: "skA" });
+    await flushMicrotasks();
+    await new Promise((r) => setTimeout(r, 70)); // commit debounce
+    // Session B: persist 2 pairs → session B watermark advances.
+    const eventB: AgentEndContext = {
+      sessionId: "t",
+      messages: [
+        { role: "user", content: "b-u1" },
+        { role: "assistant", content: "b-a1" },
+        { role: "user", content: "b-u2" },
+        { role: "assistant", content: "b-a2" },
+      ],
+    };
+    writer.onAgentEnd(eventB, { channelId: "chB", sessionKey: "skB" });
+    await flushMicrotasks();
+    await new Promise((r) => setTimeout(r, 70));
+
+    mockClient.storeChatTurn.mockClear();
+    // Compact session A only — session B's cursor must survive.
+    writer.onBeforeCompaction({}, { channelId: "chA", sessionKey: "skA" });
+
+    // Wait past dedup TTL so identical text wouldn't be blocked.
+    await new Promise((r) => setTimeout(r, 3100));
+
+    // Fire session B's agent_end with the SAME 2 pairs it already has.
+    // If R6.1 was broken (full wipe), we'd see 2 new persists (both pairs
+    // re-played into DKG). With session-scoped reset, B's watermark is
+    // still at its prior position → 0 new persists expected.
+    writer.onAgentEnd(eventB, { channelId: "chB", sessionKey: "skB" });
+    await flushMicrotasks();
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(0);
   }, 10_000);
 
   it("distinct accountId/conversationId produce distinct sessionIds (R4.1 thread separation)", async () => {
