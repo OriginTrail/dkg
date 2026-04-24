@@ -31,7 +31,7 @@ import {
   slotEntryPoint,
   CLI_NPM_PACKAGE,
   type DkgConfig,
-  type AutoUpdateConfig,
+  type ResolvedAutoUpdateConfig,
 } from '../config.js';
 import {
   _autoUpdateIo,
@@ -545,7 +545,7 @@ async function _performNpmUpdateInner(
  * Returns the latest commit SHA if an update is available, null otherwise.
  */
 export async function checkForNewCommit(
-  au: AutoUpdateConfig,
+  au: ResolvedAutoUpdateConfig,
   log: (msg: string) => void,
   refOverride?: string,
 ): Promise<string | null> {
@@ -554,7 +554,7 @@ export async function checkForNewCommit(
 }
 
 export async function checkForNewCommitWithStatus(
-  au: AutoUpdateConfig,
+  au: ResolvedAutoUpdateConfig,
   log: (msg: string) => void,
   refOverride?: string,
 ): Promise<CommitCheckStatus> {
@@ -683,7 +683,7 @@ export async function releaseUpdateLock(): Promise<void> {
  * Returns true if an update was applied (caller should SIGTERM to restart).
  */
 export async function performUpdate(
-  au: AutoUpdateConfig,
+  au: ResolvedAutoUpdateConfig,
   log: (msg: string) => void,
   opts: {
     refOverride?: string;
@@ -696,7 +696,7 @@ export async function performUpdate(
 }
 
 export async function performUpdateWithStatus(
-  au: AutoUpdateConfig,
+  au: ResolvedAutoUpdateConfig,
   log: (msg: string) => void,
   opts: {
     refOverride?: string;
@@ -723,7 +723,7 @@ export async function performUpdateWithStatus(
 }
 
 async function _performUpdateInner(
-  au: AutoUpdateConfig,
+  au: ResolvedAutoUpdateConfig,
   log: (msg: string) => void,
   opts: {
     refOverride?: string;
@@ -1126,7 +1126,7 @@ export async function performNpmUpdate(
 }
 
 export async function checkForUpdate(
-  au: AutoUpdateConfig,
+  au: ResolvedAutoUpdateConfig,
   log: (msg: string) => void,
 ): Promise<boolean> {
   try {

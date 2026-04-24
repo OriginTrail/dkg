@@ -19,6 +19,18 @@ export interface AutoUpdateConfig {
   checkIntervalMinutes: number;
 }
 
+/**
+ * AutoUpdateConfig with `repo` and `branch` guaranteed present — the shape
+ * returned by `resolveAutoUpdateConfig()` after falling back through
+ * ~/.dkg/config.json -> network/<env>.json -> project.json. Consumers of the
+ * auto-update subsystem should accept this type, not the raw `AutoUpdateConfig`,
+ * since the raw form allows `repo`/`branch` to be omitted.
+ */
+export type ResolvedAutoUpdateConfig = AutoUpdateConfig & {
+  repo: string;
+  branch: string;
+};
+
 export interface NetworkConfig {
   networkName: string;
   networkId: string;
@@ -369,7 +381,7 @@ export function _resetProjectConfigCache(): void {
 export function resolveAutoUpdateConfig(
   config: Pick<DkgConfig, 'autoUpdate'> | null | undefined,
   network: Pick<NetworkConfig, 'autoUpdate'> | null | undefined,
-): (AutoUpdateConfig & { repo: string; branch: string }) | null {
+): ResolvedAutoUpdateConfig | null {
   const cfg = config?.autoUpdate;
   const net = network?.autoUpdate;
   const enabled = cfg?.enabled ?? net?.enabled ?? false;
