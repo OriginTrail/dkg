@@ -40,7 +40,7 @@ describe("ChatTurnWriter.sanitize (N6)", () => {
     writer.onAgentEnd(event, { channelId: "c\x00h", sessionKey: "sk" });
     await flush();
     const call = mockClient.storeChatTurn.mock.calls[0];
-    expect(call[0]).toBe("openclaw:ch:sk");
+    expect(call[0]).toBe("openclaw:ch:::sk");
   });
 
   it("strips control chars from sessionId parts", async () => {
@@ -54,7 +54,7 @@ describe("ChatTurnWriter.sanitize (N6)", () => {
     writer.onAgentEnd(event, { channelId: "ch\x1fX", sessionKey: "sk" });
     await flush();
     const call = mockClient.storeChatTurn.mock.calls[0];
-    expect(call[0]).toBe("openclaw:chX:sk");
+    expect(call[0]).toBe("openclaw:chX:::sk");
   });
 
   it("strips DEL byte from sessionId parts", async () => {
@@ -68,7 +68,7 @@ describe("ChatTurnWriter.sanitize (N6)", () => {
     writer.onAgentEnd(event, { channelId: "c\x7fh", sessionKey: "sk" });
     await flush();
     const call = mockClient.storeChatTurn.mock.calls[0];
-    expect(call[0]).toBe("openclaw:ch:sk");
+    expect(call[0]).toBe("openclaw:ch:::sk");
   });
 
   it("caps sessionId parts at 64 chars", async () => {
@@ -99,7 +99,7 @@ describe("ChatTurnWriter.sanitize (N6)", () => {
     writer.onAgentEnd(event, { channelId: "ch", sessionKey: "sk" });
     await flush();
     const call = mockClient.storeChatTurn.mock.calls[0];
-    expect(call[0]).toBe("openclaw:ch:sk");
+    expect(call[0]).toBe("openclaw:ch:::sk");
   });
 
   it("handles mixed control + long strings without throwing", async () => {

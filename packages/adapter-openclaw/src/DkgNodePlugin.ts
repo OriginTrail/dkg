@@ -1470,6 +1470,19 @@ export class DkgNodePlugin {
   ): Promise<{ appendSystemContext: string } | undefined> {
     if (!this.memoryPlugin) return undefined;
 
+    // Per-turn re-assertion of the memory-slot capability. Cheap (one
+    // property assignment per DkgMemoryPlugin.reAssertCapability docstring)
+    // and runs before every prompt build, so if another plugin reclaims
+    // `memoryPluginState.capability` after startup, DKG memory re-asserts
+    // ownership before slot-backed recall runs. Replaces the retired
+    // PR #211 per-turn re-assert wiring with a lighter, channel-agnostic
+    // variant keyed to where it actually matters (recall-time).
+    try {
+      this.memoryPlugin.reAssertCapability();
+    } catch {
+      /* non-fatal; retained by DkgMemoryPlugin itself */
+    }
+
     const messages: any[] = Array.isArray(event?.messages) ? event.messages : [];
     const lastUser = [...messages].reverse().find((m) => m?.role === 'user');
     if (!lastUser) return undefined;

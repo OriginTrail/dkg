@@ -280,20 +280,55 @@ export class ChatTurnWriter {
     return createHash("sha256").update(combined).digest("hex").slice(0, 16);
   }
 
+  /**
+   * DKG-side session id from the typed-hook `ctx`. Channels like Telegram
+   * can legitimately share a `sessionKey` across threads, so the id also
+   * includes `accountId` + `conversationId` when the gateway provides
+   * them. Missing discriminators fall back to empty strings, keeping the
+   * id stable across paths for the same conversation — and matching
+   * `deriveSessionIdFromEvent` for dedup.
+   */
   private deriveSessionId(ctx?: any): string {
     if (!ctx || !ctx.channelId || !ctx.sessionKey) return "";
-    return `openclaw:${this.sanitize(ctx.channelId)}:${this.sanitize(ctx.sessionKey)}`;
+    return this.composeSessionId({
+      channelId: ctx.channelId,
+      accountId: ctx.accountId,
+      conversationId: ctx.conversationId,
+      sessionKey: ctx.sessionKey,
+    });
   }
 
   /**
-   * DKG-side session id for an internal message event. Mirrors the typed-hook
-   * `deriveSessionId(ctx)` shape (`openclaw:<channelId>:<sessionKey>`) so the
-   * same conversation persists under one session across W4a and W4b paths.
+   * DKG-side session id for an internal message event. Uses the full
+   * envelope (`channelId + accountId + conversationId + sessionKey`)
+   * so threads that legitimately share a `sessionKey` on the same
+   * channel still persist to distinct DKG sessions — and turns across
+   * those threads can't be mis-dedup'd as duplicates.
    */
   private deriveSessionIdFromEvent(ev: InternalMessageEvent): string {
-    const channelId = (ev as any)?.context?.channelId ?? (ev as any)?.channelId ?? "unknown";
-    const sessionKey = ev.sessionKey ?? "";
-    return `openclaw:${this.sanitize(channelId)}:${this.sanitize(sessionKey)}`;
+    const ctx = (ev as any)?.context ?? {};
+    return this.composeSessionId({
+      channelId: ctx.channelId ?? (ev as any)?.channelId,
+      accountId: ctx.accountId,
+      conversationId: ctx.conversationId,
+      sessionKey: ev.sessionKey,
+    });
+  }
+
+  private composeSessionId(parts: {
+    channelId?: string;
+    accountId?: string;
+    conversationId?: string;
+    sessionKey?: string;
+  }): string {
+    const channelId = parts.channelId ?? "unknown";
+    const accountId = parts.accountId ?? "";
+    const conversationId = parts.conversationId ?? "";
+    const sessionKey = parts.sessionKey ?? "";
+    const ids = [channelId, accountId, conversationId, sessionKey].map((p) =>
+      this.sanitize(String(p ?? "")),
+    );
+    return `openclaw:${ids.join(":")}`;
   }
 
   /**

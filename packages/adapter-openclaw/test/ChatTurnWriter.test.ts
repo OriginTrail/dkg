@@ -88,7 +88,7 @@ describe("ChatTurnWriter", () => {
     writer.onAgentEnd(event, { channelId: "ch", sessionKey: "sk" });
     await flushMicrotasks();
     expect(mockClient.storeChatTurn).toHaveBeenCalledWith(
-      "openclaw:ch:sk",
+      "openclaw:ch:::sk",
       "hello world",
       "hi there",
       expect.any(Object),
@@ -370,6 +370,44 @@ describe("ChatTurnWriter", () => {
     expect(persistedAssistant).not.toContain("secret");
     expect(persistedAssistant).toContain("sure");
     expect(persistedAssistant).toContain("here is your answer");
+  });
+
+  it("distinct accountId/conversationId produce distinct sessionIds (R4.1 thread separation)", async () => {
+    // Two events sharing sessionKey on the same channel but differing in
+    // accountId must land under different DKG sessionIds — otherwise
+    // unrelated Telegram/WhatsApp threads merge into one persisted
+    // session and turns across threads could be mis-dedup'd.
+    writer.onMessageReceived({
+      sessionKey: "shared-key",
+      direction: "inbound",
+      text: "hi from A",
+      ...({ context: { channelId: "tg", accountId: "userA", conversationId: "convA" } } as any),
+    } as any);
+    writer.onMessageSent({
+      sessionKey: "shared-key",
+      direction: "outbound",
+      text: "reply to A",
+      ...({ context: { channelId: "tg", accountId: "userA", conversationId: "convA", success: true } } as any),
+    } as any);
+    writer.onMessageReceived({
+      sessionKey: "shared-key",
+      direction: "inbound",
+      text: "hi from B",
+      ...({ context: { channelId: "tg", accountId: "userB", conversationId: "convB" } } as any),
+    } as any);
+    writer.onMessageSent({
+      sessionKey: "shared-key",
+      direction: "outbound",
+      text: "reply to B",
+      ...({ context: { channelId: "tg", accountId: "userB", conversationId: "convB", success: true } } as any),
+    } as any);
+    await flushMicrotasks();
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(2);
+    const sidA = mockClient.storeChatTurn.mock.calls[0][0];
+    const sidB = mockClient.storeChatTurn.mock.calls[1][0];
+    expect(sidA).not.toBe(sidB);
+    expect(sidA).toContain("userA");
+    expect(sidB).toContain("userB");
   });
 
   it("computeDelta preserves user text containing <recalled-memory> tag (R3.4)", async () => {
