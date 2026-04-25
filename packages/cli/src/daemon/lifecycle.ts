@@ -102,7 +102,7 @@ import {
 } from '../config.js';
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../catchup-runner.js';
-import { loadTokens, httpAuthGuard, extractBearerToken } from '../auth.js';
+import { loadTokens, httpAuthGuard } from '../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../extraction/index.js';
 import {
@@ -136,13 +136,6 @@ import {
   type InstallContext,
 } from '@origintrail-official/dkg-mcp/manifest/install';
 import { DkgClient } from '@origintrail-official/dkg-mcp/client';
-
-import {
-  loadApps,
-  handleAppRequest,
-  startAppStaticServer,
-  type LoadedApp,
-} from "../app-loader.js";
 
 // Daemon sub-module imports — every public symbol from sibling
 // modules is pulled in here because the legacy monolithic file used
@@ -1293,48 +1286,9 @@ export async function runDaemonInner(
     log("API authentication disabled (auth.enabled = false)");
   }
 
-  // --- Installable Apps ---
-
-  const installedApps: LoadedApp[] = await loadApps(agent, config, log);
-  let appStaticPort: number | undefined;
-  let appStaticServer: import("node:http").Server | undefined;
+  // Trusted server-side port binding used downstream (SSRF defence in
+  // manifestSelfClient; passed to handleRequest + route modules).
   const apiPortRef = { value: 0 };
-  if (installedApps.length > 0) {
-    log(
-      `${installedApps.length} DKG app(s) loaded: ${installedApps.map((a) => a.label).join(", ")}`,
-    );
-    const appHost = config.apiHost || "127.0.0.1";
-    let desiredAppPort = (config.apiPort || 19200) + 100;
-    if (config.listenPort && desiredAppPort === config.listenPort) {
-      desiredAppPort = config.listenPort + 1;
-      log(
-        `App static port would collide with libp2p listenPort ${config.listenPort}, using ${desiredAppPort}`,
-      );
-    }
-    try {
-      const boundToLoopback = appHost === "127.0.0.1" || appHost === "::1";
-      const firstToken =
-        validTokens.size > 0
-          ? (validTokens.values().next().value as string)
-          : undefined;
-      const appAuthTokenRef =
-        boundToLoopback && authEnabled ? { value: firstToken } : undefined;
-      const result = await startAppStaticServer(
-        installedApps,
-        appHost,
-        desiredAppPort,
-        apiPortRef,
-        log,
-        appAuthTokenRef,
-      );
-      appStaticServer = result.server;
-      appStaticPort = result.port;
-    } catch (err: any) {
-      log(
-        `App static server failed to start: ${err.message}. Apps will be served from main server.`,
-      );
-    }
-  }
 
   const catchupTracker: CatchupTracker = {
     jobs: new Map(),
@@ -1457,6 +1411,31 @@ export async function runDaemonInner(
       )
         return;
 
+      // Retired installable apps framework (V9): respond with 410 Gone so upgraded
+      // nodes give a clear migration hint for both the JSON API and any bookmarked
+      // app URLs, instead of an opaque 404. The replacement surface is the
+      // `dkg integration` CLI (see packages/cli/src/integrations/).
+      if (
+        reqUrl.pathname === "/api/apps" ||
+        reqUrl.pathname.startsWith("/api/apps/") ||
+        reqUrl.pathname === "/apps" ||
+        reqUrl.pathname.startsWith("/apps/")
+      ) {
+        res.writeHead(410, {
+          "Content-Type": "application/json",
+          ...corsHeaders(reqCorsOrigin),
+        });
+        res.end(
+          JSON.stringify({
+            error: "Gone",
+            reason:
+              "The installable DKG apps framework was retired in V10. Use the `dkg integration` CLI instead.",
+            docs: "https://github.com/OriginTrail/dkg/tree/main/packages/cli#extending-the-node",
+          }),
+        );
+        return;
+      }
+
       // GET /api/events — SSE stream for real-time UI updates
       if (req.method === "GET" && reqUrl.pathname === "/api/events") {
         res.writeHead(200, {
@@ -1524,35 +1503,6 @@ export async function runDaemonInner(
       const firstToken = validTokens.size > 0 ? validTokens.values().next().value as string : undefined;
       const handled = await handleNodeUIRequest(req, res, reqUrl, dashDb, nodeUiStaticDir, undefined, metricsCollector, authEnabled ? firstToken : undefined, memoryManager, llmSettings, telemetrySettings, resolveCorsOrigin(req, corsAllowed));
       if (handled) return;
-
-      // Installable DKG apps (API handlers + static UI)
-      // Always call handleAppRequest so GET /api/apps returns [] when no apps are installed.
-      // Inject the caller's verified token if present; for loopback-bound servers,
-      // fall back to the first stored token for /apps/* HTML requests only —
-      // TCP binding guarantees only local connections reach loopback sockets.
-      let appInjectToken: string | undefined;
-      if (installedApps.length > 0 && authEnabled && validTokens.size > 0) {
-        const reqToken = extractBearerToken(req.headers.authorization);
-        if (reqToken && validTokens.has(reqToken)) {
-          appInjectToken = reqToken;
-        } else if (reqUrl.pathname.startsWith("/apps/")) {
-          const boundHost = config.apiHost || "127.0.0.1";
-          const boundToLoopback =
-            boundHost === "127.0.0.1" || boundHost === "::1";
-          if (boundToLoopback) {
-            appInjectToken = validTokens.values().next().value as string;
-          }
-        }
-      }
-      const appHandled = await handleAppRequest(
-        req,
-        res,
-        reqUrl,
-        installedApps,
-        appInjectToken,
-        appStaticPort,
-      );
-      if (appHandled) return;
 
       await handleRequest(
         req,
@@ -1633,22 +1583,6 @@ export async function runDaemonInner(
     clearInterval(pingTimer);
     clearInterval(pruneTimer);
     rateLimiter.destroy();
-    await Promise.allSettled(
-      installedApps.map(async (app) => {
-        if (!app.destroy) return;
-        let timer: ReturnType<typeof setTimeout> | undefined;
-        try {
-          const timeout = new Promise<void>((_, reject) => {
-            timer = setTimeout(() => reject(new Error("timeout")), 5_000);
-          });
-          await Promise.race([app.destroy(), timeout]);
-        } catch (err: any) {
-          log(`App ${app.id} destroy error: ${err.message}`);
-        } finally {
-          if (timer) clearTimeout(timer);
-        }
-      }),
-    );
     metricsCollector.stop();
     await publisherRuntime
       ?.stop()
@@ -1661,7 +1595,6 @@ export async function runDaemonInner(
         log(`Catch-up runner stop error: ${err?.message ?? String(err)}`),
       );
     server.close();
-    appStaticServer?.close();
     await agent.stop();
     dashDb.close();
     await removePid();

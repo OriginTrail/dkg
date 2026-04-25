@@ -95,9 +95,9 @@ describe('PanelRight component', () => {
 
     act(() => {
       useProjectsStore.setState({
-        contextGraphs: [{ id: 'origin-trail-game', name: 'Origin Trail Game' }],
+        contextGraphs: [{ id: 'testing', name: 'Testing' }],
         loading: false,
-        activeProjectId: 'origin-trail-game',
+        activeProjectId: 'testing',
       });
     });
 
@@ -121,7 +121,7 @@ describe('PanelRight component', () => {
     expect(projectSelect).toBeTruthy();
     await act(async () => {
       const valueSetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set;
-      valueSetter?.call(projectSelect, 'origin-trail-game');
+      valueSetter?.call(projectSelect, 'testing');
       projectSelect!.dispatchEvent(new Event('change', { bubbles: true }));
     });
 
@@ -185,7 +185,7 @@ describe('PanelRight component', () => {
         {
           key: 'target_context_graph',
           label: 'Target context graph',
-          value: 'Origin Trail Game (origin-trail-game)',
+          value: 'Testing (testing)',
         },
         {
           key: 'current_agent_address',

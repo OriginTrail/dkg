@@ -140,13 +140,6 @@ import {
 } from '@origintrail-official/dkg-mcp/manifest/install';
 import { DkgClient } from '@origintrail-official/dkg-mcp/client';
 
-import {
-  loadApps,
-  handleAppRequest,
-  startAppStaticServer,
-  type LoadedApp,
-} from "../../app-loader.js";
-
 // Daemon sub-module imports — every public symbol from sibling
 // modules is pulled in here because the legacy monolithic file used
 // them all without explicit imports. Unused ones are tolerated by

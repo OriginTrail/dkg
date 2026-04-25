@@ -640,6 +640,43 @@ describe('CLI-16 — Path traversal in context-graph IDs', () => {
 // CLI-17 — api-client live daemon round-trip
 // ---------------------------------------------------------------------------
 
+describe('V10 retired apps framework — /api/apps and /apps/* return 410 Gone', () => {
+  // Real HTTP-level check that the retired installable-apps surface
+  // answers 410 Gone with a structured body (pointing at the `dkg integration`
+  // CLI replacement) instead of silently 404-ing on upgraded nodes. This is
+  // the request-level counterpart to the source-scan assertions in
+  // packages/node-ui/test/ui-compat.test.ts: the source scan can't catch
+  // routing/auth-ordering regressions that change behavior without changing
+  // text, so we also hit the real socket here.
+  for (const path of ['/api/apps', '/api/apps/foo', '/apps', '/apps/some-app/index.html']) {
+    it(`${path} → 410 Gone with migration body`, async () => {
+      const d = daemon!;
+      const res = await fetch(urlFor(d, path), { headers: authHeaders(d) });
+      expect(res.status).toBe(410);
+      expect(res.headers.get('content-type') ?? '').toMatch(/application\/json/);
+      const body = await res.json() as { error?: string; reason?: string; docs?: string };
+      expect(body.error).toBe('Gone');
+      expect(body.reason ?? '').toMatch(/retired in V10/);
+      expect(body.reason ?? '').toMatch(/dkg integration/);
+      expect(body.docs ?? '').toMatch(/^https?:\/\//);
+    });
+  }
+
+  it('CORS preflight on /api/apps is still handled (204), not 410', async () => {
+    // Preflight must resolve before the 410 handler fires so browsers can
+    // surface the real 410 to JS callers instead of opaque CORS failure.
+    const d = daemon!;
+    const res = await fetch(urlFor(d, '/api/apps'), {
+      method: 'OPTIONS',
+      headers: {
+        Origin: `http://127.0.0.1:${d.apiPort}`,
+        'Access-Control-Request-Method': 'GET',
+      },
+    });
+    expect(res.status).toBe(204);
+  });
+});
+
 describe('CLI-17 — api-client round-trip against live daemon', () => {
   it('ApiClient.status() returns the live daemon status (no mocks)', async () => {
     const d = daemon!;

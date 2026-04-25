@@ -20,10 +20,6 @@ const AgentHubView = React.lazy(() =>
   import('../../pages/AgentHub.js').then((m) => ({ default: m.AgentHubPage }))
 );
 
-const GameView = React.lazy(() =>
-  import('../../pages/Apps.js').then((m) => ({ default: m.AppsPage }))
-);
-
 const SettingsView = React.lazy(() =>
   import('../../pages/Settings.js').then((m) => ({ default: m.SettingsPage }))
 );
@@ -188,14 +184,6 @@ function ViewContainer() {
     return (
       <Suspense fallback={<div className="lazy-spinner">Loading agent hub...</div>}>
         <AgentHubView />
-      </Suspense>
-    );
-  }
-
-  if (activeTabId === 'game') {
-    return (
-      <Suspense fallback={<div className="lazy-spinner">Loading game...</div>}>
-        <GameView />
       </Suspense>
     );
   }

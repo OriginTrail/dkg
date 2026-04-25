@@ -148,9 +148,12 @@ export function App() {
       } />
       <Route path="/agent" element={<Navigate to="/" replace />} />
       <Route path="/explorer" element={<Navigate to="/" replace />} />
-      <Route path="/apps/*" element={<Navigate to="/" replace />} />
       <Route path="/settings" element={<Navigate to="/" replace />} />
       <Route path="/messages" element={<Navigate to="/" replace />} />
+      {/* V9 installable apps framework was retired in V10 (see daemon 410 handler).
+          Redirect stale bookmarks for /ui/apps/... back to the dashboard so upgraded
+          nodes don't silently render AppShell under a dead URL. */}
+      <Route path="/apps/*" element={<Navigate to="/" replace />} />
       <Route path="*" element={<AppShell />} />
     </Routes>
   );

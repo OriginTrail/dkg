@@ -5,7 +5,7 @@
   "packageManager": "pnpm@10.28.1",
   "scripts": {
     "build": "turbo build",
-    "build:runtime": "pnpm -r --filter @origintrail-official/dkg-core --filter @origintrail-official/dkg-storage --filter @origintrail-official/dkg-query --filter @origintrail-official/dkg-publisher --filter @origintrail-official/dkg-chain --filter @origintrail-official/dkg-epcis --filter @origintrail-official/dkg-agent --filter @origintrail-official/dkg-graph-viz --filter @origintrail-official/dkg-node-ui --filter @origintrail-official/dkg-adapter-openclaw --filter @origintrail-official/dkg --filter @origintrail-official/dkg-app-origin-trail-game run build",
+    "build:runtime": "pnpm -r --filter @origintrail-official/dkg-core --filter @origintrail-official/dkg-storage --filter @origintrail-official/dkg-query --filter @origintrail-official/dkg-publisher --filter @origintrail-official/dkg-chain --filter @origintrail-official/dkg-epcis --filter @origintrail-official/dkg-agent --filter @origintrail-official/dkg-graph-viz --filter @origintrail-official/dkg-node-ui --filter @origintrail-official/dkg-adapter-openclaw --filter @origintrail-official/dkg run build",
     "test": "turbo test",
     "test:coverage": "turbo test:coverage",
     "lint": "turbo lint",
@@ -25,9 +25,7 @@
     "test:evm-integration": "./scripts/test-evm-integration.sh",
     "test:evm": "./scripts/test-evm-integration.sh all",
     "test:e2e:ui": "pnpm --filter @origintrail-official/dkg-node-ui test:e2e",
-    "test:game:ui": "pnpm --filter @origintrail-official/dkg-app-origin-trail-game test:ui",
-    "test:game:e2e": "pnpm --filter @origintrail-official/dkg-app-origin-trail-game test:e2e",
-    "test:all": "pnpm test && pnpm test:evm && pnpm test:game:ui"
+    "test:all": "pnpm test && pnpm test:evm"
   },
   "devDependencies": {
     "@types/node": "^22",
@@ -62,7 +60,5 @@
       "hardhat@2.28.6": "patches/hardhat@2.28.6.patch"
     }
   },
-  "dependencies": {
-    "@origintrail-official/dkg-app-origin-trail-game": "workspace:*"
-  }
+  "dependencies": {}
 }

@@ -9,7 +9,6 @@ The headline observations:
 | `packages/cli/src/daemon.ts` | 10,303 | Single-file HTTP daemon with 60+ routes, journaling, MCP install, agent registration, publisher queue, sync, file uploads, and start-up wiring all interleaved |
 | `packages/agent/src/dkg-agent.ts` | 7,259 | A "god class" wrapping publisher + sync + discovery + chain + WM/SWM + chat + skills + endorse/verify + curator gates — ~170 methods |
 | `packages/cli/src/cli.ts` | 2,983 | Mixed CLI command dispatch + interactive REPL + setup wizards |
-| `packages/origin-trail-game/src/dkg/coordinator.ts` | 2,584 | Out of scope (game) |
 | `packages/publisher/src/dkg-publisher.ts` | 2,250 | Two publish paths (V10/V9) and two update paths inlined into one class — see also P‑1.2 follow‑up |
 | `packages/chain/src/evm-adapter.ts` | 2,060 | Acceptable for now (one adapter per chain, lots of typed view-call helpers) |
 | `packages/adapter-openclaw/src/DkgChannelPlugin.ts` | 1,824 | Out of scope (adapter, not core) |

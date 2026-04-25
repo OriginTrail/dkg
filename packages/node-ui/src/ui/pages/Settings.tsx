@@ -6,7 +6,6 @@ import {
   fetchLlmSettings,
   updateLlmSettings,
   fetchWalletsBalances,
-  fetchApps,
   shutdownNode,
   fetchMetrics,
   fetchRetentionSettings,
@@ -711,7 +710,6 @@ export function SettingsPage() {
 function GeneralSettingsTab() {
   const { data: status } = useFetch(fetchStatus, [], 30_000);
   const { data: wallets } = useFetch(fetchWalletsBalances, [], 60_000);
-  const { data: apps } = useFetch(fetchApps, []);
   const s = status as any;
   const w = wallets as any;
 
@@ -814,29 +812,6 @@ function GeneralSettingsTab() {
         </div>
         <Toggle label="Publish by Default" desc="Automatically push new Knowledge Assets to the DKG upon creation." on={true} disabled />
         <Toggle label="Analytics" desc="Share anonymous usage stats to help improve DKG v9." on={false} disabled />
-      </div>
-
-      {/* Apps */}
-      <div className="settings-card">
-        <div className="settings-title">Installed Apps</div>
-        {apps && (apps as any[]).length > 0 ? (
-          (apps as any[]).map((app: any) => (
-            <div key={app.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 0', borderBottom: '1px solid var(--border)' }}>
-              <span style={{ fontSize: 18 }}>🚀</span>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 12, fontWeight: 600 }}>{app.label}</div>
-                <div className="mono" style={{ fontSize: 10, color: 'var(--text-muted)' }}>{app.id} · {app.path}</div>
-              </div>
-              <span className="mono" style={{ fontSize: 9, padding: '2px 7px', borderRadius: 4, background: 'var(--green-dim)', color: 'var(--green)', fontWeight: 700 }}>
-                ACTIVE
-              </span>
-            </div>
-          ))
-        ) : (
-          <div style={{ fontSize: 12, color: 'var(--text-muted)', padding: '12px 0' }}>
-            No apps installed. Apps are loaded from <span className="mono" style={{ fontSize: 10 }}>config.json</span> on startup.
-          </div>
-        )}
       </div>
 
       {/* Danger zone */}

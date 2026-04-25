@@ -205,7 +205,6 @@ function ProjectTreeItem({
 
 function IntegrationsSection() {
   const [open, setOpen] = useState(false);
-  const { openTab } = useTabsStore();
 
   return (
     <div className="v10-tree-section">
@@ -219,10 +218,6 @@ function IntegrationsSection() {
           <div className="v10-tree-item">
             <span className="v10-tree-item-icon">⬡</span>
             <span className="v10-tree-item-label">Obsidian</span>
-          </div>
-          <div className="v10-tree-item" onClick={() => openTab({ id: 'game', label: 'OriginTrail Game', closable: true })}>
-            <span className="v10-tree-item-icon">🎮</span>
-            <span className="v10-tree-item-label">OriginTrail Game</span>
           </div>
         </div>
       )}

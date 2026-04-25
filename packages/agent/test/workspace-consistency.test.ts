@@ -4,7 +4,7 @@ import type { DKGAgent } from '../src/dkg-agent.js';
 
 const STAGES = ['recruiting', 'traveling', 'finished'] as const;
 const SUBJECT = 'urn:test:swarm:1';
-const PREDICATE = 'https://origintrail-game.dkg.io/status';
+const PREDICATE = 'https://example.org/status';
 
 describe('monotonicTransition', () => {
   it('allows forward transition recruiting → traveling', () => {

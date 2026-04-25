@@ -85,10 +85,6 @@ export class LeftPanelPage {
     await header.click();
   }
 
-  async clickGame() {
-    await this.root.locator(sel.leftPanel.treeItem).filter({ hasText: 'OriginTrail Game' }).click();
-  }
-
   async getEmptyStateTitle() {
     return this.root.locator(sel.leftPanel.emptyTitle).textContent();
   }

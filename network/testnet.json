@@ -8,7 +8,7 @@
     "/ip4/178.156.252.147/tcp/9090/p2p/12D3KooWPyTpqBBtU1AvzSsd5rWXCQzFcGtG44qDmeYenWcpzsge",
     "/ip4/49.12.4.64/tcp/9090/p2p/12D3KooWJqhnnfouiNRUyJBEREpuKtV4A448LUbS6JiVCe8Q82bZ"
   ],
-  "defaultParanets": ["testing", "origin-trail-game"],
+  "defaultParanets": ["testing"],
   "defaultNodeRole": "edge",
   "autoUpdate": {
     "enabled": true,

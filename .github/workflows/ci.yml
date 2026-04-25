@@ -60,14 +60,13 @@ jobs:
   #    output — see the `Build all Node packages` step below for the
   #    full analysis.
   #
-  # 2. `build` is TSC-ONLY for every remaining package. Vite UI bundles
-  #    (`@dkg-node-ui` + `@dkg-app-origin-trail-game`) were split out
-  #    into a separate `build:ui` task (see `turbo.json` and the
-  #    `build` / `build:ui` / `build:full` scripts in those two
-  #    packages). No test in CI reads `dist-ui/` at runtime — API tests
-  #    never hit the static dashboard routes, the daemon gracefully
-  #    404s when the dir is absent, and the node-ui vitest suite
-  #    fabricates its own temp staticDir.
+  # 2. `build` is TSC-ONLY for every remaining package. The Vite UI
+  #    bundle (`@dkg-node-ui`) was split out into a separate `build:ui`
+  #    task (see `turbo.json` and the `build` / `build:ui` / `build:full`
+  #    scripts in that package). No test in CI reads `dist-ui/` at
+  #    runtime — API tests never hit the static dashboard routes, the
+  #    daemon gracefully 404s when the dir is absent, and the node-ui
+  #    vitest suite fabricates its own temp staticDir.
   #
   # Releases DO need both evm-module contracts and `dist-ui/` shipped
   # to npm — `release.yml` and `npm-continuous-publish.yml` run
@@ -379,7 +378,7 @@ jobs:
         run: pnpm --filter @origintrail-official/dkg-node-ui test
 
   kosava-supporting:
-    name: "Kosava: adapters + epcis + graph-viz + mcp-server + network-sim + origin-trail-game"
+    name: "Kosava: adapters + epcis + graph-viz + mcp-server + network-sim"
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -409,101 +408,7 @@ jobs:
             --filter @origintrail-official/dkg-adapter-elizaos \
             --filter @origintrail-official/dkg-adapter-hermes \
             --filter @origintrail-official/dkg-adapter-openclaw \
-            --filter @origintrail-official/dkg-app-origin-trail-game \
             run test
-
-  # ------------------------------------------------------------------
-  # Kosava OriginTrail Game E2E lane — runs the 4 heavy integration
-  # tests in `packages/origin-trail-game/test/e2e/`. Each test spins
-  # up 3 DKG daemons + a local Hardhat chain, plays a full game, and
-  # asserts gossip / context-graph / CCL behavior end-to-end.
-  #
-  # Sharded 1-file-per-runner so the lane does NOT gate wall-clock:
-  # the 4 shards all run in parallel after `build`.
-  #
-  # GREEN-STATE BUDGET (all tests passing — the target green world):
-  #   - context-graph.test.ts  : ~2m 30s (60s boot + 11 tests × ~8s)
-  #   - game-ccl-e2e.test.ts   : ~1m 30s (60s boot + 2 short tests)
-  #   - new-features.test.ts   : ~2m 30s (60s boot + 16 tests × ~6s)
-  #   - three-player-game.test : ~2m 45s (60s boot + 9 tests × ~7s + the
-  #     "plays many turns" test capped at 5 turns via CI_FAST_MODE=1;
-  #     see the `env:` block on the test step below)
-  # All four shards therefore finish in ≤ 3 min green, leaving the
-  # slowest `tornado-agent` shard (~3m-3m 20s green with 10 shards) as
-  # the true critical path and keeping total wall-clock under 5 min.
-  #
-  # GATING POLICY: KOSAVA-tier but fully gating. CI-1 (cross-file
-  # pollution) was structurally resolved by per-file sharding and CI-2
-  # (within-file EADDRINUSE race on libp2p port) was structurally
-  # resolved in `helpers.ts::pickFreePortRange` — each cluster run now
-  # allocates a probed-free random port window in the 20000-30000
-  # range, so two workers can never collide on 19200/19300/18545 and
-  # the kernel can never hold a port longer than we're willing to wait.
-  # Every remaining failure in this lane is a real product bug.
-  # ------------------------------------------------------------------
-  kosava-game-e2e:
-    name: "Kosava: origin-trail-game E2E [${{ matrix.shard.id }}/4]"
-    needs: build
-    runs-on: ubuntu-latest
-    # Single file per runner: ≤ 600s beforeAll + ≤ 120s per test * a
-    # handful of tests → worst case ~8 min on cold 2-core CI runners.
-    timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        shard:
-          - { id: 1, file: test/e2e/context-graph.test.ts }
-          - { id: 2, file: test/e2e/game-ccl-e2e.test.ts }
-          - { id: 3, file: test/e2e/new-features.test.ts }
-          - { id: 4, file: test/e2e/three-player-game.test.ts }
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version-file: .nvmrc
-          cache: pnpm
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-      - uses: actions/download-artifact@v4
-        with:
-          name: build-outputs
-          path: /tmp
-      - name: Restore build outputs
-        run: tar -xzf /tmp/build-outputs.tgz
-
-      # The E2E suite spawns its own Hardhat node and runs
-      # `npx hardhat deploy --network localhost` — contracts must be
-      # compiled and typechain generated before the daemons boot.
-      - name: Cache Hardhat artifacts
-        uses: actions/cache@v4
-        with:
-          path: |
-            packages/evm-module/artifacts
-            packages/evm-module/cache
-            packages/evm-module/typechain
-          key: hardhat-${{ runner.os }}-${{ hashFiles('packages/evm-module/contracts/**/*.sol', 'packages/evm-module/hardhat.node.config.ts') }}
-          restore-keys: |
-            hardhat-${{ runner.os }}-
-
-      - name: Compile contracts
-        run: npx hardhat compile --config hardhat.node.config.ts
-        working-directory: packages/evm-module
-
-      - name: "OriginTrail Game E2E (${{ matrix.shard.file }})"
-        run: |
-          pnpm --filter @origintrail-official/dkg-app-origin-trail-game exec \
-            vitest run --config vitest.e2e.config.ts ${{ matrix.shard.file }}
-        env:
-          NODE_OPTIONS: --max-old-space-size=4096
-          # Caps the 20-turn stability test in three-player-game.test.ts at
-          # 5 turns (still 5 real M-of-N consensus rounds, cross-node state
-          # consistency, and the full no-fatal-errors log scan). Keeps the
-          # worst-case shard under 3 min green; without this the shard would
-          # run ~4m 30s green and push the critical path above 5 min total
-          # wall-clock. Local runs (CI_FAST_MODE unset) still exercise the
-          # full 20-turn long-haul version.
-          CI_FAST_MODE: "1"
 
   # ------------------------------------------------------------------
   # Tornado Solidity lane — `packages/evm-module` is TORNADO-tier
