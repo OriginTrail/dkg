@@ -46,7 +46,13 @@ const MAX_SCRYPT_P = 16;
 const MIN_SALT_BYTES = 16;
 
 /** @internal Allow tests to use lighter scrypt params to avoid memory limits */
-export function _setScryptN(n: number) { SCRYPT_N = n; }
+export function _setScryptN(n: number) {
+  const estimatedMemoryBytes = 128 * n * SCRYPT_R;
+  if (!Number.isSafeInteger(n) || !isPowerOfTwo(n) || n < MIN_SCRYPT_N || estimatedMemoryBytes > MAX_SCRYPT_MEMORY_BYTES) {
+    throw new Error('Unsupported scrypt N for keystore encryption');
+  }
+  SCRYPT_N = n;
+}
 
 function isPowerOfTwo(value: number): boolean {
   return Number.isInteger(value) && value > 0 && Number.isInteger(Math.log2(value));

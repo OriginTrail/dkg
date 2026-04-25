@@ -122,13 +122,7 @@ export function validateContextGraphId(id: string): { valid: boolean; reason?: s
   if (!id || id.length === 0) return { valid: false, reason: 'Context graph ID cannot be empty' };
   if (id.length > 256) return { valid: false, reason: 'Context graph ID exceeds 256 characters' };
   if (!/^[\w:/.@\-]+$/.test(id)) return { valid: false, reason: 'Context graph ID contains disallowed characters (allowed: alphanumeric, _, :, /, ., @, -)' };
-  let decoded: string;
-  try {
-    decoded = decodeURIComponent(id);
-  } catch {
-    return { valid: false, reason: 'Context graph ID contains malformed percent-encoding' };
-  }
-  if (decoded.split('/').some((segment) => segment === '.' || segment === '..')) {
+  if (id.split('/').some((segment) => segment === '.' || segment === '..')) {
     return { valid: false, reason: 'Context graph ID cannot contain path traversal segments' };
   }
   return { valid: true };
