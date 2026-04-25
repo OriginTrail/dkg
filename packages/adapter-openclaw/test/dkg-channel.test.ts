@@ -312,6 +312,21 @@ describe('DkgChannelPlugin', () => {
       expect(registerHttpRoute.calls).toHaveLength(2);
       expect(startSpy).not.toHaveBeenCalled();
     });
+
+    // Locks the diagnostic log line operators grep for during port-conflict
+    // troubleshooting (DkgChannelPlugin.ts skip-path). A refactor that drops
+    // the log silently regresses observability — this test fails loudly.
+    it('logs the skip reason when gateway routes are registered', () => {
+      vi.spyOn(plugin, 'start').mockResolvedValue(undefined);
+      const api = makeApi({ registerHttpRoute: trackFn() });
+
+      plugin.register(api);
+
+      const infoCalls = (api.logger.info as TrackingFn).calls;
+      expect(
+        infoCalls.some((call) => String(call[0]).includes('skipping standalone bridge server')),
+      ).toBe(true);
+    });
   });
 
   it('processInbound should use the current object-style runtime dispatch when plugin-sdk helpers are unavailable', async () => {

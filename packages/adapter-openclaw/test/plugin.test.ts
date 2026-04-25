@@ -1300,6 +1300,93 @@ describe('DkgNodePlugin', () => {
     }
   });
 
+  // Issue #272: gateway owns the route → DkgNodePlugin must not also drive
+  // standalone bridge start. The DkgChannelPlugin-side gate is covered in
+  // dkg-channel.test.ts; this asserts the same invariant at the outer
+  // DkgNodePlugin call site (DkgNodePlugin.ts gateway-route early-return).
+  it('does not call channelPlugin.start() when gateway routes are active (F-B gate)', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => ({
+      ok: true,
+      json: async () => ({ ok: true, integration: { id: 'openclaw' } }),
+    })) as typeof fetch;
+    let plugin: DkgNodePlugin | null = null;
+
+    try {
+      plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: true, port: 0 },
+        memory: { enabled: false },
+      });
+      const mockApi: OpenClawPluginApi = {
+        config: { gateway: { port: 19789 } },
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        registerHttpRoute: () => {},
+        on: () => {},
+        logger: {},
+      };
+
+      plugin.register(mockApi);
+      // After plugin.register returns, channelPlugin is instantiated and its
+      // own register() has already run (gated start skipped per F-A). Install
+      // the spy now so it intercepts only the outer DkgNodePlugin call site.
+      const channelPlugin = (plugin as any).channelPlugin as { start: (...args: unknown[]) => Promise<void> } | null;
+      expect(channelPlugin).toBeTruthy();
+      const startSpy = vi.spyOn(channelPlugin!, 'start').mockResolvedValue(undefined);
+      // Let the async connectLocalAgentIntegration → early-return chain settle.
+      await new Promise((resolve) => setTimeout(resolve, 25));
+
+      expect(startSpy).not.toHaveBeenCalled();
+    } finally {
+      await plugin?.stop();
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('does call channelPlugin.start() in bridge mode (fallback when gateway routes unavailable)', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => ({
+      ok: true,
+      json: async () => ({ ok: true, integration: { id: 'openclaw' } }),
+    })) as typeof fetch;
+    let plugin: DkgNodePlugin | null = null;
+
+    try {
+      plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: true, port: 0 },
+        memory: { enabled: false },
+      });
+      const mockApi: OpenClawPluginApi = {
+        config: { gateway: { port: 19789 } },
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        // No registerHttpRoute — fallback to standalone bridge mode.
+        on: () => {},
+        logger: {},
+      };
+
+      plugin.register(mockApi);
+      const channelPlugin = (plugin as any).channelPlugin as { start: (...args: unknown[]) => Promise<void> } | null;
+      expect(channelPlugin).toBeTruthy();
+      const startSpy = vi.spyOn(channelPlugin!, 'start').mockResolvedValue(undefined);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // The outer DkgNodePlugin.ts:602 call site fires once on the async
+      // connectLocalAgentIntegration → start() chain. F-A's call inside
+      // DkgChannelPlugin.register fired BEFORE the spy was installed and is
+      // therefore not counted here — that's the correct semantic for F-B's
+      // assertion.
+      expect(startSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      await plugin?.stop();
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it('drops a stale stored gatewayUrl when the current runtime is bridge-only', async () => {
     const originalFetch = globalThis.fetch;
     const fetchCalls: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
