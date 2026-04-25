@@ -39,11 +39,10 @@ const SCRYPT_R = 8;
 const SCRYPT_P = 1;
 const DKLEN = 32;
 const MIN_SCRYPT_N = 2 ** 15;
-const MAX_SCRYPT_N = 2 ** 18;
 const MIN_SCRYPT_R = 8;
-const MAX_SCRYPT_R = SCRYPT_R;
 const MIN_SCRYPT_P = 1;
-const MAX_SCRYPT_P = SCRYPT_P;
+const MAX_SCRYPT_MEMORY_BYTES = 256 * 1024 * 1024;
+const MAX_SCRYPT_P = 16;
 const MIN_SALT_BYTES = 16;
 
 /** @internal Allow tests to use lighter scrypt params to avoid memory limits */
@@ -54,20 +53,18 @@ function isPowerOfTwo(value: number): boolean {
 }
 
 function assertSafeKdfParams(kdfparams: EncryptedKeystore['crypto']['kdfparams']): void {
-  if (!isPowerOfTwo(kdfparams.n) || kdfparams.n < MIN_SCRYPT_N) {
+  if (!Number.isSafeInteger(kdfparams.n) || !isPowerOfTwo(kdfparams.n) || kdfparams.n < MIN_SCRYPT_N) {
     throw new Error('KDF parameters below minimum: scrypt N too low');
   }
-  if (kdfparams.n > MAX_SCRYPT_N) {
-    throw new Error('Unsupported keystore KDF parameters: scrypt N too high');
-  }
-  if (!Number.isInteger(kdfparams.r) || kdfparams.r < MIN_SCRYPT_R) {
+  if (!Number.isSafeInteger(kdfparams.r) || kdfparams.r < MIN_SCRYPT_R) {
     throw new Error('KDF parameters below minimum: scrypt r too low');
   }
-  if (kdfparams.r > MAX_SCRYPT_R) {
-    throw new Error('Unsupported keystore KDF parameters: scrypt r too high');
-  }
-  if (!Number.isInteger(kdfparams.p) || kdfparams.p < MIN_SCRYPT_P) {
+  if (!Number.isSafeInteger(kdfparams.p) || kdfparams.p < MIN_SCRYPT_P) {
     throw new Error('KDF parameters below minimum: scrypt p too low');
+  }
+  const estimatedMemoryBytes = 128 * kdfparams.n * kdfparams.r;
+  if (!Number.isSafeInteger(estimatedMemoryBytes) || estimatedMemoryBytes > MAX_SCRYPT_MEMORY_BYTES) {
+    throw new Error('Unsupported keystore KDF parameters: scrypt memory cost too high');
   }
   if (kdfparams.p > MAX_SCRYPT_P) {
     throw new Error('Unsupported keystore KDF parameters: scrypt p too high');

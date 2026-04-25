@@ -150,9 +150,9 @@ describe('CLI-1 — scrypt KDF parameter floor (PROD-BUG: not enforced)', () => 
     const ks = await encryptKeystore(PRIVKEY, PASSPHRASE);
 
     await expect(decryptKeystore(withKdfParams(ks, { n: 2 ** 30 }), PASSPHRASE))
-      .rejects.toThrow(/scrypt N too high|unsupported keystore/i);
-    await expect(decryptKeystore(withKdfParams(ks, { r: 64 }), PASSPHRASE))
-      .rejects.toThrow(/scrypt r too high|unsupported keystore/i);
+      .rejects.toThrow(/memory cost too high|unsupported keystore/i);
+    await expect(decryptKeystore(withKdfParams(ks, { r: 65 }), PASSPHRASE))
+      .rejects.toThrow(/memory cost too high|unsupported keystore/i);
     await expect(decryptKeystore(withKdfParams(ks, { p: 64 }), PASSPHRASE))
       .rejects.toThrow(/scrypt p too high|unsupported keystore/i);
   });

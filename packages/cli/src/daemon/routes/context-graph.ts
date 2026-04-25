@@ -669,7 +669,8 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
   // POST /api/context-graph/{id}/add-participant
   const addParticipantMatch = path.match(/^\/api\/context-graph\/([^/]+)\/add-participant$/);
   if (req.method === "POST" && addParticipantMatch) {
-    const contextGraphId = decodeURIComponent(addParticipantMatch[1]);
+    const contextGraphId = safeDecodeURIComponent(addParticipantMatch[1], res);
+    if (contextGraphId === null) return;
     if (!validateRequiredContextGraphId(contextGraphId, res)) return;
     const body = await readBody(req);
     const { agentAddress } = JSON.parse(body);
@@ -688,7 +689,8 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
   // POST /api/context-graph/{id}/remove-participant
   const removeParticipantMatch = path.match(/^\/api\/context-graph\/([^/]+)\/remove-participant$/);
   if (req.method === "POST" && removeParticipantMatch) {
-    const contextGraphId = decodeURIComponent(removeParticipantMatch[1]);
+    const contextGraphId = safeDecodeURIComponent(removeParticipantMatch[1], res);
+    if (contextGraphId === null) return;
     if (!validateRequiredContextGraphId(contextGraphId, res)) return;
     const body = await readBody(req);
     const { agentAddress } = JSON.parse(body);
@@ -707,7 +709,8 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
   // GET /api/context-graph/{id}/participants
   const listParticipantsMatch = path.match(/^\/api\/context-graph\/([^/]+)\/participants$/);
   if (req.method === "GET" && listParticipantsMatch) {
-    const contextGraphId = decodeURIComponent(listParticipantsMatch[1]);
+    const contextGraphId = safeDecodeURIComponent(listParticipantsMatch[1], res);
+    if (contextGraphId === null) return;
     if (!validateRequiredContextGraphId(contextGraphId, res)) return;
     try {
       const agents = await agent.getContextGraphAllowedAgents(contextGraphId);
@@ -723,7 +726,8 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
   // Otherwise, forward via P2P to all connected peers so the curator receives it.
   const requestJoinMatch = path.match(/^\/api\/context-graph\/([^/]+)\/request-join$/);
   if (req.method === "POST" && requestJoinMatch) {
-    const contextGraphId = decodeURIComponent(requestJoinMatch[1]);
+    const contextGraphId = safeDecodeURIComponent(requestJoinMatch[1], res);
+    if (contextGraphId === null) return;
     if (!validateRequiredContextGraphId(contextGraphId, res)) return;
     const body = await readBody(req);
     try {
@@ -753,7 +757,8 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
   // GET /api/context-graph/{id}/join-requests — list pending join requests (curator view)
   const joinRequestsMatch = path.match(/^\/api\/context-graph\/([^/]+)\/join-requests$/);
   if (req.method === "GET" && joinRequestsMatch) {
-    const contextGraphId = decodeURIComponent(joinRequestsMatch[1]);
+    const contextGraphId = safeDecodeURIComponent(joinRequestsMatch[1], res);
+    if (contextGraphId === null) return;
     if (!validateRequiredContextGraphId(contextGraphId, res)) return;
     try {
       const requests = await agent.listPendingJoinRequests(contextGraphId);
@@ -767,7 +772,8 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
   // POST /api/context-graph/{id}/approve-join — approve a pending request
   const approveJoinMatch = path.match(/^\/api\/context-graph\/([^/]+)\/approve-join$/);
   if (req.method === "POST" && approveJoinMatch) {
-    const contextGraphId = decodeURIComponent(approveJoinMatch[1]);
+    const contextGraphId = safeDecodeURIComponent(approveJoinMatch[1], res);
+    if (contextGraphId === null) return;
     if (!validateRequiredContextGraphId(contextGraphId, res)) return;
     const body = await readBody(req);
     try {
@@ -784,7 +790,8 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
   // POST /api/context-graph/{id}/reject-join — reject a pending request
   const rejectJoinMatch = path.match(/^\/api\/context-graph\/([^/]+)\/reject-join$/);
   if (req.method === "POST" && rejectJoinMatch) {
-    const contextGraphId = decodeURIComponent(rejectJoinMatch[1]);
+    const contextGraphId = safeDecodeURIComponent(rejectJoinMatch[1], res);
+    if (contextGraphId === null) return;
     if (!validateRequiredContextGraphId(contextGraphId, res)) return;
     const body = await readBody(req);
     try {
@@ -801,7 +808,8 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
   // POST /api/context-graph/{id}/sign-join — sign a join request and forward to curator via P2P
   const signJoinMatch = path.match(/^\/api\/context-graph\/([^/]+)\/sign-join$/);
   if (req.method === "POST" && signJoinMatch) {
-    const contextGraphId = decodeURIComponent(signJoinMatch[1]);
+    const contextGraphId = safeDecodeURIComponent(signJoinMatch[1], res);
+    if (contextGraphId === null) return;
     if (!validateRequiredContextGraphId(contextGraphId, res)) return;
     try {
       const callerAddress = agent.resolveAgentAddress(
@@ -845,7 +853,8 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
 
   const manifestPublishMatch = path.match(/^\/api\/context-graph\/([^/]+)\/manifest\/publish$/);
   if (req.method === 'POST' && manifestPublishMatch) {
-    const contextGraphId = decodeURIComponent(manifestPublishMatch[1]);
+    const contextGraphId = safeDecodeURIComponent(manifestPublishMatch[1], res);
+    if (contextGraphId === null) return;
     if (!validateRequiredContextGraphId(contextGraphId, res)) return;
     let body: any = {};
     try { body = JSON.parse(await readBody(req, SMALL_BODY_BYTES) || '{}'); }
@@ -945,7 +954,8 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
 
   const manifestPlanInstallMatch = path.match(/^\/api\/context-graph\/([^/]+)\/manifest\/plan-install$/);
   if (req.method === 'POST' && manifestPlanInstallMatch) {
-    const contextGraphId = decodeURIComponent(manifestPlanInstallMatch[1]);
+    const contextGraphId = safeDecodeURIComponent(manifestPlanInstallMatch[1], res);
+    if (contextGraphId === null) return;
     if (!validateRequiredContextGraphId(contextGraphId, res)) return;
     let body: any = {};
     try { body = JSON.parse(await readBody(req, SMALL_BODY_BYTES) || '{}'); }
@@ -1039,7 +1049,8 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
 
   const manifestInstallMatch = path.match(/^\/api\/context-graph\/([^/]+)\/manifest\/install$/);
   if (req.method === 'POST' && manifestInstallMatch) {
-    const contextGraphId = decodeURIComponent(manifestInstallMatch[1]);
+    const contextGraphId = safeDecodeURIComponent(manifestInstallMatch[1], res);
+    if (contextGraphId === null) return;
     if (!validateRequiredContextGraphId(contextGraphId, res)) return;
     let body: any = {};
     try { body = JSON.parse(await readBody(req, SMALL_BODY_BYTES) || '{}'); }

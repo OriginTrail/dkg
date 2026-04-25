@@ -646,6 +646,17 @@ describe('CLI-16 — Path traversal in context-graph IDs', () => {
     const body = await res.json().catch(() => ({}));
     expect(body.error).toMatch(/contextGraphId|context graph id|invalid/i);
   });
+
+  it('rejects malformed percent-encoding in context-graph path-param routes', async () => {
+    const d = daemon!;
+    const res = await fetch(urlFor(d, '/api/context-graph/%E0%A4%A/participants'), {
+      method: 'GET',
+      headers: authHeaders(d),
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json().catch(() => ({}));
+    expect(body.error).toMatch(/percent-encoding|malformed/i);
+  });
 });
 
 // ---------------------------------------------------------------------------
