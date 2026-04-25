@@ -1136,10 +1136,15 @@ else
 fi
 
 echo "--- 16g: VM still has data even after SWM cleared ---"
-N1_VM_STILL=$(c -X POST "http://127.0.0.1:9201/api/query" \
-  -d "{\"sparql\":\"SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }\",\"contextGraphId\":\"$CG3_ID\",\"view\":\"verified-memory\"}")
-VM_STILL_CT=$(count_integer "$N1_VM_STILL")
-[[ "$VM_STILL_CT" -ge 1 ]] && ok "VM data persists after SWM clear ($VM_STILL_CT entities)" || warn "VM data not visible immediately after SWM clear"
+VM_STILL_CT=0
+for _ in $(seq 1 30); do
+  N1_VM_STILL=$(c -X POST "http://127.0.0.1:9201/api/query" \
+    -d "{\"sparql\":\"SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }\",\"contextGraphId\":\"$CG3_ID\",\"view\":\"verified-memory\"}")
+  VM_STILL_CT=$(count_integer "$N1_VM_STILL")
+  [ "$VM_STILL_CT" -ge 1 ] && break
+  sleep 1
+done
+[[ "$VM_STILL_CT" -ge 1 ]] && ok "VM data persists after SWM clear ($VM_STILL_CT entities)" || fail "VM data lost after SWM clear"
 
 # Cleanup
 c -X POST "http://127.0.0.1:9201/api/assertion/promo-doc/discard" \

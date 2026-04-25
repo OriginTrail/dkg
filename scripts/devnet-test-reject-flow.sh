@@ -44,7 +44,6 @@ ok()   { printf '  \033[1;32m✓\033[0m %s\n' "$*"; }
 # later "Done." — the script does not run under set -e so each failure
 # path is responsible for exiting.
 fail() { printf '  \033[1;31m✗\033[0m %s\n' "$*"; exit 1; }
-warn() { printf '  \033[1;33m!\033[0m %s\n' "$*"; }
 note() { printf '  \033[0;90m· %s\033[0m\n' "$*"; }
 
 api() {
@@ -167,9 +166,7 @@ start=$(date +%s)
 while :; do
   elapsed=$(( $(date +%s) - start ))
   if [ "$elapsed" -ge 15 ]; then
-    warn "N2 did not receive a join_rejected notification within 15s; rejection status and denied catch-up were still verified"
-    api "$N2" GET /api/notifications | python3 -m json.tool | tail -40 || true
-    break
+    fail "N2 did not receive a join_rejected notification within 15s"
   fi
   hit=$(api "$N2" GET /api/notifications | python3 -c "
 import sys,json
@@ -192,5 +189,5 @@ for x in d.get('notifications',[]):
   sleep 0.5
 done
 
-hr "Done — rejection flow completed"
+hr "Done — rejection notification propagated end-to-end"
 echo "CG id used: $CG_ID"

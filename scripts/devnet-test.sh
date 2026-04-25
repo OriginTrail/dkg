@@ -413,7 +413,7 @@ http_post_capture "http://127.0.0.1:9202/api/shared-memory/publish" \
   "{\"contextGraphId\":\"$CONTEXT_GRAPH\",\"selection\":[\"http://example.org/entity/product1\"]}" \
   NON_CURATOR_BODY NON_CURATOR_CODE
 NON_CURATOR_ST=$(json_get "$NON_CURATOR_BODY" status)
-if [[ "$NON_CURATOR_CODE" == "200" && ( "$NON_CURATOR_ST" == "confirmed" || "$NON_CURATOR_ST" == "finalized" || "$NON_CURATOR_ST" == "tentative" ) ]]; then
+if [[ "$NON_CURATOR_CODE" == "200" && ( "$NON_CURATOR_ST" == "confirmed" || "$NON_CURATOR_ST" == "finalized" ) ]]; then
   ok "Open-CG publish from Node2 accepted (status=$NON_CURATOR_ST)"
 else
   fail "Open-CG publish from Node2 failed, HTTP $NON_CURATOR_CODE status=$NON_CURATOR_ST: ${NON_CURATOR_BODY:0:200}"
