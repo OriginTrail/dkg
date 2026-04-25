@@ -1302,6 +1302,14 @@ decisions: []
     });
     await agent.registerContextGraph('register-curated-policy', { callerAgentAddress: ownerAgent });
 
+    await agent.createContextGraph({
+      id: 'register-agent-allowlist-policy',
+      name: 'Agent Allowlist Policy',
+      callerAgentAddress: ownerAgent,
+    });
+    await agent.inviteAgentToContextGraph('register-agent-allowlist-policy', allowedAgent, ownerAgent);
+    await agent.registerContextGraph('register-agent-allowlist-policy', { callerAgentAddress: ownerAgent });
+
     expect(chain.createOnChainContextGraphCalls[0]).toMatchObject({
       publishPolicy: 1,
       participantAgents: [],
@@ -1309,6 +1317,8 @@ decisions: []
     expect(chain.createOnChainContextGraphCalls[1]?.publishPolicy).toBe(0);
     expect(chain.createOnChainContextGraphCalls[1]?.publishAuthority).toBe(ownerAgent);
     expect(chain.createOnChainContextGraphCalls[1]?.participantAgents).toContain(allowedAgent);
+    expect(chain.createOnChainContextGraphCalls[2]?.publishPolicy).toBe(0);
+    expect(chain.createOnChainContextGraphCalls[2]?.publishAuthority).toBe(ownerAgent);
 
     await agent.stop().catch(() => {});
   });

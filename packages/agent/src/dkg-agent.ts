@@ -3402,25 +3402,9 @@ export class DKGAgent {
       throw new Error('accessPolicy must be 0 (open) or 1 (private/curated)');
     }
     if (resolvedLocalAccessPolicy === undefined) {
-      const apResult = await this.store.query(
-        `SELECT ?ap WHERE {
-          { GRAPH <${ontologyGraph}> { <${paranetUri}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?ap } }
-          UNION
-          { GRAPH <${cgMetaGraph}> { <${paranetUri}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?ap } }
-        } LIMIT 1`,
-      );
-      const apValue = apResult.type === 'bindings' ? apResult.bindings[0]?.['ap']?.replace(/^"|"$/g, '') : undefined;
-      resolvedLocalAccessPolicy = apValue === 'private' ? LOCAL_ACCESS_CURATED : LOCAL_ACCESS_OPEN;
-
-      // A CG created with allowedPeers but no explicit accessPolicy stores
-      // "public" in the ontology graph. Detect the allowlist and promote to
-      // private so the on-chain policy matches the curator's intent.
-      if (resolvedLocalAccessPolicy === LOCAL_ACCESS_OPEN) {
-        const peers = await this.getContextGraphAllowedPeers(id);
-        if (peers !== null && peers.length > 0) {
-          resolvedLocalAccessPolicy = LOCAL_ACCESS_CURATED;
-        }
-      }
+      resolvedLocalAccessPolicy = await this.isPrivateContextGraph(id)
+        ? LOCAL_ACCESS_CURATED
+        : LOCAL_ACCESS_OPEN;
     }
     const publishPolicy = resolvedLocalAccessPolicy === LOCAL_ACCESS_CURATED
       ? EVM_PUBLISH_CURATED
