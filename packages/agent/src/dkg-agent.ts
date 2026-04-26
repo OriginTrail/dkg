@@ -6014,6 +6014,23 @@ export class DKGAgent {
   }
 
   /**
+   * Public check for whether a CG is curated (private) vs open.
+   *
+   * Curated CGs restrict VM publish to the registered curator (mirrors
+   * the on-chain `publishPolicy = EVM_PUBLISH_CURATED` configured by
+   * `registerContextGraph` when local access policy is "private" or an
+   * allowlist exists). Open CGs accept publish attempts from any
+   * collaborator and let the chain adapter's `isAuthorizedPublisher`
+   * surface arbitrate.
+   *
+   * HTTP routes use this to decide whether an owner-only preflight is
+   * appropriate before handing off to the publisher.
+   */
+  async isContextGraphCurated(contextGraphId: string): Promise<boolean> {
+    return this.isPrivateContextGraph(contextGraphId);
+  }
+
+  /**
    * Public owner-check used by HTTP routes that need to gate curator-only
    * actions (manifest publish, SWM template rewrites, etc.). Throws a
    * caller-friendly "Only the …" error when the caller isn't the CG's
