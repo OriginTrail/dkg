@@ -464,6 +464,20 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
     //
     // Preflight applies only to the curated branch; open CGs fall
     // through to the publisher and the chain adapter decides.
+    //
+    // Known scope gap (Codex PR#299 review, tracked separately):
+    // `assertContextGraphOwner` compares against the locally stored
+    // `dkg:curator` wallet DID. The on-chain
+    // `ContextGraphs.isAuthorizedPublisher` is richer — for PCA
+    // curators it live-resolves the NFT owner and any
+    // `agentToAccountId`-registered agents. This preflight therefore
+    // over-rejects PCA-delegated agents and post-transfer NFT holders
+    // whose wallets don't match the stale local curator metadata. The
+    // same shape of check is already used by share, invite, rename,
+    // and manifest-publish routes — migrating them all to a
+    // chain-authoritative preflight is a separate follow-up. Until
+    // then, those callers can work around this by publishing from the
+    // wallet recorded as the CG's local curator.
     if (await agent.isContextGraphCurated(paranetId)) {
       try {
         await agent.assertContextGraphOwner(
