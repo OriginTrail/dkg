@@ -445,6 +445,28 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
           '"subGraphName" and "publishContextGraphId" cannot be used together',
       });
     }
+
+    // Spec §2.2 — only the CG's registered curator may promote SWM to VM.
+    // Without this gate, any authenticated caller (including non-curator
+    // peers who legitimately write to SWM) could trigger an on-chain
+    // publish attempt that reverts late in the stack and returns HTTP 200
+    // with `status=tentative` — masking the authorization failure and
+    // leaving a trail of phantom "tentative" metadata on disk. Reject
+    // up-front with a clean 4xx so callers get an explicit,
+    // spec-conformant rejection (matches the project-manifest-publish
+    // gate in context-graph.ts).
+    try {
+      await agent.assertContextGraphOwner(
+        paranetId,
+        requestAgentAddress,
+        "publish shared memory to Verified Memory",
+      );
+    } catch (authErr: unknown) {
+      const msg = authErr instanceof Error ? authErr.message : String(authErr);
+      const code = /has no registered owner/.test(msg) ? 400 : 403;
+      return jsonResponse(res, code, { error: msg });
+    }
+
     const ctx = createOperationContext("publishFromSWM");
     tracker.start(ctx, {
       contextGraphId: paranetId,
