@@ -13,7 +13,27 @@ import {HubLib} from "../libraries/HubLib.sol";
 
 contract RandomSamplingStorage is INamed, IVersioned, IInitializable, ContractStatus {
     string private constant _NAME = "RandomSamplingStorage";
-    string private constant _VERSION = "1.0.0";
+    // 1.0.0 — original scalar nodeEpochScorePerStake.
+    // 2.0.0 — D26 C.2 shape: per-(identityId, epoch) EpochIndex with
+    //         firstScorePerStake36 / lastScorePerStake36 sentinels plus a
+    //         timestamped Checkpoint[] mid array appended by submitProof.
+    //         Legacy `getNodeEpochScorePerStake` / `addToNodeEpochScorePerStake`
+    //         / `setNodeEpochScorePerStake` preserved as adapters over the
+    //         new structure. Scalar mapping removed.
+    // 3.0.0 — D26 code-review follow-ups (M6/M7/L6):
+    //         * `EpochIndex.firstScorePerStake36` removed. Under D26
+    //           `scorePerStake36` is epoch-local (accumulates from 0 per
+    //           epoch), so the sentinel was always 0 — one SSTORE slot
+    //           reclaimed per epoch first-write.
+    //         * `EpochIndex.firstInitialized` removed. It was set on first
+    //           write and never read for correctness; `isEpochFirstInitialized`
+    //           view is retired.
+    //         * `setLastScorePerStake` removed — test-only path that
+    //           could desynchronize `mid[tail]` from `lastScorePerStake36`
+    //           and silently corrupt claim math. Tests now drive state
+    //           through `appendCheckpoint`.
+    //         * `getEpochFirstScorePerStake` retired (always 0 under D26).
+    string private constant _VERSION = "3.0.0";
     uint8 public constant CHUNK_BYTE_SIZE = 32;
     Chronos public chronos;
 
@@ -35,9 +55,38 @@ contract RandomSamplingStorage is INamed, IVersioned, IInitializable, ContractSt
     mapping(uint256 => uint256) public allNodesEpochScore;
     // epoch => identityId => delegatorKey => score
     mapping(uint256 => mapping(uint72 => mapping(bytes32 => uint256))) public epochNodeDelegatorScore;
-    // epoch => identityId => scorePerStake
-    mapping(uint256 => mapping(uint72 => uint256)) public nodeEpochScorePerStake;
-    // epoch => identityId => delegatorKey => last settled nodeEpochScorePerStake
+
+    // ============================================================
+    //     D26 — C.2 per-(identityId, epoch) score-per-stake index
+    // ============================================================
+    //
+    // `lastScorePerStake36` is the epoch-end cumulative score-per-stake
+    // (strictly monotonic across the epoch). `mid` is appended once per
+    // proof (timestamped) so claim can binary-search for the scorePerStake
+    // at an arbitrary `ts` in the epoch (used when a delegator's boost
+    // expires mid-epoch).
+    //
+    // M6/M7 — the pre-3.0.0 layout carried a `firstScorePerStake36` +
+    // `firstInitialized` pair. Under D26, scorePerStake36 is epoch-local
+    // (accumulates from 0), so the "first" sentinel was always 0 and the
+    // "initialized" flag was set but never consulted. Both fields are
+    // removed; `findScorePerStakeAt` now returns 0 for timestamps before
+    // the first checkpoint (the natural default).
+    struct Checkpoint {
+        uint40 timestamp;
+        uint216 scorePerStake36;
+    }
+    struct EpochIndex {
+        uint256 lastScorePerStake36;
+        Checkpoint[] mid;
+    }
+    // identityId => epoch => EpochIndex
+    mapping(uint72 => mapping(uint256 => EpochIndex)) internal nodeEpochIndex;
+
+    // epoch => identityId => delegatorKey => last settled scorePerStake36
+    //
+    // (The legacy name is preserved; this value is now the delegator's
+    // cursor into the new EpochIndex.lastScorePerStake36 stream.)
     mapping(uint256 => mapping(uint72 => mapping(bytes32 => uint256)))
         public delegatorLastSettledNodeEpochScorePerStake;
 
@@ -71,6 +120,13 @@ contract RandomSamplingStorage is INamed, IVersioned, IInitializable, ContractSt
         uint256 totalNodeEpochScorePerStake
     );
     event NodeEpochScorePerStakeSet(uint256 indexed epoch, uint72 indexed identityId, uint256 newScorePerStake);
+    // D26 — C.2 EpochIndex events.
+    event EpochCheckpointAppended(
+        uint72 indexed identityId,
+        uint256 indexed epoch,
+        uint40 timestamp,
+        uint256 scorePerStake36
+    );
     event EpochNodeDelegatorScoreAdded(
         uint256 indexed epoch,
         uint72 indexed identityId,
@@ -530,47 +586,140 @@ contract RandomSamplingStorage is INamed, IVersioned, IInitializable, ContractSt
     }
 
     /**
-     * @dev Returns the score per stake ratio for a node in a specific epoch
-     * Used for calculating proportional rewards based on staked amount
-     * @param epoch The epoch to get the score per stake for
-     * @param identityId The node identity ID to get the score per stake for
-     * @return Score per stake ratio for the node in the specified epoch, scaled by 10^36
+     * @dev Adapter for the pre-D26 read signature. Returns
+     *      `lastScorePerStake36` for `(identityId, epoch)` — semantically
+     *      identical to the pre-D26 scalar for past (fully-settled) epochs,
+     *      which is all V8 call sites ever read.
      */
     function getNodeEpochScorePerStake(uint256 epoch, uint72 identityId) external view returns (uint256) {
-        return nodeEpochScorePerStake[epoch][identityId];
+        return nodeEpochIndex[identityId][epoch].lastScorePerStake36;
     }
 
     /**
-     * @dev Adds to the score per stake ratio for a node in a specific epoch
-     * Can only be called by contracts registered in the Hub
-     * @param epoch The epoch to add the score per stake to
-     * @param identityId The node identity ID to add the score per stake for
-     * @param scorePerStakeToAdd The score per stake amount to add, scaled by 10^36
+     * @dev Legacy adapter retained for test harnesses (and any V8 emergency
+     *      path) that used to write the per-epoch score-per-stake scalar
+     *      directly. Routes through the new EpochIndex: bumps
+     *      `lastScorePerStake36` by `scorePerStakeToAdd`, and appends /
+     *      updates a `Checkpoint` at `block.timestamp` so claim-time
+     *      binary search sees the new value.
      */
     function addToNodeEpochScorePerStake(
         uint256 epoch,
         uint72 identityId,
         uint256 scorePerStakeToAdd
     ) external onlyContracts {
-        nodeEpochScorePerStake[epoch][identityId] += scorePerStakeToAdd;
-        emit NodeEpochScorePerStakeAdded(
-            epoch,
-            identityId,
-            scorePerStakeToAdd,
-            nodeEpochScorePerStake[epoch][identityId]
-        );
+        EpochIndex storage ei = nodeEpochIndex[identityId][epoch];
+        uint256 newLast = ei.lastScorePerStake36 + scorePerStakeToAdd;
+        ei.lastScorePerStake36 = newLast;
+        _upsertCheckpoint(ei, uint40(block.timestamp), newLast);
+        emit NodeEpochScorePerStakeAdded(epoch, identityId, scorePerStakeToAdd, newLast);
     }
 
     /**
-     * @dev Sets the score per stake ratio for a node in a specific epoch
-     * Can only be called by contracts registered in the Hub
-     * @param epoch The epoch to set the score per stake for
-     * @param identityId The node identity ID to set the score per stake for
-     * @param scorePerStake The score per stake amount to set, scaled by 10^36
+     * @dev Legacy adapter. Overwrites `lastScorePerStake36` to `scorePerStake`
+     *      and appends/updates a Checkpoint at `block.timestamp`.
      */
     function setNodeEpochScorePerStake(uint256 epoch, uint72 identityId, uint256 scorePerStake) external onlyContracts {
-        nodeEpochScorePerStake[epoch][identityId] = scorePerStake;
+        EpochIndex storage ei = nodeEpochIndex[identityId][epoch];
+        ei.lastScorePerStake36 = scorePerStake;
+        _upsertCheckpoint(ei, uint40(block.timestamp), scorePerStake);
         emit NodeEpochScorePerStakeSet(epoch, identityId, scorePerStake);
+    }
+
+    // ============================================================
+    //          D26 — EpochIndex mutators (submitProof)
+    // ============================================================
+
+    /// @notice Append a timestamped checkpoint (or overwrite the last one if
+    ///         its timestamp equals `ts`) and set
+    ///         `lastScorePerStake36 = scorePerStake36`.
+    ///
+    ///         `scorePerStake36` is **epoch-local** (accumulates from 0 per
+    ///         epoch).
+    function appendCheckpoint(
+        uint72 identityId,
+        uint256 epoch,
+        uint40 ts,
+        uint256 scorePerStake36
+    ) external onlyContracts {
+        EpochIndex storage ei = nodeEpochIndex[identityId][epoch];
+        require(scorePerStake36 <= type(uint216).max, "Checkpoint overflow");
+        ei.lastScorePerStake36 = scorePerStake36;
+        _upsertCheckpoint(ei, ts, scorePerStake36);
+        emit EpochCheckpointAppended(identityId, epoch, ts, scorePerStake36);
+    }
+
+    // L6 — `setLastScorePerStake` removed. It could desynchronize the
+    //      `mid[tail]` checkpoint from the `lastScorePerStake36` scalar
+    //      (breaking the `findScorePerStakeAt` monotonicity contract).
+    //      Tests that need to set state must go through `appendCheckpoint`
+    //      or `addToNodeEpochScorePerStake`, which keep both sides
+    //      consistent.
+
+    function _upsertCheckpoint(EpochIndex storage ei, uint40 ts, uint256 value) internal {
+        require(value <= type(uint216).max, "Checkpoint overflow");
+        uint256 n = ei.mid.length;
+        if (n > 0) {
+            Checkpoint storage tail = ei.mid[n - 1];
+            require(tail.timestamp <= ts, "Non-monotonic ts");
+            if (tail.timestamp == ts) {
+                tail.scorePerStake36 = uint216(value);
+                return;
+            }
+        }
+        ei.mid.push(Checkpoint({timestamp: ts, scorePerStake36: uint216(value)}));
+    }
+
+    // ============================================================
+    //          D26 — EpochIndex views (claim-time)
+    // ============================================================
+
+    function getEpochLastScorePerStake(uint72 identityId, uint256 epoch) external view returns (uint256) {
+        return nodeEpochIndex[identityId][epoch].lastScorePerStake36;
+    }
+
+    function getEpochCheckpointCount(uint72 identityId, uint256 epoch) external view returns (uint256) {
+        return nodeEpochIndex[identityId][epoch].mid.length;
+    }
+
+    function getEpochCheckpoint(
+        uint72 identityId,
+        uint256 epoch,
+        uint256 index
+    ) external view returns (uint40 timestamp, uint256 scorePerStake36) {
+        Checkpoint storage c = nodeEpochIndex[identityId][epoch].mid[index];
+        return (c.timestamp, c.scorePerStake36);
+    }
+
+    /**
+     * @notice Binary-search the per-(identityId, epoch) checkpoint array for
+     *         the scorePerStake36 at timestamp `ts`. Returns the first
+     *         sentinel if `ts` precedes every checkpoint (including when
+     *         there are none). The returned value is monotonic in `ts`.
+     */
+    function findScorePerStakeAt(uint72 identityId, uint256 epoch, uint40 ts) external view returns (uint256) {
+        EpochIndex storage ei = nodeEpochIndex[identityId][epoch];
+        uint256 n = ei.mid.length;
+        // M6 — no first-sentinel anymore; absent checkpoint → 0 (natural
+        //      pre-any-proof default under D26's epoch-local accumulator).
+        if (n == 0) {
+            return 0;
+        }
+        // Largest i with mid[i].timestamp <= ts via binary search.
+        uint256 lo = 0;
+        uint256 hi = n;
+        while (lo < hi) {
+            uint256 mid = (lo + hi) >> 1;
+            if (ei.mid[mid].timestamp <= ts) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        if (lo == 0) {
+            return 0;
+        }
+        return ei.mid[lo - 1].scorePerStake36;
     }
 
     /**

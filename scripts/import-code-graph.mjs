@@ -48,7 +48,6 @@ const DRY_RUN = args['dry-run'] === 'true';
 const OUT_FILE = args.out ?? null;
 
 const EXCLUDED_PACKAGES = new Set([
-  'origin-trail-game',
   'multi-agent-coding',
   'app-autoresearch',
 ]);

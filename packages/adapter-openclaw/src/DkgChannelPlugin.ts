@@ -177,6 +177,8 @@ function formatChatContext(entries: ChatContextEntry[]): string {
   return [
     'Context for this chat turn:',
     'If "target_context_graph" is present below, treat it as authoritative for this turn unless the user explicitly overrides it in the same message.',
+    'If "current_agent_address" is present below, use it as the primary `agent_address` for `view: "working-memory"` reads.',
+    'Do not assume the peer ID is the right working-memory identity unless the tool result or graph naming proves it.',
     ...lines,
   ].join('\n');
 }

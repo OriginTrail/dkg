@@ -9,13 +9,12 @@ import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { writeFile, unlink } from 'node:fs/promises';
 import { ethers } from 'ethers';
-import { requestFaucetFunding } from './faucet.js';
-import { toErrorMessage, hasErrorCode } from '@origintrail-official/dkg-core';
+import { requestFaucetFunding, toErrorMessage, hasErrorCode } from '@origintrail-official/dkg-core';
 import yaml from 'js-yaml';
 import {
   loadConfig, saveConfig, configExists, configPath,
   readPid, readApiPort, isProcessRunning, dkgDir, logPath, ensureDkgDir,
-  loadNetworkConfig, loadProjectConfig, releasesDir, activeSlot, swapSlot,
+  loadNetworkConfig, loadProjectConfig, resolveAutoUpdateConfig, releasesDir, activeSlot, swapSlot,
   slotEntryPoint, isStandaloneInstall,
   resolveContextGraphs, resolveNetworkDefaultContextGraphs,
 } from './config.js';
@@ -52,6 +51,7 @@ import {
   DAEMON_EXIT_CODE_RESTART,
 } from './daemon.js';
 import { migrateToBlueGreen } from './migration.js';
+import { registerIntegrationCommands } from './integrations/commands.js';
 
 /** Commander action callbacks receive parsed .option() values with loose types. */
 type ActionOpts = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -287,8 +287,16 @@ program
 
     let autoUpdate = existing.autoUpdate;
     if (enableAutoUpdate) {
-      const defaultRepo = existing.autoUpdate?.repo ?? network?.autoUpdate?.repo;
-      const defaultBranch = existing.autoUpdate?.branch ?? network?.autoUpdate?.branch ?? 'main';
+      // Effective upstream defaults — what the node would use if nothing were
+      // persisted in ~/.dkg/config.json. Network config beats project.json.
+      // We persist repo/branch only when they differ from these, so future
+      // changes to the shipped network or project config propagate on the
+      // next daemon run without requiring a config rewrite.
+      const proj = loadProjectConfig();
+      const effectiveRepo = network?.autoUpdate?.repo ?? proj.repo;
+      const effectiveBranch = network?.autoUpdate?.branch ?? proj.defaultBranch;
+      const defaultRepo = existing.autoUpdate?.repo ?? effectiveRepo;
+      const defaultBranch = existing.autoUpdate?.branch ?? effectiveBranch;
       const defaultAllowPrerelease = existing.autoUpdate?.allowPrerelease ?? network?.autoUpdate?.allowPrerelease ?? true;
       const defaultSshKeyPath = existing.autoUpdate?.sshKeyPath ?? network?.autoUpdate?.sshKeyPath ?? '';
       const defaultInterval = existing.autoUpdate?.checkIntervalMinutes ?? network?.autoUpdate?.checkIntervalMinutes ?? 5;
@@ -302,8 +310,8 @@ program
       const interval = parseInt(await ask('Check interval (minutes)', String(defaultInterval)), 10);
       autoUpdate = {
         enabled: true,
-        repo,
-        branch,
+        ...(repo && repo !== effectiveRepo ? { repo } : {}),
+        ...(branch && branch !== effectiveBranch ? { branch } : {}),
         allowPrerelease,
         sshKeyPath: sshKeyPath || undefined,
         checkIntervalMinutes: interval,
@@ -371,15 +379,18 @@ program
     console.log(`  context graphs: ${contextGraphs.length ? contextGraphs.join(', ') : '(none)'}`);
     console.log(`  apiPort:    ${config.apiPort}`);
     console.log(`  auth:       ${enableAuth ? 'enabled (token in ~/.dkg/auth.token)' : 'disabled'}`);
-    console.log(
-      `  autoUpdate: ${
-        config.autoUpdate?.enabled
-          ? `${config.autoUpdate.repo}@${config.autoUpdate.branch}` +
-            `${config.autoUpdate.allowPrerelease ? ' (pre-release allowed)' : ''}` +
-            `${config.autoUpdate.sshKeyPath ? ` (ssh key: ${config.autoUpdate.sshKeyPath})` : ''}`
-          : 'disabled'
-      }`,
-    );
+    {
+      const resolved = resolveAutoUpdateConfig(config, network);
+      console.log(
+        `  autoUpdate: ${
+          resolved
+            ? `${resolved.repo}@${resolved.branch}` +
+              `${resolved.allowPrerelease ? ' (pre-release allowed)' : ''}` +
+              `${resolved.sshKeyPath ? ` (ssh key: ${resolved.sshKeyPath})` : ''}`
+            : 'disabled'
+        }`,
+      );
+    }
     console.log(`  chain:      ${config.chain ? `${config.chain.rpcUrl} (hub: ${config.chain.hubAddress?.slice(0, 10)}...)` : '(not configured)'}`);
     if (network) {
       console.log(`  network:    ${network.networkName}`);
@@ -895,6 +906,7 @@ program
   .description('Run a SPARQL query against a context graph (or all)')
   .option('-q, --sparql <query>', 'SPARQL query string')
   .option('-f, --file <path>', 'File containing SPARQL query')
+  .option('--include-shared-memory', 'Include shared (unpublished) memory in the query — use for data written via `dkg index` / `dkg shared-memory write` before on-chain registration')
   .action(async (contextGraph: string | undefined, opts: ActionOpts) => {
     try {
       const client = await ApiClient.connect();
@@ -909,7 +921,9 @@ program
         process.exit(1);
       }
 
-      const { result } = await client.query(sparql, contextGraph);
+      const { result } = await client.query(sparql, contextGraph, {
+        includeSharedMemory: Boolean(opts.includeSharedMemory),
+      });
 
       if (result?.type === 'bindings' && result.bindings) {
         const { bindings } = result;
@@ -1278,11 +1292,14 @@ contextGraphCmd
 contextGraphCmd
   .command('register <id>')
   .description('Register an existing context graph on-chain (unlocks Verified Memory, requires TRAC)')
-  .option('--reveal', 'Reveal cleartext name and description on-chain')
+  .option('--reveal', 'Deprecated: V10 ContextGraphs registration does not reveal cleartext metadata on-chain')
   .action(async (id: string, opts: ActionOpts) => {
     try {
       const client = await ApiClient.connect();
-      const result = await client.registerContextGraph(id, { revealOnChain: opts.reveal });
+      if (opts.reveal) {
+        console.warn('--reveal is deprecated and ignored for V10 ContextGraphs registration.');
+      }
+      const result = await client.registerContextGraph(id);
       console.log(`Context graph registered on-chain:`);
       console.log(`  ID:         ${id}`);
       console.log(`  On-chain:   ${result.onChainId}`);
@@ -1672,16 +1689,12 @@ openclawCmd
   .option('--no-verify', 'Skip post-setup verification')
   .option('--no-start', 'Skip daemon start (configure only)')
   .option('--dry-run', 'Preview changes without writing anything')
-  // Deprecated flags kept for backwards compatibility with automation that
-  // shipped before faucet funding was removed from setup. Accepted as no-ops
-  // with a one-line warning so scripted `dkg openclaw setup --no-fund ...`
-  // invocations don't fail with `error: unknown option '--no-fund'`.
-  .option('--no-fund', 'Deprecated no-op — faucet funding has been removed')
-  .option('--fund', 'Deprecated no-op — faucet funding has been removed')
+  .option('--no-fund', 'Skip wallet funding via testnet faucet')
+  .option('--fund', 'Fund wallets via testnet faucet (default)')
   .action(async (opts, command) => {
-    // Dynamic import + process.exit plumbing stay here; the deprecation-flag
-    // bookkeeping and the actual `runSetup` call live in `openclawSetupAction`
-    // so they can be unit-tested without spawning the built CLI.
+    // Dynamic import + process.exit plumbing stay here; the actual `runSetup`
+    // call lives in `openclawSetupAction` so it can be unit-tested without
+    // spawning the built CLI.
     let runSetup: typeof import('@origintrail-official/dkg-adapter-openclaw').runSetup;
     try {
       ({ runSetup } = await import('@origintrail-official/dkg-adapter-openclaw'));
@@ -1952,6 +1965,7 @@ program
   .option('--shared-memory', 'Write indexed quads to shared memory instead of publishing')
   .option('--workspace', 'Write indexed quads to shared memory instead of publishing (legacy alias)')
   .option('--include-content', 'Index docs/content files in addition to source code')
+  .option('--solidity-ast', 'Use Hardhat build-info ASTs for Solidity indexing (adds StateVariable/Event/Error/Modifier and a call-graph). Falls back to regex for packages without artifacts/build-info/.')
   .option('--dry-run', 'Print statistics without publishing')
   .option('--output <file>', 'Write quads to a JSON file instead of publishing')
   .action(async (directory: string | undefined, opts: ActionOpts) => {
@@ -1965,6 +1979,8 @@ program
       const { indexRepository } = await import('./indexer.js');
       const result = await indexRepository(repoRoot, {
         includeContent: Boolean(opts.includeContent),
+        solidityAst: Boolean(opts.solidityAst),
+        contextGraphId: targetContextGraph,
       });
 
       console.log(`\n  Packages:  ${result.packageCount}`);
@@ -2793,14 +2809,18 @@ program
   .action(async (versionOrRef: string | undefined, opts: ActionOpts) => {
     const config = await loadConfig();
     const net = await loadNetworkConfig();
-    const proj = loadProjectConfig();
-    const au = config.autoUpdate ?? net?.autoUpdate ?? {
-      enabled: true,
-      repo: proj.repo,
-      branch: proj.defaultBranch,
-      allowPrerelease: true,
-      checkIntervalMinutes: 30,
-    };
+    // Resolve field-by-field across local/network/project so defaults flow
+    // through even when the local config omits repo/branch.
+    const au = resolveAutoUpdateConfig(config, net) ?? (() => {
+      const proj = loadProjectConfig();
+      return {
+        enabled: true,
+        repo: proj.repo,
+        branch: proj.defaultBranch,
+        allowPrerelease: true,
+        checkIntervalMinutes: 30,
+      };
+    })();
     const standalone = isStandaloneInstall();
     const allowPre = opts.allowPrerelease === true ? true : (au.allowPrerelease ?? true);
 
@@ -2993,5 +3013,9 @@ program
     console.log(`Rolled back: current → slot ${target}`);
     console.log('Daemon stopped. Run "dkg start" to start with the rolled-back version.');
   });
+
+// ─── dkg integration ─────────────────────────────────────────────────
+
+registerIntegrationCommands(program);
 
 program.parse();

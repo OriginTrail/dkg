@@ -352,7 +352,7 @@ create_node_config() {
   "nodeRole": "${node_role}",
   ${relay_value}
   ${store_block}
-  "contextGraphs": ["devnet-test", "origin-trail-game"],
+  "contextGraphs": ["devnet-test", "devnet-isolation"],
   ${devnet_auth_block}
   "chain": {
     "type": "evm",
@@ -706,37 +706,130 @@ cmd_start() {
     })();
   " 2>&1 | while read -r line; do log "$line"; done
 
-  # Register context graphs once from the deployer account so nodes don't each attempt it
-  log "Registering context graphs on-chain..."
-  cd "$REPO_ROOT/packages/evm-module" && node -e "
-    const { ethers } = require('ethers');
-    const fs = require('fs');
-    (async () => {
-      const provider = new ethers.JsonRpcProvider('http://127.0.0.1:$HARDHAT_PORT');
-      const deployer = await provider.getSigner(0);
-      const contracts = JSON.parse(fs.readFileSync('$contracts_json', 'utf8'));
-      const registryAddr = contracts.contracts.ParanetV9Registry?.evmAddress;
-      if (!registryAddr) { console.log('ParanetV9Registry not deployed, skipping'); return; }
-      const abi = JSON.parse(fs.readFileSync('$REPO_ROOT/packages/evm-module/abi/ParanetV9Registry.json', 'utf8'));
-      const registry = new ethers.Contract(registryAddr, abi, deployer);
-      const contextGraphs = ['devnet-test', 'origin-trail-game'];
-      for (const name of contextGraphs) {
-        const onChainId = ethers.keccak256(ethers.toUtf8Bytes(name));
-        try {
-          const tx = await registry.createParanetV9(onChainId, 0);
-          await tx.wait();
-          console.log('Registered context graph: ' + name + ' (' + onChainId.slice(0, 16) + '...)');
-        } catch (e) {
-          const data = e.data || e.message?.match(/data=\"(0x[0-9a-f]+)\"/)?.[1];
-          if (data === '0x8f53dc71' || e.message?.includes('ParanetAlreadyExists')) {
-            console.log('Context graph already exists: ' + name);
-          } else {
-            console.log('Failed to register ' + name + ': ' + e.message);
-          }
-        }
-      }
-    })();
-  " 2>&1 | while read -r line; do log "$line"; done
+  # Register context graphs on-chain by going through node 1's public API.
+  #
+  # History: this block used to call `ParanetV9Registry.createParanetV9(...)`
+  # directly from the deployer account. That is the legacy V9 paranet
+  # registry — V10 publish paths consult `ContextGraphs` + `ContextGraphStorage`
+  # and surface the resulting uint256 id as `v10Id` in the API. Registering
+  # on the V9 contract left nodes with no V10 record to look up, so every
+  # VM publish in scripts/devnet-test.sh failed with
+  # "Context graph \"devnet-test\" is not registered on-chain".
+  #
+  # We now delegate to `POST /api/context-graph/register` on node 1, which
+  # runs the same `agent.registerContextGraph` path production nodes use
+  # (calls `ContextGraphs.createContextGraph`, reads the `ContextGraphCreated`
+  # event, writes `dkg:onChainId` + `status="registered"` to _meta). Every
+  # node locally bootstraps the CG on boot via the `contextGraphs` config
+  # array, so node 1 already has it; the on-chain id then propagates to
+  # the rest via the periodic `discoverContextGraphsFromChain` sweep.
+  #
+  # Prerequisite: node 1 must have a staked identity (we ran that above),
+  # otherwise `registerContextGraph` bails with "cannot be registered
+  # on-chain without an on-chain identity".
+  log "Registering context graphs on-chain via node 1 API..."
+  local register_endpoint="http://127.0.0.1:$API_PORT_BASE/api/context-graph/register"
+  local register_auth_header="Authorization: Bearer $shared_token"
+  local register_failures=0
+  # Register two context graphs so the devnet preserves the cross-CG isolation
+  # smoke path (each CG has its own subgraph + on-chain id; nodes must keep them
+  # independent). A single graph would hide regressions that only surface when
+  # traffic fans out across multiple paranets.
+  for cg in devnet-test devnet-isolation; do
+    local on_chain_id=""
+    local attempt
+    for attempt in 1 2 3; do
+      local reg_resp
+      reg_resp=$(curl -sS --max-time 30 -X POST \
+        -H "$register_auth_header" \
+        -H "Content-Type: application/json" \
+        -d "{\"id\":\"$cg\"}" \
+        "$register_endpoint" 2>&1 || true)
+      if echo "$reg_resp" | grep -q '"onChainId"'; then
+        on_chain_id=$(echo "$reg_resp" | python3 -c "import sys,json;print(json.load(sys.stdin).get('onChainId',''))" 2>/dev/null || echo '')
+        log "Registered context graph: $cg (v10Id=$on_chain_id)"
+        break
+      elif echo "$reg_resp" | grep -q 'already registered'; then
+        # Recover the existing onChainId from node 1's local view so the
+        # cross-node visibility wait below has something to compare to.
+        on_chain_id=$(curl -sS --max-time 10 \
+          -H "$register_auth_header" \
+          "http://127.0.0.1:$API_PORT_BASE/api/context-graph/list" \
+          | python3 -c "import sys,json;d=json.load(sys.stdin);print(next((g.get('onChainId','') for g in d.get('contextGraphs',[]) if g.get('id')=='$cg'), ''))" \
+          2>/dev/null || echo '')
+        log "Context graph already registered: $cg (v10Id=${on_chain_id:-unknown})"
+        break
+      else
+        log "Register attempt $attempt for $cg failed: $reg_resp"
+        sleep 2
+      fi
+    done
+    if [ -z "$on_chain_id" ]; then
+      log "ERROR: failed to register $cg after 3 attempts; devnet is half-configured."
+      register_failures=$((register_failures + 1))
+      continue
+    fi
+
+    # Devnet bootstrap CGs are public/open. The V10 contract uses
+    # publishPolicy 0 = curated, 1 = open; keep an on-chain smoke assertion
+    # here so product/API numeric drift is caught during local bring-up.
+    local policy_check
+    policy_check=$(node -e "
+      const { ethers } = require('ethers');
+      (async () => {
+        const fs = require('fs');
+        const d = JSON.parse(fs.readFileSync('$REPO_ROOT/packages/evm-module/deployments/localhost_contracts.json','utf8'));
+        const storageAddr = d.contracts.ContextGraphStorage?.evmAddress;
+        if (!storageAddr) throw new Error('ContextGraphStorage address missing');
+        const provider = new ethers.JsonRpcProvider('http://127.0.0.1:$HARDHAT_PORT');
+        const storage = new ethers.Contract(storageAddr, ['function getPublishPolicy(uint256) view returns (uint8,address)'], provider);
+        const [policy] = await storage.getPublishPolicy(BigInt('$on_chain_id'));
+        console.log(String(policy));
+      })().catch((e) => { console.error(e.message); process.exit(1); });
+    " 2>&1 || true)
+    if [ "$policy_check" = "1" ]; then
+      log "  on-chain publishPolicy for $cg is open (1)"
+    else
+      log "  ERROR: expected open publishPolicy=1 for $cg v10Id=$on_chain_id, got '$policy_check'"
+      register_failures=$((register_failures + 1))
+    fi
+
+    # The on-chain id propagates to other nodes via ONTOLOGY gossip
+    # (`registerContextGraph` writes the `dkg:paranetOnChainId` triple +
+    # immediately broadcasts it). Wait until every node's local view
+    # surfaces the same id before declaring the devnet ready — without
+    # this wait, the next VM publish on node 2+ races the gossip and
+    # rejects with "context graph is not registered on-chain".
+    log "Waiting for $cg (v10Id=$on_chain_id) to be visible on all $NUM_NODES nodes..."
+    local node_idx
+    for node_idx in $(seq 1 "$NUM_NODES"); do
+      local node_port=$((API_PORT_BASE + node_idx - 1))
+      local seen_id=""
+      local poll
+      for poll in $(seq 1 30); do
+        seen_id=$(curl -sS --max-time 5 \
+          -H "$register_auth_header" \
+          "http://127.0.0.1:$node_port/api/context-graph/list" 2>/dev/null \
+          | python3 -c "import sys,json;d=json.load(sys.stdin);print(next((g.get('onChainId','') for g in d.get('contextGraphs',[]) if g.get('id')=='$cg'), ''))" \
+          2>/dev/null || echo '')
+        if [ "$seen_id" = "$on_chain_id" ]; then
+          break
+        fi
+        sleep 1
+      done
+      if [ "$seen_id" = "$on_chain_id" ]; then
+        log "  node $node_idx sees $cg v10Id=$seen_id"
+      else
+        log "  ERROR: node $node_idx never observed v10Id=$on_chain_id for $cg (last seen='$seen_id')"
+        register_failures=$((register_failures + 1))
+      fi
+    done
+  done
+  if [ "$register_failures" -gt 0 ]; then
+    log "FATAL: $register_failures context-graph registration step(s) failed; aborting devnet start."
+    log "Run \`./scripts/devnet.sh logs <n>\` for per-node detail. The devnet is left running for inspection — stop with \`./scripts/devnet.sh stop\`."
+    return 1
+  fi
 
   log ""
   log "=== Devnet Ready ==="

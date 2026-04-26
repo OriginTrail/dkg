@@ -281,6 +281,7 @@ export interface CatchupStatusResponse {
     dataSynced: number;
     sharedMemorySynced: number;
     denied: boolean;
+    deniedPeers: number;
     diagnostics?: {
       noProtocolPeers: number;
       durable: {
@@ -1304,10 +1305,6 @@ export const fetchWalletsBalances = () =>
 export const fetchRpcHealth = () =>
   get<{ ok: boolean; rpcUrl: string | null; latencyMs: number | null; blockNumber: number | null; error?: string }>('/api/chain/rpc-health');
 
-// --- Apps ---
-export const fetchApps = () =>
-  get<Array<{ id: string; label: string; path: string; staticUrl?: string }>>('/api/apps');
-
 // --- Node control ---
 export const shutdownNode = () =>
   post<{ ok: boolean }>('/api/shutdown', {});
@@ -1341,27 +1338,6 @@ export const fetchNotifications = (opts?: { since?: number; limit?: number }) =>
 export const markNotificationsRead = (ids?: number[]) =>
   post<{ marked: number }>('/api/notifications/read', ids ? { ids } : {});
 
-// --- OriginTrail Game ---
-const GAME_BASE = '/api/apps/origin-trail-game';
-
-export const gameApi = {
-  info:   () => get<any>(`${GAME_BASE}/info`),
-  lobby:  () => get<{ openSwarms: any[]; mySwarms: any[] }>(`${GAME_BASE}/lobby`),
-  swarm:  (id: string) => get<any>(`${GAME_BASE}/swarm/${id}`),
-  create: (playerName: string, swarmName: string, maxPlayers?: number) =>
-    post<any>(`${GAME_BASE}/create`, { playerName, swarmName, maxPlayers }),
-  join:   (swarmId: string, playerName: string) =>
-    post<any>(`${GAME_BASE}/join`, { swarmId, playerName }),
-  leave:  (swarmId: string) =>
-    post<any>(`${GAME_BASE}/leave`, { swarmId }),
-  start:  (swarmId: string) =>
-    post<any>(`${GAME_BASE}/start`, { swarmId }),
-  vote:   (swarmId: string, voteAction: string, params?: Record<string, any>) =>
-    post<any>(`${GAME_BASE}/vote`, { swarmId, voteAction, params }),
-  forceResolve: (swarmId: string) =>
-    post<any>(`${GAME_BASE}/force-resolve`, { swarmId }),
-};
-
 // --- Sub-graphs (lightweight list + counts for SubGraphBar) ---
 export interface SubGraphInfo {
   name: string;
@@ -1376,4 +1352,3 @@ export const fetchSubGraphs = (contextGraphId: string) =>
   get<{ contextGraphId: string; subGraphs: SubGraphInfo[] }>(
     `/api/sub-graph/list?contextGraphId=${encodeURIComponent(contextGraphId)}`,
   );
-

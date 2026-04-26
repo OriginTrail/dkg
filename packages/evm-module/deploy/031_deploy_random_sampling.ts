@@ -34,4 +34,5 @@ func.dependencies = [
   'ParametersStorage',
   'ContextGraphStorage',
   'ContextGraphValueStorage',
+  'ConvictionStakingStorage',
 ];

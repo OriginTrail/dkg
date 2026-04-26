@@ -14,6 +14,10 @@ func.dependencies = [
   'IdentityStorage',
   'ProfileStorage',
   'StakingStorage',
+  // D13 — StakingKPI redirects fee-flag + net-node-rewards reads to CSS.
+  // DelegatorsInfo kept in deps so fresh bring-ups still run the V6/V8
+  // migrators (see 021 header).
+  'ConvictionStakingStorage',
   'DelegatorsInfo',
   'RandomSamplingStorage',
   'EpochStorage',

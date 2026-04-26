@@ -126,13 +126,6 @@ const NO_CHAIN_EXEMPT_FROM_EVM = new Set<string>([
   'extendConvictionLock',
   'getConvictionDiscount',
   'getConvictionAccountInfo',
-  'initiatePurchase',
-  'fulfillPurchase',
-  'revealKey',
-  'disputeDelivery',
-  'claimPayment',
-  'claimRefund',
-  'getFairSwapPurchase',
   'publishKnowledgeAssetsPermanent',
   'createKnowledgeCollection',
   'updateKnowledgeCollection',
@@ -203,6 +196,63 @@ describe('MockChainAdapter API parity with EVMChainAdapter [CH-8]', () => {
     const mock = new MockChainAdapter();
     const addr = await mock.getKnowledgeAssetsV10Address();
     expect(addr).toMatch(/^0x[0-9a-fA-F]{40}$/);
+  });
+
+  it('rejects participant agent configs that would revert on-chain', async () => {
+    const mock = new MockChainAdapter();
+    const base = {
+      participantIdentityIds: [1n],
+      requiredSignatures: 1,
+    };
+
+    await expect(mock.createOnChainContextGraph({
+      ...base,
+      participantAgents: ['0x0000000000000000000000000000000000000000'],
+    })).rejects.toThrow(/zero participant agent/);
+
+    await expect(mock.createOnChainContextGraph({
+      ...base,
+      participantAgents: [
+        '0x1111111111111111111111111111111111111111',
+        '0x1111111111111111111111111111111111111111',
+      ],
+    })).rejects.toThrow(/duplicate participant agent/);
+  });
+
+  it('normalizes and rejects publish-policy configs like the EVM facade', async () => {
+    const mock = new MockChainAdapter('mock:31337', '0x1111111111111111111111111111111111111111');
+    const base = {
+      participantIdentityIds: [1n],
+      requiredSignatures: 1,
+    };
+
+    await expect(mock.createOnChainContextGraph({
+      ...base,
+      publishPolicy: 2,
+    })).rejects.toThrow(/invalid publishPolicy/);
+
+    await expect(mock.createOnChainContextGraph({
+      ...base,
+      publishPolicy: 1,
+      publishAuthority: '0x2222222222222222222222222222222222222222',
+    })).rejects.toThrow(/open policy requires zero publishAuthority/);
+
+    await expect(mock.createOnChainContextGraph({
+      ...base,
+      publishPolicy: 1,
+      publishAuthorityAccountId: 1n,
+    })).rejects.toThrow(/open policy requires zero publishAuthorityAccountId/);
+
+    await expect(mock.createOnChainContextGraph({
+      ...base,
+      publishPolicy: 0,
+      publishAuthorityAccountId: 1n,
+    })).rejects.toThrow(/PCA publishAuthorityAccountId is not supported/);
+
+    await expect(mock.createOnChainContextGraph({
+      ...base,
+      publishPolicy: 0,
+    })).resolves.toMatchObject({ contextGraphId: 1n });
   });
 });
 

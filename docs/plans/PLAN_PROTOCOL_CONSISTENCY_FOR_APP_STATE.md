@@ -2,7 +2,7 @@
 
 **Status**: Phase 1 Implemented · Phases 2–3 Pending  
 **Date**: 2026-03-13  
-**Context**: OriginTrail game swarm status regression under mixed gossip + graph-sync state sources.
+**Context**: Swarm status regression originally observed in the `origin-trail-game` app (retired in V10) under mixed gossip + graph-sync state sources. The underlying protocol concern — monotonic app-state writes across nodes — still applies to any app paranet and is captured here for reuse.
 
 ---
 
@@ -321,7 +321,7 @@ Concrete effect:
 Rollout model:
 
 - Opt-in by paranet/app via `legacy | guarded | strict`
-- Pilot first (OriginTrail game), then broader reuse
+- Pilot first (a single app paranet), then broader reuse
 
 Concrete effect:
 
@@ -357,7 +357,7 @@ Recommendation:
 
 - ✅ Add conditional write API for workspace mutations (`writeConditionalToWorkspace` in `@dkg/publisher` + `@dkg/agent`).
 - ✅ Add `stateVersion` helper support in SDK/agent (`monotonicTransition`, `versionedWrite` in `workspace-consistency.ts`).
-- ✅ Pilot CAS in OriginTrail Game: `launchExpedition` uses CAS condition on swarm status (`recruiting` → `traveling`).
+- ✅ Piloted CAS in the legacy `origin-trail-game` app (retired in V10): `launchExpedition` used a CAS condition on swarm status (`recruiting` → `traveling`). The CAS primitive (`writeConditionalToWorkspace`) survives in the publisher API for any future app paranet.
 - Add docs and examples for monotonic transitions.
 
 Success criteria:
@@ -439,7 +439,7 @@ Mitigations:
    - conditional writes
    - protocol freshness metadata
    - monotonic field semantics
-4. Build one reference implementation in OriginTrail game as a pilot for broader app adoption.
+4. Ship one reference implementation in a pilot app paranet as the blueprint for broader app adoption.
 
 ---
 
@@ -460,7 +460,7 @@ implementers can quickly see what each point brings.
 
 - **What it brings**: Reframes the issue as a distributed consistency concern across nodes.
 - **Node/graph example**: Node `A` writes `status=traveling` into
-  `did:dkg:paranet:origin-trail-game/_workspace`, gossips launch event to `B` and `C`.
+  `did:dkg:paranet:example-paranet/_workspace`, gossips launch event to `B` and `C`.
   Node `B` later queries an older workspace snapshot and sees `status=recruiting`.
   Without consistency semantics, `B` can regress local state from the graph read.
 
@@ -476,7 +476,7 @@ implementers can quickly see what each point brings.
 
 - **What it brings**: Clarifies constraints: no global lock, keep eventual consistency.
 - **Node/graph example**: Node `C` should still accept delayed replication from
-  `did:dkg:paranet:origin-trail-game/_workspace`, but never allow that delayed value to
+  `did:dkg:paranet:example-paranet/_workspace`, but never allow that delayed value to
   move a monotonic field backward.
 
 ### 12.4 Proposed improvements (what each adds in practice)
@@ -552,8 +552,7 @@ implementers can quickly see what each point brings.
 ### 12.10 Immediate next steps
 
 - **What it brings**: Practical implementation order with lowest risk first.
-- **Node/graph example**: Keep game guard in place now, then pilot CAS + version writes in origin-trail-game
-  workspace graph before rolling same semantics to other app paranets.
+- **Node/graph example**: Keep the existing app-level guard in place now, then pilot CAS + version writes in a single pilot paranet workspace graph before rolling the same semantics to all app paranets.
 
 ### 12.11 Decision summary (practical reading)
 

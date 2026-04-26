@@ -6,8 +6,10 @@ import { fileURLToPath } from 'node:url';
 
 export interface AutoUpdateConfig {
   enabled: boolean;
-  repo: string;
-  branch: string;
+  /** Optional in ~/.dkg/config.json: omit to inherit from network/project config. */
+  repo?: string;
+  /** Optional in ~/.dkg/config.json: omit to inherit from network/project config. */
+  branch?: string;
   /** Allow auto-updating to pre-release versions (e.g. 9.0.5-rc.1). */
   allowPrerelease?: boolean;
   /** Optional SSH private key path for git-based update fetches/clones. */
@@ -16,6 +18,18 @@ export interface AutoUpdateConfig {
   sshCommand?: string;
   checkIntervalMinutes: number;
 }
+
+/**
+ * AutoUpdateConfig with `repo` and `branch` guaranteed present — the shape
+ * returned by `resolveAutoUpdateConfig()` after falling back through
+ * ~/.dkg/config.json -> network/<env>.json -> project.json. Consumers of the
+ * auto-update subsystem should accept this type, not the raw `AutoUpdateConfig`,
+ * since the raw form allows `repo`/`branch` to be omitted.
+ */
+export type ResolvedAutoUpdateConfig = AutoUpdateConfig & {
+  repo: string;
+  branch: string;
+};
 
 export interface NetworkConfig {
   networkName: string;
@@ -337,9 +351,9 @@ export function loadProjectConfig(): ProjectConfig {
     } catch { /* try next */ }
   }
   _projectConfig = {
-    repo: 'OriginTrail/dkg-v9',
-    defaultBranch: 'v10-rc',
-    githubUrl: 'https://github.com/OriginTrail/dkg-v9',
+    repo: 'OriginTrail/dkg',
+    defaultBranch: 'main',
+    githubUrl: 'https://github.com/OriginTrail/dkg',
     projectName: 'dkg',
     syslogAppName: 'dkg',
     defaultNetwork: 'testnet',
@@ -349,6 +363,47 @@ export function loadProjectConfig(): ProjectConfig {
 
 export function _resetProjectConfigCache(): void {
   _projectConfig = null;
+}
+
+/**
+ * Field-level merge of the effective auto-update configuration.
+ *
+ * Precedence per field: `~/.dkg/config.json` → `network/<env>.json` →
+ * `project.json` (or static fallback). Returns null when auto-update is
+ * explicitly disabled in the local config.
+ *
+ * Rationale: `dkg init` intentionally omits `repo`/`branch` from the
+ * persisted config when the user accepts the defaults, so that future
+ * changes to the shipped network/project defaults propagate without a
+ * config rewrite. Callers must therefore resolve the effective values
+ * instead of reading `config.autoUpdate.repo` directly.
+ */
+export function resolveAutoUpdateConfig(
+  config: Pick<DkgConfig, 'autoUpdate'> | null | undefined,
+  network: Pick<NetworkConfig, 'autoUpdate'> | null | undefined,
+): ResolvedAutoUpdateConfig | null {
+  const cfg = config?.autoUpdate;
+  const net = network?.autoUpdate;
+  const enabled = cfg?.enabled ?? net?.enabled ?? false;
+  if (!enabled) return null;
+
+  const proj = loadProjectConfig();
+  const repo = cfg?.repo ?? net?.repo ?? proj.repo;
+  const branch = cfg?.branch ?? net?.branch ?? proj.defaultBranch;
+  const allowPrerelease = cfg?.allowPrerelease ?? net?.allowPrerelease ?? true;
+  const sshKeyPath = cfg?.sshKeyPath ?? net?.sshKeyPath;
+  const sshCommand = cfg?.sshCommand ?? net?.sshCommand;
+  const checkIntervalMinutes = cfg?.checkIntervalMinutes ?? net?.checkIntervalMinutes ?? 30;
+
+  return {
+    enabled: true,
+    repo,
+    branch,
+    allowPrerelease,
+    ...(sshKeyPath ? { sshKeyPath } : {}),
+    ...(sshCommand ? { sshCommand } : {}),
+    checkIntervalMinutes,
+  };
 }
 
 /**

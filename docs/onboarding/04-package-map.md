@@ -227,15 +227,6 @@ Attested Knowledge Assets (AKA) protocol implementation. Provides session manage
 
 **Depends on**: `core`, `agent`.
 
-### @origintrail-official/dkg-app-origin-trail-game
-`packages/origin-trail-game/`
-
-An installable DKG app implementing a multiplayer Oregon Trail-style game. Uses workspace writes, context graphs, and CAS conditions for coordinating swarm state across players. Serves as the reference implementation for the installable app pattern (see `DKG_APPS_INSTALLABLE.md`).
-
-**Depends on**: `core`, `agent`, `publisher`.
-
----
-
 ## "Where Do I Look?" Quick Reference
 
 | If you want to...                              | Look in                          |

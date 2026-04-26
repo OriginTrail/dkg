@@ -474,6 +474,65 @@ export class DkgDaemonClient {
   }
 
   // ---------------------------------------------------------------------------
+  // Context graph participant management
+  // ---------------------------------------------------------------------------
+
+  async inviteToContextGraph(
+    contextGraphId: string,
+    peerId: string,
+  ): Promise<{ invited: string; contextGraphId: string }> {
+    return this.post('/api/context-graph/invite', { contextGraphId, peerId });
+  }
+
+  async addParticipant(
+    contextGraphId: string,
+    agentAddress: string,
+  ): Promise<{ ok: boolean; contextGraphId: string; agentAddress: string }> {
+    return this.post(`/api/context-graph/${encodeURIComponent(contextGraphId)}/add-participant`, { agentAddress });
+  }
+
+  async removeParticipant(
+    contextGraphId: string,
+    agentAddress: string,
+  ): Promise<{ ok: boolean; contextGraphId: string; agentAddress: string }> {
+    return this.post(`/api/context-graph/${encodeURIComponent(contextGraphId)}/remove-participant`, { agentAddress });
+  }
+
+  async listParticipants(
+    contextGraphId: string,
+  ): Promise<{ contextGraphId: string; allowedAgents: string[] }> {
+    return this.get(`/api/context-graph/${encodeURIComponent(contextGraphId)}/participants`);
+  }
+
+  async listJoinRequests(
+    contextGraphId: string,
+  ): Promise<{
+    contextGraphId: string;
+    requests: Array<{
+      agentAddress: string;
+      status: string;
+      timestamp?: string;
+      agentName?: string;
+    }>;
+  }> {
+    return this.get(`/api/context-graph/${encodeURIComponent(contextGraphId)}/join-requests`);
+  }
+
+  async approveJoinRequest(
+    contextGraphId: string,
+    agentAddress: string,
+  ): Promise<{ ok: boolean; status: string; agentAddress: string }> {
+    return this.post(`/api/context-graph/${encodeURIComponent(contextGraphId)}/approve-join`, { agentAddress });
+  }
+
+  async rejectJoinRequest(
+    contextGraphId: string,
+    agentAddress: string,
+  ): Promise<{ ok: boolean; status: string; agentAddress: string }> {
+    return this.post(`/api/context-graph/${encodeURIComponent(contextGraphId)}/reject-join`, { agentAddress });
+  }
+
+  // ---------------------------------------------------------------------------
   // Agents & skills discovery
   // ---------------------------------------------------------------------------
 
@@ -574,6 +633,13 @@ export class DkgDaemonClient {
     description?: string,
   ): Promise<{ created: string; uri: string }> {
     return this.post('/api/context-graph/create', { id, name, description });
+  }
+
+  async registerContextGraph(
+    id: string,
+    opts?: { accessPolicy?: number },
+  ): Promise<{ registered: string; onChainId: string; txHash?: string; hint?: string }> {
+    return this.post('/api/context-graph/register', { id, ...opts });
   }
 
   // ---------------------------------------------------------------------------

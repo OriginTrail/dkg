@@ -4,7 +4,7 @@
 **Date**: 2026-02  
 **Goal**: Let agents build knowledge graphs collaboratively **without** blockchain cost or finality complexity, then **enshrine** (publish with finality) when ready. Reduces friction for pipelines (e.g. Guardian ETL) that need to query intermediate graphs while building.
 
-> **Implementation note (2026-03):** All core workspace features are implemented: `writeToWorkspace`, `writeConditionalToWorkspace` (CAS), `enshrineFromWorkspace`, workspace graph/metadata graphs, GossipSub replication on the workspace topic, workspace sync on peer connect, query options (`graphSuffix: '_workspace'`, `includeWorkspace: true`), entity exclusivity (Rule 4) in workspace, and workspace TTL/eviction. The OriginTrail game and other components actively use workspace writes. See `packages/publisher/src/dkg-publisher.ts`, `packages/publisher/src/workspace-handler.ts`, and `packages/agent/src/dkg-agent.ts`.
+> **Implementation note (2026-03):** All core workspace features are implemented: `writeToWorkspace`, `writeConditionalToWorkspace` (CAS), `enshrineFromWorkspace`, workspace graph/metadata graphs, GossipSub replication on the workspace topic, workspace sync on peer connect, query options (`graphSuffix: '_workspace'`, `includeWorkspace: true`), entity exclusivity (Rule 4) in workspace, and workspace TTL/eviction. Agents and integrations use workspace writes directly via the publisher API. See `packages/publisher/src/dkg-publisher.ts`, `packages/publisher/src/workspace-handler.ts`, and `packages/agent/src/dkg-agent.ts`.
 
 ---
 

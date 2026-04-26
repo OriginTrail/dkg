@@ -35,11 +35,18 @@ describe('DkgNodePlugin', () => {
     expect(registeredHooks).toContainEqual({ event: 'session_end', name: 'dkg-node-stop' });
 
     const toolNames = registeredTools.map(t => t.name);
-    // Existing 11 active tools
+    // Existing active tools
     expect(toolNames).toContain('dkg_status');
     expect(toolNames).toContain('dkg_wallet_balances');
     expect(toolNames).toContain('dkg_list_context_graphs');
     expect(toolNames).toContain('dkg_context_graph_create');
+    expect(toolNames).toContain('dkg_context_graph_invite');
+    expect(toolNames).toContain('dkg_participant_add');
+    expect(toolNames).toContain('dkg_participant_remove');
+    expect(toolNames).toContain('dkg_participant_list');
+    expect(toolNames).toContain('dkg_join_request_list');
+    expect(toolNames).toContain('dkg_join_request_approve');
+    expect(toolNames).toContain('dkg_join_request_reject');
     expect(toolNames).toContain('dkg_subscribe');
     expect(toolNames).toContain('dkg_publish');
     expect(toolNames).toContain('dkg_query');
@@ -63,8 +70,8 @@ describe('DkgNodePlugin', () => {
     expect(toolNames).not.toContain('dkg_paranet_create');
     // memory_search added by this feature branch (W2 — agent-callable recall button).
     expect(toolNames).toContain('memory_search');
-    // 13 originals (incl. paranets) - 2 retired paranets + 10 assertion/subgraph/publish + 1 memory_search = 22
-    expect(registeredTools.length).toBe(22);
+    // 28 from main (originals + assertion/subgraph/SWM/CG-registration tools) + 1 memory_search = 29
+    expect(registeredTools.length).toBe(29);
   });
 
   it('new dkg_assertion_* and dkg_sub_graph_* tools have the expected schema shape', () => {
@@ -94,6 +101,13 @@ describe('DkgNodePlugin', () => {
     };
 
     expectRequired('dkg_assertion_create', ['context_graph_id', 'name']);
+    expectRequired('dkg_context_graph_invite', ['context_graph_id', 'peer_id']);
+    expectRequired('dkg_participant_add', ['context_graph_id', 'agent_address']);
+    expectRequired('dkg_participant_remove', ['context_graph_id', 'agent_address']);
+    expectRequired('dkg_participant_list', ['context_graph_id']);
+    expectRequired('dkg_join_request_list', ['context_graph_id']);
+    expectRequired('dkg_join_request_approve', ['context_graph_id', 'agent_address']);
+    expectRequired('dkg_join_request_reject', ['context_graph_id', 'agent_address']);
     expectRequired('dkg_assertion_write', ['context_graph_id', 'name', 'quads']);
     expectRequired('dkg_assertion_promote', ['context_graph_id', 'name']);
     expectRequired('dkg_assertion_discard', ['context_graph_id', 'name']);
@@ -110,6 +124,12 @@ describe('DkgNodePlugin', () => {
     const publishProps = byName.get('dkg_shared_memory_publish')!.parameters.properties;
     expect(publishProps).toHaveProperty('sub_graph_name');
     expect(publishProps.sub_graph_name.type).toBe('string');
+    expect(publishProps).toHaveProperty('register_if_needed');
+    expect(publishProps.register_if_needed.type).toBe('boolean');
+    expect(publishProps).toHaveProperty('reveal_on_chain');
+    expect(publishProps.reveal_on_chain.type).toBe('boolean');
+    expect(publishProps).toHaveProperty('access_policy');
+    expect(publishProps.access_policy.type).toBe('number');
 
     // dkg_assertion_write.quads is an array of {subject,predicate,object}
     const writeTool = byName.get('dkg_assertion_write')!;
@@ -148,6 +168,13 @@ describe('DkgNodePlugin', () => {
     // agent_address is exposed as an optional tool param for WM targeting.
     expect(queryProps.agent_address.type).toBe('string');
     expect(queryProps.agent_address.description).toMatch(/working-memory/i);
+
+    const inviteTool = byName.get('dkg_context_graph_invite')!;
+    expect(inviteTool.description).toMatch(/primary user-facing deliverable/i);
+    expect(inviteTool.description).toMatch(/paste into Join/i);
+
+    const addParticipantTool = byName.get('dkg_participant_add')!;
+    expect(addParticipantTool.description).toMatch(/allowlisting alone is not the full UI join flow/i);
   });
 
   // ---------------------------------------------------------------------------
@@ -201,6 +228,117 @@ describe('DkgNodePlugin', () => {
         name: 'chat-turns',
         subGraphName: 'protocols',
       });
+    });
+
+    it('dkg_context_graph_invite forwards snake_case → camelCase body', async () => {
+      const statusResponse = {
+        peerId: '12D3Kooself',
+        multiaddrs: [
+          '/ip4/127.0.0.1/tcp/9201/p2p/12D3Kooself',
+          '/ip4/178.104.54.178/tcp/9090/p2p/12D3KooWSrelay/p2p-circuit/p2p/12D3Kooself',
+        ],
+      };
+      const fetchMock = vi.fn(async (url: string) => {
+        if (url === 'http://localhost:9200/api/status') {
+          return new Response(JSON.stringify(statusResponse), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        return new Response(JSON.stringify({ invited: '12D3KooWfriend', contextGraphId: 'ctx' }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      });
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+      const plugin = new DkgNodePlugin({ daemonUrl: 'http://localhost:9200' });
+      const tools: OpenClawTool[] = [];
+      plugin.register({
+        config: {},
+        registerTool: (t) => tools.push(t),
+        registerHook: () => {},
+        on: () => {},
+        logger: {},
+      });
+      const byName = new Map(tools.map((t) => [t.name, t] as const));
+      const result = await byName.get('dkg_context_graph_invite')!.execute('tc', {
+        context_graph_id: 'ctx',
+        peer_id: '12D3KooWfriend',
+      });
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('http://localhost:9200/api/context-graph/invite');
+      expect(JSON.parse(init.body as string)).toEqual({
+        contextGraphId: 'ctx',
+        peerId: '12D3KooWfriend',
+      });
+      const body = JSON.parse(result.content[0].text);
+      expect(body.peerId).toBe('12D3KooWfriend');
+      expect(body.curatorMultiaddr).toBe('/ip4/178.104.54.178/tcp/9090/p2p/12D3KooWSrelay/p2p-circuit/p2p/12D3Kooself');
+      expect(body.inviteCode).toBe('ctx\n/ip4/178.104.54.178/tcp/9090/p2p/12D3KooWSrelay/p2p-circuit/p2p/12D3Kooself');
+    });
+
+    it('dkg_participant_add forwards snake_case → camelCase body', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ ok: true, contextGraphId: 'ctx', agentAddress: '0xabc' });
+      await byName.get('dkg_participant_add')!.execute('tc', {
+        context_graph_id: 'ctx',
+        agent_address: '0xabc',
+      });
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('http://localhost:9200/api/context-graph/ctx/add-participant');
+      expect(JSON.parse(init.body as string)).toEqual({ agentAddress: '0xabc' });
+    });
+
+    it('dkg_participant_remove forwards snake_case → camelCase body', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ ok: true, contextGraphId: 'ctx', agentAddress: '0xabc' });
+      await byName.get('dkg_participant_remove')!.execute('tc', {
+        context_graph_id: 'ctx',
+        agent_address: '0xabc',
+      });
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('http://localhost:9200/api/context-graph/ctx/remove-participant');
+      expect(JSON.parse(init.body as string)).toEqual({ agentAddress: '0xabc' });
+    });
+
+    it('dkg_participant_list forwards the context-graph path', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ contextGraphId: 'ctx', allowedAgents: ['0xabc'] });
+      await byName.get('dkg_participant_list')!.execute('tc', {
+        context_graph_id: 'ctx',
+      });
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('http://localhost:9200/api/context-graph/ctx/participants');
+      expect(init.method).toBe('GET');
+    });
+
+    it('dkg_join_request_list forwards the context-graph path', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ contextGraphId: 'ctx', requests: [] });
+      await byName.get('dkg_join_request_list')!.execute('tc', {
+        context_graph_id: 'ctx',
+      });
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('http://localhost:9200/api/context-graph/ctx/join-requests');
+      expect(init.method).toBe('GET');
+    });
+
+    it('dkg_join_request_approve forwards snake_case → camelCase body', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ ok: true, status: 'approved', agentAddress: '0xabc' });
+      await byName.get('dkg_join_request_approve')!.execute('tc', {
+        context_graph_id: 'ctx',
+        agent_address: '0xabc',
+      });
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('http://localhost:9200/api/context-graph/ctx/approve-join');
+      expect(JSON.parse(init.body as string)).toEqual({ agentAddress: '0xabc' });
+    });
+
+    it('dkg_join_request_reject forwards snake_case → camelCase body', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ ok: true, status: 'rejected', agentAddress: '0xabc' });
+      await byName.get('dkg_join_request_reject')!.execute('tc', {
+        context_graph_id: 'ctx',
+        agent_address: '0xabc',
+      });
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('http://localhost:9200/api/context-graph/ctx/reject-join');
+      expect(JSON.parse(init.body as string)).toEqual({ agentAddress: '0xabc' });
     });
 
     it('dkg_assertion_write forwards snake_case → camelCase body', async () => {
@@ -446,6 +584,105 @@ describe('DkgNodePlugin', () => {
       expect(body.contextGraphId).toBe('ctx');
     });
 
+    it('dkg_shared_memory_publish can register the context graph before publish when requested', async () => {
+      const fetchMock = vi.fn(async (url: string) => {
+        if (url === 'http://localhost:9200/api/context-graph/register') {
+          return new Response(JSON.stringify({ registered: 'ctx', onChainId: '42', txHash: '0xabc' }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        return new Response(JSON.stringify({ kcId: 'kc-7', status: 'ok', kas: [] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      });
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+      const plugin = new DkgNodePlugin({ daemonUrl: 'http://localhost:9200' });
+      const tools: OpenClawTool[] = [];
+      plugin.register({
+        config: {},
+        registerTool: (t) => tools.push(t),
+        registerHook: () => {},
+        on: () => {},
+        logger: {},
+      });
+      const byName = new Map(tools.map((t) => [t.name, t] as const));
+
+      const result = await byName.get('dkg_shared_memory_publish')!.execute('tc', {
+        context_graph_id: 'ctx',
+        register_if_needed: true,
+        reveal_on_chain: true,
+        access_policy: 1,
+      });
+
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(fetchMock.mock.calls[0]?.[0]).toBe('http://localhost:9200/api/context-graph/register');
+      expect(JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string)).toEqual({
+        id: 'ctx',
+        accessPolicy: 1,
+      });
+      expect(fetchMock.mock.calls[1]?.[0]).toBe('http://localhost:9200/api/shared-memory/publish');
+      const body = JSON.parse(result.content[0].text);
+      expect(body.registration).toEqual({ registered: 'ctx', onChainId: '42', txHash: '0xabc' });
+      expect(body.kcId).toBe('kc-7');
+    });
+
+    it('dkg_shared_memory_publish ignores already-registered conflicts and still publishes', async () => {
+      const fetchMock = vi.fn(async (url: string) => {
+        if (url === 'http://localhost:9200/api/context-graph/register') {
+          return new Response(JSON.stringify({ error: 'Context graph "ctx" is already registered on-chain (42)' }), {
+            status: 409,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        return new Response(JSON.stringify({ kcId: 'kc-8', status: 'ok', kas: [] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      });
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+      const plugin = new DkgNodePlugin({ daemonUrl: 'http://localhost:9200' });
+      const tools: OpenClawTool[] = [];
+      plugin.register({
+        config: {},
+        registerTool: (t) => tools.push(t),
+        registerHook: () => {},
+        on: () => {},
+        logger: {},
+      });
+      const byName = new Map(tools.map((t) => [t.name, t] as const));
+
+      const result = await byName.get('dkg_shared_memory_publish')!.execute('tc', {
+        context_graph_id: 'ctx',
+        register_if_needed: true,
+      });
+
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      const body = JSON.parse(result.content[0].text);
+      expect(body.registration).toBeUndefined();
+      expect(body.kcId).toBe('kc-8');
+    });
+
+    it('dkg_shared_memory_publish validates register_if_needed and registration options locally', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({});
+      const bad = await byName.get('dkg_shared_memory_publish')!.execute('tc', {
+        context_graph_id: 'ctx',
+        register_if_needed: 'yes',
+        reveal_on_chain: 'yes',
+        access_policy: 3,
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(bad.content[0].text).toContain('register_if_needed');
+
+      const badReveal = await byName.get('dkg_shared_memory_publish')!.execute('tc', {
+        context_graph_id: 'ctx',
+        reveal_on_chain: 'yes',
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(badReveal.content[0].text).toContain('reveal_on_chain');
+    });
+
     it('dkg_shared_memory_publish rejects non-array / empty / non-string root_entities locally', async () => {
       const { fetchMock, byName } = setupPluginWithFetch({});
       const bad = await byName.get('dkg_shared_memory_publish')!.execute('tc', {
@@ -670,6 +907,42 @@ describe('DkgNodePlugin', () => {
       expect(query.description).not.toMatch(/omit[^.]*default[^.]*working-memory/i);
       expect(query.description).not.toMatch(/default[^.]*WM semantics/i);
       expect(query.description).not.toMatch(/Omit `?view`? for the default/i);
+    });
+
+    it('dkg_query description steers WM reads toward current_agent_address and retries identity variants', () => {
+      const plugin = new DkgNodePlugin();
+      const tools: OpenClawTool[] = [];
+      plugin.register({
+        config: {},
+        registerTool: (t) => tools.push(t),
+        registerHook: () => {},
+        on: () => {},
+        logger: {},
+      });
+      const query = tools.find((t) => t.name === 'dkg_query')!;
+      const agentAddress = query.parameters.properties.agent_address as { description?: string };
+
+      expect(query.description).toContain('current_agent_address');
+      expect(query.description).toMatch(/retry alternate identity forms/i);
+      expect(agentAddress.description).toContain('current_agent_address');
+      expect(agentAddress.description).toMatch(/wallet\/address form, raw peer ID, or DID form/i);
+    });
+
+    it('share-flow tool descriptions prefer invite code output for friend-sharing requests', () => {
+      const plugin = new DkgNodePlugin();
+      const tools: OpenClawTool[] = [];
+      plugin.register({
+        config: {},
+        registerTool: (t) => tools.push(t),
+        registerHook: () => {},
+        on: () => {},
+        logger: {},
+      });
+      const byName = new Map(tools.map((t) => [t.name, t] as const));
+
+      expect(byName.get('dkg_context_graph_invite')!.description).toContain('ready-to-share invite code');
+      expect(byName.get('dkg_context_graph_invite')!.description).toContain('paste into Join');
+      expect(byName.get('dkg_participant_add')!.description).toContain('allowlisting alone is not the full UI join flow');
     });
 
     it('dkg_query forwards the `view` field to the daemon body verbatim', async () => {

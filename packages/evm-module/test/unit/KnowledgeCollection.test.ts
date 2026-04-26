@@ -16,8 +16,6 @@ import {
   IdentityStorage,
   Hub,
   Profile,
-  ParanetKnowledgeCollectionsRegistry,
-  ParanetKnowledgeMinersRegistry,
   Identity,
   Staking,
 } from '../../typechain';
@@ -44,8 +42,6 @@ type KnowledgeCollectionFixture = {
   IdentityStorage: IdentityStorage;
   Identity: Identity;
   Profile: Profile;
-  ParanetsKnowledgeCollectionsRegistry: ParanetKnowledgeCollectionsRegistry;
-  ParanetKnowledgeMinersRegistry: ParanetKnowledgeMinersRegistry;
   Staking: Staking;
 };
 
@@ -61,8 +57,6 @@ describe('@unit KnowledgeCollection', () => {
   let IdentityStorage: IdentityStorage;
   let Identity: Identity;
   let Profile: Profile;
-  let ParanetsKnowledgeCollectionsRegistry: ParanetKnowledgeCollectionsRegistry;
-  let ParanetKnowledgeMinersRegistry: ParanetKnowledgeMinersRegistry;
   let Staking: Staking;
 
   async function deployKnowledgeCollectionFixture(): Promise<KnowledgeCollectionFixture> {
@@ -71,8 +65,6 @@ describe('@unit KnowledgeCollection', () => {
       'AskStorage',
       'EpochStorage',
       'KnowledgeCollection',
-      'ParanetKnowledgeCollectionsRegistry',
-      'ParanetKnowledgeMinersRegistry',
       'Chronos',
       'Profile',
       'Identity',
@@ -99,14 +91,6 @@ describe('@unit KnowledgeCollection', () => {
       await hre.ethers.getContract<IdentityStorage>('IdentityStorage');
     Identity = await hre.ethers.getContract<Identity>('Identity');
     Profile = await hre.ethers.getContract<Profile>('Profile');
-    ParanetsKnowledgeCollectionsRegistry =
-      await hre.ethers.getContract<ParanetKnowledgeCollectionsRegistry>(
-        'ParanetKnowledgeCollectionsRegistry',
-      );
-    ParanetKnowledgeMinersRegistry =
-      await hre.ethers.getContract<ParanetKnowledgeMinersRegistry>(
-        'ParanetKnowledgeMinersRegistry',
-      );
     Staking = await hre.ethers.getContract<Staking>('Staking');
 
     await Hub.setContractAddress('HubOwner', accounts[0].address);
@@ -122,8 +106,6 @@ describe('@unit KnowledgeCollection', () => {
       ParametersStorage,
       IdentityStorage,
       Profile,
-      ParanetsKnowledgeCollectionsRegistry,
-      ParanetKnowledgeMinersRegistry,
       Identity,
       Staking,
     };

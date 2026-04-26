@@ -3,6 +3,24 @@ import { mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync, existsSync
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+
+// Mock the core module at the module boundary so every `runSetup` invocation
+// in this suite gets a controllable `requestFaucetFunding` spy. `vi.mock` is
+// hoisted by vitest, so the mock intercepts `setup.ts`'s top-level import
+// regardless of where this line appears. Other `@origintrail-official/dkg-core`
+// exports are passed through unchanged via `importActual` so existing tests
+// that rely on core semantics (transitive imports) stay intact.
+vi.mock('@origintrail-official/dkg-core', async () => {
+  const actual = await vi.importActual<typeof import('@origintrail-official/dkg-core')>(
+    '@origintrail-official/dkg-core',
+  );
+  return {
+    ...actual,
+    requestFaucetFunding: vi.fn(async () => ({ success: true, funded: ['0.01 ETH', '1000 TRAC'] })),
+  };
+});
+import { requestFaucetFunding } from '@origintrail-official/dkg-core';
+
 import {
   discoverWorkspace,
   discoverAgentName,
@@ -15,6 +33,10 @@ import {
   removeCanonicalNodeSkill,
   resolveWorkspaceDirFromConfig,
   openclawConfigPath,
+  loadNetworkConfig,
+  readWallets,
+  readWalletsWithRetry,
+  logManualFundingInstructions,
   runSetup,
   type AdapterEntryConfig,
 } from '../src/setup.js';
@@ -62,6 +84,24 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('discoverAgentName', () => {
+  // Point DKG_HOME at a fresh tmp dir per test so the persisted-name
+  // branch (C8) sees no ~/.dkg/config.json unless the test explicitly
+  // seeds one. Otherwise, a dev-machine `~/.dkg/config.json.name`
+  // would leak into these tests and break the fallback assertions.
+  let originalDkg: string | undefined;
+  let dkgHome: string;
+
+  beforeEach(() => {
+    originalDkg = process.env.DKG_HOME;
+    dkgHome = join(testDir, '.dkg');
+    mkdirSync(dkgHome, { recursive: true });
+    process.env.DKG_HOME = dkgHome;
+  });
+
+  afterEach(() => {
+    process.env.DKG_HOME = originalDkg;
+  });
+
   it('returns override when provided', () => {
     expect(discoverAgentName('/nonexistent', 'my-agent')).toBe('my-agent');
   });
@@ -80,18 +120,83 @@ describe('discoverAgentName', () => {
     expect(discoverAgentName(ws)).toBe('Bob');
   });
 
-  it('falls back to generated name when IDENTITY.md has no Name field', () => {
+  it('falls back to generated name when IDENTITY.md has no Name field and no persisted config', () => {
     const ws = join(testDir, 'workspace');
     mkdirSync(ws, { recursive: true });
     writeFileSync(join(ws, 'IDENTITY.md'), '# Identity\nJust some text\n');
     expect(discoverAgentName(ws)).toMatch(/^openclaw-agent-[a-z0-9]+$/);
   });
 
-  it('falls back to generated name when IDENTITY.md is missing', () => {
+  it('falls back to generated name when IDENTITY.md is missing and no persisted config', () => {
     const ws = join(testDir, 'my-workspace');
     mkdirSync(ws, { recursive: true });
     const name = discoverAgentName(ws);
     expect(name).toMatch(/^openclaw-agent-[a-z0-9]+$/);
+  });
+
+  // C8: persisted name stability. On re-runs where IDENTITY.md is absent
+  // (or has no Name: field), the faucet Idempotency-Key must stay stable
+  // across invocations to avoid duplicate requests. Honoring
+  // `~/.dkg/config.json.name` (written by a prior setup run via
+  // writeDkgConfig's first-wins semantics) achieves this without
+  // introducing a new source of truth.
+  it('returns the persisted name from ~/.dkg/config.json when IDENTITY.md is missing', () => {
+    const ws = join(testDir, 'workspace');
+    mkdirSync(ws, { recursive: true });
+    writeFileSync(join(dkgHome, 'config.json'), JSON.stringify({ name: 'persisted-agent' }));
+    expect(discoverAgentName(ws)).toBe('persisted-agent');
+  });
+
+  it('returns the persisted name when IDENTITY.md has no Name: field', () => {
+    const ws = join(testDir, 'workspace');
+    mkdirSync(ws, { recursive: true });
+    writeFileSync(join(ws, 'IDENTITY.md'), '# Identity\nJust some text\n');
+    writeFileSync(join(dkgHome, 'config.json'), JSON.stringify({ name: 'persisted-agent' }));
+    expect(discoverAgentName(ws)).toBe('persisted-agent');
+  });
+
+  it('prefers IDENTITY.md over persisted name when both are present', () => {
+    const ws = join(testDir, 'workspace');
+    mkdirSync(ws, { recursive: true });
+    writeFileSync(join(ws, 'IDENTITY.md'), '# Identity\nName: Alice\n');
+    writeFileSync(join(dkgHome, 'config.json'), JSON.stringify({ name: 'persisted-agent' }));
+    expect(discoverAgentName(ws)).toBe('Alice');
+  });
+
+  it('prefers the override arg over both IDENTITY.md and persisted name', () => {
+    const ws = join(testDir, 'workspace');
+    mkdirSync(ws, { recursive: true });
+    writeFileSync(join(ws, 'IDENTITY.md'), '# Identity\nName: Alice\n');
+    writeFileSync(join(dkgHome, 'config.json'), JSON.stringify({ name: 'persisted-agent' }));
+    expect(discoverAgentName(ws, 'override-agent')).toBe('override-agent');
+  });
+
+  it('falls through to random when persisted config.json exists but lacks a name field', () => {
+    const ws = join(testDir, 'workspace');
+    mkdirSync(ws, { recursive: true });
+    writeFileSync(join(dkgHome, 'config.json'), JSON.stringify({ apiPort: 9200 }));
+    expect(discoverAgentName(ws)).toMatch(/^openclaw-agent-[a-z0-9]+$/);
+  });
+
+  it('falls through to random when persisted config.json is unparseable', () => {
+    const ws = join(testDir, 'workspace');
+    mkdirSync(ws, { recursive: true });
+    writeFileSync(join(dkgHome, 'config.json'), '{not-json');
+    expect(discoverAgentName(ws)).toMatch(/^openclaw-agent-[a-z0-9]+$/);
+  });
+
+  it('falls through to random when persisted config.json has a non-string name', () => {
+    const ws = join(testDir, 'workspace');
+    mkdirSync(ws, { recursive: true });
+    writeFileSync(join(dkgHome, 'config.json'), JSON.stringify({ name: 42 }));
+    expect(discoverAgentName(ws)).toMatch(/^openclaw-agent-[a-z0-9]+$/);
+  });
+
+  it('falls through to random when persisted config.json has an empty-string name', () => {
+    const ws = join(testDir, 'workspace');
+    mkdirSync(ws, { recursive: true });
+    writeFileSync(join(dkgHome, 'config.json'), JSON.stringify({ name: '   ' }));
+    expect(discoverAgentName(ws)).toMatch(/^openclaw-agent-[a-z0-9]+$/);
   });
 });
 
@@ -2659,4 +2764,597 @@ describe('runSetup openclaw.json preflight (R6-2 + R8-2)', () => {
       }
     },
   );
+});
+
+// ---------------------------------------------------------------------------
+// Preflight runs BEFORE daemon + faucet (C10 extraction)
+//
+// With the preflight moved to new Step 4 (between writeDkgConfig and
+// startDaemon), deterministic openclaw.json misconfigurations must throw
+// BEFORE the faucet gets called. This matters because faucet calls count
+// against the 3-calls-per-8h IP-level rate limit regardless of outcome
+// — so a user with a broken openclaw.json shouldn't burn a slot on a
+// setup that was always going to fail at merge.
+// ---------------------------------------------------------------------------
+
+describe('runSetup preflight runs before faucet (C10)', () => {
+  beforeEach(() => {
+    vi.mocked(requestFaucetFunding).mockReset();
+    vi.mocked(requestFaucetFunding).mockResolvedValue({
+      success: true,
+      funded: ['0.01 ETH', '1000 TRAC'],
+    });
+  });
+
+  it('does NOT call the faucet when openclaw.json is missing', async () => {
+    const dkgHome = join(testDir, '.dkg');
+    const openclawHome = join(testDir, '.openclaw');
+    const ws = join(testDir, 'workspace');
+    mkdirSync(dkgHome, { recursive: true });
+    mkdirSync(openclawHome, { recursive: true });
+    mkdirSync(ws, { recursive: true });
+    // Pre-seed wallets.json so Step 6 would succeed if it ever ran.
+    writeFileSync(
+      join(dkgHome, 'wallets.json'),
+      JSON.stringify({ wallets: [{ address: '0xAA', privateKey: '0x01' }] }),
+    );
+    // Intentionally no openclaw.json — preflight must throw before faucet.
+
+    const originalDkg = process.env.DKG_HOME;
+    const originalOpenclaw = process.env.OPENCLAW_HOME;
+    process.env.DKG_HOME = dkgHome;
+    process.env.OPENCLAW_HOME = openclawHome;
+
+    try {
+      await expect(
+        runSetup({ workspace: ws, start: false, verify: false }),
+      ).rejects.toThrow(/openclaw\.json not found/);
+
+      expect(requestFaucetFunding).not.toHaveBeenCalled();
+    } finally {
+      process.env.DKG_HOME = originalDkg;
+      process.env.OPENCLAW_HOME = originalOpenclaw;
+    }
+  });
+
+  it('does NOT call the faucet when openclaw.json is invalid JSON', async () => {
+    const dkgHome = join(testDir, '.dkg');
+    const openclawHome = join(testDir, '.openclaw');
+    const ws = join(testDir, 'workspace');
+    mkdirSync(dkgHome, { recursive: true });
+    mkdirSync(openclawHome, { recursive: true });
+    mkdirSync(ws, { recursive: true });
+    writeFileSync(
+      join(dkgHome, 'wallets.json'),
+      JSON.stringify({ wallets: [{ address: '0xAA', privateKey: '0x01' }] }),
+    );
+    writeFileSync(join(openclawHome, 'openclaw.json'), '{ not valid json ,,,\n');
+
+    const originalDkg = process.env.DKG_HOME;
+    const originalOpenclaw = process.env.OPENCLAW_HOME;
+    process.env.DKG_HOME = dkgHome;
+    process.env.OPENCLAW_HOME = openclawHome;
+
+    try {
+      await expect(
+        runSetup({ workspace: ws, start: false, verify: false }),
+      ).rejects.toThrow(/not valid JSON/i);
+
+      expect(requestFaucetFunding).not.toHaveBeenCalled();
+    } finally {
+      process.env.DKG_HOME = originalDkg;
+      process.env.OPENCLAW_HOME = originalOpenclaw;
+    }
+  });
+
+  it('does NOT call the faucet when plugins.slots.contextEngine is wrong-slot-wired (R8-2)', async () => {
+    const dkgHome = join(testDir, '.dkg');
+    const openclawHome = join(testDir, '.openclaw');
+    const ws = join(testDir, 'workspace');
+    mkdirSync(dkgHome, { recursive: true });
+    mkdirSync(openclawHome, { recursive: true });
+    mkdirSync(ws, { recursive: true });
+    writeFileSync(
+      join(dkgHome, 'wallets.json'),
+      JSON.stringify({ wallets: [{ address: '0xAA', privateKey: '0x01' }] }),
+    );
+    writeFileSync(
+      join(openclawHome, 'openclaw.json'),
+      JSON.stringify({
+        plugins: {
+          allow: [],
+          load: { paths: [] },
+          entries: {},
+          slots: { contextEngine: 'adapter-openclaw' }, // misconfigured
+        },
+      }, null, 2) + '\n',
+    );
+
+    const originalDkg = process.env.DKG_HOME;
+    const originalOpenclaw = process.env.OPENCLAW_HOME;
+    process.env.DKG_HOME = dkgHome;
+    process.env.OPENCLAW_HOME = openclawHome;
+
+    try {
+      await expect(
+        runSetup({ workspace: ws, start: false, verify: false }),
+      ).rejects.toThrow(/plugins\.slots\.contextEngine/);
+
+      expect(requestFaucetFunding).not.toHaveBeenCalled();
+    } finally {
+      process.env.DKG_HOME = originalDkg;
+      process.env.OPENCLAW_HOME = originalOpenclaw;
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// readWalletsWithRetry — retry accounting (C4a extraction)
+// ---------------------------------------------------------------------------
+
+describe('readWalletsWithRetry', () => {
+  it('exhausts exactly 5 retries when wallets never appear (6 reads, 5 sleeps)', async () => {
+    const readFn = vi.fn(() => [] as string[]);
+    const sleepFn = vi.fn(async () => {});
+
+    const result = await readWalletsWithRetry(sleepFn, readFn);
+
+    expect(result).toEqual([]);
+    // 1 initial attempt + 5 retries = 6 reads. Locks the off-by-one bound.
+    expect(readFn).toHaveBeenCalledTimes(6);
+    expect(sleepFn).toHaveBeenCalledTimes(5);
+    // Each sleep is a 1s delay. Locks the intended wait semantics.
+    for (const call of sleepFn.mock.calls) {
+      expect(call[0]).toBe(1_000);
+    }
+  });
+
+  it('short-circuits when wallets appear on the 3rd attempt (3 reads, 2 sleeps)', async () => {
+    // Missing on attempts 1–2, present on attempt 3.
+    const readFn = vi.fn()
+      .mockReturnValueOnce([])
+      .mockReturnValueOnce([])
+      .mockReturnValue(['0xAAAA0000000000000000000000000000000000AA']);
+    const sleepFn = vi.fn(async () => {});
+
+    const result = await readWalletsWithRetry(sleepFn, readFn);
+
+    expect(result).toEqual(['0xAAAA0000000000000000000000000000000000AA']);
+    expect(readFn).toHaveBeenCalledTimes(3);
+    expect(sleepFn).toHaveBeenCalledTimes(2);
+  });
+
+  it('returns immediately without sleeping when wallets are available on first read', async () => {
+    const readFn = vi.fn(() => ['0xBBBB0000000000000000000000000000000000BB']);
+    const sleepFn = vi.fn(async () => {});
+
+    const result = await readWalletsWithRetry(sleepFn, readFn);
+
+    expect(result).toEqual(['0xBBBB0000000000000000000000000000000000BB']);
+    expect(readFn).toHaveBeenCalledTimes(1);
+    expect(sleepFn).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// logManualFundingInstructions — manual-curl fallback output
+// ---------------------------------------------------------------------------
+
+describe('logManualFundingInstructions', () => {
+  let logSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    logSpy.mockRestore();
+  });
+
+  it('caps the curl body at the first 3 addresses matching the auto-path cap', () => {
+    const addrs = [
+      '0x1111111111111111111111111111111111111111',
+      '0x2222222222222222222222222222222222222222',
+      '0x3333333333333333333333333333333333333333',
+      '0x4444444444444444444444444444444444444444',
+      '0x5555555555555555555555555555555555555555',
+    ];
+    logManualFundingInstructions(addrs, 'https://faucet.example.com/fund', 'v10_base_sepolia');
+
+    const logged = logSpy.mock.calls.map(c => String(c[0])).join('\n');
+    // The curl body is built from JSON.stringify(fundable) — assert the
+    // cap by looking for the exact first-three array in the output and
+    // the absence of the 4th/5th addresses inside the curl line.
+    expect(logged).toContain(JSON.stringify(addrs.slice(0, 3)));
+    const curlLine = logSpy.mock.calls
+      .map(c => String(c[0]))
+      .find(line => line.includes('--data-raw'));
+    expect(curlLine).toBeDefined();
+    expect(curlLine).not.toContain(addrs[3]);
+    expect(curlLine).not.toContain(addrs[4]);
+  });
+
+  it('emits a follow-on note listing the omitted wallets when more than 3 are passed', () => {
+    const addrs = [
+      '0x1111111111111111111111111111111111111111',
+      '0x2222222222222222222222222222222222222222',
+      '0x3333333333333333333333333333333333333333',
+      '0x4444444444444444444444444444444444444444',
+      '0x5555555555555555555555555555555555555555',
+    ];
+    logManualFundingInstructions(addrs, 'https://faucet.example.com/fund', 'v10_base_sepolia');
+
+    const logged = logSpy.mock.calls.map(c => String(c[0])).join('\n');
+    expect(logged).toMatch(/faucet supports up to 3 wallets/i);
+    expect(logged).toContain('2 wallet');
+    expect(logged).toContain(addrs[3]);
+    expect(logged).toContain(addrs[4]);
+  });
+
+  it('does not emit the extras note when exactly 3 (or fewer) addresses are passed', () => {
+    const addrs = [
+      '0x1111111111111111111111111111111111111111',
+      '0x2222222222222222222222222222222222222222',
+      '0x3333333333333333333333333333333333333333',
+    ];
+    logManualFundingInstructions(addrs, 'https://faucet.example.com/fund', 'v10_base_sepolia');
+
+    const logged = logSpy.mock.calls.map(c => String(c[0])).join('\n');
+    expect(logged).toContain('To fund wallets manually');
+    expect(logged).not.toMatch(/up to 3 wallets per call/i);
+    expect(logged).not.toMatch(/remaining/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runSetup Step 5 — faucet funding
+//
+// All tests in this block use `start: false, verify: false` to skip the
+// daemon-start and verify steps (which would spawn a real `dkg start`
+// subprocess). The faucet path still runs because `options.fund !== false`
+// defaults `true`. Wallets are pre-seeded in DKG_HOME so the retry loop is
+// not exercised here — retry accounting is covered by the
+// `readWalletsWithRetry` suite above.
+// ---------------------------------------------------------------------------
+
+describe('runSetup Step 5 — faucet funding', () => {
+  const SEEDED_WALLET = '0xAAAA0000000000000000000000000000000000AA';
+
+  function setupFaucetEnv() {
+    const dkgHome = join(testDir, '.dkg');
+    const openclawHome = join(testDir, '.openclaw');
+    const workspace = join(testDir, 'workspace');
+    mkdirSync(dkgHome, { recursive: true });
+    mkdirSync(openclawHome, { recursive: true });
+    mkdirSync(workspace, { recursive: true });
+    writeFileSync(
+      join(openclawHome, 'openclaw.json'),
+      JSON.stringify({ plugins: {} }, null, 2) + '\n',
+    );
+    // Pre-seed wallets.json so readWallets() returns a wallet on the first
+    // attempt (bypasses the retry loop — that behavior is covered by the
+    // readWalletsWithRetry suite above).
+    writeFileSync(
+      join(dkgHome, 'wallets.json'),
+      JSON.stringify({ wallets: [{ address: SEEDED_WALLET, privateKey: '0xdeadbeef' }] }),
+    );
+
+    const originalDkg = process.env.DKG_HOME;
+    const originalOpenclaw = process.env.OPENCLAW_HOME;
+    process.env.DKG_HOME = dkgHome;
+    process.env.OPENCLAW_HOME = openclawHome;
+
+    return {
+      dkgHome,
+      openclawHome,
+      workspace,
+      restore: () => {
+        process.env.DKG_HOME = originalDkg;
+        process.env.OPENCLAW_HOME = originalOpenclaw;
+      },
+    };
+  }
+
+  beforeEach(() => {
+    // Reset the mock between tests so assertions on call counts / args stay
+    // isolated. Default behavior restored each test so cases that don't care
+    // get a happy response.
+    vi.mocked(requestFaucetFunding).mockReset();
+    vi.mocked(requestFaucetFunding).mockResolvedValue({
+      success: true,
+      funded: ['0.01 ETH', '1000 TRAC'],
+    });
+  });
+
+  it('calls requestFaucetFunding with (url, mode, addresses, agentName) pulled from network.faucet.*', async () => {
+    const env = setupFaucetEnv();
+    try {
+      // Pre-seed an IDENTITY.md so the agentName argument is deterministic.
+      writeFileSync(join(env.workspace, 'IDENTITY.md'), '# Identity\n- **Name**: test-agent\n');
+      await runSetup({ workspace: env.workspace, start: false, verify: false });
+
+      expect(requestFaucetFunding).toHaveBeenCalledTimes(1);
+      const [url, mode, addresses, nodeName] = vi.mocked(requestFaucetFunding).mock.calls[0];
+      expect(url).toMatch(/^https?:\/\//);
+      expect(typeof mode).toBe('string');
+      expect(mode.length).toBeGreaterThan(0);
+      expect(addresses).toEqual([SEEDED_WALLET]);
+      expect(nodeName).toBe('test-agent');
+
+      // AC3 invariant (plugins.slots.memory === 'adapter-openclaw') must still
+      // assert AFTER the faucet step. This confirms the faucet step did not
+      // short-circuit Step 7 (merge).
+      const cfg = JSON.parse(readFileSync(join(env.openclawHome, 'openclaw.json'), 'utf-8'));
+      expect(cfg.plugins.slots.memory).toBe('adapter-openclaw');
+    } finally {
+      env.restore();
+    }
+  });
+
+  it('skips the faucet call when options.fund === false (--no-fund) and still lands the merge', async () => {
+    const env = setupFaucetEnv();
+    try {
+      await runSetup({ workspace: env.workspace, start: false, verify: false, fund: false });
+
+      expect(requestFaucetFunding).not.toHaveBeenCalled();
+
+      // AC3 still holds — --no-fund does not block the rest of the pipeline.
+      const cfg = JSON.parse(readFileSync(join(env.openclawHome, 'openclaw.json'), 'utf-8'));
+      expect(cfg.plugins.slots.memory).toBe('adapter-openclaw');
+    } finally {
+      env.restore();
+    }
+  });
+
+  it('skips the faucet call under dryRun:true (no faucet request made, no merge written)', async () => {
+    const env = setupFaucetEnv();
+    try {
+      await runSetup({ workspace: env.workspace, start: false, verify: false, dryRun: true });
+
+      expect(requestFaucetFunding).not.toHaveBeenCalled();
+
+      // Dry-run does not merge either — openclaw.json remains unchanged
+      // (still the empty `plugins: {}` seeded in setupFaucetEnv).
+      const cfg = JSON.parse(readFileSync(join(env.openclawHome, 'openclaw.json'), 'utf-8'));
+      expect(cfg.plugins?.slots).toBeUndefined();
+    } finally {
+      env.restore();
+    }
+  });
+
+  it('continues non-fatally and logs manual curl instructions when requestFaucetFunding returns a 429 failure', async () => {
+    vi.mocked(requestFaucetFunding).mockResolvedValueOnce({
+      success: false,
+      funded: [],
+      error: 'HTTP 429: rate limited',
+    });
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const env = setupFaucetEnv();
+    try {
+      await expect(
+        runSetup({ workspace: env.workspace, start: false, verify: false }),
+      ).resolves.toBeUndefined();
+
+      // Manual-curl block is logged (`console.log` with the literal "curl -X POST").
+      const logged = logSpy.mock.calls.map(c => String(c[0])).join('\n');
+      expect(logged).toContain('To fund wallets manually');
+      expect(logged).toContain('curl -X POST');
+
+      // AC3 invariant holds — failure did not block Step 7 (merge).
+      const cfg = JSON.parse(readFileSync(join(env.openclawHome, 'openclaw.json'), 'utf-8'));
+      expect(cfg.plugins.slots.memory).toBe('adapter-openclaw');
+    } finally {
+      logSpy.mockRestore();
+      env.restore();
+    }
+  });
+
+  it('continues non-fatally when requestFaucetFunding returns a 5xx failure', async () => {
+    vi.mocked(requestFaucetFunding).mockResolvedValueOnce({
+      success: false,
+      funded: [],
+      error: 'HTTP 503: service unavailable',
+    });
+    const env = setupFaucetEnv();
+    try {
+      await expect(
+        runSetup({ workspace: env.workspace, start: false, verify: false }),
+      ).resolves.toBeUndefined();
+
+      const cfg = JSON.parse(readFileSync(join(env.openclawHome, 'openclaw.json'), 'utf-8'));
+      expect(cfg.plugins.slots.memory).toBe('adapter-openclaw');
+    } finally {
+      env.restore();
+    }
+  });
+
+  it('continues non-fatally when requestFaucetFunding throws a network error', async () => {
+    vi.mocked(requestFaucetFunding).mockRejectedValueOnce(new Error('ECONNREFUSED'));
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const env = setupFaucetEnv();
+    try {
+      await expect(
+        runSetup({ workspace: env.workspace, start: false, verify: false }),
+      ).resolves.toBeUndefined();
+
+      const logged = logSpy.mock.calls.map(c => String(c[0])).join('\n');
+      expect(logged).toContain('To fund wallets manually');
+
+      const cfg = JSON.parse(readFileSync(join(env.openclawHome, 'openclaw.json'), 'utf-8'));
+      expect(cfg.plugins.slots.memory).toBe('adapter-openclaw');
+    } finally {
+      logSpy.mockRestore();
+      env.restore();
+    }
+  });
+
+  it('continues non-fatally when requestFaucetFunding throws an AbortError (timeout path)', async () => {
+    // `requestFaucetFunding` in core wraps fetch with AbortSignal.timeout(30_000).
+    // A triggered timeout surfaces as a DOMException with name "TimeoutError"
+    // (or AbortError on some runtimes). Cover both.
+    const timeoutErr = new DOMException('The operation was aborted due to timeout', 'TimeoutError');
+    vi.mocked(requestFaucetFunding).mockRejectedValueOnce(timeoutErr);
+    const env = setupFaucetEnv();
+    try {
+      await expect(
+        runSetup({ workspace: env.workspace, start: false, verify: false }),
+      ).resolves.toBeUndefined();
+
+      const cfg = JSON.parse(readFileSync(join(env.openclawHome, 'openclaw.json'), 'utf-8'));
+      expect(cfg.plugins.slots.memory).toBe('adapter-openclaw');
+    } finally {
+      env.restore();
+    }
+  });
+
+  it('warns and skips faucet when no wallets are available (readWallets returns empty after retries)', async () => {
+    // Remove the pre-seeded wallets.json so readWallets returns [].
+    const env = setupFaucetEnv();
+    rmSync(join(env.dkgHome, 'wallets.json'));
+    try {
+      await expect(
+        runSetup({ workspace: env.workspace, start: false, verify: false }),
+      ).resolves.toBeUndefined();
+
+      // With `start: false`, the retry loop is intentionally skipped (no
+      // point retrying when we didn't start the daemon this run). We still
+      // assert that runSetup did NOT call the faucet and that Step 7 (merge)
+      // still ran — i.e., faucet step is truly non-fatal.
+      expect(requestFaucetFunding).not.toHaveBeenCalled();
+
+      const cfg = JSON.parse(readFileSync(join(env.openclawHome, 'openclaw.json'), 'utf-8'));
+      expect(cfg.plugins.slots.memory).toBe('adapter-openclaw');
+    } finally {
+      env.restore();
+    }
+  });
+
+  // ---- C9: effective-name drift protection -----------------------------
+  //
+  // The faucet's callerId and Idempotency-Key are derived from the
+  // `agentName` argument. `writeDkgConfig` uses first-wins semantics on
+  // `name` (existing value wins unless --name was passed), so on re-runs
+  // the name the node actually persists can differ from whatever
+  // `discoverAgentName` returned in-memory this run (specifically when
+  // IDENTITY.md has changed between runs). runSetup must thread the
+  // post-writeDkgConfig effective name through to the faucet so the
+  // caller identity matches what's persisted on disk.
+
+  it('faucet receives the persisted config.json name when IDENTITY.md changes between re-runs', async () => {
+    const env = setupFaucetEnv();
+    try {
+      // Simulate "run 1 already happened": pre-seed ~/.dkg/config.json
+      // with an older persisted name.
+      writeFileSync(
+        join(env.dkgHome, 'config.json'),
+        JSON.stringify({ name: 'persisted-run1' }),
+      );
+      // "Run 2" has a different IDENTITY.md name — writeDkgConfig's
+      // first-wins keeps the persisted name, so the faucet MUST use
+      // "persisted-run1", not "changed-run2".
+      writeFileSync(join(env.workspace, 'IDENTITY.md'), '# Identity\nName: changed-run2\n');
+
+      await runSetup({ workspace: env.workspace, start: false, verify: false });
+
+      expect(requestFaucetFunding).toHaveBeenCalledTimes(1);
+      const [, , , nodeName] = vi.mocked(requestFaucetFunding).mock.calls[0];
+      expect(nodeName).toBe('persisted-run1');
+    } finally {
+      env.restore();
+    }
+  });
+
+  it('faucet receives the discovered IDENTITY.md name on first run (no pre-existing config.json)', async () => {
+    const env = setupFaucetEnv();
+    try {
+      // No pre-existing config.json — writeDkgConfig will persist the
+      // discovered IDENTITY.md name, and the faucet should receive it.
+      writeFileSync(join(env.workspace, 'IDENTITY.md'), '# Identity\nName: first-run-name\n');
+
+      await runSetup({ workspace: env.workspace, start: false, verify: false });
+
+      const [, , , nodeName] = vi.mocked(requestFaucetFunding).mock.calls[0];
+      expect(nodeName).toBe('first-run-name');
+      // Sanity: writeDkgConfig actually persisted the first-run name.
+      const cfg = JSON.parse(readFileSync(join(env.dkgHome, 'config.json'), 'utf-8'));
+      expect(cfg.name).toBe('first-run-name');
+    } finally {
+      env.restore();
+    }
+  });
+
+  it('explicit options.name override wins over both persisted and discovered names', async () => {
+    const env = setupFaucetEnv();
+    try {
+      // Persisted name from a prior run AND a conflicting IDENTITY.md —
+      // --name should beat both.
+      writeFileSync(
+        join(env.dkgHome, 'config.json'),
+        JSON.stringify({ name: 'stale-persisted' }),
+      );
+      writeFileSync(join(env.workspace, 'IDENTITY.md'), '# Identity\nName: stale-identity\n');
+
+      await runSetup({
+        workspace: env.workspace,
+        start: false,
+        verify: false,
+        name: 'explicit-override',
+      });
+
+      const [, , , nodeName] = vi.mocked(requestFaucetFunding).mock.calls[0];
+      expect(nodeName).toBe('explicit-override');
+      // writeDkgConfig's `nameExplicit` override path must have flipped
+      // the persisted file to the explicit value too — otherwise the
+      // on-disk and in-memory identities would disagree after this run.
+      const cfg = JSON.parse(readFileSync(join(env.dkgHome, 'config.json'), 'utf-8'));
+      expect(cfg.name).toBe('explicit-override');
+    } finally {
+      env.restore();
+    }
+  });
+
+  it('C8 regression guard: persisted name still wins over random fallback when IDENTITY.md is absent', async () => {
+    const env = setupFaucetEnv();
+    try {
+      // No IDENTITY.md, but a persisted name exists. Pre-C8 behavior was
+      // to roll a new random `openclaw-agent-XXXXX` each call; C8 made
+      // discoverAgentName honor the persisted value; C9 must not have
+      // regressed that.
+      writeFileSync(
+        join(env.dkgHome, 'config.json'),
+        JSON.stringify({ name: 'persisted-no-identity' }),
+      );
+
+      await runSetup({ workspace: env.workspace, start: false, verify: false });
+
+      const [, , , nodeName] = vi.mocked(requestFaucetFunding).mock.calls[0];
+      expect(nodeName).toBe('persisted-no-identity');
+    } finally {
+      env.restore();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// testnet.json drift invariant (decision #7 — positive assertion form)
+// ---------------------------------------------------------------------------
+
+describe('testnet.json faucet block invariant', () => {
+  it('testnet.json exposes the fields requestFaucetFunding consumes, with v10_base_sepolia mode', () => {
+    // Load via the same resolver runSetup uses at Step 3 — prevents a
+    // "test reads a different file than the runtime" drift class. If
+    // loadNetworkConfig's resolution changes (path, env var, package
+    // layout), this test updates with it automatically.
+    const cfg = loadNetworkConfig();
+
+    // toMatchObject asserts the two fields requestFaucetFunding
+    // (packages/core/src/faucet.ts) actually consumes — deletion or
+    // rename of `mode` or `url` still fails the test — while leaving
+    // the network config free to grow forward-compatibly with
+    // additional fields.
+    expect(cfg.faucet).toMatchObject({
+      mode: 'v10_base_sepolia',
+      url: expect.stringMatching(/^https?:\/\//),
+    });
+  });
 });

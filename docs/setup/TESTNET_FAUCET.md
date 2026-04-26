@@ -13,7 +13,7 @@ curl -X POST "https://euphoria.origin-trail.network/faucet/fund" \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: my-unique-key-001" \
   --data-raw '{
-    "mode": "v9_base_sepolia",
+    "mode": "v10_base_sepolia",
     "wallets": ["0xYOUR_WALLET_ADDRESS"],
     "callerId": "my-node-installer"
   }'
@@ -23,7 +23,7 @@ curl -X POST "https://euphoria.origin-trail.network/faucet/fund" \
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `mode` | Yes | Must be `"v9_base_sepolia"` |
+| `mode` | Yes | Must be `"v10_base_sepolia"` |
 | `wallets` | Yes | Array of EVM addresses (1-3, no duplicates) |
 | `callerId` | No | Stable identifier for your installer/node — enables per-caller cooldown |
 
@@ -67,7 +67,7 @@ On `429` responses, back off using the `retry-after` header.
 ```bash
 curl -X POST "https://euphoria.origin-trail.network/faucet/dry-run" \
   -H "Content-Type: application/json" \
-  --data-raw '{"mode": "v9_base_sepolia", "wallets": ["0xYOUR_WALLET_ADDRESS"]}'
+  --data-raw '{"mode": "v10_base_sepolia", "wallets": ["0xYOUR_WALLET_ADDRESS"]}'
 ```
 
 ## Look up a previous result
@@ -87,7 +87,7 @@ curl "https://euphoria.origin-trail.network/faucet/requests/REQUEST_ID"
 ## Quick checklist
 
 1. Call `GET /health` to verify connectivity.
-2. Send `POST /fund` with `mode: "v9_base_sepolia"` and your wallet(s).
+2. Send `POST /fund` with `mode: "v10_base_sepolia"` and your wallet(s).
 3. Always include an `Idempotency-Key` header to safely retry on network failures.
 4. Check `results[]` — individual wallets can succeed or fail independently.
 5. Back off on `429` using the `retry-after` header.

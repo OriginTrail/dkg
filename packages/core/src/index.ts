@@ -19,6 +19,7 @@ export {
   type GenesisQuad,
 } from './genesis.js';
 export { withRetry, type RetryOptions } from './retry.js';
+export { requestFaucetFunding, type FaucetResult } from './faucet.js';
 export {
   assertSafeIri,
   isSafeIri,

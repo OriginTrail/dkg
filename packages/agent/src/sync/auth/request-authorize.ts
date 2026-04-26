@@ -145,7 +145,7 @@ export async function authorizePrivateSyncRequest(params: AuthorizeSyncRequestPa
 
   logInfo(
     ctx,
-    `Private sync auth for "${request.contextGraphId}": identityId=${requesterIdentityId.toString()} signer=${recoveredAddress} requesterAgentAddress=${request.requesterAgentAddress ?? 'n/a'} participants=${participants?.join(',') ?? 'none'} allowed=${allowed}`,
+    `Private sync auth for "${request.contextGraphId}": identityId=${requesterIdentityId.toString()} signer=${recoveredAddress} requesterAgentAddress=${request.requesterAgentAddress ?? 'n/a'} participantCount=${participants?.length ?? 0} allowed=${allowed}`,
   );
 
   if (allowed) {

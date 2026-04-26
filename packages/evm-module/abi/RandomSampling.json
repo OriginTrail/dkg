@@ -205,22 +205,22 @@
   },
   {
     "inputs": [],
-    "name": "createChallenge",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "delegatorsInfo",
+    "name": "convictionStakingStorage",
     "outputs": [
       {
-        "internalType": "contract DelegatorsInfo",
+        "internalType": "contract ConvictionStakingStorage",
         "name": "",
         "type": "address"
       }
     ],
     "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "createChallenge",
+    "outputs": [],
+    "stateMutability": "nonpayable",
     "type": "function"
   },
   {
@@ -475,19 +475,6 @@
     "outputs": [
       {
         "internalType": "contract ShardingTableStorage",
-        "name": "",
-        "type": "address"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "stakingStorage",
-    "outputs": [
-      {
-        "internalType": "contract StakingStorage",
         "name": "",
         "type": "address"
       }

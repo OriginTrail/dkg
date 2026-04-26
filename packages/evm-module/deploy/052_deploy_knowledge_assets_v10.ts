@@ -17,9 +17,6 @@ func.dependencies = [
   'IdentityStorage',
   'PaymasterManager',
   'StakingStorage',
-  'ParanetKnowledgeCollectionsRegistry',
-  'ParanetKnowledgeMinersRegistry',
-  'ParanetsRegistry',
   'AskStorage',
   'EpochStorage',
   // V10 Phase 8 dependencies — `KnowledgeAssetsV10.initialize()` reverts

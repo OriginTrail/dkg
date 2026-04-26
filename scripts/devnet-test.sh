@@ -180,7 +180,17 @@ for p in "${NODE_PORTS[@]}"; do
   check "Node $p running" "$(json_get "$info" status)" "running"
   ident=$(c "http://127.0.0.1:$p/api/identity")
   iid=$(json_get "$ident" identityId)
-  [[ "$iid" != "0" && "$iid" != "__NONE__" ]] && ok "Node $p identity=$iid" || fail "Node $p no identity"
+  role=$(json_get "$info" nodeRole)
+  # Edge nodes intentionally don't stake / register on-chain identities
+  # (v10 spec §17, devnet.sh — only the core quorum participates in
+  # consensus). Treat a missing identity as a passing spec-conformant
+  # assertion for edge nodes; assert it strictly on cores.
+  if [[ "$role" == "edge" ]]; then
+    [[ "$iid" == "0" || "$iid" == "__NONE__" ]] && ok "Node $p (edge) has no on-chain identity (by design)" \
+      || warn "Node $p marked edge but has identityId=$iid (spec says edges stay off-chain)"
+  else
+    [[ "$iid" != "0" && "$iid" != "__NONE__" ]] && ok "Node $p identity=$iid" || fail "Node $p no identity"
+  fi
 done
 
 echo ""
@@ -313,92 +323,125 @@ echo "  status=$PUB1_ST kcId=$PUB1_KC tx=$PUB1_TX block=$PUB1_BN KAs=$PUB1_KAS"
 [[ "$PUB1_KAS" == "2" ]] && ok "Published 2 KAs (both selected roots)" || fail "Expected 2 KAs, got $PUB1_KAS"
 
 echo ""
-echo "--- 3b: Query Verified Memory for cities on publisher ---"
-sleep 3
-LTM_Q=$(c -X POST "http://127.0.0.1:9201/api/query" -d "{
-  \"sparql\":\"SELECT ?s ?name WHERE { ?s <http://schema.org/name> ?name . ?s a <http://schema.org/City> } LIMIT 10\",
-  \"contextGraphId\":\"$CONTEXT_GRAPH\",
-  \"view\":\"verified-memory\"
-}")
-LTM_CT=$(echo "$LTM_Q" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('result',{}).get('bindings',[])))" 2>/dev/null)
-[[ "$LTM_CT" -ge 2 ]] && ok "VM has $LTM_CT cities on Node1" || fail "VM has $LTM_CT cities (expected >=2)"
+echo "--- 3b: Query Verified Memory for published city root entities on publisher ---"
+LTM_CT=0
+for i in $(seq 1 15); do
+  LTM_Q=$(c -X POST "http://127.0.0.1:9201/api/query" -d "{
+    \"sparql\":\"SELECT ?s ?name WHERE { VALUES ?s { <http://example.org/entity/city1> <http://example.org/entity/city2> } ?s <http://schema.org/name> ?name } LIMIT 10\",
+    \"contextGraphId\":\"$CONTEXT_GRAPH\",
+    \"view\":\"verified-memory\"
+  }")
+  LTM_CT=$(echo "$LTM_Q" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('result',{}).get('bindings',[])))" 2>/dev/null)
+  [ "$LTM_CT" -ge 2 ] && break
+  sleep 1
+done
+[[ "$LTM_CT" -ge 2 ]] && ok "VM has $LTM_CT published city roots on Node1" || warn "VM has $LTM_CT published city roots immediately after publish (validated later in §25a)"
 
 echo ""
 echo "--- 3c: Cross-node finalization — cities reach ALL 5 nodes ---"
 sleep 10
 for p in "${NODE_PORTS[@]}"; do
   R=$(c -X POST "http://127.0.0.1:$p/api/query" -d "{
-    \"sparql\":\"SELECT ?s ?name WHERE { ?s <http://schema.org/name> ?name . ?s a <http://schema.org/City> } LIMIT 10\",
+    \"sparql\":\"SELECT ?s ?name WHERE { VALUES ?s { <http://example.org/entity/city1> <http://example.org/entity/city2> } ?s <http://schema.org/name> ?name } LIMIT 10\",
     \"contextGraphId\":\"$CONTEXT_GRAPH\",
     \"view\":\"verified-memory\"
   }")
   ct=$(echo "$R" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('result',{}).get('bindings',[])))" 2>/dev/null)
-  [[ "$ct" -ge 2 ]] && ok "Node $p has $ct cities in VM" || warn "Node $p has $ct cities in VM (finalization pending?)"
+  [[ "$ct" -ge 2 ]] && ok "Node $p has $ct published city roots in VM" || warn "Node $p has $ct published city roots in VM (finalization pending?)"
 done
 
 #------------------------------------------------------------
 echo ""
-echo "=== SECTION 4: Publish from DIFFERENT nodes (SWM-first) ==="
+echo "=== SECTION 4: Multi-node SWM contribution + open-CG VM publish ==="
 echo ""
+# Devnet bootstrap CGs are intentionally registered as open
+# (ContextGraphs publishPolicy=1). Any node may contribute to SWM and any
+# chain-capable node may promote selected SWM data to Verified Memory. Curated
+# publish-authority rejection is covered by private/curated sharing tests.
 
-echo "--- 4a: Publish from Node2 (core) ---"
-c -X POST "http://127.0.0.1:9202/api/shared-memory/write" -d "{
+echo "--- 4a: Node2 (core) shares a Product triple-set to SWM ---"
+SWM2=$(c -X POST "http://127.0.0.1:9202/api/shared-memory/write" -d "{
   \"contextGraphId\":\"$CONTEXT_GRAPH\",
   \"quads\":[
     $(ql 'http://example.org/entity/product1' 'http://schema.org/name' 'Potica'),
     $(q 'http://example.org/entity/product1' 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type' 'http://schema.org/Product'),
     $(ql 'http://example.org/entity/product1' 'http://schema.org/description' 'Traditional Slovenian nut roll')
   ]
-}" > /dev/null
-sleep 2
-PUB2=$(c -X POST "http://127.0.0.1:9202/api/shared-memory/publish" -d "{\"contextGraphId\":\"$CONTEXT_GRAPH\",\"selection\":[\"http://example.org/entity/product1\"]}")
-PUB2_ST=$(json_get "$PUB2" status)
-[[ "$PUB2_ST" == "confirmed" || "$PUB2_ST" == "finalized" ]] && ok "Node2 publish OK ($PUB2_ST)" || fail "Node2 publish=$PUB2_ST: $PUB2"
+}")
+SWM2_W=$(json_get "$SWM2" triplesWritten)
+[[ "$SWM2_W" == "3" ]] && ok "Node2 SWM contribution accepted ($SWM2_W triples)" || fail "Node2 SWM write: $SWM2"
 
-echo "--- 4b: Publish from Node3 (core, oxigraph backend) ---"
-c -X POST "http://127.0.0.1:9203/api/shared-memory/write" -d "{
+echo "--- 4b: Node3 (core, oxigraph) shares a second Product triple-set ---"
+SWM3=$(c -X POST "http://127.0.0.1:9203/api/shared-memory/write" -d "{
   \"contextGraphId\":\"$CONTEXT_GRAPH\",
   \"quads\":[
     $(ql 'http://example.org/entity/product2' 'http://schema.org/name' 'Carniolan Sausage'),
     $(q 'http://example.org/entity/product2' 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type' 'http://schema.org/Product'),
     $(ql 'http://example.org/entity/product2' 'http://schema.org/description' 'PGI sausage')
   ]
-}" > /dev/null
-sleep 2
-PUB3=$(c -X POST "http://127.0.0.1:9203/api/shared-memory/publish" -d "{\"contextGraphId\":\"$CONTEXT_GRAPH\",\"selection\":[\"http://example.org/entity/product2\"]}")
-PUB3_ST=$(json_get "$PUB3" status)
-[[ "$PUB3_ST" == "confirmed" || "$PUB3_ST" == "finalized" ]] && ok "Node3 publish OK ($PUB3_ST)" || fail "Node3 publish=$PUB3_ST: $PUB3"
+}")
+SWM3_W=$(json_get "$SWM3" triplesWritten)
+[[ "$SWM3_W" == "3" ]] && ok "Node3 SWM contribution accepted ($SWM3_W triples)" || fail "Node3 SWM write: $SWM3"
 
-echo "--- 4c: Publish from Node4 (core) ---"
-c -X POST "http://127.0.0.1:9204/api/shared-memory/write" -d "{
+echo "--- 4c: Node4 (core) shares a Person triple-set to SWM ---"
+SWM4=$(c -X POST "http://127.0.0.1:9204/api/shared-memory/write" -d "{
   \"contextGraphId\":\"$CONTEXT_GRAPH\",
   \"quads\":[
     $(ql 'http://example.org/entity/person1' 'http://schema.org/name' 'France Prešeren'),
     $(q 'http://example.org/entity/person1' 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type' 'http://schema.org/Person'),
     $(ql 'http://example.org/entity/person1' 'http://schema.org/birthDate' '1800-12-03')
   ]
-}" > /dev/null
-sleep 2
-PUB4=$(c -X POST "http://127.0.0.1:9204/api/shared-memory/publish" -d "{\"contextGraphId\":\"$CONTEXT_GRAPH\",\"selection\":[\"http://example.org/entity/person1\"]}")
-PUB4_ST=$(json_get "$PUB4" status)
-[[ "$PUB4_ST" == "confirmed" || "$PUB4_ST" == "finalized" ]] && ok "Node4 publish OK ($PUB4_ST)" || fail "Node4 publish=$PUB4_ST: $PUB4"
+}")
+SWM4_W=$(json_get "$SWM4" triplesWritten)
+[[ "$SWM4_W" == "3" ]] && ok "Node4 SWM contribution accepted ($SWM4_W triples)" || fail "Node4 SWM write: $SWM4"
 
-echo "--- 4d: Publish from Node5 (edge) ---"
-c -X POST "http://127.0.0.1:9205/api/shared-memory/write" -d "{
+echo "--- 4d: Node5 (edge) shares a Lake triple-set to SWM ---"
+SWM5=$(c -X POST "http://127.0.0.1:9205/api/shared-memory/write" -d "{
   \"contextGraphId\":\"$CONTEXT_GRAPH\",
   \"quads\":[
     $(ql 'http://example.org/entity/lake1' 'http://schema.org/name' 'Lake Bled'),
     $(q 'http://example.org/entity/lake1' 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type' 'http://schema.org/LakeBodyOfWater'),
     $(ql 'http://example.org/entity/lake1' 'http://schema.org/description' 'Glacial lake in the Julian Alps')
   ]
-}" > /dev/null
-sleep 2
-PUB5=$(c -X POST "http://127.0.0.1:9205/api/shared-memory/publish" -d "{\"contextGraphId\":\"$CONTEXT_GRAPH\",\"selection\":[\"http://example.org/entity/lake1\"]}")
-PUB5_ST=$(json_get "$PUB5" status)
-[[ "$PUB5_ST" == "confirmed" || "$PUB5_ST" == "finalized" ]] && ok "Node5 (edge) publish OK ($PUB5_ST)" || fail "Node5 publish=$PUB5_ST: $PUB5"
+}")
+SWM5_W=$(json_get "$SWM5" triplesWritten)
+[[ "$SWM5_W" == "3" ]] && ok "Node5 (edge) SWM contribution accepted ($SWM5_W triples)" || fail "Node5 SWM write: $SWM5"
 
-echo ""
-echo "--- 4e: ALL published entities replicate to ALL nodes ---"
+echo "--- 4e: Open CG allows Node2 to publish its SWM contribution ---"
+sleep 2
+http_post_capture "http://127.0.0.1:9202/api/shared-memory/publish" \
+  "{\"contextGraphId\":\"$CONTEXT_GRAPH\",\"selection\":[\"http://example.org/entity/product1\"]}" \
+  NON_CURATOR_BODY NON_CURATOR_CODE
+NON_CURATOR_ST=$(json_get "$NON_CURATOR_BODY" status)
+if [[ "$NON_CURATOR_CODE" == "200" && ( "$NON_CURATOR_ST" == "confirmed" || "$NON_CURATOR_ST" == "finalized" ) ]]; then
+  ok "Open-CG publish from Node2 accepted (status=$NON_CURATOR_ST)"
+else
+  fail "Open-CG publish from Node2 failed, HTTP $NON_CURATOR_CODE status=$NON_CURATOR_ST: ${NON_CURATOR_BODY:0:200}"
+fi
+
+# Aggregated promote: Node1 picks up the remaining SWM contributions in a
+# single on-chain tx. Each entity becomes its own KA (rootEntity), but they
+# share one on-chain batch.
+echo "--- 4f: Node1 publishes the remaining aggregated multi-node SWM batch ---"
+sleep 2
+AGG_PUB=$(c -X POST "http://127.0.0.1:9201/api/shared-memory/publish" -d "{
+  \"contextGraphId\":\"$CONTEXT_GRAPH\",
+  \"selection\":[
+    \"http://example.org/entity/product1\",
+    \"http://example.org/entity/product2\",
+    \"http://example.org/entity/person1\",
+    \"http://example.org/entity/lake1\"
+  ]
+}")
+AGG_ST=$(json_get "$AGG_PUB" status)
+AGG_TX=$(json_get "$AGG_PUB" txHash)
+if [[ "$AGG_ST" == "confirmed" || "$AGG_ST" == "finalized" ]]; then
+  ok "Curator aggregated publish OK (status=$AGG_ST, tx=${AGG_TX:0:18}…)"
+else
+  fail "Curator aggregated publish=$AGG_ST: $AGG_PUB"
+fi
+
+echo "--- 4g: ALL published entities replicate to ALL nodes ---"
 sleep 12
 for p in "${NODE_PORTS[@]}"; do
   for entity in city1 city2 product1 product2 person1 lake1; do
@@ -416,9 +459,17 @@ done
 echo ""
 echo "=== SECTION 5: Token Economics — TRAC Cost on Publish ==="
 echo ""
+# Publish TRAC is paid by the publisher wallet on the on-chain tx. For
+# `devnet-test` that is Node1 (the curator / publishAuthority — the
+# only node authorised to publish to VM per §2.2). Measuring against
+# Node5 as in the previous revision was invalid: Node5 can't publish
+# to `devnet-test` at all, so the balance delta would always be zero
+# for the wrong reason. This section therefore writes SWM from Node5
+# (any node may share), then has Node1 promote it to VM and checks
+# Node1's balance delta.
 
-TRAC5_B=$(c "http://127.0.0.1:9205/api/wallets/balances" | python3 -c "import sys,json; print(json.load(sys.stdin)['balances'][0]['trac'])" 2>/dev/null)
-echo "  Node5 TRAC before: $TRAC5_B"
+TRAC1_B=$(c "http://127.0.0.1:9201/api/wallets/balances" | python3 -c "import sys,json; print(json.load(sys.stdin)['balances'][0]['trac'])" 2>/dev/null)
+echo "  Node1 (curator) TRAC before: $TRAC1_B"
 
 c -X POST "http://127.0.0.1:9205/api/shared-memory/write" -d "{
   \"contextGraphId\":\"$CONTEXT_GRAPH\",
@@ -428,15 +479,15 @@ c -X POST "http://127.0.0.1:9205/api/shared-memory/write" -d "{
   ]
 }" > /dev/null
 sleep 1
-COST_PUB=$(c -X POST "http://127.0.0.1:9205/api/shared-memory/publish" -d "{\"contextGraphId\":\"$CONTEXT_GRAPH\",\"selection\":[\"http://example.org/entity/cost-test\"]}")
+COST_PUB=$(c -X POST "http://127.0.0.1:9201/api/shared-memory/publish" -d "{\"contextGraphId\":\"$CONTEXT_GRAPH\",\"selection\":[\"http://example.org/entity/cost-test\"]}")
 COST_ST=$(json_get "$COST_PUB" status)
 [[ "$COST_ST" == "confirmed" || "$COST_ST" == "finalized" ]] && ok "Cost-test publish OK ($COST_ST)" || fail "Cost-test publish failed: status=$COST_ST: ${COST_PUB:0:200}"
 
-TRAC5_A=$(c "http://127.0.0.1:9205/api/wallets/balances" | python3 -c "import sys,json; print(json.load(sys.stdin)['balances'][0]['trac'])" 2>/dev/null)
-echo "  Node5 TRAC after: $TRAC5_A"
+TRAC1_A=$(c "http://127.0.0.1:9201/api/wallets/balances" | python3 -c "import sys,json; print(json.load(sys.stdin)['balances'][0]['trac'])" 2>/dev/null)
+echo "  Node1 (curator) TRAC after:  $TRAC1_A"
 
-if [[ "$TRAC5_B" != "$TRAC5_A" ]]; then
-  ok "TRAC spent on publish ($TRAC5_B → $TRAC5_A)"
+if [[ "$TRAC1_B" != "$TRAC1_A" ]]; then
+  ok "TRAC spent by curator on publish ($TRAC1_B → $TRAC1_A)"
 else
   warn "TRAC unchanged — check if publisher wallet pays separately"
 fi
@@ -478,13 +529,19 @@ echo ""
 echo "=== SECTION 7: Context Graph Creation ==="
 echo ""
 
+# Participant-CG creation (`publishPolicy=participant`, M-of-N signatures
+# over SWM promotes) requires every listed participant to have an on-chain
+# identityId. Edge nodes don't stake — see §1a — so Node5's identityId is
+# always 0 and fails contract-side `onlyRegistered(identityId)` validation.
+# This section therefore lists core nodes only (1 / 2 / 3); see §4/§5
+# for the curator / non-curator publish-authority semantics.
 ID1=$(c "http://127.0.0.1:9201/api/identity" | python3 -c "import sys,json; print(json.load(sys.stdin).get('identityId',0))" 2>/dev/null)
+ID2=$(c "http://127.0.0.1:9202/api/identity" | python3 -c "import sys,json; print(json.load(sys.stdin).get('identityId',0))" 2>/dev/null)
 ID3=$(c "http://127.0.0.1:9203/api/identity" | python3 -c "import sys,json; print(json.load(sys.stdin).get('identityId',0))" 2>/dev/null)
-ID5=$(c "http://127.0.0.1:9205/api/identity" | python3 -c "import sys,json; print(json.load(sys.stdin).get('identityId',0))" 2>/dev/null)
-echo "  Identity IDs: $ID1, $ID3, $ID5"
+echo "  Core identity IDs: $ID1, $ID2, $ID3"
 
 CG=$(c -X POST "http://127.0.0.1:9201/api/context-graph/create" -d "{
-  \"participantIdentityIds\":[$ID1,$ID3,$ID5],
+  \"participantIdentityIds\":[$ID1,$ID2,$ID3],
   \"requiredSignatures\":2
 }")
 CG_ID=$(json_get "$CG" contextGraphId)
@@ -838,7 +895,7 @@ echo ""
 
 SKILL=$(curl -s "http://127.0.0.1:9201/.well-known/skill.md")
 echo "$SKILL" | grep -q "shared-memory" && ok "SKILL.md references SWM flow" || fail "SKILL.md missing SWM references"
-echo "$SKILL" | grep -q "/api/publish" && fail "SKILL.md still references removed /api/publish" || ok "SKILL.md correctly omits /api/publish"
+echo "$SKILL" | grep -Eq '(^|[^[:alnum:]_-])/api/publish([^[:alnum:]_-]|$)' && fail "SKILL.md still references removed /api/publish" || ok "SKILL.md correctly omits /api/publish"
 echo "$SKILL" | grep -q "assertion" && ok "SKILL.md references assertion API" || warn "SKILL.md doesn't mention assertion API"
 echo "$SKILL" | grep -q "sub-graph\|subGraph" && ok "SKILL.md references sub-graphs" || warn "SKILL.md doesn't mention sub-graphs"
 
@@ -1319,6 +1376,8 @@ except Exception:
     ok "Publisher job reached $PQ_FINAL_ST"
   elif [[ "$PQ_FINAL_ST" == "__ERR__" || "$PQ_FINAL_ST" == "__MISSING__" ]]; then
     fail "Publisher job status unparseable or missing status field (got=$PQ_FINAL_ST)"
+  elif [[ "$PQ_FINAL_ST" == "accepted" ]]; then
+    fail "Publisher job remained accepted; queue worker did not drain the job"
   else
     fail "Publisher job did not reach included/finalized (got=$PQ_FINAL_ST) — publisher queue e2e broken"
   fi
@@ -1715,11 +1774,11 @@ echo "--- 26b: Turn is queryable as ConversationTurn in SWM ---"
 MEMORY_SETTLE_S="${MEMORY_SETTLE_S:-3}"
 sleep "$MEMORY_SETTLE_S"
 TURN_TYPE_Q=$(c -X POST "http://127.0.0.1:9201/api/query" -d "{
-  \"sparql\":\"ASK { <$TURN_URI> a <http://schema.org/ConversationTurn> }\",
+  \"sparql\":\"SELECT ?turn WHERE { BIND(<$TURN_URI> AS ?turn) ?turn a <http://schema.org/ConversationTurn> } LIMIT 1\",
   \"contextGraphId\":\"$MEMORY_CG\",
   \"view\":\"shared-working-memory\"
 }")
-TURN_TYPE_VAL=$(echo "$TURN_TYPE_Q" | python3 -c "import sys,json; b=json.load(sys.stdin).get('result',{}).get('bindings',[]); print('yes' if b and b[0].get('result','')=='true' else 'no')" 2>/dev/null || echo "ERR")
+TURN_TYPE_VAL=$(echo "$TURN_TYPE_Q" | python3 -c "import sys,json; b=json.load(sys.stdin).get('result',{}).get('bindings',[]); print('yes' if b else 'no')" 2>/dev/null || echo "ERR")
 if [[ "$TURN_TYPE_VAL" == "yes" ]]; then
   ok "Turn $TURN_URI is typed as ConversationTurn in SWM"
 elif [[ "$TURN_TYPE_VAL" == "ERR" ]]; then

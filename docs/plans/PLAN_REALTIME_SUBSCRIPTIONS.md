@@ -124,7 +124,7 @@ Example payloads:
 ```json
 {
   "type": "workspace:write",
-  "paranetId": "origin-trail-game",
+  "paranetId": "example-paranet",
   "timestamp": 1773422454258,
   "operationId": "ws-1773422454258-jmv5k32n",
   "data": {
@@ -166,7 +166,7 @@ Example payloads:
 **Example:**
 
 ```
-GET /api/events?types=workspace:write,kc:confirmed&paranets=origin-trail-game
+GET /api/events?types=workspace:write,kc:confirmed&paranets=example-paranet
 Authorization: Bearer <token>
 Accept: text/event-stream
 ```
@@ -180,10 +180,10 @@ Cache-Control: no-cache
 Connection: keep-alive
 
 event: workspace:write
-data: {"type":"workspace:write","paranetId":"origin-trail-game","timestamp":1773422454258,...}
+data: {"type":"workspace:write","paranetId":"example-paranet","timestamp":1773422454258,...}
 
 event: kc:confirmed
-data: {"type":"kc:confirmed","paranetId":"origin-trail-game","timestamp":1773422454300,...}
+data: {"type":"kc:confirmed","paranetId":"example-paranet","timestamp":1773422454300,...}
 
 : keepalive
 ```
@@ -268,37 +268,32 @@ Maintain a bounded ring buffer (last 1000 events, max 5 minutes) in `Subscriptio
 
 ## Phase 3: Consumer Integration
 
-**Goal:** Replace polling with subscriptions in the game UI, MCP server, and adapters.
+**Goal:** Replace polling with subscriptions in consumer UIs, the MCP server, and adapters.
 
-### 3.1 Game UI — replace polling with SSE
+### 3.1 Consumer UI — replace polling with SSE
 
-**File:** `packages/origin-trail-game/ui/src/App.tsx`
-
-Replace the `setInterval(refreshLobby, 4000)` and `setInterval(refreshSwarm, 3000)` with an `EventSource`:
+Any long-lived dashboard that currently polls a paranet on a fixed interval
+should open an `EventSource` instead:
 
 ```typescript
 useEffect(() => {
-  const es = new EventSource(`${getBaseUrl()}/events?types=game:swarm_created,game:turn_resolved,game:player_joined&paranets=origin-trail-game`);
+  const es = new EventSource(`${getBaseUrl()}/events?types=workspace:write,kc:confirmed&paranets=example-paranet`);
 
-  es.addEventListener('game:turn_resolved', (e) => {
-    const data = JSON.parse(e.data);
-    if (data.data.swarmId === swarm?.id) refreshSwarm(swarm.id);
+  es.addEventListener('workspace:write', (e) => {
+    const evt = JSON.parse(e.data);
+    applyWorkspaceWrite(evt);
   });
 
-  es.addEventListener('game:swarm_created', () => refreshLobby());
-  es.addEventListener('game:player_joined', (e) => {
-    const data = JSON.parse(e.data);
-    if (data.data.swarmId === swarm?.id) refreshSwarm(swarm.id);
-  });
+  es.addEventListener('kc:confirmed', () => refresh());
 
   return () => es.close();
-}, [swarm?.id]);
+}, []);
 ```
 
 **Benefits:**
-- Instant turn resolution (0ms vs 3-4s poll)
+- Instant updates (0ms vs multi-second poll)
 - No wasted requests when nothing changes
-- Swarm join is visible immediately (fixes the UX bug from PR #162)
+- New writes are visible immediately
 
 ### 3.2 MCP Server — event subscription tool
 

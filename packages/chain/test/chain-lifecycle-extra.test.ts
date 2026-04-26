@@ -24,12 +24,6 @@
  *                      V10 event selector), every node that gossips
  *                      updates silently rejects them.
  *
- *   CH-11 (MEDIUM)   — FairSwapJudge.disputeDelivery is reachable from
- *                      `EVMChainAdapter.disputeDelivery` but has zero
- *                      tests. A regression that silently swallows the
- *                      revert (e.g. forgetting `await tx.wait()`) would
- *                      go undetected.
- *
  *   CH-13 (MEDIUM)   — The test helpers `createTestContextGraph` and
  *                      `seedContextGraphRegistration` have no tests.
  *                      Any drift in the registration quad format would
@@ -273,61 +267,6 @@ describe('chain-lifecycle-extra — V10 lifecycle + adapter invariants', () => {
       const verified = await adapter.verifyKAUpdate(bogus, 1n, adapter.getSignerAddress());
       expect(verified.verified).toBe(false);
     });
-  });
-
-  // --------------------------------------------------------------------
-  // CH-11 — FairSwapJudge.disputeDelivery reachability.
-  // --------------------------------------------------------------------
-
-  describe('FairSwapJudge.disputeDelivery reachability [CH-11]', () => {
-    it('the FairSwapJudge ABI exposes disputeDelivery(uint256,bytes) with the shape the adapter uses', () => {
-      const abi = JSON.parse(readFileSync(
-        join(import.meta.dirname, '..', 'abi', 'FairSwapJudge.json'), 'utf8',
-      )) as Array<{ type: string; name?: string; inputs?: Array<{ type: string }> }>;
-      const fn = abi.find((x) => x.type === 'function' && x.name === 'disputeDelivery');
-      expect(fn, 'disputeDelivery missing from FairSwapJudge ABI').toBeDefined();
-      const types = (fn!.inputs ?? []).map((i) => i.type);
-      expect(types).toEqual(['uint256', 'bytes']);
-    });
-
-    it('adapter.disputeDelivery rejects instead of silently succeeding when called on a non-existent purchase', async () => {
-      const adapter = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
-      // Bare `rejects.toThrow()` tolerated ANY failure class — even a
-      // provider-layer crash would have satisfied it while the on-chain
-      // contract silently accepted the dispute. Match the chain revert
-      // vocabulary so a regression where the call returns early (or
-      // fails for an orthogonal reason) is distinguishable.
-      await expect(
-        adapter.disputeDelivery!(999_999n, new Uint8Array(0)),
-      ).rejects.toThrow(/revert|purchase|does not exist|not found|Invalid|state|unknown/i);
-    });
-
-    it('adapter.disputeDelivery reverts on a freshly-initiated (not-yet-fulfilled) purchase', async () => {
-      const provider = createProvider();
-      const { hubAddress } = getSharedContext();
-      const buyer = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
-      await mintTokens(
-        provider,
-        hubAddress,
-        HARDHAT_KEYS.DEPLOYER,
-        buyer.getSignerAddress(),
-        ethers.parseEther('100000'),
-      );
-
-      const sellerAddr = new Wallet(HARDHAT_KEYS.EXTRA1).address;
-      const { purchaseId, success } = await buyer.initiatePurchase!(sellerAddr, 1n, 1n, ethers.parseEther('10'));
-      expect(success).toBe(true);
-
-      // State is now 1 (Initiated). disputeDelivery requires a fulfilled
-      // purchase, so this MUST revert — the bug surfaces if adapter
-      // silently returns success=true. Bare `rejects.toThrow()` would
-      // also pass if the provider died or the call reverted for a
-      // completely unrelated reason; tie the expected failure to the
-      // chain-originated state-machine vocabulary.
-      await expect(
-        buyer.disputeDelivery!(purchaseId, ethers.getBytes('0x00')),
-      ).rejects.toThrow(/revert|state|fulfill|InvalidState|Wrong|not (fulfilled|ready)/i);
-    }, 60_000);
   });
 
   // --------------------------------------------------------------------

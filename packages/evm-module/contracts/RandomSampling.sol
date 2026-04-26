@@ -11,16 +11,15 @@ import {ProfileLib} from "./libraries/ProfileLib.sol";
 import {IdentityStorage} from "./storage/IdentityStorage.sol";
 import {RandomSamplingStorage} from "./storage/RandomSamplingStorage.sol";
 import {KnowledgeCollectionStorage} from "./storage/KnowledgeCollectionStorage.sol";
-import {StakingStorage} from "./storage/StakingStorage.sol";
 import {ProfileStorage} from "./storage/ProfileStorage.sol";
 import {EpochStorage} from "./storage/EpochStorage.sol";
 import {Chronos} from "./storage/Chronos.sol";
 import {AskStorage} from "./storage/AskStorage.sol";
-import {DelegatorsInfo} from "./storage/DelegatorsInfo.sol";
 import {ParametersStorage} from "./storage/ParametersStorage.sol";
 import {ShardingTableStorage} from "./storage/ShardingTableStorage.sol";
 import {ContextGraphStorage} from "./storage/ContextGraphStorage.sol";
 import {ContextGraphValueStorage} from "./storage/ContextGraphValueStorage.sol";
+import {ConvictionStakingStorage} from "./storage/ConvictionStakingStorage.sol";
 import {ICustodian} from "./interfaces/ICustodian.sol";
 import {HubLib} from "./libraries/HubLib.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
@@ -40,16 +39,15 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
     IdentityStorage public identityStorage;
     RandomSamplingStorage public randomSamplingStorage;
     KnowledgeCollectionStorage public knowledgeCollectionStorage;
-    StakingStorage public stakingStorage;
     ProfileStorage public profileStorage;
     EpochStorage public epochStorage;
     Chronos public chronos;
     AskStorage public askStorage;
-    DelegatorsInfo public delegatorsInfo;
     ParametersStorage public parametersStorage;
     ShardingTableStorage public shardingTableStorage;
     ContextGraphStorage public contextGraphStorage;
     ContextGraphValueStorage public contextGraphValueStorage;
+    ConvictionStakingStorage public convictionStakingStorage;
 
     error MerkleRootMismatchError(bytes32 computedMerkleRoot, bytes32 expectedMerkleRoot);
     /// @notice Thrown by `_generateChallenge` when no public, active CG holds
@@ -116,12 +114,10 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
         knowledgeCollectionStorage = KnowledgeCollectionStorage(
             hub.getAssetStorageAddress("KnowledgeCollectionStorage")
         );
-        stakingStorage = StakingStorage(hub.getContractAddress("StakingStorage"));
         profileStorage = ProfileStorage(hub.getContractAddress("ProfileStorage"));
         epochStorage = EpochStorage(hub.getContractAddress("EpochStorageV8"));
         chronos = Chronos(hub.getContractAddress("Chronos"));
         askStorage = AskStorage(hub.getContractAddress("AskStorage"));
-        delegatorsInfo = DelegatorsInfo(hub.getContractAddress("DelegatorsInfo"));
         parametersStorage = ParametersStorage(hub.getContractAddress("ParametersStorage"));
         shardingTableStorage = ShardingTableStorage(hub.getContractAddress("ShardingTableStorage"));
         // Phase 10 — value-weighted challenge generation. ContextGraphStorage is
@@ -129,6 +125,7 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
         // regular hub contract.
         contextGraphStorage = ContextGraphStorage(hub.getAssetStorageAddress("ContextGraphStorage"));
         contextGraphValueStorage = ContextGraphValueStorage(hub.getContractAddress("ContextGraphValueStorage"));
+        convictionStakingStorage = ConvictionStakingStorage(hub.getContractAddress("ConvictionStakingStorage"));
     }
 
     /**
@@ -249,32 +246,47 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
         // Get the expected merkle root for this challenge
         bytes32 expectedMerkleRoot = knowledgeCollectionStorage.getLatestMerkleRoot(challenge.knowledgeCollectionId);
 
-        // Verify the submitted root matches
-        if (computedMerkleRoot == expectedMerkleRoot) {
-            // Mark as correct submission and add points to the node
-            challenge.solved = true;
-            randomSamplingStorage.setNodeChallenge(identityId, challenge);
-
-            uint256 epoch = chronos.getCurrentEpoch();
-            randomSamplingStorage.incrementEpochNodeValidProofsCount(epoch, identityId);
-            uint256 score18 = calculateNodeScore(identityId);
-            randomSamplingStorage.addToNodeEpochProofPeriodScore(
-                epoch,
-                activeProofPeriodStartBlock,
-                identityId,
-                score18
-            );
-            randomSamplingStorage.addToNodeEpochScore(epoch, identityId, score18);
-            randomSamplingStorage.addToAllNodesEpochScore(epoch, score18);
-
-            // Calculate and add to nodeEpochScorePerStake
-            uint96 totalNodeStake = stakingStorage.getNodeStake(identityId);
-            if (totalNodeStake > 0) {
-                uint256 nodeScorePerStake36 = (score18 * SCALE18) / totalNodeStake;
-                randomSamplingStorage.addToNodeEpochScorePerStake(epoch, identityId, nodeScorePerStake36);
-            }
-        } else {
+        // L12 — early-revert style: bail out on mismatch first so the
+        //       happy path isn't nested inside an `if`.
+        if (computedMerkleRoot != expectedMerkleRoot) {
             revert MerkleRootMismatchError(computedMerkleRoot, expectedMerkleRoot);
+        }
+
+        // Mark as correct submission and add points to the node.
+        challenge.solved = true;
+        randomSamplingStorage.setNodeChallenge(identityId, challenge);
+
+        uint256 epoch = chronos.getCurrentEpoch();
+        randomSamplingStorage.incrementEpochNodeValidProofsCount(epoch, identityId);
+        uint256 score18 = calculateNodeScore(identityId);
+        randomSamplingStorage.addToNodeEpochProofPeriodScore(
+            epoch,
+            activeProofPeriodStartBlock,
+            identityId,
+            score18
+        );
+        randomSamplingStorage.addToNodeEpochScore(epoch, identityId, score18);
+        randomSamplingStorage.addToAllNodesEpochScore(epoch, score18);
+
+        // D4+D15+D26 — post-migration the only source of staked TRAC is
+        // the V10 conviction layer. The denominator is the V10 effective
+        // stake at *this instant*. Under D26 timestamp-accurate accounting
+        // we first settle the node forward to `block.timestamp` (draining
+        // any boost-expiry drops that fell inside the interval since the
+        // last proof) and then read the post-settle running effective
+        // stake.
+        uint40 tsNow = uint40(block.timestamp);
+        convictionStakingStorage.settleNodeTo(identityId, tsNow);
+        uint256 effectiveNodeStake = convictionStakingStorage.getNodeRunningEffectiveStake(identityId);
+        if (effectiveNodeStake > 0) {
+            uint256 deltaScorePerStake36 = (score18 * SCALE18) / effectiveNodeStake;
+            uint256 newLast = randomSamplingStorage.getEpochLastScorePerStake(identityId, epoch) +
+                deltaScorePerStake36;
+            // `appendCheckpoint` records the timestamped post-proof value so
+            // claim-time binary-search can split at a mid-epoch boost expiry.
+            // Under D26 `scorePerStake36` is epoch-local (accumulates from 0),
+            // no first-sentinel seeding needed (M6/M7).
+            randomSamplingStorage.appendCheckpoint(identityId, epoch, tsNow, newLast);
         }
     }
 
@@ -561,8 +573,15 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
 
         // 1. Stake factor S(t) = sqrt(nodeStake / stakeCap)
         // Using sublinear scaling to reduce stake dominance (RFC-26 Section 4.1)
+        //
+        // D15 — post-migration the node's canonical raw TRAC stake is
+        // `ConvictionStakingStorage.nodeStakeV10`. StakingStorage.nodes[id].stake
+        // is V8 legacy and not maintained after V10 cutover; reading it here
+        // would zero-out the stake factor for any V10 node and lock it out
+        // of scoring. Migration is mandatory (user directive) — there are
+        // no V8-only nodes — so the V10 aggregate IS the node stake.
         uint256 stakeCap = uint256(parametersStorage.maximumStake());
-        uint256 nodeStake = uint256(stakingStorage.getNodeStake(identityId));
+        uint256 nodeStake = convictionStakingStorage.getNodeStakeV10(identityId);
         nodeStake = nodeStake > stakeCap ? stakeCap : nodeStake;
         // S18 = sqrt((nodeStake / stakeCap) * SCALE18) * sqrt(SCALE18)
         uint256 stakeRatio18 = (nodeStake * SCALE18) / stakeCap;

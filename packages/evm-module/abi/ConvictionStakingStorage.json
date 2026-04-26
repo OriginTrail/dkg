@@ -30,19 +30,50 @@
     "anonymous": false,
     "inputs": [
       {
-        "indexed": false,
+        "indexed": true,
         "internalType": "uint256",
-        "name": "startEpoch",
+        "name": "tokenId",
         "type": "uint256"
       },
       {
         "indexed": false,
-        "internalType": "uint256",
-        "name": "endEpoch",
-        "type": "uint256"
+        "internalType": "uint96",
+        "name": "added",
+        "type": "uint96"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "newTotal",
+        "type": "uint96"
       }
     ],
-    "name": "EffectiveStakeFinalized",
+    "name": "CumulativeRewardsClaimedUpdated",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "epoch",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "bool",
+        "name": "isClaimed",
+        "type": "bool"
+      }
+    ],
+    "name": "IsOperatorFeeClaimedForEpochUpdated",
     "type": "event"
   },
   {
@@ -56,12 +87,174 @@
       },
       {
         "indexed": false,
-        "internalType": "uint64",
+        "internalType": "uint32",
         "name": "epoch",
-        "type": "uint64"
+        "type": "uint32"
       }
     ],
     "name": "LastClaimedEpochUpdated",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint32",
+        "name": "epoch",
+        "type": "uint32"
+      }
+    ],
+    "name": "MigrationEpochSet",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "epoch",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "amount",
+        "type": "uint256"
+      }
+    ],
+    "name": "NetNodeEpochRewardsSet",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      },
+      {
+        "indexed": false,
+        "internalType": "int256",
+        "name": "delta",
+        "type": "int256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "newRunningEffectiveStake",
+        "type": "uint256"
+      }
+    ],
+    "name": "NodeEffectiveStakeDelta",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint40",
+        "name": "fromTimestamp",
+        "type": "uint40"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint40",
+        "name": "toTimestamp",
+        "type": "uint40"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "newRunningEffectiveStake",
+        "type": "uint256"
+      }
+    ],
+    "name": "NodeEffectiveStakeSettled",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint40",
+        "name": "timestamp",
+        "type": "uint40"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "dropRemoved",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "newTotalDrop",
+        "type": "uint256"
+      }
+    ],
+    "name": "NodeExpiryCancelled",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint40",
+        "name": "timestamp",
+        "type": "uint40"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "dropAdded",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "newTotalDrop",
+        "type": "uint256"
+      }
+    ],
+    "name": "NodeExpiryScheduled",
     "type": "event"
   },
   {
@@ -76,17 +269,54 @@
       {
         "indexed": false,
         "internalType": "uint256",
-        "name": "startEpoch",
+        "name": "amount",
         "type": "uint256"
       },
       {
         "indexed": false,
         "internalType": "uint256",
-        "name": "endEpoch",
+        "name": "newNodeStake",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "newTotal",
         "type": "uint256"
       }
     ],
-    "name": "NodeEffectiveStakeFinalized",
+    "name": "NodeStakeV10Decreased",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "amount",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "newNodeStake",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "newTotal",
+        "type": "uint256"
+      }
+    ],
+    "name": "NodeStakeV10Increased",
     "type": "event"
   },
   {
@@ -113,13 +343,13 @@
       {
         "indexed": false,
         "internalType": "uint40",
-        "name": "lockEpochs",
+        "name": "lockTier",
         "type": "uint40"
       },
       {
         "indexed": false,
         "internalType": "uint40",
-        "name": "expiryEpoch",
+        "name": "expiryTimestamp",
         "type": "uint40"
       },
       {
@@ -127,6 +357,12 @@
         "internalType": "uint64",
         "name": "multiplier18",
         "type": "uint64"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint32",
+        "name": "migrationEpoch",
+        "type": "uint32"
       }
     ],
     "name": "PositionCreated",
@@ -176,19 +412,37 @@
       {
         "indexed": true,
         "internalType": "uint256",
-        "name": "tokenId",
+        "name": "oldTokenId",
         "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "newTokenId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint72",
+        "name": "newIdentityId",
+        "type": "uint72"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "raw",
+        "type": "uint96"
       },
       {
         "indexed": false,
         "internalType": "uint40",
-        "name": "newLockEpochs",
+        "name": "newLockTier",
         "type": "uint40"
       },
       {
         "indexed": false,
         "internalType": "uint40",
-        "name": "newExpiryEpoch",
+        "name": "newExpiryTimestamp",
         "type": "uint40"
       },
       {
@@ -198,8 +452,163 @@
         "type": "uint64"
       }
     ],
-    "name": "PositionRelocked",
+    "name": "PositionReplaced",
     "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "amount",
+        "type": "uint96"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "newRaw",
+        "type": "uint96"
+      }
+    ],
+    "name": "RawDecreased",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "amount",
+        "type": "uint96"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "newRaw",
+        "type": "uint96"
+      }
+    ],
+    "name": "RawIncreased",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint40",
+        "name": "lockTier",
+        "type": "uint40"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "duration",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint64",
+        "name": "multiplier18",
+        "type": "uint64"
+      }
+    ],
+    "name": "TierAdded",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint40",
+        "name": "lockTier",
+        "type": "uint40"
+      }
+    ],
+    "name": "TierDeactivated",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "epoch",
+        "type": "uint256"
+      }
+    ],
+    "name": "V10LaunchEpochSet",
+    "type": "event"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint96",
+        "name": "amount",
+        "type": "uint96"
+      }
+    ],
+    "name": "addCumulativeRewardsClaimed",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint40",
+        "name": "lockTier",
+        "type": "uint40"
+      },
+      {
+        "internalType": "uint256",
+        "name": "duration",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint64",
+        "name": "multiplier18",
+        "type": "uint64"
+      }
+    ],
+    "name": "addTier",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "allTierIds",
+    "outputs": [
+      {
+        "internalType": "uint40[]",
+        "name": "",
+        "type": "uint40[]"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
   },
   {
     "inputs": [],
@@ -212,6 +621,34 @@
       }
     ],
     "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "oldTokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "newTokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      },
+      {
+        "internalType": "uint40",
+        "name": "newLockTier",
+        "type": "uint40"
+      }
+    ],
+    "name": "createNewPositionFromExisting",
+    "outputs": [],
+    "stateMutability": "nonpayable",
     "type": "function"
   },
   {
@@ -233,16 +670,47 @@
       },
       {
         "internalType": "uint40",
-        "name": "lockEpochs",
+        "name": "lockTier",
         "type": "uint40"
       },
       {
-        "internalType": "uint64",
-        "name": "multiplier18",
-        "type": "uint64"
+        "internalType": "uint32",
+        "name": "migrationEpoch",
+        "type": "uint32"
       }
     ],
     "name": "createPosition",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint40",
+        "name": "lockTier",
+        "type": "uint40"
+      }
+    ],
+    "name": "deactivateTier",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint96",
+        "name": "amount",
+        "type": "uint96"
+      }
+    ],
+    "name": "decreaseRaw",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
@@ -263,27 +731,8 @@
   {
     "inputs": [
       {
-        "internalType": "uint256",
-        "name": "",
-        "type": "uint256"
-      }
-    ],
-    "name": "effectiveStakeDiff",
-    "outputs": [
-      {
-        "internalType": "int256",
-        "name": "",
-        "type": "int256"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
         "internalType": "uint40",
-        "name": "lockEpochs",
+        "name": "lockTier",
         "type": "uint40"
       }
     ],
@@ -295,20 +744,7 @@
         "type": "uint64"
       }
     ],
-    "stateMutability": "pure",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "epoch",
-        "type": "uint256"
-      }
-    ],
-    "name": "finalizeEffectiveStakeUpTo",
-    "outputs": [],
-    "stateMutability": "nonpayable",
+    "stateMutability": "view",
     "type": "function"
   },
   {
@@ -324,14 +760,31 @@
         "type": "uint256"
       }
     ],
-    "name": "finalizeNodeEffectiveStakeUpTo",
-    "outputs": [],
-    "stateMutability": "nonpayable",
+    "name": "getIsOperatorFeeClaimedForEpoch",
+    "outputs": [
+      {
+        "internalType": "bool",
+        "name": "",
+        "type": "bool"
+      }
+    ],
+    "stateMutability": "view",
     "type": "function"
   },
   {
-    "inputs": [],
-    "name": "firstDirtyEpoch",
+    "inputs": [
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      },
+      {
+        "internalType": "uint256",
+        "name": "epoch",
+        "type": "uint256"
+      }
+    ],
+    "name": "getNetNodeEpochRewards",
     "outputs": [
       {
         "internalType": "uint256",
@@ -343,8 +796,14 @@
     "type": "function"
   },
   {
-    "inputs": [],
-    "name": "getLastFinalizedEpoch",
+    "inputs": [
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      }
+    ],
+    "name": "getNodeEffectiveStake",
     "outputs": [
       {
         "internalType": "uint256",
@@ -385,14 +844,219 @@
         "internalType": "uint72",
         "name": "identityId",
         "type": "uint72"
+      },
+      {
+        "internalType": "uint40",
+        "name": "ts",
+        "type": "uint40"
       }
     ],
-    "name": "getNodeLastFinalizedEpoch",
+    "name": "getNodeEffectiveStakeAtTimestamp",
     "outputs": [
       {
         "internalType": "uint256",
         "name": "",
         "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      },
+      {
+        "internalType": "uint40",
+        "name": "ts",
+        "type": "uint40"
+      }
+    ],
+    "name": "getNodeExpiryDrop",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      }
+    ],
+    "name": "getNodeExpiryHead",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      }
+    ],
+    "name": "getNodeExpiryTimes",
+    "outputs": [
+      {
+        "internalType": "uint40[]",
+        "name": "",
+        "type": "uint40[]"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      }
+    ],
+    "name": "getNodeLastSettledAt",
+    "outputs": [
+      {
+        "internalType": "uint40",
+        "name": "",
+        "type": "uint40"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      }
+    ],
+    "name": "getNodePendingExpiryCount",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      }
+    ],
+    "name": "getNodeRunningEffectiveStake",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      }
+    ],
+    "name": "getNodeStakeV10",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      },
+      {
+        "internalType": "uint256",
+        "name": "index",
+        "type": "uint256"
+      }
+    ],
+    "name": "getNodeTokenAt",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      }
+    ],
+    "name": "getNodeTokenCount",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      }
+    ],
+    "name": "getNodeTokens",
+    "outputs": [
+      {
+        "internalType": "uint256[]",
+        "name": "",
+        "type": "uint256[]"
       }
     ],
     "stateMutability": "view",
@@ -417,12 +1081,12 @@
           },
           {
             "internalType": "uint40",
-            "name": "lockEpochs",
+            "name": "lockTier",
             "type": "uint40"
           },
           {
             "internalType": "uint40",
-            "name": "expiryEpoch",
+            "name": "expiryTimestamp",
             "type": "uint40"
           },
           {
@@ -431,14 +1095,24 @@
             "type": "uint72"
           },
           {
+            "internalType": "uint96",
+            "name": "cumulativeRewardsClaimed",
+            "type": "uint96"
+          },
+          {
             "internalType": "uint64",
             "name": "multiplier18",
             "type": "uint64"
           },
           {
-            "internalType": "uint64",
+            "internalType": "uint32",
             "name": "lastClaimedEpoch",
-            "type": "uint64"
+            "type": "uint32"
+          },
+          {
+            "internalType": "uint32",
+            "name": "migrationEpoch",
+            "type": "uint32"
           }
         ],
         "internalType": "struct ConvictionStakingStorage.Position",
@@ -452,12 +1126,47 @@
   {
     "inputs": [
       {
-        "internalType": "uint256",
-        "name": "epoch",
-        "type": "uint256"
+        "internalType": "uint40",
+        "name": "lockTier",
+        "type": "uint40"
       }
     ],
-    "name": "getTotalEffectiveStakeAtEpoch",
+    "name": "getTier",
+    "outputs": [
+      {
+        "components": [
+          {
+            "internalType": "uint256",
+            "name": "duration",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint64",
+            "name": "multiplier18",
+            "type": "uint64"
+          },
+          {
+            "internalType": "bool",
+            "name": "active",
+            "type": "bool"
+          },
+          {
+            "internalType": "bool",
+            "name": "exists",
+            "type": "bool"
+          }
+        ],
+        "internalType": "struct ConvictionStakingStorage.TierConfig",
+        "name": "",
+        "type": "tuple"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "getTotalStakeV10",
     "outputs": [
       {
         "internalType": "uint256",
@@ -482,6 +1191,24 @@
     "type": "function"
   },
   {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint96",
+        "name": "amount",
+        "type": "uint96"
+      }
+    ],
+    "name": "increaseRaw",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
     "inputs": [],
     "name": "initialize",
     "outputs": [],
@@ -489,13 +1216,24 @@
     "type": "function"
   },
   {
-    "inputs": [],
-    "name": "lastFinalizedEpoch",
-    "outputs": [
+    "inputs": [
+      {
+        "internalType": "uint72",
+        "name": "",
+        "type": "uint72"
+      },
       {
         "internalType": "uint256",
         "name": "",
         "type": "uint256"
+      }
+    ],
+    "name": "isOperatorFeeClaimedForEpoch",
+    "outputs": [
+      {
+        "internalType": "bool",
+        "name": "",
+        "type": "bool"
       }
     ],
     "stateMutability": "view",
@@ -527,7 +1265,45 @@
         "type": "uint256"
       }
     ],
-    "name": "nodeEffectiveStakeAtEpoch",
+    "name": "netNodeEpochRewards",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint72",
+        "name": "",
+        "type": "uint72"
+      }
+    ],
+    "name": "nodeLastSettledAt",
+    "outputs": [
+      {
+        "internalType": "uint40",
+        "name": "",
+        "type": "uint40"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint72",
+        "name": "",
+        "type": "uint72"
+      }
+    ],
+    "name": "nodeStakeV10",
     "outputs": [
       {
         "internalType": "uint256",
@@ -551,26 +1327,7 @@
         "type": "uint256"
       }
     ],
-    "name": "nodeEffectiveStakeDiff",
-    "outputs": [
-      {
-        "internalType": "int256",
-        "name": "",
-        "type": "int256"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint72",
-        "name": "",
-        "type": "uint72"
-      }
-    ],
-    "name": "nodeFirstDirtyEpoch",
+    "name": "nodeTokenIndex",
     "outputs": [
       {
         "internalType": "uint256",
@@ -587,9 +1344,14 @@
         "internalType": "uint72",
         "name": "",
         "type": "uint72"
+      },
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
       }
     ],
-    "name": "nodeLastFinalizedEpoch",
+    "name": "nodeTokens",
     "outputs": [
       {
         "internalType": "uint256",
@@ -617,12 +1379,12 @@
       },
       {
         "internalType": "uint40",
-        "name": "lockEpochs",
+        "name": "lockTier",
         "type": "uint40"
       },
       {
         "internalType": "uint40",
-        "name": "expiryEpoch",
+        "name": "expiryTimestamp",
         "type": "uint40"
       },
       {
@@ -631,17 +1393,69 @@
         "type": "uint72"
       },
       {
+        "internalType": "uint96",
+        "name": "cumulativeRewardsClaimed",
+        "type": "uint96"
+      },
+      {
         "internalType": "uint64",
         "name": "multiplier18",
         "type": "uint64"
       },
       {
-        "internalType": "uint64",
+        "internalType": "uint32",
         "name": "lastClaimedEpoch",
-        "type": "uint64"
+        "type": "uint32"
+      },
+      {
+        "internalType": "uint32",
+        "name": "migrationEpoch",
+        "type": "uint32"
       }
     ],
     "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint72",
+        "name": "",
+        "type": "uint72"
+      }
+    ],
+    "name": "runningNodeEffectiveStake",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      },
+      {
+        "internalType": "uint256",
+        "name": "epoch",
+        "type": "uint256"
+      },
+      {
+        "internalType": "bool",
+        "name": "isClaimed",
+        "type": "bool"
+      }
+    ],
+    "name": "setIsOperatorFeeClaimedForEpoch",
+    "outputs": [],
+    "stateMutability": "nonpayable",
     "type": "function"
   },
   {
@@ -652,9 +1466,9 @@
         "type": "uint256"
       },
       {
-        "internalType": "uint64",
+        "internalType": "uint32",
         "name": "epoch",
-        "type": "uint64"
+        "type": "uint32"
       }
     ],
     "name": "setLastClaimedEpoch",
@@ -666,11 +1480,141 @@
     "inputs": [
       {
         "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint32",
+        "name": "epoch",
+        "type": "uint32"
+      }
+    ],
+    "name": "setMigrationEpoch",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      },
+      {
+        "internalType": "uint256",
+        "name": "epoch",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "amount",
+        "type": "uint256"
+      }
+    ],
+    "name": "setNetNodeEpochRewards",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "epoch",
+        "type": "uint256"
+      }
+    ],
+    "name": "setV10LaunchEpoch",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      }
+    ],
+    "name": "settleNode",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      },
+      {
+        "internalType": "uint40",
+        "name": "ts",
+        "type": "uint40"
+      }
+    ],
+    "name": "settleNodeTo",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "tierCount",
+    "outputs": [
+      {
+        "internalType": "uint256",
         "name": "",
         "type": "uint256"
       }
     ],
-    "name": "totalEffectiveStakeAtEpoch",
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint40",
+        "name": "lockTier",
+        "type": "uint40"
+      }
+    ],
+    "name": "tierDuration",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "name": "tierIds",
+    "outputs": [
+      {
+        "internalType": "uint40",
+        "name": "",
+        "type": "uint40"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "totalStakeV10",
     "outputs": [
       {
         "internalType": "uint256",
@@ -700,26 +1644,16 @@
     "type": "function"
   },
   {
-    "inputs": [
+    "inputs": [],
+    "name": "v10LaunchEpoch",
+    "outputs": [
       {
         "internalType": "uint256",
-        "name": "tokenId",
+        "name": "",
         "type": "uint256"
-      },
-      {
-        "internalType": "uint40",
-        "name": "newLockEpochs",
-        "type": "uint40"
-      },
-      {
-        "internalType": "uint64",
-        "name": "newMultiplier18",
-        "type": "uint64"
       }
     ],
-    "name": "updateOnRelock",
-    "outputs": [],
-    "stateMutability": "nonpayable",
+    "stateMutability": "view",
     "type": "function"
   },
   {

@@ -11,9 +11,6 @@ export type OnContextGraphCreated = (info: {
   blockNumber: number;
 }) => Promise<void>;
 
-/** @deprecated Use OnContextGraphCreated */
-export type OnParanetCreated = OnContextGraphCreated;
-
 /** Callback for KnowledgeCollectionUpdated events (spec §5.1). */
 export type OnCollectionUpdated = (info: {
   merkleRoot: Uint8Array;
@@ -61,7 +58,7 @@ export interface ChainEventPollerConfig {
 /**
  * Background poller that watches for on-chain events (spec §5.1):
  * - KnowledgeBatchCreated / KCCreated: promotes tentative publishes to confirmed
- * - ParanetCreated / ContextGraphCreated: notifies the agent of new CGs
+ * - NameClaimed / ContextGraphCreated: notifies the agent of new CGs
  * - KnowledgeCollectionUpdated: applies UPDATE to LTM
  * - AllowListUpdated: updates subscription state
  * - ProfileCreated / ProfileUpdated: updates peer identity cache
@@ -175,7 +172,7 @@ export class ChainEventPoller {
     // collection failures. Stopping legacy event polling would leave those
     // publishes tentative forever on remote nodes.
     const eventTypes: string[] = ['KnowledgeBatchCreated', 'KCCreated'];
-    if (watchContextGraphs) eventTypes.push('ParanetCreated');
+    if (watchContextGraphs) eventTypes.push('NameClaimed');
     if (this.onCollectionUpdated) eventTypes.push('KnowledgeCollectionUpdated');
     if (this.onAllowListUpdated) eventTypes.push('AllowListUpdated');
     if (this.onProfileEvent) {
@@ -201,7 +198,8 @@ export class ChainEventPoller {
       if (event.blockNumber > maxEventBlock) maxEventBlock = event.blockNumber;
       if (event.type === 'KnowledgeBatchCreated' || event.type === 'KCCreated') {
         await this.handleBatchCreated(event, ctx);
-      } else if (event.type === 'ParanetCreated') {
+      } else if (event.type === 'NameClaimed' || event.type === 'ParanetCreated') {
+        // Accept 'ParanetCreated' for backward compat with adapters that have not renamed the event.
         await this.handleContextGraphCreated(event, ctx);
       } else if (event.type === 'KnowledgeCollectionUpdated') {
         await this.handleCollectionUpdated(event, ctx);
@@ -263,7 +261,7 @@ export class ChainEventPoller {
   private async handleContextGraphCreated(event: ChainEvent, ctx: OperationContext): Promise<void> {
     if (!this.onContextGraphCreated) return;
     const { data } = event;
-    const contextGraphId = String(data['paranetId'] ?? data['contextGraphId'] ?? '');
+    const contextGraphId = String(data['contextGraphId'] ?? data['paranetId'] ?? '');
     const creator = String(data['creator'] ?? '');
     const accessPolicy = Number(data['accessPolicy'] ?? 0);
 

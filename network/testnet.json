@@ -8,12 +8,12 @@
     "/ip4/178.156.252.147/tcp/9090/p2p/12D3KooWPyTpqBBtU1AvzSsd5rWXCQzFcGtG44qDmeYenWcpzsge",
     "/ip4/49.12.4.64/tcp/9090/p2p/12D3KooWJqhnnfouiNRUyJBEREpuKtV4A448LUbS6JiVCe8Q82bZ"
   ],
-  "defaultParanets": ["testing", "origin-trail-game"],
+  "defaultParanets": ["testing"],
   "defaultNodeRole": "edge",
   "autoUpdate": {
     "enabled": true,
-    "repo": "OriginTrail/dkg-v9",
-    "branch": "v10-rc",
+    "repo": "OriginTrail/dkg",
+    "branch": "main",
     "checkIntervalMinutes": 5
   },
   "chain": {
@@ -24,6 +24,6 @@
   },
   "faucet": {
     "url": "https://euphoria.origin-trail.network/faucet/fund",
-    "mode": "v9_base_sepolia"
+    "mode": "v10_base_sepolia"
   }
 }

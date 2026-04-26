@@ -10,6 +10,7 @@ The adapter is a thin bridge into the DKG node. It does not run its own DKG node
 - keeps connected-agent chat persisted in DKG Working Memory via the `chat-turns` assertion of the `agent-context` context graph
 - registers the DKG memory provider as OpenClaw's memory-slot capability, so slot-backed recall reads flow through real V10 primitives (assertion-scoped SPARQL queries with `view: 'working-memory'`, `'shared-working-memory'`, and `'verified-memory'`) rather than the legacy filesystem-watcher path
 - exposes DKG agent-network tools to the OpenClaw runtime
+- funds the first three node wallets via the testnet faucet on first setup (skippable with `--no-fund`; failures are non-fatal and log manual `curl` instructions)
 
 Memory writes are not exposed as an adapter tool. The agent persists memory through direct daemon routes listed in `packages/cli/skills/dkg-node/SKILL.md` §5 (`POST /api/assertion/create` on first use of a fresh project CG, then `POST /api/assertion/:name/write` for each write). The daemon serves the skill document at `GET /.well-known/skill.md`, so the agent sees it on startup and calls the routes directly.
 
@@ -37,6 +38,17 @@ If the OpenClaw gateway does not auto-reload after the config change, run:
 ```bash
 openclaw gateway restart
 ```
+
+### Flags
+
+| Flag | Default | Purpose |
+| --- | --- | --- |
+| `--no-fund` | off | Skip the testnet faucet call during setup. Use this if your wallets are already funded, the faucet is unreachable, or you're running offline. |
+| `--no-start` | off | Skip starting the DKG daemon (configure only). |
+| `--no-verify` | off | Skip the post-setup verification pass. |
+| `--dry-run` | off | Preview the setup actions without writing anything. |
+
+Faucet funding is best-effort: a failed call logs a manual `curl` block and setup continues. See the main repo's [Testnet Funding](../../README.md#testnet-funding) section and [`docs/setup/TESTNET_FAUCET.md`](../../docs/setup/TESTNET_FAUCET.md) for request/response semantics, rate limits, and error codes.
 
 ## Verification
 

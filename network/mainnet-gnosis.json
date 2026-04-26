@@ -8,6 +8,6 @@
   },
   "autoUpdate": {
     "enabled": true,
-    "branch": "v10-rc"
+    "branch": "main"
   }
 }

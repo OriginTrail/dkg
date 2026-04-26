@@ -14,18 +14,21 @@ interface JoinProjectModalProps {
   initialContextGraphId?: string;
 }
 
-function parseInviteCode(raw: string): { cgId: string; multiaddr: string | null } {
+export function parseInviteCode(raw: string): { cgId: string; multiaddr: string | null } {
   const normalized = raw.trim().replace(/\\n/g, '\n');
   const lines = normalized.split('\n').map((line) => line.trim()).filter(Boolean);
-  const cgId = lines[0] ?? '';
   const multilineMultiaddr = lines.slice(1).join('').replace(/\s+/g, '');
   const inlineMultiaddrMatch = normalized.match(/(?:^|\s)(\/(?:ip4|ip6|dns|dns4|dns6)\/\S+)/);
   const inlineMultiaddr = inlineMultiaddrMatch?.[1]?.replace(/\s+/g, '') ?? null;
   const multiaddr = multilineMultiaddr.startsWith('/') ? multilineMultiaddr : inlineMultiaddr;
+  const firstLine = lines[0] ?? '';
+  const cgId = inlineMultiaddr && firstLine.includes(inlineMultiaddr)
+    ? firstLine.replace(inlineMultiaddr, '').trim()
+    : firstLine;
   return { cgId, multiaddr };
 }
 
-function validateInvite(cgId: string, multiaddr: string | null): string | null {
+export function validateInvite(cgId: string, multiaddr: string | null): string | null {
   if (!cgId) return 'Missing project ID';
   if (!multiaddr) return null;
   if (!multiaddr.startsWith('/')) return 'Invalid curator multiaddr';

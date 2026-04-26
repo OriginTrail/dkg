@@ -1,7 +1,7 @@
 {
-  "repo": "OriginTrail/dkg-v9",
-  "defaultBranch": "v10-rc",
-  "githubUrl": "https://github.com/OriginTrail/dkg-v9",
+  "repo": "OriginTrail/dkg",
+  "defaultBranch": "main",
+  "githubUrl": "https://github.com/OriginTrail/dkg",
   "projectName": "dkg",
   "syslogAppName": "dkg",
   "defaultNetwork": "testnet"

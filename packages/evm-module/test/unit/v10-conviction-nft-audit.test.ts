@@ -8,7 +8,7 @@
  *   E-6  (HIGH, TEST-DEBT):     `DKGPublishingConvictionNFT` `AccountExpired`
  *         revert paths on `topUp` and `coverPublishingCost`.
  *   E-14 (MEDIUM, SPEC-GAP):    Lock-tier sanity via staking NFT — enumerate
- *         lockEpochs tiers and confirm conviction/multiplier wiring.
+ *         lockTier tiers and confirm conviction/multiplier wiring.
  *   E-16 (MEDIUM, TEST-DEBT):   Replace EOA-StakingStorage fixture with a real
  *         StakingStorage integration (NFT-held TRAC invariant is retained;
  *         real StakingStorage is registered so the Hub dependency resolves
@@ -140,7 +140,7 @@ describe('@unit v10 conviction NFT audit', () => {
     async function stake(
       signer: SignerWithAddress,
       amount: bigint,
-      lockEpochs: number,
+      lockTier: number,
     ): Promise<bigint> {
       // Fund the staker from the deployer if needed and approve.
       if (signer.address !== accounts[0].address) {
@@ -156,7 +156,7 @@ describe('@unit v10 conviction NFT audit', () => {
       const tx = await StakingNFT.connect(signer).stake(
         IDENTITY_ID,
         amount,
-        lockEpochs,
+        lockTier,
       );
       const receipt = await tx.wait();
       // PositionCreated(uint256,address,uint72,uint96,uint40) — id is topic[1]
@@ -165,7 +165,7 @@ describe('@unit v10 conviction NFT audit', () => {
       return BigInt(log.topics[1]);
     }
 
-    it('reverts LockNotExpired when current epoch < createdAt + lockEpochs', async () => {
+    it('reverts LockNotExpired when current epoch < createdAt + lockTier', async () => {
       const amount = hre.ethers.parseEther('50000');
       const positionId = await stake(accounts[0], amount, 6);
 
@@ -276,24 +276,24 @@ describe('@unit v10 conviction NFT audit', () => {
 
   describe('E-14 — staking NFT lock-tier multiplier ladder', () => {
     const SCALE18 = 10n ** 18n;
-    // (lockEpochs, expected multiplier as fractional-x-SCALE18)
+    // (lockTier, expected multiplier as fractional-x-SCALE18)
     const tiers: Array<[number, bigint]> = [
       [1, SCALE18],
       [2, (15n * SCALE18) / 10n],
       [3, 2n * SCALE18],
       [6, (35n * SCALE18) / 10n],
       [12, 6n * SCALE18],
-      // Boundary: lockEpochs just above 12 should still cap at 6x.
+      // Boundary: lockTier just above 12 should still cap at 6x.
       [24, 6n * SCALE18],
     ];
 
-    for (const [lockEpochs, expected] of tiers) {
-      it(`lockEpochs=${lockEpochs} yields multiplier = ${Number(
+    for (const [lockTier, expected] of tiers) {
+      it(`lockTier=${lockTier} yields multiplier = ${Number(
         (expected * 10n) / SCALE18,
       ) / 10}x`, async () => {
         const amount = hre.ethers.parseEther('50000');
         await TokenContract.approve(await StakingNFT.getAddress(), amount);
-        const tx = await StakingNFT.stake(IDENTITY_ID, amount, lockEpochs);
+        const tx = await StakingNFT.stake(IDENTITY_ID, amount, lockTier);
         const receipt = await tx.wait();
         const topic =
           StakingNFT.interface.getEvent('PositionCreated').topicHash;
@@ -302,7 +302,7 @@ describe('@unit v10 conviction NFT audit', () => {
 
         expect(await StakingNFT.getMultiplier(positionId)).to.equal(expected);
         expect(await StakingNFT.getConviction(positionId)).to.equal(
-          amount * BigInt(lockEpochs),
+          amount * BigInt(lockTier),
         );
       });
     }

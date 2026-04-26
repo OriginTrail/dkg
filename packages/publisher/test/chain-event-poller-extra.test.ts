@@ -5,11 +5,11 @@
  * wired to the shared Hardhat node spun up by
  * `packages/chain/test/hardhat-global-setup.ts` (port 9546 for publisher).
  * Events are produced by real contract calls (`createContextGraph` →
- * `ParanetCreated`). Block ranges are advanced using real `hardhat_mine`
+ * `NameClaimed`). Block ranges are advanced using real `hardhat_mine`
  * RPC so cursor / MAX_RANGE behaviour is exercised against genuine
  * on-chain block numbers.
  *
- * publish-lifecycle.test.ts already covers the ParanetCreated happy path
+ * publish-lifecycle.test.ts already covers the NameClaimed happy path
  * and the KnowledgeBatchCreated → confirmByMerkleRoot flow. This file
  * covers:
  *   - cursor persistence across restart (load + advance)
@@ -26,7 +26,7 @@
  * SPEC-GAP SG-6 (new finding — added by this file's migration):
  *   The real `EVMChainAdapter.listenForEvents()` only yields
  *   `KnowledgeBatchCreated`, `KCCreated` / `KnowledgeCollectionCreated`,
- *   `ParanetCreated`, and `ContextGraphExpanded`. It does NOT yield
+ *   `NameClaimed`, and `ContextGraphExpanded`. It does NOT yield
  *   `KnowledgeCollectionUpdated`, `AllowListUpdated`,
  *   `ProfileCreated`, or `ProfileUpdated` even though
  *   `ChainEventPoller.poll()` declares callback slots for all four
@@ -78,7 +78,7 @@ async function mineBlocks(count: number): Promise<void> {
   await provider.send('hardhat_mine', ['0x' + count.toString(16)]);
 }
 
-/** Fresh context-graph name per test so ParanetCreated ids don't collide. */
+/** Fresh context-graph name per test so NameClaimed ids don't collide. */
 let _cgCounter = 0;
 function nextCgName(prefix: string): string {
   _cgCounter += 1;
@@ -106,7 +106,7 @@ describe('ChainEventPoller — cursor persistence', () => {
     const provider = createProvider();
     const handler = new PublishHandler(new OxigraphStore(), new TypedEventBus());
 
-    // Emit a real ParanetCreated event; capture the exact block number.
+    // Emit a real NameClaimed event; capture the exact block number.
     const name = nextCgName('cg-restore');
     const result = await chain.createContextGraph({ name, accessPolicy: 0 });
     expect(result.success).toBe(true);
@@ -114,7 +114,7 @@ describe('ChainEventPoller — cursor persistence', () => {
 
     // Persist a cursor one block before the event so restore semantics are
     // observable: the first poll must start at `eventBlock` and pick up
-    // the ParanetCreated that would otherwise be missed if the cursor
+    // the NameClaimed that would otherwise be missed if the cursor
     // reset to 0 (slow / redundant) or to head (skips the event).
     const cursor = new InMemoryCursor(eventBlock - 1);
     const received: Array<{ id: string; blockNumber: number }> = [];
@@ -136,7 +136,7 @@ describe('ChainEventPoller — cursor persistence', () => {
     // Our event must be among the restored-cursor scan results (other
     // tests may have created CGs too — we only care that OURS is picked).
     const mine = received.find((r) => r.blockNumber === eventBlock);
-    expect(mine, `expected ParanetCreated at block ${eventBlock}; received=${JSON.stringify(received)}`).toBeDefined();
+    expect(mine, `expected NameClaimed at block ${eventBlock}; received=${JSON.stringify(received)}`).toBeDefined();
 
     // Cursor must have advanced past the event block (not regressed).
     expect(cursor.saved.length).toBeGreaterThan(0);
@@ -198,7 +198,7 @@ describe('ChainEventPoller — head seeding & range capping', () => {
     const provider = createProvider();
     const handler = new PublishHandler(new OxigraphStore(), new TypedEventBus());
 
-    // Emit a ParanetCreated at block B, then mine 1000 empty blocks so the
+    // Emit a NameClaimed at block B, then mine 1000 empty blocks so the
     // new head is B+1000, putting B well before the seed window (head-500).
     const result = await chain.createContextGraph({ name: nextCgName('cg-old'), accessPolicy: 0 });
     const oldEventBlock = result.blockNumber!;
@@ -429,7 +429,7 @@ describe('ChainEventPoller — SPEC-GAP SG-6: adapter missing 4 of 7 event types
     // them have callback slots on ChainEventPoller but are never produced
     // by the real adapter (see `packages/chain/src/evm-adapter.ts:793`
     // `listenForEvents` branches; grep shows only KnowledgeBatchCreated,
-    // KCCreated, ContextGraphExpanded, and ParanetCreated). This test
+    // KCCreated, ContextGraphExpanded, and NameClaimed). This test
     // proves the gap end-to-end: we scan a broad block range asking for
     // every type and assert the four missing ones are never yielded.
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
@@ -442,7 +442,7 @@ describe('ChainEventPoller — SPEC-GAP SG-6: adapter missing 4 of 7 event types
       eventTypes: [
         'KnowledgeBatchCreated',
         'KCCreated',
-        'ParanetCreated',
+        'NameClaimed',
         'KnowledgeCollectionUpdated',
         'AllowListUpdated',
         'ProfileCreated',

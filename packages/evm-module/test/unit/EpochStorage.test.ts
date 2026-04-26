@@ -3,27 +3,38 @@ import { loadFixture, time } from '@nomicfoundation/hardhat-network-helpers';
 import { expect } from 'chai';
 import hre from 'hardhat';
 
-import { EpochStorage } from '../../typechain';
+import { Chronos, EpochStorage } from '../../typechain';
 
 type EpochStorageFixture = {
   accounts: SignerWithAddress[];
   EpochStorage: EpochStorage;
+  Chronos: Chronos;
 };
 
 describe('@unit EpochStorage', () => {
   let accounts: SignerWithAddress[];
   let EpochStorage: EpochStorage;
+  let Chronos: Chronos;
+  // Resolved at fixture load time; mirrors Chronos.epochLength() so that
+  // "advance one epoch" test primitives track whatever cadence the
+  // deployment parameters currently specify (30 days on mainnet/dev post
+  // V10 alignment, historically 1h on legacy dev profiles).
+  let epochSeconds: number;
 
   async function deployEpochStorageFixture(): Promise<EpochStorageFixture> {
-    await hre.deployments.fixture(['EpochStorage']);
+    await hre.deployments.fixture(['EpochStorage', 'Chronos']);
     EpochStorage = await hre.ethers.getContract<EpochStorage>('EpochStorageV8');
+    Chronos = await hre.ethers.getContract<Chronos>('Chronos');
+    epochSeconds = Number(await Chronos.epochLength());
     accounts = await hre.ethers.getSigners();
-    return { accounts, EpochStorage };
+    return { accounts, EpochStorage, Chronos };
   }
 
   beforeEach(async () => {
     hre.helpers.resetDeploymentsJson();
-    ({ accounts, EpochStorage } = await loadFixture(deployEpochStorageFixture));
+    ({ accounts, EpochStorage, Chronos } = await loadFixture(
+      deployEpochStorageFixture,
+    ));
   });
 
   it('Should have correct name and version', async () => {
@@ -214,8 +225,8 @@ describe('@unit EpochStorage', () => {
   it('Check getPreviousEpochPool after adding tokens, then increment epoch to finalize', async () => {
     const shardId = 14;
     await EpochStorage.addTokensToEpochRange(shardId, 1, 1, 2000);
-    // Move to next epoch
-    await time.increase(3601);
+    // Move to next epoch (resolved from Chronos so it tracks current epoch cadence)
+    await time.increase(epochSeconds + 1);
     expect(await EpochStorage.getPreviousEpochPool(shardId)).to.equal(2000);
   });
 
@@ -330,7 +341,7 @@ describe('@unit EpochStorage', () => {
 
   it('getCurrentEpochProducedKnowledgeValue, getPreviousEpochProducedKnowledgeValue', async () => {
     await EpochStorage.addEpochProducedKnowledgeValue(10, 1, 200);
-    await time.increase(3600);
+    await time.increase(epochSeconds);
     await EpochStorage.addEpochProducedKnowledgeValue(20, 2, 300);
     expect(await EpochStorage.getCurrentEpochProducedKnowledgeValue()).to.equal(
       300,
@@ -342,7 +353,7 @@ describe('@unit EpochStorage', () => {
 
   it('getNodeCurrentEpochProducedKnowledgeValue, getNodePreviousEpochProducedKnowledgeValue', async () => {
     await EpochStorage.addEpochProducedKnowledgeValue(123, 1, 500);
-    await time.increase(3600);
+    await time.increase(epochSeconds);
     await EpochStorage.addEpochProducedKnowledgeValue(123, 2, 700);
     expect(
       await EpochStorage.getNodeCurrentEpochProducedKnowledgeValue(123),
@@ -355,7 +366,7 @@ describe('@unit EpochStorage', () => {
   it('getCurrentEpochNodeMaxProducedKnowledgeValue, getPreviousEpochNodeMaxProducedKnowledgeValue', async () => {
     await EpochStorage.addEpochProducedKnowledgeValue(1, 1, 1000);
     await EpochStorage.addEpochProducedKnowledgeValue(2, 1, 500);
-    await time.increase(3600);
+    await time.increase(epochSeconds);
     await EpochStorage.addEpochProducedKnowledgeValue(1, 2, 300);
     await EpochStorage.addEpochProducedKnowledgeValue(2, 2, 800);
     expect(
@@ -369,7 +380,7 @@ describe('@unit EpochStorage', () => {
   it('getNodeCurrentEpochProducedKnowledgeValuePercentage, getNodePreviousEpochProducedKnowledgeValuePercentage', async () => {
     await EpochStorage.addEpochProducedKnowledgeValue(1111, 1, 500);
     await EpochStorage.addEpochProducedKnowledgeValue(2222, 1, 1500);
-    await time.increase(3600);
+    await time.increase(epochSeconds);
     await EpochStorage.addEpochProducedKnowledgeValue(1111, 2, 1000);
     await EpochStorage.addEpochProducedKnowledgeValue(2222, 2, 2000);
     expect(

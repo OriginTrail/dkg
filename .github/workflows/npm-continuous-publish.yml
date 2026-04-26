@@ -9,7 +9,7 @@ name: Continuous NPM Publish
 
 on:
   push:
-    branches: [v10-rc]  # ← change this when the release branch moves
+    branches: [main]  # ← change this when the release branch moves
 
 permissions:
   contents: read
@@ -46,7 +46,7 @@ jobs:
       - name: Build all packages
         run: pnpm build
 
-      - name: Build Vite UI bundles (node-ui + origin-trail-game)
+      - name: Build Vite UI bundles (node-ui)
         # `build` was split from full (tsc + vite) into tsc-only in CI for a
         # ~2 min wall-clock reduction (see ci.yml). Dev pre-releases still
         # need the Vite-produced `dist-ui/` bundles shipped to npm, so

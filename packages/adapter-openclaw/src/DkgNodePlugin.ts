@@ -1075,6 +1075,108 @@ export class DkgNodePlugin {
         execute: async (_toolCallId, args) => this.handleContextGraphCreate(args),
       },
       {
+        name: 'dkg_context_graph_invite',
+        description:
+          'Invite a peer to a context graph using their peer ID. For "share this project with my friend" ' +
+          'requests, this is the primary user-facing deliverable because it returns a ready-to-share invite code ' +
+          'that the friend can paste into Join. Use this when you have a peer ID but not the friend\'s agent ' +
+          'address, or alongside `dkg_participant_add` when you have both identifiers for a private project.',
+        parameters: {
+          type: 'object',
+          properties: {
+            context_graph_id: { type: 'string', description: 'Target context graph ID.' },
+            peer_id: { type: 'string', description: 'Target peer ID (12D3KooW...).' },
+          },
+          required: ['context_graph_id', 'peer_id'],
+        },
+        execute: async (_toolCallId, args) => this.handleContextGraphInvite(args),
+      },
+      {
+        name: 'dkg_participant_add',
+        description:
+          'Add an agent address to a curated/private context graph allowlist. Use this when you know the ' +
+          'friend\'s DKG agent address. For "share with my friend" requests on private projects, prefer ' +
+          'returning an invite code too when you also have their peer ID, because allowlisting alone is not the ' +
+          'full UI join flow.',
+        parameters: {
+          type: 'object',
+          properties: {
+            context_graph_id: { type: 'string', description: 'Target context graph ID.' },
+            agent_address: { type: 'string', description: 'Friend\'s DKG agent address (0x...).' },
+          },
+          required: ['context_graph_id', 'agent_address'],
+        },
+        execute: async (_toolCallId, args) => this.handleParticipantAdd(args),
+      },
+      {
+        name: 'dkg_participant_remove',
+        description:
+          'Remove an agent address from a curated/private context graph allowlist.',
+        parameters: {
+          type: 'object',
+          properties: {
+            context_graph_id: { type: 'string', description: 'Target context graph ID.' },
+            agent_address: { type: 'string', description: 'Agent address to remove (0x...).' },
+          },
+          required: ['context_graph_id', 'agent_address'],
+        },
+        execute: async (_toolCallId, args) => this.handleParticipantRemove(args),
+      },
+      {
+        name: 'dkg_participant_list',
+        description:
+          'List the allowed agent addresses for a context graph.',
+        parameters: {
+          type: 'object',
+          properties: {
+            context_graph_id: { type: 'string', description: 'Target context graph ID.' },
+          },
+          required: ['context_graph_id'],
+        },
+        execute: async (_toolCallId, args) => this.handleParticipantList(args),
+      },
+      {
+        name: 'dkg_join_request_list',
+        description:
+          'List pending join requests for a context graph so the curator can review them.',
+        parameters: {
+          type: 'object',
+          properties: {
+            context_graph_id: { type: 'string', description: 'Target context graph ID.' },
+          },
+          required: ['context_graph_id'],
+        },
+        execute: async (_toolCallId, args) => this.handleJoinRequestList(args),
+      },
+      {
+        name: 'dkg_join_request_approve',
+        description:
+          'Approve a pending join request for the given agent address.',
+        parameters: {
+          type: 'object',
+          properties: {
+            context_graph_id: { type: 'string', description: 'Target context graph ID.' },
+            agent_address: { type: 'string', description: 'Requesting agent address (0x...).' },
+          },
+          required: ['context_graph_id', 'agent_address'],
+        },
+        execute: async (_toolCallId, args) => this.handleJoinRequestApprove(args),
+      },
+      {
+        name: 'dkg_join_request_reject',
+        description:
+          'Reject a pending join request for the given agent address.',
+        parameters: {
+          type: 'object',
+          properties: {
+            context_graph_id: { type: 'string', description: 'Target context graph ID.' },
+            agent_address: { type: 'string', description: 'Requesting agent address (0x...).' },
+          },
+          required: ['context_graph_id', 'agent_address'],
+        },
+        execute: async (_toolCallId, args) => this.handleJoinRequestReject(args),
+      },
+      {
         name: 'dkg_subscribe',
         description:
           'Subscribe to a context graph to receive its data from peers. Call once before querying or publishing ' +
@@ -1131,7 +1233,9 @@ export class DkgNodePlugin {
           'layer to read: `working-memory` (WM — per-agent), `shared-working-memory` (SWM — gossip-' +
           'replicated), or `verified-memory` (VM — on-chain anchored); when `view` is supplied, ' +
           '`context_graph_id` is also required. For WM reads, `agent_address` selects whose WM to ' +
-          'read — it defaults to this node\'s agent address (the same default the adapter uses for ' +
+          'read; prefer the injected `current_agent_address` from turn context when present. If a WM ' +
+          'read looks unexpectedly empty, retry alternate identity forms before concluding there is no ' +
+          'WM data. It defaults to this node\'s agent address (the same default the adapter uses for ' +
           'memory-plugin reads). Omit `view` for a cross-graph query routed via the legacy data-' +
           'graph path (unscoped, or scoped when `context_graph_id` is set); use `GRAPH ?g { ... }` ' +
           'for named-graph targeting in that mode.',
@@ -1160,8 +1264,9 @@ export class DkgNodePlugin {
               description:
                 "Optional target for `view: \"working-memory\"` reads — defaults to this node's " +
                 'agent address (matches the default the memory plugin uses for its own WM reads). ' +
-                'Ignored for non-WM views. Supply an explicit value to read another local agent\'s ' +
-                'WM namespace in multi-agent deployments.',
+                'Prefer the injected `current_agent_address` from chat context when available. Accepts ' +
+                'wallet/address form, raw peer ID, or DID form. Ignored for non-WM views. Supply an ' +
+                'explicit value to read another local agent\'s WM namespace in multi-agent deployments.',
             },
           },
           required: ['sparql'],
@@ -1407,7 +1512,9 @@ export class DkgNodePlugin {
         name: 'dkg_shared_memory_publish',
         description:
           'Final step of the canonical flow. Publish all Shared Working Memory in a context graph to Verified ' +
-          'Memory (on-chain) and clear SWM. Use after `dkg_assertion_promote` to finalize promoted data.',
+          'Memory (on-chain) and clear SWM. Use after `dkg_assertion_promote` to finalize promoted data. ' +
+          'If the context graph is still local-only/unregistered, set `register_if_needed: true` to explicitly ' +
+          'upgrade it to on-chain registration before publishing.',
         parameters: {
           type: 'object',
           properties: {
@@ -1420,6 +1527,18 @@ export class DkgNodePlugin {
             sub_graph_name: {
               type: 'string',
               description: 'Optional sub-graph scope. Must match the sub-graph used during create/write/promote. Cannot be combined with a cross-CG publish target.',
+            },
+            register_if_needed: {
+              type: 'boolean',
+              description: 'When true, explicitly register the context graph on-chain before publishing if needed. This may spend gas/TRAC; it is opt-in and not the default.',
+            },
+            reveal_on_chain: {
+              type: 'boolean',
+              description: 'Deprecated compatibility no-op. V10 context graph registration ignores metadata reveal.',
+            },
+            access_policy: {
+              type: 'number',
+              description: 'Optional registration access policy used only when `register_if_needed` is true: `0` for open, `1` for private.',
             },
           },
           required: ['context_graph_id'],
@@ -1823,6 +1942,100 @@ export class DkgNodePlugin {
     }
   }
 
+  private async handleContextGraphInvite(args: Record<string, unknown>): Promise<OpenClawToolResult> {
+    try {
+      const contextGraphId = typeof args.context_graph_id === 'string' ? args.context_graph_id.trim() : '';
+      const peerId = typeof args.peer_id === 'string' ? args.peer_id.trim() : '';
+      if (!contextGraphId) return this.error('"context_graph_id" is required.');
+      if (!peerId) return this.error('"peer_id" is required.');
+      const [result, status] = await Promise.all([
+        this.client.inviteToContextGraph(contextGraphId, peerId),
+        this.client.getFullStatus().catch(() => null),
+      ]);
+      const multiaddrs = Array.isArray(status?.multiaddrs)
+        ? status.multiaddrs.filter((value): value is string => typeof value === 'string')
+        : [];
+      const curatorMultiaddr = pickShareableMultiaddr(multiaddrs);
+      const inviteCode = curatorMultiaddr ? `${contextGraphId}\n${curatorMultiaddr}` : contextGraphId;
+      return this.json({
+        ...result,
+        peerId,
+        curatorMultiaddr,
+        inviteCode,
+      });
+    } catch (err: any) {
+      return this.daemonError(err);
+    }
+  }
+
+  private async handleParticipantAdd(args: Record<string, unknown>): Promise<OpenClawToolResult> {
+    try {
+      const contextGraphId = typeof args.context_graph_id === 'string' ? args.context_graph_id.trim() : '';
+      const agentAddress = typeof args.agent_address === 'string' ? args.agent_address.trim() : '';
+      if (!contextGraphId) return this.error('"context_graph_id" is required.');
+      if (!agentAddress) return this.error('"agent_address" is required.');
+      return this.json(await this.client.addParticipant(contextGraphId, agentAddress));
+    } catch (err: any) {
+      return this.daemonError(err);
+    }
+  }
+
+  private async handleParticipantRemove(args: Record<string, unknown>): Promise<OpenClawToolResult> {
+    try {
+      const contextGraphId = typeof args.context_graph_id === 'string' ? args.context_graph_id.trim() : '';
+      const agentAddress = typeof args.agent_address === 'string' ? args.agent_address.trim() : '';
+      if (!contextGraphId) return this.error('"context_graph_id" is required.');
+      if (!agentAddress) return this.error('"agent_address" is required.');
+      return this.json(await this.client.removeParticipant(contextGraphId, agentAddress));
+    } catch (err: any) {
+      return this.daemonError(err);
+    }
+  }
+
+  private async handleParticipantList(args: Record<string, unknown>): Promise<OpenClawToolResult> {
+    try {
+      const contextGraphId = typeof args.context_graph_id === 'string' ? args.context_graph_id.trim() : '';
+      if (!contextGraphId) return this.error('"context_graph_id" is required.');
+      return this.json(await this.client.listParticipants(contextGraphId));
+    } catch (err: any) {
+      return this.daemonError(err);
+    }
+  }
+
+  private async handleJoinRequestList(args: Record<string, unknown>): Promise<OpenClawToolResult> {
+    try {
+      const contextGraphId = typeof args.context_graph_id === 'string' ? args.context_graph_id.trim() : '';
+      if (!contextGraphId) return this.error('"context_graph_id" is required.');
+      return this.json(await this.client.listJoinRequests(contextGraphId));
+    } catch (err: any) {
+      return this.daemonError(err);
+    }
+  }
+
+  private async handleJoinRequestApprove(args: Record<string, unknown>): Promise<OpenClawToolResult> {
+    try {
+      const contextGraphId = typeof args.context_graph_id === 'string' ? args.context_graph_id.trim() : '';
+      const agentAddress = typeof args.agent_address === 'string' ? args.agent_address.trim() : '';
+      if (!contextGraphId) return this.error('"context_graph_id" is required.');
+      if (!agentAddress) return this.error('"agent_address" is required.');
+      return this.json(await this.client.approveJoinRequest(contextGraphId, agentAddress));
+    } catch (err: any) {
+      return this.daemonError(err);
+    }
+  }
+
+  private async handleJoinRequestReject(args: Record<string, unknown>): Promise<OpenClawToolResult> {
+    try {
+      const contextGraphId = typeof args.context_graph_id === 'string' ? args.context_graph_id.trim() : '';
+      const agentAddress = typeof args.agent_address === 'string' ? args.agent_address.trim() : '';
+      if (!contextGraphId) return this.error('"context_graph_id" is required.');
+      if (!agentAddress) return this.error('"agent_address" is required.');
+      return this.json(await this.client.rejectJoinRequest(contextGraphId, agentAddress));
+    } catch (err: any) {
+      return this.daemonError(err);
+    }
+  }
+
   private async handleSubscribe(args: Record<string, unknown>): Promise<OpenClawToolResult> {
     try {
       const contextGraphId = typeof args.context_graph_id === 'string' ? args.context_graph_id.trim() : '';
@@ -2139,8 +2352,31 @@ export class DkgNodePlugin {
         return this.error('"root_entities" must be omitted or a non-empty array of root entity URIs.');
       }
       const subGraphName = args.sub_graph_name ? String(args.sub_graph_name) : undefined;
+      const registerIfNeeded = args.register_if_needed === true;
+      if (args.register_if_needed !== undefined && typeof args.register_if_needed !== 'boolean') {
+        return this.error('"register_if_needed" must be a boolean.');
+      }
+      if (args.reveal_on_chain !== undefined && typeof args.reveal_on_chain !== 'boolean') {
+        return this.error('"reveal_on_chain" must be a boolean.');
+      }
+      if (args.access_policy !== undefined && args.access_policy !== 0 && args.access_policy !== 1) {
+        return this.error('"access_policy" must be 0 (open) or 1 (private).');
+      }
+      let registration: Record<string, unknown> | undefined;
+      if (registerIfNeeded) {
+        try {
+          registration = await this.client.registerContextGraph(contextGraphId, {
+            accessPolicy: args.access_policy as number | undefined,
+          });
+        } catch (err: any) {
+          const message = err?.message ?? String(err);
+          if (!message.includes('already registered')) {
+            throw err;
+          }
+        }
+      }
       const result = await this.client.publishSharedMemory(contextGraphId, { rootEntities, subGraphName });
-      return this.json(result);
+      return this.json(registration ? { ...result, registration } : result);
     } catch (err: any) {
       return this.daemonError(err);
     }
@@ -2158,6 +2394,37 @@ function slugify(name: string): string {
 /** Check if a value looks like a URI (starts with a known scheme). */
 function isUri(value: string): boolean {
   return /^(?:https?:\/\/|urn:|did:)/i.test(value);
+}
+
+function pickShareableMultiaddr(addrs: string[]): string | null {
+  if (addrs.length === 0) return null;
+  const ranked = [...addrs].sort((a, b) => scoreMultiaddr(b) - scoreMultiaddr(a));
+  return ranked[0] ?? null;
+}
+
+function scoreMultiaddr(addr: string): number {
+  if (addr.includes('/p2p-circuit/')) return 100;
+  const ipv4 = addr.match(/\/ip4\/([^/]+)/)?.[1];
+  if (!ipv4) return 50;
+  if (isLoopbackIPv4(ipv4)) return 0;
+  if (isPrivateIPv4(ipv4)) return 10;
+  return 80;
+}
+
+function isLoopbackIPv4(ip: string): boolean {
+  return ip.startsWith('127.');
+}
+
+function isPrivateIPv4(ip: string): boolean {
+  if (ip.startsWith('10.')) return true;
+  if (ip.startsWith('192.168.')) return true;
+  if (ip.startsWith('169.254.')) return true;
+  const m = ip.match(/^172\.(\d+)\./);
+  if (m) {
+    const second = Number.parseInt(m[1]!, 10);
+    if (second >= 16 && second <= 31) return true;
+  }
+  return false;
 }
 
 /**

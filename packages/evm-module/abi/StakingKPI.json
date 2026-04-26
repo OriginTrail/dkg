@@ -52,10 +52,10 @@
   },
   {
     "inputs": [],
-    "name": "delegatorsInfo",
+    "name": "convictionStakingStorage",
     "outputs": [
       {
-        "internalType": "contract DelegatorsInfo",
+        "internalType": "contract ConvictionStakingStorage",
         "name": "",
         "type": "address"
       }

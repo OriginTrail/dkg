@@ -362,25 +362,6 @@
     "type": "function"
   },
   {
-    "inputs": [
-      {
-        "internalType": "uint40",
-        "name": "lockEpochs",
-        "type": "uint40"
-      }
-    ],
-    "name": "convictionMultiplier",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "multiplier18",
-        "type": "uint256"
-      }
-    ],
-    "stateMutability": "pure",
-    "type": "function"
-  },
-  {
     "inputs": [],
     "name": "delegatorsInfo",
     "outputs": [
@@ -430,30 +411,6 @@
     "name": "finalizeWithdrawal",
     "outputs": [],
     "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint72",
-        "name": "",
-        "type": "uint72"
-      },
-      {
-        "internalType": "address",
-        "name": "",
-        "type": "address"
-      }
-    ],
-    "name": "getDelegatorConvictionMultiplier",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "multiplier18",
-        "type": "uint256"
-      }
-    ],
-    "stateMutability": "pure",
     "type": "function"
   },
   {

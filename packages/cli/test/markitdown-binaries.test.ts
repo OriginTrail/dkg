@@ -42,7 +42,7 @@ describe('bundle-markitdown-binaries helpers', () => {
     expect(parseSha256File('abc123  markitdown-linux-x64\n')).toBe('abc123');
     expect(releaseTagForVersion('9.0.0-rc.2')).toBe('v9.0.0-rc.2');
     expect(releaseBaseUrl('9.0.0-rc.2')).toBe(
-      'https://github.com/OriginTrail/dkg-v9/releases/download/v9.0.0-rc.2',
+      'https://github.com/OriginTrail/dkg/releases/download/v9.0.0-rc.2',
     );
     expect(releaseAssetUrl('https://example.invalid/release', 'markitdown-linux-x64')).toBe(
       'https://example.invalid/release/markitdown-linux-x64',

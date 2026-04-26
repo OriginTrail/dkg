@@ -105,6 +105,22 @@ describe('DkgMemoryPlugin.register', () => {
     expect(typeof capability.runtime?.getMemorySearchManager).toBe('function');
   });
 
+  it('registers a prompt builder that teaches WM identity selection', () => {
+    const api = makeApi();
+    plugin.register(api);
+
+    const capability = api.registerMemoryCapability.mock.calls[0][0] as MemoryPluginCapability;
+    const sections = capability.promptBuilder?.({ availableTools: new Set(), citationsMode: undefined }) ?? [];
+
+    expect(sections.join('\n')).toContain('current_agent_address');
+    expect(sections.join('\n')).toContain('working-memory');
+    expect(sections.join('\n')).toContain('shared-working-memory');
+    expect(sections.join('\n')).toContain('verified-memory');
+    expect(sections.join('\n')).toContain('retry with alternate identity forms');
+    expect(sections.join('\n')).toContain('generate an invite code first');
+    expect(sections.join('\n')).toContain('allowlisting is not the full UI join flow');
+  });
+
   it('registers only the memory slot capability, no conventional memory tools (Codex B-retire)', () => {
     const api = makeApi();
     plugin.register(api);

@@ -180,6 +180,7 @@ export const DKG_ONTOLOGY = {
   DKG_REPLICATION_POLICY: `${DKG}replicationPolicy`,
   DKG_ACCESS_POLICY: `${DKG}accessPolicy`,
   DKG_PARTICIPANT_IDENTITY_ID: `${DKG}participantIdentityId`,
+  DKG_PARTICIPANT_AGENT: `${DKG}participantAgent`,
   DKG_CCL_POLICY: `${DKG}CCLPolicy`,
   DKG_POLICY_BINDING: `${DKG}PolicyBinding`,
   DKG_POLICY_APPLIES_TO_PARANET: `${DKG}appliesToParanet`,

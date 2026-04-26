@@ -2,7 +2,10 @@ import { Worker } from 'node:worker_threads';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
-import { DKGEvent } from '@origintrail-official/dkg-core';
+import { DKGEvent, PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
+
+const SYNC_PROTOCOL_CHECK_ATTEMPTS = 3;
+const SYNC_PROTOCOL_CHECK_DELAY_MS = 500;
 
 export interface CatchupJobResult {
   connectedPeers: number;
@@ -11,6 +14,7 @@ export interface CatchupJobResult {
   dataSynced: number;
   sharedMemorySynced: number;
   denied: boolean;
+  deniedPeers: number;
   diagnostics?: {
     noProtocolPeers: number;
     durable: {
@@ -70,6 +74,22 @@ export function createCatchupRunner(agent: DKGAgent): CatchupRunner {
 
 export function createInlineCatchupRunner(agent: DKGAgent): CatchupRunner {
   return new InlineCatchupRunner(agent);
+}
+
+async function waitForSyncProtocolFromPeerProtocols(
+  getPeerProtocols: (peerId: string) => Promise<string[]>,
+  peerId: string,
+): Promise<boolean> {
+  for (let attempt = 0; attempt < SYNC_PROTOCOL_CHECK_ATTEMPTS; attempt += 1) {
+    const protocols: string[] = await getPeerProtocols(peerId).catch((): string[] => []);
+    if (protocols.includes(PROTOCOL_SYNC)) {
+      return true;
+    }
+    if (attempt < SYNC_PROTOCOL_CHECK_ATTEMPTS - 1) {
+      await new Promise((resolve) => setTimeout(resolve, SYNC_PROTOCOL_CHECK_DELAY_MS));
+    }
+  }
+  return false;
 }
 
 class WorkerCatchupRunner implements CatchupRunner {
@@ -155,6 +175,9 @@ class WorkerCatchupRunner implements CatchupRunner {
       }
       case 'waitForSyncProtocol': {
         const [peerId] = args as [string];
+        if (typeof agent.getPeerProtocols === 'function') {
+          return waitForSyncProtocolFromPeerProtocols(agent.getPeerProtocols.bind(agent), peerId);
+        }
         return agent.waitForSyncProtocol({ toString: () => peerId });
       }
       case 'syncDurable': {
