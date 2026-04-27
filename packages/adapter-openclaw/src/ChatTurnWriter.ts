@@ -86,12 +86,38 @@ export class ChatTurnWriter {
   // Keyed by `<sessionId>::<turnId>` so a session reset can clear only that
   // session's reservations (see resetSessionState).
   //
-  // The TTL is intentionally short (3s). Cross-path double-fire happens in
-  // the same delivery cycle — typically milliseconds between `agent_end` and
-  // `message:sent`. A longer TTL would silently drop two legitimate real
-  // turns in a short window whose text happens to be identical.
+  // The TTL is bounded but generous (R18.1, was 3s). Slow outbound
+  // channels (queued Telegram delivery, network glitch) can produce a
+  // multi-second delay between `agent_end` and `message:sent`; a 3s TTL
+  // expired the cross-path stamp before the second path even fired,
+  // letting both paths persist the same turn. 60s comfortably covers
+  // realistic slow-channel delivery without making the in-memory map
+  // unbounded — entries are evicted opportunistically on each `markTurnIdSeen`
+  // call and explicitly on session reset.
+  //
+  // Same-content false-dedup risk under the longer TTL is bounded by
+  // R15.1's per-`messageId` in-flight key (the cross-path content-only
+  // stamps are non-mutating peeks from the opposite path, so two
+  // legitimate same-content turns with distinct messageIds do not
+  // collide).
   private recentTurnIds: Map<string, number> = new Map();
-  private static readonly TURNID_TTL_MS = 3_000;
+  private static readonly TURNID_TTL_MS = 60_000;
+  // R18.2 — Per-session count of W4b persists. In-memory only; rebuilt
+  // from zero on gateway restart (acceptable because watermarks are
+  // also disk-persisted via `cachedWatermarks` and the dedup map is
+  // process-local). Used by `computeDelta` to advance `savedUpTo` past
+  // turns that W4b persisted while typed hooks were unavailable
+  // (e.g., during a `setup-runtime → full` upgrade where W4b runs
+  // alone for a stretch and then W4a kicks in with backfill against
+  // a -1 watermark). Without this, the first `agent_end` after the
+  // upgrade re-persists every turn W4b already wrote.
+  //
+  // Trade-off: assumes one `message:sent` fire = one turn pair. For
+  // chunked-delivery channels that emit multiple `message:sent` per
+  // logical reply, the count can over-advance by the chunk count;
+  // worst case is W4a skipping pairs that W4b actually wrote — same
+  // failure mode as the lastIdx peek hit, no new data loss.
+  private w4bSessionCounts: Map<string, number> = new Map();
   // In-flight persist tracking — `resetSessionState()` awaits these so a
   // pre-reset persist can't advance the just-reset watermark afterward.
   // Both W4a (`onAgentEnd`) and W4b (`onMessageSent`) MUST register their
@@ -147,7 +173,18 @@ export class ChatTurnWriter {
       // against stale state.
       const pendingReset = this.pendingResets.get(sessionId);
       if (pendingReset) await pendingReset;
-      const pairs = this.computeDelta(event.messages, this.loadWatermark(sessionId));
+      // R18.2 — Take the MAX of W4a's pair-indexed watermark and W4b's
+      // session count (minus 1, because count is 1-based). When typed
+      // hooks were unavailable for a stretch (e.g., the `setup-runtime`
+      // phase before `full` mode comes online), W4b persisted turns
+      // without W4a's watermark advancing, so the first `agent_end`
+      // after the upgrade would otherwise treat every prior pair as
+      // unsaved backfill and re-persist it. Using the W4b count as a
+      // floor ensures `computeDelta` skips those.
+      const w4aWatermark = this.loadWatermark(sessionId);
+      const w4bCount = this.w4bSessionCounts.get(sessionId) ?? 0;
+      const savedUpTo = Math.max(w4aWatermark, w4bCount - 1);
+      const pairs = this.computeDelta(event.messages, savedUpTo);
       if (pairs.length === 0) return;
       // Persist sequentially so a transient failure on pair N leaves the
       // watermark at N-1 and the next agent_end call retries from the same
@@ -310,6 +347,11 @@ export class ChatTurnWriter {
     // `DkgChannelPlugin`).
     this.pendingUserMessages.delete(sessionId);
     this.clearSessionTurnIds(sessionId);
+    // R18.2 — Reset the W4b session count too. After compaction the
+    // `messages[]` array is rewritten, so the W4b count's "I persisted
+    // N turns" no longer maps to the new pair indices. Leaving stale
+    // count would skip new pairs in `computeDelta`.
+    this.w4bSessionCounts.delete(sessionId);
     this.writeWatermarkFile();
   }
 
@@ -401,6 +443,15 @@ export class ChatTurnWriter {
             // a later W4a `agent_end` last-pair peek can see that W4b
             // already persisted this turn and skip + bumpWatermark.
             this.markTurnIdSeen(sessionId, this.w4bOriginKey(userText, assistantText));
+            // R18.2 — Track the W4b session count so a later `agent_end`
+            // (typically after a `setup-runtime → full` upgrade) sees a
+            // raised `savedUpTo` floor in `computeDelta` and doesn't
+            // re-persist turns W4b already wrote. Bump only on
+            // successful persist.
+            this.w4bSessionCounts.set(
+              sessionId,
+              (this.w4bSessionCounts.get(sessionId) ?? 0) + 1,
+            );
           } catch (err) {
             // W4b is the ONLY path with a copy of `userText` (it lives
             // ephemerally in the FIFO queue). On a hard persist failure
