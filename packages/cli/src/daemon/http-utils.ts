@@ -576,10 +576,8 @@ export function shouldBypassRateLimitForLoopbackTraffic(ip: string, pathname: st
 }
 
 export function isValidContextGraphId(id: string): boolean {
-  if (!id || typeof id !== "string") return false;
-  if (id.length > 256) return false;
-  // Allow URNs, DIDs, simple slug-like identifiers, and URIs
-  return /^[\w:/.@\-]+$/.test(id);
+  if (typeof id !== "string") return false;
+  return validateContextGraphId(id).valid;
 }
 
 export function shortId(peerId: string): string {

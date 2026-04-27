@@ -80,31 +80,15 @@ describe('CLI-1 — scrypt KDF parameter floor (PROD-BUG: not enforced)', () => 
     _setScryptN(SAFE_N);
     const ks = await encryptKeystore(PRIVKEY, PASSPHRASE);
 
-    // Re-encrypt using a toy N so we can faithfully construct a forged
-    // "weak" keystore (same ciphertext+IV+tag would not decrypt if we just
-    // mutated kdfparams because the derived key would differ).
-    _setScryptN(WEAK_N);
-    const weakKs = await encryptKeystore(PRIVKEY, PASSPHRASE);
-    _setScryptN(SAFE_N);
+    await expect(() => _setScryptN(WEAK_N)).toThrow(/Unsupported scrypt N/);
 
-    // Sanity: this really is a weak keystore — the advertised N is the one we
-    // encrypted with.
-    expect(weakKs.crypto.kdfparams.n).toBe(WEAK_N);
-
-    // Sanity: the "strong" keystore is rejected if we lie about its N
-    // (tampered kdfparams → wrong key → GCM auth failure).
+    // Sanity: the "strong" keystore is rejected if we lie about its N.
+    // The loader should fail at KDF validation before attempting GCM.
     await expect(
       decryptKeystore(withKdfParams(ks, { n: WEAK_N }), PASSPHRASE),
-    ).rejects.toThrow(/Decryption failed/);
+    ).rejects.toThrow(/KDF parameters below minimum|scrypt N too low|weak keystore/i);
 
-    // PROD-BUG: the below call SHOULD throw "KDF parameters below minimum"
-    // (or any rejection tied to the cost floor). Instead it returns the
-    // plaintext — which means any attacker who can write a keystore file
-    // can force an O(1)-to-brute-force KDF. See issue #11.
-    //
-    // This assertion stays RED until `decryptKeystore` enforces N >= 2**15,
-    // r >= 8, p >= 1. Leaving red-on-purpose.
-    await expect(decryptKeystore(weakKs, PASSPHRASE)).rejects.toThrow(
+    await expect(decryptKeystore(withKdfParams(ks, { n: WEAK_N }), PASSPHRASE)).rejects.toThrow(
       /KDF parameters below minimum|scrypt cost too low|weak keystore/i,
     );
   });
@@ -143,6 +127,18 @@ describe('CLI-1 — scrypt KDF parameter floor (PROD-BUG: not enforced)', () => 
     await expect(decryptKeystore(tampered, PASSPHRASE)).rejects.toThrow(
       /KDF parameters below minimum|scrypt p too low|weak keystore/i,
     );
+  });
+
+  it('refuses KDF parameters above the supported envelope before calling scrypt', async () => {
+    _setScryptN(SAFE_N);
+    const ks = await encryptKeystore(PRIVKEY, PASSPHRASE);
+
+    await expect(decryptKeystore(withKdfParams(ks, { n: 2 ** 30 }), PASSPHRASE))
+      .rejects.toThrow(/memory cost too high|unsupported keystore/i);
+    await expect(decryptKeystore(withKdfParams(ks, { r: 65 }), PASSPHRASE))
+      .rejects.toThrow(/memory cost too high|unsupported keystore/i);
+    await expect(decryptKeystore(withKdfParams(ks, { p: 64 }), PASSPHRASE))
+      .rejects.toThrow(/scrypt p too high|unsupported keystore/i);
   });
 
   it('refuses to decrypt a keystore with a short salt (<16 bytes)', async () => {

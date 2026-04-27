@@ -8,7 +8,7 @@ import {
 } from '../src/keystore.js';
 
 beforeAll(() => {
-  _setScryptN(2 ** 14);
+  _setScryptN(2 ** 15);
 });
 
 const TEST_KEY = 'aabbccdd11223344aabbccdd11223344aabbccdd11223344aabbccdd11223344';
