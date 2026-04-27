@@ -884,13 +884,20 @@ export class DkgNodePlugin {
   }
 
   async stop(): Promise<void> {
+    // R19.2 — Tear hooks down BEFORE draining persists. A late
+    // `agent_end` / `message:sent` arriving during shutdown would
+    // otherwise schedule a new persist job after `flush()` snapshots
+    // the in-flight set, and `stop()` would return without awaiting
+    // it. By destroying the hook surface first, no NEW handler
+    // invocations dispatch; the loop in `flush()` then waits out the
+    // handlers that were already in flight when `destroy()` ran.
+    try { this.hookSurface?.destroy(); } catch { /* best effort */ }
     // `flush()` (vs `flushSync()`) awaits in-flight `storeChatTurn` jobs
     // and any pending session resets before committing the watermark
     // file. Without the await, a shutdown immediately after a reply
     // could exit while the final turn's network persist is still in
     // flight and the turn is silently lost.
     try { await this.chatTurnWriter?.flush(); } catch { /* best effort */ }
-    try { this.hookSurface?.destroy(); } catch { /* best effort */ }
     this.clearLocalAgentIntegrationRetry();
     if (this.peerIdDeferredRetryTimer) {
       clearTimeout(this.peerIdDeferredRetryTimer);

@@ -538,16 +538,29 @@ export class ChatTurnWriter {
    * sync `flushSync()` only commits the file but leaves a fire-and-forget
    * `storeChatTurn()` in flight, so a shutdown right after a reply could
    * exit before the final turn is persisted to the daemon.
+   *
+   * R19.2 — Loops until `inFlightPersists` and `pendingResets` are both
+   * empty. A previously-dispatched hook handler (e.g., `agent_end` /
+   * `message:sent`) can still be running when `stop()` calls `flush()`;
+   * if it reaches `trackPersistJob` AFTER our snapshot but BEFORE
+   * `Promise.allSettled` returns, the job would otherwise be missed.
+   * Re-snapshotting and re-awaiting closes that race. Bounded because
+   * `stop()` calls `hookSurface.destroy()` BEFORE `flush()` (R19.2),
+   * so no NEW handler invocations are dispatched while flush runs —
+   * only the in-flight ones complete.
    */
   async flush(): Promise<void> {
-    const allJobs: Promise<void>[] = [];
-    for (const bucket of this.inFlightPersists.values()) {
-      for (const j of bucket) allJobs.push(j);
+    while (true) {
+      const allJobs: Promise<void>[] = [];
+      for (const bucket of this.inFlightPersists.values()) {
+        for (const j of bucket) allJobs.push(j);
+      }
+      for (const reset of this.pendingResets.values()) {
+        allJobs.push(reset);
+      }
+      if (allJobs.length === 0) break;
+      await Promise.allSettled(allJobs);
     }
-    for (const reset of this.pendingResets.values()) {
-      allJobs.push(reset);
-    }
-    if (allJobs.length > 0) await Promise.allSettled(allJobs);
     this.flushSync();
   }
 
@@ -578,38 +591,49 @@ export class ChatTurnWriter {
     savedUpTo: number,
   ): Array<{ user: string; assistant: string; pairIndex: number }> {
     const pairs: Array<{ user: string; assistant: string; pairIndex: number }> = [];
-    let currentUser = "";
+    // R19.1 — Queue of unmatched user messages. Two transcript shapes
+    // were previously mis-parsed:
+    //   * `[user1, user2, assistant]` — the prior single-slot
+    //     `currentUser = ...` overwrote `user1` with `user2`, so only
+    //     `user2` was paired with the reply and `user1` was lost.
+    //   * `[user, assistant(toolCalls + text), tool, assistant(final)]`
+    //     — the prior `if (!text && hasToolCalls)` skip didn't catch
+    //     intermediate steps that included assistant text alongside
+    //     the tool call, so the tool-call step was paired as a turn
+    //     and the real final reply ended up paired with an empty user.
+    // Both shapes are handled by accumulating consecutive user messages
+    // into a queue and flushing the queue (joined) into the next
+    // non-tool-call assistant turn. Any assistant carrying tool calls
+    // is treated as intermediate regardless of whether it also has
+    // text content.
+    const pendingUsers: string[] = [];
     let pairIndex = 0;
     for (const msg of messages) {
       if (msg.role === "user") {
-        currentUser = this.extractText(msg.content);
+        pendingUsers.push(this.extractText(msg.content));
       } else if (msg.role === "assistant") {
-        // Skip intermediate assistant messages that exist solely to call
-        // tools — they have empty/absent text content and a populated
-        // `toolCalls` / `tool_calls` array. A tool-using turn looks like
-        // [user, assistant(tool_call), tool, assistant(final_reply)];
-        // without this skip, computeDelta would emit two pairs (one
-        // empty-reply, one empty-user-final-reply), and W4b's later
-        // `message:sent` would fail to dedup because the content hashes
-        // diverge from the canonical (user, final-reply) pair.
         const text = this.extractText(msg.content);
         const hasToolCalls = Array.isArray(msg.toolCalls) ? msg.toolCalls.length > 0
           : Array.isArray(msg.tool_calls) ? msg.tool_calls.length > 0
           : false;
-        if (!text && hasToolCalls) {
+        if (hasToolCalls) {
           // Intermediate tool-call step — do NOT count as a pair, do NOT
-          // advance pairIndex (the watermark counts user-visible turns).
+          // advance pairIndex (the watermark counts user-visible turns),
+          // and do NOT consume `pendingUsers`. The next non-tool-call
+          // assistant is the real final reply that belongs to the
+          // accumulated user side.
           continue;
         }
+        const userText = pendingUsers.join("\n");
+        pendingUsers.length = 0;
         if (pairIndex > savedUpTo) {
           pairs.push({
-            user: currentUser,
+            user: userText,
             assistant: this.stripRecalledMemory(text),
             pairIndex,
           });
         }
         pairIndex++;
-        currentUser = "";
       }
       // Skip `tool` and `system` messages — they don't form turns.
     }

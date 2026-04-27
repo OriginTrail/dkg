@@ -202,6 +202,60 @@ describe("ChatTurnWriter", () => {
     expect((writer as any).debounceTimers.size).toBe(0);
   });
 
+  it("R19.1 — computeDelta concatenates consecutive user messages before pairing with assistant reply", async () => {
+    // Regression for R19.1: pre-fix, the parser used a single
+    // `currentUser` slot that overwrote on each user message. So
+    // `[user1, user2, asst]` paired only `user2` with `asst` and
+    // dropped `user1`. The fix accumulates consecutive users and
+    // joins them with `\n` before pairing.
+    const event: AgentEndContext = {
+      sessionId: "test",
+      messages: [
+        { role: "user", content: "first user message" },
+        { role: "user", content: "second user message" },
+        { role: "assistant", content: "single reply" },
+      ],
+    };
+    writer.onAgentEnd(event, { channelId: "tg", sessionKey: "sk" });
+    await flushMicrotasks();
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    const call = mockClient.storeChatTurn.mock.calls[0];
+    // User side preserves both messages joined with newline.
+    expect(call[1]).toContain("first user message");
+    expect(call[1]).toContain("second user message");
+    expect(call[2]).toBe("single reply");
+  });
+
+  it("R19.1 — computeDelta treats assistant with text+toolCalls as intermediate, pairs final reply with original user", async () => {
+    // Regression for R19.1: pre-fix, an assistant message carrying
+    // BOTH text content AND tool_calls was treated as a final reply
+    // (the `!text && hasToolCalls` skip required empty text). That
+    // produced two pairs from `[user, asst(tool+text), tool, asst(final)]`,
+    // with the second pair missing the user side. The fix treats any
+    // assistant with tool_calls as intermediate, so the final reply
+    // pairs with the original user message.
+    const event: AgentEndContext = {
+      sessionId: "test",
+      messages: [
+        { role: "user", content: "what's the weather?" },
+        {
+          role: "assistant",
+          content: "Let me check that for you.",
+          tool_calls: [{ id: "c1", type: "function", function: { name: "weather" } }],
+        } as any,
+        { role: "tool" as any, content: "rainy" },
+        { role: "assistant", content: "It's rainy today." },
+      ],
+    };
+    writer.onAgentEnd(event, { channelId: "tg", sessionKey: "sk" });
+    await flushMicrotasks();
+    // Exactly one pair persisted (not two).
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    const call = mockClient.storeChatTurn.mock.calls[0];
+    expect(call[1]).toBe("what's the weather?");
+    expect(call[2]).toBe("It's rainy today.");
+  });
+
   it("R18.1 — TURNID_TTL_MS is generous enough to cover slow outbound channels (>=30s)", () => {
     // Regression for R18.1: the cross-path dedup TTL was 3s, so a slow
     // `message:sent` (queued Telegram, retry, network glitch) arriving
@@ -211,6 +265,52 @@ describe("ChatTurnWriter", () => {
     // unbounded.
     const ttl = (writer.constructor as any).TURNID_TTL_MS;
     expect(ttl).toBeGreaterThanOrEqual(30_000);
+  });
+
+  it("R19.2 — flush() awaits a job enqueued AFTER its initial snapshot (loop until empty)", async () => {
+    // Regression for R19.2: pre-fix, `flush()` snapshotted in-flight
+    // jobs once, then awaited. A late-arriving hook handler that
+    // called `trackPersistJob` AFTER the snapshot would not be in
+    // the awaited set, so shutdown could return before the late
+    // persist completed. The fix loops until both the in-flight
+    // bucket and pending-resets bucket are empty across an iteration.
+
+    const dkw = writer as any;
+    const sessionId = "openclaw:tg:::sk";
+
+    // Track ordering so we can assert flush awaited the late job.
+    const order: string[] = [];
+
+    // Seed an initial in-flight job that completes quickly.
+    let resolveFirst: () => void = () => {};
+    const firstJob = new Promise<void>((r) => { resolveFirst = r; });
+    dkw.trackPersistJob(sessionId, async () => {
+      await firstJob;
+      order.push("first done");
+    }).catch(() => {});
+
+    // Schedule a "late" job that enqueues itself ONLY after the first
+    // resolves (simulating a hook handler that races flush's snapshot).
+    let resolveSecond: () => void = () => {};
+    const secondJob = new Promise<void>((r) => { resolveSecond = r; });
+    setTimeout(() => {
+      dkw.trackPersistJob(sessionId, async () => {
+        await secondJob;
+        order.push("second done");
+      }).catch(() => {});
+    }, 5);
+
+    // Resolve the second slightly later so flush's loop catches it.
+    setTimeout(() => resolveSecond(), 30);
+    // Resolve first immediately so flush proceeds past the first iteration.
+    setTimeout(() => resolveFirst(), 10);
+
+    await writer.flush();
+    order.push("flush returned");
+    // Both jobs must have completed BEFORE flush returned.
+    expect(order).toContain("first done");
+    expect(order).toContain("second done");
+    expect(order[order.length - 1]).toBe("flush returned");
   });
 
   it("R18.2 — agent_end after setup-runtime → full upgrade does NOT re-persist W4b-written turns", async () => {
