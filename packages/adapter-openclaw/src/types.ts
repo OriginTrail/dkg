@@ -19,7 +19,19 @@ export interface OpenClawPluginApi {
   registrationMode?: 'full' | 'setup-only' | 'setup-runtime' | 'cli-metadata';
   registerTool(tool: OpenClawTool): void;
   registerHook(event: string, handler: (...args: any[]) => Promise<void>, opts?: { name: string }): void;
-  on(event: string, handler: (...args: any[]) => void): void;
+  /**
+   * Register a typed-hook handler. The OpenClaw upstream
+   * (`openclaw/src/plugins/registry.ts:registerTypedHook` →
+   * `registry.typedHooks` → `hooks.ts:runModifyingHook`) sequentially
+   * awaits handlers and reads their return value: modifying hooks like
+   * `before_prompt_build` honor `{ appendSystemContext, ... }`, and
+   * fire-and-forget hooks like `agent_end` ignore the return.
+   *
+   * The signature accepts `unknown | Promise<unknown>` to match this
+   * contract — the previous `=> void` was an under-specification that
+   * masked the dependency on return-value propagation (R16.1).
+   */
+  on(event: string, handler: (...args: any[]) => unknown | Promise<unknown>): void;
   logger: { info?(...args: any[]): void; warn?(...args: any[]): void; debug?(...args: any[]): void };
 
   /** Register a bidirectional channel plugin. */

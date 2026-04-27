@@ -259,6 +259,15 @@ export class HookSurface {
       return null;
     }
 
+    // R16.1 — Return-value propagation contract. OpenClaw's typed-hook
+    // dispatcher (`openclaw/src/plugins/hooks.ts:runModifyingHook` ~L362)
+    // sequentially awaits each handler and reads its return value:
+    // modifying hooks like `before_prompt_build` consume
+    // `{ appendSystemContext, ... }`; fire-and-forget hooks like
+    // `agent_end` ignore it. Forwarding the handler's return through
+    // this wrapper is therefore load-bearing — DO NOT rewrite to a
+    // void-returning wrapped form. The `OpenClawPluginApi.on` signature
+    // in `types.ts` reflects this `unknown | Promise<unknown>` contract.
     const wrapped = (...args: unknown[]) => {
       this.recordFire(key);
       return (handler as (...a: unknown[]) => unknown)(...args);
