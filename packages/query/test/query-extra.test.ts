@@ -978,3 +978,130 @@ describe('[Q-1] minTrust handles SPARQL 1.1 shorthand WHERE forms (bot review r3
     expect(result.bindings).toEqual([]);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PR #229 bot review (r3147347... — dkg-query-engine.ts:540 follow-up).
+// `findWhereBraceStart` previously treated EVERY `<` as the start of an IRI
+// and skipped to the next `>`. SPARQL `<` is overloaded as a comparison
+// operator, so queries like `FILTER(?n < 10)` ate the rest of the query
+// and `wrapWithGraph` / `injectMinTrustFilter` no-op'd → wrong-graph hits
+// or silent fail-closed.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('[Q-1] findWhereBraceStart distinguishes IRI from comparison operator', () => {
+  it('honors minTrust on a SELECT whose FILTER uses `<` as less-than (no IRI swallowing)', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const consensusGraph = contextGraphVerifiedMemoryUri(CG, 'consensus-verified');
+    await store.insert([
+      quad('urn:e1', 'http://schema.org/age', '"21"^^<http://www.w3.org/2001/XMLSchema#integer>', consensusGraph),
+      quad('urn:e1', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.ConsensusVerified}"`, consensusGraph),
+    ]);
+
+    // Pre-fix: the `<` inside `FILTER(?n < 100)` made findWhereBraceStart
+    // scan to the next `>` (here the IRI's closing `>`), corrupting the
+    // brace search. With the IRI/comparison disambiguator the rewrite
+    // succeeds and the binding is returned.
+    const result = await engine.query(
+      'SELECT ?n WHERE { <urn:e1> <http://schema.org/age> ?n . FILTER(?n < 100) }',
+      { contextGraphId: CG, view: 'verified-memory', minTrust: TrustLevel.ConsensusVerified },
+    );
+    expect(result.bindings.length).toBe(1);
+    // Object literal includes the typed-literal serialisation; just
+    // assert the lexical form matches.
+    expect(String(result.bindings[0]['n'])).toContain('21');
+  });
+
+  it('honors minTrust on a SHORTHAND SELECT whose FILTER uses `<=` as comparison', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const consensusGraph = contextGraphVerifiedMemoryUri(CG, 'consensus-verified');
+    await store.insert([
+      quad('urn:e1', 'http://schema.org/age', '"21"^^<http://www.w3.org/2001/XMLSchema#integer>', consensusGraph),
+      quad('urn:e1', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.ConsensusVerified}"`, consensusGraph),
+    ]);
+
+    // Shorthand (no WHERE keyword) + `<=` operator. Pre-fix this
+    // returned `null` from `findWhereBraceStart` because the IRI
+    // scanner ran past the closing `}` looking for `>`. Now the
+    // disambiguator recognises `<=` and skips past the operator.
+    const result = await engine.query(
+      'SELECT ?n { <urn:e1> <http://schema.org/age> ?n . FILTER(?n <= 100) }',
+      { contextGraphId: CG, view: 'verified-memory', minTrust: TrustLevel.ConsensusVerified },
+    );
+    expect(result.bindings.length).toBe(1);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PR #229 bot review (r3147347... — dkg-query-engine.ts:851).
+// The unsupported-nesting brace check ran on the RAW WHERE body, so any
+// `{`/`}` inside a string literal (or sensitive keyword inside a comment)
+// caused `injectMinTrustFilter` to bail and the caller fell through to an
+// empty result. Real text/JSON payloads constantly contain those tokens,
+// so legitimate high-trust queries silently fail-closed.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('[Q-1] minTrust survives literals/comments containing braces or keywords', () => {
+  it('honors minTrust when a triple-object literal contains `{` and `}` (JSON payload)', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const consensusGraph = contextGraphVerifiedMemoryUri(CG, 'consensus-verified');
+    await store.insert([
+      quad('urn:e1', 'http://schema.org/text', '"{\\"key\\": 1}"', consensusGraph),
+      quad('urn:e1', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.ConsensusVerified}"`, consensusGraph),
+    ]);
+
+    // Pre-fix the literal `"{\"key\": 1}"` made the brace check fire
+    // and `injectMinTrustFilter` returned null → empty result.
+    const result = await engine.query(
+      'SELECT ?t WHERE { <urn:e1> <http://schema.org/text> ?t . FILTER(STR(?t) = "{\\"key\\": 1}") }',
+      { contextGraphId: CG, view: 'verified-memory', minTrust: TrustLevel.ConsensusVerified },
+    );
+    expect(result.bindings.length).toBe(1);
+  });
+
+  it('honors minTrust when a `# …` comment contains a sensitive keyword like OPTIONAL or SELECT', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const consensusGraph = contextGraphVerifiedMemoryUri(CG, 'consensus-verified');
+    await store.insert([
+      quad('urn:e1', 'http://schema.org/name', '"Alice"', consensusGraph),
+      quad('urn:e1', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.ConsensusVerified}"`, consensusGraph),
+    ]);
+
+    // Pre-fix the keyword scan saw `OPTIONAL`/`SELECT` inside the
+    // comment and returned null. With comment scrubbing the keyword
+    // check only sees real code tokens.
+    const sparql = [
+      '# OPTIONAL inline comment with SELECT inside — must not bail',
+      'SELECT ?n WHERE {',
+      '  # another comment OPTIONAL { fake } UNION { fake }',
+      '  <urn:e1> <http://schema.org/name> ?n',
+      '}',
+    ].join('\n');
+    const result = await engine.query(sparql, {
+      contextGraphId: CG,
+      view: 'verified-memory',
+      minTrust: TrustLevel.ConsensusVerified,
+    });
+    expect(result.bindings.map((b) => b['n'])).toEqual(['"Alice"']);
+  });
+
+  it('still bails (returns empty) on a REAL OPTIONAL { … } block in code', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const consensusGraph = contextGraphVerifiedMemoryUri(CG, 'consensus-verified');
+    await store.insert([
+      quad('urn:e1', 'http://schema.org/name', '"Alice"', consensusGraph),
+      quad('urn:e1', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.ConsensusVerified}"`, consensusGraph),
+    ]);
+
+    // Sanity: literal-aware scrubbing must NOT relax the genuine
+    // refusal of nested code (OPTIONAL/UNION/etc.) since the flat
+    // subject scanner still cannot reason about them.
+    const result = await engine.query(
+      'SELECT ?n WHERE { <urn:e1> <http://schema.org/name> ?n . OPTIONAL { ?n <http://schema.org/x> ?z } }',
+      { contextGraphId: CG, view: 'verified-memory', minTrust: TrustLevel.ConsensusVerified },
+    );
+    expect(result.bindings).toEqual([]);
+  });
+});

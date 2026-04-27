@@ -323,3 +323,76 @@ describe('A-7 / D1: buildEndorsementQuadsAsync with a real ethers.Wallet signer'
     expect(recovered.toLowerCase()).not.toBe(agentWallet.address.toLowerCase());
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PR #229 bot review (r3147347... — dkg-agent.ts:5424).
+// Pre-fix `DKGAgent.endorse()` fell through to
+// `buildEndorsementQuadsAsync(..., {})` (NO signer) when the supplied
+// `opts.agentAddress` was not backed by any local wallet, publishing
+// an endorsement carrying ONLY the unsigned digest hex.
+// `resolveEndorsementFacts()` (`packages/agent/src/ccl-fact-resolution.ts`)
+// counts `dkg:endorses` quads by joining
+//   ?endorsement dkg:endorses   ?ual .
+//   ?endorsement dkg:endorsedBy ?endorser .
+// without verifying the EIP-191 signature on
+// `dkg:endorsementSignature`, so a caller could publish endorsements
+// claiming arbitrary external agent identities and inflate
+// endorsement-based provenance / CCL counts.
+//
+// Source-level test: assert the production fix is in place. We avoid
+// booting a full DKGAgent (libp2p + chain harness) for this guard
+// because the bug is structural — the throw must exist on the
+// fall-through path. A future regression that re-introduces the
+// silent unsigned-digest branch will fail this check.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('A-7 / r29-2: DKGAgent.endorse() refuses to publish unsigned external endorsements', () => {
+  it('source guards the no-local-wallet branch with an explicit throw (no silent unsigned-digest fallthrough)', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const { fileURLToPath } = await import('node:url');
+    const { resolve, dirname } = await import('node:path');
+
+    const here = dirname(fileURLToPath(import.meta.url));
+    const src = await readFile(resolve(here, '..', 'src', 'dkg-agent.ts'), 'utf8');
+
+    // Locate the endorse() body. We can't just `indexOf('\n  }')`
+    // because the parameter type literal `opts: { ... }` itself
+    // contains a 2-space-indented `}`. Walk balanced braces from the
+    // first `{` after the signature until depth returns to zero.
+    const endorseStart = src.indexOf('async endorse(opts: {');
+    expect(endorseStart, 'endorse() definition must exist').toBeGreaterThan(-1);
+    const bodyOpenIdx = src.indexOf(': Promise<PublishResult> {', endorseStart);
+    expect(bodyOpenIdx, 'endorse() body opener must exist').toBeGreaterThan(endorseStart);
+    let depth = 0;
+    let endorseEnd = -1;
+    for (let i = bodyOpenIdx; i < src.length; i++) {
+      const ch = src[i];
+      if (ch === '{') depth++;
+      else if (ch === '}') {
+        depth--;
+        if (depth === 0) { endorseEnd = i + 1; break; }
+      }
+    }
+    expect(endorseEnd, 'endorse() closing brace must be balanced').toBeGreaterThan(bodyOpenIdx);
+    const endorseBody = src.slice(endorseStart, endorseEnd);
+
+    // The "external agent without local wallet" branch MUST throw.
+    expect(
+      /throw new Error\([^)]*refusing to publish endorsement on behalf of external agent/i
+        .test(endorseBody),
+      'endorse() must reject external agentAddress without a recoverable signature',
+    ).toBe(true);
+
+    // And the prior silent-fall-through that built quads with `{}`
+    // (no signer) must NOT survive on the no-wallet path. Pre-fix
+    // shape: `signer ? { signer } : {}`. Any reappearance of that
+    // ternary near `buildEndorsementQuadsAsync` indicates the
+    // regression is back.
+    const buildCallIdx = endorseBody.indexOf('buildEndorsementQuadsAsync(');
+    expect(buildCallIdx, 'buildEndorsementQuadsAsync call must exist').toBeGreaterThan(-1);
+    const callSlice = endorseBody.slice(buildCallIdx, buildCallIdx + 400);
+    expect(
+      /signer\s*\?\s*\{\s*signer\s*\}\s*:\s*\{\s*\}/.test(callSlice),
+      'endorse() must NOT pass `{}` (no signer) to buildEndorsementQuadsAsync',
+    ).toBe(false);
+  });
+});

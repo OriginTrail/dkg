@@ -5401,11 +5401,31 @@ export class DKGAgent {
     const agentAddress = canonicalAgentDidSubject(agentAddressRaw);
     const walletForEndorsement = this.getLocalAgentWallet(agentAddress);
     if (!walletForEndorsement) {
-      // We know the address is registered locally iff localAgents has an
-      // entry for it WITHOUT a private key (self-sovereign). In that
-      // case the caller is expected to sign externally — not supported
-      // here. Fall back to unsigned digest only when the endorsing
-      // address is genuinely external (remote agent endorsing on-chain).
+      // PR #229 bot review (r3147347... — dkg-agent.ts:5424).
+      // Pre-fix the "no local wallet" branch fell through to
+      // `buildEndorsementQuadsAsync(..., {})` and emitted an
+      // endorsement carrying ONLY the unsigned digest. Verifiers
+      // (`resolveEndorsementFacts` in `ccl-fact-resolution.ts`)
+      // currently count any quad pair
+      //   ?endorsement dkg:endorses   <ual> .
+      //   ?endorsement dkg:endorsedBy <agent> .
+      // without recovering / verifying the EIP-191 signature on
+      // `dkg:endorsementSignature`. That meant a caller on this
+      // node could publish endorsements claiming arbitrary
+      // EXTERNAL agent identities and inflate
+      // endorsement-based provenance / CCL counts for any UAL.
+      //
+      // Two flavours are distinguishable here:
+      //   (a) self-sovereign LOCAL agent — registered in
+      //       `localAgents` but without a private key. This
+      //       branch can only be unblocked by the caller
+      //       supplying a real off-line signature; today the API
+      //       has no slot for that, so we still throw.
+      //   (b) genuinely EXTERNAL agent — no local record at all.
+      //       Until `endorse()` is extended to accept a
+      //       caller-supplied EIP-191 signature recoverable to
+      //       `agentAddress`, refuse the call instead of
+      //       publishing an unsigned forgeable endorsement.
       const localRecord = [...this.localAgents.values()].find(
         (r) => r.agentAddress.toLowerCase() === agentAddress.toLowerCase(),
       );
@@ -5415,17 +5435,24 @@ export class DKGAgent {
           `Pre-sign the endorsement digest externally or register the wallet's private key.`,
         );
       }
-      // else: external agentAddress → emit unsigned-digest endorsement
-      // (verifiers requiring non-repudiation will reject).
+      throw new Error(
+        `endorse: refusing to publish endorsement on behalf of external agent ${agentAddress} ` +
+        `without a recoverable EIP-191 signature. ${
+          this.defaultAgentAddress
+            ? `Either omit opts.agentAddress to endorse as the default local agent ` +
+              `(${this.defaultAgentAddress}), or register a wallet for ${agentAddress} ` +
+              `via registerAgent() before calling endorse().`
+            : `Register a local agent via registerAgent() before calling endorse(), or pass ` +
+              `opts.agentAddress matching a registered local wallet.`
+        }`,
+      );
     }
-    const signer = walletForEndorsement
-      ? (digest: Uint8Array) => walletForEndorsement.signMessage(digest)
-      : undefined;
+    const signer = (digest: Uint8Array) => walletForEndorsement.signMessage(digest);
     const quads = await buildEndorsementQuadsAsync(
       agentAddress,
       opts.knowledgeAssetUal,
       opts.contextGraphId,
-      signer ? { signer } : {},
+      { signer },
     );
     return this.publish(opts.contextGraphId, quads);
   }

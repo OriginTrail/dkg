@@ -614,3 +614,120 @@ describe('dkgPlugin.hooks — r24-2: cache is scoped by destination assertion gr
     }
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PR #229 bot review (r3147347... — adapter-elizaos/src/index.ts:353).
+// `onChatTurnHandler` recorded the persisted-user-turn cache entry
+// UNCONDITIONALLY using `(message as any).id`. The exported
+// `DkgChatTurnHook` interface ALSO accepts the assistant-reply overload
+// (`mode: 'assistant-reply'`), so a caller wiring the same handler into
+// a reply path could poison the cache under the assistant message id —
+// any future user-turn id that collided with that assistant id would
+// then take the append-only branch against a turn envelope that never
+// existed.
+//
+// Fix: skip the cache write when `options.mode === 'assistant-reply'`,
+// and prefer `options.userMessageId` over `message.id` when the caller
+// drove the user-turn path with an explicit id (so the cache key
+// matches what `onAssistantReply` will look up).
+// ─────────────────────────────────────────────────────────────────────────────
+describe('dkgPlugin.hooks.onChatTurn — r29-2: assistant-reply mode does NOT poison the user-turn cache', () => {
+  beforeEach(() => {
+    __resetPersistedUserTurnCacheForTests();
+  });
+
+  it('onChatTurn called with mode:"assistant-reply" does NOT mark the assistant id as a persisted user-turn', async () => {
+    const spy = vi.spyOn(dkgService, 'persistChatTurn' as any)
+      .mockResolvedValue({ tripleCount: 0, turnUri: '', kcId: '' } as any);
+    try {
+      const runtime = { getSetting: () => undefined, character: { name: 'x' } } as any;
+      // The caller (mis-)wires the user-turn hook with an
+      // assistant-shaped payload. message.id here is the ASSISTANT
+      // message id; pre-fix this would have been recorded as a
+      // persisted user-turn under that id.
+      const assistantMsgPosingAsUser = {
+        content: { text: 'reply' }, id: 'asst-poison-id', userId: 'a', roomId: 'room-poison',
+      } as any;
+      await (dkgPlugin as any).hooks.onChatTurn(
+        runtime,
+        assistantMsgPosingAsUser,
+        {},
+        { mode: 'assistant-reply' },
+      );
+
+      // Now a legitimate reply arrives whose userMessageId
+      // coincidentally collides with the assistant id we just
+      // (mis-)used. With the fix, the cache must NOT have been
+      // populated → reply takes the headless branch.
+      const collidingReply = {
+        content: { text: 'r' }, id: 'asst-real', userId: 'a', roomId: 'room-poison',
+        replyTo: 'asst-poison-id',
+      } as any;
+      await (dkgPlugin as any).hooks.onAssistantReply(runtime, collidingReply, {}, {});
+
+      const replyOpts = spy.mock.calls[1][3] as any;
+      expect(replyOpts.mode).toBe('assistant-reply');
+      expect(replyOpts.userMessageId).toBe('asst-poison-id');
+      // Pre-fix this would have been `true` (poisoned cache hit).
+      expect(replyOpts.userTurnPersisted).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('onChatTurn user-turn path prefers options.userMessageId over message.id when both are supplied', async () => {
+    const spy = vi.spyOn(dkgService, 'persistChatTurn' as any)
+      .mockResolvedValue({ tripleCount: 0, turnUri: '', kcId: '' } as any);
+    try {
+      const runtime = { getSetting: () => undefined, character: { name: 'x' } } as any;
+      const userMsg = {
+        content: { text: 'hello' }, id: 'incidental-msg-id', userId: 'u', roomId: 'room-explicit',
+      } as any;
+
+      // Caller pre-mints a stable user-turn id different from
+      // message.id (the multi-step pipeline case from the comment).
+      await (dkgPlugin as any).hooks.onChatTurn(
+        runtime,
+        userMsg,
+        {},
+        { userMessageId: 'pre-minted-uid' },
+      );
+
+      // The reply uses the pre-minted id → must hit the cache.
+      const reply = {
+        content: { text: 'r' }, id: 'a1', userId: 'a', roomId: 'room-explicit',
+        replyTo: 'pre-minted-uid',
+      } as any;
+      await (dkgPlugin as any).hooks.onAssistantReply(runtime, reply, {}, {});
+
+      const replyOpts = spy.mock.calls[1][3] as any;
+      expect(replyOpts.userMessageId).toBe('pre-minted-uid');
+      expect(replyOpts.userTurnPersisted).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('onChatTurn user-turn path WITHOUT options.userMessageId still falls back to message.id (regression guard)', async () => {
+    const spy = vi.spyOn(dkgService, 'persistChatTurn' as any)
+      .mockResolvedValue({ tripleCount: 0, turnUri: '', kcId: '' } as any);
+    try {
+      const runtime = { getSetting: () => undefined, character: { name: 'x' } } as any;
+      const userMsg = {
+        content: { text: 'hello' }, id: 'msg-fallback', userId: 'u', roomId: 'room-fb',
+      } as any;
+      const reply = {
+        content: { text: 'r' }, id: 'a1', userId: 'a', roomId: 'room-fb',
+        replyTo: 'msg-fallback',
+      } as any;
+
+      await (dkgPlugin as any).hooks.onChatTurn(runtime, userMsg, {}, {});
+      await (dkgPlugin as any).hooks.onAssistantReply(runtime, reply, {}, {});
+
+      const replyOpts = spy.mock.calls[1][3] as any;
+      expect(replyOpts.userTurnPersisted).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});

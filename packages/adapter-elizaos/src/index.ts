@@ -341,16 +341,45 @@ async function onChatTurnHandler(
   options?: Parameters<typeof dkgService.onChatTurn>[3],
 ) {
   const result = await dkgService.persistChatTurn(runtime, message, state, options);
-  // Only mark AFTER the write resolved — if it throws we never
-  // reach this line and the cache stays clean. r17-1: scope the
-  // record by the runtime identity so runtime B never sees
-  // runtime A's successful user-turn writes. r24-2: ALSO scope
-  // by the destination tuple so the same (roomId, userMsgId)
-  // routed into a second store re-emits the full envelope there.
-  const roomId = (message as any)?.roomId;
-  const userMsgId = (message as any)?.id;
-  const dest = resolveDestinationFromOptions(runtime, options);
-  markUserTurnPersisted(runtime, roomId, userMsgId, dest.contextGraphId, dest.assertionName);
+  // PR #229 bot review (r3147347... — adapter-elizaos/src/index.ts:353).
+  // Pre-fix this wrapper recorded the user-turn cache entry
+  // UNCONDITIONALLY using `(message as any)?.id` as the cache key.
+  // The exported `DkgChatTurnHook` interface ALSO accepts the
+  // assistant-reply overload (`mode: 'assistant-reply'` plus the
+  // assistant `Memory`), so a caller wiring the same handler into
+  // both `dkgPlugin.hooks.onChatTurn` and a reply-shaped path could
+  // poison the cache under the ASSISTANT message id. A subsequent
+  // `onAssistantReply` for the actual user message would then miss
+  // the cache (correct), BUT — worse — a stray collision between an
+  // assistant id we recorded here and a future `userMessageId` would
+  // make `hasUserTurnBeenPersisted(...)` return true and the impl
+  // would take the append-only path against a turn envelope that
+  // never existed. Skip the cache write entirely on assistant-reply
+  // mode; if the caller really intends to mark a user-turn as
+  // persisted while in reply mode they must pass `userMessageId`
+  // explicitly via options (handled by the explicit reply hook
+  // below, not this one).
+  const optsAny = options as Record<string, unknown> | undefined;
+  const isAssistantReply = optsAny?.mode === 'assistant-reply';
+  if (!isAssistantReply) {
+    // r17-1: scope the record by the runtime identity so runtime B
+    // never sees runtime A's successful user-turn writes. r24-2:
+    // ALSO scope by the destination tuple so the same (roomId,
+    // userMsgId) routed into a second store re-emits the full
+    // envelope there.
+    const roomId = (message as any)?.roomId;
+    // r29-2: when the caller intentionally drove the user-turn path
+    // with an explicit `options.userMessageId` (rare but legal —
+    // e.g. multi-step pipelines that pre-mint a user-turn id before
+    // the message lands) prefer that id over `message.id` so the
+    // cache key matches the id `onAssistantReply` will look up.
+    const userMsgId =
+      typeof optsAny?.userMessageId === 'string'
+        ? (optsAny.userMessageId as string)
+        : (message as any)?.id;
+    const dest = resolveDestinationFromOptions(runtime, options);
+    markUserTurnPersisted(runtime, roomId, userMsgId, dest.contextGraphId, dest.assertionName);
+  }
   return result;
 }
 

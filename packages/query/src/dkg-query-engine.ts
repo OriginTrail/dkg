@@ -527,6 +527,58 @@ function findWhereBraceStart(sparql: string): number {
   // boundaries — IRIs (`<...>`), quoted literals, and `#` comments
   // can all contain stray `{` chars that the regex would
   // misinterpret as block openers.
+  //
+  // PR #229 bot review (r3147347820 follow-up — comment id 3148... on
+  // dkg-query-engine.ts:540). The pre-fix scanner treated EVERY `<`
+  // as the start of an IRI and skipped to the next `>`. That broke
+  // perfectly legitimate SPARQL like
+  //   `SELECT ?n { ?s ?p ?n . FILTER(?n < 10) }`
+  // because `<` here is a less-than comparison and the matching `>`
+  // either lives much further down (consuming real `{`/`}` along the
+  // way) or never appears at all (`findWhereBraceStart` returns -1
+  // and graph wrapping / trust rewriting silently no-ops). SPARQL's
+  // IRIREF grammar (`'<' ([^<>"{}|^`\]-[#x00-#x20])* '>'`) is
+  // distinguishable from a comparison operator by two cheap checks:
+  //   1. comparison operators begin with `<`, `<=`, or `<<` and are
+  //      followed by whitespace / a digit / a `?`/`$` variable / `(`
+  //      — never by an IRI scheme character;
+  //   2. an IRIREF body cannot contain whitespace, `<`, `"`, `{`,
+  //      `}`, `|`, `\`, `^`, or `` ` ``. If we see any of those
+  //      before a `>`, this is not an IRI.
+  // We classify by peeking the next char (rejecting `=` and ASCII
+  // whitespace as obvious comparison forms) and then doing a
+  // bounded forward scan; if no `>` appears before a disallowed
+  // character we treat the `<` as a comparison operator and advance
+  // by one byte instead of swallowing the rest of the query.
+  const isIriStart = (idx: number): boolean => {
+    const next = sparql[idx + 1];
+    if (next === undefined) return false;
+    // `<=` / `< ` / `<\n` / `<\t` / `<<` are unambiguously
+    // comparison operators in SPARQL — IRIREFs may not contain `=`,
+    // `<`, or whitespace inside.
+    if (next === '=' || next === '<' || /\s/.test(next)) return false;
+    for (let j = idx + 1; j < n; j++) {
+      const c = sparql[j];
+      if (c === '>') return true;
+      // Any IRIREF-forbidden character before `>` proves this `<`
+      // is a comparison, not the start of an IRI.
+      if (
+        c === '<' ||
+        c === '"' ||
+        c === '{' ||
+        c === '}' ||
+        c === '|' ||
+        c === '\\' ||
+        c === '^' ||
+        c === '`' ||
+        /\s/.test(c)
+      ) {
+        return false;
+      }
+    }
+    return false;
+  };
+
   const n = sparql.length;
   const opens: number[] = [];
   let depth = 0;
@@ -538,9 +590,14 @@ function findWhereBraceStart(sparql: string): number {
       continue;
     }
     if (ch === '<') {
-      const end = sparql.indexOf('>', i + 1);
-      if (end === -1) return -1;
-      i = end + 1;
+      if (isIriStart(i)) {
+        const end = sparql.indexOf('>', i + 1);
+        if (end === -1) return -1;
+        i = end + 1;
+        continue;
+      }
+      // Comparison operator — advance one byte and keep scanning.
+      i++;
       continue;
     }
     if (ch === '"' || ch === "'") {
@@ -724,6 +781,61 @@ function stripSparqlLineComments(src: string): string {
 }
 
 /**
+ * Replace every SPARQL string literal and `# …` comment in `src`
+ * with neutral whitespace, preserving overall byte length. IRIs and
+ * code tokens are passed through verbatim. The returned string is
+ * suitable for STRUCTURAL CHECKS (brace balancing, keyword scans)
+ * that must not be confused by user payloads such as
+ * `"{json: 1}"` or `# OPTIONAL: ...`.
+ *
+ * PR #229 bot review (dkg-query-engine.ts:851). Triple-quoted
+ * (`"""…"""` / `'''…'''`) literals are NOT recognised because
+ * `injectMinTrustFilter`'s outer pipeline already refuses any WHERE
+ * carrying tokens from the multi-line literal grammar (FILTER EXISTS,
+ * SELECT inside, etc.).
+ */
+function scrubStringsAndComments(src: string): string {
+  const n = src.length;
+  const buf: string[] = new Array(n);
+  let i = 0;
+  while (i < n) {
+    const ch = src[i];
+    if (ch === '<') {
+      const end = src.indexOf('>', i + 1);
+      if (end === -1) {
+        for (let k = i; k < n; k++) buf[k] = src[k];
+        return buf.join('');
+      }
+      for (let k = i; k <= end; k++) buf[k] = src[k];
+      i = end + 1;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      const quote = ch;
+      let j = i + 1;
+      while (j < n) {
+        if (src[j] === '\\' && j + 1 < n) { j += 2; continue; }
+        if (src[j] === quote) { j++; break; }
+        j++;
+      }
+      for (let k = i; k < j; k++) buf[k] = src[k] === '\n' ? '\n' : ' ';
+      i = j;
+      continue;
+    }
+    if (ch === '#') {
+      const nl = src.indexOf('\n', i);
+      const end = nl === -1 ? n : nl;
+      for (let k = i; k < end; k++) buf[k] = ' ';
+      i = end;
+      continue;
+    }
+    buf[i] = ch;
+    i++;
+  }
+  return buf.join('');
+}
+
+/**
  * Split a SPARQL WHERE body on **top-level** triple terminators, i.e.
  * dots that live outside quoted literals and outside IRI angle
  * brackets. PR #229 bot review round 8 (dkg-query-engine.ts:576): the
@@ -842,14 +954,26 @@ function injectMinTrustFilter(sparql: string, minTrust: number): string | null {
   const { valuesClause, bodyAfterValues } = peelLeadingValues(inner);
   const scanTarget = bodyAfterValues ?? inner;
 
-  // Refuse to rewrite shapes we cannot reason about without a real
-  // SPARQL parser. Any of these tokens means there's a nested scope
-  // whose subjects the flat scan below cannot see.
+  // PR #229 bot review (r3147347... — dkg-query-engine.ts:851).
+  // Pre-fix the unsupported-nesting guard `/\{|\}/.test(scanTarget)`
+  // and the keyword guard below ran on the RAW WHERE body. Any
+  // `{`, `}`, or sensitive keyword that happened to appear inside a
+  // SPARQL string literal (`"{json: 1}"`, `"OPTIONAL field"`,
+  // `"SELECT * FROM x"`) or inside a `# …` line comment caused the
+  // rewriter to bail out and the caller fell through to
+  // `emptyQueryResultForKind(...)`. That silently fail-closed every
+  // legitimate high-trust query whose payload happened to mention
+  // those tokens — text/JSON/log content is the most common case.
   //
-  // `VALUES` is still in the list so we catch any non-leading /
-  // multi-line / tuple VALUES clause the peeler declined to handle.
-  if (/\{|\}/.test(scanTarget)) return null;
-  if (/\b(GRAPH|OPTIONAL|UNION|MINUS|SERVICE|VALUES|FILTER\s+EXISTS|FILTER\s+NOT\s+EXISTS|SELECT)\b/i.test(scanTarget)) {
+  // Scrub literals and comments to neutral spaces BEFORE the
+  // structural / keyword checks so they only see real code tokens.
+  // IRIs are preserved verbatim because IRIREF grammar already
+  // forbids `{`, `}`, `"`, and the keyword tokens we care about.
+  const codeView = scrubStringsAndComments(scanTarget);
+  if (/[{}]/.test(codeView)) return null;
+  if (
+    /\b(GRAPH|OPTIONAL|UNION|MINUS|SERVICE|VALUES|FILTER\s+EXISTS|FILTER\s+NOT\s+EXISTS|SELECT)\b/i.test(codeView)
+  ) {
     return null;
   }
 
