@@ -110,6 +110,16 @@ export class HookSurface {
    * exactly one handler per surface slot to keep dispatch observable.
    */
   private readonly installedHandlers = new Map<string, { handler: HookHandler; unsubscribe: Unsubscribe }>();
+  /**
+   * R21.1 — Soft "destroyed" flag. OpenClaw's `api.on` and `api.registerHook`
+   * have no unsubscribe primitives, so `destroy()`'s no-op unsubscribes for
+   * typed and legacy hooks leave handlers live in the upstream registry.
+   * Each wrapped handler checks this flag and short-circuits BEFORE
+   * invoking the user handler when the surface has been torn down. Without
+   * this gate, `before_prompt_build` / `agent_end` / `session_end` would
+   * keep firing the old plugin's logic after `destroy()` returned.
+   */
+  private destroyed = false;
 
   /** Timers for the I4 grace-period commit path. Cleared on first fire or destroy. */
   private readonly commitTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -232,6 +242,14 @@ export class HookSurface {
    * `session_end` legacy hook.
    */
   destroy(): void {
+    // R21.1 — Set the soft-destroyed flag FIRST so any handler invocation
+    // already in flight will short-circuit when its wrapper checks the
+    // flag. Internal-hook unsubscribes actually remove handlers from the
+    // global map; typed and legacy unsubscribes are documented no-ops
+    // (OpenClaw `api.on` / `api.registerHook` have no unsub primitive),
+    // so the flag is the only thing that prevents post-destroy dispatches
+    // from re-entering the plugin.
+    this.destroyed = true;
     for (const { unsubscribe } of this.installedHandlers.values()) {
       try {
         unsubscribe();
@@ -269,6 +287,15 @@ export class HookSurface {
     // void-returning wrapped form. The `OpenClawPluginApi.on` signature
     // in `types.ts` reflects this `unknown | Promise<unknown>` contract.
     const wrapped = (...args: unknown[]) => {
+      // R21.1 — Soft-destroyed gate. The upstream `api.on` registry has no
+      // unsubscribe primitive, so a stop/re-register cycle leaves THIS
+      // wrapped handler live in the dispatcher. Without this gate, an
+      // `agent_end` / `before_prompt_build` arriving after `destroy()`
+      // would still re-enter the user handler and execute against the
+      // torn-down `chatTurnWriter` / `memoryPlugin`. Returning undefined
+      // makes modifying hooks (`before_prompt_build`) a no-op (no
+      // `appendSystemContext`); fire-and-forget hooks just drop the call.
+      if (this.destroyed) return undefined;
       this.recordFire(key);
       return (handler as (...a: unknown[]) => unknown)(...args);
     };
@@ -360,6 +387,11 @@ export class HookSurface {
     }
 
     const wrapped = async (...args: unknown[]) => {
+      // R21.1 — Soft-destroyed gate. `api.registerHook` (legacy registry)
+      // has no unsubscribe primitive, so a stop/re-register cycle leaves
+      // THIS wrapped handler live in the dispatcher. Drop the call when
+      // the surface is torn down.
+      if (this.destroyed) return;
       this.recordFire(key);
       await (handler as (...a: unknown[]) => unknown)(...args);
     };

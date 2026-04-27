@@ -202,6 +202,33 @@ describe("ChatTurnWriter", () => {
     expect((writer as any).debounceTimers.size).toBe(0);
   });
 
+  it("R21.2 — onMessageSent with no pending user does NOT persist an orphan assistant turn", async () => {
+    // Regression for R21.2: pre-fix, an outbound `message:sent` arriving
+    // when the pending-user queue was empty (chunk 2+ of one logical
+    // reply, or a proactive notification with no inbound) persisted as a
+    // standalone assistant-only turn. That polluted chat memory/search
+    // results and broke the one-turn-per-exchange invariant. The fix
+    // bails when the queue is empty.
+    await writer.onMessageSent({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "orphan reply", success: true, messageId: "out-orphan" },
+    } as any);
+    await flushMicrotasks();
+    expect(mockClient.storeChatTurn).not.toHaveBeenCalled();
+
+    // Confirm normal pairing still works after the bail-on-empty.
+    writer.onMessageReceived({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "real q", messageId: "in-1" },
+    } as any);
+    await writer.onMessageSent({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "real reply", success: true, messageId: "out-1" },
+    } as any);
+    await flushMicrotasks();
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+  });
+
   it("R20.1 — onMessageSent with success=true but empty content does NOT consume the pending user", async () => {
     // Regression for R20.1: pre-fix, the dequeue happened before the
     // `assistantText` check, so a `message:sent` carrying an empty

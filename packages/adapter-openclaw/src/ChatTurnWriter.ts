@@ -414,8 +414,16 @@ export class ChatTurnWriter {
       // and persist as an assistant-only turn.
       if (!assistantText) return;
       const queue = this.pendingUserMessages.get(conversationKey);
-      const userText = queue && queue.length > 0 ? queue.shift()! : "";
-      if (queue && queue.length === 0) this.pendingUserMessages.delete(conversationKey);
+      // R21.2 — Bail when no pending user exists. Persisting an assistant-
+      // only turn for a chunked-reply continuation (chunk 2+ of one
+      // logical reply) or a proactive notification with no inbound would
+      // pollute chat memory/search and break the one-turn-per-exchange
+      // invariant. Drop the orphan; if proactive notifications need to
+      // be persisted later, they should go through a dedicated path
+      // that supplies a synthesized user side or a distinct schema.
+      if (!queue || queue.length === 0) return;
+      const userText = queue.shift()!;
+      if (queue.length === 0) this.pendingUserMessages.delete(conversationKey);
       if (userText || assistantText) {
         // Cross-path dedup, W4b side:
         //   PEEK w4a-origin — non-mutating; if W4a already wrote this

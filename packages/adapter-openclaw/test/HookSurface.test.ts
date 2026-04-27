@@ -152,6 +152,42 @@ describe("HookSurface", () => {
     });
   });
 
+  describe("destroy() soft-destroyed gate (R21.1)", () => {
+    it("R21.1 — typed handler short-circuits after destroy() (api.on has no unsubscribe)", () => {
+      const api = mkApi();
+      const hs = new HookSurface(api, mkLogger());
+      const userHandler = vi.fn();
+      hs.install("typed", "agent_end", userHandler);
+      // Capture the wrapped handler that was registered with api.on.
+      const onCall = (api.on as any).mock.calls[0];
+      const wrapped = onCall[1] as (...args: unknown[]) => unknown;
+      // Pre-destroy: wrapped invokes the user handler.
+      wrapped({ messages: [] }, {});
+      expect(userHandler).toHaveBeenCalledTimes(1);
+      // Destroy.
+      hs.destroy();
+      // Post-destroy: same wrapped (still live in upstream registry due
+      // to api.on no-unsub) must short-circuit and NOT invoke the user
+      // handler.
+      wrapped({ messages: [] }, {});
+      expect(userHandler).toHaveBeenCalledTimes(1);
+    });
+
+    it("R21.1 — legacy handler short-circuits after destroy() (registerHook has no unsubscribe)", async () => {
+      const api = mkApi();
+      const hs = new HookSurface(api, mkLogger());
+      const userHandler = vi.fn();
+      hs.install("legacy", "session_end", userHandler);
+      const regCall = (api.registerHook as any).mock.calls[0];
+      const wrapped = regCall[1] as (...args: unknown[]) => Promise<void>;
+      await wrapped({}, {});
+      expect(userHandler).toHaveBeenCalledTimes(1);
+      hs.destroy();
+      await wrapped({}, {});
+      expect(userHandler).toHaveBeenCalledTimes(1);
+    });
+  });
+
   describe("C5 double-registration guard", () => {
     it("same handler identity returns existing unsubscribe", () => {
       const hs = new HookSurface(mkApi(), mkLogger());
