@@ -375,12 +375,27 @@ export class DkgChannelPlugin {
   private stopping = false;
   private readonly stopWaiters: Array<() => void> = [];
   private stopDrainDeadlineAt: number | null = null;
+  /**
+   * Pre-dispatch memory-slot re-assert callback. Set by `DkgNodePlugin`
+   * to `memoryPlugin.reAssertCapability.bind(memoryPlugin)`. Called
+   * once per `processInbound` / `processInboundStream` so the slot
+   * stays owned by this adapter even when another plugin's startup
+   * code overwrote `memoryPluginState.capability` after our
+   * registration ran. Mode-independent — fires for every UI dispatch
+   * regardless of `full` vs `setup-runtime`.
+   */
+  private preDispatchReAssert: (() => void) | null = null;
 
   constructor(
     private readonly config: NonNullable<DkgOpenClawConfig['channel']>,
     private readonly client: DkgDaemonClient,
   ) {
     this.port = config.port ?? 9201;
+  }
+
+  /** Wire the memory-slot re-assert callback. Called by `DkgNodePlugin`. */
+  setPreDispatchReAssert(cb: (() => void) | null): void {
+    this.preDispatchReAssert = cb;
   }
 
   /**
@@ -786,6 +801,10 @@ export class DkgChannelPlugin {
   ): Promise<ChannelOutboundReply> {
     const api = this.api;
     if (!api) throw new Error('Channel not registered');
+    // Re-assert memory-slot ownership before this dispatch reaches the
+    // memory host. Cheap and runs in every registration mode, so the
+    // slot stays honest even when full-mode-only anchors don't fire.
+    try { this.preDispatchReAssert?.(); } catch { /* non-fatal */ }
 
     const runtime = this.runtime;
     const cfg = this.cfg;
@@ -1094,6 +1113,8 @@ export class DkgChannelPlugin {
     opts?: InboundChatOptions,
   ): AsyncGenerator<{ type: 'text_delta'; delta: string } | { type: 'final'; text: string; correlationId: string }> {
     if (!this.api) throw new Error('Channel not registered');
+    // Mode-independent slot re-assert (mirrors `processInbound`).
+    try { this.preDispatchReAssert?.(); } catch { /* non-fatal */ }
 
     const log = this.api.logger;
     const runtime = this.runtime;

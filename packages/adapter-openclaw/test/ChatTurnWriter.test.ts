@@ -247,6 +247,102 @@ describe("ChatTurnWriter", () => {
     expect(() => writer.onBeforeReset({}, {})).not.toThrow();
   });
 
+  it("onBeforeCompaction is awaitable; subsequent onAgentEnd waits for the reset (R9.2/R9.5)", async () => {
+    let releasePersist: (() => void) | null = null;
+    mockClient.storeChatTurn = vi.fn().mockImplementation(
+      () => new Promise<void>((resolve) => { releasePersist = resolve; }),
+    );
+    writer = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
+
+    const event: AgentEndContext = {
+      sessionId: "t",
+      messages: [
+        { role: "user", content: "u1" },
+        { role: "assistant", content: "a1" },
+      ],
+    };
+    await writer.onAgentEnd(event, { channelId: "ch", sessionKey: "sk" });
+
+    // Kick off compaction — returns a promise that should not resolve
+    // until the in-flight persist is released.
+    const compactionPromise = writer.onBeforeCompaction({}, { channelId: "ch", sessionKey: "sk" });
+    let compactionDone = false;
+    compactionPromise.then(() => { compactionDone = true; });
+
+    // Now fire a follow-up agent_end DURING the reset. It must not
+    // observe the stale watermark — it should `await` the pending reset.
+    const followupEvent: AgentEndContext = {
+      sessionId: "t",
+      messages: [
+        { role: "user", content: "u2" },
+        { role: "assistant", content: "a2" },
+      ],
+    };
+    const followupPromise = writer.onAgentEnd(followupEvent, { channelId: "ch", sessionKey: "sk" });
+    await flushMicrotasks();
+    expect(compactionDone).toBe(false);
+
+    // Release the persist; reset finishes; the gated agent_end proceeds.
+    releasePersist!();
+    await compactionPromise;
+    await followupPromise;
+    expect(compactionDone).toBe(true);
+  });
+
+  it("onMessageSent persist is tracked in inFlightPersists so reset awaits it (R9.4)", async () => {
+    let releasePersist: (() => void) | null = null;
+    mockClient.storeChatTurn = vi.fn().mockImplementation(
+      () => new Promise<void>((resolve) => { releasePersist = resolve; }),
+    );
+    writer = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
+
+    writer.onMessageReceived({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "hello" },
+    } as any);
+    await writer.onMessageSent({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "reply", success: true },
+    } as any);
+    // Under the hood, onMessageSent should have registered the persist
+    // job in inFlightPersists; reset must wait for it before clearing.
+    const inFlight = (writer as any).inFlightPersists as Map<string, Set<Promise<void>>>;
+    let totalJobs = 0;
+    for (const bucket of inFlight.values()) totalJobs += bucket.size;
+    expect(totalJobs).toBeGreaterThan(0);
+
+    releasePersist!();
+    // Drain to clear the in-flight bucket cleanly.
+    await new Promise((r) => setTimeout(r, 50));
+  });
+
+  it("flush() drains in-flight persists before returning (R9.8)", async () => {
+    let releasePersist: (() => void) | null = null;
+    mockClient.storeChatTurn = vi.fn().mockImplementation(
+      () => new Promise<void>((resolve) => { releasePersist = resolve; }),
+    );
+    writer = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
+
+    await writer.onAgentEnd(
+      {
+        sessionId: "t",
+        messages: [
+          { role: "user", content: "u" },
+          { role: "assistant", content: "a" },
+        ],
+      },
+      { channelId: "ch", sessionKey: "sk" },
+    );
+
+    let flushDone = false;
+    const flushP = writer.flush().then(() => { flushDone = true; });
+    await flushMicrotasks();
+    expect(flushDone).toBe(false); // persist still hanging
+    releasePersist!();
+    await flushP;
+    expect(flushDone).toBe(true);
+  });
+
   it("resetSessionState awaits in-flight persists before wiping watermark (R7.4)", async () => {
     // Slow client — first call resolves only after we've issued the reset,
     // so the post-completion saveWatermark would otherwise race past it.

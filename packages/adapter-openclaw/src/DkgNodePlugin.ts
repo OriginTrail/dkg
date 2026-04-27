@@ -397,9 +397,20 @@ export class DkgNodePlugin {
     this.hookSurface.install('typed', 'before_compaction', (ev, ctx) => this.chatTurnWriter!.onBeforeCompaction(ev, ctx), { rareFireExpected: true });
     this.hookSurface.install('typed', 'before_reset',      (ev, ctx) => this.chatTurnWriter!.onBeforeReset(ev, ctx), { rareFireExpected: true });
 
-    // W4b — non-LLM channel capture via internal-hook map (PR #216 mechanism)
-    this.hookSurface.install('internal', 'message:received', (ev) => this.chatTurnWriter!.onMessageReceived(ev));
-    this.hookSurface.install('internal', 'message:sent',     (ev) => this.chatTurnWriter!.onMessageSent(ev));
+    // W4b — non-LLM channel capture via internal-hook map (PR #216 mechanism).
+    // Internal hooks fire across both `full` and `setup-runtime` modes, so
+    // we tack a memory-slot re-assert onto each fire as the mode-independent
+    // ownership anchor. Cheap (one property assignment) and keeps the slot
+    // honest even when `before_prompt_build` (full-only) and the
+    // `memory_search` tool path don't run.
+    this.hookSurface.install('internal', 'message:received', (ev) => {
+      try { this.memoryPlugin?.reAssertCapability(); } catch { /* non-fatal */ }
+      return this.chatTurnWriter!.onMessageReceived(ev);
+    });
+    this.hookSurface.install('internal', 'message:sent', (ev) => {
+      try { this.memoryPlugin?.reAssertCapability(); } catch { /* non-fatal */ }
+      return this.chatTurnWriter!.onMessageSent(ev);
+    });
 
     // I8 — tool-selection guidance injected into the system prompt every turn.
     // Reaches the agent model directly (unlike SKILL.md which only reaches
@@ -458,10 +469,17 @@ export class DkgNodePlugin {
       }
       api.logger.info?.('[dkg] Memory module enabled — DKG-backed memory slot active');
 
-      // Wire the channel plugin to re-assert our memory-slot capability
-      // before each inbound turn dispatch. This guarantees our runtime
-      // handles recall even when memory-core's dreaming sidecar overwrites
-      // the single-slot capability store during plugin loading.
+      // Mode-independent memory-slot re-assert anchor. The channel plugin
+      // calls this once per inbound dispatch, before the message reaches
+      // the memory host. Covers `setup-runtime` and write-only flows that
+      // never reach the W3 (`before_prompt_build`) or `memory_search`
+      // anchors, so a different plugin reclaiming the slot mid-session
+      // gets bounced back before our recall/persist runs.
+      const memoryPlugin = this.memoryPlugin;
+      if (memoryPlugin && this.channelPlugin) {
+        this.channelPlugin.setPreDispatchReAssert(() => memoryPlugin.reAssertCapability());
+      }
+
       // Cache the API handle so `ensureNodePeerId` can log from the lazy
       // re-probe call tree, which fires outside of any register() scope
       // when a later resolver call asks for the default agent address.
@@ -755,7 +773,12 @@ export class DkgNodePlugin {
   }
 
   async stop(): Promise<void> {
-    try { this.chatTurnWriter?.flushSync(); } catch { /* best effort */ }
+    // `flush()` (vs `flushSync()`) awaits in-flight `storeChatTurn` jobs
+    // and any pending session resets before committing the watermark
+    // file. Without the await, a shutdown immediately after a reply
+    // could exit while the final turn's network persist is still in
+    // flight and the turn is silently lost.
+    try { await this.chatTurnWriter?.flush(); } catch { /* best effort */ }
     try { this.hookSurface?.destroy(); } catch { /* best effort */ }
     this.clearLocalAgentIntegrationRetry();
     if (this.peerIdDeferredRetryTimer) {

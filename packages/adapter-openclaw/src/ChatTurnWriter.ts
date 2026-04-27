@@ -80,7 +80,14 @@ export class ChatTurnWriter {
   private static readonly TURNID_TTL_MS = 3_000;
   // In-flight persist tracking — `resetSessionState()` awaits these so a
   // pre-reset persist can't advance the just-reset watermark afterward.
+  // Both W4a (`onAgentEnd`) and W4b (`onMessageSent`) MUST register their
+  // persist jobs here, otherwise the reset assumption "all persists for
+  // this session are tracked" is silently violated.
   private inFlightPersists: Map<string, Set<Promise<void>>> = new Map();
+  // Per-session reset promises. `onAgentEnd` / `onMessageSent` await these
+  // before processing so a compacted message array can't be read against
+  // a stale watermark while the reset is still draining.
+  private pendingResets: Map<string, Promise<void>> = new Map();
 
   constructor(options: { client: any; logger: Logger; stateDir: string }) {
     this.client = options.client;
@@ -112,7 +119,7 @@ export class ChatTurnWriter {
     }
   }
 
-  onAgentEnd(event: AgentEndContext, ctx?: any): void {
+  async onAgentEnd(event: AgentEndContext, ctx?: any): Promise<void> {
     try {
       // B5 — skip dkg-ui channel; DkgChannelPlugin.queueTurnPersistence
       // owns UI-channel persistence with richer metadata (correlation IDs,
@@ -120,18 +127,18 @@ export class ChatTurnWriter {
       if (ctx?.channelId === "dkg-ui") return;
       const sessionId = this.deriveSessionId(ctx);
       if (!sessionId) return;
+      // If a compaction/reset is mid-flight for this session, wait for it
+      // before reading the watermark. Otherwise we'd compute the delta
+      // against stale state.
+      const pendingReset = this.pendingResets.get(sessionId);
+      if (pendingReset) await pendingReset;
       const pairs = this.computeDelta(event.messages, this.loadWatermark(sessionId));
       if (pairs.length === 0) return;
       // Persist sequentially so a transient failure on pair N leaves the
       // watermark at N-1 and the next agent_end call retries from the same
       // point. Without sequencing, a failed middle pair could be skipped
       // when the tail succeeds.
-      const sessionInFlight = (() => {
-        let bucket = this.inFlightPersists.get(sessionId);
-        if (!bucket) { bucket = new Set(); this.inFlightPersists.set(sessionId, bucket); }
-        return bucket;
-      })();
-      const job = (async () => {
+      const job = this.trackPersistJob(sessionId, async () => {
         for (const { user, assistant } of pairs) {
           if (!user && !assistant) continue;
           const turnId = this.deterministicTurnId(sessionId, user, assistant);
@@ -147,39 +154,78 @@ export class ChatTurnWriter {
             return; // leave watermark at last successful pair
           }
         }
-      })();
-      sessionInFlight.add(job);
-      job.finally(() => sessionInFlight.delete(job)).catch(() => {});
+      });
+      // Don't await the persist work itself — gateway must not block on
+      // disk/network; the await above only covers the reset gate.
+      job.catch(() => { /* outer try-catch already covered */ });
     } catch (err) {
       this.logger.error?.("[ChatTurnWriter.onAgentEnd] Error", { err });
     }
   }
 
-  onBeforeCompaction(event: any, ctx?: any): void {
+  /**
+   * Wrap a persist job in the per-session `inFlightPersists` set so
+   * `resetSessionState()` can `Promise.allSettled` everything that's
+   * still running. Both W4a and W4b persist paths route through here so
+   * the reset gate can't miss a fire-and-forget write.
+   */
+  private trackPersistJob(sessionId: string, run: () => Promise<void>): Promise<void> {
+    let bucket = this.inFlightPersists.get(sessionId);
+    if (!bucket) { bucket = new Set(); this.inFlightPersists.set(sessionId, bucket); }
+    const job = run();
+    bucket.add(job);
+    job.finally(() => {
+      const b = this.inFlightPersists.get(sessionId);
+      if (b) {
+        b.delete(job);
+        if (b.size === 0) this.inFlightPersists.delete(sessionId);
+      }
+    }).catch(() => {});
+    return job;
+  }
+
+  async onBeforeCompaction(event: any, ctx?: any): Promise<void> {
     try {
       this.flushSync();
       // Compaction shrinks or rewrites `messages`, but our pair-index
       // watermark is relative to the current array. A stale N-pair
       // watermark against a compacted 3-pair array would cause the next
       // `onAgentEnd` to skip every pair as "already persisted".
-      // Reset is SESSION-SCOPED: clearing the whole map would wipe
-      // unrelated concurrent chats' cursors and cause them to replay
-      // historical turns on their next `agent_end`.
-      void this.resetSessionState(this.deriveSessionId(ctx));
+      // Reset is SESSION-SCOPED. The hook returns the reset promise so
+      // OpenClaw's typed-hook dispatcher awaits it — the next `agent_end`
+      // for this session can't race past the in-flight cleanup.
+      await this.runReset(this.deriveSessionId(ctx));
     } catch (err) {
       this.logger.error?.("[ChatTurnWriter.onBeforeCompaction] Error", { err });
     }
   }
 
-  onBeforeReset(event: any, ctx?: any): void {
+  async onBeforeReset(event: any, ctx?: any): Promise<void> {
     try {
       this.flushSync();
-      // Reset wipes this session's history; the pair-index watermark must
-      // start over for THIS session only (compaction/reset events are
-      // session-scoped per OpenClaw dispatch semantics).
-      void this.resetSessionState(this.deriveSessionId(ctx));
+      await this.runReset(this.deriveSessionId(ctx));
     } catch (err) {
       this.logger.error?.("[ChatTurnWriter.onBeforeReset] Error", { err });
+    }
+  }
+
+  /**
+   * Track the reset promise on `pendingResets` so `onAgentEnd` /
+   * `onMessageSent` can `await` it before processing a turn that arrived
+   * mid-reset. Without this gate, a fast post-compaction `agent_end`
+   * could read the stale watermark before the reset finishes draining.
+   */
+  private async runReset(sessionId: string): Promise<void> {
+    if (!sessionId) return;
+    const reset = this.resetSessionState(sessionId);
+    this.pendingResets.set(sessionId, reset);
+    try {
+      await reset;
+    } finally {
+      // Only delete if no newer reset replaced ours.
+      if (this.pendingResets.get(sessionId) === reset) {
+        this.pendingResets.delete(sessionId);
+      }
     }
   }
 
@@ -210,17 +256,14 @@ export class ChatTurnWriter {
       clearTimeout(entry.timer);
       this.debounceTimers.delete(sessionId);
     }
-    this.pendingUserMessages.forEach((_v, k) => {
-      // pendingUserMessages keys are envelope-shaped (channelId:account:conv:sessionKey),
-      // sessionId is just (channelId:account:conv:sessionKey) too — but we don't
-      // have a clean reverse-lookup. Drop everything whose key terminates with
-      // the session's sessionKey portion. Conservative: just clear all keyed
-      // entries that share the channelId prefix to avoid mismatched pairings
-      // after a compaction.
-      if (k.endsWith(`:${sessionId.split(":").slice(-1)[0]}`)) {
-        this.pendingUserMessages.delete(k);
-      }
-    });
+    // `conversationKeyFromInternalEvent` and `composeSessionId` produce the
+    // same string shape (`openclaw:<channelId>:<accountId>:<conversationId>:<sessionKey>`),
+    // so a session reset deletes its pending entry by exact key — no
+    // sessionKey suffix matching, which would falsely clear unrelated
+    // conversations whose sessionKey shares a trailing fragment OR contains
+    // raw `:` (e.g. the `agent:<agentId>:<identity>` keys created in
+    // `DkgChannelPlugin`).
+    this.pendingUserMessages.delete(sessionId);
     this.clearSessionTurnIds(sessionId);
     this.writeWatermarkFile();
   }
@@ -241,7 +284,7 @@ export class ChatTurnWriter {
     }
   }
 
-  onMessageSent(ev: InternalMessageEvent): void {
+  async onMessageSent(ev: InternalMessageEvent): Promise<void> {
     try {
       // B5 — skip dkg-ui channel; DkgChannelPlugin owns UI persistence.
       // Internal-hook envelope carries channelId on event.context per
@@ -250,6 +293,11 @@ export class ChatTurnWriter {
       if (channelId === "dkg-ui") return;
       const conversationKey = this.conversationKeyFromInternalEvent(ev);
       if (!conversationKey) return;
+      const sessionId = this.deriveSessionIdFromEvent(ev);
+      // Wait for any compaction/reset on this session before pairing,
+      // so we don't write a turn whose state was about to be wiped.
+      const pendingReset = this.pendingResets.get(sessionId);
+      if (pendingReset) await pendingReset;
       // Drop failed outbound sends: chat history should not show replies the
       // user never received. Still consume the oldest pending inbound so the
       // next successful turn does not pair its reply with a stale inbound
@@ -266,14 +314,21 @@ export class ChatTurnWriter {
       // legitimate pastes (XML, logs) containing the tag would otherwise be
       // silently corrupted.
       const assistantText = this.stripRecalledMemory(readEventText(ev));
-      const sessionId = this.deriveSessionIdFromEvent(ev);
       if (userText || assistantText) {
         const turnId = this.deterministicTurnId(sessionId, userText, assistantText);
         if (this.markTurnIdSeen(sessionId, turnId)) return; // already written via agent_end path
-        this.persistOne(sessionId, userText, assistantText, turnId).catch((err) => {
-          this.releaseTurnIdReservation(sessionId, turnId);
-          this.logger.error?.("[ChatTurnWriter.onMessageSent] Persist failed", { err });
-        });
+        // Route through the same tracked-job wrapper as onAgentEnd so the
+        // reset gate sees this in-flight write and `Promise.allSettled`s
+        // it. Without tracking, a `message:sent` write mid-compaction
+        // could land its `saveWatermark()` after the reset clears state.
+        this.trackPersistJob(sessionId, async () => {
+          try {
+            await this.persistOne(sessionId, userText, assistantText, turnId);
+          } catch (err) {
+            this.releaseTurnIdReservation(sessionId, turnId);
+            this.logger.error?.("[ChatTurnWriter.onMessageSent] Persist failed", { err });
+          }
+        }).catch(() => {});
       }
     } catch (err) {
       this.logger.error?.("[ChatTurnWriter.onMessageSent] Error", { err });
@@ -314,6 +369,26 @@ export class ChatTurnWriter {
     for (const k of this.recentTurnIds.keys()) {
       if (k.startsWith(prefix)) this.recentTurnIds.delete(k);
     }
+  }
+
+  /**
+   * Drain everything before shutdown. Awaits all in-flight `persistOne`
+   * jobs across every session, settles any pending session reset, and
+   * commits the watermark file. `stop()` callers MUST await this — a
+   * sync `flushSync()` only commits the file but leaves a fire-and-forget
+   * `storeChatTurn()` in flight, so a shutdown right after a reply could
+   * exit before the final turn is persisted to the daemon.
+   */
+  async flush(): Promise<void> {
+    const allJobs: Promise<void>[] = [];
+    for (const bucket of this.inFlightPersists.values()) {
+      for (const j of bucket) allJobs.push(j);
+    }
+    for (const reset of this.pendingResets.values()) {
+      allJobs.push(reset);
+    }
+    if (allJobs.length > 0) await Promise.allSettled(allJobs);
+    this.flushSync();
   }
 
   flushSync(): void {
