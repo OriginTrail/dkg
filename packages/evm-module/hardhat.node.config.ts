@@ -45,7 +45,7 @@ const config: HardhatUserConfig = {
       },
     },
     base_sepolia_v10: {
-      environment: 'development',
+      environment: 'testnet',
       chainId: 84532,
       url: rpc('BASE_SEPOLIA_V10') || 'https://sepolia.base.org',
       accounts: accounts('BASE_SEPOLIA_V10'),

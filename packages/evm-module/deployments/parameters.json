@@ -29,11 +29,6 @@
                 "proofingPeriodDurationInBlocks": "100",
                 "W1": "0",
                 "W2": "2"
-            },
-            "base_sepolia_v10": {
-                "proofingPeriodDurationInBlocks": "900",
-                "W1": "0",
-                "W2": "2"
             }
         }
     },
@@ -104,6 +99,11 @@
             },
             "gnosis_chiado_test": {
                 "proofingPeriodDurationInBlocks": "360",
+                "W1": "0",
+                "W2": "2"
+            },
+            "base_sepolia_v10": {
+                "proofingPeriodDurationInBlocks": "900",
                 "W1": "0",
                 "W2": "2"
             }
