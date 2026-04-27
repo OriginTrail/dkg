@@ -87,6 +87,12 @@ export async function notifyLocalAgentIntegrationWake(
 
   const wakeAuth = integration.transport?.wakeAuth ?? inferWakeAuthFromUrl(wakeUrl);
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (wakeAuth === 'gateway') {
+    // The daemon does not currently own OpenClaw gateway credentials. Treat
+    // gateway wake endpoints as unavailable rather than sending a request that
+    // the gateway-auth route will reject.
+    return { status: 'skipped', reason: 'wake_unavailable' };
+  }
   if (wakeAuth === 'bridge-token') {
     if (!bridgeAuthToken?.trim()) return { status: 'failed', reason: 'missing_bridge_token' };
     headers['x-dkg-bridge-token'] = bridgeAuthToken.trim();
@@ -182,6 +188,11 @@ export function isAuthorizedLocalAgentSemanticWorkerRequest(
   config: DkgConfig,
   req: IncomingMessage,
   integrationId: string,
+  opts: {
+    requestToken?: string;
+    bridgeAuthToken?: string;
+    resolveAgentByToken?: (token: string) => unknown;
+  } = {},
 ): boolean {
   const normalizedIntegrationId = normalizeIntegrationId(integrationId);
   if (!normalizedIntegrationId) return false;
@@ -191,7 +202,14 @@ export function isAuthorizedLocalAgentSemanticWorkerRequest(
     readSingleHeaderValue(req.headers['x-dkg-local-agent-integration']) ?? '',
   );
   if (headerIntegrationId !== normalizedIntegrationId) return false;
-  return isLoopbackClientIp(req.socket.remoteAddress ?? '');
+  if (!isLoopbackClientIp(req.socket.remoteAddress ?? '')) return false;
+
+  const requestToken = opts.requestToken?.trim();
+  const bridgeAuthToken = opts.bridgeAuthToken?.trim();
+  if (!requestToken || !bridgeAuthToken || requestToken !== bridgeAuthToken) return false;
+  const bridgeHeader = readSingleHeaderValue(req.headers['x-dkg-bridge-token'])?.trim();
+  if (bridgeHeader !== bridgeAuthToken) return false;
+  return opts.resolveAgentByToken?.(requestToken) === undefined;
 }
 
 export function reconcileOpenClawSemanticAvailability(
@@ -797,10 +815,14 @@ function failLeasedSemanticEvent(
 }
 
 export async function handleSemanticEnrichmentRoutes(ctx: RequestContext): Promise<void> {
-  const { req, res, path, config, dashDb, agent, extractionStatus } = ctx;
+  const { req, res, path, config, dashDb, agent, extractionStatus, requestToken, bridgeAuthToken } = ctx;
   if (!path.startsWith('/api/semantic-enrichment/')) return;
 
-  if (!isAuthorizedLocalAgentSemanticWorkerRequest(config, req, 'openclaw')) {
+  if (!isAuthorizedLocalAgentSemanticWorkerRequest(config, req, 'openclaw', {
+    requestToken,
+    bridgeAuthToken,
+    resolveAgentByToken: (token) => agent.resolveAgentByToken(token),
+  })) {
     return jsonResponse(res, 403, {
       error: 'Semantic enrichment worker routes are restricted to the local OpenClaw runtime',
     });

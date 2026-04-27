@@ -457,14 +457,20 @@ describe('DkgDaemonClient', () => {
       new Response(JSON.stringify({}), { status: 200 }),
     );
 
-    client.setLocalAgentRequestContext({
+    const authedClient = new DkgDaemonClient({
+      baseUrl: 'http://localhost:9200',
+      apiToken: 'node-token',
+    });
+    authedClient.setLocalAgentRequestContext({
       integrationId: 'openclaw',
       semanticEnrichmentSupported: false,
     });
 
-    await client.storeChatTurn('session-2', 'Hello', 'Hi there', { turnId: 'turn-2' });
+    await authedClient.storeChatTurn('session-2', 'Hello', 'Hi there', { turnId: 'turn-2' });
 
     expect(fetchSpy.mock.calls[0]?.[1]?.headers).toMatchObject({
+      Authorization: 'Bearer node-token',
+      'X-DKG-Bridge-Token': 'node-token',
       'X-DKG-Local-Agent-Integration': 'openclaw',
       'X-DKG-Local-Agent-Semantic-Enrichment': 'false',
     });

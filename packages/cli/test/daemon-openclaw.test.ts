@@ -373,7 +373,7 @@ describe('local agent semantic wake helper', () => {
     );
   });
 
-  it('uses gateway wake auth mode without sending the bridge token header', async () => {
+  it('skips gateway wake auth mode because the daemon has no OpenClaw gateway credentials', async () => {
     const fetchSpy = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }));
 
     const result = await notifyLocalAgentIntegrationWake(
@@ -395,13 +395,8 @@ describe('local agent semantic wake helper', () => {
       fetchSpy as any,
     );
 
-    expect(result).toEqual({ status: 'delivered' });
-    expect(fetchSpy).toHaveBeenCalledWith(
-      'http://127.0.0.1:18789/api/dkg-channel/semantic-enrichment/wake',
-      expect.objectContaining({
-        headers: { 'Content-Type': 'application/json' },
-      }),
-    );
+    expect(result).toEqual({ status: 'skipped', reason: 'wake_unavailable' });
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   it('infers bridge-token wake auth from a preserved wakeUrl when wakeAuth is missing', async () => {
@@ -700,31 +695,59 @@ describe('best-effort semantic enqueue helper', () => {
       },
     });
 
+    const authOpts = {
+      requestToken: 'node-token',
+      bridgeAuthToken: 'node-token',
+      resolveAgentByToken: () => undefined,
+    };
+
+    expect(isAuthorizedLocalAgentSemanticWorkerRequest(enabledConfig, {
+      headers: {
+        'x-dkg-local-agent-integration': 'openclaw',
+        'x-dkg-bridge-token': 'node-token',
+      },
+      socket: { remoteAddress: '127.0.0.1' },
+    } as any, 'openclaw', authOpts)).toBe(true);
+
     expect(isAuthorizedLocalAgentSemanticWorkerRequest(enabledConfig, {
       headers: {
         'x-dkg-local-agent-integration': 'openclaw',
       },
       socket: { remoteAddress: '127.0.0.1' },
-    } as any, 'openclaw')).toBe(true);
+    } as any, 'openclaw', authOpts)).toBe(false);
+
+    expect(isAuthorizedLocalAgentSemanticWorkerRequest(enabledConfig, {
+      headers: {
+        'x-dkg-local-agent-integration': 'openclaw',
+        'x-dkg-bridge-token': 'agent-token',
+      },
+      socket: { remoteAddress: '127.0.0.1' },
+    } as any, 'openclaw', {
+      requestToken: 'agent-token',
+      bridgeAuthToken: 'node-token',
+      resolveAgentByToken: () => 'did:dkg:agent:0xagent',
+    })).toBe(false);
 
     expect(isAuthorizedLocalAgentSemanticWorkerRequest(enabledConfig, {
       headers: {},
       socket: { remoteAddress: '127.0.0.1' },
-    } as any, 'openclaw')).toBe(false);
+    } as any, 'openclaw', authOpts)).toBe(false);
 
     expect(isAuthorizedLocalAgentSemanticWorkerRequest(enabledConfig, {
       headers: {
         'x-dkg-local-agent-integration': 'openclaw',
+        'x-dkg-bridge-token': 'node-token',
       },
       socket: { remoteAddress: '10.0.0.8' },
-    } as any, 'openclaw')).toBe(false);
+    } as any, 'openclaw', authOpts)).toBe(false);
 
     expect(isAuthorizedLocalAgentSemanticWorkerRequest(makeConfig(), {
       headers: {
         'x-dkg-local-agent-integration': 'openclaw',
+        'x-dkg-bridge-token': 'node-token',
       },
       socket: { remoteAddress: '127.0.0.1' },
-    } as any, 'openclaw')).toBe(false);
+    } as any, 'openclaw', authOpts)).toBe(false);
   });
 
   it('uses the same resolved default agent address as assertion writes for chat-turn semantic URIs', () => {

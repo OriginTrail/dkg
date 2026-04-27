@@ -918,6 +918,7 @@ export class DkgDaemonClient {
     const semanticEnrichmentSupported = this.localAgentRequestContext?.semanticEnrichmentSupported;
     return {
       'X-DKG-Local-Agent-Integration': integrationId,
+      ...(this.apiToken ? { 'X-DKG-Bridge-Token': this.apiToken } : {}),
       ...(typeof semanticEnrichmentSupported === 'boolean'
         ? { 'X-DKG-Local-Agent-Semantic-Enrichment': semanticEnrichmentSupported ? 'true' : 'false' }
         : {}),
