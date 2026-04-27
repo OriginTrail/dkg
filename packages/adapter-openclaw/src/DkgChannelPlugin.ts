@@ -1782,7 +1782,15 @@ export class DkgChannelPlugin {
 
   get bridgePort(): number {
     const address = this.server?.address();
-    return typeof address === 'object' && address ? address.port : this.port;
+    if (typeof address === 'object' && address) {
+      return address.port;
+    }
+    // No standalone server is bound (either start() hasn't been called,
+    // it failed, or it was intentionally skipped because the gateway took
+    // ownership of the channel routes — see issue #272). Return 0 so
+    // callers like DkgNodePlugin.buildOpenClawTransport know not to
+    // publish a stale bridgeUrl pointing at a port nobody is listening on.
+    return 0;
   }
 
   get isListening(): boolean {

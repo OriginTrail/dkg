@@ -1210,7 +1210,8 @@ describe('DkgNodePlugin', () => {
       );
 
       expect(connectCall).toBeTruthy();
-      expect(JSON.parse(String(connectCall?.[1]?.body))).toMatchObject({
+      const connectBody = JSON.parse(String(connectCall?.[1]?.body));
+      expect(connectBody).toMatchObject({
         transport: {
           kind: 'openclaw-channel',
           gatewayUrl: 'http://127.0.0.1:19789',
@@ -1224,6 +1225,12 @@ describe('DkgNodePlugin', () => {
           lastError: null,
         },
       });
+      // In gateway-route mode the standalone bridge isn't bound, so the
+      // adapter must NOT advertise a bridgeUrl/healthUrl that points at a
+      // port nobody is listening on (issue #272 follow-up — caused the UI
+      // health probe to fail and show "OpenClaw is unavailable").
+      expect(connectBody.transport.bridgeUrl).toBeUndefined();
+      expect(connectBody.transport.healthUrl).toBeUndefined();
       expect(readyCall).toBeUndefined();
     } finally {
       await plugin?.stop();
