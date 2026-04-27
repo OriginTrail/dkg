@@ -6,7 +6,6 @@
  * This module rejects any SPARQL that attempts mutation operations.
  */
 
-import type { Quad } from '@origintrail-official/dkg-storage';
 import { stripLiteralsAndComments } from './sparql-utils.js';
 import type { QueryResult } from './query-engine.js';
 
@@ -67,30 +66,28 @@ export function detectSparqlQueryForm(sparql: string): SparqlQueryForm {
 /**
  * Shape of an empty `QueryResult`.
  *
- * Structural alias deliberately expressed with the `unknown`/`never`
- * quad element type so this module stays dependency-free of
- * `@origintrail-official/dkg-query`'s `Quad`. Callers treat the
- * returned object as a plain `QueryResult` — the `quads` array is
- * always `[]`.
+ * Now an alias of the canonical `QueryResult` so the empty-shape
+ * contract and the success-shape contract cannot drift. Callers can
+ * treat `EmptyQueryResultShape` and `QueryResult` interchangeably —
+ * the only difference is a structural guarantee that `bindings` is
+ * empty (and `quads`, when present, is `[]`).
  */
-export interface EmptyQueryResultShape {
-  bindings: Array<Record<string, string>>;
-  quads?: unknown[];
-}
+export type EmptyQueryResultShape = QueryResult;
 
 /**
  * Build a shape-matched empty `QueryResult` for a given SPARQL form.
  *
- * Keep this logic colocated with `detectSparqlQueryForm` (same file)
- * so the shape contract is visibly enforced in one place — any future
- * change to `QueryResult` in `@origintrail-official/dkg-query` must
- * update both together.
- *
- * Returns a FRESH object on every call, so callers can safely mutate
+ * Returns a FRESH object on every call so callers can safely mutate
  * it (append bindings on a subsequent fallthrough, e.g.) without
  * worrying about cross-call aliasing.
+ *
+ * PR #229 bot review (r3148... — sparql-guard.ts:56). This is the
+ * SINGLE canonical empty-shape builder for the package — there is no
+ * parallel `emptyQueryResultForKind` helper anymore. Any future
+ * change to `QueryResult` only has to update this function and
+ * `detectSparqlQueryForm` (also in this file).
  */
-export function emptyResultForForm(form: SparqlQueryForm): EmptyQueryResultShape {
+export function emptyResultForForm(form: SparqlQueryForm): QueryResult {
   if (form === 'CONSTRUCT' || form === 'DESCRIBE') {
     return { bindings: [], quads: [] };
   }
@@ -98,6 +95,24 @@ export function emptyResultForForm(form: SparqlQueryForm): EmptyQueryResultShape
     return { bindings: [{ result: 'false' }] };
   }
   return { bindings: [] };
+}
+
+/**
+ * One-shot ergonomic helper: classify the SPARQL string and build a
+ * shape-matched empty `QueryResult` in a single call. Equivalent to
+ * `emptyResultForForm(detectSparqlQueryForm(sparql))` and exists
+ * solely so callers that don't already need the form for branching
+ * don't have to write the two-step every time.
+ *
+ * PR #229 bot review (r3148... — sparql-guard.ts:56) consolidation:
+ * before this consolidation, two parallel pairs lived in this file
+ * (`detectSparqlQueryForm` + `emptyResultForForm` AND
+ * `classifySparqlForm` + `emptyQueryResultForKind`). The legacy pair
+ * is gone; this helper replaces the legacy `emptyQueryResultForKind`
+ * call sites without re-introducing a parallel classifier.
+ */
+export function emptyResultForSparql(sparql: string): QueryResult {
+  return emptyResultForForm(detectSparqlQueryForm(sparql));
 }
 
 export interface SparqlGuardResult {
@@ -132,41 +147,3 @@ export function validateReadOnlySparql(sparql: string): SparqlGuardResult {
 
   return { safe: true };
 }
-
-export type SparqlForm = 'SELECT' | 'CONSTRUCT' | 'ASK' | 'DESCRIBE';
-
-/**
- * Classify the query form of a SPARQL string. Used by engines that need to
- * short-circuit a query (e.g. "no graphs resolved") while still returning a
- * result shape that matches the requested form — `QueryResult.bindings: []`
- * is not a valid ASK response (ASK must return a boolean binding) and is not
- * a valid CONSTRUCT/DESCRIBE response either (those must carry `quads: []`).
- */
-export function classifySparqlForm(sparql: string): SparqlForm {
-  const stripped = stripLiteralsAndComments(sparql);
-  const match = READ_ONLY_FORMS.exec(stripped);
-  const form = (match?.[1] ?? 'SELECT').toUpperCase();
-  if (form === 'ASK' || form === 'CONSTRUCT' || form === 'DESCRIBE') {
-    return form;
-  }
-  return 'SELECT';
-}
-
-/**
- * Produce an empty `QueryResult` that matches the requested query form.
- * Centralising this keeps every "nothing to query" short-circuit
- * (access-denied synthetic response, zero-graph resolution, etc.) aligned
- * on a single well-typed contract instead of returning `{ bindings: [] }`
- * for every form.
- */
-export function emptyQueryResultForKind(sparql: string): QueryResult {
-  const form = classifySparqlForm(sparql);
-  if (form === 'ASK') {
-    return { bindings: [{ result: 'false' }] };
-  }
-  if (form === 'CONSTRUCT' || form === 'DESCRIBE') {
-    return { bindings: [], quads: [] as Quad[] };
-  }
-  return { bindings: [] };
-}
-

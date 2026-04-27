@@ -11,9 +11,13 @@
  * explicit: `detectSparqlQueryForm` and `emptyResultForForm`.
  */
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, resolve } from 'node:path';
 import {
   detectSparqlQueryForm,
   emptyResultForForm,
+  emptyResultForSparql,
   type SparqlQueryForm,
 } from '../src/index.js';
 
@@ -126,4 +130,101 @@ describe('round-trip: form → empty result preserves the `quads` presence disti
       expect(Object.prototype.hasOwnProperty.call(r, 'quads')).toBe(hasQuads);
     });
   }
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// PR #229 bot review (r3148... — sparql-guard.ts:56). Before this
+// consolidation, `sparql-guard.ts` exported TWO parallel pairs:
+//   (a) detectSparqlQueryForm + emptyResultForForm
+//   (b) classifySparqlForm    + emptyQueryResultForKind
+// (a) returned `UNKNOWN` for unparseable input; (b) silently mapped
+// it to `SELECT`. Two pairs meant the next time ASK/CONSTRUCT shaping
+// changed, only one would get updated and the other call path would
+// reintroduce the malformed empty-response bug. The bot asked for
+// consolidation onto ONE pair.
+//
+// These tests pin the anti-drift contract structurally so any future
+// re-introduction of the legacy pair fails CI:
+//   1. The legacy symbols are no longer exported from the package
+//      barrel.
+//   2. `sparql-guard.ts` source no longer defines the legacy
+//      identifiers.
+//   3. The new ergonomic one-shot helper `emptyResultForSparql`
+//      delegates to `emptyResultForForm(detectSparqlQueryForm(sparql))`
+//      bit-for-bit (no parallel logic path).
+// ─────────────────────────────────────────────────────────────────────
+describe('[r30-3] consolidation: single canonical form-classifier + empty-result builder pair', () => {
+  it('emptyResultForSparql composes the canonical pair (no parallel classifier)', () => {
+    // For every form: emptyResultForSparql(q) must structurally equal
+    // emptyResultForForm(detectSparqlQueryForm(q)). If anyone ever
+    // re-introduces a parallel classifier with subtly different
+    // shaping (the EXACT regression the bot flagged), this assertion
+    // immediately catches the divergence.
+    const queries: string[] = [
+      'SELECT ?s WHERE { ?s ?p ?o }',
+      'CONSTRUCT { ?s ?p ?o } WHERE {}',
+      'DESCRIBE <urn:x>',
+      'ASK { ?s ?p ?o }',
+      'PREFIX ex: <urn:example:>\nSELECT ?s WHERE { ?s ex:p ?o }',
+      'not-a-query',
+      '',
+    ];
+    for (const q of queries) {
+      const oneShot = emptyResultForSparql(q);
+      const twoStep = emptyResultForForm(detectSparqlQueryForm(q));
+      expect(oneShot).toEqual(twoStep);
+      // `quads` presence parity is the property that makes
+      // CONSTRUCT/DESCRIBE callers branch correctly. Pin it both ways.
+      expect(Object.prototype.hasOwnProperty.call(oneShot, 'quads'))
+        .toBe(Object.prototype.hasOwnProperty.call(twoStep, 'quads'));
+    }
+  });
+
+  it('emptyResultForSparql returns a FRESH object (no shared mutable state with emptyResultForForm)', () => {
+    // The convenience wrapper must inherit the freshness guarantee
+    // of the underlying builder — otherwise a caller mutating the
+    // returned `bindings` would poison every later deny that hit
+    // the same form.
+    const a = emptyResultForSparql('CONSTRUCT { ?s ?p ?o } WHERE {}');
+    const b = emptyResultForSparql('CONSTRUCT { ?s ?p ?o } WHERE {}');
+    expect(a).not.toBe(b);
+    expect(a.bindings).not.toBe(b.bindings);
+    expect(a.quads).not.toBe(b.quads);
+    a.bindings.push({ forged: 'v' });
+    expect(b.bindings).toEqual([]);
+  });
+
+  it('legacy `classifySparqlForm` and `emptyQueryResultForKind` are NOT exported from the package barrel (anti-drift)', async () => {
+    // Dynamic import so the test still loads even if the symbols
+    // were re-introduced (would just observe their presence and
+    // fail the assertion below).
+    const exports = (await import('../src/index.js')) as Record<string, unknown>;
+    expect(exports.classifySparqlForm).toBeUndefined();
+    expect(exports.emptyQueryResultForKind).toBeUndefined();
+    // The legacy `SparqlForm` type alias was the second exported
+    // surface that proved drift was happening. Confirm it's gone too.
+    // (Type aliases don't appear at runtime, so this is satisfied
+    // structurally by tsc — re-introducing the export would be a
+    // compile error in this file's import statement.)
+  });
+
+  it('legacy identifiers are NOT defined in the source (anti-regression source guard)', () => {
+    // Source-level guard: if a future commit re-adds
+    // `classifySparqlForm` / `emptyQueryResultForKind` / `SparqlForm`
+    // to `sparql-guard.ts` (even unexported), this check fails and
+    // forces the author to choose: extend the canonical pair instead.
+    // This is the "any future change to ASK/CONSTRUCT shaping has to
+    // touch ONE spot, not two" enforcement the bot asked for.
+    const here = dirname(fileURLToPath(import.meta.url));
+    const guardPath = resolve(here, '..', 'src', 'sparql-guard.ts');
+    const src = readFileSync(guardPath, 'utf-8');
+    // Match the IDENTIFIER (function/type definition tokens), not
+    // the comment/historical references. We allow the symbols to
+    // appear in JSDoc strings explaining the consolidation.
+    expect(src).not.toMatch(/\bexport\s+function\s+classifySparqlForm\b/);
+    expect(src).not.toMatch(/\bexport\s+function\s+emptyQueryResultForKind\b/);
+    expect(src).not.toMatch(/\bexport\s+type\s+SparqlForm\b/);
+    expect(src).not.toMatch(/\bfunction\s+classifySparqlForm\b/);
+    expect(src).not.toMatch(/\bfunction\s+emptyQueryResultForKind\b/);
+  });
 });

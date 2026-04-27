@@ -33,7 +33,6 @@ import { ethers } from 'ethers';
 import {
   DKGQueryEngine, QueryHandler,
   detectSparqlQueryForm, emptyResultForForm,
-  emptyQueryResultForKind,
   validateReadOnlySparql,
   type QueryRequest, type QueryResponse, type QueryAccessConfig, type LookupType,
   type SparqlQueryForm,
@@ -3160,22 +3159,25 @@ export class DKGAgent {
       throw new Error(`SPARQL rejected: ${readOnlyGuard.reason}`);
     }
 
-    // PR #229 bot review round 17 (r17-2) + A-1 follow-up: fail-closed
-    // denials MUST preserve the `QueryResult` shape for the SPARQL form
-    // the caller issued — otherwise a `CONSTRUCT`/`DESCRIBE` caller
-    // branching on `result.quads !== undefined` misinterprets an auth
-    // denial as an empty-bindings SELECT success, and an ASK caller sees
+    // PR #229 bot review round 17 (r17-2) + A-1 follow-up + r30-3
+    // consolidation: fail-closed denials MUST preserve the `QueryResult`
+    // shape for the SPARQL form the caller issued — otherwise a
+    // `CONSTRUCT`/`DESCRIBE` caller branching on
+    // `result.quads !== undefined` misinterprets an auth denial as an
+    // empty-bindings SELECT success, and an ASK caller sees
     // `bindings: []` instead of the expected `[{ result: 'false' }]`.
-    // `emptyQueryResultForKind(sparql)` returns a fresh, shape-matched
-    // object on every call so deny branches never share a mutable
-    // reference. `sparqlForm` is retained because a few callers below
-    // still pass the detected form through for telemetry.
+    //
+    // `detectSparqlQueryForm` + `emptyResultForForm` is the SINGLE
+    // canonical empty-shape pair (see `sparql-guard.ts`). Detect once
+    // at the top so every fail-closed return below can reuse the form
+    // without re-parsing the query string. `emptyResultForForm`
+    // returns a fresh, shape-matched object on every call so deny
+    // branches never share a mutable reference.
     const sparqlForm: SparqlQueryForm = detectSparqlQueryForm(sparql);
-    void sparqlForm;
 
     if (opts.contextGraphId && !(await this.canReadContextGraph(opts.contextGraphId))) {
       this.log.info(ctx, `Query denied for private context graph "${opts.contextGraphId}"`);
-      return emptyQueryResultForKind(sparql);
+      return emptyResultForForm(sparqlForm);
     }
 
     // A-1 review: `/api/query` passes the raw JSON body through, so
@@ -3297,7 +3299,7 @@ export class DKGAgent {
             ctx,
             `WM cross-agent query denied: missing/invalid agentAuthSignature for ${opts.agentAddress}`,
           );
-          return emptyQueryResultForKind(sparql);
+          return emptyResultForForm(sparqlForm);
         }
       } else {
         this.log.warn(
@@ -3350,7 +3352,7 @@ export class DKGAgent {
         ctx,
         `WM query denied: caller=${callerAgentAddressStr} cannot read agentAddress=${agentAddressStr} — A-1 isolation`,
       );
-      return emptyQueryResultForKind(sparql);
+      return emptyResultForForm(sparqlForm);
     }
 
     // When no context graph is specified, exclude private CGs the caller cannot
@@ -3364,7 +3366,7 @@ export class DKGAgent {
       // aggregates (ASK, COUNT) or projections that omit graph/subject.
       if (excludeGraphPrefixes.length > 0 && this.sparqlReferencesPrivateGraphs(sparql, excludeGraphPrefixes)) {
         this.log.info(ctx, 'Query denied: SPARQL references private context graphs the caller cannot read');
-        return emptyQueryResultForKind(sparql);
+        return emptyResultForForm(sparqlForm);
       }
     }
 

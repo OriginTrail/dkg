@@ -11,7 +11,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   validateReadOnlySparql,
-  emptyQueryResultForKind,
+  emptyResultForSparql,
 } from './sparql-guard.js';
 
 /**
@@ -308,7 +308,7 @@ export class DKGQueryEngine implements QueryEngine {
       // for an ASK would look like a SELECT result and break clients that
       // rely on ASK's boolean binding; CONSTRUCT/DESCRIBE must carry
       // `quads: []`. Delegate to the shared kind-aware empty-result helper.
-      return emptyQueryResultForKind(sparql);
+      return emptyResultForSparql(sparql);
     }
 
     // Spec §14 trust-gradient filter — only enforced on verified-memory
@@ -366,7 +366,7 @@ export class DKGQueryEngine implements QueryEngine {
         // Preserve the query form so CONSTRUCT/DESCRIBE callers see
         // `{ bindings: [], quads: [] }` rather than a shapeless deny, and
         // ASK callers see `{ bindings: [{ result: 'false' }] }`.
-        return emptyQueryResultForKind(sparql);
+        return emptyResultForSparql(sparql);
       }
       effectiveSparql = rewritten;
     }
@@ -981,7 +981,7 @@ function injectMinTrustFilter(sparql: string, minTrust: number): string | null {
   // SPARQL string literal (`"{json: 1}"`, `"OPTIONAL field"`,
   // `"SELECT * FROM x"`) or inside a `# …` line comment caused the
   // rewriter to bail out and the caller fell through to
-  // `emptyQueryResultForKind(...)`. That silently fail-closed every
+  // `emptyResultForSparql(...)`. That silently fail-closed every
   // legitimate high-trust query whose payload happened to mention
   // those tokens — text/JSON/log content is the most common case.
   //
