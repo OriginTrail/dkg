@@ -32,6 +32,7 @@ import {
   encodeGossipEnvelope,
   type GossipEnvelopeMsg,
 } from '@origintrail-official/dkg-core';
+import { classifyGossipBytes } from '../src/signed-gossip.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const AGENT_SRC = resolve(__dirname, '..', 'src');
@@ -275,5 +276,86 @@ describe('A-15: PROD-BUG — DKGAgent publishes gossip WITHOUT signing', () => {
       offenders.length,
       `Empty publisher signatures found (BUGS_FOUND.md A-15):\n${JSON.stringify(offenders, null, 2)}`,
     ).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PR #229 bot review r3131820480 (signed-gossip.ts:136) — parsed-but-invalid
+// envelopes MUST NOT be downgraded to `'raw'`. With `strictGossipEnvelope`
+// off (rolling upgrade), the dispatcher accepts `'raw'` as legacy unsigned
+// gossip; the original `classifyGossipBytes` branch returned `'raw'` for any
+// envelope whose `version` byte didn't match `GOSSIP_ENVELOPE_VERSION`, for
+// missing-signature envelopes, and for missing-payload envelopes. A peer
+// could therefore bypass signing by setting `version='99.0.0'`. The fix
+// classifies all such cases as `'forged'`, and the dispatcher already drops
+// `'forged'`. These tests pin the new contract.
+// ---------------------------------------------------------------------------
+describe('classifyGossipBytes — parsed-but-invalid envelopes are FORGED, not RAW (r3131820480)', () => {
+  const CG = 'cg-classify';
+
+  function makeEnvelopeBytes(over: Partial<GossipEnvelopeMsg> = {}): Uint8Array {
+    const wallet = ethers.Wallet.createRandom();
+    const ts = '2026-04-20T00:00:00.000Z';
+    const payload = new TextEncoder().encode('p');
+    // Build a valid envelope first, then mutate.
+    const signingPayload = computeGossipSigningPayload('PUBLISH_REQUEST', CG, ts, payload);
+    const sigHex = wallet.signMessageSync(signingPayload);
+    const env: GossipEnvelopeMsg = {
+      version: '10.0.0',
+      type: 'PUBLISH_REQUEST',
+      contextGraphId: CG,
+      agentAddress: wallet.address,
+      timestamp: ts,
+      signature: ethers.getBytes(sigHex),
+      payload,
+      ...over,
+    };
+    return encodeGossipEnvelope(env);
+  }
+
+  it('returns "raw" for bytes that do not decode as an envelope at all', () => {
+    // Random non-protobuf bytes — `decodeGossipEnvelope` throws → 'raw'.
+    // (Legacy unsigned gossip is the legitimate `'raw'` case.)
+    const garbage = new Uint8Array([0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
+    expect(classifyGossipBytes(garbage)).toBe('raw');
+  });
+
+  it('returns "forged" for an envelope with a wrong version byte (was "raw" → bypass)', () => {
+    const bytes = makeEnvelopeBytes({ version: '99.0.0' });
+    expect(classifyGossipBytes(bytes)).toBe('forged');
+  });
+
+  it('returns "forged" for an envelope with no signature (was "raw" → bypass)', () => {
+    const bytes = makeEnvelopeBytes({ signature: new Uint8Array(0) });
+    expect(classifyGossipBytes(bytes)).toBe('forged');
+  });
+
+  it('returns "forged" for an envelope with no payload (was "raw" → bypass)', () => {
+    const bytes = makeEnvelopeBytes({ payload: new Uint8Array(0) });
+    expect(classifyGossipBytes(bytes)).toBe('forged');
+  });
+
+  it('returns "forged" for an envelope whose signer does not match agentAddress', () => {
+    const wallet = ethers.Wallet.createRandom();
+    const otherWallet = ethers.Wallet.createRandom();
+    const ts = '2026-04-20T00:00:00.000Z';
+    const payload = new TextEncoder().encode('p');
+    const signingPayload = computeGossipSigningPayload('PUBLISH_REQUEST', CG, ts, payload);
+    const sigHex = wallet.signMessageSync(signingPayload);
+    const env: GossipEnvelopeMsg = {
+      version: '10.0.0',
+      type: 'PUBLISH_REQUEST',
+      contextGraphId: CG,
+      agentAddress: otherWallet.address, // claims someone ELSE signed it
+      timestamp: ts,
+      signature: ethers.getBytes(sigHex),
+      payload,
+    };
+    expect(classifyGossipBytes(encodeGossipEnvelope(env))).toBe('forged');
+  });
+
+  it('returns "verified" for a properly-signed envelope (positive control)', () => {
+    const bytes = makeEnvelopeBytes();
+    expect(classifyGossipBytes(bytes)).toBe('verified');
   });
 });

@@ -152,9 +152,52 @@ describe('@unit v10 Hub audit', function () {
     });
 
     it('success path: sets new contracts and re-initializes them', async () => {
-      // Deploy a disposable DKGStakingConvictionNFT whose `initialize()`
-      // tolerates missing StakingStorage/Chronos and reads Token from the
-      // Hub. This exercises the full setAndReinitializeContracts sequence.
+      // E-1 happy path. We exercise the full
+      // `setAndReinitializeContracts` sequence (phase 1: register names;
+      // phase 3: call `initialize()` on each `reinitializeContracts`
+      // entry) using `DKGStakingConvictionNFT` as the disposable
+      // candidate. The NFT's `initialize()` resolves several names from
+      // the Hub (`StakingV10`, `StakingStorage`, `ConvictionStakingStorage`,
+      // `Chronos`, `RandomSamplingStorage`, `ShardingTableStorage`,
+      // `ShardingTable`, `Ask`, `ProfileStorage`, `Token`); the audit
+      // fixture only deploys `Hub`, `ParametersStorage`, `Token`, so we
+      // pre-register placeholder addresses for the remaining names. The
+      // NFT casts each one to a typed interface but never calls into them
+      // during `initialize()`, so a non-zero EOA placeholder is fine for
+      // the purpose of this audit (we only care that the reinit
+      // **succeeds and registers `E1StakingNFT`**, not that the NFT is
+      // actually wired against real storage contracts here — that case
+      // is covered exhaustively by `DKGStakingConvictionNFT.test.ts`).
+      //
+      // PR #229 follow-up: previously the placeholders were skipped and
+      // the test reverted with `ContractDoesNotExist("StakingV10")` from
+      // `DKGStakingConvictionNFT.initialize` line 234. The audit's
+      // intent is to pin the success path of the **Hub** mechanism, not
+      // the NFT's wiring; pre-registering the placeholders is the
+      // correct setup for a hub-level audit.
+      // The Hub set is keyed by address, so the placeholders MUST be
+      // pairwise distinct — `_setContractAddress` reverts with
+      // `AddressAlreadyInSet` when a single address is registered under
+      // two different names. Pull a unique signer slot for each name.
+      const requiredNames = [
+        'StakingV10',
+        'StakingStorage',
+        'ConvictionStakingStorage',
+        'Chronos',
+        'RandomSamplingStorage',
+        'ShardingTableStorage',
+        'ShardingTable',
+        'Ask',
+        'ProfileStorage',
+      ];
+      for (let i = 0; i < requiredNames.length; i++) {
+        // Skip account[0] (deployer / hub owner) and accounts already
+        // bound to other roles in `deployFixture`. Slot `i + 5` lands
+        // safely after `HubOwner` (slot 0) and any other reserved
+        // accounts; hardhat exposes 20 signers so this fits.
+        await HubContract.setContractAddress(requiredNames[i], accounts[i + 5].address);
+      }
+
       const NFTFactory = await hre.ethers.getContractFactory(
         'DKGStakingConvictionNFT',
       );

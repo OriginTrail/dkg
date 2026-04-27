@@ -25,7 +25,8 @@
  * (CLI-9, CLI-16 blocks) and continue to exercise the wired-up daemon.
  */
 import { describe, it, expect } from 'vitest';
-import { isValidContextGraphId, sanitizeRevertMessage } from '../src/daemon.js';
+import { ServerResponse } from 'node:http';
+import { isValidContextGraphId, sanitizeRevertMessage, jsonResponse } from '../src/daemon.js';
 
 describe('isValidContextGraphId — segment-aware path-traversal rejection', () => {
   // Real traversal patterns: every segment that EQUALS `.` or `..`
@@ -151,5 +152,101 @@ describe('sanitizeRevertMessage — redacts every revert-blob shape recognised b
     const dt = Date.now() - t0;
     expect(out).toContain('data="<redacted>"');
     expect(dt).toBeLessThan(100);
+  });
+});
+
+/**
+ * PR #229 CodeQL js/stack-trace-exposure (http-utils.ts:206) —
+ * `jsonResponse` is the single egress point for every JSON HTTP body the
+ * daemon writes. Forty-plus call sites pass `{ error: err.message }`
+ * straight to it, and Node.js / ethers / libp2p errors regularly embed
+ * absolute filesystem paths and v8 stack frames inside `err.message`. A
+ * regression at any one of those callers would leak server-internal paths
+ * to the wire; the contract tested here is that the egress sink physically
+ * scrubs that information before serialising it, so the leak class is
+ * defended at the boundary regardless of how individual handlers compose
+ * their error bodies.
+ */
+function captureJsonResponse(status: number, data: unknown): { status: number; body: any } {
+  let writtenStatus = -1;
+  let writtenBody = '';
+  const fakeRes = {
+    writeHead(s: number) {
+      writtenStatus = s;
+    },
+    end(body: string) {
+      writtenBody = body;
+    },
+  } as unknown as ServerResponse;
+  jsonResponse(fakeRes, status, data);
+  return { status: writtenStatus, body: JSON.parse(writtenBody) };
+}
+
+describe('jsonResponse — stack-trace / path scrubbing on egress', () => {
+  it('strips multi-line v8 stack frames from { error } responses', () => {
+    const errMsg =
+      'TypeError: foo is undefined\n' +
+      '    at handler (/Users/runner/work/dkg/packages/cli/src/daemon/routes/foo.ts:123:45)\n' +
+      '    at process.processTicksAndRejections (node:internal/process/task_queues:95:5)';
+    const { body } = captureJsonResponse(500, { error: errMsg });
+    expect(body.error).toBe('TypeError: foo is undefined');
+    expect(body.error).not.toMatch(/at handler/);
+    expect(body.error).not.toMatch(/\/Users\//);
+  });
+
+  it('redacts inline absolute POSIX paths with line:col in error messages', () => {
+    const errMsg = 'cannot find module (/Users/runner/work/dkg/packages/foo/index.js:12:34)';
+    const { body } = captureJsonResponse(500, { error: errMsg });
+    expect(body.error).toContain('<redacted-path>');
+    expect(body.error).not.toMatch(/\/Users\//);
+  });
+
+  it('also scrubs the same patterns from `message` / `detail` / `details` fields', () => {
+    const errMsg = 'boom\n    at /tmp/secrets/loader.ts:1:1';
+    const { body } = captureJsonResponse(500, {
+      error: errMsg,
+      message: errMsg,
+      detail: errMsg,
+      details: errMsg,
+    });
+    for (const k of ['error', 'message', 'detail', 'details'] as const) {
+      expect(body[k]).toBe('boom');
+    }
+  });
+
+  it('leaves a clean error string untouched (no false-positive scrubbing)', () => {
+    const msg = 'paranet not found';
+    const { body } = captureJsonResponse(404, { error: msg });
+    expect(body.error).toBe(msg);
+  });
+
+  it('does NOT scrub non-error fields that legitimately contain `/`', () => {
+    // Successful responses commonly include URN/URL/path-shaped IDs in
+    // result fields; the scrubber must not touch those.
+    const ok = {
+      ok: true,
+      contextGraphId: 'urn:cg:my-project',
+      uri: 'http://example.org/resource/42',
+      filePath: '/var/lib/dkg/data.ttl', // legitimate, NOT an error
+    };
+    const { body } = captureJsonResponse(200, ok);
+    expect(body).toEqual(ok);
+  });
+
+  it('handles nested arrays/objects without mangling them', () => {
+    const payload = {
+      results: [
+        { id: 'a', error: 'oops\n    at /opt/app/x.js:1:2' },
+        { id: 'b', value: 7 },
+      ],
+    };
+    const { body } = captureJsonResponse(200, payload);
+    expect(body.results[0].error).toBe('oops');
+    expect(body.results[1]).toEqual({ id: 'b', value: 7 });
+  });
+
+  it('preserves bigint serialisation (regression — original BigInt-as-string contract)', () => {
+    const { body } = captureJsonResponse(200, { count: 42n });
+    expect(body.count).toBe('42');
   });
 });

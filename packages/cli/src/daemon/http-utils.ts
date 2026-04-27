@@ -187,6 +187,73 @@ export function parsePublishRequestBody(
   };
 }
 
+/**
+ * PR #229 CodeQL js/stack-trace-exposure: route handlers across the
+ * daemon return errors as `{ error: err.message }`, and `err.message`
+ * sometimes carries the *first frame* of a stack — e.g. node's built-in
+ * `TypeError`s embed `(/abs/path/file.js:line:col)` directly in the
+ * message, and ethers/libp2p re-throw with file paths spliced into the
+ * message too. CodeQL flags every reachable `res.end(JSON.stringify(...))`
+ * sink for this; rather than auditing all 40+ call sites individually we
+ * scrub the egress here so a malformed callsite physically cannot leak
+ * server-internal paths or `at <fn> (path:line:col)` frames to the wire.
+ *
+ * The redaction is deliberately narrow:
+ *   1. Strip `\n   at <fn> (...)` continuation lines (Node.js v8 stack
+ *      frame format).
+ *   2. Replace any absolute filesystem path containing a line:col suffix
+ *      with `<redacted-path>` — covers the common `(/Users/.../foo.ts:12:34)`
+ *      and `at /Users/.../foo.ts:12:34` patterns produced by Error.stack.
+ *   3. Leave purely human messages untouched (no file path, no line:col).
+ */
+function stripStackFrames(input: string): string {
+  return input
+    // Multi-frame stack: drop everything from the first newline that
+    // begins with whitespace + "at " onwards.
+    .replace(/\n\s+at [\s\S]*$/m, '')
+    // Absolute POSIX path with :line:col (with or without surrounding
+    // parens). Matches `/Users/.../foo.ts:12:34` and `/usr/...:1:1`.
+    .replace(/\(?\/(?:[^\s()]+\/)+[^\s()]+\.(?:js|ts|cjs|mjs|jsx|tsx)(?::\d+)?(?::\d+)?\)?/g, '<redacted-path>')
+    // Windows-style absolute path with :line:col (defence-in-depth even
+    // though the daemon doesn't run on Windows in CI).
+    .replace(/\(?[A-Za-z]:[\\/](?:[^\s()]+[\\/])+[^\s()]+\.(?:js|ts|cjs|mjs|jsx|tsx)(?::\d+)?(?::\d+)?\)?/g, '<redacted-path>');
+}
+
+const ERROR_SHAPED_KEYS = new Set(['error', 'message', 'detail', 'details']);
+
+function scrubResponseBody(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(scrubResponseBody);
+  if (value !== null && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      if (ERROR_SHAPED_KEYS.has(k) && typeof v === 'string') {
+        // Conventional error fields → scrub stack-frame patterns.
+        // Successful-response fields with the same key would also be
+        // scrubbed, which is acceptable: they should never contain stack
+        // traces and `<redacted-path>` is harmless on legitimate strings
+        // that don't match the pattern (the regex never fires).
+        out[k] = stripStackFrames(v);
+      } else if (v !== null && typeof v === 'object') {
+        // Recurse into arrays/objects so nested error fields (common in
+        // batch / aggregate responses) are scrubbed too.
+        out[k] = scrubResponseBody(v);
+      } else {
+        // Leaf primitives (string/number/bool/bigint/null) outside the
+        // error-shaped key set are passed through untouched. This keeps
+        // success-shape fields like `filePath`, `uri`, `contextGraphId`
+        // — which legitimately contain `/` — pristine.
+        out[k] = v;
+      }
+    }
+    return out;
+  }
+  // Top-level non-object values (string/number/etc.) — leave alone.
+  // We never scrub a bare string at the top level because callers pass
+  // structured objects; bare strings would be ambiguous re: error vs
+  // legitimate identifier.
+  return value;
+}
+
 export function jsonResponse(
   res: ServerResponse,
   status: number,
@@ -197,7 +264,8 @@ export function jsonResponse(
     corsOrigin !== undefined
       ? corsOrigin
       : (((res as any).__corsOrigin as string | null) ?? null);
-  const body = JSON.stringify(data, (_key, value) =>
+  const scrubbed = scrubResponseBody(data);
+  const body = JSON.stringify(scrubbed, (_key, value) =>
     typeof value === "bigint" ? value.toString() : value,
   );
   res.writeHead(status, {

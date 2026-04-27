@@ -404,6 +404,93 @@ describe('[Q-1] DKGQueryEngine minTrust is graph-scope only — PROD-BUG', () =>
     // returned because the rewriter bailed on VALUES.
     expect(result.bindings.map((b) => b['l'])).toEqual(['"H"']);
   });
+
+  // ─────────────────────────────────────────────────────────────────────
+  // PR #229 bot review r3131942426 (dkg-query-engine.ts:754)
+  //
+  // A query like
+  //     SELECT ?o WHERE { ?s <p> ?o . FILTER(?o > 10) }
+  // splits into two top-level statements: `?s <p> ?o` and
+  // `FILTER(?o > 10)`. Pre-fix, the subject scanner saw the FILTER
+  // statement, the regex didn't match, `injectMinTrustFilter` returned
+  // null, and the whole query collapsed to `[]` whenever
+  // `minTrust > SelfAttested`. The new behaviour: top-level FILTER /
+  // BIND clauses are skipped during the subject scan and survive
+  // verbatim in the rewritten WHERE (since the rewriter appends trust-
+  // filter triples to the original trimmed inner).
+  // ─────────────────────────────────────────────────────────────────────
+  it('honors _minTrust on a BGP whose top-level statements include a FILTER — bot review r3131942426', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const consensus = contextGraphVerifiedMemoryUri(CG, 'consensus-verified');
+    await store.insert([
+      quad('urn:doc1', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.ConsensusVerified}"`, consensus),
+      quad('urn:doc2', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.ConsensusVerified}"`, consensus),
+      quad('urn:doc1', 'http://schema.org/score', '"5"^^<http://www.w3.org/2001/XMLSchema#integer>', consensus),
+      quad('urn:doc2', 'http://schema.org/score', '"42"^^<http://www.w3.org/2001/XMLSchema#integer>', consensus),
+    ]);
+    const sparql = [
+      'SELECT ?s ?score WHERE {',
+      '  ?s <http://schema.org/score> ?score .',
+      '  FILTER(?score > 10)',
+      '}',
+    ].join('\n');
+    const result = await engine.query(
+      sparql,
+      { contextGraphId: CG, view: 'verified-memory', _minTrust: TrustLevel.ConsensusVerified },
+    );
+    // Only doc2 has score > 10. Pre-fix this would have returned [] —
+    // not because the data didn't match but because the rewriter
+    // returned null and the caller fail-closed the entire query.
+    expect(result.bindings.map((b) => b['s'])).toEqual(['urn:doc2']);
+  });
+
+  it('honors _minTrust on a BGP whose top-level statements include a BIND — bot review r3131942426', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const consensus = contextGraphVerifiedMemoryUri(CG, 'consensus-verified');
+    await store.insert([
+      quad('urn:x', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.ConsensusVerified}"`, consensus),
+      quad('urn:x', 'http://schema.org/title', '"Hello"', consensus),
+    ]);
+    const sparql = [
+      'SELECT ?s ?upper WHERE {',
+      '  ?s <http://schema.org/title> ?title .',
+      '  BIND(UCASE(?title) AS ?upper)',
+      '}',
+    ].join('\n');
+    const result = await engine.query(
+      sparql,
+      { contextGraphId: CG, view: 'verified-memory', _minTrust: TrustLevel.ConsensusVerified },
+    );
+    expect(result.bindings.map((b) => b['upper'])).toEqual(['"HELLO"']);
+  });
+
+  it('does not regress: trust-failed FILTER queries still return [] (filter is applied)', async () => {
+    // Negative control: FILTER queries that legitimately match nothing
+    // because the trust threshold excludes the only candidate must
+    // STILL return [] (post-rewrite the trust filter rejects the row).
+    // This pins that we didn't accidentally remove the trust check by
+    // letting FILTER short-circuit the rewriter.
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const consensus = contextGraphVerifiedMemoryUri(CG, 'consensus-verified');
+    await store.insert([
+      quad('urn:lo', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.Unverified}"`, consensus),
+      quad('urn:lo', 'http://schema.org/score', '"99"^^<http://www.w3.org/2001/XMLSchema#integer>', consensus),
+    ]);
+    const sparql = [
+      'SELECT ?s ?score WHERE {',
+      '  ?s <http://schema.org/score> ?score .',
+      '  FILTER(?score > 10)',
+      '}',
+    ].join('\n');
+    const result = await engine.query(
+      sparql,
+      { contextGraphId: CG, view: 'verified-memory', _minTrust: TrustLevel.ConsensusVerified },
+    );
+    expect(result.bindings).toEqual([]);
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

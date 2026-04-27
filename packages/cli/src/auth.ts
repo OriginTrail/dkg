@@ -1097,6 +1097,15 @@ function installSignedRequestResponseGuard(
 
   const origWriteHead = res.writeHead.bind(res) as typeof res.writeHead;
   const origEnd = res.end.bind(res) as typeof res.end;
+  // PR #229 bot review r3146563620 (auth.ts:1244): a handler can leak
+  // response bytes through `res.write()` (which auto-flushes implicit
+  // headers on first call) or via the explicit `res.flushHeaders()`,
+  // before the deferred HMAC verification flips `pending.verified`.
+  // Bind the originals so we can safely replay them after verification.
+  const origWrite = res.write.bind(res) as typeof res.write;
+  const origFlushHeaders = (res as ServerResponse & { flushHeaders?: () => void }).flushHeaders
+    ? ((res as ServerResponse & { flushHeaders: () => void }).flushHeaders.bind(res) as () => void)
+    : undefined;
   // `spent === true` means we already rewrote the response to 401;
   // every subsequent writeHead/end call from the original handler
   // collapses to a silent no-op so we never get an ERR_STREAM_WRITE_
@@ -1160,14 +1169,47 @@ function installSignedRequestResponseGuard(
       req.resume();
     });
 
+  // PR #229 bot review r3146563616 (auth.ts:1170): the prior check
+  //   `req.complete || req.readableEnded` && `drainedBytes === 0`
+  // was wrong — `req.complete` only means "Node finished parsing" and
+  // `drainedBytes === 0` only means "we have not attached our drain
+  // listeners yet", neither of which is evidence that the wire body
+  // was zero-length. A chunked-or-CL>0 request whose body had been
+  // fully buffered into the socket but never read by the handler would
+  // pass this gate and bind the HMAC to an empty string, accepting
+  // tampered bodies.
+  //
+  // Fix: gate the passive path on the request *framing* declared by
+  // the client. Only short-circuit when the headers prove the request
+  // is body-less (Content-Length: 0, OR no Content-Length and no
+  // Transfer-Encoding — RFC 9112 §6.1: a non-chunked request with no
+  // Content-Length has no body). `Transfer-Encoding: chunked` is
+  // unconditionally rejected here because we cannot tell from the
+  // headers alone whether the chunks were empty; that case MUST flow
+  // through the deferred `attachDrainListeners` → `waitForRequestEnd`
+  // path so the HMAC is bound to whatever bytes actually arrived.
+  const isFramingBodylessByHeaders = (): boolean => {
+    const headers = req.headers ?? {};
+    const teRaw = headers['transfer-encoding'];
+    const teHeader = Array.isArray(teRaw) ? teRaw.join(', ') : (teRaw ?? '');
+    if (/chunked/i.test(teHeader)) return false;
+    const clRaw = headers['content-length'];
+    const clHeader = Array.isArray(clRaw) ? clRaw[0] : clRaw;
+    if (typeof clHeader === 'string' && clHeader.length > 0) {
+      const n = Number(clHeader);
+      return Number.isFinite(n) && n <= 0;
+    }
+    // No Content-Length and no chunked → semantically bodyless per RFC.
+    return true;
+  };
+
   const tryPassiveEmptyBodyVerification = (): boolean => {
     const pending = (req as unknown as {
       __dkgSignedAuth?: SignedAuthPending & { verified?: boolean };
     }).__dkgSignedAuth;
     if (!pending || pending.verified) return true;
-    const reqAny = req as IncomingMessage & { complete?: boolean; readableEnded?: boolean };
-    const ended = Boolean(reqAny.complete) || Boolean(reqAny.readableEnded);
-    if (!ended || drainedBytes !== 0) return false;
+    if (!isFramingBodylessByHeaders()) return false;
+    if (drainedBytes !== 0) return false;
     const outcome = verifyHttpSignedRequestAfterBody(req, '');
     if (!outcome.ok) return false;
     pending.verified = true;
@@ -1190,22 +1232,30 @@ function installSignedRequestResponseGuard(
     }
   };
 
-  // A queued writeHead / end emission whose fate depends on the
-  // async drain-and-verify. We hold at most ONE writeHead and
-  // chain end() after. When the handler calls both in quick
-  // succession we must replay them in order so the status
-  // arrives before the payload, preserving the semantics the
-  // handler intended.
+  // A queued writeHead / write / end / flushHeaders emission whose
+  // fate depends on the async drain-and-verify. We replay them in the
+  // exact order the handler emitted them so the status arrives before
+  // the payload, preserving the semantics the handler intended.
+  //
+  // PR #229 r3146563620 follow-up: the queue now also holds `write`
+  // chunks and `flushHeaders` markers — those used to bypass the guard
+  // entirely and stream response bytes to the wire while the HMAC was
+  // still unverified.
   type Queued =
     | { kind: 'writeHead'; args: Parameters<ServerResponse['writeHead']> }
-    | { kind: 'end'; args: Parameters<ServerResponse['end']> };
+    | { kind: 'write'; args: Parameters<ServerResponse['write']> }
+    | { kind: 'end'; args: Parameters<ServerResponse['end']> }
+    | { kind: 'flushHeaders' };
   const queue: Queued[] = [];
 
   const flushQueue = (): void => {
     for (const q of queue) {
       try {
         if (q.kind === 'writeHead') origWriteHead(...q.args);
-        else origEnd(...q.args);
+        else if (q.kind === 'write') origWrite(...q.args);
+        else if (q.kind === 'flushHeaders') {
+          if (origFlushHeaders) origFlushHeaders();
+        } else origEnd(...q.args);
       } catch {
         // res destroyed mid-flush; give up gracefully.
       }
@@ -1267,4 +1317,36 @@ function installSignedRequestResponseGuard(
     deferAndResolve();
     return res;
   }) as ServerResponse['end'];
+
+  // PR #229 r3146563620: also wrap `write` so streaming response bytes
+  // cannot be flushed to the wire ahead of HMAC verification. Node will
+  // implicitly call `writeHead(200)` on the first `write()` call if the
+  // handler did not call it explicitly, so wrapping `write` is what
+  // physically prevents the data leak.
+  (res as ServerResponse).write = ((...args: Parameters<ServerResponse['write']>) => {
+    if (spent) return false;
+    const p = pending();
+    if (!p || p.verified) return origWrite(...args);
+    if (tryPassiveEmptyBodyVerification()) return origWrite(...args);
+    queue.push({ kind: 'write', args });
+    deferAndResolve();
+    return true;
+  }) as ServerResponse['write'];
+
+  if (origFlushHeaders) {
+    (res as ServerResponse & { flushHeaders: () => void }).flushHeaders = (() => {
+      if (spent) return;
+      const p = pending();
+      if (!p || p.verified) {
+        origFlushHeaders();
+        return;
+      }
+      if (tryPassiveEmptyBodyVerification()) {
+        origFlushHeaders();
+        return;
+      }
+      queue.push({ kind: 'flushHeaders' });
+      deferAndResolve();
+    }) as () => void;
+  }
 }

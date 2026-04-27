@@ -654,7 +654,14 @@ describe('persistChatTurnImpl — rdfString escaping + dateTime literal', () => 
     const { agent, publishes } = makeCapturingAgent();
     await persistChatTurnImpl(agent, makeRuntime(), makeMessage('hi'), {} as State, {});
     const ts = publishes[0].quads.find((q) => q.predicate === `${SCHEMA}dateCreated` && q.subject.startsWith('urn:dkg:chat:msg:'))!;
-    expect(ts.object).toMatch(new RegExp(`\\^\\^<${XSD_DATETIME}>$`));
+    // PR #229 CodeQL js/incomplete-hostname-regexp: the previous form
+    //   new RegExp(`\\^\\^<${XSD_DATETIME}>$`)
+    // interpolated the literal URL `http://www.w3.org/...` straight into a
+    // regex without escaping the `.` chars, so the pattern matched
+    // "wXwXorg" / "wAwAorg" / etc. The intent is a literal tail-match —
+    // build the regex from the escaped URL string.
+    const escaped = XSD_DATETIME.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    expect(ts.object).toMatch(new RegExp(`\\^\\^<${escaped}>$`));
   });
 });
 

@@ -1125,6 +1125,179 @@ describe('httpAuthGuard — signed GET/HEAD requests verify HMAC synchronously',
     expect(handlerCallCount).toBe(0);
   });
 
+  // -------------------------------------------------------------
+  // PR #229 bot review r3146563616 (auth.ts:1170 fast-empty path)
+  //
+  // The original `tryPassiveEmptyBodyVerification` accepted on
+  // `req.complete && drainedBytes === 0`, which is satisfiable by a
+  // *non-empty* `Content-Length` body that the parser had already
+  // buffered before the handler emitted its writeHead. That bound
+  // the HMAC to `""` and let a tampered body slip past auth on any
+  // route whose handler ignored the body.
+  //
+  // The fix gates the fast path on the request's *header framing*
+  // (only Content-Length:0 OR no CL+no chunked qualifies). For a
+  // Content-Length>0 body whose handler ignores the body, the guard
+  // must now drain → verify the actual bytes → 401 on mismatch.
+  // -------------------------------------------------------------
+  it('r3146563616: signed POST with Content-Length>0 + tampered sig + IGNORED body returns 401 (not silently 200)', async () => {
+    // The body the handler ignores. Pre-fix the empty-body fast path
+    // would have accepted a tampered signature because it never read
+    // these bytes.
+    const wireBody = '{"tampered":true}';
+    const ts = String(Date.now());
+    const nonce = `n-${randomBytes(8).toString('hex')}`;
+    // Signature is COMPLETELY UNRELATED to the wire body. Pre-fix the
+    // guard would have bound this to `""` (because drainedBytes was
+    // 0 when writeHead fired) and verified against the empty-body
+    // canonical string — which the attacker can also produce. The
+    // post-fix guard drains the wire bytes and verifies against
+    // those, surfacing the mismatch.
+    const forgedSig = 'beef'.repeat(16);
+    const { hostname, port } = new URL(baseUrl);
+    const rawReq =
+      `POST /api/agents HTTP/1.1\r\n` +
+      `Host: ${hostname}:${port}\r\n` +
+      `Authorization: Bearer ${VALID}\r\n` +
+      `Content-Length: ${Buffer.byteLength(wireBody)}\r\n` +
+      `x-dkg-timestamp: ${ts}\r\n` +
+      `x-dkg-nonce: ${nonce}\r\n` +
+      `x-dkg-signature: ${forgedSig}\r\n` +
+      `Connection: close\r\n` +
+      `\r\n` +
+      wireBody;
+    const res = await sendRawHttp(Number(port), rawReq);
+    expect(res.status).toBe(401);
+    // The 401 must come from the response-guard rewrite (not from the
+    // route handler succeeding) — its body identifies the rejection.
+    expect(res.body.toLowerCase()).toContain('signed request rejected');
+    expect(res.body).not.toContain('"ok":true');
+  });
+
+  it('r3146563616: signed POST with Content-Length>0 and HONESTLY-signed body (handler ignores body) still returns 200', async () => {
+    // Counterpoint: a legitimate signed body whose handler chose not
+    // to read it must still pass — the drain-and-verify path is
+    // expected to bind the HMAC to the actual wire bytes and pass.
+    const wireBody = '{"legitimate":true}';
+    const ts = String(Date.now());
+    const nonce = `n-${randomBytes(8).toString('hex')}`;
+    const goodSig = sigFor(VALID, 'POST', '/api/agents', ts, nonce, wireBody);
+    const { hostname, port } = new URL(baseUrl);
+    const rawReq =
+      `POST /api/agents HTTP/1.1\r\n` +
+      `Host: ${hostname}:${port}\r\n` +
+      `Authorization: Bearer ${VALID}\r\n` +
+      `Content-Length: ${Buffer.byteLength(wireBody)}\r\n` +
+      `x-dkg-timestamp: ${ts}\r\n` +
+      `x-dkg-nonce: ${nonce}\r\n` +
+      `x-dkg-signature: ${goodSig}\r\n` +
+      `Connection: close\r\n` +
+      `\r\n` +
+      wireBody;
+    const res = await sendRawHttp(Number(port), rawReq);
+    expect(res.status).toBe(200);
+  });
+
+  // -------------------------------------------------------------
+  // PR #229 bot review r3146563620 (auth.ts:1244 write/flushHeaders)
+  //
+  // The response guard wrapped writeHead+end but NOT res.write or
+  // res.flushHeaders, so a handler calling res.write() before the
+  // deferred HMAC verification finished could leak response bytes
+  // to a request whose signed body had not yet been authenticated.
+  // The fix wraps res.write and res.flushHeaders too: they queue
+  // until verification succeeds, then replay; or get rewritten to
+  // 401 on failure.
+  // -------------------------------------------------------------
+  it('r3146563620: handler that streams via res.write() with TAMPERED sig + non-empty body still 401s (no leaked bytes)', async () => {
+    // Spin up a dedicated server whose handler calls res.write()
+    // BEFORE res.end(), without ever calling readBody*(). Pre-fix
+    // the wrap-only-writeHead/end guard would have let those
+    // res.write() chunks reach the wire while the deferred drain
+    // was still in flight; post-fix they're queued and the guard
+    // physically rewrites the response to 401 on signature
+    // mismatch.
+    const writeServer = createServer((req: IncomingMessage, res: ServerResponse) => {
+      if (!httpAuthGuard(req, res, true, validTokens, null)) return;
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      // Stream-style emission: each .write() chunk MUST stay
+      // queued until the HMAC has been verified against the
+      // body that actually arrived on the wire.
+      res.write('chunk-1\n');
+      res.write('chunk-2\n');
+      res.end('tail\n');
+    });
+    await new Promise<void>(r => writeServer.listen(0, '127.0.0.1', r));
+    try {
+      const port = (writeServer.address() as { port: number }).port;
+      const wireBody = '{"x":1}';
+      const ts = String(Date.now());
+      const nonce = `n-${randomBytes(8).toString('hex')}`;
+      const forgedSig = 'feed'.repeat(16);
+      const rawReq =
+        `POST /api/agents HTTP/1.1\r\n` +
+        `Host: 127.0.0.1:${port}\r\n` +
+        `Authorization: Bearer ${VALID}\r\n` +
+        `Content-Length: ${Buffer.byteLength(wireBody)}\r\n` +
+        `x-dkg-timestamp: ${ts}\r\n` +
+        `x-dkg-nonce: ${nonce}\r\n` +
+        `x-dkg-signature: ${forgedSig}\r\n` +
+        `Connection: close\r\n` +
+        `\r\n` +
+        wireBody;
+      const res = await sendRawHttp(Number(port), rawReq);
+      expect(res.status).toBe(401);
+      // The 401 body is the JSON envelope from the guard — none of
+      // the streamed chunks the handler tried to write must appear
+      // in the response.
+      expect(res.body).not.toContain('chunk-1');
+      expect(res.body).not.toContain('chunk-2');
+      expect(res.body).not.toContain('tail');
+    } finally {
+      await new Promise<void>(r => writeServer.close(() => r()));
+    }
+  });
+
+  it('r3146563620: handler that streams via res.write() with VALID sig replays writes after verification (no truncation)', async () => {
+    // Counterpoint: a correctly-signed request whose handler streams
+    // via res.write must still receive the full streamed body. The
+    // queued chunks are flushed in order after the deferred drain +
+    // verify returns ok.
+    const writeServer = createServer((req: IncomingMessage, res: ServerResponse) => {
+      if (!httpAuthGuard(req, res, true, validTokens, null)) return;
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.write('chunk-1\n');
+      res.write('chunk-2\n');
+      res.end('tail\n');
+    });
+    await new Promise<void>(r => writeServer.listen(0, '127.0.0.1', r));
+    try {
+      const port = (writeServer.address() as { port: number }).port;
+      const wireBody = '{"x":1}';
+      const ts = String(Date.now());
+      const nonce = `n-${randomBytes(8).toString('hex')}`;
+      const goodSig = sigFor(VALID, 'POST', '/api/agents', ts, nonce, wireBody);
+      const rawReq =
+        `POST /api/agents HTTP/1.1\r\n` +
+        `Host: 127.0.0.1:${port}\r\n` +
+        `Authorization: Bearer ${VALID}\r\n` +
+        `Content-Length: ${Buffer.byteLength(wireBody)}\r\n` +
+        `x-dkg-timestamp: ${ts}\r\n` +
+        `x-dkg-nonce: ${nonce}\r\n` +
+        `x-dkg-signature: ${goodSig}\r\n` +
+        `Connection: close\r\n` +
+        `\r\n` +
+        wireBody;
+      const res = await sendRawHttp(Number(port), rawReq);
+      expect(res.status).toBe(200);
+      expect(res.body).toContain('chunk-1');
+      expect(res.body).toContain('chunk-2');
+      expect(res.body).toContain('tail');
+    } finally {
+      await new Promise<void>(r => writeServer.close(() => r()));
+    }
+  });
+
   it('handles a signed GET marks request.__dkgSignedAuth.verified so later readBody is a no-op', async () => {
     // White-box test: spin up an in-process server that reaches into
     // the request object and pins that __dkgSignedAuth.verified === true

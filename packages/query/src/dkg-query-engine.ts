@@ -780,6 +780,30 @@ function injectMinTrustFilter(sparql: string, minTrust: number): string | null {
   const subjectIris = new Set<string>();
   const subjectPrefixed = new Set<string>();
   for (const stmt of statements) {
+    // PR #229 bot review r3131942426 (dkg-query-engine.ts:754):
+    // top-level `FILTER(...)` / `BIND(... AS ?x)` clauses share the
+    // statement-list with triple patterns and have no subject token.
+    // Pre-fix the subject regex below didn't match either keyword,
+    // returned `null`, and `injectMinTrustFilter()` propagated `null`
+    // — collapsing every query like
+    //   SELECT ?s WHERE { ?s <p> ?o . FILTER(?o > 10) }
+    // into an empty result whenever `minTrust > SelfAttested`.
+    //
+    // Skip these clauses in the subject scan: they don't introduce
+    // new subjects and they survive verbatim because the rewritten
+    // WHERE is built by appending trust-filter triples to the
+    // *original* trimmed inner (see `rewrittenBody` below) — the
+    // FILTER/BIND text stays exactly where the caller put it.
+    //
+    // Anti-recursion: only skip TOP-LEVEL FILTER/BIND. Nested ones
+    // (e.g. `FILTER EXISTS { ... }`) are already rejected by the
+    // `\{|\}` and `FILTER\s+EXISTS` checks at line 753 / 754, so
+    // by the time we reach this loop we're guaranteed to be looking
+    // at a flat FILTER(<expr>) or BIND(<expr> AS ?x).
+    const stmtTrimmed = stmt.trim();
+    if (/^FILTER\s*\(/i.test(stmtTrimmed) || /^BIND\s*\(/i.test(stmtTrimmed)) {
+      continue;
+    }
     // First non-whitespace token is the subject. Accept:
     //   - variable (`?x`, `$x`)
     //   - absolute IRI (`<urn:x>`)

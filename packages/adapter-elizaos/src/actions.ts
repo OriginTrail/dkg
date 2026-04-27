@@ -431,27 +431,50 @@ function sessionRootCacheKey(
   return `${destContextGraphId}\u0000${destAssertionName}\u0000${sessionUri}`;
 }
 
-function shouldEmitSessionRoot(
-  runtime: unknown,
-  sessionUri: string,
-  destContextGraphId: string,
-  destAssertionName: string,
-): boolean {
-  const key = sessionRootCacheKey(destContextGraphId, destAssertionName, sessionUri);
-  let seen: Set<string>;
+// PR #229 bot review r3131820483 (actions.ts:453): the previous
+// implementation marked the session root as emitted at the moment we
+// DECIDED to emit it, before `ensureContextGraphLocal()` and
+// `assertion.write()` had a chance to fail. If the persist threw,
+// the cache was poisoned: any retry on the same room saw "already
+// emitted", skipped the `schema:Conversation` root, and the room was
+// permanently missing its session-root triple.
+//
+// Split the cache surface in two:
+//   - `wouldEmitSessionRoot()` is a PURE peek (no mutation) used to
+//     decide whether to include the root quads in the persist batch;
+//   - `markSessionRootEmitted()` is called ONLY after the persist
+//     succeeds, so a failing write leaves the cache untouched and the
+//     next attempt re-emits the root.
+function getSessionRootSeenSet(runtime: unknown): Set<string> {
   if (runtime !== null && typeof runtime === 'object') {
     let s = emittedSessionRootsByRuntime.get(runtime as object);
     if (!s) {
       s = new Set<string>();
       emittedSessionRootsByRuntime.set(runtime as object, s);
     }
-    seen = s;
-  } else {
-    seen = emittedSessionRootsAnon;
+    return s;
   }
-  if (seen.has(key)) return false;
-  seen.add(key);
-  return true;
+  return emittedSessionRootsAnon;
+}
+
+function wouldEmitSessionRoot(
+  runtime: unknown,
+  sessionUri: string,
+  destContextGraphId: string,
+  destAssertionName: string,
+): boolean {
+  const key = sessionRootCacheKey(destContextGraphId, destAssertionName, sessionUri);
+  return !getSessionRootSeenSet(runtime).has(key);
+}
+
+function markSessionRootEmitted(
+  runtime: unknown,
+  sessionUri: string,
+  destContextGraphId: string,
+  destAssertionName: string,
+): void {
+  const key = sessionRootCacheKey(destContextGraphId, destAssertionName, sessionUri);
+  getSessionRootSeenSet(runtime).add(key);
 }
 
 /** Test-only: drop every recorded session-root emission. */
@@ -961,6 +984,9 @@ export async function persistChatTurnImpl(
   const assistantTs = deriveAssistantTimestamp(ts);
 
   let quads: ChatQuad[];
+  // PR #229 r3131820483: tracked across both branches so we can
+  // promote the session-root cache AFTER assertion.write() succeeds.
+  let didIncludeSessionRoot = false;
 
   if (mode === 'assistant-reply') {
     // 2nd-pass A6: append-only assistant-reply path. When the caller
@@ -1037,6 +1063,16 @@ export async function persistChatTurnImpl(
         assistantText,
         turnKey,
       ).filter((q) => q.predicate !== `${DKG_ONT_NS}replyTo`);
+      // PR #229 r3131820483: peek-only (no mutation). The cache is
+      // promoted to "emitted" AFTER assertion.write() succeeds; if
+      // the persist throws we leave the cache untouched so a retry
+      // re-emits the session root.
+      didIncludeSessionRoot = wouldEmitSessionRoot(
+        runtime,
+        sessionUri,
+        contextGraphId,
+        assertionName,
+      );
       quads = [
         // r21-3: only emit the session root the first time this
         // runtime sees this `sessionUri` in the current process.
@@ -1047,7 +1083,7 @@ export async function persistChatTurnImpl(
         // assertionName) so writing the same session into two
         // different stores still emits a `schema:Conversation`
         // root in BOTH places.
-        ...(shouldEmitSessionRoot(runtime, sessionUri, contextGraphId, assertionName)
+        ...(didIncludeSessionRoot
           ? buildSessionEntityQuads(sessionUri, sessionId)
           : []),
         ...buildHeadlessUserStubQuads(userStubUri, sessionUri, ts, turnKey),
@@ -1084,6 +1120,16 @@ export async function persistChatTurnImpl(
       ?? (state as any)?.lastAssistantReply
       ?? '';
 
+    // PR #229 r3131820483: peek-only (no mutation). The cache is
+    // promoted to "emitted" AFTER assertion.write() succeeds; if
+    // the persist throws we leave the cache untouched so a retry
+    // re-emits the session root.
+    didIncludeSessionRoot = wouldEmitSessionRoot(
+      runtime,
+      sessionUri,
+      contextGraphId,
+      assertionName,
+    );
     quads = [
       // r21-3: only emit the session root the first time this
       // runtime sees this `sessionUri` in the current process —
@@ -1095,7 +1141,7 @@ export async function persistChatTurnImpl(
       // r24-1: scope by the destination (contextGraphId,
       // assertionName) so the root re-emits in a second
       // store that has not yet received it.
-      ...(shouldEmitSessionRoot(runtime, sessionUri, contextGraphId, assertionName)
+      ...(didIncludeSessionRoot
         ? buildSessionEntityQuads(sessionUri, sessionId)
         : []),
       ...buildUserMessageQuads(userMsgUri, sessionUri, ts, userText, turnKey),
@@ -1134,6 +1180,13 @@ export async function persistChatTurnImpl(
   // A1/A3: write into the per-agent WM assertion graph, not the
   // broadcast data graph.
   await agent.assertion.write(contextGraphId, assertionName, quads);
+  // PR #229 r3131820483: cache promotion is the LAST step. Until
+  // assertion.write() resolves we MUST keep the session-root cache
+  // untouched, otherwise a failed persist would poison the cache
+  // and the retry would skip the `schema:Conversation` root.
+  if (didIncludeSessionRoot) {
+    markSessionRootEmitted(runtime, sessionUri, contextGraphId, assertionName);
+  }
   // r21-1: callers that take the headless assistant-reply path get
   // back the dedicated `headlessTurnUri` so any follow-up
   // attribution (e.g. `recordPersistedUserTurn`) keys against the

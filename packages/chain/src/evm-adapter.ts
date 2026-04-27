@@ -1788,12 +1788,29 @@ export class EVMChainAdapter implements ChainAdapter {
     } catch {
       throw new Error('DKGStakingConvictionNFT contract not deployed.');
     }
-    const nftAddr = await nft.getAddress();
 
-    if (this.contracts.token && amount > 0n) {
-      const currentAllowance: bigint = await this.contracts.token.allowance(this.signer.address, nftAddr);
+    // PR #229 follow-up: TRAC flows
+    //   user --(token.transferFrom by StakingV10)--> StakingStorage
+    // i.e. the ERC-20 caller in the inner `token.transferFrom(staker,
+    // stakingStorage, amount)` is `StakingV10`, NOT the NFT wrapper.
+    // The previous version of this adapter granted allowance to the
+    // NFT contract address, which `transferFrom` ignores; the call
+    // therefore reverted with `ERC20InsufficientAllowance` (caught as
+    // `require(false)` because the staking-conviction tests look at
+    // the outer `eth_estimateGas`). Approve `StakingV10` directly so
+    // its `transferFrom` succeeds.
+    let stakingV10: Contract | undefined;
+    try {
+      stakingV10 = await this.resolveContract('StakingV10');
+    } catch {
+      stakingV10 = undefined;
+    }
+
+    if (this.contracts.token && amount > 0n && stakingV10) {
+      const stakingV10Addr = await stakingV10.getAddress();
+      const currentAllowance: bigint = await this.contracts.token.allowance(this.signer.address, stakingV10Addr);
       if (currentAllowance < amount) {
-        await (await this.contracts.token.approve(nftAddr, ethers.MaxUint256)).wait();
+        await (await this.contracts.token.approve(stakingV10Addr, ethers.MaxUint256)).wait();
       }
     }
 

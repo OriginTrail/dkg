@@ -119,12 +119,27 @@ export function tryUnwrapSignedEnvelope(
 
 /**
  * Classification helper used by ingress logging/metrics to distinguish
- * "legacy raw" from "tampered" without relaxing the dispatch rule. Returns:
- *   - 'raw'       — bytes are not an envelope.
- *   - 'verified'  — well-formed envelope with a valid signature that matches
- *                   `envelope.agentAddress`.
- *   - 'forged'    — well-formed envelope whose signature did not recover or
- *                   whose recovered signer did not match `agentAddress`.
+ * "legacy raw" from "tampered" without relaxing the dispatch rule.
+ *
+ * PR #229 bot review r3131820480 (signed-gossip.ts:136): pre-fix this
+ * helper classified parsed envelopes with a wrong `version` (or empty
+ * signature/payload) as `'raw'`. With `strictGossipEnvelope` disabled
+ * for rolling upgrades, the dispatcher would then accept those bytes
+ * as legacy unsigned gossip and bypass signature verification — a peer
+ * could downgrade an envelope to "legacy raw" by setting an unknown
+ * `version` byte. Parsed-but-invalid envelopes must classify as
+ * `'forged'`, not `'raw'`. `'raw'` is reserved for byte streams that
+ * are not envelopes at all (i.e. `decodeGossipEnvelope` threw).
+ *
+ * Returns:
+ *   - 'raw'       — bytes did NOT decode as a gossip envelope at all
+ *                   (legacy / unsigned protobuf wire format).
+ *   - 'verified'  — well-formed envelope with a valid signature that
+ *                   matches `envelope.agentAddress`.
+ *   - 'forged'    — bytes decoded as an envelope but failed any of the
+ *                   structural / cryptographic checks (wrong version,
+ *                   missing signature, missing payload, recovery failure,
+ *                   signer mismatch). Dispatch MUST drop these.
  */
 export function classifyGossipBytes(data: Uint8Array): 'raw' | 'verified' | 'forged' {
   let envelope: GossipEnvelopeMsg;
@@ -133,9 +148,13 @@ export function classifyGossipBytes(data: Uint8Array): 'raw' | 'verified' | 'for
   } catch {
     return 'raw';
   }
-  if (envelope.version !== GOSSIP_ENVELOPE_VERSION) return 'raw';
-  if (!envelope.signature || envelope.signature.length === 0) return 'raw';
-  if (!envelope.payload || envelope.payload.length === 0) return 'raw';
+  // From here on the bytes WERE an envelope. Any structural failure
+  // means the sender attempted to forge / downgrade an envelope and
+  // must NOT be re-promoted to "legacy raw" — that's exactly the
+  // bypass r3131820480 closes.
+  if (envelope.version !== GOSSIP_ENVELOPE_VERSION) return 'forged';
+  if (!envelope.signature || envelope.signature.length === 0) return 'forged';
+  if (!envelope.payload || envelope.payload.length === 0) return 'forged';
   try {
     const signingPayload = computeGossipSigningPayload(
       envelope.type,
