@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
+import { homedir } from 'os';
 import { DkgNodePlugin } from '../src/DkgNodePlugin.js';
 import { DkgChannelPlugin } from '../src/DkgChannelPlugin.js';
 import type { OpenClawPluginApi, OpenClawTool } from '../src/types.js';
@@ -2463,6 +2464,53 @@ describe('DkgNodePlugin', () => {
     expect(result).toBeUndefined();
   });
 
+  it('R16.2 — chat-turn watermark stateDir prefers api.workspaceDir over ~/.openclaw fallback', () => {
+    // Regression for R16.2: previously the stateDir fallback chain went
+    // straight to `~/.openclaw` when `runtime.state.resolveStateDir()` and
+    // `OPENCLAW_STATE_DIR` were both absent, so two workspaces on the
+    // same machine would share `chat-turn-watermarks.json`. The new
+    // fallback prefers `api.workspaceDir + '/.openclaw'` when present.
+    const prevEnv = process.env.OPENCLAW_STATE_DIR;
+    delete process.env.OPENCLAW_STATE_DIR;
+    try {
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: false },
+        memory: { enabled: false },
+      } as any);
+      const mockApi: OpenClawPluginApi = {
+        config: {},
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+        workspaceDir: '/tmp/dkg-r162-workspace',
+      } as unknown as OpenClawPluginApi;
+      plugin.register(mockApi);
+      const ctw = (plugin as any).chatTurnWriter;
+      expect(ctw).toBeDefined();
+      // ChatTurnWriter stores the resolved stateDir privately and writes
+      // `<stateDir>/dkg-adapter/chat-turn-watermarks.json`. Inspecting
+      // `watermarkFilePath` confirms the workspace-derived path won.
+      const watermarkPath: string = (ctw as any).watermarkFilePath;
+      // Normalize separators for cross-platform path comparison (Windows
+      // path.join produces backslashes from a forward-slash workspaceDir).
+      const normalized = watermarkPath.replace(/\\/g, '/');
+      expect(normalized).toContain('/tmp/dkg-r162-workspace/.openclaw/dkg-adapter/chat-turn-watermarks.json');
+      // Must NOT have fallen back to the home dir.
+      expect(normalized).not.toContain(homedir().replace(/\\/g, '/') + '/.openclaw/dkg-adapter');
+      // The home-dir fallback warn must NOT have fired.
+      const warnSpy = mockApi.logger.warn as any;
+      const homeFallbackWarn = warnSpy.mock.calls.find((c: any[]) =>
+        String(c[0] ?? '').includes('Could not resolve a workspace-scoped state dir'),
+      );
+      expect(homeFallbackWarn).toBeUndefined();
+    } finally {
+      if (prevEnv !== undefined) process.env.OPENCLAW_STATE_DIR = prevEnv;
+    }
+  });
+
   it('warns once when legacy OriginTrail Game config is still present', () => {
     const plugin = new DkgNodePlugin({
       daemonUrl: 'http://localhost:9200',
@@ -2484,8 +2532,15 @@ describe('DkgNodePlugin', () => {
     plugin.register(mockApi);
     plugin.register(mockApi);
 
-    expect(warnCalls).toHaveLength(1);
-    expect(String(warnCalls[0]?.[0])).toContain('dkg-node.game.enabled');
+    // R16.2 introduced a separate warn when the state dir falls back to
+    // `~/.openclaw` because `workspaceDir` and `OPENCLAW_STATE_DIR` are
+    // both absent in this fixture. Filter to the game-config warn so the
+    // assertion remains scoped to the legacy-detection invariant.
+    const gameWarns = warnCalls.filter((args) =>
+      String(args?.[0] ?? '').includes('dkg-node.game.enabled'),
+    );
+    expect(gameWarns).toHaveLength(1);
+    expect(String(gameWarns[0]?.[0])).toContain('dkg-node.game.enabled');
   });
 
   it('upgrades from setup-runtime to full runtime and registers the memory slot capability', () => {

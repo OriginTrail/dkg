@@ -108,6 +108,29 @@ describe('handleBeforePromptBuild (W3 auto-recall)', () => {
     expect(result).toBeUndefined();
   });
 
+  it('R16.3 — caps the auto-recall query at AUTO_RECALL_QUERY_MAX_CHARS to bound SPARQL fan-out', async () => {
+    // Regression for R16.3: a pasted log/code block should not produce
+    // a multi-KB query that `DkgMemorySearchManager.runSearch` expands
+    // into hundreds of SPARQL filter terms. The handler must truncate
+    // before calling searchNarrow so daemon-side per-turn cost is bounded.
+    const { plugin } = mkPlugin();
+    const observed: string[] = [];
+    const proto = DkgMemorySearchManager.prototype;
+    proto.searchNarrow = vi.fn().mockImplementation(async (q: string) => {
+      observed.push(q);
+      return [];
+    });
+    const huge = 'lorem ipsum '.repeat(400); // ~4800 chars
+    await (plugin as any).handleBeforePromptBuild(
+      { messages: [{ role: 'user', content: huge }] },
+      { sessionKey: 'sk' },
+    );
+    expect(observed.length).toBe(1);
+    expect(observed[0].length).toBeLessThanOrEqual(500);
+    // First chars match the original (truncation, not transformation).
+    expect(huge.startsWith(observed[0])).toBe(true);
+  });
+
   it('returns recalled-memory block when searchNarrow returns hits', async () => {
     const { plugin } = mkPlugin();
     stubSearchNarrow(plugin, [

@@ -85,6 +85,16 @@ const NODE_PEER_ID_DEFERRED_RETRY_DELAY_MS = 5_000;
  */
 const AVAILABLE_CONTEXT_GRAPH_CACHE_TTL_MS = 30_000;
 
+/**
+ * R16.3 — Maximum length of the auto-recall query passed to
+ * `DkgMemorySearchManager.searchNarrow` from the `before_prompt_build`
+ * hook. The manager expands every 2+ char token into the SPARQL filter,
+ * so a pasted log/code block can blow up the fan-out cost. 500 chars
+ * preserves enough signal for natural-language turns while bounding
+ * worst-case daemon work per prompt build.
+ */
+const AUTO_RECALL_QUERY_MAX_CHARS = 500;
+
 export class DkgNodePlugin {
   private readonly config: DkgOpenClawConfig;
 
@@ -330,9 +340,31 @@ export class DkgNodePlugin {
     const daemonUrl = this.config.daemonUrl ?? 'http://127.0.0.1:9200';
     this.client = new DkgDaemonClient({ baseUrl: daemonUrl });
     this.initialized = true;
-    const stateDir = (api as any)?.runtime?.state?.resolveStateDir?.()
-      ?? process.env.OPENCLAW_STATE_DIR
-      ?? `${homedir()}/.openclaw`;
+    // R16.2 — Watermark file MUST live in a per-workspace location.
+    // `ChatTurnWriter` persists session watermarks across restarts; if two
+    // workspaces on the same machine share `~/.openclaw/dkg-adapter/chat-turn-watermarks.json`,
+    // one workspace can skip/backfill turns based on the other's session
+    // state. Fall back order:
+    //   1. `runtime.state.resolveStateDir()` — gateway-provided, workspace-scoped.
+    //   2. `OPENCLAW_STATE_DIR` env override — operator-controlled, opt-in.
+    //   3. `api.workspaceDir + .openclaw` — workspace-scoped derived path.
+    //   4. `~/.openclaw` — last resort; logged as a warning so ops can fix.
+    const workspaceDir = (api as any)?.workspaceDir;
+    const homeDir = `${homedir()}/.openclaw`;
+    let stateDir =
+      (api as any)?.runtime?.state?.resolveStateDir?.() ??
+      process.env.OPENCLAW_STATE_DIR ??
+      (typeof workspaceDir === 'string' && workspaceDir.length > 0
+        ? `${workspaceDir}/.openclaw`
+        : undefined) ??
+      homeDir;
+    if (stateDir === homeDir) {
+      api.logger.warn?.(
+        '[dkg] Could not resolve a workspace-scoped state dir (api.runtime.state.resolveStateDir / OPENCLAW_STATE_DIR / api.workspaceDir all unavailable); ' +
+        `falling back to '${homeDir}'. Two workspaces on the same machine will share chat-turn watermarks. ` +
+        'Set OPENCLAW_STATE_DIR explicitly to silence this.',
+      );
+    }
     this.chatTurnWriter = new ChatTurnWriter({ client: this.client, logger: api.logger, stateDir });
     // Hook installation is a runtime-only side effect — `setup-only`
     // metadata loads must not wire `before_prompt_build` / `agent_end` /
@@ -1704,8 +1736,19 @@ export class DkgNodePlugin {
     const lastUser = [...messages].reverse().find((m) => m?.role === 'user');
     if (!lastUser) return undefined;
 
-    const query = extractUserTextFromContent(lastUser.content);
-    if (!query || query.length < 2) return undefined;
+    const rawQuery = extractUserTextFromContent(lastUser.content);
+    if (!rawQuery || rawQuery.length < 2) return undefined;
+    // R16.3 — Cap the auto-recall query to bound SPARQL fan-out cost.
+    // `DkgMemorySearchManager.runSearch` expands every 2+ char token into
+    // the SPARQL filter; a pasted log/code block (multi-KB) would generate
+    // a massive 6-query fan-out on every turn. The 250ms `Promise.race`
+    // below only stops *waiting* — the queries keep running daemon-side
+    // after timeout (no AbortSignal threading yet — plan N4). Truncating
+    // here keeps the daemon's per-turn compute budget bounded.
+    const query =
+      rawQuery.length > AUTO_RECALL_QUERY_MAX_CHARS
+        ? rawQuery.slice(0, AUTO_RECALL_QUERY_MAX_CHARS)
+        : rawQuery;
 
     try {
       const manager = new DkgMemorySearchManager({
