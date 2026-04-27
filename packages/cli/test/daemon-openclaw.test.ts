@@ -408,6 +408,32 @@ describe('local agent semantic wake helper', () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
+  it('does not send unauthenticated wake requests to non-loopback URLs', async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }));
+
+    const result = await notifyLocalAgentIntegrationWake(
+      makeConfig({
+        localAgentIntegrations: {
+          openclaw: {
+            enabled: true,
+            transport: {
+              kind: 'openclaw-channel',
+              wakeUrl: 'https://example.com/semantic-enrichment/wake',
+              wakeAuth: 'none',
+            },
+          },
+        },
+      }),
+      'openclaw',
+      { kind: 'semantic_enrichment', eventKind: 'chat_turn', eventId: 'evt-1' },
+      undefined,
+      fetchSpy as any,
+    );
+
+    expect(result).toEqual({ status: 'skipped', reason: 'wake_unavailable' });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
   it('skips gateway wake auth mode because the daemon has no OpenClaw gateway credentials', async () => {
     const fetchSpy = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }));
 
@@ -935,6 +961,108 @@ describe('best-effort semantic enqueue helper', () => {
     expect(res.statusCode).toBe(404);
     expect(JSON.parse(res.body)).toEqual({
       error: 'Semantic enrichment event not found: evt-large-body',
+    });
+  });
+
+  it('cleans event provenance and semantic count when semantic append insert fails', async () => {
+    const req = new PassThrough() as any;
+    req.method = 'POST';
+    req.headers = {
+      'x-dkg-local-agent-integration': 'openclaw',
+      'x-dkg-bridge-token': 'bridge-token',
+    };
+    req.socket = { remoteAddress: '127.0.0.1' };
+    const res = {
+      statusCode: 0,
+      body: '',
+      writeHead(status: number) {
+        this.statusCode = status;
+      },
+      end(body: string) {
+        this.body = body;
+      },
+    };
+    const assertionUri = 'did:dkg:context-graph:cg1/assertion/peer/doc';
+    const payload = buildFileSemanticEventPayload({
+      assertionUri,
+      contextGraphId: 'cg1',
+      fileHash: 'sha256:file',
+      importStartedAt: '2026-04-15T12:00:00.000Z',
+      filename: 'doc.md',
+    });
+    const deleteByPattern = vi.fn().mockResolvedValue(undefined);
+    const insert = vi.fn().mockRejectedValue(new Error('insert failed'));
+    const query = vi.fn(async (sparql: string) => {
+      if (sparql.includes('sourceFileHash')) {
+        return {
+          bindings: [{
+            fileHash: '"sha256:file"',
+            importStartedAt: '"2026-04-15T12:00:00.000Z"',
+          }],
+        };
+      }
+      if (sparql.includes('ASK')) return { value: false };
+      if (sparql.includes('semanticTripleCount')) return { bindings: [] };
+      return { bindings: [] };
+    });
+    const body = JSON.stringify({
+      eventId: 'evt-partial',
+      leaseOwner: 'host-a:123:boot-1',
+      triples: [{
+        subject: 'urn:dkg:entity:acme',
+        predicate: 'http://schema.org/name',
+        object: '"Acme"',
+      }],
+    });
+
+    const responsePromise = handleSemanticEnrichmentRoutes({
+      req,
+      res: res as any,
+      path: '/api/semantic-enrichment/events/append',
+      config: makeConfig({
+        localAgentIntegrations: {
+          openclaw: {
+            enabled: true,
+          },
+        },
+      }),
+      dashDb: {
+        getSemanticEnrichmentEvent: vi.fn().mockReturnValue({
+          id: 'evt-partial',
+          kind: 'file_import',
+          idempotency_key: 'file',
+          payload_json: JSON.stringify(payload),
+          status: 'leased',
+          attempts: 1,
+          max_attempts: 5,
+          lease_owner: 'host-a:123:boot-1',
+          lease_expires_at: Date.now() + 60_000,
+          next_attempt_at: Date.now(),
+          semantic_triple_count: 0,
+          last_error: null,
+          created_at: Date.now(),
+          updated_at: Date.now(),
+        }),
+      },
+      agent: {
+        resolveAgentByToken: () => undefined,
+        store: { query, insert, deleteByPattern },
+      },
+      extractionStatus: new Map(),
+      requestToken: 'bridge-token',
+      bridgeAuthToken: 'bridge-token',
+    } as any);
+    req.end(body);
+
+    await expect(responsePromise).rejects.toThrow('insert failed');
+    expect(deleteByPattern).toHaveBeenCalledWith({
+      subject: 'urn:dkg:semantic-enrichment:evt-partial',
+      graph: assertionUri,
+    });
+    expect(deleteByPattern).toHaveBeenCalledWith({
+      subject: assertionUri,
+      predicate: 'http://dkg.io/ontology/semanticTripleCount',
+      graph: 'did:dkg:context-graph:cg1/_meta',
     });
   });
 
@@ -2773,7 +2901,7 @@ describe('local agent integration registry helpers', () => {
     expect(integration.transport.wakeAuth).toBe('bridge-token');
   });
 
-  it('drops custom non-loopback bridge-token wake metadata from integration updates', () => {
+  it('drops custom non-loopback wake metadata from integration updates', () => {
     const config = makeConfig();
 
     const integration = updateLocalAgentIntegration(config, 'openclaw', {
@@ -2791,6 +2919,16 @@ describe('local agent integration registry helpers', () => {
     expect(integration.transport.kind).toBe('openclaw-channel');
     expect(integration.transport.wakeUrl).toBeUndefined();
     expect(integration.transport.wakeAuth).toBeUndefined();
+
+    const unauthenticated = updateLocalAgentIntegration(config, 'openclaw', {
+      transport: {
+        kind: 'openclaw-channel',
+        wakeUrl: 'https://example.com/semantic-enrichment/wake',
+        wakeAuth: 'none',
+      },
+    });
+    expect(unauthenticated.transport.wakeUrl).toBeUndefined();
+    expect(unauthenticated.transport.wakeAuth).toBeUndefined();
   });
 });
 

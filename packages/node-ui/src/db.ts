@@ -1031,17 +1031,19 @@ export class DashboardDB {
 
   reclaimExpiredSemanticEnrichmentEvents(now: number): number {
     const tx = this.db.transaction((reclaimNow: number) => {
+      const leaseExpiredError = 'Semantic enrichment lease expired before completion';
       const deadLettered = this.db.prepare(`
         UPDATE semantic_enrichment_events
         SET status = 'dead_letter',
             lease_owner = NULL,
             lease_expires_at = NULL,
+            last_error = ?,
             updated_at = ?
         WHERE status = 'leased'
           AND lease_expires_at IS NOT NULL
           AND lease_expires_at < ?
           AND attempts >= max_attempts
-      `).run(reclaimNow, reclaimNow).changes;
+      `).run(leaseExpiredError, reclaimNow, reclaimNow).changes;
 
       const reclaimed = this.stmt('reclaimExpiredSemanticEnrichmentEvents', `
         UPDATE semantic_enrichment_events

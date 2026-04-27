@@ -217,6 +217,7 @@ describe('DashboardDB — semantic enrichment events', () => {
     expect(row!.status).toBe('dead_letter');
     expect(row!.lease_owner).toBeNull();
     expect(row!.lease_expires_at).toBeNull();
+    expect(row!.last_error).toBe('Semantic enrichment lease expired before completion');
     expect(db.getRunnableSemanticEnrichmentEvents(2_000)).toHaveLength(0);
   });
 

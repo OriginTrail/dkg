@@ -88,6 +88,7 @@ export async function notifyLocalAgentIntegrationWake(
 
   const wakeUrl = integration.transport?.wakeUrl?.trim();
   if (!wakeUrl) return { status: 'skipped', reason: 'wake_unavailable' };
+  if (!isSafeBridgeTokenWakeUrl(wakeUrl)) return { status: 'skipped', reason: 'wake_unavailable' };
 
   const wakeAuth = integration.transport?.wakeAuth ?? inferWakeAuthFromUrl(wakeUrl);
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -99,7 +100,6 @@ export async function notifyLocalAgentIntegrationWake(
   }
   if (wakeAuth === 'bridge-token') {
     if (!bridgeAuthToken?.trim()) return { status: 'failed', reason: 'missing_bridge_token' };
-    if (!isSafeBridgeTokenWakeUrl(wakeUrl)) return { status: 'skipped', reason: 'wake_unavailable' };
     headers['x-dkg-bridge-token'] = bridgeAuthToken.trim();
   }
 
@@ -736,6 +736,17 @@ async function semanticEnrichmentAlreadyApplied(
   return result?.value === true;
 }
 
+async function cleanupSemanticEnrichmentEventProvenance(
+  agent: Pick<DKGAgent, 'store'>,
+  graph: string,
+  eventId: string,
+): Promise<void> {
+  await agent.store.deleteByPattern({
+    subject: `urn:dkg:semantic-enrichment:${eventId}`,
+    graph,
+  });
+}
+
 async function readCurrentSemanticTripleCount(
   agent: Pick<DKGAgent, 'store'>,
   contextGraphId: string,
@@ -1237,6 +1248,18 @@ export async function handleSemanticEnrichmentRoutes(ctx: RequestContext): Promi
         try {
           await agent.store.insert(semanticQuads);
         } catch (err: any) {
+          try {
+            await cleanupSemanticEnrichmentEventProvenance(agent, targetGraph, eventId);
+            await agent.store.deleteByPattern({
+              subject: eventPayload.assertionUri,
+              predicate: SEMANTIC_ENRICHMENT_COUNT_PREDICATE,
+              graph: metaGraph,
+            });
+          } catch (cleanupErr: any) {
+            throw new Error(
+              `${err?.message ?? String(err)}; semantic append cleanup failed: ${cleanupErr?.message ?? String(cleanupErr)}`,
+            );
+          }
           if (previousSemanticTripleCountState.exists) {
             try {
               await agent.store.insert([{
@@ -1255,7 +1278,18 @@ export async function handleSemanticEnrichmentRoutes(ctx: RequestContext): Promi
         }
       } else {
         semanticTripleCount = triples.length;
-        await agent.store.insert(semanticQuads);
+        try {
+          await agent.store.insert(semanticQuads);
+        } catch (err: any) {
+          try {
+            await cleanupSemanticEnrichmentEventProvenance(agent, targetGraph, eventId);
+          } catch (cleanupErr: any) {
+            throw new Error(
+              `${err?.message ?? String(err)}; semantic append cleanup failed: ${cleanupErr?.message ?? String(cleanupErr)}`,
+            );
+          }
+          throw err;
+        }
       }
     }
 

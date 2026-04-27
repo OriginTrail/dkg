@@ -130,19 +130,14 @@ export function normalizeLocalAgentTransport(input: unknown): LocalAgentIntegrat
   const wakeUrl = typeof input.wakeUrl === 'string' && input.wakeUrl.trim()
     ? trimTrailingSlashes(input.wakeUrl.trim())
     : undefined;
-  const requestedWakeAuth = input.wakeAuth === 'bridge-token' || input.wakeAuth === 'gateway' || input.wakeAuth === 'none'
-    ? input.wakeAuth
-    : undefined;
+  const safeWakeUrl = wakeUrl && isSafeBridgeTokenWakeUrl(wakeUrl) ? wakeUrl : undefined;
   if (input.wakeAuth === 'bridge-token' || input.wakeAuth === 'gateway' || input.wakeAuth === 'none') {
-    if (input.wakeAuth !== 'bridge-token' || !wakeUrl || isSafeBridgeTokenWakeUrl(wakeUrl)) {
+    if (!wakeUrl || safeWakeUrl) {
       transport.wakeAuth = input.wakeAuth;
     }
   }
-  if (
-    wakeUrl
-    && (requestedWakeAuth !== 'bridge-token' || isSafeBridgeTokenWakeUrl(wakeUrl))
-  ) {
-    transport.wakeUrl = wakeUrl;
+  if (safeWakeUrl) {
+    transport.wakeUrl = safeWakeUrl;
   }
   return Object.keys(transport).length > 0 ? transport : undefined;
 }
