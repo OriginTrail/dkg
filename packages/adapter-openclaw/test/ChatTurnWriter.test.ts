@@ -202,6 +202,33 @@ describe("ChatTurnWriter", () => {
     expect((writer as any).debounceTimers.size).toBe(0);
   });
 
+  it("R17.1 — contentHash distinguishes (a:b, c) from (a, b:c) (no delimiter collision)", () => {
+    // Regression for R17.1: pre-fix, both pairs hashed `${user}:${assistant}`
+    // → "a:b:c" → same digest → cross-path dedup falsely treated distinct
+    // turns as duplicates and skipped persistence. The new structured
+    // encoding via JSON.stringify quotes each segment unambiguously.
+    const dkw = writer as any;
+    const h1 = dkw.contentHash("a:b", "c");
+    const h2 = dkw.contentHash("a", "b:c");
+    expect(h1).not.toBe(h2);
+    // Same values still hash to the same digest (idempotency).
+    expect(dkw.contentHash("a:b", "c")).toBe(h1);
+  });
+
+  it("R17.1 — deterministicTurnId distinguishes (s:1, u, a) from (s, 1:u, a) (no delimiter collision)", () => {
+    // Regression for R17.1: pre-fix, sessionId/user/assistant joined with
+    // raw `:` produced colliding hashes for distinct sessionId-vs-user
+    // splits. The new JSON.stringify encoding quotes each segment.
+    const dkw = writer as any;
+    const id1 = dkw.deterministicTurnId("s:1", "u", "a");
+    const id2 = dkw.deterministicTurnId("s", "1:u", "a");
+    expect(id1).not.toBe(id2);
+    // pairIndex variant: same content + different pairIndex → different ids.
+    const id3 = dkw.deterministicTurnId("s", "u", "a", 0);
+    const id4 = dkw.deterministicTurnId("s", "u", "a", 1);
+    expect(id3).not.toBe(id4);
+  });
+
   it("R15.1 — two legitimate same-content W4b turns within the dedup TTL both persist when messageId is supplied", async () => {
     // Regression for R15.1: previously W4b's pre-persist dedup key was
     // content-only with a 3s TTL, so two legitimate non-LLM turns with

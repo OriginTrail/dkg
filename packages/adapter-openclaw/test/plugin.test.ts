@@ -2403,6 +2403,74 @@ describe('DkgNodePlugin', () => {
     expect(plugin.getClient().baseUrl).toBe('http://localhost:9200');
   });
 
+  it('R17.2 — setup-only registration must NOT construct ChatTurnWriter (no filesystem side effects)', () => {
+    // Regression for R17.2: previously `ChatTurnWriter` was constructed
+    // unconditionally before the `runtimeEnabled` gate, so setup-only
+    // metadata-only loads still ran `mkdirSync` and read the watermark
+    // file. In read-only workspaces that emitted warnings or errors
+    // during what should be a side-effect-free scan. The writer must
+    // now be created lazily inside the runtime-enabled branch.
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: true },
+      memory: { enabled: true },
+    });
+    const mockApi: OpenClawPluginApi = {
+      config: {},
+      registrationMode: 'setup-only',
+      registerTool: () => {},
+      registerHook: () => {},
+      on: () => {},
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    };
+    plugin.register(mockApi);
+    expect((plugin as any).chatTurnWriter).toBeNull();
+  });
+
+  it('R17.2 — setup-only → full re-entry constructs ChatTurnWriter and installs hooks', () => {
+    // Regression for the qa-engineer-flagged R17.2 follow-up: the
+    // first `setup-only` call correctly skips ChatTurnWriter construction
+    // (no FS work in metadata-only mode), but the SECOND call (full)
+    // must then construct it before installHooksIfNeeded runs —
+    // otherwise installHooksIfNeeded's `if (!this.chatTurnWriter) return`
+    // guard silently no-ops and W3 / W4a / W4b never wire up.
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: true },
+      memory: { enabled: true },
+    });
+    const onSpy = vi.fn();
+    const setupOnlyApi: OpenClawPluginApi = {
+      config: {},
+      registrationMode: 'setup-only',
+      registerTool: () => {},
+      registerHook: () => {},
+      on: onSpy,
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    };
+    plugin.register(setupOnlyApi);
+    // Tick 1: setup-only — no ChatTurnWriter, no hooks.
+    expect((plugin as any).chatTurnWriter).toBeNull();
+    expect(onSpy).not.toHaveBeenCalled();
+
+    // Tick 2: full — must construct ChatTurnWriter AND install hooks.
+    const fullApi: OpenClawPluginApi = {
+      config: {},
+      registrationMode: 'full',
+      registerTool: () => {},
+      registerHook: () => {},
+      on: onSpy,
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    };
+    plugin.register(fullApi);
+    expect((plugin as any).chatTurnWriter).not.toBeNull();
+    // At least one typed hook (`before_prompt_build` or `agent_end`)
+    // must have been registered against the now-full api.
+    const typedHookEvents = onSpy.mock.calls.map((c: any[]) => c[0]);
+    expect(typedHookEvents).toContain('before_prompt_build');
+    expect(typedHookEvents).toContain('agent_end');
+  });
+
   it('R14.3 — setup-only registration must NOT install before_prompt_build / agent_end / message:* hooks', () => {
     // Regression for R14.3: `installHooksIfNeeded` previously ran
     // unconditionally in `register()`, so a metadata-only setup-only load

@@ -331,6 +331,13 @@ export class DkgNodePlugin {
         // that and re-install against the current (possibly full-mode)
         // api. Gate on `runtimeEnabled` so a `setup-only` re-entry never
         // wires prompt-injection / turn-persistence hooks (R14.3).
+        //
+        // R17.2 follow-up — `setup-only → full` re-entry: the first call
+        // skipped `ChatTurnWriter` construction (no FS work in metadata-
+        // only mode), so we MUST construct it now before installing
+        // hooks. Without this, `installHooksIfNeeded` early-returns on
+        // null `chatTurnWriter` and W3/W4a/W4b silently never install.
+        this.ensureChatTurnWriter(api);
         this.installHooksIfNeeded(api);
       }
       return;
@@ -340,6 +347,44 @@ export class DkgNodePlugin {
     const daemonUrl = this.config.daemonUrl ?? 'http://127.0.0.1:9200';
     this.client = new DkgDaemonClient({ baseUrl: daemonUrl });
     this.initialized = true;
+    // R17.2 — Defer `ChatTurnWriter` construction to runtime-enabled
+    // modes. The constructor calls `mkdirSync` + reads the watermark
+    // file via `initFromFile`; doing that at `setup-only` load
+    // time is filesystem work in what should be a side-effect-free
+    // metadata scan (and can warn/throw against read-only workspaces).
+    // Idempotent helper — the re-entry branch above also calls it for
+    // the `setup-only → full` upgrade case.
+    if (runtimeEnabled) {
+      this.ensureChatTurnWriter(api);
+      // Hook installation is a runtime-only side effect — `setup-only`
+      // metadata loads must not wire `before_prompt_build` / `agent_end` /
+      // internal `message:*` handlers, which would turn a metadata-only
+      // load into live prompt injection and turn persistence (R14.3).
+      this.installHooksIfNeeded(api);
+    }
+
+    // --- Integration modules ---
+    this.registerIntegrationModules(api, { enableFullRuntime: runtimeEnabled });
+
+    if (runtimeEnabled) {
+      this.registerLocalAgentIntegration(api, registrationMode);
+    }
+  }
+
+  /**
+   * Idempotent constructor for `ChatTurnWriter`. Resolves the per-workspace
+   * `stateDir` (R16.2) and creates the writer if it doesn't exist yet.
+   * Called from BOTH:
+   *   - First-time path inside the `runtimeEnabled` branch.
+   *   - Re-entry path before `installHooksIfNeeded`, to cover the
+   *     `setup-only → full` upgrade where the first call skipped
+   *     construction (R17.2 + qa-engineer follow-up).
+   *
+   * No-op if already constructed.
+   */
+  private ensureChatTurnWriter(api: OpenClawPluginApi): void {
+    if (this.chatTurnWriter) return;
+    if (!this.client) return;
     // R16.2 — Watermark file MUST live in a per-workspace location.
     // `ChatTurnWriter` persists session watermarks across restarts; if two
     // workspaces on the same machine share `~/.openclaw/dkg-adapter/chat-turn-watermarks.json`,
@@ -351,7 +396,7 @@ export class DkgNodePlugin {
     //   4. `~/.openclaw` — last resort; logged as a warning so ops can fix.
     const workspaceDir = (api as any)?.workspaceDir;
     const homeDir = `${homedir()}/.openclaw`;
-    let stateDir =
+    const stateDir =
       (api as any)?.runtime?.state?.resolveStateDir?.() ??
       process.env.OPENCLAW_STATE_DIR ??
       (typeof workspaceDir === 'string' && workspaceDir.length > 0
@@ -366,20 +411,6 @@ export class DkgNodePlugin {
       );
     }
     this.chatTurnWriter = new ChatTurnWriter({ client: this.client, logger: api.logger, stateDir });
-    // Hook installation is a runtime-only side effect — `setup-only`
-    // metadata loads must not wire `before_prompt_build` / `agent_end` /
-    // internal `message:*` handlers, which would turn a metadata-only
-    // load into live prompt injection and turn persistence (R14.3).
-    if (runtimeEnabled) {
-      this.installHooksIfNeeded(api);
-    }
-
-    // --- Integration modules ---
-    this.registerIntegrationModules(api, { enableFullRuntime: runtimeEnabled });
-
-    if (runtimeEnabled) {
-      this.registerLocalAgentIntegration(api, registrationMode);
-    }
   }
 
   /**

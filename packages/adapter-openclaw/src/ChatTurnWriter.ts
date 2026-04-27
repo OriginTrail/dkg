@@ -647,8 +647,20 @@ export class ChatTurnWriter {
    * index) — both paths see the same canonical content for the same
    * exchange and produce the same hash.
    */
+  /**
+   * R17.1 — Hash a STRUCTURED encoding (not raw `:`-joined) so a literal
+   * `:` inside `user` or `assistant` cannot bleed across the boundary
+   * and let two distinct turns collide on the same digest. Without
+   * this, `(user="a:b", assistant="c")` and `(user="a", assistant="b:c")`
+   * both hashed `"a:b:c"` and the cross-path dedup map treated them as
+   * the same turn. `JSON.stringify` quotes and escapes each segment
+   * unambiguously.
+   */
   private contentHash(user: string, assistant: string): string {
-    return createHash("sha256").update(`${user}:${assistant}`).digest("hex").slice(0, 16);
+    return createHash("sha256")
+      .update(JSON.stringify([user, assistant]))
+      .digest("hex")
+      .slice(0, 16);
   }
   private w4aOriginKey(user: string, assistant: string): string {
     return `w4a-content::${this.contentHash(user, assistant)}`;
@@ -689,10 +701,20 @@ export class ChatTurnWriter {
     return this.w4aOriginKey(user, assistant);
   }
 
+  /**
+   * R17.1 — Hash a STRUCTURED encoding (not raw `:`-joined) so a literal
+   * `:` inside any segment cannot let two distinct turns collide. The
+   * raw-join form had the same delimiter-collision bug as `contentHash`:
+   * `(sessionId="s:1", user="u")` and `(sessionId="s", user="1:u")` both
+   * hashed to `"s:1:u:..."`. `JSON.stringify` quotes each segment.
+   */
   private deterministicTurnId(sessionId: string, user: string, assistant: string, pairIndex?: number): string {
-    const indexPart = typeof pairIndex === "number" ? `:${pairIndex}` : "";
-    const combined = `${sessionId}:${user}:${assistant}${indexPart}`;
-    return createHash("sha256").update(combined).digest("hex").slice(0, 16);
+    const parts: unknown[] = [sessionId, user, assistant];
+    if (typeof pairIndex === "number") parts.push(pairIndex);
+    return createHash("sha256")
+      .update(JSON.stringify(parts))
+      .digest("hex")
+      .slice(0, 16);
   }
 
   /**
