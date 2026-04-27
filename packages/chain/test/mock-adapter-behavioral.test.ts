@@ -216,6 +216,99 @@ describe('MockChainAdapter — UAL ranges, publishing, verify', () => {
     expect(evs.some(e => e.data.isPermanent === true)).toBe(true);
   });
 
+  // ─────────────────────────────────────────────────────────────────────────
+  // PR #229 bot review (r3148... — mock-adapter.ts:868). The real EVM
+  // adapter ALSO emits a `V10KnowledgeBatchEmitted` event alongside
+  // `KnowledgeBatchCreated` whenever a V10 batch is published; downstream
+  // V10 consumers (the chain-event-poller's `onUnmatchedBatchCreated` WAL
+  // recovery callback, the publisher's `V10KnowledgeBatchEmitted` matchers)
+  // listen for this name specifically. The mock used to only emit the
+  // plain `KnowledgeBatchCreated` form, which created a divergence: tests
+  // and dev environments using the mock could not exercise WAL recovery
+  // matching against `V10KnowledgeBatchEmitted` because the mock never
+  // produced one.
+  //
+  // These tests pin the emission contract: every V10 publish (regular AND
+  // permanent) MUST surface a `V10KnowledgeBatchEmitted` event with the
+  // schema-shape consumers expect (batchId / merkleRoot / startKAId /
+  // endKAId / isPermanent / txHash). If the mock regresses to NOT emitting
+  // this event, V10 WAL recovery silently fails to find its match.
+  // ─────────────────────────────────────────────────────────────────────────
+  it('r30-6: publishKnowledgeAssets emits V10KnowledgeBatchEmitted with shape parity to the real EVM adapter', async () => {
+    const params = makePublishParams(1);
+    const out = await m.publishKnowledgeAssets(params);
+    const evs: any[] = [];
+    for await (const e of m.listenForEvents({ fromBlock: 0, eventTypes: ['V10KnowledgeBatchEmitted'] })) {
+      evs.push(e);
+    }
+    expect(evs.length).toBe(1);
+    const ev = evs[0];
+    expect(ev.type).toBe('V10KnowledgeBatchEmitted');
+    expect(ev.data.batchId).toBe(out.batchId.toString());
+    expect(ev.data.startKAId).toBe(out.startKAId.toString());
+    expect(ev.data.endKAId).toBe(out.endKAId.toString());
+    expect(ev.data.knowledgeAssetsCount).toBe(params.kaCount.toString());
+    expect(ev.data.txHash).toBe(out.txHash);
+    expect(ev.data.merkleRoot).toMatch(/^0x[0-9a-f]+$/i);
+    expect(ev.data.publisherAddress).toBe(m.signerAddress);
+    expect(ev.data.isPermanent).toBe(false);
+  });
+
+  it('r30-6: publishKnowledgeAssetsPermanent emits V10KnowledgeBatchEmitted with isPermanent=true', async () => {
+    const params = makePublishParams(1);
+    const out = await m.publishKnowledgeAssetsPermanent(params);
+    const evs: any[] = [];
+    for await (const e of m.listenForEvents({ fromBlock: 0, eventTypes: ['V10KnowledgeBatchEmitted'] })) {
+      evs.push(e);
+    }
+    expect(evs.length).toBe(1);
+    expect(evs[0].data.isPermanent).toBe(true);
+    expect(evs[0].data.batchId).toBe(out.batchId.toString());
+    expect(evs[0].data.txHash).toBe(out.txHash);
+  });
+
+  it('r30-6: V10KnowledgeBatchEmitted is emitted IN THE SAME BLOCK as KnowledgeBatchCreated for the same publish', async () => {
+    // The real EVM adapter emits the two events in the same transaction
+    // receipt. Downstream consumers that correlate by blockNumber rely
+    // on this. The mock must mirror that ordering.
+    const out = await m.publishKnowledgeAssets(makePublishParams(1));
+    const all: any[] = [];
+    for await (const e of m.listenForEvents({
+      fromBlock: 0,
+      eventTypes: ['KnowledgeBatchCreated', 'V10KnowledgeBatchEmitted'],
+    })) {
+      all.push(e);
+    }
+    const v10 = all.filter(e => e.type === 'V10KnowledgeBatchEmitted');
+    const created = all.filter(e => e.type === 'KnowledgeBatchCreated');
+    expect(v10.length).toBe(1);
+    expect(created.length).toBe(1);
+    expect(v10[0].blockNumber).toBe(created[0].blockNumber);
+    // Same logical batch — same batchId on both events.
+    expect(v10[0].data.batchId).toBe(out.batchId.toString());
+    expect(created[0].data.batchId).toBe(out.batchId.toString());
+  });
+
+  it('r30-6: multiple V10 publishes each produce one V10KnowledgeBatchEmitted (no missed emissions, no spurious extras)', async () => {
+    // WAL recovery iterates events looking for a matching merkleRoot;
+    // missing OR duplicated emissions both break it. Pin both shapes.
+    const a = await m.publishKnowledgeAssets(makePublishParams(1));
+    const b = await m.publishKnowledgeAssets(makePublishParams(1));
+    const c = await m.publishKnowledgeAssetsPermanent(makePublishParams(1));
+    const evs: any[] = [];
+    for await (const e of m.listenForEvents({ fromBlock: 0, eventTypes: ['V10KnowledgeBatchEmitted'] })) {
+      evs.push(e);
+    }
+    expect(evs.length).toBe(3);
+    expect(evs.map(e => e.data.batchId)).toEqual([
+      a.batchId.toString(),
+      b.batchId.toString(),
+      c.batchId.toString(),
+    ]);
+    // Pin the isPermanent flag pattern across the sequence.
+    expect(evs.map(e => e.data.isPermanent)).toEqual([false, false, true]);
+  });
+
   it('transferNamespace moves reserved ranges + nextId to the new owner and emits NamespaceTransferred', async () => {
     await m.reserveUALRange(5);
     const newOwner = '0x' + '9'.repeat(40);

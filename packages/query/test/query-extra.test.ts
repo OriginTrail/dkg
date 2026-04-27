@@ -1212,3 +1212,130 @@ describe('[Q-1] minTrust survives literals/comments containing braces or keyword
     expect(result.bindings).toEqual([]);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PR #229 bot review (r3148... — dkg-query-engine.ts:939). Three call sites
+// in the engine were finding the WHERE-block close-brace by counting `{` and
+// `}` characters with no awareness of strings/comments/IRIs:
+//
+//   • injectMinTrustFilter (line ≈939)
+//   • wrapWithGraph
+//   • wrapWithGraphUnion
+//
+// A SPARQL string literal carrying a single unbalanced `{` (or `}`), or an
+// IRI containing `{`/`}` characters that escape on the lexer side, drove the
+// counter into negative or unmatched territory. The previous tests in this
+// file used a literal with BALANCED braces (`"{\"key\": 1}"`), so they
+// happened to work despite the bug — they did not exercise the unbalanced
+// path. The cases below pin the truly broken inputs and prove the new
+// findMatchingCloseBrace helper handles them.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('[Q-1] minTrust + view wrapping survive UNBALANCED literal braces (bot r30-6)', () => {
+  it('honors minTrust when a string literal contains a SOLITARY unbalanced `{` (no closing `}`)', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const consensusGraph = contextGraphVerifiedMemoryUri(CG, 'consensus-verified');
+    await store.insert([
+      quad('urn:e1', 'http://schema.org/text', '"open-brace {"', consensusGraph),
+      quad('urn:e1', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.ConsensusVerified}"`, consensusGraph),
+    ]);
+
+    // SPARQL: FILTER(STR(?t) = "{")
+    // Pre-fix: the brace counter saw the lone `{` inside the literal as
+    // an extra block opener and the closing `}` of WHERE re-balanced
+    // depth, so the WHERE-end was located at the WRONG `}`. Result was
+    // either malformed SPARQL or fail-closed empty bindings.
+    const result = await engine.query(
+      'SELECT ?t WHERE { <urn:e1> <http://schema.org/text> ?t . FILTER(STR(?t) = "open-brace {") }',
+      { contextGraphId: CG, view: 'verified-memory', minTrust: TrustLevel.ConsensusVerified },
+    );
+    expect(result.bindings.length).toBe(1);
+  });
+
+  it('honors minTrust when a string literal contains a SOLITARY unbalanced `}` (no opening `{`)', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const consensusGraph = contextGraphVerifiedMemoryUri(CG, 'consensus-verified');
+    await store.insert([
+      quad('urn:e1', 'http://schema.org/text', '"close-brace }"', consensusGraph),
+      quad('urn:e1', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.ConsensusVerified}"`, consensusGraph),
+    ]);
+
+    // SPARQL: FILTER(STR(?t) = "}")
+    // Pre-fix: the brace counter saw the literal `}` as the WHERE-end
+    // immediately after the FILTER opener, truncating the query.
+    const result = await engine.query(
+      'SELECT ?t WHERE { <urn:e1> <http://schema.org/text> ?t . FILTER(STR(?t) = "close-brace }") }',
+      { contextGraphId: CG, view: 'verified-memory', minTrust: TrustLevel.ConsensusVerified },
+    );
+    expect(result.bindings.length).toBe(1);
+  });
+
+  it('honors minTrust when a `# …` line comment contains an unbalanced `{` or `}`', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const consensusGraph = contextGraphVerifiedMemoryUri(CG, 'consensus-verified');
+    await store.insert([
+      quad('urn:e1', 'http://schema.org/name', '"Alice"', consensusGraph),
+      quad('urn:e1', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.ConsensusVerified}"`, consensusGraph),
+    ]);
+
+    // The comment carries a pile of unbalanced braces, mostly the
+    // opening kind. Pre-fix the comment scrub for keyword detection
+    // worked, but the brace counter STILL saw raw text and bailed.
+    const sparql = [
+      'SELECT ?n WHERE {',
+      '  # legacy syntax used to be: { ?s a <X> { fail',
+      '  # and { still { not { closing',
+      '  <urn:e1> <http://schema.org/name> ?n',
+      '}',
+    ].join('\n');
+    const result = await engine.query(sparql, {
+      contextGraphId: CG,
+      view: 'verified-memory',
+      minTrust: TrustLevel.ConsensusVerified,
+    });
+    expect(result.bindings.map((b) => b['n'])).toEqual(['"Alice"']);
+  });
+
+  it('still bails (empty) on a real OPTIONAL after the literal-aware brace counter — no semantic regression', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const consensusGraph = contextGraphVerifiedMemoryUri(CG, 'consensus-verified');
+    await store.insert([
+      quad('urn:e1', 'http://schema.org/name', '"Alice"', consensusGraph),
+      quad('urn:e1', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.ConsensusVerified}"`, consensusGraph),
+    ]);
+
+    // Even with the much smarter brace counter, the existing semantic
+    // refusal of OPTIONAL/UNION/etc. inside the WHERE block still fires
+    // — the only thing the new helper changes is the *location* of the
+    // closing brace, not whether the content is allowed.
+    const result = await engine.query(
+      'SELECT ?n WHERE { <urn:e1> <http://schema.org/name> ?n . OPTIONAL { ?n <http://schema.org/x> ?z } # has "}" comment\n }',
+      { contextGraphId: CG, view: 'verified-memory', minTrust: TrustLevel.ConsensusVerified },
+    );
+    expect(result.bindings).toEqual([]);
+  });
+
+  it('wrapWithGraph (default-graph filter) survives unbalanced braces inside string literals', async () => {
+    // verified-memory route triggers wrapWithGraph to scope to the
+    // sub-graph URI. If the brace counter mis-locates the WHERE end,
+    // the wrapped query is malformed and the engine returns empty.
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const consensusGraph = contextGraphVerifiedMemoryUri(CG, 'consensus-verified');
+    await store.insert([
+      quad('urn:e1', 'http://schema.org/text', '"unbalanced } trailing"', consensusGraph),
+      quad('urn:e1', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.ConsensusVerified}"`, consensusGraph),
+    ]);
+
+    // Note: minTrust is NOT set here, so wrapWithGraph runs but
+    // injectMinTrustFilter does not. Pin wrapWithGraph specifically.
+    const result = await engine.query(
+      'SELECT ?t WHERE { <urn:e1> <http://schema.org/text> ?t . FILTER(CONTAINS(STR(?t), "unbalanced }")) }',
+      { contextGraphId: CG, view: 'verified-memory' },
+    );
+    expect(result.bindings.length).toBe(1);
+  });
+});

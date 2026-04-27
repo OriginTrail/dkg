@@ -645,6 +645,85 @@ function findWhereBraceStart(sparql: string): number {
 }
 
 /**
+ * Locate the matching `}` for the `{` at `openIdx`, while skipping over
+ * `{` / `}` chars that appear inside SPARQL string literals, line
+ * comments, or IRIREFs.
+ *
+ * PR #229 bot review (r3148... — dkg-query-engine.ts:939). The naive
+ * brace-balance loop in `injectMinTrustFilter`, `wrapWithGraph`, and
+ * `wrapWithGraphUnion` counted `{`/`}` blindly. A query like
+ *
+ *     SELECT ?t WHERE { ... FILTER(STR(?t) = "{") }
+ *
+ * has a literal `{` inside a string literal and a single closing `}`
+ * for the WHERE block, so the naive counter ended at depth 1 and
+ * returned `-1`. Every caller treated `-1` as "refuse to rewrite" and
+ * (for `injectMinTrustFilter`) silently fail-closed `minTrust >
+ * Endorsed` queries to an empty result — exactly the literal-heavy
+ * shape the surrounding scrubbing was supposed to enable.
+ *
+ * Returns `-1` if `sparql[openIdx]` is not `{` or no matching close
+ * exists at depth zero.
+ */
+function findMatchingCloseBrace(sparql: string, openIdx: number): number {
+  if (sparql[openIdx] !== '{') return -1;
+  const n = sparql.length;
+  let depth = 0;
+  let i = openIdx;
+  while (i < n) {
+    const ch = sparql[i];
+    if (ch === '#') {
+      // Line comment — skip to newline.
+      while (i < n && sparql[i] !== '\n') i++;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      const quote = ch;
+      let j = i + 1;
+      while (j < n) {
+        if (sparql[j] === '\\' && j + 1 < n) { j += 2; continue; }
+        if (sparql[j] === quote) { j++; break; }
+        j++;
+      }
+      i = j;
+      continue;
+    }
+    if (ch === '<') {
+      // Look ahead for a balanced `>` that delimits an IRIREF body.
+      // IRIREFs cannot contain whitespace or any of `<{}|"^\``, so a
+      // candidate range that contains those chars is treated as a
+      // comparison operator and we fall through to a single-byte
+      // advance. (Mirror of the IRI/comparison disambiguation in
+      // `findWhereBraceStart`.)
+      let foundIri = false;
+      for (let j = i + 1; j < n; j++) {
+        const c = sparql[j];
+        if (c === '>') { foundIri = true; i = j + 1; break; }
+        if (
+          c === '<' || c === '"' || c === '{' || c === '}' ||
+          c === '|' || c === '\\' || c === '^' || c === '`' ||
+          /\s/.test(c)
+        ) {
+          break;
+        }
+      }
+      if (foundIri) continue;
+      // Comparison operator — advance one byte.
+      i++;
+      continue;
+    }
+    if (ch === '{') depth++;
+    else if (ch === '}') {
+      depth--;
+      if (depth === 0) return i;
+      if (depth < 0) return -1;
+    }
+    i++;
+  }
+  return -1;
+}
+
+/**
  * Wraps a SELECT query to scope it to a named graph.
  * If the query already uses GRAPH patterns, returns it unchanged.
  */
@@ -654,15 +733,11 @@ function wrapWithGraph(sparql: string, graphUri: string): string {
   const braceStart = findWhereBraceStart(sparql);
   if (braceStart === -1) return sparql;
 
-  let depth = 0;
-  let braceEnd = -1;
-  for (let i = braceStart; i < sparql.length; i++) {
-    if (sparql[i] === '{') depth++;
-    else if (sparql[i] === '}') {
-      depth--;
-      if (depth === 0) { braceEnd = i; break; }
-    }
-  }
+  // PR #229 bot review (r3148... — dkg-query-engine.ts:939). Use the
+  // literal/comment/IRI-aware helper so a `{` or `}` inside a SPARQL
+  // string literal, line comment, or IRI does NOT confuse the depth
+  // counter and we stop wrapping queries with literal-heavy bodies.
+  const braceEnd = findMatchingCloseBrace(sparql, braceStart);
   if (braceEnd === -1) return sparql;
 
   const before = sparql.slice(0, braceStart + 1);
@@ -702,15 +777,9 @@ function wrapWithGraphUnion(sparql: string, graphUris: string[]): string {
   const braceStart = findWhereBraceStart(sparql);
   if (braceStart === -1) return sparql;
 
-  let depth = 0;
-  let braceEnd = -1;
-  for (let i = braceStart; i < sparql.length; i++) {
-    if (sparql[i] === '{') depth++;
-    else if (sparql[i] === '}') {
-      depth--;
-      if (depth === 0) { braceEnd = i; break; }
-    }
-  }
+  // PR #229 bot review (r3148... — dkg-query-engine.ts:939). See
+  // `findMatchingCloseBrace` and the `wrapWithGraph` cousin above.
+  const braceEnd = findMatchingCloseBrace(sparql, braceStart);
   if (braceEnd === -1) return sparql;
 
   const before = sparql.slice(0, braceStart + 1);
@@ -934,15 +1003,15 @@ function injectMinTrustFilter(sparql: string, minTrust: number): string | null {
   const braceStart = findWhereBraceStart(sparql);
   if (braceStart === -1) return null;
 
-  let depth = 0;
-  let braceEnd = -1;
-  for (let i = braceStart; i < sparql.length; i++) {
-    if (sparql[i] === '{') depth++;
-    else if (sparql[i] === '}') {
-      depth--;
-      if (depth === 0) { braceEnd = i; break; }
-    }
-  }
+  // PR #229 bot review (r3148... — dkg-query-engine.ts:939). The
+  // earlier brace-balance loop counted `{`/`}` inside SPARQL string
+  // literals (e.g. `FILTER(STR(?t) = "{")`), so a literal-heavy WHERE
+  // ended at depth 1 and `injectMinTrustFilter` returned `null` —
+  // which the `_minTrust > Endorsed` caller treats as "refuse to run"
+  // and silently fails closed. Use the literal/comment/IRI-aware
+  // helper so the brace boundaries match what SPARQL actually
+  // parses.
+  const braceEnd = findMatchingCloseBrace(sparql, braceStart);
   if (braceEnd === -1) return null;
 
   const inner = sparql.slice(braceStart + 1, braceEnd);

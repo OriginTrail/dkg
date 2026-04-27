@@ -182,6 +182,36 @@ export class MockChainAdapter implements ChainAdapter {
       txHash,
     });
 
+    // PR #229 bot review (r3148... — evm-adapter.ts:868). The EVM
+    // adapter exposes `V10KnowledgeBatchEmitted` as a first-class
+    // event on `listenForEvents()`. KASStorage emits this distinct
+    // topic for V10 publishes so V10-aware indexers can subscribe to
+    // a batch-shaped projection without picking up legacy
+    // `KnowledgeBatchCreated` rows. Mirror that emission here so any
+    // consumer that subscribes via the shared `ChainAdapter`
+    // interface gets the same stream from the mock that it would
+    // from a real EVM chain. (Without this the mock-vs-real split
+    // would silently desync test fixtures from production
+    // behaviour — bot's exact concern.)
+    this.pushEvent('V10KnowledgeBatchEmitted', {
+      batchId: batchId.toString(),
+      publisherAddress: this.signerAddress,
+      merkleRoot: toHex(params.merkleRoot),
+      publicByteSize: '0',
+      knowledgeAssetsCount: params.kaCount.toString(),
+      startKAId: startId.toString(),
+      endKAId: endId.toString(),
+      // Epoch / token fields are not modelled in the mock; emit
+      // schema-compatible zero values so downstream decoders never
+      // see an `undefined` where the real chain would carry a
+      // value.
+      startEpoch: '0',
+      endEpoch: '0',
+      tokenAmount: '0',
+      isPermanent: false,
+      txHash,
+    });
+
     const result = this.txResult(true);
     return {
       batchId,
@@ -233,6 +263,26 @@ export class MockChainAdapter implements ChainAdapter {
       startKAId: startId.toString(),
       endKAId: endId.toString(),
       kaCount: params.kaCount,
+      isPermanent: true,
+      txHash,
+    });
+
+    // PR #229 bot review (r3148... — evm-adapter.ts:868). Mirror
+    // V10KnowledgeBatchEmitted for the permanent-publish path too
+    // (real KASStorage emits the same topic for both
+    // permanent/non-permanent V10 publishes; only the `isPermanent`
+    // field differs).
+    this.pushEvent('V10KnowledgeBatchEmitted', {
+      batchId: batchId.toString(),
+      publisherAddress: this.signerAddress,
+      merkleRoot: toHex(params.merkleRoot),
+      publicByteSize: '0',
+      knowledgeAssetsCount: params.kaCount.toString(),
+      startKAId: startId.toString(),
+      endKAId: endId.toString(),
+      startEpoch: '0',
+      endEpoch: '0',
+      tokenAmount: '0',
       isPermanent: true,
       txHash,
     });

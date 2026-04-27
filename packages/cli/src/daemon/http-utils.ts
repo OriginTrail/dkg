@@ -319,13 +319,33 @@ export function jsonResponse(
   // misses, so `body === rawBody` and there is no observable
   // behaviour change.
   //
-  // ReDoS safety: `[^"\n]+` and `[^)"\n]+` cannot be ambiguous because
-  // each character has exactly one role per branch — the same anti-
-  // backtracking shape as the existing `stripStackFrames` regex
-  // (CodeQL alerts 56 / 57).
+  // PR #229 bot review (r3148... — http-utils.ts:328). The earlier
+  // shape `\s+at\s+(?:[^\s()"]+\s+)?\([^)"\n]+\)` recognised any
+  // `(stuff)` after an `at <word>` token, so a perfectly-legitimate
+  // payload like `{"text":"meet at lunch (cafeteria)"}` matched the
+  // ` at lunch (cafeteria)` slice and the response degraded to
+  // `{"text":"meet"}`. The fix is to require the parenthesised body
+  // to actually look like a v8 stack frame location:
+  //   - either contain `:NUM:NUM` (the file:line:col suffix that
+  //     every real frame carries — `at fn (file.js:10:20)`); OR
+  //   - be one of the special sentinels v8 emits without a location
+  //     (`<anonymous>`, `native`, `eval at ...`).
+  // The async-continuation shape `(index N)` from
+  // `at async Promise.all (index 0)` does NOT match — but those
+  // continuation lines are always interleaved with real `:line:col`
+  // frames in a stack trace, so the surrounding pass still removes
+  // the parent stack and the lone continuation is harmless.
+  //
+  // ReDoS safety: every alternative is anchored by literal tokens
+  // (`:`, `<anonymous>`, `native`) and each character class has a
+  // unique role per branch — the same anti-backtracking shape as
+  // the existing `stripStackFrames` regex (CodeQL alerts 56 / 57).
   const body = rawBody
     .replace(/\\n\s+at [^"\n]+/g, "")
-    .replace(/\s+at\s+(?:[^\s()"]+\s+)?\([^)"\n]+\)/g, "")
+    .replace(
+      /\s+at\s+(?:[^\s()"]+\s+)?\((?:[^)"\n]*?:\d+(?::\d+)?|<anonymous>|native|eval[^)"\n]*)\)/g,
+      "",
+    )
     .replace(/\s+at\s+[^\s()":]+:\d+:\d+/g, "");
   res.writeHead(status, {
     "Content-Type": "application/json",

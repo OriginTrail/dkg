@@ -375,6 +375,100 @@ describe('jsonResponse — stack-trace / path scrubbing on egress', () => {
       expect(body.payload.context).toContain('happened');
     });
 
+    // -----------------------------------------------------------
+    // PR #229 bot review (r3148... — http-utils.ts:328). The earlier
+    // expanded egress regex `\s+at\s+(?:[^\s()"]+\s+)?\([^)"\n]+\)`
+    // matched any `(stuff)` after an `at <word>`, so a perfectly
+    // legitimate body like
+    //   { text: "meet at lunch (cafeteria)" }
+    // was rewritten to `{"text":"meet"}` because the regex chewed
+    // through ` at lunch (cafeteria)` thinking it was a v8 frame.
+    // The fix is to require the parenthesised body to actually look
+    // like a v8 frame location (`:NUM:NUM`, `<anonymous>`, `native`,
+    // or `eval ...`). These tests pin the truthful positive AND
+    // negative behaviour so the regex cannot drift back to the loose
+    // form that ate user data.
+    // -----------------------------------------------------------
+    it('r30-6: preserves "at WORD (PARENS)" payloads that are NOT stack frames (the original "meet at lunch (cafeteria)" lure)', () => {
+      const { body } = captureJsonResponse(200, {
+        ok: true,
+        text: 'meet at lunch (cafeteria)',
+      });
+      expect(body.text).toBe('meet at lunch (cafeteria)');
+    });
+
+    it('r30-6: preserves the bot\'s exact reproduction case verbatim', () => {
+      // The bot showed `jsonResponse(res, 200, { text: "meet at lunch (cafeteria)" })`
+      // collapsing to `{"text":"meet"}`. Pin the exact shape so any
+      // future regression of this regex tightening is caught.
+      const data = { text: 'meet at lunch (cafeteria)' };
+      const { body } = captureJsonResponse(200, data);
+      expect(body).toEqual(data);
+    });
+
+    it('r30-6: preserves a wide variety of "at <word> (<word>)" prose shapes', () => {
+      const phrases = [
+        'meet at lunch (cafeteria)',
+        'served at table (window seat)',
+        'arrives at noon (sharp)',
+        'speaking at conference (Tuesday)',
+        'live at venue (downtown stage)',
+        'fired at target (bullseye)',
+        'meet at gate (B12)',
+        'compiled at runtime (lazy)',
+        'happens at level (3)', // the digits in the parens used to be safe but
+        // the sub-pattern `[^)"\n]+` plus the relaxed boundaries used to be
+        // dangerous when combined with `at WORD`; the tightening keeps it safe.
+      ];
+      for (const phrase of phrases) {
+        const { body } = captureJsonResponse(200, { msg: phrase });
+        expect(body.msg, `phrase preserved: "${phrase}"`).toBe(phrase);
+      }
+    });
+
+    it('r30-6: STILL strips a real v8-shaped frame `at fn (file.js:LINE:COL)` from non-error keys (positive case)', () => {
+      // Make sure tightening did NOT regress the actual stack-frame
+      // stripping responsibility — the `:NUM:NUM` suffix branch must
+      // continue to fire.
+      const errMsg = 'first frame at handler (/Users/runner/work/dkg/foo.ts:42:7) trailing';
+      const { body } = captureJsonResponse(500, {
+        ok: false,
+        payload: { context: errMsg },
+      });
+      expect(body.payload.context).not.toMatch(/foo\.ts/);
+      expect(body.payload.context).not.toMatch(/:42:7/);
+      expect(body.payload.context).toContain('first frame');
+      expect(body.payload.context).toContain('trailing');
+    });
+
+    it('r30-6: STILL strips `at <anonymous>` and `at native` v8 sentinels', () => {
+      // Anonymous and native frames have no `:LINE:COL`, so the
+      // tightened regex must include them as explicit alternatives
+      // (otherwise tightening would have leaked anonymous frames).
+      const cases = [
+        { msg: 'oops at fn (<anonymous>) cleanup', shouldNotContain: 'at fn (<anonymous>)' },
+        { msg: 'crash at builtin (native) recovery', shouldNotContain: 'at builtin (native)' },
+      ];
+      for (const { msg, shouldNotContain } of cases) {
+        const { body } = captureJsonResponse(500, { ok: false, payload: { context: msg } });
+        expect(body.payload.context, `case "${msg}" was stripped`).not.toContain(shouldNotContain);
+      }
+    });
+
+    it('r30-6: tightening does not introduce ReDoS on adversarial "at WORD (...)" inputs', () => {
+      // Belt-and-suspenders: the new regex has a non-greedy `*?` and
+      // anchors. Hammer it with a long input that almost matches but
+      // doesn't, to make sure backtracking stays linear.
+      const adversarial = ' at fn (' + 'a'.repeat(2000) + ' no colon line col' + ')';
+      const start = Date.now();
+      const { body } = captureJsonResponse(500, { msg: adversarial });
+      const elapsed = Date.now() - start;
+      expect(elapsed).toBeLessThan(200);
+      // No `:line:col` inside the parens, so the tightened regex
+      // must NOT match — the user's text round-trips intact.
+      expect(body.msg).toBe(adversarial);
+    });
+
     it('preserves legitimate `.json` / `.txt` paths in non-error fields', () => {
       // The egress chain MUST NOT mangle bare absolute paths that
       // legitimately appear in non-error response shapes — they are
