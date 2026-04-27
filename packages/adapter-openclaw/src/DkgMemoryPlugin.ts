@@ -154,7 +154,6 @@ export class DkgMemorySearchManager implements MemorySearchManager {
   private async runSearch(
     query: string,
     options?: MemorySearchOptions,
-    layerFilter?: ReadonlyArray<MemoryLayer>,
   ): Promise<MemorySearchResult[]> {
     // B37: The clamped value is interpolated directly into the SPARQL
     // `LIMIT` clause below, so it must be an integer. A fractional
@@ -324,16 +323,8 @@ export class DkgMemorySearchManager implements MemorySearchManager {
       );
     }
 
-    // `searchNarrow` restricts to WM-only layers so the ranked top-N
-    // window cannot be starved by higher-trust SWM/VM hits. Apply the
-    // filter before fan-out so we also skip the unnecessary SWM/VM
-    // queries entirely.
-    const activePlans = layerFilter
-      ? plans.filter((p) => layerFilter.includes(p.layer))
-      : plans;
-
     const settled = await Promise.all(
-      activePlans.map(plan =>
+      plans.map(plan =>
         this.deps.client
           .query(plan.sparql, {
             contextGraphId: plan.contextGraphId,
@@ -369,7 +360,7 @@ export class DkgMemorySearchManager implements MemorySearchManager {
     this.deps.logger?.info?.(
       `[dkg-memory] search fired: ` +
       `project=${projectContextGraphId ?? '∅'}, ` +
-      `layers=${activePlans.length}, ` +
+      `layers=${plans.length}, ` +
       `raw_hits=${totalRawHits} (${perLayerBreakdown})`,
     );
     this.deps.logger?.debug?.(

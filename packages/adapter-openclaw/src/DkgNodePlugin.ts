@@ -320,8 +320,6 @@ export class DkgNodePlugin {
     this.chatTurnWriter = new ChatTurnWriter({ client: this.client, logger: api.logger, stateDir });
     this.installHooksIfNeeded(api);
 
-    api.registerHook('session_end', () => this.stop(), { name: 'dkg-node-stop' });
-
     // --- Integration modules ---
     this.registerIntegrationModules(api, { enableFullRuntime: runtimeEnabled });
 
@@ -378,6 +376,15 @@ export class DkgNodePlugin {
 
     this.hookSurface = new HookSurface(api, api.logger);
     this.hookSurfaceApi = api;
+    // session_end (legacy hook) is registered every (re)build so it follows
+    // the api currently in effect. Without re-registering on api change,
+    // an old api instance would still be the only one that fires `stop()`,
+    // leaving the new api's gateway shutdown un-hooked.
+    try {
+      api.registerHook?.('session_end', () => this.stop(), { name: 'dkg-node-stop' });
+    } catch (err: any) {
+      api.logger.debug?.(`[dkg] session_end registration failed: ${err?.message ?? err}`);
+    }
 
     // W3 — auto-recall every turn via before_prompt_build typed hook
     this.hookSurface.install('typed', 'before_prompt_build', (ev, ctx) => this.handleBeforePromptBuild(ev, ctx));
@@ -1669,6 +1676,31 @@ export class DkgNodePlugin {
       ? Math.floor(Math.max(1, Math.min(100, rawLimit as number)))
       : 20;
 
+    // Mode-independent slot re-assertion anchor. `before_prompt_build`
+    // (the W3 anchor) only fires in `full` registration mode, which means
+    // a setup-runtime gateway never re-asserts. Tool execution is one of
+    // the few mechanisms that DOES fire in setup-runtime, so we do an
+    // opportunistic re-assert here too — cheap (one property assignment)
+    // and guarantees a recently-reclaimed slot bounces back before this
+    // call's read path runs.
+    try { this.memoryPlugin?.reAssertCapability(); } catch { /* non-fatal */ }
+
+    // Distinguish "memory backend not ready yet" from "no hits found".
+    // `DkgMemorySearchManager.search` returns [] in BOTH cases, but they
+    // mean very different things to the agent: a not-ready response
+    // should prompt a retry, an empty-result response should prompt a
+    // different query. The peer ID (agentAddress) is what the WM read
+    // path requires — if the resolver hasn't probed it yet, we cannot
+    // run the fan-out at all.
+    const session = this.memorySessionResolver.getSession(undefined);
+    const agentAddress = session?.agentAddress ?? this.memorySessionResolver.getDefaultAgentAddress();
+    if (!agentAddress) {
+      return this.error(
+        'memory_search backend not ready: peer ID has not been resolved yet. ' +
+        'Retry shortly. This is normal for the first few seconds after gateway start.',
+      );
+    }
+
     try {
       const manager = new DkgMemorySearchManager({
         client: this.client,
@@ -1676,7 +1708,6 @@ export class DkgNodePlugin {
         logger: this.memoryResolverApi?.logger,
       });
       const hits = await manager.search(query, { maxResults: limit });
-      const session = this.memorySessionResolver.getSession(undefined);
       return this.json({
         query,
         count: hits.length,

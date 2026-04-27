@@ -19,10 +19,39 @@ export interface AgentEndContext {
   messages: ChatTurnMessage[];
 }
 
+/**
+ * Canonical shape mirrors `InternalHookEvent` from
+ * `@openclaw/openclaw/src/hooks/internal-hook-types.ts`:
+ *   - `sessionKey` is at the event root
+ *   - actual message text + envelope metadata live on `event.context.content`,
+ *     `event.context.channelId`, `event.context.success`, etc.
+ *
+ * `text` and `direction` at the root are accepted as a back-compat / test
+ * fixture shorthand; production gateway envelopes always use `context`.
+ */
 export interface InternalMessageEvent {
   sessionKey: string;
-  direction: "inbound" | "outbound";
-  text: string;
+  direction?: "inbound" | "outbound";
+  text?: string;
+  context?: {
+    content?: string;
+    channelId?: string;
+    accountId?: string;
+    conversationId?: string;
+    success?: boolean;
+    [k: string]: unknown;
+  };
+}
+
+/**
+ * Pull the message text out of the envelope, preferring the canonical
+ * `context.content` over the test-fixture `text` shorthand.
+ */
+function readEventText(ev: InternalMessageEvent): string {
+  const ctx = ev.context;
+  if (ctx && typeof ctx.content === "string") return ctx.content;
+  if (typeof ev.text === "string") return ev.text;
+  return "";
 }
 
 export class ChatTurnWriter {
@@ -38,16 +67,20 @@ export class ChatTurnWriter {
   private watermarkFilePath: string;
   // Cross-path dedup (W4a agent_end vs. W4b message:sent). The gateway fires
   // both for ordinary LLM turns and the deterministic turnId is identical
-  // across paths, so the second persist would be a duplicate write. Daemon
-  // does not dedup (ADR-002), so we gate here before calling storeChatTurn.
+  // across paths, so the second persist would be a duplicate write.
+  //
+  // Keyed by `<sessionId>::<turnId>` so a session reset can clear only that
+  // session's reservations (see resetSessionState).
   //
   // The TTL is intentionally short (3s). Cross-path double-fire happens in
   // the same delivery cycle — typically milliseconds between `agent_end` and
   // `message:sent`. A longer TTL would silently drop two legitimate real
-  // turns in a short window whose text happens to be identical (e.g.
-  // "thanks" / "you're welcome" said twice within a minute).
+  // turns in a short window whose text happens to be identical.
   private recentTurnIds: Map<string, number> = new Map();
   private static readonly TURNID_TTL_MS = 3_000;
+  // In-flight persist tracking — `resetSessionState()` awaits these so a
+  // pre-reset persist can't advance the just-reset watermark afterward.
+  private inFlightPersists: Map<string, Set<Promise<void>>> = new Map();
 
   constructor(options: { client: any; logger: Logger; stateDir: string }) {
     this.client = options.client;
@@ -93,25 +126,30 @@ export class ChatTurnWriter {
       // watermark at N-1 and the next agent_end call retries from the same
       // point. Without sequencing, a failed middle pair could be skipped
       // when the tail succeeds.
-      (async () => {
+      const sessionInFlight = (() => {
+        let bucket = this.inFlightPersists.get(sessionId);
+        if (!bucket) { bucket = new Set(); this.inFlightPersists.set(sessionId, bucket); }
+        return bucket;
+      })();
+      const job = (async () => {
         for (const { user, assistant } of pairs) {
           if (!user && !assistant) continue;
           const turnId = this.deterministicTurnId(sessionId, user, assistant);
-          if (this.markTurnIdSeen(turnId)) continue; // cross-path dedup
+          if (this.markTurnIdSeen(sessionId, turnId)) continue; // cross-path dedup
           try {
             await this.persistOne(sessionId, user, assistant, turnId);
           } catch (err) {
             // Release the reservation so a retry (next agent_end or the
             // paired internal hook) can re-attempt rather than silently
-            // skipping this turn for 60s.
-            this.releaseTurnIdReservation(turnId);
+            // skipping this turn within the dedup window.
+            this.releaseTurnIdReservation(sessionId, turnId);
             this.logger.error?.("[ChatTurnWriter.onAgentEnd] Persist failed", { err });
             return; // leave watermark at last successful pair
           }
         }
-      })().catch(() => {
-        /* outer try-catch already covered; here only to satisfy floating-promise */
-      });
+      })();
+      sessionInFlight.add(job);
+      job.finally(() => sessionInFlight.delete(job)).catch(() => {});
     } catch (err) {
       this.logger.error?.("[ChatTurnWriter.onAgentEnd] Error", { err });
     }
@@ -127,7 +165,7 @@ export class ChatTurnWriter {
       // Reset is SESSION-SCOPED: clearing the whole map would wipe
       // unrelated concurrent chats' cursors and cause them to replay
       // historical turns on their next `agent_end`.
-      this.resetSessionWatermark(this.deriveSessionId(ctx));
+      void this.resetSessionState(this.deriveSessionId(ctx));
     } catch (err) {
       this.logger.error?.("[ChatTurnWriter.onBeforeCompaction] Error", { err });
     }
@@ -139,25 +177,51 @@ export class ChatTurnWriter {
       // Reset wipes this session's history; the pair-index watermark must
       // start over for THIS session only (compaction/reset events are
       // session-scoped per OpenClaw dispatch semantics).
-      this.resetSessionWatermark(this.deriveSessionId(ctx));
+      void this.resetSessionState(this.deriveSessionId(ctx));
     } catch (err) {
       this.logger.error?.("[ChatTurnWriter.onBeforeReset] Error", { err });
     }
   }
 
   /**
-   * Clear watermark state for a single session and any pending debounce
-   * timer it owns. No-op when `sessionId` is empty (derivation failed —
-   * safer to leave state intact than wipe every session as a fallback).
+   * Clear all session state for a single session: pending debounce timer,
+   * cached watermark, dedup reservations, AND any in-flight `persistOne`
+   * jobs are awaited before the wipe. No-op when `sessionId` is empty.
+   *
+   * In-flight tracking is the load-bearing piece — without it, an `agent_end`
+   * fires `persistOne` (fire-and-forget) and IMMEDIATELY a compaction event
+   * arrives. The reset clears the watermark to -1, then the still-running
+   * `persistOne` calls `saveWatermark(0)`, leaving stale state for the next
+   * `agent_end` against a smaller post-compaction array.
    */
-  private resetSessionWatermark(sessionId: string): void {
+  private async resetSessionState(sessionId: string): Promise<void> {
     if (!sessionId) return;
+    const inFlight = this.inFlightPersists.get(sessionId);
+    if (inFlight && inFlight.size > 0) {
+      // Snapshot the set — settle every job (success or failure) before
+      // wiping watermark state so a late completion can't reintroduce it.
+      const pending = Array.from(inFlight);
+      await Promise.allSettled(pending);
+    }
+    this.inFlightPersists.delete(sessionId);
     this.cachedWatermarks.delete(sessionId);
     const entry = this.debounceTimers.get(sessionId);
     if (entry) {
       clearTimeout(entry.timer);
       this.debounceTimers.delete(sessionId);
     }
+    this.pendingUserMessages.forEach((_v, k) => {
+      // pendingUserMessages keys are envelope-shaped (channelId:account:conv:sessionKey),
+      // sessionId is just (channelId:account:conv:sessionKey) too — but we don't
+      // have a clean reverse-lookup. Drop everything whose key terminates with
+      // the session's sessionKey portion. Conservative: just clear all keyed
+      // entries that share the channelId prefix to avoid mismatched pairings
+      // after a compaction.
+      if (k.endsWith(`:${sessionId.split(":").slice(-1)[0]}`)) {
+        this.pendingUserMessages.delete(k);
+      }
+    });
+    this.clearSessionTurnIds(sessionId);
     this.writeWatermarkFile();
   }
 
@@ -168,8 +232,9 @@ export class ChatTurnWriter {
       if (channelId === "dkg-ui") return;
       const conversationKey = this.conversationKeyFromInternalEvent(ev);
       if (!conversationKey) return;
+      const text = readEventText(ev);
       const queue = this.pendingUserMessages.get(conversationKey) ?? [];
-      queue.push(ev.text);
+      queue.push(text);
       this.pendingUserMessages.set(conversationKey, queue);
     } catch (err) {
       this.logger.error?.("[ChatTurnWriter.onMessageReceived] Error", { err });
@@ -200,13 +265,13 @@ export class ChatTurnWriter {
       // diverge and cross-path dedup misses. User text is NOT stripped:
       // legitimate pastes (XML, logs) containing the tag would otherwise be
       // silently corrupted.
-      const assistantText = this.stripRecalledMemory(ev.text);
+      const assistantText = this.stripRecalledMemory(readEventText(ev));
       const sessionId = this.deriveSessionIdFromEvent(ev);
       if (userText || assistantText) {
         const turnId = this.deterministicTurnId(sessionId, userText, assistantText);
-        if (this.markTurnIdSeen(turnId)) return; // already written via agent_end path
+        if (this.markTurnIdSeen(sessionId, turnId)) return; // already written via agent_end path
         this.persistOne(sessionId, userText, assistantText, turnId).catch((err) => {
-          this.releaseTurnIdReservation(turnId);
+          this.releaseTurnIdReservation(sessionId, turnId);
           this.logger.error?.("[ChatTurnWriter.onMessageSent] Persist failed", { err });
         });
       }
@@ -222,20 +287,33 @@ export class ChatTurnWriter {
    * `releaseTurnIdReservation(turnId)` on persist failure so retries are
    * not blocked by a stale mark. Evicts expired ids opportunistically.
    */
-  private markTurnIdSeen(turnId: string): boolean {
+  private dedupKey(sessionId: string, turnId: string): string {
+    return `${sessionId}::${turnId}`;
+  }
+
+  private markTurnIdSeen(sessionId: string, turnId: string): boolean {
+    const key = this.dedupKey(sessionId, turnId);
     const now = Date.now();
     const ttl = ChatTurnWriter.TURNID_TTL_MS;
-    for (const [id, ts] of this.recentTurnIds) {
-      if (now - ts > ttl) this.recentTurnIds.delete(id);
+    for (const [k, ts] of this.recentTurnIds) {
+      if (now - ts > ttl) this.recentTurnIds.delete(k);
     }
-    if (this.recentTurnIds.has(turnId)) return true;
-    this.recentTurnIds.set(turnId, now);
+    if (this.recentTurnIds.has(key)) return true;
+    this.recentTurnIds.set(key, now);
     return false;
   }
 
   /** Release a turnId reservation on persist failure so retries can proceed. */
-  private releaseTurnIdReservation(turnId: string): void {
-    this.recentTurnIds.delete(turnId);
+  private releaseTurnIdReservation(sessionId: string, turnId: string): void {
+    this.recentTurnIds.delete(this.dedupKey(sessionId, turnId));
+  }
+
+  /** Drop all dedup reservations belonging to one session. */
+  private clearSessionTurnIds(sessionId: string): void {
+    const prefix = `${sessionId}::`;
+    for (const k of this.recentTurnIds.keys()) {
+      if (k.startsWith(prefix)) this.recentTurnIds.delete(k);
+    }
   }
 
   flushSync(): void {
@@ -425,7 +503,14 @@ export class ChatTurnWriter {
     let attempt = 0;
     while (attempt < 2) {
       try {
-        await this.client.storeChatTurn(sessionId, user, assistant, { turnId });
+        // `turnId` stays in-process only — used for our cross-path dedup
+        // map (W4a vs W4b). It is intentionally NOT sent to the daemon:
+        // the daemon mints a fresh UUID per call (`daemon/routes/openclaw.ts`
+        // → `chat-memory.ts: turnUri = ${CHAT_NS}turn:${turnId}`), so
+        // passing our content-derived turnId would let two real-world
+        // identical exchanges in the same session collide on the same RDF
+        // subject URI.
+        await this.client.storeChatTurn(sessionId, user, assistant);
         // Prefer the pending debounced index (in-flight increments not yet
         // committed to cachedWatermarks) so two persists inside the 50ms
         // debounce window each advance the watermark instead of both
