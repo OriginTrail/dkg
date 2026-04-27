@@ -1008,6 +1008,27 @@ export class DashboardDB {
     });
   }
 
+  refreshActiveSemanticEnrichmentEventPayload(
+    id: string,
+    payloadJson: string,
+    semanticTripleCount: number,
+    updatedAt: number,
+  ): boolean {
+    const result = this.stmt('refreshActiveSemanticEnrichmentEventPayload', `
+      UPDATE semantic_enrichment_events
+      SET payload_json = ?,
+          status = 'pending',
+          semantic_triple_count = ?,
+          next_attempt_at = ?,
+          lease_owner = NULL,
+          lease_expires_at = NULL,
+          last_error = NULL,
+          updated_at = ?
+      WHERE id = ? AND status IN ('pending', 'leased')
+    `).run(payloadJson, semanticTripleCount, updatedAt, updatedAt, id);
+    return result.changes > 0;
+  }
+
   reclaimExpiredSemanticEnrichmentEvents(now: number): number {
     const tx = this.db.transaction((reclaimNow: number) => {
       const deadLettered = this.db.prepare(`

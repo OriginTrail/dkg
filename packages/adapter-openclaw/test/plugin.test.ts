@@ -1356,8 +1356,8 @@ describe('DkgNodePlugin', () => {
       const clientContext = (plugin.getClient() as any).localAgentRequestContext;
       expect(clientContext).toMatchObject({
         integrationId: 'openclaw',
+        semanticEnrichmentSupported: false,
       });
-      expect(clientContext).not.toHaveProperty('semanticEnrichmentSupported');
 
       await new Promise((resolve) => setTimeout(resolve, 25));
 

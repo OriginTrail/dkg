@@ -1185,6 +1185,111 @@ describe('best-effort semantic enqueue helper', () => {
     });
   });
 
+  it('refreshes active chat-turn payloads before reusing an existing semantic event', () => {
+    const oldPayload = {
+      kind: 'chat_turn' as const,
+      sessionId: 'openclaw:dkg-ui',
+      turnId: 'turn-refresh',
+      contextGraphId: 'agent-context',
+      assertionName: 'chat-turns',
+      assertionUri: 'did:dkg:context-graph:agent-context/assertion/peer/chat-turns',
+      sessionUri: 'urn:dkg:chat:session:openclaw:dkg-ui',
+      turnUri: 'urn:dkg:chat:turn:turn-refresh',
+      userMessage: 'summarize the roadmap',
+      assistantReply: 'draft answer',
+      persistenceState: 'pending' as const,
+    };
+    const newPayload = {
+      ...oldPayload,
+      assistantReply: 'final answer with more grounded detail',
+      persistenceState: 'stored' as const,
+    };
+    let row: any = {
+      id: 'evt-chat-refresh',
+      kind: 'chat_turn',
+      idempotency_key: 'chat-turn:turn-refresh',
+      payload_json: JSON.stringify(oldPayload),
+      status: 'leased',
+      semantic_triple_count: 5,
+      attempts: 1,
+      max_attempts: 5,
+      next_attempt_at: 1_000,
+      lease_owner: 'worker-a',
+      lease_expires_at: 300_000,
+      last_error: 'old failure',
+      created_at: 900,
+      updated_at: 1_000,
+    };
+    const dashDb = {
+      getSemanticEnrichmentEventByIdempotencyKey: vi.fn(() => row),
+      refreshActiveSemanticEnrichmentEventPayload: vi.fn((
+        id: string,
+        payloadJson: string,
+        semanticTripleCount: number,
+        updatedAt: number,
+      ) => {
+        row = {
+          ...row,
+          payload_json: payloadJson,
+          status: 'pending',
+          semantic_triple_count: semanticTripleCount,
+          next_attempt_at: updatedAt,
+          lease_owner: null,
+          lease_expires_at: null,
+          last_error: null,
+          updated_at: updatedAt,
+        };
+        return id === 'evt-chat-refresh';
+      }),
+      insertSemanticEnrichmentEvent: vi.fn(),
+      getSemanticEnrichmentEvent: vi.fn(() => row),
+    };
+
+    const descriptor = queueLocalAgentSemanticEnrichmentBestEffort({
+      config: makeConfig({
+        localAgentIntegrations: {
+          openclaw: {
+            enabled: true,
+            capabilities: {
+              semanticEnrichment: true,
+            },
+          },
+        },
+      }),
+      dashDb: dashDb as any,
+      integrationId: 'openclaw',
+      kind: 'chat_turn',
+      payload: newPayload,
+      skipWhenUnavailable: true,
+      logLabel: 'chat turn refresh',
+    });
+
+    expect(dashDb.insertSemanticEnrichmentEvent).not.toHaveBeenCalled();
+    expect(dashDb.refreshActiveSemanticEnrichmentEventPayload).toHaveBeenCalledWith(
+      'evt-chat-refresh',
+      JSON.stringify(newPayload),
+      0,
+      expect.any(Number),
+    );
+    expect(JSON.parse(row.payload_json)).toMatchObject({
+      assistantReply: 'final answer with more grounded detail',
+      persistenceState: 'stored',
+    });
+    expect(row).toMatchObject({
+      status: 'pending',
+      semantic_triple_count: 0,
+      lease_owner: null,
+      lease_expires_at: null,
+      last_error: null,
+    });
+    expect(descriptor).toMatchObject({
+      eventId: 'evt-chat-refresh',
+      status: 'pending',
+      semanticTripleCount: 0,
+    });
+    expect(descriptor?.lastError).toBeUndefined();
+  });
+
   it('swallows enqueue failures so the primary route can still succeed', () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const dashDb = {

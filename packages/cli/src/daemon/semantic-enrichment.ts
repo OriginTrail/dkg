@@ -561,8 +561,21 @@ function ensureSemanticEnrichmentEvent(
       : (() => {
           throw new Error(`Semantic enrichment payload kind mismatch: expected ${kind}, received ${payload.kind}`);
         })();
+  const payloadJson = JSON.stringify(payload);
   const existing = dashDb.getSemanticEnrichmentEventByIdempotencyKey(idempotencyKey);
-  if (existing) return semanticEnrichmentDescriptorFromRow(existing);
+  if (existing) {
+    const refreshed = refreshActiveChatSemanticEventPayloadIfNeeded(
+      dashDb,
+      existing,
+      kind,
+      payload,
+      payloadJson,
+      semanticTripleCount,
+      now,
+    );
+    if (refreshed) return refreshed;
+    return semanticEnrichmentDescriptorFromRow(existing);
+  }
 
   const eventId = randomUUID();
   try {
@@ -570,7 +583,7 @@ function ensureSemanticEnrichmentEvent(
       id: eventId,
       kind,
       idempotency_key: idempotencyKey,
-      payload_json: JSON.stringify(payload),
+      payload_json: payloadJson,
       status: 'pending',
       semantic_triple_count: semanticTripleCount,
       attempts: 0,
@@ -581,7 +594,19 @@ function ensureSemanticEnrichmentEvent(
     });
   } catch (err) {
     const racedExisting = dashDb.getSemanticEnrichmentEventByIdempotencyKey(idempotencyKey);
-    if (racedExisting) return semanticEnrichmentDescriptorFromRow(racedExisting);
+    if (racedExisting) {
+      const refreshed = refreshActiveChatSemanticEventPayloadIfNeeded(
+        dashDb,
+        racedExisting,
+        kind,
+        payload,
+        payloadJson,
+        semanticTripleCount,
+        now,
+      );
+      if (refreshed) return refreshed;
+      return semanticEnrichmentDescriptorFromRow(racedExisting);
+    }
     throw err;
   }
   const row = dashDb.getSemanticEnrichmentEvent(eventId);
@@ -592,6 +617,46 @@ function ensureSemanticEnrichmentEvent(
     updated_at: now,
     last_error: null,
   });
+}
+
+function refreshActiveChatSemanticEventPayloadIfNeeded(
+  dashDb: DashboardDB,
+  row: SemanticEnrichmentEventRow,
+  kind: SemanticEnrichmentKind,
+  payload: SemanticEnrichmentEventPayload,
+  payloadJson: string,
+  semanticTripleCount: number,
+  now: number,
+): SemanticEnrichmentDescriptor | undefined {
+  if (
+    kind !== 'chat_turn'
+    || payload.kind !== 'chat_turn'
+    || row.payload_json === payloadJson
+    || (row.status !== 'pending' && row.status !== 'leased')
+  ) {
+    return undefined;
+  }
+
+  const refreshed = dashDb.refreshActiveSemanticEnrichmentEventPayload(
+    row.id,
+    payloadJson,
+    semanticTripleCount,
+    now,
+  );
+  if (!refreshed) return undefined;
+
+  return semanticEnrichmentDescriptorFromRow(
+    dashDb.getSemanticEnrichmentEvent(row.id) ?? {
+      ...row,
+      payload_json: payloadJson,
+      status: 'pending',
+      semantic_triple_count: semanticTripleCount,
+      lease_owner: null,
+      lease_expires_at: null,
+      last_error: null,
+      updated_at: now,
+    },
+  );
 }
 
 function isSemanticTripleInput(value: unknown): value is SemanticTripleInput {
