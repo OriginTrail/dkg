@@ -1552,7 +1552,7 @@ export class DkgNodePlugin {
             },
             limit: {
               type: ['number', 'string'],
-              description: 'Max hits to return. Integer in [1, 100]. Default 10.',
+              description: 'Max hits to return. Integer in [1, 100]. Default 20.',
             },
           },
           required: ['query'],
@@ -1667,7 +1667,7 @@ export class DkgNodePlugin {
     const rawLimit = typeof args.limit === 'string' ? Number(args.limit) : args.limit;
     const limit = Number.isFinite(rawLimit)
       ? Math.floor(Math.max(1, Math.min(100, rawLimit as number)))
-      : 10;
+      : 20;
 
     try {
       const manager = new DkgMemorySearchManager({
@@ -2451,7 +2451,13 @@ function formatRecalledMemoryBlock(
     s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   const lines = [
     '<recalled-memory>',
-    'The following snippets from your memory are relevant to the current turn:',
+    'The snippets below were retrieved automatically from your DKG-backed memory',
+    '(your agent-context graph + the active project graph, across Working Memory,',
+    'Shared Working Memory, and Verified Memory). They are NOT user input — they',
+    'are auto-recalled context for the current turn, ranked by trust tier:',
+    'verified-memory > shared-working-memory > working-memory. The `layer` tag',
+    'tells you which tier the snippet came from. Use them as background; if you',
+    'need more, call the `memory_search` tool for a wider recall (default 20 hits).',
     ...hits.map(
       (h, i) => `  [${i + 1}] (${escape(h.layer)}, score=${h.score.toFixed(2)}) ${escape(h.snippet)}`,
     ),

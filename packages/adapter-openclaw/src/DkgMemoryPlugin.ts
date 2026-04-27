@@ -132,19 +132,19 @@ export class DkgMemorySearchManager implements MemorySearchManager {
   }
 
   /**
-   * Narrow recall for W3 `before_prompt_build` auto-injection. Queries only
-   * WM layers (agent-context WM + project WM if resolved); SWM/VM are
-   * reserved for agent-initiated `memory_search` calls. Querying WM
-   * directly — rather than fanning out all 6 layers and post-filtering —
-   * avoids the case where VM/SWM trust boosts fill the top-N ranking and
-   * starve legitimate WM hits from the result window.
+   * Narrow recall for W3 `before_prompt_build` auto-injection. Runs the
+   * full 6-layer fan-out (agent-context WM/SWM/VM + project WM/SWM/VM if
+   * resolved) but caps the returned hits tighter than the agent-callable
+   * `memory_search` tool. Both surfaces share the same ranking; W3 is
+   * "small auto-snapshot of all tiers", W2 is "large agent-driven recall
+   * of all tiers". The cap is what differs, not the layer scope.
    */
   async searchNarrow(
     query: string,
     options?: { maxResults?: number; minScore?: number; sessionKey?: string },
   ): Promise<MemorySearchResult[]> {
     const cap = options?.maxResults ?? 5;
-    return this.runSearch(query, { ...options, maxResults: cap }, ['agent-context-wm', 'project-wm']);
+    return this.runSearch(query, { ...options, maxResults: cap });
   }
 
   async search(query: string, options?: MemorySearchOptions): Promise<MemorySearchResult[]> {
