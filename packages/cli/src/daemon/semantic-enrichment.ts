@@ -1,3 +1,4 @@
+import { Buffer } from 'node:buffer';
 import { randomUUID } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
@@ -11,7 +12,7 @@ import {
   DashboardDB,
   type SemanticEnrichmentEventRow,
 } from '@origintrail-official/dkg-node-ui';
-import type { DkgConfig } from '../config.js';
+import type { DkgConfig, LocalAgentIntegrationConfig } from '../config.js';
 import {
   type ExtractionStatusRecord,
   getExtractionStatusRecord,
@@ -54,12 +55,14 @@ const SEMANTIC_ENRICHMENT_MAX_ATTEMPTS = 5;
 const SEMANTIC_ENRICHMENT_METHOD = 'semantic-llm-agent';
 const SEMANTIC_ENRICHMENT_EVENT_ID_PREDICATE = 'http://dkg.io/ontology/semanticEnrichmentEventId';
 const SEMANTIC_ENRICHMENT_SOURCE_PREDICATE = 'http://dkg.io/ontology/extractedFrom';
+const SEMANTIC_ENRICHMENT_SOURCE_AGENT_PREDICATE = 'http://dkg.io/ontology/sourceAgent';
 const SEMANTIC_ENRICHMENT_COUNT_PREDICATE = 'http://dkg.io/ontology/semanticTripleCount';
 const EXTRACTION_PROVENANCE_TYPE = 'http://dkg.io/ontology/ExtractionProvenance';
 const EXTRACTION_METHOD_PREDICATE = 'http://dkg.io/ontology/extractionMethod';
 const EXTRACTED_AT_PREDICATE = 'http://dkg.io/ontology/extractedAt';
 const EXTRACTED_BY_PREDICATE = 'http://dkg.io/ontology/extractedBy';
 const RDF_TYPE_PREDICATE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+const SEMANTIC_APPEND_BODY_BYTES = 8 * 1024 * 1024;
 
 export interface LocalAgentIntegrationWakeRequest {
   kind: 'semantic_enrichment';
@@ -219,8 +222,9 @@ export function reconcileOpenClawSemanticAvailability(
   reason = 'OpenClaw semantic enrichment is unavailable on this runtime',
 ): number {
   const stored = getStoredLocalAgentIntegrations(config).openclaw;
-  if (!stored) return deadLetterUnavailableOpenClawSemanticEvents(extractionStatus, dashDb, reason);
-  if (stored.enabled === true && stored.capabilities?.semanticEnrichment !== false) return 0;
+  if (!stored) return 0;
+  if (stored.enabled === true) return 0;
+  if (!isOpenClawExplicitlyDisconnected(stored)) return 0;
   return deadLetterUnavailableOpenClawSemanticEvents(extractionStatus, dashDb, reason);
 }
 
@@ -316,6 +320,38 @@ export function semanticEnrichmentDescriptorFromRow(
   };
 }
 
+function isOpenClawExplicitlyDisconnected(stored: LocalAgentIntegrationConfig): boolean {
+  if (stored.metadata?.userDisabled === true) return true;
+  return Boolean(
+    stored.connectedAt
+    && stored.enabled === false
+    && stored.runtime?.status === 'disconnected',
+  );
+}
+
+function refreshExtractionStatusSemanticDescriptor(
+  dashDb: DashboardDB,
+  record: ExtractionStatusRecord,
+): ExtractionStatusRecord {
+  const currentSemanticEnrichment = record.semanticEnrichment;
+  if (!currentSemanticEnrichment?.eventId) return record;
+  const row = dashDb.getSemanticEnrichmentEvent(currentSemanticEnrichment.eventId);
+  if (!row) return record;
+  const semanticEnrichment = semanticEnrichmentDescriptorFromRow(row);
+  if (
+    currentSemanticEnrichment.status === semanticEnrichment.status
+    && currentSemanticEnrichment.semanticTripleCount === semanticEnrichment.semanticTripleCount
+    && currentSemanticEnrichment.updatedAt === semanticEnrichment.updatedAt
+    && currentSemanticEnrichment.lastError === semanticEnrichment.lastError
+  ) {
+    return record;
+  }
+  return {
+    ...record,
+    semanticEnrichment,
+  };
+}
+
 function parseSemanticEnrichmentEventPayload(raw: string): SemanticEnrichmentEventPayload | undefined {
   try {
     const parsed = JSON.parse(raw) as SemanticEnrichmentEventPayload;
@@ -365,13 +401,27 @@ export function getHydratedExtractionStatusRecord(
   assertionUri: string,
 ): ExtractionStatusRecord | undefined {
   const current = getExtractionStatusRecord(extractionStatus, assertionUri);
-  if (current) return current;
+  if (current) {
+    const refreshed = refreshExtractionStatusSemanticDescriptor(dashDb, current);
+    if (refreshed !== current) {
+      setPersistedExtractionStatusRecord(extractionStatus, dashDb, assertionUri, refreshed);
+    }
+    return refreshed;
+  }
   const snapshot = dashDb.getExtractionStatusSnapshot(assertionUri);
   if (!snapshot) return undefined;
   const parsed = parseExtractionStatusSnapshotRecord(snapshot.record_json);
   if (!parsed) return undefined;
-  setExtractionStatusRecord(extractionStatus, assertionUri, parsed);
-  return parsed;
+  const refreshed = refreshExtractionStatusSemanticDescriptor(dashDb, parsed);
+  setExtractionStatusRecord(extractionStatus, assertionUri, refreshed);
+  if (refreshed !== parsed) {
+    dashDb.upsertExtractionStatusSnapshot({
+      assertion_uri: assertionUri,
+      record_json: JSON.stringify(refreshed),
+      updated_at: Date.now(),
+    });
+  }
+  return refreshed;
 }
 
 export function deletePersistedExtractionStatusRecord(
@@ -745,8 +795,14 @@ export async function readSemanticTripleCountForEvent(
   return readSemanticProvenanceTripleCount(agent, eventPayload.assertionUri, eventId);
 }
 
-function buildSemanticAppendQuads(args: {
-  agentDid: string;
+export function semanticWorkerDidFromLeaseOwner(leaseOwner: string): string {
+  const normalized = leaseOwner.trim() || 'unknown-worker';
+  return `urn:dkg:semantic-worker:${Buffer.from(normalized).toString('base64url')}`;
+}
+
+export function buildSemanticAppendQuads(args: {
+  extractedByDid: string;
+  sourceAgentDid?: string;
   eventId: string;
   graph: string;
   sourceRef: string;
@@ -770,12 +826,20 @@ function buildSemanticAppendQuads(args: {
   quads.push(
     { subject: provenanceUri, predicate: RDF_TYPE_PREDICATE, object: EXTRACTION_PROVENANCE_TYPE, graph: args.graph },
     { subject: provenanceUri, predicate: SEMANTIC_ENRICHMENT_SOURCE_PREDICATE, object: args.sourceRef, graph: args.graph },
-    { subject: provenanceUri, predicate: EXTRACTED_BY_PREDICATE, object: args.agentDid, graph: args.graph },
+    { subject: provenanceUri, predicate: EXTRACTED_BY_PREDICATE, object: args.extractedByDid, graph: args.graph },
     { subject: provenanceUri, predicate: EXTRACTED_AT_PREDICATE, object: `"${args.extractedAt}"^^<http://www.w3.org/2001/XMLSchema#dateTime>`, graph: args.graph },
     { subject: provenanceUri, predicate: EXTRACTION_METHOD_PREDICATE, object: JSON.stringify(SEMANTIC_ENRICHMENT_METHOD), graph: args.graph },
     { subject: provenanceUri, predicate: SEMANTIC_ENRICHMENT_EVENT_ID_PREDICATE, object: JSON.stringify(args.eventId), graph: args.graph },
     { subject: provenanceUri, predicate: SEMANTIC_ENRICHMENT_COUNT_PREDICATE, object: semanticCountLiteral(args.semanticTripleCount), graph: args.graph },
   );
+  if (args.sourceAgentDid && isSafeIri(args.sourceAgentDid)) {
+    quads.push({
+      subject: provenanceUri,
+      predicate: SEMANTIC_ENRICHMENT_SOURCE_AGENT_PREDICATE,
+      object: args.sourceAgentDid,
+      graph: args.graph,
+    });
+  }
 
   for (const subject of sourceLinkedSubjects) {
     quads.push({
@@ -828,7 +892,10 @@ export async function handleSemanticEnrichmentRoutes(ctx: RequestContext): Promi
     });
   }
 
-  const body = await readBody(req, SMALL_BODY_BYTES);
+  const bodyLimit = req.method === 'POST' && path === '/api/semantic-enrichment/events/append'
+    ? SEMANTIC_APPEND_BODY_BYTES
+    : SMALL_BODY_BYTES;
+  const body = await readBody(req, bodyLimit);
   let payload: Record<string, unknown>;
   try {
     payload = JSON.parse(body);
@@ -1068,11 +1135,12 @@ export async function handleSemanticEnrichmentRoutes(ctx: RequestContext): Promi
     let semanticTripleCount = await readSemanticTripleCountForEvent(agent, eventPayload, eventId);
 
     if (!alreadyApplied && triples.length > 0) {
-      const semanticAgentDid = eventPayload.kind === 'file_import' && eventPayload.sourceAgentAddress
+      const sourceAgentDid = eventPayload.kind === 'file_import' && eventPayload.sourceAgentAddress
         ? `did:dkg:agent:${eventPayload.sourceAgentAddress}`
-        : `did:dkg:agent:${agent.peerId}`;
+        : undefined;
       const semanticQuads = buildSemanticAppendQuads({
-        agentDid: semanticAgentDid,
+        extractedByDid: semanticWorkerDidFromLeaseOwner(leaseOwner),
+        sourceAgentDid,
         eventId,
         graph: targetGraph,
         sourceRef,

@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { PassThrough } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   buildOpenClawChannelHeaders,
@@ -22,6 +23,8 @@ import {
   queueLocalAgentSemanticEnrichmentBestEffort,
   reconcileOpenClawSemanticAvailability,
   saveConfigAndReconcileOpenClawSemanticAvailability,
+  getHydratedExtractionStatusRecord,
+  handleSemanticEnrichmentRoutes,
   fileImportSourceIdentityMatchesCurrentState,
   normalizeQueriedLiteralValue,
   normalizeOntologyQuadObjectInput,
@@ -36,6 +39,8 @@ import {
   verifyOpenClawAttachmentRefsProvenance,
   normalizeExplicitLocalAgentDisconnectBody,
   readSemanticTripleCountForEvent,
+  buildSemanticAppendQuads,
+  semanticWorkerDidFromLeaseOwner,
   resolveChatTurnsAssertionAgentAddress,
   shouldBypassRateLimitForLoopbackTraffic,
   updateLocalAgentIntegration,
@@ -762,6 +767,147 @@ describe('best-effort semantic enqueue helper', () => {
     })).toBe('peer-id');
   });
 
+  it('refreshes extraction-status semantic descriptors from the live outbox row', () => {
+    const assertionUri = 'did:dkg:context-graph:cg1/assertion/peer/roadmap';
+    const extractionStatus = new Map<string, any>();
+    const now = Date.now();
+    const startedAt = new Date(now - 2_000).toISOString();
+    const completedAt = new Date(now - 1_000).toISOString();
+    const staleSemanticUpdatedAt = new Date(now - 500).toISOString();
+    const liveSemanticUpdatedAt = new Date(now).toISOString();
+    const snapshotRecord = {
+      status: 'completed',
+      fileHash: 'sha256:file-1',
+      detectedContentType: 'text/markdown',
+      pipelineUsed: 'markdown-deterministic',
+      tripleCount: 4,
+      startedAt,
+      completedAt,
+      semanticEnrichment: {
+        eventId: 'evt-1',
+        status: 'pending',
+        semanticTripleCount: 0,
+        updatedAt: staleSemanticUpdatedAt,
+      },
+    };
+    const dashDb = {
+      getExtractionStatusSnapshot: vi.fn().mockReturnValue({
+        assertion_uri: assertionUri,
+        record_json: JSON.stringify(snapshotRecord),
+        updated_at: Date.parse(completedAt),
+      }),
+      getSemanticEnrichmentEvent: vi.fn().mockReturnValue({
+        id: 'evt-1',
+        status: 'dead_letter',
+        semantic_triple_count: 2,
+        updated_at: Date.parse(liveSemanticUpdatedAt),
+        last_error: 'worker unavailable',
+      }),
+      upsertExtractionStatusSnapshot: vi.fn(),
+    };
+
+    const record = getHydratedExtractionStatusRecord(extractionStatus as any, dashDb as any, assertionUri);
+
+    expect(record?.semanticEnrichment).toEqual({
+      eventId: 'evt-1',
+      status: 'dead_letter',
+      semanticTripleCount: 2,
+      updatedAt: liveSemanticUpdatedAt,
+      lastError: 'worker unavailable',
+    });
+    expect(extractionStatus.get(assertionUri)?.semanticEnrichment.status).toBe('dead_letter');
+    expect(dashDb.upsertExtractionStatusSnapshot).toHaveBeenCalledWith(expect.objectContaining({
+      assertion_uri: assertionUri,
+      record_json: expect.stringContaining('"status":"dead_letter"'),
+    }));
+  });
+
+  it('attributes semantic provenance to the worker while preserving the source agent separately', () => {
+    const workerDid = semanticWorkerDidFromLeaseOwner('host-a:123:boot-1');
+    const quads = buildSemanticAppendQuads({
+      extractedByDid: workerDid,
+      sourceAgentDid: 'did:dkg:agent:0ximporter',
+      eventId: 'evt-provenance',
+      graph: 'did:dkg:context-graph:cg1/assertion/peer/roadmap',
+      sourceRef: 'did:dkg:context-graph:cg1/assertion/peer/roadmap#file',
+      triples: [{
+        subject: 'urn:dkg:entity:acme',
+        predicate: 'http://schema.org/name',
+        object: '"Acme"',
+      }],
+      semanticTripleCount: 1,
+      extractedAt: '2026-04-15T12:00:00.000Z',
+    });
+
+    expect(workerDid).toMatch(/^urn:dkg:semantic-worker:/);
+    expect(quads).toContainEqual(expect.objectContaining({
+      subject: 'urn:dkg:semantic-enrichment:evt-provenance',
+      predicate: 'http://dkg.io/ontology/extractedBy',
+      object: workerDid,
+    }));
+    expect(quads).toContainEqual(expect.objectContaining({
+      subject: 'urn:dkg:semantic-enrichment:evt-provenance',
+      predicate: 'http://dkg.io/ontology/sourceAgent',
+      object: 'did:dkg:agent:0ximporter',
+    }));
+  });
+
+  it('accepts semantic append payloads larger than the shared small-body limit', async () => {
+    const req = new PassThrough() as any;
+    req.method = 'POST';
+    req.headers = {
+      'x-dkg-local-agent-integration': 'openclaw',
+      'x-dkg-bridge-token': 'bridge-token',
+    };
+    req.socket = { remoteAddress: '127.0.0.1' };
+    const res = {
+      statusCode: 0,
+      body: '',
+      writeHead(status: number) {
+        this.statusCode = status;
+      },
+      end(body: string) {
+        this.body = body;
+      },
+    };
+    const body = JSON.stringify({
+      eventId: 'evt-large-body',
+      leaseOwner: 'host-a:123:boot-1',
+      triples: [],
+      padding: 'x'.repeat(300_000),
+    });
+
+    const responsePromise = handleSemanticEnrichmentRoutes({
+      req,
+      res: res as any,
+      path: '/api/semantic-enrichment/events/append',
+      config: makeConfig({
+        localAgentIntegrations: {
+          openclaw: {
+            enabled: true,
+          },
+        },
+      }),
+      dashDb: {
+        getSemanticEnrichmentEvent: vi.fn().mockReturnValue(undefined),
+      },
+      agent: {
+        resolveAgentByToken: () => undefined,
+      },
+      extractionStatus: new Map(),
+      requestToken: 'bridge-token',
+      bridgeAuthToken: 'bridge-token',
+    } as any);
+    req.end(body);
+    await responsePromise;
+
+    expect(body.length).toBeGreaterThan(256 * 1024);
+    expect(res.statusCode).toBe(404);
+    expect(JSON.parse(res.body)).toEqual({
+      error: 'Semantic enrichment event not found: evt-large-body',
+    });
+  });
+
   it('stops queueing when the adapter explicitly disables semantic enrichment support', () => {
     expect(canQueueLocalAgentSemanticEnrichment(makeConfig({
       localAgentIntegrations: {
@@ -775,7 +921,7 @@ describe('best-effort semantic enqueue helper', () => {
     }), 'openclaw')).toBe(false);
   });
 
-  it('dead-letters queued semantic events at reconciliation time when stored OpenClaw support is disabled', () => {
+  it('dead-letters queued semantic events at reconciliation time when OpenClaw is explicitly disconnected', () => {
     const extractionStatus = new Map<string, any>();
     const dashDb = {
       deadLetterActiveSemanticEnrichmentEvents: vi.fn().mockReturnValue([]),
@@ -786,6 +932,14 @@ describe('best-effort semantic enqueue helper', () => {
         localAgentIntegrations: {
           openclaw: {
             enabled: false,
+            connectedAt: '2026-04-15T12:00:00.000Z',
+            runtime: {
+              status: 'disconnected',
+              ready: false,
+            },
+            metadata: {
+              userDisabled: true,
+            },
           },
         },
       }),
@@ -797,7 +951,7 @@ describe('best-effort semantic enqueue helper', () => {
     expect(dashDb.deadLetterActiveSemanticEnrichmentEvents).toHaveBeenCalledOnce();
   });
 
-  it('dead-letters queued semantic events at reconciliation time when the stored OpenClaw integration is missing', () => {
+  it('leaves queued semantic events pending when the stored OpenClaw integration is missing', () => {
     const extractionStatus = new Map<string, any>();
     const dashDb = {
       deadLetterActiveSemanticEnrichmentEvents: vi.fn().mockReturnValue([]),
@@ -810,7 +964,37 @@ describe('best-effort semantic enqueue helper', () => {
     );
 
     expect(count).toBe(0);
-    expect(dashDb.deadLetterActiveSemanticEnrichmentEvents).toHaveBeenCalledOnce();
+    expect(dashDb.deadLetterActiveSemanticEnrichmentEvents).not.toHaveBeenCalled();
+  });
+
+  it('leaves queued semantic events pending during a transient OpenClaw runtime downgrade', () => {
+    const extractionStatus = new Map<string, any>();
+    const dashDb = {
+      deadLetterActiveSemanticEnrichmentEvents: vi.fn().mockReturnValue([]),
+    };
+
+    const count = reconcileOpenClawSemanticAvailability(
+      makeConfig({
+        localAgentIntegrations: {
+          openclaw: {
+            enabled: true,
+            capabilities: {
+              semanticEnrichment: false,
+            },
+            runtime: {
+              status: 'degraded',
+              ready: false,
+              lastError: 'runtime.subagent unavailable',
+            },
+          },
+        },
+      }),
+      extractionStatus as any,
+      dashDb as any,
+    );
+
+    expect(count).toBe(0);
+    expect(dashDb.deadLetterActiveSemanticEnrichmentEvents).not.toHaveBeenCalled();
   });
 
   it('saves config before reconciling OpenClaw semantic availability', async () => {
@@ -821,7 +1005,21 @@ describe('best-effort semantic enqueue helper', () => {
     };
 
     await saveConfigAndReconcileOpenClawSemanticAvailability({
-      config: makeConfig(),
+      config: makeConfig({
+        localAgentIntegrations: {
+          openclaw: {
+            enabled: false,
+            connectedAt: '2026-04-15T12:00:00.000Z',
+            runtime: {
+              status: 'disconnected',
+              ready: false,
+            },
+            metadata: {
+              userDisabled: true,
+            },
+          },
+        },
+      }),
       extractionStatus: extractionStatus as any,
       dashDb: dashDb as any,
       saveConfig,
