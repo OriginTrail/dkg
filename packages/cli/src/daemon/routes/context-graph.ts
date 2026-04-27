@@ -1137,6 +1137,52 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
 
     const shouldSyncSharedMemory =
       (includeSharedMemory ?? includeWorkspace) !== false;
+
+    const subMap = (agent as any).subscribedContextGraphs as
+      | Map<string, { subscribed: boolean; synced: boolean; metaSynced?: boolean; name?: string; [k: string]: unknown }>
+      | undefined;
+    const existingSub = subMap?.get(paranetId);
+    const existingJobId = catchupTracker.latestByParanet.get(paranetId);
+    const existingJob = existingJobId ? catchupTracker.jobs.get(existingJobId) : undefined;
+
+    if (existingSub?.subscribed) {
+      if (existingJob && (existingJob.status === "queued" || existingJob.status === "running")) {
+        return jsonResponse(res, 200, {
+          subscribed: paranetId,
+          catchup: {
+            status: existingJob.status,
+            includeWorkspace: existingJob.includeWorkspace,
+            jobId: existingJob.jobId,
+          },
+        });
+      }
+
+      if (existingSub.synced) {
+        const jobId = existingJob?.jobId ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+        if (!existingJob) {
+          const syntheticJob: CatchupJob = {
+            jobId,
+            paranetId,
+            includeWorkspace: shouldSyncSharedMemory,
+            status: "done",
+            queuedAt: Date.now(),
+            startedAt: Date.now(),
+            finishedAt: Date.now(),
+          };
+          catchupTracker.jobs.set(jobId, syntheticJob);
+          catchupTracker.latestByParanet.set(paranetId, jobId);
+        }
+        return jsonResponse(res, 200, {
+          subscribed: paranetId,
+          catchup: {
+            status: "done",
+            includeWorkspace: shouldSyncSharedMemory,
+            jobId,
+          },
+        });
+      }
+    }
+
     console.log(`[subscribe] contextGraph=${paranetId} includeSharedMemory=${shouldSyncSharedMemory}`);
     agent.subscribeToContextGraph(paranetId);
 
@@ -1205,9 +1251,6 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
 
         if (job.status === "done") {
           if (cleanResponse) {
-            const subMap = (agent as any).subscribedContextGraphs as
-              | Map<string, { subscribed: boolean; synced: boolean; metaSynced?: boolean; name?: string; [k: string]: unknown }>
-              | undefined;
             const sub = subMap?.get(paranetId);
             if (sub) {
               sub.synced = true;

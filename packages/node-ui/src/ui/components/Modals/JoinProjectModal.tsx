@@ -70,6 +70,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
   const [progress, setProgress] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
+  const [syncInProgress, setSyncInProgress] = useState(false);
   const [requestSent, setRequestSent] = useState(false);
   const [sendingRequest, setSendingRequest] = useState(false);
   const [accessDenied, setAccessDenied] = useState(false);
@@ -93,6 +94,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
       setInviteCode(initialContextGraphId ?? '');
       setError(null);
       setSuccess(false);
+      setSyncInProgress(false);
       setRequestSent(false);
       setAccessDenied(false);
       setProgress('');
@@ -112,6 +114,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
     setJoining(true);
     setError(null);
     setSuccess(false);
+    setSyncInProgress(false);
     setRequestSent(false);
     setAccessDenied(false);
 
@@ -128,6 +131,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
 
       setProgress('Subscribing to project…');
       const subResult = await subscribeToContextGraph(cgId);
+      const subscribed = !!subResult?.subscribed;
 
       setProgress('Syncing knowledge from peers…');
 
@@ -152,26 +156,13 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
       }
 
       if (catchup.status === 'timeout') {
-        // A poll timeout is NOT evidence of ACL denial — it just means
-        // no peer finished the catchup within ~90s. Common reasons:
-        //   - project is public but peers are slow / offline,
-        //   - network path is congested,
-        //   - our subscribe hasn't reached a peer that holds the CG yet.
-        // Flipping `accessDenied` here used to push users of public
-        // projects straight into the "Access Restricted — send signed
-        // join request" flow, which is misleading and cuts them off
-        // from just retrying. Surface a neutral network error instead
-        // and let them retry; a real ACL denial lands in the `denied`
-        // branch above, or in the `err.message` check at the bottom
-        // of this function. (HEAD tier-4c G3; v10-rc's copy "syncing
-        // still in progress" was milder but still implied success —
-        // we'd rather the user retry explicitly than think the subscribe
-        // finished when the background sync never landed data.)
-        setError(
-          'Timed out waiting for peers to respond. The project may be slow to catch up, or no peer currently holds the data. Try again in a moment.',
-        );
-        setProgress('');
-        return;
+        if (!subscribed) {
+          setError(
+            'Timed out waiting for peers to respond. The project may be slow to catch up, or no peer currently holds the data. Try again in a moment.',
+          );
+          setProgress('');
+          return;
+        }
       }
 
       setProgress('Refreshing project list…');
@@ -184,7 +175,15 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
         openTab({ id: `project:${joined.id}`, label: joined.name || joined.id, closable: true });
       }
 
+      if (catchup.status === 'timeout') {
+        setSuccess(true);
+        setSyncInProgress(true);
+        setProgress('');
+        return;
+      }
+
       setSuccess(true);
+      setSyncInProgress(false);
       setProgress('');
       // Phase 8: transition into wire-workspace step instead of
       // auto-closing. The joiner can either install workspace files
@@ -291,10 +290,13 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
           {success && (
             <div style={{
               padding: '10px 14px', borderRadius: 8, marginBottom: 16, fontSize: 12,
-              background: 'rgba(34, 197, 94, 0.08)', border: '1px solid rgba(34, 197, 94, 0.25)',
-              color: 'var(--accent-green)',
+              background: syncInProgress ? 'rgba(59, 130, 246, 0.08)' : 'rgba(34, 197, 94, 0.08)',
+              border: syncInProgress ? '1px solid rgba(59, 130, 246, 0.25)' : '1px solid rgba(34, 197, 94, 0.25)',
+              color: syncInProgress ? 'var(--accent-primary, #3b82f6)' : 'var(--accent-green)',
             }}>
-              Successfully joined! Syncing knowledge from peers…
+              {syncInProgress
+                ? 'Project joined successfully. Initial sync is still in progress and data will appear as peers respond.'
+                : 'Successfully joined! Syncing knowledge from peers…'}
             </div>
           )}
 
