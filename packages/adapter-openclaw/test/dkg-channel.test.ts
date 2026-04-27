@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { createServer } from 'node:http';
 import { DkgChannelPlugin, CHANNEL_NAME, formatInboundTurnDiagnostic } from '../src/DkgChannelPlugin.js';
 import { DkgDaemonClient } from '../src/dkg-client.js';
 import type { OpenClawPluginApi } from '../src/types.js';
@@ -274,22 +275,27 @@ describe('DkgChannelPlugin', () => {
     expect(plugin.isUsingGatewayRoute).toBe(false);
   });
 
-  // Issue #272: when the gateway hosts the channel routes, the standalone
-  // bridge listener on port 9201 collides with the gateway's listener on the
-  // same port and throws EADDRINUSE on startup.
-  describe('issue #272 — standalone bridge skipped when gateway routes registered', () => {
-    it('does not call start() when registerHttpRoute is available (gateway-route mode)', () => {
+  // Issue #272: in OpenClaw versions where the gateway also binds the
+  // configured channel port (e.g. 2026.3.31 with channels.dkg-ui.port = 9201),
+  // the standalone bridge can't bind on its configured port. Earlier we
+  // tried skipping the bridge entirely when gateway routes were registered,
+  // but the gateway-side `/api/dkg-channel/health` route is auth:'gateway'
+  // and rejects the daemon's no-auth probe — leaving the UI with no usable
+  // health target. The bridge is the only transport the daemon trusts (via
+  // the bridge auth token), so it must always start. start() now falls back
+  // to an OS-allocated free port on EADDRINUSE so it always comes up.
+  describe('issue #272 — standalone bridge always starts (with port fallback)', () => {
+    it('calls start() when registerHttpRoute is available (gateway-route mode)', () => {
       const startSpy = vi.spyOn(plugin, 'start').mockResolvedValue(undefined);
       const api = makeApi({ registerHttpRoute: trackFn() });
 
       plugin.register(api);
 
       expect(plugin.isUsingGatewayRoute).toBe(true);
-      expect(startSpy).not.toHaveBeenCalled();
-      expect((plugin as any).server).toBeNull();
+      expect(startSpy).toHaveBeenCalledTimes(1);
     });
 
-    it('does call start() when registerHttpRoute is unavailable (fallback bridge mode)', () => {
+    it('calls start() when registerHttpRoute is unavailable (fallback bridge mode)', () => {
       const startSpy = vi.spyOn(plugin, 'start').mockResolvedValue(undefined);
       const api = makeApi(); // no registerHttpRoute
 
@@ -299,7 +305,7 @@ describe('DkgChannelPlugin', () => {
       expect(startSpy).toHaveBeenCalledTimes(1);
     });
 
-    it('does not call start() even when registerChannel and registerHttpRoute are both available', () => {
+    it('calls start() when registerChannel and registerHttpRoute are both available', () => {
       const startSpy = vi.spyOn(plugin, 'start').mockResolvedValue(undefined);
       const registerChannel = trackFn();
       const registerHttpRoute = trackFn();
@@ -310,22 +316,39 @@ describe('DkgChannelPlugin', () => {
       expect(plugin.isUsingGatewayRoute).toBe(true);
       expect(registerChannel.calls).toHaveLength(1);
       expect(registerHttpRoute.calls).toHaveLength(2);
-      expect(startSpy).not.toHaveBeenCalled();
+      expect(startSpy).toHaveBeenCalledTimes(1);
     });
 
-    // Locks the diagnostic log line operators grep for during port-conflict
-    // troubleshooting (DkgChannelPlugin.ts skip-path). A refactor that drops
-    // the log silently regresses observability — this test fails loudly.
-    it('logs the skip reason when gateway routes are registered', () => {
-      vi.spyOn(plugin, 'start').mockResolvedValue(undefined);
-      const api = makeApi({ registerHttpRoute: trackFn() });
+    // Drives the port-fallback path: pre-bind a server on a port, then ask
+    // the plugin to listen on the same port. start() must catch EADDRINUSE
+    // and re-listen on an OS-allocated port; the bound port surfaces via
+    // bridgePort, and a diagnostic info log captures the fallback. A
+    // refactor that drops the fallback silently regresses both #272 envs.
+    it('falls back to an OS-allocated port on EADDRINUSE', async () => {
+      const blocker = createServer(() => {});
+      try {
+        await new Promise<void>((resolve, reject) => {
+          blocker.once('error', reject);
+          blocker.listen(0, '127.0.0.1', () => resolve());
+        });
+        const blockerAddr = blocker.address();
+        const blockerPort = typeof blockerAddr === 'object' && blockerAddr ? blockerAddr.port : 0;
+        expect(blockerPort).toBeGreaterThan(0);
 
-      plugin.register(api);
+        const conflictClient = new DkgDaemonClient({ baseUrl: 'http://localhost:9200', apiToken: 'test-token' });
+        const conflictPlugin = new DkgChannelPlugin({ enabled: true, port: blockerPort }, conflictClient);
 
-      const infoCalls = (api.logger.info as TrackingFn).calls;
-      expect(
-        infoCalls.some((call) => String(call[0]).includes('skipping standalone bridge server')),
-      ).toBe(true);
+        await conflictPlugin.start();
+
+        try {
+          expect(conflictPlugin.bridgePort).toBeGreaterThan(0);
+          expect(conflictPlugin.bridgePort).not.toBe(blockerPort);
+        } finally {
+          await conflictPlugin.stop();
+        }
+      } finally {
+        await new Promise<void>((resolve) => blocker.close(() => resolve()));
+      }
     });
   });
 

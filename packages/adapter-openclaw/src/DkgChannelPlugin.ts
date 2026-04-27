@@ -508,19 +508,21 @@ export class DkgChannelPlugin {
       log.info?.('[dkg-channel] Registered HTTP routes on gateway: POST /api/dkg-channel/inbound, GET /api/dkg-channel/health');
     }
 
-    // Start the standalone bridge server only when the gateway has not taken
-    // ownership of the channel routes via api.registerHttpRoute(). When the
-    // gateway is hosting `/api/dkg-channel/inbound` and `/api/dkg-channel/health`
-    // for us, binding our own listener on `this.port` (default 9201) collides
-    // with the gateway's listener on the same port and throws EADDRINUSE on
-    // startup — see issue #272.
-    if (!this.useGatewayRoute) {
-      this.start().catch((err) => {
-        log.warn?.(`[dkg-channel] Bridge server failed to start: ${err.message}`);
-      });
-    } else {
-      log.info?.(`[dkg-channel] Gateway channel routes registered — skipping standalone bridge server (port ${this.port})`);
-    }
+    // Always start the standalone bridge server. It's the transport the
+    // daemon's UI health probe and message dispatch trust (via the bridge
+    // auth token). The gateway-side `/api/dkg-channel/health` route we
+    // registered above is `auth: 'gateway'` and rejects the daemon's
+    // unauthenticated probe, so the bridge cannot be skipped.
+    //
+    // In OpenClaw versions where the gateway also binds the configured
+    // channel port (e.g. 2026.3.31 with channels.dkg-ui.port = 9201, see
+    // issue #272), our listen() throws EADDRINUSE on the configured port.
+    // start() handles that by falling back to an OS-allocated free port
+    // and the actual bound port surfaces via bridgePort + the daemon's
+    // transport.bridgeUrl, so the probe always finds the bridge.
+    this.start().catch((err: any) => {
+      log.warn?.(`[dkg-channel] Bridge server failed to start: ${err?.message ?? err}`);
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -541,22 +543,38 @@ export class DkgChannelPlugin {
 
     const server = this.server;
     this.serverStart = new Promise<void>((resolve, reject) => {
-      const onError = (err: Error) => {
-        server.off('error', onError);
-        this.serverStart = null;
-        this.server = null;
-        reject(err);
+      const tryListen = (port: number, isFallback: boolean) => {
+        const onError = (err: any) => {
+          server.off('error', onError);
+          const isAddrInUse = err?.code === 'EADDRINUSE'
+            || /EADDRINUSE/i.test(String(err?.message ?? ''));
+          if (isAddrInUse && !isFallback) {
+            // Configured port (default 9201) is taken — typically because
+            // the OpenClaw gateway itself binds channels.dkg-ui.port in
+            // versions like 2026.3.31 (issue #272). Fall back to an
+            // OS-allocated free port so the bridge still comes up; the
+            // actual bound port surfaces via bridgePort + the daemon's
+            // transport.bridgeUrl, which is what the UI health probe and
+            // message dispatch use.
+            this.api?.logger.info?.(`[dkg-channel] Configured bridge port ${port} is in use; falling back to an OS-allocated free port (issue #272)`);
+            tryListen(0, true);
+            return;
+          }
+          this.serverStart = null;
+          this.server = null;
+          reject(err);
+        };
+        server.once('error', onError);
+        server.listen(port, '127.0.0.1', () => {
+          server.off('error', onError);
+          this.serverStart = null;
+          const address = server.address();
+          const boundPort = typeof address === 'object' && address ? address.port : port;
+          this.api?.logger.info?.(`[dkg-channel] Bridge server listening on 127.0.0.1:${boundPort}`);
+          resolve();
+        });
       };
-
-      server.once('error', onError);
-      server.listen(this.port, '127.0.0.1', () => {
-        server.off('error', onError);
-        this.serverStart = null;
-        const address = server.address();
-        const boundPort = typeof address === 'object' && address ? address.port : this.port;
-        this.api?.logger.info?.(`[dkg-channel] Bridge server listening on 127.0.0.1:${boundPort}`);
-        resolve();
-      });
+      tryListen(this.port, false);
     });
 
     await this.serverStart;

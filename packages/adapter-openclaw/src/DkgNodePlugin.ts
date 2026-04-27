@@ -563,11 +563,13 @@ export class DkgNodePlugin {
     };
     const bridgeAlreadyReady = this.channelPlugin?.isListening === true;
     // When the gateway owns the channel routes (set by api.registerHttpRoute
-    // success in DkgChannelPlugin.register), the gateway is the live transport
-    // — our standalone bridge port is intentionally not bound (issue #272).
-    // Treat that as "ready at registration time" so we don't kick off a
-    // redundant channelPlugin.start() that would collide with the gateway's
-    // own listener on port 9201.
+    // success in DkgChannelPlugin.register), the gateway is already serving
+    // the channel even before the standalone bridge finishes binding. Treat
+    // that as "ready at registration time" so the UI doesn't see a transient
+    // 'connecting' state. The follow-up start().then() PUT below still fires
+    // — it's what publishes transport.bridgeUrl/healthUrl after start()
+    // resolves to a bound port (which may differ from the configured port if
+    // the gateway also bound it — see issue #272 fallback in DkgChannelPlugin.start()).
     const gatewayOwnsRoute = this.channelPlugin?.isUsingGatewayRoute === true;
     const readyAtRegistration = bridgeAlreadyReady || gatewayOwnsRoute;
     const basePayload = {
@@ -595,7 +597,7 @@ export class DkgNodePlugin {
       return;
     }
 
-    if (readyAtRegistration || !this.channelPlugin) {
+    if (bridgeAlreadyReady || !this.channelPlugin) {
       return;
     }
 

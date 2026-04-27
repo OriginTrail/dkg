@@ -1225,13 +1225,28 @@ describe('DkgNodePlugin', () => {
           lastError: null,
         },
       });
-      // In gateway-route mode the standalone bridge isn't bound, so the
-      // adapter must NOT advertise a bridgeUrl/healthUrl that points at a
-      // port nobody is listening on (issue #272 follow-up — caused the UI
-      // health probe to fail and show "OpenClaw is unavailable").
+      // The connect call fires synchronously during register(), BEFORE the
+      // standalone bridge has finished binding — so transport.bridgeUrl is
+      // not populated in this body yet. We mark ready=true upfront because
+      // the gateway already owns the channel (registerHttpRoute succeeded);
+      // the follow-up PUT below fires once start() resolves and is what
+      // populates transport.bridgeUrl/healthUrl with the actual bound port.
+      // The bridge's /health is the live probe target — the gateway-side
+      // `/api/dkg-channel/health` is auth:'gateway' and rejects the daemon's
+      // no-auth probe. start() falls back to an OS-allocated free port if
+      // the configured one is taken (e.g. by the gateway in 2026.3.31, see
+      // issue #272).
       expect(connectBody.transport.bridgeUrl).toBeUndefined();
-      expect(connectBody.transport.healthUrl).toBeUndefined();
-      expect(readyCall).toBeUndefined();
+      expect(readyCall).toBeTruthy();
+      const readyBodyAfterStart = JSON.parse(String(readyCall?.[1]?.body));
+      expect(readyBodyAfterStart.transport.bridgeUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+      expect(readyBodyAfterStart.transport.healthUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/health$/);
+      expect(readyBodyAfterStart.transport.gatewayUrl).toBe('http://127.0.0.1:19789');
+      expect(readyBodyAfterStart.runtime).toMatchObject({
+        status: 'ready',
+        ready: true,
+        lastError: null,
+      });
     } finally {
       await plugin?.stop();
       globalThis.fetch = originalFetch;
@@ -1307,51 +1322,6 @@ describe('DkgNodePlugin', () => {
           lastError: null,
         },
       });
-    } finally {
-      await plugin?.stop();
-      globalThis.fetch = originalFetch;
-    }
-  });
-
-  // Issue #272: gateway owns the route → DkgNodePlugin must not also drive
-  // standalone bridge start. The DkgChannelPlugin-side gate is covered in
-  // dkg-channel.test.ts; this asserts the same invariant at the outer
-  // DkgNodePlugin call site (DkgNodePlugin.ts gateway-route early-return).
-  it('does not call channelPlugin.start() when gateway routes are active (F-B gate)', async () => {
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async () => ({
-      ok: true,
-      json: async () => ({ ok: true, integration: { id: 'openclaw' } }),
-    })) as typeof fetch;
-    let plugin: DkgNodePlugin | null = null;
-
-    try {
-      plugin = new DkgNodePlugin({
-        daemonUrl: 'http://localhost:9200',
-        channel: { enabled: true, port: 0 },
-        memory: { enabled: false },
-      });
-      const mockApi: OpenClawPluginApi = {
-        config: { gateway: { port: 19789 } },
-        registrationMode: 'full',
-        registerTool: () => {},
-        registerHook: () => {},
-        registerHttpRoute: () => {},
-        on: () => {},
-        logger: {},
-      };
-
-      plugin.register(mockApi);
-      // After plugin.register returns, channelPlugin is instantiated and its
-      // own register() has already run (gated start skipped per F-A). Install
-      // the spy now so it intercepts only the outer DkgNodePlugin call site.
-      const channelPlugin = (plugin as any).channelPlugin as { start: (...args: unknown[]) => Promise<void> } | null;
-      expect(channelPlugin).toBeTruthy();
-      const startSpy = vi.spyOn(channelPlugin!, 'start').mockResolvedValue(undefined);
-      // Let the async connectLocalAgentIntegration → early-return chain settle.
-      await new Promise((resolve) => setTimeout(resolve, 25));
-
-      expect(startSpy).not.toHaveBeenCalled();
     } finally {
       await plugin?.stop();
       globalThis.fetch = originalFetch;
