@@ -202,6 +202,215 @@ describe("ChatTurnWriter", () => {
     expect((writer as any).debounceTimers.size).toBe(0);
   });
 
+  it("R21.2 — onMessageSent with no pending user does NOT persist an orphan assistant turn", async () => {
+    // Regression for R21.2: pre-fix, an outbound `message:sent` arriving
+    // when the pending-user queue was empty (chunk 2+ of one logical
+    // reply, or a proactive notification with no inbound) persisted as a
+    // standalone assistant-only turn. That polluted chat memory/search
+    // results and broke the one-turn-per-exchange invariant. The fix
+    // bails when the queue is empty.
+    await writer.onMessageSent({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "orphan reply", success: true, messageId: "out-orphan" },
+    } as any);
+    await flushMicrotasks();
+    expect(mockClient.storeChatTurn).not.toHaveBeenCalled();
+
+    // Confirm normal pairing still works after the bail-on-empty.
+    writer.onMessageReceived({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "real q", messageId: "in-1" },
+    } as any);
+    await writer.onMessageSent({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "real reply", success: true, messageId: "out-1" },
+    } as any);
+    await flushMicrotasks();
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+  });
+
+  it("R20.1 — onMessageSent with success=true but empty content does NOT consume the pending user", async () => {
+    // Regression for R20.1: pre-fix, the dequeue happened before the
+    // `assistantText` check, so a `message:sent` carrying an empty
+    // content (channel ack, attachment-only send, status broadcast)
+    // would eat the user side and leave the next REAL textual reply
+    // with no pending user — persisted as an assistant-only turn.
+    writer.onMessageReceived({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "real user question", messageId: "in-1" },
+    } as any);
+
+    // Empty-content success-true outbound (channel ack / attachment-only).
+    await writer.onMessageSent({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "", success: true, messageId: "out-ack" },
+    } as any);
+    await flushMicrotasks();
+    expect(mockClient.storeChatTurn).not.toHaveBeenCalled();
+    // The pending user must still be in the queue.
+    const pending = (writer as any).pendingUserMessages;
+    expect(pending.size).toBeGreaterThan(0);
+
+    // The real reply now arrives — must pair with the original user.
+    await writer.onMessageSent({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "real reply", success: true, messageId: "out-1" },
+    } as any);
+    await flushMicrotasks();
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    const call = mockClient.storeChatTurn.mock.calls[0];
+    expect(call[1]).toBe("real user question");
+    expect(call[2]).toBe("real reply");
+  });
+
+  it("R20.2 — w4bSessionCounts only increments for persists that consumed a pending user (chunked-reply safety)", async () => {
+    // Regression for R20.2: pre-fix, every successful W4b persist
+    // bumped `w4bSessionCounts` by 1, including chunk-2+ deliveries
+    // that ran out of pending users on chunk 1 and persisted as
+    // assistant-only turns. The count then advanced past
+    // `event.messages` and the next `agent_end` skipped real pairs as
+    // already-W4b-persisted. The fix guards the increment on
+    // `userText` non-empty (i.e., this persist represents a complete
+    // logical turn pair).
+    writer.onMessageReceived({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "q1", messageId: "in-1" },
+    } as any);
+    // Chunk 1: pairs with user, increments count.
+    await writer.onMessageSent({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "chunk1", success: true, messageId: "out-1a" },
+    } as any);
+    await flushMicrotasks();
+    // Chunks 2+: queue is empty, persist as assistant-only — must NOT
+    // bump the count.
+    await writer.onMessageSent({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "chunk2", success: true, messageId: "out-1b" },
+    } as any);
+    await writer.onMessageSent({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "chunk3", success: true, messageId: "out-1c" },
+    } as any);
+    await flushMicrotasks();
+    const counts = (writer as any).w4bSessionCounts as Map<string, number>;
+    // Exactly ONE turn pair was consumed — count must reflect that,
+    // not the 3 raw `message:sent` fires.
+    const sessionId = "openclaw:tg:::sk";
+    expect(counts.get(sessionId)).toBe(1);
+  });
+
+  it("R22.1 — computeDelta drops assistant-only artifacts (initial greeting, compaction) and does NOT advance pairIndex", async () => {
+    // Regression for R22.1: pre-fix, an assistant message with no
+    // preceding user (initial agent greeting, post-compaction artifact,
+    // system-injected announcement) emitted a pair as ("", asst) and
+    // bumped `pairIndex`. That polluted memory AND inflated the
+    // watermark — so the next REAL (user, assistant) pair would be
+    // skipped on the next agent_end as already-saved.
+    //
+    // Setup: messages = [asst(greeting), user, asst(reply)]. Pre-fix
+    // would emit two pairs (greeting at index 0, reply at index 1) and
+    // skip the next agent_end's reply if backfill watermark = 1.
+    // Post-fix emits exactly one pair: (user, reply) at pairIndex 0.
+    const event: AgentEndContext = {
+      sessionId: "test",
+      messages: [
+        { role: "assistant", content: "Hi! I'm your assistant." }, // initial greeting, no pending user
+        { role: "user", content: "Real question" },
+        { role: "assistant", content: "Real reply" },
+      ],
+    };
+    writer.onAgentEnd(event, { channelId: "tg", sessionKey: "sk" });
+    await flushMicrotasks();
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    const call = mockClient.storeChatTurn.mock.calls[0];
+    expect(call[1]).toBe("Real question");
+    expect(call[2]).toBe("Real reply");
+  });
+
+  it("R22.1 — pairIndex is NOT advanced for orphan assistant messages so the watermark stays correct", async () => {
+    // Stronger guard: drive the same shape twice and confirm the second
+    // agent_end (with the same messages array) does not write a new
+    // pair, because the watermark advanced exactly to the one real
+    // pair persisted on the first call.
+    const dkw = writer as any;
+    const ev: AgentEndContext = {
+      sessionId: "test",
+      messages: [
+        { role: "assistant", content: "system greeting" },
+        { role: "user", content: "q1" },
+        { role: "assistant", content: "a1" },
+      ],
+    };
+    writer.onAgentEnd(ev, { channelId: "tg", sessionKey: "sk" });
+    await flushMicrotasks();
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    // Flush so loadWatermark reflects the persisted index.
+    writer.flushSync();
+    // The real pair lands at pairIndex 0 (orphan asst was skipped, NOT
+    // counted), so the watermark should be 0 — not 1.
+    expect(dkw.loadWatermark("openclaw:tg:::sk")).toBe(0);
+
+    writer.onAgentEnd(ev, { channelId: "tg", sessionKey: "sk" });
+    await flushMicrotasks();
+    // Second call must not re-persist anything.
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+  });
+
+  it("R19.1 — computeDelta concatenates consecutive user messages before pairing with assistant reply", async () => {
+    // Regression for R19.1: pre-fix, the parser used a single
+    // `currentUser` slot that overwrote on each user message. So
+    // `[user1, user2, asst]` paired only `user2` with `asst` and
+    // dropped `user1`. The fix accumulates consecutive users and
+    // joins them with `\n` before pairing.
+    const event: AgentEndContext = {
+      sessionId: "test",
+      messages: [
+        { role: "user", content: "first user message" },
+        { role: "user", content: "second user message" },
+        { role: "assistant", content: "single reply" },
+      ],
+    };
+    writer.onAgentEnd(event, { channelId: "tg", sessionKey: "sk" });
+    await flushMicrotasks();
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    const call = mockClient.storeChatTurn.mock.calls[0];
+    // User side preserves both messages joined with newline.
+    expect(call[1]).toContain("first user message");
+    expect(call[1]).toContain("second user message");
+    expect(call[2]).toBe("single reply");
+  });
+
+  it("R19.1 — computeDelta treats assistant with text+toolCalls as intermediate, pairs final reply with original user", async () => {
+    // Regression for R19.1: pre-fix, an assistant message carrying
+    // BOTH text content AND tool_calls was treated as a final reply
+    // (the `!text && hasToolCalls` skip required empty text). That
+    // produced two pairs from `[user, asst(tool+text), tool, asst(final)]`,
+    // with the second pair missing the user side. The fix treats any
+    // assistant with tool_calls as intermediate, so the final reply
+    // pairs with the original user message.
+    const event: AgentEndContext = {
+      sessionId: "test",
+      messages: [
+        { role: "user", content: "what's the weather?" },
+        {
+          role: "assistant",
+          content: "Let me check that for you.",
+          tool_calls: [{ id: "c1", type: "function", function: { name: "weather" } }],
+        } as any,
+        { role: "tool" as any, content: "rainy" },
+        { role: "assistant", content: "It's rainy today." },
+      ],
+    };
+    writer.onAgentEnd(event, { channelId: "tg", sessionKey: "sk" });
+    await flushMicrotasks();
+    // Exactly one pair persisted (not two).
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    const call = mockClient.storeChatTurn.mock.calls[0];
+    expect(call[1]).toBe("what's the weather?");
+    expect(call[2]).toBe("It's rainy today.");
+  });
+
   it("R18.1 — TURNID_TTL_MS is generous enough to cover slow outbound channels (>=30s)", () => {
     // Regression for R18.1: the cross-path dedup TTL was 3s, so a slow
     // `message:sent` (queued Telegram, retry, network glitch) arriving
@@ -211,6 +420,52 @@ describe("ChatTurnWriter", () => {
     // unbounded.
     const ttl = (writer.constructor as any).TURNID_TTL_MS;
     expect(ttl).toBeGreaterThanOrEqual(30_000);
+  });
+
+  it("R19.2 — flush() awaits a job enqueued AFTER its initial snapshot (loop until empty)", async () => {
+    // Regression for R19.2: pre-fix, `flush()` snapshotted in-flight
+    // jobs once, then awaited. A late-arriving hook handler that
+    // called `trackPersistJob` AFTER the snapshot would not be in
+    // the awaited set, so shutdown could return before the late
+    // persist completed. The fix loops until both the in-flight
+    // bucket and pending-resets bucket are empty across an iteration.
+
+    const dkw = writer as any;
+    const sessionId = "openclaw:tg:::sk";
+
+    // Track ordering so we can assert flush awaited the late job.
+    const order: string[] = [];
+
+    // Seed an initial in-flight job that completes quickly.
+    let resolveFirst: () => void = () => {};
+    const firstJob = new Promise<void>((r) => { resolveFirst = r; });
+    dkw.trackPersistJob(sessionId, async () => {
+      await firstJob;
+      order.push("first done");
+    }).catch(() => {});
+
+    // Schedule a "late" job that enqueues itself ONLY after the first
+    // resolves (simulating a hook handler that races flush's snapshot).
+    let resolveSecond: () => void = () => {};
+    const secondJob = new Promise<void>((r) => { resolveSecond = r; });
+    setTimeout(() => {
+      dkw.trackPersistJob(sessionId, async () => {
+        await secondJob;
+        order.push("second done");
+      }).catch(() => {});
+    }, 5);
+
+    // Resolve the second slightly later so flush's loop catches it.
+    setTimeout(() => resolveSecond(), 30);
+    // Resolve first immediately so flush proceeds past the first iteration.
+    setTimeout(() => resolveFirst(), 10);
+
+    await writer.flush();
+    order.push("flush returned");
+    // Both jobs must have completed BEFORE flush returned.
+    expect(order).toContain("first done");
+    expect(order).toContain("second done");
+    expect(order[order.length - 1]).toBe("flush returned");
   });
 
   it("R18.2 — agent_end after setup-runtime → full upgrade does NOT re-persist W4b-written turns", async () => {
@@ -925,25 +1180,6 @@ describe("ChatTurnWriter", () => {
     expect(secondCall[2]).toBe("a2");
   });
 
-  it("pairs consecutive users FIFO on agent_end to match message:sent queueing", async () => {
-    const event: AgentEndContext = {
-      sessionId: "test",
-      messages: [
-        { role: "user", content: "u1" },
-        { role: "user", content: "u2" },
-        { role: "assistant", content: "a1" },
-        { role: "assistant", content: "a2" },
-      ],
-    };
-    writer.onAgentEnd(event, { channelId: "ch", sessionKey: "sk" });
-    await flushMicrotasks();
-    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(2);
-    expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("u1");
-    expect(mockClient.storeChatTurn.mock.calls[0][2]).toBe("a1");
-    expect(mockClient.storeChatTurn.mock.calls[1][1]).toBe("u2");
-    expect(mockClient.storeChatTurn.mock.calls[1][2]).toBe("a2");
-  });
-
   it("FIFO pending queue pairs replies with the oldest unmatched inbound (R2.3)", async () => {
     // Two inbound messages arrive back-to-back before any outbound reply.
     writer.onMessageReceived({ sessionKey: "sk", direction: "inbound", text: "first" });
@@ -960,7 +1196,7 @@ describe("ChatTurnWriter", () => {
     expect(mockClient.storeChatTurn.mock.calls[1][2]).toBe("reply-2");
   });
 
-  it("dedups W4b after W4a when consecutive users precede assistant replies", async () => {
+  it("clears W4b pending users after W4a persisted a coalesced consecutive-user turn", async () => {
     writer.onAgentEnd({
       sessionId: "test",
       messages: [
@@ -971,7 +1207,7 @@ describe("ChatTurnWriter", () => {
     }, { channelId: "tg", sessionKey: "sk" });
     await flushMicrotasks();
     expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
-    expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("u1");
+    expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("u1\nu2");
     expect(mockClient.storeChatTurn.mock.calls[0][2]).toBe("a1");
 
     writer.onMessageReceived({
@@ -994,6 +1230,7 @@ describe("ChatTurnWriter", () => {
     } as any);
     await flushMicrotasks();
     expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    expect((writer as any).pendingUserMessages.size).toBe(0);
 
     writer.onMessageSent({
       sessionKey: "sk",
@@ -1002,9 +1239,7 @@ describe("ChatTurnWriter", () => {
       ...({ context: { channelId: "tg", success: true } } as any),
     } as any);
     await flushMicrotasks();
-    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(2);
-    expect(mockClient.storeChatTurn.mock.calls[1][1]).toBe("u2");
-    expect(mockClient.storeChatTurn.mock.calls[1][2]).toBe("a2");
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
   });
 
   it("cross-path dedup: agent_end followed by message:sent with same content writes once (R2.2)", async () => {

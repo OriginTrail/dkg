@@ -395,15 +395,17 @@ export class ChatTurnWriter {
       // so we don't write a turn whose state was about to be wiped.
       const pendingReset = this.pendingResets.get(sessionId);
       if (pendingReset) await pendingReset;
+      const success = (ev as any)?.context?.success ?? (ev as any)?.success;
       // Drop failed outbound sends: chat history should not show replies the
       // user never received. Still consume the oldest pending inbound so the
       // next successful turn does not pair its reply with a stale inbound
       // from the aborted exchange.
-      const success = (ev as any)?.context?.success ?? (ev as any)?.success;
-      const queue = this.pendingUserMessages.get(conversationKey);
-      const userText = queue && queue.length > 0 ? queue.shift()! : "";
-      if (queue && queue.length === 0) this.pendingUserMessages.delete(conversationKey);
-      if (success === false) return;
+      if (success === false) {
+        const failedQueue = this.pendingUserMessages.get(conversationKey);
+        if (failedQueue && failedQueue.length > 0) failedQueue.shift();
+        if (failedQueue && failedQueue.length === 0) this.pendingUserMessages.delete(conversationKey);
+        return;
+      }
       // Strip injected `<recalled-memory>` from assistant text — the model may
       // echo the auto-recall block, and if we persist the raw version here
       // while the W4a path persists the stripped version, the two turnIds
@@ -411,6 +413,31 @@ export class ChatTurnWriter {
       // legitimate pastes (XML, logs) containing the tag would otherwise be
       // silently corrupted.
       const assistantText = this.stripRecalledMemory(readEventText(ev));
+      // R20.1 — Compute `assistantText` BEFORE consuming the pending user.
+      // A `message:sent` with `success: true` but no textual content
+      // (channel ack, attachment-only send, status broadcast) must not
+      // eat the queued user message — otherwise the next REAL textual
+      // outbound for this conversation would have nothing to pair with
+      // and persist as an assistant-only turn.
+      if (!assistantText) return;
+      const queue = this.pendingUserMessages.get(conversationKey);
+      // R21.2 — Bail when no pending user exists. Persisting an assistant-
+      // only turn for a chunked-reply continuation (chunk 2+ of one
+      // logical reply) or a proactive notification with no inbound would
+      // pollute chat memory/search and break the one-turn-per-exchange
+      // invariant. Drop the orphan; if proactive notifications need to
+      // be persisted later, they should go through a dedicated path
+      // that supplies a synthesized user side or a distinct schema.
+      if (!queue || queue.length === 0) return;
+      if (queue.length > 1) {
+        const joinedUserText = queue.join("\n");
+        if (this.peekTurnIdSeen(sessionId, this.w4aOriginKey(joinedUserText, assistantText))) {
+          this.pendingUserMessages.delete(conversationKey);
+          return; // W4a already persisted the coalesced consecutive-user turn.
+        }
+      }
+      const userText = queue.shift()!;
+      if (queue.length === 0) this.pendingUserMessages.delete(conversationKey);
       if (userText || assistantText) {
         // Cross-path dedup, W4b side:
         //   PEEK w4a-origin — non-mutating; if W4a already wrote this
@@ -446,12 +473,23 @@ export class ChatTurnWriter {
             // R18.2 — Track the W4b session count so a later `agent_end`
             // (typically after a `setup-runtime → full` upgrade) sees a
             // raised `savedUpTo` floor in `computeDelta` and doesn't
-            // re-persist turns W4b already wrote. Bump only on
-            // successful persist.
-            this.w4bSessionCounts.set(
-              sessionId,
-              (this.w4bSessionCounts.get(sessionId) ?? 0) + 1,
-            );
+            // re-persist turns W4b already wrote.
+            // R20.2 — Only count when the persist consumed BOTH a user
+            // message and assistant text — i.e. it represents a complete
+            // logical turn pair as `computeDelta` would emit. Counting
+            // every successful `message:sent` (chunked replies, channel
+            // broadcasts, multi-payload deliveries) advanced the count
+            // past `event.messages` and the next `agent_end` skipped
+            // real pairs as already persisted. The R20.1 fix above
+            // already returns early on empty `assistantText`; the
+            // additional `userText` check here filters chunk-2+ deliveries
+            // that ran out of pending users on chunk 1.
+            if (userText) {
+              this.w4bSessionCounts.set(
+                sessionId,
+                (this.w4bSessionCounts.get(sessionId) ?? 0) + 1,
+              );
+            }
           } catch (err) {
             // W4b is the ONLY path with a copy of `userText` (it lives
             // ephemerally in the FIFO queue). On a hard persist failure
@@ -545,16 +583,29 @@ export class ChatTurnWriter {
    * sync `flushSync()` only commits the file but leaves a fire-and-forget
    * `storeChatTurn()` in flight, so a shutdown right after a reply could
    * exit before the final turn is persisted to the daemon.
+   *
+   * R19.2 — Loops until `inFlightPersists` and `pendingResets` are both
+   * empty. A previously-dispatched hook handler (e.g., `agent_end` /
+   * `message:sent`) can still be running when `stop()` calls `flush()`;
+   * if it reaches `trackPersistJob` AFTER our snapshot but BEFORE
+   * `Promise.allSettled` returns, the job would otherwise be missed.
+   * Re-snapshotting and re-awaiting closes that race. Bounded because
+   * `stop()` calls `hookSurface.destroy()` BEFORE `flush()` (R19.2),
+   * so no NEW handler invocations are dispatched while flush runs —
+   * only the in-flight ones complete.
    */
   async flush(): Promise<void> {
-    const allJobs: Promise<void>[] = [];
-    for (const bucket of this.inFlightPersists.values()) {
-      for (const j of bucket) allJobs.push(j);
+    while (true) {
+      const allJobs: Promise<void>[] = [];
+      for (const bucket of this.inFlightPersists.values()) {
+        for (const j of bucket) allJobs.push(j);
+      }
+      for (const reset of this.pendingResets.values()) {
+        allJobs.push(reset);
+      }
+      if (allJobs.length === 0) break;
+      await Promise.allSettled(allJobs);
     }
-    for (const reset of this.pendingResets.values()) {
-      allJobs.push(reset);
-    }
-    if (allJobs.length > 0) await Promise.allSettled(allJobs);
     this.flushSync();
   }
 
@@ -572,9 +623,7 @@ export class ChatTurnWriter {
   }
 
   /**
-   * Return every unsaved (user, assistant) pair in order. Consecutive user
-   * messages are matched FIFO against later assistant messages, mirroring the
-   * internal `message:received` / `message:sent` queue path. `savedUpTo` is a
+   * Return every unsaved (user, assistant) pair in order. `savedUpTo` is a
    * pair-count watermark: -1 means nothing saved, 0 means the first pair
    * has been saved, and so on. Iterates the full message array and emits
    * pairs whose 0-indexed position exceeds the watermark — a transient
@@ -587,34 +636,55 @@ export class ChatTurnWriter {
     savedUpTo: number,
   ): Array<{ user: string; assistant: string; pairIndex: number }> {
     const pairs: Array<{ user: string; assistant: string; pairIndex: number }> = [];
+    // R19.1 — Queue of unmatched user messages. Two transcript shapes
+    // were previously mis-parsed:
+    //   * `[user1, user2, assistant]` — the prior single-slot
+    //     `currentUser = ...` overwrote `user1` with `user2`, so only
+    //     `user2` was paired with the reply and `user1` was lost.
+    //   * `[user, assistant(toolCalls + text), tool, assistant(final)]`
+    //     — the prior `if (!text && hasToolCalls)` skip didn't catch
+    //     intermediate steps that included assistant text alongside
+    //     the tool call, so the tool-call step was paired as a turn
+    //     and the real final reply ended up paired with an empty user.
+    // Both shapes are handled by accumulating consecutive user messages
+    // into a queue and flushing the queue (joined) into the next
+    // non-tool-call assistant turn. Any assistant carrying tool calls
+    // is treated as intermediate regardless of whether it also has
+    // text content.
     const pendingUsers: string[] = [];
     let pairIndex = 0;
     for (const msg of messages) {
       if (msg.role === "user") {
-        const text = this.extractText(msg.content);
-        if (text) pendingUsers.push(text);
+        pendingUsers.push(this.extractText(msg.content));
       } else if (msg.role === "assistant") {
-        // Skip intermediate assistant messages that exist solely to call
-        // tools — they have empty/absent text content and a populated
-        // `toolCalls` / `tool_calls` array. A tool-using turn looks like
-        // [user, assistant(tool_call), tool, assistant(final_reply)];
-        // without this skip, computeDelta would emit two pairs (one
-        // empty-reply, one empty-user-final-reply), and W4b's later
-        // `message:sent` would fail to dedup because the content hashes
-        // diverge from the canonical (user, final-reply) pair.
         const text = this.extractText(msg.content);
         const hasToolCalls = Array.isArray(msg.toolCalls) ? msg.toolCalls.length > 0
           : Array.isArray(msg.tool_calls) ? msg.tool_calls.length > 0
           : false;
-        if (!text && hasToolCalls) {
+        if (hasToolCalls) {
           // Intermediate tool-call step — do NOT count as a pair, do NOT
-          // advance pairIndex (the watermark counts user-visible turns).
+          // advance pairIndex (the watermark counts user-visible turns),
+          // and do NOT consume `pendingUsers`. The next non-tool-call
+          // assistant is the real final reply that belongs to the
+          // accumulated user side.
           continue;
         }
-        const user = pendingUsers.shift() ?? "";
+        if (pendingUsers.length === 0) {
+          // R22.1 — Assistant message arrived without any pending user
+          // (initial agent greeting, post-compaction artifact, system-
+          // injected announcement). Don't emit an empty-user pair, and
+          // crucially DON'T advance `pairIndex`: doing so would inflate
+          // the watermark and let the next real (user, assistant) pair
+          // be skipped as already-saved on the next agent_end. Skip the
+          // orphan, leave the watermark untouched, mirror W4b's
+          // R21.2 drop-orphan-assistant invariant on the W4a side.
+          continue;
+        }
+        const userText = pendingUsers.join("\n");
+        pendingUsers.length = 0;
         if (pairIndex > savedUpTo) {
           pairs.push({
-            user,
+            user: userText,
             assistant: this.stripRecalledMemory(text),
             pairIndex,
           });

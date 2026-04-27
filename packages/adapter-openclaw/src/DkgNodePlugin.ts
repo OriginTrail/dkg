@@ -434,6 +434,13 @@ export class DkgNodePlugin {
   // phase init (setup-runtime → full upgrade). Without per-event tracking,
   // each internal fire would log twice and the diagnostic counts would drift.
   private probeInternalEventsInstalled = new Set<string>();
+  // R21.3 — Mutable ref to the most-recent register() call's api and
+  // registration mode. Probe handlers (installed once per event into the
+  // process-global hook map) read from this on each fire, so a
+  // `setup-runtime → full` upgrade correctly logs the new mode + new
+  // logger AT THE TIME of the fire instead of staying frozen on the
+  // closure captured at first-install time.
+  private probeCurrent: { api: OpenClawPluginApi; mode: string } | null = null;
   /**
    * Track hook fires per (event, mechanism) for the registration-mode probe.
    * Maps "event:via" to fire count.
@@ -1110,13 +1117,20 @@ export class DkgNodePlugin {
   }
 
   async stop(): Promise<void> {
+    // R19.2 — Tear hooks down BEFORE draining persists. A late
+    // `agent_end` / `message:sent` arriving during shutdown would
+    // otherwise schedule a new persist job after `flush()` snapshots
+    // the in-flight set, and `stop()` would return without awaiting
+    // it. By destroying the hook surface first, no NEW handler
+    // invocations dispatch; the loop in `flush()` then waits out the
+    // handlers that were already in flight when `destroy()` ran.
+    try { this.hookSurface?.destroy(); } catch { /* best effort */ }
     // `flush()` (vs `flushSync()`) awaits in-flight `storeChatTurn` jobs
     // and any pending session resets before committing the watermark
     // file. Without the await, a shutdown immediately after a reply
     // could exit while the final turn's network persist is still in
     // flight and the turn is silently lost.
     try { await this.chatTurnWriter?.flush(); } catch { /* best effort */ }
-    try { this.hookSurface?.destroy(); } catch { /* best effort */ }
     this.clearLocalAgentIntegrationRetry();
     if (this.peerIdDeferredRetryTimer) {
       clearTimeout(this.peerIdDeferredRetryTimer);
@@ -2484,6 +2498,15 @@ export class DkgNodePlugin {
   private runRegistrationModeProbe(api: OpenClawPluginApi): void {
     this.probeRegisterCallCount++;
     const mode = api.registrationMode ?? 'full';
+    // R21.3 — Refresh the probe's mutable api+mode ref BEFORE the
+    // install gates below. Internal-hook probe handlers were installed
+    // once per event into the process-global map and closed over the
+    // first `api`/`mode` they saw; after a `setup-runtime → full`
+    // upgrade they continued logging via the stale logger and stale
+    // mode label, exactly when the diagnostic was supposed to confirm
+    // the upgrade. Reading from `this.probeCurrent` at fire time fixes
+    // that without re-installing duplicate handlers.
+    this.probeCurrent = { api, mode };
     const hasOn = typeof api.on === 'function';
     const hasRegisterHook = typeof api.registerHook === 'function';
     const hasGlobalHookMap = !!(globalThis as any)[Symbol.for('openclaw.internalHookHandlers')];
@@ -2511,14 +2534,24 @@ export class DkgNodePlugin {
     }
     this.probeRegisteredApis.add(api);
 
-    // Helper to make a probe handler factory
+    // Helper to make a probe handler factory.
+    // R21.3 — Read api+mode from `this.probeCurrent` at fire time
+    // (NOT from the closure-captured `api` / `mode` at install time).
+    // The internal-hook probe handlers are installed once per event
+    // into the process-global hook map and survive
+    // `setup-runtime → full` upgrades — without this indirection the
+    // post-upgrade probe would log via the original (stale) api logger
+    // and mode label, defeating the diagnostic purpose.
     const makeProbeHandler = (eventName: string, via: string) => {
       return () => {
         const key = eventName + ':' + via;
         const count = (this.probeHookFireCounts.get(key) ?? 0) + 1;
         this.probeHookFireCounts.set(key, count);
-        api.logger.info?.(
-          '[dkg-probe] HOOK FIRED: event=' + eventName + ' via=' + via + ' mode=' + mode + ' fire#=' + count,
+        const current = this.probeCurrent;
+        const currentApi = current?.api ?? api;
+        const currentMode = current?.mode ?? mode;
+        currentApi.logger.info?.(
+          '[dkg-probe] HOOK FIRED: event=' + eventName + ' via=' + via + ' mode=' + currentMode + ' fire#=' + count,
         );
       };
     };

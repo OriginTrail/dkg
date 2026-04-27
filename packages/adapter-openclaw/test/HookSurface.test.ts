@@ -115,6 +115,32 @@ describe("HookSurface", () => {
       expect(unsub).toBeNull();
       expect(logger.warn).toHaveBeenCalled();
     });
+
+    it("R20.3 — api-on strategy override forces legacy hooks onto api.on (not registerHook)", () => {
+      // Regression for R20.3: the class contract documents that
+      // `strategyOverride: 'api-on'` forces both 'typed' AND 'legacy'
+      // onto the `api.on` path, but `installLegacy` previously ignored
+      // the override and always called `registerHook`. The fix reroutes
+      // legacy installs through `api.on` when the override is set.
+      const api = mkApi();
+      const hs = new HookSurface(api, mkLogger(), "api-on");
+      const unsub = hs.install("legacy", "session_end", vi.fn());
+      expect(unsub).not.toBeNull();
+      // api.on must have been called; api.registerHook must NOT.
+      expect(api.on).toHaveBeenCalled();
+      expect(api.registerHook).not.toHaveBeenCalled();
+    });
+
+    it("R20.3 — api-on strategy override returns null when api.on is absent", () => {
+      // The override reroutes to api.on, but if api.on isn't a function
+      // we should fail loud (not silently fall back to registerHook).
+      const api = mkApi({ on: undefined as any });
+      const logger = mkLogger();
+      const hs = new HookSurface(api, logger, "api-on");
+      const unsub = hs.install("legacy", "session_end", vi.fn());
+      expect(unsub).toBeNull();
+      expect(logger.warn).toHaveBeenCalled();
+    });
   });
 
   describe("strategy override = off", () => {
@@ -123,6 +149,42 @@ describe("HookSurface", () => {
       expect(hs.install("typed", "agent_end", vi.fn())).toBeNull();
       expect(hs.install("internal", "message:sent", vi.fn())).toBeNull();
       expect(hs.install("legacy", "session_end", vi.fn())).toBeNull();
+    });
+  });
+
+  describe("destroy() soft-destroyed gate (R21.1)", () => {
+    it("R21.1 — typed handler short-circuits after destroy() (api.on has no unsubscribe)", () => {
+      const api = mkApi();
+      const hs = new HookSurface(api, mkLogger());
+      const userHandler = vi.fn();
+      hs.install("typed", "agent_end", userHandler);
+      // Capture the wrapped handler that was registered with api.on.
+      const onCall = (api.on as any).mock.calls[0];
+      const wrapped = onCall[1] as (...args: unknown[]) => unknown;
+      // Pre-destroy: wrapped invokes the user handler.
+      wrapped({ messages: [] }, {});
+      expect(userHandler).toHaveBeenCalledTimes(1);
+      // Destroy.
+      hs.destroy();
+      // Post-destroy: same wrapped (still live in upstream registry due
+      // to api.on no-unsub) must short-circuit and NOT invoke the user
+      // handler.
+      wrapped({ messages: [] }, {});
+      expect(userHandler).toHaveBeenCalledTimes(1);
+    });
+
+    it("R21.1 — legacy handler short-circuits after destroy() (registerHook has no unsubscribe)", async () => {
+      const api = mkApi();
+      const hs = new HookSurface(api, mkLogger());
+      const userHandler = vi.fn();
+      hs.install("legacy", "session_end", userHandler);
+      const regCall = (api.registerHook as any).mock.calls[0];
+      const wrapped = regCall[1] as (...args: unknown[]) => Promise<void>;
+      await wrapped({}, {});
+      expect(userHandler).toHaveBeenCalledTimes(1);
+      hs.destroy();
+      await wrapped({}, {});
+      expect(userHandler).toHaveBeenCalledTimes(1);
     });
   });
 
