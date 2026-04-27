@@ -561,16 +561,27 @@ export class DkgNodePlugin {
       registrationMode,
       transportMode: this.channelPlugin?.isUsingGatewayRoute ? 'gateway+bridge' : 'bridge',
     };
-    // The integration is only honestly `ready` once the standalone bridge is
-    // listening — the daemon's send/probe flow goes through transport.bridgeUrl,
-    // and the gateway-side /api/dkg-channel/* routes reject the daemon's auth.
-    // Even when registerHttpRoute succeeded (gateway owns its own listener),
-    // we wait for our own start() to resolve before flipping ready=true. That
-    // happens in the follow-up updateLocalAgentIntegration PUT below, which
-    // also publishes transport.bridgeUrl/healthUrl pointing at whichever port
-    // start() actually bound to (may differ from the configured port — see
-    // issue #272 fallback in DkgChannelPlugin.start()).
-    const bridgeAlreadyReady = this.channelPlugin?.isListening === true;
+
+    // Wait for the standalone bridge to bind BEFORE the connect call so the
+    // daemon never sees a ready=true integration whose transport.bridgeUrl
+    // isn't actually serving yet. start() is idempotent (no-op if already
+    // listening) and falls back to an OS-allocated port if the configured one
+    // is taken (issue #272), so it resolves quickly in both 2026.3.31 (gateway
+    // holds 9201 → fallback) and 2026.4.15 (port free → configured). Without
+    // this await, getOpenClawChannelTargets in the daemon would synthesize a
+    // default-9201 bridge target or a gateway target with no bridgeUrl and
+    // race UI probes / send-forwarding against the bridge bind.
+    let startError: Error | null = null;
+    if (this.channelPlugin) {
+      try {
+        await this.channelPlugin.start();
+      } catch (err: any) {
+        startError = err instanceof Error ? err : new Error(String(err));
+        api.logger.warn?.(`[dkg] OpenClaw channel bridge failed to start: ${startError.message}`);
+      }
+    }
+
+    const bridgeReady = this.channelPlugin?.isListening === true && !startError;
     const basePayload = {
       id: 'openclaw',
       enabled: true,
@@ -586,46 +597,15 @@ export class DkgNodePlugin {
       await this.client.connectLocalAgentIntegration({
         ...basePayload,
         runtime: {
-          status: bridgeAlreadyReady ? 'ready' : 'connecting',
-          ready: bridgeAlreadyReady,
-          lastError: null,
+          status: startError ? 'error' : bridgeReady ? 'ready' : 'connecting',
+          ready: bridgeReady,
+          lastError: startError ? startError.message : null,
         },
       });
     } catch (err: any) {
       api.logger.warn?.(`[dkg] Local agent registration failed (will retry on next gateway start): ${err.message}`);
       return;
     }
-
-    if (bridgeAlreadyReady || !this.channelPlugin) {
-      return;
-    }
-
-    void this.channelPlugin.start()
-      .then(() => this.client.updateLocalAgentIntegration('openclaw', {
-        ...basePayload,
-        transport: this.buildOpenClawTransport(existing?.transport, api),
-        runtime: {
-          status: 'ready',
-          ready: true,
-          lastError: null,
-        },
-      }))
-      .catch(async (err: any) => {
-        api.logger.warn?.(`[dkg] OpenClaw channel startup did not reach ready state: ${err.message}`);
-        try {
-          await this.client.updateLocalAgentIntegration('openclaw', {
-            ...basePayload,
-            transport: this.buildOpenClawTransport(existing?.transport, api),
-            runtime: {
-              status: 'error',
-              ready: false,
-              lastError: err.message ?? String(err),
-            },
-          });
-        } catch (updateErr: any) {
-          api.logger.warn?.(`[dkg] Failed to persist OpenClaw channel error state: ${updateErr.message}`);
-        }
-      });
   }
 
   private async loadStoredOpenClawIntegration(api: OpenClawPluginApi): Promise<LocalAgentIntegrationRecord | null | undefined> {

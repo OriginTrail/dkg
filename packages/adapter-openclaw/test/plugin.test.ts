@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { DkgNodePlugin } from '../src/DkgNodePlugin.js';
+import { DkgChannelPlugin } from '../src/DkgChannelPlugin.js';
 import type { OpenClawPluginApi, OpenClawTool } from '../src/types.js';
 
 describe('DkgNodePlugin', () => {
@@ -1112,20 +1113,24 @@ describe('DkgNodePlugin', () => {
       };
 
       plugin.register(mockApi);
-      await new Promise((resolve) => setTimeout(resolve, 25));
+      await vi.waitFor(() => {
+        const connectCall = fetchCalls.find((call) =>
+          String(call[0]).includes('/api/local-agent-integrations/connect'),
+        );
+        expect(connectCall).toBeTruthy();
+      });
 
       const connectCall = fetchCalls.find((call) =>
         String(call[0]).includes('/api/local-agent-integrations/connect'),
       );
-      const readyCall = fetchCalls.find((call) =>
-        String(call[0]).includes('/api/local-agent-integrations/openclaw')
-        && call[1]?.method === 'PUT',
-      );
-      expect(connectCall).toBeTruthy();
-      expect(JSON.parse(String(connectCall?.[1]?.body))).toMatchObject({
+      // Post-pivot, connect publishes the ready/bound transport upfront
+      // (no follow-up PUT). syncLocalAgentIntegrationState awaits start()
+      // before firing connect, so isListening is already true and
+      // bridgeUrl/healthUrl/runtime.ready are all populated in this call.
+      const connectBody = JSON.parse(String(connectCall?.[1]?.body));
+      expect(connectBody).toMatchObject({
         id: 'openclaw',
         enabled: true,
-        transport: { kind: 'openclaw-channel' },
         manifest: {
           packageName: '@origintrail-official/dkg-adapter-openclaw',
           setupEntry: './setup-entry.mjs',
@@ -1134,27 +1139,30 @@ describe('DkgNodePlugin', () => {
           channelId: 'dkg-ui',
           registrationMode: 'full',
         },
+        runtime: {
+          status: 'ready',
+          ready: true,
+          lastError: null,
+        },
       });
-      expect(readyCall).toBeTruthy();
-      const readyBody = JSON.parse(String(readyCall?.[1]?.body));
-      expect(readyBody.enabled).toBe(true);
-      expect(readyBody.capabilities).toMatchObject({
+      expect(connectBody.capabilities).toMatchObject({
         localChat: true,
         connectFromUi: true,
         dkgPrimaryMemory: true,
       });
-      expect(readyBody.manifest).toEqual({
+      expect(connectBody.manifest).toEqual({
         packageName: '@origintrail-official/dkg-adapter-openclaw',
         setupEntry: './setup-entry.mjs',
       });
-      expect(readyBody.setupEntry).toBe('./setup-entry.mjs');
-      expect(readyBody.transport.kind).toBe('openclaw-channel');
-      expect(readyBody.transport.bridgeUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
-      expect(readyBody.runtime).toMatchObject({
-        status: 'ready',
-        ready: true,
-        lastError: null,
-      });
+      expect(connectBody.setupEntry).toBe('./setup-entry.mjs');
+      expect(connectBody.transport.kind).toBe('openclaw-channel');
+      expect(connectBody.transport.bridgeUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+
+      const readyCall = fetchCalls.find((call) =>
+        String(call[0]).includes('/api/local-agent-integrations/openclaw')
+        && call[1]?.method === 'PUT',
+      );
+      expect(readyCall).toBeUndefined();
     } finally {
       await plugin?.stop();
       globalThis.fetch = originalFetch;
@@ -1163,12 +1171,12 @@ describe('DkgNodePlugin', () => {
 
   // Issue #272: when the gateway hosts the channel routes via registerHttpRoute,
   // start() still binds the standalone bridge — but on a fallback OS-allocated
-  // port if the configured one is held by the gateway. The connect call fires
-  // synchronously during register() and writes runtime.ready:false (the bridge
-  // can't actually serve traffic until start() resolves and we publish
-  // transport.bridgeUrl). The follow-up PUT fires once start() resolves and
-  // flips ready:true with bridgeUrl + healthUrl pointing at the bound port.
-  it('persists gatewayUrl via the connect call upfront, then bridgeUrl via the post-start PUT (gateway routes active)', async () => {
+  // port if the configured one is held by the gateway. To eliminate the
+  // ready-but-not-yet-bound window the daemon would otherwise see, we await
+  // start() BEFORE firing the connect call. The connect publishes ready:true
+  // with the actually-bound bridgeUrl/healthUrl in one shot — there is no
+  // separate post-start PUT.
+  it('awaits channelPlugin.start() before firing connect (gateway routes active)', async () => {
     const originalFetch = globalThis.fetch;
     const fetchCalls: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -1179,12 +1187,13 @@ describe('DkgNodePlugin', () => {
       };
     }) as typeof fetch;
     let plugin: DkgNodePlugin | null = null;
-    // Hold start() so the connect-call snapshot is deterministic — we need
-    // isListening === false at that moment for `runtime.ready: false` to
-    // surface honestly. Without this, on a fast runner start() could resolve
-    // before connectLocalAgentIntegration finishes building the payload.
+    // Patch start() on the prototype so the spy is in place BEFORE the
+    // DkgChannelPlugin instance is constructed by DkgNodePlugin.register().
+    // Patching the instance after register() is too late — start() has
+    // already been invoked through the await in syncLocalAgentIntegrationState.
     let resolveStart: () => void = () => {};
     const startGate = new Promise<void>((resolve) => { resolveStart = resolve; });
+    const startSpy = vi.spyOn(DkgChannelPlugin.prototype, 'start').mockImplementation(() => startGate);
 
     try {
       plugin = new DkgNodePlugin({
@@ -1193,11 +1202,7 @@ describe('DkgNodePlugin', () => {
         memory: { enabled: false },
       });
       const mockApi: OpenClawPluginApi = {
-        config: {
-          gateway: {
-            port: 19789,
-          },
-        },
+        config: { gateway: { port: 19789 } },
         registrationMode: 'full',
         registerTool: () => {},
         registerHook: () => {},
@@ -1207,12 +1212,25 @@ describe('DkgNodePlugin', () => {
       };
 
       plugin.register(mockApi);
-      const channelPlugin = (plugin as any).channelPlugin as { start: (...args: unknown[]) => Promise<void> } | null;
-      expect(channelPlugin).toBeTruthy();
-      const startSpy = vi.spyOn(channelPlugin!, 'start').mockImplementation(() => startGate);
 
-      // Wait for the connect call to land, then assert the connecting state
-      // BEFORE start() resolves.
+      // Wait until start() has been invoked — proves the registration path
+      // reached the await. Connect must NOT fire while start is pending.
+      await vi.waitFor(() => {
+        expect(startSpy).toHaveBeenCalled();
+      });
+
+      // Settle pending microtasks before the negative assertion so we don't
+      // race a connect call queued after start was observed.
+      await Promise.resolve();
+      await Promise.resolve();
+      const connectBeforeResolve = fetchCalls.find((call) =>
+        String(call[0]).includes('/api/local-agent-integrations/connect'),
+      );
+      expect(connectBeforeResolve).toBeUndefined();
+
+      // Release start() — the await resolves and the connect call fires.
+      resolveStart();
+
       await vi.waitFor(() => {
         const connectCall = fetchCalls.find((call) =>
           String(call[0]).includes('/api/local-agent-integrations/connect'),
@@ -1224,6 +1242,12 @@ describe('DkgNodePlugin', () => {
         String(call[0]).includes('/api/local-agent-integrations/connect'),
       );
       const connectBody = JSON.parse(String(connectCall?.[1]?.body));
+      // start() is stubbed (never actually binds), so isListening stays false.
+      // The connect call fires with status:'connecting' / ready:false in this
+      // case. What matters for the round-2 review is the ORDERING (start
+      // awaited before connect), not the bound-port shape — the bridge-mode
+      // test below exercises the real-bind path against a port:0 server and
+      // asserts the ready/bridgeUrl shape.
       expect(connectBody).toMatchObject({
         transport: {
           kind: 'openclaw-channel',
@@ -1232,56 +1256,26 @@ describe('DkgNodePlugin', () => {
         metadata: {
           transportMode: 'gateway+bridge',
         },
-        runtime: {
-          status: 'connecting',
-          ready: false,
-          lastError: null,
-        },
       });
-      // bridgeUrl is published by the post-start PUT, not the connect call.
-      expect(connectBody.transport.bridgeUrl).toBeUndefined();
-
-      // Now release start() so the post-start updateLocalAgentIntegration PUT
-      // can fire. We resolve through the spy: it returns startGate, which the
-      // adapter's start() chain awaits before flipping to ready.
-      expect(startSpy).toHaveBeenCalled();
-      resolveStart();
-
-      await vi.waitFor(() => {
-        const readyCall = fetchCalls.find((call) =>
-          String(call[0]).includes('/api/local-agent-integrations/openclaw')
-          && call[1]?.method === 'PUT',
-        );
-        expect(readyCall).toBeTruthy();
-      });
-
+      // No follow-up PUT — connect publishes the bound transport upfront.
       const readyCall = fetchCalls.find((call) =>
         String(call[0]).includes('/api/local-agent-integrations/openclaw')
         && call[1]?.method === 'PUT',
       );
-      const readyBody = JSON.parse(String(readyCall?.[1]?.body));
-      // start() is stubbed and never actually binds, so the post-PUT body
-      // carries whatever transport.buildOpenClawTransport produces from the
-      // (still-listening-false) channel plugin. The semantically-meaningful
-      // assertions are the ready-state flip and the gatewayUrl preservation.
-      expect(readyBody.transport.gatewayUrl).toBe('http://127.0.0.1:19789');
-      expect(readyBody.runtime).toMatchObject({
-        status: 'ready',
-        ready: true,
-        lastError: null,
-      });
+      expect(readyCall).toBeUndefined();
     } finally {
       resolveStart();
+      startSpy.mockRestore();
       await plugin?.stop();
       globalThis.fetch = originalFetch;
     }
   });
 
   // Bridge-mode (fallback) path — older gateways or runtimes where
-  // api.registerHttpRoute is not available. The standalone bridge bind still
-  // happens, status transitions connecting → ready via the PUT update fired
-  // after channelPlugin.start() resolves.
-  it('persists gatewayUrl on first registration in bridge mode (fallback when gateway routes unavailable)', async () => {
+  // api.registerHttpRoute is not available. The standalone bridge binds on
+  // an OS-allocated port (channel.port: 0), then connect publishes ready:true
+  // with the actually-bound bridgeUrl/healthUrl. There is no follow-up PUT.
+  it('publishes ready:true with the bound bridgeUrl in bridge mode (no registerHttpRoute)', async () => {
     const originalFetch = globalThis.fetch;
     const fetchCalls: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -1291,87 +1285,6 @@ describe('DkgNodePlugin', () => {
         json: async () => ({ ok: true, integration: { id: 'openclaw' } }),
       };
     }) as typeof fetch;
-    let plugin: DkgNodePlugin | null = null;
-
-    try {
-      plugin = new DkgNodePlugin({
-        daemonUrl: 'http://localhost:9200',
-        channel: { enabled: true, port: 0 },
-        memory: { enabled: false },
-      });
-      const mockApi: OpenClawPluginApi = {
-        config: {
-          gateway: {
-            port: 19789,
-          },
-        },
-        registrationMode: 'full',
-        registerTool: () => {},
-        registerHook: () => {},
-        // No registerHttpRoute — fallback to standalone bridge mode.
-        on: () => {},
-        logger: {},
-      };
-
-      plugin.register(mockApi);
-      // Wait for the connect call to land. The fetch chain
-      // connect → start → updateLocalAgent runs asynchronously after register
-      // returns; vi.waitFor polls until the assertion succeeds, replacing a
-      // brittle fixed-timeout sleep.
-      await vi.waitFor(() => {
-        const connectCall = fetchCalls.find((call) =>
-          String(call[0]).includes('/api/local-agent-integrations/connect'),
-        );
-        expect(connectCall).toBeTruthy();
-      });
-
-      const connectCall = fetchCalls.find((call) =>
-        String(call[0]).includes('/api/local-agent-integrations/connect'),
-      );
-      expect(JSON.parse(String(connectCall?.[1]?.body))).toMatchObject({
-        metadata: {
-          transportMode: 'bridge',
-        },
-        runtime: {
-          status: 'connecting',
-          ready: false,
-          lastError: null,
-        },
-      });
-
-      // Then wait for the post-start PUT once the standalone bridge has
-      // bound on its OS-allocated port (channel.port: 0).
-      await vi.waitFor(() => {
-        const readyCall = fetchCalls.find((call) =>
-          String(call[0]).includes('/api/local-agent-integrations/openclaw')
-          && call[1]?.method === 'PUT',
-        );
-        expect(readyCall).toBeTruthy();
-      });
-
-      const readyCall = fetchCalls.find((call) =>
-        String(call[0]).includes('/api/local-agent-integrations/openclaw')
-        && call[1]?.method === 'PUT',
-      );
-      expect(JSON.parse(String(readyCall?.[1]?.body))).toMatchObject({
-        runtime: {
-          status: 'ready',
-          ready: true,
-          lastError: null,
-        },
-      });
-    } finally {
-      await plugin?.stop();
-      globalThis.fetch = originalFetch;
-    }
-  });
-
-  it('channelPlugin.start() runs in bridge mode (no registerHttpRoute) and the post-start PUT fires from DkgNodePlugin', async () => {
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async () => ({
-      ok: true,
-      json: async () => ({ ok: true, integration: { id: 'openclaw' } }),
-    })) as typeof fetch;
     let plugin: DkgNodePlugin | null = null;
 
     try {
@@ -1391,20 +1304,42 @@ describe('DkgNodePlugin', () => {
       };
 
       plugin.register(mockApi);
-      const channelPlugin = (plugin as any).channelPlugin as { start: (...args: unknown[]) => Promise<void> } | null;
-      expect(channelPlugin).toBeTruthy();
-      const startSpy = vi.spyOn(channelPlugin!, 'start').mockResolvedValue(undefined);
 
-      // The outer DkgNodePlugin call site fires channelPlugin.start() once on
-      // the async connectLocalAgentIntegration → start() chain. The earlier
-      // call from inside DkgChannelPlugin.register() (which always fires
-      // post-pivot — start() owns the port-conflict fallback) ran BEFORE the
-      // spy was installed, so it does not appear in this count. This test
-      // asserts the DkgNodePlugin-side call site, not the in-channel one.
-      // vi.waitFor polls deterministically instead of guessing a fixed delay.
       await vi.waitFor(() => {
-        expect(startSpy).toHaveBeenCalledTimes(1);
+        const connectCall = fetchCalls.find((call) =>
+          String(call[0]).includes('/api/local-agent-integrations/connect'),
+        );
+        expect(connectCall).toBeTruthy();
       });
+
+      const connectCall = fetchCalls.find((call) =>
+        String(call[0]).includes('/api/local-agent-integrations/connect'),
+      );
+      expect(JSON.parse(String(connectCall?.[1]?.body))).toMatchObject({
+        metadata: {
+          transportMode: 'bridge',
+        },
+        runtime: {
+          status: 'ready',
+          ready: true,
+          lastError: null,
+        },
+        transport: {
+          kind: 'openclaw-channel',
+          bridgeUrl: expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+$/),
+          healthUrl: expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+\/health$/),
+        },
+      });
+
+      // Confirm there's NO follow-up PUT — connect now publishes the bound
+      // transport upfront. This locks the round-2 simplification: the daemon
+      // never sees a transient ready:true integration whose bridgeUrl can't
+      // serve traffic yet.
+      const readyCall = fetchCalls.find((call) =>
+        String(call[0]).includes('/api/local-agent-integrations/openclaw')
+        && call[1]?.method === 'PUT',
+      );
+      expect(readyCall).toBeUndefined();
     } finally {
       await plugin?.stop();
       globalThis.fetch = originalFetch;
@@ -1455,56 +1390,48 @@ describe('DkgNodePlugin', () => {
       };
 
       plugin.register(mockApi);
-      await new Promise((resolve) => setTimeout(resolve, 25));
+      await vi.waitFor(() => {
+        const connectCall = fetchCalls.find((call) =>
+          String(call[0]).includes('/api/local-agent-integrations/connect'),
+        );
+        expect(connectCall).toBeTruthy();
+      });
 
       const connectCall = fetchCalls.find((call) =>
         String(call[0]).includes('/api/local-agent-integrations/connect'),
       );
-      const readyCall = fetchCalls.find((call) =>
-        String(call[0]).includes('/api/local-agent-integrations/openclaw')
-        && call[1]?.method === 'PUT',
-      );
-
-      expect(connectCall).toBeTruthy();
-      expect(JSON.parse(String(connectCall?.[1]?.body))).toEqual({
+      // Post-pivot: connect publishes ready/bound transport upfront. The
+      // stale stored gatewayUrl from the GET above must be dropped because
+      // the current runtime (no registerHttpRoute → bridge-only) does not
+      // serve gateway routes. bridgeUrl/healthUrl reflect the actually
+      // bound port from the awaited start().
+      const connectBody = JSON.parse(String(connectCall?.[1]?.body));
+      expect(connectBody).toMatchObject({
         id: 'openclaw',
         enabled: true,
-        description: 'Connect a local OpenClaw agent through the DKG node.',
-        transport: {
-          kind: 'openclaw-channel',
-        },
-        capabilities: expect.objectContaining({
-          localChat: true,
-          connectFromUi: true,
-          dkgPrimaryMemory: true,
-          wmImportPipeline: true,
-          nodeServedSkill: true,
-        }),
-        manifest: {
-          packageName: '@origintrail-official/dkg-adapter-openclaw',
-          setupEntry: './setup-entry.mjs',
-        },
-        setupEntry: './setup-entry.mjs',
-        metadata: expect.objectContaining({
-          channelId: 'dkg-ui',
-          registrationMode: 'full',
-          transportMode: 'bridge',
-        }),
-        runtime: expect.objectContaining({
-          status: 'connecting',
-          ready: false,
-          lastError: null,
-        }),
-      });
-      expect(readyCall).toBeTruthy();
-      expect(JSON.parse(String(readyCall?.[1]?.body))).toMatchObject({
         transport: {
           kind: 'openclaw-channel',
           bridgeUrl: expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+$/),
           healthUrl: expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+\/health$/),
         },
+        metadata: expect.objectContaining({
+          channelId: 'dkg-ui',
+          registrationMode: 'full',
+          transportMode: 'bridge',
+        }),
+        runtime: {
+          status: 'ready',
+          ready: true,
+          lastError: null,
+        },
       });
-      expect(JSON.parse(String(readyCall?.[1]?.body)).transport.gatewayUrl).toBeUndefined();
+      expect(connectBody.transport.gatewayUrl).toBeUndefined();
+
+      const readyCall = fetchCalls.find((call) =>
+        String(call[0]).includes('/api/local-agent-integrations/openclaw')
+        && call[1]?.method === 'PUT',
+      );
+      expect(readyCall).toBeUndefined();
     } finally {
       await plugin?.stop();
       globalThis.fetch = originalFetch;
@@ -1949,7 +1876,7 @@ describe('DkgNodePlugin', () => {
     }
   });
 
-  it('preserves a stored bridgeUrl and healthUrl when the current bridge has not bound a port yet', async () => {
+  it('overwrites a stored bridgeUrl with the freshly bound port (post-pivot await-before-connect)', async () => {
     const originalFetch = globalThis.fetch;
     const fetchCalls: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -1993,20 +1920,26 @@ describe('DkgNodePlugin', () => {
       };
 
       plugin.register(mockApi);
-      await new Promise((resolve) => setTimeout(resolve, 25));
+      await vi.waitFor(() => {
+        const connectCall = fetchCalls.find((call) =>
+          String(call[0]).includes('/api/local-agent-integrations/connect'),
+        );
+        expect(connectCall).toBeTruthy();
+      });
 
       const connectCall = fetchCalls.find((call) =>
         String(call[0]).includes('/api/local-agent-integrations/connect'),
       );
-
-      expect(connectCall).toBeTruthy();
-      expect(JSON.parse(String(connectCall?.[1]?.body))).toMatchObject({
-        transport: {
-          kind: 'openclaw-channel',
-          bridgeUrl: 'http://127.0.0.1:9201',
-          healthUrl: 'http://127.0.0.1:9201/health',
-        },
-      });
+      // Post-pivot: syncLocalAgentIntegrationState awaits start() before
+      // building the connect payload, so bridgePort > 0 by the time
+      // buildOpenClawTransport runs and the stored stale bridgeUrl is
+      // overwritten with the freshly bound port. The stored values from the
+      // GET above (port 9201) are intentionally NOT preserved on this path —
+      // they would be wrong (the gateway holds 9201 in 2026.3.31).
+      const connectBody = JSON.parse(String(connectCall?.[1]?.body));
+      expect(connectBody.transport.bridgeUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+      expect(connectBody.transport.bridgeUrl).not.toBe('http://127.0.0.1:9201');
+      expect(connectBody.transport.healthUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/health$/);
     } finally {
       await plugin?.stop();
       globalThis.fetch = originalFetch;
