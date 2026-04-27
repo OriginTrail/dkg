@@ -1162,11 +1162,13 @@ describe('DkgNodePlugin', () => {
   });
 
   // Issue #272: when the gateway hosts the channel routes via registerHttpRoute,
-  // the channel plugin skips the standalone bridge bind (avoiding EADDRINUSE on
-  // port 9201). The connect call upfront marks `runtime.ready: true` because
-  // the gateway already owns the live transport — there is no follow-up PUT
-  // to flip status, since status was never `connecting` in this path.
-  it('persists gatewayUrl via the connect call when gateway routes are active (no follow-up PUT)', async () => {
+  // start() still binds the standalone bridge — but on a fallback OS-allocated
+  // port if the configured one is held by the gateway. The connect call fires
+  // synchronously during register() and writes runtime.ready:true upfront +
+  // transport.gatewayUrl (gateway is the live transport). The follow-up PUT
+  // fires once start() resolves and writes transport.bridgeUrl + healthUrl
+  // pointing at whichever port the standalone bridge actually bound to.
+  it('persists gatewayUrl via the connect call upfront, then bridgeUrl via the post-start PUT (gateway routes active)', async () => {
     const originalFetch = globalThis.fetch;
     const fetchCalls: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -1328,7 +1330,7 @@ describe('DkgNodePlugin', () => {
     }
   });
 
-  it('channelPlugin.start() is called from DkgNodePlugin in bridge mode (fallback when gateway routes unavailable)', async () => {
+  it('channelPlugin.start() runs in bridge mode (no registerHttpRoute) and the post-start PUT fires from DkgNodePlugin', async () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async () => ({
       ok: true,

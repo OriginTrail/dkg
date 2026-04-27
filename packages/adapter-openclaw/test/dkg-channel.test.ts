@@ -337,12 +337,22 @@ describe('DkgChannelPlugin', () => {
 
         const conflictClient = new DkgDaemonClient({ baseUrl: 'http://localhost:9200', apiToken: 'test-token' });
         const conflictPlugin = new DkgChannelPlugin({ enabled: true, port: blockerPort }, conflictClient);
-
+        // Capture info logs so we can lock the operator-greppable fallback
+        // diagnostic. register() wires api.logger into the plugin; start()
+        // emits the fallback line via api.logger.info when EADDRINUSE fires.
+        const infoCalls: unknown[][] = [];
+        const api = makeApi({ logger: { info: (...args: unknown[]) => infoCalls.push(args) } });
+        conflictPlugin.register(api);
         await conflictPlugin.start();
 
         try {
           expect(conflictPlugin.bridgePort).toBeGreaterThan(0);
           expect(conflictPlugin.bridgePort).not.toBe(blockerPort);
+          // Refactor that drops the fallback log silently regresses operator
+          // observability — issue #272 troubleshooting greps for this line.
+          expect(
+            infoCalls.some((call) => String(call[0]).includes('falling back to an OS-allocated free port')),
+          ).toBe(true);
         } finally {
           await conflictPlugin.stop();
         }
