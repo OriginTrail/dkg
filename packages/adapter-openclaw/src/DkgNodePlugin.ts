@@ -2532,8 +2532,20 @@ function extractUserTextFromContent(content: unknown): string {
 function formatRecalledMemoryBlock(
   hits: ReadonlyArray<{ snippet: string; layer: string; score: number }>,
 ): string {
+  // Full attribute-safe escape: covers `&`, `<`, `>`, `"`, `'`. The double-
+  // and single-quote escapes are load-bearing because the per-snippet
+  // envelope below interpolates `escape(h.layer)` into double-quoted HTML
+  // attributes; without `"` and `'` escapes a stray quote in the layer
+  // string would let attribute content break out (CodeQL alert from the
+  // 14c886c6 push). `layer` is currently a typed enum, but the escape
+  // is defensive — a future writer that widens the type to free-form
+  // can't introduce an attribute-injection regression.
   const escape = (s: string): string =>
-    s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    s.replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
   // Snippets fetched from SWM/VM may have been authored by other peers
   // (Shared Working Memory and Verified Memory are cross-agent surfaces).
   // HTML-escaping prevents tag breakout, but does NOT defend against
