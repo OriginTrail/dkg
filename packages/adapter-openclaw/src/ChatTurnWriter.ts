@@ -322,6 +322,14 @@ export class ChatTurnWriter {
       const conversationKey = this.conversationKeyFromInternalEvent(ev);
       if (!conversationKey) return;
       const text = readEventText(ev);
+      // R15.2 — Skip attachment-only / non-text inbound events. `readEventText`
+      // returns "" when the envelope carries no text payload (e.g. an image
+      // upload from Telegram). Enqueueing an empty string here would let the
+      // next `message:sent` pair its assistant reply with a blank user side,
+      // persisting an assistant-only turn for a conversation that had no
+      // textual inbound. Drop until we add a recoverable representation for
+      // attachment-only turns.
+      if (!text) return;
       const queue = this.pendingUserMessages.get(conversationKey) ?? [];
       queue.push(text);
       this.pendingUserMessages.set(conversationKey, queue);
@@ -364,16 +372,23 @@ export class ChatTurnWriter {
       if (userText || assistantText) {
         // Cross-path dedup, W4b side:
         //   PEEK w4a-origin — non-mutating; if W4a already wrote this
-        //   turn within the TTL window, skip. Stamping the key here
-        //   would let two legitimate same-content W4b turns within
-        //   the TTL collide on the W4b→W4b self-stamp (R13.1).
-        //   Then reserve W4b's OWN origin key so a later W4a's
-        //   last-pair peek sees it. The W4b-origin key is the only
-        //   one W4b is authorized to set.
+        //   turn within the TTL window, skip.
         const w4aOrigin = this.w4aOriginKey(userText, assistantText);
         if (this.peekTurnIdSeen(sessionId, w4aOrigin)) return; // W4a already wrote
-        const w4bOrigin = this.w4bOriginKey(userText, assistantText);
-        if (this.markTurnIdSeen(sessionId, w4bOrigin)) return; // another W4b path is in flight
+        // R15.1 — In-flight guard with per-turn discriminator.
+        //   The cross-path stamp (`w4bOrigin`, content-only) is held for
+        //   3s post-success so W4a's later last-pair peek can find it.
+        //   That stamp must NOT also serve as the "another W4b path is
+        //   in flight" check, because two LEGITIMATE non-LLM turns with
+        //   identical text in the same conversation within the TTL
+        //   window would collide on it and silently drop the second.
+        //   Use the gateway-provided `messageId` as the per-turn key so
+        //   distinct turns are never mis-deduped. Fall back to a
+        //   monotonic in-process sequence when the envelope omits it
+        //   (concurrent same-content fires for a single messageId-less
+        //   turn are vanishingly rare in that path).
+        const w4bInflight = this.w4bInflightKey(ev, userText, assistantText);
+        if (this.markTurnIdSeen(sessionId, w4bInflight)) return; // concurrent W4b dispatch
         const turnId = this.deterministicTurnId(sessionId, userText, assistantText);
         // Route through the same tracked-job wrapper as onAgentEnd so the
         // reset gate sees this in-flight write and `Promise.allSettled`s
@@ -382,6 +397,10 @@ export class ChatTurnWriter {
         this.trackPersistJob(sessionId, async () => {
           try {
             await this.persistOne(sessionId, userText, assistantText, turnId);
+            // Post-success: stamp the content-only `w4bOrigin` key so
+            // a later W4a `agent_end` last-pair peek can see that W4b
+            // already persisted this turn and skip + bumpWatermark.
+            this.markTurnIdSeen(sessionId, this.w4bOriginKey(userText, assistantText));
           } catch (err) {
             // W4b is the ONLY path with a copy of `userText` (it lives
             // ephemerally in the FIFO queue). On a hard persist failure
@@ -395,8 +414,10 @@ export class ChatTurnWriter {
               restored.unshift(userText);
               this.pendingUserMessages.set(conversationKey, restored);
             }
-            // Release both origin keys so the retry path can proceed.
-            this.releaseTurnIdReservation(sessionId, this.w4bOriginKey(userText, assistantText));
+            // Release the in-flight reservation so a retry can proceed.
+            // No `w4bOrigin` release needed — we don't stamp it pre-persist
+            // anymore; only stamping happens post-success above.
+            this.releaseTurnIdReservation(sessionId, w4bInflight);
             this.logger.error?.("[ChatTurnWriter.onMessageSent] Persist failed", { err });
           }
         }).catch(() => {});
@@ -552,23 +573,42 @@ export class ChatTurnWriter {
   }
 
   /**
-   * Strip `<recalled-memory>` blocks from assistant text before persistence.
-   * Prevents the per-turn auto-recall block from boomeranging into future
-   * turn queries if the model verbatim-quotes system-context. Handles:
-   *   - well-formed `<recalled-memory>...</recalled-memory>` (any attrs, case-insensitive)
-   *   - orphaned open tag at end-of-text (truncated model output)
-   * The tag shape is load-bearing — keep in sync with
+   * Strip the auto-injected `<recalled-memory>` block from assistant text
+   * before persistence. Prevents the per-turn auto-recall block from
+   * boomeranging into future turn queries if the model verbatim-quotes
+   * system-context.
+   *
+   * R15.3 — Only strip blocks that carry the `data-source="dkg-auto-recall"`
+   * sentinel emitted by `formatRecalledMemoryBlock` in DkgNodePlugin.ts.
+   * A user-emitted plain `<recalled-memory>` literal (XML examples,
+   * documentation, debugging output) survives verbatim in the persisted
+   * transcript. The sentinel match is case-insensitive on the tag/attribute
+   * names but the value `dkg-auto-recall` is matched as-is.
+   *
+   * Handles:
+   *   - well-formed sentinel pairs `<recalled-memory data-source="dkg-auto-recall" ...>...</recalled-memory>`
+   *   - orphaned sentinel open tag at end-of-text (truncated model output)
+   *
+   * The sentinel value is load-bearing — keep in sync with
    * `formatRecalledMemoryBlock` in DkgNodePlugin.ts.
    */
   private stripRecalledMemory(text: string): string {
     if (!text) return "";
-    // (a) well-formed pairs
+    // Sentinel attribute requirement: `data-source="dkg-auto-recall"`. The
+    // attribute may appear anywhere inside the tag's attribute list, so the
+    // pattern is anchored on the tag name + a flexible attr scan that
+    // requires the sentinel before the closing `>`.
+    const sentinelOpen = /<recalled-memory\b(?=[^>]*\bdata-source\s*=\s*"dkg-auto-recall")[^>]*>/i;
+    // (a) well-formed sentinel pairs
     let out = text.replace(
-      /<recalled-memory(\s[^>]*)?>[\s\S]*?<\/recalled-memory>/gi,
+      new RegExp(sentinelOpen.source + /[\s\S]*?<\/recalled-memory>/.source, "gi"),
       "",
     );
-    // (b) orphaned open tag → strip from open-tag to end-of-string
-    out = out.replace(/<recalled-memory(\s[^>]*)?>[\s\S]*$/i, "");
+    // (b) orphaned sentinel open tag → strip from open-tag to end-of-string
+    out = out.replace(
+      new RegExp(sentinelOpen.source + /[\s\S]*$/.source, "i"),
+      "",
+    );
     return out.trim();
   }
 
@@ -622,6 +662,31 @@ export class ChatTurnWriter {
   }
   private w4bOriginKey(user: string, assistant: string): string {
     return `w4b-content::${this.contentHash(user, assistant)}`;
+  }
+
+  /**
+   * R15.1 — Per-turn in-flight reservation key for the W4b path.
+   * Distinct from the cross-path `w4bOrigin` (which is content-only and
+   * held post-success so W4a's last-pair peek can find it). This key
+   * exists only to dedup CONCURRENT same-content `message:sent`
+   * dispatches for the same logical turn — released on persist
+   * completion (success or failure).
+   *
+   * Prefer the gateway-provided `messageId` (one-per-delivery guarantee
+   * from `openclaw/src/infra/outbound/deliver.ts:381`). Fall back to a
+   * monotonic in-process sequence when the envelope omits it; in that
+   * fallback the in-flight guard becomes effectively a no-op (each fire
+   * gets a unique key), which is acceptable because messageId-less
+   * envelopes don't exhibit the race in practice.
+   */
+  private w4bInflightSeq = 0;
+  private w4bInflightKey(ev: InternalMessageEvent, user: string, assistant: string): string {
+    const messageId = (ev as any)?.context?.messageId;
+    if (typeof messageId === "string" && messageId.length > 0) {
+      return `w4b-inflight::msg::${messageId}`;
+    }
+    this.w4bInflightSeq = (this.w4bInflightSeq + 1) >>> 0;
+    return `w4b-inflight::seq::${this.w4bInflightSeq}::${this.contentHash(user, assistant)}`;
   }
   /**
    * @deprecated Kept temporarily for tests that inspect the dedup-map key

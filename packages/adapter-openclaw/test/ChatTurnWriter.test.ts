@@ -115,14 +115,14 @@ describe("ChatTurnWriter", () => {
     expect(mockClient.storeChatTurn).toHaveBeenCalled();
   });
 
-  it("strips well-formed <recalled-memory> block from assistant text before persist (I1)", async () => {
+  it("strips well-formed <recalled-memory data-source=\"dkg-auto-recall\"> block from assistant text before persist (I1)", async () => {
     const event: AgentEndContext = {
       sessionId: "test",
       messages: [
         { role: "user", content: "query" },
         {
           role: "assistant",
-          content: "prefix <recalled-memory>\n[1] (agent-context-wm) secret\n</recalled-memory> suffix",
+          content: "prefix <recalled-memory data-source=\"dkg-auto-recall\">\n[1] (agent-context-wm) secret\n</recalled-memory> suffix",
         },
       ],
     };
@@ -135,6 +135,27 @@ describe("ChatTurnWriter", () => {
     expect(call[2]).toContain("suffix");
   });
 
+  it("R15.3 — preserves user-emitted plain <recalled-memory> literals (no sentinel) in assistant text", async () => {
+    // Regression for R15.3: stripping must only target the auto-injected
+    // block carrying `data-source=\"dkg-auto-recall\"`. Plain literals an
+    // agent emits while answering questions about XML, debugging, or
+    // documentation must survive verbatim in the persisted transcript.
+    const event = {
+      sessionId: "test",
+      messages: [
+        { role: "user" as const, content: "Show me an example XML element" },
+        {
+          role: "assistant" as const,
+          content: 'Here is an example tag: <recalled-memory>verbatim user content</recalled-memory> done',
+        },
+      ],
+    };
+    writer.onAgentEnd(event, { channelId: "ch", sessionKey: "sk" });
+    await flushMicrotasks();
+    const call = mockClient.storeChatTurn.mock.calls[0];
+    expect(call[2]).toContain("<recalled-memory>verbatim user content</recalled-memory>");
+  });
+
   it("strips orphaned <recalled-memory> open tag when closing tag is missing (I1 truncation)", async () => {
     const event: AgentEndContext = {
       sessionId: "test",
@@ -142,7 +163,7 @@ describe("ChatTurnWriter", () => {
         { role: "user", content: "query" },
         {
           role: "assistant",
-          content: "answer text <recalled-memory>\n[1] (agent-context-wm) truncated",
+          content: "answer text <recalled-memory data-source=\"dkg-auto-recall\">\n[1] (agent-context-wm) truncated",
         },
       ],
     };
@@ -179,6 +200,63 @@ describe("ChatTurnWriter", () => {
   it("flushSync clears debounce timers", () => {
     writer.flushSync();
     expect((writer as any).debounceTimers.size).toBe(0);
+  });
+
+  it("R15.1 — two legitimate same-content W4b turns within the dedup TTL both persist when messageId is supplied", async () => {
+    // Regression for R15.1: previously W4b's pre-persist dedup key was
+    // content-only with a 3s TTL, so two legitimate non-LLM turns with
+    // identical text within 3 seconds dropped the second reply. The
+    // fix moves the in-flight guard to a per-turn `messageId`-based
+    // key (the gateway emits one `messageId` per delivery per
+    // `openclaw/src/infra/outbound/deliver.ts`). Cross-path stamping
+    // of the content-only `w4bOrigin` happens AFTER persist completes
+    // and never blocks legitimate sequential same-content turns.
+    writer.onMessageReceived({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "ping", messageId: "in-msg-1" },
+    } as any);
+    await writer.onMessageSent({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "pong", success: true, messageId: "out-msg-1" },
+    } as any);
+    await flushMicrotasks();
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+
+    // Same content within the 3s TTL — different messageId. Must persist.
+    writer.onMessageReceived({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "ping", messageId: "in-msg-2" },
+    } as any);
+    await writer.onMessageSent({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "pong", success: true, messageId: "out-msg-2" },
+    } as any);
+    await flushMicrotasks();
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(2);
+  });
+
+  it("R15.2 — empty inbound text is dropped (attachment-only events do not enqueue blanks)", () => {
+    // Regression for R15.2: `readEventText` returns "" for attachment-only
+    // / non-text inbound events. Previously we still enqueued an empty
+    // string, which paired with the next `message:sent` to persist an
+    // assistant-only turn for a conversation that had no textual inbound.
+    // Skip until we add a recoverable representation for non-text payloads.
+    writer.onMessageReceived({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "" },
+    } as any);
+    writer.onMessageReceived({
+      sessionKey: "sk",
+      context: { channelId: "tg" }, // no content at all
+    } as any);
+    expect((writer as any).pendingUserMessages.size).toBe(0);
+
+    // A genuine text inbound after the empty ones still enqueues normally.
+    writer.onMessageReceived({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "hello" },
+    } as any);
+    expect((writer as any).pendingUserMessages.size).toBe(1);
   });
 
   it("W4b-first then W4a same content: cross-path dedup is symmetric, no double-write (R12.6)", async () => {
@@ -845,7 +923,7 @@ describe("ChatTurnWriter", () => {
 
   it("onMessageSent strips <recalled-memory> from assistant text only (R3.2)", async () => {
     const echoed =
-      "sure — <recalled-memory>[1] (agent-context-wm) secret</recalled-memory> here is your answer";
+      "sure — <recalled-memory data-source=\"dkg-auto-recall\">[1] (agent-context-wm) secret</recalled-memory> here is your answer";
     writer.onMessageReceived({
       sessionKey: "sk",
       direction: "inbound",

@@ -119,7 +119,11 @@ describe('handleBeforePromptBuild (W3 auto-recall)', () => {
       { sessionKey: 'sk' },
     );
     expect(result).toBeDefined();
-    expect(result.appendSystemContext).toContain('<recalled-memory>');
+    // R15.3 — auto-recall block carries the `dkg-auto-recall` sentinel
+    // so `ChatTurnWriter.stripRecalledMemory` only strips this exact
+    // injected envelope and leaves user-emitted plain `<recalled-memory>`
+    // literals intact.
+    expect(result.appendSystemContext).toContain('<recalled-memory data-source="dkg-auto-recall">');
     expect(result.appendSystemContext).toContain('</recalled-memory>');
     expect(result.appendSystemContext).toContain('teal');
     expect(result.appendSystemContext).toContain('friday');
