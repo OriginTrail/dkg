@@ -202,6 +202,63 @@ describe("ChatTurnWriter", () => {
     expect((writer as any).debounceTimers.size).toBe(0);
   });
 
+  it("R18.1 — TURNID_TTL_MS is generous enough to cover slow outbound channels (>=30s)", () => {
+    // Regression for R18.1: the cross-path dedup TTL was 3s, so a slow
+    // `message:sent` (queued Telegram, retry, network glitch) arriving
+    // after agent_end's stamp had expired would persist the same turn
+    // twice. The new TTL (60s by design, but at minimum >=30s) covers
+    // realistic slow-channel delivery without making the dedup map
+    // unbounded.
+    const ttl = (writer.constructor as any).TURNID_TTL_MS;
+    expect(ttl).toBeGreaterThanOrEqual(30_000);
+  });
+
+  it("R18.2 — agent_end after setup-runtime → full upgrade does NOT re-persist W4b-written turns", async () => {
+    // Regression for R18.2: while typed hooks were unavailable
+    // (setup-runtime mode), W4b can persist turns directly via
+    // `message:sent`, but W4a's pair-indexed watermark stays at -1
+    // because no agent_end fires. After the upgrade to full mode, the
+    // first agent_end's `computeDelta` would treat the entire transcript
+    // as backfill and W4b's per-pair-index check (only the LAST pair
+    // peeks `w4bOrigin`) wouldn't catch earlier pairs — they'd all be
+    // re-persisted. The fix tracks per-session W4b persist counts and
+    // raises `savedUpTo` floor by `count - 1` so already-W4b-persisted
+    // pairs are skipped entirely.
+
+    // Simulate setup-runtime: W4b persists 3 turns directly.
+    for (let i = 1; i <= 3; i++) {
+      await writer.onMessageReceived({
+        sessionKey: "sk",
+        context: { channelId: "tg", content: `q${i}`, messageId: `in-${i}` },
+      } as any);
+      await writer.onMessageSent({
+        sessionKey: "sk",
+        context: { channelId: "tg", content: `a${i}`, success: true, messageId: `out-${i}` },
+      } as any);
+      await flushMicrotasks();
+    }
+    // Three persists from W4b.
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(3);
+
+    // Now full mode kicks in — agent_end fires with the full
+    // accumulated `messages[]` (3 user/assistant pairs).
+    const ev: AgentEndContext = {
+      sessionId: "test",
+      messages: [
+        { role: "user", content: "q1" },
+        { role: "assistant", content: "a1" },
+        { role: "user", content: "q2" },
+        { role: "assistant", content: "a2" },
+        { role: "user", content: "q3" },
+        { role: "assistant", content: "a3" },
+      ],
+    };
+    writer.onAgentEnd(ev, { channelId: "tg", sessionKey: "sk" });
+    await flushMicrotasks();
+    // Must NOT re-persist any of the 3 turns W4b already wrote.
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(3);
+  });
+
   it("R17.1 — contentHash distinguishes (a:b, c) from (a, b:c) (no delimiter collision)", () => {
     // Regression for R17.1: pre-fix, both pairs hashed `${user}:${assistant}`
     // → "a:b:c" → same digest → cross-path dedup falsely treated distinct
