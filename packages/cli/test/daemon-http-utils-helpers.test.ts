@@ -249,4 +249,84 @@ describe('jsonResponse — stack-trace / path scrubbing on egress', () => {
     const { body } = captureJsonResponse(200, { count: 42n });
     expect(body.count).toBe('42');
   });
+
+  // PR #229 CodeQL js/redos (alerts 56 + 57): the path-redaction regex
+  // used `(?:[^\\s()]+\\/)+[^\\s()]+`, where the inner class included
+  // the `/` separator. That made the match ambiguous and produced
+  // catastrophic backtracking on adversarial inputs starting with `/`
+  // and many repetitions of `!/`. Pinning a wall-clock budget here
+  // proves the fix: each input below would have taken seconds to fail
+  // on the pre-fix regex; with the separator excluded from the
+  // segment class, every input matches or rejects in microseconds.
+  describe('ReDoS resistance (alerts 56 / 57)', () => {
+    it('handles adversarial POSIX-style "/!/" repetitions in microseconds', () => {
+      // 200 × "!/" ⇒ before the fix this took ~exponential time and
+      // would dominate the test run. With the deterministic regex
+      // we expect well under 100ms even on cold CI hardware.
+      const adversarial = '/' + '!/'.repeat(200) + 'final';
+      const start = Date.now();
+      const { body } = captureJsonResponse(500, { error: adversarial });
+      const elapsed = Date.now() - start;
+      expect(elapsed).toBeLessThan(100);
+      expect(typeof body.error).toBe('string');
+    });
+
+    it('handles adversarial Windows-style "A:/!/" repetitions in microseconds', () => {
+      const adversarial = 'A:/' + '!/'.repeat(200) + 'final';
+      const start = Date.now();
+      const { body } = captureJsonResponse(500, { error: adversarial });
+      const elapsed = Date.now() - start;
+      expect(elapsed).toBeLessThan(100);
+      expect(typeof body.error).toBe('string');
+    });
+
+    it('still redacts a real POSIX path next to a "/!/" decoy', () => {
+      const msg =
+        'cannot load (/Users/runner/work/dkg/packages/foo/index.js:12:34) ' +
+        'after seeing "/!/!/!/!" in input';
+      const { body } = captureJsonResponse(500, { error: msg });
+      expect(body.error).toContain('<redacted-path>');
+      expect(body.error).not.toMatch(/\/Users\//);
+    });
+
+    it('still redacts a real Windows path next to a "A:/!/" decoy', () => {
+      const msg = 'failed at (C:\\Users\\runner\\work\\dkg\\foo.js:12:34) — A:/!/!/';
+      const { body } = captureJsonResponse(500, { error: msg });
+      expect(body.error).toContain('<redacted-path>');
+      expect(body.error).not.toMatch(/C:\\\\?Users/);
+    });
+  });
+
+  // PR #229 CodeQL js/stack-trace-exposure (alert 47): the egress
+  // barrier in `jsonResponse` does a final-mile `String.replace` on the
+  // serialised JSON body to strip any `\n   at <fn> (...)` continuation
+  // lines that escaped the structural scrub above (e.g. because they
+  // were embedded in a non-error-shaped field deep inside a nested
+  // payload). The structural scrub is the primary line of defence; the
+  // egress barrier is the belt-and-braces fail-safe that CodeQL's
+  // taint-flow analysis can statically recognise as a sanitiser.
+  describe('egress sink barrier (alert 47, defense-in-depth)', () => {
+    it('strips a stack-frame continuation hidden inside a non-error-shaped nested field', () => {
+      // `payload.trace` is NOT in ERROR_SHAPED_KEYS, so the structural
+      // scrub does NOT touch it. The egress regex MUST still strip the
+      // stack-frame continuation to honour the security contract.
+      const errMsg = 'oops\n    at handler (/Users/runner/work/foo.ts:1:2)';
+      const { body } = captureJsonResponse(500, {
+        ok: false,
+        payload: { trace: errMsg },
+      });
+      expect(body.payload.trace).not.toMatch(/at handler/);
+      // The leading "oops" survives — only the v8 frame continuation
+      // is stripped, not the human-readable error label.
+      expect(body.payload.trace).toContain('oops');
+    });
+
+    it('is a no-op on already-scrubbed payloads', () => {
+      const { body } = captureJsonResponse(200, {
+        ok: true,
+        msg: 'all systems nominal',
+      });
+      expect(body).toEqual({ ok: true, msg: 'all systems nominal' });
+    });
+  });
 });

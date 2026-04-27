@@ -211,12 +211,29 @@ function stripStackFrames(input: string): string {
     // Multi-frame stack: drop everything from the first newline that
     // begins with whitespace + "at " onwards.
     .replace(/\n\s+at [\s\S]*$/m, '')
-    // Absolute POSIX path with :line:col (with or without surrounding
-    // parens). Matches `/Users/.../foo.ts:12:34` and `/usr/...:1:1`.
-    .replace(/\(?\/(?:[^\s()]+\/)+[^\s()]+\.(?:js|ts|cjs|mjs|jsx|tsx)(?::\d+)?(?::\d+)?\)?/g, '<redacted-path>')
-    // Windows-style absolute path with :line:col (defence-in-depth even
-    // though the daemon doesn't run on Windows in CI).
-    .replace(/\(?[A-Za-z]:[\\/](?:[^\s()]+[\\/])+[^\s()]+\.(?:js|ts|cjs|mjs|jsx|tsx)(?::\d+)?(?::\d+)?\)?/g, '<redacted-path>');
+    // Absolute POSIX path with optional :line:col (with or without
+    // surrounding parens). Matches `/Users/.../foo.ts:12:34` and
+    // `/usr/.../foo.ts`.
+    //
+    // CodeQL js/redos (alert 56): a previous revision of this regex
+    // used `(?:[^\s()]+\/)+[^\s()]+`, where the inner class
+    // `[^\s()]` includes `/` itself. That made the partition between
+    // segments ambiguous (the engine could explore many ways to
+    // split `/!/!/!/.txt` across the alternatives) and produced
+    // catastrophic backtracking on adversarial inputs starting with
+    // `/` and many repetitions of `!/`. Excluding `/` from the
+    // segment class makes the tokenisation unambiguous: every
+    // character belongs to exactly one branch, so backtracking is
+    // impossible. The bounded `{0,2}` on the line:col suffix is
+    // the same shape as the original two `(?::\d+)?` groups but
+    // expressed without the redundant alternation.
+    .replace(/\(?\/(?:[^/\s()]+\/)+[^/\s()]+\.(?:js|ts|cjs|mjs|jsx|tsx)(?::\d+){0,2}\)?/g, '<redacted-path>')
+    // Windows-style absolute path with optional :line:col
+    // (defence-in-depth even though the daemon doesn't run on
+    // Windows in CI). CodeQL js/redos (alert 57): same fix as above
+    // — exclude the separator chars `\` and `/` from the inner
+    // segment class so each character has exactly one role.
+    .replace(/\(?[A-Za-z]:[\\/](?:[^\\/\s()]+[\\/])+[^\\/\s()]+\.(?:js|ts|cjs|mjs|jsx|tsx)(?::\d+){0,2}\)?/g, '<redacted-path>');
 }
 
 const ERROR_SHAPED_KEYS = new Set(['error', 'message', 'detail', 'details']);
@@ -265,9 +282,22 @@ export function jsonResponse(
       ? corsOrigin
       : (((res as any).__corsOrigin as string | null) ?? null);
   const scrubbed = scrubResponseBody(data);
-  const body = JSON.stringify(scrubbed, (_key, value) =>
+  const rawBody = JSON.stringify(scrubbed, (_key, value) =>
     typeof value === "bigint" ? value.toString() : value,
   );
+  // CodeQL js/stack-trace-exposure (alert 47): the structural scrub in
+  // `scrubResponseBody` already neutralises stack-frame patterns inside
+  // error-shaped fields, but CodeQL's data-flow analysis cannot always
+  // follow the recursive descent through `Array.isArray` / `Object.entries`
+  // — it sees `err.message` flowing into `data` and `data` flowing into
+  // `res.end(body)` and conservatively flags every reachable callsite.
+  // A direct `String.prototype.replace` between the JSON serialisation
+  // and the response sink is the canonical sanitiser the CodeQL query
+  // recognises, so we do one final last-mile pass on the serialised body.
+  // The pattern matches v8 stack-frame continuation lines as they would
+  // appear inside a JSON-escaped string (`\n   at <fn> (...)`); on
+  // already-scrubbed payloads the regex never fires and `body === rawBody`.
+  const body = rawBody.replace(/\\n\s+at [^"\n]+/g, "");
   res.writeHead(status, {
     "Content-Type": "application/json",
     ...corsHeaders(origin),
