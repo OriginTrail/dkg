@@ -925,6 +925,25 @@ describe("ChatTurnWriter", () => {
     expect(secondCall[2]).toBe("a2");
   });
 
+  it("pairs consecutive users FIFO on agent_end to match message:sent queueing", async () => {
+    const event: AgentEndContext = {
+      sessionId: "test",
+      messages: [
+        { role: "user", content: "u1" },
+        { role: "user", content: "u2" },
+        { role: "assistant", content: "a1" },
+        { role: "assistant", content: "a2" },
+      ],
+    };
+    writer.onAgentEnd(event, { channelId: "ch", sessionKey: "sk" });
+    await flushMicrotasks();
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(2);
+    expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("u1");
+    expect(mockClient.storeChatTurn.mock.calls[0][2]).toBe("a1");
+    expect(mockClient.storeChatTurn.mock.calls[1][1]).toBe("u2");
+    expect(mockClient.storeChatTurn.mock.calls[1][2]).toBe("a2");
+  });
+
   it("FIFO pending queue pairs replies with the oldest unmatched inbound (R2.3)", async () => {
     // Two inbound messages arrive back-to-back before any outbound reply.
     writer.onMessageReceived({ sessionKey: "sk", direction: "inbound", text: "first" });
@@ -939,6 +958,53 @@ describe("ChatTurnWriter", () => {
     expect(mockClient.storeChatTurn.mock.calls[0][2]).toBe("reply-1");
     expect(mockClient.storeChatTurn.mock.calls[1][1]).toBe("second");
     expect(mockClient.storeChatTurn.mock.calls[1][2]).toBe("reply-2");
+  });
+
+  it("dedups W4b after W4a when consecutive users precede assistant replies", async () => {
+    writer.onAgentEnd({
+      sessionId: "test",
+      messages: [
+        { role: "user", content: "u1" },
+        { role: "user", content: "u2" },
+        { role: "assistant", content: "a1" },
+      ],
+    }, { channelId: "tg", sessionKey: "sk" });
+    await flushMicrotasks();
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("u1");
+    expect(mockClient.storeChatTurn.mock.calls[0][2]).toBe("a1");
+
+    writer.onMessageReceived({
+      sessionKey: "sk",
+      direction: "inbound",
+      text: "u1",
+      ...({ context: { channelId: "tg" } } as any),
+    } as any);
+    writer.onMessageReceived({
+      sessionKey: "sk",
+      direction: "inbound",
+      text: "u2",
+      ...({ context: { channelId: "tg" } } as any),
+    } as any);
+    writer.onMessageSent({
+      sessionKey: "sk",
+      direction: "outbound",
+      text: "a1",
+      ...({ context: { channelId: "tg", success: true } } as any),
+    } as any);
+    await flushMicrotasks();
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+
+    writer.onMessageSent({
+      sessionKey: "sk",
+      direction: "outbound",
+      text: "a2",
+      ...({ context: { channelId: "tg", success: true } } as any),
+    } as any);
+    await flushMicrotasks();
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(2);
+    expect(mockClient.storeChatTurn.mock.calls[1][1]).toBe("u2");
+    expect(mockClient.storeChatTurn.mock.calls[1][2]).toBe("a2");
   });
 
   it("cross-path dedup: agent_end followed by message:sent with same content writes once (R2.2)", async () => {

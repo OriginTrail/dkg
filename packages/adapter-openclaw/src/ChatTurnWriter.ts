@@ -572,7 +572,9 @@ export class ChatTurnWriter {
   }
 
   /**
-   * Return every unsaved (user, assistant) pair in order. `savedUpTo` is a
+   * Return every unsaved (user, assistant) pair in order. Consecutive user
+   * messages are matched FIFO against later assistant messages, mirroring the
+   * internal `message:received` / `message:sent` queue path. `savedUpTo` is a
    * pair-count watermark: -1 means nothing saved, 0 means the first pair
    * has been saved, and so on. Iterates the full message array and emits
    * pairs whose 0-indexed position exceeds the watermark — a transient
@@ -585,11 +587,12 @@ export class ChatTurnWriter {
     savedUpTo: number,
   ): Array<{ user: string; assistant: string; pairIndex: number }> {
     const pairs: Array<{ user: string; assistant: string; pairIndex: number }> = [];
-    let currentUser = "";
+    const pendingUsers: string[] = [];
     let pairIndex = 0;
     for (const msg of messages) {
       if (msg.role === "user") {
-        currentUser = this.extractText(msg.content);
+        const text = this.extractText(msg.content);
+        if (text) pendingUsers.push(text);
       } else if (msg.role === "assistant") {
         // Skip intermediate assistant messages that exist solely to call
         // tools — they have empty/absent text content and a populated
@@ -608,15 +611,15 @@ export class ChatTurnWriter {
           // advance pairIndex (the watermark counts user-visible turns).
           continue;
         }
+        const user = pendingUsers.shift() ?? "";
         if (pairIndex > savedUpTo) {
           pairs.push({
-            user: currentUser,
+            user,
             assistant: this.stripRecalledMemory(text),
             pairIndex,
           });
         }
         pairIndex++;
-        currentUser = "";
       }
       // Skip `tool` and `system` messages — they don't form turns.
     }
