@@ -148,32 +148,40 @@ export class ChatTurnWriter {
       // watermark at N-1 and the next agent_end call retries from the same
       // point. Without sequencing, a failed middle pair could be skipped
       // when the tail succeeds.
+      const lastIdx = pairs.length - 1;
       const job = this.trackPersistJob(sessionId, async () => {
-        for (const { user, assistant, pairIndex } of pairs) {
+        for (let i = 0; i < pairs.length; i++) {
+          const { user, assistant, pairIndex } = pairs[i];
           if (!user && !assistant) continue;
-          // W4a turnId mixes pair position into the hash so that two
-          // legitimate same-text exchanges within the same `agent_end`
-          // backfill (e.g. user said "hi" twice) get distinct turnIds
-          // and BOTH persist. Without `pairIndex`, the second one would
-          // hit the cross-path dedup map (stamped by the first) and be
-          // silently dropped.
+          // W4a turnId mixes pair position into the hash so backfill of
+          // two same-text pairs (e.g. user said "hi" twice) produces
+          // distinct turnIds and BOTH persist.
           const turnId = this.deterministicTurnId(sessionId, user, assistant, pairIndex);
-          // Also record a content-only fingerprint as an alias — this is
-          // what the W4b `message:sent` path checks (it has no pair
-          // index). The most-recent W4a write stamps the alias; a W4b
-          // fire within the dedup TTL for the same content will skip.
-          const contentAlias = this.contentAliasKey(sessionId, user, assistant);
+          // Cross-path dedup: only the LAST pair in the loop is the
+          // most-recent turn that W4b could plausibly have already
+          // persisted. Earlier pairs are backfill (historical turns,
+          // never seen by W4b), so they skip the W4b-origin check —
+          // otherwise same-content backfill pairs would falsely dedup
+          // against each other via the shared content hash.
+          if (i === lastIdx) {
+            const w4bOrigin = this.w4bOriginKey(user, assistant);
+            if (this.markTurnIdSeen(sessionId, w4bOrigin)) continue; // W4b wrote it
+          }
           if (this.markTurnIdSeen(sessionId, turnId)) continue;
           try {
             await this.persistOne(sessionId, user, assistant, turnId, { pairIndex });
-            // After successful persist, refresh the content alias so
-            // a same-cycle W4b fire dedups against the latest write.
-            this.markTurnIdSeen(sessionId, contentAlias);
+            // Stamp W4a-origin so a same-cycle W4b fire dedups.
+            this.markTurnIdSeen(sessionId, this.w4aOriginKey(user, assistant));
           } catch (err) {
-            // Release the reservation so a retry (next agent_end or the
-            // paired internal hook) can re-attempt rather than silently
-            // skipping this turn within the dedup window.
+            // Release reservations so a retry (next agent_end or the
+            // paired internal hook) can re-attempt. The last-pair w4b
+            // origin reservation MUST also be released — without it,
+            // the next agent_end's last pair would falsely dedup
+            // against the stale reservation and silently skip the turn.
             this.releaseTurnIdReservation(sessionId, turnId);
+            if (i === lastIdx) {
+              this.releaseTurnIdReservation(sessionId, this.w4bOriginKey(user, assistant));
+            }
             this.logger.error?.("[ChatTurnWriter.onAgentEnd] Persist failed", { err });
             return; // leave watermark at last successful pair
           }
@@ -339,12 +347,15 @@ export class ChatTurnWriter {
       // silently corrupted.
       const assistantText = this.stripRecalledMemory(readEventText(ev));
       if (userText || assistantText) {
-        // W4b has no concept of pair index, so the cross-path dedup
-        // check uses the content-only alias that W4a stamps on every
-        // successful persist. If `agent_end` already wrote this turn
-        // within the TTL window, the alias is present and we skip.
-        const contentAlias = this.contentAliasKey(sessionId, userText, assistantText);
-        if (this.markTurnIdSeen(sessionId, contentAlias)) return; // already written via W4a
+        // Cross-path dedup, W4b side: check the W4a-origin key — if
+        // `agent_end` already wrote this turn within the TTL window,
+        // skip. Then reserve the W4b-origin key (atomic mark) so a
+        // later `agent_end` whose LAST pair has the same content sees
+        // it and skips. Symmetric across paths regardless of order.
+        const w4aOrigin = this.w4aOriginKey(userText, assistantText);
+        if (this.markTurnIdSeen(sessionId, w4aOrigin)) return; // W4a already wrote
+        const w4bOrigin = this.w4bOriginKey(userText, assistantText);
+        this.markTurnIdSeen(sessionId, w4bOrigin); // reserve for W4a's last-pair check
         const turnId = this.deterministicTurnId(sessionId, userText, assistantText);
         // Route through the same tracked-job wrapper as onAgentEnd so the
         // reset gate sees this in-flight write and `Promise.allSettled`s
@@ -354,7 +365,20 @@ export class ChatTurnWriter {
           try {
             await this.persistOne(sessionId, userText, assistantText, turnId);
           } catch (err) {
-            this.releaseTurnIdReservation(sessionId, contentAlias);
+            // W4b is the ONLY path with a copy of `userText` (it lives
+            // ephemerally in the FIFO queue). On a hard persist failure
+            // there's no `agent_end` backfill — the messages array doesn't
+            // exist for non-LLM channels. Push the consumed user message
+            // back to the FRONT of the queue so the next outbound delivery
+            // for this conversation re-pairs and retries. Without this,
+            // a transient daemon outage would silently drop the turn.
+            if (userText) {
+              const restored = this.pendingUserMessages.get(conversationKey) ?? [];
+              restored.unshift(userText);
+              this.pendingUserMessages.set(conversationKey, restored);
+            }
+            // Release both origin keys so the retry path can proceed.
+            this.releaseTurnIdReservation(sessionId, this.w4bOriginKey(userText, assistantText));
             this.logger.error?.("[ChatTurnWriter.onMessageSent] Persist failed", { err });
           }
         }).catch(() => {});
@@ -511,16 +535,39 @@ export class ChatTurnWriter {
   }
 
   /**
-   * Content-only dedup alias used by W4b (`message:sent`) which has no
-   * concept of pair index. Format: `<sessionId>::content::<sha-16>`.
-   * Stamped by every successful W4a persist so that an immediately-
-   * following W4b fire for the same content skips. Two legitimate same-
-   * text exchanges spaced more than `TURNID_TTL_MS` apart get a fresh
-   * alias each time and persist.
+   * Cross-path dedup keys. Each path stamps its OWN origin key when it
+   * persists; each path checks the OTHER path's origin key before
+   * persisting. This makes dedup symmetric — neither order causes a
+   * double-write.
+   *
+   *   - W4a stamps `w4a-content::<sha>` after each successful persist.
+   *     `onMessageSent` (W4b) checks this up-front: if W4a already wrote
+   *     the same content within the TTL, skip.
+   *   - W4b reserves `w4b-content::<sha>` BEFORE persist (atomic mark).
+   *     `onAgentEnd`'s LAST pair (the most-recent turn that W4b could
+   *     plausibly have just persisted) checks this; backfill pairs
+   *     (earlier pair indices) do not, because they correspond to
+   *     historical turns W4b never saw.
+   *
+   * Hash includes only `user:assistant` text (no sessionId, no pair
+   * index) — both paths see the same canonical content for the same
+   * exchange and produce the same hash.
    */
-  private contentAliasKey(sessionId: string, user: string, assistant: string): string {
-    const hash = createHash("sha256").update(`${user}:${assistant}`).digest("hex").slice(0, 16);
-    return `content::${hash}`;
+  private contentHash(user: string, assistant: string): string {
+    return createHash("sha256").update(`${user}:${assistant}`).digest("hex").slice(0, 16);
+  }
+  private w4aOriginKey(user: string, assistant: string): string {
+    return `w4a-content::${this.contentHash(user, assistant)}`;
+  }
+  private w4bOriginKey(user: string, assistant: string): string {
+    return `w4b-content::${this.contentHash(user, assistant)}`;
+  }
+  /**
+   * @deprecated Kept temporarily for tests that inspect the dedup-map key
+   * shape; new code should use `w4aOriginKey` / `w4bOriginKey`.
+   */
+  private contentAliasKey(_sessionId: string, user: string, assistant: string): string {
+    return this.w4aOriginKey(user, assistant);
   }
 
   private deterministicTurnId(sessionId: string, user: string, assistant: string, pairIndex?: number): string {
@@ -564,6 +611,21 @@ export class ChatTurnWriter {
     });
   }
 
+  /**
+   * Per-field encoder used before joining session-id segments with `:`.
+   * Without encoding, raw `channelId` / `accountId` / `conversationId` /
+   * `sessionKey` values that legitimately contain `:` (e.g. OpenClaw's
+   * own `agent:<agentId>:<identity>` session keys) collapse different
+   * tuples to the same composed string and merge unrelated conversations'
+   * watermarks and pending queues.
+   *
+   * Percent-encode `:` as `%3A` and `%` as `%25` (so the encoding is
+   * reversible). Cheap, deterministic, no third-party dependency.
+   */
+  private encodeIdField(s: string): string {
+    return String(s ?? "").replace(/[%:]/g, (c) => (c === '%' ? '%25' : '%3A'));
+  }
+
   private composeSessionId(parts: {
     channelId?: string;
     accountId?: string;
@@ -575,7 +637,7 @@ export class ChatTurnWriter {
     const conversationId = parts.conversationId ?? "";
     const sessionKey = parts.sessionKey ?? "";
     const ids = [channelId, accountId, conversationId, sessionKey].map((p) =>
-      this.sanitize(String(p ?? "")),
+      this.encodeIdField(this.sanitize(String(p ?? ""))),
     );
     return `openclaw:${ids.join(":")}`;
   }
@@ -592,13 +654,12 @@ export class ChatTurnWriter {
       return "";
     }
     const ctx = (ev as any)?.context ?? {};
-    const channelId = ctx.channelId ?? (ev as any)?.channelId ?? "unknown";
-    const accountId = ctx.accountId ?? "";
-    const conversationId = ctx.conversationId ?? "";
-    const parts = [channelId, accountId, conversationId, ev.sessionKey].map((p) =>
-      this.sanitize(String(p ?? "")),
-    );
-    return `openclaw:${parts.join(":")}`;
+    return this.composeSessionId({
+      channelId: ctx.channelId ?? (ev as any)?.channelId,
+      accountId: ctx.accountId,
+      conversationId: ctx.conversationId,
+      sessionKey: ev.sessionKey,
+    });
   }
 
   private extractText(content: string | Array<{ type: string; text?: string }>): string {

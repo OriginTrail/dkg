@@ -181,6 +181,105 @@ describe("ChatTurnWriter", () => {
     expect((writer as any).debounceTimers.size).toBe(0);
   });
 
+  it("W4b-first then W4a same content: cross-path dedup is symmetric, no double-write (R12.6)", async () => {
+    // The qa-engineer-flagged R10/R11 race: previously W4b would persist
+    // and then W4a's pair (same content, different turnId via pairIndex)
+    // wouldn't dedup against it. Now W4b reserves w4b-content origin and
+    // W4a's last-pair check catches that.
+    writer.onMessageReceived({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "hi" },
+    } as any);
+    await writer.onMessageSent({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "hello", success: true },
+    } as any);
+    await flushMicrotasks();
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1); // W4b wrote
+
+    // Now W4a fires for the same turn (canonical mixed scenario).
+    writer.onAgentEnd(
+      {
+        sessionId: "t",
+        messages: [
+          { role: "user", content: "hi" },
+          { role: "assistant", content: "hello" },
+        ],
+      },
+      { channelId: "tg", sessionKey: "sk" },
+    );
+    await flushMicrotasks();
+    // W4a's last-pair check sees the W4b origin reservation → skips.
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+  });
+
+  it("backfill of identical content STILL persists both pairs even after symmetric dedup (R12.6 + R10.4)", async () => {
+    // Backfill scenario: agent_end fires with messages array containing
+    // two same-content pairs. Pre-fix collision in dedup would drop
+    // the second. The W4b-origin check is gated to LAST pair only, so
+    // the earlier (backfill) pair persists via its own pair-indexed
+    // turnId without false dedup.
+    const event: AgentEndContext = {
+      sessionId: "t",
+      messages: [
+        { role: "user", content: "thanks" },
+        { role: "assistant", content: "you're welcome" },
+        { role: "user", content: "thanks" },
+        { role: "assistant", content: "you're welcome" },
+      ],
+    };
+    writer.onAgentEnd(event, { channelId: "ch", sessionKey: "sk" });
+    await flushMicrotasks();
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(2);
+  });
+
+  it("encodes ':' in session-id fields so colon-rich values don't collide (R12.8)", async () => {
+    // Two distinct conversations whose raw fields naively join to the
+    // SAME `openclaw:...` string under the pre-fix joiner:
+    //   A: channelId='ch', accountId='a', conversationId='', sessionKey='b:c'
+    //      → naive: openclaw:ch:a::b:c
+    //   B: channelId='ch:a', accountId='', conversationId='', sessionKey='b:c'
+    //      → naive: openclaw:ch:a::b:c   (collision)
+    // With per-field colon encoding the two land at distinct keys and
+    // their pending queues are kept separate.
+    writer.onMessageReceived({
+      sessionKey: "b:c",
+      context: { channelId: "ch", accountId: "a", content: "from-A" },
+    } as any);
+    writer.onMessageReceived({
+      sessionKey: "b:c",
+      context: { channelId: "ch:a", content: "from-B" },
+    } as any);
+    const pending = (writer as any).pendingUserMessages as Map<string, string[]>;
+    expect(pending.size).toBe(2); // two distinct conversation keys
+  });
+
+  it("on persist failure W4b restores the user message to the front of the queue (R12.3/R12.7)", async () => {
+    // Pre-fix: persist failure dropped the user half permanently.
+    mockClient.storeChatTurn = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("daemon down"))
+      .mockRejectedValueOnce(new Error("daemon still down"))
+      .mockResolvedValue(undefined);
+    writer = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
+
+    writer.onMessageReceived({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "important question" },
+    } as any);
+    await writer.onMessageSent({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "first attempt reply", success: true },
+    } as any);
+    // wait for persist retries to complete + failure restoration
+    await new Promise((r) => setTimeout(r, 1500));
+    // First attempt failed; user message should be restored to the queue.
+    const pending = (writer as any).pendingUserMessages as Map<string, string[]>;
+    let restored: string[] | undefined;
+    for (const v of pending.values()) restored = v;
+    expect(restored?.[0]).toBe("important question");
+  }, 10_000);
+
   it("watermark uses absolute pairIndex and does not drift on cross-path persist (R11.2)", async () => {
     // Simulate W4a + W4b firing for the same turn: W4a persists with
     // pairIndex=0, W4b persists without pairIndex. Watermark must end
@@ -313,11 +412,20 @@ describe("ChatTurnWriter", () => {
     await flushMicrotasks();
     expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
     const recent = (writer as any).recentTurnIds as Map<string, number>;
-    expect(recent.size).toBe(2); // turnId + content alias
+    // After R12.6 symmetric dedup, a single W4a persist stamps THREE
+    // map entries:
+    //   1. The pair-indexed turnId (the W4a write key)
+    //   2. The W4a-origin key (`w4a-content::<sha>`) so future W4b fires
+    //      dedup against this write
+    //   3. The W4b-origin reservation from the last-pair check (used
+    //      to detect a W4b that may have already written)
+    expect(recent.size).toBe(3);
     const keys = Array.from(recent.keys());
-    const aliasKey = keys.find((k) => k.includes("::content::"));
-    const turnIdKey = keys.find((k) => k !== aliasKey)!;
-    expect(aliasKey).toMatch(/::content::[0-9a-f]{16}$/);
+    const w4aKey = keys.find((k) => k.includes("::w4a-content::"));
+    const w4bKey = keys.find((k) => k.includes("::w4b-content::"));
+    const turnIdKey = keys.find((k) => k !== w4aKey && k !== w4bKey)!;
+    expect(w4aKey).toMatch(/::w4a-content::[0-9a-f]{16}$/);
+    expect(w4bKey).toMatch(/::w4b-content::[0-9a-f]{16}$/);
     const turnId = turnIdKey.slice(turnIdKey.lastIndexOf("::") + 2);
     expect(turnId).toMatch(/^[0-9a-f]{16}$/);
   });

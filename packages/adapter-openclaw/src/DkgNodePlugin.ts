@@ -371,11 +371,15 @@ export class DkgNodePlugin {
         // `agent_end` would fire twice per turn.
         const internalNeedsRetry = (event: string) =>
           stats[`internal:${event}`]?.installedVia === 'none';
+        // Use the SAME wrapped-handler factories as the initial install
+        // below so a late retry preserves the mode-independent slot
+        // re-assert anchor. Without the wrapper, turn persistence would
+        // recover but slot ownership wouldn't bounce back per-message.
         if (internalNeedsRetry('message:received')) {
-          this.hookSurface.install('internal', 'message:received', (ev) => this.chatTurnWriter!.onMessageReceived(ev));
+          this.hookSurface.install('internal', 'message:received', this.makeMessageReceivedHandler());
         }
         if (internalNeedsRetry('message:sent')) {
-          this.hookSurface.install('internal', 'message:sent', (ev) => this.chatTurnWriter!.onMessageSent(ev));
+          this.hookSurface.install('internal', 'message:sent', this.makeMessageSentHandler());
         }
         return;
       }
@@ -410,14 +414,8 @@ export class DkgNodePlugin {
     // ownership anchor. Cheap (one property assignment) and keeps the slot
     // honest even when `before_prompt_build` (full-only) and the
     // `memory_search` tool path don't run.
-    this.hookSurface.install('internal', 'message:received', (ev) => {
-      try { this.memoryPlugin?.reAssertCapability(); } catch { /* non-fatal */ }
-      return this.chatTurnWriter!.onMessageReceived(ev);
-    });
-    this.hookSurface.install('internal', 'message:sent', (ev) => {
-      try { this.memoryPlugin?.reAssertCapability(); } catch { /* non-fatal */ }
-      return this.chatTurnWriter!.onMessageSent(ev);
-    });
+    this.hookSurface.install('internal', 'message:received', this.makeMessageReceivedHandler());
+    this.hookSurface.install('internal', 'message:sent', this.makeMessageSentHandler());
 
     // I8 — tool-selection guidance injected into the system prompt every turn.
     // Reaches the agent model directly (unlike SKILL.md which only reaches
@@ -438,6 +436,27 @@ export class DkgNodePlugin {
         api.logger.debug?.(`[dkg] registerMemoryPromptSection failed: ${err?.message ?? err}`);
       }
     }
+  }
+
+  /**
+   * Internal-hook handler factories. Both the initial install and the
+   * same-api retry path use these so the mode-independent re-assert
+   * wrapper is consistent across paths. A late retry that recovered turn
+   * persistence WITHOUT the wrapper would silently lose slot-ownership
+   * defense-in-depth on every internal-hook fire.
+   */
+  private makeMessageReceivedHandler() {
+    return (ev: any) => {
+      try { this.memoryPlugin?.reAssertCapability(); } catch { /* non-fatal */ }
+      return this.chatTurnWriter!.onMessageReceived(ev);
+    };
+  }
+
+  private makeMessageSentHandler() {
+    return (ev: any) => {
+      try { this.memoryPlugin?.reAssertCapability(); } catch { /* non-fatal */ }
+      return this.chatTurnWriter!.onMessageSent(ev);
+    };
   }
 
   /**
@@ -482,14 +501,18 @@ export class DkgNodePlugin {
       const memoryPlugin = this.memoryPlugin;
       if (!registered) {
         // Slot is owned by a different plugin (or registration is
-        // intentionally disabled). Clear any stale pre-dispatch re-assert
-        // callback wired by a previous register() call — without this,
-        // `DkgChannelPlugin.processInbound*()` would keep calling our
-        // re-assert and steal the slot back from the new owner on every
-        // UI turn.
+        // intentionally disabled). Clear all paths that could re-assert
+        // ownership and steal the slot back from the new owner:
+        //   1. Channel plugin pre-dispatch callback (per-turn anchor).
+        //   2. The memory plugin's CACHED capability+api — without this,
+        //      `before_prompt_build` / `message:received` / `message:sent`
+        //      / `memory_search` would all still call `reAssertCapability()`
+        //      and re-stamp the cached entry, silently overwriting the
+        //      newly elected provider on every turn.
         if (this.channelPlugin) {
           this.channelPlugin.setPreDispatchReAssert(null);
         }
+        memoryPlugin?.invalidateRegistration();
         api.logger.info?.('[dkg] Memory module loaded but slot registration was skipped (see warn above for reason)');
         return;
       }

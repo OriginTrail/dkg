@@ -136,15 +136,25 @@ describe('Memory integration round-trip (issue #199 Phase 1 + Phase 2)', () => {
       expect(snippet.toLowerCase()).toContain('tatooine');
     });
 
-    it('searchNarrow (W3 auto-recall) filters to WM layers only', async () => {
+    it('searchNarrow (W3 auto-recall) fans out across all layers and caps at maxResults', async () => {
+      // Updated for the W3 widening: searchNarrow shares the full 6-layer
+      // fan-out with `memory_search` and only differs in the result cap.
+      // Pinning to WM-only here would push a regression back to the old
+      // narrow behavior once SWM/VM happen to contain matching data.
       const manager = new DkgMemorySearchManager({
         client: (plugin as any).client,
         resolver: (plugin as any).memorySessionResolver,
       });
       const hits = await manager.searchNarrow('tatooine', { maxResults: 5 });
-      // All returned hits must be from a WM layer.
+      // Cap respected — never more than the requested maxResults.
+      expect(hits.length).toBeLessThanOrEqual(5);
+      // Layers must all be valid memory layers from the 6-layer fan-out.
+      const validLayers = new Set([
+        'agent-context-wm', 'agent-context-swm', 'agent-context-vm',
+        'project-wm', 'project-swm', 'project-vm',
+      ]);
       for (const h of hits) {
-        expect(['agent-context-wm', 'project-wm']).toContain(h.layer);
+        expect(validLayers.has(h.layer ?? '')).toBe(true);
       }
     });
   });

@@ -66,7 +66,10 @@ console.log(BANNER);
 const logPath = process.argv[2];
 if (logPath) {
   console.log(`\nTailing gateway log: ${logPath}\n`);
-  const child = spawn('tail', ['-f', logPath], { stdio: 'inherit' });
+  // The `--` end-of-options sentinel forces `tail` to treat the next
+  // argument as a positional filename even when it begins with `-`,
+  // closing an option-injection vector if `logPath` is user-controlled.
+  const child = spawn('tail', ['-f', '--', logPath], { stdio: 'inherit' });
   child.on('error', (err) => {
     console.error(`Error tailing log: ${err.message}`);
   });

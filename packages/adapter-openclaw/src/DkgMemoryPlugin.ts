@@ -616,6 +616,21 @@ export class DkgMemoryPlugin {
   }
 
   /**
+   * Invalidate the cached capability + api so subsequent
+   * `reAssertCapability()` calls become no-ops.
+   *
+   * Called by `DkgNodePlugin` whenever a later `register()` call returns
+   * `false` (slot ownership lost to another plugin). Without this clear,
+   * the cached capability would persist and per-turn re-assert anchors
+   * (`before_prompt_build`, `message:received`/`sent`, `memory_search`)
+   * would silently steal the slot back from the newly elected provider.
+   */
+  invalidateRegistration(): void {
+    this.registeredCapability = null;
+    this.registeredApi = null;
+  }
+
+  /**
    * Registers the memory-slot capability. Two gates must pass:
    *
    * 1. The gateway must expose `api.registerMemoryCapability` — older

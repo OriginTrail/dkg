@@ -158,6 +158,27 @@ describe('DkgMemoryPlugin.register', () => {
     expect(api.registerTool).not.toHaveBeenCalled();
   });
 
+  it('invalidateRegistration() clears cached capability so reAssertCapability becomes a no-op (R12.2)', () => {
+    // Step 1: successful registration caches capability + api.
+    const api1 = makeApi();
+    plugin.register(api1);
+    expect(api1.registerMemoryCapability).toHaveBeenCalledTimes(1);
+
+    // Step 2: another reAssertCapability call would re-stamp the cached
+    // capability — verify by counting the registerMemoryCapability calls.
+    plugin.reAssertCapability();
+    expect(api1.registerMemoryCapability).toHaveBeenCalledTimes(2);
+
+    // Step 3: invalidate — simulating slot ownership lost.
+    plugin.invalidateRegistration();
+
+    // Step 4: subsequent reAssertCapability MUST be a no-op. Without
+    // invalidation the cached api1+capability would be re-stamped
+    // and silently overwrite whatever provider currently owns the slot.
+    plugin.reAssertCapability();
+    expect(api1.registerMemoryCapability).toHaveBeenCalledTimes(2); // unchanged
+  });
+
   it('reads plugins.slots.memory from api.cfg when api.config is missing (Codex B58 gateway shim)', () => {
     const api = makeApi();
     (api as any).cfg = api.config;
