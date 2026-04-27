@@ -20,7 +20,6 @@ import {
   fetchCatchupStatus,
   fetchNotifications,
   markNotificationsRead,
-  fetchApps,
   fetchRpcHealth,
   fetchQueryHistory,
   fetchSavedQueries,
@@ -42,7 +41,6 @@ import {
   subscribeToContextGraph,
   shutdownNode,
   promoteAssertion,
-  gameApi,
 } from '../src/ui/api.js';
 
 let server: Server;
@@ -75,8 +73,6 @@ function startTestServer(): Promise<void> {
           res.end(JSON.stringify({ retentionDays: 30 }));
         } else if (url.startsWith('/api/settings/telemetry')) {
           res.end(JSON.stringify({ enabled: true }));
-        } else if (url.startsWith('/api/apps')) {
-          res.end(JSON.stringify({ apps: [] }));
         } else if (url.startsWith('/api/chain/rpc-health')) {
           res.end(JSON.stringify({ healthy: true }));
         } else if (url.startsWith('/api/economics')) {
@@ -230,11 +226,6 @@ describe('UI API tests', () => {
       expect(res.enabled).toBe(true);
     });
 
-    it('fetchApps calls /api/apps', async () => {
-      await fetchApps();
-      expect(requestLog.some(r => r.url.startsWith('/api/apps'))).toBe(true);
-    });
-
     it('fetchRpcHealth calls /api/rpc-health', async () => {
       await fetchRpcHealth();
       expect(requestLog.some(r => r.url.startsWith('/api/chain/rpc-health'))).toBe(true);
@@ -346,17 +337,6 @@ describe('UI API tests', () => {
       const call = requestLog.find(r => r.method === 'POST' && r.url.includes('/api/subscribe'));
       const body = JSON.parse(call?.body ?? '{}');
       expect(body.contextGraphId).toBe('cg-1');
-    });
-  });
-
-  describe('gameApi', () => {
-    it('exports expected methods', () => {
-      expect(gameApi).toHaveProperty('lobby');
-      expect(gameApi).toHaveProperty('join');
-      expect(gameApi).toHaveProperty('leave');
-      expect(gameApi).toHaveProperty('create');
-      expect(gameApi).toHaveProperty('info');
-      expect(gameApi).toHaveProperty('swarm');
     });
   });
 

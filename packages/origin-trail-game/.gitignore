@@ -1,9 +1,0 @@
-node_modules/
-dist/
-dist-ui/
-tsconfig.tsbuildinfo
-*.tgz
-.env
-.play-nodes/
-.test-nodes/
-.DS_Store

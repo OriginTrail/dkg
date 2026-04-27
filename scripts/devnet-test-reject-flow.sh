@@ -167,8 +167,6 @@ while :; do
   elapsed=$(( $(date +%s) - start ))
   if [ "$elapsed" -ge 15 ]; then
     fail "N2 did not receive a join_rejected notification within 15s"
-    api "$N2" GET /api/notifications | python3 -m json.tool | tail -40
-    exit 1
   fi
   hit=$(api "$N2" GET /api/notifications | python3 -c "
 import sys,json

@@ -102,21 +102,23 @@ When the daemon is running, it exposes a local HTTP API (default: `http://localh
 - `GET /api/peers`, `GET /api/connections`, `GET /api/agents` — network introspection
 - `GET /api/wallets/balances`, `GET /api/chain/rpc-health` — wallet and chain health
 - `GET /api/events` — Server-Sent Events stream for real-time notifications
-- `GET /api/apps` — list installed DKG apps
+
+> The V9 `GET /api/apps` endpoint (and the `/apps/*` iframe host) was retired in
+> V10 along with the installable apps framework — the daemon now returns
+> `410 Gone` on those paths. See [Extending the Node](#extending-the-node) below.
 
 All endpoints (except public paths like `/api/status`, `/api/chain/rpc-health`, and `/.well-known/skill.md`) require an API token via `Authorization: Bearer <token>` header.
 
 The full API surface — including request bodies, response shapes, and error codes — is documented in [`skills/dkg-node/SKILL.md`](./skills/dkg-node/SKILL.md).
 
-## Installable Apps
+## Extending the Node
 
-The daemon includes a generic app loader that discovers and serves third-party DKG apps without any per-app code changes. Apps are npm packages with a `dkgApp` manifest in their `package.json`. The daemon:
-
-1. **Discovers** installed apps from `node_modules` (packages with a `dkgApp` field) or explicit config.
-2. **Loads** each app's API handler and invokes it for requests under `/api/apps/:appId/*`.
-3. **Serves** each app's built UI (static assets) at `/apps/:appId/`.
-
-Node runners install an app (`pnpm add <dkg-app-package>`), restart, and it appears in the Node UI sidebar. See [`docs/plans/DKG_APPS_INSTALLABLE.md`](../../docs/plans/DKG_APPS_INSTALLABLE.md) for the full design.
+The V9 "installable apps" framework (iframe-hosted third-party UIs loaded from
+`node_modules` with a `dkgApp` manifest) was retired in V10 to shrink the
+security surface and simplify the daemon. The supported extension surface is now
+the `dkg integration` CLI (see `packages/cli/src/integrations/`), which installs
+trusted `cli` / `mcp` integrations from a registry with npm provenance
+verification.
 
 ## Internal Dependencies
 

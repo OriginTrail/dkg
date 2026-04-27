@@ -140,13 +140,6 @@ import {
 } from '@origintrail-official/dkg-mcp/manifest/install';
 import { DkgClient } from '@origintrail-official/dkg-mcp/client';
 
-import {
-  loadApps,
-  handleAppRequest,
-  startAppStaticServer,
-  type LoadedApp,
-} from "../../app-loader.js";
-
 // Daemon sub-module imports — every public symbol from sibling
 // modules is pulled in here because the legacy monolithic file used
 // them all without explicit imports. Unused ones are tolerated by
@@ -576,6 +569,11 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
     }
     if (!validateRequiredContextGraphId(contextGraphId, res)) return;
     if (!validateOptionalSubGraphName(subGraphName, res)) return;
+    if (sessionUri !== undefined) {
+      if (typeof sessionUri !== 'string' || !isSafeIri(sessionUri)) {
+        return jsonResponse(res, 400, { error: 'Invalid "sessionUri": must be a safe IRI' });
+      }
+    }
 
     const targetLayer = layer === 'wm' ? 'wm' : 'swm';
     const agentDid = `did:dkg:agent:${agent.peerId}`;

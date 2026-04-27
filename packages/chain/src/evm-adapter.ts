@@ -1031,12 +1031,12 @@ export class EVMChainAdapter implements ChainAdapter {
     const hostingNodes = params.participantIdentityIds.map((id) => id);
     const tx = await this.contracts.contextGraphs.createContextGraph(
       hostingNodes,
-      [],
+      params.participantAgents ?? [],
       params.requiredSignatures,
       params.metadataBatchId ?? 0n,
       params.publishPolicy ?? 1,
       params.publishAuthority ?? ethers.ZeroAddress,
-      0n,
+      params.publishAuthorityAccountId ?? 0n,
     );
     const receipt = await tx.wait();
 

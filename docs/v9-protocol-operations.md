@@ -958,7 +958,7 @@ graph TB
 
 > **REVIEW: App topic is untyped.**
 > The `app` topic carries JSON messages with an `app` field for routing (e.g.
-> `"origin-trail-game"`). All apps on the same paranet share a single topic.
+> `"example-app"`). All apps on the same paranet share a single topic.
 > **Risk:** A malicious app could flood the topic, affecting all apps. Consider
 > per-app subtopics: `dkg/paranet/{id}/app/{appId}`.
 
@@ -969,8 +969,8 @@ graph TB
 ```mermaid
 graph TB
     subgraph "Triple Store (Oxigraph)"
-        subgraph "Paranet: origin-trail-game"
-            DATA["Data Graph<br/>did:dkg:paranet:origin-trail-game<br/>Published triples + player profiles"]
+        subgraph "Paranet: example-paranet"
+            DATA["Data Graph<br/>did:dkg:paranet:example-paranet<br/>Published triples"]
             META["Meta Graph<br/>.../_meta<br/>KC/KA metadata, merkle roots, status"]
             PRIV["Private Graph<br/>.../_private<br/>Publisher-only triples"]
             WS["Workspace Graph<br/>.../_workspace<br/>Swarms, memberships, votes"]
@@ -988,7 +988,7 @@ graph TB
 
 | Pattern | Example | Content |
 |---------|---------|---------|
-| `did:dkg:paranet:{id}` | `did:dkg:paranet:origin-trail-game` | Published data |
+| `did:dkg:paranet:{id}` | `did:dkg:paranet:example-paranet` | Published data |
 | `did:dkg:paranet:{id}/_meta` | `.../_meta` | KC/KA metadata |
 | `did:dkg:paranet:{id}/_private` | `.../_private` | Private triples |
 | `did:dkg:paranet:{id}/_workspace` | `.../_workspace` | Workspace data |

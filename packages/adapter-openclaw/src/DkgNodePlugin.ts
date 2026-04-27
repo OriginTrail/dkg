@@ -1538,7 +1538,7 @@ export class DkgNodePlugin {
             },
             reveal_on_chain: {
               type: 'boolean',
-              description: 'Optional registration flag used only when `register_if_needed` is true. Controls whether CG metadata is revealed on-chain.',
+              description: 'Deprecated compatibility no-op. V10 context graph registration ignores metadata reveal.',
             },
             access_policy: {
               type: 'number',
@@ -2147,7 +2147,6 @@ export class DkgNodePlugin {
       if (registerIfNeeded) {
         try {
           registration = await this.client.registerContextGraph(contextGraphId, {
-            revealOnChain: args.reveal_on_chain as boolean | undefined,
             accessPolicy: args.access_policy as number | undefined,
           });
         } catch (err: any) {

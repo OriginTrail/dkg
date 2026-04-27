@@ -21,7 +21,6 @@ export default defineConfig({
       'packages/adapter-elizaos',
       'packages/adapter-hermes',
       'packages/adapter-autoresearch',
-      'packages/origin-trail-game',
     ],
   },
 });

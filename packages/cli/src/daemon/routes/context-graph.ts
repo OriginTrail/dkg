@@ -140,13 +140,6 @@ import {
 } from '@origintrail-official/dkg-mcp/manifest/install';
 import { DkgClient } from '@origintrail-official/dkg-mcp/client';
 
-import {
-  loadApps,
-  handleAppRequest,
-  startAppStaticServer,
-  type LoadedApp,
-} from "../../app-loader.js";
-
 // Daemon sub-module imports — every public symbol from sibling
 // modules is pulled in here because the legacy monolithic file used
 // them all without explicit imports. Unused ones are tolerated by
@@ -446,7 +439,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       }
     }
     // Body has `id` + `name` → context-graph-style context graph definition create (handled below)
-    const { id, name, description, allowedAgents, allowedPeers, publishPolicy, accessPolicy, register } = parsed;
+    const { id, name, description, allowedAgents, allowedPeers, participantAgents, publishPolicy, accessPolicy, register } = parsed;
     if (!id || !name)
       return jsonResponse(res, 400, { error: 'Missing "id" or "name"' });
     if (!isValidContextGraphId(id))
@@ -458,6 +451,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
         description,
         allowedAgents: Array.isArray(allowedAgents) ? allowedAgents : undefined,
         allowedPeers: Array.isArray(allowedPeers) ? allowedPeers : undefined,
+        participantAgents: Array.isArray(participantAgents) ? participantAgents : undefined,
         accessPolicy: typeof accessPolicy === 'number' ? accessPolicy : undefined,
         callerAgentAddress: requestAgentAddress,
         ...(parsed.private === true ? { private: true } : {}),
@@ -508,18 +502,15 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     const body = await readBody(req, SMALL_BODY_BYTES);
     const parsed = safeParseJson(body, res);
     if (!parsed) return;
-    const { id, revealOnChain, accessPolicy } = parsed;
+    const { id, accessPolicy } = parsed;
     if (!id) return jsonResponse(res, 400, { error: 'Missing "id"' });
     if (typeof id !== 'string') return jsonResponse(res, 400, { error: '"id" must be a string' });
     if (!isValidContextGraphId(id)) return jsonResponse(res, 400, { error: 'Invalid context graph id' });
-    if (revealOnChain !== undefined && typeof revealOnChain !== 'boolean') {
-      return jsonResponse(res, 400, { error: '"revealOnChain" must be a boolean' });
-    }
     if (accessPolicy !== undefined && (accessPolicy !== 0 && accessPolicy !== 1)) {
       return jsonResponse(res, 400, { error: '"accessPolicy" must be 0 (open) or 1 (private)' });
     }
     try {
-      const result = await agent.registerContextGraph(id, { revealOnChain, accessPolicy, callerAgentAddress: requestAgentAddress });
+      const result = await agent.registerContextGraph(id, { accessPolicy, callerAgentAddress: requestAgentAddress });
       return jsonResponse(res, 200, {
         registered: id,
         onChainId: result.onChainId,
@@ -538,6 +529,12 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
         return jsonResponse(res, 503, { error: msg, hint: 'Creator not yet synced. Retry after sync completes.' });
       }
       if (msg.includes('Only the context graph creator')) {
+        return jsonResponse(res, 403, { error: msg });
+      }
+      if (msg.includes('Only the context graph curator')) {
+        return jsonResponse(res, 403, { error: msg });
+      }
+      if (msg.includes('address-scoped curator')) {
         return jsonResponse(res, 403, { error: msg });
       }
       return jsonResponse(res, 500, { error: msg });

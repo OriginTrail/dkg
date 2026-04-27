@@ -25,8 +25,8 @@ describe('context graph topic helpers (V10)', () => {
   });
 
   it('contextGraphAppTopic returns V10 app topic', () => {
-    expect(contextGraphAppTopic('origin-trail-game')).toBe('dkg/context-graph/origin-trail-game/app');
     expect(contextGraphAppTopic('testing')).toBe('dkg/context-graph/testing/app');
+    expect(contextGraphAppTopic('agents')).toBe('dkg/context-graph/agents/app');
   });
 
   it('contextGraphDataUri returns V10 data URI', () => {

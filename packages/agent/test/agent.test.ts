@@ -15,10 +15,10 @@ import {
   parseCclPolicy,
 } from '../src/index.js';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import { getGenesisQuads, computeNetworkId, PROTOCOL_SYNC, SYSTEM_PARANETS, DKG_ONTOLOGY, paranetDataGraphUri, paranetWorkspaceGraphUri, sparqlString } from '@origintrail-official/dkg-core';
+import { getGenesisQuads, computeNetworkId, PROTOCOL_SYNC, SYSTEM_PARANETS, DKG_ONTOLOGY, paranetDataGraphUri, paranetWorkspaceGraphUri, contextGraphMetaUri, sparqlString } from '@origintrail-official/dkg-core';
 import { DKGQueryEngine } from '@origintrail-official/dkg-query';
 import { sha256 } from '@noble/hashes/sha2.js';
-import { EVMChainAdapter } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, MockChainAdapter, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult } from '@origintrail-official/dkg-chain';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import { ethers } from 'ethers';
@@ -31,6 +31,19 @@ import { fileURLToPath } from 'node:url';
 const require = createRequire(import.meta.url);
 const { Evaluator: ReferenceEvaluator, loadYaml } = require(fileURLToPath(new URL('../../../ccl_v0_1/evaluator/reference_evaluator.js', import.meta.url)));
 const CCL_FACT_NS = 'https://example.org/ccl-fact#';
+
+class CapturingContextGraphChainAdapter extends MockChainAdapter {
+  createOnChainContextGraphCalls: CreateOnChainContextGraphParams[] = [];
+
+  async createOnChainContextGraph(params: CreateOnChainContextGraphParams): Promise<CreateOnChainContextGraphResult> {
+    this.createOnChainContextGraphCalls.push({
+      ...params,
+      participantIdentityIds: [...params.participantIdentityIds],
+      participantAgents: params.participantAgents ? [...params.participantAgents] : undefined,
+    });
+    return super.createOnChainContextGraph(params);
+  }
+}
 
 let _fileSnapshot: string;
 beforeAll(async () => {
@@ -1262,6 +1275,153 @@ decisions: []
       .resolves.toBeUndefined();
 
     await node.stop().catch(() => {});
+  });
+
+  it('maps local access policy to EVM publish policy and forwards participant agents on registration', async () => {
+    const chain = new CapturingContextGraphChainAdapter();
+    const agent = await DKGAgent.create({
+      name: 'RegistrationPolicyBot',
+      store: new OxigraphStore(),
+      chainAdapter: chain,
+      nodeRole: 'core',
+    });
+    await agent.start();
+
+    const ownerAgent = ethers.getAddress(chain.signerAddress);
+    const allowedAgent = new ethers.Wallet(HARDHAT_KEYS.REC1_OP).address;
+    const nonDefaultOwnerAgent = new ethers.Wallet(HARDHAT_KEYS.CORE_OP).address;
+
+    await expect(agent.createContextGraph({
+      id: 'register-zero-participant-agent',
+      name: 'Zero Participant Agent',
+      accessPolicy: 1,
+      participantAgents: [ethers.ZeroAddress],
+      callerAgentAddress: ownerAgent,
+    })).rejects.toThrow(/zero address/);
+    await expect(agent.createContextGraph({
+      id: 'register-duplicate-participant-agent',
+      name: 'Duplicate Participant Agent',
+      accessPolicy: 1,
+      participantAgents: [allowedAgent, allowedAgent.toLowerCase()],
+      callerAgentAddress: ownerAgent,
+    })).rejects.toThrow(/Duplicate Ethereum address/);
+    await expect(agent.createContextGraph({
+      id: 'register-open-participant-agent',
+      name: 'Open Participant Agent',
+      participantAgents: [allowedAgent],
+      callerAgentAddress: ownerAgent,
+    })).rejects.toThrow(/Set accessPolicy: 1/);
+    await expect(agent.createContextGraph({
+      id: 'register-too-many-participant-agents',
+      name: 'Too Many Participant Agents',
+      accessPolicy: 1,
+      participantAgents: Array.from({ length: 257 }, (_, i) => `0x${(i + 1).toString(16).padStart(40, '0')}`),
+      callerAgentAddress: ownerAgent,
+    })).rejects.toThrow(/participantAgents cannot exceed/);
+    await agent.createContextGraph({
+      id: 'register-non-default-curated-policy',
+      name: 'Non-default Curated Policy',
+      accessPolicy: 1,
+      callerAgentAddress: nonDefaultOwnerAgent,
+    });
+    await expect(agent.registerContextGraph('register-non-default-curated-policy', { callerAgentAddress: nonDefaultOwnerAgent }))
+      .rejects.toThrow(/Per-agent chain signers are not supported/);
+
+    await agent.createContextGraph({ id: 'register-open-policy', name: 'Open Policy', callerAgentAddress: ownerAgent });
+    await agent.registerContextGraph('register-open-policy', { callerAgentAddress: ownerAgent });
+
+    await agent.createContextGraph({
+      id: 'register-curated-policy',
+      name: 'Curated Policy',
+      accessPolicy: 1,
+      participantAgents: [allowedAgent],
+      callerAgentAddress: ownerAgent,
+    });
+    await agent.registerContextGraph('register-curated-policy', { callerAgentAddress: ownerAgent });
+
+    await agent.createContextGraph({
+      id: 'register-agent-allowlist-policy',
+      name: 'Agent Allowlist Policy',
+      callerAgentAddress: ownerAgent,
+    });
+    await agent.inviteAgentToContextGraph('register-agent-allowlist-policy', allowedAgent, ownerAgent);
+    await agent.registerContextGraph('register-agent-allowlist-policy', { callerAgentAddress: ownerAgent });
+
+    expect(chain.createOnChainContextGraphCalls[0]).toMatchObject({
+      publishPolicy: 1,
+      participantAgents: [],
+    });
+    expect(chain.createOnChainContextGraphCalls[1]?.publishPolicy).toBe(0);
+    expect(chain.createOnChainContextGraphCalls[1]?.publishAuthority).toBe(ethers.getAddress(chain.signerAddress));
+    expect(chain.createOnChainContextGraphCalls[1]?.participantAgents).toContain(allowedAgent);
+    expect(chain.createOnChainContextGraphCalls[2]?.publishPolicy).toBe(0);
+    expect(chain.createOnChainContextGraphCalls[2]?.publishAuthority).toBe(ethers.getAddress(chain.signerAddress));
+    expect(chain.createOnChainContextGraphCalls[2]?.participantAgents).toEqual([]);
+
+    await agent.stop().catch(() => {});
+  });
+
+  it('requires address-scoped curator authority for on-chain registration', async () => {
+    const store = new OxigraphStore();
+    const chain = new CapturingContextGraphChainAdapter();
+    const agent = await DKGAgent.create({
+      name: 'RegistrationOwnerBot',
+      store,
+      chainAdapter: chain,
+      nodeRole: 'core',
+    });
+    await agent.start();
+
+    const nonDefaultAddr = new ethers.Wallet(HARDHAT_KEYS.REC1_OP).address;
+    const siblingAddr = new ethers.Wallet(HARDHAT_KEYS.REC2_OP).address;
+
+    await agent.createContextGraph({
+      id: 'register-owner-agent',
+      name: 'Owner Agent',
+      callerAgentAddress: nonDefaultAddr,
+    });
+
+    await expect(agent.registerContextGraph('register-owner-agent'))
+      .rejects.toThrow(/Only the context graph curator can register/);
+    await expect(agent.registerContextGraph('register-owner-agent', { callerAgentAddress: siblingAddr }))
+      .rejects.toThrow(/Only the context graph curator can register/);
+    await expect(agent.registerContextGraph('register-owner-agent', { callerAgentAddress: nonDefaultAddr }))
+      .resolves.toMatchObject({ onChainId: expect.any(String) });
+
+    await agent.createContextGraph({ id: 'register-legacy-peer-curator', name: 'Legacy Peer Curator' });
+    const legacyMetaGraph = contextGraphMetaUri('register-legacy-peer-curator');
+    const legacyUri = 'did:dkg:context-graph:register-legacy-peer-curator';
+    await store.deleteByPattern({
+      graph: legacyMetaGraph,
+      subject: legacyUri,
+      predicate: DKG_ONTOLOGY.DKG_CURATOR,
+    });
+    await store.insert([{
+      graph: legacyMetaGraph,
+      subject: legacyUri,
+      predicate: DKG_ONTOLOGY.DKG_CURATOR,
+      object: `did:dkg:agent:${agent.peerId}`,
+    }]);
+    await expect(agent.registerContextGraph('register-legacy-peer-curator', { callerAgentAddress: nonDefaultAddr }))
+      .resolves.toMatchObject({ onChainId: expect.any(String) });
+
+    await agent.createContextGraph({ id: 'register-foreign-peer-only', name: 'Foreign Peer Only' });
+    const contextGraphUri = 'did:dkg:context-graph:register-foreign-peer-only';
+    await store.deleteByPattern({ graph: 'did:dkg:context-graph:register-foreign-peer-only/_meta', subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_CURATOR });
+    await store.deleteByPattern({ graph: 'did:dkg:context-graph:ontology', subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_CREATOR });
+    await store.insert([
+      {
+        graph: 'did:dkg:context-graph:ontology',
+        subject: contextGraphUri,
+        predicate: DKG_ONTOLOGY.DKG_CREATOR,
+        object: 'did:dkg:agent:12D3KooWForeignCreatorPeer111111111111111111111111',
+      },
+    ]);
+
+    await expect(agent.registerContextGraph('register-foreign-peer-only'))
+      .rejects.toThrow(/has no address-scoped curator/);
+
+    await agent.stop().catch(() => {});
   });
 
   it('validates CCL policy content before publish', async () => {

@@ -1292,11 +1292,14 @@ contextGraphCmd
 contextGraphCmd
   .command('register <id>')
   .description('Register an existing context graph on-chain (unlocks Verified Memory, requires TRAC)')
-  .option('--reveal', 'Reveal cleartext name and description on-chain')
+  .option('--reveal', 'Deprecated: V10 ContextGraphs registration does not reveal cleartext metadata on-chain')
   .action(async (id: string, opts: ActionOpts) => {
     try {
       const client = await ApiClient.connect();
-      const result = await client.registerContextGraph(id, { revealOnChain: opts.reveal });
+      if (opts.reveal) {
+        console.warn('--reveal is deprecated and ignored for V10 ContextGraphs registration.');
+      }
+      const result = await client.registerContextGraph(id);
       console.log(`Context graph registered on-chain:`);
       console.log(`  ID:         ${id}`);
       console.log(`  On-chain:   ${result.onChainId}`);

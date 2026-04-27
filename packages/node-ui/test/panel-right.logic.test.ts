@@ -94,10 +94,10 @@ function renderConnectedAgentsTab(overrides: Record<string, unknown> = {}) {
     onLocalInputChange: noop,
     onSendLocalMessage: noop,
     localSending: false,
-    activeProjectId: 'origin-trail-game',
+    activeProjectId: 'testing',
     availableProjects: [
-      { id: 'origin-trail-game', name: 'Origin Trail Game' },
       { id: 'testing', name: 'Testing' },
+      { id: 'agents', name: 'Agents' },
     ],
     projectsLoading: false,
     onSelectProject: noop,
@@ -243,12 +243,12 @@ describe('ConnectedAgentsTab rendering', () => {
         role: 'assistant',
         content: 'Hello **world**\n`code`',
         ts: '10:00',
-        attachments: [{ fileName: 'spec.md', contextGraphId: 'origin-trail-game', assertionName: 'spec' }],
+        attachments: [{ fileName: 'spec.md', contextGraphId: 'testing', assertionName: 'spec' }],
       }],
       attachments: [{
         id: 'draft-1',
         file: new File(['hello'], 'spec.md', { type: 'text/markdown' }),
-        contextGraphId: 'origin-trail-game',
+        contextGraphId: 'testing',
         assertionName: 'spec',
         status: 'queued',
       }],
@@ -261,7 +261,7 @@ describe('ConnectedAgentsTab rendering', () => {
     expect(markup).toContain('Hello <strong>world</strong><br/><code>code</code>');
     expect(markup).toContain('spec.md');
     expect(markup).toContain('Queued - imports on send');
-    expect(markup).toContain('Queued files keep their stored target: Origin Trail Game.');
+    expect(markup).toContain('Queued files keep their stored target: Testing.');
     expect(markup).toContain('Project');
     expect(markup).toContain('Upload file');
     expect(markup).toContain('Message OpenClaw');

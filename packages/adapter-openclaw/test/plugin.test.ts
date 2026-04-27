@@ -617,7 +617,6 @@ describe('DkgNodePlugin', () => {
       expect(fetchMock.mock.calls[0]?.[0]).toBe('http://localhost:9200/api/context-graph/register');
       expect(JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string)).toEqual({
         id: 'ctx',
-        revealOnChain: true,
         accessPolicy: 1,
       });
       expect(fetchMock.mock.calls[1]?.[0]).toBe('http://localhost:9200/api/shared-memory/publish');
@@ -667,11 +666,18 @@ describe('DkgNodePlugin', () => {
       const bad = await byName.get('dkg_shared_memory_publish')!.execute('tc', {
         context_graph_id: 'ctx',
         register_if_needed: 'yes',
-        reveal_on_chain: 'true',
+        reveal_on_chain: 'yes',
         access_policy: 3,
       });
       expect(fetchMock).not.toHaveBeenCalled();
       expect(bad.content[0].text).toContain('register_if_needed');
+
+      const badReveal = await byName.get('dkg_shared_memory_publish')!.execute('tc', {
+        context_graph_id: 'ctx',
+        reveal_on_chain: 'yes',
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(badReveal.content[0].text).toContain('reveal_on_chain');
     });
 
     it('dkg_shared_memory_publish rejects non-array / empty / non-string root_entities locally', async () => {

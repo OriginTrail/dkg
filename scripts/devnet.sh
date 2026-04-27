@@ -352,7 +352,7 @@ create_node_config() {
   "nodeRole": "${node_role}",
   ${relay_value}
   ${store_block}
-  "contextGraphs": ["devnet-test", "origin-trail-game"],
+  "contextGraphs": ["devnet-test", "devnet-isolation"],
   ${devnet_auth_block}
   "chain": {
     "type": "evm",
@@ -731,7 +731,11 @@ cmd_start() {
   local register_endpoint="http://127.0.0.1:$API_PORT_BASE/api/context-graph/register"
   local register_auth_header="Authorization: Bearer $shared_token"
   local register_failures=0
-  for cg in devnet-test origin-trail-game; do
+  # Register two context graphs so the devnet preserves the cross-CG isolation
+  # smoke path (each CG has its own subgraph + on-chain id; nodes must keep them
+  # independent). A single graph would hide regressions that only surface when
+  # traffic fans out across multiple paranets.
+  for cg in devnet-test devnet-isolation; do
     local on_chain_id=""
     local attempt
     for attempt in 1 2 3; do
@@ -764,6 +768,30 @@ cmd_start() {
       log "ERROR: failed to register $cg after 3 attempts; devnet is half-configured."
       register_failures=$((register_failures + 1))
       continue
+    fi
+
+    # Devnet bootstrap CGs are public/open. The V10 contract uses
+    # publishPolicy 0 = curated, 1 = open; keep an on-chain smoke assertion
+    # here so product/API numeric drift is caught during local bring-up.
+    local policy_check
+    policy_check=$(node -e "
+      const { ethers } = require('ethers');
+      (async () => {
+        const fs = require('fs');
+        const d = JSON.parse(fs.readFileSync('$REPO_ROOT/packages/evm-module/deployments/localhost_contracts.json','utf8'));
+        const storageAddr = d.contracts.ContextGraphStorage?.evmAddress;
+        if (!storageAddr) throw new Error('ContextGraphStorage address missing');
+        const provider = new ethers.JsonRpcProvider('http://127.0.0.1:$HARDHAT_PORT');
+        const storage = new ethers.Contract(storageAddr, ['function getPublishPolicy(uint256) view returns (uint8,address)'], provider);
+        const [policy] = await storage.getPublishPolicy(BigInt('$on_chain_id'));
+        console.log(String(policy));
+      })().catch((e) => { console.error(e.message); process.exit(1); });
+    " 2>&1 || true)
+    if [ "$policy_check" = "1" ]; then
+      log "  on-chain publishPolicy for $cg is open (1)"
+    else
+      log "  ERROR: expected open publishPolicy=1 for $cg v10Id=$on_chain_id, got '$policy_check'"
+      register_failures=$((register_failures + 1))
     fi
 
     # The on-chain id propagates to other nodes via ONTOLOGY gossip

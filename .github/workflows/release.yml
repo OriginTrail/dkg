@@ -91,7 +91,7 @@ jobs:
       - name: Build
         run: pnpm build
 
-      - name: Build Vite UI bundles (node-ui + origin-trail-game)
+      - name: Build Vite UI bundles (node-ui)
         # `build` was split from full (tsc + vite) into tsc-only in CI for a
         # ~2 min wall-clock reduction (see ci.yml). Releases still need the
         # Vite-produced `dist-ui/` bundles shipped to npm, so rebuild them

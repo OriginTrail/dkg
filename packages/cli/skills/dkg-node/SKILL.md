@@ -302,7 +302,7 @@ Implications:
   - **Real chain adapter WITHOUT on-chain identity**: no auto-register on create; CG stays local until `/api/context-graph/register` or `register: true` promotes it.
   - **Simple CG** (default): pass `{ id, name }`. Creator alone publishes to VM. Add `accessPolicy: 1` + `allowedAgents` for a curated CG.
   - **Multi-sig CG**: pass `participantIdentityIds: [...]` + `requiredSignatures: M`. Use `register: true` so the participant set and threshold are anchored on-chain. `requiredSignatures` is optional when `private: true`.
-- `POST /api/context-graph/register` — register a previously-created local CG on-chain (two-phase creation). Body: `{ id, revealOnChain?, accessPolicy? }`. Use this to promote a free CG to an on-chain identity before publishing to Verified Memory.
+- `POST /api/context-graph/register` — register a previously-created local CG on-chain (two-phase creation). Body: `{ id, accessPolicy? }`. Use this to promote a free CG to an on-chain identity before publishing to Verified Memory. `revealOnChain` is deprecated and ignored on the V10 ContextGraphs path.
 - `POST /api/context-graph/rename` — rename a CG (human-readable name only; the ID is immutable). Body: `{ contextGraphId, name }`.
 - `POST /api/context-graph/subscribe` — subscribe to a context graph
 - `GET /api/context-graph/list` — list subscribed context graphs
