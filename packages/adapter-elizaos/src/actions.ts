@@ -439,12 +439,33 @@ function sessionRootCacheKey(
 // emitted", skipped the `schema:Conversation` root, and the room was
 // permanently missing its session-root triple.
 //
-// Split the cache surface in two:
-//   - `wouldEmitSessionRoot()` is a PURE peek (no mutation) used to
-//     decide whether to include the root quads in the persist batch;
-//   - `markSessionRootEmitted()` is called ONLY after the persist
-//     succeeds, so a failing write leaves the cache untouched and the
-//     next attempt re-emits the root.
+// PR #229 bot review (r31-11 — actions.ts:460). The earlier fix
+// split the cache into a peek (`wouldEmitSessionRoot`) + a
+// post-success mark (`markSessionRootEmitted`). That preserved
+// crash-safety BUT introduced a race window between the peek and
+// the mark: two concurrent persists for the same
+// `(runtime, sessionUri, contextGraphId, assertionName)` could
+// both peek `false` (cache miss), both emit `schema:Conversation`,
+// and the WM Rule-4 duplicate-root validator would reject the
+// second write. Real symptoms: any client racing two concurrent
+// chat-turn persists in the same room would intermittently see one
+// of the writes fail with "duplicate root".
+//
+// The fix: replace the peek-then-mark-after-success pattern with
+// reserve-before-await + rollback-on-failure.
+//   - `reserveSessionRoot()` is a SYNCHRONOUS atomic CAS — at most
+//     one concurrent caller wins the reservation per key, so only
+//     ONE persist includes the root quads.
+//   - On write failure the caller MUST call `rollbackSessionRoot()`
+//     so the next retry re-emits (preserves r3131820483 crash-
+//     safety).
+//   - On write success the reservation stays in place (semantics:
+//     emitted), so subsequent persists for the same key skip the
+//     root quads.
+//
+// JavaScript is single-threaded so the reservation is genuinely
+// atomic — no other event loop turn can interleave between the
+// `has()` check and the `add()` call inside `reserveSessionRoot`.
 function getSessionRootSeenSet(runtime: unknown): Set<string> {
   if (runtime !== null && typeof runtime === 'object') {
     let s = emittedSessionRootsByRuntime.get(runtime as object);
@@ -457,24 +478,52 @@ function getSessionRootSeenSet(runtime: unknown): Set<string> {
   return emittedSessionRootsAnon;
 }
 
-function wouldEmitSessionRoot(
+/**
+ * PR #229 bot review (r31-11 — actions.ts:460). Synchronous atomic
+ * check-and-set. Returns `true` ONLY for the caller that won the
+ * reservation; that caller MUST emit the `schema:Conversation`
+ * root quads AND, on a downstream write failure, MUST call
+ * `rollbackSessionRoot()` to release the reservation so a retry
+ * can re-emit.
+ *
+ * Concurrent callers (within the same JS event loop, before the
+ * winner's await suspension) see `false` and SKIP the root — so
+ * only ONE write carries the root quads, eliminating the
+ * peek-then-emit race that previously tripped WM Rule-4 duplicate-
+ * root validation under concurrent persist.
+ */
+function reserveSessionRoot(
   runtime: unknown,
   sessionUri: string,
   destContextGraphId: string,
   destAssertionName: string,
 ): boolean {
+  const set = getSessionRootSeenSet(runtime);
   const key = sessionRootCacheKey(destContextGraphId, destAssertionName, sessionUri);
-  return !getSessionRootSeenSet(runtime).has(key);
+  if (set.has(key)) return false;
+  set.add(key);
+  return true;
 }
 
-function markSessionRootEmitted(
+/**
+ * PR #229 bot review (r31-11 — actions.ts:460). Roll back a
+ * `reserveSessionRoot()` reservation. Call this from the failure
+ * path of any `agent.assertion.write()` (or earlier
+ * `ensureContextGraphLocal()`) that would have written the
+ * reserved root quads, so the NEXT retry can re-emit them.
+ *
+ * No-op if the key wasn't reserved by this caller (the Set's
+ * `delete` is idempotent), so it's safe to call defensively.
+ */
+function rollbackSessionRoot(
   runtime: unknown,
   sessionUri: string,
   destContextGraphId: string,
   destAssertionName: string,
 ): void {
+  const set = getSessionRootSeenSet(runtime);
   const key = sessionRootCacheKey(destContextGraphId, destAssertionName, sessionUri);
-  getSessionRootSeenSet(runtime).add(key);
+  set.delete(key);
 }
 
 /** Test-only: drop every recorded session-root emission. */
@@ -1270,11 +1319,15 @@ export async function persistChatTurnImpl(
           graph: '',
         });
       }
-      // PR #229 r3131820483: peek-only (no mutation). The cache is
-      // promoted to "emitted" AFTER assertion.write() succeeds; if
-      // the persist throws we leave the cache untouched so a retry
-      // re-emits the session root.
-      didIncludeSessionRoot = wouldEmitSessionRoot(
+      // PR #229 r3131820483 + r31-11: synchronous atomic
+      // reservation. Only the caller that wins the reservation
+      // includes the root quads — concurrent persists for the same
+      // (runtime, sessionUri, dest) skip the root, eliminating the
+      // peek-then-emit race that previously tripped WM Rule-4
+      // duplicate-root validation under concurrent load. On a write
+      // failure we MUST `rollbackSessionRoot()` so a retry re-emits
+      // (the rollback happens in the catch block below the await).
+      didIncludeSessionRoot = reserveSessionRoot(
         runtime,
         sessionUri,
         contextGraphId,
@@ -1329,11 +1382,11 @@ export async function persistChatTurnImpl(
       ?? (state as any)?.lastAssistantReply
       ?? '';
 
-    // PR #229 r3131820483: peek-only (no mutation). The cache is
-    // promoted to "emitted" AFTER assertion.write() succeeds; if
-    // the persist throws we leave the cache untouched so a retry
-    // re-emits the session root.
-    didIncludeSessionRoot = wouldEmitSessionRoot(
+    // PR #229 r3131820483 + r31-11: synchronous atomic reservation.
+    // See the rationale block above on the headless branch — same
+    // semantics here. On a write failure we MUST
+    // `rollbackSessionRoot()` so a retry re-emits.
+    didIncludeSessionRoot = reserveSessionRoot(
       runtime,
       sessionUri,
       contextGraphId,
@@ -1373,29 +1426,46 @@ export async function persistChatTurnImpl(
     );
   }
 
-  // A2: best-effort lazy CG ensure. If the CG already exists this is a
-  // cheap no-op; if the agent doesn't expose the method (unit tests) we
-  // skip and let assertionWrite surface a real error. We intentionally do
-  // NOT register on-chain here — that's a separate explicit operation.
-  if (typeof agent.ensureContextGraphLocal === 'function') {
-    await agent.ensureContextGraphLocal({
-      id: contextGraphId,
-      name: contextGraphId,
-      description: 'ElizaOS chat-turn persistence (canonical schema:Conversation / schema:Message shape)',
-      curated: true,
-    });
-  }
+  // PR #229 bot review (r31-11 — actions.ts:460). The session-root
+  // reservation was taken SYNCHRONOUSLY above before the first
+  // await. If anything between here and `agent.assertion.write()`
+  // throws (CG ensure, the assertion write itself), we MUST roll
+  // the reservation back so the next retry re-emits the
+  // `schema:Conversation` root quads. Otherwise the cache would
+  // be poisoned: the retry would observe the (now-stale)
+  // reservation, skip the root, and the room would permanently
+  // lack its `schema:Conversation` triple — exactly the
+  // r3131820483 regression the original split was designed to
+  // avoid. The try/catch makes the failure path symmetric with
+  // the success path's "reservation persists" semantics.
+  try {
+    // A2: best-effort lazy CG ensure. If the CG already exists this is a
+    // cheap no-op; if the agent doesn't expose the method (unit tests) we
+    // skip and let assertionWrite surface a real error. We intentionally do
+    // NOT register on-chain here — that's a separate explicit operation.
+    if (typeof agent.ensureContextGraphLocal === 'function') {
+      await agent.ensureContextGraphLocal({
+        id: contextGraphId,
+        name: contextGraphId,
+        description: 'ElizaOS chat-turn persistence (canonical schema:Conversation / schema:Message shape)',
+        curated: true,
+      });
+    }
 
-  // A1/A3: write into the per-agent WM assertion graph, not the
-  // broadcast data graph.
-  await agent.assertion.write(contextGraphId, assertionName, quads);
-  // PR #229 r3131820483: cache promotion is the LAST step. Until
-  // assertion.write() resolves we MUST keep the session-root cache
-  // untouched, otherwise a failed persist would poison the cache
-  // and the retry would skip the `schema:Conversation` root.
-  if (didIncludeSessionRoot) {
-    markSessionRootEmitted(runtime, sessionUri, contextGraphId, assertionName);
+    // A1/A3: write into the per-agent WM assertion graph, not the
+    // broadcast data graph.
+    await agent.assertion.write(contextGraphId, assertionName, quads);
+  } catch (err) {
+    if (didIncludeSessionRoot) {
+      rollbackSessionRoot(runtime, sessionUri, contextGraphId, assertionName);
+    }
+    throw err;
   }
+  // PR #229 r31-11: with `reserveSessionRoot()` taking the
+  // reservation synchronously above, the reservation IS the "this
+  // root has been emitted" signal — so no post-success mark is
+  // needed. The catch block above is the only place that releases
+  // a reservation (write failure → retry should re-emit).
   // r21-1: callers that take the headless assistant-reply path get
   // back the dedicated `headlessTurnUri` so any follow-up
   // attribution (e.g. `recordPersistedUserTurn`) keys against the

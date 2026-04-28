@@ -1211,6 +1211,58 @@ export class ChatMemoryManager {
     };
     // Try the bare literal first (canonical user-first turn).
     let resolution = await tryResolveTurn(turnId);
+    // PR #229 bot review (r31-11 — chat-memory.ts:1213). The
+    // canonical-first lookup above conflicts with the new r31-6
+    // `dkg:supersedesCanonicalAssistant` arbitration that
+    // `getSession()` performs. When a PROVISIONAL canonical
+    // assistant exists AND a SUPERSEDING headless variant for the
+    // same turn key carries `dkg:supersedesCanonicalAssistant
+    // "true"` on its assistant message, `getSession()` (post r31-6)
+    // returns the FRESH headless text, but the delta path here
+    // would still bind to the STALE canonical turn URI and ship
+    // its assistant-message triples to incremental consumers —
+    // the two reader surfaces would observably disagree.
+    //
+    // Fix: when the bare canonical lookup hit, check whether a
+    // superseding-headless twin exists for the same turn key; if so,
+    // re-route the CONSTRUCT projection (`turnUri`, `userMsgUri`,
+    // `assistantMsgUri`) to the headless variant. The WATERMARK
+    // logic (`currentTurnId`, `currentTurnTs`,
+    // `resolvedTurnIdLiteral` used in previous-turn / turn-index
+    // FILTERs) deliberately continues to use the CANONICAL turn's
+    // literal so the previous-turn search excludes the headless
+    // twin (their timestamps and lexicographic IDs would otherwise
+    // alias and the canonical version of the same turn key would
+    // surface as the "previous" turn, breaking the watermark
+    // contract). Only the URI surface used for the delta CONSTRUCT
+    // changes — the watermark stays canonical.
+    //
+    // Gated on `canonicalHit` (NOT on `resolution`): in the headless-
+    // fallback branch below the resolution IS the only headless
+    // variant and there's nothing to supersede, so the check is a
+    // no-op and would just consume a SPARQL round trip unnecessarily.
+    const canonicalHit = !!resolution;
+    let supersedingTwinResolution: { uri: string; ts: string; literal: string } | null = null;
+    if (canonicalHit && !turnId.startsWith('headless:')) {
+      const headlessLiteral = `headless:${turnId}`;
+      const headlessLiteralSparql = JSON.stringify(headlessLiteral);
+      const supersedeCheck = await this.tools.query(
+        `SELECT ?marker WHERE {
+          ?turn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
+          ?turn <${SCHEMA}isPartOf> <${sessionUri}> .
+          ?turn <${DKG_ONT}turnId> ${headlessLiteralSparql} .
+          ?turn <${DKG_ONT}hasAssistantMessage> ?msg .
+          ?msg <${DKG_ONT}supersedesCanonicalAssistant> ?marker .
+        } LIMIT 1`,
+        this.wmReadOpts(),
+      );
+      const markerRow = (supersedeCheck.bindings ?? [])[0];
+      const isSupersedingHeadless =
+        stripRdfLiteral(markerRow?.marker ?? '').trim() === 'true';
+      if (isSupersedingHeadless) {
+        supersedingTwinResolution = await tryResolveTurn(headlessLiteral);
+      }
+    }
     // Fallback: try the `headless:` prefixed literal so callers
     // that pass the original `userMessageId` (without knowing
     // whether the canonical user-turn ever made it to disk) still
@@ -1349,11 +1401,24 @@ export class ChatMemoryManager {
       };
     }
 
+    // PR #229 bot review (r31-11 — chat-memory.ts:1213). When the
+    // superseding-headless twin was discovered above, route the
+    // CONSTRUCT projection to the HEADLESS turn URI so the
+    // assistant-message subject + `dkg:hasAssistantMessage` link
+    // and the assistant's text/timestamp/author triples come from
+    // the FRESH variant — the same arbitration `getSession()`
+    // applies on its full-replay path. The watermark queries
+    // above (latestTurnId / previousTurnId / turnIndex)
+    // deliberately continued to use the CANONICAL `turnUri` so
+    // the headless twin doesn't alias as the "previous" turn for
+    // its own canonical sibling (their timestamps and lexicographic
+    // IDs would otherwise collide).
+    const effectiveTurnUri = supersedingTwinResolution?.uri || turnUri;
     const turnMessagesResult = await this.tools.query(
       `SELECT ?user ?assistant WHERE {
-        <${turnUri}> <${SCHEMA}isPartOf> <${sessionUri}> .
-        <${turnUri}> <${DKG_ONT}hasUserMessage> ?user .
-        <${turnUri}> <${DKG_ONT}hasAssistantMessage> ?assistant .
+        <${effectiveTurnUri}> <${SCHEMA}isPartOf> <${sessionUri}> .
+        <${effectiveTurnUri}> <${DKG_ONT}hasUserMessage> ?user .
+        <${effectiveTurnUri}> <${DKG_ONT}hasAssistantMessage> ?assistant .
       } LIMIT 1`,
       this.wmReadOpts(),
     );
@@ -1382,7 +1447,7 @@ export class ChatMemoryManager {
       `SELECT DISTINCT ?s WHERE {
         VALUES ?msg { <${userMsgUri}> <${assistantMsgUri}> }
         { BIND(<${sessionUri}> AS ?s) }
-        UNION { BIND(<${turnUri}> AS ?s) }
+        UNION { BIND(<${effectiveTurnUri}> AS ?s) }
         UNION { BIND(?msg AS ?s) }
         UNION { <${assistantMsgUri}> <${DKG_ONT}usedTool> ?s }
         UNION { ?s <${DKG_ONT}mentionedIn> ?msg }
@@ -1394,7 +1459,7 @@ export class ChatMemoryManager {
       } LIMIT 5000`,
       this.wmReadOpts(),
     );
-    const subjectSet = new Set<string>([sessionUri, turnUri, userMsgUri, assistantMsgUri]);
+    const subjectSet = new Set<string>([sessionUri, effectiveTurnUri, userMsgUri, assistantMsgUri]);
     for (const b of relatedSubjectsResult.bindings ?? []) {
       const iri = String(b.s ?? '').replace(/[<>]/g, '');
       if (!iri || !isSafeIri(iri)) continue;

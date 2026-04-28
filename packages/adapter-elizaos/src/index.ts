@@ -524,7 +524,39 @@ async function onAssistantReplyHandler(
         || '';
       if (incomingReplyText === cachedAssistantText) {
         opts.assistantAlreadyPersisted = true;
-      } else if (incomingReplyText.length > 0) {
+      } else if (incomingReplyText.length === 0) {
+        // PR #229 bot review (r31-11 — index.ts:527).
+        //
+        // The empty-incoming follow-up case used to be a fall-
+        // through: neither the equality branch nor the supersede
+        // branch ran, so the wrapper handed the empty payload to
+        // `_dkgServiceLoose.persistChatTurn(...)` with
+        // `userTurnPersisted: true` still set. The impl then took
+        // its append-only branch (because the user-turn write was
+        // marked done) and stamped a SECOND canonical assistant
+        // message subject with `schema:text ""` onto the same
+        // `msg:agent:${turnKey}` URI — exactly the multi-valued
+        // assistant-text shape the supersede branch above was
+        // engineered to avoid. Reader code (`getSession()`,
+        // `getSessionGraphDelta()`) reads `schema:text` with no
+        // `ORDER BY`, so it would non-deterministically surface
+        // either the cached canonical text OR the empty string.
+        //
+        // The contract: an empty follow-up reply with a cached
+        // non-empty assistant text is at best a noisy retry (the
+        // hook re-fired with no new content) and at worst a
+        // streaming-cancellation echo. In either case the EXISTING
+        // canonical text is strictly better than a blank
+        // overwrite. Treat this exactly like the equality case —
+        // mark `assistantAlreadyPersisted` so the impl returns a
+        // synthetic no-op (`tripleCount: 0`) and the canonical
+        // subject is left untouched.
+        //
+        // We do NOT route to a superseding-headless URI here
+        // (that's reserved for a meaningful, NEW reply text) —
+        // empty supersedes nothing.
+        opts.assistantAlreadyPersisted = true;
+      } else {
         // PR #229 bot review (r31-6 — adapter-elizaos/src/index.ts:521).
         //
         // The cached text disagrees with the incoming reply. Pre-fix the

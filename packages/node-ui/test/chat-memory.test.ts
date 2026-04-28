@@ -1190,6 +1190,8 @@ describe('ChatMemoryManager', () => {
           },
         ],
       },
+      // r31-11 supersede-twin probe: no superseding-headless variant exists for `t2`.
+      { bindings: [] },
       {
         bindings: [
           {
@@ -1253,6 +1255,8 @@ describe('ChatMemoryManager', () => {
       {
         bindings: [{ turn: 'urn:dkg:chat:turn:t2', ts: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' }],
       },
+      // r31-11 supersede-twin probe: no superseding-headless variant.
+      { bindings: [] },
       {
         bindings: [{ latestTurnId: '"t2"', latestTs: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' }],
       },
@@ -1280,6 +1284,8 @@ describe('ChatMemoryManager', () => {
       {
         bindings: [{ turn: 'urn:dkg:chat:turn:t2', ts: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' }],
       },
+      // r31-11 supersede-twin probe: no superseding-headless variant.
+      { bindings: [] },
       {
         bindings: [{ latestTurnId: '"t2"', latestTs: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' }],
       },
@@ -1295,7 +1301,9 @@ describe('ChatMemoryManager', () => {
     expect(delta.mode).toBe('full_refresh_required');
     expect(delta.reason).toBe('missing_watermark');
     expect(delta.triples).toHaveLength(0);
-    expect(mockQuery.calls).toHaveLength(6);
+    // r31-11: bumps from 6 → 7 calls (added supersede-twin probe between
+    // bare-literal lookup and latest-turn watermark probe).
+    expect(mockQuery.calls).toHaveLength(7);
   });
 
   it('getSessionGraphDelta requires full refresh when watermark mismatches', async () => {
@@ -1307,6 +1315,8 @@ describe('ChatMemoryManager', () => {
       {
         bindings: [{ turn: 'urn:dkg:chat:turn:t2', ts: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' }],
       },
+      // r31-11 supersede-twin probe: no superseding-headless variant.
+      { bindings: [] },
       {
         bindings: [{ latestTurnId: '"t2"', latestTs: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' }],
       },
@@ -1322,7 +1332,8 @@ describe('ChatMemoryManager', () => {
     expect(delta.mode).toBe('full_refresh_required');
     expect(delta.reason).toBe('watermark_mismatch');
     expect(delta.triples).toHaveLength(0);
-    expect(mockQuery.calls).toHaveLength(6);
+    // r31-11: bumps from 6 → 7 calls (added supersede-twin probe).
+    expect(mockQuery.calls).toHaveLength(7);
   });
 
   // PR #229 r30-8 review (chat-memory.ts:1011) — assistant-only "headless"
@@ -1539,6 +1550,8 @@ describe('ChatMemoryManager', () => {
           },
         ],
       },
+      // r31-11: supersede-twin probe (no superseding-headless variant exists).
+      { bindings: [] }, // 3.5
       {
         bindings: [
           {
@@ -1558,13 +1571,14 @@ describe('ChatMemoryManager', () => {
     expect(delta.mode).toBe('delta');
 
     const allSparql = mockQuery.calls.map((c) => String((c as unknown[])[0] ?? ''));
-    // Previous-turn query MUST contain `"t2"` (the resolved literal
-    // for the canonical hit) and MUST NOT contain `"headless:t2"`.
-    const previousTurnSparql = allSparql[4] ?? '';
+    // r31-11: previous-turn shifted from index [4] → [5] because the
+    // supersede-twin probe is now at index [3] (right after the bare-
+    // literal lookup at index [2]).
+    const previousTurnSparql = allSparql[5] ?? '';
     expect(previousTurnSparql).toContain('"t2"');
     expect(previousTurnSparql).not.toContain('"headless:t2"');
-    // Turn-index query: same constraint.
-    const turnIndexSparql = allSparql[5] ?? '';
+    // Turn-index query: same constraint, shifted [5] → [6].
+    const turnIndexSparql = allSparql[6] ?? '';
     expect(turnIndexSparql).toContain('"t2"');
     expect(turnIndexSparql).not.toContain('"headless:t2"');
   });
@@ -1591,6 +1605,9 @@ describe('ChatMemoryManager', () => {
           },
         ],
       },
+      // r31-11: supersede-twin probe — no superseding-headless variant
+      // exists, so the canonical (which won the bare lookup above) is kept.
+      { bindings: [] },
       {
         bindings: [
           {
@@ -1614,15 +1631,17 @@ describe('ChatMemoryManager', () => {
     const constructQuery = String(constructQueryArgs[0] ?? '');
     expect(constructQuery).toContain('<urn:dkg:chat:turn:t2>');
     expect(constructQuery).not.toContain('urn:dkg:chat:headless-turn:t2');
-    // Crucially: NO call carries the `"headless:t2"` literal because
-    // the bare-literal lookup succeeded first. Pin the count too —
-    // happy path is 8 queries (no fallback issued).
+    // r31-11: the supersede-twin probe DOES carry the `"headless:t2"`
+    // literal (it's looking for the superseding twin), but no OTHER
+    // call should — the bare-literal lookup hit and the headless
+    // FALLBACK was not issued because resolution was already set.
     const allSparql = mockQuery.calls.map((c) => String((c as unknown[])[0] ?? ''));
-    expect(allSparql.some((q) => q.includes('"headless:t2"'))).toBe(false);
-    // 9 queries on the happy path: ensureInitialized probe + countResult +
-    // bare-literal lookup (HIT, no fallback) + latest-turn + previous-turn +
-    // turnIndex + turnMessages + relatedSubjects + CONSTRUCT.
-    expect(mockQuery.calls).toHaveLength(9);
+    // The supersede-twin probe is at index [3] — exactly one call
+    // carries the headless literal (the probe itself).
+    const headlessLiteralCallCount = allSparql.filter((q) => q.includes('"headless:t2"')).length;
+    expect(headlessLiteralCallCount).toBe(1);
+    // r31-11: bumps from 9 → 10 calls (added supersede-twin probe).
+    expect(mockQuery.calls).toHaveLength(10);
   });
 
   // r31-3 follow-up: when the caller already passes a `headless:`-prefixed
@@ -1703,6 +1722,210 @@ describe('ChatMemoryManager', () => {
     // We made it through both lookups + the latest-turn watermark
     // probe (5 queries) before bailing.
     expect(mockQuery.calls).toHaveLength(5);
+  });
+
+  // -------------------------------------------------------------------------
+  // PR #229 bot review (r31-11 — chat-memory.ts:1213).
+  //
+  // Bug IoNL: pre-fix the `getSessionGraphDelta()` bare-literal canonical
+  // lookup ALWAYS won when a canonical user-first turn existed for the
+  // requested id, even when r31-6 had ALSO written a SUPERSEDING headless
+  // variant marked `dkg:supersedesCanonicalAssistant "true"`. This put
+  // `getSession()` (which honours the supersede marker via the r31-6
+  // dedupe pass) and `getSessionGraphDelta()` (which did not) on
+  // DIFFERENT branches: full-refresh callers saw the FRESH headless
+  // text, delta callers saw the STALE canonical text.
+  //
+  // Fix: after a canonical hit, probe the WM for a headless-twin
+  // assistant message carrying `dkg:supersedesCanonicalAssistant "true"`.
+  // If found, switch the delta's `effectiveTurnUri` to the headless
+  // variant so the `CONSTRUCT` projection pulls the FRESH triples; the
+  // watermark logic still uses the canonical id (so subsequent deltas
+  // chain correctly off the same id space).
+  // -------------------------------------------------------------------------
+  it('r31-11 (IoNL): canonical hit + superseding headless twin → delta projects headless URI (matches getSession() arbitration)', async () => {
+    mockQuery.returns.push(
+      { bindings: [] },
+      // session-message count probe.
+      { bindings: [{ c: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' }] },
+      // Bare-literal lookup for `t2` HITS the CANONICAL turn URI.
+      {
+        bindings: [
+          {
+            turn: 'urn:dkg:chat:turn:t2',
+            ts: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>',
+          },
+        ],
+      },
+      // r31-11 supersede-twin probe: a headless variant of the SAME turn
+      // key exists AND its assistant message carries the supersede marker.
+      // The fix MUST react to this and re-resolve to the headless URI.
+      { bindings: [{ marker: '"true"' }] },
+      // r31-11: when the supersede marker is found, the impl re-resolves
+      // by issuing a FRESH bare-literal lookup with `"headless:t2"` —
+      // returns the HEADLESS turn URI.
+      {
+        bindings: [
+          {
+            turn: 'urn:dkg:chat:headless-turn:t2',
+            ts: '"2026-03-08T10:00:11Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>',
+          },
+        ],
+      },
+      // Latest-turn watermark probe — uses the CANONICAL id.
+      {
+        bindings: [
+          {
+            latestTurnId: '"t2"',
+            latestTs: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>',
+          },
+        ],
+      },
+      // Previous-turn lookup — we asked for baseTurnId t1.
+      { bindings: [{ previousTurnId: '"t1"' }] },
+      // Turn-index sanity probe.
+      { bindings: [{ c: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' }] },
+      // Turn-messages projection — pulls msg URIs OFF the HEADLESS turn,
+      // not the canonical one. The fact that this binding returns is
+      // what proves the impl bound the headless URI here.
+      {
+        bindings: [
+          { user: 'urn:dkg:chat:msg:user-h', assistant: 'urn:dkg:chat:msg:agent-h' },
+        ],
+      },
+      // Related subjects.
+      { bindings: [{ s: 'urn:dkg:chat:msg:user-h' }, { s: 'urn:dkg:chat:msg:agent-h' }] },
+      // CONSTRUCT — returns triples scoped to the HEADLESS turn URI.
+      {
+        quads: [
+          {
+            subject: 'urn:dkg:chat:headless-turn:t2',
+            predicate: 'http://dkg.io/ontology/turnId',
+            object: '"headless:t2"',
+          },
+          {
+            subject: 'urn:dkg:chat:msg:agent-h',
+            predicate: 'http://schema.org/text',
+            object: '"FRESH headless reply that supersedes stale canonical"',
+          },
+        ],
+      },
+    );
+
+    const delta = await manager.getSessionGraphDelta('s-graph', 't2', { baseTurnId: 't1' });
+    expect(delta.mode).toBe('delta');
+    // Watermark logic stays on the canonical id — delta callers chain
+    // off the same id space they passed in.
+    expect(delta.turnId).toBe('t2');
+    // The CONSTRUCT projection MUST have used the HEADLESS turn URI
+    // (the fix's whole purpose) — pin it via the SPARQL inspection.
+    const allSparql = mockQuery.calls.map((c) => String((c as unknown[])[0] ?? ''));
+    const constructQuery = allSparql[allSparql.length - 1];
+    expect(constructQuery).toContain('<urn:dkg:chat:headless-turn:t2>');
+    expect(constructQuery).not.toContain('<urn:dkg:chat:turn:t2>');
+    // The CONSTRUCT result includes the FRESH headless reply text.
+    const text = delta.triples.find(
+      (t) => t.subject === 'urn:dkg:chat:msg:agent-h'
+        && t.predicate === 'http://schema.org/text',
+    );
+    expect(text?.object).toBe('FRESH headless reply that supersedes stale canonical');
+  });
+
+  it('r31-11 (IoNL): canonical hit + headless twin WITHOUT supersede marker → delta KEEPS the canonical URI (no over-fire)', async () => {
+    mockQuery.returns.push(
+      { bindings: [] },
+      { bindings: [{ c: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' }] },
+      // Canonical lookup HITS.
+      {
+        bindings: [
+          {
+            turn: 'urn:dkg:chat:turn:t2',
+            ts: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>',
+          },
+        ],
+      },
+      // Supersede-twin probe — headless twin EXISTS but has NO supersede
+      // marker (e.g. it's a separate headless reply that was never
+      // promoted to "this overrides the canonical"). The fix MUST NOT
+      // re-resolve in this case.
+      { bindings: [] },
+      // Latest-turn / previous-turn / turn-index / messages / subjects /
+      // CONSTRUCT — all keyed off the CANONICAL URI as usual.
+      {
+        bindings: [
+          {
+            latestTurnId: '"t2"',
+            latestTs: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>',
+          },
+        ],
+      },
+      { bindings: [{ previousTurnId: '"t1"' }] },
+      { bindings: [{ c: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' }] },
+      { bindings: [{ user: 'urn:dkg:chat:msg:user-c', assistant: 'urn:dkg:chat:msg:agent-c' }] },
+      { bindings: [{ s: 'urn:dkg:chat:msg:user-c' }, { s: 'urn:dkg:chat:msg:agent-c' }] },
+      { quads: [{ subject: 'urn:dkg:chat:turn:t2', predicate: 'http://dkg.io/ontology/turnId', object: '"t2"' }] },
+    );
+
+    const delta = await manager.getSessionGraphDelta('s-graph', 't2', { baseTurnId: 't1' });
+    expect(delta.mode).toBe('delta');
+    expect(delta.turnId).toBe('t2');
+    // CONSTRUCT projects off the CANONICAL URI — the IoNL guard did
+    // NOT over-fire on a non-superseding headless twin.
+    const allSparql = mockQuery.calls.map((c) => String((c as unknown[])[0] ?? ''));
+    const constructQuery = allSparql[allSparql.length - 1];
+    expect(constructQuery).toContain('<urn:dkg:chat:turn:t2>');
+    expect(constructQuery).not.toContain('<urn:dkg:chat:headless-turn:t2>');
+  });
+
+  it('r31-11 (IoNL): supersede probe is SKIPPED when caller already passes a `headless:`-prefixed turnId (no self-arbitration)', async () => {
+    // Caller is asking for a headless-prefixed id directly. The
+    // supersede check exists to FIX a canonical → headless re-resolve;
+    // when we're already on the headless side there's nothing to
+    // supersede, and issuing the probe would be a wasted round trip.
+    // The fix gates the probe on `!turnId.startsWith('headless:')`.
+    mockQuery.returns.push(
+      { bindings: [] },
+      { bindings: [{ c: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' }] },
+      // Bare-literal lookup with `"headless:t2"` HITS — no supersede
+      // probe issued (the caller is already on the headless track).
+      {
+        bindings: [
+          {
+            turn: 'urn:dkg:chat:headless-turn:t2',
+            ts: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>',
+          },
+        ],
+      },
+      {
+        bindings: [
+          {
+            latestTurnId: '"headless:t2"',
+            latestTs: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>',
+          },
+        ],
+      },
+      { bindings: [{ previousTurnId: '"t1"' }] },
+      { bindings: [{ c: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' }] },
+      { bindings: [{ user: 'urn:dkg:chat:msg:u', assistant: 'urn:dkg:chat:msg:a' }] },
+      { bindings: [{ s: 'urn:dkg:chat:msg:u' }, { s: 'urn:dkg:chat:msg:a' }] },
+      { quads: [{ subject: 'urn:dkg:chat:headless-turn:t2', predicate: 'http://dkg.io/ontology/turnId', object: '"headless:t2"' }] },
+    );
+
+    const delta = await manager.getSessionGraphDelta('s-graph', 'headless:t2', { baseTurnId: 't1' });
+    expect(delta.mode).toBe('delta');
+    // Pin the call count: exactly the same 9 calls as the no-double-
+    // prefix path — the supersede probe was NOT issued because the
+    // caller already passed a `headless:` turnId.
+    expect(mockQuery.calls).toHaveLength(9);
+    // None of those 9 calls is the supersede-marker probe — pin it
+    // by verifying no SPARQL contains BOTH the supersede predicate
+    // AND the headless-twin literal pattern the probe would emit.
+    const allSparql = mockQuery.calls.map((c) => String((c as unknown[])[0] ?? ''));
+    const supersedeProbeIssued = allSparql.some((q) =>
+      q.includes('supersedesCanonicalAssistant')
+      && q.includes('"headless:headless:t2"'),
+    );
+    expect(supersedeProbeIssued).toBe(false);
   });
 });
 

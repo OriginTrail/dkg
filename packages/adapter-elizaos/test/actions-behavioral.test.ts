@@ -2109,3 +2109,213 @@ describe('persistChatTurnImpl — r21-3: schema:Conversation session root emitte
     )).toBe(true);
   });
 });
+
+// ===========================================================================
+// PR #229 round 31 — r31-11 regression tests
+//
+// Bug IoNR (actions.ts:460): the previous "peek-then-mark-after-success"
+// session-root cache pattern split the gate into a peek
+// (`wouldEmitSessionRoot`) and a `markSessionRootEmitted` AFTER the
+// `await agent.assertion.write(...)` resolved. JavaScript's single-
+// threaded model only protects synchronous code; concurrent
+// `persistChatTurnImpl` calls for the same `(runtime, sessionUri,
+// contextGraphId, assertionName)` tuple could BOTH "peek" before
+// either marked, BOTH include the `?session a schema:Conversation`
+// root, and the second write would trip the WM Rule-4 entity-
+// exclusivity guard with a duplicate-root failure.
+//
+// Fix: replace the peek-then-mark pattern with a synchronous
+// `reserveSessionRoot()` (atomic CAS — at most one caller wins per
+// key per process) plus a `rollbackSessionRoot()` released from the
+// failure path of `agent.assertion.write()`/`ensureContextGraphLocal()`
+// so retries can re-emit (preserves r3131820483 crash-safety).
+//
+// These tests pin BOTH halves of the contract:
+//   1. concurrent persist calls — exactly ONE includes the root quads;
+//   2. failure rollback — a write throw releases the reservation so
+//      the NEXT (retry) call DOES re-include the root.
+// ===========================================================================
+describe('persistChatTurnImpl — r31-11 (IoNR): session-root reservation race + rollback', () => {
+  it('concurrent persists for the same (runtime, session, dest) — exactly ONE write carries the schema:Conversation root', async () => {
+    __resetEmittedSessionRootsForTests();
+    // Build an agent whose `assertion.write` resolves only after the
+    // test releases a latch. With the OLD peek-then-mark pattern
+    // BOTH concurrent calls would peek "not-yet-emitted" before
+    // EITHER mark fired, so both publishes would carry the root.
+    // With `reserveSessionRoot()` the first SYNCHRONOUS caller wins
+    // the slot and the second sees `false` and skips the root.
+    let releaseFirst: (() => void) | null = null;
+    const firstWriteUnblocked = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const publishes: CapturedPublish[] = [];
+    let writes = 0;
+    const agent = {
+      assertion: {
+        async write(cgId: string, name: string, quads: any) {
+          const order = ++writes;
+          publishes.push({ cgId, name, quads: [...quads] });
+          if (order === 1) await firstWriteUnblocked;
+        },
+      },
+      async ensureContextGraphLocal(_opts: any) {/* no-op */},
+    };
+    const runtime = makeRuntime();
+    // Fire BOTH calls before either has a chance to await the write.
+    // Both reach `reserveSessionRoot()` synchronously, but only ONE
+    // wins the CAS — the SECOND must skip the root.
+    const p1 = persistChatTurnImpl(
+      agent, runtime,
+      makeMessage('a', { id: 'r31-11-c-1', roomId: 'race-room' } as any),
+      {} as State, {},
+    );
+    const p2 = persistChatTurnImpl(
+      agent, runtime,
+      makeMessage('b', { id: 'r31-11-c-2', roomId: 'race-room' } as any),
+      {} as State, {},
+    );
+    // Release the first write so both can settle.
+    releaseFirst!();
+    await Promise.all([p1, p2]);
+    expect(writes).toBe(2);
+    const sessionUri = 'urn:dkg:chat:session:race-room';
+    const convRoots = publishes.flatMap((p) =>
+      p.quads.filter(
+        (q) => q.subject === sessionUri
+          && q.predicate === RDF_TYPE
+          && q.object === `${SCHEMA}Conversation`,
+      ),
+    );
+    // EXACTLY ONE schema:Conversation root across BOTH writes —
+    // the WM Rule-4 invariant survives concurrent persist.
+    expect(convRoots).toHaveLength(1);
+  });
+
+  it('write FAILURE rolls the reservation back — the next retry RE-EMITS the schema:Conversation root', async () => {
+    __resetEmittedSessionRootsForTests();
+    // First call's write throws. Without `rollbackSessionRoot()` the
+    // reservation would stick and the retry would skip the root,
+    // leaving the room without a `schema:Conversation` triple — the
+    // reader would then surface zero sessions.
+    const publishes: CapturedPublish[] = [];
+    let writeCount = 0;
+    const agent = {
+      assertion: {
+        async write(cgId: string, name: string, quads: any) {
+          writeCount += 1;
+          publishes.push({ cgId, name, quads: [...quads] });
+          if (writeCount === 1) throw new Error('simulated transient failure');
+        },
+      },
+      async ensureContextGraphLocal(_opts: any) {/* no-op */},
+    };
+    const runtime = makeRuntime();
+    await expect(
+      persistChatTurnImpl(
+        agent, runtime,
+        makeMessage('first', { id: 'r31-11-fail-1', roomId: 'rollback-room' } as any),
+        {} as State, {},
+      ),
+    ).rejects.toThrow(/transient failure/);
+    // RETRY in the SAME runtime + session + dest — the rolled-back
+    // reservation lets us re-emit the root.
+    await persistChatTurnImpl(
+      agent, runtime,
+      makeMessage('retry', { id: 'r31-11-fail-2', roomId: 'rollback-room' } as any),
+      {} as State, {},
+    );
+    const sessionUri = 'urn:dkg:chat:session:rollback-room';
+    const convRoot = (qs: any[]) => qs.filter(
+      (q) => q.subject === sessionUri
+        && q.predicate === RDF_TYPE
+        && q.object === `${SCHEMA}Conversation`,
+    );
+    // Both attempts (the failure AND the retry) carry the root.
+    // The failure carries it because the write was already in-flight
+    // when it threw; the retry carries it because the rollback released
+    // the reservation. The WM Rule-4 invariant still holds because the
+    // failure is by definition NOT a successful prior write.
+    expect(convRoot(publishes[0].quads)).toHaveLength(1);
+    expect(convRoot(publishes[1].quads)).toHaveLength(1);
+  });
+
+  it('write SUCCESS keeps the reservation — a normal subsequent turn DOES skip the root (proves rollback only fires on failure)', async () => {
+    __resetEmittedSessionRootsForTests();
+    const { agent, publishes } = makeCapturingAgent();
+    const runtime = makeRuntime();
+    // Three sequential turns: first gets the root; second and third
+    // SKIP it because the reservation persists across successful
+    // writes. This pins that the rollback path is gated on `catch`,
+    // not run unconditionally.
+    await persistChatTurnImpl(
+      agent, runtime,
+      makeMessage('t1', { id: 'r31-11-ok-1', roomId: 'happy-room' } as any),
+      {} as State, {},
+    );
+    await persistChatTurnImpl(
+      agent, runtime,
+      makeMessage('t2', { id: 'r31-11-ok-2', roomId: 'happy-room' } as any),
+      {} as State, {},
+    );
+    await persistChatTurnImpl(
+      agent, runtime,
+      makeMessage('t3', { id: 'r31-11-ok-3', roomId: 'happy-room' } as any),
+      {} as State, {},
+    );
+    const sessionUri = 'urn:dkg:chat:session:happy-room';
+    const convRoot = (qs: any[]) => qs.filter(
+      (q) => q.subject === sessionUri
+        && q.predicate === RDF_TYPE
+        && q.object === `${SCHEMA}Conversation`,
+    );
+    expect(convRoot(publishes[0].quads)).toHaveLength(1);
+    expect(convRoot(publishes[1].quads)).toHaveLength(0);
+    expect(convRoot(publishes[2].quads)).toHaveLength(0);
+  });
+
+  it('ensureContextGraphLocal FAILURE also rolls the reservation back (the rollback covers the FULL try block, not just write)', async () => {
+    __resetEmittedSessionRootsForTests();
+    // The fix wraps both `ensureContextGraphLocal` AND
+    // `agent.assertion.write` in the same try/catch. A failure from
+    // either MUST release the reservation. Pin both ends so a
+    // future refactor that drops `ensureContextGraphLocal` from the
+    // try-block would surface here.
+    const publishes: CapturedPublish[] = [];
+    let ensureCallCount = 0;
+    const agent = {
+      assertion: {
+        async write(cgId: string, name: string, quads: any) {
+          publishes.push({ cgId, name, quads: [...quads] });
+        },
+      },
+      async ensureContextGraphLocal(_opts: any) {
+        ensureCallCount += 1;
+        if (ensureCallCount === 1) throw new Error('graph create failed');
+      },
+    };
+    const runtime = makeRuntime();
+    await expect(
+      persistChatTurnImpl(
+        agent, runtime,
+        makeMessage('first', { id: 'r31-11-ensure-fail', roomId: 'ensure-room' } as any),
+        {} as State, {},
+      ),
+    ).rejects.toThrow(/graph create failed/);
+    await persistChatTurnImpl(
+      agent, runtime,
+      makeMessage('retry', { id: 'r31-11-ensure-retry', roomId: 'ensure-room' } as any),
+      {} as State, {},
+    );
+    const sessionUri = 'urn:dkg:chat:session:ensure-room';
+    const convRoot = (qs: any[]) => qs.filter(
+      (q) => q.subject === sessionUri
+        && q.predicate === RDF_TYPE
+        && q.object === `${SCHEMA}Conversation`,
+    );
+    // The FAILED first attempt didn't even reach `assertion.write`,
+    // so `publishes` only has the SECOND (retry) entry — and it
+    // MUST contain the root quad.
+    expect(publishes).toHaveLength(1);
+    expect(convRoot(publishes[0].quads)).toHaveLength(1);
+  });
+});

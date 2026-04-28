@@ -1068,6 +1068,116 @@ describe('dkgPlugin.hooks — r31-1: assistant-message double-write guard', () =
       }
     });
 
+    // -----------------------------------------------------------------------
+    // PR #229 bot review (r31-11 — adapter-elizaos/src/index.ts:527).
+    //
+    // Bug IoNQ: pre-r31-11 the wrapper handled exactly TWO cases when
+    // the cached assistant text was defined:
+    //   1. incoming text === cached text  → `assistantAlreadyPersisted=true`
+    //   2. incoming text !== cached text  → `assistantSupersedesCanonical=true`
+    //                                       (route to headless URI)
+    // The empty-incoming case fell into branch 2 with `incomingReplyText
+    // = ''`. The wrapper would then route the EMPTY text to the headless
+    // URI, write a `dkg:supersedesCanonicalAssistant "true"` marker, and
+    // the reader's r31-6 dedupe would surface the EMPTY headless reply
+    // INSTEAD of the cached non-empty canonical reply — chat history
+    // would silently flip to a blank assistant message.
+    //
+    // The contract: an empty follow-up reply with a cached non-empty
+    // assistant text is a noisy retry / streaming-cancellation echo.
+    // The cached text is strictly better than blank — treat it like the
+    // equality case and SUPPRESS the empty write entirely.
+    // -----------------------------------------------------------------------
+    it('r31-11 (IoNQ): empty incoming reply with cached non-empty text → assistantAlreadyPersisted=true (no empty write, no headless supersede)', async () => {
+      const spy = vi.spyOn(dkgService, 'persistChatTurn' as any)
+        .mockResolvedValue({ tripleCount: 0, turnUri: '', kcId: '' } as any);
+      try {
+        const runtime = { getSetting: () => undefined, character: { name: 'x' } } as any;
+        const userMsg = { content: { text: 'hello' }, id: 'user-r31-11-q', userId: 'u', roomId: 'room-r31-11-q' } as any;
+        await (dkgPlugin as any).hooks.onChatTurn(runtime, userMsg, {}, {
+          assistantText: 'real cached reply text',
+        });
+        // Empty-text follow-up — hook re-fires with no incoming
+        // content (streaming cancellation, retry echo, etc).
+        const emptyReply = {
+          content: { text: '' }, id: 'asst-r31-11-q', userId: 'a', roomId: 'room-r31-11-q',
+          replyTo: 'user-r31-11-q',
+        } as any;
+        await (dkgPlugin as any).hooks.onAssistantReply(runtime, emptyReply, {}, {});
+
+        const replyOpts = spy.mock.calls[1][3] as any;
+        // r31-11 invariant: empty incoming + non-empty cached →
+        // suppression (NOT supersede). Pre-fix this would have set
+        // `assistantSupersedesCanonical=true` and the impl would have
+        // routed the EMPTY text to a headless URI marked
+        // `supersedesCanonicalAssistant`, and the reader's r31-6
+        // dedupe would have surfaced the empty headless reply.
+        expect(replyOpts.assistantAlreadyPersisted).toBe(true);
+        expect(replyOpts.assistantSupersedesCanonical).toBeUndefined();
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it('r31-11 (IoNQ): empty incoming reply via options.assistantText with cached non-empty text → assistantAlreadyPersisted=true (parity with message.content path)', async () => {
+      const spy = vi.spyOn(dkgService, 'persistChatTurn' as any)
+        .mockResolvedValue({ tripleCount: 0, turnUri: '', kcId: '' } as any);
+      try {
+        const runtime = { getSetting: () => undefined, character: { name: 'x' } } as any;
+        const userMsg = { content: { text: 'hello' }, id: 'user-r31-11-q-opts', userId: 'u', roomId: 'room-r31-11-q-opts' } as any;
+        await (dkgPlugin as any).hooks.onChatTurn(runtime, userMsg, {}, {
+          assistantText: 'cached reply via options',
+        });
+        // All three text-input shapes ('content.text', 'options.assistantText',
+        // 'options.assistantReply.text') are inert — the resolution chain
+        // falls through to '' and the IoNQ branch must still fire.
+        const reply = {
+          content: { text: '' }, id: 'asst-r31-11-q-opts', userId: 'a', roomId: 'room-r31-11-q-opts',
+          replyTo: 'user-r31-11-q-opts',
+        } as any;
+        await (dkgPlugin as any).hooks.onAssistantReply(runtime, reply, {}, {
+          assistantText: '', assistantReply: { text: '' },
+        });
+
+        const replyOpts = spy.mock.calls[1][3] as any;
+        expect(replyOpts.assistantAlreadyPersisted).toBe(true);
+        expect(replyOpts.assistantSupersedesCanonical).toBeUndefined();
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it('r31-11 (IoNQ): non-empty incoming reply with cached text → still routes through SUPERSEDE branch (the IoNQ guard does not over-fire)', async () => {
+      const spy = vi.spyOn(dkgService, 'persistChatTurn' as any)
+        .mockResolvedValue({ tripleCount: 0, turnUri: '', kcId: '' } as any);
+      try {
+        const runtime = { getSetting: () => undefined, character: { name: 'x' } } as any;
+        const userMsg = { content: { text: 'hello' }, id: 'user-r31-11-q-sup', userId: 'u', roomId: 'room-r31-11-q-sup' } as any;
+        await (dkgPlugin as any).hooks.onChatTurn(runtime, userMsg, {}, {
+          assistantText: 'stale provisional',
+        });
+        // Final non-empty reply — DIFFERENT from the cached text.
+        // Must STILL hit the supersede branch (r31-6 contract); the
+        // IoNQ fix MUST only intercept the empty case.
+        const reply = {
+          content: { text: 'final corrected reply' }, id: 'asst-r31-11-q-sup', userId: 'a', roomId: 'room-r31-11-q-sup',
+          replyTo: 'user-r31-11-q-sup',
+        } as any;
+        await (dkgPlugin as any).hooks.onAssistantReply(runtime, reply, {}, {});
+
+        const replyOpts = spy.mock.calls[1][3] as any;
+        // IoNQ invariant: non-empty incoming text → original supersede
+        // branch fires (r31-6 protection still works). Empty-only
+        // intercept means the IoNQ test must FAIL if the new branch
+        // accidentally widens to non-empty mismatches.
+        expect(replyOpts.assistantAlreadyPersisted).toBeUndefined();
+        expect(replyOpts.assistantSupersedesCanonical).toBe(true);
+        expect(replyOpts.userTurnPersisted).toBe(false);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
     it('explicit caller assistantAlreadyPersisted=true STILL wins over the payload comparison (caller signal is authoritative)', async () => {
       const spy = vi.spyOn(dkgService, 'persistChatTurn' as any)
         .mockResolvedValue({ tripleCount: 0, turnUri: '', kcId: '' } as any);
