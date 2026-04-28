@@ -58,14 +58,17 @@ export interface HermesSetupState {
 
 export interface HermesChannelHealthResponse {
   ok: boolean;
-  status: HermesRuntimeStatus;
-  profile?: Pick<HermesProfileMetadata, 'profileName' | 'hermesHome' | 'memoryMode'>;
-  bridge?: {
-    url?: string;
-    sessionId?: string;
-  };
+  target?: 'bridge' | 'gateway';
+  bridge?: HermesHealthState;
+  gateway?: HermesHealthState;
   error?: string;
 }
+
+export type HermesHealthState = Record<string, unknown> & {
+  ok: boolean;
+  channel?: string;
+  error?: string;
+};
 
 export interface HermesChannelMessage {
   role: 'user' | 'assistant' | 'system' | 'tool';

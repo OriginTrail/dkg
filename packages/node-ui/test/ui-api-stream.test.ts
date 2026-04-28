@@ -153,7 +153,7 @@ describe('ui local-agent stream api', () => {
         start(controller) {
           controller.enqueue(encoder.encode('data: {"type":"delta","text":"Her","correlationId":"h2"}\n\n'));
           controller.enqueue(encoder.encode('data: {"type":"delta","text":"mes","correlationId":"h2"}\n\n'));
-          controller.enqueue(encoder.encode('data: {"type":"final","text":"Hermes","correlationId":"h2"}\n\n'));
+          controller.enqueue(encoder.encode('data: {"type":"final","text":"Hermes","correlationId":"h2","sessionId":"bridge-session","turnId":"bridge-turn"}\n\n'));
           controller.close();
         },
       });
@@ -171,10 +171,12 @@ describe('ui local-agent stream api', () => {
 
       expect(res.text).toBe('Hermes');
       expect(res.correlationId).toBe('h2');
+      expect(res.sessionId).toBe('bridge-session');
+      expect(res.turnId).toBe('bridge-turn');
       expect(events).toMatchObject([
         { type: 'text_delta', delta: 'Her' },
         { type: 'text_delta', delta: 'mes' },
-        { type: 'final' },
+        { type: 'final', sessionId: 'bridge-session', turnId: 'bridge-turn' },
       ]);
     } finally {
       globalThis.fetch = prevFetch;

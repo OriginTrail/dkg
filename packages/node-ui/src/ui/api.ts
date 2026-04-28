@@ -737,10 +737,17 @@ export const sendOpenClawChat = (peerId: string, text: string) =>
 
 // --- OpenClaw local channel bridge ---
 
+export interface LocalAgentChatResponse {
+  text: string;
+  correlationId: string;
+  sessionId?: string;
+  turnId?: string;
+}
+
 export async function sendOpenClawLocalChat(
   text: string,
   opts?: LocalAgentChatRequestOptions,
-): Promise<{ text: string; correlationId: string }> {
+): Promise<LocalAgentChatResponse> {
   const res = await fetch('/api/openclaw-channel/send', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
@@ -756,7 +763,7 @@ export async function sendOpenClawLocalChat(
 
 export type OpenClawStreamEvent =
   | { type: 'text_delta'; delta: string }
-  | { type: 'final'; text: string; correlationId: string }
+  | ({ type: 'final' } & LocalAgentChatResponse)
   | { type: 'error'; error: string };
 
 type HermesRawStreamEvent =
@@ -806,7 +813,7 @@ export async function streamOpenClawLocalChat(
   opts: LocalAgentChatRequestOptions & {
     onEvent?: (event: OpenClawStreamEvent) => void;
   } = {},
-): Promise<{ text: string; correlationId: string }> {
+): Promise<LocalAgentChatResponse> {
   const res = await fetch('/api/openclaw-channel/stream', {
     method: 'POST',
     headers: {
@@ -827,7 +834,7 @@ export async function streamOpenClawLocalChat(
 
   // Fallback: if server didn't return SSE, treat as JSON
   if (!res.body || !contentType.includes('text/event-stream')) {
-    const data = await res.json() as { text: string; correlationId: string };
+    const data = await res.json() as LocalAgentChatResponse;
     opts.onEvent?.({ type: 'final', ...data });
     return data;
   }
@@ -836,7 +843,7 @@ export async function streamOpenClawLocalChat(
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
-  let finalPayload: { text: string; correlationId: string } | undefined;
+  let finalPayload: LocalAgentChatResponse | undefined;
   let streamError: Error | undefined;
 
   const handleEvent = (event: OpenClawStreamEvent): void => {
@@ -844,7 +851,12 @@ export async function streamOpenClawLocalChat(
     if (event.type === 'error') {
       streamError = new Error(event.error || 'Stream failed');
     } else if (event.type === 'final') {
-      finalPayload = { text: event.text, correlationId: event.correlationId };
+      finalPayload = {
+        text: event.text,
+        correlationId: event.correlationId,
+        ...(event.sessionId ? { sessionId: event.sessionId } : {}),
+        ...(event.turnId ? { turnId: event.turnId } : {}),
+      };
     }
   };
 
@@ -898,7 +910,7 @@ export const fetchOpenClawLocalHealth = () =>
 export async function sendHermesLocalChat(
   text: string,
   opts?: LocalAgentChatRequestOptions,
-): Promise<{ text: string; correlationId: string }> {
+): Promise<LocalAgentChatResponse> {
   const res = await fetch('/api/hermes-channel/send', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
@@ -917,7 +929,7 @@ export async function streamHermesLocalChat(
   opts: LocalAgentChatRequestOptions & {
     onEvent?: (event: OpenClawStreamEvent) => void;
   } = {},
-): Promise<{ text: string; correlationId: string }> {
+): Promise<LocalAgentChatResponse> {
   const res = await fetch('/api/hermes-channel/stream', {
     method: 'POST',
     headers: {
@@ -937,7 +949,7 @@ export async function streamHermesLocalChat(
   const contentType = (res.headers.get('content-type') ?? '').toLowerCase();
 
   if (!res.body || !contentType.includes('text/event-stream')) {
-    const data = await res.json() as { text: string; correlationId: string };
+    const data = await res.json() as LocalAgentChatResponse;
     opts.onEvent?.({ type: 'final', ...data });
     return data;
   }
@@ -945,7 +957,7 @@ export async function streamHermesLocalChat(
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
-  let finalPayload: { text: string; correlationId: string } | undefined;
+  let finalPayload: LocalAgentChatResponse | undefined;
   let streamError: Error | undefined;
 
   const normalizeHermesEvent = (event: HermesRawStreamEvent): OpenClawStreamEvent => {
@@ -960,7 +972,12 @@ export async function streamHermesLocalChat(
     if (event.type === 'error') {
       streamError = new Error(event.error || 'Stream failed');
     } else if (event.type === 'final') {
-      finalPayload = { text: event.text, correlationId: event.correlationId };
+      finalPayload = {
+        text: event.text,
+        correlationId: event.correlationId,
+        ...(event.sessionId ? { sessionId: event.sessionId } : {}),
+        ...(event.turnId ? { turnId: event.turnId } : {}),
+      };
     }
   };
 
@@ -1517,7 +1534,7 @@ export async function streamLocalAgentChat(
     /** UI-selected project context graph for this turn (memory scope). */
     contextGraphId?: string;
   } = {},
-): Promise<{ text: string; correlationId: string }> {
+): Promise<LocalAgentChatResponse> {
   const normalizedId = id.trim().toLowerCase();
   const surface = LOCAL_AGENT_SURFACES[normalizedId];
   if (surface?.streamChat) {

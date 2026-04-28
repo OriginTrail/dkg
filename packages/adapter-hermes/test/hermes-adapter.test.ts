@@ -293,6 +293,28 @@ describe('HermesDkgClient', () => {
     expect(redact('Authorization: Bearer secret-token', 'secret-token')).not.toContain('secret-token');
   });
 
+  it('reads the daemon Hermes channel health wire shape', async () => {
+    const fetchImpl = async () => new Response(JSON.stringify({
+      ok: true,
+      target: 'gateway',
+      bridge: { ok: false, error: 'bridge unavailable' },
+      gateway: { ok: true, channel: 'hermes-channel' },
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+    const client = new HermesDkgClient({
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    const health = await client.getHermesChannelHealth();
+
+    expect(health.ok).toBe(true);
+    expect(health.target).toBe('gateway');
+    expect(health.bridge?.ok).toBe(false);
+    expect(health.gateway?.channel).toBe('hermes-channel');
+  });
+
   it('marks Hermes disconnected through the local-agent integration route', async () => {
     const calls: Array<{ url: string; init: RequestInit }> = [];
     const fetchImpl = async (url: string | URL | Request, init?: RequestInit) => {
@@ -494,9 +516,13 @@ describe('Hermes profile setup helpers', () => {
     disconnectHermesProfile({ hermesHome });
 
     const disconnectedConfig = readFileSync(join(hermesHome, 'config.yaml'), 'utf-8');
+    const disconnectedVerify = verifyHermesProfile({ hermesHome, memoryMode: 'provider' });
     expect(disconnectedConfig).not.toContain('provider: dkg');
     expect(disconnectedConfig).not.toContain('BEGIN DKG ADAPTER HERMES MANAGED');
     expect(disconnectedConfig).toContain('  retrieval_k: 8');
+    expect(disconnectedVerify.ok).toBe(true);
+    expect(disconnectedVerify.status).toBe('disconnected');
+    expect(disconnectedVerify.errors.some((error) => error.includes('managed memory.provider'))).toBe(false);
   });
 
   it('best-effort disables the daemon registry during disconnect and uninstall', async () => {

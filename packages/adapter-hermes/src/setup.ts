@@ -190,6 +190,7 @@ export function verifyHermesProfile(options: HermesSetupOptions = {}): HermesVer
   const effectiveMemoryMode = options.memoryMode ?? state?.profile.memoryMode ?? profile.memoryMode;
   const effectiveProfile = { ...profile, memoryMode: effectiveMemoryMode };
   const warnings: string[] = [];
+  const disconnected = state?.status === 'disconnected';
   const providerConflicts = detectProviderConflict(effectiveProfile, effectiveMemoryMode);
   errors.push(...providerConflicts);
 
@@ -207,12 +208,14 @@ export function verifyHermesProfile(options: HermesSetupOptions = {}): HermesVer
   } else if (!isOwnedJson(dkgConfigPath)) {
     errors.push(`DKG Hermes config is not ownership-marked: ${dkgConfigPath}`);
   }
-  if (effectiveMemoryMode === 'provider') {
+  if (effectiveMemoryMode === 'provider' && !disconnected) {
     if (!existsSync(profile.configPath)) {
       errors.push(`Hermes provider mode requires config.yaml with managed memory.provider: dkg at ${profile.configPath}`);
     } else if (!hasManagedDkgProvider(readFileSync(profile.configPath, 'utf-8'))) {
       errors.push(`Hermes provider mode requires an adapter-managed memory.provider: dkg block in ${profile.configPath}`);
     }
+  } else if (effectiveMemoryMode === 'provider' && disconnected) {
+    warnings.push('Hermes profile is disconnected; managed memory.provider: dkg is not expected until reconnect.');
   }
   const pluginDir = join(profile.hermesHome, 'plugins', 'dkg');
   if (state && !isOwnedPluginDir(pluginDir)) {
@@ -221,7 +224,7 @@ export function verifyHermesProfile(options: HermesSetupOptions = {}): HermesVer
 
   return {
     ok: errors.length === 0,
-    status: errors.length ? 'error' : warnings.length ? 'degraded' : 'configured',
+    status: errors.length ? 'error' : disconnected ? 'disconnected' : warnings.length ? 'degraded' : 'configured',
     profile: effectiveProfile,
     warnings,
     errors,
