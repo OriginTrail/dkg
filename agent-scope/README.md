@@ -58,11 +58,57 @@ written without your OK.
   `AGENTS.md` / `GEMINI.md` on session start and are expected to follow
   the rules. Best-effort.
 
-After you clone the repo, run this once to check your agent is wired up:
+## Onboarding (new clone)
+
+The intended flow for a coworker who just cloned the repo:
 
 ```bash
-pnpm scope:check-agent
+pnpm install                      # postinstall auto-runs scope-setup
+pnpm build                        # builds packages/mcp-dkg/dist/index.js
+dkg start                         # in another terminal, leave running
+# open Cursor → chat normally
 ```
+
+What the postinstall step does for you (`scripts/scope-setup.mjs`):
+
+1. **Writes `.dkg/config.yaml`** if it doesn't exist, with sensible
+   defaults (`http://localhost:9200`, `~/.dkg/auth.token`,
+   `contextGraph: dev-coordination`) and a per-machine agent URI
+   auto-derived as `urn:dkg:agent:cursor-${user}-${hostname}`.
+2. **Creates the `dev-coordination` paranet** on your local DKG daemon
+   if it isn't there yet (skipped silently if the daemon isn't up — the
+   next manual `pnpm scope:setup` will pick it up).
+
+If postinstall hooks make you nervous you can run it explicitly any
+time:
+
+```bash
+pnpm scope:setup                  # idempotent, safe to re-run
+pnpm scope:check-agent            # verify Cursor / Claude Code are wired
+```
+
+### When the project-level MCP doesn't load in Cursor
+
+Cursor's project `.cursor/mcp.json` is committed and points at the
+built `packages/mcp-dkg/dist/index.js`. If after `pnpm build` and a
+Cursor restart you still don't see `dkg_*` tools in the chat, fall
+back to adding it to your global `~/.cursor/mcp.json` with absolute
+paths:
+
+```json
+{
+  "mcpServers": {
+    "dkg": {
+      "command": "node",
+      "args": ["/absolute/path/to/dkg/packages/mcp-dkg/dist/index.js"],
+      "cwd": "/absolute/path/to/dkg"
+    }
+  }
+}
+```
+
+This is the safety net for Cursor environments where `node` isn't on
+the spawn PATH.
 
 ## Editing agent-scope itself
 

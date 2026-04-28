@@ -1,9 +1,9 @@
 {
-  "_comment": "DKG MCP read tools. Invoked via pnpm exec so the workspace-local tsx binary (devDependency of the root package) runs the TypeScript source directly. This avoids the fresh-clone footgun where dist/ is gitignored and the auto-loaded MCP server would 404 before anyone ran `pnpm build`. Config (API, token, project) comes from .dkg/config.yaml in the workspace root. `cwd` is pinned to the workspace folder because Cursor spawns MCP servers from its own CWD, not the workspace — without this, pnpm resolves the wrong workspace and the upward .dkg/config.yaml lookup misses the token file.",
+  "_comment": "DKG MCP read tools. Spawned by Cursor on workspace open. We invoke the built `dist/index.js` via `node` (rather than `pnpm exec tsx` against the source) for two reasons: (1) Cursor spawns MCP servers in a non-interactive environment that often does NOT have NVM-managed `pnpm`/`tsx` on PATH, but `node` almost always resolves; (2) starting from compiled JS is ~500ms faster than tsx-on-the-fly. Coworkers run `pnpm install && pnpm build` once, after which this auto-wires. `cwd` is pinned to the workspace because Cursor spawns from its own install dir by default, and the MCP server walks upwards from cwd to find `.dkg/config.yaml`.",
   "mcpServers": {
     "dkg": {
-      "command": "pnpm",
-      "args": ["exec", "tsx", "packages/mcp-dkg/src/index.ts"],
+      "command": "node",
+      "args": ["packages/mcp-dkg/dist/index.js"],
       "cwd": "${workspaceFolder}"
     }
   }

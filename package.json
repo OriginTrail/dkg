@@ -27,7 +27,9 @@
     "test:e2e:ui": "pnpm --filter @origintrail-official/dkg-node-ui test:e2e",
     "test:all": "pnpm test && pnpm test:evm",
     "scope:test": "node --test agent-scope/lib/scope.test.mjs agent-scope/lib/dkg-source.test.mjs agent-scope/lib/shell-parse.test.mjs agent-scope/lib/denial.test.mjs agent-scope/lib/check-agent.test.mjs",
-    "scope:check-agent": "node agent-scope/lib/check-agent.mjs"
+    "scope:check-agent": "node agent-scope/lib/check-agent.mjs",
+    "scope:setup": "node scripts/scope-setup.mjs",
+    "postinstall": "node scripts/scope-setup.mjs --auto"
   },
   "devDependencies": {
     "@types/node": "^22",
