@@ -451,8 +451,7 @@ export class DkgNodePlugin {
         // setup-runtime api where api.on was undefined. HookSurface records
         // those as installedVia='none' with installError set; we detect
         // that and re-install against the current (possibly full-mode)
-        // api. Gate on `runtimeEnabled` so a `setup-only` re-entry never
-        // wires prompt-injection / turn-persistence hooks (R14.3).
+        // api.
         //
         // R17.2 follow-up — `setup-only → full` re-entry: the first call
         // skipped `ChatTurnWriter` construction (no FS work in metadata-
@@ -460,8 +459,12 @@ export class DkgNodePlugin {
         // hooks. Without this, `installHooksIfNeeded` early-returns on
         // null `chatTurnWriter` and W3/W4a/W4b silently never install.
         this.ensureChatTurnWriter(api);
-        this.installHooksIfNeeded(api);
       }
+      // T52 — Always run installHooksIfNeeded so the legacy
+      // `session_end` cleanup is wired even in setup-only re-entry.
+      // The runtime flag gates the W3/W4a/W4b installs below the
+      // surface build inside the helper.
+      this.installHooksIfNeeded(api, { runtimeHooksEnabled: runtimeEnabled });
       return;
     }
 
@@ -478,12 +481,16 @@ export class DkgNodePlugin {
     // the `setup-only → full` upgrade case.
     if (runtimeEnabled) {
       this.ensureChatTurnWriter(api);
-      // Hook installation is a runtime-only side effect — `setup-only`
-      // metadata loads must not wire `before_prompt_build` / `agent_end` /
-      // internal `message:*` handlers, which would turn a metadata-only
-      // load into live prompt injection and turn persistence (R14.3).
-      this.installHooksIfNeeded(api);
     }
+    // T52 — Always install hooks (with the runtime flag gating
+    // W3/W4a/W4b inside). `setup-only` mode still gets `session_end`
+    // wired so the channel bridge's HTTP server (registered below by
+    // `registerIntegrationModules` whenever `channel.enabled`) has a
+    // shutdown path. The R14.3 invariant — setup-only must not wire
+    // prompt-injection / turn-persistence — is preserved by the
+    // `runtimeHooksEnabled: false` flag short-circuiting the W3/W4
+    // installs inside `installHooksIfNeeded`.
+    this.installHooksIfNeeded(api, { runtimeHooksEnabled: runtimeEnabled });
 
     // --- Integration modules ---
     this.registerIntegrationModules(api, { enableFullRuntime: runtimeEnabled });
@@ -621,8 +628,28 @@ export class DkgNodePlugin {
    * cross-channel persistence (W4b) would otherwise stay dead forever
    * even after the map appears on a later re-entry.
    */
-  private installHooksIfNeeded(api: OpenClawPluginApi): void {
-    if (!this.chatTurnWriter) return;
+  private installHooksIfNeeded(
+    api: OpenClawPluginApi,
+    opts?: { runtimeHooksEnabled?: boolean },
+  ): void {
+    // T52 — Default keeps existing call sites working (they all expect
+    // runtime hooks). Setup-only callers pass `false` to wire ONLY the
+    // legacy `session_end` cleanup hook so the channel HTTP server
+    // (registered unconditionally by `registerIntegrationModules` when
+    // `channel.enabled`) has a shutdown path. Without this, a
+    // setup-only register would bring up port 9201 with no
+    // `session_end` listener — gateway shutdown would leak the bound
+    // port and any stale bridge state into the next runtime upgrade.
+    const runtimeHooks = opts?.runtimeHooksEnabled ?? true;
+    // T52 — `chatTurnWriter` is required for W4a/W4b but NOT for the
+    // session_end cleanup. In setup-only mode the writer is never
+    // constructed (R17.2 — no FS work for metadata-only loads), so
+    // the prior unconditional `if (!chatTurnWriter) return` short-
+    // circuited the entire install path and stranded the channel
+    // server with no shutdown hook. Allow the setup path through;
+    // the W4 install lines below are gated on `runtimeHooks` and
+    // never dereference a null writer.
+    if (runtimeHooks && !this.chatTurnWriter) return;
 
     if (this.hookSurface) {
       const stats = this.hookSurface.getDispatchStats();
@@ -665,33 +692,39 @@ export class DkgNodePlugin {
         const legacyNeedsRetry = (event: string) =>
           stats[`legacy:${event}`]?.installedVia === 'none' &&
           typeof api.registerHook === 'function';
-        // Use the SAME wrapped-handler factories as the initial install
-        // below so a late retry preserves the mode-independent slot
-        // re-assert anchor. Without the wrapper, turn persistence would
-        // recover but slot ownership wouldn't bounce back per-message.
-        if (internalNeedsRetry('message:received')) {
-          this.hookSurface.install('internal', 'message:received', this.makeMessageReceivedHandler());
-        }
-        if (internalNeedsRetry('message:sent')) {
-          this.hookSurface.install('internal', 'message:sent', this.makeMessageSentHandler());
-        }
-        // T6 — Typed hook retries for setup-runtime → full upgrades on
-        // the SAME api object. Without these, `before_prompt_build` and
-        // `agent_end` would stay permanently uninstalled because the
-        // first register() found `api.on === undefined` and recorded
-        // `installedVia: 'none'`. The `installedVia: 'none'` precondition
-        // guarantees we're not double-binding a live handler.
-        if (typedNeedsRetry('before_prompt_build')) {
-          this.hookSurface.install('typed', 'before_prompt_build', (ev, ctx) => this.handleBeforePromptBuild(ev, ctx));
-        }
-        if (typedNeedsRetry('agent_end')) {
-          this.hookSurface.install('typed', 'agent_end', (ev, ctx) => this.chatTurnWriter!.onAgentEnd(ev, ctx));
-        }
-        if (typedNeedsRetry('before_compaction')) {
-          this.hookSurface.install('typed', 'before_compaction', (ev, ctx) => this.chatTurnWriter!.onBeforeCompaction(ev, ctx), { rareFireExpected: true });
-        }
-        if (typedNeedsRetry('before_reset')) {
-          this.hookSurface.install('typed', 'before_reset', (ev, ctx) => this.chatTurnWriter!.onBeforeReset(ev, ctx), { rareFireExpected: true });
+        // T52 — runtime-hook retries depend on a constructed
+        // chatTurnWriter (W4a/W4b dispatch into it). In setup-only re-
+        // entry the writer is still null; skip the runtime block
+        // entirely and let the legacy session_end retry below run.
+        if (runtimeHooks && this.chatTurnWriter) {
+          // Use the SAME wrapped-handler factories as the initial install
+          // below so a late retry preserves the mode-independent slot
+          // re-assert anchor. Without the wrapper, turn persistence would
+          // recover but slot ownership wouldn't bounce back per-message.
+          if (internalNeedsRetry('message:received')) {
+            this.hookSurface.install('internal', 'message:received', this.makeMessageReceivedHandler());
+          }
+          if (internalNeedsRetry('message:sent')) {
+            this.hookSurface.install('internal', 'message:sent', this.makeMessageSentHandler());
+          }
+          // T6 — Typed hook retries for setup-runtime → full upgrades on
+          // the SAME api object. Without these, `before_prompt_build` and
+          // `agent_end` would stay permanently uninstalled because the
+          // first register() found `api.on === undefined` and recorded
+          // `installedVia: 'none'`. The `installedVia: 'none'` precondition
+          // guarantees we're not double-binding a live handler.
+          if (typedNeedsRetry('before_prompt_build')) {
+            this.hookSurface.install('typed', 'before_prompt_build', (ev, ctx) => this.handleBeforePromptBuild(ev, ctx));
+          }
+          if (typedNeedsRetry('agent_end')) {
+            this.hookSurface.install('typed', 'agent_end', (ev, ctx) => this.chatTurnWriter!.onAgentEnd(ev, ctx));
+          }
+          if (typedNeedsRetry('before_compaction')) {
+            this.hookSurface.install('typed', 'before_compaction', (ev, ctx) => this.chatTurnWriter!.onBeforeCompaction(ev, ctx), { rareFireExpected: true });
+          }
+          if (typedNeedsRetry('before_reset')) {
+            this.hookSurface.install('typed', 'before_reset', (ev, ctx) => this.chatTurnWriter!.onBeforeReset(ev, ctx), { rareFireExpected: true });
+          }
         }
         // T7 — Legacy `session_end` retry. Same logic: only retry if the
         // previous install recorded `installedVia: 'none'` (i.e. registerHook
@@ -745,6 +778,15 @@ export class DkgNodePlugin {
     // wrapper the soft-destroyed gate (R21.1) so old wrappers
     // short-circuit after `stop()` has already torn the surface down.
     this.hookSurface.install('legacy', 'session_end', () => this.stop());
+
+    // T52 — Runtime-only hooks (W3 auto-recall, W4a LLM turn capture,
+    // W4b non-LLM channel capture) gate on `runtimeHooks`. In setup-
+    // only mode we install ONLY `session_end` above so the channel
+    // bridge's HTTP server has a shutdown path. Returning here when
+    // `runtimeHooks === false` skips the prompt-section install too,
+    // matching the existing R14.3 invariant ("setup-only must not
+    // wire prompt injection").
+    if (!runtimeHooks) return;
 
     // W3 — auto-recall every turn via before_prompt_build typed hook
     this.hookSurface.install('typed', 'before_prompt_build', (ev, ctx) => this.handleBeforePromptBuild(ev, ctx));

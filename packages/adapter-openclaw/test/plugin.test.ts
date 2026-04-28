@@ -3258,29 +3258,39 @@ describe('DkgNodePlugin', () => {
     expect(typedHookEvents).toContain('agent_end');
   });
 
-  it('R14.3 — setup-only registration must NOT install before_prompt_build / agent_end / message:* hooks', () => {
-    // Regression for R14.3: `installHooksIfNeeded` previously ran
-    // unconditionally in `register()`, so a metadata-only setup-only load
-    // wired live prompt-injection and turn-persistence handlers. The
-    // hookSurface must remain null on setup-only so no listeners attach.
+  it('R14.3 / T52 — setup-only registration installs ONLY session_end cleanup, not the runtime hooks', () => {
+    // R14.3: setup-only metadata loads must NOT wire prompt-injection /
+    // turn-persistence handlers (`before_prompt_build`, `agent_end`,
+    // `message:received`, `message:sent`).
+    //
+    // T52 superset: `session_end` legacy cleanup MUST still install,
+    // because `registerIntegrationModules` brings up the channel HTTP
+    // server unconditionally when `channel.enabled`. Without
+    // `session_end`, gateway shutdown leaks the bound port.
     const plugin = new DkgNodePlugin({
       daemonUrl: 'http://localhost:9200',
       channel: { enabled: true },
       memory: { enabled: true },
     });
     const onSpy = vi.fn();
+    const registerHookSpy = vi.fn();
     const mockApi: OpenClawPluginApi = {
       config: {},
       registrationMode: 'setup-only',
       registerTool: () => {},
-      registerHook: () => {},
+      registerHook: registerHookSpy,
       on: onSpy,
       logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
     };
     plugin.register(mockApi);
-    expect((plugin as any).hookSurface).toBeNull();
-    // No typed-hook installs may have called api.on either.
+    // T52 — Surface MUST exist now (was null pre-fix). It owns the
+    // session_end cleanup that tears down the channel server.
+    expect((plugin as any).hookSurface).not.toBeNull();
+    // R14.3 — No typed-hook installs may have called api.on.
     expect(onSpy).not.toHaveBeenCalled();
+    // T52 — `session_end` MUST be the only legacy registerHook call.
+    expect(registerHookSpy).toHaveBeenCalledTimes(1);
+    expect(registerHookSpy.mock.calls[0][0]).toBe('session_end');
   });
 
   it('R14.2 — handleBeforePromptBuild returns undefined when memoryPlugin exists but is not registered (slot owned by another plugin)', async () => {
