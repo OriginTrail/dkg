@@ -329,8 +329,8 @@ import {
   buildChatSemanticEventPayload,
   queueLocalAgentSemanticEnrichmentBestEffort,
   requestAdvertisesLocalAgentSemanticEnrichment,
+  requestHasTrustedLocalAgentBridgeAuth,
   requestLocalAgentWakeTransport,
-  requestTargetsLocalAgentIntegration,
   resolveChatTurnsAssertionAgentAddress,
 } from '../semantic-enrichment.js';
 
@@ -846,6 +846,7 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
         typeof projectContextGraphId === 'string' && projectContextGraphId.trim()
           ? projectContextGraphId.trim()
           : undefined;
+      const trustedOpenClawRequest = requestHasTrustedLocalAgentBridgeAuth(req, 'openclaw', bridgeAuthToken);
       const semanticEnrichment = queueLocalAgentSemanticEnrichmentBestEffort({
         config,
         dashDb,
@@ -864,9 +865,15 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
         }),
         bridgeAuthToken,
         skipWhenUnavailable: true,
-        liveSemanticEnrichmentSupported: requestAdvertisesLocalAgentSemanticEnrichment(req, 'openclaw'),
-        requestFromIntegration: requestTargetsLocalAgentIntegration(req, 'openclaw'),
-        requestWakeTransport: requestLocalAgentWakeTransport(req, 'openclaw'),
+        liveSemanticEnrichmentSupported: requestAdvertisesLocalAgentSemanticEnrichment(req, 'openclaw', {
+          bridgeAuthToken,
+          requireBridgeAuth: true,
+        }),
+        requestFromIntegration: trustedOpenClawRequest,
+        requestWakeTransport: requestLocalAgentWakeTransport(req, 'openclaw', {
+          bridgeAuthToken,
+          requireBridgeAuth: true,
+        }),
         logLabel: `chat turn semantic event for ${normalizedTurnId}`,
       });
       return jsonResponse(res, 200, {

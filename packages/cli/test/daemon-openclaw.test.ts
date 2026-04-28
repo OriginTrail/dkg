@@ -34,6 +34,7 @@ import {
   probeOpenClawChannelHealth,
   isAuthorizedLocalAgentSemanticWorkerRequest,
   requestAdvertisesLocalAgentSemanticEnrichment,
+  requestLocalAgentWakeTransport,
   refreshLocalAgentIntegrationFromUi,
   reverseLocalAgentSetupForUi,
   runOpenClawUiSetup,
@@ -826,6 +827,47 @@ describe('best-effort semantic enqueue helper', () => {
     })).toBe(false);
   });
 
+  it('ignores local-agent capability and wake hint headers unless bridge-auth trusted', () => {
+    const spoofedReq = {
+      headers: {
+        'x-dkg-local-agent-integration': 'openclaw',
+        'x-dkg-local-agent-semantic-enrichment': 'false',
+        'x-dkg-local-agent-wake-url': 'http://127.0.0.1:9301/semantic-enrichment/wake',
+        'x-dkg-local-agent-wake-auth': 'bridge-token',
+      },
+      socket: { remoteAddress: '127.0.0.1' },
+    } as any;
+
+    expect(requestAdvertisesLocalAgentSemanticEnrichment(spoofedReq, 'openclaw', {
+      bridgeAuthToken: 'bridge-token',
+      requireBridgeAuth: true,
+    })).toBeUndefined();
+    expect(requestLocalAgentWakeTransport(spoofedReq, 'openclaw', {
+      bridgeAuthToken: 'bridge-token',
+      requireBridgeAuth: true,
+    })).toBeUndefined();
+
+    const trustedReq = {
+      headers: {
+        ...spoofedReq.headers,
+        'x-dkg-bridge-token': 'bridge-token',
+      },
+      socket: { remoteAddress: '127.0.0.1' },
+    } as any;
+
+    expect(requestAdvertisesLocalAgentSemanticEnrichment(trustedReq, 'openclaw', {
+      bridgeAuthToken: 'bridge-token',
+      requireBridgeAuth: true,
+    })).toBe(false);
+    expect(requestLocalAgentWakeTransport(trustedReq, 'openclaw', {
+      bridgeAuthToken: 'bridge-token',
+      requireBridgeAuth: true,
+    })).toEqual({
+      wakeUrl: 'http://127.0.0.1:9301/semantic-enrichment/wake',
+      wakeAuth: 'bridge-token',
+    });
+  });
+
   it('restricts semantic worker routes to loopback OpenClaw integration requests', () => {
     const enabledConfig = makeConfig({
       localAgentIntegrations: {
@@ -1308,10 +1350,14 @@ describe('best-effort semantic enqueue helper', () => {
     expect(dashDb.deadLetterActiveSemanticEnrichmentEvents).not.toHaveBeenCalled();
   });
 
-  it('leaves queued semantic events pending during a transient OpenClaw runtime downgrade', () => {
+  it('dead-letters queued semantic events when OpenClaw semantic capability is downgraded', () => {
     const extractionStatus = new Map<string, any>();
     const dashDb = {
-      deadLetterActiveSemanticEnrichmentEvents: vi.fn().mockReturnValue([]),
+      deadLetterActiveSemanticEnrichmentEvents: vi.fn().mockReturnValue([{
+        id: 'evt-downgraded',
+        payload_json: JSON.stringify({ kind: 'chat_turn' }),
+        status: 'dead_letter',
+      }]),
     };
 
     const count = reconcileOpenClawSemanticAvailability(
@@ -1334,8 +1380,8 @@ describe('best-effort semantic enqueue helper', () => {
       dashDb as any,
     );
 
-    expect(count).toBe(0);
-    expect(dashDb.deadLetterActiveSemanticEnrichmentEvents).not.toHaveBeenCalled();
+    expect(count).toBe(1);
+    expect(dashDb.deadLetterActiveSemanticEnrichmentEvents).toHaveBeenCalledOnce();
   });
 
   it('saves config before reconciling OpenClaw semantic availability', async () => {

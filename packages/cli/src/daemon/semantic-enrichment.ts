@@ -185,11 +185,31 @@ export function requestTargetsLocalAgentIntegration(
   return !!requestedIntegrationId && headerIntegrationId === requestedIntegrationId;
 }
 
+export function requestHasTrustedLocalAgentBridgeAuth(
+  req: IncomingMessage,
+  integrationId: string,
+  bridgeAuthToken: string | undefined,
+): boolean {
+  if (!requestTargetsLocalAgentIntegration(req, integrationId)) return false;
+  const expectedToken = bridgeAuthToken?.trim();
+  if (!expectedToken) return false;
+  if (!isLoopbackClientIp(req.socket.remoteAddress ?? '')) return false;
+  const bridgeHeader = readSingleHeaderValue(req.headers['x-dkg-bridge-token'])?.trim();
+  return bridgeHeader === expectedToken;
+}
+
 export function requestLocalAgentWakeTransport(
   req: IncomingMessage,
   integrationId: string,
+  opts: { bridgeAuthToken?: string; requireBridgeAuth?: boolean } = {},
 ): LocalAgentIntegrationWakeTransportHint | undefined {
   if (!requestTargetsLocalAgentIntegration(req, integrationId)) return undefined;
+  if (
+    opts.requireBridgeAuth
+    && !requestHasTrustedLocalAgentBridgeAuth(req, integrationId, opts.bridgeAuthToken)
+  ) {
+    return undefined;
+  }
   const wakeUrl = readSingleHeaderValue(req.headers['x-dkg-local-agent-wake-url'])?.trim();
   if (!wakeUrl || !isSafeBridgeTokenWakeUrl(wakeUrl)) return undefined;
   const wakeAuthHeader = readSingleHeaderValue(req.headers['x-dkg-local-agent-wake-auth'])?.trim();
@@ -223,8 +243,15 @@ function parseBooleanHeaderValue(value: string | undefined): boolean | undefined
 export function requestAdvertisesLocalAgentSemanticEnrichment(
   req: IncomingMessage,
   integrationId: string,
+  opts: { bridgeAuthToken?: string; requireBridgeAuth?: boolean } = {},
 ): boolean | undefined {
   if (!requestTargetsLocalAgentIntegration(req, integrationId)) return undefined;
+  if (
+    opts.requireBridgeAuth
+    && !requestHasTrustedLocalAgentBridgeAuth(req, integrationId, opts.bridgeAuthToken)
+  ) {
+    return undefined;
+  }
   return parseBooleanHeaderValue(
     readSingleHeaderValue(req.headers['x-dkg-local-agent-semantic-enrichment']),
   );
@@ -266,8 +293,8 @@ export function reconcileOpenClawSemanticAvailability(
 ): number {
   const stored = getStoredLocalAgentIntegrations(config).openclaw;
   if (!stored) return 0;
-  if (stored.enabled === true) return 0;
-  if (!isOpenClawExplicitlyDisconnected(stored)) return 0;
+  if (stored.enabled === true && stored.capabilities?.semanticEnrichment !== false) return 0;
+  if (stored.enabled !== true && !isOpenClawExplicitlyDisconnected(stored)) return 0;
   return deadLetterUnavailableOpenClawSemanticEvents(extractionStatus, dashDb, reason);
 }
 
