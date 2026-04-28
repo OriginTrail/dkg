@@ -1358,6 +1358,18 @@ decisions: []
     expect(chain.createOnChainContextGraphCalls[2]?.publishAuthority).toBe(ethers.getAddress(chain.signerAddress));
     expect(chain.createOnChainContextGraphCalls[2]?.participantAgents).toEqual([]);
 
+    // `isContextGraphCurated` must mirror the EVM publish-policy
+    // mapping above — HTTP routes (see
+    // packages/cli/src/daemon/routes/memory.ts) rely on it to decide
+    // whether to preflight a curator-only owner gate before
+    // `publishFromSharedMemory`. If this ever drifts from the policy
+    // the chain adapter actually enforces, non-curator publishes to
+    // open CGs will be rejected with 403 even though the contract
+    // accepts them (Codex PR#299 review finding).
+    expect(await agent.isContextGraphCurated('register-open-policy')).toBe(false);
+    expect(await agent.isContextGraphCurated('register-curated-policy')).toBe(true);
+    expect(await agent.isContextGraphCurated('register-agent-allowlist-policy')).toBe(true);
+
     await agent.stop().catch(() => {});
   });
 

@@ -445,6 +445,53 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
           '"subGraphName" and "publishContextGraphId" cannot be used together',
       });
     }
+
+    // Policy-aware preflight (spec §2.2):
+    //
+    // - Curated CGs (on-chain `publishPolicy = EVM_PUBLISH_CURATED`,
+    //   which `registerContextGraph` sets for private CGs or any CG
+    //   with an allowlist): only the registered curator may VM-publish.
+    //   Without this gate, non-curator callers hit the on-chain
+    //   `isAuthorizedPublisher` revert deep in the stack and the HTTP
+    //   surface returns 200 with `status=tentative` — masking the
+    //   authorization failure and leaving phantom tentative metadata
+    //   on disk.
+    //
+    // - Open CGs (on-chain `publishPolicy = EVM_PUBLISH_OPEN`): any
+    //   non-zero collaborator may publish per the contract; we must
+    //   NOT gate on curator identity here or we'd reject legitimate
+    //   participant publishes with 403.
+    //
+    // Preflight applies only to the curated branch; open CGs fall
+    // through to the publisher and the chain adapter decides.
+    //
+    // Known scope gap (Codex PR#299 review, tracked separately):
+    // `assertContextGraphOwner` compares against the locally stored
+    // `dkg:curator` wallet DID. The on-chain
+    // `ContextGraphs.isAuthorizedPublisher` is richer — for PCA
+    // curators it live-resolves the NFT owner and any
+    // `agentToAccountId`-registered agents. This preflight therefore
+    // over-rejects PCA-delegated agents and post-transfer NFT holders
+    // whose wallets don't match the stale local curator metadata. The
+    // same shape of check is already used by share, invite, rename,
+    // and manifest-publish routes — migrating them all to a
+    // chain-authoritative preflight is a separate follow-up. Until
+    // then, those callers can work around this by publishing from the
+    // wallet recorded as the CG's local curator.
+    if (await agent.isContextGraphCurated(paranetId)) {
+      try {
+        await agent.assertContextGraphOwner(
+          paranetId,
+          requestAgentAddress,
+          "publish shared memory to Verified Memory",
+        );
+      } catch (authErr: unknown) {
+        const msg = authErr instanceof Error ? authErr.message : String(authErr);
+        const code = /has no registered owner/.test(msg) ? 400 : 403;
+        return jsonResponse(res, code, { error: msg });
+      }
+    }
+
     const ctx = createOperationContext("publishFromSWM");
     tracker.start(ctx, {
       contextGraphId: paranetId,
