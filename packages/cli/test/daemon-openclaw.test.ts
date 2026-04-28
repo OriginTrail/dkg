@@ -346,6 +346,34 @@ describe('local agent semantic wake helper', () => {
     ).resolves.toEqual({ status: 'skipped', reason: 'wake_unavailable' });
   });
 
+  it('uses a safe request-scoped wake transport before the integration record is stored', async () => {
+    const fetchSpy = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }));
+
+    const result = await notifyLocalAgentIntegrationWake(
+      makeConfig(),
+      'openclaw',
+      wakePayload,
+      'bridge-token',
+      fetchSpy as any,
+      {
+        wakeUrl: 'http://127.0.0.1:9301/semantic-enrichment/wake',
+        wakeAuth: 'bridge-token',
+      },
+    );
+
+    expect(result).toEqual({ status: 'delivered' });
+    expect(fetchSpy).toHaveBeenCalledWith(
+      'http://127.0.0.1:9301/semantic-enrichment/wake',
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({
+          'Content-Type': 'application/json',
+          'x-dkg-bridge-token': 'bridge-token',
+        }),
+      }),
+    );
+  });
+
   it('applies bridge-token auth when the wake transport requires it', async () => {
     const fetchSpy = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }));
 

@@ -321,6 +321,12 @@ describe('DkgDaemonClient', () => {
   it('importAssertionFile hits /api/assertion/:name/import-file as POST multipart with camelCase form fields', async () => {
     fetchResponses.push(new Response(JSON.stringify({ assertionUri: 'urn:x' }), { status: 200 }));
 
+    client.setLocalAgentRequestContext({
+      integrationId: 'openclaw',
+      semanticEnrichmentSupported: false,
+      wakeUrl: 'http://127.0.0.1:9301/semantic-enrichment/wake',
+      wakeAuth: 'bridge-token',
+    });
     const buf = new Uint8Array([1, 2, 3, 4]);
     await client.importAssertionFile('ctx', 'notes', buf, 'doc.md', {
       contentType: 'text/markdown',
@@ -331,6 +337,14 @@ describe('DkgDaemonClient', () => {
     const [url, opts] = fetchCalls[0];
     expect(url).toBe('http://localhost:9200/api/assertion/notes/import-file');
     expect(opts?.method).toBe('POST');
+    expect(opts?.headers).toMatchObject({
+      Accept: 'application/json',
+      'X-DKG-Local-Agent-Integration': 'openclaw',
+      'X-DKG-Local-Agent-Semantic-Enrichment': 'false',
+      'X-DKG-Local-Agent-Wake-Url': 'http://127.0.0.1:9301/semantic-enrichment/wake',
+      'X-DKG-Local-Agent-Wake-Auth': 'bridge-token',
+    });
+    expect(opts?.headers).not.toHaveProperty('Content-Type');
     // `body` must be a FormData — Node's fetch sets the multipart boundary automatically.
     expect(opts?.body).toBeInstanceOf(FormData);
     const form = opts?.body as FormData;

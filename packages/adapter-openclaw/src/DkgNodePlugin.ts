@@ -250,9 +250,14 @@ export class DkgNodePlugin {
       : this.semanticEnrichmentAvailabilityHint === false
         ? false
         : undefined;
+    const bridgePort = this.channelPlugin.bridgePort;
+    const wakeUrl = bridgePort > 0
+      ? `http://127.0.0.1:${bridgePort}/semantic-enrichment/wake`
+      : undefined;
     this.client.setLocalAgentRequestContext({
       integrationId: 'openclaw',
       ...(semanticEnrichmentSupported !== undefined ? { semanticEnrichmentSupported } : {}),
+      ...(wakeUrl ? { wakeUrl, wakeAuth: 'bridge-token' as const } : {}),
     });
   }
 

@@ -331,6 +331,7 @@ import {
   getHydratedExtractionStatusRecord,
   queueLocalAgentSemanticEnrichmentBestEffort,
   requestAdvertisesLocalAgentSemanticEnrichment,
+  requestLocalAgentWakeTransport,
   requestTargetsLocalAgentIntegration,
   setPersistedExtractionStatusRecord,
   updateExtractionStatusSemanticDescriptor,
@@ -1558,6 +1559,7 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
         skipWhenUnavailable: true,
         liveSemanticEnrichmentSupported: requestAdvertisesLocalAgentSemanticEnrichment(req, 'openclaw'),
         requestFromIntegration: requestTargetsLocalAgentIntegration(req, 'openclaw'),
+        requestWakeTransport: requestLocalAgentWakeTransport(req, 'openclaw'),
         logLabel: `file import semantic event for ${assertionUri}`,
       });
       if (semanticEnrichment) {

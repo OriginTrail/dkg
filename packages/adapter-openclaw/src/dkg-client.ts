@@ -20,6 +20,8 @@ export interface DkgClientOptions {
 interface LocalAgentRequestContext {
   integrationId: string;
   semanticEnrichmentSupported?: boolean;
+  wakeUrl?: string;
+  wakeAuth?: 'bridge-token' | 'gateway' | 'none';
 }
 
 export interface OpenClawAttachmentRef {
@@ -183,11 +185,19 @@ export class DkgDaemonClient {
     const semanticEnrichmentSupported = typeof context?.semanticEnrichmentSupported === 'boolean'
       ? context.semanticEnrichmentSupported
       : undefined;
+    const wakeUrl = typeof context?.wakeUrl === 'string' && context.wakeUrl.trim()
+      ? context.wakeUrl.trim()
+      : undefined;
+    const wakeAuth = context?.wakeAuth === 'bridge-token' || context?.wakeAuth === 'gateway' || context?.wakeAuth === 'none'
+      ? context.wakeAuth
+      : undefined;
     this.localAgentRequestContext = {
       integrationId,
       ...(typeof semanticEnrichmentSupported === 'boolean'
         ? { semanticEnrichmentSupported }
         : {}),
+      ...(wakeUrl ? { wakeUrl } : {}),
+      ...(wakeAuth ? { wakeAuth } : {}),
     };
   }
 
@@ -427,7 +437,7 @@ export class DkgDaemonClient {
       `${this.baseUrl}/api/assertion/${encodeURIComponent(name)}/import-file`,
       {
         method: 'POST',
-        headers: { Accept: 'application/json', ...this.authHeaders() },
+        headers: { Accept: 'application/json', ...this.authHeaders(), ...this.localAgentHeaders() },
         body: form,
         signal: AbortSignal.timeout(this.timeoutMs),
       },
@@ -933,12 +943,16 @@ export class DkgDaemonClient {
     const integrationId = this.localAgentRequestContext?.integrationId?.trim();
     if (!integrationId) return {};
     const semanticEnrichmentSupported = this.localAgentRequestContext?.semanticEnrichmentSupported;
+    const wakeUrl = this.localAgentRequestContext?.wakeUrl?.trim();
+    const wakeAuth = this.localAgentRequestContext?.wakeAuth;
     return {
       'X-DKG-Local-Agent-Integration': integrationId,
       ...(this.apiToken ? { 'X-DKG-Bridge-Token': this.apiToken } : {}),
       ...(typeof semanticEnrichmentSupported === 'boolean'
         ? { 'X-DKG-Local-Agent-Semantic-Enrichment': semanticEnrichmentSupported ? 'true' : 'false' }
         : {}),
+      ...(wakeUrl ? { 'X-DKG-Local-Agent-Wake-Url': wakeUrl } : {}),
+      ...(wakeAuth ? { 'X-DKG-Local-Agent-Wake-Auth': wakeAuth } : {}),
     };
   }
 }

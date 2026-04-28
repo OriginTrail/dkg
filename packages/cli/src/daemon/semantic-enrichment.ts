@@ -71,6 +71,11 @@ export interface LocalAgentIntegrationWakeRequest {
   eventId: string;
 }
 
+export interface LocalAgentIntegrationWakeTransportHint {
+  wakeUrl?: string;
+  wakeAuth?: 'bridge-token' | 'gateway' | 'none';
+}
+
 export type LocalAgentIntegrationWakeResult =
   | { status: 'delivered' }
   | { status: 'skipped'; reason: 'integration_disabled' | 'wake_unavailable' }
@@ -82,15 +87,22 @@ export async function notifyLocalAgentIntegrationWake(
   wake: LocalAgentIntegrationWakeRequest,
   bridgeAuthToken?: string,
   fetchImpl: typeof globalThis.fetch = globalThis.fetch,
+  fallbackTransport?: LocalAgentIntegrationWakeTransportHint,
 ): Promise<LocalAgentIntegrationWakeResult> {
-  const integration = getLocalAgentIntegration(config, integrationId);
-  if (!integration?.enabled) return { status: 'skipped', reason: 'integration_disabled' };
+  const normalizedId = normalizeIntegrationId(integrationId);
+  const stored = getStoredLocalAgentIntegrations(config)[normalizedId];
+  const integration = stored ? getLocalAgentIntegration(config, normalizedId) : null;
+  if (stored && integration?.enabled !== true) return { status: 'skipped', reason: 'integration_disabled' };
+  if (!stored && !fallbackTransport?.wakeUrl) return { status: 'skipped', reason: 'integration_disabled' };
 
-  const wakeUrl = integration.transport?.wakeUrl?.trim();
+  const wakeTransport = integration?.transport?.wakeUrl?.trim()
+    ? integration.transport
+    : fallbackTransport;
+  const wakeUrl = wakeTransport?.wakeUrl?.trim();
   if (!wakeUrl) return { status: 'skipped', reason: 'wake_unavailable' };
   if (!isSafeBridgeTokenWakeUrl(wakeUrl)) return { status: 'skipped', reason: 'wake_unavailable' };
 
-  const wakeAuth = integration.transport?.wakeAuth ?? inferWakeAuthFromUrl(wakeUrl);
+  const wakeAuth = wakeTransport?.wakeAuth ?? inferWakeAuthFromUrl(wakeUrl);
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (wakeAuth === 'gateway') {
     // The daemon does not currently own OpenClaw gateway credentials. Treat
@@ -171,6 +183,20 @@ export function requestTargetsLocalAgentIntegration(
     readSingleHeaderValue(req.headers['x-dkg-local-agent-integration']) ?? '',
   );
   return !!requestedIntegrationId && headerIntegrationId === requestedIntegrationId;
+}
+
+export function requestLocalAgentWakeTransport(
+  req: IncomingMessage,
+  integrationId: string,
+): LocalAgentIntegrationWakeTransportHint | undefined {
+  if (!requestTargetsLocalAgentIntegration(req, integrationId)) return undefined;
+  const wakeUrl = readSingleHeaderValue(req.headers['x-dkg-local-agent-wake-url'])?.trim();
+  if (!wakeUrl || !isSafeBridgeTokenWakeUrl(wakeUrl)) return undefined;
+  const wakeAuthHeader = readSingleHeaderValue(req.headers['x-dkg-local-agent-wake-auth'])?.trim();
+  const wakeAuth = wakeAuthHeader === 'bridge-token' || wakeAuthHeader === 'none'
+    ? wakeAuthHeader
+    : inferWakeAuthFromUrl(wakeUrl);
+  return { wakeUrl, wakeAuth };
 }
 
 function readSingleHeaderValue(value: string | string[] | undefined): string | undefined {
@@ -278,6 +304,7 @@ export function queueLocalAgentSemanticEnrichmentBestEffort(args: {
   skipWhenUnavailable?: boolean;
   liveSemanticEnrichmentSupported?: boolean;
   requestFromIntegration?: boolean;
+  requestWakeTransport?: LocalAgentIntegrationWakeTransportHint;
   logLabel: string;
   semanticTripleCount?: number;
 }): SemanticEnrichmentDescriptor | undefined {
@@ -306,6 +333,8 @@ export function queueLocalAgentSemanticEnrichmentBestEffort(args: {
         eventId: descriptor.eventId,
       },
       args.bridgeAuthToken,
+      globalThis.fetch,
+      args.requestWakeTransport,
     ).then((result) => {
       if (result.status === 'failed') {
         console.warn(
