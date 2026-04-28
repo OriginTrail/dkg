@@ -515,6 +515,8 @@ export async function runDaemonInner(
       })()
     : undefined;
 
+  const dashDb = new DashboardDB({ dataDir: dkgDir() });
+
   const agent = await DKGAgent.create({
     name: config.name,
     framework: "DKG",
@@ -537,6 +539,53 @@ export async function runDaemonInner(
       chainId: chainBase.chainId,
     } : undefined,
     sharedMemoryTtlMs: resolveSharedMemoryTtlMs(config),
+    contextGraphSubscriptionStore: {
+      loadAll: async () => dashDb.listContextGraphSubscriptions().map((row) => ({
+        id: row.context_graph_id,
+        name: row.name ?? undefined,
+        subscribed: row.subscribed === 1,
+        synced: row.synced === 1,
+        sharedMemorySynced: row.shared_memory_synced == null ? undefined : row.shared_memory_synced === 1,
+        metaSynced: row.meta_synced == null ? undefined : row.meta_synced === 1,
+        onChainId: row.on_chain_id ?? undefined,
+        syncScoped: row.sync_scoped === 1,
+      })),
+      save: async (record) => {
+        dashDb.upsertContextGraphSubscription({
+          context_graph_id: record.id,
+          name: record.name ?? null,
+          subscribed: record.subscribed ? 1 : 0,
+          synced: record.synced ? 1 : 0,
+          shared_memory_synced: record.sharedMemorySynced == null ? null : record.sharedMemorySynced ? 1 : 0,
+          meta_synced: record.metaSynced == null ? null : record.metaSynced ? 1 : 0,
+          on_chain_id: record.onChainId ?? null,
+          sync_scoped: record.syncScoped ? 1 : 0,
+          updated_at: Date.now(),
+        });
+      },
+      delete: async (contextGraphId) => {
+        dashDb.deleteContextGraphSubscription(contextGraphId);
+      },
+    },
+    contextGraphMembershipStore: {
+      upsert: async (record) => {
+        dashDb.upsertContextGraphMember({
+          context_graph_id: record.contextGraphId,
+          principal_type: record.principalType,
+          principal_id: record.principalId,
+          role: record.role ?? null,
+          status: record.status,
+          source: record.source ?? null,
+          display_name: record.displayName ?? null,
+          metadata: record.metadata ? JSON.stringify(record.metadata) : null,
+          first_seen_at: record.firstSeenAt ?? record.updatedAt,
+          updated_at: record.updatedAt,
+        });
+      },
+      delete: async (contextGraphId, principalType, principalId) => {
+        dashDb.deleteContextGraphMember(contextGraphId, principalType, principalId);
+      },
+    },
   });
 
   let publisherRuntime: PublisherRuntime | null = null;
@@ -780,7 +829,6 @@ export async function runDaemonInner(
 
   // --- Dashboard DB + Metrics ---
 
-  const dashDb = new DashboardDB({ dataDir: dkgDir() });
   chatDb = dashDb;
   log("Dashboard DB initialized at " + join(dkgDir(), "node-ui.db"));
 

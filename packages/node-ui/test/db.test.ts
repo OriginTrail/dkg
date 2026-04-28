@@ -362,3 +362,94 @@ describe('DashboardDB — schema idempotency', () => {
     db = new DashboardDB({ dataDir: dir });
   });
 });
+
+describe('DashboardDB — context graph subscriptions', () => {
+  it('persists shared-memory sync state across upserts', () => {
+    db.upsertContextGraphSubscription({
+      context_graph_id: 'project-a',
+      name: 'Project A',
+      subscribed: 1,
+      synced: 1,
+      shared_memory_synced: 0,
+      meta_synced: 1,
+      on_chain_id: '0xabc',
+      sync_scoped: 1,
+      updated_at: 1000,
+    });
+
+    expect(db.listContextGraphSubscriptions()).toMatchObject([{
+      context_graph_id: 'project-a',
+      shared_memory_synced: 0,
+      meta_synced: 1,
+      sync_scoped: 1,
+    }]);
+
+    db.upsertContextGraphSubscription({
+      context_graph_id: 'project-a',
+      name: 'Project A',
+      subscribed: 1,
+      synced: 1,
+      shared_memory_synced: 1,
+      meta_synced: 1,
+      on_chain_id: '0xabc',
+      sync_scoped: 1,
+      updated_at: 2000,
+    });
+
+    expect(db.listContextGraphSubscriptions()).toMatchObject([{
+      context_graph_id: 'project-a',
+      shared_memory_synced: 1,
+      updated_at: 2000,
+    }]);
+  });
+});
+
+describe('DashboardDB — context graph memberships', () => {
+  it('upserts, lists, and deletes node/agent membership rows', () => {
+    db.upsertContextGraphMember({
+      context_graph_id: 'project-a',
+      principal_type: 'node',
+      principal_id: 'peer-1',
+      role: 'subscriber',
+      status: 'active',
+      source: 'subscription',
+      display_name: 'Node 1',
+      metadata: JSON.stringify({ synced: false }),
+      first_seen_at: 1000,
+      updated_at: 1000,
+    });
+    db.upsertContextGraphMember({
+      context_graph_id: 'project-a',
+      principal_type: 'agent',
+      principal_id: '0x1111111111111111111111111111111111111111',
+      role: 'participant',
+      status: 'active',
+      source: 'allowed-agent',
+      updated_at: 1100,
+    });
+
+    expect(db.listContextGraphMembers('project-a')).toHaveLength(2);
+
+    db.upsertContextGraphMember({
+      context_graph_id: 'project-a',
+      principal_type: 'node',
+      principal_id: 'peer-1',
+      role: 'curator',
+      status: 'active',
+      source: 'local-create',
+      first_seen_at: 2000,
+      updated_at: 2000,
+    });
+
+    const node = db.listContextGraphMembers('project-a').find((m) => m.principal_type === 'node');
+    expect(node?.role).toBe('curator');
+    expect(node?.source).toBe('local-create');
+    expect(node?.first_seen_at).toBe(1000);
+    expect(node?.updated_at).toBe(2000);
+
+    db.deleteContextGraphMember('project-a', 'agent', '0x1111111111111111111111111111111111111111');
+    const remaining = db.listContextGraphMembers('project-a');
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0].principal_id).toBe('peer-1');
+  });
+});
