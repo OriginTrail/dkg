@@ -238,41 +238,43 @@ export class ChatTurnWriter {
     } catch (err) {
       this.logger.warn?.("[ChatTurnWriter.setStateDir] Failed to merge destination file; proceeding with current state", { err });
     }
-    const oldWatermarkFilePath = this.watermarkFilePath;
-    this.stateDir = newStateDir;
-    this.watermarkFilePath = newWatermarkFilePath;
+    // T27 — Write to the NEW path FIRST; only swap internal state on
+    // confirmed success. Pre-fix the swap happened pre-write, so a
+    // failed write left `this.stateDir` / `this.watermarkFilePath`
+    // already pointing at the (broken) new location. The next
+    // `setStateDir(newStateDir)` retry would short-circuit on the
+    // same-path guard and never re-attempt the write — the writer
+    // stayed permanently pinned to a path with no valid file.
     let wrote = false;
     try {
       const newDir = path.dirname(newWatermarkFilePath);
       if (!fs.existsSync(newDir)) fs.mkdirSync(newDir, { recursive: true });
-      wrote = this.writeWatermarkFile();
+      wrote = this.writeWatermarkFile(newWatermarkFilePath);
     } catch (err) {
       // T23 — Surface BOTH mkdirSync failures (ENOTDIR / ENOENT on
       // an unwritable parent) AND writeWatermarkFile failures
-      // through the same `wrote` boolean so the old-file delete
-      // below is gated on confirmed success at the new location.
+      // through the same `wrote` boolean.
       this.logger.error?.(
         "[ChatTurnWriter.setStateDir] Failed to write watermark file at new path",
         { err, newWatermarkFilePath },
       );
       wrote = false;
     }
-    // T23 — Only remove the OLD file if the write at the NEW path
-    // succeeded. If the new location is unwritable (permissions,
-    // full disk, ENOSPC), `writeWatermarkFile` swallows the error
-    // and returns false — deleting the old file in that case would
-    // leave NO valid watermark anywhere, and the next restart would
-    // backfill every previously-persisted turn as new (daemon
-    // duplicate writes). On write failure the old file is preserved
-    // and the writer's internal `watermarkFilePath` already points
-    // at the new (failed) location, so future writes also try the
-    // new path. Operators see the logged error and can intervene.
     if (wrote) {
+      // Only NOW commit the swap. Subsequent normal writes via
+      // `writeWatermarkFile()` (no explicit target) will hit the new
+      // path. Best-effort delete the old file as the last step.
+      const oldWatermarkFilePath = this.watermarkFilePath;
+      this.stateDir = newStateDir;
+      this.watermarkFilePath = newWatermarkFilePath;
       try { fs.unlinkSync(oldWatermarkFilePath); } catch { /* best effort */ }
     } else {
+      // T23/T27 — Internal state stays at the OLD path so a future
+      // setStateDir(newStateDir) retry re-attempts the write. The
+      // old file is also preserved as a recovery source.
       this.logger.warn?.(
-        "[ChatTurnWriter.setStateDir] Skipping old-file delete because the write at the new path failed; preserving old file as recovery source",
-        { oldWatermarkFilePath, newWatermarkFilePath },
+        "[ChatTurnWriter.setStateDir] Migration to new path failed; preserving old path and file. A future register() with the same target will retry.",
+        { oldStateDir: this.stateDir, attemptedNewStateDir: newStateDir },
       );
     }
   }
@@ -1051,7 +1053,16 @@ export class ChatTurnWriter {
     let pairIndex = 0;
     for (const msg of messages) {
       if (msg.role === "user") {
-        pendingUsers.push(this.extractText(msg.content));
+        // T28 — Skip image/attachment-only user messages whose
+        // `extractText()` returns "" (the multi-modal content array
+        // contained no `type === "text"` parts). W4b's
+        // `onMessageReceived` already drops empty inbound text via
+        // R15.2 to avoid persisting blank-user turns; W4a must mirror
+        // that semantic in `computeDelta` or it produces an
+        // assistant-only pair (`{ user: "", assistant: reply }`)
+        // for any image-only user message followed by a reply.
+        const userText = this.extractText(msg.content);
+        if (userText) pendingUsers.push(userText);
       } else if (msg.role === "assistant") {
         const text = this.extractText(msg.content);
         const hasToolCalls = Array.isArray(msg.toolCalls) ? msg.toolCalls.length > 0
@@ -1447,7 +1458,7 @@ export class ChatTurnWriter {
     }
   }
 
-  private writeWatermarkFile(): boolean {
+  private writeWatermarkFile(targetPath: string = this.watermarkFilePath): boolean {
     try {
       // T17 — Emit the new `{ w: <watermark>, b: <w4bCount> }` shape so
       // the W4b session count is preserved across process restarts.
@@ -1455,6 +1466,13 @@ export class ChatTurnWriter {
       // can have a watermark without ever incrementing w4bCount (and
       // vice versa). Reader handles both legacy (number) and current
       // (object) shapes — see `initFromFile`.
+      // T27 — `targetPath` defaults to the current watermarkFilePath
+      // for normal writes, but `setStateDir` passes an explicit
+      // destination so it can write-then-swap (instead of swap-then-
+      // write). Without the explicit override, a failed migration
+      // would leave the writer's internal state pointing at the new
+      // path even though no valid file exists there, and the next
+      // setStateDir(newStateDir) would short-circuit on same-path.
       const allKeys = new Set<string>([
         ...this.cachedWatermarks.keys(),
         ...this.w4bSessionCounts.keys(),
@@ -1466,9 +1484,9 @@ export class ChatTurnWriter {
           b: this.w4bSessionCounts.get(key) ?? 0,
         };
       }
-      const tmpPath = `${this.watermarkFilePath}.tmp`;
+      const tmpPath = `${targetPath}.tmp`;
       fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2), "utf-8");
-      fs.renameSync(tmpPath, this.watermarkFilePath);
+      fs.renameSync(tmpPath, targetPath);
       // T23 — Return true so callers (notably `setStateDir`) can gate
       // destructive follow-up actions like deleting the OLD file on
       // a confirmed-successful write at the new path. Without this,

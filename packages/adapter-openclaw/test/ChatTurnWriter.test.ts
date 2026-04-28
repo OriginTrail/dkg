@@ -1976,6 +1976,91 @@ describe("ChatTurnWriter", () => {
     try { fs.rmSync(newStateDir, { recursive: true, force: true }); } catch { /* best effort */ }
   });
 
+  it("T27 — setStateDir leaves stateDir/watermarkFilePath unchanged when the new-path write fails (retry-safe)", async () => {
+    // Regression for T27: pre-fix `setStateDir` swapped internal
+    // `stateDir` / `watermarkFilePath` BEFORE attempting the write.
+    // A failed write left the writer pointing at the broken new path,
+    // and a retry of `setStateDir(newStateDir)` short-circuited under
+    // the same-path guard — the migration never re-attempted.
+    const dkw = writer as any;
+    dkw.cachedWatermarks.set("openclaw:tg:::sk", 5);
+    dkw.writeWatermarkFile();
+    const oldStateDir = dkw.stateDir;
+    const oldWatermarkFilePath = dkw.watermarkFilePath;
+
+    // Force write failure via parent-is-a-file ENOTDIR.
+    const blockingFile = path.join(stateDir, "blocker27.txt");
+    fs.writeFileSync(blockingFile, "blocker");
+    const badStateDir = path.join(blockingFile, "nested-not-a-dir");
+
+    await writer.setStateDir(badStateDir);
+
+    // Internal state MUST still point at the OLD path so a follow-up
+    // setStateDir(badStateDir) (or any other target) re-attempts
+    // instead of short-circuiting on the same-path guard.
+    expect(dkw.stateDir).toBe(oldStateDir);
+    expect(dkw.watermarkFilePath).toBe(oldWatermarkFilePath);
+
+    // A retry to a VALID destination must now succeed normally —
+    // proves the failed migration didn't poison the writer.
+    const goodStateDir = fs.mkdtempSync(path.join(os.tmpdir(), "chatturnwriter-t27-good-"));
+    try {
+      await writer.setStateDir(goodStateDir);
+      expect(dkw.stateDir).toBe(goodStateDir);
+      const goodFile = path.join(goodStateDir, "dkg-adapter", "chat-turn-watermarks.json");
+      expect(fs.existsSync(goodFile)).toBe(true);
+    } finally {
+      try { fs.rmSync(goodStateDir, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+  });
+
+  it("T28 — computeDelta skips image-only user messages (no blank-user assistant pair)", async () => {
+    // Regression for T28: pre-fix `computeDelta` queued every user
+    // message into `pendingUsers`, including ones whose multi-modal
+    // content array had no `type === "text"` parts (extractText
+    // returns ""). The next assistant reply was then persisted as
+    // `{ user: "", assistant: reply }` — a blank-user turn.
+    // Post-fix W4a mirrors W4b's R15.2 invariant: image-only user
+    // messages are skipped in `pendingUsers`, so an immediately-
+    // following reply pairs only with the most recent text user
+    // message (or bails per R22.1 if there is none).
+    const event: AgentEndContext = {
+      sessionId: "test",
+      messages: [
+        { role: "user", content: "real text question" },
+        { role: "user", content: [{ type: "image", text: undefined } as any] }, // image-only
+        { role: "assistant", content: "reply" },
+      ],
+    };
+    writer.onAgentEnd(event, { channelId: "tg", sessionKey: "sk" });
+    await flushMicrotasks();
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    const call = mockClient.storeChatTurn.mock.calls[0];
+    // user side must be the text question — NOT an empty string from
+    // the image-only message blowing away the join, NOT a "real text
+    // question\n" with a trailing blank from the join with "".
+    expect(call[1]).toBe("real text question");
+    expect(call[2]).toBe("reply");
+  });
+
+  it("T28 — image-only user followed by another text user collapses ONLY the text users (consistent with W4b R15.2)", async () => {
+    // Edge case: [text-u1, image-u2, text-u3, reply]. The image
+    // contributes nothing; the join is "u1\nu3", not "u1\n\nu3".
+    const event: AgentEndContext = {
+      sessionId: "test",
+      messages: [
+        { role: "user", content: "u1" },
+        { role: "user", content: [{ type: "image", text: undefined } as any] },
+        { role: "user", content: "u3" },
+        { role: "assistant", content: "reply" },
+      ],
+    };
+    writer.onAgentEnd(event, { channelId: "tg", sessionKey: "sk" });
+    await flushMicrotasks();
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("u1\nu3");
+  });
+
   it("T23 — setStateDir does NOT delete the old file when the write at the new path fails", async () => {
     // Regression for T23: pre-fix, `setStateDir` unconditionally
     // unlinked the OLD file after calling `writeWatermarkFile()`,
