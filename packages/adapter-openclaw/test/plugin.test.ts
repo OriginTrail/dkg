@@ -3283,15 +3283,18 @@ describe('DkgNodePlugin', () => {
     expect(typedHookEvents).toContain('agent_end');
   });
 
-  it('R14.3 / T52 — setup-only registration installs ONLY session_end cleanup, not the runtime hooks', () => {
-    // R14.3: setup-only metadata loads must NOT wire prompt-injection /
-    // turn-persistence handlers (`before_prompt_build`, `agent_end`,
+  it('R14.3 / T52 / T58 — setup-only registers only session_end (no channel server, no typed/internal hooks)', () => {
+    // R14.3: setup-only must NOT wire prompt-injection / turn-
+    // persistence handlers (`before_prompt_build`, `agent_end`,
     // `message:received`, `message:sent`).
     //
-    // T52 superset: `session_end` legacy cleanup MUST still install,
-    // because `registerIntegrationModules` brings up the channel HTTP
-    // server unconditionally when `channel.enabled`. Without
-    // `session_end`, gateway shutdown leaks the bound port.
+    // T52: `session_end` legacy cleanup STILL installs so that any
+    // future runtime upgrade has a deterministic shutdown path.
+    //
+    // T58: `registerIntegrationModules` no longer brings up the
+    // channel HTTP server in setup-only — the documented
+    // metadata-only contract is honored. Channel registration is
+    // deferred to the runtime-enabled re-entry.
     const plugin = new DkgNodePlugin({
       daemonUrl: 'http://localhost:9200',
       channel: { enabled: true },
@@ -3308,14 +3311,61 @@ describe('DkgNodePlugin', () => {
       logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
     };
     plugin.register(mockApi);
-    // T52 — Surface MUST exist now (was null pre-fix). It owns the
-    // session_end cleanup that tears down the channel server.
+    // T52 — Surface MUST exist (session_end is the cleanup anchor).
     expect((plugin as any).hookSurface).not.toBeNull();
     // R14.3 — No typed-hook installs may have called api.on.
     expect(onSpy).not.toHaveBeenCalled();
     // T52 — `session_end` MUST be the only legacy registerHook call.
     expect(registerHookSpy).toHaveBeenCalledTimes(1);
     expect(registerHookSpy.mock.calls[0][0]).toBe('session_end');
+    // T58 — Channel must NOT have started in setup-only mode.
+    expect((plugin as any).channelPlugin).toBeFalsy();
+  });
+
+  it('T59 — setup-only → full upgrade on the same api installs runtime hooks (W3/W4) on re-entry', () => {
+    // T59: pre-fix the same-api retry path required `installedVia ===
+    // 'none'` (an explicit failure record) to fire a re-install. In
+    // setup-only the runtime hooks were never attempted, so their
+    // stats keys were absent — the retry predicate evaluated
+    // `undefined?.installedVia === 'none'` as false and the
+    // setup-only → full upgrade left W3/W4/internal permanently
+    // uninstalled. Post-fix the predicate treats `stats[key] ===
+    // undefined` as a first-time install when the dispatch primitive
+    // is now available.
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+      memory: { enabled: true },
+    });
+    const onSpy = vi.fn();
+    const registerHookSpy = vi.fn();
+    const mockApi: any = {
+      config: { plugins: { slots: { memory: 'adapter-openclaw' } } },
+      registrationMode: 'setup-only',
+      registerTool: () => {},
+      registerHook: registerHookSpy,
+      registerMemoryCapability: () => {},
+      on: onSpy,
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    };
+    // First register: setup-only — no W3/W4/internal installs.
+    plugin.register(mockApi);
+    expect(onSpy).not.toHaveBeenCalled();
+    expect(registerHookSpy).toHaveBeenCalledTimes(1);
+    expect(registerHookSpy.mock.calls[0][0]).toBe('session_end');
+
+    // Re-register on the SAME api with mode flipped to full. T59
+    // guarantees this path installs the typed hooks even though
+    // their stats keys are absent (never attempted in setup-only).
+    mockApi.registrationMode = 'full';
+    plugin.register(mockApi);
+
+    // api.on MUST have been called for each typed hook now.
+    const typedEvents = onSpy.mock.calls.map((c: any[]) => c[0]);
+    expect(typedEvents).toContain('before_prompt_build');
+    expect(typedEvents).toContain('agent_end');
+    expect(typedEvents).toContain('before_compaction');
+    expect(typedEvents).toContain('before_reset');
   });
 
   it('R14.2 — handleBeforePromptBuild returns undefined when memoryPlugin exists but is not registered (slot owned by another plugin)', async () => {

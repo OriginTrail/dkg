@@ -695,14 +695,34 @@ export class DkgNodePlugin {
         // since become available is safe and is the only way to recover
         // from a `setup-runtime → full` upgrade on the same api object
         // where typed-hook surface flips from absent to present (T6).
-        const internalNeedsRetry = (event: string) =>
-          stats[`internal:${event}`]?.installedVia === 'none';
-        const typedNeedsRetry = (event: string) =>
-          stats[`typed:${event}`]?.installedVia === 'none' &&
-          typeof api.on === 'function';
-        const legacyNeedsRetry = (event: string) =>
-          stats[`legacy:${event}`]?.installedVia === 'none' &&
-          typeof api.registerHook === 'function';
+        // T59 — "Needs install" covers BOTH the explicit-failure
+        // retry case (`installedVia === 'none'`, surfaces from
+        // `setup-runtime → full` upgrades on the same api where
+        // `api.on` was undefined at first-call) AND the
+        // never-attempted case (`stats[key] === undefined`, which
+        // happens when the first register was `setup-only` and
+        // skipped W3/W4/internal entirely). Without the
+        // never-attempted branch, a `setup-only → full` upgrade on
+        // the SAME api would leave the runtime hooks permanently
+        // uninstalled — the surface exists from the setup-only
+        // pass, the apiChanged check is false, and the retry
+        // predicates only fired on explicit failures. Treat absent
+        // stats as a first-time install when the corresponding
+        // dispatch primitive is now available.
+        const internalNeedsRetry = (event: string) => {
+          const s = stats[`internal:${event}`];
+          return s === undefined || s.installedVia === 'none';
+        };
+        const typedNeedsRetry = (event: string) => {
+          const s = stats[`typed:${event}`];
+          return (s === undefined || s.installedVia === 'none') &&
+            typeof api.on === 'function';
+        };
+        const legacyNeedsRetry = (event: string) => {
+          const s = stats[`legacy:${event}`];
+          return (s === undefined || s.installedVia === 'none') &&
+            typeof api.registerHook === 'function';
+        };
         // T52 — runtime-hook retries depend on a constructed
         // chatTurnWriter (W4a/W4b dispatch into it). In setup-only re-
         // entry the writer is still null; skip the runtime block
@@ -988,6 +1008,22 @@ export class DkgNodePlugin {
    * Each module is optional — enabled via config flags.
    */
   private registerIntegrationModules(api: OpenClawPluginApi, opts?: { enableFullRuntime?: boolean }): void {
+    // T58 — Gate channel registration on `enableFullRuntime`. The
+    // file header (line 432-436) explicitly documents `setup-only`
+    // and `cli-metadata` as "true metadata-only modes that skip
+    // integration wiring", but the channel module's
+    // `DkgChannelPlugin.register()` calls `createServer().listen(port,
+    // ...)` (default 9201) — a real network side effect. Pre-fix
+    // setup-only register bound the port even when the gateway was
+    // only doing setup-time discovery and might never upgrade to
+    // full runtime, leaking a listening server into ambient state.
+    // Re-aligns the integration-modules contract with the documented
+    // metadata-only intent.
+    if (!opts?.enableFullRuntime) {
+      api.logger.info?.('[dkg] Metadata-only OpenClaw registration — skipping channel + memory-slot integration');
+      return;
+    }
+
     // --- Channel module ---
     const channelConfig = this.config.channel;
     if (channelConfig?.enabled) {
@@ -996,11 +1032,6 @@ export class DkgNodePlugin {
       }
       this.channelPlugin.register(api);
       api.logger.info?.('[dkg] Channel module enabled — DKG UI bridge active');
-    }
-
-    if (!opts?.enableFullRuntime) {
-      api.logger.info?.('[dkg] Metadata-only OpenClaw registration — skipping memory-slot integration');
-      return;
     }
 
     // --- Memory module ---
