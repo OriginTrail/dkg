@@ -643,29 +643,31 @@ export async function checkForNewCommitWithStatus(
 
 async function recordCheck(args: { ref: string; status: 'available' | 'up-to-date' | 'error'; remoteCommit?: string }): Promise<void> {
   try {
-    const prev = (await readAutoUpdateStatus()) ?? { consecutiveFailures: 0 };
-    // A clean `up-to-date` poll means the remote was reachable AND the local
-    // commit matches it — i.e. the node is currently healthy. Clear the
-    // failure counter so the documented `consecutiveFailures >= 3` alert
-    // resolves itself after a manual remediation (or a remote rollback that
-    // brings the upstream tip back to our local commit), without requiring
-    // a fresh successful build/swap to happen first.
-    //
-    // We deliberately do NOT clear on `available` (an attempt is about to
-    // run; let `recordAttempt` reflect its true outcome) or on `error`
-    // (transient or persistent — preserve the signal so the alert keeps
-    // firing if the remote stays unreachable).
-    const next: AutoUpdateStatusFile = {
-      ...prev,
-      lastCheck: {
-        at: new Date().toISOString(),
-        ref: args.ref,
-        status: args.status,
-        ...(args.remoteCommit ? { remoteCommit: args.remoteCommit } : {}),
-      },
-      ...(args.status === 'up-to-date' ? { consecutiveFailures: 0 } : {}),
-    };
-    await writeAutoUpdateStatus(next);
+    await withStatusMutex(async () => {
+      const prev = (await readAutoUpdateStatus()) ?? { consecutiveFailures: 0 };
+      // A clean `up-to-date` poll means the remote was reachable AND the
+      // local commit matches it — i.e. the node is currently healthy. Clear
+      // the failure counter so the documented `consecutiveFailures >= 3`
+      // alert resolves itself after a manual remediation (or a remote
+      // rollback that brings the upstream tip back to our local commit),
+      // without requiring a fresh successful build/swap to happen first.
+      //
+      // We deliberately do NOT clear on `available` (an attempt is about to
+      // run; let `recordAttempt` reflect its true outcome) or on `error`
+      // (transient or persistent — preserve the signal so the alert keeps
+      // firing if the remote stays unreachable).
+      const next: AutoUpdateStatusFile = {
+        ...prev,
+        lastCheck: {
+          at: new Date().toISOString(),
+          ref: args.ref,
+          status: args.status,
+          ...(args.remoteCommit ? { remoteCommit: args.remoteCommit } : {}),
+        },
+        ...(args.status === 'up-to-date' ? { consecutiveFailures: 0 } : {}),
+      };
+      await writeAutoUpdateStatus(next);
+    });
   } catch {
     /* observability-only */
   }
@@ -878,42 +880,62 @@ function sweepOrphanBuildProcesses(slotDir: string, log: (m: string) => void): v
  *     cache; cold solc builds on ARM64 routinely exceed the build-step
  *     timeout, so this cache is critical to keep)
  *
- * Best-effort: failure here is logged but doesn't abort the update.
+ * Implemented in pure Node (`readdir` + `rm`/`unlink`) so it has no
+ * dependency on POSIX `find`/`rm`. If even the Node implementation fails
+ * (e.g. EACCES on `packages/`), we fall back to `git clean -fdx` so we
+ * never proceed to build/swap with potentially stale `dist/*.js` from a
+ * previous commit. If the fallback also fails the caller throws — better
+ * to fail the update than to silently activate stale code.
  */
 async function cleanGeneratedOutputs(
   targetDir: string,
   log: (m: string) => void,
 ): Promise<void> {
-  const { execFile: execFileAsync } = _autoUpdateIo;
+  const { execFile: execFileAsync, rm } = _autoUpdateIo;
   try {
-    await execFileAsync(
-      'find',
-      [
-        'packages',
-        '-mindepth', '2',
-        '-maxdepth', '2',
-        '-type', 'd',
-        '-name', 'dist',
-        '-prune',
-        '-exec', 'rm', '-rf', '{}', '+',
-      ],
-      { cwd: targetDir, encoding: 'utf-8', timeout: 30_000 },
+    const { readdir } = await import('node:fs/promises');
+    const packagesDir = join(targetDir, 'packages');
+    let pkgEntries: Array<{ name: string; isDirectory: () => boolean }>;
+    try {
+      pkgEntries = await readdir(packagesDir, { withFileTypes: true });
+    } catch (err: any) {
+      // No packages/ dir is unusual but not fatal — nothing to clean.
+      if (err?.code === 'ENOENT') {
+        log('Auto-update: no packages/ directory found; nothing to pre-clean.');
+        return;
+      }
+      throw err;
+    }
+    let removedDist = 0;
+    let removedTsBuildInfo = 0;
+    for (const entry of pkgEntries) {
+      if (!entry.isDirectory()) continue;
+      const distPath = join(packagesDir, entry.name, 'dist');
+      const tsBuildInfoPath = join(packagesDir, entry.name, 'tsconfig.tsbuildinfo');
+      // `rm({ recursive: true, force: true })` is a no-op on missing paths.
+      await rm(distPath, { recursive: true, force: true });
+      await rm(tsBuildInfoPath, { force: true });
+      removedDist += 1;
+      removedTsBuildInfo += 1;
+    }
+    log(
+      `Auto-update: cleared stale dist/ (${removedDist} pkgs) + tsconfig.tsbuildinfo (${removedTsBuildInfo} pkgs) before build (incremental caches preserved).`,
     );
-    await execFileAsync(
-      'find',
-      [
-        'packages',
-        '-mindepth', '2',
-        '-maxdepth', '2',
-        '-type', 'f',
-        '-name', 'tsconfig.tsbuildinfo',
-        '-delete',
-      ],
-      { cwd: targetDir, encoding: 'utf-8', timeout: 30_000 },
+  } catch (primaryErr: any) {
+    log(
+      `Auto-update: Node-based pre-build clean failed (${primaryErr?.message ?? String(primaryErr)}); falling back to git clean -fdx.`,
     );
-    log('Auto-update: cleared stale dist/ + tsconfig.tsbuildinfo before build (incremental caches preserved).');
-  } catch (err: any) {
-    log(`Auto-update: pre-build clean failed (${err?.message ?? String(err)}); proceeding anyway.`);
+    // Fallback wipes more than we'd like (also nukes node_modules + Hardhat
+    // cache, so the next build is cold) but is correct: the alternative is
+    // proceeding with possibly-stale dist/*.js, which is exactly the bug
+    // we're trying to prevent. If even this fails, throw — abort the update
+    // rather than swap a dirty slot.
+    await execFileAsync('git', ['clean', '-fdx'], {
+      cwd: targetDir,
+      encoding: 'utf-8',
+      timeout: 120_000,
+    });
+    log('Auto-update: fallback git clean -fdx completed.');
   }
 }
 
@@ -1024,6 +1046,34 @@ export interface AutoUpdateStatusFile {
 
 const STATUS_FILE_NAME = '.update-status.json';
 
+/**
+ * In-process mutex for `.update-status.json` read-modify-write sequences.
+ *
+ * `recordCheck()` runs on every poll (no update lock held). `recordAttempt()`
+ * runs inside the update lock. Both do read → mutate → write of the same
+ * file via `await`-points; without serialization, an interleaving like:
+ *     recordCheck:   read prev (consecutiveFailures=2)
+ *     recordAttempt: read prev (consecutiveFailures=2), write (=3)
+ *     recordCheck:   write merged-from-stale (=0)
+ * silently erases the newer state.
+ *
+ * The daemon is single-process, so a Promise-chain mutex is sufficient.
+ * Cross-process serialization is delegated to whoever holds the update lock
+ * (only the daemon writes this file in normal operation; CLI commands read).
+ */
+let _statusWriteChain: Promise<void> = Promise.resolve();
+async function withStatusMutex<T>(fn: () => Promise<T>): Promise<T> {
+  const prev = _statusWriteChain;
+  let release!: () => void;
+  _statusWriteChain = new Promise<void>((resolve) => { release = resolve; });
+  try { await prev; } catch { /* prior holder errored — proceed */ }
+  try {
+    return await fn();
+  } finally {
+    release();
+  }
+}
+
 export async function readAutoUpdateStatus(): Promise<AutoUpdateStatusFile | null> {
   const { dkgDir, readFile } = _autoUpdateIo;
   try {
@@ -1056,37 +1106,39 @@ async function recordAttempt(args: {
   startedAt: number;
   version?: string;
 }): Promise<void> {
-  const prev = (await readAutoUpdateStatus()) ?? { consecutiveFailures: 0 };
-  const nowIso = new Date().toISOString();
-  const elapsedMs = Date.now() - args.startedAt;
-  const next: AutoUpdateStatusFile = {
-    ...prev,
-    lastAttempt: {
-      at: nowIso,
-      ref: args.ref,
-      fromCommit: args.fromCommit,
-      ...(args.toCommit ? { toCommit: args.toCommit } : {}),
-      status: args.status,
-      ...(args.errorMessage ? { errorMessage: args.errorMessage } : {}),
-      elapsedMs,
-    },
-    // Caller guards `up-to-date` so it never reaches here; only `updated`
-    // resets the counter, every other terminal status (failed/error) bumps it.
-    consecutiveFailures:
-      args.status === 'updated'
-        ? 0
-        : (prev.consecutiveFailures ?? 0) + 1,
-  };
-  if (args.status === 'updated' && args.toCommit) {
-    next.lastSuccess = {
-      at: nowIso,
-      ref: args.ref,
-      fromCommit: args.fromCommit,
-      toCommit: args.toCommit,
-      ...(args.version ? { version: args.version } : {}),
+  await withStatusMutex(async () => {
+    const prev = (await readAutoUpdateStatus()) ?? { consecutiveFailures: 0 };
+    const nowIso = new Date().toISOString();
+    const elapsedMs = Date.now() - args.startedAt;
+    const next: AutoUpdateStatusFile = {
+      ...prev,
+      lastAttempt: {
+        at: nowIso,
+        ref: args.ref,
+        fromCommit: args.fromCommit,
+        ...(args.toCommit ? { toCommit: args.toCommit } : {}),
+        status: args.status,
+        ...(args.errorMessage ? { errorMessage: args.errorMessage } : {}),
+        elapsedMs,
+      },
+      // Caller guards `up-to-date` so it never reaches here; only `updated`
+      // resets the counter, every other terminal status (failed/error) bumps it.
+      consecutiveFailures:
+        args.status === 'updated'
+          ? 0
+          : (prev.consecutiveFailures ?? 0) + 1,
     };
-  }
-  await writeAutoUpdateStatus(next);
+    if (args.status === 'updated' && args.toCommit) {
+      next.lastSuccess = {
+        at: nowIso,
+        ref: args.ref,
+        fromCommit: args.fromCommit,
+        toCommit: args.toCommit,
+        ...(args.version ? { version: args.version } : {}),
+      };
+    }
+    await writeAutoUpdateStatus(next);
+  });
 }
 
 /**
@@ -1357,8 +1409,6 @@ async function _performUpdateInner(
         encoding: "utf-8",
         timeout: 120_000,
       });
-    } else {
-      await cleanGeneratedOutputs(targetDir, log);
     }
     const { stdout } = await execFileAsync("git", ["rev-parse", "HEAD"], {
       cwd: targetDir,
@@ -1377,6 +1427,21 @@ async function _performUpdateInner(
       `Auto-update: git fetch/checkout/verify failed in slot ${target} — ${fetchErr.message}`,
     );
     return "failed";
+  }
+
+  // Stale-output cleanup is its own phase: failing here MUST abort the
+  // update, otherwise we'd swap a slot that may still hold `dist/*.js`
+  // from an older commit (the bug this whole helper exists to prevent).
+  if (!opts.forceClean) {
+    try {
+      await cleanGeneratedOutputs(targetDir, log);
+    } catch (cleanErr: any) {
+      log(
+        `Auto-update: pre-build clean failed in slot ${target} — ${cleanErr?.message ?? String(cleanErr)}. ` +
+          `Aborting update rather than swap a potentially dirty slot. Active slot untouched.`,
+      );
+      return "failed";
+    }
   }
 
   const timeouts = resolveBuildTimeouts(au);

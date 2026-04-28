@@ -1755,4 +1755,74 @@ describe('autoupdater hardening', () => {
     expect(releaseIdx).toBeGreaterThanOrEqual(0);
     expect(writeIdx).toBeLessThan(releaseIdx);
   });
+
+  it('aborts the update if pre-build clean fails (no swap of a potentially dirty slot)', async () => {
+    readFileImpl = async () => 'aaa111';
+    makeFetchOk('bbb222');
+    // Force the Node-based clean to throw on rm of dist (EACCES-ish), and
+    // also force the git clean -fdx fallback to fail. Update must abort.
+    _autoUpdateIo.rm = (async () => {
+      throw new Error('EACCES: simulated permission denied on dist');
+    }) as any;
+    execFileImpl = async (file: string, args: string[]) => {
+      if (file === 'git' && args[0] === 'clean' && args[1] === '-fdx') {
+        throw new Error('EACCES: simulated permission denied on git clean');
+      }
+      return { stdout: '', stderr: '' };
+    };
+    const logs: string[] = [];
+    const result = await performUpdate(AU, (m) => logs.push(m));
+    expect(result).toBe(false);
+    expect(logs.some(m => m.includes('pre-build clean failed') && m.includes('Aborting'))).toBe(true);
+    // No slot swap should have happened.
+    expect(swapSlotCalls.length).toBe(0);
+  });
+
+  it('serializes recordCheck and recordAttempt: interleaving cannot clobber consecutiveFailures', async () => {
+    // Simulate: prior status with consecutiveFailures=2 from a real failed
+    // attempt. Then a check (`up-to-date`) and an attempt-record (`failed`)
+    // race within the same Node process. With the in-process mutex, the
+    // final on-disk state must reflect both writes serially — the LATER
+    // write wins, not whichever read-snapshot raced last.
+    let stored: any = { consecutiveFailures: 2, lastAttempt: { status: 'failed', fromCommit: 'aaa111', toCommit: 'old', ref: 'main', at: '', elapsedMs: 0 } };
+    readFileImpl = async (path: any) => {
+      if (String(path).endsWith('.update-status.json')) return JSON.stringify(stored);
+      return '';
+    };
+    writeFileImpl = async (path: any, data: any) => {
+      if (String(path).includes('.update-status.json')) {
+        // Atomic file write goes path.tmp.* → rename → path. Just record
+        // the last full-snapshot write here so we can verify the merged result.
+        stored = JSON.parse(String(data));
+      }
+    };
+    // Both runs concurrently; await their settled state.
+    const [, ] = await Promise.all([
+      // direct call to the recordCheck path
+      checkForNewCommitWithStatus({ ...AU } as any, () => {}).then(() => {}),
+      // an attempt-style write — invoke performUpdate where remote is bbb222 and build fails fast
+      (async () => {
+        // override fetch + impls to drive a `failed` recordAttempt on the second invocation
+        const origFetchImpl = fetchImpl;
+        fetchImpl = async () => ({ ok: true, json: async () => ({ sha: 'bbb222' }) });
+        execImpl = async (cmd: string) => {
+          if (cmd.includes('pnpm install')) throw new Error('boom');
+          return { stdout: '', stderr: '' };
+        };
+        await performUpdate(AU, () => {});
+        fetchImpl = origFetchImpl;
+      })(),
+    ]);
+    // The final snapshot must be self-consistent: lastAttempt.status from
+    // recordAttempt + lastCheck.status from recordCheck. consecutiveFailures
+    // reflects the LAST write (whichever ran second), but it's never the
+    // stale snapshot's value (would be 2 if races corrupted the merge).
+    expect(stored.lastAttempt?.status).toBe('failed');
+    expect(stored.lastCheck?.status).toBeDefined();
+    // The mutex guarantees at least one of these writes saw the other's
+    // result, i.e. counter is either 0 (recordCheck cleared, ran last) or 3
+    // (recordAttempt incremented from 2, ran last). It must NOT remain at 2
+    // (which would mean a write was lost).
+    expect([0, 3]).toContain(stored.consecutiveFailures);
+  });
 });
