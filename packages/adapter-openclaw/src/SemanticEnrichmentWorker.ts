@@ -1660,12 +1660,29 @@ export class SemanticEnrichmentWorker {
 
   private extractAssistantText(messages: unknown[]): string {
     const assistantMessages = messages.filter((message) => this.isAssistantRoleMessage(message));
-    const candidates = assistantMessages.length > 0 ? assistantMessages : messages;
-    for (let index = candidates.length - 1; index >= 0; index -= 1) {
-      const candidate = this.extractTextFromMessage(candidates[index]);
-      if (candidate) return candidate;
+    if (assistantMessages.length > 0) {
+      for (let index = assistantMessages.length - 1; index >= 0; index -= 1) {
+        const candidate = this.extractTextFromMessage(assistantMessages[index]);
+        if (candidate) return candidate;
+      }
+    }
+
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const candidate = this.extractTextFromMessage(messages[index]);
+      if (candidate && !this.isPromptEchoText(candidate)) return candidate;
     }
     return '';
+  }
+
+  private isPromptEchoText(value: string): boolean {
+    return [
+      'Return JSON only. Do not wrap the answer in markdown fences.',
+      'Schema: {"triples"',
+      'Untrusted ontology data:',
+      'Untrusted source data:',
+      '<<<BEGIN ONTOLOGY DATA>>>',
+      '<<<BEGIN SOURCE DATA>>>',
+    ].some((marker) => value.includes(marker));
   }
 
   private isAssistantRoleMessage(message: unknown): boolean {
@@ -1731,7 +1748,7 @@ export class SemanticEnrichmentWorker {
   }
 
   private parseTriplesFromAssistantText(rawText: string): SemanticTripleInput[] {
-    if (!rawText.trim()) return [];
+    if (!rawText.trim()) throw new Error('OpenClaw subagent returned empty output');
     let structuredError: string | null = null;
     for (const candidate of extractJsonCandidates(rawText)) {
       try {

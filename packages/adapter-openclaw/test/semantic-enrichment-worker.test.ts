@@ -1566,6 +1566,86 @@ describe('SemanticEnrichmentWorker', () => {
     );
   });
 
+  it('does not parse prompt-echo transcript entries when assistant role metadata is missing', async () => {
+    const claim = vi.fn<() => Promise<{ event: SemanticEnrichmentEventLease | null }>>()
+      .mockResolvedValueOnce({
+        event: {
+          id: 'evt-chat-prompt-echo',
+          kind: 'chat_turn',
+          payload: {
+            kind: 'chat_turn',
+            sessionId: 'openclaw:dkg-ui',
+            turnId: 'turn-prompt-echo',
+            contextGraphId: 'agent-context',
+            assertionName: 'chat-turns',
+            assertionUri: 'did:dkg:context-graph:agent-context/assertion/peer/chat-turns',
+            sessionUri: 'urn:dkg:chat:session:openclaw:dkg-ui',
+            turnUri: 'urn:dkg:chat:turn:turn-prompt-echo',
+            userMessage: 'Who owns the roadmap?',
+            assistantReply: 'Alice owns it.',
+            persistenceState: 'stored',
+          },
+          status: 'leased',
+          attempts: 1,
+          maxAttempts: 5,
+          leaseOwner: 'worker',
+          leaseExpiresAt: Date.now() + 60_000,
+          nextAttemptAt: Date.now(),
+        },
+      })
+      .mockResolvedValueOnce({ event: null })
+      .mockResolvedValue({ event: null });
+    const append = vi.fn().mockResolvedValue({
+      applied: true,
+      completed: true,
+      semanticEnrichment: {
+        eventId: 'evt-chat-prompt-echo',
+        status: 'completed',
+        semanticTripleCount: 1,
+        updatedAt: new Date().toISOString(),
+      },
+    });
+    const fail = vi.fn().mockResolvedValue({ status: 'pending' });
+    const worker = new SemanticEnrichmentWorker(
+      makeApi({
+        subagent: {
+          run: vi.fn().mockResolvedValue({ runId: 'run-prompt-echo' }),
+          waitForRun: vi.fn().mockResolvedValue({ status: 'completed' }),
+          getSessionMessages: vi.fn().mockResolvedValue({
+            messages: [{
+              text: [
+                'Return JSON only. Do not wrap the answer in markdown fences.',
+                'Schema: {"triples":[{"subject":"absolute-or-native-iri","predicate":"absolute-or-native-iri","object":"absolute-or-native-iri or quoted N-Triples literal"}]}',
+                '<<<BEGIN SOURCE DATA>>>',
+                '{"triples":[{"subject":"urn:dkg:chat:turn:turn-prompt-echo","predicate":"https://schema.org/about","object":"https://schema.org/Person"}]}',
+              ].join('\n'),
+            }],
+          }),
+          deleteSession: vi.fn().mockResolvedValue(undefined),
+        } as any,
+      }),
+      makeClient({
+        claimSemanticEnrichmentEvent: claim,
+        appendSemanticEnrichmentEvent: append,
+        failSemanticEnrichmentEvent: fail,
+      }),
+    );
+
+    worker.noteWake({
+      kind: 'chat_turn',
+      eventKey: 'evt-chat-prompt-echo',
+      triggerSource: 'daemon',
+    });
+    await worker.flush();
+
+    expect(append).not.toHaveBeenCalled();
+    expect(fail).toHaveBeenCalledWith(
+      'evt-chat-prompt-echo',
+      worker.getWorkerInstanceId(),
+      expect.stringContaining('empty output'),
+    );
+  });
+
   it('uses the explicit ontologyRef as an opaque replace-only override name for file import prompts', async () => {
     const claim = vi.fn<() => Promise<{ event: SemanticEnrichmentEventLease | null }>>()
       .mockResolvedValueOnce({

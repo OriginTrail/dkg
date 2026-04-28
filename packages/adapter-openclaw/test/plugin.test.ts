@@ -1635,6 +1635,8 @@ describe('DkgNodePlugin', () => {
           transportMode: 'gateway+bridge',
         },
       });
+      expect(connectBody.transport.wakeUrl).toBeUndefined();
+      expect(connectBody.transport.wakeAuth).toBeUndefined();
       // No follow-up PUT — connect publishes the bound transport upfront.
       const readyCall = fetchCalls.find((call) =>
         String(call[0]).includes('/api/local-agent-integrations/openclaw')

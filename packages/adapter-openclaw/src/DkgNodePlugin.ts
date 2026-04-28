@@ -193,16 +193,9 @@ export class DkgNodePlugin {
   }
 
   private buildDerivedWakeCandidates(
-    transport: Pick<LocalAgentIntegrationTransport, 'bridgeUrl' | 'gatewayUrl'> | undefined,
-  ): Array<{ url: string; auth: 'bridge-token' | 'gateway' }> {
-    const candidates: Array<{ url: string; auth: 'bridge-token' | 'gateway' }> = [];
-    const gatewayUrl = transport?.gatewayUrl?.trim();
-    if (gatewayUrl) {
-      candidates.push({
-        url: `${gatewayUrl.replace(/\/+$/, '')}/api/dkg-channel/semantic-enrichment/wake`,
-        auth: 'gateway',
-      });
-    }
+    transport: Pick<LocalAgentIntegrationTransport, 'bridgeUrl'> | undefined,
+  ): Array<{ url: string; auth: 'bridge-token' }> {
+    const candidates: Array<{ url: string; auth: 'bridge-token' }> = [];
     const bridgeUrl = transport?.bridgeUrl?.trim();
     if (bridgeUrl) {
       candidates.push({
@@ -216,7 +209,7 @@ export class DkgNodePlugin {
   private resolveWakeTransport(
     existing: LocalAgentIntegrationTransport | undefined,
     existingWakeAuth: 'bridge-token' | 'gateway' | 'none' | undefined,
-    candidates: Array<{ url: string; auth: 'bridge-token' | 'gateway' }>,
+    candidates: Array<{ url: string; auth: 'bridge-token' }>,
   ): { url: string; auth?: 'bridge-token' | 'gateway' | 'none' } | undefined {
     const existingWakeUrl = existing?.wakeUrl;
     const normalizedExistingWakeUrl = this.normalizeWakeUrl(existingWakeUrl);
@@ -236,9 +229,13 @@ export class DkgNodePlugin {
     if (matchingCandidate) {
       return matchingCandidate;
     }
+    const inferredAuth = existingWakeAuth ?? this.inferWakeAuthFromUrl(normalizedExistingWakeUrl);
+    if (inferredAuth === 'gateway') {
+      return candidates[0];
+    }
     return {
       url: normalizedExistingWakeUrl,
-      auth: existingWakeAuth ?? this.inferWakeAuthFromUrl(normalizedExistingWakeUrl),
+      auth: inferredAuth,
     };
   }
 
@@ -1013,7 +1010,7 @@ export class DkgNodePlugin {
       }
     }
 
-    const wakeCandidates: Array<{ url: string; auth: 'bridge-token' | 'gateway' }> = [];
+    const wakeCandidates: Array<{ url: string; auth: 'bridge-token' }> = [];
     if (liveBridgeUrl) {
       wakeCandidates.push({
         url: `${liveBridgeUrl}/semantic-enrichment/wake`,
@@ -1025,13 +1022,6 @@ export class DkgNodePlugin {
         auth: 'bridge-token',
       });
     }
-    if (this.channelPlugin.isUsingGatewayRoute && gatewayBaseUrl) {
-      wakeCandidates.push({
-        url: `${gatewayBaseUrl}/api/dkg-channel/semantic-enrichment/wake`,
-        auth: 'gateway',
-      });
-    }
-
     const wakeTransport = this.resolveWakeTransport(existing, existingWakeAuth, wakeCandidates);
     if (wakeTransport) {
       transport.wakeUrl = wakeTransport.url;
