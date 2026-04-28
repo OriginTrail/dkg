@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { spawnSync } from 'node:child_process';
 import { HermesAdapterPlugin } from '../src/HermesAdapterPlugin.js';
 import { registerHermesRoutes } from '../src/hermes-routes.js';
 import type { DaemonPluginApi } from '../src/types.js';
@@ -449,6 +450,19 @@ describe('Hermes profile setup helpers', () => {
     uninstallHermesProfile({ hermesHome, profileName: 'dev' });
 
     expect(existsSync(join(hermesHome, 'plugins', 'dkg'))).toBe(false);
+    expect(existsSync(join(hermesHome, '.dkg-adapter-hermes'))).toBe(false);
+  });
+
+  it('preserves manual adapter state files during uninstall', () => {
+    const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-'));
+    setupHermesProfile({ hermesHome, profileName: 'dev' });
+    const manualPath = join(hermesHome, '.dkg-adapter-hermes', 'operator-note.txt');
+    writeFileSync(manualPath, 'keep me\n');
+
+    uninstallHermesProfile({ hermesHome, profileName: 'dev' });
+
+    expect(existsSync(join(hermesHome, '.dkg-adapter-hermes', 'setup-state.json'))).toBe(false);
+    expect(readFileSync(manualPath, 'utf-8')).toBe('keep me\n');
   });
 
   it('reports a partially removed provider plugin during verify', () => {
@@ -714,5 +728,82 @@ describe('Hermes profile setup helpers', () => {
       gatewayUrl: 'https://hermes.example.com',
       healthUrl: 'https://hermes.example.com/api/hermes-channel/health',
     });
+  });
+});
+
+describe('Hermes Python provider', () => {
+  it('persists turn identity sequence across provider restarts', () => {
+    const script = String.raw`
+import importlib.util
+import json
+import sys
+import tempfile
+import types
+from pathlib import Path
+
+home = Path(tempfile.mkdtemp(prefix="hermes-dkg-provider-"))
+
+agent_pkg = types.ModuleType("agent")
+memory_provider = types.ModuleType("agent.memory_provider")
+class MemoryProvider:
+    pass
+memory_provider.MemoryProvider = MemoryProvider
+sys.modules["agent"] = agent_pkg
+sys.modules["agent.memory_provider"] = memory_provider
+
+tools_pkg = types.ModuleType("tools")
+registry = types.ModuleType("tools.registry")
+def tool_error(message):
+    return json.dumps({"error": message})
+registry.tool_error = tool_error
+sys.modules["tools"] = tools_pkg
+sys.modules["tools.registry"] = registry
+
+constants = types.ModuleType("hermes_constants")
+constants.get_hermes_home = lambda: home
+sys.modules["hermes_constants"] = constants
+
+sys.modules["plugins"] = types.ModuleType("plugins")
+sys.modules["plugins.memory"] = types.ModuleType("plugins.memory")
+
+plugin_dir = Path(r"${process.cwd().replace(/\\/g, '\\\\')}") / "hermes-plugin"
+spec = importlib.util.spec_from_file_location(
+    "plugins.memory.dkg",
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+module = importlib.util.module_from_spec(spec)
+sys.modules["plugins.memory.dkg"] = module
+spec.loader.exec_module(module)
+
+def make_provider():
+    provider = module.DKGMemoryProvider()
+    provider._config = {"profile_name": "dev"}
+    provider._agent_name = "agent"
+    provider._session_id = module._scoped_session_id("session-1", provider._config)
+    provider._cache = module._load_cache("agent")
+    provider._offline = True
+    provider._client = None
+    return provider
+
+first = make_provider()
+first.sync_turn("same user", "same assistant")
+second = make_provider()
+second.sync_turn("same user", "same assistant")
+
+cache = module._load_cache("agent")
+turns = [item for item in cache["queued_writes"] if item.get("type") == "turn"]
+assert len(turns) == 2, turns
+assert turns[0]["turn_id"] != turns[1]["turn_id"], turns
+assert turns[0]["idempotency_key"] != turns[1]["idempotency_key"], turns
+assert turns[0]["turn_id"].split(":")[-2] == "1", turns
+assert turns[1]["turn_id"].split(":")[-2] == "2", turns
+`;
+    const result = spawnSync('python', ['-B', '-c', script], {
+      cwd: process.cwd(),
+      encoding: 'utf-8',
+    });
+
+    expect(result.status, result.stderr || result.stdout).toBe(0);
   });
 });

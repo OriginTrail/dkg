@@ -1,4 +1,4 @@
-import { cpSync, existsSync, readFileSync, rmSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
+import { cpSync, existsSync, readFileSync, rmSync, writeFileSync, mkdirSync, statSync, rmdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
@@ -271,11 +271,7 @@ export function uninstallHermesProfile(options: HermesSetupOptions = {}): Hermes
   for (const path of managedFiles) {
     removeOwnedArtifact(path);
   }
-  try {
-    rmSync(profile.stateDir, { recursive: true, force: true });
-  } catch {
-    // Best effort. A non-empty state dir is preserved.
-  }
+  removeEmptyDir(profile.stateDir);
   return plan;
 }
 
@@ -723,6 +719,14 @@ function removeOwnedArtifact(path: string): void {
     if (!raw.includes(`Managed by ${MANAGED_BY}`)) return;
   }
   rmSync(path, { force: true });
+}
+
+function removeEmptyDir(path: string): void {
+  try {
+    rmdirSync(path);
+  } catch {
+    // Best effort. A non-empty or absent state dir is preserved.
+  }
 }
 
 function installHermesProviderPlugin(profile: HermesProfileMetadata): void {

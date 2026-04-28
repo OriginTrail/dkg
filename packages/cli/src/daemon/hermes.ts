@@ -90,6 +90,21 @@ function buildHermesGatewayBase(value: string): string {
     : `${value}/api/hermes-channel`;
 }
 
+function urlBelongsToBase(value: string, base: string): boolean {
+  try {
+    const parsedValue = new URL(value);
+    const parsedBase = new URL(base);
+    if (parsedValue.origin !== parsedBase.origin) return false;
+
+    const basePath = trimTrailingSlashes(parsedBase.pathname);
+    if (!basePath || basePath === '/') return true;
+    return parsedValue.pathname === basePath
+      || parsedValue.pathname.startsWith(`${basePath}/`);
+  } catch {
+    return false;
+  }
+}
+
 export function isHermesLoopbackUrl(value: string | undefined): boolean {
   if (!value) return false;
   try {
@@ -127,6 +142,16 @@ export function getHermesChannelTargets(config: DkgConfig): HermesChannelTarget[
   const gatewayBase =
     explicitGatewayBase ??
     (bridgeLooksLikeGateway ? explicitBridgeBase : undefined);
+  const normalizedGatewayBase = gatewayBase
+    ? buildHermesGatewayBase(gatewayBase)
+    : undefined;
+  const explicitHealthIsGateway =
+    !!explicitHealthUrl
+    && !!gatewayBase
+    && (
+      urlBelongsToBase(explicitHealthUrl, gatewayBase)
+      || (!!normalizedGatewayBase && urlBelongsToBase(explicitHealthUrl, normalizedGatewayBase))
+    );
   const targets: HermesChannelTarget[] = [];
   const seenInboundUrls = new Set<string>();
 
@@ -141,17 +166,20 @@ export function getHermesChannelTargets(config: DkgConfig): HermesChannelTarget[
       name: 'bridge',
       inboundUrl: `${standaloneBridgeBase}/send`,
       streamUrl: `${standaloneBridgeBase}/stream`,
-      healthUrl: explicitHealthUrl ?? `${standaloneBridgeBase}/health`,
+      healthUrl: explicitHealthUrl && !explicitHealthIsGateway
+        ? explicitHealthUrl
+        : `${standaloneBridgeBase}/health`,
     });
   }
 
-  if (gatewayBase) {
-    const normalizedGatewayBase = buildHermesGatewayBase(gatewayBase);
+  if (normalizedGatewayBase) {
     pushTarget({
       name: 'gateway',
       inboundUrl: `${normalizedGatewayBase}/send`,
       streamUrl: `${normalizedGatewayBase}/stream`,
-      healthUrl: explicitHealthUrl ?? `${normalizedGatewayBase}/health`,
+      healthUrl: explicitHealthUrl && (explicitHealthIsGateway || !standaloneBridgeBase)
+        ? explicitHealthUrl
+        : `${normalizedGatewayBase}/health`,
     });
   }
 

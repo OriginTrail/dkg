@@ -183,6 +183,55 @@ describe('Hermes channel helpers', () => {
     }))[0]?.healthUrl).toBe('https://hermes.example.com/custom-health');
   });
 
+  it('does not apply a gateway healthUrl override to the bridge target', async () => {
+    const config = makeConfig({
+      localAgentIntegrations: {
+        hermes: {
+          enabled: true,
+          transport: {
+            kind: 'hermes-channel',
+            bridgeUrl: 'http://127.0.0.1:9444',
+            gatewayUrl: 'https://hermes.example.com',
+            healthUrl: 'https://hermes.example.com/custom-health',
+          },
+        },
+      },
+    });
+    const targets = getHermesChannelTargets(config);
+    expect(targets).toEqual([
+      {
+        name: 'bridge',
+        inboundUrl: 'http://127.0.0.1:9444/send',
+        streamUrl: 'http://127.0.0.1:9444/stream',
+        healthUrl: 'http://127.0.0.1:9444/health',
+      },
+      {
+        name: 'gateway',
+        inboundUrl: 'https://hermes.example.com/api/hermes-channel/send',
+        streamUrl: 'https://hermes.example.com/api/hermes-channel/stream',
+        healthUrl: 'https://hermes.example.com/custom-health',
+      },
+    ]);
+
+    const urls: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string | URL | Request) => {
+      const requestUrl = String(url);
+      urls.push(requestUrl);
+      if (requestUrl === 'http://127.0.0.1:9444/health') {
+        return new Response(JSON.stringify({ ok: false, error: 'bridge offline' }), { status: 503 });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }));
+
+    const report = await probeHermesChannelHealth(config, 'bridge-token');
+
+    expect(report).toMatchObject({ ok: true, target: 'gateway' });
+    expect(urls).toEqual([
+      'http://127.0.0.1:9444/health',
+      'https://hermes.example.com/custom-health',
+    ]);
+  });
+
   it('ignores non-loopback bridge URLs and requires gatewayUrl for remote transports', () => {
     expect(getHermesChannelTargets(makeConfig({
       localAgentIntegrations: {

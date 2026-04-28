@@ -641,9 +641,9 @@ class DKGMemoryProvider(MemoryProvider):
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
         """Send turn to daemon for entity extraction + persistence."""
-        self._turn_count += 1
         effective_session_id = _scoped_session_id(session_id or self._session_id, self._config)
-        turn_id = self._build_turn_id(effective_session_id, self._turn_count, user_content, assistant_content)
+        turn_sequence = self._next_turn_sequence(effective_session_id)
+        turn_id = self._build_turn_id(effective_session_id, turn_sequence, user_content, assistant_content)
         idempotency_key = f"hermes:{turn_id}"
         if self._offline or not self._client:
             # Queue for later sync
@@ -1093,16 +1093,32 @@ class DKGMemoryProvider(MemoryProvider):
             or str(self._config.get("publish_tool", "")).lower() == "direct"
         )
 
-    def _build_turn_id(self, session_id: str, turn_count: int, user_content: str, assistant_content: str) -> str:
+    def _next_turn_sequence(self, session_id: str) -> int:
+        with self._lock:
+            raw_sequences = self._cache.setdefault("turn_sequences", {})
+            if not isinstance(raw_sequences, dict):
+                raw_sequences = {}
+                self._cache["turn_sequences"] = raw_sequences
+            try:
+                current = int(raw_sequences.get(session_id, 0))
+            except Exception:
+                current = 0
+            next_sequence = current + 1
+            raw_sequences[session_id] = next_sequence
+            self._turn_count = max(self._turn_count, next_sequence)
+            _save_cache(self._cache, self._agent_name)
+            return next_sequence
+
+    def _build_turn_id(self, session_id: str, turn_sequence: int, user_content: str, assistant_content: str) -> str:
         digest = hashlib.sha256()
         digest.update(session_id.encode("utf-8", errors="ignore"))
         digest.update(b"\0")
-        digest.update(str(turn_count).encode("ascii"))
+        digest.update(str(turn_sequence).encode("ascii"))
         digest.update(b"\0")
         digest.update(user_content[:2000].encode("utf-8", errors="ignore"))
         digest.update(b"\0")
         digest.update(assistant_content[:2000].encode("utf-8", errors="ignore"))
-        return f"{session_id}:{turn_count}:{digest.hexdigest()[:16]}"
+        return f"{session_id}:{turn_sequence}:{digest.hexdigest()[:16]}"
 
     def _queue_turn(
         self,
