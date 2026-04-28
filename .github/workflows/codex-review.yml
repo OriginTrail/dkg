@@ -16,7 +16,11 @@ jobs:
   review:
     name: Codex Review
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Bumped from 15 → 30 after the r30-8 push on PR #229 hit the cap mid-stream
+    # against a 35,200-line diff (gpt-5.4 / effort: high). The concurrency group
+    # above already cancel-in-progress, so a new push will kill any still-running
+    # review — there's no downside to a generous ceiling.
+    timeout-minutes: 30
     # Skip fork PRs - they cannot access repository secrets
     if: github.event.pull_request.head.repo.full_name == github.repository
 
