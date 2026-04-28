@@ -52,7 +52,15 @@ export class BlazegraphStore implements TripleStore {
   }
 
   async deleteByPattern(pattern: Partial<DKGQuad>): Promise<number> {
-    const s = pattern.subject ? `<${escapeUri(pattern.subject)}>` : '?s';
+    // PR #229 bot review follow-up (blazegraph.ts:55). The pattern
+    // subject can legitimately be a blank node when callers passed
+    // through a previously-materialised quad row (e.g. the cleanup
+    // path that re-deletes specific bnode-subject quads). Funnel it
+    // through `formatTerm` so `_:b0` stays `_:b0` instead of being
+    // wrapped as the invalid IRI `<_:b0>`. The predicate is still
+    // angle-bracketed because the SPARQL grammar only allows IRIs
+    // in predicate position.
+    const s = pattern.subject ? formatTerm(pattern.subject) : '?s';
     const p = pattern.predicate ? `<${escapeUri(pattern.predicate)}>` : '?p';
     const o = pattern.object ? formatTerm(pattern.object) : '?o';
     const triple = `${s} ${p} ${o}`;
@@ -91,7 +99,19 @@ export class BlazegraphStore implements TripleStore {
         const key = `${sx}\u0001${px}\u0001${ox}`;
         if (seen.has(key)) continue;
         seen.add(key);
-        const tripleData = `<${escapeUri(sx)}> <${escapeUri(px)}> ${formatTerm(ox)} .`;
+        // PR #229 bot review (blazegraph.ts:94). The SELECT above
+        // materialises every matching row, which in quads mode
+        // includes blank-node subjects (`_:b0`). Re-serialising
+        // `sx` as `<${escapeUri(sx)}>` turned `_:b0` into the
+        // syntactically invalid IRI `<_:b0>` and the resulting
+        // `DELETE DATA` either errored on the wire or silently
+        // no-op'd, leaving blank-node quads alive forever in
+        // Blazegraph. `formatTerm` already encodes blank nodes
+        // (`_:foo`), explicit IRIs (`<…>`), and bare strings
+        // (wrapped in angle brackets) correctly, so route every
+        // RDF position through it. Predicates stay angle-bracketed
+        // because by RDF spec a predicate can only be an IRI.
+        const tripleData = `${formatTerm(sx)} <${escapeUri(px)}> ${formatTerm(ox)} .`;
         await this.sparqlUpdate(
           `DELETE DATA { GRAPH <${escapeUri(pattern.graph)}> { ${tripleData} } }`,
         );
@@ -128,7 +148,13 @@ export class BlazegraphStore implements TripleStore {
         const ox = pattern.object ?? row['o'];
         const g = row['g'];
         if (!sx || !px || !ox || !g) continue;
-        const tripleData = `<${escapeUri(sx)}> <${escapeUri(px)}> ${formatTerm(ox)} .`;
+        // PR #229 bot review (blazegraph.ts:131). Same blank-node
+        // round-trip bug as the single-graph branch above: `sx` may
+        // be a bnode (`_:b0`), so funnel it through `formatTerm`
+        // instead of the IRI-only `<${escapeUri(sx)}>` to avoid
+        // emitting the invalid IRI literal `<_:b0>` in the
+        // `DELETE DATA` payload.
+        const tripleData = `${formatTerm(sx)} <${escapeUri(px)}> ${formatTerm(ox)} .`;
         const key = `${g}\u0001${sx}\u0001${px}\u0001${ox}`;
         if (seen.has(key)) continue;
         seen.add(key);
@@ -161,7 +187,16 @@ export class BlazegraphStore implements TripleStore {
         const px = pattern.predicate ?? row['p'];
         const ox = pattern.object ?? row['o'];
         if (!sx || !px || !ox) continue;
-        const tripleData = `<${escapeUri(sx)}> <${escapeUri(px)}> ${formatTerm(ox)} .`;
+        // PR #229 bot review (blazegraph.ts:164). Same blank-node
+        // round-trip bug as the named-graph branch: route `sx`
+        // through `formatTerm` so a bnode (`_:b0`) is emitted as
+        // `_:b0` and not the invalid IRI `<_:b0>`. Without this the
+        // default-graph DELETE silently no-op'd for blank-node
+        // subjects (the `DELETE DATA` either errored on the wire
+        // or, on lenient engines, never matched the row), which in
+        // turn left blank-node-subject quads pinned in storage and
+        // inflated countQuads-driven assertions.
+        const tripleData = `${formatTerm(sx)} <${escapeUri(px)}> ${formatTerm(ox)} .`;
         const dedupKey = `__default__\u0001${sx}\u0001${px}\u0001${ox}`;
         if (seen.has(dedupKey)) continue;
         seen.add(dedupKey);

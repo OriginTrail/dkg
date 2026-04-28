@@ -686,11 +686,26 @@ function isPublicPath(pathname: string): boolean {
  */
 
 /**
- * HTTP auth guard. Returns true if the request is allowed to proceed,
- * false if a 401 response was sent.
+ * HTTP auth guard. Returns `true` if the request is allowed to
+ * proceed, `false` if a 401 response was sent.
+ *
+ * For body-carrying signed requests (the only case where the HMAC
+ * cannot be verified synchronously from headers alone) the guard
+ * returns a `Promise<boolean>` that resolves AFTER the body has been
+ * drained and the HMAC has been verified — so callers that `await`
+ * the result are guaranteed not to run their handler until the
+ * signature is confirmed (PR #229 bot review r31-7, auth.ts:947). The
+ * older response-time guard remains installed as defense-in-depth for
+ * legacy callers that don't `await`, but the supported contract is to
+ * always `await` the return value.
  *
  * Usage in the server handler:
- *   if (!httpAuthGuard(req, res, authEnabled, validTokens)) return;
+ *   if (!(await httpAuthGuard(req, res, authEnabled, validTokens))) return;
+ *
+ * Body-less paths (GET / HEAD / OPTIONS / public paths / unsigned
+ * requests / framing-bodyless signed requests) still resolve
+ * synchronously to a bare `boolean` so existing fast-path callers do
+ * not pay an awaiting cost on hot routes.
  */
 export function httpAuthGuard(
   req: IncomingMessage,
@@ -698,7 +713,7 @@ export function httpAuthGuard(
   authEnabled: boolean,
   validTokens: Set<string>,
   corsOrigin?: string | null,
-): boolean {
+): boolean | Promise<boolean> {
   if (!authEnabled) return true;
   if (req.method === 'OPTIONS') return true;
 
@@ -919,32 +934,42 @@ export function httpAuthGuard(
         }
         pending.verified = true;
       } else {
-        // PR #229 bot review round 23 (r23-1): body-carrying signed
-        // requests (chunked OR explicit `Content-Length > 0`) are
-        // accepted here on the bearer-token proof alone and the HMAC
-        // check is deferred to `enforceSignedRequestPostBody`, which
-        // only runs when a route handler calls `readBody*()`. If a
-        // handler happens to ignore the body (for example
-        // `POST /api/local-agent-integrations/:id/refresh`, which
-        // only cares that the path was hit), the signed-request HMAC
-        // is *never* verified and an attacker with a valid bearer
-        // token can forge any `x-dkg-signature` + arbitrary body —
-        // the bearer token alone unlocks the route. The original
-        // r19-1 fix only caught the empty-`Content-Length` case;
-        // `Transfer-Encoding: chunked` with an empty body (and
-        // non-chunked bodies on handlers that don't read) were still
-        // exploitable.
+        // PR #229 bot review round 23 (r23-1) + r31-7 follow-up.
         //
-        // Fix: install a response-level fail-closed guard. We record
-        // the fact that a post-body HMAC verification is still
-        // outstanding and override `res.writeHead` / `res.end` so
-        // that if the handler attempts to emit ANY response while
-        // `__dkgSignedAuth.verified` is still false, we replace the
-        // status with 401 and refuse to serve data. Routes that do
-        // read the body hit `readBody` → `enforceSignedRequestPostBody`
-        // → `pending.verified = true` and the guard collapses into a
-        // no-op on the first response call.
-        installSignedRequestResponseGuard(req, res, corsOrigin ?? undefined);
+        // Body-carrying signed requests cannot be verified
+        // synchronously here because the HMAC binds the request body
+        // and the body has not yet flowed off the wire. The legacy
+        // (r23-1) fix installed a response-level guard that rewrote
+        // the handler's response to 401 if the HMAC was never
+        // verified — but the bot (r31-7) correctly pointed out that
+        // the handler had ALREADY RUN by then, so any state mutation
+        // performed by a handler that ignores the body went through
+        // with a forged signature even though the response was
+        // blocked.
+        //
+        // r31-7 fix: drain the request body and verify the HMAC
+        // BEFORE returning, by switching to a `Promise<boolean>`
+        // return on this branch. Callers that `await` the result are
+        // guaranteed not to invoke their handler until the signature
+        // is confirmed. The drained body is stashed on
+        // `req.__dkgPrebufferedBody` so the daemon's `readBody` /
+        // `readBodyBuffer` helpers can resolve it without
+        // re-attaching `data` listeners on the now-exhausted stream.
+        //
+        // `installSignedRequestResponseGuard` (which still serves as
+        // defense-in-depth for any embedder that hasn't migrated to
+        // the `await`-based contract) now ALSO drives the eager
+        // drain — they share the captured `origWriteHead`/`origEnd`
+        // so the failure path emits a clean 401 even when the
+        // wrappers are in place, and they share the queue so a
+        // non-awaiting caller's interleaved handler emissions are
+        // either flushed (success) or dropped (failure) without
+        // racing.
+        return installSignedRequestResponseGuard(
+          req,
+          res,
+          corsOrigin ?? undefined,
+        );
       }
 
       return true;
@@ -1125,15 +1150,44 @@ export function _clearReplayCacheForTesting(): void {
  * catch streaming responses, and mark the guard as "spent" so the
  * wrappers don't recurse when we ourselves call writeHead/end to
  * emit the 401 response.
+ *
+ * PR #229 bot review r31-7 follow-up. This function now ALSO drives
+ * the eager pre-handler drain. The bot pointed out that the
+ * response-time guard alone is insufficient: it rewrites the
+ * response to 401, but the handler has already run and any
+ * state-mutating side effect has already happened on a forged
+ * signature. The fix is to also kick off a body drain + HMAC verify
+ * BEFORE returning, returning a `Promise<boolean>` that callers MUST
+ * `await` so the route handler does not run until the signature is
+ * confirmed.
+ *
+ * Both the eager drain and the response wrappers share the captured
+ * `origWriteHead` / `origEnd` and the queue, so the failure 401 is
+ * emitted cleanly through the unwrapped methods AND the queued
+ * handler emissions are dropped (failure) or replayed (success)
+ * without races. On success, the buffered body is stashed on
+ * `req.__dkgPrebufferedBody` so daemon body readers can resolve
+ * without re-attaching listeners on an exhausted stream.
  */
 function installSignedRequestResponseGuard(
   req: IncomingMessage,
   res: ServerResponse,
   corsOrigin?: string,
-): void {
-  type GuardedRes = ServerResponse & { __dkgSignedAuthGuardInstalled?: boolean };
+): Promise<boolean> {
+  type GuardedRes = ServerResponse & {
+    __dkgSignedAuthGuardInstalled?: boolean;
+    __dkgSignedAuthEagerDrainPromise?: Promise<boolean>;
+  };
   const guarded = res as GuardedRes;
-  if (guarded.__dkgSignedAuthGuardInstalled) return;
+  if (guarded.__dkgSignedAuthGuardInstalled) {
+    // Idempotence: a second `httpAuthGuard` call (or a legacy caller
+    // that triggers the guard install path twice) returns the SAME
+    // eager-drain Promise so awaiters never see two competing drain
+    // outcomes for the same request.
+    return (
+      guarded.__dkgSignedAuthEagerDrainPromise ?? Promise.resolve(true)
+    );
+  }
   guarded.__dkgSignedAuthGuardInstalled = true;
 
   const origWriteHead = res.writeHead.bind(res) as typeof res.writeHead;
@@ -1390,6 +1444,48 @@ function installSignedRequestResponseGuard(
     deferred = true;
     void (async () => {
       try {
+        // PR #229 bot review r31-7 follow-up. When the eager drain
+        // (kicked off synchronously inside `httpAuthGuard` for the
+        // body-carrying signed-request branch) is in flight or has
+        // already completed, await its outcome instead of attaching
+        // OUR own data listener. Two reasons:
+        //
+        //   1. Race-freedom. Two concurrent drain listeners would
+        //      both observe each chunk, but only the first one to
+        //      see `'end'` fire its 'end' handler synchronously sets
+        //      `pending.verified`. A late listener would observe an
+        //      empty buffer (`Buffer.concat([])`) and fail HMAC
+        //      verification against a body that already verified —
+        //      a spurious 401 for a legitimate signed request.
+        //
+        //   2. Single-source-of-truth. The eager drain stashes the
+        //      body on `req.__dkgPrebufferedBody` so daemon body
+        //      readers don't re-attach listeners on an exhausted
+        //      stream. The response guard would otherwise need its
+        //      own copy of the same buffer.
+        const eagerExtras = req as IncomingMessage & {
+          __dkgEagerDrainPromise?: Promise<boolean>;
+        };
+        if (eagerExtras.__dkgEagerDrainPromise) {
+          const ok = await eagerExtras.__dkgEagerDrainPromise;
+          if (!ok) {
+            // The eager drain has already emitted its own 401 (with
+            // a precise reason). Mark the response guard spent so
+            // any further writeHead/end/write/flushHeaders from the
+            // handler collapses into a no-op instead of trampling
+            // the in-flight 401.
+            spent = true;
+            return;
+          }
+          // pending.verified is now true (set by the eager drain) —
+          // flush the queued handler emissions intact.
+          flushQueue();
+          return;
+        }
+
+        // No eager drain ran (legacy non-signed-mode call site, or a
+        // unit-test that exercises the response guard directly). Fall
+        // back to the response-guard's own drain.
         attachDrainListeners();
         const waitOutcome = await waitForRequestEnd();
         if (waitOutcome.timedOut) {
@@ -1483,4 +1579,83 @@ function installSignedRequestResponseGuard(
       deferAndResolve();
     }) as () => void;
   }
+
+  // PR #229 bot review r31-7. Kick off the eager pre-handler drain
+  // and HMAC verification. The returned Promise is what
+  // `httpAuthGuard` returns (and what the daemon `await`s) — until
+  // it resolves, the route handler does NOT run, so any
+  // state-mutating side effect on a forged signature is impossible.
+  //
+  // We share the captured `origWriteHead` / `origEnd` (so the 401
+  // failure path is emitted through the unwrapped methods, not the
+  // queue-wrappers we just installed) AND the queue + spent flag
+  // (so a non-awaiting legacy caller's interleaved handler
+  // emissions are either flushed on success or dropped on failure
+  // without races).
+  //
+  // Stash the body Buffer on `req.__dkgPrebufferedBody` on success
+  // so daemon body readers (`readBody` / `readBodyBuffer`) resolve
+  // from the buffer rather than re-attaching listeners on a stream
+  // we have already exhausted.
+  type EagerExtras = {
+    __dkgPrebufferedBody?: Buffer;
+  };
+  const reqExtras = req as IncomingMessage & EagerExtras;
+
+  const eagerDrainPromise = (async (): Promise<boolean> => {
+    try {
+      // Fast path: the body is framing-bodyless per the headers AND
+      // nothing has arrived on the wire. Bind HMAC to "" and return.
+      if (isFramingBodylessByHeaders()) {
+        const outcome = verifyHttpSignedRequestAfterBody(req, '');
+        if (!outcome.ok) {
+          spent = true;
+          failClosed(outcome.reason);
+          return false;
+        }
+        const p = pending();
+        if (p) p.verified = true;
+        reqExtras.__dkgPrebufferedBody = Buffer.alloc(0);
+        return true;
+      }
+
+      // Body-carrying path: drain bounded, verify, then either
+      // succeed (handler will run; queue is empty so flushQueue is
+      // a no-op) or fail-close.
+      attachDrainListeners();
+      const waitOutcome = await waitForRequestEnd();
+      if (waitOutcome.timedOut) {
+        spent = true;
+        failClosed('signed request body drain timed out');
+        destroyStuckRequest();
+        return false;
+      }
+      if (drainOverflow) {
+        spent = true;
+        failClosed('request body exceeded maximum drain size');
+        return false;
+      }
+      const body = Buffer.concat(drainedChunks);
+      const outcome = verifyHttpSignedRequestAfterBody(req, body);
+      if (!outcome.ok) {
+        spent = true;
+        failClosed(outcome.reason);
+        return false;
+      }
+      const p = pending();
+      if (p) p.verified = true;
+      reqExtras.__dkgPrebufferedBody = body;
+      // If a non-awaiting caller's handler already queued
+      // emissions while we were draining, replay them now.
+      flushQueue();
+      return true;
+    } catch {
+      spent = true;
+      failClosed('verification failed');
+      return false;
+    }
+  })();
+
+  guarded.__dkgSignedAuthEagerDrainPromise = eagerDrainPromise;
+  return eagerDrainPromise;
 }

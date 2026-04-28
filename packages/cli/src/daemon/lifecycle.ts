@@ -1402,15 +1402,25 @@ export async function runDaemonInner(
         return;
       }
 
-      // Auth guard — rejects with 401 if token is invalid/missing
+      // Auth guard — rejects with 401 if token is invalid/missing.
+      //
+      // PR #229 bot review r31-7 (auth.ts:947). For body-carrying
+      // signed requests `httpAuthGuard` returns a `Promise<boolean>`
+      // that resolves only after the request body has been drained
+      // and the HMAC verified — `await`ing here is what guarantees
+      // the route handler does NOT run on a forged signature, even
+      // for handlers that ignore the body (the bug the bot caught
+      // was that the response was rewritten to 401 too late, after
+      // a state-mutating handler had already executed). Body-less
+      // paths still resolve synchronously to a bare boolean.
       if (
-        !httpAuthGuard(
+        !(await httpAuthGuard(
           req,
           res,
           authEnabled,
           validTokens,
           resolveCorsOrigin(req, corsAllowed),
-        )
+        ))
       )
         return;
 

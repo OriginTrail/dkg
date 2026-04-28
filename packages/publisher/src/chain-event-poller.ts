@@ -296,20 +296,32 @@ export class ChainEventPoller {
     const walRecoveryActive =
       !!this.onUnmatchedBatchCreated &&
       (this.hasRecoverableWal ? this.hasRecoverableWal() : true);
-    // The early-return gate still needs to keep the poller alive when
-    // the callback is installed even if the WAL is empty right now —
-    // a publish-then-crash a few seconds in must still drain. So this
-    // condition uses the looser "callback present" test for the
-    // tick-skip decision but the stricter `walRecoveryActive` test
-    // for the seed-near-tip decision below.
-    const watchUnmatchedBatches = !!this.onUnmatchedBatchCreated;
+    // PR #229 bot review (chain-event-poller.ts:305). The previous gate
+    // tested `!!this.onUnmatchedBatchCreated`, but `DKGAgent` now wires
+    // that callback unconditionally for every node, so the flag was
+    // effectively `true` everywhere and the early-return at the bottom
+    // of this block never fired. Fresh nodes with an empty WAL therefore
+    // continued to poll `KnowledgeBatchCreated` / `KCCreated` every
+    // tick, which is exactly the idle RPC churn the `hasRecoverableWal`
+    // gate was added to avoid (a future publish or WAL append flips
+    // `walRecoveryActive` true on the very next tick anyway, because
+    // both paths schedule a re-poll, so we lose nothing by skipping the
+    // current tick when the WAL is empty).
+    //
+    // We keep the looser `!!this.onUnmatchedBatchCreated` test for
+    // exactly one purpose: legacy callers that don't yet implement
+    // `hasRecoverableWal` ⇒ `walRecoveryActive` falls through to the
+    // permissive `true` branch above, which preserves their existing
+    // behaviour. Modern callers (the production `DKGAgent`) DO supply
+    // `hasRecoverableWal`, so they get the stricter, idle-friendly gate
+    // without a code change at the call site.
     if (
       !hasPending
       && !watchContextGraphs
       && !watchUpdates
       && !watchAllowList
       && !watchProfiles
-      && !watchUnmatchedBatches
+      && !walRecoveryActive
     ) return;
 
     const ctx = createOperationContext('publish');

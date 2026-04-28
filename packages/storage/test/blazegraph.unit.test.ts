@@ -355,6 +355,201 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     expect(defaultDelete).toBeUndefined();
   });
 
+  // PR #229 bot review (r31-7, blazegraph.ts:94/131/164). The previous
+  // revision unconditionally wrapped each materialised SELECT-row
+  // subject (`sx`) as `<${escapeUri(sx)}>` before issuing the
+  // `DELETE DATA`. SELECT bindings in quads mode include blank-node
+  // subjects (e.g. `_:b0`), so a bnode would be re-emitted as the
+  // syntactically invalid IRI `<_:b0>` — Blazegraph either errored
+  // on the wire or, on lenient engines, never matched the row, and
+  // the bnode-subject quad stayed pinned in storage forever.
+  //
+  // The fix funnels the row subject through `formatTerm`, which
+  // already encodes `_:foo` blank nodes correctly. These tests pin
+  // the contract for all three branches (single-graph SELECT, no-
+  // graph named SELECT, no-graph default-dataset SELECT) AND for the
+  // top-level `pattern.subject` itself (line 55) so a caller that
+  // hands a bnode subject to `deleteByPattern` still gets it deleted.
+  describe('deleteByPattern — blank-node round-trip (r31-7 regression)', () => {
+    it('single-graph branch: emits `_:b0` (NOT `<_:b0>`) for materialised bnode subject', async () => {
+      const updates: string[] = [];
+      setFetch(async (_url, init) => {
+        const body = String(init?.body ?? '');
+        if (body.startsWith('update=')) {
+          updates.push(decodeURIComponent(body.slice('update='.length)));
+          return new Response(null, { status: 200 });
+        }
+        if (body.startsWith('query=')) {
+          return new Response(
+            JSON.stringify({
+              head: { vars: ['s', 'p', 'o'] },
+              results: {
+                bindings: [
+                  {
+                    s: { type: 'bnode', value: 'b0' },
+                    p: { type: 'uri', value: 'http://ex/p' },
+                    o: { type: 'literal', value: 'lit' },
+                  },
+                ],
+              },
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+        return new Response(null, { status: 200 });
+      });
+      const s = new BlazegraphStore(baseUrl);
+      const removed = await s.deleteByPattern({ graph: 'http://g' });
+      expect(removed).toBe(1);
+      expect(updates).toHaveLength(1);
+      const body = updates[0];
+      // The bnode lexeme MUST appear as `_:b0`, not as `<_:b0>`.
+      expect(body).toContain('_:b0 <http://ex/p>');
+      expect(body).not.toContain('<_:b0>');
+      expect(body).toMatch(/DELETE DATA \{ GRAPH <http:\/\/g> \{ _:b0 <http:\/\/ex\/p> "lit" \. \} \}/);
+    });
+
+    it('no-graph (named) branch: emits `_:b0` (NOT `<_:b0>`) for materialised bnode subject', async () => {
+      const updates: string[] = [];
+      setFetch(async (_url, init) => {
+        const body = String(init?.body ?? '');
+        if (body.startsWith('update=')) {
+          updates.push(decodeURIComponent(body.slice('update='.length)));
+          return new Response(null, { status: 200 });
+        }
+        if (body.startsWith('query=')) {
+          const decoded = decodeURIComponent(body.slice('query='.length));
+          if (/GRAPH \?g/.test(decoded)) {
+            return new Response(
+              JSON.stringify({
+                head: { vars: ['s', 'p', 'o', 'g'] },
+                results: {
+                  bindings: [
+                    {
+                      s: { type: 'bnode', value: 'b1' },
+                      p: { type: 'uri', value: 'http://ex/p' },
+                      o: { type: 'literal', value: 'lit' },
+                      g: { type: 'uri', value: 'http://ex.org/g' },
+                    },
+                  ],
+                },
+              }),
+              { status: 200, headers: { 'Content-Type': 'application/json' } },
+            );
+          }
+          // Default-dataset SELECT after the named delete: no rows.
+          return new Response(
+            JSON.stringify({ head: { vars: ['s', 'p', 'o'] }, results: { bindings: [] } }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+        return new Response(null, { status: 200 });
+      });
+      const s = new BlazegraphStore(baseUrl);
+      const removed = await s.deleteByPattern({});
+      expect(removed).toBe(1);
+      expect(updates).toHaveLength(1);
+      expect(updates[0]).toContain('_:b1 <http://ex/p>');
+      expect(updates[0]).not.toContain('<_:b1>');
+    });
+
+    it('no-graph (default) branch: emits `_:b0` (NOT `<_:b0>`) when default-dataset SELECT returns a bnode subject', async () => {
+      const updates: string[] = [];
+      setFetch(async (_url, init) => {
+        const body = String(init?.body ?? '');
+        if (body.startsWith('update=')) {
+          updates.push(decodeURIComponent(body.slice('update='.length)));
+          return new Response(null, { status: 200 });
+        }
+        if (body.startsWith('query=')) {
+          const decoded = decodeURIComponent(body.slice('query='.length));
+          if (/^SELECT/i.test(decoded.trim()) && /GRAPH \?g/.test(decoded)) {
+            // Named SELECT: nothing.
+            return new Response(
+              JSON.stringify({ head: { vars: ['s', 'p', 'o', 'g'] }, results: { bindings: [] } }),
+              { status: 200, headers: { 'Content-Type': 'application/json' } },
+            );
+          }
+          if (/^SELECT/i.test(decoded.trim())) {
+            // Default-dataset SELECT: bnode-subject hit.
+            return new Response(
+              JSON.stringify({
+                head: { vars: ['s', 'p', 'o'] },
+                results: {
+                  bindings: [
+                    {
+                      s: { type: 'bnode', value: 'b2' },
+                      p: { type: 'uri', value: 'http://ex/p' },
+                      o: { type: 'literal', value: 'lit' },
+                    },
+                  ],
+                },
+              }),
+              { status: 200, headers: { 'Content-Type': 'application/json' } },
+            );
+          }
+          if (/^ASK/i.test(decoded.trim())) {
+            return new Response(
+              JSON.stringify({ boolean: true }),
+              { status: 200, headers: { 'Content-Type': 'application/json' } },
+            );
+          }
+        }
+        return new Response(null, { status: 200 });
+      });
+      const s = new BlazegraphStore(baseUrl);
+      const removed = await s.deleteByPattern({});
+      expect(removed).toBe(1);
+      expect(updates).toHaveLength(1);
+      expect(updates[0]).toContain('_:b2 <http://ex/p>');
+      expect(updates[0]).not.toContain('<_:b2>');
+    });
+
+    it('top-level pattern.subject branch: caller-supplied bnode subject round-trips as `_:bX` (NOT `<_:bX>`)', async () => {
+      // White-box: when the caller passes `{ subject: '_:b9' }`, the
+      // SELECT triple template (`triple` at line 58) and the per-row
+      // DELETE template both need to keep `_:b9` as `_:b9` instead of
+      // wrapping it as the invalid IRI `<_:b9>`.
+      const queriesSeen: string[] = [];
+      const updates: string[] = [];
+      setFetch(async (_url, init) => {
+        const body = String(init?.body ?? '');
+        if (body.startsWith('update=')) {
+          updates.push(decodeURIComponent(body.slice('update='.length)));
+          return new Response(null, { status: 200 });
+        }
+        if (body.startsWith('query=')) {
+          const decoded = decodeURIComponent(body.slice('query='.length));
+          queriesSeen.push(decoded);
+          return new Response(
+            JSON.stringify({
+              head: { vars: ['p', 'o'] },
+              results: {
+                bindings: [
+                  { p: { type: 'uri', value: 'http://ex/p' }, o: { type: 'literal', value: 'lit' } },
+                ],
+              },
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+        return new Response(null, { status: 200 });
+      });
+      const s = new BlazegraphStore(baseUrl);
+      const removed = await s.deleteByPattern({ graph: 'http://g', subject: '_:b9' });
+      expect(removed).toBe(1);
+      // SELECT must use `_:b9` as the subject, not `<_:b9>`.
+      const selectQ = queriesSeen.find((q) => /^SELECT/i.test(q.trim()));
+      expect(selectQ).toBeDefined();
+      expect(selectQ!).toContain('_:b9');
+      expect(selectQ!).not.toContain('<_:b9>');
+      // DELETE DATA must use `_:b9` as the subject, not `<_:b9>`.
+      expect(updates).toHaveLength(1);
+      expect(updates[0]).toContain('_:b9 <http://ex/p>');
+      expect(updates[0]).not.toContain('<_:b9>');
+    });
+  });
+
   it('deleteBySubjectPrefix returns count delta', async () => {
     let call = 0;
     setFetch(async (_url, init) => {

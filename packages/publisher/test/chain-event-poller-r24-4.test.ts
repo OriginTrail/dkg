@@ -257,14 +257,27 @@ describe('ChainEventPoller.poll() — r30-4 hasRecoverableWal gates the seed-nea
     const chain = makeMockChain();
     chain.getBlockNumber = async () => 1_000_000;
     const handler = makeHandler();
+    // PR #229 bot review (r31-7) follow-up: keep the original r30-4
+    // intent — "an empty-WAL node still seeds near tip" — but give the
+    // poller an INDEPENDENT reason to scan this tick (a registered
+    // context-graph watcher). Without a reason to scan, the new
+    // early-return at chain-event-poller.ts:318 correctly
+    // short-circuits the tick (idle nodes are exactly the case the
+    // early-return targets), so lastBlock would stay at 0. The
+    // seed-near-tip decision is what we're proving here, not the
+    // unrelated "should an idle node scan?" question — those have
+    // separate dedicated regression tests in the r31-7 describe-block
+    // below. We deliberately use `onContextGraphCreated` (and NOT a
+    // pending publish) because the seed-near-tip branch at
+    // chain-event-poller.ts:359 ALSO requires `!hasPending`, so a
+    // pending publish would suppress the seed we're trying to verify.
 
     const poller = new ChainEventPoller({
       chain: chain as unknown as ChainAdapter,
       publishHandler: handler,
       intervalMs: 1_000_000,
       onUnmatchedBatchCreated: async () => {},
-      // The actual signal: this node has nothing in its journal, so
-      // there's nothing to recover.
+      onContextGraphCreated: async () => {},
       hasRecoverableWal: () => false,
     });
 
@@ -331,6 +344,105 @@ describe('ChainEventPoller.poll() — r30-4 hasRecoverableWal gates the seed-nea
     const lastBlock = (poller as unknown as { lastBlock: number }).lastBlock;
     expect(lastBlock).toBeLessThan(9001);
     expect(lastBlock).toBeGreaterThan(0);
+  });
+
+  // -------------------------------------------------------------------
+  // PR #229 bot review (r31-7, chain-event-poller.ts:305). After r30-4
+  // introduced `hasRecoverableWal()`, the early-return gate inside
+  // `poll()` STILL keyed off `watchUnmatchedBatches = !!onUnmatchedBatchCreated`.
+  // Because `DKGAgent` always wires that callback for every node, the
+  // gate was effectively `true` everywhere and the early-return never
+  // fired — fresh nodes with empty WALs continued to issue a
+  // `listenForEvents` RPC every tick for nothing. The fix swaps the
+  // gate to `walRecoveryActive` (which honours `hasRecoverableWal`),
+  // matching the seed-near-tip decision below it.
+  // -------------------------------------------------------------------
+  describe('r31-7: tick early-return must key on walRecoveryActive (NOT bare callback presence)', () => {
+    it('idle node (callback wired, hasRecoverableWal === false, no other watchers, no pending) skips listenForEvents', async () => {
+      const chain = makeMockChain();
+      const handler = makeHandler();
+      expect(handler.hasPendingPublishes).toBe(false);
+
+      const poller = new ChainEventPoller({
+        chain: chain as unknown as ChainAdapter,
+        publishHandler: handler,
+        intervalMs: 1_000_000,
+        onUnmatchedBatchCreated: async () => {},
+        hasRecoverableWal: () => false,
+      });
+
+      await callPollDirectly(poller);
+
+      // Pre-fix: `listenForEventsCalls === 1` (the bug — wasted RPC).
+      // Post-fix: `0` because `walRecoveryActive === false` and no
+      //          other watcher / pending publish keeps the gate open.
+      expect(chain.listenForEventsCalls).toBe(0);
+    });
+
+    it('node with live WAL (callback wired, hasRecoverableWal === true) STILL scans (drain path stays alive)', async () => {
+      const chain = makeMockChain();
+      const handler = makeHandler();
+
+      const poller = new ChainEventPoller({
+        chain: chain as unknown as ChainAdapter,
+        publishHandler: handler,
+        intervalMs: 1_000_000,
+        onUnmatchedBatchCreated: async () => {},
+        hasRecoverableWal: () => true,
+      });
+
+      await callPollDirectly(poller);
+
+      // The fix MUST NOT regress WAL recovery. When the journal has
+      // entries to drain we still need to scan KnowledgeBatchCreated.
+      expect(chain.listenForEventsCalls).toBe(1);
+    });
+
+    it('legacy poller (callback wired, NO hasRecoverableWal) still scans — back-compat', async () => {
+      const chain = makeMockChain();
+      const handler = makeHandler();
+
+      const poller = new ChainEventPoller({
+        chain: chain as unknown as ChainAdapter,
+        publishHandler: handler,
+        intervalMs: 1_000_000,
+        onUnmatchedBatchCreated: async () => {},
+        // No hasRecoverableWal — falls back to permissive `true` so
+        // existing callers (and tests written before r30-4) keep
+        // their previous behaviour.
+      });
+
+      await callPollDirectly(poller);
+
+      expect(chain.listenForEventsCalls).toBe(1);
+    });
+
+    it('idle node flips to scanning the moment hasRecoverableWal returns true (publish landed mid-session)', async () => {
+      const chain = makeMockChain();
+      const handler = makeHandler();
+
+      let walPresent = false;
+      const poller = new ChainEventPoller({
+        chain: chain as unknown as ChainAdapter,
+        publishHandler: handler,
+        intervalMs: 1_000_000,
+        onUnmatchedBatchCreated: async () => {},
+        hasRecoverableWal: () => walPresent,
+      });
+
+      await callPollDirectly(poller);
+      expect(chain.listenForEventsCalls).toBe(0);
+
+      // Simulate a fresh publish that wrote a WAL entry between ticks.
+      walPresent = true;
+      await callPollDirectly(poller);
+      expect(chain.listenForEventsCalls).toBe(1);
+
+      // And back to idle — the new gate is per-tick, not sticky.
+      walPresent = false;
+      await callPollDirectly(poller);
+      expect(chain.listenForEventsCalls).toBe(1);
+    });
   });
 
   it('hasRecoverableWal is queried on EACH poll tick — not once at construction (so a publish crashed mid-session still flips to refuse-seed)', async () => {

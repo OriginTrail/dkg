@@ -559,6 +559,39 @@ export function readBody(
   req: IncomingMessage,
   maxBytes = MAX_BODY_BYTES,
 ): Promise<string> {
+  // PR #229 bot review r31-7 follow-up. When `httpAuthGuard` ran the
+  // eager pre-handler drain for a body-carrying signed request, the
+  // wire bytes are already buffered on `req.__dkgPrebufferedBody`
+  // and the underlying stream is exhausted. Re-attaching `data`
+  // listeners would observe nothing and the resulting `'end'` would
+  // resolve to an empty body — which then ALSO bypasses the
+  // post-body HMAC check (since the eager drain already flipped
+  // `pending.verified = true`, `enforceSignedRequestPostBody` is a
+  // no-op). Routes that legitimately need the body (e.g. PUT
+  // /api/settings/...) would receive an empty payload instead of
+  // their JSON, which would silently corrupt config writes.
+  //
+  // Fix: if a prebuffer is present, resolve from it directly
+  // (re-checking the size limit so callers that lower `maxBytes`
+  // still get the same 413). The signed-request HMAC was already
+  // verified by the eager drain, so re-running
+  // `enforceSignedRequestPostBody` here would be redundant — but we
+  // call it anyway to preserve the centralised invariant that
+  // EVERY body-reading site flows through the verifier.
+  const prebuffered = (req as IncomingMessage & {
+    __dkgPrebufferedBody?: Buffer;
+  }).__dkgPrebufferedBody;
+  if (Buffer.isBuffer(prebuffered)) {
+    if (prebuffered.length > maxBytes) {
+      return Promise.reject(new PayloadTooLargeError(maxBytes));
+    }
+    try {
+      enforceSignedRequestPostBody(req, prebuffered);
+    } catch (err) {
+      return Promise.reject(err);
+    }
+    return Promise.resolve(prebuffered.toString());
+  }
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let total = 0;
@@ -610,6 +643,28 @@ export function readBodyBuffer(
   req: IncomingMessage,
   maxBytes = MAX_BODY_BYTES,
 ): Promise<Buffer> {
+  // PR #229 bot review r31-7 follow-up. See `readBody()` above for
+  // the rationale — when the eager drain inside `httpAuthGuard` has
+  // already buffered the body, the underlying stream is exhausted
+  // and we must resolve from the prebuffer instead of re-attaching
+  // listeners. The signed-request HMAC check is still routed
+  // through `enforceSignedRequestPostBody` so the post-body
+  // invariant ("every body reader runs the verifier") is preserved
+  // verbatim.
+  const prebuffered = (req as IncomingMessage & {
+    __dkgPrebufferedBody?: Buffer;
+  }).__dkgPrebufferedBody;
+  if (Buffer.isBuffer(prebuffered)) {
+    if (prebuffered.length > maxBytes) {
+      return Promise.reject(new PayloadTooLargeError(maxBytes));
+    }
+    try {
+      enforceSignedRequestPostBody(req, prebuffered);
+    } catch (err) {
+      return Promise.reject(err);
+    }
+    return Promise.resolve(prebuffered);
+  }
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let total = 0;
