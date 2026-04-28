@@ -1755,6 +1755,190 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     }
   });
 
+  it('persists runtime subscriptions and rehydrates them on restart', async () => {
+    const persisted = new Map<string, any>();
+    const persistedMembers = new Map<string, any>();
+    const subscriptionStore = {
+      loadAll: async () => [...persisted.values()],
+      save: async (record: any) => {
+        persisted.set(record.id, { ...record });
+      },
+      delete: async (contextGraphId: string) => {
+        persisted.delete(contextGraphId);
+      },
+    };
+    const membershipStore = {
+      upsert: async (record: any) => {
+        persistedMembers.set(`${record.contextGraphId}|${record.principalType}|${record.principalId}`, { ...record });
+      },
+      delete: async (contextGraphId: string, principalType: string, principalId: string) => {
+        persistedMembers.delete(`${contextGraphId}|${principalType}|${principalId}`);
+      },
+    };
+
+    const agentA = await DKGAgent.create({
+      name: 'PersistedSubscriptionsA',
+      listenHost: '127.0.0.1',
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      contextGraphSubscriptionStore: subscriptionStore,
+      contextGraphMembershipStore: membershipStore,
+    });
+
+    let agentAPeerId = '';
+    try {
+      await agentA.start();
+      agentAPeerId = agentA.peerId;
+      agentA.subscribeToContextGraph('persisted-cg');
+      agentA.markContextGraphSubscriptionState('persisted-cg', {
+        synced: true,
+        sharedMemorySynced: true,
+        metaSynced: true,
+        onChainId: '0x1234',
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    } finally {
+      await agentA.stop().catch(() => {});
+    }
+
+    expect(persisted.get('persisted-cg')).toMatchObject({
+      id: 'persisted-cg',
+      subscribed: true,
+      synced: true,
+      sharedMemorySynced: true,
+      metaSynced: true,
+      onChainId: '0x1234',
+      syncScoped: true,
+    });
+    expect(persistedMembers.get(`persisted-cg|node|${agentAPeerId}`)).toMatchObject({
+      contextGraphId: 'persisted-cg',
+      principalType: 'node',
+      principalId: agentAPeerId,
+      role: 'subscriber',
+      status: 'active',
+      source: 'subscription',
+    });
+
+    const agentB = await DKGAgent.create({
+      name: 'PersistedSubscriptionsB',
+      listenHost: '127.0.0.1',
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      contextGraphSubscriptionStore: subscriptionStore,
+      contextGraphMembershipStore: membershipStore,
+    });
+
+    try {
+      await agentB.start();
+      expect(agentB.getSubscribedContextGraphs().get('persisted-cg')).toMatchObject({
+        subscribed: true,
+        synced: true,
+        sharedMemorySynced: true,
+        metaSynced: true,
+        onChainId: '0x1234',
+      });
+      expect((agentB as any).config.syncContextGraphs ?? []).toContain('persisted-cg');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(persistedMembers.get(`persisted-cg|node|${agentB.peerId}`)).toMatchObject({
+        contextGraphId: 'persisted-cg',
+        principalType: 'node',
+        principalId: agentB.peerId,
+        status: 'active',
+        source: 'rehydrated-subscription',
+      });
+    } finally {
+      await agentB.stop().catch(() => {});
+    }
+  });
+
+  it('rehydrates persisted subscriptions without forcing sync scope', async () => {
+    const subscriptionStore = {
+      loadAll: async () => [{
+        id: 'discovered-cg',
+        name: 'Discovered CG',
+        subscribed: true,
+        synced: false,
+        sharedMemorySynced: false,
+        metaSynced: false,
+        onChainId: '0xabcd',
+        syncScoped: false,
+      }],
+      save: async () => {},
+      delete: async () => {},
+    };
+
+    const agent = await DKGAgent.create({
+      name: 'PersistedSubscriptionsNoScope',
+      listenHost: '127.0.0.1',
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      contextGraphSubscriptionStore: subscriptionStore,
+    });
+
+    try {
+      await agent.start();
+      expect(agent.getSubscribedContextGraphs().get('discovered-cg')).toMatchObject({
+        subscribed: true,
+        synced: false,
+        sharedMemorySynced: false,
+        metaSynced: false,
+        onChainId: '0xabcd',
+      });
+      expect((agent as any).config.syncContextGraphs ?? []).not.toContain('discovered-cg');
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('canonicalizes Ethereum agent membership principals before persistence', async () => {
+    const persistedMembers = new Map<string, any>();
+    const deletedMembers: string[] = [];
+    const membershipStore = {
+      upsert: async (record: any) => {
+        persistedMembers.set(`${record.contextGraphId}|${record.principalType}|${record.principalId}`, { ...record });
+      },
+      delete: async (contextGraphId: string, principalType: string, principalId: string) => {
+        const key = `${contextGraphId}|${principalType}|${principalId}`;
+        deletedMembers.push(key);
+        persistedMembers.delete(key);
+      },
+    };
+    const lowercaseAddress = '0x86b8521581b87e21ebd730cbba110e1480454d6d';
+    const checksumAddress = ethers.getAddress(lowercaseAddress);
+
+    const agent = await DKGAgent.create({
+      name: 'MembershipPrincipalCanonical',
+      listenHost: '127.0.0.1',
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      contextGraphMembershipStore: membershipStore,
+    });
+
+    try {
+      await agent.start();
+      await agent.createContextGraph({
+        id: 'membership-canonical-cg',
+        name: 'Membership Canonical',
+        accessPolicy: 1,
+        allowedAgents: [lowercaseAddress],
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(persistedMembers.get(`membership-canonical-cg|agent|${checksumAddress}`)).toMatchObject({
+        contextGraphId: 'membership-canonical-cg',
+        principalType: 'agent',
+        principalId: checksumAddress,
+        role: 'participant',
+        status: 'active',
+        source: 'allowed-agent',
+      });
+      expect(persistedMembers.has(`membership-canonical-cg|agent|${lowercaseAddress}`)).toBe(false);
+
+      await agent.removeAgentFromContextGraph('membership-canonical-cg', lowercaseAddress);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(deletedMembers).toContain(`membership-canonical-cg|agent|${checksumAddress}`);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
   it('syncContextGraphFromConnectedPeers returns empty stats without peers', async () => {
     const agent = await DKGAgent.create({
       name: 'RuntimeCatchupNoPeers',

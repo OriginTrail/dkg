@@ -194,6 +194,8 @@ export interface ContextGraphSub {
   subscribed: boolean;
   /** Definition triples exist in the local triple store. */
   synced: boolean;
+  /** Shared-memory catch-up has completed at least once for this subscription. */
+  sharedMemorySynced?: boolean;
   /**
    * Whether the `_meta` graph (allowlist, registration status) has been
    * fetched via authenticated sync or is known from local creation.
@@ -207,6 +209,42 @@ export interface ContextGraphSub {
   participantIdentityIds?: bigint[];
   /** Participant agent addresses (V10 agent identity model). */
   participantAgents?: string[];
+}
+
+export interface ContextGraphSubscriptionRecord {
+  id: string;
+  name?: string;
+  subscribed: boolean;
+  synced: boolean;
+  sharedMemorySynced?: boolean;
+  metaSynced?: boolean;
+  onChainId?: string;
+  syncScoped: boolean;
+}
+
+export interface ContextGraphSubscriptionStore {
+  loadAll(): Promise<ContextGraphSubscriptionRecord[]>;
+  save(record: ContextGraphSubscriptionRecord): Promise<void>;
+  delete(contextGraphId: string): Promise<void>;
+}
+
+export type ContextGraphMemberPrincipalType = 'node' | 'agent' | 'identity';
+export type ContextGraphMemberStatus = 'active' | 'removed' | 'pending';
+
+export interface ContextGraphMembershipRecord {
+  contextGraphId: string;
+  principalType: ContextGraphMemberPrincipalType;
+  principalId: string;
+  role?: string;
+  status: ContextGraphMemberStatus;
+  source?: string;
+  displayName?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface ContextGraphMembershipStore {
+  upsert(record: ContextGraphMembershipRecord & { firstSeenAt?: number; updatedAt: number }): Promise<void>;
+  delete(contextGraphId: string, principalType: ContextGraphMemberPrincipalType, principalId: string): Promise<void>;
 }
 
 /** @deprecated Use ContextGraphSub */
@@ -300,6 +338,10 @@ export interface DKGAgentConfig {
   syncContextGraphs?: string[];
   /** TTL for shared memory data in milliseconds. Expired operations are periodically cleaned up. Default: 48 hours. Set to 0 to disable. */
   sharedMemoryTtlMs?: number;
+  /** Durable local store for subscribed context-graph runtime state. */
+  contextGraphSubscriptionStore?: ContextGraphSubscriptionStore;
+  /** Durable local cache for nodes/agents known to be members of a context graph. */
+  contextGraphMembershipStore?: ContextGraphMembershipStore;
 }
 
 /**
@@ -544,6 +586,7 @@ export class DKGAgent {
 
     this.router = new ProtocolRouter(this.node);
     this.gossip = new GossipSubManager(this.node, this.eventBus);
+    await this.rehydrateContextGraphSubscriptions();
 
     // Register protocol handlers
     const accessHandler = new AccessHandler(this.store, this.eventBus);
@@ -781,6 +824,16 @@ export class DKGAgent {
             this.preferredSyncPeers.set(contextGraphId, peerId.toString());
             this.log.info(createOperationContext('system'), `Join request approved for "${contextGraphId}" — auto-subscribing`);
             this.subscribeToContextGraph(contextGraphId);
+            if (approvedAddr) {
+              this.upsertContextGraphMember({
+                contextGraphId,
+                principalType: 'agent',
+                principalId: approvedAddr,
+                role: 'participant',
+                status: 'active',
+                source: 'join-approved',
+              });
+            }
             this.syncContextGraphFromConnectedPeers(contextGraphId, { includeSharedMemory: true }).catch(() => {});
             this.eventBus.emit(DKGEvent.JOIN_APPROVED, {
               contextGraphId,
@@ -830,6 +883,14 @@ export class DKGAgent {
             return new TextEncoder().encode(JSON.stringify({ ok: true, skipped: true }));
           }
           this.log.info(createOperationContext('system'), `Join request rejected for "${contextGraphId}"`);
+          this.upsertContextGraphMember({
+            contextGraphId,
+            principalType: 'agent',
+            principalId: rejectedAddr,
+            role: 'requester',
+            status: 'removed',
+            source: 'join-rejected',
+          });
           this.eventBus.emit(DKGEvent.JOIN_REJECTED, {
             contextGraphId,
             agentAddress: rejectedAddr,
@@ -1495,7 +1556,160 @@ export class DKGAgent {
       if (!sub || sub.metaSynced === true) continue;
       if (await this.hasConfirmedMetaState(contextGraphId)) {
         sub.metaSynced = true;
+        this.persistContextGraphSubscription(contextGraphId);
       }
+    }
+  }
+
+  private setContextGraphSubscription(
+    contextGraphId: string,
+    next: ContextGraphSub,
+    options?: { persist?: boolean },
+  ): ContextGraphSub {
+    this.subscribedContextGraphs.set(contextGraphId, next);
+    if (options?.persist !== false) {
+      this.persistContextGraphSubscription(contextGraphId);
+      if (next.subscribed) {
+        this.persistLocalNodeMembership(contextGraphId);
+      } else {
+        this.deleteContextGraphMember(contextGraphId, 'node', this.peerId);
+      }
+    }
+    return next;
+  }
+
+  markContextGraphSubscriptionState(contextGraphId: string, patch: Partial<ContextGraphSub>): void {
+    const existing = this.subscribedContextGraphs.get(contextGraphId);
+    if (!existing) return;
+    this.setContextGraphSubscription(contextGraphId, { ...existing, ...patch });
+  }
+
+  persistContextGraphSubscriptionState(contextGraphId: string): void {
+    this.persistContextGraphSubscription(contextGraphId);
+  }
+
+  private persistContextGraphSubscription(contextGraphId: string): void {
+    const store = this.config.contextGraphSubscriptionStore;
+    if (!store) return;
+    const sub = this.subscribedContextGraphs.get(contextGraphId);
+    if (!sub?.subscribed) {
+      void store.delete(contextGraphId).catch((err) => {
+        this.log.warn(
+          createOperationContext('system'),
+          `Failed to delete persisted context-graph subscription for "${contextGraphId}": ${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
+      return;
+    }
+    void store.save({
+      id: contextGraphId,
+      name: sub.name,
+      subscribed: sub.subscribed,
+      synced: sub.synced,
+      sharedMemorySynced: sub.sharedMemorySynced,
+      metaSynced: sub.metaSynced,
+      onChainId: sub.onChainId,
+      syncScoped: (this.config.syncContextGraphs ?? []).includes(contextGraphId),
+    }).catch((err) => {
+      this.log.warn(
+        createOperationContext('system'),
+        `Failed to persist context-graph subscription for "${contextGraphId}": ${err instanceof Error ? err.message : String(err)}`,
+      );
+    });
+  }
+
+  private normalizeMembershipPrincipal(
+    principalType: ContextGraphMemberPrincipalType,
+    principalId: string,
+  ): string {
+    if (principalType === 'agent' && ethers.isAddress(principalId)) {
+      return ethers.getAddress(principalId);
+    }
+    return principalId;
+  }
+
+  private upsertContextGraphMember(record: ContextGraphMembershipRecord): void {
+    const store = this.config.contextGraphMembershipStore;
+    if (!store) return;
+    const normalizedRecord = {
+      ...record,
+      principalId: this.normalizeMembershipPrincipal(record.principalType, record.principalId),
+    };
+    const updatedAt = Date.now();
+    void store.upsert({ ...normalizedRecord, updatedAt }).catch((err) => {
+      this.log.warn(
+        createOperationContext('system'),
+        `Failed to persist context-graph membership for "${normalizedRecord.contextGraphId}" (${normalizedRecord.principalType}:${normalizedRecord.principalId}): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    });
+  }
+
+  private deleteContextGraphMember(
+    contextGraphId: string,
+    principalType: ContextGraphMemberPrincipalType,
+    principalId: string,
+  ): void {
+    const store = this.config.contextGraphMembershipStore;
+    if (!store) return;
+    const normalizedPrincipalId = this.normalizeMembershipPrincipal(principalType, principalId);
+    void store.delete(contextGraphId, principalType, normalizedPrincipalId).catch((err) => {
+      this.log.warn(
+        createOperationContext('system'),
+        `Failed to delete context-graph membership for "${contextGraphId}" (${principalType}:${normalizedPrincipalId}): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    });
+  }
+
+  private persistLocalNodeMembership(contextGraphId: string, source = 'subscription'): void {
+    const sub = this.subscribedContextGraphs.get(contextGraphId);
+    this.upsertContextGraphMember({
+      contextGraphId,
+      principalType: 'node',
+      principalId: this.peerId,
+      role: 'subscriber',
+      status: 'active',
+      source,
+      displayName: this.nodeName,
+      metadata: {
+        subscribed: sub?.subscribed ?? false,
+        synced: sub?.synced ?? false,
+        sharedMemorySynced: sub?.sharedMemorySynced ?? false,
+        metaSynced: sub?.metaSynced ?? false,
+        ...(sub?.onChainId ? { onChainId: sub.onChainId } : {}),
+      },
+    });
+  }
+
+  private async rehydrateContextGraphSubscriptions(): Promise<void> {
+    const store = this.config.contextGraphSubscriptionStore;
+    if (!store) return;
+    const ctx = createOperationContext('init');
+    try {
+      const rows = await store.loadAll();
+      for (const row of rows) {
+        this.setContextGraphSubscription(row.id, {
+          name: row.name,
+          subscribed: row.subscribed,
+          synced: row.synced,
+          sharedMemorySynced: row.sharedMemorySynced,
+          metaSynced: row.metaSynced,
+          onChainId: row.onChainId,
+        }, { persist: false });
+      }
+      for (const row of rows) {
+        if (row.syncScoped) {
+          this.trackSyncContextGraph(row.id);
+        }
+        if (row.subscribed) {
+          this.subscribeToContextGraph(row.id, { trackSyncScope: false, persist: false });
+          this.persistLocalNodeMembership(row.id, 'rehydrated-subscription');
+        }
+      }
+      if (rows.length > 0) {
+        this.log.info(ctx, `Rehydrated ${rows.length} persisted context-graph subscription(s)`);
+      }
+    } catch (err) {
+      this.log.warn(ctx, `Failed to rehydrate persisted context-graph subscriptions: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
@@ -2413,6 +2627,27 @@ export class DKGAgent {
       throw new Error('createOnChainContextGraph not available on chain adapter');
     }
     const result = await this.chain.createOnChainContextGraph(params);
+    const contextGraphId = result.contextGraphId.toString();
+    for (const identityId of params.participantIdentityIds) {
+      this.upsertContextGraphMember({
+        contextGraphId,
+        principalType: 'identity',
+        principalId: identityId.toString(),
+        role: 'hosting-node',
+        status: 'active',
+        source: 'on-chain-registration',
+      });
+    }
+    for (const agentAddress of params.participantAgents ?? []) {
+      this.upsertContextGraphMember({
+        contextGraphId,
+        principalType: 'agent',
+        principalId: agentAddress,
+        role: 'participant-agent',
+        status: 'active',
+        source: 'on-chain-registration',
+      });
+    }
     this.log.info(ctx, `Created on-chain context graph ${result.contextGraphId} (M=${params.requiredSignatures}, N=${params.participantIdentityIds.length})`);
     return result;
   }
@@ -2869,7 +3104,7 @@ export class DKGAgent {
     });
   }
 
-  subscribeToContextGraph(contextGraphId: string, options?: { trackSyncScope?: boolean }): void {
+  subscribeToContextGraph(contextGraphId: string, options?: { trackSyncScope?: boolean; persist?: boolean }): void {
     if (options?.trackSyncScope !== false) {
       this.trackSyncContextGraph(contextGraphId);
     }
@@ -2878,7 +3113,11 @@ export class DKGAgent {
     if (this.gossipRegistered.has(contextGraphId)) {
       const existing = this.subscribedContextGraphs.get(contextGraphId);
       if (!existing?.subscribed) {
-        this.subscribedContextGraphs.set(contextGraphId, { ...existing, subscribed: true, synced: existing?.synced ?? false });
+        this.setContextGraphSubscription(
+          contextGraphId,
+          { ...existing, subscribed: true, synced: existing?.synced ?? false },
+          { persist: options?.persist },
+        );
       }
       return;
     }
@@ -2893,7 +3132,11 @@ export class DKGAgent {
     this.gossip.subscribe(appTopic);
 
     const existing = this.subscribedContextGraphs.get(contextGraphId);
-    this.subscribedContextGraphs.set(contextGraphId, { ...existing, subscribed: true, synced: existing?.synced ?? false });
+    this.setContextGraphSubscription(
+      contextGraphId,
+      { ...existing, subscribed: true, synced: existing?.synced ?? false },
+      { persist: options?.persist },
+    );
 
     this.gossip.onMessage(publishTopic, async (_topic, data, from) => {
       const gph = this.getOrCreateGossipPublishHandler();
@@ -2949,6 +3192,7 @@ export class DKGAgent {
           getContextGraphOwner: (id) => this.getContextGraphCreator(id),
           subscribeToContextGraph: (id, options) => this.subscribeToContextGraph(id, options),
           hasConfirmedMetaState: (id) => this.hasConfirmedMetaState(id),
+          persistContextGraphSubscription: (id) => this.persistContextGraphSubscriptionState(id),
         },
       );
     }
@@ -3216,12 +3460,81 @@ export class DKGAgent {
     await this.store.insert(quads);
     await gm.ensureParanet(opts.id);
 
-    this.subscribedContextGraphs.set(opts.id, {
+    this.setContextGraphSubscription(opts.id, {
       name: opts.name,
       subscribed: !opts.private,
       synced: true,
       metaSynced: true,
     });
+
+    if (opts.private || isCurated) {
+      this.upsertContextGraphMember({
+        contextGraphId: opts.id,
+        principalType: 'node',
+        principalId: this.peerId,
+        role: 'curator',
+        status: 'active',
+        source: 'local-create',
+        displayName: this.nodeName,
+      });
+    }
+
+    const curatorAgentAddress = opts.callerAgentAddress ?? this.defaultAgentAddress;
+    if (curatorAgentAddress) {
+      this.upsertContextGraphMember({
+        contextGraphId: opts.id,
+        principalType: 'agent',
+        principalId: curatorAgentAddress,
+        role: 'curator',
+        status: 'active',
+        source: 'local-create',
+      });
+    }
+
+    for (const peer of opts.allowedPeers ?? []) {
+      this.upsertContextGraphMember({
+        contextGraphId: opts.id,
+        principalType: 'node',
+        principalId: peer,
+        role: 'participant',
+        status: 'active',
+        source: 'allowed-peer',
+      });
+    }
+
+    for (const addr of opts.allowedAgents ?? []) {
+      this.upsertContextGraphMember({
+        contextGraphId: opts.id,
+        principalType: 'agent',
+        principalId: addr,
+        role: 'participant',
+        status: 'active',
+        source: 'allowed-agent',
+      });
+    }
+
+    for (const addr of opts.participantAgents ?? []) {
+      if (!ethers.isAddress(addr)) continue;
+      this.upsertContextGraphMember({
+        contextGraphId: opts.id,
+        principalType: 'agent',
+        principalId: ethers.getAddress(addr),
+        role: 'participant-agent',
+        status: 'active',
+        source: 'participant-agent',
+      });
+    }
+
+    for (const identityId of participantIdentityIds) {
+      this.upsertContextGraphMember({
+        contextGraphId: opts.id,
+        principalType: 'identity',
+        principalId: identityId.toString(),
+        role: 'hosting-node',
+        status: 'active',
+        source: 'participant-identity',
+      });
+    }
 
     // On-chain registration is intentionally NOT done here — per v10 spec
     // §2.2 / §2.3 Context Graphs are a local-first primitive. A CG exists
@@ -3548,6 +3861,7 @@ export class DKGAgent {
         this.subscribeToContextGraph(id, { trackSyncScope: true });
         this.log.info(ctx, `Subscribed to newly registered context graph "${id}"`);
       }
+      this.persistContextGraphSubscription(id);
     }
 
     // Registration status is in _meta — it propagates to peers via sync, not
@@ -3628,6 +3942,14 @@ export class DKGAgent {
 
     // Skip if already in the allowlist (idempotent)
     if (existingAllowlist?.includes(peerId)) {
+      this.upsertContextGraphMember({
+        contextGraphId,
+        principalType: 'node',
+        principalId: peerId,
+        role: 'participant',
+        status: 'active',
+        source: 'allowed-peer',
+      });
       this.log.info(ctx, `Peer ${peerId} already in allowlist for "${contextGraphId}" — skipping`);
       return;
     }
@@ -3640,6 +3962,26 @@ export class DKGAgent {
     });
 
     await this.store.insert(quadsToInsert);
+
+    if (existingAllowlist === null || existingAllowlist.length === 0) {
+      this.upsertContextGraphMember({
+        contextGraphId,
+        principalType: 'node',
+        principalId: this.peerId,
+        role: 'curator',
+        status: 'active',
+        source: 'allowed-peer',
+        displayName: this.nodeName,
+      });
+    }
+    this.upsertContextGraphMember({
+      contextGraphId,
+      principalType: 'node',
+      principalId: peerId,
+      role: 'participant',
+      status: 'active',
+      source: 'allowed-peer',
+    });
 
     // Allowlist updates are in _meta and propagate to peers via the
     // authenticated sync protocol, not unauthenticated gossip.
@@ -3685,6 +4027,14 @@ export class DKGAgent {
         object: `"${this.defaultAgentAddress}"`,
         graph: cgMetaGraph,
       });
+      this.upsertContextGraphMember({
+        contextGraphId,
+        principalType: 'agent',
+        principalId: this.defaultAgentAddress,
+        role: 'curator',
+        status: 'active',
+        source: 'allowed-agent',
+      });
     }
 
     quadsToInsert.push({
@@ -3695,6 +4045,14 @@ export class DKGAgent {
     });
 
     await this.store.insert(quadsToInsert);
+    this.upsertContextGraphMember({
+      contextGraphId,
+      principalType: 'agent',
+      principalId: agentAddress,
+      role: 'participant',
+      status: 'active',
+      source: 'allowed-agent',
+    });
 
     this.log.info(ctx, `Invited agent ${agentAddress} to context graph "${contextGraphId}"`);
   }
@@ -3732,6 +4090,7 @@ export class DKGAgent {
       predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
       object: `"${agentAddress}"`,
     });
+    this.deleteContextGraphMember(contextGraphId, 'agent', agentAddress);
 
     this.log.info(ctx, `Removed agent ${agentAddress} from context graph "${contextGraphId}"`);
   }
@@ -3907,6 +4266,16 @@ export class DKGAgent {
       quads.push({ subject: requestUri, predicate: SCHEMA_NAME, object: `"${agentName}"`, graph: cgMetaGraph });
     }
     await this.store.insert(quads);
+    this.upsertContextGraphMember({
+      contextGraphId,
+      principalType: 'agent',
+      principalId: agentAddress,
+      role: 'requester',
+      status: 'pending',
+      source: 'join-request',
+      ...(agentName ? { displayName: agentName } : {}),
+      metadata: { timestamp },
+    });
     const ctx = createOperationContext('system');
     this.log.info(ctx, `Stored pending join request from ${agentAddress} for "${contextGraphId}"`);
   }
@@ -4048,6 +4417,14 @@ export class DKGAgent {
       object: `"rejected"`,
       graph: cgMetaGraph,
     }]);
+    this.upsertContextGraphMember({
+      contextGraphId,
+      principalType: 'agent',
+      principalId: agentAddress,
+      role: 'requester',
+      status: 'removed',
+      source: 'join-rejected',
+    });
 
     const ctx = createOperationContext('system');
     this.log.info(ctx, `Rejected join request from ${agentAddress} for "${contextGraphId}"`);
@@ -4458,7 +4835,7 @@ export class DKGAgent {
       // `LIMIT 1` made ownership nondeterministic — any subscriber could
       // win the unordered query and look like the curator.
       this.subscribeToContextGraph(opts.id);
-      this.subscribedContextGraphs.set(opts.id, {
+      this.setContextGraphSubscription(opts.id, {
         name: opts.name,
         subscribed: true,
         synced: true,
@@ -4516,7 +4893,7 @@ export class DKGAgent {
     await gm.ensureParanet(opts.id);
 
     this.subscribeToContextGraph(opts.id);
-    this.subscribedContextGraphs.set(opts.id, {
+    this.setContextGraphSubscription(opts.id, {
       name: opts.name,
       subscribed: true,
       synced: true,
@@ -6592,23 +6969,23 @@ export class DKGAgent {
         // `refreshMetaSyncedFlags(newlyDiscovered)` call from
         // `trySyncFromPeer` (see ~#1012) will flip the flag once the
         // allowlist has been fetched via the authenticated sync path.
-        this.subscribedContextGraphs.set(id, {
+        this.setContextGraphSubscription(id, {
           name,
           subscribed: false,
           synced: true,
           metaSynced: false,
           onChainId: undefined,
-        });
+        }, { persist: false });
         this.subscribeToContextGraph(id);
         this.log.info(ctx, `Discovered invited context graph "${name}" (${id}) — auto-subscribed (private/allowlisted)`);
       } else {
-        this.subscribedContextGraphs.set(id, {
+        this.setContextGraphSubscription(id, {
           name,
           subscribed: false,
           synced: true,
           metaSynced: source === 'meta',
           onChainId: undefined,
-        });
+        }, { persist: false });
         this.log.info(ctx, `Discovered context graph "${name}" (${id}) from ${source} store — added as discoverable only`);
       }
       discovered++;
@@ -6660,7 +7037,7 @@ export class DKGAgent {
         continue;
       }
 
-      this.subscribedContextGraphs.set(p.name, {
+      this.setContextGraphSubscription(p.name, {
         name: p.name,
         subscribed: true,
         synced: false,
@@ -7058,4 +7435,3 @@ export class DKGAgent {
   }
 
 }
-

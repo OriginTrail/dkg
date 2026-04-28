@@ -21,7 +21,7 @@ export type GossipPhaseCallback = (phase: string, status: 'start' | 'end') => vo
 export interface GossipPublishHandlerCallbacks {
   contextGraphExists: (id: string) => Promise<boolean>;
   getContextGraphOwner: (id: string) => Promise<string | null>;
-  subscribeToContextGraph: (id: string, options?: { trackSyncScope?: boolean }) => void;
+  subscribeToContextGraph: (id: string, options?: { trackSyncScope?: boolean; persist?: boolean }) => void;
   /**
    * Same semantics as `DKGAgent#hasConfirmedMetaState`: returns true when the
    * local store already has a trustworthy public announcement for this CG
@@ -35,6 +35,7 @@ export interface GossipPublishHandlerCallbacks {
    * callback returned `false`).
    */
   hasConfirmedMetaState?: (id: string) => Promise<boolean>;
+  persistContextGraphSubscription?: (id: string) => void;
   onPhase?: GossipPhaseCallback;
 }
 
@@ -217,6 +218,7 @@ export class GossipPublishHandler {
               : false;
             if (confirmed) {
               sub.metaSynced = true;
+              this.callbacks.persistContextGraphSubscription?.(request.paranetId);
             } else {
               this.log.warn(ctx, `Gossip publish deferred: context graph "${request.paranetId}" _meta not yet synced — defaulting to deny`);
               return;

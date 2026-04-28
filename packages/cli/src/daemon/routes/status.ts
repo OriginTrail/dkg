@@ -396,6 +396,20 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
     return;
   }
 
+  // GET /api/context-graph/{id}/members — local SQL membership cache.
+  // Kept in this early route group so the cache has a lightweight read path.
+  const contextGraphMembersMatch = path.match(/^\/api\/context-graph\/([^/]+)\/members$/);
+  if (req.method === "GET" && contextGraphMembersMatch) {
+    const contextGraphId = decodeURIComponent(contextGraphMembersMatch[1]);
+    if (!isValidContextGraphId(contextGraphId)) {
+      return jsonResponse(res, 400, { error: 'Invalid context graph id' });
+    }
+    return jsonResponse(res, 200, {
+      contextGraphId,
+      members: dashDb.listContextGraphMembers(contextGraphId),
+    });
+  }
+
   // GET /api/status
   if (req.method === "GET" && path === "/api/status") {
     const allConns = agent.node.libp2p.getConnections();

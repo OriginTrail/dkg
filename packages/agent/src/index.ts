@@ -55,6 +55,12 @@ export {
   DKGAgent,
   type DKGAgentConfig,
   type ContextGraphSub,
+  type ContextGraphMemberPrincipalType,
+  type ContextGraphMemberStatus,
+  type ContextGraphMembershipRecord,
+  type ContextGraphMembershipStore,
+  type ContextGraphSubscriptionRecord,
+  type ContextGraphSubscriptionStore,
   type ParanetSub,
   type PeerHealth,
 } from './dkg-agent.js';
