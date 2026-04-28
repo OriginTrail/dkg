@@ -2313,6 +2313,53 @@ describe("ChatTurnWriter", () => {
     try { fs.rmSync(newStateDir2, { recursive: true, force: true }); } catch { /* best effort */ }
   });
 
+  it("T54 — setStateDir does a final rewrite at new path so late-persist advances are durable", async () => {
+    // Regression for T54: pre-fix, the success path wrote a SNAPSHOT
+    // of mergedWm/Bc to the new file, then unioned live with merged.
+    // A late persist arriving between `flush()` returning and the
+    // union landed in live but NOT the file. A crash before the next
+    // debounce would leave the new file stale; on restart the writer
+    // would load a watermark below the daemon's actual state and
+    // replay turns (daemon does not dedup — ADR-002).
+    const newStateDir = fs.mkdtempSync(path.join(os.tmpdir(), "chatturnwriter-t54-"));
+    const newDir = path.join(newStateDir, "dkg-adapter");
+    fs.mkdirSync(newDir, { recursive: true });
+    const newFile = path.join(newDir, "chat-turn-watermarks.json");
+    // Destination has older state than source.
+    fs.writeFileSync(newFile, JSON.stringify({
+      "openclaw:tg:::sk-shared": { w: 5, b: 3 },
+    }));
+
+    const dkw = writer as any;
+    dkw.cachedWatermarks.set("openclaw:tg:::sk-shared", 7);
+    dkw.w4bSessionCounts.set("openclaw:tg:::sk-shared", 4);
+
+    // Simulate a late persist firing AFTER the snapshot is built but
+    // before the write completes: spy on writeWatermarkFile, on the
+    // FIRST call (the merge+write at new path with override maps),
+    // bump live to 9 to simulate the concurrent advance, then call
+    // through to the original implementation.
+    const realWrite = dkw.writeWatermarkFile.bind(dkw);
+    const writeSpy = vi.spyOn(dkw, "writeWatermarkFile").mockImplementationOnce((target: string, override: any) => {
+      // Late persist fires DURING the migration write.
+      dkw.cachedWatermarks.set("openclaw:tg:::sk-shared", 9);
+      return realWrite(target, override);
+    });
+
+    await writer.setStateDir(newStateDir);
+
+    // Read the new file. Pre-fix it would contain {w: 7, b: 4}
+    // (the snapshot) instead of {w: 9, b: 4} (live with late
+    // persist). The final rewrite must capture the post-union
+    // live value of 9.
+    const persisted = JSON.parse(fs.readFileSync(newFile, "utf-8"));
+    expect(persisted["openclaw:tg:::sk-shared"]).toEqual({ w: 9, b: 4 });
+    expect(dkw.stateDir).toBe(newStateDir);
+
+    writeSpy.mockRestore();
+    try { fs.rmSync(newStateDir, { recursive: true, force: true }); } catch { /* best effort */ }
+  });
+
   it("T19 — failed outbound consumes the FULL pending queue (matches success-path collapse)", async () => {
     // Regression for T19: pre-fix, the success === false branch shifted
     // only the OLDEST pending inbound, but T15 changed the success path
