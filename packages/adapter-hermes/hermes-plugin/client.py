@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -17,6 +18,14 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_URL = "http://127.0.0.1:9200"
 _TIMEOUT = 5  # seconds
+
+
+def redact_text(value: str, token: Optional[str] = None) -> str:
+    """Remove bearer tokens from text safe to show in logs/errors."""
+    redacted = re.sub(r"Bearer\s+[A-Za-z0-9._~+/=-]+", "Bearer [REDACTED]", value)
+    if token:
+        redacted = redacted.replace(token, "[REDACTED]")
+    return redacted
 
 
 def _resolve_dkg_home() -> Path:
@@ -64,7 +73,7 @@ class DKGClient:
             r.raise_for_status()
             return r.json()
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return {"success": False, "error": redact_text(str(e), self._token)}
 
     def _post(self, path: str, data: Dict[str, Any] = None) -> Dict[str, Any]:
         try:
@@ -76,7 +85,7 @@ class DKGClient:
             r.raise_for_status()
             return r.json()
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return {"success": False, "error": redact_text(str(e), self._token)}
 
     # -- Health ----------------------------------------------------------------
 
@@ -134,10 +143,13 @@ class DKGClient:
             payload["subGraphName"] = sub_graph_name
         return self._post(f"/api/assertion/{assertion_name}/write", payload)
 
-    def query_assertion(self, assertion_name: str, context_graph_id: str, sparql: str) -> Dict[str, Any]:
-        """POST /api/assertion/{name}/query — SPARQL within assertion scope."""
+    def query_assertion(self, assertion_name: str, context_graph_id: str, sparql: str = "") -> Dict[str, Any]:
+        """POST /api/assertion/{name}/query — return quads in an assertion scope.
+
+        The DKG V10 assertion route returns the assertion quads directly; callers
+        that need SPARQL should use ``query()`` against ``/api/query``.
+        """
         return self._post(f"/api/assertion/{assertion_name}/query", {
-            "sparql": sparql,
             "contextGraphId": context_graph_id,
         })
 
@@ -185,16 +197,27 @@ class DKGClient:
 
     # -- Hermes-specific routes (served by adapter-hermes on daemon) -----------
 
-    def store_turn(self, session_id: str, user_content: str, assistant_content: str, agent_name: str = "") -> Dict[str, Any]:
-        """POST /api/hermes/session-turn — persist turn + trigger entity extraction."""
+    def store_turn(
+        self,
+        session_id: str,
+        user_content: str,
+        assistant_content: str,
+        agent_name: str = "",
+        turn_id: str = "",
+        idempotency_key: str = "",
+    ) -> Dict[str, Any]:
+        """POST /api/hermes-channel/persist-turn — persist turn + trigger entity extraction."""
         payload: Dict[str, Any] = {
             "sessionId": session_id,
-            "user": user_content,
-            "assistant": assistant_content,
+            "turnId": turn_id or f"{session_id}:unknown",
+            "idempotencyKey": idempotency_key or turn_id or f"{session_id}:unknown",
+            "userMessage": user_content,
+            "assistantReply": assistant_content,
+            "source": "hermes-provider",
         }
         if agent_name:
             payload["agentName"] = agent_name
-        return self._post("/api/hermes/session-turn", payload)
+        return self._post("/api/hermes-channel/persist-turn", payload)
 
     def end_session(self, session_id: str, turn_count: int = 0) -> Dict[str, Any]:
         """POST /api/hermes/session-end — finalize session."""

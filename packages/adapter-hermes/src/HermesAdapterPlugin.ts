@@ -7,7 +7,7 @@
  * - No write-capture (daemon's importMemories handles entity extraction)
  *
  * The Hermes Python plugin (plugins/memory/dkg/) talks to this adapter
- * via HTTP at localhost:9200/api/hermes/*. All heavy lifting (triple store,
+ * via HTTP at localhost:9200/api/hermes-channel/*. All heavy lifting (triple store,
  * P2P networking, publishing) is delegated to the daemon's DKGAgent.
  */
 
@@ -38,7 +38,7 @@ export class HermesAdapterPlugin {
 
     // Register Hermes-specific HTTP routes
     registerHermesRoutes(api);
-    api.logger.info?.('[hermes] Hermes adapter routes registered (/api/hermes/*)');
+    api.logger.info?.('[hermes] Hermes adapter routes registered (/api/hermes-channel/*)');
 
     // Register cleanup hook
     api.registerHook('session_end', async () => {

@@ -55,6 +55,15 @@ describe('OpenClaw bridge API contract', () => {
     expect(apiSrc).toMatch(/\/api\/openclaw-channel\/health/);
   });
 
+  it('exports Hermes local channel helpers', () => {
+    expect(apiSrc).toContain('sendHermesLocalChat');
+    expect(apiSrc).toContain('streamHermesLocalChat');
+    expect(apiSrc).toContain('fetchHermesLocalHealth');
+    expect(apiSrc).toMatch(/\/api\/hermes-channel\/send/);
+    expect(apiSrc).toMatch(/\/api\/hermes-channel\/stream/);
+    expect(apiSrc).toMatch(/\/api\/hermes-channel\/health/);
+  });
+
   it('exports fetchOpenClawLocalHistory', () => {
     expect(apiSrc).toContain('fetchOpenClawLocalHistory');
     expect(apiSrc).toContain('getDefaultLocalAgentSessionId');
@@ -110,16 +119,21 @@ describe('OpenClaw daemon endpoints', () => {
     expect(daemonSrc).toMatch(/timedOut/);
   });
 
-  it('does not default OpenClaw chatAttachments in daemon-owned registry surfaces', () => {
-    const definitionsBlock = daemonSrc.slice(
+  it('keeps chatAttachments daemon-owned and Hermes-enabled without changing OpenClaw defaults', () => {
+    const openClawDefinitionsBlock = daemonSrc.slice(
       daemonSrc.indexOf("openclaw: {"),
       daemonSrc.indexOf('hermes: {'),
+    );
+    const hermesDefinitionsBlock = daemonSrc.slice(
+      daemonSrc.indexOf('hermes: {'),
+      daemonSrc.indexOf('};', daemonSrc.indexOf('hermes: {')),
     );
     const registerAdapterBlock = daemonSrc.slice(
       daemonSrc.indexOf("// POST /api/register-adapter"),
       daemonSrc.indexOf('// GET /api/settings', daemonSrc.indexOf("// POST /api/register-adapter")),
     );
-    expect(definitionsBlock).not.toContain('chatAttachments: true');
+    expect(openClawDefinitionsBlock).not.toContain('chatAttachments: true');
+    expect(hermesDefinitionsBlock).toContain('chatAttachments: true');
     expect(registerAdapterBlock).not.toContain('chatAttachments: true');
   });
 
@@ -204,7 +218,7 @@ describe('PanelRight UI - connected agent flow', () => {
 
   it('keeps the interface future-friendly for Hermes', () => {
     expect(panelRight).toContain('Hermes');
-    expect(panelRight).toContain('same local-agent contract');
+    expect(panelRight).toContain('Connect Hermes');
   });
 
   it('shows the inline attachment tray and project fallback picker in the chat composer', () => {
@@ -657,6 +671,11 @@ describe('OpenClaw bridge behavioral tests', () => {
     }
   });
 
+  it('Hermes registers a default local-agent session id', async () => {
+    const { getDefaultLocalAgentSessionId } = await import('../src/ui/api.js');
+    expect(getDefaultLocalAgentSessionId('hermes')).toBe('hermes:dkg-ui');
+  });
+
   it('streamLocalAgentChat forwards injected context entries', async () => {
     const fetchCalls: [string | URL | Request, RequestInit | undefined][] = [];
     const fakeFetch = (async (url: string | URL | Request, init?: RequestInit) => {
@@ -687,7 +706,7 @@ describe('OpenClaw bridge behavioral tests', () => {
     }
   });
 
-  it('fetchLocalAgentIntegrations maps OpenClaw readiness and Hermes placeholder state', async () => {
+  it('fetchLocalAgentIntegrations maps OpenClaw readiness and Hermes connectable state', async () => {
     const { fetch } = createTrackingFetch([
       {
         ok: true,
@@ -725,7 +744,56 @@ describe('OpenClaw bridge behavioral tests', () => {
       expect(openclaw?.bridgeStatusLabel).toBe('Connected');
       expect(openclaw?.status).toBe('chat_ready');
       expect(openclaw?.target).toBe('gateway');
-      expect(hermes?.status).toBe('coming_soon');
+      expect(hermes?.status).toBe('available');
+      expect(hermes?.connectSupported).toBe(true);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it('fetchLocalAgentIntegrations maps Hermes health metadata into degraded detail', async () => {
+    const { fetch } = createTrackingFetch([
+      {
+        ok: true,
+        json: async () => ({
+          integrations: [
+            {
+              id: 'hermes',
+              name: 'Hermes',
+              description: 'Hermes framework adapter',
+              enabled: true,
+              capabilities: { localChat: true, connectFromUi: true, chatAttachments: true },
+              runtime: { status: 'degraded' },
+            },
+          ],
+        }),
+      },
+      {
+        ok: true,
+        json: async () => ({
+          ok: false,
+          target: 'bridge',
+          profile: 'dkg-smoke',
+          status: 'provider_conflict',
+          memory: { provider: 'honcho', conflict: true },
+          error: 'provider conflict',
+        }),
+      },
+    ]);
+    const original = globalThis.fetch;
+    globalThis.fetch = fetch;
+    try {
+      const { fetchLocalAgentIntegrations } = await import('../src/ui/api.js');
+      const result = await fetchLocalAgentIntegrations();
+      const hermes = result.integrations.find((item) => item.id === 'hermes');
+      expect(hermes).toMatchObject({
+        status: 'degraded',
+        statusLabel: 'Degraded',
+        bridgeStatusLabel: 'Degraded',
+        chatAttachments: true,
+      });
+      expect(hermes?.detail).toContain('profile dkg-smoke');
+      expect(hermes?.detail).toContain('memory provider conflict');
     } finally {
       globalThis.fetch = original;
     }

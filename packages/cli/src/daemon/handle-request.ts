@@ -323,6 +323,7 @@ import type { RequestContext } from './routes/context.js';
 import { handleStatusRoutes } from './routes/status.js';
 import { handleAgentChatRoutes } from './routes/agent-chat.js';
 import { handleOpenclawRoutes } from './routes/openclaw.js';
+import { handleHermesRoutes } from './routes/hermes.js';
 import { handleMemoryRoutes } from './routes/memory.js';
 import { handlePublisherRoutes } from './routes/publisher.js';
 import { handleContextGraphRoutes } from './routes/context-graph.js';
@@ -408,6 +409,9 @@ export async function handleRequest(
   if (res.writableEnded) return;
 
   await handleOpenclawRoutes(ctx);
+  if (res.writableEnded) return;
+
+  await handleHermesRoutes(ctx);
   if (res.writableEnded) return;
 
   await handleMemoryRoutes(ctx);

@@ -1,7 +1,20 @@
 import { describe, it, expect, beforeEach } from 'vitest';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { HermesAdapterPlugin } from '../src/HermesAdapterPlugin.js';
 import { registerHermesRoutes } from '../src/hermes-routes.js';
 import type { DaemonPluginApi, SessionTurnPayload, SessionEndPayload } from '../src/types.js';
+import { HermesDkgClient, redact } from '../src/dkg-client.js';
+import {
+  disconnectHermesProfile,
+  planHermesSetup,
+  resolveHermesProfile,
+  runSetup,
+  setupHermesProfile,
+  uninstallHermesProfile,
+  verifyHermesProfile,
+} from '../src/setup.js';
 
 interface TrackingApi extends DaemonPluginApi {
   routes: Map<string, (req: any, res: any) => Promise<void>>;
@@ -75,8 +88,11 @@ describe('HermesAdapterPlugin', () => {
 
     plugin.register(api);
 
-    expect(api.registerHttpRouteCalls).toHaveLength(3);
-    expect(api.routes.has('POST /api/hermes/session-turn')).toBe(true);
+    expect(api.registerHttpRouteCalls).toHaveLength(7);
+    expect(api.routes.has('GET /api/hermes-channel/health')).toBe(true);
+    expect(api.routes.has('POST /api/hermes-channel/send')).toBe(true);
+    expect(api.routes.has('POST /api/hermes-channel/stream')).toBe(true);
+    expect(api.routes.has('POST /api/hermes-channel/persist-turn')).toBe(true);
     expect(api.routes.has('POST /api/hermes/session-end')).toBe(true);
     expect(api.routes.has('GET /api/hermes/status')).toBe(true);
   });
@@ -99,45 +115,47 @@ describe('HermesAdapterPlugin', () => {
     plugin.register(api);
     plugin.register(api);
 
-    expect(api.registerHttpRouteCalls).toHaveLength(3);
+    expect(api.registerHttpRouteCalls).toHaveLength(7);
   });
 });
 
-describe('POST /api/hermes/session-turn', () => {
+describe('POST /api/hermes-channel/persist-turn', () => {
   let api: TrackingApi;
   let handler: (req: any, res: any) => Promise<void>;
 
   beforeEach(() => {
     api = createTrackingApi();
     registerHermesRoutes(api);
-    handler = api.routes.get('POST /api/hermes/session-turn')!;
+    handler = api.routes.get('POST /api/hermes-channel/persist-turn')!;
   });
 
   it('stores chat turn and returns success', async () => {
-    const body: SessionTurnPayload = { sessionId: 's1', user: 'hello', assistant: 'hi there' };
+    const body = {
+      sessionId: 's1',
+      turnId: 't1',
+      idempotencyKey: 'idem-t1',
+      userMessage: 'hello',
+      assistantReply: 'hi there',
+    };
     const { res, calls } = trackingRes();
 
     await handler({ body }, res);
 
-    expect((api.agent as any)._storeChatTurnCalls[0]).toEqual(['s1', 'hello', 'hi there']);
+    expect((api.agent as any)._storeChatTurnCalls[0]).toEqual([
+      's1',
+      'hello',
+      'hi there',
+      { turnId: 't1', idempotencyKey: 'idem-t1', source: 'hermes-channel' },
+    ]);
     expect((api.agent as any)._importMemoriesCalls[0][0]).toBe('hi there');
-    expect((api.agent as any)._importMemoriesCalls[0][1]).toBe('hermes-session:s1');
-    expect(calls.some(c => c.json?.success === true && c.json?.sessionId === 's1')).toBe(true);
-  });
-
-  it('prefixes source tag with agentName when provided', async () => {
-    const body = { sessionId: 's1', user: '', assistant: 'response', agentName: 'Atlas' };
-    const { res } = trackingRes();
-
-    await handler({ body }, res);
-
-    expect((api.agent as any)._importMemoriesCalls[0][1]).toBe('Atlas:hermes-session:s1');
+    expect((api.agent as any)._importMemoriesCalls[0][1]).toBe('hermes-session:s1:turn:t1');
+    expect(calls.some(c => c.json?.success === true && c.json?.turnId === 't1')).toBe(true);
   });
 
   it('returns 400 when sessionId is missing', async () => {
     const { res, calls } = trackingRes();
 
-    await handler({ body: { user: 'hello' } }, res);
+    await handler({ body: { turnId: 't1', idempotencyKey: 'idem', userMessage: 'hello' } }, res);
 
     expect(calls.some(c => c.status === 400)).toBe(true);
     expect(calls.some(c => c.json?.success === false)).toBe(true);
@@ -146,7 +164,7 @@ describe('POST /api/hermes/session-turn', () => {
   it('returns 400 when both user and assistant are missing', async () => {
     const { res, calls } = trackingRes();
 
-    await handler({ body: { sessionId: 's1' } }, res);
+    await handler({ body: { sessionId: 's1', turnId: 't1', idempotencyKey: 'idem' } }, res);
 
     expect(calls.some(c => c.status === 400)).toBe(true);
   });
@@ -154,7 +172,9 @@ describe('POST /api/hermes/session-turn', () => {
   it('succeeds with only user (no assistant)', async () => {
     const { res, calls } = trackingRes();
 
-    await handler({ body: { sessionId: 's1', user: 'hello' } }, res);
+    await handler({
+      body: { sessionId: 's1', turnId: 't1', idempotencyKey: 'idem', userMessage: 'hello' },
+    }, res);
 
     expect(calls.some(c => c.json?.success === true && c.json?.sessionId === 's1')).toBe(true);
     expect((api.agent as any)._importMemoriesCalls).toHaveLength(0);
@@ -164,7 +184,9 @@ describe('POST /api/hermes/session-turn', () => {
     (api.agent as any)._setImportMemoriesError(new Error('LLM timeout'));
     const { res, calls } = trackingRes();
 
-    await handler({ body: { sessionId: 's1', user: '', assistant: 'x' } }, res);
+    await handler({
+      body: { sessionId: 's1', turnId: 't1', idempotencyKey: 'idem', userMessage: '', assistantReply: 'x' },
+    }, res);
 
     expect(calls.some(c => c.json?.success === true && c.json?.sessionId === 's1')).toBe(true);
   });
@@ -173,7 +195,9 @@ describe('POST /api/hermes/session-turn', () => {
     (api.agent as any)._setStoreChatTurnError(new Error('DB error'));
     const { res, calls } = trackingRes();
 
-    await handler({ body: { sessionId: 's1', user: 'u', assistant: 'a' } }, res);
+    await handler({
+      body: { sessionId: 's1', turnId: 't1', idempotencyKey: 'idem', userMessage: 'u', assistantReply: 'a' },
+    }, res);
 
     expect(calls.some(c => c.status === 500)).toBe(true);
     expect(calls.some(c => c.json?.success === false)).toBe(true);
@@ -183,7 +207,9 @@ describe('POST /api/hermes/session-turn', () => {
     api.agent.storeChatTurn = undefined;
     const { res, calls } = trackingRes();
 
-    await handler({ body: { sessionId: 's1', user: 'u', assistant: 'a' } }, res);
+    await handler({
+      body: { sessionId: 's1', turnId: 't1', idempotencyKey: 'idem', userMessage: 'u', assistantReply: 'a' },
+    }, res);
 
     expect(calls.some(c => c.json?.success === true && c.json?.sessionId === 's1')).toBe(true);
   });
@@ -192,7 +218,9 @@ describe('POST /api/hermes/session-turn', () => {
     api.agent.importMemories = undefined;
     const { res, calls } = trackingRes();
 
-    await handler({ body: { sessionId: 's1', user: '', assistant: 'stuff' } }, res);
+    await handler({
+      body: { sessionId: 's1', turnId: 't1', idempotencyKey: 'idem', userMessage: '', assistantReply: 'stuff' },
+    }, res);
 
     expect(calls.some(c => c.json?.success === true && c.json?.sessionId === 's1')).toBe(true);
   });
@@ -249,5 +277,141 @@ describe('GET /api/hermes/status', () => {
       c.json?.framework === 'hermes-agent' &&
       c.json?.status === 'connected',
     )).toBe(true);
+  });
+});
+
+describe('HermesDkgClient', () => {
+  it('registers Hermes through the local-agent integration route', async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const fetchImpl = async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), init: init ?? {} });
+      return new Response(JSON.stringify({ ok: true, integration: { id: 'hermes' } }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    };
+    const client = new HermesDkgClient({
+      baseUrl: 'http://127.0.0.1:9200/',
+      apiToken: 'secret-token',
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    await client.connectHermesIntegration({
+      metadata: { profileName: 'dkg-smoke' },
+      transport: { bridgeUrl: 'http://127.0.0.1:3199' },
+    });
+
+    expect(calls[0].url).toBe('http://127.0.0.1:9200/api/local-agent-integrations/connect');
+    expect((calls[0].init.headers as Record<string, string>).Authorization).toBe('Bearer secret-token');
+    const body = JSON.parse(String(calls[0].init.body));
+    expect(body.id).toBe('hermes');
+    expect(body.transport.kind).toBe('hermes-channel');
+    expect(body.capabilities.localChat).toBe(true);
+  });
+
+  it('redacts bearer tokens from daemon errors', async () => {
+    const fetchImpl = async () => new Response('Bearer secret-token exploded', { status: 500 });
+    const client = new HermesDkgClient({
+      apiToken: 'secret-token',
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    await expect(client.getHermesChannelHealth()).rejects.toThrow('[REDACTED]');
+    await expect(client.getHermesChannelHealth()).rejects.not.toThrow('secret-token');
+    expect(redact('Authorization: Bearer secret-token', 'secret-token')).not.toContain('secret-token');
+  });
+});
+
+describe('Hermes profile setup helpers', () => {
+  it('resolves named Hermes profiles into profile-scoped Hermes homes', () => {
+    const profile = resolveHermesProfile({ profileName: 'dkg-smoke' });
+
+    expect(profile.hermesHome.replace(/\\/g, '/')).toContain('/.hermes/profiles/dkg-smoke');
+    expect(profile.configPath.replace(/\\/g, '/')).toContain('/.hermes/profiles/dkg-smoke/config.yaml');
+  });
+
+  it('plans setup without writing files in dry-run mode', () => {
+    const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-'));
+    const plan = planHermesSetup({
+      hermesHome,
+      profileName: 'dev',
+      dryRun: true,
+      daemonUrl: 'http://127.0.0.1:9200/',
+    });
+
+    expect(plan.dryRun).toBe(true);
+    expect(plan.state.daemonUrl).toBe('http://127.0.0.1:9200');
+    expect(plan.actions.some((action) => action.path.endsWith('dkg.json'))).toBe(true);
+  });
+
+  it('writes ownership-marked profile artifacts idempotently', () => {
+    const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-'));
+    const first = setupHermesProfile({
+      hermesHome,
+      profileName: 'dev',
+      nodeSkillContent: '# DKG Node\n',
+    });
+    const second = setupHermesProfile({
+      hermesHome,
+      profileName: 'dev',
+      nodeSkillContent: '# DKG Node\n',
+    });
+    const verify = verifyHermesProfile({ hermesHome, profileName: 'dev' });
+
+    expect(first.state.installedAt).toBe(second.state.installedAt);
+    expect(verify.ok).toBe(true);
+    expect(readFileSync(join(hermesHome, 'dkg.json'), 'utf-8')).toContain('@origintrail-official/dkg-adapter-hermes');
+    expect(readFileSync(join(hermesHome, 'config.yaml'), 'utf-8')).toContain('provider: dkg');
+    expect(readFileSync(join(hermesHome, 'skills', 'dkg-node', 'SKILL.md'), 'utf-8')).toContain('Managed by @origintrail-official/dkg-adapter-hermes');
+    expect(readFileSync(join(hermesHome, 'plugins', 'dkg', '__init__.py'), 'utf-8')).toContain('DKGMemoryProvider');
+    expect(readFileSync(join(hermesHome, 'plugins', 'dkg', '.dkg-adapter-hermes-owner.json'), 'utf-8')).toContain('@origintrail-official/dkg-adapter-hermes');
+  });
+
+  it('detects provider conflicts and preserves user config on disconnect/uninstall', () => {
+    const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-'));
+    writeFileSync(join(hermesHome, 'config.yaml'), 'memory:\n  provider: mem0\n');
+
+    expect(() => setupHermesProfile({ hermesHome, memoryMode: 'provider' })).toThrow('memory.provider: mem0');
+
+    const plan = setupHermesProfile({ hermesHome, memoryMode: 'tools-only' });
+    const verify = verifyHermesProfile({ hermesHome, memoryMode: 'provider' });
+
+    expect(plan.warnings).toHaveLength(0);
+    expect(verify.ok).toBe(true);
+    expect(verify.warnings[0]).toContain('mem0');
+
+    disconnectHermesProfile({ hermesHome });
+    uninstallHermesProfile({ hermesHome });
+
+    expect(readFileSync(join(hermesHome, 'config.yaml'), 'utf-8')).toContain('provider: mem0');
+  });
+
+  it('removes only ownership-marked provider plugin artifacts during uninstall', () => {
+    const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-'));
+    setupHermesProfile({ hermesHome, profileName: 'dev' });
+
+    uninstallHermesProfile({ hermesHome, profileName: 'dev' });
+
+    expect(existsSync(join(hermesHome, 'plugins', 'dkg'))).toBe(false);
+  });
+
+  it('adds a managed provider line inside an existing Hermes memory config', () => {
+    const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-'));
+    writeFileSync(join(hermesHome, 'config.yaml'), 'model: gpt-5\nmemory:\n  retrieval_k: 8\n');
+
+    setupHermesProfile({ hermesHome, memoryMode: 'provider' });
+
+    const config = readFileSync(join(hermesHome, 'config.yaml'), 'utf-8');
+    expect((config.match(/^memory:/gm) ?? [])).toHaveLength(1);
+    expect(config).toContain('  provider: dkg');
+    expect(config).toContain('  retrieval_k: 8');
+  });
+
+  it('exposes a dry-run CLI setup helper for dkg hermes setup', async () => {
+    await expect(runSetup({
+      profile: 'dkg-smoke',
+      dryRun: true,
+      daemonUrl: 'http://127.0.0.1:9200/',
+    })).resolves.toBeUndefined();
   });
 });

@@ -1,0 +1,584 @@
+import { cpSync, existsSync, readFileSync, rmSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { homedir } from 'node:os';
+import { createHash } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
+import {
+  type HermesMemoryMode,
+  type HermesProfileMetadata,
+  type HermesPublishGuardPolicy,
+  type HermesRuntimeStatus,
+  type HermesSetupState,
+} from './types.js';
+import { HermesDkgClient, redact } from './dkg-client.js';
+
+const MANAGED_BY = '@origintrail-official/dkg-adapter-hermes' as const;
+const STATE_VERSION = 1;
+const CONFIG_BEGIN = '# BEGIN DKG ADAPTER HERMES MANAGED';
+const CONFIG_END = '# END DKG ADAPTER HERMES MANAGED';
+const PLUGIN_OWNER_FILE = '.dkg-adapter-hermes-owner.json';
+
+export interface HermesSetupOptions {
+  profileName?: string;
+  hermesHome?: string;
+  daemonUrl?: string;
+  contextGraph?: string;
+  agentName?: string;
+  memoryMode?: HermesMemoryMode;
+  dryRun?: boolean;
+  publishGuard?: Partial<HermesPublishGuardPolicy>;
+  nodeSkillContent?: string;
+}
+
+export interface HermesCliOptions {
+  profile?: string;
+  profileName?: string;
+  hermesHome?: string;
+  daemonUrl?: string;
+  port?: string | number;
+  cwd?: string;
+  memoryMode?: HermesMemoryMode | 'primary' | 'ask';
+  dryRun?: boolean;
+  verify?: boolean;
+  start?: boolean;
+}
+
+export interface HermesSetupPlan {
+  dryRun: boolean;
+  profile: HermesProfileMetadata;
+  actions: Array<{ type: 'create' | 'update' | 'remove' | 'skip'; path: string; reason: string }>;
+  warnings: string[];
+  state: HermesSetupState;
+}
+
+export interface HermesVerifyResult {
+  ok: boolean;
+  status: HermesRuntimeStatus;
+  profile: HermesProfileMetadata;
+  warnings: string[];
+  errors: string[];
+  state?: HermesSetupState;
+}
+
+export function resolveHermesProfile(options: Pick<HermesSetupOptions, 'profileName' | 'hermesHome' | 'memoryMode'> = {}): HermesProfileMetadata {
+  const profileName = trimmed(options.profileName);
+  if (profileName && /[\\/]/.test(profileName)) {
+    throw new Error('Hermes profile name must not contain path separators');
+  }
+  const defaultHome = profileName
+    ? join(homedir(), '.hermes', 'profiles', profileName)
+    : join(homedir(), '.hermes');
+  const hermesHome = resolve(expandHome(options.hermesHome ?? process.env.HERMES_HOME ?? defaultHome));
+  const stateDir = join(hermesHome, '.dkg-adapter-hermes');
+  return {
+    profileName,
+    hermesHome,
+    configPath: join(hermesHome, 'config.yaml'),
+    stateDir,
+    memoryMode: options.memoryMode ?? 'provider',
+  };
+}
+
+export function planHermesSetup(options: HermesSetupOptions = {}): HermesSetupPlan {
+  const profile = resolveHermesProfile(options);
+  const warnings = detectProviderConflict(profile, options.memoryMode ?? 'provider');
+  const daemonUrl = stripTrailingSlashes(options.daemonUrl ?? 'http://127.0.0.1:9200');
+  const publishGuard = normalizePublishGuard(options.publishGuard);
+  const managedFiles = [
+    join(profile.hermesHome, 'dkg.json'),
+    join(profile.hermesHome, 'plugins', 'dkg'),
+    join(profile.stateDir, 'setup-state.json'),
+  ];
+  if (profile.memoryMode === 'provider') {
+    managedFiles.push(profile.configPath);
+  }
+  if (options.nodeSkillContent) {
+    managedFiles.push(join(profile.hermesHome, 'skills', 'dkg-node', 'SKILL.md'));
+  }
+
+  const now = new Date().toISOString();
+  const state: HermesSetupState = {
+    managedBy: MANAGED_BY,
+    version: STATE_VERSION,
+    status: warnings.length ? 'degraded' : 'configured',
+    profile,
+    daemonUrl,
+    contextGraph: options.contextGraph ?? 'hermes-memory',
+    agentName: options.agentName,
+    publishGuard,
+    installedAt: now,
+    updatedAt: now,
+    managedFiles,
+  };
+
+  return {
+    dryRun: options.dryRun === true,
+    profile,
+    warnings,
+    state,
+    actions: managedFiles.map((path) => ({
+      type: existsSync(path) ? 'update' : 'create',
+      path,
+      reason: 'adapter-managed Hermes profile artifact',
+    })),
+  };
+}
+
+export function setupHermesProfile(options: HermesSetupOptions = {}): HermesSetupPlan {
+  const plan = planHermesSetup(options);
+  if (plan.dryRun) return plan;
+  if (plan.profile.memoryMode === 'provider' && plan.warnings.length) {
+    throw new Error(plan.warnings.join('\n'));
+  }
+
+  mkdirSync(plan.profile.hermesHome, { recursive: true });
+  mkdirSync(plan.profile.stateDir, { recursive: true });
+
+  const dkgConfigPath = join(plan.profile.hermesHome, 'dkg.json');
+  if (existsSync(dkgConfigPath) && !isOwnedJson(dkgConfigPath)) {
+    throw new Error(`Refusing to overwrite non-managed Hermes DKG config: ${dkgConfigPath}`);
+  }
+  writeOwnedJson(dkgConfigPath, {
+    managedBy: MANAGED_BY,
+    daemon_url: plan.state.daemonUrl,
+    context_graph: plan.state.contextGraph,
+    agent_name: plan.state.agentName ?? '',
+    memory_mode: plan.profile.memoryMode,
+    publish_guard: plan.state.publishGuard,
+  });
+
+  installHermesProviderPlugin(plan.profile);
+
+  if (plan.profile.memoryMode === 'provider') {
+    ensureManagedProviderBlock(plan.profile.configPath);
+  }
+
+  if (options.nodeSkillContent) {
+    const skillPath = join(plan.profile.hermesHome, 'skills', 'dkg-node', 'SKILL.md');
+    writeOwnedText(skillPath, options.nodeSkillContent);
+  }
+
+  const existingState = readSetupState(plan.profile);
+  const state = {
+    ...plan.state,
+    installedAt: existingState?.installedAt ?? plan.state.installedAt,
+    updatedAt: new Date().toISOString(),
+  };
+  writeOwnedJson(join(plan.profile.stateDir, 'setup-state.json'), state);
+  plan.state = state;
+  return plan;
+}
+
+export function verifyHermesProfile(options: HermesSetupOptions = {}): HermesVerifyResult {
+  const profile = resolveHermesProfile(options);
+  const errors: string[] = [];
+  const warnings = detectProviderConflict(profile, options.memoryMode ?? profile.memoryMode);
+  const state = readSetupState(profile);
+
+  if (!existsSync(profile.hermesHome)) {
+    errors.push(`Hermes profile directory does not exist: ${profile.hermesHome}`);
+  }
+  if (!state) {
+    errors.push(`DKG Hermes setup state not found at ${join(profile.stateDir, 'setup-state.json')}`);
+  } else if (state.managedBy !== MANAGED_BY) {
+    errors.push('DKG Hermes setup state is not owned by this adapter');
+  }
+  const dkgConfigPath = join(profile.hermesHome, 'dkg.json');
+  if (existsSync(dkgConfigPath) && !isOwnedJson(dkgConfigPath)) {
+    warnings.push(`Existing dkg.json is not ownership-marked: ${dkgConfigPath}`);
+  }
+
+  return {
+    ok: errors.length === 0,
+    status: errors.length ? 'error' : warnings.length ? 'degraded' : 'configured',
+    profile,
+    warnings,
+    errors,
+    state: state ?? undefined,
+  };
+}
+
+export function disconnectHermesProfile(options: HermesSetupOptions = {}): HermesSetupPlan {
+  const profile = resolveHermesProfile(options);
+  const existingState = readSetupState(profile);
+  const plan = planHermesSetup({ ...options, dryRun: options.dryRun });
+  plan.actions = [
+    { type: 'update', path: profile.configPath, reason: 'remove adapter-managed provider election block' },
+    { type: 'update', path: join(profile.stateDir, 'setup-state.json'), reason: 'mark adapter disconnected' },
+  ];
+  if (plan.dryRun) return plan;
+
+  removeManagedProviderBlock(profile.configPath);
+  const now = new Date().toISOString();
+  const nextState: HermesSetupState = {
+    ...(existingState ?? plan.state),
+    status: 'disconnected',
+    updatedAt: now,
+  };
+  writeOwnedJson(join(profile.stateDir, 'setup-state.json'), nextState);
+  plan.state = nextState;
+  return plan;
+}
+
+export function uninstallHermesProfile(options: HermesSetupOptions = {}): HermesSetupPlan {
+  const profile = resolveHermesProfile(options);
+  const plan = disconnectHermesProfile({ ...options, dryRun: true });
+  plan.dryRun = options.dryRun === true;
+  const managedFiles = readSetupState(profile)?.managedFiles ?? plan.state.managedFiles;
+  plan.actions = managedFiles.map((path) => ({
+    type: 'remove',
+    path,
+    reason: 'remove ownership-marked adapter artifact',
+  }));
+  plan.actions.push({ type: 'remove', path: profile.stateDir, reason: 'remove empty adapter state directory' });
+  if (options.dryRun) return plan;
+
+  removeManagedProviderBlock(profile.configPath);
+  for (const path of managedFiles) {
+    removeOwnedArtifact(path);
+  }
+  try {
+    rmSync(profile.stateDir, { recursive: true, force: true });
+  } catch {
+    // Best effort. A non-empty state dir is preserved.
+  }
+  return plan;
+}
+
+export async function runSetup(options: HermesCliOptions = {}): Promise<void> {
+  const setupOptions = toSetupOptions(options);
+  const plan = setupHermesProfile(setupOptions);
+  printPlan('Hermes setup', plan);
+  if (plan.dryRun) return;
+
+  if (options.start !== false) {
+    await connectDaemonBestEffort(plan, setupOptions.daemonUrl);
+  }
+
+  if (options.verify !== false) {
+    const result = verifyHermesProfile(setupOptions);
+    printVerify('Hermes verify', result);
+    if (!result.ok) {
+      throw new Error(result.errors.join('\n'));
+    }
+  }
+}
+
+export async function runVerify(options: HermesCliOptions = {}): Promise<void> {
+  const result = verifyHermesProfile(toSetupOptions(options));
+  printVerify('Hermes verify', result);
+  if (!result.ok) {
+    throw new Error(result.errors.join('\n'));
+  }
+}
+
+export async function runStatus(options: HermesCliOptions = {}): Promise<void> {
+  const result = verifyHermesProfile(toSetupOptions(options));
+  printVerify('Hermes status', result);
+}
+
+export async function runDoctor(options: HermesCliOptions = {}): Promise<void> {
+  const result = verifyHermesProfile(toSetupOptions(options));
+  printVerify('Hermes doctor', result);
+  if (!result.ok) {
+    throw new Error(result.errors.join('\n'));
+  }
+}
+
+export async function runDisconnect(options: HermesCliOptions = {}): Promise<void> {
+  const plan = disconnectHermesProfile(toSetupOptions(options));
+  printPlan('Hermes disconnect', plan);
+}
+
+export async function runReconnect(options: HermesCliOptions = {}): Promise<void> {
+  await runSetup(options);
+}
+
+export async function runUninstall(options: HermesCliOptions = {}): Promise<void> {
+  const plan = uninstallHermesProfile(toSetupOptions(options));
+  printPlan('Hermes uninstall', plan);
+}
+
+export const setup = runSetup;
+export const verify = runVerify;
+export const status = runStatus;
+export const doctor = runDoctor;
+export const disconnect = runDisconnect;
+export const reconnect = runReconnect;
+export const uninstall = runUninstall;
+
+function normalizePublishGuard(input: Partial<HermesPublishGuardPolicy> | undefined): HermesPublishGuardPolicy {
+  return {
+    defaultToolExposure: input?.defaultToolExposure ?? 'request-only',
+    allowDirectPublish: input?.allowDirectPublish ?? false,
+    requireExplicitApproval: input?.requireExplicitApproval ?? true,
+    requireWalletCheck: input?.requireWalletCheck ?? true,
+  };
+}
+
+function toSetupOptions(options: HermesCliOptions): HermesSetupOptions {
+  const port = normalizePort(options.port);
+  return {
+    profileName: trimmed(options.profileName ?? options.profile),
+    hermesHome: trimmed(options.hermesHome),
+    daemonUrl: stripTrailingSlashes(trimmed(options.daemonUrl) ?? (port ? `http://127.0.0.1:${port}` : 'http://127.0.0.1:9200')),
+    memoryMode: options.memoryMode === 'tools-only' ? 'tools-only' : 'provider',
+    dryRun: options.dryRun === true,
+  };
+}
+
+function normalizePort(value: string | number | undefined): number | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  const port = typeof value === 'number' ? value : Number(value);
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+    throw new Error(`Invalid Hermes daemon port: ${String(value)}`);
+  }
+  return port;
+}
+
+async function connectDaemonBestEffort(plan: HermesSetupPlan, daemonUrl: string | undefined): Promise<void> {
+  const apiToken = process.env.DKG_API_TOKEN ?? process.env.DKG_AUTH_TOKEN;
+  const client = new HermesDkgClient({
+    baseUrl: daemonUrl,
+    apiToken,
+    timeoutMs: 3_000,
+  });
+  try {
+    await client.connectHermesIntegration({
+      metadata: {
+        profileName: plan.profile.profileName,
+        hermesHome: plan.profile.hermesHome,
+        memoryMode: plan.profile.memoryMode,
+        setupState: plan.state.status,
+      },
+      transport: {
+        kind: 'hermes-channel',
+        bridgeUrl: 'http://127.0.0.1:9202',
+      },
+      runtime: {
+        status: plan.state.status === 'degraded' ? 'degraded' : 'configured',
+        ready: false,
+        lastError: null,
+      },
+    });
+  } catch (err: any) {
+    console.warn(`Hermes local-agent registration skipped: ${redact(err?.message ?? String(err), apiToken)}`);
+  }
+}
+
+function printPlan(label: string, plan: HermesSetupPlan): void {
+  console.log(`${label}: ${plan.profile.profileName ?? 'default'} (${plan.profile.hermesHome})`);
+  for (const warning of plan.warnings) {
+    console.warn(`warning: ${warning}`);
+  }
+  for (const action of plan.actions) {
+    console.log(`${plan.dryRun ? 'would ' : ''}${action.type}: ${action.path}`);
+  }
+}
+
+function printVerify(label: string, result: HermesVerifyResult): void {
+  console.log(`${label}: ${result.status} (${result.profile.hermesHome})`);
+  for (const warning of result.warnings) {
+    console.warn(`warning: ${warning}`);
+  }
+  for (const error of result.errors) {
+    console.error(`error: ${error}`);
+  }
+}
+
+function detectProviderConflict(profile: HermesProfileMetadata, memoryMode: HermesMemoryMode): string[] {
+  if (memoryMode !== 'provider' || !existsSync(profile.configPath)) return [];
+  const raw = readFileSync(profile.configPath, 'utf-8');
+  const provider = findConfiguredMemoryProvider(raw);
+  if (provider && provider !== 'dkg') {
+    return [`Hermes profile already has memory.provider: ${provider}; use tools-only mode or switch explicitly.`];
+  }
+  return [];
+}
+
+function findConfiguredMemoryProvider(raw: string): string | null {
+  const lines = raw.split(/\r?\n/);
+  let inMemory = false;
+  for (const line of lines) {
+    if (/^\s*memory\s*:\s*$/.test(line)) {
+      inMemory = true;
+      continue;
+    }
+    if (inMemory && /^\S/.test(line)) {
+      inMemory = false;
+    }
+    if (inMemory) {
+      const match = line.match(/^\s+provider\s*:\s*["']?([^"'\s#]+)["']?/);
+      if (match) return match[1];
+    }
+    const inline = line.match(/^\s*memory\.provider\s*:\s*["']?([^"'\s#]+)["']?/);
+    if (inline) return inline[1];
+  }
+  return null;
+}
+
+function ensureManagedProviderBlock(configPath: string): void {
+  const existing = existsSync(configPath) ? readFileSync(configPath, 'utf-8') : '';
+  const configuredProvider = findConfiguredMemoryProvider(existing);
+  if (!existing.includes(CONFIG_BEGIN) && configuredProvider === 'dkg') {
+    return;
+  }
+  if (configuredProvider && configuredProvider !== 'dkg') {
+    throw new Error(`Refusing to replace existing Hermes memory.provider: ${configuredProvider}`);
+  }
+
+  const unmanaged = removeManagedBlock(existing);
+  const next = hasTopLevelMemoryBlock(unmanaged)
+    ? insertManagedProviderIntoMemoryBlock(unmanaged)
+    : appendManagedMemoryBlock(unmanaged);
+  writeOwnedText(configPath, next, false);
+}
+
+function removeManagedProviderBlock(configPath: string): void {
+  if (!existsSync(configPath)) return;
+  const existing = readFileSync(configPath, 'utf-8');
+  if (!existing.includes(CONFIG_BEGIN)) return;
+  const next = removeManagedBlock(existing);
+  writeFileSync(configPath, next);
+}
+
+function appendManagedMemoryBlock(raw: string): string {
+  const block = `${CONFIG_BEGIN}\nmemory:\n  provider: dkg\n${CONFIG_END}\n`;
+  return `${raw}${raw && !raw.endsWith('\n') ? '\n' : ''}${block}`;
+}
+
+function insertManagedProviderIntoMemoryBlock(raw: string): string {
+  const lines = raw.split(/\r?\n/);
+  const next: string[] = [];
+  let inserted = false;
+  for (const line of lines) {
+    next.push(line);
+    if (!inserted && /^\s*memory\s*:\s*$/.test(line)) {
+      const indent = line.match(/^(\s*)/)?.[1] ?? '';
+      next.push(`${indent}  ${CONFIG_BEGIN}`);
+      next.push(`${indent}  provider: dkg`);
+      next.push(`${indent}  ${CONFIG_END}`);
+      inserted = true;
+    }
+  }
+  return next.join('\n');
+}
+
+function hasTopLevelMemoryBlock(raw: string): boolean {
+  return raw.split(/\r?\n/).some((line) => /^\s*memory\s*:\s*$/.test(line));
+}
+
+function removeManagedBlock(raw: string): string {
+  return raw.replace(
+    new RegExp(`^[ \\t]*${escapeRegExp(CONFIG_BEGIN)}\\r?\\n[\\s\\S]*?^[ \\t]*${escapeRegExp(CONFIG_END)}\\r?\\n?`, 'm'),
+    '',
+  );
+}
+
+function readSetupState(profile: HermesProfileMetadata): HermesSetupState | null {
+  const statePath = join(profile.stateDir, 'setup-state.json');
+  if (!existsSync(statePath)) return null;
+  try {
+    return JSON.parse(readFileSync(statePath, 'utf-8')) as HermesSetupState;
+  } catch {
+    return null;
+  }
+}
+
+function writeOwnedJson(path: string, value: unknown): void {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+function writeOwnedText(path: string, content: string, wrap = true): void {
+  mkdirSync(dirname(path), { recursive: true });
+  const body = wrap
+    ? `<!-- Managed by ${MANAGED_BY}; sha256:${sha256(content)} -->\n${content}`
+    : content;
+  writeFileSync(path, body.endsWith('\n') ? body : `${body}\n`);
+}
+
+function isOwnedJson(path: string): boolean {
+  try {
+    const raw = JSON.parse(readFileSync(path, 'utf-8'));
+    return raw?.managedBy === MANAGED_BY;
+  } catch {
+    return false;
+  }
+}
+
+function removeOwnedArtifact(path: string): void {
+  if (!existsSync(path)) return;
+  if (statSync(path).isDirectory()) {
+    if (!isOwnedPluginDir(path)) return;
+    rmSync(path, { recursive: true, force: true });
+    return;
+  }
+  if (path.endsWith('.json') && !isOwnedJson(path)) return;
+  if (!path.endsWith('.json')) {
+    const raw = readFileSync(path, 'utf-8');
+    if (!raw.includes(`Managed by ${MANAGED_BY}`)) return;
+  }
+  rmSync(path, { force: true });
+}
+
+function installHermesProviderPlugin(profile: HermesProfileMetadata): void {
+  const source = resolveBundledHermesPluginDir();
+  const target = join(profile.hermesHome, 'plugins', 'dkg');
+  if (existsSync(target) && !isOwnedPluginDir(target)) {
+    throw new Error(`Refusing to overwrite non-managed Hermes DKG provider plugin: ${target}`);
+  }
+
+  rmSync(target, { recursive: true, force: true });
+  mkdirSync(dirname(target), { recursive: true });
+  cpSync(source, target, {
+    recursive: true,
+    filter: (sourcePath) => {
+      const normalized = sourcePath.replace(/\\/g, '/');
+      return !normalized.includes('/__pycache__/') && !normalized.endsWith('.pyc');
+    },
+  });
+  writeOwnedJson(join(target, PLUGIN_OWNER_FILE), {
+    managedBy: MANAGED_BY,
+    sourcePackage: '@origintrail-official/dkg-adapter-hermes',
+    installedAt: new Date().toISOString(),
+  });
+}
+
+function resolveBundledHermesPluginDir(): string {
+  const moduleDir = dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    resolve(moduleDir, '..', 'hermes-plugin'),
+    resolve(moduleDir, '..', '..', 'hermes-plugin'),
+  ];
+  const found = candidates.find((candidate) => existsSync(join(candidate, '__init__.py')));
+  if (!found) {
+    throw new Error('Bundled Hermes provider plugin was not found in @origintrail-official/dkg-adapter-hermes');
+  }
+  return found;
+}
+
+function isOwnedPluginDir(path: string): boolean {
+  const marker = join(path, PLUGIN_OWNER_FILE);
+  return existsSync(marker) && isOwnedJson(marker);
+}
+
+function expandHome(path: string): string {
+  return path.replace(/^~(?=$|[\\/])/, homedir());
+}
+
+function trimmed(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function stripTrailingSlashes(value: string): string {
+  return value.replace(/\/+$/, '');
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function sha256(value: string): string {
+  return createHash('sha256').update(value).digest('hex');
+}

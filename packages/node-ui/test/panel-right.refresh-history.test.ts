@@ -110,6 +110,11 @@ describe('PanelRight chat history rehydration on mount (issue #255)', () => {
         && args[2]?.sessionId === 'openclaw:dkg-ui',
     );
     expect(earlyCall, 'chat history must be fetched on mount even before integrations resolve').toBeTruthy();
+    const hermesEarlyCall = fetchLocalAgentHistoryMock.mock.calls.find(
+      (args) => args[0] === 'hermes'
+        && args[2]?.sessionId === 'hermes:dkg-ui',
+    );
+    expect(hermesEarlyCall, 'Hermes default history must also hydrate before integrations resolve').toBeTruthy();
 
     await act(async () => {
       resolveIntegrations?.({ integrations: [readyOpenclawIntegration()] });

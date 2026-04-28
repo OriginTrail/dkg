@@ -72,6 +72,7 @@ interface LocalAgentSessionSummary {
 const OPENCLAW_DOCS_URL = 'https://docs.openclaw.ai/';
 const OPENCLAW_RELEASE_URL = 'https://github.com/openclaw/openclaw/releases';
 const ADD_AGENT_TAB_ID = '__add_agent__';
+const DEFAULT_LOCAL_AGENT_HISTORY_INTEGRATIONS = ['openclaw', 'hermes'] as const;
 
 let localMessageId = 0;
 
@@ -490,9 +491,10 @@ export function shouldPreserveSelectedLocalAgentTab(args: {
   localMessagesByConversation: Record<string, LocalAgentMessage[]>;
   sessionSummaries: LocalAgentSessionSummary[];
 }): boolean {
+  const selectedItem = args.selectedItem;
   return args.selectedIntegrationId === ADD_AGENT_TAB_ID
-    || (Boolean(args.selectedItem)
-      && (args.selectedItem.persistentChat
+    || (selectedItem != null
+      && (selectedItem.persistentChat
         || hasLocalAgentConversation(
           args.selectedIntegrationId,
           args.selectedSessionId,
@@ -528,6 +530,9 @@ function localAgentToolbarLabel(
   }
   if (integration.status === 'connecting') {
     return `${integration.name} is connecting…`;
+  }
+  if (integration.status === 'degraded') {
+    return `${integration.name} degraded`;
   }
   return `${integration.name} is unavailable`;
 }
@@ -717,9 +722,22 @@ export function ConnectedAgentsTab(props: {
                   </>
                 )}
                 {integration.id === 'hermes' && (
-                  <p className="v10-local-agent-copy">
-                    Hermes will plug into this same local-agent contract next, using the same side-panel chat surface once its runtime bridge is ready.
-                  </p>
+                  <>
+                    <p className="v10-local-agent-copy">
+                      Connect a local Hermes profile through the node, then this tab becomes the persistent chat surface for that profile.
+                    </p>
+                    {integration.connectSupported && (
+                      <div className="v10-local-agent-actions">
+                        <button
+                          className="v10-agent-send-btn secondary"
+                          onClick={() => onConnectIntegration(integration.id)}
+                          disabled={connectBusyId === integration.id}
+                        >
+                          {connectBusyId === integration.id ? 'Connecting...' : 'Connect Hermes'}
+                        </button>
+                      </div>
+                    )}
+                  </>
                 )}
               </div>
             ))}
@@ -763,6 +781,8 @@ export function ConnectedAgentsTab(props: {
                   ? `${selected.name} is not currently attached to this node. Session history remains available here; reconnect from the + tab when you want live chat again.`
                   : selected.status === 'connecting'
                   ? `${selected.name} is still finishing setup. This chat tab stays in place and will go live automatically when the connection is ready.`
+                  : selected.status === 'degraded'
+                  ? selected.detail
                   : showingStoredSessions
                   ? `${selected.name} has saved sessions on this node. Open one from Sessions or reconnect from the + tab to resume live chat here.`
                   : `${selected.name} is temporarily unavailable. Refresh after it recovers to resume chatting here.`}
@@ -1376,10 +1396,12 @@ export function PanelRight() {
     refreshLocalIntegrations();
   }, [loadSessions, refreshPeers, refreshLocalIntegrations]);
 
-  // Mount-time hydrate from the stable openclaw session so chat history
-  // paints before the bridge probe completes (issue #255).
+  // Mount-time hydrate stable local-agent sessions so chat history paints
+  // before bridge probes complete (issue #255).
   useEffect(() => {
-    void loadLocalHistory('openclaw', getDefaultLocalAgentSessionId('openclaw'));
+    for (const integrationId of DEFAULT_LOCAL_AGENT_HISTORY_INTEGRATIONS) {
+      void loadLocalHistory(integrationId, getDefaultLocalAgentSessionId(integrationId));
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

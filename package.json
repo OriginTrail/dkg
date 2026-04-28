@@ -5,7 +5,7 @@
   "packageManager": "pnpm@10.28.1",
   "scripts": {
     "build": "turbo build",
-    "build:runtime": "pnpm -r --filter @origintrail-official/dkg-core --filter @origintrail-official/dkg-storage --filter @origintrail-official/dkg-query --filter @origintrail-official/dkg-publisher --filter @origintrail-official/dkg-chain --filter @origintrail-official/dkg-epcis --filter @origintrail-official/dkg-agent --filter @origintrail-official/dkg-graph-viz --filter @origintrail-official/dkg-node-ui --filter @origintrail-official/dkg-adapter-openclaw --filter @origintrail-official/dkg run build",
+    "build:runtime": "pnpm -r --filter @origintrail-official/dkg-core --filter @origintrail-official/dkg-storage --filter @origintrail-official/dkg-query --filter @origintrail-official/dkg-publisher --filter @origintrail-official/dkg-chain --filter @origintrail-official/dkg-epcis --filter @origintrail-official/dkg-agent --filter @origintrail-official/dkg-graph-viz --filter @origintrail-official/dkg-node-ui --filter @origintrail-official/dkg-adapter-openclaw --filter @origintrail-official/dkg-adapter-hermes --filter @origintrail-official/dkg run build",
     "test": "turbo test",
     "test:coverage": "turbo test:coverage",
     "lint": "turbo lint",

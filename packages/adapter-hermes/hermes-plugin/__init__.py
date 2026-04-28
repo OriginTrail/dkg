@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import hashlib
 import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -43,6 +44,8 @@ def _load_config() -> dict:
         "daemon_url": os.environ.get("DKG_DAEMON_URL", "http://127.0.0.1:9200"),
         "context_graph": os.environ.get("DKG_CONTEXT_GRAPH", "hermes-memory"),
         "agent_name": os.environ.get("DKG_AGENT_NAME", ""),
+        "publish_tool": os.environ.get("DKG_PUBLISH_TOOL", "request-only"),
+        "allow_direct_publish": os.environ.get("DKG_ALLOW_DIRECT_PUBLISH", "").lower() in ("1", "true", "yes"),
     }
 
     config_path = get_hermes_home() / "dkg.json"
@@ -444,8 +447,8 @@ class DKGMemoryProvider(MemoryProvider):
         if not facts:
             return (
                 "DKG memory is connected but empty. Use dkg_memory to store facts, "
-                "dkg_query to search, dkg_share to share with team, dkg_publish "
-                "to publish on-chain."
+                "dkg_query to search, and dkg_share to share with team. "
+                "Direct Verified Memory publish is guarded by the operator."
             )
 
         memory_facts = [f for f in facts if f.get("target") == "memory"]
@@ -478,7 +481,7 @@ class DKGMemoryProvider(MemoryProvider):
             "\n"
             "COLLABORATION WORKFLOW:\n"
             "  dkg_share — Share findings to Shared Working Memory (team-visible, free)\n"
-            "  dkg_publish — Publish to Verified Memory (chain-anchored, costs TRAC)\n"
+            "  Direct Verified Memory publish is guarded and not a default model tool\n"
             "  dkg_wallet_balances — Check TRAC balance BEFORE publishing\n"
             "\n"
             "NETWORK & DISCOVERY:\n"
@@ -501,11 +504,10 @@ class DKGMemoryProvider(MemoryProvider):
         return "\n\n".join(blocks)
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
-        return [
+        schemas = [
             DKG_MEMORY_SCHEMA,
             DKG_QUERY_SCHEMA,
             DKG_SHARE_SCHEMA,
-            DKG_PUBLISH_SCHEMA,
             DKG_STATUS_SCHEMA,
             DKG_WALLET_SCHEMA,
             DKG_FIND_AGENTS_SCHEMA,
@@ -515,6 +517,9 @@ class DKGMemoryProvider(MemoryProvider):
             DKG_SUBSCRIBE_SCHEMA,
             DKG_CREATE_CONTEXT_GRAPH_SCHEMA,
         ]
+        if self._direct_publish_allowed():
+            schemas.insert(3, DKG_PUBLISH_SCHEMA)
+        return schemas
 
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
         handlers = {
@@ -552,7 +557,19 @@ class DKGMemoryProvider(MemoryProvider):
                 f"}} LIMIT 10"
             )
             if self._assertion_id:
-                result = self._client.query_assertion(self._assertion_id, self._context_graph, sparql)
+                result = self._client.query_assertion(self._assertion_id, self._context_graph)
+                quads = [
+                    quad for quad in _extract_quads(result)
+                    if query.lower() in _quad_object(quad).lower()
+                ][:10]
+                if not quads:
+                    return ""
+
+                lines = [
+                    f"  {_short(_quad_subject(quad))} - {_short(_quad_predicate(quad))} - {_quad_object(quad)}"
+                    for quad in quads
+                ]
+                return f"<dkg-context>\nRelevant knowledge from DKG:\n" + "\n".join(lines) + "\n</dkg-context>"
             else:
                 result = self._client.query(sparql, self._context_graph)
             bindings = result.get("results", {}).get("bindings", [])
@@ -576,30 +593,31 @@ class DKGMemoryProvider(MemoryProvider):
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
         """Send turn to daemon for entity extraction + persistence."""
         self._turn_count += 1
+        effective_session_id = session_id or self._session_id
+        turn_id = self._build_turn_id(effective_session_id, self._turn_count, user_content, assistant_content)
+        idempotency_key = f"hermes:{turn_id}"
         if self._offline or not self._client:
             # Queue for later sync
-            with self._lock:
-                self._cache.setdefault("queued_writes", []).append({
-                    "type": "turn",
-                    "session_id": self._session_id,
-                    "user": user_content[:2000],
-                    "assistant": assistant_content[:2000],
-                })
-                _save_cache(self._cache, self._agent_name)
+            self._queue_turn(effective_session_id, turn_id, idempotency_key, user_content, assistant_content)
             return
 
         # Fire-and-forget in background thread
         agent_name = self._agent_name
         def _sync():
             try:
-                self._client.store_turn(
-                    self._session_id,
+                result = self._client.store_turn(
+                    effective_session_id,
                     user_content[:2000],
                     assistant_content[:2000],
                     agent_name=agent_name,
+                    turn_id=turn_id,
+                    idempotency_key=idempotency_key,
                 )
+                if _client_result_failed(result):
+                    self._queue_turn(effective_session_id, turn_id, idempotency_key, user_content, assistant_content)
             except Exception as e:
                 logger.debug(f"[dkg] sync_turn failed: {e}")
+                self._queue_turn(effective_session_id, turn_id, idempotency_key, user_content, assistant_content)
 
         threading.Thread(target=_sync, daemon=True).start()
 
@@ -667,7 +685,9 @@ class DKGMemoryProvider(MemoryProvider):
 
     def save_config(self, values: Dict[str, Any], hermes_home: str) -> None:
         config_path = Path(hermes_home) / "dkg.json"
-        config_path.write_text(json.dumps(values, indent=2), encoding="utf-8")
+        owned_values = dict(values)
+        owned_values.setdefault("managedBy", "@origintrail-official/dkg-adapter-hermes")
+        config_path.write_text(json.dumps(owned_values, indent=2) + "\n", encoding="utf-8")
 
     # -- Internal: memory operations -------------------------------------------
 
@@ -701,6 +721,7 @@ class DKGMemoryProvider(MemoryProvider):
             _save_cache(self._cache, self._agent_name)
 
         # Write to DKG assertion if online
+        write_queued = False
         if self._client and not self._offline and self._assertion_id:
             quads = []
             for e in entries:
@@ -710,13 +731,16 @@ class DKGMemoryProvider(MemoryProvider):
                     "object": f"[{e.get('target', target)}]\n{e['content']}",
                 })
             try:
-                self._client.write_assertion(
+                result = self._client.write_assertion(
                     self._assertion_id,
                     self._context_graph,
                     quads,
                 )
+                if _client_result_failed(result):
+                    raise RuntimeError(result.get("error", "DKG assertion write failed"))
             except Exception as e:
                 logger.debug(f"[dkg] Assertion write failed: {e}")
+                write_queued = True
                 self._cache.setdefault("queued_writes", []).append({
                     "type": "memory",
                     "action": action,
@@ -732,6 +756,7 @@ class DKGMemoryProvider(MemoryProvider):
             "target": target,
             "entries": count,
             "store": "dkg" if not self._offline else "local_cache",
+            "queued": write_queued,
         })
 
     def _handle_query(self, args: Dict[str, Any]) -> str:
@@ -760,6 +785,11 @@ class DKGMemoryProvider(MemoryProvider):
         return json.dumps(result)
 
     def _handle_publish(self, args: Dict[str, Any]) -> str:
+        if not self._direct_publish_allowed():
+            return tool_error(
+                "Direct DKG publish is disabled by the adapter publish guard. "
+                "Use an operator-reviewed publish request or enable DKG_ALLOW_DIRECT_PUBLISH explicitly."
+            )
         if self._offline:
             return tool_error("DKG daemon is offline. Cannot publish to chain.")
         cg = args.get("context_graph", self._context_graph)
@@ -820,7 +850,7 @@ class DKGMemoryProvider(MemoryProvider):
     def _handle_wallet(self, args: Dict[str, Any]) -> str:
         if self._offline:
             return tool_error("DKG daemon is offline.")
-        return json.dumps(self._client._get("/api/wallet/balances"))
+        return json.dumps(self._client._get("/api/wallets/balances"))
 
     def _handle_find_agents(self, args: Dict[str, Any]) -> str:
         if self._offline:
@@ -950,13 +980,15 @@ class DKGMemoryProvider(MemoryProvider):
             return self._cache.get("memory", []) + self._cache.get("user", [])
 
         try:
-            sparql = "SELECT ?content WHERE { ?s <urn:hermes:content> ?content }"
-            result = self._client.query_assertion(self._assertion_id, self._context_graph, sparql)
-            bindings = result.get("results", {}).get("bindings", [])
-            if bindings:
+            result = self._client.query_assertion(self._assertion_id, self._context_graph)
+            quads = [
+                quad for quad in _extract_quads(result)
+                if _quad_predicate(quad) == "urn:hermes:content"
+            ]
+            if quads:
                 facts = []
-                for b in bindings:
-                    content = b.get("content", {}).get("value", "")
+                for quad in quads:
+                    content = _quad_object(quad)
                     if content.startswith("[user]"):
                         facts.append({"target": "user", "content": content[6:].strip()})
                     elif content.startswith("[memory]"):
@@ -980,23 +1012,75 @@ class DKGMemoryProvider(MemoryProvider):
         for item in queued:
             try:
                 if item.get("type") == "turn":
-                    self._client.store_turn(
+                    result = self._client.store_turn(
                         item["session_id"],
                         item.get("user", ""),
                         item.get("assistant", ""),
+                        agent_name=self._agent_name,
+                        turn_id=item.get("turn_id", ""),
+                        idempotency_key=item.get("idempotency_key", ""),
                     )
+                    if _client_result_failed(result):
+                        failed.append(item)
                 elif item.get("type") == "memory":
-                    self._handle_memory({
+                    result = self._handle_memory({
                         "action": item["action"],
                         "target": item["target"],
                         "content": item["content"],
                     })
+                    try:
+                        parsed = json.loads(result)
+                    except Exception:
+                        parsed = {}
+                    if parsed.get("queued"):
+                        failed.append(item)
             except Exception as e:
                 logger.debug(f"[dkg] Failed to flush queued write: {e}")
                 failed.append(item)
 
         with self._lock:
             self._cache["queued_writes"] = failed
+            _save_cache(self._cache, self._agent_name)
+
+    def _direct_publish_allowed(self) -> bool:
+        allow = self._config.get("allow_direct_publish")
+        return (
+            allow is True
+            or str(allow).lower() in ("1", "true", "yes")
+            or str(self._config.get("publish_tool", "")).lower() == "direct"
+        )
+
+    def _build_turn_id(self, session_id: str, turn_count: int, user_content: str, assistant_content: str) -> str:
+        digest = hashlib.sha256()
+        digest.update(session_id.encode("utf-8", errors="ignore"))
+        digest.update(b"\0")
+        digest.update(str(turn_count).encode("ascii"))
+        digest.update(b"\0")
+        digest.update(user_content[:2000].encode("utf-8", errors="ignore"))
+        digest.update(b"\0")
+        digest.update(assistant_content[:2000].encode("utf-8", errors="ignore"))
+        return f"{session_id}:{turn_count}:{digest.hexdigest()[:16]}"
+
+    def _queue_turn(
+        self,
+        session_id: str,
+        turn_id: str,
+        idempotency_key: str,
+        user_content: str,
+        assistant_content: str,
+    ) -> None:
+        queued = {
+            "type": "turn",
+            "session_id": session_id,
+            "turn_id": turn_id,
+            "idempotency_key": idempotency_key,
+            "user": user_content[:2000],
+            "assistant": assistant_content[:2000],
+        }
+        with self._lock:
+            existing = self._cache.setdefault("queued_writes", [])
+            if not any(item.get("type") == "turn" and item.get("idempotency_key") == idempotency_key for item in existing):
+                existing.append(queued)
             _save_cache(self._cache, self._agent_name)
 
 
@@ -1021,6 +1105,40 @@ def _short(uri: str) -> str:
     if "/" in uri:
         return uri.split("/")[-1]
     return uri
+
+
+def _client_result_failed(result: Any) -> bool:
+    if not isinstance(result, dict):
+        return False
+    return result.get("success") is False or result.get("ok") is False or bool(result.get("error"))
+
+
+def _extract_quads(result: Dict[str, Any]) -> List[Dict[str, Any]]:
+    quads = result.get("quads", [])
+    return [quad for quad in quads if isinstance(quad, dict)]
+
+
+def _quad_subject(quad: Dict[str, Any]) -> str:
+    return _term_value(quad.get("subject") or quad.get("s"))
+
+
+def _quad_predicate(quad: Dict[str, Any]) -> str:
+    return _term_value(quad.get("predicate") or quad.get("p"))
+
+
+def _quad_object(quad: Dict[str, Any]) -> str:
+    return _term_value(quad.get("object") or quad.get("o"))
+
+
+def _term_value(term: Any) -> str:
+    if isinstance(term, dict):
+        value = term.get("value") or term.get("id") or term.get("term") or ""
+    else:
+        value = term
+    text = str(value or "")
+    if len(text) >= 2 and text[0] == '"' and text[-1] == '"':
+        text = text[1:-1]
+    return text.replace('\\"', '"').replace("\\n", "\n")
 
 
 # ---------------------------------------------------------------------------

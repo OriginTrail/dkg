@@ -218,7 +218,7 @@ describe('ConnectedAgentsTab rendering', () => {
     const markup = renderConnectedAgentsTab({
       integrations: [
         integration({ persistentChat: false, configured: false, detected: false, bridgeOnline: false, chatReady: false, status: 'available', statusLabel: 'Ready to connect' }),
-        integration({ id: 'hermes', name: 'Hermes', persistentChat: false, configured: false, detected: false, bridgeOnline: false, chatReady: false, status: 'coming_soon', statusLabel: 'Coming next', connectSupported: false }),
+        integration({ id: 'hermes', name: 'Hermes', persistentChat: false, configured: false, detected: false, bridgeOnline: false, chatReady: false, status: 'available', statusLabel: 'Ready to connect', connectSupported: true }),
       ],
       selectedIntegrationId: '__add_agent__',
       selectedIntegration: null,
@@ -231,7 +231,8 @@ describe('ConnectedAgentsTab rendering', () => {
     expect(markup).toContain('Connecting...');
     expect(markup).toContain('Docs');
     expect(markup).toContain('Release Notes');
-    expect(markup).toContain('Hermes will plug into this same local-agent contract next');
+    expect(markup).toContain('Connect Hermes');
+    expect(markup).toContain('local Hermes profile');
     expect(markup).toContain('connected');
     expect(markup).toContain('error');
   });
