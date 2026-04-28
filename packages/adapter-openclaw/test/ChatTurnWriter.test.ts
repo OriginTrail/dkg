@@ -1196,6 +1196,52 @@ describe("ChatTurnWriter", () => {
     expect(mockClient.storeChatTurn.mock.calls[1][2]).toBe("reply-2");
   });
 
+  it("clears W4b pending users after W4a persisted a coalesced consecutive-user turn", async () => {
+    writer.onAgentEnd({
+      sessionId: "test",
+      messages: [
+        { role: "user", content: "u1" },
+        { role: "user", content: "u2" },
+        { role: "assistant", content: "a1" },
+      ],
+    }, { channelId: "tg", sessionKey: "sk" });
+    await flushMicrotasks();
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("u1\nu2");
+    expect(mockClient.storeChatTurn.mock.calls[0][2]).toBe("a1");
+
+    writer.onMessageReceived({
+      sessionKey: "sk",
+      direction: "inbound",
+      text: "u1",
+      ...({ context: { channelId: "tg" } } as any),
+    } as any);
+    writer.onMessageReceived({
+      sessionKey: "sk",
+      direction: "inbound",
+      text: "u2",
+      ...({ context: { channelId: "tg" } } as any),
+    } as any);
+    writer.onMessageSent({
+      sessionKey: "sk",
+      direction: "outbound",
+      text: "a1",
+      ...({ context: { channelId: "tg", success: true } } as any),
+    } as any);
+    await flushMicrotasks();
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    expect((writer as any).pendingUserMessages.size).toBe(0);
+
+    writer.onMessageSent({
+      sessionKey: "sk",
+      direction: "outbound",
+      text: "a2",
+      ...({ context: { channelId: "tg", success: true } } as any),
+    } as any);
+    await flushMicrotasks();
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+  });
+
   it("cross-path dedup: agent_end followed by message:sent with same content writes once (R2.2)", async () => {
     // First W4a path persists a turn.
     const event: AgentEndContext = {

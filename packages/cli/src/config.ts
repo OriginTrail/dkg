@@ -103,6 +103,7 @@ export interface LocalAgentIntegrationCapabilities {
   dkgPrimaryMemory?: boolean;
   wmImportPipeline?: boolean;
   nodeServedSkill?: boolean;
+  semanticEnrichment?: boolean;
 }
 
 export interface LocalAgentIntegrationTransport {
@@ -110,6 +111,8 @@ export interface LocalAgentIntegrationTransport {
   bridgeUrl?: string;
   gatewayUrl?: string;
   healthUrl?: string;
+  wakeUrl?: string;
+  wakeAuth?: 'bridge-token' | 'gateway' | 'none';
 }
 
 export interface LocalAgentIntegrationManifest {

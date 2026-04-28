@@ -23,12 +23,17 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { validateContextGraphId } from '@origintrail-official/dkg-core';
 import type {
   ChannelOutboundReply,
   DkgOpenClawConfig,
   OpenClawPluginApi,
 } from './types.js';
 import type { DkgDaemonClient, OpenClawAttachmentRef } from './dkg-client.js';
+import {
+  SemanticEnrichmentWorker,
+  type SemanticEnrichmentWakeRequest,
+} from './SemanticEnrichmentWorker.js';
 
 export const CHANNEL_NAME = 'dkg-ui';
 const DEFAULT_CHANNEL_ACCOUNT_ID = 'default';
@@ -42,6 +47,20 @@ const FAILED_TURN_MESSAGE_PREFIX = '[OpenClaw reply failed before completion';
 /** Strip identity to safe characters and cap length to prevent injection into session keys / URIs. */
 function sanitizeIdentity(raw: string): string {
   return raw.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64) || 'unknown';
+}
+
+function normalizeOptionalContextGraphId(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const trimmed = raw.trim();
+  if (!trimmed) return undefined;
+  return validateContextGraphId(trimmed).valid ? trimmed : undefined;
+}
+
+function hasInvalidOptionalContextGraphId(raw: unknown): boolean {
+  if (raw == null) return false;
+  if (typeof raw !== 'string') return true;
+  const trimmed = raw.trim();
+  return !!trimmed && !validateContextGraphId(trimmed).valid;
 }
 
 function finalizeAgentReplyText(text: string): string {
@@ -212,6 +231,7 @@ interface PersistTurnOptions {
   persistenceState?: 'stored' | 'failed' | 'pending';
   failureReason?: string | null;
   attachmentRefs?: OpenClawAttachmentRef[];
+  projectContextGraphId?: string;
 }
 
 interface InboundChatOptions {
@@ -252,6 +272,27 @@ interface DkgDispatchContext {
   sessionKey?: string;
   /** Turn correlation id, for diagnostics. */
   correlationId?: string;
+}
+
+interface SemanticEnrichmentWakeEnvelope {
+  kind: 'semantic_enrichment';
+  eventKind: SemanticEnrichmentWakeRequest['kind'];
+  eventId: string;
+}
+
+function normalizeSemanticEnrichmentWakeEnvelope(raw: unknown): SemanticEnrichmentWakeEnvelope | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const record = raw as Record<string, unknown>;
+  const kind = typeof record.kind === 'string' ? record.kind.trim() : '';
+  const eventKind = typeof record.eventKind === 'string' ? record.eventKind.trim() : '';
+  const eventId = typeof record.eventId === 'string' ? record.eventId.trim() : '';
+  if (kind !== 'semantic_enrichment') return null;
+  if ((eventKind !== 'chat_turn' && eventKind !== 'file_import') || !eventId) return null;
+  return {
+    kind: 'semantic_enrichment',
+    eventKind,
+    eventId,
+  };
 }
 
 function normalizeChatContextEntry(raw: unknown): ChatContextEntry | null {
@@ -356,6 +397,7 @@ export class DkgChannelPlugin {
     timer: ReturnType<typeof setTimeout> | null;
     allowDuringShutdown: boolean;
   }>();
+  private semanticEnrichmentWorker: SemanticEnrichmentWorker | null = null;
   /**
    * Per-dispatch AsyncLocalStorage holding the UI-selected project
    * context graph for the currently-running turn. Populated by
@@ -393,6 +435,16 @@ export class DkgChannelPlugin {
     this.port = config.port ?? 9201;
   }
 
+  private ensureSemanticEnrichmentWorker(): SemanticEnrichmentWorker | null {
+    if (!this.api) return null;
+    if (!this.semanticEnrichmentWorker) {
+      this.semanticEnrichmentWorker = new SemanticEnrichmentWorker(this.api, this.client);
+    } else {
+      this.semanticEnrichmentWorker.bind(this.api, this.client);
+    }
+    return this.semanticEnrichmentWorker;
+  }
+
   /** Wire the memory-slot re-assert callback. Called by `DkgNodePlugin`. */
   setPreDispatchReAssert(cb: (() => void) | null): void {
     this.preDispatchReAssert = cb;
@@ -427,6 +479,36 @@ export class DkgChannelPlugin {
       return undefined;
     }
     return store.uiContextGraphId;
+  }
+
+  supportsSemanticEnrichment(): boolean {
+    const worker = this.ensureSemanticEnrichmentWorker();
+    return worker?.getRuntimeProbe().supported === true;
+  }
+
+  isSemanticEnrichmentActive(): boolean {
+    const worker = this.ensureSemanticEnrichmentWorker();
+    return worker?.isActive() === true;
+  }
+
+  async startSemanticEnrichmentWorker(): Promise<void> {
+    const semanticWorker = this.ensureSemanticEnrichmentWorker();
+    if (!semanticWorker) return;
+    const probe = semanticWorker.getRuntimeProbe();
+    if (probe.supported) {
+      this.api?.logger.info?.(
+        `[dkg-channel] runtime.subagent available for semantic wake coordination (worker=${semanticWorker.getWorkerInstanceId()})`,
+      );
+      await semanticWorker.start();
+      return;
+    }
+    this.api?.logger.warn?.(
+      `[dkg-channel] runtime.subagent unavailable for semantic wake coordination; missing ${probe.missing.join(', ') || 'subagent helpers'}`,
+    );
+  }
+
+  async stopSemanticEnrichmentWorker(): Promise<void> {
+    await this.semanticEnrichmentWorker?.stop();
   }
 
   /**
@@ -513,9 +595,21 @@ export class DkgChannelPlugin {
           res.end?.(JSON.stringify({ ok: true, channel: CHANNEL_NAME }));
         },
       });
+      api.registerHttpRoute({
+        method: 'POST',
+        path: '/api/dkg-channel/semantic-enrichment/wake',
+        auth: 'gateway',
+        handler: (req: any, res: any) => {
+          void this.handleGatewaySemanticWakeRoute(req, res).catch((err) => {
+            this.handleUnexpectedGatewayError(res, err);
+          });
+        },
+      });
       this.gatewayRoutesRegistered = true;
       this.useGatewayRoute = true;
-      log.info?.('[dkg-channel] Registered HTTP routes on gateway: POST /api/dkg-channel/inbound, GET /api/dkg-channel/health');
+      log.info?.(
+        '[dkg-channel] Registered HTTP routes on gateway: POST /api/dkg-channel/inbound, GET /api/dkg-channel/health, POST /api/dkg-channel/semantic-enrichment/wake',
+      );
     }
 
     // Always start the standalone bridge server. It's the transport the
@@ -627,6 +721,7 @@ export class DkgChannelPlugin {
       this.clearPendingTurnPersistence();
     }
     this.stopDrainDeadlineAt = null;
+    await this.semanticEnrichmentWorker?.stop();
   }
 
   private deletePendingTurnPersistence(correlationId: string): void {
@@ -812,9 +907,10 @@ export class DkgChannelPlugin {
     const contextAttachmentRefs = sanitizeAttachmentRefsForContext(attachmentRefs);
     const contextEntries = normalizeChatContextEntries(opts?.contextEntries);
     const sanitizedContextEntries = sanitizeChatContextEntries(contextEntries);
-    const uiContextGraphId = typeof opts?.uiContextGraphId === 'string' && opts.uiContextGraphId.trim()
-      ? opts.uiContextGraphId.trim()
-      : undefined;
+    if (hasInvalidOptionalContextGraphId(opts?.uiContextGraphId)) {
+      throw new Error('Invalid uiContextGraphId');
+    }
+    const uiContextGraphId = normalizeOptionalContextGraphId(opts?.uiContextGraphId);
     if (opts?.attachmentRefs != null && attachmentRefs === undefined) {
       throw new Error('Invalid attachment refs');
     }
@@ -832,6 +928,7 @@ export class DkgChannelPlugin {
         // Fire-and-forget: persist turn to DKG graph for Agent Hub visualization
         this.queueTurnPersistence(text, reply.text, correlationId, identity, {
           attachmentRefs,
+          projectContextGraphId: uiContextGraphId,
         }, true);
         return reply;
       } catch (err: any) {
@@ -868,6 +965,7 @@ export class DkgChannelPlugin {
       );
       this.queueTurnPersistence(text, reply.text, correlationId, identity || 'owner', {
         attachmentRefs,
+        projectContextGraphId: uiContextGraphId,
       }, true);
       return reply;
     }
@@ -1123,9 +1221,10 @@ export class DkgChannelPlugin {
     const contextAttachmentRefs = sanitizeAttachmentRefsForContext(attachmentRefs);
     const contextEntries = normalizeChatContextEntries(opts?.contextEntries);
     const sanitizedContextEntries = sanitizeChatContextEntries(contextEntries);
-    const uiContextGraphId = typeof opts?.uiContextGraphId === 'string' && opts.uiContextGraphId.trim()
-      ? opts.uiContextGraphId.trim()
-      : undefined;
+    if (hasInvalidOptionalContextGraphId(opts?.uiContextGraphId)) {
+      throw new Error('Invalid uiContextGraphId');
+    }
+    const uiContextGraphId = normalizeOptionalContextGraphId(opts?.uiContextGraphId);
     if (opts?.attachmentRefs != null && attachmentRefs === undefined) {
       throw new Error('Invalid attachment refs');
     }
@@ -1283,14 +1382,21 @@ export class DkgChannelPlugin {
       if (resolvedTerminalState === 'completed' && resolvedFinalText) {
         this.queueTurnPersistence(text, resolvedFinalText, correlationId, identity, {
           attachmentRefs,
+          projectContextGraphId: uiContextGraphId,
         }, true);
       } else if (resolvedTerminalState === 'failed') {
+        const failedReply = this.buildFailedAssistantReply(resolvedFailureReason);
         this.queueTurnPersistence(
           text,
-          this.buildFailedAssistantReply(resolvedFailureReason),
+          failedReply,
           correlationId,
           identity,
-          { persistenceState: 'failed', failureReason: resolvedFailureReason, attachmentRefs },
+          {
+            persistenceState: 'failed',
+            failureReason: resolvedFailureReason,
+            attachmentRefs,
+            projectContextGraphId: uiContextGraphId,
+          },
           true,
         );
       } else {
@@ -1299,7 +1405,12 @@ export class DkgChannelPlugin {
           CANCELLED_TURN_MESSAGE,
           correlationId,
           identity,
-          { persistenceState: 'failed', failureReason: 'cancelled', attachmentRefs },
+          {
+            persistenceState: 'failed',
+            failureReason: 'cancelled',
+            attachmentRefs,
+            projectContextGraphId: uiContextGraphId,
+          },
           true,
         );
       }
@@ -1492,6 +1603,7 @@ export class DkgChannelPlugin {
     const sessionId = identity && identity !== 'owner'
       ? `openclaw:${CHANNEL_NAME}:${sanitizeIdentity(identity)}`
       : `openclaw:${CHANNEL_NAME}`;
+    const projectContextGraphId = normalizeOptionalContextGraphId(opts?.projectContextGraphId);
     await this.client.storeChatTurn(
       sessionId,
       userMessage,
@@ -1501,6 +1613,7 @@ export class DkgChannelPlugin {
         ...(opts?.attachmentRefs?.length ? { attachmentRefs: opts.attachmentRefs.map((ref) => ({ ...ref })) } : {}),
         ...(opts?.persistenceState ? { persistenceState: opts.persistenceState } : {}),
         ...(opts?.failureReason != null ? { failureReason: opts.failureReason } : {}),
+        ...(projectContextGraphId ? { projectContextGraphId } : {}),
       },
     );
     this.api?.logger.info?.(`[dkg-channel] Turn persisted to DKG graph: ${correlationId}`);
@@ -1591,6 +1704,11 @@ export class DkgChannelPlugin {
       return;
     }
 
+    if (req.method === 'POST' && req.url === '/semantic-enrichment/wake') {
+      await this.handleSemanticEnrichmentWakeHttp(req, res);
+      return;
+    }
+
     if (req.method === 'GET' && req.url === '/health') {
       if (!this.authorizeBridgeRequest(req, res)) return;
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -1641,9 +1759,12 @@ export class DkgChannelPlugin {
           res.end(JSON.stringify({ error: 'Invalid "contextEntries"' }));
           return;
         }
-        const uiContextGraphId = typeof parsed.uiContextGraphId === 'string' && parsed.uiContextGraphId.trim()
-          ? parsed.uiContextGraphId.trim()
-          : undefined;
+        if (hasInvalidOptionalContextGraphId(parsed.uiContextGraphId)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Invalid "uiContextGraphId"' }));
+          return;
+        }
+        const uiContextGraphId = normalizeOptionalContextGraphId(parsed.uiContextGraphId);
         const { text, correlationId, identity } = parsed;
         if (!hasInboundChatTurnContent(text, attachmentRefs) || typeof correlationId !== 'string' || correlationId.length === 0) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -1707,9 +1828,12 @@ export class DkgChannelPlugin {
         res.end(JSON.stringify({ error: 'Invalid "contextEntries"' }));
         return;
       }
-      const uiContextGraphId = typeof parsed.uiContextGraphId === 'string' && parsed.uiContextGraphId.trim()
-        ? parsed.uiContextGraphId.trim()
-        : undefined;
+      if (hasInvalidOptionalContextGraphId(parsed.uiContextGraphId)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid "uiContextGraphId"' }));
+        return;
+      }
+      const uiContextGraphId = normalizeOptionalContextGraphId(parsed.uiContextGraphId);
       const { text, correlationId, identity } = parsed;
       if (!hasInboundChatTurnContent(text, attachmentRefs) || typeof correlationId !== 'string' || correlationId.length === 0) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -1765,9 +1889,12 @@ export class DkgChannelPlugin {
         res.end?.(JSON.stringify({ error: 'Invalid "contextEntries"' }));
         return;
       }
-      const uiContextGraphId = typeof body.uiContextGraphId === 'string' && body.uiContextGraphId.trim()
-        ? body.uiContextGraphId.trim()
-        : undefined;
+      if (hasInvalidOptionalContextGraphId(body.uiContextGraphId)) {
+        res.writeHead?.(400, { 'Content-Type': 'application/json' });
+        res.end?.(JSON.stringify({ error: 'Invalid "uiContextGraphId"' }));
+        return;
+      }
+      const uiContextGraphId = normalizeOptionalContextGraphId(body.uiContextGraphId);
       const { text, correlationId, identity } = body;
       if (!hasInboundChatTurnContent(text, attachmentRefs) || typeof correlationId !== 'string' || correlationId.length === 0) {
         res.writeHead?.(400, { 'Content-Type': 'application/json' });
@@ -1783,6 +1910,56 @@ export class DkgChannelPlugin {
       const status = err.message === 'Agent response timeout' ? 504 : 500;
       res.writeHead?.(status, { 'Content-Type': 'application/json' });
       res.end?.(JSON.stringify({ error: err.message }));
+    }
+  }
+
+  private async handleGatewaySemanticWakeRoute(req: any, res: any): Promise<void> {
+    try {
+      const payload = normalizeSemanticEnrichmentWakeEnvelope(
+        typeof req.body === 'object' ? req.body : JSON.parse(await readBody(req)),
+      );
+      if (!payload) {
+        res.writeHead?.(400, { 'Content-Type': 'application/json' });
+        res.end?.(JSON.stringify({ error: 'Invalid semantic enrichment wake payload' }));
+        return;
+      }
+      if (!this.handleSemanticEnrichmentWake(payload)) {
+        res.writeHead?.(503, { 'Content-Type': 'application/json' });
+        res.end?.(JSON.stringify({ error: 'Semantic enrichment worker unavailable' }));
+        return;
+      }
+      res.writeHead?.(200, { 'Content-Type': 'application/json' });
+      res.end?.(JSON.stringify({ ok: true }));
+    } catch {
+      res.writeHead?.(400, { 'Content-Type': 'application/json' });
+      res.end?.(JSON.stringify({ error: 'Invalid JSON body' }));
+    }
+  }
+
+  private async handleSemanticEnrichmentWakeHttp(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (!this.authorizeBridgeRequest(req, res)) return;
+    try {
+      const payload = normalizeSemanticEnrichmentWakeEnvelope(JSON.parse(await readBody(req)));
+      if (!payload) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid semantic enrichment wake payload' }));
+        return;
+      }
+      if (!this.handleSemanticEnrichmentWake(payload)) {
+        res.writeHead(503, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Semantic enrichment worker unavailable' }));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true }));
+    } catch (err: any) {
+      if (err?.message === 'Request body too large') {
+        res.writeHead(413, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Request body too large' }));
+        return;
+      }
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Invalid JSON body' }));
     }
   }
 
@@ -1828,6 +2005,18 @@ export class DkgChannelPlugin {
 
   get isUsingGatewayRoute(): boolean {
     return this.useGatewayRoute;
+  }
+
+  private handleSemanticEnrichmentWake(payload: SemanticEnrichmentWakeEnvelope): boolean {
+    const worker = this.ensureSemanticEnrichmentWorker();
+    if (!worker) return false;
+    if (!worker.isActive()) return false;
+    worker.noteWake({
+      kind: payload.eventKind,
+      eventKey: payload.eventId,
+      triggerSource: 'daemon',
+    });
+    return true;
   }
 }
 

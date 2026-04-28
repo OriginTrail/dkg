@@ -9,6 +9,10 @@ interface Logger {
   debug?: (...args: unknown[]) => void;
 }
 
+function isSemanticEnrichmentSubagentSessionKey(value: unknown): boolean {
+  return typeof value === "string" && value.includes(":subagent:semantic-enrichment:");
+}
+
 export interface ChatTurnMessage {
   role: "user" | "assistant" | "system" | "tool";
   content: string | Array<{ type: string; text?: string }>;
@@ -157,6 +161,7 @@ export class ChatTurnWriter {
 
   async onAgentEnd(event: AgentEndContext, ctx?: any): Promise<void> {
     try {
+      if (isSemanticEnrichmentSubagentSessionKey(ctx?.sessionKey ?? (event as any)?.sessionKey)) return;
       // B5 — skip dkg-ui channel; DkgChannelPlugin.queueTurnPersistence
       // owns UI-channel persistence with richer metadata (correlation IDs,
       // attachment refs). Avoids double-persist under different sessionIds.
@@ -352,6 +357,7 @@ export class ChatTurnWriter {
 
   onMessageReceived(ev: InternalMessageEvent): void {
     try {
+      if (isSemanticEnrichmentSubagentSessionKey(ev.sessionKey)) return;
       // B5 — skip dkg-ui channel; DkgChannelPlugin owns UI persistence.
       const channelId = (ev as any)?.context?.channelId ?? (ev as any)?.channelId;
       if (channelId === "dkg-ui") return;
@@ -376,6 +382,7 @@ export class ChatTurnWriter {
 
   async onMessageSent(ev: InternalMessageEvent): Promise<void> {
     try {
+      if (isSemanticEnrichmentSubagentSessionKey(ev.sessionKey)) return;
       // B5 — skip dkg-ui channel; DkgChannelPlugin owns UI persistence.
       // Internal-hook envelope carries channelId on event.context per
       // openclaw/src/infra/outbound/deliver.ts.
@@ -422,6 +429,13 @@ export class ChatTurnWriter {
       // be persisted later, they should go through a dedicated path
       // that supplies a synthesized user side or a distinct schema.
       if (!queue || queue.length === 0) return;
+      if (queue.length > 1) {
+        const joinedUserText = queue.join("\n");
+        if (this.peekTurnIdSeen(sessionId, this.w4aOriginKey(joinedUserText, assistantText))) {
+          this.pendingUserMessages.delete(conversationKey);
+          return; // W4a already persisted the coalesced consecutive-user turn.
+        }
+      }
       const userText = queue.shift()!;
       if (queue.length === 0) this.pendingUserMessages.delete(conversationKey);
       if (userText || assistantText) {

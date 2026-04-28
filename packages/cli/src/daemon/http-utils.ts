@@ -13,6 +13,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import type { DkgConfig } from '../config.js';
+import type { SemanticEnrichmentDescriptor } from '../semantic-enrichment.js';
 
 // Co-located here because the body parser is their only semantic
 // consumer; moving them to `./types.ts` would just add an import
@@ -373,6 +374,7 @@ export interface ImportFileExtractionPayload {
   pipelineUsed: string | null;
   mdIntermediateHash?: string;
   error?: string;
+  semanticEnrichment?: SemanticEnrichmentDescriptor;
 }
 
 export function buildImportFileResponse(args: {
@@ -395,6 +397,9 @@ export function buildImportFileResponse(args: {
         ? { mdIntermediateHash: args.extraction.mdIntermediateHash }
         : {}),
       ...(args.extraction.error ? { error: args.extraction.error } : {}),
+      ...(args.extraction.semanticEnrichment
+        ? { semanticEnrichment: args.extraction.semanticEnrichment }
+        : {}),
     },
   };
 }

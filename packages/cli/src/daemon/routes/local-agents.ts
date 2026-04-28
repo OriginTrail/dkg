@@ -325,6 +325,9 @@ import {
   reverseLocalAgentSetupForUi,
   refreshLocalAgentIntegrationFromUi,
 } from '../local-agents.js';
+import {
+  saveConfigAndReconcileOpenClawSemanticAvailability,
+} from '../semantic-enrichment.js';
 
 import type { RequestContext } from './context.js';
 
@@ -390,7 +393,16 @@ export async function handleLocalAgentsRoutes(ctx: RequestContext): Promise<void
       const result = source === 'node-ui'
         ? await connectLocalAgentIntegrationFromUi(config, parsed, bridgeAuthToken, { saveConfig })
         : { integration: connectLocalAgentIntegration(config, parsed) };
-      await saveConfig(config);
+      if (result.integration.id === 'openclaw') {
+        await saveConfigAndReconcileOpenClawSemanticAvailability({
+          config,
+          extractionStatus,
+          dashDb,
+          saveConfig,
+        });
+      } else {
+        await saveConfig(config);
+      }
       return jsonResponse(res, 200, { ok: true, integration: result.integration, notice: result.notice });
     } catch (err: any) {
       try { await saveConfig(config); } catch { /* best effort: preserve failed attach state when available */ }
@@ -451,13 +463,27 @@ export async function handleLocalAgentsRoutes(ctx: RequestContext): Promise<void
               lastError: `OpenClaw disconnect failed: ${err?.message ?? 'unknown error'}`,
             },
           });
-          await saveConfig(config);
+          await saveConfigAndReconcileOpenClawSemanticAvailability({
+            config,
+            extractionStatus,
+            dashDb,
+            saveConfig,
+          });
           return jsonResponse(res, 200, { ok: true, integration });
         }
       }
 
       const integration = updateLocalAgentIntegration(config, id, normalizedPatch);
-      await saveConfig(config);
+      if (normalizedId === 'openclaw') {
+        await saveConfigAndReconcileOpenClawSemanticAvailability({
+          config,
+          extractionStatus,
+          dashDb,
+          saveConfig,
+        });
+      } else {
+        await saveConfig(config);
+      }
       return jsonResponse(res, 200, { ok: true, integration });
     } catch (err: any) {
       return jsonResponse(res, 400, { error: err?.message ?? 'Invalid local agent integration payload' });

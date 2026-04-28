@@ -118,7 +118,7 @@ import {
   hasVerifiedBundledBinary as hasVerifiedBundledMarkItDownBinary,
   metadataPathFor as markItDownMetadataPath,
 } from '../../../scripts/markitdown-bundle-validation.mjs';
-import { type ExtractionStatusRecord, getExtractionStatusRecord, setExtractionStatusRecord } from '../../extraction-status.js';
+import { type ExtractionStatusRecord } from '../../extraction-status.js';
 import { FileStore } from '../../file-store.js';
 import { VectorStore, OpenAIEmbeddingProvider, type EmbeddingProvider } from '../../vector-store.js';
 import { parseBoundary, parseMultipart, MultipartParseError } from '../../http/multipart.js';
@@ -325,6 +325,17 @@ import {
   reverseLocalAgentSetupForUi,
   refreshLocalAgentIntegrationFromUi,
 } from '../local-agents.js';
+import {
+  buildFileSemanticEventPayload,
+  deletePersistedExtractionStatusRecord,
+  getHydratedExtractionStatusRecord,
+  queueLocalAgentSemanticEnrichmentBestEffort,
+  requestAdvertisesLocalAgentSemanticEnrichment,
+  requestHasTrustedLocalAgentBridgeAuth,
+  requestLocalAgentWakeTransport,
+  setPersistedExtractionStatusRecord,
+  updateExtractionStatusSemanticDescriptor,
+} from '../semantic-enrichment.js';
 
 import type { RequestContext } from './context.js';
 
@@ -561,7 +572,7 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
         assertionName,
         subGraphName,
       );
-      extractionStatus.delete(assertionUri);
+      deletePersistedExtractionStatusRecord(extractionStatus, dashDb, assertionUri);
       return jsonResponse(res, 200, { discarded: true });
     } catch (err: any) {
       if (
@@ -627,7 +638,7 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
   //   file (required):           the uploaded document bytes
   //   contextGraphId (required): target context graph
   //   contentType (optional):    override the file part's Content-Type
-  //   ontologyRef (optional):    CG _ontology URI for guided Phase 2 extraction
+  //   ontologyRef (optional):    opaque v1 ontology hint for guided semantic extraction
   //   subGraphName (optional):   target sub-graph inside the CG
   //
   // Orchestration:
@@ -823,7 +834,7 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
           }),
         );
       const recordInProgressExtraction = (): void => {
-        setExtractionStatusRecord(extractionStatus, assertionUri, {
+        setPersistedExtractionStatusRecord(extractionStatus, dashDb, assertionUri, {
           status: "in_progress",
           fileHash: fileStoreEntry.keccak256,
           detectedContentType,
@@ -850,7 +861,7 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
           startedAt,
           completedAt: new Date().toISOString(),
         };
-        setExtractionStatusRecord(extractionStatus, assertionUri, failedRecord);
+        setPersistedExtractionStatusRecord(extractionStatus, dashDb, assertionUri, failedRecord);
         return failedRecord;
       };
       const respondWithFailedExtraction = (
@@ -922,8 +933,9 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
           startedAt,
           completedAt: new Date().toISOString(),
         };
-        setExtractionStatusRecord(
+        setPersistedExtractionStatusRecord(
           extractionStatus,
+          dashDb,
           assertionUri,
           skippedRecord,
         );
@@ -1200,6 +1212,12 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
           subject: assertionUri,
           predicate: "http://dkg.io/ontology/sourceFileHash",
           object: JSON.stringify(fileStoreEntry.keccak256),
+          graph: metaGraph,
+        },
+        {
+          subject: assertionUri,
+          predicate: "http://dkg.io/ontology/importStartedAt",
+          object: startedAtLiteral,
           graph: metaGraph,
         },
         // Row 17
@@ -1513,17 +1531,59 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
         startedAt,
         completedAt: new Date().toISOString(),
       };
-      setExtractionStatusRecord(
+      setPersistedExtractionStatusRecord(
         extractionStatus,
+        dashDb,
         assertionUri,
         completedRecord,
       );
+      const trustedOpenClawRequest = requestHasTrustedLocalAgentBridgeAuth(req, 'openclaw', bridgeAuthToken);
+      const semanticEnrichment = queueLocalAgentSemanticEnrichmentBestEffort({
+        config,
+        dashDb,
+        integrationId: 'openclaw',
+        kind: 'file_import',
+        payload: buildFileSemanticEventPayload({
+          contextGraphId: contextGraphId!,
+          assertionName,
+          assertionUri,
+          importStartedAt: startedAt,
+          sourceAgentAddress: requestAgentAddress,
+          rootEntity: completedRecord.rootEntity,
+          fileHash: fileStoreEntry.keccak256,
+          mdIntermediateHash,
+          detectedContentType,
+          sourceFileName: uploadedFilename || undefined,
+          ontologyRef: ontologyRef?.trim() || undefined,
+        }),
+        bridgeAuthToken,
+        skipWhenUnavailable: true,
+        liveSemanticEnrichmentSupported: requestAdvertisesLocalAgentSemanticEnrichment(req, 'openclaw', {
+          bridgeAuthToken,
+          requireBridgeAuth: true,
+        }),
+        requestFromIntegration: trustedOpenClawRequest,
+        requestWakeTransport: requestLocalAgentWakeTransport(req, 'openclaw', {
+          bridgeAuthToken,
+          requireBridgeAuth: true,
+        }),
+        logLabel: `file import semantic event for ${assertionUri}`,
+      });
+      if (semanticEnrichment) {
+        updateExtractionStatusSemanticDescriptor(
+          extractionStatus,
+          dashDb,
+          assertionUri,
+          semanticEnrichment,
+        );
+      }
 
       return respondWithImportFileResponse(200, {
         status: "completed",
         tripleCount: triples.length,
         pipelineUsed,
         ...(mdIntermediateHash ? { mdIntermediateHash } : {}),
+        ...(semanticEnrichment ? { semanticEnrichment } : {}),
       });
     } finally {
       // Round 14 Bug 42 outer finally: release the per-assertion
@@ -1576,7 +1636,7 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
       assertionName,
       subGraphName,
     );
-    const record = getExtractionStatusRecord(extractionStatus, assertionUri);
+    const record = getHydratedExtractionStatusRecord(extractionStatus, dashDb, assertionUri);
     if (!record) {
       return jsonResponse(res, 404, {
         error: `No extraction record found for assertion "${assertionName}" in context graph "${contextGraphId}"`,
@@ -1594,6 +1654,7 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
         ? { mdIntermediateHash: record.mdIntermediateHash }
         : {}),
       ...(record.error ? { error: record.error } : {}),
+      ...(record.semanticEnrichment ? { semanticEnrichment: record.semanticEnrichment } : {}),
       startedAt: record.startedAt,
       ...(record.completedAt ? { completedAt: record.completedAt } : {}),
     });

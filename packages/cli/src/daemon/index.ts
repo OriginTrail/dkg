@@ -16,6 +16,7 @@ export * from './manifest.js';
 export * from './http-utils.js';
 export * from './auto-update.js';
 export * from './openclaw.js';
+export * from './semantic-enrichment.js';
 export * from './local-agents.js';
 export * from './lifecycle.js';
 export * from './handle-request.js';

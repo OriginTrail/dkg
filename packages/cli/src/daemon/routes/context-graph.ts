@@ -139,6 +139,7 @@ import {
   type InstallContext,
 } from '@origintrail-official/dkg-mcp/manifest/install';
 import { DkgClient } from '@origintrail-official/dkg-mcp/client';
+import { handleTemporaryOntologyWriteRoute } from '../semantic-enrichment.js';
 
 // Daemon sub-module imports — every public symbol from sibling
 // modules is pulled in here because the legacy monolithic file used
@@ -330,6 +331,9 @@ import type { RequestContext } from './context.js';
 
 
 export async function handleContextGraphRoutes(ctx: RequestContext): Promise<void> {
+  await handleTemporaryOntologyWriteRoute(ctx);
+  if (ctx.res.writableEnded) return;
+
   const {
     req,
     res,

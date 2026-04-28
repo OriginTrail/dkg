@@ -129,7 +129,7 @@ describe('OpenClaw daemon endpoints', () => {
       daemonSrc.indexOf("// POST /api/assertion/:name/import-file"),
     );
     expect(discardBlock).toContain('const assertionUri = contextGraphAssertionUri(');
-    expect(discardBlock).toContain('extractionStatus.delete(assertionUri);');
+    expect(discardBlock).toContain('deletePersistedExtractionStatusRecord(extractionStatus, dashDb, assertionUri);');
   });
 
   it('chat-openclaw persists outbound messages', () => {

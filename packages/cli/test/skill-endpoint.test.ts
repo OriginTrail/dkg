@@ -7,7 +7,7 @@ import { httpAuthGuard } from '../src/auth.js';
 // Auth: /.well-known/skill.md is a public path
 // ---------------------------------------------------------------------------
 
-describe('httpAuthGuard — /.well-known/skill.md', () => {
+describe('httpAuthGuard - /.well-known/skill.md', () => {
   const VALID_TOKEN = 'secret';
   const validTokens = new Set([VALID_TOKEN]);
   let server: Server;
@@ -19,13 +19,13 @@ describe('httpAuthGuard — /.well-known/skill.md', () => {
       res.writeHead(200, { 'Content-Type': 'text/plain' });
       res.end('ok');
     });
-    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     const addr = server.address() as { port: number };
     baseUrl = `http://127.0.0.1:${addr.port}`;
   });
 
   afterEach(async () => {
-    await new Promise<void>(resolve => server.close(() => resolve()));
+    await new Promise<void>((resolve) => server.close(() => resolve()));
   });
 
   it('allows /.well-known/skill.md without a token (public endpoint)', async () => {
@@ -96,10 +96,9 @@ describe('SKILL.md file', () => {
   });
 
   it('marks planned endpoints clearly', () => {
-    // The Planned/🚧 markers in the skill doc cover context graph sub-resources
-    // and future agent profile endpoints — NOT the assertion API, which ships
-    // as of PR #108 (create/write/query/promote/discard) and this PR (import-file,
-    // extraction-status).
+    // The Planned/roadmap markers in the skill doc cover context-graph
+    // sub-resources and future agent profile endpoints - not the assertion
+    // API surface that is already shipped.
     expect(skillContent).toContain('*(planned)*');
   });
 
@@ -121,10 +120,10 @@ describe('SKILL.md file', () => {
     expect(skillContent).toContain('| 409 |');
   });
 
-  it('does NOT contain V9 to V10 migration table (removed — first product release)', () => {
-    expect(skillContent).not.toContain('V9 → V10 Migration');
-    expect(skillContent).not.toContain('| Paranet | Context Graph |');
-    expect(skillContent).not.toContain('| `POST /api/workspace/write`');
+  it('documents the current V10 context graph and project terminology', () => {
+    expect(skillContent).toContain('## 6. Context Graphs');
+    expect(skillContent).toContain('context graphs are called **projects**');
+    expect(skillContent).toContain('target_context_graph');
   });
 
   it('is under 500 lines (Agent Skills best practice)', () => {

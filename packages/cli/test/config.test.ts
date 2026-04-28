@@ -162,6 +162,9 @@ describe('localAgentIntegrations config round-trip', () => {
           transport: {
             kind: 'openclaw-channel',
             gatewayUrl: 'http://gateway.local:3030',
+            healthUrl: 'http://gateway.local:3030/api/dkg-channel/health',
+            wakeUrl: 'http://gateway.local:3030/api/dkg-channel/semantic-enrichment/wake',
+            wakeAuth: 'gateway',
           },
           manifest: {
             packageName: '@dkg/openclaw-adapter',
@@ -176,6 +179,9 @@ describe('localAgentIntegrations config round-trip', () => {
 
     const loaded = await loadConfig();
     expect(loaded.localAgentIntegrations?.openclaw?.transport?.gatewayUrl).toBe('http://gateway.local:3030');
+    expect(loaded.localAgentIntegrations?.openclaw?.transport?.healthUrl).toBe('http://gateway.local:3030/api/dkg-channel/health');
+    expect(loaded.localAgentIntegrations?.openclaw?.transport?.wakeUrl).toBe('http://gateway.local:3030/api/dkg-channel/semantic-enrichment/wake');
+    expect(loaded.localAgentIntegrations?.openclaw?.transport?.wakeAuth).toBe('gateway');
     expect(loaded.localAgentIntegrations?.openclaw?.manifest?.version).toBe('2026.4.12');
     expect(loaded.localAgentIntegrations?.openclaw?.runtime?.status).toBe('ready');
   });

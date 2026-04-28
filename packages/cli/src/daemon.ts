@@ -10,6 +10,7 @@ export * from './daemon/manifest.js';
 export * from './daemon/http-utils.js';
 export * from './daemon/auto-update.js';
 export * from './daemon/openclaw.js';
+export * from './daemon/semantic-enrichment.js';
 export * from './daemon/local-agents.js';
 export * from './daemon/lifecycle.js';
 export * from './daemon/handle-request.js';

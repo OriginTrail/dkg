@@ -366,13 +366,24 @@ async function runImportFileOrchestration(params: {
   multipartBody: Buffer;
   boundary: string;
   assertionName: string;
+  requestAgentAddress?: string;
   onInProgress?: (assertionUri: string, record: ExtractionStatusRecord) => void | Promise<void>;
   // Bug 19: per-assertion mutex map. If omitted, a fresh map is used
   // (safe for sequential tests). Concurrent-import tests that need to
   // observe the lock must pass a shared map across their parallel calls.
   assertionImportLocks?: Map<string, Promise<void>>;
 }): Promise<ImportFileResult> {
-  const { agent, fileStore, extractionRegistry, extractionStatus, multipartBody, boundary, assertionName, onInProgress } = params;
+  const {
+    agent,
+    fileStore,
+    extractionRegistry,
+    extractionStatus,
+    multipartBody,
+    boundary,
+    assertionName,
+    requestAgentAddress = agent.peerId,
+    onInProgress,
+  } = params;
   const assertionImportLocks = params.assertionImportLocks ?? new Map<string, Promise<void>>();
 
   const fields = parseMultipart(multipartBody, boundary);
@@ -399,7 +410,7 @@ async function runImportFileOrchestration(params: {
   }
 
   const fileStoreEntry = await fileStore.put(filePart.content, detectedContentType);
-  const assertionUri = contextGraphAssertionUri(contextGraphId, agent.peerId, assertionName, subGraphName);
+  const assertionUri = contextGraphAssertionUri(contextGraphId, requestAgentAddress, assertionName, subGraphName);
   const startedAt = new Date().toISOString();
 
   // Round 14 Bug 42: per-assertion mutex BEFORE extraction — mirrors
@@ -480,7 +491,7 @@ async function runImportFileOrchestration(params: {
         filePath: fileStoreEntry.path,
         contentType: detectedContentType,
         ontologyRef,
-        agentDid: `did:dkg:agent:${agent.peerId}`,
+        agentDid: `did:dkg:agent:${requestAgentAddress}`,
       });
       mdIntermediate = md;
       pipelineUsed = detectedContentType;
@@ -518,7 +529,7 @@ async function runImportFileOrchestration(params: {
   // on the file URN is impossible on promote.
   const fileUri = `urn:dkg:file:${fileStoreEntry.keccak256}`;
   const provUri = `urn:dkg:extraction:${randomUUID()}`;
-  const agentDid = `did:dkg:agent:${agent.peerId}`;
+  const agentDid = `did:dkg:agent:${requestAgentAddress}`;
   let triples: ReturnType<typeof extractFromMarkdown>['triples'];
   let sourceFileLinkage: ReturnType<typeof extractFromMarkdown>['sourceFileLinkage'];
   let documentSubjectIri: string;
@@ -587,7 +598,7 @@ async function runImportFileOrchestration(params: {
   // call. See the daemon comment for the full rationale — short version:
   // every storage adapter's `insert` is a single N-Quads load / INSERT
   // DATA operation, so all-or-nothing applies across graphs.
-  const assertionGraph = contextGraphAssertionUri(contextGraphId, agent.peerId, assertionName, subGraphName);
+  const assertionGraph = contextGraphAssertionUri(contextGraphId, requestAgentAddress, assertionName, subGraphName);
   const metaGraph = contextGraphMetaUri(contextGraphId);
   const startedAtLiteral = `"${startedAt}"^^<http://www.w3.org/2001/XMLSchema#dateTime>`;
   const markdownFormUri = mdIntermediateHash
@@ -629,6 +640,7 @@ async function runImportFileOrchestration(params: {
     { subject: assertionUri, predicate: 'http://dkg.io/ontology/rootEntity', object: resolvedRootEntity, graph: metaGraph },
     { subject: assertionUri, predicate: 'http://dkg.io/ontology/sourceContentType', object: JSON.stringify(detectedContentType), graph: metaGraph },
     { subject: assertionUri, predicate: 'http://dkg.io/ontology/sourceFileHash', object: JSON.stringify(fileStoreEntry.keccak256), graph: metaGraph },
+    { subject: assertionUri, predicate: 'http://dkg.io/ontology/importStartedAt', object: startedAtLiteral, graph: metaGraph },
     { subject: assertionUri, predicate: 'http://dkg.io/ontology/extractionMethod', object: JSON.stringify('structural'), graph: metaGraph },
     { subject: assertionUri, predicate: 'http://dkg.io/ontology/structuralTripleCount', object: `"${triples.length}"^^<http://www.w3.org/2001/XMLSchema#integer>`, graph: metaGraph },
     { subject: assertionUri, predicate: 'http://dkg.io/ontology/semanticTripleCount', object: `"0"^^<http://www.w3.org/2001/XMLSchema#integer>`, graph: metaGraph },
@@ -950,6 +962,35 @@ describe('import-file orchestration — happy paths', () => {
     expect(record.fileHash).toBe(result.fileHash);
     expect(record.pipelineUsed).toBe('text/markdown');
     expect(record.tripleCount).toBe(result.extraction.tripleCount);
+  });
+
+  it('uses the requesting agent identity for file assertion URIs and extractedBy provenance', async () => {
+    const requestAgentAddress = '0xInvitedAgentAddress';
+    const body = buildMultipart([
+      { kind: 'text', name: 'contextGraphId', value: 'research-cg' },
+      { kind: 'file', name: 'file', filename: 'delegated.md', contentType: 'text/markdown', content: Buffer.from('# Delegated\n\nImported through an invited agent.\n', 'utf-8') },
+    ]);
+
+    const result = await runImportFileOrchestration({
+      agent,
+      fileStore,
+      extractionRegistry: registry,
+      extractionStatus: status,
+      multipartBody: body,
+      boundary: BOUNDARY,
+      assertionName: 'delegated-import',
+      requestAgentAddress,
+    });
+
+    expect(result.assertionUri).toBe(
+      contextGraphAssertionUri('research-cg', requestAgentAddress, 'delegated-import'),
+    );
+
+    const extractedByQuad = agent.insertedQuads.find(q =>
+      q.graph === result.assertionUri
+      && q.predicate === 'http://dkg.io/ontology/extractedBy',
+    );
+    expect(extractedByQuad?.object).toBe(`did:dkg:agent:${requestAgentAddress}`);
   });
 
   it('text/markdown upload uses filePart content type when contentType field is not provided', async () => {
@@ -1821,9 +1862,9 @@ describe('import-file orchestration — source-file linkage (§10.1 / §6.3 / §
     const metaForAssertion = agent.insertedQuads.filter(q =>
       q.graph === metaGraph && q.subject === result.assertionUri,
     );
-    // Rows 14-19 plus Round 9 Bug 27 `dkg:sourceFileName` (7 total) —
-    // no row 20 because Phase 1 did not run for a direct markdown upload.
-    expect(metaForAssertion).toHaveLength(7);
+    // Rows 14-20 plus Round 9 Bug 27 `dkg:sourceFileName` (8 total) —
+    // no `mdIntermediateHash` because Phase 1 did not run for a direct markdown upload.
+    expect(metaForAssertion).toHaveLength(8);
 
     const byPredicate = (predLocal: string) =>
       metaForAssertion.find(q => q.predicate === `${DKG}${predLocal}`);
@@ -1837,13 +1878,18 @@ describe('import-file orchestration — source-file linkage (§10.1 / §6.3 / §
     expect(byPredicate('sourceContentType')?.object).toBe('"text/markdown"');
     // Row 16 — load-bearing: sourceFileHash lets a caller recover the blob
     expect(byPredicate('sourceFileHash')?.object).toBe(`"${result.fileHash}"`);
-    // Row 17
+    // Row 17 — import start time is persisted so stale same-byte re-import jobs
+    // can be rejected during semantic-enrichment identity checks.
+    expect(byPredicate('importStartedAt')?.object).toMatch(
+      /^".+"\^\^<http:\/\/www\.w3\.org\/2001\/XMLSchema#dateTime>$/,
+    );
+    // Row 18
     expect(byPredicate('extractionMethod')?.object).toBe('"structural"');
-    // Row 18 — structural triple count matches the Phase 2 result
+    // Row 19 — structural triple count matches the Phase 2 result
     expect(byPredicate('structuralTripleCount')?.object).toBe(`"${result.extraction.tripleCount}"^^<${XSD_INTEGER}>`);
-    // Row 19 — V10.0 has no semantic extraction yet
+    // Row 20 — V10.0 has no semantic extraction yet
     expect(byPredicate('semanticTripleCount')?.object).toBe(`"0"^^<${XSD_INTEGER}>`);
-    // Row 20 — absent because Phase 1 did not run for a direct markdown upload
+    // `mdIntermediateHash` is absent because Phase 1 did not run for a direct markdown upload.
     expect(byPredicate('mdIntermediateHash')).toBeUndefined();
     // Round 9 Bug 27 — `dkg:sourceFileName` present on the UAL, carrying
     // the original upload filename literal. This is the new home for
@@ -1878,14 +1924,18 @@ describe('import-file orchestration — source-file linkage (§10.1 / §6.3 / §
     const metaForAssertion = agent.insertedQuads.filter(q =>
       q.graph === metaGraph && q.subject === result.assertionUri,
     );
-    // Rows 14-20 + Round 9 Bug 27 `dkg:sourceFileName` = 8 rows total.
-    expect(metaForAssertion).toHaveLength(8);
+    // Rows 14-21 + Round 9 Bug 27 `dkg:sourceFileName` = 9 rows total.
+    expect(metaForAssertion).toHaveLength(9);
 
     const byPredicate = (predLocal: string) =>
       metaForAssertion.find(q => q.predicate === `${DKG}${predLocal}`);
 
     // Row 15 — original content type is application/pdf in _meta
     expect(byPredicate('sourceContentType')?.object).toBe('"application/pdf"');
+    // Row 17 — import start time is persisted for semantic job invalidation.
+    expect(byPredicate('importStartedAt')?.object).toMatch(
+      /^".+"\^\^<http:\/\/www\.w3\.org\/2001\/XMLSchema#dateTime>$/,
+    );
     // Row 20 — mdIntermediateHash now present, matching the wire value
     expect(byPredicate('mdIntermediateHash')?.object).toBe(`"${result.extraction.mdIntermediateHash}"`);
     // Round 9 Bug 27 — sourceFileName present on the UAL for the PDF upload.

@@ -12,6 +12,10 @@ export type {
   LogRow,
   QueryHistoryRow,
   SavedQueryRow,
+  SemanticEnrichmentEventRow,
+  SemanticEnrichmentHealthRow,
+  SemanticEnrichmentStatus,
+  ExtractionStatusSnapshotRow,
 } from './db.js';
 
 export { StructuredLogger } from './structured-logger.js';

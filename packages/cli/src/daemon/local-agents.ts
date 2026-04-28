@@ -90,6 +90,7 @@ export const LOCAL_AGENT_INTEGRATION_DEFINITIONS: Record<string, LocalAgentInteg
       dkgPrimaryMemory: true,
       wmImportPipeline: true,
       nodeServedSkill: true,
+      semanticEnrichment: false,
     },
     manifest: {
       packageName: '@origintrail-official/dkg-adapter-openclaw',
@@ -126,7 +127,49 @@ export function normalizeLocalAgentTransport(input: unknown): LocalAgentIntegrat
   if (typeof input.bridgeUrl === 'string' && input.bridgeUrl.trim()) transport.bridgeUrl = trimTrailingSlashes(input.bridgeUrl.trim());
   if (typeof input.gatewayUrl === 'string' && input.gatewayUrl.trim()) transport.gatewayUrl = trimTrailingSlashes(input.gatewayUrl.trim());
   if (typeof input.healthUrl === 'string' && input.healthUrl.trim()) transport.healthUrl = trimTrailingSlashes(input.healthUrl.trim());
+  const wakeUrl = typeof input.wakeUrl === 'string' && input.wakeUrl.trim()
+    ? trimTrailingSlashes(input.wakeUrl.trim())
+    : undefined;
+  const inferredWakeAuth = wakeUrl ? inferSafeLocalAgentWakeAuthFromUrl(wakeUrl) : undefined;
+  const requestedWakeAuth = input.wakeAuth === 'bridge-token' || input.wakeAuth === 'gateway' || input.wakeAuth === 'none'
+    ? input.wakeAuth
+    : undefined;
+  const safeWakeUrl = wakeUrl && inferredWakeAuth && (!requestedWakeAuth || requestedWakeAuth === inferredWakeAuth)
+    ? wakeUrl
+    : undefined;
+  if (requestedWakeAuth) {
+    if (!wakeUrl || (safeWakeUrl && requestedWakeAuth === inferredWakeAuth)) {
+      transport.wakeAuth = requestedWakeAuth;
+    }
+  }
+  if (safeWakeUrl) {
+    transport.wakeUrl = safeWakeUrl;
+  }
   return Object.keys(transport).length > 0 ? transport : undefined;
+}
+
+export function isSafeBridgeTokenWakeUrl(value: string): boolean {
+  return inferSafeLocalAgentWakeAuthFromUrl(value) !== undefined;
+}
+
+export function inferSafeLocalAgentWakeAuthFromUrl(value: string): 'bridge-token' | 'gateway' | undefined {
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return undefined;
+    if (parsed.username || parsed.password || parsed.search || parsed.hash) return undefined;
+    const hostname = parsed.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+    const isLoopback = hostname === 'localhost'
+      || hostname === '::1'
+      || hostname === '0:0:0:0:0:0:0:1'
+      || /^127(?:\.\d{1,3}){3}$/.test(hostname);
+    if (!isLoopback) return undefined;
+    const normalizedPath = trimTrailingSlashes(parsed.pathname);
+    if (normalizedPath === '/semantic-enrichment/wake') return 'bridge-token';
+    if (normalizedPath === '/api/dkg-channel/semantic-enrichment/wake') return 'gateway';
+    return undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export function normalizeLocalAgentCapabilities(input: unknown): LocalAgentIntegrationCapabilities | undefined {
@@ -140,6 +183,7 @@ export function normalizeLocalAgentCapabilities(input: unknown): LocalAgentInteg
     'dkgPrimaryMemory',
     'wmImportPipeline',
     'nodeServedSkill',
+    'semanticEnrichment',
   ];
   for (const key of keys) {
     if (typeof input[key] === 'boolean') capabilities[key] = input[key];
@@ -307,6 +351,8 @@ export function extractLocalAgentIntegrationPatch(body: Record<string, unknown>)
     bridgeUrl: body.bridgeUrl,
     gatewayUrl: body.gatewayUrl,
     healthUrl: body.healthUrl,
+    wakeUrl: body.wakeUrl,
+    wakeAuth: body.wakeAuth,
   });
   patch.transport = transport || topLevelTransport;
   patch.capabilities = normalizeLocalAgentCapabilities(body.capabilities);

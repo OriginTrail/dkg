@@ -423,7 +423,7 @@ supported (no converter needed).
 | `file`          | yes      | The document bytes                                                          |
 | `contextGraphId`| yes      | Target context graph                                                        |
 | `contentType`   | no       | Override the file part's Content-Type header                                |
-| `ontologyRef`   | no       | CG `_ontology` URI for guided Phase 2 extraction                            |
+| `ontologyRef`   | no       | V1 override hint string for semantic extraction prompt guidance             |
 | `subGraphName`  | no       | Target sub-graph inside the CG (must be registered via `createSubGraph`)    |
 
 ### Example

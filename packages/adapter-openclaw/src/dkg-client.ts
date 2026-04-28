@@ -17,6 +17,13 @@ export interface DkgClientOptions {
   timeoutMs?: number;
 }
 
+interface LocalAgentRequestContext {
+  integrationId: string;
+  semanticEnrichmentSupported?: boolean;
+  wakeUrl?: string;
+  wakeAuth?: 'bridge-token' | 'gateway' | 'none';
+}
+
 export interface OpenClawAttachmentRef {
   assertionUri: string;
   fileHash: string;
@@ -36,6 +43,7 @@ export interface LocalAgentIntegrationCapabilities {
   wmImportPipeline?: boolean;
   nodeServedSkill?: boolean;
   chatAttachments?: boolean;
+  semanticEnrichment?: boolean;
 }
 
 export interface LocalAgentIntegrationTransport {
@@ -43,6 +51,8 @@ export interface LocalAgentIntegrationTransport {
   bridgeUrl?: string;
   gatewayUrl?: string;
   healthUrl?: string;
+  wakeUrl?: string;
+  wakeAuth?: 'bridge-token' | 'gateway' | 'none';
 }
 
 export interface LocalAgentIntegrationManifest {
@@ -77,10 +87,75 @@ export interface LocalAgentIntegrationRecord extends LocalAgentIntegrationPayloa
   updatedAt?: string;
 }
 
+export interface SemanticEnrichmentDescriptor {
+  eventId: string;
+  status: 'pending' | 'leased' | 'completed' | 'dead_letter';
+  semanticTripleCount: number;
+  updatedAt: string;
+  lastError?: string;
+}
+
+export interface SemanticTripleInput {
+  subject: string;
+  predicate: string;
+  object: string;
+}
+
+export interface ChatTurnSemanticEventPayload {
+  kind: 'chat_turn';
+  sessionId: string;
+  turnId: string;
+  contextGraphId: string;
+  assertionName: string;
+  assertionUri: string;
+  sessionUri: string;
+  turnUri: string;
+  userMessage: string;
+  assistantReply: string;
+  attachmentRefs?: OpenClawAttachmentRef[];
+  persistenceState: 'stored' | 'failed' | 'pending';
+  failureReason?: string;
+  projectContextGraphId?: string;
+}
+
+export interface FileImportSemanticEventPayload {
+  kind: 'file_import';
+  contextGraphId: string;
+  assertionName: string;
+  assertionUri: string;
+  importStartedAt: string;
+  sourceAgentAddress?: string;
+  rootEntity?: string;
+  fileHash: string;
+  mdIntermediateHash?: string;
+  detectedContentType: string;
+  sourceFileName?: string;
+  ontologyRef?: string;
+}
+
+export type SemanticEnrichmentEventPayload =
+  | ChatTurnSemanticEventPayload
+  | FileImportSemanticEventPayload;
+
+export interface SemanticEnrichmentEventLease {
+  id: string;
+  kind: 'chat_turn' | 'file_import';
+  payload: SemanticEnrichmentEventPayload;
+  status: 'leased';
+  attempts: number;
+  maxAttempts: number;
+  leaseOwner?: string | null;
+  leaseExpiresAt?: number | null;
+  nextAttemptAt?: number;
+  payloadHash?: string;
+  lastError?: string;
+}
+
 export class DkgDaemonClient {
   readonly baseUrl: string;
   private readonly timeoutMs: number;
   private readonly apiToken: string | undefined;
+  private localAgentRequestContext: LocalAgentRequestContext | null = null;
 
   constructor(opts?: DkgClientOptions) {
     this.baseUrl = stripTrailingSlashes(opts?.baseUrl ?? 'http://127.0.0.1:9200');
@@ -99,6 +174,31 @@ export class DkgDaemonClient {
 
   getAuthToken(): string | undefined {
     return this.apiToken;
+  }
+
+  setLocalAgentRequestContext(context: LocalAgentRequestContext | null | undefined): void {
+    const integrationId = typeof context?.integrationId === 'string' ? context.integrationId.trim() : '';
+    if (!integrationId) {
+      this.localAgentRequestContext = null;
+      return;
+    }
+    const semanticEnrichmentSupported = typeof context?.semanticEnrichmentSupported === 'boolean'
+      ? context.semanticEnrichmentSupported
+      : undefined;
+    const wakeUrl = typeof context?.wakeUrl === 'string' && context.wakeUrl.trim()
+      ? context.wakeUrl.trim()
+      : undefined;
+    const wakeAuth = context?.wakeAuth === 'bridge-token' || context?.wakeAuth === 'gateway' || context?.wakeAuth === 'none'
+      ? context.wakeAuth
+      : undefined;
+    this.localAgentRequestContext = {
+      integrationId,
+      ...(typeof semanticEnrichmentSupported === 'boolean'
+        ? { semanticEnrichmentSupported }
+        : {}),
+      ...(wakeUrl ? { wakeUrl } : {}),
+      ...(wakeAuth ? { wakeAuth } : {}),
+    };
   }
 
   // ---------------------------------------------------------------------------
@@ -337,7 +437,7 @@ export class DkgDaemonClient {
       `${this.baseUrl}/api/assertion/${encodeURIComponent(name)}/import-file`,
       {
         method: 'POST',
-        headers: { Accept: 'application/json', ...this.authHeaders() },
+        headers: { Accept: 'application/json', ...this.authHeaders(), ...this.localAgentHeaders() },
         body: form,
         signal: AbortSignal.timeout(this.timeoutMs),
       },
@@ -410,9 +510,10 @@ export class DkgDaemonClient {
       attachmentRefs?: OpenClawAttachmentRef[];
       persistenceState?: 'stored' | 'failed' | 'pending';
       failureReason?: string | null;
+      projectContextGraphId?: string;
     },
-  ): Promise<void> {
-    await this.post('/api/openclaw-channel/persist-turn', {
+  ): Promise<{ ok: boolean; turnId?: string; semanticEnrichment?: SemanticEnrichmentDescriptor }> {
+    return this.post('/api/openclaw-channel/persist-turn', {
       sessionId,
       userMessage,
       assistantReply,
@@ -421,7 +522,91 @@ export class DkgDaemonClient {
       attachmentRefs: opts?.attachmentRefs,
       persistenceState: opts?.persistenceState,
       failureReason: opts?.failureReason,
+      projectContextGraphId: opts?.projectContextGraphId,
     });
+  }
+
+  async claimSemanticEnrichmentEvent(leaseOwner: string): Promise<{ event: SemanticEnrichmentEventLease | null }> {
+    return this.post('/api/semantic-enrichment/events/claim', { leaseOwner });
+  }
+
+  async renewSemanticEnrichmentEvent(
+    eventId: string,
+    leaseOwner: string,
+    payloadHash?: string,
+  ): Promise<{ renewed: boolean }> {
+    return this.post('/api/semantic-enrichment/events/renew', {
+      eventId,
+      leaseOwner,
+      ...(payloadHash ? { payloadHash } : {}),
+    });
+  }
+
+  async releaseSemanticEnrichmentEvent(
+    eventId: string,
+    leaseOwner: string,
+    payloadHash?: string,
+  ): Promise<{ released: boolean; semanticEnrichment?: SemanticEnrichmentDescriptor }> {
+    return this.post('/api/semantic-enrichment/events/release', {
+      eventId,
+      leaseOwner,
+      ...(payloadHash ? { payloadHash } : {}),
+    });
+  }
+
+  async appendSemanticEnrichmentEvent(
+    eventId: string,
+    leaseOwner: string,
+    triples: SemanticTripleInput[],
+    payloadHash?: string,
+  ): Promise<{
+    applied: boolean;
+    alreadyApplied?: boolean;
+    completed: boolean;
+    semanticEnrichment: SemanticEnrichmentDescriptor;
+  }> {
+    return this.post('/api/semantic-enrichment/events/append', {
+      eventId,
+      leaseOwner,
+      triples,
+      ...(payloadHash ? { payloadHash } : {}),
+    });
+  }
+
+  async completeSemanticEnrichmentEvent(
+    eventId: string,
+    leaseOwner: string,
+    semanticTripleCount = 0,
+    payloadHash?: string,
+  ): Promise<{ completed: boolean; semanticEnrichment?: SemanticEnrichmentDescriptor }> {
+    return this.post('/api/semantic-enrichment/events/complete', {
+      eventId,
+      leaseOwner,
+      semanticTripleCount,
+      ...(payloadHash ? { payloadHash } : {}),
+    });
+  }
+
+  async failSemanticEnrichmentEvent(
+    eventId: string,
+    leaseOwner: string,
+    error: string,
+    payloadHash?: string,
+  ): Promise<{ status: 'pending' | 'dead_letter' | null; semanticEnrichment?: SemanticEnrichmentDescriptor }> {
+    return this.post('/api/semantic-enrichment/events/fail', {
+      eventId,
+      leaseOwner,
+      error,
+      ...(payloadHash ? { payloadHash } : {}),
+    });
+  }
+
+  async fetchFileText(hash: string, contentType?: string): Promise<string> {
+    const normalizedHash = hash.startsWith('sha256:') || hash.startsWith('keccak256:')
+      ? hash
+      : `sha256:${hash}`;
+    const suffix = contentType ? `?contentType=${encodeURIComponent(contentType)}` : '';
+    return this.getText(`/api/file/${encodeURIComponent(normalizedHash)}${suffix}`);
   }
 
   // ---------------------------------------------------------------------------
@@ -693,7 +878,7 @@ export class DkgDaemonClient {
   private async get<T>(path: string): Promise<T> {
     const res = await fetch(`${this.baseUrl}${path}`, {
       method: 'GET',
-      headers: { 'Accept': 'application/json', ...this.authHeaders() },
+      headers: { 'Accept': 'application/json', ...this.authHeaders(), ...this.localAgentHeaders() },
       signal: AbortSignal.timeout(this.timeoutMs),
     });
     if (!res.ok) {
@@ -703,10 +888,28 @@ export class DkgDaemonClient {
     return res.json() as Promise<T>;
   }
 
+  private async getText(path: string): Promise<string> {
+    const res = await fetch(`${this.baseUrl}${path}`, {
+      method: 'GET',
+      headers: { ...this.authHeaders(), ...this.localAgentHeaders() },
+      signal: AbortSignal.timeout(this.timeoutMs),
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      throw new Error(`DKG daemon ${path} responded ${res.status}: ${body}`);
+    }
+    return res.text();
+  }
+
   private async post<T>(path: string, body: unknown): Promise<T> {
     const res = await fetch(`${this.baseUrl}${path}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', ...this.authHeaders() },
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        ...this.authHeaders(),
+        ...this.localAgentHeaders(),
+      },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(this.timeoutMs),
     });
@@ -720,7 +923,12 @@ export class DkgDaemonClient {
   private async put<T>(path: string, body: unknown): Promise<T> {
     const res = await fetch(`${this.baseUrl}${path}`, {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', ...this.authHeaders() },
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        ...this.authHeaders(),
+        ...this.localAgentHeaders(),
+      },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(this.timeoutMs),
     });
@@ -730,6 +938,24 @@ export class DkgDaemonClient {
     }
     return res.json() as Promise<T>;
   }
+
+  private localAgentHeaders(): Record<string, string> {
+    if (!isLoopbackDaemonUrl(this.baseUrl)) return {};
+    const integrationId = this.localAgentRequestContext?.integrationId?.trim();
+    if (!integrationId) return {};
+    const semanticEnrichmentSupported = this.localAgentRequestContext?.semanticEnrichmentSupported;
+    const wakeUrl = this.localAgentRequestContext?.wakeUrl?.trim();
+    const wakeAuth = this.localAgentRequestContext?.wakeAuth;
+    return {
+      'X-DKG-Local-Agent-Integration': integrationId,
+      ...(this.apiToken ? { 'X-DKG-Bridge-Token': this.apiToken } : {}),
+      ...(typeof semanticEnrichmentSupported === 'boolean'
+        ? { 'X-DKG-Local-Agent-Semantic-Enrichment': semanticEnrichmentSupported ? 'true' : 'false' }
+        : {}),
+      ...(wakeUrl ? { 'X-DKG-Local-Agent-Wake-Url': wakeUrl } : {}),
+      ...(wakeAuth ? { 'X-DKG-Local-Agent-Wake-Auth': wakeAuth } : {}),
+    };
+  }
 }
 
 function stripTrailingSlashes(value: string): string {
@@ -738,4 +964,17 @@ function stripTrailingSlashes(value: string): string {
     end -= 1;
   }
   return value.slice(0, end);
+}
+
+function isLoopbackDaemonUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    const hostname = parsed.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+    return hostname === 'localhost'
+      || hostname === '::1'
+      || hostname === '0:0:0:0:0:0:0:1'
+      || /^127(?:\.\d{1,3}){3}$/.test(hostname);
+  } catch {
+    return false;
+  }
 }

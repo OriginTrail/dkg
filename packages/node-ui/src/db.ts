@@ -1,8 +1,11 @@
 import Database from 'better-sqlite3';
 import { join } from 'node:path';
 
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 9;
 const DEFAULT_RETENTION_DAYS = 90;
+const DEFAULT_SEMANTIC_ENRICHMENT_LEASE_MS = 5 * 60_000;
+const DEFAULT_SEMANTIC_ENRICHMENT_RETRY_BASE_MS = 1_000;
+const DEFAULT_SEMANTIC_ENRICHMENT_RETRY_MAX_MS = 5 * 60_000;
 
 export interface DashboardDBOptions {
   /** Directory to store the SQLite database file. */
@@ -216,6 +219,57 @@ export class DashboardDB {
       `);
     }
 
+    if (version < 7) {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS semantic_enrichment_events (
+          id TEXT PRIMARY KEY,
+          kind TEXT NOT NULL,
+          idempotency_key TEXT NOT NULL UNIQUE,
+          payload_json TEXT NOT NULL,
+          status TEXT NOT NULL,
+          semantic_triple_count INTEGER NOT NULL DEFAULT 0,
+          attempts INTEGER NOT NULL DEFAULT 0,
+          max_attempts INTEGER NOT NULL DEFAULT 3,
+          next_attempt_at INTEGER NOT NULL,
+          lease_owner TEXT,
+          lease_expires_at INTEGER,
+          last_error TEXT,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_semantic_enrichment_status_next
+          ON semantic_enrichment_events(status, next_attempt_at);
+        CREATE INDEX IF NOT EXISTS idx_semantic_enrichment_status_lease
+          ON semantic_enrichment_events(status, lease_expires_at);
+        CREATE INDEX IF NOT EXISTS idx_semantic_enrichment_updated_at
+          ON semantic_enrichment_events(updated_at);
+      `);
+    }
+
+    if (version < 8) {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS extraction_status_snapshots (
+          assertion_uri TEXT PRIMARY KEY,
+          record_json TEXT NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_extraction_status_snapshots_updated_at
+          ON extraction_status_snapshots(updated_at);
+      `);
+    }
+
+    if (version < 9) {
+      const semanticEventColumns = this.db
+        .prepare(`PRAGMA table_info(semantic_enrichment_events)`)
+        .all() as Array<{ name?: string }>;
+      if (!semanticEventColumns.some((column) => column.name === 'semantic_triple_count')) {
+        this.db.exec(`
+          ALTER TABLE semantic_enrichment_events
+          ADD COLUMN semantic_triple_count INTEGER NOT NULL DEFAULT 0
+        `);
+      }
+    }
+
     this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
 
     const savedRetention = this.db.prepare("SELECT value FROM settings WHERE key = 'retentionDays'").get() as { value: string } | undefined;
@@ -236,6 +290,8 @@ export class DashboardDB {
     this.db.exec(`DELETE FROM query_history WHERE ts < ${cutoff}`);
     this.db.exec(`DELETE FROM chat_messages WHERE ts < ${cutoff}`);
     this.db.exec(`DELETE FROM chat_persistence_jobs WHERE updated_at < ${cutoff} AND status IN ('stored', 'failed')`);
+    this.db.exec(`DELETE FROM semantic_enrichment_events WHERE updated_at < ${cutoff} AND status IN ('completed', 'dead_letter')`);
+    this.db.exec(`DELETE FROM extraction_status_snapshots WHERE updated_at < ${cutoff}`);
     this.db.exec(`DELETE FROM notifications WHERE ts < ${cutoff}`);
   }
 
@@ -905,6 +961,346 @@ export class DashboardDB {
     };
   }
 
+  // --- Semantic enrichment events ---
+
+  getSemanticEnrichmentEvent(id: string): SemanticEnrichmentEventRow | undefined {
+    return this.db.prepare(
+      'SELECT * FROM semantic_enrichment_events WHERE id = ?',
+    ).get(id) as SemanticEnrichmentEventRow | undefined;
+  }
+
+  getSemanticEnrichmentEventByIdempotencyKey(idempotencyKey: string): SemanticEnrichmentEventRow | undefined {
+    return this.db.prepare(
+      'SELECT * FROM semantic_enrichment_events WHERE idempotency_key = ?',
+    ).get(idempotencyKey) as SemanticEnrichmentEventRow | undefined;
+  }
+
+  insertSemanticEnrichmentEvent(event: {
+    id: string;
+    kind: string;
+    idempotency_key: string;
+    payload_json: string;
+    status: SemanticEnrichmentStatus;
+    semantic_triple_count?: number;
+    attempts: number;
+    max_attempts: number;
+    next_attempt_at: number;
+    lease_owner?: string | null;
+    lease_expires_at?: number | null;
+    last_error?: string | null;
+    created_at: number;
+    updated_at: number;
+  }): void {
+    this.stmt('insertSemanticEnrichmentEvent', `
+      INSERT INTO semantic_enrichment_events (
+        id, kind, idempotency_key, payload_json, status, semantic_triple_count, attempts, max_attempts,
+        next_attempt_at, lease_owner, lease_expires_at, last_error, created_at, updated_at
+      ) VALUES (
+        @id, @kind, @idempotency_key, @payload_json, @status, @semantic_triple_count, @attempts, @max_attempts,
+        @next_attempt_at, @lease_owner, @lease_expires_at, @last_error, @created_at, @updated_at
+      )
+    `).run({
+      ...event,
+      semantic_triple_count: event.semantic_triple_count ?? 0,
+      lease_owner: event.lease_owner ?? null,
+      lease_expires_at: event.lease_expires_at ?? null,
+      last_error: event.last_error ?? null,
+    });
+  }
+
+  refreshActiveSemanticEnrichmentEventPayload(
+    id: string,
+    payloadJson: string,
+    semanticTripleCount: number,
+    updatedAt: number,
+  ): boolean {
+    const result = this.stmt('refreshActiveSemanticEnrichmentEventPayload', `
+      UPDATE semantic_enrichment_events
+      SET payload_json = ?,
+          semantic_triple_count = ?,
+          attempts = 0,
+          next_attempt_at = ?,
+          last_error = NULL,
+          updated_at = ?
+      WHERE id = ? AND status IN ('pending', 'leased')
+    `).run(payloadJson, semanticTripleCount, updatedAt, updatedAt, id);
+    return result.changes > 0;
+  }
+
+  reclaimExpiredSemanticEnrichmentEvents(now: number): number {
+    const tx = this.db.transaction((reclaimNow: number) => {
+      const leaseExpiredError = 'Semantic enrichment lease expired before completion';
+      const deadLettered = this.db.prepare(`
+        UPDATE semantic_enrichment_events
+        SET status = 'dead_letter',
+            lease_owner = NULL,
+            lease_expires_at = NULL,
+            last_error = ?,
+            updated_at = ?
+        WHERE status = 'leased'
+          AND lease_expires_at IS NOT NULL
+          AND lease_expires_at < ?
+          AND attempts >= max_attempts
+      `).run(leaseExpiredError, reclaimNow, reclaimNow).changes;
+
+      const reclaimed = this.stmt('reclaimExpiredSemanticEnrichmentEvents', `
+        UPDATE semantic_enrichment_events
+        SET status = 'pending',
+            lease_owner = NULL,
+            lease_expires_at = NULL,
+            next_attempt_at = ?,
+            updated_at = ?
+        WHERE status = 'leased'
+          AND lease_expires_at IS NOT NULL
+          AND lease_expires_at < ?
+          AND attempts < max_attempts
+      `).run(reclaimNow, reclaimNow, reclaimNow).changes;
+
+      return deadLettered + reclaimed;
+    });
+
+    return tx(now);
+  }
+
+  deadLetterActiveSemanticEnrichmentEvents(
+    updatedAt: number,
+    lastError: string,
+  ): SemanticEnrichmentEventRow[] {
+    const tx = this.db.transaction((ts: number, error: string) => {
+      const rows = this.db.prepare(`
+        SELECT * FROM semantic_enrichment_events
+        WHERE status IN ('pending', 'leased')
+        ORDER BY created_at ASC, id ASC
+      `).all() as SemanticEnrichmentEventRow[];
+      if (rows.length === 0) return [] as SemanticEnrichmentEventRow[];
+
+      this.db.prepare(`
+        UPDATE semantic_enrichment_events
+        SET status = 'dead_letter',
+            lease_owner = NULL,
+            lease_expires_at = NULL,
+            last_error = ?,
+            updated_at = ?
+        WHERE status IN ('pending', 'leased')
+      `).run(error, ts);
+
+      return rows.map((row) => ({
+        ...row,
+        status: 'dead_letter' as const,
+        lease_owner: null,
+        lease_expires_at: null,
+        last_error: error,
+        updated_at: ts,
+      }));
+    });
+
+    return tx(updatedAt, lastError);
+  }
+
+  claimNextRunnableSemanticEnrichmentEvent(
+    now: number,
+    leaseOwner: string,
+    leaseTtlMs = DEFAULT_SEMANTIC_ENRICHMENT_LEASE_MS,
+  ): SemanticEnrichmentEventRow | undefined {
+    const tx = this.db.transaction((claimNow: number, owner: string, ttlMs: number) => {
+      this.reclaimExpiredSemanticEnrichmentEvents(claimNow);
+
+      const candidate = this.db.prepare(`
+        SELECT id
+        FROM semantic_enrichment_events
+        WHERE status = 'pending' AND next_attempt_at <= ? AND attempts < max_attempts
+        ORDER BY next_attempt_at ASC, created_at ASC, id ASC
+        LIMIT 1
+      `).get(claimNow) as { id: string } | undefined;
+      if (!candidate) return undefined;
+
+      const updated = this.db.prepare(`
+        UPDATE semantic_enrichment_events
+        SET status = 'leased',
+            attempts = attempts + 1,
+            lease_owner = ?,
+            lease_expires_at = ?,
+            updated_at = ?,
+            last_error = NULL
+        WHERE id = ? AND status = 'pending' AND next_attempt_at <= ? AND attempts < max_attempts
+      `).run(owner, claimNow + ttlMs, claimNow, candidate.id, claimNow);
+      if (updated.changes === 0) return undefined;
+      return this.getSemanticEnrichmentEvent(candidate.id);
+    });
+
+    return tx(now, leaseOwner, leaseTtlMs);
+  }
+
+  renewSemanticEnrichmentLease(
+    id: string,
+    leaseOwner: string,
+    now: number,
+    leaseTtlMs = DEFAULT_SEMANTIC_ENRICHMENT_LEASE_MS,
+  ): boolean {
+    const result = this.stmt('renewSemanticEnrichmentLease', `
+      UPDATE semantic_enrichment_events
+      SET lease_expires_at = ?,
+          updated_at = ?,
+          last_error = NULL
+      WHERE id = ? AND status = 'leased' AND lease_owner = ? AND lease_expires_at > ?
+    `).run(now + leaseTtlMs, now, id, leaseOwner, now);
+    return result.changes > 0;
+  }
+
+  releaseSemanticEnrichmentLease(
+    id: string,
+    leaseOwner: string,
+    now: number,
+  ): boolean {
+    const result = this.stmt('releaseSemanticEnrichmentLease', `
+      UPDATE semantic_enrichment_events
+      SET status = 'pending',
+          next_attempt_at = ?,
+          lease_owner = NULL,
+          lease_expires_at = NULL,
+          updated_at = ?,
+          last_error = NULL
+      WHERE id = ? AND status = 'leased' AND lease_owner = ?
+    `).run(now, now, id, leaseOwner);
+    return result.changes > 0;
+  }
+
+  completeSemanticEnrichmentEvent(
+    id: string,
+    leaseOwner: string,
+    updatedAt: number,
+    semanticTripleCount?: number,
+  ): boolean {
+    const result = this.stmt('completeSemanticEnrichmentEvent', `
+      UPDATE semantic_enrichment_events
+      SET status = 'completed',
+          semantic_triple_count = COALESCE(?, semantic_triple_count),
+          lease_owner = NULL,
+          lease_expires_at = NULL,
+          updated_at = ?,
+          last_error = NULL
+      WHERE id = ? AND status = 'leased' AND lease_owner = ?
+    `).run(semanticTripleCount ?? null, updatedAt, id, leaseOwner);
+    return result.changes > 0;
+  }
+
+  failSemanticEnrichmentEvent(
+    id: string,
+    leaseOwner: string,
+    attempts: number,
+    maxAttempts: number,
+    nextAttemptAt: number,
+    updatedAt: number,
+    errorMessage: string,
+  ): SemanticEnrichmentStatus | undefined {
+    const status: SemanticEnrichmentStatus = attempts >= maxAttempts ? 'dead_letter' : 'pending';
+    const result = this.stmt('failSemanticEnrichmentEvent', `
+      UPDATE semantic_enrichment_events
+      SET status = ?,
+          attempts = ?,
+          next_attempt_at = ?,
+          lease_owner = NULL,
+          lease_expires_at = NULL,
+          updated_at = ?,
+          last_error = ?
+      WHERE id = ? AND status = 'leased' AND lease_owner = ?
+    `).run(status, attempts, nextAttemptAt, updatedAt, errorMessage, id, leaseOwner);
+    return result.changes > 0 ? status : undefined;
+  }
+
+  getRunnableSemanticEnrichmentEvents(now: number, limit = 10): SemanticEnrichmentEventRow[] {
+    return this.db.prepare(`
+      SELECT * FROM semantic_enrichment_events
+      WHERE status = 'pending' AND next_attempt_at <= ? AND attempts < max_attempts
+      ORDER BY next_attempt_at ASC, created_at ASC, id ASC
+      LIMIT ?
+    `).all(now, limit) as SemanticEnrichmentEventRow[];
+  }
+
+  getNextPendingSemanticEnrichmentAt(): number | null {
+    const row = this.db.prepare(
+      `SELECT MIN(next_attempt_at) AS next_at FROM semantic_enrichment_events WHERE status = 'pending'`,
+    ).get() as { next_at: number | null };
+    return row?.next_at ?? null;
+  }
+
+  getSemanticEnrichmentHealth(now: number): SemanticEnrichmentHealthRow {
+    const counts = this.db.prepare(`
+      SELECT
+        SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending_count,
+        SUM(CASE WHEN status = 'leased' THEN 1 ELSE 0 END) AS leased_count,
+        SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed_count,
+        SUM(CASE WHEN status = 'dead_letter' THEN 1 ELSE 0 END) AS dead_letter_count,
+        SUM(CASE WHEN status = 'pending' AND next_attempt_at < ? THEN 1 ELSE 0 END) AS overdue_pending_count,
+        SUM(CASE WHEN status = 'leased' AND lease_expires_at IS NOT NULL AND lease_expires_at < ? THEN 1 ELSE 0 END) AS expired_lease_count
+      FROM semantic_enrichment_events
+    `).get(now, now) as {
+      pending_count: number | null;
+      leased_count: number | null;
+      completed_count: number | null;
+      dead_letter_count: number | null;
+      overdue_pending_count: number | null;
+      expired_lease_count: number | null;
+    };
+
+    const oldest = this.db.prepare(`
+      SELECT MIN(created_at) AS oldest_pending_created_at
+      FROM semantic_enrichment_events
+      WHERE status = 'pending'
+    `).get() as { oldest_pending_created_at: number | null };
+
+    const nextPendingAt = this.getNextPendingSemanticEnrichmentAt();
+
+    return {
+      pending_count: counts?.pending_count ?? 0,
+      leased_count: counts?.leased_count ?? 0,
+      completed_count: counts?.completed_count ?? 0,
+      dead_letter_count: counts?.dead_letter_count ?? 0,
+      overdue_pending_count: counts?.overdue_pending_count ?? 0,
+      expired_lease_count: counts?.expired_lease_count ?? 0,
+      oldest_pending_created_at: oldest?.oldest_pending_created_at ?? null,
+      next_pending_at: nextPendingAt,
+    };
+  }
+
+  getSemanticEnrichmentRetryDelayMs(attempts: number): number {
+    if (attempts <= 0) return DEFAULT_SEMANTIC_ENRICHMENT_RETRY_BASE_MS;
+    const delay = DEFAULT_SEMANTIC_ENRICHMENT_RETRY_BASE_MS * (2 ** Math.max(0, attempts - 1));
+    return Math.min(delay, DEFAULT_SEMANTIC_ENRICHMENT_RETRY_MAX_MS);
+  }
+
+  getSemanticEnrichmentNextAttemptAt(now: number, attempts: number): number {
+    return now + this.getSemanticEnrichmentRetryDelayMs(attempts);
+  }
+
+  // --- Extraction-status snapshots ---
+
+  getExtractionStatusSnapshot(assertionUri: string): ExtractionStatusSnapshotRow | undefined {
+    return this.db.prepare(
+      'SELECT * FROM extraction_status_snapshots WHERE assertion_uri = ?',
+    ).get(assertionUri) as ExtractionStatusSnapshotRow | undefined;
+  }
+
+  upsertExtractionStatusSnapshot(snapshot: {
+    assertion_uri: string;
+    record_json: string;
+    updated_at: number;
+  }): void {
+    this.stmt('upsertExtractionStatusSnapshot', `
+      INSERT INTO extraction_status_snapshots (assertion_uri, record_json, updated_at)
+      VALUES (@assertion_uri, @record_json, @updated_at)
+      ON CONFLICT(assertion_uri) DO UPDATE SET
+        record_json = excluded.record_json,
+        updated_at = excluded.updated_at
+    `).run(snapshot);
+  }
+
+  deleteExtractionStatusSnapshot(assertionUri: string): void {
+    this.stmt('deleteExtractionStatusSnapshot', `
+      DELETE FROM extraction_status_snapshots WHERE assertion_uri = ?
+    `).run(assertionUri);
+  }
+
   // --- Logs ---
 
   insertLog(entry: {
@@ -1263,6 +1659,42 @@ export interface ChatPersistenceHealthRow {
   failed_count: number;
   overdue_pending_count: number;
   oldest_pending_queued_at: number | null;
+}
+
+export type SemanticEnrichmentStatus = 'pending' | 'leased' | 'completed' | 'dead_letter';
+
+export interface SemanticEnrichmentEventRow {
+  id: string;
+  kind: string;
+  idempotency_key: string;
+  payload_json: string;
+  status: SemanticEnrichmentStatus;
+  semantic_triple_count: number;
+  attempts: number;
+  max_attempts: number;
+  next_attempt_at: number;
+  lease_owner: string | null;
+  lease_expires_at: number | null;
+  last_error: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface SemanticEnrichmentHealthRow {
+  pending_count: number;
+  leased_count: number;
+  completed_count: number;
+  dead_letter_count: number;
+  overdue_pending_count: number;
+  expired_lease_count: number;
+  oldest_pending_created_at: number | null;
+  next_pending_at: number | null;
+}
+
+export interface ExtractionStatusSnapshotRow {
+  assertion_uri: string;
+  record_json: string;
+  updated_at: number;
 }
 
 export interface SpendingPeriod {

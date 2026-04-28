@@ -325,6 +325,14 @@ import {
   reverseLocalAgentSetupForUi,
   refreshLocalAgentIntegrationFromUi,
 } from '../local-agents.js';
+import {
+  buildChatSemanticEventPayload,
+  queueLocalAgentSemanticEnrichmentBestEffort,
+  requestAdvertisesLocalAgentSemanticEnrichment,
+  requestHasTrustedLocalAgentBridgeAuth,
+  requestLocalAgentWakeTransport,
+  resolveChatTurnsAssertionAgentAddress,
+} from '../semantic-enrichment.js';
 
 import type { RequestContext } from './context.js';
 
@@ -786,7 +794,17 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
           "Missing required fields: sessionId, userMessage, assistantReply",
       });
     }
-    const { sessionId, userMessage, assistantReply, turnId, toolCalls, attachmentRefs, persistenceState, failureReason } =
+    const {
+      sessionId,
+      userMessage,
+      assistantReply,
+      turnId,
+      toolCalls,
+      attachmentRefs,
+      persistenceState,
+      failureReason,
+      projectContextGraphId,
+    } =
       payload;
     const normalizedToolCalls = Array.isArray(toolCalls)
       ? (toolCalls as Array<{
@@ -824,7 +842,45 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
           failureReason: normalizedFailureReason,
         },
       );
-      return jsonResponse(res, 200, { ok: true });
+      const uiContextGraphId =
+        typeof projectContextGraphId === 'string' && projectContextGraphId.trim()
+          ? projectContextGraphId.trim()
+          : undefined;
+      const trustedOpenClawRequest = requestHasTrustedLocalAgentBridgeAuth(req, 'openclaw', bridgeAuthToken);
+      const semanticEnrichment = queueLocalAgentSemanticEnrichmentBestEffort({
+        config,
+        dashDb,
+        integrationId: 'openclaw',
+        kind: 'chat_turn',
+        payload: buildChatSemanticEventPayload({
+          assertionAgentAddress: resolveChatTurnsAssertionAgentAddress(agent),
+          sessionId,
+          turnId: normalizedTurnId,
+          userMessage,
+          assistantReply,
+          attachmentRefs: verifiedAttachmentRefs,
+          persistenceState: normalizedPersistenceState,
+          failureReason: normalizedFailureReason,
+          projectContextGraphId: uiContextGraphId,
+        }),
+        bridgeAuthToken,
+        skipWhenUnavailable: true,
+        liveSemanticEnrichmentSupported: requestAdvertisesLocalAgentSemanticEnrichment(req, 'openclaw', {
+          bridgeAuthToken,
+          requireBridgeAuth: true,
+        }),
+        requestFromIntegration: trustedOpenClawRequest,
+        requestWakeTransport: requestLocalAgentWakeTransport(req, 'openclaw', {
+          bridgeAuthToken,
+          requireBridgeAuth: true,
+        }),
+        logLabel: `chat turn semantic event for ${normalizedTurnId}`,
+      });
+      return jsonResponse(res, 200, {
+        ok: true,
+        turnId: normalizedTurnId,
+        ...(semanticEnrichment ? { semanticEnrichment } : {}),
+      });
     } catch (err: any) {
       return jsonResponse(res, 500, { error: err.message });
     }

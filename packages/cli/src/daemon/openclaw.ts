@@ -40,6 +40,7 @@ import {
 } from '../extraction-status.js';
 import { daemonState } from './state.js';
 import { normalizeDetectedContentType } from './manifest.js';
+import { isValidContextGraphId } from './http-utils.js';
 // Cycle: local-agents imports lots from openclaw, and openclaw needs
 // these two getters from local-agents. TS handles the cycle because
 // every reference is inside a function body (not module-init).
@@ -203,6 +204,8 @@ export function transportPatchFromOpenClawTarget(
       kind: 'openclaw-channel',
       bridgeUrl: bridgeBase,
       ...(target.healthUrl ? { healthUrl: target.healthUrl } : {}),
+      wakeUrl: `${bridgeBase}/semantic-enrichment/wake`,
+      wakeAuth: 'bridge-token',
     };
   }
 
@@ -583,6 +586,7 @@ export function isValidOpenClawPersistTurnPayload(payload: {
   sessionId?: unknown;
   userMessage?: unknown;
   assistantReply?: unknown;
+  projectContextGraphId?: unknown;
   persistenceState?: unknown;
   failureReason?: unknown;
   attachmentRefs?: unknown;
@@ -590,6 +594,7 @@ export function isValidOpenClawPersistTurnPayload(payload: {
   sessionId: string;
   userMessage: string;
   assistantReply: string;
+  projectContextGraphId?: string;
   turnId?: unknown;
   toolCalls?: unknown;
   persistenceState?: unknown;
@@ -601,6 +606,10 @@ export function isValidOpenClawPersistTurnPayload(payload: {
     payload.sessionId.trim().length > 0 &&
     typeof payload.userMessage === "string" &&
     typeof payload.assistantReply === "string" &&
+    (
+      payload.projectContextGraphId === undefined ||
+      (typeof payload.projectContextGraphId === 'string' && isValidContextGraphId(payload.projectContextGraphId))
+    ) &&
     (
       payload.failureReason === undefined ||
       payload.failureReason === null ||
