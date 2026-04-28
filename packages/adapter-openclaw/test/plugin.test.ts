@@ -3160,6 +3160,68 @@ describe('DkgNodePlugin', () => {
     expect(result).toBeUndefined();
   });
 
+  it('T26 — empty / whitespace-only OPENCLAW_STATE_DIR does NOT short-circuit the fallback chain', () => {
+    // Regression for T26: pre-fix the `??` chain treated empty strings
+    // as real values, so `OPENCLAW_STATE_DIR=''` (or whitespace-only)
+    // bypassed `api.workspaceDir` and `~/.openclaw` and the writer
+    // ended up writing `./dkg-adapter/chat-turn-watermarks.json` from
+    // the process CWD — silent state leak across workspaces.
+    const prevEnv = process.env.OPENCLAW_STATE_DIR;
+    process.env.OPENCLAW_STATE_DIR = '';   // empty
+    try {
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: false },
+        memory: { enabled: false },
+      } as any);
+      const mockApi: OpenClawPluginApi = {
+        config: {},
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+        workspaceDir: '/tmp/dkg-t26-workspace',
+      } as unknown as OpenClawPluginApi;
+      plugin.register(mockApi);
+      const ctw = (plugin as any).chatTurnWriter;
+      const watermarkPath: string = (ctw as any).watermarkFilePath;
+      const normalized = watermarkPath.replace(/\\/g, '/');
+      // Must have fallen through empty env to workspaceDir-derived path.
+      expect(normalized).toContain('/tmp/dkg-t26-workspace/.openclaw/dkg-adapter/chat-turn-watermarks.json');
+    } finally {
+      if (prevEnv === undefined) delete process.env.OPENCLAW_STATE_DIR;
+      else process.env.OPENCLAW_STATE_DIR = prevEnv;
+    }
+
+    // Whitespace-only also normalizes to "missing".
+    process.env.OPENCLAW_STATE_DIR = '   ';
+    try {
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: false },
+        memory: { enabled: false },
+      } as any);
+      const mockApi: OpenClawPluginApi = {
+        config: {},
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+        workspaceDir: '/tmp/dkg-t26-workspace-ws',
+      } as unknown as OpenClawPluginApi;
+      plugin.register(mockApi);
+      const watermarkPath: string = ((plugin as any).chatTurnWriter as any).watermarkFilePath;
+      expect(watermarkPath.replace(/\\/g, '/')).toContain(
+        '/tmp/dkg-t26-workspace-ws/.openclaw/dkg-adapter/chat-turn-watermarks.json',
+      );
+    } finally {
+      if (prevEnv === undefined) delete process.env.OPENCLAW_STATE_DIR;
+      else process.env.OPENCLAW_STATE_DIR = prevEnv;
+    }
+  });
+
   it('R16.2 — chat-turn watermark stateDir prefers api.workspaceDir over ~/.openclaw fallback', () => {
     // Regression for R16.2: previously the stateDir fallback chain went
     // straight to `~/.openclaw` when `runtime.state.resolveStateDir()` and

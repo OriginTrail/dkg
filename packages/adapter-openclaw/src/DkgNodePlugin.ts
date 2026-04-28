@@ -448,12 +448,23 @@ export class DkgNodePlugin {
     //   4. `~/.openclaw` — last resort; logged as a warning so ops can fix.
     const workspaceDir = (api as any)?.workspaceDir;
     const homeDir = `${homedir()}/.openclaw`;
+    // T26 — Normalize each source through trim+non-empty before the
+    // `??` chain. Pre-fix `??` treated empty string as a real value,
+    // so an accidentally-empty `OPENCLAW_STATE_DIR=''` (or whitespace-
+    // only, or an empty return from `resolveStateDir()`) would
+    // short-circuit the chain and leave `ChatTurnWriter` reading
+    // `./dkg-adapter/chat-turn-watermarks.json` from the process CWD —
+    // a hard-to-diagnose state leak across workspaces.
+    const trimmedNonEmpty = (s: unknown): string | undefined => {
+      if (typeof s !== 'string') return undefined;
+      const t = s.trim();
+      return t.length > 0 ? t : undefined;
+    };
+    const trimmedWorkspaceDir = trimmedNonEmpty(workspaceDir);
     const stateDir =
-      (api as any)?.runtime?.state?.resolveStateDir?.() ??
-      process.env.OPENCLAW_STATE_DIR ??
-      (typeof workspaceDir === 'string' && workspaceDir.length > 0
-        ? `${workspaceDir}/.openclaw`
-        : undefined) ??
+      trimmedNonEmpty((api as any)?.runtime?.state?.resolveStateDir?.()) ??
+      trimmedNonEmpty(process.env.OPENCLAW_STATE_DIR) ??
+      (trimmedWorkspaceDir ? `${trimmedWorkspaceDir}/.openclaw` : undefined) ??
       homeDir;
 
     if (this.chatTurnWriter) {
