@@ -788,6 +788,7 @@ describe('Hermes daemon routes', () => {
     const importMemories = vi.fn(async () => {});
     const memoryManager = {
       hasChatTurn: vi.fn(async () => true),
+      getChatTurnPersistenceState: vi.fn(async () => 'stored'),
       storeChatExchange: vi.fn(async () => {}),
     };
     const { ctx, res } = makeHermesRouteContext({
@@ -802,9 +803,45 @@ describe('Hermes daemon routes', () => {
 
     expect(res.statusCode).toBe(200);
     expect(JSON.parse(res.body)).toEqual({ ok: true, duplicate: true, turnId: 'turn-1' });
-    expect(memoryManager.hasChatTurn).toHaveBeenCalledWith('hermes:default', 'turn-1');
+    expect(memoryManager.getChatTurnPersistenceState).toHaveBeenCalledWith('hermes:default', 'turn-1');
+    expect(memoryManager.hasChatTurn).not.toHaveBeenCalled();
     expect(memoryManager.storeChatExchange).not.toHaveBeenCalled();
     expect(importMemories).not.toHaveBeenCalled();
+  });
+
+  it('allows stored Hermes retries to replace provisional turn state', async () => {
+    const storeChatExchange = vi.fn(async () => {});
+    const importMemories = vi.fn(async () => {});
+    const memoryManager = {
+      hasChatTurn: vi.fn(async () => true),
+      getChatTurnPersistenceState: vi.fn(async () => 'pending'),
+      storeChatExchange,
+    };
+    const { ctx, res } = makeHermesRouteContext({
+      sessionId: 'hermes:default',
+      userMessage: 'hello',
+      assistantReply: 'final reply',
+      turnId: 'turn-1',
+      persistenceState: 'stored',
+    }, memoryManager);
+    ctx.agent.importMemories = importMemories;
+
+    await handleHermesRoutes(ctx);
+
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({ ok: true, turnId: 'turn-1' });
+    expect(memoryManager.getChatTurnPersistenceState).toHaveBeenCalledWith('hermes:default', 'turn-1');
+    expect(storeChatExchange).toHaveBeenCalledWith(
+      'hermes:default',
+      'hello',
+      'final reply',
+      undefined,
+      expect.objectContaining({
+        turnId: 'turn-1',
+        persistenceState: 'stored',
+      }),
+    );
+    expect(importMemories).toHaveBeenCalledWith('final reply', 'hermes-session:hermes:default:turn:turn-1');
   });
 
   it('serializes concurrent persist-turn retries for the same turn id', async () => {

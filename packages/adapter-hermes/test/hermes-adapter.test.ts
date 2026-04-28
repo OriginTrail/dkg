@@ -735,6 +735,13 @@ describe('Hermes profile setup helpers', () => {
     setupHermesProfile({ hermesHome, memoryMode: 'provider' });
     expect(readFileSync(join(hermesHome, 'config.yaml'), 'utf-8')).toContain('provider: dkg');
 
+    const dryRun = planHermesSetup({ hermesHome, memoryMode: 'tools-only', dryRun: true });
+    expect(dryRun.actions).toContainEqual(expect.objectContaining({
+      type: 'update',
+      path: join(hermesHome, 'config.yaml'),
+    }));
+    expect(readFileSync(join(hermesHome, 'config.yaml'), 'utf-8')).toContain('provider: dkg');
+
     const plan = setupHermesProfile({ hermesHome, memoryMode: 'tools-only' });
     const config = readFileSync(join(hermesHome, 'config.yaml'), 'utf-8');
     const verify = verifyHermesProfile({ hermesHome });
@@ -1103,6 +1110,93 @@ assert provider._client.calls[0][1] == "cg:test", provider._client.calls
 assert "SELECT ?s ?p ?o" in provider._client.calls[0][2], provider._client.calls
 assert "CONTAINS" in provider._client.calls[0][2], provider._client.calls
 assert "Needle fact from DKG" in text, text
+`;
+    const result = spawnSync('python', ['-B', '-c', script], {
+      cwd: process.cwd(),
+      encoding: 'utf-8',
+    });
+
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+  });
+
+  it('flushes queued memory writes without reapplying them to the local cache', () => {
+    const script = String.raw`
+import importlib.util
+import json
+import sys
+import tempfile
+import types
+from pathlib import Path
+
+home = Path(tempfile.mkdtemp(prefix="hermes-dkg-queue-"))
+
+agent_pkg = types.ModuleType("agent")
+memory_provider = types.ModuleType("agent.memory_provider")
+class MemoryProvider:
+    pass
+memory_provider.MemoryProvider = MemoryProvider
+sys.modules["agent"] = agent_pkg
+sys.modules["agent.memory_provider"] = memory_provider
+
+tools_pkg = types.ModuleType("tools")
+registry = types.ModuleType("tools.registry")
+def tool_error(message):
+    return json.dumps({"error": message})
+registry.tool_error = tool_error
+sys.modules["tools"] = tools_pkg
+sys.modules["tools.registry"] = registry
+
+constants = types.ModuleType("hermes_constants")
+constants.get_hermes_home = lambda: home
+sys.modules["hermes_constants"] = constants
+
+sys.modules["plugins"] = types.ModuleType("plugins")
+sys.modules["plugins.memory"] = types.ModuleType("plugins.memory")
+
+plugin_dir = Path(r"${process.cwd().replace(/\\/g, '\\\\')}") / "hermes-plugin"
+spec = importlib.util.spec_from_file_location(
+    "plugins.memory.dkg",
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+module = importlib.util.module_from_spec(spec)
+sys.modules["plugins.memory.dkg"] = module
+spec.loader.exec_module(module)
+
+class FakeClient:
+    def __init__(self):
+        self.writes = []
+
+    def write_assertion(self, assertion_name, context_graph_id, quads):
+        self.writes.append((assertion_name, context_graph_id, quads))
+        return {"success": True}
+
+provider = module.DKGMemoryProvider()
+provider._client = FakeClient()
+provider._offline = False
+provider._assertion_id = "hermes"
+provider._context_graph = "cg:test"
+provider._agent_name = "agent"
+provider._cache = {
+    "memory": [{"target": "memory", "content": "cached fact"}],
+    "queued_writes": [{"type": "memory", "action": "add", "target": "memory", "content": "cached fact"}],
+}
+
+provider._flush_queued_writes()
+
+assert provider._cache["memory"] == [{"target": "memory", "content": "cached fact"}], provider._cache
+assert provider._cache["queued_writes"] == [], provider._cache
+assert len(provider._client.writes) == 1, provider._client.writes
+assert provider._client.writes[0][2] == [{
+    "subject": "urn:hermes:agent:memory",
+    "predicate": "urn:hermes:content",
+    "object": "[memory]\ncached fact",
+}], provider._client.writes
+
+provider._assertion_id = ""
+provider._cache["queued_writes"] = [{"type": "memory", "action": "replace", "target": "memory", "content": "new fact", "old_text": "cached"}]
+provider._flush_queued_writes()
+assert provider._cache["queued_writes"] == [{"type": "memory", "action": "replace", "target": "memory", "content": "new fact", "old_text": "cached"}], provider._cache
 `;
     const result = spawnSync('python', ['-B', '-c', script], {
       cwd: process.cwd(),

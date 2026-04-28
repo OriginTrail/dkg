@@ -416,10 +416,13 @@ export function hermesPersistTurnKey(sessionId: string, turnId: string): string 
 }
 
 export async function hasPersistedHermesTurn(
-  memoryManager: Pick<ChatMemoryManager, 'hasChatTurn'>,
+  memoryManager: Pick<ChatMemoryManager, 'hasChatTurn'> & Partial<Pick<ChatMemoryManager, 'getChatTurnPersistenceState'>>,
   sessionId: string,
   turnId: string,
 ): Promise<boolean> {
+  if (typeof memoryManager.getChatTurnPersistenceState === 'function') {
+    return (await memoryManager.getChatTurnPersistenceState(sessionId, turnId)) === 'stored';
+  }
   return memoryManager.hasChatTurn(sessionId, turnId);
 }
 

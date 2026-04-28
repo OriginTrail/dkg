@@ -98,7 +98,9 @@ export function planHermesSetup(options: HermesSetupOptions = {}): HermesSetupPl
     join(profile.hermesHome, 'plugins', 'dkg'),
     join(profile.stateDir, 'setup-state.json'),
   ];
-  if (profile.memoryMode === 'provider') {
+  const hasExistingManagedProvider = existsSync(profile.configPath)
+    && hasManagedDkgProvider(readFileSync(profile.configPath, 'utf-8'));
+  if (profile.memoryMode === 'provider' || hasExistingManagedProvider) {
     managedFiles.push(profile.configPath);
   }
   if (options.nodeSkillContent) {

@@ -751,34 +751,17 @@ class DKGMemoryProvider(MemoryProvider):
             self._cache[target] = entries
             _save_cache(self._cache, self._agent_name)
 
-        # Write to DKG assertion if online
         write_queued = False
-        if self._client and not self._offline and self._assertion_id:
-            quads = []
-            for e in entries:
-                quads.append({
-                    "subject": f"urn:hermes:{self._agent_name}:{target}",
-                    "predicate": "urn:hermes:content",
-                    "object": f"[{e.get('target', target)}]\n{e['content']}",
-                })
-            try:
-                result = self._client.write_assertion(
-                    self._assertion_id,
-                    self._context_graph,
-                    quads,
-                )
-                if _client_result_failed(result):
-                    raise RuntimeError(result.get("error", "DKG assertion write failed"))
-            except Exception as e:
-                logger.debug(f"[dkg] Assertion write failed: {e}")
-                write_queued = True
-                self._cache.setdefault("queued_writes", []).append({
-                    "type": "memory",
-                    "action": action,
-                    "target": target,
-                    "content": content,
-                })
-                _save_cache(self._cache, self._agent_name)
+        if not self._write_memory_target_to_assertion(target):
+            write_queued = True
+            self._cache.setdefault("queued_writes", []).append({
+                "type": "memory",
+                "action": action,
+                "target": target,
+                "content": content,
+                "old_text": old_text,
+            })
+            _save_cache(self._cache, self._agent_name)
 
         count = len(entries)
         return json.dumps({
@@ -1054,16 +1037,8 @@ class DKGMemoryProvider(MemoryProvider):
                     if _client_result_failed(result):
                         failed.append(item)
                 elif item.get("type") == "memory":
-                    result = self._handle_memory({
-                        "action": item["action"],
-                        "target": item["target"],
-                        "content": item["content"],
-                    })
-                    try:
-                        parsed = json.loads(result)
-                    except Exception:
-                        parsed = {}
-                    if parsed.get("queued"):
+                    target = item.get("target", "memory")
+                    if not self._write_memory_target_to_assertion(target):
                         failed.append(item)
             except Exception as e:
                 logger.debug(f"[dkg] Failed to flush queued write: {e}")
@@ -1072,6 +1047,31 @@ class DKGMemoryProvider(MemoryProvider):
         with self._lock:
             self._cache["queued_writes"] = failed
             _save_cache(self._cache, self._agent_name)
+
+    def _write_memory_target_to_assertion(self, target: str) -> bool:
+        if not (self._client and not self._offline and self._assertion_id):
+            return False
+
+        entries = list(self._cache.get(target, []))
+        quads = []
+        for e in entries:
+            quads.append({
+                "subject": f"urn:hermes:{self._agent_name}:{target}",
+                "predicate": "urn:hermes:content",
+                "object": f"[{e.get('target', target)}]\n{e['content']}",
+            })
+        try:
+            result = self._client.write_assertion(
+                self._assertion_id,
+                self._context_graph,
+                quads,
+            )
+            if _client_result_failed(result):
+                raise RuntimeError(result.get("error", "DKG assertion write failed"))
+            return True
+        except Exception as e:
+            logger.debug(f"[dkg] Assertion write failed: {e}")
+            return False
 
     def _direct_publish_allowed(self) -> bool:
         allow = self._config.get("allow_direct_publish")

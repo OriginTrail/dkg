@@ -593,19 +593,29 @@ export class ChatMemoryManager {
   }
 
   async hasChatTurn(sessionId: string, turnId: string): Promise<boolean> {
+    return (await this.getChatTurnPersistenceState(sessionId, turnId)) !== null;
+  }
+
+  async getChatTurnPersistenceState(sessionId: string, turnId: string): Promise<'stored' | 'failed' | 'pending' | null> {
     await this.ensureInitialized();
     const trimmedTurnId = turnId.trim();
-    if (!trimmedTurnId) return false;
+    if (!trimmedTurnId) return null;
     const sessionUri = `${CHAT_NS}session:${sessionId}`;
     const result = await this.tools.query(
-      `SELECT ?turn WHERE {
+      `SELECT ?persistenceState WHERE {
         ?turn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
         ?turn <${SCHEMA}isPartOf> <${sessionUri}> .
-        ?turn <${DKG_ONT}turnId> ${JSON.stringify(trimmedTurnId)}
-      } LIMIT 1`,
+        ?turn <${DKG_ONT}turnId> ${JSON.stringify(trimmedTurnId)} .
+        ?turn <${DKG_ONT}persistenceState> ?persistenceState .
+      }`,
       this.wmReadOpts(),
     );
-    return (result.bindings?.length ?? 0) > 0;
+    const states = (result.bindings ?? [])
+      .map((binding: Record<string, string>) => stripRdfLiteral(binding.persistenceState ?? '').trim());
+    if (states.includes('stored')) return 'stored';
+    if (states.includes('failed')) return 'failed';
+    if (states.includes('pending')) return 'pending';
+    return null;
   }
 
   private async extractAndWriteMentions(
