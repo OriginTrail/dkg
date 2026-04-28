@@ -28,9 +28,10 @@ SETUP:
   1. Set environment variable:
      export DKG_PROBE_REGISTRATION_MODE=1
 
-  2. Restart your OpenClaw gateway:
-     dkg stop
-     dkg start
+  2. Restart your OpenClaw gateway (NOT the DKG node daemon — they
+     are separate processes; see packages/adapter-openclaw/README.md
+     line 36-39 for the canonical command):
+     openclaw gateway restart
 
   3. Drive test turns:
      - Click "Send" in the DKG Agent Hub (UI turn via dkg-ui channel)

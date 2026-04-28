@@ -1002,8 +1002,17 @@ export class ChatTurnWriter {
       } catch (err) {
         attempt++;
         if (attempt < 2) {
-          const backoff = attempt === 1 ? 250 : 1000;
-          await new Promise((resolve) => setTimeout(resolve, backoff));
+          // Single 250ms backoff retry for transient daemon hiccups.
+          // Longer outages are recovered by the next-call mechanisms:
+          // W4a backfills via `computeDelta` against an unchanged
+          // watermark; W4b restores the consumed user message to the
+          // front of the FIFO queue (R12.3 / R12.7) so the next
+          // outbound re-pairs and retries. No need for a multi-rung
+          // ladder here — a 1000ms ladder rung was previously coded
+          // but unreachable because `attempt < 2` exits after the
+          // first retry; collapsed to one explicit backoff to keep
+          // the persistence policy clear (R-feedback).
+          await new Promise((resolve) => setTimeout(resolve, 250));
         } else {
           throw err;
         }

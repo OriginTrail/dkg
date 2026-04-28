@@ -136,26 +136,51 @@ describe('Memory integration round-trip (issue #199 Phase 1 + Phase 2)', () => {
       expect(snippet.toLowerCase()).toContain('tatooine');
     });
 
-    it('searchNarrow (W3 auto-recall) fans out across all layers and caps at maxResults', async () => {
-      // Updated for the W3 widening: searchNarrow shares the full 6-layer
-      // fan-out with `memory_search` and only differs in the result cap.
-      // Pinning to WM-only here would push a regression back to the old
-      // narrow behavior once SWM/VM happen to contain matching data.
+    it('searchNarrow (W3 auto-recall) restricts fan-out to WM-only tiers and caps at maxResults', async () => {
+      // R-trust-boundary: searchNarrow no longer fans out the full
+      // 6-layer scope. Auto-recall on every prompt would otherwise
+      // inject SWM/VM (cross-peer) content into the system context
+      // implicitly, widening the trust boundary beyond agent-owned WM.
+      // The agent-callable `memory_search` tool keeps the wider
+      // 6-layer fan-out via `search()`. Verifies (a) result cap is
+      // still respected and (b) only WM layers appear in returned
+      // hits — SWM and VM are pruned at the plan-filter step.
       const manager = new DkgMemorySearchManager({
         client: (plugin as any).client,
         resolver: (plugin as any).memorySessionResolver,
       });
       const hits = await manager.searchNarrow('tatooine', { maxResults: 5 });
-      // Cap respected — never more than the requested maxResults.
       expect(hits.length).toBeLessThanOrEqual(5);
-      // Layers must all be valid memory layers from the 6-layer fan-out.
-      const validLayers = new Set([
-        'agent-context-wm', 'agent-context-swm', 'agent-context-vm',
-        'project-wm', 'project-swm', 'project-vm',
-      ]);
+      const allowedLayers = new Set(['agent-context-wm', 'project-wm']);
       for (const h of hits) {
-        expect(validLayers.has(h.layer ?? '')).toBe(true);
+        expect(allowedLayers.has(h.layer ?? '')).toBe(true);
       }
+      // Inspect the actual SPARQL fan-out via the mocked client. With
+      // wmOnly: true (the searchNarrow default), at most 2 query calls
+      // hit the daemon (agent-context-wm + project-wm if resolved) —
+      // not the 6-layer count of `memory_search`.
+      const queryCalls = mockQuery.mock.calls;
+      const views = queryCalls.map((c: any) => c[1].view);
+      expect(views.every((v: any) => v === 'working-memory')).toBe(true);
+    });
+
+    it('R-trust-boundary — searchNarrow can opt out of the WM-only restriction via wmOnly: false', async () => {
+      // The opt-out exists for callers that explicitly want the wider
+      // scope but still need searchNarrow's tighter result cap.
+      // Agent-driven `memory_search` should use `search()` instead;
+      // this option is exposed primarily for legacy callers and tests.
+      const manager = new DkgMemorySearchManager({
+        client: (plugin as any).client,
+        resolver: (plugin as any).memorySessionResolver,
+      });
+      mockQuery.mockClear();
+      await manager.searchNarrow('tatooine', { maxResults: 5, wmOnly: false });
+      const queryCalls = mockQuery.mock.calls;
+      const views = new Set(queryCalls.map((c: any) => c[1].view));
+      // All three view tiers must have been queried at least once.
+      expect(views.has('working-memory')).toBe(true);
+      expect(views.has('shared-working-memory')).toBe(true);
+      expect(views.has('verified-memory')).toBe(true);
     });
   });
 

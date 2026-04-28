@@ -233,6 +233,14 @@ export interface MemorySearchOptions {
   maxResults?: number;
   minScore?: number;
   sessionKey?: string;
+  /**
+   * R-trust-boundary: when true, restricts the fan-out to working-memory
+   * tiers only (skips SWM and VM). Used by W3 auto-recall via
+   * `searchNarrow` so the implicit per-turn injection never widens the
+   * trust boundary to peer-authored cross-agent content. The agent-
+   * callable `memory_search` tool keeps the full fan-out.
+   */
+  wmOnly?: boolean;
 }
 
 /**
