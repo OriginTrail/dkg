@@ -364,7 +364,7 @@ function normalizePublishGuard(input: Partial<HermesPublishGuardPolicy> | undefi
 }
 
 function toSetupOptions(options: HermesCliOptions): HermesSetupOptions {
-  const profileName = trimmed(options.profileName ?? options.profile);
+  const profileName = trimmed(options.profile) ?? trimmed(options.profileName);
   const hermesHome = trimmed(options.hermesHome);
   const existingState = readSetupState(resolveHermesProfile({ profileName, hermesHome }));
   const memoryMode = normalizeCliMemoryMode(options.memoryMode) ?? existingState?.profile.memoryMode;

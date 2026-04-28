@@ -184,6 +184,8 @@ export function transportPatchFromHermesTarget(
   targetName: 'bridge' | 'gateway' | undefined,
 ): LocalAgentIntegrationTransport | undefined {
   if (!targetName) return undefined;
+  const hermesIntegration = getLocalAgentIntegration(config, 'hermes');
+  const existingTransport = hermesIntegration?.transport ?? {};
   const target = getHermesChannelTargets(config).find((item) => item.name === targetName);
   if (!target) return undefined;
 
@@ -194,6 +196,7 @@ export function transportPatchFromHermesTarget(
     return {
       kind: 'hermes-channel',
       bridgeUrl: bridgeBase,
+      ...(existingTransport.gatewayUrl ? { gatewayUrl: existingTransport.gatewayUrl } : {}),
       ...(target.healthUrl ? { healthUrl: target.healthUrl } : {}),
     };
   }
@@ -206,6 +209,7 @@ export function transportPatchFromHermesTarget(
     : gatewayBase;
   return {
     kind: 'hermes-channel',
+    ...(existingTransport.bridgeUrl ? { bridgeUrl: existingTransport.bridgeUrl } : {}),
     gatewayUrl,
     ...(target.healthUrl ? { healthUrl: target.healthUrl } : {}),
   };

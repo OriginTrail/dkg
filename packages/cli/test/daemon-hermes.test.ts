@@ -375,6 +375,35 @@ describe('Hermes local-agent registry lifecycle', () => {
     expect(integration.transport.bridgeUrl).toBe('http://127.0.0.1:9444');
   });
 
+  it('refresh preserves sibling Hermes transport endpoints when one target is healthy', async () => {
+    const config = makeConfig({
+      localAgentIntegrations: {
+        hermes: {
+          enabled: true,
+          transport: {
+            kind: 'hermes-channel',
+            bridgeUrl: 'http://127.0.0.1:9444',
+            gatewayUrl: 'https://hermes.example.com',
+          },
+          runtime: { status: 'degraded', ready: false },
+        },
+      },
+    });
+    vi.stubGlobal('fetch', vi.fn(async (url: string | URL | Request) => {
+      const requestUrl = String(url);
+      if (requestUrl.startsWith('http://127.0.0.1:9444')) {
+        return new Response(JSON.stringify({ ok: false, error: 'bridge offline' }), { status: 503 });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }));
+
+    const integration = await refreshLocalAgentIntegrationFromUi(config, 'hermes', 'bridge-token');
+
+    expect(integration.runtime.status).toBe('ready');
+    expect(integration.transport.bridgeUrl).toBe('http://127.0.0.1:9444');
+    expect(integration.transport.gatewayUrl).toBe('https://hermes.example.com');
+  });
+
   it('refresh keeps Hermes degraded when health returns ok false with HTTP 200', async () => {
     const config = makeConfig({
       localAgentIntegrations: {

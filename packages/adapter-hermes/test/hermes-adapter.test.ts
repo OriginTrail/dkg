@@ -667,6 +667,23 @@ describe('Hermes profile setup helpers', () => {
     })).resolves.toBeUndefined();
   });
 
+  it('prefers profile over profileName in adapter CLI setup options', async () => {
+    const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-'));
+
+    await runSetup({
+      hermesHome,
+      profile: 'explicit',
+      profileName: 'alias',
+      start: false,
+      verify: false,
+    });
+
+    const config = JSON.parse(readFileSync(join(hermesHome, 'dkg.json'), 'utf-8'));
+    const state = JSON.parse(readFileSync(join(hermesHome, '.dkg-adapter-hermes', 'setup-state.json'), 'utf-8'));
+    expect(config.profile_name).toBe('explicit');
+    expect(state.profile.profileName).toBe('explicit');
+  });
+
   it('reads the default DKG auth token file for setup daemon registration', async () => {
     const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-'));
     const dkgHome = mkdtempSync(join(tmpdir(), 'dkg-home-'));
