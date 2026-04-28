@@ -1584,11 +1584,15 @@ describe('autoupdater hardening', () => {
     for (const call of sweepCalls) {
       // No host-wide command-line pattern matching.
       expect(call.cmd).not.toMatch(/pkill\s+(-\S+\s+)*-f/);
-      // Scoping happens via the DKG_AU_SLOT env var, not embedded in the script.
+      // Scoping happens via env vars, not embedded in the script. EUID is
+      // resolved in Node and passed as DKG_AU_UID — we MUST NOT depend on
+      // bash-only `$EUID` because /bin/sh on Ubuntu/Debian is dash.
       expect(call.cmd).toContain('$DKG_AU_SLOT');
-      expect(call.cmd).toContain('pgrep -u "$EUID"');
+      expect(call.cmd).toContain('pgrep -u "$DKG_AU_UID"');
+      expect(call.cmd).not.toContain('$EUID');
       expect(call.cmd).toContain('/proc/$pid/cwd');
       expect(call.env?.DKG_AU_SLOT).toMatch(/\/releases\/[ab]$/);
+      expect(call.env?.DKG_AU_UID).toMatch(/^\d+$/);
     }
   });
 
@@ -1652,5 +1656,24 @@ describe('autoupdater hardening', () => {
     expect(writtenStatus.lastAttempt?.status).toBe('failed');
     expect(writtenStatus.lastAttempt?.fromCommit).toBe('aaa111');
     expect(writtenStatus.consecutiveFailures).toBe(1);
+  });
+
+  it('records an `error` lastCheck when the configured branch/ref is invalid', async () => {
+    // Misconfiguration path: `!isValidRef(ref)` returns early without ever
+    // hitting `resolveRemoteCommitSha`. Without an explicit recordCheck on
+    // this branch, alerting based on `lastCheck.status` would keep showing
+    // the previous healthy poll while the node is silently broken.
+    let writtenStatus: any = null;
+    writeFileImpl = async (path: any, data: any) => {
+      if (String(path).includes('.update-status.json')) {
+        writtenStatus = JSON.parse(String(data));
+      }
+    };
+    const badAu: AutoUpdateConfig = { ...AU, branch: '--evil-flag' };
+    const result = await checkForNewCommitWithStatus(badAu as any, () => {});
+    expect(result.status).toBe('error');
+    expect(writtenStatus).toBeTruthy();
+    expect(writtenStatus.lastCheck?.status).toBe('error');
+    expect(writtenStatus.lastCheck?.ref).toBe('--evil-flag');
   });
 });

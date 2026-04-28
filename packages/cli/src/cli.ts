@@ -325,10 +325,13 @@ program
         ...(allowPrerelease !== effectiveAllowPrerelease ? { allowPrerelease } : {}),
         ...(sshKeyPath && sshKeyPath !== effectiveSshKeyPath ? { sshKeyPath } : {}),
         ...(Number.isFinite(interval) && interval !== effectiveInterval ? { checkIntervalMinutes: interval } : {}),
-        // Preserve advanced fields the wizard does not prompt for. Operators
-        // hand-tune `buildTimeoutMs` for slow ARM64 hosts; rerunning `dkg init`
-        // shouldn't silently revert them.
+        // Preserve advanced fields the wizard does not prompt for so a
+        // rerun of `dkg init` doesn't silently revert operator tuning:
+        //  - `buildTimeoutMs`: per-step overrides for slow ARM64 hosts
+        //  - `sshCommand`: custom GIT_SSH_COMMAND (jump hosts, non-default
+        //    port, custom IdentityFile, etc.)
         ...(existing.autoUpdate?.buildTimeoutMs ? { buildTimeoutMs: existing.autoUpdate.buildTimeoutMs } : {}),
+        ...(existing.autoUpdate?.sshCommand ? { sshCommand: existing.autoUpdate.sshCommand } : {}),
       } as AutoUpdateConfig;
     }
 

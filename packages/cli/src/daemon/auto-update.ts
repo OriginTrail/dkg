@@ -608,6 +608,10 @@ export async function checkForNewCommitWithStatus(
   const gitEnv = gitCommandEnv(au);
   if (!isValidRef(ref)) {
     log(`Auto-update: invalid branch/ref "${ref}"`);
+    // Record the failure too, otherwise alerting based on `lastCheck.status`
+    // keeps showing the previous healthy poll while the node is silently
+    // misconfigured (no remote check ever happens past this point).
+    await recordCheck({ ref, status: 'error' });
     return { status: "error" };
   }
 
@@ -815,10 +819,17 @@ export async function runBuildStep(
 function sweepOrphanBuildProcesses(slotDir: string, log: (m: string) => void): void {
   const { execSync } = _autoUpdateIo;
   if (!slotDir || !slotDir.startsWith('/')) return;
+  // EUID is a bash-only variable. Production hosts (Ubuntu/Debian) symlink
+  // /bin/sh -> dash, where `$EUID` is unset and `set -u` aborts the whole
+  // script before pgrep ever runs — silently disabling the sweep. Resolve
+  // the EUID in Node and pass it through env so the script works under any
+  // POSIX shell.
+  const euid = typeof process.geteuid === 'function' ? process.geteuid() : null;
+  if (euid === null) return;
   try {
     const script =
       'set -u; ' +
-      'for pid in $(pgrep -u "$EUID" 2>/dev/null); do ' +
+      'for pid in $(pgrep -u "$DKG_AU_UID" 2>/dev/null); do ' +
       '  cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null || true); ' +
       '  case "$cwd" in ' +
       '    "$DKG_AU_SLOT"|"$DKG_AU_SLOT/"*) kill -KILL "$pid" 2>/dev/null || true ;; ' +
@@ -828,7 +839,11 @@ function sweepOrphanBuildProcesses(slotDir: string, log: (m: string) => void): v
       stdio: 'ignore',
       timeout: 5_000,
       shell: '/bin/sh',
-      env: { ...process.env, DKG_AU_SLOT: slotDir.replace(/\/+$/, '') },
+      env: {
+        ...process.env,
+        DKG_AU_SLOT: slotDir.replace(/\/+$/, ''),
+        DKG_AU_UID: String(euid),
+      },
     });
     log(`Auto-update: swept orphan build subprocesses with cwd under ${slotDir} (best-effort).`);
   } catch {
