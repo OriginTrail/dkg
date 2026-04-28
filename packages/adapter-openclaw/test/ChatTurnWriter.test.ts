@@ -87,13 +87,45 @@ describe("ChatTurnWriter", () => {
     };
     writer.onAgentEnd(event, { channelId: "ch", sessionKey: "sk" });
     await flushMicrotasks();
-    // turnId is intentionally not passed to the daemon (kept in-memory
-    // for cross-path dedup only); daemon mints its own RDF-subject UUID.
+    // T29 — A stable per-invocation `turnId` is now passed to the daemon
+    // so retries are idempotent on the RDF-subject URI. The id is a
+    // fresh UUID generated once per persistOne call.
     expect(mockClient.storeChatTurn).toHaveBeenCalledWith(
       "openclaw:ch:::sk",
       "hello world",
       "hi there",
+      expect.objectContaining({ turnId: expect.any(String) }),
     );
+  });
+
+  it("T29 — persistOne retries pass the SAME turnId so the daemon dedups", async () => {
+    // Regression for T29: pre-fix `persistOne` passed no turnId, so a
+    // transient daemon timeout after the first POST committed produced
+    // a duplicate chat turn on the retry (the daemon minted a fresh
+    // UUID per call). Post-fix, all retries within one persistOne
+    // invocation share the same caller-supplied UUID.
+    let callCount = 0;
+    const turnIds: Array<string | undefined> = [];
+    mockClient.storeChatTurn = vi.fn().mockImplementation(async (_sid, _u, _a, opts) => {
+      callCount++;
+      turnIds.push(opts?.turnId);
+      if (callCount === 1) throw new Error("transient daemon timeout");
+      // Second call (retry) succeeds.
+    });
+    writer = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
+    const event: AgentEndContext = {
+      sessionId: "test",
+      messages: [
+        { role: "user", content: "u1" },
+        { role: "assistant", content: "a1" },
+      ],
+    };
+    writer.onAgentEnd(event, { channelId: "ch", sessionKey: "sk" });
+    // Wait for retry to settle (250ms backoff inside persistOne).
+    await new Promise((r) => setTimeout(r, 600));
+    expect(callCount).toBe(2);
+    expect(turnIds[0]).toBeDefined();
+    expect(turnIds[1]).toBe(turnIds[0]); // same id across retry
   });
 
   it("extracts text from array content", async () => {

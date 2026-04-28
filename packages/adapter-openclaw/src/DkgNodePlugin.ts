@@ -923,12 +923,28 @@ export class DkgNodePlugin {
     }
 
     const bridgeReady = this.channelPlugin?.isListening === true && !startError;
+    // T30 — Derive memory-related capability flags from actual
+    // registration state, not the static manifest constant. When the
+    // memory slot is owned by another plugin (or memory is config-
+    // disabled), `memoryPlugin.isRegistered()` returns false and we
+    // must NOT advertise `dkgPrimaryMemory: true` / `wmImportPipeline:
+    // true` — otherwise UI/daemon consumers would offer DKG-backed
+    // memory actions that the slot's actual owner can't honour. The
+    // remaining capabilities (localChat, chatAttachments, connectFromUi,
+    // installNode, nodeServedSkill) are independent of slot ownership
+    // and stay statically true.
+    const memoryActive = this.memoryPlugin?.isRegistered() === true;
+    const capabilities = {
+      ...OPENCLAW_LOCAL_AGENT_CAPABILITIES,
+      dkgPrimaryMemory: memoryActive,
+      wmImportPipeline: memoryActive,
+    };
     const basePayload = {
       id: 'openclaw',
       enabled: true,
       description: 'Connect a local OpenClaw agent through the DKG node.',
       transport: this.buildOpenClawTransport(existing?.transport, api),
-      capabilities: OPENCLAW_LOCAL_AGENT_CAPABILITIES,
+      capabilities,
       manifest: OPENCLAW_LOCAL_AGENT_MANIFEST,
       setupEntry: OPENCLAW_LOCAL_AGENT_MANIFEST.setupEntry,
       metadata,

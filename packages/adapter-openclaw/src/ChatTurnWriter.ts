@@ -1,6 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
-import { createHash } from "crypto";
+import { createHash, randomUUID } from "crypto";
 
 interface Logger {
   info?: (...args: unknown[]) => void;
@@ -1410,17 +1410,31 @@ export class ChatTurnWriter {
     turnId: string,
     opts?: { pairIndex?: number }
   ): Promise<void> {
+    // T29 — Generate a per-INVOCATION request id BEFORE the retry loop
+    // so all retries pass the same id to the daemon. The daemon's
+    // `/api/openclaw-channel/persist-turn` route accepts a caller-
+    // supplied `turnId` and uses it to mint the RDF subject URI. Pre-
+    // fix we passed nothing and the daemon minted a fresh UUID per
+    // call — a transient timeout after the first POST committed
+    // produced a duplicate chat turn on the retry. Now retries are
+    // idempotent on the daemon side.
+    //
+    // Why a fresh UUID rather than the in-process `turnId` parameter:
+    //   * W4a's `turnId` is content+pairIndex (unique per logical
+    //     turn — would also work).
+    //   * W4b's `turnId` is content-only (would COLLIDE on legitimately-
+    //     repeated same-content turns within a session and merge them
+    //     into one RDF subject).
+    // A fresh UUID per persistOne call is unique per logical turn for
+    // both paths and stable across this call's retries — the simplest
+    // invariant. The in-process `turnId` parameter is still used for
+    // cross-path dedup (recentTurnIds + crossPathStamps) and the debug
+    // log; only the daemon-facing id is the fresh UUID.
+    const requestId = randomUUID();
     let attempt = 0;
     while (attempt < 2) {
       try {
-        // `turnId` stays in-process only — used for our cross-path dedup
-        // map (W4a vs W4b). It is intentionally NOT sent to the daemon:
-        // the daemon mints a fresh UUID per call (`daemon/routes/openclaw.ts`
-        // → `chat-memory.ts: turnUri = ${CHAT_NS}turn:${turnId}`), so
-        // passing our content-derived turnId would let two real-world
-        // identical exchanges in the same session collide on the same RDF
-        // subject URI.
-        await this.client.storeChatTurn(sessionId, user, assistant);
+        await this.client.storeChatTurn(sessionId, user, assistant, { turnId: requestId });
         // Watermark advance:
         //   - W4a passes `pairIndex` (the position of the persisted pair
         //     in the messages array). We set the watermark to MAX of

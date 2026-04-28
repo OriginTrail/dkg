@@ -1122,6 +1122,59 @@ describe('DkgNodePlugin', () => {
     await expect(plugin.stop()).resolves.toBeUndefined();
   });
 
+  it('T30 — capabilities.dkgPrimaryMemory / wmImportPipeline mirror actual memory-slot registration state', async () => {
+    // Regression for T30: pre-fix the local-agent connect payload
+    // statically advertised `dkgPrimaryMemory: true` and
+    // `wmImportPipeline: true` from a frozen constant — even when
+    // memory was config-disabled, or another plugin owned the slot.
+    // Daemon/UI consumers would then offer DKG-backed memory actions
+    // that the slot's actual owner couldn't honour. Post-fix the
+    // flags are derived from `this.memoryPlugin?.isRegistered()`.
+    const originalFetch = globalThis.fetch;
+    const fetchCalls: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      fetchCalls.push([input, init]);
+      return {
+        ok: true,
+        json: async () => ({ ok: true, integration: { id: 'openclaw' } }),
+      };
+    }) as typeof fetch;
+    let plugin: DkgNodePlugin | null = null;
+    try {
+      // Memory enabled → registration succeeds → flags should be true.
+      plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: true, port: 0 },
+        memory: { enabled: true },
+      });
+      const mockApi: OpenClawPluginApi = {
+        config: { plugins: { slots: { memory: 'adapter-openclaw' } } },
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        registerMemoryCapability: vi.fn(),
+        on: () => {},
+        logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+      } as unknown as OpenClawPluginApi;
+      plugin.register(mockApi);
+      await vi.waitFor(() => {
+        const connectCall = fetchCalls.find((call) =>
+          String(call[0]).includes('/api/local-agent-integrations/connect'),
+        );
+        expect(connectCall).toBeTruthy();
+      });
+      const connectCall = fetchCalls.find((call) =>
+        String(call[0]).includes('/api/local-agent-integrations/connect'),
+      );
+      const body = JSON.parse(String(connectCall?.[1]?.body));
+      expect(body.capabilities.dkgPrimaryMemory).toBe(true);
+      expect(body.capabilities.wmImportPipeline).toBe(true);
+    } finally {
+      await plugin?.stop();
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it('getClient() returns the DkgDaemonClient after register()', () => {
     const plugin = new DkgNodePlugin({ daemonUrl: 'http://example.com:9200' });
     const mockApi: OpenClawPluginApi = {
@@ -1197,10 +1250,15 @@ describe('DkgNodePlugin', () => {
           lastError: null,
         },
       });
+      // T30 — `dkgPrimaryMemory` and `wmImportPipeline` are derived
+      // from the actual memory-slot registration state. This test
+      // configured `memory.enabled: false`, so the slot is NOT
+      // registered and these flags MUST be false.
       expect(connectBody.capabilities).toMatchObject({
         localChat: true,
         connectFromUi: true,
-        dkgPrimaryMemory: true,
+        dkgPrimaryMemory: false,
+        wmImportPipeline: false,
       });
       expect(connectBody.manifest).toEqual({
         packageName: '@origintrail-official/dkg-adapter-openclaw',
