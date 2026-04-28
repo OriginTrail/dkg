@@ -568,6 +568,125 @@ export function skipSparqlStringLiteral(src: string, i: number): number {
 }
 
 /**
+ * Token-aware locator for the explicit `WHERE` keyword at the
+ * top-level of a SPARQL query. Mirrors the lex rules used by
+ * {@link findMatchingCloseBrace} / the fallback path in
+ * {@link findWhereBraceStart}: skips line comments (`# ... \n`),
+ * single/double/triple-quoted string literals (via
+ * {@link skipSparqlStringLiteral}), and IRIREFs (`<...>`) so the
+ * `WHERE` substring can NOT be sourced from inside any of those
+ * payload contexts. The `<` token is disambiguated as IRI-start
+ * vs less-than via the same next-byte allow-list as
+ * {@link findWhereBraceStart}'s fallback.
+ *
+ * Returns the index of the `W` of the `WHERE` keyword, or `-1` if
+ * none is found at top level. Case-insensitive on the keyword
+ * itself, but the surrounding word boundary is enforced (so
+ * identifiers like `WHEREVER` / `aWHERE` do NOT match).
+ *
+ * PR #229 bot review r31-8 (dkg-query-engine.ts:598).
+ */
+function findExplicitWhereTokenIdx(sparql: string): number {
+  const n = sparql.length;
+  const isWordStart = (c: string): boolean =>
+    (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c === '_';
+  const isWordCont = (c: string): boolean =>
+    (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+    (c >= '0' && c <= '9') || c === '_';
+  const isIriStartFirstByte = (c: string): boolean => {
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) return true;
+    return c === '#' || c === '_' || c === '/' || c === '.';
+  };
+  const isIriStart = (idx: number): boolean => {
+    const next = sparql[idx + 1];
+    if (next === undefined) return false;
+    if (!isIriStartFirstByte(next)) return false;
+    for (let j = idx + 1; j < n; j++) {
+      const c = sparql[j];
+      if (c === '>') return true;
+      if (
+        c === '<' || c === '"' || c === '{' || c === '}' ||
+        c === '|' || c === '\\' || c === '^' || c === '`' ||
+        /\s/.test(c)
+      ) return false;
+    }
+    return false;
+  };
+
+  let i = 0;
+  while (i < n) {
+    const ch = sparql[i];
+    if (ch === '#') {
+      while (i < n && sparql[i] !== '\n') i++;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      i = skipSparqlStringLiteral(sparql, i);
+      continue;
+    }
+    if (ch === '<') {
+      if (isIriStart(i)) {
+        const end = sparql.indexOf('>', i + 1);
+        if (end === -1) return -1;
+        i = end + 1;
+        continue;
+      }
+      i++;
+      continue;
+    }
+    if (isWordStart(ch)) {
+      // Word boundary check: previous char (if any) must NOT be a
+      // word-continuation byte. The outer lexer already skipped
+      // comments/strings/IRIs, so a non-word predecessor means we're
+      // at a real keyword start.
+      const prev = i > 0 ? sparql[i - 1] : '';
+      if (prev && isWordCont(prev)) {
+        // Mid-identifier — skip the rest of the word.
+        let j = i + 1;
+        while (j < n && isWordCont(sparql[j])) j++;
+        i = j;
+        continue;
+      }
+      let j = i + 1;
+      while (j < n && isWordCont(sparql[j])) j++;
+      const word = sparql.substring(i, j);
+      if (word.length === 5 && word.toUpperCase() === 'WHERE') {
+        return i;
+      }
+      i = j;
+      continue;
+    }
+    i++;
+  }
+  return -1;
+}
+
+/**
+ * Find the next significant `{` after a given index, skipping
+ * whitespace AND line comments (`# … \n`) but NOT string literals
+ * — SPARQL grammar does not allow a string literal between the
+ * `WHERE` keyword and its opening `{`, so encountering one means
+ * the input is malformed and we should bail (return `-1`).
+ *
+ * PR #229 bot review r31-8 (dkg-query-engine.ts:598).
+ */
+function nextSignificantBraceAfter(sparql: string, startIdx: number): number {
+  const n = sparql.length;
+  let i = startIdx;
+  while (i < n) {
+    const ch = sparql[i];
+    if (ch === '#') {
+      while (i < n && sparql[i] !== '\n') i++;
+      continue;
+    }
+    if (/\s/.test(ch)) { i++; continue; }
+    if (ch === '{') return i;
+    return -1;
+  }
+  return -1;
+}
+
+/**
  * Locate the opening `{` of the WHERE clause in a SPARQL query.
  *
  * SPARQL 1.1 (§16) allows the `WHERE` keyword to be omitted from
@@ -595,10 +714,30 @@ export function skipSparqlStringLiteral(src: string, i: number): number {
  * Bot review: PR #229 r3147347827 (dkg-query-engine.ts:718).
  */
 function findWhereBraceStart(sparql: string): number {
-  const whereIdx = sparql.search(/\bWHERE\s*\{/i);
-  if (whereIdx !== -1) {
-    const idx = sparql.indexOf('{', whereIdx);
-    return idx === -1 ? -1 : idx;
+  // PR #229 bot review r31-8 (dkg-query-engine.ts:598). Until r31-8
+  // the fast path used a raw regex `/\bWHERE\s*\{/i` which matches
+  // ANY `WHERE` followed by `{` — including ones embedded inside
+  // string literals or comments. Adversarial / obfuscated input
+  // like
+  //   SELECT ("WHERE {" AS ?x) WHERE { ... }
+  // would have the regex hit the literal substring inside the
+  // SELECT projection, then `sparql.indexOf('{', whereIdx)` would
+  // grab the brace just past the literal — and every later
+  // injection (`wrapWithGraph` / `injectMinTrustFilter`) would
+  // rewrite the wrong block, in some cases producing an invalid
+  // query and in others silently filtering against a string-literal
+  // expression rather than the actual WHERE clause.
+  //
+  // Fix: locate the explicit `WHERE` token using the SAME token-
+  // aware scanner the fallback already uses (skips line comments,
+  // single/double/triple-quoted string literals, and IRIREFs;
+  // disambiguates `<` as IRI-start vs less-than via the next-byte
+  // allow-list below). Then advance past inter-keyword whitespace
+  // (and any line comments) before reading the `{`.
+  const whereTokenIdx = findExplicitWhereTokenIdx(sparql);
+  if (whereTokenIdx !== -1) {
+    const idx = nextSignificantBraceAfter(sparql, whereTokenIdx + 'WHERE'.length);
+    return idx;
   }
 
   // Fallback: scan for top-level `{` while honouring SPARQL token

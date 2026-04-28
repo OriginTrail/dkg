@@ -560,3 +560,133 @@ describe('N-Quads typed-literal round-trip — regression for issue #34 [ST-12]'
     await sink.close();
   });
 });
+
+// =======================================================================
+// PR #229 bot review r31-8 (oxigraph.ts:48): per-position numeric-
+// subtype conflict detection. The previous side-table happily let a
+// later insert at the SAME `(s, p, value, g)` overwrite a different
+// declared subtype, so a SELECT readback silently returned the
+// latest-written subtype for both writes. We now mark the position
+// (and the lexeme) as conflicted and refuse to restore — the caller
+// gets Oxigraph's canonical form (`xsd:integer`).
+// =======================================================================
+describe('OxigraphStore — per-position numeric-subtype conflict (r31-8 regression)', () => {
+  const XSD = 'http://www.w3.org/2001/XMLSchema';
+  const intType = `${XSD}#int`;
+  const positiveIntegerType = `${XSD}#positiveInteger`;
+  const integerType = `${XSD}#integer`;
+  const longType = `${XSD}#long`;
+  const subject = 'urn:dkg:r31-8:s';
+  const predicate = 'http://ex.org/v';
+  const graph = 'urn:dkg:r31-8:g';
+
+  it('two writes at the same (s,p,value,g) with DIFFERENT declared subtypes fall back to canonical (NOT silently latest-write-wins)', async () => {
+    const store = new OxigraphStore();
+    // Write 1: declares xsd:int.
+    await store.insert([
+      { subject, predicate, object: `"1"^^<${intType}>`, graph },
+    ]);
+    // Write 2: same lexeme/position but a different declared subtype.
+    // Oxigraph collapses both literals to `"1"^^xsd:integer` in the
+    // store, so SELECT can ONLY see one canonicalised quad. Without
+    // r31-8, the side-table would silently report the LAST-written
+    // subtype — for either logical source.
+    await store.insert([
+      { subject, predicate, object: `"1"^^<${positiveIntegerType}>`, graph },
+    ]);
+
+    const r = await store.query(
+      `SELECT ?o WHERE { GRAPH <${graph}> { <${subject}> <${predicate}> ?o } }`,
+    );
+    expect(r.type).toBe('bindings');
+    if (r.type !== 'bindings') return;
+    expect(r.bindings).toHaveLength(1);
+    // r31-8 contract: when the per-position subtype is ambiguous, the
+    // restorer MUST fall back to Oxigraph's canonical xsd:integer
+    // form. Returning either xsd:int OR xsd:positiveInteger here
+    // would be a fail-OPEN restoration.
+    expect(r.bindings[0]['o']).toBe(`"1"^^<${integerType}>`);
+    expect(r.bindings[0]['o']).not.toBe(`"1"^^<${intType}>`);
+    expect(r.bindings[0]['o']).not.toBe(`"1"^^<${positiveIntegerType}>`);
+    await store.close();
+  });
+
+  it('CONSTRUCT round-trip on a per-position-conflicted lexeme returns canonical xsd:integer (NOT either source subtype)', async () => {
+    const store = new OxigraphStore();
+    await store.insert([
+      { subject, predicate, object: `"7"^^<${intType}>`, graph },
+    ]);
+    await store.insert([
+      { subject, predicate, object: `"7"^^<${positiveIntegerType}>`, graph },
+    ]);
+
+    const c = await store.query(
+      `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${graph}> { ?s ?p ?o } }`,
+    );
+    expect(c.type).toBe('quads');
+    if (c.type !== 'quads') return;
+    expect(c.quads).toHaveLength(1);
+    expect(c.quads[0].object).toBe(`"7"^^<${integerType}>`);
+    await store.close();
+  });
+
+  it('two writes at the same position with the SAME declared subtype do NOT mark a conflict (idempotent inserts stay restorable)', async () => {
+    const store = new OxigraphStore();
+    // Same key, same dtype — must NOT trip the conflict detector.
+    await store.insert([
+      { subject, predicate, object: `"42"^^<${longType}>`, graph },
+    ]);
+    await store.insert([
+      { subject, predicate, object: `"42"^^<${longType}>`, graph },
+    ]);
+
+    const r = await store.query(
+      `SELECT ?o WHERE { GRAPH <${graph}> { <${subject}> <${predicate}> ?o } }`,
+    );
+    expect(r.type).toBe('bindings');
+    if (r.type !== 'bindings') return;
+    expect(r.bindings).toHaveLength(1);
+    // Idempotent insert preserves the original declared subtype.
+    expect(r.bindings[0]['o']).toBe(`"42"^^<${longType}>`);
+    await store.close();
+  });
+
+  it('a SELECT binding whose lexeme matches a per-position-conflicted lexeme refuses lexical-only restore (no sibling-dtype leak)', async () => {
+    const store = new OxigraphStore();
+    // Position A in graph A: conflicting xsd:int + xsd:positiveInteger.
+    await store.insert([
+      { subject: 'urn:dkg:r31-8:a', predicate, object: `"5"^^<${intType}>`, graph },
+    ]);
+    await store.insert([
+      { subject: 'urn:dkg:r31-8:a', predicate, object: `"5"^^<${positiveIntegerType}>`, graph },
+    ]);
+    // Position B in a DIFFERENT graph but same lexeme `5` with a
+    // single declared subtype. The lexical fallback would otherwise
+    // pick xsd:long — but because the lexeme appears in
+    // `conflictedNumericDatatypeLexemes`, even non-conflicted SELECT
+    // rows with this lexeme must refuse to restore.
+    await store.insert([
+      { subject: 'urn:dkg:r31-8:b', predicate, object: `"5"^^<${longType}>`, graph: 'urn:dkg:r31-8:other-graph' },
+    ]);
+
+    // Run a SELECT across BOTH graphs that strips position
+    // information (no GRAPH binding in projection) — the binding row
+    // for the conflicted position would otherwise inherit b's xsd:long
+    // through the lexical-only fallback.
+    const r = await store.query(
+      `SELECT ?s ?o WHERE { GRAPH ?g { ?s <${predicate}> ?o } }`,
+    );
+    expect(r.type).toBe('bindings');
+    if (r.type !== 'bindings') return;
+    // Find the row for subject :a (the conflicted lexeme position).
+    const aRow = r.bindings.find((b) => b['s'] === 'urn:dkg:r31-8:a');
+    expect(aRow).toBeDefined();
+    if (!aRow) return;
+    // r31-8 contract: lexeme-level conflict refusal scopes to ANY
+    // SELECT row carrying the conflicted lexeme, so we must NOT
+    // restore it as xsd:long here.
+    expect(aRow['o']).toBe(`"5"^^<${integerType}>`);
+    expect(aRow['o']).not.toBe(`"5"^^<${longType}>`);
+    await store.close();
+  });
+});

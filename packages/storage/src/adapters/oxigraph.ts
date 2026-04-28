@@ -36,8 +36,47 @@ export class OxigraphStore implements TripleStore {
    * graph) so each typed-literal position owns its own declared type.
    * Collisions only happen when the same position is written twice
    * with different declared types, which is a genuine overwrite.
+   *
+   * PR #229 bot review r31-8 (oxigraph.ts:48): even with the
+   * per-position key, two quads at the same `(s, p, value, g)` with
+   * DIFFERENT declared subtypes (e.g. `"1"^^xsd:int` and
+   * `"1"^^xsd:positiveInteger`) collapse to the SAME single
+   * canonicalised literal in Oxigraph. Silently letting the second
+   * insert overwrite the first meant the readback returned the
+   * latest-written subtype for both — a fail-OPEN data-integrity bug.
+   * The fix below tracks per-position conflicts in
+   * {@link conflictedNumericDatatypeKeys} and per-lexeme conflicts in
+   * {@link conflictedNumericDatatypeLexemes}: once a key (or its
+   * lexeme) conflicts, the side-table refuses to restore the subtype
+   * for that key (and for unkeyed SELECT bindings of the same
+   * lexeme). Callers fall through to Oxigraph's canonical form
+   * (`xsd:integer`) — fail-CLOSED.
    */
   private originalNumericDatatype = new Map<string, string>();
+
+  /**
+   * Set of side-table keys whose per-position write history saw two
+   * different declared subtypes. Once a key is in this set we refuse
+   * to restore its subtype (and remove any prior entry from
+   * {@link originalNumericDatatype} so we don't leak the
+   * latest-write-wins value through `restoreOriginalDatatype`).
+   * Persisted alongside the dump so the conflict survives restarts;
+   * bot review r31-8 (oxigraph.ts:48).
+   */
+  private conflictedNumericDatatypeKeys = new Set<string>();
+
+  /**
+   * Set of lexemes (raw value strings) for which any per-position key
+   * conflict has been observed. SELECT bindings strip the position
+   * (we only see the lexeme value), so the lexical-only fallback in
+   * {@link restoreOriginalDatatypeForSelectBinding} consults this set
+   * and refuses to restore — even when the surviving non-conflicting
+   * entries for the same lexeme would otherwise resolve to a single
+   * subtype. Without this guard, a SELECT row hit by the conflicted
+   * position would silently inherit a sibling position's dtype.
+   * Persisted alongside the dump; bot review r31-8 (oxigraph.ts:48).
+   */
+  private conflictedNumericDatatypeLexemes = new Set<string>();
 
   private static numericDatatypeKey(
     subject: string,
@@ -79,6 +118,24 @@ export class OxigraphStore implements TripleStore {
     const dtype = m[2];
     if (!isNumericSubtype(dtype)) return;
     const key = OxigraphStore.numericDatatypeKey(q.subject, q.predicate, value, q.graph);
+    // PR #229 bot review r31-8 (oxigraph.ts:48). Per-position conflict
+    // detection: if this key is already known-conflicted, no further
+    // writes can disambiguate it. If the key already has a different
+    // declared subtype recorded, mark it (and the lexeme) as conflicted
+    // and remove the now-ambiguous entry so `restoreOriginalDatatype`
+    // can no longer return either side as authoritative — the only
+    // safe answer is Oxigraph's canonicalised form.
+    if (this.conflictedNumericDatatypeKeys.has(key)) {
+      this.conflictedNumericDatatypeLexemes.add(value);
+      return;
+    }
+    const existing = this.originalNumericDatatype.get(key);
+    if (existing !== undefined && existing !== dtype) {
+      this.originalNumericDatatype.delete(key);
+      this.conflictedNumericDatatypeKeys.add(key);
+      this.conflictedNumericDatatypeLexemes.add(value);
+      return;
+    }
     this.originalNumericDatatype.set(key, dtype);
   }
 
@@ -101,6 +158,15 @@ export class OxigraphStore implements TripleStore {
     if (!isNumericSubtype(dtype)) return;
     const key = OxigraphStore.numericDatatypeKey(q.subject, q.predicate, value, q.graph);
     this.originalNumericDatatype.delete(key);
+    // PR #229 bot review r31-8 (oxigraph.ts:48). When the conflicting
+    // canonical literal at this position is deleted, the conflict
+    // marker becomes meaningless — Oxigraph collapsed both writes
+    // into the single canonical literal that the caller is now
+    // removing, so there is nothing left to restore-or-refuse for
+    // this key. Drop the key marker. The lexeme marker is kept
+    // pessimistically because OTHER positions for the same lexeme
+    // may still be ambiguous in SELECT projections.
+    this.conflictedNumericDatatypeKeys.delete(key);
   }
 
   /**
@@ -119,6 +185,17 @@ export class OxigraphStore implements TripleStore {
       if (!k.endsWith(suffix)) continue;
       if (subjectPrefix && !k.startsWith(subjectPrefix)) continue;
       this.originalNumericDatatype.delete(k);
+    }
+    // PR #229 bot review r31-8 (oxigraph.ts:48). The conflict-key
+    // markers (kept on a parallel Set keyed by the same `s\0p\0v\0g`
+    // shape) must be evicted in lockstep; otherwise dropping the
+    // graph would leave dangling conflict markers that block
+    // unrelated future writes from the same key shape (e.g. a fresh
+    // graph re-using a UAL pattern).
+    for (const k of this.conflictedNumericDatatypeKeys) {
+      if (!k.endsWith(suffix)) continue;
+      if (subjectPrefix && !k.startsWith(subjectPrefix)) continue;
+      this.conflictedNumericDatatypeKeys.delete(k);
     }
   }
 
@@ -177,7 +254,18 @@ export class OxigraphStore implements TripleStore {
       if (!existsSync(sidecarPath)) return;
       const raw = readFileSync(sidecarPath, 'utf-8');
       if (!raw.trim()) return;
-      const parsed = JSON.parse(raw) as { entries?: Array<[string, string]> };
+      const parsed = JSON.parse(raw) as {
+        entries?: Array<[string, string]>;
+        // PR #229 bot review r31-8 (oxigraph.ts:48). Persist the
+        // per-position and per-lexeme conflict sets alongside the
+        // entry map so a restart re-establishes "this position /
+        // lexeme is ambiguous, never restore" instead of silently
+        // forgetting the conflict (which would re-open the
+        // fail-OPEN data-integrity bug the conflict tracking was
+        // added to close).
+        conflictedKeys?: string[];
+        conflictedLexemes?: string[];
+      };
       const entries = parsed && Array.isArray(parsed.entries) ? parsed.entries : [];
       for (const entry of entries) {
         if (
@@ -188,6 +276,16 @@ export class OxigraphStore implements TripleStore {
         ) {
           this.originalNumericDatatype.set(entry[0], entry[1]);
         }
+      }
+      const conflictedKeys = parsed && Array.isArray(parsed.conflictedKeys)
+        ? parsed.conflictedKeys : [];
+      for (const k of conflictedKeys) {
+        if (typeof k === 'string') this.conflictedNumericDatatypeKeys.add(k);
+      }
+      const conflictedLexemes = parsed && Array.isArray(parsed.conflictedLexemes)
+        ? parsed.conflictedLexemes : [];
+      for (const l of conflictedLexemes) {
+        if (typeof l === 'string') this.conflictedNumericDatatypeLexemes.add(l);
       }
     } catch {
       // Sidecar missing or corrupt — fall back to lexical-only restore.
@@ -219,8 +317,16 @@ export class OxigraphStore implements TripleStore {
       // Oxigraph has already collapsed the subtype by the time it dumps.
       const sidecarPath = OxigraphStore.numericDatatypeSidecarPath(this.persistPath);
       const sidecar = JSON.stringify({
-        version: 1,
+        // PR #229 bot review r31-8 (oxigraph.ts:48). Bumped to v2
+        // because the schema now includes `conflictedKeys` /
+        // `conflictedLexemes` arrays so a restart re-establishes
+        // per-position / per-lexeme conflict markers. v1 sidecars
+        // load fine (the new arrays default to empty); the version
+        // tag is informational for ops grepping the file.
+        version: 2,
         entries: Array.from(this.originalNumericDatatype.entries()),
+        conflictedKeys: Array.from(this.conflictedNumericDatatypeKeys),
+        conflictedLexemes: Array.from(this.conflictedNumericDatatypeLexemes),
       });
       await writeFile(sidecarPath, sidecar, 'utf-8');
     } catch {
@@ -329,6 +435,17 @@ export class OxigraphStore implements TripleStore {
     // is the unambiguous path when one position declared a specific
     // subtype).
     const key = OxigraphStore.numericDatatypeKey(q.subject, q.predicate, value, q.graph);
+    // PR #229 bot review r31-8 (oxigraph.ts:48). Per-position conflict
+    // short-circuit: if two writes at this exact `(s, p, value, g)`
+    // declared different subtypes, the side-table cannot recover
+    // either source's intent (Oxigraph collapsed both into one
+    // canonical literal). Fall straight through to the canonical
+    // form — do NOT delegate to the lexical-only fallback because
+    // a sibling position with the same lexeme but a single declared
+    // subtype would otherwise silently win.
+    if (this.conflictedNumericDatatypeKeys.has(key)) {
+      return serialized;
+    }
     const original = this.originalNumericDatatype.get(key);
     if (original && original !== dtype) {
       return `"${value}"^^<${original}>`;
@@ -358,6 +475,14 @@ export class OxigraphStore implements TripleStore {
     const value = m[1];
     const dtype = m[2];
     if (!isNumericSubtype(dtype)) return serialized;
+    // PR #229 bot review r31-8 (oxigraph.ts:48). If ANY per-position
+    // write of this lexeme observed a per-position subtype conflict,
+    // the lexical-only path cannot tell whether THIS binding row came
+    // from the conflicted position or a clean sibling — refuse to
+    // restore so we can't silently inherit a sibling's dtype.
+    if (this.conflictedNumericDatatypeLexemes.has(value)) {
+      return serialized;
+    }
     let only: string | undefined;
     // Keys are `s\0p\0value\0g` — scan for entries matching this value.
     const needle = `\u0000${value}\u0000`;

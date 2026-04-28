@@ -264,7 +264,25 @@ async function resolveEndorsementFacts(
   // Verifiers that need the full proof tuple can fetch the remaining
   // three predicates off `?endorsement` — they are no longer spread
   // across the agent subject and are no longer ambiguous.
-  const query = `
+  //
+  // PR #229 bot review r31-8 (ccl-fact-resolution.ts:270): the
+  // r19-3 query above ONLY matches the new endorsement-resource
+  // shape. Every endorsement that was published BEFORE r19-3 lives
+  // as the legacy direct shape `<agent> dkg:endorses <ual>` (no
+  // intermediate endorsement subject, no separate `dkg:endorsedBy`
+  // predicate — the endorser IS the subject). Without back-compat
+  // those historical endorsements vanish on deploy until storage is
+  // migrated, which silently flips CCL `endorsement_count` facts to
+  // 0 for every UAL whose endorsements predate r19-3 and would
+  // cause owner_assertion / context_corroboration policies to deny
+  // access to genuinely-endorsed content.
+  //
+  // Fix: union both shapes here and de-duplicate (endorser, ual)
+  // pairs in JS so a UAL endorsed by the same agent under both
+  // shapes only counts once. The `r19-3` shape stays preferred
+  // because `?endorsement` carries the full proof tuple — the
+  // legacy shape only contributes to recall.
+  const newShapeQuery = `
     SELECT ?endorser ?ual WHERE {
       GRAPH <${graph}> {
         ?endorsement <${DKG_ENDORSES}>   ?ual .
@@ -274,19 +292,55 @@ async function resolveEndorsementFacts(
       }
     }
   `;
-  const result = await store.query(query);
-  if (result.type !== 'bindings') return [];
+  const legacyShapeQuery = `
+    SELECT ?endorser ?ual WHERE {
+      GRAPH <${graph}> {
+        ?endorser <${DKG_ENDORSES}> ?ual .
+        # Exclude rows that ALSO match the new shape so we don't
+        # double-count a [?endorsement dkg:endorses ?ual] quad whose
+        # subject happens to be an agent IRI. This is cheap because
+        # the new shape requires the matching dkg:endorsedBy join
+        # which the legacy shape never carries.
+        FILTER NOT EXISTS { ?endorser <${DKG_ENDORSED_BY}> ?_ }
+        ${snapshotJoin}
+        ${filters.join('\n        ')}
+      }
+    }
+  `;
+  const [newResult, legacyResult] = await Promise.all([
+    store.query(newShapeQuery),
+    store.query(legacyShapeQuery),
+  ]);
 
   const facts: CclFactTuple[] = [];
   const counts = new Map<string, number>();
+  const seenPairs = new Set<string>();
 
-  for (const row of result.bindings as Record<string, string>[]) {
-    const endorser = row['endorser'] ?? '';
-    const ual = row['ual'] ?? '';
-    if (!endorser || !ual) continue;
+  const ingest = (rows: Record<string, string>[]): void => {
+    for (const row of rows) {
+      const endorser = row['endorser'] ?? '';
+      const ual = row['ual'] ?? '';
+      if (!endorser || !ual) continue;
+      // Per (endorser, ual) dedupe: BUGS_FOUND.md#CCL-2 — a single
+      // agent's two endorsements of the same UAL count as one
+      // endorsement for `endorsement_count` purposes (the policy
+      // semantics are "how many distinct endorsers", not "how many
+      // endorsement events"). Mirror that here so the legacy/new
+      // union doesn't inflate the count when the same agent issued
+      // both shapes.
+      const pairKey = `${endorser}\u0001${ual}`;
+      if (seenPairs.has(pairKey)) continue;
+      seenPairs.add(pairKey);
+      facts.push(['endorsement', endorser, ual]);
+      counts.set(ual, (counts.get(ual) ?? 0) + 1);
+    }
+  };
 
-    facts.push(['endorsement', endorser, ual]);
-    counts.set(ual, (counts.get(ual) ?? 0) + 1);
+  if (newResult.type === 'bindings') {
+    ingest(newResult.bindings as Record<string, string>[]);
+  }
+  if (legacyResult.type === 'bindings') {
+    ingest(legacyResult.bindings as Record<string, string>[]);
   }
 
   for (const [ual, count] of counts) {
