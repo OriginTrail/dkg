@@ -1,27 +1,29 @@
-import { HermesAdapterPlugin } from './dist/index.js';
+async function importSetup() {
+  return import('./dist/setup.js');
+}
 
-export {
-  disconnect,
-  disconnectHermesProfile,
-  doctor,
-  planHermesSetup,
-  reconnect,
-  resolveHermesProfile,
-  runDisconnect,
-  runDoctor,
-  runReconnect,
-  runSetup,
-  runStatus,
-  runUninstall,
-  runVerify,
-  setup,
-  setupHermesProfile,
-  status,
-  uninstall,
-  uninstallHermesProfile,
-  verify,
-  verifyHermesProfile,
-} from './dist/setup.js';
+const lazySetupExport = (name) => async (...args) => (await importSetup())[name](...args);
+
+export const disconnect = lazySetupExport('disconnect');
+export const disconnectHermesProfile = lazySetupExport('disconnectHermesProfile');
+export const doctor = lazySetupExport('doctor');
+export const planHermesSetup = lazySetupExport('planHermesSetup');
+export const reconnect = lazySetupExport('reconnect');
+export const resolveHermesProfile = lazySetupExport('resolveHermesProfile');
+export const runDisconnect = lazySetupExport('runDisconnect');
+export const runDoctor = lazySetupExport('runDoctor');
+export const runReconnect = lazySetupExport('runReconnect');
+export const runSetup = lazySetupExport('runSetup');
+export const runStatus = lazySetupExport('runStatus');
+export const runUninstall = lazySetupExport('runUninstall');
+export const runVerify = lazySetupExport('runVerify');
+export const setup = lazySetupExport('setup');
+export const setupHermesProfile = lazySetupExport('setupHermesProfile');
+export const status = lazySetupExport('status');
+export const uninstall = lazySetupExport('uninstall');
+export const uninstallHermesProfile = lazySetupExport('uninstallHermesProfile');
+export const verify = lazySetupExport('verify');
+export const verifyHermesProfile = lazySetupExport('verifyHermesProfile');
 
 export default function setupEntry(api = {}) {
   const mode = api.registrationMode ?? 'full';
@@ -36,6 +38,14 @@ export default function setupEntry(api = {}) {
     return;
   }
 
-  const plugin = new HermesAdapterPlugin(api.config?.hermes);
-  return plugin.register(api);
+  const importRuntime = api._importRuntime ?? (() => import('./dist/index.js'));
+  return importRuntime().then((runtime) => {
+    const Plugin = runtime.HermesAdapterPlugin;
+    if (typeof Plugin !== 'function') {
+      log.warn?.('[dkg-hermes-setup-entry] HermesAdapterPlugin export unavailable; skipping runtime registration');
+      return;
+    }
+    const plugin = new Plugin(api.config?.hermes);
+    return plugin.register(api);
+  });
 }

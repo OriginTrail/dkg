@@ -92,6 +92,53 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+describe('setup-entry.mjs', () => {
+  it('skips runtime imports in setup-safe modes', async () => {
+    const entry = await import('../setup-entry.mjs');
+    const importRuntime = vi.fn(async () => {
+      throw new Error('runtime import should be skipped');
+    });
+
+    for (const registrationMode of ['setup-only', 'cli-metadata'] as const) {
+      const result = entry.default({
+        registrationMode,
+        _importRuntime: importRuntime,
+        logger: { info: vi.fn() },
+      });
+
+      expect(result).toBeUndefined();
+    }
+    expect(importRuntime).not.toHaveBeenCalled();
+  });
+
+  it('lazy-loads the runtime plugin for daemon registration', async () => {
+    const entry = await import('../setup-entry.mjs');
+    const register = vi.fn(() => 'registered');
+    let observedConfig: unknown;
+    class FakePlugin {
+      constructor(config: unknown) {
+        observedConfig = config;
+      }
+
+      register = register;
+    }
+    const importRuntime = vi.fn(async () => ({ HermesAdapterPlugin: FakePlugin }));
+
+    const result = await entry.default({
+      _importRuntime: importRuntime,
+      registerHttpRoute: vi.fn(),
+      registerHook: vi.fn(),
+      config: { hermes: { profileName: 'dev' } },
+      logger: { info: vi.fn(), warn: vi.fn() },
+    });
+
+    expect(result).toBe('registered');
+    expect(importRuntime).toHaveBeenCalledTimes(1);
+    expect(observedConfig).toEqual({ profileName: 'dev' });
+    expect(register).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('HermesAdapterPlugin', () => {
   it('registers HTTP routes on first call', () => {
     const plugin = new HermesAdapterPlugin();
@@ -414,6 +461,27 @@ describe('Hermes profile setup helpers', () => {
     expect(config.allow_direct_publish).toBe(true);
     expect(config.require_explicit_approval).toBe(false);
     expect(config.require_wallet_check).toBe(false);
+  });
+
+  it('rejects non-loopback bridge URLs during setup', () => {
+    const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-'));
+
+    expect(() => setupHermesProfile({
+      hermesHome,
+      bridgeUrl: 'https://hermes.example.com:9202',
+    })).toThrow('--gateway-url');
+    expect(existsSync(join(hermesHome, '.dkg-adapter-hermes', 'setup-state.json'))).toBe(false);
+  });
+
+  it('accepts loopback bridge URLs during setup', () => {
+    const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-'));
+
+    const plan = setupHermesProfile({
+      hermesHome,
+      bridgeUrl: 'http://127.0.0.1:9202/',
+    });
+
+    expect(plan.state.bridge).toEqual({ url: 'http://127.0.0.1:9202' });
   });
 
   it('detects provider conflicts and preserves user config on disconnect/uninstall', async () => {

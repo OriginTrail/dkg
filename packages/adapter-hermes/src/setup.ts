@@ -3,6 +3,7 @@ import { dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { isIP } from 'node:net';
 import {
   type HermesMemoryMode,
   type HermesProfileMetadata,
@@ -504,11 +505,27 @@ function normalizeBridgeConfig(
   const gatewayUrl = stripTrailingSlashes(trimmed(options.gatewayUrl) ?? '');
   const healthUrl = stripTrailingSlashes(trimmed(options.bridgeHealthUrl) ?? '');
   if (!url && !gatewayUrl && !healthUrl) return undefined;
+  if (url && !isLoopbackUrl(url)) {
+    throw new Error('Hermes bridge URL must be a loopback URL; use --gateway-url for WSL2 or remote Hermes gateways.');
+  }
   return {
     ...(url ? { url } : {}),
     ...(gatewayUrl ? { gatewayUrl } : {}),
     ...(healthUrl ? { healthUrl } : {}),
   };
+}
+
+function isLoopbackUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    const host = parsed.hostname.toLowerCase();
+    return host === 'localhost'
+      || host === '::1'
+      || host === '[::1]'
+      || (isIP(host) === 4 && host.startsWith('127.'));
+  } catch {
+    return false;
+  }
 }
 
 function loadDkgAuthToken(): string | undefined {
