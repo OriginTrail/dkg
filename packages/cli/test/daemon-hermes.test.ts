@@ -4,7 +4,9 @@ import type { DkgConfig } from '../src/config.js';
 import {
   buildHermesChannelHeaders,
   buildStableHermesTurnId,
+  ensureHermesBridgeAvailable,
   getHermesChannelTargets,
+  normalizeHermesChatPayload,
   normalizeHermesPersistTurnPayload,
   probeHermesChannelHealth,
 } from '../src/daemon/hermes.js';
@@ -193,12 +195,47 @@ describe('Hermes channel helpers', () => {
     )).toEqual({ 'Content-Type': 'application/json' });
   });
 
-  it('normalizes persist-turn payloads and builds stable generated turn ids', () => {
+  it('normalizes profileName aliases for send and persist payloads', () => {
+    const send = normalizeHermesChatPayload({
+      text: 'hello',
+      correlationId: 'corr-1',
+      profileName: ' default ',
+    });
+    const persist = normalizeHermesPersistTurnPayload({
+      sessionId: 'hermes:default',
+      userMessage: 'hello',
+      assistantReply: 'hi',
+      profileName: ' default ',
+      idempotencyKey: 'idem-1',
+    });
+
+    expect('error' in send).toBe(false);
+    expect('error' in persist).toBe(false);
+    if ('error' in send || 'error' in persist) throw new Error('unexpected normalization error');
+    expect(send.profile).toBe('default');
+    expect(persist.profile).toBe('default');
+  });
+
+  it('prefers profile over profileName when both aliases are present', () => {
+    const send = normalizeHermesChatPayload({
+      text: 'hello',
+      correlationId: 'corr-1',
+      profile: ' explicit ',
+      profileName: 'alias',
+    });
+
+    expect('error' in send).toBe(false);
+    if ('error' in send) throw new Error('unexpected normalization error');
+    expect(send.profile).toBe('explicit');
+  });
+
+  it('normalizes persist-turn payloads with idempotency-key turn ids', () => {
     const payload = {
       sessionId: ' hermes:default ',
       userMessage: 'hello',
       assistantReply: 'hi',
       profile: 'default',
+      idempotencyKey: ' idem-1 ',
     };
     const first = normalizeHermesPersistTurnPayload(payload);
     const second = normalizeHermesPersistTurnPayload(payload);
@@ -208,10 +245,26 @@ describe('Hermes channel helpers', () => {
     expect(first.turnId).toBe(second.turnId);
     expect(first.turnId).toBe(buildStableHermesTurnId({
       sessionId: 'hermes:default',
+      idempotencyKey: 'idem-1',
+      profile: 'default',
+    }));
+  });
+
+  it('does not collapse identical persist-turn payloads without an idempotency key', () => {
+    const payload = {
+      sessionId: 'hermes:default',
       userMessage: 'hello',
       assistantReply: 'hi',
       profile: 'default',
-    }));
+    };
+    const first = normalizeHermesPersistTurnPayload(payload);
+    const second = normalizeHermesPersistTurnPayload(payload);
+    expect('error' in first).toBe(false);
+    expect('error' in second).toBe(false);
+    if ('error' in first || 'error' in second) throw new Error('unexpected normalization error');
+    expect(first.turnId).toMatch(/^hermes-/);
+    expect(second.turnId).toMatch(/^hermes-/);
+    expect(first.turnId).not.toBe(second.turnId);
   });
 });
 
@@ -270,10 +323,33 @@ describe('Hermes local-agent registry lifecycle', () => {
     expect(integration.transport.bridgeUrl).toBe('http://127.0.0.1:9444');
   });
 
+  it('refresh keeps Hermes degraded when health returns ok false with HTTP 200', async () => {
+    const config = makeConfig({
+      localAgentIntegrations: {
+        hermes: {
+          enabled: true,
+          transport: { kind: 'hermes-channel', bridgeUrl: 'http://127.0.0.1:9444' },
+          runtime: { status: 'ready', ready: true },
+        },
+      },
+    });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      ok: false,
+      error: 'warming up',
+    }), { status: 200 })));
+
+    const integration = await refreshLocalAgentIntegrationFromUi(config, 'hermes', 'bridge-token');
+
+    expect(integration.runtime.status).toBe('degraded');
+    expect(integration.runtime.ready).toBe(false);
+    expect(integration.runtime.lastError).toBe('warming up');
+  });
+
   it('Hermes definition includes manifest, transport, and local chat capabilities', () => {
     const integration = getLocalAgentIntegration(makeConfig(), 'hermes');
     expect(integration?.transport.kind).toBe('hermes-channel');
     expect(integration?.manifest?.packageName).toBe('@origintrail-official/dkg-adapter-hermes');
+    expect(integration?.manifest?.setupEntry).toBe('./setup-entry.mjs');
     expect(integration?.capabilities.localChat).toBe(true);
     expect(integration?.capabilities.chatAttachments).toBe(true);
   });
@@ -322,7 +398,7 @@ describe('Hermes daemon routes', () => {
     expect(storeChatExchange).toHaveBeenCalled();
   });
 
-  it('persists a Hermes turn through ChatMemoryManager with a normalized stable turn id', async () => {
+  it('persists a Hermes turn through ChatMemoryManager with a normalized generated turn id', async () => {
     const storeChatExchange = vi.fn(async () => {});
     const memoryManager = {
       hasChatTurn: vi.fn(async () => false),
@@ -408,5 +484,37 @@ describe('Hermes daemon routes', () => {
       'http://127.0.0.1:9202/health',
       expect.objectContaining({ headers: expect.objectContaining({ 'x-dkg-bridge-token': 'bridge-token' }) }),
     );
+  });
+
+  it('does not mark Hermes ready when health JSON reports ok false', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      ok: false,
+      error: 'warming up',
+    }), { status: 200 })));
+
+    const report = await probeHermesChannelHealth(makeConfig(), 'bridge-token');
+
+    expect(report.ok).toBe(false);
+    expect(report.bridge?.ok).toBe(false);
+    expect(report.error).toBe('warming up');
+  });
+
+  it('treats a bridge health ok:false body as unavailable before send', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      ok: false,
+      error: 'profile conflict',
+    }), { status: 200 })));
+
+    const availability = await ensureHermesBridgeAvailable({
+      name: 'bridge',
+      inboundUrl: 'http://127.0.0.1:9202/send',
+      healthUrl: 'http://127.0.0.1:9202/health',
+    }, 'bridge-token');
+
+    expect(availability).toMatchObject({
+      ok: false,
+      details: 'profile conflict',
+      offline: true,
+    });
   });
 });

@@ -175,7 +175,9 @@ export function verifyHermesProfile(options: HermesSetupOptions = {}): HermesVer
   const state = readSetupState(profile);
   const effectiveMemoryMode = options.memoryMode ?? state?.profile.memoryMode ?? profile.memoryMode;
   const effectiveProfile = { ...profile, memoryMode: effectiveMemoryMode };
-  const warnings = detectProviderConflict(effectiveProfile, effectiveMemoryMode);
+  const warnings: string[] = [];
+  const providerConflicts = detectProviderConflict(effectiveProfile, effectiveMemoryMode);
+  errors.push(...providerConflicts);
 
   if (!existsSync(profile.hermesHome)) {
     errors.push(`Hermes profile directory does not exist: ${profile.hermesHome}`);

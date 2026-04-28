@@ -33,6 +33,7 @@ describe('hermesSetupAction', () => {
 
     expect(runSetup).toHaveBeenCalledWith({
       profile: 'default',
+      profileName: undefined,
       hermesBin: 'C:/Tools/hermes.exe',
       daemonUrl: 'http://127.0.0.1:9200',
       port: 9300,
@@ -47,6 +48,7 @@ describe('hermesSetupAction', () => {
   it('defaults verify/start to true and dryRun to false', () => {
     expect(normalizeHermesSetupOptions({})).toEqual({
       profile: undefined,
+      profileName: undefined,
       hermesBin: undefined,
       daemonUrl: undefined,
       port: undefined,
@@ -55,6 +57,22 @@ describe('hermesSetupAction', () => {
       verify: true,
       start: true,
       dryRun: false,
+    });
+  });
+
+  it('accepts profileName as a programmatic alias while preferring profile', () => {
+    expect(normalizeHermesSetupOptions({
+      profileName: ' alias ',
+    })).toMatchObject({
+      profile: 'alias',
+      profileName: 'alias',
+    });
+    expect(normalizeHermesSetupOptions({
+      profile: ' cli ',
+      profileName: ' alias ',
+    })).toMatchObject({
+      profile: 'cli',
+      profileName: 'alias',
     });
   });
 

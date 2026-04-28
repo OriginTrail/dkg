@@ -50,7 +50,7 @@ export class HermesDkgClient {
       },
       manifest: {
         packageName: '@origintrail-official/dkg-adapter-hermes',
-        setupEntry: './setup.js',
+        setupEntry: './setup-entry.mjs',
         ...payload.manifest,
       },
       metadata: payload.metadata,

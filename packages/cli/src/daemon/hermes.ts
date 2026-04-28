@@ -65,6 +65,8 @@ export interface HermesPersistTurnPayload {
   userMessage: string;
   assistantReply: string;
   turnId: string;
+  correlationId?: string;
+  idempotencyKey?: string;
   toolCalls?: Array<{ name: string; args: Record<string, unknown>; result: unknown }>;
   attachmentRefs?: OpenClawAttachmentRef[];
   persistenceState: 'stored' | 'failed' | 'pending';
@@ -80,6 +82,10 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 
 function optionalTrimmedString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function optionalHermesProfileName(raw: Record<string, unknown>): string | undefined {
+  return optionalTrimmedString(raw.profile) ?? optionalTrimmedString(raw.profileName);
 }
 
 function buildHermesGatewayBase(value: string): string {
@@ -236,12 +242,14 @@ export async function probeHermesChannelHealth(
       const result: HermesHealthState = { ok: healthRes.ok, ...parsed };
       if (target.name === 'bridge') bridge = result;
       else gateway = result;
-      if (healthRes.ok) {
+      if (healthRes.ok && result.ok === true) {
         return { ok: true, target: target.name, bridge, gateway };
       }
       lastError = typeof result.error === 'string'
         ? result.error
-        : `Health endpoint responded ${healthRes.status}`;
+        : healthRes.ok
+          ? 'Health endpoint reported not ready'
+          : `Health endpoint responded ${healthRes.status}`;
     } catch (err: any) {
       const result = { ok: false, error: err.message };
       if (target.name === 'bridge') bridge = result;
@@ -272,12 +280,30 @@ export async function ensureHermesBridgeAvailable(
       headers: buildHermesChannelHeaders(target, bridgeAuthToken, { Accept: 'application/json' }),
       signal: AbortSignal.timeout(3_000),
     });
+    const body = await healthRes.text().catch(() => '');
+    let parsed: Record<string, unknown> = {};
+    if (body) {
+      try {
+        parsed = JSON.parse(body) as Record<string, unknown>;
+      } catch {
+        parsed = { body };
+      }
+    }
     if (!healthRes.ok) {
-      const details = await healthRes.text().catch(() => '');
       return {
         ok: false,
         status: healthRes.status,
-        details: details || `Bridge health responded ${healthRes.status}`,
+        details: body || `Bridge health responded ${healthRes.status}`,
+        offline: true,
+      };
+    }
+    if (parsed.ok !== true) {
+      return {
+        ok: false,
+        status: healthRes.status,
+        details: typeof parsed.error === 'string'
+          ? parsed.error
+          : 'Bridge health reported not ready',
         offline: true,
       };
     }
@@ -313,7 +339,7 @@ export function normalizeHermesChatPayload(raw: unknown): HermesChatPayload | { 
     correlationId: optionalTrimmedString(raw.correlationId) ?? randomUUID(),
     identity: optionalTrimmedString(raw.identity),
     sessionId: optionalTrimmedString(raw.sessionId),
-    profile: optionalTrimmedString(raw.profile),
+    profile: optionalHermesProfileName(raw),
     attachmentRefs: normalizedAttachmentRefs,
     contextEntries: normalizedContextEntries,
     uiContextGraphId: optionalTrimmedString(raw.contextGraphId),
@@ -323,20 +349,21 @@ export function normalizeHermesChatPayload(raw: unknown): HermesChatPayload | { 
 
 export function buildStableHermesTurnId(args: {
   sessionId: string;
-  userMessage: string;
-  assistantReply: string;
+  idempotencyKey?: string;
+  correlationId?: string;
   profile?: string;
   contextGraphId?: string;
-  metadata?: unknown;
+  nonce?: string;
 }): string {
+  const discriminator = args.idempotencyKey ?? args.correlationId ?? args.nonce;
+  if (!discriminator) return `hermes-${randomUUID()}`;
+
   const hash = createHash('sha256')
     .update(JSON.stringify({
       sessionId: args.sessionId,
-      userMessage: args.userMessage,
-      assistantReply: args.assistantReply,
+      discriminator,
       profile: args.profile ?? '',
       contextGraphId: args.contextGraphId ?? '',
-      metadata: args.metadata ?? null,
     }))
     .digest('hex')
     .slice(0, 32);
@@ -384,15 +411,16 @@ export function normalizeHermesPersistTurnPayload(raw: unknown): HermesPersistTu
       }))
     : undefined;
   const contextGraphId = optionalTrimmedString(raw.contextGraphId);
-  const profile = optionalTrimmedString(raw.profile);
+  const profile = optionalHermesProfileName(raw);
+  const correlationId = optionalTrimmedString(raw.correlationId);
+  const idempotencyKey = optionalTrimmedString(raw.idempotencyKey);
   const metadata = isPlainRecord(raw.metadata) ? raw.metadata : undefined;
   const turnId = optionalTrimmedString(raw.turnId) ?? buildStableHermesTurnId({
     sessionId,
-    userMessage,
-    assistantReply,
+    idempotencyKey,
+    correlationId,
     profile,
     contextGraphId,
-    metadata,
   });
 
   return {
@@ -400,6 +428,8 @@ export function normalizeHermesPersistTurnPayload(raw: unknown): HermesPersistTu
     userMessage,
     assistantReply,
     turnId,
+    correlationId,
+    idempotencyKey,
     toolCalls,
     attachmentRefs: normalizedAttachmentRefs,
     persistenceState,

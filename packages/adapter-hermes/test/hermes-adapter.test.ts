@@ -9,6 +9,7 @@ import { HermesDkgClient, redact } from '../src/dkg-client.js';
 import {
   disconnectHermesProfile,
   planHermesSetup,
+  runDoctor,
   resolveHermesProfile,
   runSetup,
   runVerify,
@@ -268,6 +269,41 @@ describe('POST /api/hermes/session-end', () => {
   });
 });
 
+describe('GET /api/hermes-channel/health', () => {
+  it('reports degraded until a bridge dispatcher is registered', async () => {
+    const api = createTrackingApi();
+    registerHermesRoutes(api);
+    const handler = api.routes.get('GET /api/hermes-channel/health')!;
+    const { res, calls } = trackingRes();
+
+    await handler({}, res);
+
+    expect(calls.some(c => c.status === 503)).toBe(true);
+    expect(calls.some(c =>
+      c.json?.ok === false &&
+      c.json?.status === 'degraded' &&
+      c.json?.bridge?.ready === false,
+    )).toBe(true);
+  });
+});
+
+describe('POST /api/hermes-channel/send and stream', () => {
+  it('fail closed until a bridge dispatcher is registered', async () => {
+    const api = createTrackingApi();
+    registerHermesRoutes(api);
+
+    for (const route of ['POST /api/hermes-channel/send', 'POST /api/hermes-channel/stream']) {
+      const handler = api.routes.get(route)!;
+      const { res, calls } = trackingRes();
+
+      await handler({ body: { text: 'hello', correlationId: 'corr-1' } }, res);
+
+      expect(calls.some(c => c.status === 501)).toBe(true);
+      expect(calls.some(c => c.json?.success === false)).toBe(true);
+    }
+  });
+});
+
 describe('GET /api/hermes/status', () => {
   it('returns adapter status JSON', async () => {
     const api = createTrackingApi();
@@ -310,6 +346,7 @@ describe('HermesDkgClient', () => {
     expect((calls[0].init.headers as Record<string, string>).Authorization).toBe('Bearer secret-token');
     const body = JSON.parse(String(calls[0].init.body));
     expect(body.id).toBe('hermes');
+    expect(body.manifest.setupEntry).toBe('./setup-entry.mjs');
     expect(body.transport.kind).toBe('hermes-channel');
     expect(body.capabilities.localChat).toBe(true);
   });
@@ -386,9 +423,12 @@ describe('Hermes profile setup helpers', () => {
     expect(verify.ok).toBe(true);
     expect(verify.profile.memoryMode).toBe('tools-only');
     expect(verify.warnings).toHaveLength(0);
-    expect(providerVerify.ok).toBe(true);
-    expect(providerVerify.warnings[0]).toContain('mem0');
+    expect(providerVerify.ok).toBe(false);
+    expect(providerVerify.status).toBe('error');
+    expect(providerVerify.errors[0]).toContain('mem0');
     await expect(runVerify({ hermesHome })).resolves.toBeUndefined();
+    await expect(runVerify({ hermesHome, memoryMode: 'provider' })).rejects.toThrow('mem0');
+    await expect(runDoctor({ hermesHome, memoryMode: 'provider' })).rejects.toThrow('mem0');
 
     disconnectHermesProfile({ hermesHome });
     uninstallHermesProfile({ hermesHome });

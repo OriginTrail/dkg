@@ -11,7 +11,12 @@ export function registerHermesRoutes(api: DaemonPluginApi): void {
     method: 'GET',
     path: '/api/hermes-channel/health',
     handler: async (_req, res) => {
-      res.json({ ok: true, status: 'configured', bridge: {} });
+      res.status(503).json({
+        ok: false,
+        status: 'degraded',
+        error: 'Hermes bridge dispatcher is not registered in this adapter package yet.',
+        bridge: { ready: false },
+      });
     },
   });
 

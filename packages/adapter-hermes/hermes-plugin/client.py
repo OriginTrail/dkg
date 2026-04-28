@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -239,10 +240,11 @@ class DKGClient:
         idempotency_key: str = "",
     ) -> Dict[str, Any]:
         """POST /api/hermes-channel/persist-turn — persist turn + trigger entity extraction."""
+        fallback_key = idempotency_key or turn_id or f"{session_id}:{uuid.uuid4()}"
         payload: Dict[str, Any] = {
             "sessionId": session_id,
-            "turnId": turn_id or f"{session_id}:unknown",
-            "idempotencyKey": idempotency_key or turn_id or f"{session_id}:unknown",
+            "turnId": turn_id or fallback_key,
+            "idempotencyKey": fallback_key,
             "userMessage": user_content,
             "assistantReply": assistant_content,
             "source": "hermes-provider",

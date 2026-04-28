@@ -4,6 +4,7 @@ export type HermesMemoryMode = 'primary' | 'tools-only' | 'ask';
 
 export interface HermesSetupCliOptions {
   profile?: string;
+  profileName?: string;
   hermesBin?: string;
   daemonUrl?: string;
   port?: string | number;
@@ -16,6 +17,7 @@ export interface HermesSetupCliOptions {
 
 export interface NormalizedHermesSetupOptions {
   profile?: string;
+  profileName?: string;
   hermesBin?: string;
   daemonUrl?: string;
   port?: number;
@@ -55,7 +57,8 @@ export function normalizeHermesSetupOptions(opts: HermesSetupCliOptions): Normal
   }
 
   return {
-    profile: trimmed(opts.profile),
+    profile: trimmed(opts.profile) ?? trimmed(opts.profileName),
+    profileName: trimmed(opts.profileName),
     hermesBin: trimmed(opts.hermesBin),
     daemonUrl: trimmed(opts.daemonUrl),
     port: normalizePort(opts.port),
