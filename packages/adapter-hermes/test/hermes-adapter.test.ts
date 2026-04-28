@@ -970,4 +970,122 @@ assert turns[1]["turn_id"].split(":")[-2] == "2", turns
 
     expect(result.status, result.stderr || result.stdout).toBe(0);
   });
+
+  it('uses server-side assertion query filtering for prefetch', () => {
+    const script = String.raw`
+import importlib.util
+import json
+import sys
+import tempfile
+import types
+from pathlib import Path
+
+home = Path(tempfile.mkdtemp(prefix="hermes-dkg-prefetch-"))
+
+agent_pkg = types.ModuleType("agent")
+memory_provider = types.ModuleType("agent.memory_provider")
+class MemoryProvider:
+    pass
+memory_provider.MemoryProvider = MemoryProvider
+sys.modules["agent"] = agent_pkg
+sys.modules["agent.memory_provider"] = memory_provider
+
+tools_pkg = types.ModuleType("tools")
+registry = types.ModuleType("tools.registry")
+def tool_error(message):
+    return json.dumps({"error": message})
+registry.tool_error = tool_error
+sys.modules["tools"] = tools_pkg
+sys.modules["tools.registry"] = registry
+
+constants = types.ModuleType("hermes_constants")
+constants.get_hermes_home = lambda: home
+sys.modules["hermes_constants"] = constants
+
+sys.modules["plugins"] = types.ModuleType("plugins")
+sys.modules["plugins.memory"] = types.ModuleType("plugins.memory")
+
+plugin_dir = Path(r"${process.cwd().replace(/\\/g, '\\\\')}") / "hermes-plugin"
+client_spec = importlib.util.spec_from_file_location(
+    "plugins.memory.dkg.client",
+    plugin_dir / "client.py",
+)
+client_module = importlib.util.module_from_spec(client_spec)
+sys.modules["plugins.memory.dkg.client"] = client_module
+client_spec.loader.exec_module(client_module)
+
+client = client_module.DKGClient("http://127.0.0.1:9200")
+client._get = lambda path: {"agentAddress": "0xabc"} if path == "/api/agent/identity" else {}
+client_calls = []
+def post(path, data=None):
+    client_calls.append((path, data or {}))
+    return {"result": {"bindings": []}}
+client._post = post
+client.query_assertion("hermes", "cg:test", "SELECT ?s ?p ?o WHERE { ?s ?p ?o }")
+assert client_calls == [
+    (
+        "/api/query",
+        {
+            "sparql": "SELECT ?s ?p ?o WHERE { ?s ?p ?o }",
+            "contextGraphId": "cg:test",
+            "view": "working-memory",
+            "assertionName": "hermes",
+            "agentAddress": "0xabc",
+        },
+    )
+], client_calls
+client.query_assertion("hermes", "cg:test")
+assert client_calls[-1] == ("/api/assertion/hermes/query", {"contextGraphId": "cg:test"}), client_calls
+
+spec = importlib.util.spec_from_file_location(
+    "plugins.memory.dkg",
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+module = importlib.util.module_from_spec(spec)
+sys.modules["plugins.memory.dkg"] = module
+spec.loader.exec_module(module)
+
+class FakeClient:
+    def __init__(self):
+        self.calls = []
+
+    def query_assertion(self, assertion_name, context_graph_id, sparql=""):
+        self.calls.append((assertion_name, context_graph_id, sparql))
+        return {
+            "result": {
+                "bindings": [
+                    {
+                        "s": {"value": "urn:hermes:agent:memory"},
+                        "p": {"value": "urn:hermes:content"},
+                        "o": {"value": "Needle fact from DKG"},
+                    }
+                ]
+            }
+        }
+
+    def query(self, *args, **kwargs):
+        raise AssertionError("prefetch should use the assertion-scoped query path")
+
+provider = module.DKGMemoryProvider()
+provider._offline = False
+provider._client = FakeClient()
+provider._assertion_id = "hermes"
+provider._context_graph = "cg:test"
+text = provider.prefetch("Needle")
+
+assert len(provider._client.calls) == 1, provider._client.calls
+assert provider._client.calls[0][0] == "hermes", provider._client.calls
+assert provider._client.calls[0][1] == "cg:test", provider._client.calls
+assert "SELECT ?s ?p ?o" in provider._client.calls[0][2], provider._client.calls
+assert "CONTAINS" in provider._client.calls[0][2], provider._client.calls
+assert "Needle fact from DKG" in text, text
+`;
+    const result = spawnSync('python', ['-B', '-c', script], {
+      cwd: process.cwd(),
+      encoding: 'utf-8',
+    });
+
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+  });
 });

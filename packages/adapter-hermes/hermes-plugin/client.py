@@ -90,6 +90,8 @@ class DKGClient:
         self.timeout = timeout
         self._token = _load_auth_token()
         self._session = None  # lazy
+        self._agent_address: Optional[str] = None
+        self._agent_identity_loaded = False
 
     def _get_session(self):
         if self._session is None:
@@ -135,13 +137,43 @@ class DKGClient:
         """GET /api/status — node info, peers, sync."""
         return self._get("/api/status")
 
+    def agent_identity(self) -> Dict[str, Any]:
+        """GET /api/agent/identity — current local-agent identity."""
+        return self._get("/api/agent/identity")
+
+    def _resolve_agent_address(self) -> Optional[str]:
+        if not self._agent_identity_loaded:
+            self._agent_identity_loaded = True
+            identity = self.agent_identity()
+            agent_address = identity.get("agentAddress") if isinstance(identity, dict) else None
+            if isinstance(agent_address, str) and agent_address:
+                self._agent_address = agent_address
+        return self._agent_address
+
     # -- SPARQL query ----------------------------------------------------------
 
-    def query(self, sparql: str, context_graph_id: Optional[str] = None) -> Dict[str, Any]:
+    def query(
+        self,
+        sparql: str,
+        context_graph_id: Optional[str] = None,
+        *,
+        view: Optional[str] = None,
+        assertion_name: Optional[str] = None,
+        agent_address: Optional[str] = None,
+        sub_graph_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """POST /api/query — run SPARQL on local triple store."""
         payload: Dict[str, Any] = {"sparql": sparql}
         if context_graph_id:
             payload["contextGraphId"] = context_graph_id
+        if view:
+            payload["view"] = view
+        if assertion_name:
+            payload["assertionName"] = assertion_name
+        if agent_address:
+            payload["agentAddress"] = agent_address
+        if sub_graph_name:
+            payload["subGraphName"] = sub_graph_name
         return self._post("/api/query", payload)
 
     # -- Assertions (Working Memory) -------------------------------------------
@@ -168,11 +200,20 @@ class DKGClient:
         return self._post(f"/api/assertion/{assertion_name}/write", payload)
 
     def query_assertion(self, assertion_name: str, context_graph_id: str, sparql: str = "") -> Dict[str, Any]:
-        """POST /api/assertion/{name}/query — return quads in an assertion scope.
+        """Query an assertion scope.
 
-        The DKG V10 assertion route returns the assertion quads directly; callers
-        that need SPARQL should use ``query()`` against ``/api/query``.
+        Without SPARQL, returns full assertion quads from
+        ``/api/assertion/{name}/query``. With SPARQL, uses the scoped
+        ``/api/query`` view path so filtering happens server-side.
         """
+        if sparql and sparql.strip():
+            return self.query(
+                sparql,
+                context_graph_id,
+                view="working-memory",
+                assertion_name=assertion_name,
+                agent_address=self._resolve_agent_address(),
+            )
         return self._post(f"/api/assertion/{assertion_name}/query", {
             "contextGraphId": context_graph_id,
         })

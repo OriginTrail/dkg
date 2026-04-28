@@ -606,22 +606,10 @@ class DKGMemoryProvider(MemoryProvider):
                 f"}} LIMIT 10"
             )
             if self._assertion_id:
-                result = self._client.query_assertion(self._assertion_id, self._context_graph)
-                quads = [
-                    quad for quad in _extract_quads(result)
-                    if query.lower() in _quad_object(quad).lower()
-                ][:10]
-                if not quads:
-                    return ""
-
-                lines = [
-                    f"  {_short(_quad_subject(quad))} - {_short(_quad_predicate(quad))} - {_quad_object(quad)}"
-                    for quad in quads
-                ]
-                return f"<dkg-context>\nRelevant knowledge from DKG:\n" + "\n".join(lines) + "\n</dkg-context>"
+                result = self._client.query_assertion(self._assertion_id, self._context_graph, sparql)
             else:
                 result = self._client.query(sparql, self._context_graph)
-            bindings = result.get("results", {}).get("bindings", [])
+            bindings = _extract_query_bindings(result)
             if not bindings:
                 return ""
 
@@ -1173,8 +1161,21 @@ def _client_result_failed(result: Any) -> bool:
 
 
 def _extract_quads(result: Dict[str, Any]) -> List[Dict[str, Any]]:
-    quads = result.get("quads", [])
+    query_result = result.get("result", {}) if isinstance(result.get("result"), dict) else {}
+    quads = result.get("quads", []) or query_result.get("quads", [])
     return [quad for quad in quads if isinstance(quad, dict)]
+
+
+def _extract_query_bindings(result: Dict[str, Any]) -> List[Dict[str, Any]]:
+    if not isinstance(result, dict):
+        return []
+    if isinstance(result.get("result"), dict):
+        bindings = result["result"].get("bindings", [])
+    elif isinstance(result.get("results"), dict):
+        bindings = result["results"].get("bindings", [])
+    else:
+        bindings = result.get("bindings", [])
+    return [binding for binding in bindings if isinstance(binding, dict)]
 
 
 def _quad_subject(quad: Dict[str, Any]) -> str:
