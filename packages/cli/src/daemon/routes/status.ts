@@ -557,7 +557,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       ? normalizeIntegrationId(parsed.id)
       : 'openclaw';
     const definition = LOCAL_AGENT_INTEGRATION_DEFINITIONS[adapterId];
-    if (!definition || (adapterId !== 'openclaw' && adapterId !== 'hermes')) {
+    if (!definition || adapterId !== 'openclaw') {
       return jsonResponse(res, 400, { error: `Unknown adapter id: ${String(parsed.id ?? adapterId)}` });
     }
     try {

@@ -107,7 +107,7 @@ dkg hermes setup --profile research --memory-mode tools-only
 Tools-only mode preserves the existing provider and still writes DKG adapter
 state (`dkg.json`, the provider plugin files, and setup-state metadata) so
 status, doctor, reconnect, and uninstall can reason about the profile. In this
-PR, model-injected DKG memory tools are available when Hermes activates the DKG
+release, model-injected DKG memory tools are available when Hermes activates the DKG
 memory provider; a separate general Hermes tool plugin for tools-only mode is
 future work.
 
@@ -132,7 +132,7 @@ flows should remain operator-reviewed.
 
 ## Local-Agent Routes
 
-Hermes uses Hermes-specific daemon routes for this PR. These routes are
+Hermes uses Hermes-specific daemon routes for this release. These routes are
 supported by the DKG CLI daemon; this adapter package provides the setup,
 client, and payload contracts that call into them.
 

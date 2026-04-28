@@ -1691,7 +1691,7 @@ button:focus:not(:focus-visible) { outline: none; }
 .v10-publish-result-block { color: var(--text-tertiary); }
 
 /* ══════════════════════════════════════════
-   LEGACY COMPONENT STYLES (preserved from V9)
+   SHARED COMPONENT STYLES
    ══════════════════════════════════════════ */
 
 /* Tooltip */

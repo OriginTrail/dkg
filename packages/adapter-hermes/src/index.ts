@@ -42,8 +42,6 @@ export type {
   HermesProfileMetadata,
   HermesPublishGuardPolicy,
   HermesSetupState,
-  SessionTurnPayload,
-  SessionEndPayload,
 } from './types.js';
 export type { HermesDkgClientOptions } from './dkg-client.js';
 export type { HermesCliOptions, HermesSetupOptions, HermesSetupPlan, HermesVerifyResult } from './setup.js';

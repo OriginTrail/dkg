@@ -135,6 +135,8 @@ describe('OpenClaw daemon endpoints', () => {
     expect(openClawDefinitionsBlock).not.toContain('chatAttachments: true');
     expect(hermesDefinitionsBlock).toContain('chatAttachments: true');
     expect(registerAdapterBlock).not.toContain('chatAttachments: true');
+    expect(registerAdapterBlock).toContain("adapterId !== 'openclaw'");
+    expect(registerAdapterBlock).not.toContain("'hermes'");
   });
 
   it('discarding an imported assertion evicts its cached extraction status', () => {

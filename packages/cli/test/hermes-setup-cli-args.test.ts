@@ -34,7 +34,6 @@ describe('hermesSetupAction', () => {
 
     expect(runSetup).toHaveBeenCalledWith({
       profile: 'default',
-      profileName: undefined,
       daemonUrl: 'http://127.0.0.1:9200',
       bridgeUrl: 'http://127.0.0.1:9202',
       gatewayUrl: 'https://hermes.example.com',
@@ -50,7 +49,6 @@ describe('hermesSetupAction', () => {
   it('defaults verify/start to true and dryRun to false', () => {
     expect(normalizeHermesSetupOptions({})).toEqual({
       profile: undefined,
-      profileName: undefined,
       daemonUrl: undefined,
       bridgeUrl: undefined,
       gatewayUrl: undefined,
@@ -63,19 +61,11 @@ describe('hermesSetupAction', () => {
     });
   });
 
-  it('accepts profileName as a programmatic alias while preferring profile', () => {
-    expect(normalizeHermesSetupOptions({
-      profileName: ' alias ',
-    })).toMatchObject({
-      profile: 'alias',
-      profileName: 'alias',
-    });
+  it('trims the Hermes profile name', () => {
     expect(normalizeHermesSetupOptions({
       profile: ' cli ',
-      profileName: ' alias ',
     })).toMatchObject({
       profile: 'cli',
-      profileName: 'alias',
     });
   });
 

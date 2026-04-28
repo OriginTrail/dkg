@@ -93,12 +93,7 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
             ...(payload.profile ? { profile: payload.profile } : {}),
             ...(attachmentRefs ? { attachmentRefs } : {}),
             ...(payload.contextEntries ? { contextEntries: payload.contextEntries } : {}),
-            ...(payload.contextGraphId ?? payload.uiContextGraphId
-              ? {
-                  contextGraphId: payload.contextGraphId ?? payload.uiContextGraphId,
-                  uiContextGraphId: payload.uiContextGraphId ?? payload.contextGraphId,
-                }
-              : {}),
+            ...(payload.contextGraphId ? { contextGraphId: payload.contextGraphId } : {}),
             ...(payload.currentAgentAddress ?? requestAgentAddress
               ? { currentAgentAddress: payload.currentAgentAddress ?? requestAgentAddress }
               : {}),
@@ -190,12 +185,7 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
             ...(payload.profile ? { profile: payload.profile } : {}),
             ...(attachmentRefs ? { attachmentRefs } : {}),
             ...(payload.contextEntries ? { contextEntries: payload.contextEntries } : {}),
-            ...(payload.contextGraphId ?? payload.uiContextGraphId
-              ? {
-                  contextGraphId: payload.contextGraphId ?? payload.uiContextGraphId,
-                  uiContextGraphId: payload.uiContextGraphId ?? payload.contextGraphId,
-                }
-              : {}),
+            ...(payload.contextGraphId ? { contextGraphId: payload.contextGraphId } : {}),
             ...(payload.currentAgentAddress ?? requestAgentAddress
               ? { currentAgentAddress: payload.currentAgentAddress ?? requestAgentAddress }
               : {}),

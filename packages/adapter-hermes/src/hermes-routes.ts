@@ -1,10 +1,7 @@
 import type {
   DaemonPluginApi,
   HermesChannelPersistTurnPayload,
-  SessionEndPayload,
-  SessionTurnPayload,
 } from './types.js';
-import { randomUUID } from 'node:crypto';
 
 export function registerHermesRoutes(api: DaemonPluginApi): void {
   api.registerHttpRoute({
@@ -12,49 +9,6 @@ export function registerHermesRoutes(api: DaemonPluginApi): void {
     path: '/api/hermes-channel/persist-turn',
     handler: async (req, res) => {
       await handlePersistTurn(api, req.body as Partial<HermesChannelPersistTurnPayload>, res);
-    },
-  });
-
-  api.registerHttpRoute({
-    method: 'POST',
-    path: '/api/hermes/session-turn',
-    handler: async (req, res) => {
-      const body = req.body as SessionTurnPayload & { agentName?: string };
-      const explicitTurnId = typeof body.turnId === 'string' && body.turnId.trim()
-        ? body.turnId.trim()
-        : undefined;
-      const explicitIdempotencyKey = typeof body.idempotencyKey === 'string' && body.idempotencyKey.trim()
-        ? body.idempotencyKey.trim()
-        : undefined;
-      const fallbackTurnId = `legacy-${body.sessionId ?? 'unknown'}-${randomUUID()}`;
-      const turnId = explicitTurnId ?? fallbackTurnId;
-      await handlePersistTurn(api, {
-        sessionId: body.sessionId,
-        turnId,
-        idempotencyKey: explicitIdempotencyKey ?? turnId,
-        userMessage: body.user ?? '',
-        assistantReply: body.assistant ?? '',
-        source: 'hermes-provider',
-      }, res);
-    },
-  });
-
-  api.registerHttpRoute({
-    method: 'POST',
-    path: '/api/hermes/session-end',
-    handler: async (req, res) => {
-      try {
-        const body: SessionEndPayload = req.body;
-        if (!body.sessionId) {
-          res.status(400).json({ success: false, error: 'sessionId required' });
-          return;
-        }
-        api.logger.info?.(`[hermes] Session ended: ${body.sessionId} (${body.turnCount ?? 0} turns)`);
-        res.json({ success: true, sessionId: body.sessionId });
-      } catch (err) {
-        api.logger.warn?.(`[hermes] session-end error: ${err}`);
-        res.status(500).json({ success: false, error: String(err) });
-      }
     },
   });
 

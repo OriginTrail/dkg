@@ -1,7 +1,7 @@
 # Setting Up DKG V10 with Hermes Agent
 
 This guide connects a Hermes profile to a local DKG V10 node. It reflects the
-current PR behavior: profile-aware DKG setup helpers, DKG as an optional Hermes
+current release behavior: profile-aware DKG setup helpers, DKG as an optional Hermes
 memory provider, and DKG daemon-owned local-agent routes under
 `/api/hermes-channel/*`.
 
@@ -67,10 +67,10 @@ Tools-only mode preserves `memory.provider` in `config.yaml`. It still writes
 adapter state and installs the provider package files so `status`, `doctor`,
 `disconnect`, `reconnect`, and `uninstall` can inspect and repair the
 DKG/Hermes profile relationship. Model-injected DKG memory tools require
-provider mode in this PR.
+provider mode in this release.
 
 `--memory-mode ask` is reserved for a future interactive setup flow and is not
-supported in this PR.
+supported in this release.
 
 ## CLI Helpers
 

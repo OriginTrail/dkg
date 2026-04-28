@@ -1,3 +1,5 @@
+import { HermesAdapterPlugin } from './dist/index.js';
+
 export {
   disconnect,
   disconnectHermesProfile,
@@ -29,16 +31,11 @@ export default function setupEntry(api = {}) {
     return;
   }
 
-  const importRuntime = api._importRuntime ?? (() => import('./dist/index.js'));
-  return importRuntime().then((runtime) => {
-    const Plugin = runtime.HermesAdapterPlugin ?? runtime.default;
-    if (typeof Plugin !== 'function') {
-      throw new Error('Hermes setup entry could not find HermesAdapterPlugin');
-    }
-    const plugin = new Plugin(api.config?.hermes);
-    if (typeof plugin.register !== 'function') {
-      throw new Error('HermesAdapterPlugin does not expose register(api)');
-    }
-    return plugin.register(api);
-  });
+  if (typeof api.registerHttpRoute !== 'function' || typeof api.registerHook !== 'function') {
+    log.info?.('[dkg-hermes-setup-entry] Daemon plugin API unavailable; skipping runtime registration');
+    return;
+  }
+
+  const plugin = new HermesAdapterPlugin(api.config?.hermes);
+  return plugin.register(api);
 }

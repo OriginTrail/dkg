@@ -247,17 +247,17 @@ describe('Hermes channel helpers', () => {
     )).toEqual({ Accept: 'application/json' });
   });
 
-  it('normalizes profileName aliases for send and persist payloads', () => {
+  it('normalizes profile for send and persist payloads', () => {
     const send = normalizeHermesChatPayload({
       text: 'hello',
       correlationId: 'corr-1',
-      profileName: ' default ',
+      profile: ' default ',
     });
     const persist = normalizeHermesPersistTurnPayload({
       sessionId: 'hermes:default',
       userMessage: 'hello',
       assistantReply: 'hi',
-      profileName: ' default ',
+      profile: ' default ',
       idempotencyKey: 'idem-1',
     });
 
@@ -268,17 +268,24 @@ describe('Hermes channel helpers', () => {
     expect(persist.profile).toBe('default');
   });
 
-  it('prefers profile over profileName when both aliases are present', () => {
+  it('does not accept profileName as a Hermes channel payload alias', () => {
     const send = normalizeHermesChatPayload({
       text: 'hello',
       correlationId: 'corr-1',
-      profile: ' explicit ',
+      profileName: 'alias',
+    });
+    const persist = normalizeHermesPersistTurnPayload({
+      sessionId: 'hermes:default',
+      userMessage: 'hello',
+      assistantReply: 'hi',
       profileName: 'alias',
     });
 
     expect('error' in send).toBe(false);
-    if ('error' in send) throw new Error('unexpected normalization error');
-    expect(send.profile).toBe('explicit');
+    expect('error' in persist).toBe(false);
+    if ('error' in send || 'error' in persist) throw new Error('unexpected normalization error');
+    expect(send.profile).toBeUndefined();
+    expect(persist.profile).toBeUndefined();
   });
 
   it('normalizes persist-turn payloads with idempotency-key turn ids', () => {
@@ -458,7 +465,7 @@ describe('Hermes daemon routes', () => {
     });
   });
 
-  it('forwards the documented contextGraphId and legacy uiContextGraphId to Hermes send', async () => {
+  it('forwards the documented contextGraphId to Hermes send', async () => {
     const forwardedBodies: any[] = [];
     vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
       if (url.endsWith('/health')) {
@@ -482,11 +489,10 @@ describe('Hermes daemon routes', () => {
     expect(forwardedBodies).toHaveLength(1);
     expect(forwardedBodies[0]).toMatchObject({
       contextGraphId: 'project-1',
-      uiContextGraphId: 'project-1',
     });
   });
 
-  it('forwards the documented contextGraphId and legacy uiContextGraphId to Hermes stream', async () => {
+  it('forwards the documented contextGraphId to Hermes stream', async () => {
     const forwardedBodies: any[] = [];
     vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
       if (url.endsWith('/health')) {
@@ -511,7 +517,6 @@ describe('Hermes daemon routes', () => {
     expect(forwardedBodies).toHaveLength(1);
     expect(forwardedBodies[0]).toMatchObject({
       contextGraphId: 'project-1',
-      uiContextGraphId: 'project-1',
     });
   });
 

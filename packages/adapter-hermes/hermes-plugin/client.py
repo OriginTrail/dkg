@@ -135,15 +135,6 @@ class DKGClient:
         """GET /api/status — node info, peers, sync."""
         return self._get("/api/status")
 
-    # -- Adapter registration --------------------------------------------------
-
-    def register_adapter(self, adapter_id: str = "hermes", framework: str = "hermes-agent") -> Dict[str, Any]:
-        """POST /api/register-adapter — tell daemon we're here."""
-        return self._post("/api/register-adapter", {
-            "id": adapter_id,
-            "framework": framework,
-        })
-
     # -- SPARQL query ----------------------------------------------------------
 
     def query(self, sparql: str, context_graph_id: Optional[str] = None) -> Dict[str, Any]:
@@ -252,13 +243,6 @@ class DKGClient:
         if agent_name:
             payload["agentName"] = agent_name
         return self._post("/api/hermes-channel/persist-turn", payload)
-
-    def end_session(self, session_id: str, turn_count: int = 0) -> Dict[str, Any]:
-        """POST /api/hermes/session-end — finalize session."""
-        return self._post("/api/hermes/session-end", {
-            "sessionId": session_id,
-            "turnCount": turn_count,
-        })
 
     # -- Cleanup ---------------------------------------------------------------
 

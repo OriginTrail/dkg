@@ -282,7 +282,7 @@ describe('handleNodeUIRequest Stage 5 memory/publication routes', () => {
       error: 'POST /api/memory/import is retired in v1',
       errorCode: 'memory_import_endpoint_retired_v1',
     });
-    expect(body.reason).toMatch(/V9 relic|LLM API keys|sidecar graph/i);
+    expect(body.reason).toMatch(/LLM API keys|sidecar graph/i);
     expect(Array.isArray(body.replacements)).toBe(true);
     // Codex B64: the 410 migration pointer must list BOTH the create step
     // and the write step so callers bootstrapping a fresh project CG

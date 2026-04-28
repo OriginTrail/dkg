@@ -35,7 +35,6 @@ export interface HermesSetupOptions {
 
 export interface HermesCliOptions {
   profile?: string;
-  profileName?: string;
   hermesHome?: string;
   daemonUrl?: string;
   bridgeUrl?: string;
@@ -364,7 +363,7 @@ function normalizePublishGuard(input: Partial<HermesPublishGuardPolicy> | undefi
 }
 
 function toSetupOptions(options: HermesCliOptions): HermesSetupOptions {
-  const profileName = trimmed(options.profile) ?? trimmed(options.profileName);
+  const profileName = trimmed(options.profile);
   const hermesHome = trimmed(options.hermesHome);
   const existingState = readSetupState(resolveHermesProfile({ profileName, hermesHome }));
   const memoryMode = normalizeCliMemoryMode(options.memoryMode) ?? existingState?.profile.memoryMode;

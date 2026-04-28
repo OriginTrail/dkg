@@ -57,7 +57,6 @@ export interface HermesChatPayload {
   attachmentRefs?: OpenClawAttachmentRef[];
   contextEntries?: OpenClawChatContextEntry[];
   contextGraphId?: string;
-  uiContextGraphId?: string;
   currentAgentAddress?: string;
 }
 
@@ -83,10 +82,6 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 
 function optionalTrimmedString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
-}
-
-function optionalHermesProfileName(raw: Record<string, unknown>): string | undefined {
-  return optionalTrimmedString(raw.profile) ?? optionalTrimmedString(raw.profileName);
 }
 
 function buildHermesGatewayBase(value: string): string {
@@ -346,19 +341,17 @@ export function normalizeHermesChatPayload(raw: unknown): HermesChatPayload | { 
     return { error: 'Missing "text"' };
   }
 
-  const contextGraphId =
-    optionalTrimmedString(raw.contextGraphId) ?? optionalTrimmedString(raw.uiContextGraphId);
+  const contextGraphId = optionalTrimmedString(raw.contextGraphId);
 
   return {
     text,
     correlationId: optionalTrimmedString(raw.correlationId) ?? randomUUID(),
     identity: optionalTrimmedString(raw.identity),
     sessionId: optionalTrimmedString(raw.sessionId),
-    profile: optionalHermesProfileName(raw),
+    profile: optionalTrimmedString(raw.profile),
     attachmentRefs: normalizedAttachmentRefs,
     contextEntries: normalizedContextEntries,
     contextGraphId,
-    uiContextGraphId: contextGraphId,
     currentAgentAddress: optionalTrimmedString(raw.currentAgentAddress),
   };
 }
@@ -427,7 +420,7 @@ export function normalizeHermesPersistTurnPayload(raw: unknown): HermesPersistTu
       }))
     : undefined;
   const contextGraphId = optionalTrimmedString(raw.contextGraphId);
-  const profile = optionalHermesProfileName(raw);
+  const profile = optionalTrimmedString(raw.profile);
   const correlationId = optionalTrimmedString(raw.correlationId);
   const idempotencyKey = optionalTrimmedString(raw.idempotencyKey);
   const metadata = isPlainRecord(raw.metadata) ? raw.metadata : undefined;

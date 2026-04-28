@@ -1,10 +1,10 @@
 # OriginTrail DKG V10 Node — your multi-agent memory 🦞
 <img width="1536" height="1024" alt="dkg_img" src="docs/assets/dkg-v10.png" />
 
-[![CI](https://github.com/OriginTrail/dkg-v9/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/OriginTrail/dkg-v9/actions/workflows/ci.yml)
+[![CI](https://github.com/OriginTrail/dkg/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/OriginTrail/dkg/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/@origintrail-official/dkg?label=npm)](https://www.npmjs.com/package/@origintrail-official/dkg)
-[![Releases](https://img.shields.io/badge/release-latest-2ea44f)](https://github.com/OriginTrail/dkg-v9/releases)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/OriginTrail/dkg-v9/blob/main/LICENSE)
+[![Releases](https://img.shields.io/badge/release-latest-2ea44f)](https://github.com/OriginTrail/dkg/releases)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/OriginTrail/dkg/blob/main/LICENSE)
 [![Discord](https://img.shields.io/badge/discord-join-5865F2?logo=discord&logoColor=white)](https://discord.com/invite/xCaY7hvNwD)
 
 **Give your AI agents the ultimate memory that survives the session.**
@@ -74,7 +74,7 @@ All on-chain publishing goes through SWM first — the chain transaction is a fi
 
 > **ElizaOS agents:** Use the [`@origintrail-official/dkg-adapter-elizaos`](packages/adapter-elizaos/README.md) adapter. See the [ElizaOS setup guide](docs/setup/SETUP_ELIZAOS.md).
 
-> **Hermes agents:** Use the [`@origintrail-official/dkg-adapter-hermes`](packages/adapter-hermes/README.md) adapter — it ships both the DKG-side daemon plugin and a Python memory provider for Hermes.
+> **Hermes agents:** Use the [`@origintrail-official/dkg-adapter-hermes`](packages/adapter-hermes/README.md) adapter — it ships DKG setup/client support and a Python memory provider for Hermes.
 
 > **Cursor / Claude Code / other MCP clients:** Install the [`@origintrail-official/dkg-mcp`](packages/mcp-dkg/README.md) MCP server to expose your local node as tools for your coding assistant.
 
@@ -363,7 +363,7 @@ This is a pnpm + Turborepo monorepo.
 ```text
 @origintrail-official/dkg-adapter-openclaw        OpenClaw gateway bridge
 @origintrail-official/dkg-adapter-elizaos         ElizaOS plugin (embedded DKGAgent)
-@origintrail-official/dkg-adapter-hermes          Hermes Agent (Python plugin + TS daemon adapter)
+@origintrail-official/dkg-adapter-hermes          Hermes Agent (Python memory provider + TypeScript setup/client helpers)
 @origintrail-official/dkg-adapter-autoresearch    AutoResearch integration
 ```
 
@@ -423,7 +423,7 @@ Tier-based thresholds (TORNADO / BURA / KOSAVA) and Solidity lcov checks are doc
 
 We welcome contributions — bug reports, feature ideas, and pull requests.
 
-- [Open an issue](https://github.com/OriginTrail/dkg-v9/issues) for bugs or feature requests
+- [Open an issue](https://github.com/OriginTrail/dkg/issues) for bugs or feature requests
 - **Build a DKG integration** — submit to the [integrations registry](https://github.com/OriginTrail/dkg-integrations) (see [CONTRIBUTING.md](https://github.com/OriginTrail/dkg-integrations/blob/main/CONTRIBUTING.md) and the [dkg-hello-world](https://github.com/OriginTrail/dkg-hello-world) template)
 - [Join Discord](https://discord.com/invite/xCaY7hvNwD) for questions and discussion
-- [Releases](https://github.com/OriginTrail/dkg-v9/releases)
+- [Releases](https://github.com/OriginTrail/dkg/releases)

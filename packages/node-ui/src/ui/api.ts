@@ -673,8 +673,8 @@ export const fetchMemorySessionGraphDelta = (
 };
 
 // IMPORT_SOURCES / ImportSource / ImportMemoryQuad / ImportMemoryResult /
-// importMemories were retired with the /api/memory/import V9 relic as
-// part of the openclaw-dkg-primary-memory work. Agents write memory via
+// importMemories were retired with /api/memory/import as part of the
+// openclaw-dkg-primary-memory work. Agents write memory via
 // the adapter's dkg_memory_import tool, and file-import flows go through
 // /api/assertion/:name/import-file directly.
 

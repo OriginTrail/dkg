@@ -1,13 +1,13 @@
 # @origintrail-official/dkg-node-ui
 
-Web dashboard for DKG V9 nodes. Provides a browser-based UI for monitoring node health, exploring the knowledge graph, running SPARQL queries, and chatting with integrated agents.
+Web dashboard for DKG V10 nodes. Provides a browser-based UI for monitoring node health, exploring the knowledge graph, running SPARQL queries, and chatting with integrated agents.
 
 ## Features
 
 - **Dashboard** - real-time node metrics (peers, KAs published, queries served, uptime)
 - **Knowledge Explorer** - browse and search Knowledge Assets with interactive graph visualization (powered by `@origintrail-official/dkg-graph-viz`)
 - **SPARQL editor** - write and execute SPARQL queries with syntax highlighting and result tables
-- **Integrated-agent side panel** - connect a local OpenClaw-style agent, chat in the right rail, inspect network peers, and browse persisted sessions
+- **Integrated-agent side panel** - connect a local agent, chat in the right rail, inspect network peers, and browse persisted sessions
 - **Metrics & telemetry** - `DashboardDB` (SQLite) for persistent metric snapshots, `MetricsCollector` for gauges and counters, `OperationTracker` for request tracing
 - **Structured logging** - `StructuredLogger` with operation context, log levels, and JSON output
 

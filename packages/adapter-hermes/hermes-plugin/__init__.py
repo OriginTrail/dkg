@@ -120,12 +120,7 @@ def _scoped_session_id(raw_session_id: str, config: Optional[dict] = None) -> st
     hermes_home = str(get_hermes_home())
     profile_name = ""
     if config:
-        profile_name = str(
-            config.get("profile_name")
-            or config.get("profileName")
-            or config.get("profile")
-            or ""
-        ).strip()
+        profile_name = str(config.get("profile_name") or "").strip()
     if not profile_name:
         profile_name = Path(hermes_home).name or "default"
 
@@ -463,11 +458,6 @@ class DKGMemoryProvider(MemoryProvider):
             self._offline = True
             return
 
-        # Register adapter with daemon
-        result = self._client.register_adapter("hermes", "hermes-agent")
-        if result.get("success") is False:
-            logger.warning(f"[dkg] Adapter registration failed: {result.get('error')}")
-
         # Create or resolve assertion for this agent's Working Memory
         result = self._client.create_assertion(
             self._context_graph, self._agent_name,
@@ -681,12 +671,6 @@ class DKGMemoryProvider(MemoryProvider):
 
     def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
         """Finalize session: flush state to DKG and update local cache."""
-        if self._client and not self._offline:
-            try:
-                self._client.end_session(self._session_id, self._turn_count)
-            except Exception as e:
-                logger.debug(f"[dkg] end_session failed: {e}")
-
         # Snapshot current facts to local cache for offline fallback
         facts = self._recall_facts()
         if facts:

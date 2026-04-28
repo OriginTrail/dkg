@@ -510,7 +510,7 @@ describe('ChatMemoryManager', () => {
 
   // The 'getSessionRootEntities widens the openclaw local session to
   // imported memory roots' test was removed with the retirement of the
-  // /api/memory/import V9 relic and the ImportedMemory / MemoryImport
+  // /api/memory/import endpoint and the ImportedMemory / MemoryImport
   // special-case branch inside buildSessionRootPattern.
 
   it('getSessionRootEntities keeps regular chat sessions scoped to their own graph roots', async () => {

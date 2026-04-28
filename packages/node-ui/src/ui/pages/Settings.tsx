@@ -811,7 +811,7 @@ function GeneralSettingsTab() {
           These settings are not yet configurable via the UI. Edit <span className="mono" style={{ fontSize: 10 }}>~/.dkg/config.json</span> directly.
         </div>
         <Toggle label="Publish by Default" desc="Automatically push new Knowledge Assets to the DKG upon creation." on={true} disabled />
-        <Toggle label="Analytics" desc="Share anonymous usage stats to help improve DKG v9." on={false} disabled />
+        <Toggle label="Analytics" desc="Share anonymous usage stats to help improve DKG V10." on={false} disabled />
       </div>
 
       {/* Danger zone */}

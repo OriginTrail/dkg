@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { HermesAdapterPlugin } from '../src/HermesAdapterPlugin.js';
 import { registerHermesRoutes } from '../src/hermes-routes.js';
-import type { DaemonPluginApi, SessionTurnPayload, SessionEndPayload } from '../src/types.js';
+import type { DaemonPluginApi } from '../src/types.js';
 import { HermesDkgClient, redact } from '../src/dkg-client.js';
 import {
   disconnectHermesProfile,
@@ -98,14 +98,11 @@ describe('HermesAdapterPlugin', () => {
 
     plugin.register(api);
 
-    expect(api.registerHttpRouteCalls).toHaveLength(4);
-    expect(api.routes.has('GET /api/hermes-channel/health')).toBe(false);
-    expect(api.routes.has('POST /api/hermes-channel/send')).toBe(false);
-    expect(api.routes.has('POST /api/hermes-channel/stream')).toBe(false);
-    expect(api.routes.has('POST /api/hermes-channel/persist-turn')).toBe(true);
-    expect(api.routes.has('POST /api/hermes/session-turn')).toBe(true);
-    expect(api.routes.has('POST /api/hermes/session-end')).toBe(true);
-    expect(api.routes.has('GET /api/hermes/status')).toBe(true);
+    expect(api.registerHttpRouteCalls).toHaveLength(2);
+    expect([...api.routes.keys()].sort()).toEqual([
+      'GET /api/hermes/status',
+      'POST /api/hermes-channel/persist-turn',
+    ]);
   });
 
   it('registers session_end lifecycle hook', () => {
@@ -126,7 +123,7 @@ describe('HermesAdapterPlugin', () => {
     plugin.register(api);
     plugin.register(api);
 
-    expect(api.registerHttpRouteCalls).toHaveLength(4);
+    expect(api.registerHttpRouteCalls).toHaveLength(2);
   });
 });
 
@@ -234,64 +231,6 @@ describe('POST /api/hermes-channel/persist-turn', () => {
     }, res);
 
     expect(calls.some(c => c.json?.success === true && c.json?.sessionId === 's1')).toBe(true);
-  });
-});
-
-describe('POST /api/hermes/session-turn', () => {
-  it('generates distinct fallback ids for legacy turns without ids', async () => {
-    const api = createTrackingApi();
-    registerHermesRoutes(api);
-    const handler = api.routes.get('POST /api/hermes/session-turn')!;
-    const first = trackingRes();
-    const second = trackingRes();
-
-    await handler({ body: { sessionId: 's1', user: 'hello', assistant: 'hi' } }, first.res);
-    await handler({ body: { sessionId: 's1', user: 'hello', assistant: 'hi again' } }, second.res);
-
-    const calls = (api.agent as any)._storeChatTurnCalls;
-    expect(calls).toHaveLength(2);
-    expect(calls[0][3].turnId).toMatch(/^legacy-s1-/);
-    expect(calls[1][3].turnId).toMatch(/^legacy-s1-/);
-    expect(calls[0][3].turnId).not.toBe(calls[1][3].turnId);
-    expect(calls[0][3].idempotencyKey).toBe(calls[0][3].turnId);
-    expect(calls[1][3].idempotencyKey).toBe(calls[1][3].turnId);
-  });
-});
-
-describe('POST /api/hermes/session-end', () => {
-  let api: TrackingApi;
-  let handler: (req: any, res: any) => Promise<void>;
-
-  beforeEach(() => {
-    api = createTrackingApi();
-    registerHermesRoutes(api);
-    handler = api.routes.get('POST /api/hermes/session-end')!;
-  });
-
-  it('accepts a valid session-end payload', async () => {
-    const body: SessionEndPayload = { sessionId: 's1', turnCount: 5 };
-    const { res, calls } = trackingRes();
-
-    await handler({ body }, res);
-
-    expect(calls.some(c => c.json?.success === true && c.json?.sessionId === 's1')).toBe(true);
-  });
-
-  it('returns 400 when sessionId is missing', async () => {
-    const { res, calls } = trackingRes();
-
-    await handler({ body: {} }, res);
-
-    expect(calls.some(c => c.status === 400)).toBe(true);
-    expect(calls.some(c => c.json?.success === false)).toBe(true);
-  });
-
-  it('works without optional turnCount', async () => {
-    const { res, calls } = trackingRes();
-
-    await handler({ body: { sessionId: 's2' } }, res);
-
-    expect(calls.some(c => c.json?.success === true && c.json?.sessionId === 's2')).toBe(true);
   });
 });
 
@@ -667,13 +606,12 @@ describe('Hermes profile setup helpers', () => {
     })).resolves.toBeUndefined();
   });
 
-  it('prefers profile over profileName in adapter CLI setup options', async () => {
+  it('uses profile in adapter CLI setup options', async () => {
     const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-'));
 
     await runSetup({
       hermesHome,
       profile: 'explicit',
-      profileName: 'alias',
       start: false,
       verify: false,
     });

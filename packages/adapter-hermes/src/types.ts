@@ -10,25 +10,6 @@ export interface HermesAdapterConfig {
   publishGuard?: HermesPublishGuardPolicy;
 }
 
-/**
- * Session turn payload from the Hermes Python plugin.
- */
-export interface SessionTurnPayload {
-  sessionId: string;
-  user: string;
-  assistant: string;
-  turnId?: string;
-  idempotencyKey?: string;
-}
-
-/**
- * Session end payload from the Hermes Python plugin.
- */
-export interface SessionEndPayload {
-  sessionId: string;
-  turnCount?: number;
-}
-
 export type HermesRuntimeStatus = 'disconnected' | 'configured' | 'connecting' | 'ready' | 'degraded' | 'error';
 
 export type HermesMemoryMode = 'provider' | 'tools-only';
@@ -115,7 +96,7 @@ export interface HermesChannelSendPayload {
   text: string;
   correlationId: string;
   sessionId?: string;
-  profileName?: string;
+  profile?: string;
   contextGraphId?: string;
   contextEntries?: HermesChannelContextEntry[];
   attachmentRefs?: HermesChannelAttachmentRef[];
@@ -140,7 +121,7 @@ export interface HermesChannelPersistTurnPayload {
   correlationId?: string;
   userMessage: string;
   assistantReply: string;
-  profileName?: string;
+  profile?: string;
   contextGraphId?: string;
   attachmentRefs?: HermesChannelAttachmentRef[];
   idempotencyKey: string;
