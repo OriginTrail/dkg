@@ -121,6 +121,30 @@ export interface ChatTurnPersistOptions {
    * path.
    */
   readonly userTurnPersisted?: boolean;
+  /**
+   * PR #229 bot review (r31-1 — actions.ts:1107 / actions.ts:1149).
+   *
+   * Explicit signal from the caller that the ASSISTANT leg of this
+   * turn has already been persisted by a prior write — typically the
+   * matching user-turn `onChatTurn` call that picked up
+   * `assistantText` / `assistantReply.text` / `state.lastAssistantReply`
+   * from the same payload and emitted both legs in a single envelope.
+   *
+   * When `true` on the assistant-reply path, `persistChatTurnImpl`
+   * returns a synthetic no-op result (`tripleCount: 0`) without
+   * emitting any quads. This prevents the second `onAssistantReply`
+   * call from stacking duplicate `schema:text` / `schema:dateCreated`
+   * / `schema:author` triples onto the same `msg:agent:${turnKey}`
+   * URI (RDF predicates are multi-valued, so a stale `LIMIT 1`
+   * query downstream would bind nondeterministic values).
+   *
+   * The plugin wrapper (`onAssistantReplyHandler` in `src/index.ts`)
+   * reads an in-process `persistedAssistantMessages` cache and sets
+   * this flag automatically; direct callers of
+   * `dkgService.persistChatTurn` / `_dkgServiceLoose.persistChatTurn`
+   * may set it themselves to opt into the same protection.
+   */
+  readonly assistantAlreadyPersisted?: boolean;
   readonly ts?: string;
   readonly timestamp?: string;
 }

@@ -230,6 +230,11 @@ function hasUserTurnBeenPersisted(
  * Resets BOTH the anonymous fallback Map and the per-runtime
  * WeakMap (the WeakMap itself cannot be cleared in-place, so we
  * rebind it — old entries become unreachable and GC-eligible).
+ *
+ * r31-1: also resets the parallel `persistedAssistantMessages`
+ * cache (see below) so tests that exercise the
+ * "user-turn embeds assistant + onAssistantReply" double-write
+ * guard can isolate each scenario.
  */
 export function __resetPersistedUserTurnCacheForTests(): void {
   persistedUserTurnsAnon = new Map();
@@ -238,6 +243,93 @@ export function __resetPersistedUserTurnCacheForTests(): void {
   // GC-eligible. WeakMap has no `.clear()` in the spec — rebinding
   // is the canonical "drop everything" operation.
   persistedUserTurnsByRuntime = new WeakMap();
+  persistedAssistantMessagesAnon = new Map();
+  persistedAssistantMessagesByRuntime = new WeakMap();
+}
+
+/**
+ * PR #229 bot review (r31-1 — actions.ts:1107 / actions.ts:1149).
+ *
+ * Parallel cache to {@link persistedUserTurnsByRuntime}, but tracking
+ * which `(roomId, userMsgId, contextGraphId, assertionName)` tuples
+ * have ALREADY had their ASSISTANT leg persisted (typically because
+ * the matching `onChatTurn` call carried `assistantText` /
+ * `assistantReply.text` / `state.lastAssistantReply` and the
+ * user-turn branch in `persistChatTurnImpl` emitted both legs in a
+ * single envelope).
+ *
+ * Why a separate cache: the user-turn cache flips the
+ * `userTurnPersisted` signal in `onAssistantReplyHandler` to take the
+ * cheap append-only path (good — avoids re-emitting the headless
+ * stub envelope when the canonical user turn already exists). But
+ * "user-turn was persisted" does NOT imply "assistant leg was
+ * persisted" — a user-turn write with no assistant text emits ONLY
+ * the user message + envelope, and the subsequent assistant-reply
+ * SHOULD still write the assistant leg. The two facts are
+ * independent and need independent cache lines.
+ *
+ * Concretely: when the user-turn path emits assistant quads (because
+ * `assistantText` was present), `onChatTurnHandler` records this
+ * here so `onAssistantReplyHandler` can short-circuit the duplicate
+ * `buildAssistantMessageQuads` call. The append-only branch in
+ * `persistChatTurnImpl` would otherwise stack a SECOND
+ * `schema:text` / `schema:dateCreated` / `schema:author` triple
+ * onto the same `msg:agent:${turnKey}` URI (RDF predicates are
+ * multi-valued), and downstream `LIMIT 1` queries would pick a
+ * nondeterministic winner.
+ *
+ * Same scoping rules as the user-turn cache: per-runtime via
+ * `WeakMap`, scoped by destination (`contextGraphId`,
+ * `assertionName`) so a successful write into store A does NOT
+ * silently short-circuit an assistant-reply heading into store B.
+ */
+let persistedAssistantMessagesByRuntime: WeakMap<object, Map<string, true>> = new WeakMap();
+let persistedAssistantMessagesAnon: Map<string, true> = new Map();
+
+function resolveAssistantRuntimeCache(runtime: unknown): Map<string, true> {
+  if (runtime !== null && typeof runtime === 'object') {
+    let m = persistedAssistantMessagesByRuntime.get(runtime as object);
+    if (!m) {
+      m = new Map<string, true>();
+      persistedAssistantMessagesByRuntime.set(runtime as object, m);
+    }
+    return m;
+  }
+  return persistedAssistantMessagesAnon;
+}
+
+function markAssistantPersisted(
+  runtime: unknown,
+  roomId: unknown,
+  userMsgId: unknown,
+  destContextGraphId: string,
+  destAssertionName: string,
+): void {
+  const k = persistedUserTurnKey(roomId, userMsgId, destContextGraphId, destAssertionName);
+  if (!k) return;
+  const m = resolveAssistantRuntimeCache(runtime);
+  m.delete(k);
+  m.set(k, true);
+  if (m.size > PERSISTED_USER_TURN_CACHE_MAX) {
+    const oldest = m.keys().next().value;
+    if (oldest !== undefined) m.delete(oldest);
+  }
+}
+
+function hasAssistantBeenPersisted(
+  runtime: unknown,
+  roomId: unknown,
+  userMsgId: unknown,
+  destContextGraphId: string,
+  destAssertionName: string,
+): boolean {
+  const k = persistedUserTurnKey(roomId, userMsgId, destContextGraphId, destAssertionName);
+  if (k === null) return false;
+  if (runtime !== null && typeof runtime === 'object') {
+    const m = persistedAssistantMessagesByRuntime.get(runtime as object);
+    return m !== undefined && m.has(k);
+  }
+  return persistedAssistantMessagesAnon.has(k);
 }
 
 /**
@@ -332,6 +424,34 @@ async function onAssistantReplyHandler(
       dest.assertionName,
     );
   }
+  // PR #229 bot review (r31-1 — actions.ts:1107 / actions.ts:1149).
+  // If the matching user-turn write embedded the assistant leg
+  // (i.e., the host plumbed `assistantText` /
+  // `assistantReply.text` / `state.lastAssistantReply` into the
+  // user-turn payload AND the user-turn write succeeded), the
+  // assistant Message subject + `dkg:hasAssistantMessage` link
+  // already exist on the canonical turn URI. Re-emitting them via
+  // the append-only branch in `persistChatTurnImpl` would stack a
+  // SECOND `schema:text` / `schema:dateCreated` / `schema:author`
+  // triple onto the same `msg:agent:${turnKey}` URI (multi-valued
+  // RDF predicates), and `getSessionGraphDelta()`'s `LIMIT 1`
+  // query would bind a nondeterministic value across replays.
+  //
+  // Plumb an explicit `assistantAlreadyPersisted: true` so the
+  // impl returns a synthetic no-op (`tripleCount: 0`) instead of
+  // writing duplicate quads. We keep going through
+  // `_dkgServiceLoose.persistChatTurn` (rather than short-
+  // circuiting in the wrapper) so the impl-level guard is the
+  // single source of truth — direct callers that bypass this
+  // wrapper still get the same protection from
+  // `optsAny.assistantAlreadyPersisted` (defence-in-depth).
+  if (opts.assistantAlreadyPersisted === undefined) {
+    const roomId = (message as any)?.roomId;
+    const dest = resolveDestinationFromOptions(runtime, opts);
+    if (hasAssistantBeenPersisted(runtime, roomId, userMessageId, dest.contextGraphId, dest.assertionName)) {
+      opts.assistantAlreadyPersisted = true;
+    }
+  }
   // r30-8: route through the internal-only loose handle. The public
   // `dkgService.persistChatTurn` no longer accepts a generic
   // `Record<string, unknown>` options bag (the catch-all overload
@@ -395,6 +515,37 @@ async function onChatTurnHandler(
         : (message as any)?.id;
     const dest = resolveDestinationFromOptions(runtime, options);
     markUserTurnPersisted(runtime, roomId, userMsgId, dest.contextGraphId, dest.assertionName);
+    // PR #229 bot review (r31-1 — actions.ts:1107 / actions.ts:1149).
+    // The user-turn branch in `persistChatTurnImpl` ALSO writes the
+    // assistant leg when the host plumbed
+    // `assistantText` / `assistantReply.text` /
+    // `state.lastAssistantReply` into the same call. If we don't
+    // record this fact, a follow-up `onAssistantReply` for the
+    // SAME turn (typical ElizaOS hook chain — onChatTurn fires
+    // synchronously before the assistant reply hook) would take
+    // the append-only branch and re-emit the assistant Message
+    // quads onto the SAME `msg:agent:${turnKey}` URI, stacking
+    // duplicate `schema:text` / `schema:dateCreated` /
+    // `schema:author` triples (multi-valued RDF predicates) and
+    // making downstream `LIMIT 1` queries nondeterministic.
+    //
+    // We mirror the impl's own check (`assistantText` truthy) here
+    // so the cache fires only when the impl actually wrote those
+    // quads. Reading `(message as any).content?.text` is NOT
+    // sufficient — that's the user message's text on the
+    // user-turn path; the assistant leg comes exclusively from
+    // `options` / `state`.
+    const optsForAssistant = (optsAny ?? {}) as Record<string, unknown>;
+    const assistantReplyOpt = optsForAssistant.assistantReply as { text?: unknown } | undefined;
+    const stateForAssistant = (state ?? {}) as { lastAssistantReply?: unknown };
+    const assistantText =
+      (typeof optsForAssistant.assistantText === 'string' && optsForAssistant.assistantText)
+      || (typeof assistantReplyOpt?.text === 'string' && assistantReplyOpt.text)
+      || (typeof stateForAssistant.lastAssistantReply === 'string' && stateForAssistant.lastAssistantReply)
+      || '';
+    if (assistantText) {
+      markAssistantPersisted(runtime, roomId, userMsgId, dest.contextGraphId, dest.assertionName);
+    }
   }
   return result;
 }

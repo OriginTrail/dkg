@@ -803,10 +803,20 @@ describe('persistChatTurnImpl — PR #229 round 13 (r13-1): userTurnPersisted ex
     // turn URI is left untouched.
     const turnUri = 'urn:dkg:chat:headless-turn:r:mem-1';
     // r15-2: the headless stub lives in the `msg:user-stub:` namespace
-    // keyed on the ASSISTANT memory id (not the user message id) so it
-    // can't collide with any canonical `msg:user:` URI the user-turn
-    // hook wrote under the same turnKey.
-    const userStubUri = 'urn:dkg:chat:msg:user-stub:r:asst-2';
+    // keyed on the turnKey (which uses `userMessageId` when present)
+    // so it can't collide with any canonical `msg:user:` URI the
+    // user-turn hook wrote under the same turnKey — the dedicated
+    // namespace prefix is sufficient for that distinctness.
+    //
+    // r31-1: pre-r31 the stub key was derived from the assistant
+    // memory id (`asst-2` here), but that broke retry idempotence —
+    // every reconnect with a fresh assistant memory id produced a
+    // FRESH stub URI on the SAME `headless-turn:` envelope, leaving
+    // multiple `dkg:hasUserMessage` edges for `getSessionGraphDelta`'s
+    // `LIMIT 1` to bind nondeterministically. The fix uses the same
+    // `turnKey` the envelope uses (`r:mem-1`) so headless retries
+    // are byte-identical.
+    const userStubUri = 'urn:dkg:chat:msg:user-stub:r:mem-1';
     // Full envelope must be present so the reader resolves the turn.
     expect(quads).toContainEqual(expect.objectContaining({
       subject: turnUri, predicate: RDF_TYPE, object: `${DKG_ONT}ChatTurn`,
@@ -958,6 +968,133 @@ describe('persistChatTurnImpl — PR #229 round 13 (r13-1): userTurnPersisted ex
       subject: turnUri, predicate: `${DKG_ONT}headlessTurn`, object: '"true"',
     }));
   });
+
+  // -------------------------------------------------------------------
+  // PR #229 bot review (r31-1 — actions.ts:1107 / actions.ts:1149).
+  //
+  // Root cause: the user-turn branch in `persistChatTurnImpl` emits
+  // the assistant Message + `hasAssistantMessage` link when the
+  // caller plumbs `assistantText` / `assistantReply.text` /
+  // `state.lastAssistantReply` into the same call (typical ElizaOS
+  // shape — the assistant text is captured on the user-turn callback
+  // and a separate `onAssistantReply` hook fires later). Pre-r31 the
+  // append-only branch in the second call would re-emit
+  // `buildAssistantMessageQuads(...)` onto the SAME
+  // `msg:agent:${turnKey}` URI — stacking duplicate
+  // `schema:text` / `schema:dateCreated` / `schema:author` triples
+  // (multi-valued RDF predicates) and making downstream `LIMIT 1`
+  // queries nondeterministic across replays.
+  //
+  // Fix: an explicit `assistantAlreadyPersisted: true` option on the
+  // assistant-reply path triggers a synthetic no-op return
+  // (`tripleCount: 0`) so the impl writes nothing. The wrapper
+  // `onAssistantReplyHandler` in `src/index.ts` reads an in-process
+  // `persistedAssistantMessages` cache and sets the flag
+  // automatically; defence-in-depth: the impl honours the flag
+  // directly so callers that bypass the wrapper get the same
+  // protection.
+  // -------------------------------------------------------------------
+  it('r31-1: assistantAlreadyPersisted=true short-circuits the assistant-reply path (no quads written)', async () => {
+    const { agent, publishes } = makeCapturingAgent();
+    const out = await persistChatTurnImpl(
+      agent, makeRuntime(),
+      makeMessage('reply', { id: 'asst-r31-noop', roomId: 'r' } as any),
+      {} as State,
+      {
+        mode: 'assistant-reply',
+        userMessageId: 'mem-1',
+        userTurnPersisted: true,
+        // r31-1: the user-turn branch has already emitted the
+        // assistant Message + hasAssistantMessage link for this
+        // turn (because the matching onChatTurn carried
+        // assistantText). Re-emitting them here would stack
+        // duplicate triples → return a synthetic no-op instead.
+        assistantAlreadyPersisted: true,
+      },
+    );
+    // tripleCount === 0 is the wire-level signal that no quads were
+    // emitted; the turnUri still points at the canonical turn so
+    // any caller chaining further work (e.g. publishing an LLM
+    // observation onto the same turn) gets the right subject.
+    expect(out.tripleCount).toBe(0);
+    expect(out.turnUri).toBe('urn:dkg:chat:turn:r:mem-1');
+    // No `assertion.write` happened at all (the early-return runs
+    // BEFORE the write call) — the capturing agent's `publishes`
+    // queue stays empty. This is the strongest possible
+    // verification that the synthetic no-op truly emitted nothing
+    // (a bug that wrote zero quads to the assertion would still
+    // create a `publishes` entry; the empty queue rules that out).
+    expect(publishes).toHaveLength(0);
+  });
+
+  it('r31-1: assistantAlreadyPersisted=true short-circuits the headless variant too (no stub envelope re-emitted)', async () => {
+    const { agent, publishes } = makeCapturingAgent();
+    const out = await persistChatTurnImpl(
+      agent, makeRuntime(),
+      makeMessage('reply', { id: 'asst-r31-noop-h', roomId: 'r' } as any),
+      {} as State,
+      {
+        mode: 'assistant-reply',
+        // No userMessageId → would normally take the headless
+        // full-envelope path. The flag still wins.
+        assistantAlreadyPersisted: true,
+      },
+    );
+    expect(out.tripleCount).toBe(0);
+    // The synthetic turnUri is still the headless one for this
+    // shape so callers that chain further work bind to the right
+    // subject — same as a normal headless write would have.
+    expect(out.turnUri).toBe('urn:dkg:chat:headless-turn:r:asst-r31-noop-h');
+    // Same strict no-write contract: nothing reached the
+    // `assertion.write()` boundary.
+    expect(publishes).toHaveLength(0);
+  });
+
+  it('r31-1: assistantAlreadyPersisted=false (or undefined) still writes normally (regression guard)', async () => {
+    // Regression guard: the no-op branch must fire ONLY when the
+    // flag is `=== true`. Anything else (false, undefined, missing
+    // option, or non-boolean truthy) keeps the existing
+    // assistant-reply semantics — otherwise the well-known
+    // `onChatTurn` (no assistantText) → `onAssistantReply` chain
+    // would silently drop the assistant leg entirely.
+    const { agent, publishes } = makeCapturingAgent();
+    await persistChatTurnImpl(
+      agent, makeRuntime(),
+      makeMessage('reply', { id: 'asst-r31-write', roomId: 'r' } as any),
+      {} as State,
+      {
+        mode: 'assistant-reply',
+        userMessageId: 'mem-1',
+        userTurnPersisted: true,
+        assistantAlreadyPersisted: false,
+      },
+    );
+    const quads = publishes[0].quads;
+    const assistantMsgUri = 'urn:dkg:chat:msg:agent:r:mem-1';
+    const turnUri = 'urn:dkg:chat:turn:r:mem-1';
+    // Append-only branch wrote the assistant text + link.
+    expect(quads).toContainEqual(expect.objectContaining({
+      subject: assistantMsgUri, predicate: `${SCHEMA}text`, object: '"reply"',
+    }));
+    expect(quads).toContainEqual(expect.objectContaining({
+      subject: turnUri, predicate: `${DKG_ONT}hasAssistantMessage`, object: assistantMsgUri,
+    }));
+    // The string `'true'` (truthy, not boolean true) MUST also fail
+    // the `=== true` check — defence-in-depth against typos.
+    const { agent: a2, publishes: p2 } = makeCapturingAgent();
+    await persistChatTurnImpl(
+      a2, makeRuntime(),
+      makeMessage('reply', { id: 'asst-r31-write-2', roomId: 'r' } as any),
+      {} as State,
+      {
+        mode: 'assistant-reply',
+        userMessageId: 'mem-1',
+        userTurnPersisted: true,
+        assistantAlreadyPersisted: 'true' as unknown as boolean,
+      },
+    );
+    expect(p2[0].quads.length).toBeGreaterThan(0);
+  });
 });
 
 describe('persistChatTurnImpl — PR #229 round 13 (r13-2): headless user stub does NOT leak into session', () => {
@@ -1035,6 +1172,17 @@ describe('persistChatTurnImpl — PR #229 round 13 (r13-2): headless user stub d
 // PR #229 bot review round 15 — r15-2: headless stub URI MUST NOT collide
 // with the real user-message URI, even when the caller provides a
 // `userMessageId` that matches an earlier onChatTurn write.
+//
+// r31-1 update: the stub URI is now keyed on the same `turnKey` the
+// headless envelope uses (which itself derives from `userMessageId`
+// when present). The dedicated `msg:user-stub:` / `msg:agent-headless:`
+// namespace prefixes are sufficient to keep the stub from colliding
+// with the canonical `msg:user:${turnKey}` / `msg:agent:${turnKey}`
+// URIs — adding the assistant memory id was over-engineering that
+// broke retry idempotence (a reconnect with a fresh assistant memory
+// id produced a fresh stub pair on the SAME envelope, leaving
+// `getSessionGraphDelta`'s `LIMIT 1` query nondeterministic across
+// replays).
 // ===========================================================================
 describe('persistChatTurnImpl — PR #229 round 15 (r15-2): headless stub URI namespace isolation', () => {
   // -------------------------------------------------------------------
@@ -1044,11 +1192,11 @@ describe('persistChatTurnImpl — PR #229 round 15 (r15-2): headless stub URI na
   // the stub shared `msg:user:${turnKey}` with the real user msg, we
   // would stack a second `schema:author = agent:system` + empty
   // `schema:text` onto the real subject (RDF predicates are
-  // multi-valued), corrupting chat history. The fix keys the stub on
-  // the assistant memory id under a dedicated `msg:user-stub:`
-  // namespace so the two subjects can NEVER share an IRI.
+  // multi-valued), corrupting chat history. The fix uses the
+  // dedicated `msg:user-stub:` namespace so the two subjects can
+  // NEVER share an IRI even when the suffix (turnKey) matches.
   // -------------------------------------------------------------------
-  it('stub uses msg:user-stub: namespace keyed on assistant message id (not msg:user:)', async () => {
+  it('stub uses msg:user-stub: namespace keyed on the same turnKey as the envelope (NOT msg:user:)', async () => {
     const { agent, publishes } = makeCapturingAgent();
     await persistChatTurnImpl(
       agent, makeRuntime(),
@@ -1057,8 +1205,12 @@ describe('persistChatTurnImpl — PR #229 round 15 (r15-2): headless stub URI na
       { mode: 'assistant-reply', userMessageId: 'user-r15-1', userTurnPersisted: false },
     );
     const quads = publishes[0].quads;
-    // Stub subject under the dedicated namespace.
-    const stubUri = 'urn:dkg:chat:msg:user-stub:r:asst-r15-1';
+    // r31-1: stub URI is keyed on the same `turnKey` the envelope
+    // uses (`r:user-r15-1` here, derived from `userMessageId`),
+    // NOT on the assistant memory id. The `msg:user-stub:` namespace
+    // prefix keeps it disjoint from the canonical `msg:user:` URI
+    // for the same turnKey.
+    const stubUri = 'urn:dkg:chat:msg:user-stub:r:user-r15-1';
     expect(quads.some((q) =>
       q.subject === stubUri && q.predicate === RDF_TYPE && q.object === `${SCHEMA}Message`,
     )).toBe(true);
@@ -1068,33 +1220,75 @@ describe('persistChatTurnImpl — PR #229 round 15 (r15-2): headless stub URI na
     expect(quads.some((q) => q.subject === canonicalUserMsgUri)).toBe(false);
   });
 
-  it('stub URI is keyed on assistant memory id so two headless replies with the same userMessageId do NOT collide', async () => {
+  // ---------------------------------------------------------------------
+  // PR #229 bot review (r31-1 — actions.ts:1048): the previous
+  // revision keyed the stub URI off the assistant memory id, which
+  // produced a NEW stub on every retry that arrived with a fresh
+  // assistant `Memory.id`. Because the `headless-turn:${turnKey}`
+  // envelope itself is keyed on the stable `userMessageId`-derived
+  // `turnKey`, those retries accumulated multiple
+  // `dkg:hasUserMessage` / `dkg:hasAssistantMessage` edges on the
+  // SAME envelope subject, and `ChatMemoryManager.getSessionGraphDelta()`'s
+  // `LIMIT 1` resolution bound an arbitrary stub/assistant pair —
+  // i.e., reads were nondeterministic across reconnects.
+  //
+  // The fix: stub + assistant URIs share the envelope's `turnKey`,
+  // so two retries of the SAME logical reply produce byte-identical
+  // quads (idempotent). The dedicated namespace prefixes keep the
+  // stub disjoint from any canonical user/assistant URI.
+  // ---------------------------------------------------------------------
+  it('r31-1: two headless retries with the SAME userMessageId produce IDENTICAL stub + assistant URIs (idempotent)', async () => {
     const { agent: a1, publishes: p1 } = makeCapturingAgent();
     await persistChatTurnImpl(
       a1, makeRuntime(),
-      makeMessage('reply one', { id: 'asst-r15-a', roomId: 'r' } as any),
+      makeMessage('reply one', { id: 'asst-r31-a', roomId: 'r' } as any),
       {} as State,
       { mode: 'assistant-reply', userMessageId: 'same-parent', userTurnPersisted: false },
     );
     const { agent: a2, publishes: p2 } = makeCapturingAgent();
     await persistChatTurnImpl(
       a2, makeRuntime(),
-      makeMessage('reply two', { id: 'asst-r15-b', roomId: 'r' } as any),
+      makeMessage('reply two', { id: 'asst-r31-b', roomId: 'r' } as any),
       {} as State,
       { mode: 'assistant-reply', userMessageId: 'same-parent', userTurnPersisted: false },
     );
-    const stubSubjects1 = p1[0].quads.filter((q) =>
-      q.subject.startsWith('urn:dkg:chat:msg:user-stub:'),
-    ).map((q) => q.subject);
-    const stubSubjects2 = p2[0].quads.filter((q) =>
-      q.subject.startsWith('urn:dkg:chat:msg:user-stub:'),
-    ).map((q) => q.subject);
-    // Stubs are tied to the assistant memory id (asst-r15-a vs
-    // asst-r15-b) so they get distinct URIs even though both replies
-    // reference the same userMessageId.
-    expect(stubSubjects1).toContain('urn:dkg:chat:msg:user-stub:r:asst-r15-a');
-    expect(stubSubjects2).toContain('urn:dkg:chat:msg:user-stub:r:asst-r15-b');
-    expect(stubSubjects1[0]).not.toBe(stubSubjects2[0]);
+    const stubSubjects1 = p1[0].quads
+      .filter((q) => q.subject.startsWith('urn:dkg:chat:msg:user-stub:'))
+      .map((q) => q.subject);
+    const stubSubjects2 = p2[0].quads
+      .filter((q) => q.subject.startsWith('urn:dkg:chat:msg:user-stub:'))
+      .map((q) => q.subject);
+    const asstSubjects1 = p1[0].quads
+      .filter((q) => q.subject.startsWith('urn:dkg:chat:msg:agent-headless:'))
+      .map((q) => q.subject);
+    const asstSubjects2 = p2[0].quads
+      .filter((q) => q.subject.startsWith('urn:dkg:chat:msg:agent-headless:'))
+      .map((q) => q.subject);
+    // Both retries land on the SAME stub URI (keyed on the
+    // envelope's turnKey, which is stable across assistant-id
+    // rotation). Pre-r31 these were `asst-r31-a` vs `asst-r31-b`
+    // — a fresh pair on every reconnect.
+    expect(stubSubjects1).toContain('urn:dkg:chat:msg:user-stub:r:same-parent');
+    expect(stubSubjects2).toContain('urn:dkg:chat:msg:user-stub:r:same-parent');
+    expect(stubSubjects1[0]).toBe(stubSubjects2[0]);
+    // Same for the headless assistant URIs.
+    expect(asstSubjects1).toContain('urn:dkg:chat:msg:agent-headless:r:same-parent');
+    expect(asstSubjects2).toContain('urn:dkg:chat:msg:agent-headless:r:same-parent');
+    expect(asstSubjects1[0]).toBe(asstSubjects2[0]);
+    // And both retries point the envelope's hasUserMessage /
+    // hasAssistantMessage edges at the SAME stub/assistant pair so
+    // `getSessionGraphDelta()`'s `LIMIT 1` resolves deterministically
+    // across replays. Pre-r31 the second retry stacked a fresh pair
+    // onto the same envelope and the reader bound an arbitrary one.
+    const envelopeUri = 'urn:dkg:chat:headless-turn:r:same-parent';
+    const userEdges1 = p1[0].quads
+      .filter((q) => q.subject === envelopeUri && q.predicate === `${DKG_ONT}hasUserMessage`)
+      .map((q) => q.object);
+    const userEdges2 = p2[0].quads
+      .filter((q) => q.subject === envelopeUri && q.predicate === `${DKG_ONT}hasUserMessage`)
+      .map((q) => q.object);
+    expect(userEdges1).toEqual(['urn:dkg:chat:msg:user-stub:r:same-parent']);
+    expect(userEdges2).toEqual(['urn:dkg:chat:msg:user-stub:r:same-parent']);
   });
 
   it('headless turn envelope points dkg:hasUserMessage at the stub, NOT at the canonical user msg URI', async () => {
@@ -1115,8 +1309,14 @@ describe('persistChatTurnImpl — PR #229 round 15 (r15-2): headless stub URI na
     );
     // Exactly one hasUserMessage edge, pointing at the stub.
     expect(hasUserEdges).toHaveLength(1);
-    expect(hasUserEdges[0].object).toBe('urn:dkg:chat:msg:user-stub:r:asst-r15-c');
-    // Must NOT also point at the canonical user URI (no double edge).
+    // r31-1: stub URI is keyed on the envelope's `turnKey` (which
+    // is `r:parent-msg` here, derived from `userMessageId`), not on
+    // the assistant memory id `asst-r15-c`. The dedicated
+    // `msg:user-stub:` namespace keeps it disjoint from the
+    // canonical `msg:user:r:parent-msg` URI.
+    expect(hasUserEdges[0].object).toBe('urn:dkg:chat:msg:user-stub:r:parent-msg');
+    // Must NOT also point at the canonical user URI (the dedicated
+    // namespace prefix guarantees this; pin it for regression).
     expect(hasUserEdges[0].object).not.toBe('urn:dkg:chat:msg:user:r:parent-msg');
   });
 

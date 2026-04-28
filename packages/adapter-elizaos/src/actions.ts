@@ -1004,6 +1004,39 @@ export async function persistChatTurnImpl(
     // user message, but we still produce a `dkg:ChatTurn` subject so
     // ChatMemoryManager queries filtered on `?turn a dkg:ChatTurn`
     // can find this reply.
+
+    // PR #229 bot review (r31-1 — actions.ts:1107 / actions.ts:1149):
+    // the user-turn path can ALSO write the assistant leg when the
+    // caller plumbs `assistantText` / `assistantReply.text` /
+    // `state.lastAssistantReply`. If a separate `onAssistantReply`
+    // hook then fires for the same turn, the append-only branch
+    // below would re-emit `buildAssistantMessageQuads(...)` onto
+    // the SAME `msg:agent:${turnKey}` URI, stacking duplicate
+    // `schema:text` / `schema:dateCreated` / `schema:author` quads
+    // (RDF predicates are multi-valued). Downstream `LIMIT 1`
+    // queries against that subject would then bind nondeterministic
+    // values for the reply text.
+    //
+    // The plugin wrapper (`onAssistantReplyHandler` in src/index.ts)
+    // gates this at the boundary by consulting an in-process
+    // `persistedAssistantMessages` cache and short-circuiting the
+    // call entirely when the user-turn path already wrote the
+    // assistant leg. Defence-in-depth here: also accept an explicit
+    // `assistantAlreadyPersisted: true` option so direct callers
+    // that don't go through the wrapper (`dkgService` /
+    // `_dkgServiceLoose` users) get the same protection. Returning
+    // a synthetic no-op result with `tripleCount: 0` and the
+    // expected canonical turnUri is byte-equivalent to a successful
+    // idempotent re-fire — which is exactly what this branch
+    // semantically represents.
+    if (optsAny.assistantAlreadyPersisted === true) {
+      return {
+        tripleCount: 0,
+        turnUri: headlessAssistantReply ? headlessTurnUri : turnUri,
+        kcId: '',
+      };
+    }
+
     const assistantText = (message as any)?.content?.text
       ?? optsAny.assistantText
       ?? optsAny.assistantReply?.text
@@ -1032,29 +1065,36 @@ export async function persistChatTurnImpl(
       // predicates are multi-valued in RDF, so the store keeps BOTH
       // the real user's author/text AND the stub's).
       //
-      // Fix: key the stub on a DEDICATED `msg:user-stub:` namespace
-      // AND on the assistant memory id (when available) — the real
-      // user-message URI uses `msg:user:` + the user memory id's
-      // turnKey, so the two paths can never share a subject. The
-      // headless turn envelope still points `dkg:hasUserMessage` at
-      // the stub (not the real user msg); readers that care about
-      // the distinction filter on `dkg:headlessUserMessage "true"`
-      // (set by `buildHeadlessUserStubQuads`) or on the `user-stub:`
-      // prefix.
+      // PR #229 bot review (r31-1 — actions.ts:1048): the previous
+      // revision derived `stubTurnKey` from `rawMemoryId` (the
+      // assistant memory's own id) "to keep the stub distinct from
+      // the canonical msg:user URI". That distinctness is ALREADY
+      // provided by the dedicated `msg:user-stub:` / `msg:agent-
+      // headless:` namespace prefixes — adding the assistant id was
+      // over-engineering that broke retry idempotence: when the
+      // caller drives the headless path with a stable
+      // `userMessageId` (so `turnKey` is stable across retries) but
+      // the assistant Memory's `message.id` differs across
+      // reconnects, every retry produced a FRESH `stubTurnKey` →
+      // fresh `userStubUri` + fresh `headlessAssistantMsgUri`. The
+      // canonical `headless-turn:${turnKey}` envelope (keyed on the
+      // stable `turnKey`) then accumulated multiple
+      // `dkg:hasUserMessage` / `dkg:hasAssistantMessage` edges, and
+      // ChatMemoryManager.getSessionGraphDelta()'s `LIMIT 1` query
+      // bound to an arbitrary stub/assistant pair → reads were
+      // nondeterministic across replay.
       //
-      // We also build a distinct `stubTurnKey` so the stub URI never
-      // accidentally matches a turn URI the reader resolves as the
-      // canonical turn for a legitimate user-id-keyed turnKey.
-      const stubSourceId =
-        typeof rawMemoryId === 'string' && rawMemoryId.length > 0
-          ? rawMemoryId
-          : turnSourceId;
-      const stubTurnKey = `${encodeIriSegment(roomId)}:${encodeIriSegment(stubSourceId)}`;
-      const userStubUri = `${CHAT_NS}msg:user-stub:${stubTurnKey}`;
-      // r21-1: assistant message lives on its own URI keyed by
-      // the stub turn key so it cannot collide with a real
-      // canonical assistant message URI for the same `turnKey`.
-      const headlessAssistantMsgUri = `${CHAT_NS}msg:agent-headless:${stubTurnKey}`;
+      // Fix: key BOTH the stub user-message URI AND the headless
+      // assistant-message URI on the same `turnKey` the headless
+      // envelope already uses. The `msg:user-stub:` / `msg:agent-
+      // headless:` namespace prefixes are sufficient to keep the
+      // stub from colliding with any canonical `msg:user:` /
+      // `msg:agent:` URI for the same `turnKey`. Headless retries
+      // are now byte-identical and `getSessionGraphDelta()` always
+      // resolves to the same stub/assistant pair regardless of how
+      // many times the assistant Memory id rotated.
+      const userStubUri = `${CHAT_NS}msg:user-stub:${turnKey}`;
+      const headlessAssistantMsgUri = `${CHAT_NS}msg:agent-headless:${turnKey}`;
       const assistantQuads = buildAssistantMessageQuads(
         headlessAssistantMsgUri,
         userStubUri,
