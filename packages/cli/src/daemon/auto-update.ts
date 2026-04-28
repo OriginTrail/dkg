@@ -838,11 +838,13 @@ function sweepOrphanBuildProcesses(slotDir: string, log: (m: string) => void): v
 
 /**
  * Wipe per-package `dist/` directories and `tsconfig.tsbuildinfo` files in
- * the slot before building. Runs unconditionally (regardless of `forceClean`)
+ * the slot before building. Called on the default (`forceClean: false`) path
  * because most upstream packages build with bare `tsc`, which does not
  * remove generated files when their source is deleted/renamed. Without this,
  * a fetch-and-rebuild cycle could leave stale `.js` in `dist/` and quietly
- * activate it on the next slot swap. We deliberately do NOT touch:
+ * activate it on the next slot swap. The `forceClean: true` path runs
+ * `git clean -fdx` instead (which already covers dist/), so this helper is
+ * not called there. We deliberately do NOT touch:
  *   - `node_modules/` (preserved → pnpm install stays incremental)
  *   - `packages/evm-module/cache/` and `.../artifacts/` (Hardhat compile
  *     cache; cold solc builds on ARM64 routinely exceed the build-step
