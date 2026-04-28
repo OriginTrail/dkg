@@ -1926,7 +1926,20 @@ export class DkgNodePlugin {
     // but the underlying SPARQL queries kept executing), skip this turn's
     // recall to avoid amplifying load. The next turn that fires after
     // the in-flight recall settles gets fresh recall.
-    const recallSessionKey = ctx?.sessionKey ?? '__default__';
+    // T14 — Key by the full conversation identity, not just sessionKey.
+    // Channels can multiplex multiple conversations under one
+    // sessionKey (the same composite identity that `ChatTurnWriter`
+    // uses to keep per-conversation FIFO queues). Keying single-flight
+    // on raw `sessionKey` would suppress recall in unrelated threads
+    // when one slow conversation has work in flight. JSON.stringify
+    // gives a deterministic, collision-safe key without coupling to
+    // ChatTurnWriter's internal encoding.
+    const recallSessionKey = JSON.stringify([
+      ctx?.channelId ?? 'unknown',
+      ctx?.accountId ?? '',
+      ctx?.conversationId ?? '',
+      ctx?.sessionKey ?? '__default__',
+    ]);
     if (this.autoRecallInFlight.has(recallSessionKey)) return undefined;
 
     try {

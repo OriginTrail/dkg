@@ -289,6 +289,81 @@ describe("ChatTurnWriter", () => {
     expect(call[2]).toBe("real reply");
   });
 
+  it("T15 — onMessageSent collapses the FULL pending queue into one user-side (matches computeDelta)", async () => {
+    // Regression for T15: pre-fix, W4b shifted only the OLDEST pending
+    // user message and left any others queued. `computeDelta` (W4a)
+    // collapses consecutive user messages before one assistant reply
+    // into a single logical pair via `pendingUsers.join("\n")`. The
+    // mismatch caused two failures:
+    //   1. Setup-runtime / typed-hook-miss scenarios where ONLY W4b
+    //      runs: u2 stayed queued forever and got mis-paired with the
+    //      NEXT assistant reply.
+    //   2. Cross-path dedup broke when both paths fire — W4a stamped
+    //      `crossPathStamps[w4aOrigin("u1\nu2", reply)]` while W4b
+    //      peeked `w4aOrigin("u1", reply)` (different content keys),
+    //      so W4b proceeded to write a duplicate `(u1, reply)` turn.
+    writer.onMessageReceived({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "u1", messageId: "in-1" },
+    } as any);
+    writer.onMessageReceived({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "u2", messageId: "in-2" },
+    } as any);
+    await writer.onMessageSent({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "reply", success: true, messageId: "out-1" },
+    } as any);
+    await flushMicrotasks();
+    // Persist must have been called ONCE with the JOINED user-side.
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    const call = mockClient.storeChatTurn.mock.calls[0];
+    expect(call[1]).toBe("u1\nu2"); // joined, matches computeDelta
+    expect(call[2]).toBe("reply");
+    // Pending queue must be empty (no leftover u2).
+    const pending = (writer as any).pendingUserMessages;
+    expect(pending.size).toBe(0);
+  });
+
+  it("T15 — persist-failure restore preserves the ORIGINAL queue items (not the joined string)", async () => {
+    // Regression for T15: when persist fails, the catch block must
+    // restore each ORIGINAL queue item to the front, not the joined
+    // string. This way a later inbound that arrives between the
+    // failure and the retry queues normally and the next outbound
+    // re-collapses the full queue (old + new).
+    let firstAttempt = true;
+    mockClient.storeChatTurn = vi.fn().mockImplementation(async () => {
+      if (firstAttempt) {
+        firstAttempt = false;
+        throw new Error("transient daemon failure");
+      }
+      // also fail the persistOne single retry so the catch block runs
+      throw new Error("hard daemon failure");
+    });
+    writer = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
+    writer.onMessageReceived({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "u1", messageId: "in-1" },
+    } as any);
+    writer.onMessageReceived({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "u2", messageId: "in-2" },
+    } as any);
+    await writer.onMessageSent({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "reply", success: true, messageId: "out-1" },
+    } as any);
+    // Wait for persistOne 250ms backoff retry to complete.
+    await new Promise((r) => setTimeout(r, 600));
+
+    // The original two queue items must be restored at the front, NOT
+    // a single `"u1\nu2"` string.
+    const pending = (writer as any).pendingUserMessages;
+    const conversationKey = Array.from(pending.keys())[0] as string;
+    const restoredQueue = pending.get(conversationKey) as string[];
+    expect(restoredQueue).toEqual(["u1", "u2"]);
+  });
+
   it("R20.2 — w4bSessionCounts only increments for persists that consumed a pending user (chunked-reply safety)", async () => {
     // Regression for R20.2: pre-fix, every successful W4b persist
     // bumped `w4bSessionCounts` by 1, including chunk-2+ deliveries
@@ -1444,20 +1519,26 @@ describe("ChatTurnWriter", () => {
     expect(secondCall[2]).toBe("a2");
   });
 
-  it("FIFO pending queue pairs replies with the oldest unmatched inbound (R2.3)", async () => {
-    // Two inbound messages arrive back-to-back before any outbound reply.
+  it("pending queue collapses into one user-side per outbound (R2.3 / T15)", async () => {
+    // Pre-T15 this test asserted FIFO 1:1 matching (each outbound
+    // pairs with the next-oldest inbound). That diverged from W4a
+    // `computeDelta`, which collapses consecutive user messages
+    // before one assistant reply via `pendingUsers.join("\n")`.
+    // T15 aligned W4b with that semantic — the whole pending queue
+    // drains into the first outbound; subsequent outbounds with no
+    // queued users are treated as chunked replies / proactive
+    // notifications and bail per the R21.2 orphan-assistant guard.
     writer.onMessageReceived({ sessionKey: "sk", direction: "inbound", text: "first" });
     writer.onMessageReceived({ sessionKey: "sk", direction: "inbound", text: "second" });
-    // Two outbound replies go out in order.
     writer.onMessageSent({ sessionKey: "sk", direction: "outbound", text: "reply-1" });
     await flushMicrotasks();
     writer.onMessageSent({ sessionKey: "sk", direction: "outbound", text: "reply-2" });
     await flushMicrotasks();
-    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(2);
-    expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("first");
+    // Exactly ONE persist — `("first\nsecond", reply-1)`. `reply-2`
+    // bails because the queue is empty (R21.2).
+    expect(mockClient.storeChatTurn).toHaveBeenCalledTimes(1);
+    expect(mockClient.storeChatTurn.mock.calls[0][1]).toBe("first\nsecond");
     expect(mockClient.storeChatTurn.mock.calls[0][2]).toBe("reply-1");
-    expect(mockClient.storeChatTurn.mock.calls[1][1]).toBe("second");
-    expect(mockClient.storeChatTurn.mock.calls[1][2]).toBe("reply-2");
   });
 
   it("cross-path dedup: agent_end followed by message:sent with same content writes once (R2.2)", async () => {

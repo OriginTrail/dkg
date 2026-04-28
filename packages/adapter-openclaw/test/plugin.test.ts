@@ -2738,6 +2738,67 @@ describe('DkgNodePlugin', () => {
     await plugin.stop();
   });
 
+  it('T14 — single-flight key is per-conversation; a slow recall in one conversation does NOT block recall in a sibling conversation under the same sessionKey', async () => {
+    // Regression for T14: pre-fix, single-flight was keyed on raw
+    // `ctx.sessionKey`. Channels can multiplex several conversations
+    // under one sessionKey (the same composition that ChatTurnWriter
+    // uses for its FIFO queues), so a slow recall in conversation A
+    // would suppress recall in unrelated conversation B. Post-fix,
+    // the key is composed of channelId + accountId + conversationId +
+    // sessionKey so siblings stay independent.
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+      memory: { enabled: true },
+    } as any);
+    const mockApi: OpenClawPluginApi = {
+      config: { plugins: { slots: { memory: 'adapter-openclaw' } } },
+      registrationMode: 'full',
+      registerTool: () => {},
+      registerHook: () => {},
+      registerMemoryCapability: vi.fn(),
+      on: () => {},
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+      registerMemoryPromptSection: vi.fn(),
+    } as unknown as OpenClawPluginApi;
+    plugin.register(mockApi);
+    const client = (plugin as any).client;
+    let queryCalls = 0;
+    const pendingResolvers: Array<() => void> = [];
+    client.query = vi.fn().mockImplementation(async () => {
+      queryCalls++;
+      await new Promise<void>((resolve) => { pendingResolvers.push(resolve); });
+      return { results: { bindings: [] } };
+    });
+    (plugin as any).nodePeerId = '12D3KooWTestT14';
+
+    const event = { messages: [{ role: 'user', content: 'find something' }] };
+    // Two ctx values share the SAME sessionKey but differ on
+    // conversationId — exactly the scenario T14 flags.
+    const ctxA = { channelId: 'tg', accountId: 'bot', conversationId: 'chat-A', sessionKey: 'shared-sk' };
+    const ctxB = { channelId: 'tg', accountId: 'bot', conversationId: 'chat-B', sessionKey: 'shared-sk' };
+
+    // Conversation A: hangs in searchNarrow.
+    const turnA = (plugin as any).handleBeforePromptBuild(event, ctxA);
+    await new Promise((r) => setTimeout(r, 300));
+    await turnA;
+    const queriesAfterA = queryCalls;
+    expect(queriesAfterA).toBeGreaterThan(0);
+
+    // Conversation B fires while A still has queries in flight. With
+    // the per-conversation key, B MUST issue its own queries (not be
+    // blocked by A's reservation under the shared sessionKey).
+    const turnB = (plugin as any).handleBeforePromptBuild(event, ctxB);
+    await new Promise((r) => setTimeout(r, 300));
+    await turnB;
+    expect(queryCalls).toBeGreaterThan(queriesAfterA);
+
+    // Cleanup.
+    while (pendingResolvers.length) pendingResolvers.shift()!();
+    await new Promise((r) => setTimeout(r, 50));
+    await plugin.stop();
+  });
+
   it('R23.2 — stop() nulls out hookSurface refs so a later register() rebuilds the surface', async () => {
     // Regression for R23.2: pre-fix, stop() called hookSurface.destroy()
     // but left this.hookSurface and this.hookSurfaceApi populated.

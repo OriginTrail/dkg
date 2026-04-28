@@ -540,8 +540,23 @@ export class ChatTurnWriter {
       // be persisted later, they should go through a dedicated path
       // that supplies a synthesized user side or a distinct schema.
       if (!queue || queue.length === 0) return;
-      const userText = queue.shift()!;
-      if (queue.length === 0) this.pendingUserMessages.delete(conversationKey);
+      // T15 — Collapse the ENTIRE pending queue into one user-side,
+      // matching `computeDelta`'s pendingUsers join semantics. If a
+      // user sends `u1` then `u2` before the agent fires, both belong
+      // to the same logical turn (one assistant reply addresses both).
+      // Pre-fix, W4b shifted only the oldest, leaving `u2` queued —
+      // it would then be wrongly paired with the NEXT outbound, OR
+      // (in setup-runtime, where W4a doesn't run) silently never
+      // persist. The collapsed user-side also makes the W4a-stamped
+      // `crossPathStamps[w4aOrigin]` content key match what W4b
+      // computes here, so cross-path dedup stays symmetric.
+      // Snapshot before consuming so the persist-failure restore
+      // path below can re-queue the ORIGINAL items (not the joined
+      // string), preserving structure if a later inbound arrives
+      // before the retry.
+      const queuedItems = [...queue];
+      const userText = queuedItems.join("\n");
+      this.pendingUserMessages.delete(conversationKey);
       if (userText || assistantText) {
         // Cross-path dedup, W4b side (T5: short-TTL stamp map):
         //   PEEK w4a-origin — non-mutating; if W4a already wrote this
@@ -614,13 +629,18 @@ export class ChatTurnWriter {
             // W4b is the ONLY path with a copy of `userText` (it lives
             // ephemerally in the FIFO queue). On a hard persist failure
             // there's no `agent_end` backfill — the messages array doesn't
-            // exist for non-LLM channels. Push the consumed user message
+            // exist for non-LLM channels. Push the consumed user messages
             // back to the FRONT of the queue so the next outbound delivery
             // for this conversation re-pairs and retries. Without this,
             // a transient daemon outage would silently drop the turn.
-            if (userText) {
+            // T15 — Restore the ORIGINAL queue items (not the joined
+            // `userText` string) so a later inbound that arrives between
+            // the failure and the next outbound queues normally — the
+            // next outbound will collapse the full queue (old items +
+            // new) into one user-side, matching W4a's pairing.
+            if (queuedItems.length > 0) {
               const restored = this.pendingUserMessages.get(conversationKey) ?? [];
-              restored.unshift(userText);
+              restored.unshift(...queuedItems);
               this.pendingUserMessages.set(conversationKey, restored);
             }
             // Release the in-flight reservation so a retry can proceed.
