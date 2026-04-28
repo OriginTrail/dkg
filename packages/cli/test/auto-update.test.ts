@@ -361,7 +361,7 @@ describe('blue-green checkForUpdate', () => {
     expect(swapSlotCalls).toContain('b');
     expect(
       writeFileCalls.some((call) =>
-        normalizePathString(call[0]).endsWith('/tmp/dkg-test/.current-commit') && call[1] === latest)
+        normalizePathString(call[0]).includes('/tmp/dkg-test/.current-commit') && call[1] === latest)
     ).toBe(true);
   });
 
@@ -1370,7 +1370,7 @@ describe('autoupdater hardening', () => {
     expect(contractsTimeout).toBe(1_200_000);
   });
 
-  it('contract-diff fails closed in a SAFE direction: rebuilds contracts when diff errors and parent fetch also errors', async () => {
+  it('contract-diff fails closed: skips contract build when diff errors and parent fetch also errors (matches legacy behaviour)', async () => {
     readFileImpl = async () => 'aaa111';
     makeFetchOk('bbb222');
     let contractsBuilt = false;
@@ -1390,6 +1390,40 @@ describe('autoupdater hardening', () => {
       return { stdout: '', stderr: '' };
     };
     await performUpdate(AU, () => {});
+    expect(contractsBuilt).toBe(false);
+  });
+
+  it('contract-diff retries via `git fetch --depth=1` for the missing parent commit before giving up', async () => {
+    readFileImpl = async () => 'aaa111';
+    makeFetchOk('bbb222');
+    let firstDiffSeen = false;
+    let fetchSeen = false;
+    let secondDiffSeen = false;
+    execFileImpl = async (file: string, args: string[]) => {
+      if (file === 'git' && args[0] === 'diff') {
+        if (!firstDiffSeen) {
+          firstDiffSeen = true;
+          throw new Error('fatal: bad revision');
+        }
+        secondDiffSeen = true;
+        return { stdout: 'packages/evm-module/contracts/Foo.sol\n', stderr: '' };
+      }
+      if (file === 'git' && args[0] === 'fetch' && args.includes('--depth=1')) {
+        fetchSeen = true;
+      }
+      return { stdout: '', stderr: '' };
+    };
+    let contractsBuilt = false;
+    execImpl = async (cmd: string) => {
+      if (cmd.includes('pnpm --filter @origintrail-official/dkg-evm-module build')) {
+        contractsBuilt = true;
+      }
+      return { stdout: '', stderr: '' };
+    };
+    await performUpdate(AU, () => {});
+    expect(firstDiffSeen).toBe(true);
+    expect(fetchSeen).toBe(true);
+    expect(secondDiffSeen).toBe(true);
     expect(contractsBuilt).toBe(true);
   });
 
@@ -1404,7 +1438,9 @@ describe('autoupdater hardening', () => {
     makeFetchOk('bbb222');
     let writtenStatus: any = null;
     writeFileImpl = async (path: any, data: any) => {
-      if (String(path).endsWith('.update-status.json')) {
+      // writeFileAtomic writes to <path>.tmp.<pid>.<rand>, then rename(tmp, path).
+      // The tmp path INCLUDES `.update-status.json`, so use .includes() not .endsWith().
+      if (String(path).includes('.update-status.json')) {
         writtenStatus = JSON.parse(String(data));
       }
     };
@@ -1433,7 +1469,7 @@ describe('autoupdater hardening', () => {
     };
     let writtenStatus: any = null;
     writeFileImpl = async (path: any, data: any) => {
-      if (String(path).endsWith('.update-status.json')) {
+      if (String(path).includes('.update-status.json')) {
         writtenStatus = JSON.parse(String(data));
       }
     };
@@ -1441,5 +1477,55 @@ describe('autoupdater hardening', () => {
     expect(writtenStatus).toBeTruthy();
     expect(writtenStatus.consecutiveFailures).toBe(3);
     expect(writtenStatus.lastAttempt?.status).toBe('failed');
+  });
+
+  it('atomic bookkeeping writes go through a temp path then rename to final', async () => {
+    // Reproduces the dkg-v9-relay-01 corruption scenario: a partial / retried
+    // writeFile to `.current-commit` left an 80-char doubled SHA on disk. With
+    // writeFileAtomic, the actual writeFile lands at a tmp path and only the
+    // rename produces the live file — so an interrupted write can never be
+    // observed by the daemon as a corrupted live file.
+    readFileImpl = async () => 'aaa111';
+    makeFetchOk('bbb222');
+    const renameCalls: Array<[string, string]> = [];
+    _autoUpdateIo.rename = (async (from: any, to: any) => {
+      renameCalls.push([String(from), String(to)]);
+    }) as any;
+    await performUpdate(AU, () => {});
+    // We expect a rename whose target is the live `.current-commit` and source
+    // is a sibling tmp path. The same applies to `.current-version` and
+    // `.update-status.json`.
+    const commitRename = renameCalls.find(([, to]) => to.endsWith('/.current-commit'));
+    expect(commitRename).toBeTruthy();
+    expect(commitRename?.[0]).toMatch(/\.current-commit\.tmp\./);
+    const statusRename = renameCalls.find(([, to]) => to.endsWith('/.update-status.json'));
+    expect(statusRename).toBeTruthy();
+    expect(statusRename?.[0]).toMatch(/\.update-status\.json\.tmp\./);
+  });
+
+  it('self-heals pre-existing `.current-commit` corruption (>64 chars) by re-deriving from git HEAD', async () => {
+    // Exact dkg-v9-relay-01 reproduction: the file on disk contained the same
+    // 40-char SHA written twice end-to-end (80 chars total). The daemon should
+    // detect the malformed value, fall back to `git rev-parse HEAD`, and on
+    // the next swap rewrite the file (atomically) with the real SHA.
+    const corrupted = 'a'.repeat(40) + 'a'.repeat(40); // 80 chars
+    readFileImpl = async (path: any) => {
+      const p = String(path);
+      if (p.endsWith('.current-commit')) return corrupted;
+      return '';
+    };
+    makeFetchOk('bbb222');
+    let revParseCalled = false;
+    execImpl = async (cmd: string) => {
+      if (cmd.includes('git rev-parse HEAD')) {
+        revParseCalled = true;
+        return { stdout: 'aaa111\n', stderr: '' };
+      }
+      return { stdout: '', stderr: '' };
+    };
+    const logCalls: string[] = [];
+    await performUpdate(AU, (m) => logCalls.push(m));
+    expect(revParseCalled).toBe(true);
+    expect(logCalls.some((m) => m.includes('malformed value') && m.includes('len=80'))).toBe(true);
   });
 });

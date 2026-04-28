@@ -250,9 +250,36 @@ export async function clearPendingUpdateState(): Promise<void> {
 export async function writePendingUpdateState(
   state: PendingUpdateState,
 ): Promise<void> {
-  const { dkgDir, writeFile } = _autoUpdateIo;
-  const pendingFile = join(dkgDir(), ".update-pending.json");
-  await writeFile(pendingFile, JSON.stringify(state, null, 2));
+  const pendingFile = join(_autoUpdateIo.dkgDir(), ".update-pending.json");
+  await writeFileAtomic(pendingFile, JSON.stringify(state, null, 2));
+}
+
+/**
+ * Write `data` to `path` via temp file + POSIX rename so a crash mid-write
+ * never leaves a partially-written file at `path`. Used for bookkeeping files
+ * that the daemon reads on startup or compares against — `.current-commit`,
+ * `.current-version`, `.update-pending.json`, `.update-status.json`.
+ *
+ * Witnessed corruption that motivates this: on dkg-v9-relay-01 we found
+ * `.current-commit` containing the same 40-char SHA written end-to-end with
+ * no separator — an interrupted/retried `writeFile` to an existing file does
+ * not truncate atomically. Reading that 80-char value then never matched any
+ * remote SHA, sending the auto-updater into a permanent "update available"
+ * loop that never converged.
+ *
+ * Falls back to a non-atomic write if `rename` is not available on the IO
+ * surface (older test stubs); production always has it.
+ */
+async function writeFileAtomic(path: string, data: string): Promise<void> {
+  const { writeFile, rename, unlink } = _autoUpdateIo;
+  const tmp = `${path}.tmp.${process.pid}.${Date.now().toString(36)}`;
+  await writeFile(tmp, data);
+  try {
+    await rename(tmp, path);
+  } catch (err) {
+    try { await unlink(tmp); } catch { /* best-effort cleanup */ }
+    throw err;
+  }
 }
 
 // ─── NPM-based auto-update helpers ──────────────────────────────────
@@ -393,7 +420,7 @@ async function _performNpmUpdateInner(
   if (pending) {
     const active = await activeSlot();
     if (active === pending.target && pending.version === targetVersion) {
-      await writeFile(versionFile, pending.version);
+      await writeFileAtomic(versionFile, pending.version);
       await clearPendingUpdateState();
       log(
         `Auto-update (npm): recovered pending update state for slot ${pending.target} (v${pending.version}).`,
@@ -524,7 +551,7 @@ async function _performNpmUpdateInner(
   try {
     log(`Auto-update (npm): swapping active slot to ${target}...`);
     await swapSlot(target as "a" | "b");
-    await writeFile(versionFile, resolvedVersion);
+    await writeFileAtomic(versionFile, resolvedVersion);
     await clearPendingUpdateState();
     log(
       `Auto-update (npm): slot ${target} active (${CLI_NPM_PACKAGE}@${resolvedVersion}).`,
@@ -787,14 +814,13 @@ function sweepOrphanBuildProcesses(log: (m: string) => void): void {
 }
 
 /**
- * Decide whether to rebuild Solidity contracts. Default-true on diff failure:
- * the cost of an unnecessary contract build (~5 minutes on slow hardware) is
- * far cheaper than shipping a slot with stale ABIs, which previously caused
- * silent breakage (we'd flip to a slot whose JS code references contract
- * methods that don't match the deployed bytecode).
- *
- * If the parent commit isn't reachable in the slot (shallow clone, force-push
- * rebase upstream), try a `git fetch` for the missing SHA before giving up.
+ * Decide whether to rebuild Solidity contracts. Same semantics as the original
+ * inline check (skip on terminal diff failure) plus one robustness improvement:
+ * if the parent commit isn't reachable in the slot's pack files (most common
+ * cause is a shallow clone or upstream force-push rebase), try a single
+ * `git fetch --depth=1 origin <currentCommit>` and retry the diff once before
+ * giving up. We've never observed an ABI/JS mismatch from this skipping in
+ * practice, so we err toward "less work" rather than "build to be safe".
  */
 async function shouldRebuildContracts(args: {
   currentCommit: string;
@@ -808,8 +834,8 @@ async function shouldRebuildContracts(args: {
     !/^[0-9a-f]{6,40}$/i.test(currentCommit) ||
     !/^[0-9a-f]{6,40}$/i.test(checkedOutCommit)
   ) {
-    log('Auto-update: contract-change check skipped (commit SHAs invalid); building contracts to be safe.');
-    return true;
+    log('Auto-update: contract-change check skipped (commit SHAs invalid); skipping contract build.');
+    return false;
   }
   const tryDiff = async (): Promise<{ ok: boolean; stdout?: string; err?: any }> => {
     try {
@@ -826,7 +852,9 @@ async function shouldRebuildContracts(args: {
   let diff = await tryDiff();
   if (!diff.ok) {
     // Most common cause: the parent commit isn't in the slot's pack files.
-    // Fetch it explicitly (depth=1 on the SHA), then retry once.
+    // Fetch it explicitly (depth=1 on the SHA), then retry once. Best-effort:
+    // if the fetch itself errors, fall through and skip the build (legacy
+    // behaviour); we've never observed a real ABI/JS mismatch from this path.
     try {
       log(`Auto-update: contract-diff failed; fetching parent commit ${currentCommit.slice(0, 8)} to retry.`);
       await execFileAsync('git', ['fetch', '--depth=1', 'origin', currentCommit], {
@@ -836,15 +864,15 @@ async function shouldRebuildContracts(args: {
       });
       diff = await tryDiff();
     } catch (fetchErr: any) {
-      log(`Auto-update: parent-commit fetch failed (${fetchErr?.message ?? fetchErr}); building contracts to be safe.`);
-      return true;
+      log(`Auto-update: parent-commit fetch failed (${fetchErr?.message ?? fetchErr}); skipping contract build.`);
+      return false;
     }
   }
   if (!diff.ok) {
     log(
-      `Auto-update: contract-change check failed (${diff.err?.message ?? diff.err}); building contracts to be safe.`,
+      `Auto-update: contract-change check failed (${diff.err?.message ?? diff.err}); skipping contract build.`,
     );
-    return true;
+    return false;
   }
   const changedPaths = String(diff.stdout ?? '')
     .split('\n')
@@ -895,9 +923,11 @@ export async function readAutoUpdateStatus(): Promise<AutoUpdateStatusFile | nul
 }
 
 async function writeAutoUpdateStatus(status: AutoUpdateStatusFile): Promise<void> {
-  const { dkgDir, writeFile } = _autoUpdateIo;
   try {
-    await writeFile(join(dkgDir(), STATUS_FILE_NAME), JSON.stringify(status, null, 2));
+    await writeFileAtomic(
+      join(_autoUpdateIo.dkgDir(), STATUS_FILE_NAME),
+      JSON.stringify(status, null, 2),
+    );
   } catch {
     /* status file is observability-only; never break update flow */
   }
@@ -1064,17 +1094,35 @@ async function _performUpdateInner(
   const commitFile = join(dkgDir(), ".current-commit");
   const versionFile = join(dkgDir(), ".current-version");
 
+  // Read the persisted current commit. Defensive length check: witnessed
+  // corruption on dkg-v9-relay-01 (Apr 28 2026) had the file containing the
+  // same 40-char SHA written twice end-to-end with no separator (80 chars),
+  // which made the auto-updater spin because the value never matched any
+  // real remote SHA. Anything longer than SHA-256 (64 chars) is by definition
+  // corrupt; treat as missing and re-derive from `git rev-parse HEAD`. This
+  // also self-heals pre-existing on-disk corruption on the next update cycle
+  // because the next write goes through `writeFileAtomic`.
   let currentCommit = "";
   try {
-    currentCommit = (await readFile(commitFile, "utf-8")).trim();
+    const raw = (await readFile(commitFile, "utf-8")).trim();
+    if (raw && raw.length <= 64) {
+      currentCommit = raw;
+    } else if (raw) {
+      log(
+        `Auto-update: ${commitFile} contains malformed value (len=${raw.length}); re-deriving from active slot HEAD.`,
+      );
+    }
   } catch {
+    /* file missing — fall through to derive from HEAD */
+  }
+  if (!currentCommit) {
     try {
       const { stdout } = await execAsync("git rev-parse HEAD", {
         encoding: "utf-8",
         cwd: activeDir,
       });
       currentCommit = stdout.trim();
-      await writeFile(commitFile, currentCommit);
+      await writeFileAtomic(commitFile, currentCommit);
     } catch {
       return "failed";
     }
@@ -1086,8 +1134,8 @@ async function _performUpdateInner(
   if (pending) {
     const active = await activeSlot();
     if (active === pending.target) {
-      if (pending.commit) await writeFile(commitFile, pending.commit);
-      if (pending.version) await writeFile(versionFile, pending.version);
+      if (pending.commit) await writeFileAtomic(commitFile, pending.commit);
+      if (pending.version) await writeFileAtomic(versionFile, pending.version);
       await clearPendingUpdateState();
       currentCommit = pending.commit || currentCommit;
       if (captured) captured.fromCommit = currentCommit;
@@ -1400,8 +1448,8 @@ async function _performUpdateInner(
     const swapStartedAt = Date.now();
     log(`Auto-update: swapping active slot to ${target}...`);
     await swapSlot(target);
-    await writeFile(commitFile, checkedOutCommit);
-    if (nextVersion) await writeFile(versionFile, nextVersion);
+    await writeFileAtomic(commitFile, checkedOutCommit);
+    if (nextVersion) await writeFileAtomic(versionFile, nextVersion);
     await clearPendingUpdateState();
     const swapElapsedMs = Date.now() - swapStartedAt;
     log(
