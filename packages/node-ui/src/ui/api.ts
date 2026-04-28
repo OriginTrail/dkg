@@ -759,6 +759,10 @@ export type OpenClawStreamEvent =
   | { type: 'final'; text: string; correlationId: string }
   | { type: 'error'; error: string };
 
+type HermesRawStreamEvent =
+  | OpenClawStreamEvent
+  | { type: 'delta'; text?: string; correlationId?: string };
+
 export type LocalAgentChannelTarget = 'bridge' | 'gateway';
 
 export interface LocalAgentHealthResponse {
@@ -944,6 +948,13 @@ export async function streamHermesLocalChat(
   let finalPayload: { text: string; correlationId: string } | undefined;
   let streamError: Error | undefined;
 
+  const normalizeHermesEvent = (event: HermesRawStreamEvent): OpenClawStreamEvent => {
+    if (event.type === 'delta') {
+      return { type: 'text_delta', delta: event.text ?? '' };
+    }
+    return event;
+  };
+
   const handleEvent = (event: OpenClawStreamEvent): void => {
     opts.onEvent?.(event);
     if (event.type === 'error') {
@@ -963,7 +974,7 @@ export async function streamHermesLocalChat(
       const dataLine = line.slice(5).trim();
       if (!dataLine) continue;
       try {
-        handleEvent(JSON.parse(dataLine) as OpenClawStreamEvent);
+        handleEvent(normalizeHermesEvent(JSON.parse(dataLine) as HermesRawStreamEvent));
       } catch { /* ignore malformed frames */ }
       if (streamError) return;
     }
@@ -971,7 +982,7 @@ export async function streamHermesLocalChat(
       const dataLine = buffer.trim().slice(5).trim();
       if (!dataLine) return;
       try {
-        handleEvent(JSON.parse(dataLine) as OpenClawStreamEvent);
+        handleEvent(normalizeHermesEvent(JSON.parse(dataLine) as HermesRawStreamEvent));
       } catch { /* ignore malformed frames */ }
       buffer = '';
     }

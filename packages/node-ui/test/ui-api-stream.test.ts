@@ -145,6 +145,42 @@ describe('ui local-agent stream api', () => {
     expect(requestLog.some(r => r.url.includes('/api/hermes-channel/stream'))).toBe(true);
   });
 
+  it('normalizes Hermes delta/text SSE frames into local-agent text deltas', async () => {
+    const prevFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      const encoder = new TextEncoder();
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(encoder.encode('data: {"type":"delta","text":"Her","correlationId":"h2"}\n\n'));
+          controller.enqueue(encoder.encode('data: {"type":"delta","text":"mes","correlationId":"h2"}\n\n'));
+          controller.enqueue(encoder.encode('data: {"type":"final","text":"Hermes","correlationId":"h2"}\n\n'));
+          controller.close();
+        },
+      });
+      return new Response(stream, {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream' },
+      });
+    }) as typeof globalThis.fetch;
+
+    const events: Array<{ type: string; delta?: string }> = [];
+    try {
+      const res = await streamHermesLocalChat('hi', {
+        onEvent: (event) => events.push(event),
+      });
+
+      expect(res.text).toBe('Hermes');
+      expect(res.correlationId).toBe('h2');
+      expect(events).toMatchObject([
+        { type: 'text_delta', delta: 'Her' },
+        { type: 'text_delta', delta: 'mes' },
+        { type: 'final' },
+      ]);
+    } finally {
+      globalThis.fetch = prevFetch;
+    }
+  });
+
   it('requests session graph delta with turn watermark query params', async () => {
     requestLog.length = 0;
 

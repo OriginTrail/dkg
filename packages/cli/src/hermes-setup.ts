@@ -5,13 +5,11 @@ export type HermesMemoryMode = 'primary' | 'tools-only';
 export interface HermesSetupCliOptions {
   profile?: string;
   profileName?: string;
-  hermesBin?: string;
   daemonUrl?: string;
   bridgeUrl?: string;
   gatewayUrl?: string;
   bridgeHealthUrl?: string;
   port?: string | number;
-  cwd?: string;
   memoryMode?: HermesMemoryMode;
   verify?: boolean;
   start?: boolean;
@@ -21,13 +19,11 @@ export interface HermesSetupCliOptions {
 export interface NormalizedHermesSetupOptions {
   profile?: string;
   profileName?: string;
-  hermesBin?: string;
   daemonUrl?: string;
   bridgeUrl?: string;
   gatewayUrl?: string;
   bridgeHealthUrl?: string;
   port?: number;
-  cwd?: string;
   memoryMode?: HermesMemoryMode;
   verify: boolean;
   start: boolean;
@@ -64,13 +60,11 @@ export function normalizeHermesSetupOptions(opts: HermesSetupCliOptions): Normal
   return {
     profile: trimmed(opts.profile) ?? trimmed(opts.profileName),
     profileName: trimmed(opts.profileName),
-    hermesBin: trimmed(opts.hermesBin),
     daemonUrl: trimmed(opts.daemonUrl),
     bridgeUrl: trimmed(opts.bridgeUrl),
     gatewayUrl: trimmed(opts.gatewayUrl),
     bridgeHealthUrl: trimmed(opts.bridgeHealthUrl),
     port: normalizePort(opts.port),
-    cwd: trimmed(opts.cwd),
     memoryMode,
     verify: opts.verify !== false,
     start: opts.start !== false,

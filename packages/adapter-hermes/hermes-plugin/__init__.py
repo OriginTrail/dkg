@@ -97,6 +97,42 @@ def _save_cache(cache: dict, agent_name: str = "") -> None:
         logger.warning(f"[dkg] Failed to save cache: {e}")
 
 
+def _stable_scope_hash(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8", errors="ignore")).hexdigest()[:12]
+
+
+def _session_segment(value: str) -> str:
+    cleaned = []
+    for char in value.strip():
+        cleaned.append(char.lower() if char.isalnum() or char in "._-" else "-")
+    segment = "-".join(part for part in "".join(cleaned).split("-") if part)
+    return segment or _stable_scope_hash(value)
+
+
+def _scoped_session_id(raw_session_id: str, config: Optional[dict] = None) -> str:
+    """Scope Hermes session IDs by profile/home before DKG persistence."""
+    session_id = str(raw_session_id or "default")
+    if session_id.startswith("hermes:dkg:"):
+        return session_id
+
+    from hermes_constants import get_hermes_home
+
+    hermes_home = str(get_hermes_home())
+    profile_name = ""
+    if config:
+        profile_name = str(
+            config.get("profile_name")
+            or config.get("profileName")
+            or config.get("profile")
+            or ""
+        ).strip()
+    if not profile_name:
+        profile_name = Path(hermes_home).name or "default"
+
+    scope = f"profile-{_session_segment(profile_name)}:home-{_stable_scope_hash(hermes_home)}"
+    return f"hermes:dkg:{scope}:{session_id}"
+
+
 # ---------------------------------------------------------------------------
 # Tool schemas
 # ---------------------------------------------------------------------------
@@ -406,7 +442,7 @@ class DKGMemoryProvider(MemoryProvider):
 
     def initialize(self, session_id: str, **kwargs) -> None:
         self._config = _load_config()
-        self._session_id = session_id
+        self._session_id = _scoped_session_id(session_id, self._config)
         self._agent_name = (
             self._config.get("agent_name")
             or kwargs.get("agent_identity", "")
@@ -602,7 +638,7 @@ class DKGMemoryProvider(MemoryProvider):
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
         """Send turn to daemon for entity extraction + persistence."""
         self._turn_count += 1
-        effective_session_id = session_id or self._session_id
+        effective_session_id = _scoped_session_id(session_id or self._session_id, self._config)
         turn_id = self._build_turn_id(effective_session_id, self._turn_count, user_content, assistant_content)
         idempotency_key = f"hermes:{turn_id}"
         if self._offline or not self._client:

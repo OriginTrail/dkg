@@ -42,7 +42,6 @@ export interface HermesCliOptions {
   gatewayUrl?: string;
   bridgeHealthUrl?: string;
   port?: string | number;
-  cwd?: string;
   memoryMode?: HermesMemoryMode | 'primary';
   dryRun?: boolean;
   verify?: boolean;
@@ -152,6 +151,7 @@ export function setupHermesProfile(options: HermesSetupOptions = {}): HermesSetu
     ...(plan.state.bridge ? { bridge: plan.state.bridge } : {}),
     context_graph: plan.state.contextGraph,
     agent_name: plan.state.agentName ?? '',
+    profile_name: plan.profile.profileName ?? '',
     memory_mode: plan.profile.memoryMode,
     publish_guard: plan.state.publishGuard,
     publish_tool: plan.state.publishGuard.defaultToolExposure,
