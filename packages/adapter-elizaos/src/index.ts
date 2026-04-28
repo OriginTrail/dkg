@@ -724,7 +724,17 @@ export const dkgPlugin: Plugin & {
     onChatTurnHandler(runtime, message, state, options as Record<string, unknown> | undefined)) as DkgUserTurnHook,
 };
 
-export { dkgService, getAgent } from './service.js';
+export { dkgService, dkgServiceLegacy, getAgent } from './service.js';
+// PR #229 bot review (r31-4 — packages/adapter-elizaos/src/service.ts:359).
+// Re-export the legacy loose-typed service surface from the package
+// entrypoint so consumers importing
+// `@origintrail-official/dkg-adapter-elizaos` can actually reach the
+// `@deprecated` migration alias. Without this re-export the
+// `Record<string, unknown>` overload removal in r31-3 was a hard
+// breaking change for downstream `as any` callers — they had no
+// in-package surface to switch onto. See `service.ts` for the rest
+// of the rationale.
+export type { DKGServiceLoose } from './service.js';
 export { dkgKnowledgeProvider } from './provider.js';
 export {
   dkgPublish,

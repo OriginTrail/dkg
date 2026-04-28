@@ -29,6 +29,7 @@
  * flagged.
  */
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { _dkgServiceLoose, dkgService, dkgServiceLegacy } from '../src/service.js';
 import type {
   AssistantReplyChatTurnOptions,
@@ -373,6 +374,93 @@ describe('r18-2: DKGService overload contract', () => {
       const pending = dkgService.persistChatTurn(runtime, userMsg, undefined, strictOpts);
       void (pending as Promise<unknown>).catch(() => {});
       expect(typeof (pending as Promise<unknown>)).toBe('object');
+    });
+
+    // PR #229 bot review (r31-4 — packages/adapter-elizaos/src/service.ts:359).
+    //
+    // r31-3 introduced `dkgServiceLegacy` as a separate `@deprecated`
+    // export on `service.ts` for downstream `as any` callers. The bot
+    // pointed out that the package entrypoint (`src/index.ts`) only
+    // re-exported `dkgService` — `dkgServiceLegacy` was not visible to
+    // consumers importing from `@origintrail-official/dkg-adapter-elizaos`,
+    // so the catch-all overload removal on `DKGService` remained a
+    // breaking change with no in-package migration alias.
+    //
+    // r31-4 re-exports `dkgServiceLegacy` (and the `DKGServiceLoose`
+    // type) from `src/index.ts`. These tests pin that the public
+    // entrypoint actually exposes the migration alias.
+    it('[r31-4] `dkgServiceLegacy` is re-exported from the package entrypoint (`src/index.ts`)', async () => {
+      const indexExports = (await import('../src/index.js')) as Record<
+        string,
+        unknown
+      >;
+      // Runtime check: the alias is reachable from the public barrel.
+      expect(indexExports.dkgServiceLegacy).toBeDefined();
+      // Identity pin: the entrypoint export is the SAME runtime
+      // object as the `service.ts` export (no double-wrapping that
+      // could subtly drift the `@deprecated` annotation away from
+      // the actual handle consumers use).
+      expect(indexExports.dkgServiceLegacy).toBe(dkgServiceLegacy);
+      // And consequently the same impl as `dkgService` (because
+      // `dkgServiceLegacy === _dkgServiceLoose === dkgService`'s impl
+      // — pinned in the r31-3 identity test above).
+      expect(indexExports.dkgServiceLegacy).toBe(_dkgServiceLoose);
+    });
+
+    it('[r31-4] importing `dkgServiceLegacy` from the package barrel routes through the same `persistChatTurnImpl` as the strict `dkgService`', async () => {
+      // Cross-handle wiring pin: a malformed `Record<string, unknown>`
+      // payload routed through the BARREL-exported `dkgServiceLegacy`
+      // hits the same runtime guard as the `service.ts`-exported
+      // handle. Anything that breaks this wiring (e.g. accidentally
+      // re-exporting a stale snapshot) would surface as a different
+      // error message or a different rejection shape.
+      const { dkgServiceLegacy: barrelLegacy } = (await import(
+        '../src/index.js'
+      )) as { dkgServiceLegacy: typeof dkgServiceLegacy };
+      const runtime = makeRuntime();
+      const msg: Memory = makePlainMemoryWithoutId();
+      const malformed: Record<string, unknown> = {
+        mode: 'assistant-reply',
+        userMessageId: 'msg-r31-4-user-parent',
+        userTurnPersisted: false,
+      };
+      await expect(
+        barrelLegacy.persistChatTurn(runtime, msg, undefined, malformed),
+      ).rejects.toThrow(/DKG node not started/);
+    });
+
+    it('[r31-4] the public entrypoint exposes BOTH the strict `dkgService` and the deprecated `dkgServiceLegacy` (consumers can pick their migration speed)', async () => {
+      // Anti-removal guard: a future refactor that strips
+      // `dkgServiceLegacy` from the entrypoint reintroduces the
+      // exact breaking change r31-4 fixes. Pin both names at the
+      // package boundary so the deprecation path stays observable
+      // until the next major bump.
+      const indexExports = (await import('../src/index.js')) as Record<
+        string,
+        unknown
+      >;
+      expect(typeof indexExports.dkgService).toBe('object');
+      expect(typeof indexExports.dkgServiceLegacy).toBe('object');
+      // Type-only re-export sanity: `DKGServiceLoose` is type-only
+      // (no runtime presence), but its source-level re-export is
+      // checked by the source guard below.
+    });
+
+    it('[r31-4] `src/index.ts` source re-exports BOTH `dkgService` and `dkgServiceLegacy` (anti-drift guard for the public surface)', () => {
+      // Source-level pin: the re-export line in `src/index.ts` MUST
+      // carry both names. If a future refactor accidentally strips
+      // `dkgServiceLegacy` from the re-export (e.g. an auto-import
+      // tidy-up), this assertion fails before users hit the
+      // breaking change.
+      const indexPath = new URL('../src/index.ts', import.meta.url).pathname;
+      const src = readFileSync(indexPath, 'utf-8');
+      expect(src).toMatch(
+        /export\s*\{\s*[^}]*\bdkgService\b[^}]*\bdkgServiceLegacy\b[^}]*\}\s*from\s*['"]\.\/service\.js['"]/,
+      );
+      // And the `DKGServiceLoose` type re-export is present too.
+      expect(src).toMatch(
+        /export\s+type\s*\{[^}]*\bDKGServiceLoose\b[^}]*\}\s*from\s*['"]\.\/service\.js['"]/,
+      );
     });
 
     it('the user-turn-shaped legacy options bag still routes correctly when narrowed (preferred path for new code)', async () => {

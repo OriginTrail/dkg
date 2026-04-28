@@ -878,6 +878,149 @@ describe('ChatMemoryManager', () => {
     expect(fallbackSparql).toContain('"headless:t2"');
   });
 
+  // PR #229 r31-4 review (chat-memory.ts:1091) — when the headless
+  // fallback resolves the turn, downstream previous-turn and
+  // turn-index queries MUST compare against the resolved
+  // `dkg:turnId` literal (`"headless:t2"`), not the caller's bare
+  // `turnId` (`"t2"`). The pre-r31-4 code force-set
+  // `currentTurnId = turnId` for downstream comparisons, which
+  // joined headless turns against canonical literals — yielding
+  // wrong watermarks (the "previous" search would never find sibling
+  // headless turns because they're stored under prefixed literals).
+  //
+  // This test pins that the SPARQL string used in the previous-turn
+  // and turn-index queries contains the RESOLVED literal, NOT the
+  // bare one, when the fallback path is taken.
+  it('[r31-4] getSessionGraphDelta uses the RESOLVED `dkg:turnId` literal for previous-turn/turn-index comparisons after a headless fallback', async () => {
+    mockQuery.returns.push(
+      { bindings: [] }, // 1: ensureInitialized
+      { bindings: [{ c: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' }] }, // 2: turn count
+      { bindings: [] }, // 3: bare-literal lookup MISSES
+      {
+        bindings: [
+          {
+            turn: 'urn:dkg:chat:headless-turn:t2',
+            ts: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>',
+          },
+        ],
+      }, // 4: headless-fallback HITS — resolution carries the prefixed literal
+      {
+        bindings: [
+          {
+            latestTurnId: '"headless:t2"',
+            latestTs: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>',
+          },
+        ],
+      }, // 5: latest-turn watermark
+      // 6: previous-turn query — MUST use `"headless:t2"` for the
+      //    `currentTurnIdLiteral` comparison, NOT `"t2"`. We assert
+      //    on the SPARQL string after the call.
+      { bindings: [{ previousTurnId: '"headless:t1"' }] },
+      // 7: turn-index query — same constraint.
+      { bindings: [{ c: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' }] },
+      {
+        bindings: [{ user: 'urn:dkg:chat:msg:u', assistant: 'urn:dkg:chat:msg:a' }],
+      }, // 8: turnMessages
+      {
+        bindings: [
+          { s: 'urn:dkg:chat:msg:u' },
+          { s: 'urn:dkg:chat:msg:a' },
+        ],
+      }, // 9: relatedSubjects
+      {
+        quads: [
+          {
+            subject: 'urn:dkg:chat:headless-turn:t2',
+            predicate: 'http://dkg.io/ontology/turnId',
+            object: '"headless:t2"',
+          },
+        ],
+      }, // 10: CONSTRUCT
+    );
+
+    const delta = await manager.getSessionGraphDelta('s-graph', 't2', { baseTurnId: 'headless:t1' });
+
+    // Caller-facing turnId is unchanged — the watermark contract
+    // continues to use the input `turnId` so callers can keep
+    // tracking watermarks against their original key.
+    expect(delta.turnId).toBe('t2');
+
+    const allSparql = mockQuery.calls.map((c) => String((c as unknown[])[0] ?? ''));
+
+    // r31-4: the previous-turn query (call index 5, SPARQL #6) MUST
+    // compare `?previousTurnId < "headless:t2"`, NOT `< "t2"`.
+    const previousTurnSparql = allSparql[5] ?? '';
+    expect(previousTurnSparql).toContain('"headless:t2"');
+    // Inverse guard: the bare canonical literal must NOT appear in
+    // the comparison context. (The literal `"t2"` could legitimately
+    // appear inside a quoted `"headless:t2"`, which is why we use a
+    // strict regex that matches a standalone `"t2"` token.)
+    expect(/[^:]"t2"/.test(previousTurnSparql)).toBe(false);
+
+    // r31-4: the turn-index query (call index 6, SPARQL #7) MUST
+    // also compare against the resolved literal.
+    const turnIndexSparql = allSparql[6] ?? '';
+    expect(turnIndexSparql).toContain('"headless:t2"');
+    expect(/[^:]"t2"/.test(turnIndexSparql)).toBe(false);
+
+    // Sanity: the bare-literal lookup (call index 2, SPARQL #3) DID
+    // run with `"t2"` first — the resolution prefers canonical.
+    const bareLookupSparql = allSparql[2] ?? '';
+    expect(bareLookupSparql).toContain('"t2"');
+    // And the fallback (call index 3, SPARQL #4) carried the
+    // prefixed literal.
+    const fallbackSparql = allSparql[3] ?? '';
+    expect(fallbackSparql).toContain('"headless:t2"');
+  });
+
+  // [r31-4] complement: when the bare-literal lookup hits (canonical
+  // turn exists), the downstream queries continue to use the bare
+  // literal — same behaviour as before r31-4. Pin both code paths so
+  // a future "always prefix in downstream queries" simplification
+  // can't accidentally break canonical turns.
+  it('[r31-4] getSessionGraphDelta uses the BARE `dkg:turnId` literal for downstream comparisons when the canonical lookup hits first', async () => {
+    mockQuery.returns.push(
+      { bindings: [] }, // 1
+      { bindings: [{ c: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' }] }, // 2
+      // 3: bare-literal lookup HITS — canonical turn.
+      {
+        bindings: [
+          {
+            turn: 'urn:dkg:chat:turn:t2',
+            ts: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>',
+          },
+        ],
+      },
+      {
+        bindings: [
+          {
+            latestTurnId: '"t2"',
+            latestTs: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>',
+          },
+        ],
+      }, // 4
+      { bindings: [{ previousTurnId: '"t1"' }] }, // 5: previous-turn
+      { bindings: [{ c: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' }] }, // 6: turn-index
+      { bindings: [{ user: 'urn:dkg:chat:msg:u', assistant: 'urn:dkg:chat:msg:a' }] }, // 7
+      { bindings: [{ s: 'urn:dkg:chat:msg:u' }, { s: 'urn:dkg:chat:msg:a' }] }, // 8
+      { quads: [{ subject: 'urn:dkg:chat:turn:t2', predicate: 'http://dkg.io/ontology/turnId', object: '"t2"' }] }, // 9
+    );
+
+    const delta = await manager.getSessionGraphDelta('s-graph', 't2', { baseTurnId: 't1' });
+    expect(delta.mode).toBe('delta');
+
+    const allSparql = mockQuery.calls.map((c) => String((c as unknown[])[0] ?? ''));
+    // Previous-turn query MUST contain `"t2"` (the resolved literal
+    // for the canonical hit) and MUST NOT contain `"headless:t2"`.
+    const previousTurnSparql = allSparql[4] ?? '';
+    expect(previousTurnSparql).toContain('"t2"');
+    expect(previousTurnSparql).not.toContain('"headless:t2"');
+    // Turn-index query: same constraint.
+    const turnIndexSparql = allSparql[5] ?? '';
+    expect(turnIndexSparql).toContain('"t2"');
+    expect(turnIndexSparql).not.toContain('"headless:t2"');
+  });
+
   // r31-3 follow-up: when the canonical user-first turn EXISTS for the
   // same id, the bare-literal lookup hits first and the headless
   // fallback is never queried. This is the determinism property that

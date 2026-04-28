@@ -182,13 +182,26 @@ export function classifySparqlForm(sparql: string): SparqlForm {
 }
 
 /**
- * @deprecated PR #229 bot review (r31-2 — packages/query/src/index.ts:7).
+ * @deprecated PR #229 bot review (r31-2 — packages/query/src/index.ts:7;
+ * r31-4 — packages/query/src/sparql-guard.ts:201).
  *
  * Legacy one-shot helper preserved as a thin composition over the
  * canonical primitives. Use {@link emptyResultForSparql} for new
  * code (drop-in replacement that exists for the same ergonomic
  * "single call" reason this helper did) or
  * {@link emptyResultForForm} when the form is already known.
+ *
+ * **r31-4 signature compat**: the legacy `emptyQueryResultForKind`
+ * accepted the raw SPARQL **string** and classified it internally.
+ * The r31-2 version of this wrapper changed the parameter type to
+ * `SparqlForm`, which silently broke `JS`/`any` callers — they now
+ * passed a SPARQL string into a slot typed as a form discriminator,
+ * and the function returned the SELECT-shaped empty result for
+ * `ASK` / `CONSTRUCT` queries (because the string didn't match any
+ * variant). The signature is restored to `string` here so existing
+ * `emptyQueryResultForKind(query)` call sites compile and behave
+ * identically to the pre-r31-2 surface, with the form classification
+ * delegated to {@link emptyResultForSparql}.
  *
  * Behaviour matches the legacy implementation: for unparseable
  * input this routes onto the canonical `'SELECT'` empty shape
@@ -198,10 +211,8 @@ export function classifySparqlForm(sparql: string): SparqlForm {
  * the canonical {@link emptyResultForForm} already handles those
  * forms identically.
  */
-export function emptyQueryResultForKind(form: SparqlForm): QueryResult {
-  // Widening to the richer `SparqlQueryForm` is safe — `SparqlForm`
-  // is a strict subset (`'UNKNOWN'` is the only added variant).
-  return emptyResultForForm(form as SparqlQueryForm);
+export function emptyQueryResultForKind(sparql: string): QueryResult {
+  return emptyResultForSparql(sparql);
 }
 
 export interface SparqlGuardResult {

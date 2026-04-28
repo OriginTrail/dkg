@@ -2690,16 +2690,36 @@ export class DKGAgent {
     // `perCgRequiredSignatures === undefined` and fell back to the
     // global default — a CG that required 3 core-node ACKs could
     // confirm on-chain with just 1 via the self-sign fallback.
+    // PR #229 bot review (r31-4 — dkg-agent.ts:2701).
+    // The previous catch-all swallowed BOTH the `BigInt(onChainId)` parse
+    // case (legitimate mock-only graph) AND any real chain-RPC failure
+    // raised by `getContextGraphRequiredSignatures()`. With the catch
+    // around both, a transient RPC error or contract revert silently
+    // dropped `perCgRequiredSignatures` to `undefined`, so the publish
+    // path fell back to the global ParametersStorage minimum and could
+    // confirm an M-of-N context graph with too few ACKs (the exact
+    // regression r26-1 was supposed to prevent).
+    //
+    // Split the two failure modes:
+    //   (a) BigInt parse failure → mock-only on-chain id, skip the gate;
+    //   (b) RPC / contract failure → propagate so the publish fails
+    //       loudly instead of silently downgrading the quorum.
     let perCgRequiredSignatures: number | undefined;
     if (onChainId && typeof this.chain.getContextGraphRequiredSignatures === 'function') {
+      let parsedId: bigint | null = null;
       try {
-        const id = BigInt(onChainId);
-        if (id > 0n) {
-          const n = await this.chain.getContextGraphRequiredSignatures(id);
-          if (Number.isFinite(n) && n > 0) perCgRequiredSignatures = n;
-        }
+        const candidate = BigInt(onChainId);
+        if (candidate > 0n) parsedId = candidate;
       } catch {
-        // non-numeric on-chain id (mock-only graph) → skip per-CG gate.
+        // Non-numeric on-chain id (mock-only graph) → skip per-CG gate.
+        parsedId = null;
+      }
+      if (parsedId !== null) {
+        // RPC / contract errors are NOT swallowed here — they bubble out
+        // so the caller surfaces the failure rather than silently
+        // downgrading to the global minimum.
+        const n = await this.chain.getContextGraphRequiredSignatures(parsedId);
+        if (Number.isFinite(n) && n > 0) perCgRequiredSignatures = n;
       }
     }
 
@@ -2889,16 +2909,27 @@ export class DKGAgent {
     // per-CG `requiredSignatures` through to the publisher so the on-chain
     // tx is gated on collected ACK count even when the global
     // ParametersStorage minimum is 1.
+    // PR #229 bot review (r31-4 — dkg-agent.ts:2701).
+    // See the comment block above the matching block in `_publish()` for
+    // the full rationale: previous catch-all swallowed real chain-RPC
+    // failures and silently downgraded the per-CG quorum to the global
+    // minimum, defeating the r26-1 fix. Split into:
+    //   (a) BigInt parse failure → mock-only on-chain id, skip the gate;
+    //   (b) RPC / contract failure → propagate so publishFromSharedMemory
+    //       fails loudly instead of confirming an M-of-N CG with too few
+    //       ACKs.
     let perCgRequiredSignatures: number | undefined;
     if (onChainId && typeof this.chain.getContextGraphRequiredSignatures === 'function') {
+      let parsedId: bigint | null = null;
       try {
-        const id = BigInt(onChainId);
-        if (id > 0n) {
-          const n = await this.chain.getContextGraphRequiredSignatures(id);
-          if (Number.isFinite(n) && n > 0) perCgRequiredSignatures = n;
-        }
+        const candidate = BigInt(onChainId);
+        if (candidate > 0n) parsedId = candidate;
       } catch {
-        // non-numeric on-chain id (e.g. mock-only graph) → skip per-CG gate.
+        parsedId = null;
+      }
+      if (parsedId !== null) {
+        const n = await this.chain.getContextGraphRequiredSignatures(parsedId);
+        if (Number.isFinite(n) && n > 0) perCgRequiredSignatures = n;
       }
     }
 

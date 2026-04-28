@@ -283,6 +283,98 @@ describe('[r30-3] consolidation: single canonical form-classifier + empty-result
     // below.
   });
 
+  // PR #229 bot review (r31-4 — packages/query/src/sparql-guard.ts:201).
+  //
+  // r31-2 restored the `@deprecated` `emptyQueryResultForKind` wrapper
+  // but accidentally CHANGED its parameter type from the legacy
+  // `string` (raw SPARQL — the function classified internally) to the
+  // `SparqlForm` discriminator. That silently broke downstream
+  // `emptyQueryResultForKind(query)` callers in two ways:
+  //
+  //   (a) TypeScript callers: stop compiling outright (`string` is
+  //       not assignable to `SparqlForm`).
+  //   (b) `JS` / `as any` callers: the function returns the SELECT-
+  //       shaped empty result for `ASK` / `CONSTRUCT` queries because
+  //       the raw SPARQL string doesn't match any `SparqlForm` variant.
+  //
+  // r31-4 restores the legacy `string` parameter type and delegates to
+  // `emptyResultForSparql()` so existing call sites compile and behave
+  // identically to the pre-r31-2 surface. These tests pin the contract
+  // structurally so a future "tighten the signature" change can't
+  // re-introduce the regression.
+  it('[r31-4] @deprecated `emptyQueryResultForKind` accepts a raw SPARQL STRING (not a SparqlForm) and routes onto the right empty shape', async () => {
+    const { emptyQueryResultForKind } = await import('../src/index.js');
+
+    // The exact regression the bot flagged: `emptyQueryResultForKind`
+    // called with a real CONSTRUCT query MUST return the CONSTRUCT
+    // empty shape (`{ bindings: [], quads: [] }`), not the SELECT
+    // empty shape. r31-2 returned SELECT for this input because it
+    // typed the param as `SparqlForm` and the raw string didn't match.
+    const construct = emptyQueryResultForKind('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }');
+    expect(construct.bindings).toEqual([]);
+    expect(construct.quads).toBeDefined();
+    expect(construct.quads).toEqual([]);
+
+    // Likewise for DESCRIBE — quads must be present.
+    const describe = emptyQueryResultForKind('DESCRIBE <urn:x>');
+    expect(describe.bindings).toEqual([]);
+    expect(describe.quads).toBeDefined();
+    expect(describe.quads).toEqual([]);
+
+    // And ASK — bindings must be `[{ result: 'false' }]` per the
+    // dkg-query-engine convention.
+    const ask = emptyQueryResultForKind('ASK { ?s ?p ?o }');
+    expect(ask.bindings).toEqual([{ result: 'false' }]);
+    expect(ask.quads).toBeUndefined();
+
+    // SELECT (with PREFIX preamble, exercising the same parser path).
+    const select = emptyQueryResultForKind(
+      'PREFIX ex: <urn:example:>\nSELECT ?s WHERE { ?s ex:p ?o }',
+    );
+    expect(select.bindings).toEqual([]);
+    expect(select.quads).toBeUndefined();
+  });
+
+  it('[r31-4] `emptyQueryResultForKind` is byte-compatible with `emptyResultForSparql` for every parseable input', async () => {
+    // Composition pin: post-r31-4 the wrapper IS `emptyResultForSparql`
+    // (no parallel logic path). If anyone ever reintroduces local
+    // form-classification inside the wrapper, this assertion catches
+    // the divergence on every call site.
+    const { emptyQueryResultForKind, emptyResultForSparql } = await import(
+      '../src/index.js'
+    );
+    const queries: string[] = [
+      'SELECT ?s WHERE { ?s ?p ?o }',
+      'CONSTRUCT { ?s ?p ?o } WHERE {}',
+      'DESCRIBE <urn:x>',
+      'ASK { ?s ?p ?o }',
+      'PREFIX ex: <urn:example:>\nSELECT ?s WHERE { ?s ex:p ?o }',
+      'not-a-query',
+      '',
+    ];
+    for (const q of queries) {
+      expect(emptyQueryResultForKind(q)).toEqual(emptyResultForSparql(q));
+    }
+  });
+
+  it('[r31-4] `emptyQueryResultForKind` source signature uses `string` (NOT `SparqlForm`) — anti-drift guard for the param type', () => {
+    // Source-level guard: the legacy `(form: SparqlForm)` signature
+    // is the regression we just fixed. Pin the `(sparql: string)`
+    // signature in the source so a future "small tidy-up" that
+    // restores the `SparqlForm` parameter type fails CI here.
+    const here = dirname(fileURLToPath(import.meta.url));
+    const guardPath = resolve(here, '..', 'src', 'sparql-guard.ts');
+    const src = readFileSync(guardPath, 'utf-8');
+    expect(src).toMatch(
+      /\bexport\s+function\s+emptyQueryResultForKind\s*\(\s*sparql\s*:\s*string\s*\)/,
+    );
+    // Inverse guard: the `(form: SparqlForm)` signature must NOT be
+    // present anymore.
+    expect(src).not.toMatch(
+      /\bexport\s+function\s+emptyQueryResultForKind\s*\(\s*form\s*:\s*SparqlForm\s*\)/,
+    );
+  });
+
   it('the deprecated wrappers ARE defined in the source AND ARE annotated `@deprecated` (downstream tooling surfaces the migration)', () => {
     // Source-level guard: the wrappers MUST exist (so the public
     // surface is whole) AND MUST carry `@deprecated` JSDoc

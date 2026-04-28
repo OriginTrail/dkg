@@ -1054,6 +1054,15 @@ export class ChatMemoryManager {
     const tryResolveTurn = async (literal: string): Promise<{
       uri: string;
       ts: string;
+      // PR #229 bot review (r31-4 — chat-memory.ts:1091).
+      // The actual `dkg:turnId` literal that joined this row. For the
+      // bare-literal lookup this is just the input `turnId`; for the
+      // headless fallback it's `"headless:<turnId>"`. Downstream
+      // previous-turn / turn-index queries MUST use this literal
+      // (not the caller's `turnId`) because they compare the stored
+      // `dkg:turnId` values in WM, which for headless turns are
+      // always prefixed.
+      literal: string;
     } | null> => {
       const sparqlLit = JSON.stringify(literal);
       const result = await this.tools.query(
@@ -1068,7 +1077,11 @@ export class ChatMemoryManager {
       const row = (result.bindings ?? [])[0];
       const uri = String(row?.turn ?? '').replace(/[<>]/g, '');
       if (!uri || !isSafeIri(uri)) return null;
-      return { uri, ts: stripRdfLiteral(row?.ts ?? '').trim() };
+      return {
+        uri,
+        ts: stripRdfLiteral(row?.ts ?? '').trim(),
+        literal,
+      };
     };
     // Try the bare literal first (canonical user-first turn).
     let resolution = await tryResolveTurn(turnId);
@@ -1090,6 +1103,17 @@ export class ChatMemoryManager {
     // logical turn id might map to canonical OR headless.
     const currentTurnId = resolvedTurnUri ? turnId : '';
     const currentTurnTs = resolution?.ts ?? '';
+    // PR #229 bot review (r31-4 — chat-memory.ts:1091).
+    // Use the resolved `dkg:turnId` literal for SPARQL comparisons
+    // against stored `dkg:turnId` values, NOT the caller's bare
+    // `turnId`. For canonical turns these are equal (`"t2"`); for
+    // headless turns the resolved literal is `"headless:t2"` and
+    // the bare-literal comparison would have returned the wrong
+    // previous-turn / turn-index because the WM stores the prefixed
+    // form. The caller-facing `currentTurnId` (above) stays as the
+    // input `turnId` so the watermark / result.turnId contracts are
+    // unchanged.
+    const resolvedTurnIdLiteral = resolution?.literal ?? currentTurnId;
     const latestTurnResult = await this.tools.query(
       `SELECT ?latestTurnId ?latestTs WHERE {
         ?latestTurn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
@@ -1118,7 +1142,7 @@ export class ChatMemoryManager {
       };
     }
 
-    const currentTurnIdLiteral = JSON.stringify(currentTurnId);
+    const currentTurnIdLiteral = JSON.stringify(resolvedTurnIdLiteral);
     const currentTsLiteral = currentTurnTs
       ? `"${currentTurnTs}"^^<${XSD_DATETIME}>`
       : null;
