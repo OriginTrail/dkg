@@ -76,7 +76,7 @@ describe('PanelRight chat history rehydration on mount (issue #255)', () => {
     return readyOpenclawIntegration({
       id: 'hermes',
       name: 'Hermes',
-      defaultSessionId: 'hermes:dkg-ui:profile-dkg-smoke:transport-abcd',
+      defaultSessionId: 'hermes:dkg-ui:profile-dkg-smoke:home-abcd',
       target: 'bridge',
       ...overrides,
     });
@@ -179,7 +179,7 @@ describe('PanelRight chat history rehydration on mount (issue #255)', () => {
 
     const hermesProfileCall = fetchLocalAgentHistoryMock.mock.calls.find(
       (args) => args[0] === 'hermes'
-        && args[2]?.sessionId === 'hermes:dkg-ui:profile-dkg-smoke:transport-abcd',
+        && args[2]?.sessionId === 'hermes:dkg-ui:profile-dkg-smoke:home-abcd',
     );
     expect(hermesProfileCall, 'Hermes history should use the profile-aware default session').toBeTruthy();
 

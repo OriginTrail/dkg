@@ -520,6 +520,105 @@ describe('Hermes daemon routes', () => {
     });
   });
 
+  it('falls back to the gateway when bridge send returns retryable 5xx', async () => {
+    const urls: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string | URL | Request) => {
+      const requestUrl = String(url);
+      urls.push(requestUrl);
+      if (requestUrl === 'http://127.0.0.1:9444/health') {
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      if (requestUrl === 'http://127.0.0.1:9444/send') {
+        return new Response('bridge failed', { status: 500 });
+      }
+      if (requestUrl === 'https://hermes.example.com/api/hermes-channel/send') {
+        return new Response(JSON.stringify({ text: 'gateway reply', correlationId: 'corr-1' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response('unexpected target', { status: 418 });
+    }));
+    const { ctx, res } = makeHermesRouteContext({
+      text: 'hello',
+      correlationId: 'corr-1',
+    }, {
+      hasChatTurn: vi.fn(async () => false),
+      storeChatExchange: vi.fn(async () => {}),
+    }, {
+      localAgentIntegrations: {
+        hermes: {
+          enabled: true,
+          transport: {
+            kind: 'hermes-channel',
+            bridgeUrl: 'http://127.0.0.1:9444',
+            gatewayUrl: 'https://hermes.example.com',
+          },
+        },
+      },
+    }, '/api/hermes-channel/send');
+
+    await handleHermesRoutes(ctx);
+
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toMatchObject({ text: 'gateway reply', correlationId: 'corr-1' });
+    expect(urls).toEqual([
+      'http://127.0.0.1:9444/health',
+      'http://127.0.0.1:9444/send',
+      'https://hermes.example.com/api/hermes-channel/send',
+    ]);
+  });
+
+  it('falls back to the gateway when bridge stream returns retryable 5xx', async () => {
+    const urls: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string | URL | Request) => {
+      const requestUrl = String(url);
+      urls.push(requestUrl);
+      if (requestUrl === 'http://127.0.0.1:9444/health') {
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      if (requestUrl === 'http://127.0.0.1:9444/stream') {
+        return new Response('bridge failed', { status: 502 });
+      }
+      if (requestUrl === 'https://hermes.example.com/api/hermes-channel/stream') {
+        return new Response(JSON.stringify({ text: 'gateway stream', correlationId: 'corr-1' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response('unexpected target', { status: 418 });
+    }));
+    const { ctx, res } = makeHermesRouteContext({
+      text: 'hello',
+      correlationId: 'corr-1',
+    }, {
+      hasChatTurn: vi.fn(async () => false),
+      storeChatExchange: vi.fn(async () => {}),
+    }, {
+      localAgentIntegrations: {
+        hermes: {
+          enabled: true,
+          transport: {
+            kind: 'hermes-channel',
+            bridgeUrl: 'http://127.0.0.1:9444',
+            gatewayUrl: 'https://hermes.example.com',
+          },
+        },
+      },
+    }, '/api/hermes-channel/stream');
+
+    await handleHermesRoutes(ctx);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['Content-Type']).toContain('text/event-stream');
+    expect(res.body).toContain('"text":"gateway stream"');
+    expect(urls).toEqual([
+      'http://127.0.0.1:9444/health',
+      'http://127.0.0.1:9444/stream',
+      'https://hermes.example.com/api/hermes-channel/stream',
+    ]);
+  });
+
   it('accepts authenticated persist-turn even when UI chat is not enabled', async () => {
     const storeChatExchange = vi.fn(async () => {});
     const { ctx, res } = makeHermesRouteContext({

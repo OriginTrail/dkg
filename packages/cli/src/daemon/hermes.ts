@@ -321,7 +321,7 @@ export async function ensureHermesBridgeAvailable(
 }
 
 export function shouldTryNextHermesTarget(status: number): boolean {
-  return status === 404 || status === 405 || status === 501 || status === 503;
+  return status === 404 || status === 405 || (status >= 500 && status < 600);
 }
 
 export function normalizeHermesChatPayload(raw: unknown): HermesChatPayload | { error: string } {

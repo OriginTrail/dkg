@@ -622,10 +622,10 @@ describe('Hermes profile setup helpers', () => {
     expect(state.profile.profileName).toBe('explicit');
   });
 
-  it('reads the default DKG auth token file for setup daemon registration', async () => {
+  it('reads the first usable default DKG auth token file line for setup daemon registration', async () => {
     const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-'));
     const dkgHome = mkdtempSync(join(tmpdir(), 'dkg-home-'));
-    writeFileSync(join(dkgHome, 'auth.token'), 'file-token\n');
+    writeFileSync(join(dkgHome, 'auth.token'), '# comment\n\nfile-token\nignored-token\n');
     const calls: Array<{ url: string; init: RequestInit }> = [];
     vi.stubGlobal('fetch', async (url: string | URL | Request, init?: RequestInit) => {
       calls.push({ url: String(url), init: init ?? {} });

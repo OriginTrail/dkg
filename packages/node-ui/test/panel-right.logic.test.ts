@@ -134,13 +134,13 @@ describe('PanelRight logic helpers', () => {
         id: 'hermes',
         name: 'Hermes',
         persistentChat: true,
-        defaultSessionId: 'hermes:dkg-ui:profile-new-profile:transport-new',
+        defaultSessionId: 'hermes:dkg-ui:profile-new-profile',
       }),
     ];
 
     expect(shouldPreserveSessionOnReconnect({
       integrationId: 'hermes',
-      selectedSessionId: 'hermes:dkg-ui:profile-old-profile:transport-old',
+      selectedSessionId: 'hermes:dkg-ui:profile-old-profile',
       integrations,
     })).toBe(false);
     expect(shouldPreserveSessionForIntegrationSelection({

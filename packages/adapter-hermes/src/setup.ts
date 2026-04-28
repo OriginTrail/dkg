@@ -489,7 +489,12 @@ function loadDkgAuthToken(): string | undefined {
 
   const dkgHome = resolve(expandHome(trimmed(process.env.DKG_HOME) ?? join(homedir(), '.dkg')));
   try {
-    return trimmed(readFileSync(join(dkgHome, 'auth.token'), 'utf-8'));
+    const rawTokenFile = readFileSync(join(dkgHome, 'auth.token'), 'utf-8');
+    for (const line of rawTokenFile.split('\n')) {
+      const token = trimmed(line);
+      if (token && !token.startsWith('#')) return token;
+    }
+    return undefined;
   } catch {
     return undefined;
   }

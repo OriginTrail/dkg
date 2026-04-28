@@ -41,11 +41,11 @@ def _load_config() -> dict:
     from hermes_constants import get_hermes_home
 
     config = {
-        "daemon_url": os.environ.get("DKG_DAEMON_URL", "http://127.0.0.1:9200"),
-        "context_graph": os.environ.get("DKG_CONTEXT_GRAPH", "hermes-memory"),
-        "agent_name": os.environ.get("DKG_AGENT_NAME", ""),
-        "publish_tool": os.environ.get("DKG_PUBLISH_TOOL", "request-only"),
-        "allow_direct_publish": os.environ.get("DKG_ALLOW_DIRECT_PUBLISH", "").lower() in ("1", "true", "yes"),
+        "daemon_url": "http://127.0.0.1:9200",
+        "context_graph": "hermes-memory",
+        "agent_name": "",
+        "publish_tool": "request-only",
+        "allow_direct_publish": False,
     }
 
     config_path = get_hermes_home() / "dkg.json"
@@ -65,6 +65,20 @@ def _load_config() -> dict:
                     config["allow_direct_publish"] = publish_guard.get("allow_direct_publish")
         except Exception:
             pass
+
+    for env_name, config_key in (
+        ("DKG_DAEMON_URL", "daemon_url"),
+        ("DKG_CONTEXT_GRAPH", "context_graph"),
+        ("DKG_AGENT_NAME", "agent_name"),
+        ("DKG_PUBLISH_TOOL", "publish_tool"),
+    ):
+        env_value = os.environ.get(env_name)
+        if env_value is not None and env_value != "":
+            config[config_key] = env_value
+
+    direct_publish_env = os.environ.get("DKG_ALLOW_DIRECT_PUBLISH")
+    if direct_publish_env is not None and direct_publish_env != "":
+        config["allow_direct_publish"] = direct_publish_env.lower() in ("1", "true", "yes")
 
     return config
 
@@ -112,7 +126,7 @@ def _session_segment(value: str) -> str:
 def _scoped_session_id(raw_session_id: str, config: Optional[dict] = None) -> str:
     """Scope Hermes session IDs by profile/home before DKG persistence."""
     session_id = str(raw_session_id or "default")
-    if session_id.startswith("hermes:dkg:"):
+    if session_id.startswith("hermes:dkg:") or session_id.startswith("hermes:dkg-ui:"):
         return session_id
 
     from hermes_constants import get_hermes_home

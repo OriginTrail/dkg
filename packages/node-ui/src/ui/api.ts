@@ -1241,18 +1241,9 @@ function buildHermesDefaultSessionId(
     metadata.profile,
   );
   const hermesHome = firstTrimmedString(metadata.hermesHome);
-  const transport = record?.transport;
-  const transportSource = [
-    health?.target,
-    transport?.bridgeUrl,
-    transport?.gatewayUrl,
-    transport?.healthUrl,
-  ].filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
-    .join('|');
   const segments = [
     profile ? `profile-${sessionSegment(profile)}` : null,
     hermesHome ? `home-${stableSessionHash(hermesHome)}` : null,
-    transportSource ? `transport-${stableSessionHash(transportSource)}` : null,
   ].filter((value): value is string => value != null);
   return segments.length
     ? `${integrationId}:dkg-ui:${segments.join(':')}`
