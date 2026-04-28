@@ -44,6 +44,15 @@ import type {
 } from './types.js';
 import { homedir } from 'node:os';
 
+// T44 — same regex as `dkg-core/src/dkg-home.ts` ETH_ADDR_RE. Kept
+// duplicated rather than exposed from dkg-core because the adapter's
+// only use is the localhost-gate validation; a leaked helper would
+// invite drift over time.
+const ETH_ADDR_RE_LC = /^0x[0-9a-f]{40}$/;
+function isValidEthAddressString(value: string | undefined): boolean {
+  return typeof value === 'string' && ETH_ADDR_RE_LC.test(value.trim().toLowerCase());
+}
+
 const OPENCLAW_LOCAL_AGENT_CAPABILITIES = {
   localChat: true,
   chatAttachments: true,
@@ -1575,7 +1584,22 @@ export class DkgNodePlugin {
       // read on a localhost daemonUrl. Honor `DKG_AGENT_ADDRESS` env
       // override regardless — operators who need to point at a remote
       // daemon can disambiguate manually.
-      const explicitAddress = process.env.DKG_AGENT_ADDRESS;
+      // T44 — `DKG_AGENT_ADDRESS` must be a syntactically valid eth
+      // address before it counts as a "trusted operator override" for
+      // the localhost gate. `loadAgentEthAddressSync` silently ignores
+      // invalid override values and falls back to the keystore read,
+      // so a typo like `DKG_AGENT_ADDRESS=foo` would otherwise satisfy
+      // the truthy-string gate, skip the localhost guard, and scope
+      // WM to the gateway's local keystore — exactly what the gate
+      // exists to prevent for remote-daemon setups.
+      const rawExplicit = process.env.DKG_AGENT_ADDRESS;
+      const explicitAddress = isValidEthAddressString(rawExplicit) ? rawExplicit : undefined;
+      if (rawExplicit && !explicitAddress) {
+        api.logger.warn?.(
+          `[dkg-memory] DKG_AGENT_ADDRESS env value "${rawExplicit}" is not a valid 0x-prefixed eth address (must match /^0x[0-9a-f]{40}$/i). ` +
+          'Override ignored — falling through to localhost gate / keystore read.',
+        );
+      }
       if (!explicitAddress && !this.daemonIsLocalhost()) {
         api.logger.warn?.(
           '[dkg-memory] Daemon URL is non-local; skipping keystore read. ' +

@@ -4004,6 +4004,33 @@ describe('DkgNodePlugin', () => {
       }
     });
 
+    it('rejects invalid DKG_AGENT_ADDRESS for the localhost gate, warns, falls through to remote-skip (T44)', async () => {
+      // T44 — `DKG_AGENT_ADDRESS=foo` (typo) must NOT bypass the
+      // localhost gate. Pre-fix: truthy-string check passed → gate
+      // skipped → loadAgentEthAddressSync silently dropped the
+      // invalid override and fell through to keystore read, scoping
+      // WM to the gateway's local identity for a remote-daemon
+      // setup.
+      writeKeystore([ETH_PRIMARY]);
+      process.env.DKG_AGENT_ADDRESS = 'foo';
+      const api = makeMockApi();
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://daemon.example.com:9200',
+        memory: { enabled: true },
+        channel: { enabled: false },
+      });
+      try {
+        plugin.register(api);
+        await (plugin as any).ensureNodeAgentAddress();
+        expect((plugin as any).nodeAgentAddress).toBeUndefined();
+        const warnCalls = (api.logger.warn as any).mock.calls.map((c: any) => String(c[0]));
+        expect(warnCalls.some((m: string) => m.includes('not a valid 0x-prefixed eth address'))).toBe(true);
+        expect(warnCalls.some((m: string) => m.includes('Daemon URL is non-local'))).toBe(true);
+      } finally {
+        await plugin.stop();
+      }
+    });
+
     it('treats IPv6 loopback (`http://[::1]:…`) as localhost (T40)', async () => {
       // T40 — `new URL('http://[::1]:9200').hostname` returns `[::1]`
       // (with brackets) per WHATWG URL. Without bracket-stripping,

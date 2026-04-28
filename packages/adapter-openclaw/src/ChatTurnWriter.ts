@@ -208,8 +208,25 @@ export class ChatTurnWriter {
     // all outstanding persists/resets/chains — we must capture their
     // effects before swapping paths.
     await this.flush();
-    // Merge with destination state, taking max per session so we never
-    // roll back newer values.
+    // T43 — Merge into TEMPORARY snapshots first; only commit to the
+    // live `this.cachedWatermarks` / `this.w4bSessionCounts` after the
+    // write to the new path succeeds. Pre-fix order was:
+    //   (a) merge directly into live maps,
+    //   (b) attempt write,
+    //   (c) on failure, keep old paths.
+    // That left the in-memory state polluted with destination's
+    // watermarks even when the write failed. Concrete failure path:
+    // unpersisted pair at idx 5 in old session, destination file's
+    // same session at idx 7 (newer process or stale state) → merge
+    // pushes live watermark to 7 → new-path write fails (e.g. disk
+    // full) → writer keeps old path → next persist treats turn at
+    // idx 6 as already saved (6 < 7) and silently drops it.
+    //
+    // Snapshot live state, mutate live maps for the write (so
+    // `writeWatermarkFile` sees the merged data without a separate
+    // override channel), restore from snapshot on failure.
+    const wmSnapshot = new Map(this.cachedWatermarks);
+    const bcSnapshot = new Map(this.w4bSessionCounts);
     try {
       if (fs.existsSync(newWatermarkFilePath)) {
         const raw = fs.readFileSync(newWatermarkFilePath, "utf-8");
@@ -259,6 +276,13 @@ export class ChatTurnWriter {
         { err, newWatermarkFilePath },
       );
       wrote = false;
+    }
+    if (!wrote) {
+      // T43 — Restore the pre-merge in-memory state. Without this,
+      // the live maps remain polluted with destination's watermarks
+      // and turns can be incorrectly skipped on subsequent persists.
+      this.cachedWatermarks = wmSnapshot;
+      this.w4bSessionCounts = bcSnapshot;
     }
     if (wrote) {
       // Only NOW commit the swap. Subsequent normal writes via

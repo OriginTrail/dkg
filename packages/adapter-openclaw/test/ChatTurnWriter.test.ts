@@ -2207,6 +2207,44 @@ describe("ChatTurnWriter", () => {
     try { fs.rmSync(newStateDir, { recursive: true, force: true }); } catch { /* best effort */ }
   });
 
+  it("T43 — setStateDir restores in-memory watermarks when the new-path write fails (no destination-state pollution)", async () => {
+    // Regression for T43: pre-fix the merge mutated `cachedWatermarks`
+    // / `w4bSessionCounts` BEFORE attempting the write. If the write
+    // failed, the writer kept old paths but carried the destination's
+    // (newer) watermarks in memory, so the next persist would skip
+    // turns whose pair index is < the merged watermark.
+    const newStateDir = fs.mkdtempSync(path.join(os.tmpdir(), "chatturnwriter-t43-"));
+    const newDir = path.join(newStateDir, "dkg-adapter");
+    fs.mkdirSync(newDir, { recursive: true });
+    const newFile = path.join(newDir, "chat-turn-watermarks.json");
+    // Destination file exists with NEWER state for one session, so the
+    // merge phase has something to merge.
+    fs.writeFileSync(newFile, JSON.stringify({
+      "openclaw:tg:::sk-shared": { w: 99, b: 50 },
+    }));
+
+    // Source writer has OLDER state.
+    const dkw = writer as any;
+    dkw.cachedWatermarks.set("openclaw:tg:::sk-shared", 5);
+    dkw.w4bSessionCounts.set("openclaw:tg:::sk-shared", 2);
+
+    // Force the write to fail via vi.spyOn — first call returns false
+    // (the new-path write inside setStateDir), subsequent calls fall
+    // through to the real implementation.
+    const writeSpy = vi.spyOn(dkw, "writeWatermarkFile").mockImplementationOnce(() => false);
+
+    await writer.setStateDir(newStateDir);
+
+    // In-memory state MUST be the old values, not the destination's.
+    expect(dkw.cachedWatermarks.get("openclaw:tg:::sk-shared")).toBe(5);
+    expect(dkw.w4bSessionCounts.get("openclaw:tg:::sk-shared")).toBe(2);
+    // stateDir / watermarkFilePath unchanged on failure.
+    expect(dkw.stateDir).not.toBe(newStateDir);
+
+    writeSpy.mockRestore();
+    try { fs.rmSync(newStateDir, { recursive: true, force: true }); } catch { /* best effort */ }
+  });
+
   it("T19 — failed outbound consumes the FULL pending queue (matches success-path collapse)", async () => {
     // Regression for T19: pre-fix, the success === false branch shifted
     // only the OLDEST pending inbound, but T15 changed the success path
