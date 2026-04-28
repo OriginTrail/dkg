@@ -1170,6 +1170,38 @@ export async function persistChatTurnImpl(
       // coherent within the headless turn while staying disjoint
       // from any canonical turn for the same `turnKey`.
       const headlessTurnIdLiteral = `headless:${turnKey}`;
+      // PR #229 bot review (r31-5 — actions.ts:1173): the headless
+      // branch was reusing `buildAssistantMessageQuads(...)` verbatim,
+      // which emits `?msg schema:isPartOf <session>`. That edge is
+      // ALSO the predicate `ChatMemoryManager.getSession()` enumerates
+      // messages on (`?m schema:isPartOf <sessionUri>` — see
+      // `node-ui/src/chat-memory.ts`). When the canonical user-first
+      // turn is later replayed for the same `turnKey`, the user-turn
+      // path writes a SECOND assistant message at the canonical
+      // `msg:agent:${turnKey}` URI, also session-scoped. Both messages
+      // then surface in `getSession()` because their URIs differ
+      // (`msg:agent-headless:${turnKey}` vs `msg:agent:${turnKey}`)
+      // even though they represent the same logical reply — chat
+      // history shows duplicates.
+      //
+      // Fix (split across writer + reader): tag the headless assistant
+      // message with `dkg:headlessAssistantMessage "true"` here so the
+      // reader can identify and dedupe it. The reader-side complement
+      // is in `ChatMemoryManager.getSession()` (post-process bindings:
+      // when a non-headless message exists for the same canonical
+      // `turnKey` — extracted by stripping the `headless:` literal
+      // prefix off `dkg:turnId` — drop the headless variant). We
+      // deliberately leave the `schema:isPartOf` edge in place so a
+      // headless reply that NEVER gets a canonical user-first turn
+      // replay (the typical proactive-agent / recovery-path case) is
+      // still surfaced by the standard session-enumeration query.
+      // Dedupe activates only when BOTH variants exist for the same
+      // canonical turn key.
+      //
+      // Mirrors the established `dkg:headlessUserMessage "true"`
+      // marker on the user stub (r13-2) — the markers give downstream
+      // consumers two independent ways to filter headless content
+      // (URI namespace + explicit predicate).
       const assistantQuads = buildAssistantMessageQuads(
         headlessAssistantMsgUri,
         userStubUri,
@@ -1178,6 +1210,12 @@ export async function persistChatTurnImpl(
         assistantText,
         headlessTurnIdLiteral,
       ).filter((q) => q.predicate !== `${DKG_ONT_NS}replyTo`);
+      assistantQuads.push({
+        subject: headlessAssistantMsgUri,
+        predicate: `${DKG_ONT_NS}headlessAssistantMessage`,
+        object: rdfString('true'),
+        graph: '',
+      });
       // PR #229 r3131820483: peek-only (no mutation). The cache is
       // promoted to "emitted" AFTER assertion.write() succeeds; if
       // the persist throws we leave the cache untouched so a retry

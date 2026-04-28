@@ -840,14 +840,23 @@ describe('dkgPlugin.hooks — r31-1: assistant-message double-write guard', () =
     }
   });
 
-  it('onChatTurn with state.lastAssistantReply also populates the assistant cache (parity with assistantText)', async () => {
+  it('onChatTurn with state.lastAssistantReply also populates the assistant cache when incoming reply text matches (parity with assistantText)', async () => {
     const spy = vi.spyOn(dkgService, 'persistChatTurn' as any)
       .mockResolvedValue({ tripleCount: 0, turnUri: '', kcId: '' } as any);
     try {
       const runtime = { getSetting: () => undefined, character: { name: 'x' } } as any;
       const userMsg = { content: { text: 'hello' }, id: 'user-r31-3', userId: 'u', roomId: 'room-r31-3' } as any;
+      // r31-5: the cache stores the FULL assistant text persisted on
+      // the user-turn write, and `onAssistantReplyHandler` only sets
+      // `assistantAlreadyPersisted=true` when the incoming reply text
+      // matches (idempotent retry). So the parity assertion across
+      // input shapes (`state.lastAssistantReply`, `assistantText`,
+      // `assistantReply.text`) is now: same text in & out ⇒ cache
+      // hit ⇒ suppression. We use BYTE-IDENTICAL text here so the
+      // parity invariant survives the new payload comparison.
+      const persistedText = 'reply';
       const reply = {
-        content: { text: 'reply' }, id: 'asst-r31-3', userId: 'a', roomId: 'room-r31-3',
+        content: { text: persistedText }, id: 'asst-r31-3', userId: 'a', roomId: 'room-r31-3',
         replyTo: 'user-r31-3',
       } as any;
 
@@ -857,7 +866,7 @@ describe('dkgPlugin.hooks — r31-1: assistant-message double-write guard', () =
       // accepts both shapes, so the wrapper's marker MUST mirror
       // that or the cache would miss.
       await (dkgPlugin as any).hooks.onChatTurn(
-        runtime, userMsg, { lastAssistantReply: 'reply via state' }, {},
+        runtime, userMsg, { lastAssistantReply: persistedText }, {},
       );
       await (dkgPlugin as any).hooks.onAssistantReply(runtime, reply, {}, {});
 
@@ -868,19 +877,23 @@ describe('dkgPlugin.hooks — r31-1: assistant-message double-write guard', () =
     }
   });
 
-  it('onChatTurn with assistantReply.text also populates the assistant cache (parity with assistantText)', async () => {
+  it('onChatTurn with assistantReply.text also populates the assistant cache when incoming reply text matches (parity with assistantText)', async () => {
     const spy = vi.spyOn(dkgService, 'persistChatTurn' as any)
       .mockResolvedValue({ tripleCount: 0, turnUri: '', kcId: '' } as any);
     try {
       const runtime = { getSetting: () => undefined, character: { name: 'x' } } as any;
       const userMsg = { content: { text: 'hello' }, id: 'user-r31-4', userId: 'u', roomId: 'room-r31-4' } as any;
+      // r31-5: see the matching state.lastAssistantReply test —
+      // payload comparison means the cache only suppresses when
+      // the recorded text matches the incoming reply.
+      const persistedText = 'reply via assistantReply';
       const reply = {
-        content: { text: 'reply' }, id: 'asst-r31-4', userId: 'a', roomId: 'room-r31-4',
+        content: { text: persistedText }, id: 'asst-r31-4', userId: 'a', roomId: 'room-r31-4',
         replyTo: 'user-r31-4',
       } as any;
 
       await (dkgPlugin as any).hooks.onChatTurn(runtime, userMsg, {}, {
-        assistantReply: { text: 'reply via assistantReply' },
+        assistantReply: { text: persistedText },
       });
       await (dkgPlugin as any).hooks.onAssistantReply(runtime, reply, {}, {});
 
@@ -889,6 +902,197 @@ describe('dkgPlugin.hooks — r31-1: assistant-message double-write guard', () =
     } finally {
       spy.mockRestore();
     }
+  });
+
+  // -----------------------------------------------------------------------
+  // PR #229 bot review (r31-5 — adapter-elizaos/src/index.ts:555).
+  //
+  // Pre-fix the cache stored a bare `true` per `(roomId, userMsgId,
+  // dest)` key, so ANY non-empty `assistantText` /
+  // `assistantReply.text` / `state.lastAssistantReply` plumbed
+  // through `onChatTurn` flipped the cache → the later real
+  // `onAssistantReply` saw `assistantAlreadyPersisted=true` and
+  // short-circuited, leaving the stored reply stuck on the
+  // partial/wrong text.
+  //
+  // Fix: cache stores the FULL assistant text (not a bare `true`)
+  // and `onAssistantReplyHandler` only suppresses when the incoming
+  // reply text MATCHES the cached value byte-for-byte (idempotent
+  // retry). Mismatches mean the host pipelined a provisional /
+  // stale text through `onChatTurn` and the FINAL reply landed
+  // later — we leave the flag unset so the impl emits the new
+  // assistant message instead of freezing the stale snapshot.
+  // -----------------------------------------------------------------------
+  describe('dkgPlugin.hooks — r31-5: assistant-cache payload comparison (no stale-text freeze)', () => {
+    beforeEach(() => {
+      __resetPersistedUserTurnCacheForTests();
+    });
+
+    it('onChatTurn caches PROVISIONAL text + onAssistantReply with FINAL different text → wrapper does NOT set assistantAlreadyPersisted (the FINAL reply gets written, no stale freeze)', async () => {
+      const spy = vi.spyOn(dkgService, 'persistChatTurn' as any)
+        .mockResolvedValue({ tripleCount: 0, turnUri: '', kcId: '' } as any);
+      try {
+        const runtime = { getSetting: () => undefined, character: { name: 'x' } } as any;
+        const userMsg = { content: { text: 'hello' }, id: 'user-r31-5-stale', userId: 'u', roomId: 'room-r31-5-stale' } as any;
+        // Host plumbs an in-flight LLM PARTIAL — typical for the
+        // streaming-completion / provisional-state pattern the bot
+        // bot review called out.
+        await (dkgPlugin as any).hooks.onChatTurn(
+          runtime, userMsg, { lastAssistantReply: 'partial reply…' }, {},
+        );
+        // Then the FINAL reply lands via the dedicated hook with a
+        // different (longer/corrected) text.
+        const finalReply = {
+          content: { text: 'partial reply, now with the full corrected text.' },
+          id: 'asst-r31-5-stale', userId: 'a', roomId: 'room-r31-5-stale',
+          replyTo: 'user-r31-5-stale',
+        } as any;
+        await (dkgPlugin as any).hooks.onAssistantReply(runtime, finalReply, {}, {});
+
+        const replyOpts = spy.mock.calls[1][3] as any;
+        // r31-5 invariant: cached text differs from incoming reply
+        // text → wrapper MUST NOT set the suppression flag, so the
+        // impl writes the (final, correct) reply quads. Pre-fix this
+        // would have been `true` and the stale "partial reply…"
+        // would have been the only stored assistant text.
+        expect(replyOpts.assistantAlreadyPersisted).toBeUndefined();
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it('onChatTurn caches text + onAssistantReply with IDENTICAL text → wrapper sets assistantAlreadyPersisted=true (idempotent retry case still works)', async () => {
+      const spy = vi.spyOn(dkgService, 'persistChatTurn' as any)
+        .mockResolvedValue({ tripleCount: 0, turnUri: '', kcId: '' } as any);
+      try {
+        const runtime = { getSetting: () => undefined, character: { name: 'x' } } as any;
+        const userMsg = { content: { text: 'hello' }, id: 'user-r31-5-match', userId: 'u', roomId: 'room-r31-5-match' } as any;
+        const persistedText = 'reply text — final, matches both calls';
+        await (dkgPlugin as any).hooks.onChatTurn(runtime, userMsg, {}, {
+          assistantText: persistedText,
+        });
+        const reply = {
+          content: { text: persistedText }, id: 'asst-r31-5-match', userId: 'a', roomId: 'room-r31-5-match',
+          replyTo: 'user-r31-5-match',
+        } as any;
+        await (dkgPlugin as any).hooks.onAssistantReply(runtime, reply, {}, {});
+
+        const replyOpts = spy.mock.calls[1][3] as any;
+        // r31-5: matching text means the second call is genuinely a
+        // duplicate — suppression fires (preserves the r31-1
+        // protection against stacking duplicate `schema:text`
+        // triples on the same `msg:agent:${turnKey}` URI).
+        expect(replyOpts.assistantAlreadyPersisted).toBe(true);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it('onChatTurn caches text + onAssistantReply provides the SAME text on options.assistantText (incoming text not on message.content) → suppression still fires', async () => {
+      const spy = vi.spyOn(dkgService, 'persistChatTurn' as any)
+        .mockResolvedValue({ tripleCount: 0, turnUri: '', kcId: '' } as any);
+      try {
+        const runtime = { getSetting: () => undefined, character: { name: 'x' } } as any;
+        const userMsg = { content: { text: 'hello' }, id: 'user-r31-5-opts', userId: 'u', roomId: 'room-r31-5-opts' } as any;
+        const persistedText = 'reply via options';
+        await (dkgPlugin as any).hooks.onChatTurn(runtime, userMsg, {}, {
+          assistantText: persistedText,
+        });
+        // Caller passes the reply text via options instead of
+        // `message.content.text` — the wrapper's incoming-text
+        // resolution chain accepts BOTH shapes (parity with how
+        // the user-turn side records the text in the first place).
+        const reply = {
+          content: { text: '' }, id: 'asst-r31-5-opts', userId: 'a', roomId: 'room-r31-5-opts',
+          replyTo: 'user-r31-5-opts',
+        } as any;
+        await (dkgPlugin as any).hooks.onAssistantReply(runtime, reply, {}, {
+          assistantText: persistedText,
+        });
+
+        const replyOpts = spy.mock.calls[1][3] as any;
+        expect(replyOpts.assistantAlreadyPersisted).toBe(true);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it('onChatTurn caches text + onAssistantReply provides the SAME text on options.assistantReply.text → suppression still fires', async () => {
+      const spy = vi.spyOn(dkgService, 'persistChatTurn' as any)
+        .mockResolvedValue({ tripleCount: 0, turnUri: '', kcId: '' } as any);
+      try {
+        const runtime = { getSetting: () => undefined, character: { name: 'x' } } as any;
+        const userMsg = { content: { text: 'hello' }, id: 'user-r31-5-rep', userId: 'u', roomId: 'room-r31-5-rep' } as any;
+        const persistedText = 'reply via assistantReply.text';
+        await (dkgPlugin as any).hooks.onChatTurn(runtime, userMsg, {}, {
+          assistantReply: { text: persistedText },
+        });
+        const reply = {
+          content: { text: '' }, id: 'asst-r31-5-rep', userId: 'a', roomId: 'room-r31-5-rep',
+          replyTo: 'user-r31-5-rep',
+        } as any;
+        await (dkgPlugin as any).hooks.onAssistantReply(runtime, reply, {}, {
+          assistantReply: { text: persistedText },
+        });
+
+        const replyOpts = spy.mock.calls[1][3] as any;
+        expect(replyOpts.assistantAlreadyPersisted).toBe(true);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it('onChatTurn writes EMPTY assistantText (truthy guard fails) → cache stays clean → no false-positive suppression on a NON-EMPTY incoming reply', async () => {
+      const spy = vi.spyOn(dkgService, 'persistChatTurn' as any)
+        .mockResolvedValue({ tripleCount: 0, turnUri: '', kcId: '' } as any);
+      try {
+        const runtime = { getSetting: () => undefined, character: { name: 'x' } } as any;
+        const userMsg = { content: { text: 'hello' }, id: 'user-r31-5-empty', userId: 'u', roomId: 'room-r31-5-empty' } as any;
+        // Host fires onChatTurn with no assistant text at all (the
+        // standard "user turn only, reply later" flow). The wrapper
+        // does not even invoke `markAssistantPersisted` because the
+        // truthiness check fails — cache stays empty, the safety
+        // net (refusing to cache empty strings inside
+        // `markAssistantPersisted`) is the second line of defence.
+        await (dkgPlugin as any).hooks.onChatTurn(runtime, userMsg, {}, {});
+        const reply = {
+          content: { text: 'real reply' }, id: 'asst-r31-5-empty', userId: 'a', roomId: 'room-r31-5-empty',
+          replyTo: 'user-r31-5-empty',
+        } as any;
+        await (dkgPlugin as any).hooks.onAssistantReply(runtime, reply, {}, {});
+
+        const replyOpts = spy.mock.calls[1][3] as any;
+        expect(replyOpts.assistantAlreadyPersisted).toBeUndefined();
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it('explicit caller assistantAlreadyPersisted=true STILL wins over the payload comparison (caller signal is authoritative)', async () => {
+      const spy = vi.spyOn(dkgService, 'persistChatTurn' as any)
+        .mockResolvedValue({ tripleCount: 0, turnUri: '', kcId: '' } as any);
+      try {
+        const runtime = { getSetting: () => undefined, character: { name: 'x' } } as any;
+        const userMsg = { content: { text: 'hello' }, id: 'user-r31-5-explicit', userId: 'u', roomId: 'room-r31-5-explicit' } as any;
+        // No prior onChatTurn → cache is empty → payload comparison
+        // would not fire. But the caller knows authoritatively the
+        // assistant write was already done elsewhere and explicitly
+        // sets the flag — the wrapper must defer to that
+        // (explicit > implicit, same precedence as the cache check).
+        const reply = {
+          content: { text: 'reply text' }, id: 'asst-r31-5-explicit', userId: 'a', roomId: 'room-r31-5-explicit',
+          replyTo: 'user-r31-5-explicit',
+        } as any;
+        await (dkgPlugin as any).hooks.onAssistantReply(runtime, reply, {}, {
+          assistantAlreadyPersisted: true,
+        });
+
+        const replyOpts = spy.mock.calls[0][3] as any;
+        expect(replyOpts.assistantAlreadyPersisted).toBe(true);
+      } finally {
+        spy.mockRestore();
+      }
+    });
   });
 
   it('explicit caller assistantAlreadyPersisted=false WINS over the cache (caller signal is authoritative)', async () => {

@@ -1605,6 +1605,101 @@ describe('persistChatTurnImpl — PR #229 round 31 (r31-3): headless turn id + s
   });
 });
 
+// ===========================================================================
+// PR #229 bot review (r31-5 — actions.ts:1173).
+//
+// The headless branch was reusing `buildAssistantMessageQuads(...)` verbatim,
+// which emits `?msg schema:isPartOf <session>`. That edge is also the
+// predicate `ChatMemoryManager.getSession()` enumerates messages on. When
+// the canonical user-first turn is later replayed for the SAME `turnKey`,
+// the user-turn path writes a SECOND assistant message at the canonical
+// `msg:agent:${turnKey}` URI, also session-scoped. Both messages then
+// surface in `getSession()` because their URIs differ even though they
+// represent the same logical reply — chat history shows duplicates.
+//
+// Fix (writer side, here): tag the headless assistant message with
+// `dkg:headlessAssistantMessage "true"` so the reader can identify and
+// dedupe it. The reader-side complement lives in
+// `ChatMemoryManager.getSession()` (post-process bindings: when a
+// non-headless message exists for the same canonical `turnKey` —
+// extracted by stripping the `headless:` literal prefix off `dkg:turnId`
+// — drop the headless variant). The `schema:isPartOf` edge stays on the
+// headless assistant message so a headless-only session (no canonical
+// user-first replay) is still surfaced by the standard enumeration.
+// ===========================================================================
+describe('persistChatTurnImpl — PR #229 round 31 (r31-5): headless assistant marker for getSession() dedupe', () => {
+  it('headless assistant message carries dkg:headlessAssistantMessage "true" marker (so getSession() can dedupe against canonical replay)', async () => {
+    const { agent, publishes } = makeCapturingAgent();
+    await persistChatTurnImpl(
+      agent, makeRuntime(),
+      makeMessage('headless reply', { id: 'asst-r31-5-a', roomId: 'r' } as any),
+      {} as State,
+      { mode: 'assistant-reply', userMessageId: 'parent-r31-5-a', userTurnPersisted: false },
+    );
+    const quads = publishes[0].quads;
+    const asstUri = 'urn:dkg:chat:msg:agent-headless:r:parent-r31-5-a';
+    const markerQuads = quads.filter((q) =>
+      q.subject === asstUri && q.predicate === `${DKG_ONT}headlessAssistantMessage`,
+    );
+    expect(markerQuads).toHaveLength(1);
+    expect(markerQuads[0].object).toBe('"true"');
+  });
+
+  it('canonical (user-first) assistant message does NOT carry the headlessAssistantMessage marker (the marker is exclusive to the headless path)', async () => {
+    const { agent, publishes } = makeCapturingAgent();
+    // User-turn that ALSO embeds the assistant text (so the impl
+    // writes the canonical assistant message at the canonical URI).
+    await persistChatTurnImpl(
+      agent, makeRuntime(),
+      makeMessage('hi', { id: 'user-r31-5-b', roomId: 'r' } as any),
+      {} as State,
+      { assistantText: 'reply' } as any,
+    );
+    const quads = publishes[0].quads;
+    const canonicalAsstUri = 'urn:dkg:chat:msg:agent:r:user-r31-5-b';
+    expect(quads.some((q) =>
+      q.subject === canonicalAsstUri && q.predicate === `${DKG_ONT}headlessAssistantMessage`,
+    )).toBe(false);
+    // Cross-cut: the headlessUserMessage marker is also exclusive
+    // to the headless path — the canonical user message must not
+    // carry it either (anti-drift guard).
+    const canonicalUserUri = 'urn:dkg:chat:msg:user:r:user-r31-5-b';
+    expect(quads.some((q) =>
+      q.subject === canonicalUserUri && q.predicate === `${DKG_ONT}headlessUserMessage`,
+    )).toBe(false);
+  });
+
+  it('headless assistant message KEEPS schema:isPartOf <session> (so headless-only sessions still surface in getSession() enumeration)', async () => {
+    // The bug bot's two suggested remediations were:
+    //   (a) drop schema:isPartOf on the headless assistant message
+    //       (writer-only fix; but then headless-only sessions never
+    //       surface in getSession() because the enumeration walks
+    //       schema:isPartOf, so the proactive-agent / recovery-path
+    //       case lost its main read path), OR
+    //   (b) update the reader to hide superseded headless messages.
+    //
+    // We picked (b) because (a) breaks the legitimate
+    // headless-only flow. This test pins the property: the
+    // `schema:isPartOf <session>` edge IS still on the headless
+    // assistant message so the existing reader contract for
+    // headless-only sessions is preserved. Dedupe is a reader-side
+    // post-pass keyed on the new marker.
+    const { agent, publishes } = makeCapturingAgent();
+    await persistChatTurnImpl(
+      agent, makeRuntime(),
+      makeMessage('headless reply', { id: 'asst-r31-5-c', roomId: 'r' } as any),
+      {} as State,
+      { mode: 'assistant-reply', userMessageId: 'parent-r31-5-c', userTurnPersisted: false },
+    );
+    const quads = publishes[0].quads;
+    const asstUri = 'urn:dkg:chat:msg:agent-headless:r:parent-r31-5-c';
+    const sessionUri = 'urn:dkg:chat:session:r';
+    expect(quads).toContainEqual(expect.objectContaining({
+      subject: asstUri, predicate: `${SCHEMA}isPartOf`, object: sessionUri,
+    }));
+  });
+});
+
 describe('types — PR #229 round 13 (r13-3): Memory includes runtime-required fields', () => {
   // -------------------------------------------------------------------
   // r13-3: the public `Memory` type previously exposed only

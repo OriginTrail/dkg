@@ -353,8 +353,180 @@ describe('ChatMemoryManager', () => {
       'urn:dkg:chat:msg:user-1',
     ]);
     const queryText = String(mockQuery.calls[1][0]);
-    expect(queryText).toContain('SELECT ?m ?author ?text ?ts ?turnId ?persistenceState ?attachmentRefs ?failureReason');
+    expect(queryText).toContain('SELECT ?m ?author ?text ?ts ?turnId ?persistenceState ?attachmentRefs ?failureReason ?headlessAssistantFlag');
     expect(queryText).toContain('ORDER BY DESC(?ts) LIMIT 3');
+  });
+
+  // ---------------------------------------------------------------------
+  // PR #229 bot review (r31-5 — adapter-elizaos/src/actions.ts:1173).
+  //
+  // The headless branch in `persistChatTurnImpl` re-uses
+  // `buildAssistantMessageQuads(...)` which emits
+  // `?msg schema:isPartOf <session>`. That edge is what `getSession`
+  // walks to enumerate messages. So when a canonical user-first turn
+  // is later replayed for the same `turnKey`, the user-turn path
+  // writes a SECOND assistant message at `msg:agent:K` (also
+  // session-scoped) and `getSession()` returns BOTH because the URIs
+  // differ even though they represent the same logical reply — chat
+  // history shows duplicates.
+  //
+  // Fix: tag the headless assistant message with
+  // `dkg:headlessAssistantMessage "true"` (writer side) and dedupe
+  // here by canonical turn key (strip the `headless:` literal prefix
+  // off `dkg:turnId`). When BOTH variants exist for the same canonical
+  // key, drop the headless one. Headless replies that have NO
+  // canonical counterpart (the proactive-agent / recovery-path case)
+  // are KEPT — dedupe activates only when both are present.
+  // ---------------------------------------------------------------------
+  it('[r31-5] getSession dedupes headless assistant messages when a canonical reply for the same turn exists', async () => {
+    mockQuery.returns.push(
+      { bindings: [] },
+      {
+        bindings: [
+          // Real user message (canonical user-first turn).
+          {
+            m: 'urn:dkg:chat:msg:user:K',
+            author: 'urn:dkg:chat:actor:user',
+            text: '"hi"',
+            ts: '"2026-01-01T12:00:00Z"',
+            turnId: '"K"',
+          },
+          // Headless assistant message (proactive reply, written
+          // first when the canonical user-turn hadn't fired).
+          {
+            m: 'urn:dkg:chat:msg:agent-headless:K',
+            author: 'urn:dkg:chat:actor:agent',
+            text: '"headless reply (provisional)"',
+            ts: '"2026-01-01T12:00:00.500Z"',
+            turnId: '"headless:K"',
+            headlessAssistantFlag: '"true"',
+          },
+          // Canonical assistant message (written when the user-first
+          // turn replayed and embedded the assistant text).
+          {
+            m: 'urn:dkg:chat:msg:agent:K',
+            author: 'urn:dkg:chat:actor:agent',
+            text: '"final canonical reply"',
+            ts: '"2026-01-01T12:00:01Z"',
+            turnId: '"K"',
+          },
+        ],
+      },
+    );
+
+    const session = await manager.getSession('test-session-r31-5-dedupe');
+    expect(session).not.toBeNull();
+    // The headless assistant message MUST be filtered out because a
+    // canonical reply for the same canonical `turnKey` (`K`) exists.
+    // Pre-fix `getSession` returned all three rows.
+    const uris = session!.messages.map((m) => m.uri);
+    expect(uris).toEqual([
+      'urn:dkg:chat:msg:user:K',
+      'urn:dkg:chat:msg:agent:K',
+    ]);
+    // The dedupe key is the CANONICAL turn key — `headless:K` and
+    // `K` collapse to the same group `K`. Pin that property.
+    expect(uris).not.toContain('urn:dkg:chat:msg:agent-headless:K');
+    // Public message shape MUST NOT leak the internal
+    // `isHeadlessAssistant` discriminator. The dedupe pass
+    // strips it before returning.
+    for (const m of session!.messages) {
+      expect((m as any).isHeadlessAssistant).toBeUndefined();
+    }
+  });
+
+  it('[r31-5] getSession KEEPS the headless assistant message when no canonical reply exists for the same turn (proactive-agent / recovery-path flow stays surfaced)', async () => {
+    mockQuery.returns.push(
+      { bindings: [] },
+      {
+        bindings: [
+          // Stub user message. `dkg:HeadlessUserStub` has no
+          // `schema:isPartOf` so it never reaches getSession in
+          // production — but for completeness the dedupe pass MUST
+          // not drop it either. The realistic shape is just the
+          // headless assistant alone because the stub is not part
+          // of session enumeration.
+          {
+            m: 'urn:dkg:chat:msg:agent-headless:K-only',
+            author: 'urn:dkg:chat:actor:agent',
+            text: '"proactive reply, no user-turn replay"',
+            ts: '"2026-01-01T12:00:01Z"',
+            turnId: '"headless:K-only"',
+            headlessAssistantFlag: '"true"',
+          },
+        ],
+      },
+    );
+
+    const session = await manager.getSession('test-session-r31-5-headless-only');
+    expect(session).not.toBeNull();
+    expect(session!.messages.map((m) => m.uri)).toEqual([
+      'urn:dkg:chat:msg:agent-headless:K-only',
+    ]);
+    // Pin the public-shape projection — even when the headless
+    // message is kept, the discriminator is stripped.
+    expect((session!.messages[0] as any).isHeadlessAssistant).toBeUndefined();
+  });
+
+  it('[r31-5] getSession SPARQL query fetches the dkg:headlessAssistantMessage marker (anti-drift guard for the dedupe pass)', async () => {
+    mockQuery.returns.push(
+      { bindings: [] },
+      {
+        bindings: [
+          {
+            m: 'urn:dkg:chat:msg:user:K-q',
+            author: 'urn:dkg:chat:actor:user',
+            text: '"hi"',
+            ts: '"2026-01-01T12:00:00Z"',
+            turnId: '"K-q"',
+          },
+        ],
+      },
+    );
+    await manager.getSession('test-session-r31-5-shape');
+    const queryText = String(mockQuery.calls[1][0]);
+    // Without `?headlessAssistantFlag` in the SELECT projection AND
+    // the OPTIONAL pattern, the dedupe pass cannot tell a headless
+    // assistant message apart from a canonical one — every message
+    // would be treated as canonical and the bug regresses.
+    expect(queryText).toContain('?headlessAssistantFlag');
+    expect(queryText).toMatch(/headlessAssistantMessage>\s+\?headlessAssistantFlag/);
+  });
+
+  it('[r31-5] getSession dedupe is keyed on canonical turn key (strips `headless:` prefix) — different canonical keys do NOT cross-dedupe', async () => {
+    mockQuery.returns.push(
+      { bindings: [] },
+      {
+        bindings: [
+          // Headless assistant on turn key A — no canonical exists
+          // for `A`, so it must survive.
+          {
+            m: 'urn:dkg:chat:msg:agent-headless:A',
+            author: 'urn:dkg:chat:actor:agent',
+            text: '"headless A"',
+            ts: '"2026-01-01T12:00:00Z"',
+            turnId: '"headless:A"',
+            headlessAssistantFlag: '"true"',
+          },
+          // Canonical user message on turn key B (different turn).
+          {
+            m: 'urn:dkg:chat:msg:user:B',
+            author: 'urn:dkg:chat:actor:user',
+            text: '"hi B"',
+            ts: '"2026-01-01T12:00:01Z"',
+            turnId: '"B"',
+          },
+        ],
+      },
+    );
+    const session = await manager.getSession('test-session-r31-5-cross-key');
+    expect(session).not.toBeNull();
+    // No cross-key dedupe — the canonical user-message on turn B
+    // must NOT cause the headless reply on turn A to be dropped.
+    expect(session!.messages.map((m) => m.uri)).toEqual([
+      'urn:dkg:chat:msg:agent-headless:A',
+      'urn:dkg:chat:msg:user:B',
+    ]);
   });
 
   it('getSession returns null when session has no messages', async () => {

@@ -283,14 +283,38 @@ export function __resetPersistedUserTurnCacheForTests(): void {
  * `assertionName`) so a successful write into store A does NOT
  * silently short-circuit an assistant-reply heading into store B.
  */
-let persistedAssistantMessagesByRuntime: WeakMap<object, Map<string, true>> = new WeakMap();
-let persistedAssistantMessagesAnon: Map<string, true> = new Map();
+// PR #229 bot review (r31-5 — adapter-elizaos/src/index.ts:555).
+//
+// The cache used to store a bare `true` per `(roomId, userMsgId,
+// dest)` key, treating any prior user-turn write that carried a
+// non-empty `assistantText` / `assistantReply.text` /
+// `state.lastAssistantReply` as proof that the assistant leg was
+// FINAL. Hosts that pipe a PROVISIONAL or STALE assistant string
+// through `onChatTurn` (e.g. an in-flight LLM partial parked on
+// `state.lastAssistantReply` before the streaming completion fires)
+// would mark the cache → the later real `onAssistantReply` then read
+// `assistantAlreadyPersisted=true` and short-circuited, leaving the
+// stored reply stuck on the partial/wrong text.
+//
+// Fix: store the assistant TEXT the writer used, not a boolean. The
+// follow-up `onAssistantReplyHandler` compares the cached text
+// against the incoming reply payload and only sets
+// `assistantAlreadyPersisted=true` when they MATCH (idempotent
+// retry case). Mismatches mean a different/final reply arrived
+// after `onChatTurn` recorded a provisional string — we leave the
+// flag unset so the impl emits the new assistant message instead of
+// freezing the stale one. Same scoping rules as before: per-runtime
+// via `WeakMap`, scoped by destination tuple so a successful write
+// into store A does NOT silently short-circuit an assistant-reply
+// heading into store B.
+let persistedAssistantMessagesByRuntime: WeakMap<object, Map<string, string>> = new WeakMap();
+let persistedAssistantMessagesAnon: Map<string, string> = new Map();
 
-function resolveAssistantRuntimeCache(runtime: unknown): Map<string, true> {
+function resolveAssistantRuntimeCache(runtime: unknown): Map<string, string> {
   if (runtime !== null && typeof runtime === 'object') {
     let m = persistedAssistantMessagesByRuntime.get(runtime as object);
     if (!m) {
-      m = new Map<string, true>();
+      m = new Map<string, string>();
       persistedAssistantMessagesByRuntime.set(runtime as object, m);
     }
     return m;
@@ -304,32 +328,41 @@ function markAssistantPersisted(
   userMsgId: unknown,
   destContextGraphId: string,
   destAssertionName: string,
+  assistantText: string,
 ): void {
   const k = persistedUserTurnKey(roomId, userMsgId, destContextGraphId, destAssertionName);
   if (!k) return;
+  // r31-5: empty string defeats the payload comparison (would match
+  // every empty incoming reply). Refuse to cache empty values so an
+  // explicit caller mistake doesn't silently freeze "" as the final
+  // reply text. Any non-empty value is recorded verbatim — the
+  // cache's only consumer (`getCachedAssistantText`) compares it to
+  // the incoming reply, so it does not need to reason about
+  // provisional/final semantics here.
+  if (typeof assistantText !== 'string' || assistantText.length === 0) return;
   const m = resolveAssistantRuntimeCache(runtime);
   m.delete(k);
-  m.set(k, true);
+  m.set(k, assistantText);
   if (m.size > PERSISTED_USER_TURN_CACHE_MAX) {
     const oldest = m.keys().next().value;
     if (oldest !== undefined) m.delete(oldest);
   }
 }
 
-function hasAssistantBeenPersisted(
+function getCachedAssistantText(
   runtime: unknown,
   roomId: unknown,
   userMsgId: unknown,
   destContextGraphId: string,
   destAssertionName: string,
-): boolean {
+): string | undefined {
   const k = persistedUserTurnKey(roomId, userMsgId, destContextGraphId, destAssertionName);
-  if (k === null) return false;
+  if (k === null) return undefined;
   if (runtime !== null && typeof runtime === 'object') {
     const m = persistedAssistantMessagesByRuntime.get(runtime as object);
-    return m !== undefined && m.has(k);
+    return m === undefined ? undefined : m.get(k);
   }
-  return persistedAssistantMessagesAnon.has(k);
+  return persistedAssistantMessagesAnon.get(k);
 }
 
 /**
@@ -448,8 +481,50 @@ async function onAssistantReplyHandler(
   if (opts.assistantAlreadyPersisted === undefined) {
     const roomId = (message as any)?.roomId;
     const dest = resolveDestinationFromOptions(runtime, opts);
-    if (hasAssistantBeenPersisted(runtime, roomId, userMessageId, dest.contextGraphId, dest.assertionName)) {
-      opts.assistantAlreadyPersisted = true;
+    const cachedAssistantText = getCachedAssistantText(
+      runtime,
+      roomId,
+      userMessageId,
+      dest.contextGraphId,
+      dest.assertionName,
+    );
+    // PR #229 bot review (r31-5 — adapter-elizaos/src/index.ts:555).
+    //
+    // Pre-fix the cache held a bare `true` and we set
+    // `assistantAlreadyPersisted=true` for ANY hit. Hosts that
+    // plumbed a PROVISIONAL `assistantText` /
+    // `state.lastAssistantReply` through `onChatTurn` (e.g. partial
+    // streaming completion parked before the final reply fires)
+    // would mark the cache and the later real `onAssistantReply`
+    // would short-circuit — chat history kept the stale partial
+    // forever.
+    //
+    // Fix: payload comparison. The cache now stores the FULL
+    // assistant text the user-turn write actually persisted. We
+    // only suppress the second write when the incoming reply
+    // matches that cached text byte-for-byte (the genuine
+    // idempotent-retry case the r31-1 protection was designed to
+    // catch). When the incoming reply differs we leave the flag
+    // unset so the impl emits the new (final) assistant message
+    // — at the cost of potentially layering an extra `schema:text`
+    // triple on the same `msg:agent:${turnKey}` URI, which is
+    // strictly less wrong than freezing stale text.
+    //
+    // The replied-with text comes off the assistant `Memory`'s
+    // own `content.text` (the canonical ElizaOS shape), with the
+    // explicit options-bag `assistantText` / `assistantReply.text`
+    // as fallbacks for hosts that don't put the reply text on
+    // `message.content`.
+    if (cachedAssistantText !== undefined) {
+      const replyOpt = (options as any)?.assistantReply as { text?: unknown } | undefined;
+      const incomingReplyText =
+        (typeof (message as any)?.content?.text === 'string' && (message as any).content.text)
+        || (typeof (options as any)?.assistantText === 'string' && (options as any).assistantText)
+        || (typeof replyOpt?.text === 'string' && replyOpt.text)
+        || '';
+      if (incomingReplyText === cachedAssistantText) {
+        opts.assistantAlreadyPersisted = true;
+      }
     }
   }
   // r30-8: route through the internal-only loose handle. The public
@@ -544,6 +619,19 @@ async function onChatTurnHandler(
   // sufficient — that's the user message's text on the
   // user-turn path; the assistant leg comes exclusively from
   // `options` / `state`.
+  //
+  // PR #229 bot review (r31-5 — adapter-elizaos/src/index.ts:555).
+  // The cache now stores the FULL assistant text (not a bare
+  // `true`) so `onAssistantReplyHandler` can compare incoming
+  // reply text against the recorded value and avoid suppressing
+  // a follow-up real reply when the user-turn snapshot was
+  // provisional/stale. The trigger condition (`assistantText`
+  // truthy) is unchanged — we still record whatever the impl
+  // actually wrote — but the recorded VALUE shifted from a
+  // confirmation flag to the payload itself. Empty strings are
+  // refused inside `markAssistantPersisted` so the cache cannot
+  // accidentally match a follow-up reply whose text is also
+  // empty (defence-in-depth).
   const optsForAssistant = (optsAny ?? {}) as Record<string, unknown>;
   const assistantReplyOpt = optsForAssistant.assistantReply as { text?: unknown } | undefined;
   const stateForAssistant = (state ?? {}) as { lastAssistantReply?: unknown };
@@ -553,7 +641,7 @@ async function onChatTurnHandler(
     || (typeof stateForAssistant.lastAssistantReply === 'string' && stateForAssistant.lastAssistantReply)
     || '';
   if (assistantText) {
-    markAssistantPersisted(runtime, roomId, userMsgId, dest.contextGraphId, dest.assertionName);
+    markAssistantPersisted(runtime, roomId, userMsgId, dest.contextGraphId, dest.assertionName, assistantText);
   }
   return result;
 }

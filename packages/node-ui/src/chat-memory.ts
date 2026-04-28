@@ -859,13 +859,14 @@ export class ChatMemoryManager {
       const order = opts.order === 'desc' ? 'DESC' : 'ASC';
       const sessionUri = `${CHAT_NS}session:${sessionId}`;
       const msgsResult = await this.tools.query(
-        `SELECT ?m ?author ?text ?ts ?turnId ?persistenceState ?attachmentRefs ?failureReason WHERE {
+        `SELECT ?m ?author ?text ?ts ?turnId ?persistenceState ?attachmentRefs ?failureReason ?headlessAssistantFlag WHERE {
           ?m <${SCHEMA}isPartOf> <${sessionUri}> .
           ?m <${SCHEMA}author> ?author .
           ?m <${SCHEMA}text> ?text .
           ?m <${SCHEMA}dateCreated> ?ts
           OPTIONAL { ?m <${DKG_ONT}turnId> ?turnId }
           OPTIONAL { ?m <${CHAT_ATTACHMENT_REFS_PREDICATE}> ?attachmentRefs }
+          OPTIONAL { ?m <${DKG_ONT}headlessAssistantMessage> ?headlessAssistantFlag }
           OPTIONAL {
             ?turn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
             ?turn <${SCHEMA}isPartOf> <${sessionUri}> .
@@ -878,14 +879,26 @@ export class ChatMemoryManager {
       );
       const bindings = msgsResult.bindings ?? [];
       if (bindings.length === 0) return null;
-      return {
-        session: sessionId,
-        messages: bindings.map((mb: any) => ({
+      type RawMessage = {
+        uri: string;
+        author: 'user' | 'agent';
+        text: string;
+        ts: string;
+        turnId: string | undefined;
+        attachmentRefs: ChatAttachmentRef[] | undefined;
+        persistStatus: 'pending' | 'in_progress' | 'stored' | 'failed' | 'skipped' | undefined;
+        failureReason: string | undefined;
+        isHeadlessAssistant: boolean;
+      };
+      const rawMessages: RawMessage[] = bindings.map((mb: any): RawMessage => {
+        const turnIdLiteral = stripRdfLiteral(mb.turnId ?? '') || undefined;
+        const headlessFlag = stripRdfLiteral(mb.headlessAssistantFlag ?? '').trim();
+        return {
           uri: String(mb.m ?? '').replace(/[<>]/g, ''),
           author: mb.author?.includes('user') ? 'user' : 'agent',
           text: stripRdfLiteral(mb.text ?? ''),
           ts: stripRdfLiteral(mb.ts ?? ''),
-          turnId: stripRdfLiteral(mb.turnId ?? '') || undefined,
+          turnId: turnIdLiteral,
           attachmentRefs: parseAttachmentRefsLiteral(String(mb.attachmentRefs ?? '')),
           persistStatus: (() => {
             const status = stripRdfLiteral(mb.persistenceState ?? '').trim();
@@ -898,7 +911,52 @@ export class ChatMemoryManager {
             const reason = stripRdfLiteral(mb.failureReason ?? '').trim();
             return reason.length > 0 ? reason : undefined;
           })(),
-        })),
+          // r31-5 (PR #229 bot review — actions.ts:1173): used ONLY by
+          // the dedupe pass below, then stripped from the public shape.
+          // `true` iff the writer tagged the message
+          // `dkg:headlessAssistantMessage "true"` (i.e. it came from
+          // the proactive/recovery headless reply path, not the
+          // canonical user-first turn).
+          isHeadlessAssistant: headlessFlag === 'true',
+        };
+      });
+      // PR #229 bot review (r31-5 — actions.ts:1173): when both a
+      // headless assistant message (`msg:agent-headless:K`,
+      // `dkg:turnId "headless:K"`, marked
+      // `dkg:headlessAssistantMessage "true"`) AND a canonical
+      // assistant message (`msg:agent:K`, `dkg:turnId "K"`) exist for
+      // the same logical turn, the SPARQL above returns both because
+      // their URIs differ — chat history would render the same reply
+      // twice. Group by the canonical turn key (strip the `headless:`
+      // literal prefix off `dkg:turnId`) and, when a non-headless
+      // message exists in a group, drop the headless variant. Headless
+      // replies that have NO canonical counterpart (the standard
+      // proactive-agent / recovery case) are kept untouched — dedupe
+      // activates only when both variants are present.
+      const HEADLESS_PREFIX = 'headless:';
+      const canonicalTurnKey = (turnId: string | undefined): string | null => {
+        if (!turnId) return null;
+        return turnId.startsWith(HEADLESS_PREFIX)
+          ? turnId.slice(HEADLESS_PREFIX.length)
+          : turnId;
+      };
+      const groupHasNonHeadless = new Map<string, boolean>();
+      for (const m of rawMessages) {
+        const key = canonicalTurnKey(m.turnId);
+        if (key === null) continue;
+        if (!m.isHeadlessAssistant) groupHasNonHeadless.set(key, true);
+      }
+      const dedupedMessages = rawMessages
+        .filter((m) => {
+          if (!m.isHeadlessAssistant) return true;
+          const key = canonicalTurnKey(m.turnId);
+          if (key === null) return true;
+          return !groupHasNonHeadless.get(key);
+        })
+        .map(({ isHeadlessAssistant: _ignored, ...publicShape }) => publicShape);
+      return {
+        session: sessionId,
+        messages: dedupedMessages,
       };
     } catch {
       return null;
