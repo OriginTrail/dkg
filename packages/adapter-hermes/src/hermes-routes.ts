@@ -5,6 +5,7 @@ import type {
   SessionEndPayload,
   SessionTurnPayload,
 } from './types.js';
+import { randomUUID } from 'node:crypto';
 
 export function registerHermesRoutes(api: DaemonPluginApi): void {
   api.registerHttpRoute({
@@ -65,10 +66,18 @@ export function registerHermesRoutes(api: DaemonPluginApi): void {
     path: '/api/hermes/session-turn',
     handler: async (req, res) => {
       const body = req.body as SessionTurnPayload & { agentName?: string };
+      const explicitTurnId = typeof body.turnId === 'string' && body.turnId.trim()
+        ? body.turnId.trim()
+        : undefined;
+      const explicitIdempotencyKey = typeof body.idempotencyKey === 'string' && body.idempotencyKey.trim()
+        ? body.idempotencyKey.trim()
+        : undefined;
+      const fallbackTurnId = `legacy-${body.sessionId ?? 'unknown'}-${randomUUID()}`;
+      const turnId = explicitTurnId ?? fallbackTurnId;
       await handlePersistTurn(api, {
         sessionId: body.sessionId,
-        turnId: body.turnId ?? `${body.sessionId}:legacy`,
-        idempotencyKey: body.idempotencyKey ?? `${body.sessionId}:legacy`,
+        turnId,
+        idempotencyKey: explicitIdempotencyKey ?? turnId,
         userMessage: body.user ?? '',
         assistantReply: body.assistant ?? '',
         source: 'hermes-provider',

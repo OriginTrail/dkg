@@ -10,6 +10,7 @@ import {
   disconnectHermesProfile,
   planHermesSetup,
   runDoctor,
+  runReconnect,
   resolveHermesProfile,
   runSetup,
   runVerify,
@@ -229,6 +230,27 @@ describe('POST /api/hermes-channel/persist-turn', () => {
     }, res);
 
     expect(calls.some(c => c.json?.success === true && c.json?.sessionId === 's1')).toBe(true);
+  });
+});
+
+describe('POST /api/hermes/session-turn', () => {
+  it('generates distinct fallback ids for legacy turns without ids', async () => {
+    const api = createTrackingApi();
+    registerHermesRoutes(api);
+    const handler = api.routes.get('POST /api/hermes/session-turn')!;
+    const first = trackingRes();
+    const second = trackingRes();
+
+    await handler({ body: { sessionId: 's1', user: 'hello', assistant: 'hi' } }, first.res);
+    await handler({ body: { sessionId: 's1', user: 'hello', assistant: 'hi again' } }, second.res);
+
+    const calls = (api.agent as any)._storeChatTurnCalls;
+    expect(calls).toHaveLength(2);
+    expect(calls[0][3].turnId).toMatch(/^legacy-s1-/);
+    expect(calls[1][3].turnId).toMatch(/^legacy-s1-/);
+    expect(calls[0][3].turnId).not.toBe(calls[1][3].turnId);
+    expect(calls[0][3].idempotencyKey).toBe(calls[0][3].turnId);
+    expect(calls[1][3].idempotencyKey).toBe(calls[1][3].turnId);
   });
 });
 
@@ -466,6 +488,39 @@ describe('Hermes profile setup helpers', () => {
     expect((config.match(/^memory:/gm) ?? [])).toHaveLength(1);
     expect(config).toContain('  provider: dkg');
     expect(config).toContain('  retrieval_k: 8');
+  });
+
+  it('removes the managed provider block when switching to tools-only mode', () => {
+    const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-'));
+
+    setupHermesProfile({ hermesHome, memoryMode: 'provider' });
+    expect(readFileSync(join(hermesHome, 'config.yaml'), 'utf-8')).toContain('provider: dkg');
+
+    const plan = setupHermesProfile({ hermesHome, memoryMode: 'tools-only' });
+    const config = readFileSync(join(hermesHome, 'config.yaml'), 'utf-8');
+    const verify = verifyHermesProfile({ hermesHome });
+
+    expect(plan.profile.memoryMode).toBe('tools-only');
+    expect(config).not.toContain('provider: dkg');
+    expect(config).not.toContain('BEGIN DKG ADAPTER HERMES MANAGED');
+    expect(verify.ok).toBe(true);
+    expect(verify.profile.memoryMode).toBe('tools-only');
+  });
+
+  it('reconnect preserves a disconnected tools-only profile mode', async () => {
+    const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-'));
+    writeFileSync(join(hermesHome, 'config.yaml'), 'memory:\n  provider: mem0\n');
+    setupHermesProfile({ hermesHome, memoryMode: 'tools-only' });
+    disconnectHermesProfile({ hermesHome });
+
+    await runReconnect({ hermesHome, start: false });
+
+    const config = readFileSync(join(hermesHome, 'config.yaml'), 'utf-8');
+    const verify = verifyHermesProfile({ hermesHome });
+    expect(config).toContain('provider: mem0');
+    expect(config).not.toContain('provider: dkg');
+    expect(verify.ok).toBe(true);
+    expect(verify.profile.memoryMode).toBe('tools-only');
   });
 
   it('exposes a dry-run CLI setup helper for dkg hermes setup', async () => {

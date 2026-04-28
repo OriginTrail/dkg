@@ -151,6 +151,8 @@ export function setupHermesProfile(options: HermesSetupOptions = {}): HermesSetu
 
   if (plan.profile.memoryMode === 'provider') {
     ensureManagedProviderBlock(plan.profile.configPath);
+  } else {
+    removeManagedProviderBlock(plan.profile.configPath);
   }
 
   if (options.nodeSkillContent) {
@@ -255,6 +257,13 @@ export function uninstallHermesProfile(options: HermesSetupOptions = {}): Hermes
 
 export async function runSetup(options: HermesCliOptions = {}): Promise<void> {
   const setupOptions = toSetupOptions(options);
+  await executeSetup(options, setupOptions);
+}
+
+async function executeSetup(
+  options: HermesCliOptions,
+  setupOptions: HermesSetupOptions,
+): Promise<void> {
   const plan = setupHermesProfile(setupOptions);
   printPlan('Hermes setup', plan);
   if (plan.dryRun) return;
@@ -299,7 +308,7 @@ export async function runDisconnect(options: HermesCliOptions = {}): Promise<voi
 }
 
 export async function runReconnect(options: HermesCliOptions = {}): Promise<void> {
-  await runSetup(options);
+  await executeSetup(options, toReconnectSetupOptions(options));
 }
 
 export async function runUninstall(options: HermesCliOptions = {}): Promise<void> {
@@ -332,6 +341,18 @@ function toSetupOptions(options: HermesCliOptions): HermesSetupOptions {
     daemonUrl: stripTrailingSlashes(trimmed(options.daemonUrl) ?? (port ? `http://127.0.0.1:${port}` : 'http://127.0.0.1:9200')),
     memoryMode: normalizeCliMemoryMode(options.memoryMode),
     dryRun: options.dryRun === true,
+  };
+}
+
+function toReconnectSetupOptions(options: HermesCliOptions): HermesSetupOptions {
+  const setupOptions = toSetupOptions(options);
+  if (setupOptions.memoryMode) return setupOptions;
+
+  const state = readSetupState(resolveHermesProfile(setupOptions));
+  if (!state?.profile.memoryMode) return setupOptions;
+  return {
+    ...setupOptions,
+    memoryMode: state.profile.memoryMode,
   };
 }
 
