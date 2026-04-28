@@ -186,8 +186,25 @@ export class ChatTurnWriter {
         const data = JSON.parse(content);
         if (data && typeof data === "object") {
           for (const [key, val] of Object.entries(data)) {
+            // T17 — Two formats supported for backward compat:
+            //   * Number `5`             → legacy: watermark only
+            //   * Object `{ w: 5, b: 3 }` → watermark + W4b session count
+            // Preserving w4bCount across restarts is load-bearing: in
+            // setup-runtime mode only W4b runs, so a process restart
+            // mid-conversation would otherwise reset the count to 0
+            // while the watermark file is still -1, and the next
+            // `agent_end` would re-emit every W4b-persisted pair as
+            // backfill — daemon-side duplicate writes.
             if (typeof val === "number") {
               this.cachedWatermarks.set(key, val);
+            } else if (val && typeof val === "object") {
+              const obj = val as { w?: unknown; b?: unknown };
+              if (typeof obj.w === "number") {
+                this.cachedWatermarks.set(key, obj.w);
+              }
+              if (typeof obj.b === "number") {
+                this.w4bSessionCounts.set(key, obj.b);
+              }
             }
           }
         }
@@ -286,6 +303,11 @@ export class ChatTurnWriter {
               // index — without this, a later `agent_end` (after the
               // dedup TTL has expired) would re-pair the same pair as
               // unsaved backfill and write a duplicate (R14.1).
+              // T16 — Consume the stamp so a future same-content turn
+              // within the 5s window doesn't false-hit on W4b's stale
+              // stamp. The watermark advance below provides the
+              // independent backfill guard for THIS pair.
+              this.consumeCrossPathStamp(sessionId, w4bOrigin);
               this.bumpWatermark(sessionId, pairIndex);
               continue;
             }
@@ -564,7 +586,17 @@ export class ChatTurnWriter {
         //   short window means a repeated same-content turn fired
         //   later won't collide with the previous turn's stamp.
         const w4aOrigin = this.w4aOriginKey(userText, assistantText);
-        if (this.peekCrossPathStamp(sessionId, w4aOrigin)) return; // W4a already wrote
+        if (this.peekCrossPathStamp(sessionId, w4aOrigin)) {
+          // T16 — Consume the stamp so a future same-content turn
+          // within the 5s window doesn't false-hit on W4a's stale
+          // stamp (which would make W4b drop turn 2's items even
+          // though W4a never persisted turn 2). Narrows the data-
+          // loss window from "any 5s same-content turn" to "5s
+          // same-content turn where W4a fired for turn 1 but skipped
+          // turn 2" — much rarer in practice.
+          this.consumeCrossPathStamp(sessionId, w4aOrigin);
+          return; // W4a already wrote
+        }
         // T10 — Cross-path in-flight check. If W4a is mid-persist for
         // this pair, skip; W4a will own the persist. We've already
         // consumed the pending user above (line 508), which is correct
@@ -624,6 +656,15 @@ export class ChatTurnWriter {
                 sessionId,
                 (this.w4bSessionCounts.get(sessionId) ?? 0) + 1,
               );
+              // T17 — Persist the new count to disk via the
+              // debounced flush so a process restart preserves
+              // the "skip these pairs in computeDelta" floor.
+              // Without this, setup-runtime → restart → upgrade
+              // to full would replay every W4b-persisted turn as
+              // backfill (count resets to 0, watermark file is
+              // still -1, savedUpTo computes to -1, computeDelta
+              // emits everything).
+              this.scheduleWatermarkFlush(sessionId);
             }
           } catch (err) {
             // W4b is the ONLY path with a copy of `userText` (it lives
@@ -731,6 +772,21 @@ export class ChatTurnWriter {
       if (now - ts > ttl) this.crossPathStamps.delete(k);
     }
     this.crossPathStamps.set(compositeKey, now);
+  }
+
+  /**
+   * T16 — Consume a cross-path stamp after a successful peek-hit.
+   * The 5s TTL is generous to cover slow channels, but a content-only
+   * stamp left in place can false-dedup a legitimate same-content
+   * turn that arrives within the window. Consuming on peek-hit
+   * narrows the false-dedup risk to the very specific case where
+   * the OWNING path (e.g., W4a) fires for turn 1 but skips turn 2,
+   * within the same 5s window. Each path consumes at most ONE stamp
+   * per logical turn (W4a's last-pair peek and W4b's pre-persist
+   * peek both run once per turn).
+   */
+  private consumeCrossPathStamp(sessionId: string, key: string): void {
+    this.crossPathStamps.delete(this.dedupKey(sessionId, key));
   }
 
   /**
@@ -1213,6 +1269,23 @@ export class ChatTurnWriter {
     this.debounceTimers.set(sessionId, { timer, pendingIndex: index });
   }
 
+  /**
+   * T17 — Schedule a debounced watermark-file flush WITHOUT changing
+   * the pending watermark value. Used by W4b's `w4bSessionCounts`
+   * increment so the new count lands on disk via the same file write
+   * that watermark updates use. If a flush is already scheduled, no-op
+   * — it will pick up the new w4bCount when it fires.
+   */
+  private scheduleWatermarkFlush(sessionId: string): void {
+    if (this.debounceTimers.has(sessionId)) return;
+    const currentWatermark = this.cachedWatermarks.get(sessionId) ?? -1;
+    const timer = setTimeout(() => {
+      this.writeWatermarkFile();
+      this.debounceTimers.delete(sessionId);
+    }, 50);
+    this.debounceTimers.set(sessionId, { timer, pendingIndex: currentWatermark });
+  }
+
   private async persistOne(
     sessionId: string,
     user: string,
@@ -1270,7 +1343,23 @@ export class ChatTurnWriter {
 
   private writeWatermarkFile(): void {
     try {
-      const data = Object.fromEntries(this.cachedWatermarks);
+      // T17 — Emit the new `{ w: <watermark>, b: <w4bCount> }` shape so
+      // the W4b session count is preserved across process restarts.
+      // The union of session keys spans both maps because a session
+      // can have a watermark without ever incrementing w4bCount (and
+      // vice versa). Reader handles both legacy (number) and current
+      // (object) shapes — see `initFromFile`.
+      const allKeys = new Set<string>([
+        ...this.cachedWatermarks.keys(),
+        ...this.w4bSessionCounts.keys(),
+      ]);
+      const data: Record<string, { w: number; b: number }> = {};
+      for (const key of allKeys) {
+        data[key] = {
+          w: this.cachedWatermarks.get(key) ?? -1,
+          b: this.w4bSessionCounts.get(key) ?? 0,
+        };
+      }
       const tmpPath = `${this.watermarkFilePath}.tmp`;
       fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2), "utf-8");
       fs.renameSync(tmpPath, this.watermarkFilePath);

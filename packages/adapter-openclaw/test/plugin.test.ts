@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { homedir } from 'os';
+import * as fs from 'fs';
+import * as path from 'path';
 import { DkgNodePlugin } from '../src/DkgNodePlugin.js';
 import { DkgChannelPlugin } from '../src/DkgChannelPlugin.js';
 import type { OpenClawPluginApi, OpenClawTool } from '../src/types.js';
@@ -2736,6 +2738,70 @@ describe('DkgNodePlugin', () => {
     expect(queryCalls).toBeGreaterThan(queriesAfterTurn1);
 
     await plugin.stop();
+  });
+
+  it('T18 — ensureChatTurnWriter rebuilds and migrates when a better stateDir becomes available on a later register()', () => {
+    // Regression for T18: pre-fix, once `chatTurnWriter` was constructed
+    // with the home-dir fallback (because setup-runtime register had
+    // no workspaceDir / resolveStateDir wired yet), it stayed pinned
+    // forever. A later full-mode register that DID provide a workspace-
+    // scoped path would short-circuit the idempotent guard and the
+    // wrong watermark file kept getting used. Post-fix, an upgrade
+    // from fallback → workspace-scoped triggers a rebuild and
+    // best-effort migrates the watermark file.
+    const prevEnv = process.env.OPENCLAW_STATE_DIR;
+    delete process.env.OPENCLAW_STATE_DIR;
+    const tmpRoot = require('os').tmpdir();
+    const workspaceDir = path.join(tmpRoot, `dkg-t18-workspace-${Date.now()}`);
+    // Match DkgNodePlugin's homeDir construction (template literal with /).
+    const homeDir = `${require('os').homedir()}/.openclaw`;
+    try {
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: false },
+        memory: { enabled: false },
+      } as any);
+      // First register: NO workspaceDir → fallback to homeDir.
+      const apiFallback: OpenClawPluginApi = {
+        config: {},
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+      } as unknown as OpenClawPluginApi;
+      plugin.register(apiFallback);
+      const writer1 = (plugin as any).chatTurnWriter;
+      expect((plugin as any).chatTurnWriterStateDir).toBe(homeDir);
+      const path1 = (writer1 as any).watermarkFilePath as string;
+      expect(path1.replace(/\\/g, '/')).toContain('/.openclaw/dkg-adapter/chat-turn-watermarks.json');
+
+      // Second register: workspaceDir IS available now → upgrade.
+      const apiBetter: OpenClawPluginApi = {
+        config: {},
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+        workspaceDir,
+      } as unknown as OpenClawPluginApi;
+      plugin.register(apiBetter);
+      const writer2 = (plugin as any).chatTurnWriter;
+      // Writer was REBUILT (different instance).
+      expect(writer2).not.toBe(writer1);
+      // New stateDir is the workspace-scoped one.
+      expect((plugin as any).chatTurnWriterStateDir.replace(/\\/g, '/')).toBe(
+        workspaceDir.replace(/\\/g, '/') + '/.openclaw',
+      );
+      const path2 = (writer2 as any).watermarkFilePath as string;
+      expect(path2.replace(/\\/g, '/')).toContain(
+        workspaceDir.replace(/\\/g, '/') + '/.openclaw/dkg-adapter/chat-turn-watermarks.json',
+      );
+    } finally {
+      if (prevEnv !== undefined) process.env.OPENCLAW_STATE_DIR = prevEnv;
+      try { fs.rmSync(workspaceDir, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
   });
 
   it('T14 — single-flight key is per-conversation; a slow recall in one conversation does NOT block recall in a sibling conversation under the same sessionKey', async () => {

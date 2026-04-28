@@ -38,6 +38,8 @@ import type {
   OpenClawToolResult,
 } from './types.js';
 import { homedir } from 'node:os';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 
 const OPENCLAW_LOCAL_AGENT_CAPABILITIES = {
   localChat: true,
@@ -130,6 +132,10 @@ export class DkgNodePlugin {
   // `client.query()` so the daemon-side queries can be cancelled.
   private autoRecallInFlight: Set<string> = new Set();
   private chatTurnWriter: ChatTurnWriter | null = null;
+  // T18 — Track the resolved stateDir so a later register() can detect
+  // when a better (workspace-scoped) path becomes available and rebuild
+  // the writer at the upgraded location.
+  private chatTurnWriterStateDir: string | null = null;
   private warnedLegacyGameConfig = false;
   private localAgentIntegrationRetryTimer: ReturnType<typeof setTimeout> | null = null;
   /**
@@ -410,10 +416,17 @@ export class DkgNodePlugin {
    *     `setup-only → full` upgrade where the first call skipped
    *     construction (R17.2 + qa-engineer follow-up).
    *
-   * No-op if already constructed.
+   * T18 — Re-resolves stateDir on every call. If the writer was
+   * previously constructed with the home-dir fallback because no
+   * better path was available (typically during early
+   * `setup-runtime` when `runtime.state.resolveStateDir()` /
+   * `api.workspaceDir` haven't been wired yet), and a better path
+   * is now available, rebuild the writer at the new location and
+   * best-effort migrate the watermark file. Without this, the
+   * fallback path is permanent and a later workspace-scoped resolve
+   * never takes effect.
    */
   private ensureChatTurnWriter(api: OpenClawPluginApi): void {
-    if (this.chatTurnWriter) return;
     if (!this.client) return;
     // R16.2 — Watermark file MUST live in a per-workspace location.
     // `ChatTurnWriter` persists session watermarks across restarts; if two
@@ -433,6 +446,29 @@ export class DkgNodePlugin {
         ? `${workspaceDir}/.openclaw`
         : undefined) ??
       homeDir;
+
+    if (this.chatTurnWriter) {
+      // T18 — Already constructed. If a better stateDir is now
+      // available, rebuild at the new location and migrate the
+      // watermark file. Only upgrade fallback → workspace-scoped;
+      // never the other direction. Same-path is a no-op.
+      if (this.chatTurnWriterStateDir === stateDir) return;
+      const wasFallback = this.chatTurnWriterStateDir === homeDir;
+      const isUpgrade = wasFallback && stateDir !== homeDir;
+      if (!isUpgrade) return; // Don't downgrade or sidestep.
+      api.logger.info?.(
+        `[dkg] Migrating ChatTurnWriter stateDir from fallback '${homeDir}' to workspace-scoped '${stateDir}'.`,
+      );
+      try { this.chatTurnWriter.flushSync(); } catch { /* best effort */ }
+      // Best-effort migrate the watermark file so w4bCount and
+      // watermarks survive the rebuild (T17 made these load-bearing
+      // for setup-runtime → restart correctness).
+      this.migrateWatermarkFile(this.chatTurnWriterStateDir!, stateDir, api.logger);
+      this.chatTurnWriter = new ChatTurnWriter({ client: this.client, logger: api.logger, stateDir });
+      this.chatTurnWriterStateDir = stateDir;
+      return;
+    }
+
     if (stateDir === homeDir) {
       api.logger.warn?.(
         '[dkg] Could not resolve a workspace-scoped state dir (api.runtime.state.resolveStateDir / OPENCLAW_STATE_DIR / api.workspaceDir all unavailable); ' +
@@ -441,6 +477,29 @@ export class DkgNodePlugin {
       );
     }
     this.chatTurnWriter = new ChatTurnWriter({ client: this.client, logger: api.logger, stateDir });
+    this.chatTurnWriterStateDir = stateDir;
+  }
+
+  /**
+   * T18 — Best-effort copy the chat-turn watermark file from the old
+   * fallback location to the new workspace-scoped location. Failure
+   * is logged at debug (the new writer will simply start with empty
+   * state; correctness is preserved by W4a backfill on the next
+   * `agent_end`).
+   */
+  private migrateWatermarkFile(oldStateDir: string, newStateDir: string, logger: any): void {
+    try {
+      const oldFile = path.join(oldStateDir, 'dkg-adapter', 'chat-turn-watermarks.json');
+      const newFile = path.join(newStateDir, 'dkg-adapter', 'chat-turn-watermarks.json');
+      if (!fs.existsSync(oldFile)) return;
+      const newDir = path.dirname(newFile);
+      if (!fs.existsSync(newDir)) fs.mkdirSync(newDir, { recursive: true });
+      // copyFileSync is safer than rename across mounts.
+      fs.copyFileSync(oldFile, newFile);
+      logger?.debug?.(`[dkg] Migrated watermark file ${oldFile} -> ${newFile}`);
+    } catch (err: any) {
+      logger?.debug?.(`[dkg] Watermark file migration failed: ${err?.message ?? err}`);
+    }
   }
 
   /**

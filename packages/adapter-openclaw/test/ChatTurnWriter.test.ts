@@ -289,6 +289,103 @@ describe("ChatTurnWriter", () => {
     expect(call[2]).toBe("real reply");
   });
 
+  it("T16 — W4b's peek-hit on w4aOrigin stamp consumes it so a future same-content turn within 5s does not false-dedup", async () => {
+    // Regression for T16: pre-fix, the cross-path stamp lived for 5s
+    // post-success and was peeked non-mutatively. If a turn 1 W4a
+    // persisted same-content C1, then turn 2 with same content C1
+    // arrived within 5s, W4b's peek would hit turn 1's stale stamp
+    // and skip turn 2 — even though W4a never re-stamped (e.g., W4a
+    // didn't fire for turn 2). Post-fix, the stamp is CONSUMED on
+    // peek-hit so a future stale-hit can't trigger.
+    const dkw = writer as any;
+    const sessionId = "openclaw:tg:::sk";
+    // Stamp w4aOrigin manually (simulating W4a's post-success stamp).
+    dkw.markCrossPathStamp(sessionId, dkw.w4aOriginKey("hi", "there"));
+    expect(dkw.peekCrossPathStamp(sessionId, dkw.w4aOriginKey("hi", "there"))).toBe(true);
+
+    // W4b fires for the same content — peek hits, consumes stamp, returns.
+    writer.onMessageReceived({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "hi", messageId: "in-1" },
+    } as any);
+    await writer.onMessageSent({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "there", success: true, messageId: "out-1" },
+    } as any);
+    await flushMicrotasks();
+    expect(mockClient.storeChatTurn).not.toHaveBeenCalled(); // skipped per stamp
+
+    // CRITICAL: stamp must now be GONE.
+    expect(dkw.peekCrossPathStamp(sessionId, dkw.w4aOriginKey("hi", "there"))).toBe(false);
+  });
+
+  it("T16 — W4a's last-pair peek-hit on w4bOrigin stamp consumes it (symmetric)", async () => {
+    // Symmetric regression: W4a's last-pair check must also consume
+    // the stamp after a hit, so a later same-content backfill cycle
+    // doesn't false-dedup against a stale W4b stamp.
+    const dkw = writer as any;
+    const sessionId = "openclaw:tg:::sk";
+    dkw.markCrossPathStamp(sessionId, dkw.w4bOriginKey("ping", "pong"));
+    expect(dkw.peekCrossPathStamp(sessionId, dkw.w4bOriginKey("ping", "pong"))).toBe(true);
+
+    const ev: AgentEndContext = {
+      sessionId: "test",
+      messages: [
+        { role: "user", content: "ping" },
+        { role: "assistant", content: "pong" },
+      ],
+    };
+    writer.onAgentEnd(ev, { channelId: "tg", sessionKey: "sk" });
+    await flushMicrotasks();
+    // Stamp consumed.
+    expect(dkw.peekCrossPathStamp(sessionId, dkw.w4bOriginKey("ping", "pong"))).toBe(false);
+  });
+
+  it("T17 — w4bSessionCounts is persisted to disk and restored across writer restart", async () => {
+    // Regression for T17: pre-fix, w4bSessionCounts was process-local
+    // only. setup-runtime mode → W4b persists turns → process restart
+    // → w4bCount resets to 0 while watermark file is still -1 → next
+    // agent_end re-emits every W4b-persisted pair as backfill (daemon
+    // duplicate writes). Post-fix, the count is persisted alongside
+    // the watermark in the same file under `{ w, b }` shape.
+    writer.onMessageReceived({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "u1", messageId: "in-1" },
+    } as any);
+    await writer.onMessageSent({
+      sessionKey: "sk",
+      context: { channelId: "tg", content: "r1", success: true, messageId: "out-1" },
+    } as any);
+    await flushMicrotasks();
+    // First turn persisted; w4bCount should now be 1 in memory.
+    expect((writer as any).w4bSessionCounts.get("openclaw:tg:::sk")).toBe(1);
+
+    // Force the debounced flush to write to disk.
+    writer.flushSync();
+    // Wait an extra tick for the timer-driven write.
+    await new Promise((r) => setTimeout(r, 100));
+
+    // Simulate process restart by constructing a NEW writer with the
+    // SAME stateDir. It MUST load w4bCount from disk, not start at 0.
+    const newWriter = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
+    expect((newWriter as any).w4bSessionCounts.get("openclaw:tg:::sk")).toBe(1);
+    newWriter.flushSync();
+  });
+
+  it("T17 — disk file accepts the legacy number format for backward compat", async () => {
+    // The pre-fix file contained `{ "sid": <number> }` (watermark only).
+    // Existing on-disk files MUST still load correctly to avoid losing
+    // watermark progress on the upgrade.
+    const filePath = path.join(stateDir, "dkg-adapter", "chat-turn-watermarks.json");
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, JSON.stringify({ "openclaw:legacy:::sk": 7 }));
+
+    const w = new ChatTurnWriter({ client: mockClient, logger: mockLogger, stateDir });
+    expect((w as any).cachedWatermarks.get("openclaw:legacy:::sk")).toBe(7);
+    expect((w as any).w4bSessionCounts.get("openclaw:legacy:::sk")).toBeUndefined();
+    w.flushSync();
+  });
+
   it("T15 — onMessageSent collapses the FULL pending queue into one user-side (matches computeDelta)", async () => {
     // Regression for T15: pre-fix, W4b shifted only the OLDEST pending
     // user message and left any others queued. `computeDelta` (W4a)
