@@ -925,6 +925,17 @@ describe('best-effort semantic enqueue helper', () => {
     expect(isAuthorizedLocalAgentSemanticWorkerRequest(enabledConfig, {
       headers: {
         'x-dkg-local-agent-integration': 'openclaw',
+        'x-dkg-bridge-token': 'node-token',
+      },
+      socket: { remoteAddress: '127.0.0.1' },
+    } as any, 'openclaw', {
+      bridgeAuthToken: 'node-token',
+      resolveAgentByToken: () => undefined,
+    })).toBe(true);
+
+    expect(isAuthorizedLocalAgentSemanticWorkerRequest(enabledConfig, {
+      headers: {
+        'x-dkg-local-agent-integration': 'openclaw',
       },
       socket: { remoteAddress: '127.0.0.1' },
     } as any, 'openclaw', authOpts)).toBe(false);
@@ -1219,7 +1230,7 @@ describe('best-effort semantic enqueue helper', () => {
     );
   });
 
-  it('cleans event provenance and semantic count when semantic append insert fails', async () => {
+  it('cleans the semantic quad batch and semantic count when semantic append insert fails', async () => {
     const req = new PassThrough() as any;
     req.method = 'POST';
     req.headers = {
@@ -1313,6 +1324,20 @@ describe('best-effort semantic enqueue helper', () => {
     await expect(responsePromise).rejects.toThrow('insert failed');
     expect(deleteByPattern).toHaveBeenCalledWith({
       subject: 'urn:dkg:semantic-enrichment:evt-partial',
+      predicate: 'http://dkg.io/ontology/semanticEnrichmentEventId',
+      object: '"evt-partial"',
+      graph: assertionUri,
+    });
+    expect(deleteByPattern).toHaveBeenCalledWith({
+      subject: 'urn:dkg:entity:acme',
+      predicate: 'http://schema.org/name',
+      object: '"Acme"',
+      graph: assertionUri,
+    });
+    expect(deleteByPattern).toHaveBeenCalledWith({
+      subject: 'urn:dkg:entity:acme',
+      predicate: 'http://dkg.io/ontology/extractedFrom',
+      object: 'urn:dkg:file:sha256:file',
       graph: assertionUri,
     });
     expect(deleteByPattern).toHaveBeenCalledWith({

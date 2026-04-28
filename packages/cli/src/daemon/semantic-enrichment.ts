@@ -267,9 +267,11 @@ export function isAuthorizedLocalAgentSemanticWorkerRequest(
 
   const requestToken = opts.requestToken?.trim();
   const bridgeAuthToken = opts.bridgeAuthToken?.trim();
-  if (!requestToken || !bridgeAuthToken || requestToken !== bridgeAuthToken) return false;
+  if (!bridgeAuthToken) return false;
   const bridgeHeader = readSingleHeaderValue(req.headers['x-dkg-bridge-token'])?.trim();
   if (bridgeHeader !== bridgeAuthToken) return false;
+  if (!requestToken) return true;
+  if (requestToken !== bridgeAuthToken) return false;
   return opts.resolveAgentByToken?.(requestToken) === undefined;
 }
 
@@ -806,15 +808,57 @@ async function semanticEnrichmentAlreadyApplied(
   return result?.value === true;
 }
 
-async function cleanupSemanticEnrichmentEventProvenance(
+type SemanticAppendQuad = ReturnType<typeof buildSemanticAppendQuads>[number];
+
+function semanticAppendQuadKey(quad: SemanticAppendQuad): string {
+  return `${quad.graph}\u0000${quad.subject}\u0000${quad.predicate}\u0000${quad.object}`;
+}
+
+function semanticQuadObjectSparqlTerm(object: string): string {
+  return isSafeIri(object) ? `<${object}>` : object;
+}
+
+async function semanticAppendQuadExists(
   agent: Pick<DKGAgent, 'store'>,
-  graph: string,
-  eventId: string,
+  quad: SemanticAppendQuad,
+): Promise<boolean> {
+  const result = await agent.store.query(`
+    ASK {
+      GRAPH <${quad.graph}> {
+        <${quad.subject}> <${quad.predicate}> ${semanticQuadObjectSparqlTerm(quad.object)} .
+      }
+    }
+  `) as { value?: boolean };
+  return result?.value === true;
+}
+
+async function readExistingSemanticAppendQuadKeys(
+  agent: Pick<DKGAgent, 'store'>,
+  quads: SemanticAppendQuad[],
+): Promise<Set<string>> {
+  const existing = new Set<string>();
+  const seen = new Set<string>();
+  for (const quad of quads) {
+    const key = semanticAppendQuadKey(quad);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (await semanticAppendQuadExists(agent, quad)) existing.add(key);
+  }
+  return existing;
+}
+
+async function cleanupSemanticAppendQuads(
+  agent: Pick<DKGAgent, 'store'>,
+  quads: SemanticAppendQuad[],
+  preExistingKeys: Set<string>,
 ): Promise<void> {
-  await agent.store.deleteByPattern({
-    subject: `urn:dkg:semantic-enrichment:${eventId}`,
-    graph,
-  });
+  const cleaned = new Set<string>();
+  for (const quad of [...quads].reverse()) {
+    const key = semanticAppendQuadKey(quad);
+    if (preExistingKeys.has(key) || cleaned.has(key)) continue;
+    cleaned.add(key);
+    await agent.store.deleteByPattern(quad);
+  }
 }
 
 async function readCurrentSemanticTripleCount(
@@ -1369,11 +1413,12 @@ export async function handleSemanticEnrichmentRoutes(ctx: RequestContext): Promi
           object: semanticCountLiteral(semanticTripleCount),
           graph: metaGraph,
         });
+        const preExistingSemanticQuadKeys = await readExistingSemanticAppendQuadKeys(agent, semanticQuads);
         try {
           await agent.store.insert(semanticQuads);
         } catch (err: any) {
           try {
-            await cleanupSemanticEnrichmentEventProvenance(agent, targetGraph, eventId);
+            await cleanupSemanticAppendQuads(agent, semanticQuads, preExistingSemanticQuadKeys);
             await agent.store.deleteByPattern({
               subject: eventPayload.assertionUri,
               predicate: SEMANTIC_ENRICHMENT_COUNT_PREDICATE,
@@ -1402,11 +1447,12 @@ export async function handleSemanticEnrichmentRoutes(ctx: RequestContext): Promi
         }
       } else {
         semanticTripleCount = triples.length;
+        const preExistingSemanticQuadKeys = await readExistingSemanticAppendQuadKeys(agent, semanticQuads);
         try {
           await agent.store.insert(semanticQuads);
         } catch (err: any) {
           try {
-            await cleanupSemanticEnrichmentEventProvenance(agent, targetGraph, eventId);
+            await cleanupSemanticAppendQuads(agent, semanticQuads, preExistingSemanticQuadKeys);
           } catch (cleanupErr: any) {
             throw new Error(
               `${err?.message ?? String(err)}; semantic append cleanup failed: ${cleanupErr?.message ?? String(cleanupErr)}`,
