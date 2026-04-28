@@ -138,7 +138,7 @@ export function getHermesChannelTargets(config: DkgConfig): HermesChannelTarget[
     && !bridgeLooksLikeGateway;
   const standaloneBridgeBase = standaloneBridgeUsesExplicitBase && explicitBridgeBase
     ? explicitBridgeBase
-    : !explicitGatewayBase && !bridgeLooksLikeGateway
+    : !explicitBridgeBase && !explicitGatewayBase && !bridgeLooksLikeGateway
       ? DEFAULT_HERMES_BRIDGE_URL
       : undefined;
   const gatewayBase =

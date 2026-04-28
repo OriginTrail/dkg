@@ -232,7 +232,7 @@ describe('Hermes channel helpers', () => {
     ]);
   });
 
-  it('falls back to the default local bridge when bridgeUrl is non-loopback', () => {
+  it('does not fall back to the default local bridge when bridgeUrl is non-loopback', () => {
     expect(getHermesChannelTargets(makeConfig({
       localAgentIntegrations: {
         hermes: {
@@ -244,14 +244,7 @@ describe('Hermes channel helpers', () => {
           },
         },
       },
-    }))).toEqual([
-      {
-        name: 'bridge',
-        inboundUrl: 'http://127.0.0.1:9202/send',
-        streamUrl: 'http://127.0.0.1:9202/stream',
-        healthUrl: 'http://127.0.0.1:9202/health',
-      },
-    ]);
+    }))).toEqual([]);
   });
 
   it('uses gatewayUrl rather than the local bridge when a remote Hermes transport is configured', () => {

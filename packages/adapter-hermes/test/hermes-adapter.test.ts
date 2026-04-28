@@ -511,6 +511,29 @@ describe('Hermes profile setup helpers', () => {
     expect(readFileSync(join(hermesHome, 'config.yaml'), 'utf-8')).toContain('provider: mem0');
   });
 
+  it('ignores nested memory provider blocks when managing Hermes provider config', () => {
+    const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-'));
+    writeFileSync(join(hermesHome, 'config.yaml'), [
+      'plugins:',
+      '  helper:',
+      '    memory:',
+      '      provider: mem0',
+      '',
+    ].join('\n'));
+
+    setupHermesProfile({ hermesHome, memoryMode: 'provider' });
+    const configured = readFileSync(join(hermesHome, 'config.yaml'), 'utf-8');
+
+    expect(configured).toContain('    memory:\n      provider: mem0');
+    expect(configured).toContain('# BEGIN DKG ADAPTER HERMES MANAGED\nmemory:\n  provider: dkg');
+
+    disconnectHermesProfile({ hermesHome });
+    const disconnected = readFileSync(join(hermesHome, 'config.yaml'), 'utf-8');
+
+    expect(disconnected).toContain('    memory:\n      provider: mem0');
+    expect(disconnected).not.toContain('# BEGIN DKG ADAPTER HERMES MANAGED');
+  });
+
   it('removes only ownership-marked provider plugin artifacts during uninstall', () => {
     const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-'));
     setupHermesProfile({ hermesHome, profileName: 'dev' });

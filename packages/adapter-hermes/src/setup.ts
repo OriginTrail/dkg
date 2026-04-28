@@ -18,6 +18,9 @@ const STATE_VERSION = 1;
 const CONFIG_BEGIN = '# BEGIN DKG ADAPTER HERMES MANAGED';
 const CONFIG_END = '# END DKG ADAPTER HERMES MANAGED';
 const PLUGIN_OWNER_FILE = '.dkg-adapter-hermes-owner.json';
+const TOP_LEVEL_MEMORY_BLOCK_RE = /^memory\s*:\s*$/;
+const TOP_LEVEL_MEMORY_PROVIDER_RE = /^memory\.provider\s*:\s*["']?([^"'\s#]+)["']?/;
+const INDENTED_PROVIDER_RE = /^(\s+)provider\s*:\s*["']?([^"'\s#]+)["']?/;
 
 export interface HermesSetupOptions {
   profileName?: string;
@@ -579,7 +582,7 @@ function findConfiguredMemoryProvider(raw: string): string | null {
   const lines = raw.split(/\r?\n/);
   let inMemory = false;
   for (const line of lines) {
-    if (/^\s*memory\s*:\s*$/.test(line)) {
+    if (TOP_LEVEL_MEMORY_BLOCK_RE.test(line)) {
       inMemory = true;
       continue;
     }
@@ -587,10 +590,10 @@ function findConfiguredMemoryProvider(raw: string): string | null {
       inMemory = false;
     }
     if (inMemory) {
-      const match = line.match(/^\s+provider\s*:\s*["']?([^"'\s#]+)["']?/);
-      if (match) return match[1];
+      const match = line.match(INDENTED_PROVIDER_RE);
+      if (match) return match[2];
     }
-    const inline = line.match(/^\s*memory\.provider\s*:\s*["']?([^"'\s#]+)["']?/);
+    const inline = line.match(TOP_LEVEL_MEMORY_PROVIDER_RE);
     if (inline) return inline[1];
   }
   return null;
@@ -644,17 +647,17 @@ function markExistingDkgProvider(raw: string): string {
 
   for (const line of lines) {
     if (!marked) {
-      const inline = line.match(/^(\s*)memory\.provider\s*:\s*["']?([^"'\s#]+)["']?/);
-      if (inline?.[2] === 'dkg') {
-        next.push(`${inline[1]}${CONFIG_BEGIN}`);
+      const inline = line.match(TOP_LEVEL_MEMORY_PROVIDER_RE);
+      if (inline?.[1] === 'dkg') {
+        next.push(CONFIG_BEGIN);
         next.push(line);
-        next.push(`${inline[1]}${CONFIG_END}`);
+        next.push(CONFIG_END);
         marked = true;
         continue;
       }
     }
 
-    if (/^\s*memory\s*:\s*$/.test(line)) {
+    if (TOP_LEVEL_MEMORY_BLOCK_RE.test(line)) {
       inMemory = true;
       next.push(line);
       continue;
@@ -663,7 +666,7 @@ function markExistingDkgProvider(raw: string): string {
       inMemory = false;
     }
     if (!marked && inMemory) {
-      const match = line.match(/^(\s+)provider\s*:\s*["']?([^"'\s#]+)["']?/);
+      const match = line.match(INDENTED_PROVIDER_RE);
       if (match?.[2] === 'dkg') {
         next.push(`${match[1]}${CONFIG_BEGIN}`);
         next.push(line);
@@ -698,7 +701,7 @@ function insertManagedProviderIntoMemoryBlock(raw: string): string {
   let inserted = false;
   for (const line of lines) {
     next.push(line);
-    if (!inserted && /^\s*memory\s*:\s*$/.test(line)) {
+    if (!inserted && TOP_LEVEL_MEMORY_BLOCK_RE.test(line)) {
       const indent = line.match(/^(\s*)/)?.[1] ?? '';
       next.push(`${indent}  ${CONFIG_BEGIN}`);
       next.push(`${indent}  provider: dkg`);
@@ -710,7 +713,7 @@ function insertManagedProviderIntoMemoryBlock(raw: string): string {
 }
 
 function hasTopLevelMemoryBlock(raw: string): boolean {
-  return raw.split(/\r?\n/).some((line) => /^\s*memory\s*:\s*$/.test(line));
+  return raw.split(/\r?\n/).some((line) => TOP_LEVEL_MEMORY_BLOCK_RE.test(line));
 }
 
 function removeManagedBlock(raw: string): string {
