@@ -572,6 +572,7 @@ describe('mergeOpenClawConfig', () => {
     mergeOpenClawConfig(configPath, '/path/to/adapter', {
       daemonUrl: 'http://127.0.0.1:9200',
       stateDir,
+      stateDirSource: 'setup-default',
       memory: { enabled: true },
       channel: { enabled: true },
     }, defaultInstalledWorkspace);
@@ -579,6 +580,23 @@ describe('mergeOpenClawConfig', () => {
     const config = JSON.parse(readFileSync(configPath, 'utf-8'));
     expect(config.plugins.entries['adapter-openclaw'].config.stateDir).toBe(stateDir);
     expect(config.plugins.entries['adapter-openclaw'].config.stateDirSource).toBe('setup-default');
+  });
+
+  it('does not mark an incoming stateDir as setup-owned without the setup marker', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({ plugins: {} }));
+    const stateDir = join(defaultInstalledWorkspace, '.openclaw');
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', {
+      daemonUrl: 'http://127.0.0.1:9200',
+      stateDir,
+      memory: { enabled: true },
+      channel: { enabled: true },
+    }, defaultInstalledWorkspace);
+
+    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(config.plugins.entries['adapter-openclaw'].config.stateDir).toBe(stateDir);
+    expect(config.plugins.entries['adapter-openclaw'].config.stateDirSource).toBeUndefined();
   });
 
   it('preserves existing entry.config values on re-merge (first-wins semantics)', () => {
@@ -633,6 +651,7 @@ describe('mergeOpenClawConfig', () => {
     mergeOpenClawConfig(configPath, '/path/to/adapter', {
       daemonUrl: 'http://127.0.0.1:9200',
       stateDir: join(defaultInstalledWorkspace, '.openclaw'),
+      stateDirSource: 'setup-default',
       memory: { enabled: true },
       channel: { enabled: true },
     }, defaultInstalledWorkspace);
@@ -664,6 +683,7 @@ describe('mergeOpenClawConfig', () => {
     mergeOpenClawConfig(configPath, '/path/to/adapter', {
       daemonUrl: 'http://127.0.0.1:9200',
       stateDir: join(secondWs, '.openclaw'),
+      stateDirSource: 'setup-default',
       memory: { enabled: true },
       channel: { enabled: true },
     }, secondWs);
@@ -684,6 +704,7 @@ describe('mergeOpenClawConfig', () => {
     mergeOpenClawConfig(configPath, '/path/to/adapter', {
       daemonUrl: 'http://127.0.0.1:9200',
       stateDir: join(firstWs, '.openclaw'),
+      stateDirSource: 'setup-default',
       memory: { enabled: true },
       channel: { enabled: true },
     }, firstWs);
@@ -691,6 +712,7 @@ describe('mergeOpenClawConfig', () => {
     mergeOpenClawConfig(configPath, '/path/to/adapter', {
       daemonUrl: 'http://127.0.0.1:9200',
       stateDir: join(secondWs, '.openclaw'),
+      stateDirSource: 'setup-default',
       memory: { enabled: true },
       channel: { enabled: true },
     }, secondWs);
@@ -723,6 +745,7 @@ describe('mergeOpenClawConfig', () => {
     mergeOpenClawConfig(configPath, '/path/to/adapter', {
       daemonUrl: 'http://127.0.0.1:9200',
       stateDir: join(secondWs, '.openclaw'),
+      stateDirSource: 'setup-default',
       memory: { enabled: true },
       channel: { enabled: true },
     }, secondWs);
@@ -762,6 +785,7 @@ describe('mergeOpenClawConfig', () => {
     mergeOpenClawConfig(configPath, '/path/to/adapter', {
       daemonUrl: 'http://127.0.0.1:9200',
       stateDir: join(secondWs, '.openclaw'),
+      stateDirSource: 'setup-default',
       memory: { enabled: true },
       channel: { enabled: true },
     }, secondWs);

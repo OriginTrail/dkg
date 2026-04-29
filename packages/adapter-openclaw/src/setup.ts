@@ -957,6 +957,7 @@ export function mergeOpenClawConfig(
   const existingStateDir = trimmedNonEmpty(existingEntryConfig.stateDir);
   const incomingStateDir = trimmedNonEmpty(entryConfig.stateDir);
   const incomingStateDirIsSetupDefault =
+    entryConfig.stateDirSource === 'setup-default' &&
     !!incomingStateDir &&
     sameResolvedPath(incomingStateDir, defaultStateDirForWorkspace(installedWorkspace));
   const existingStateDirIsSetupOwned =
