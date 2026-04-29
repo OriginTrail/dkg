@@ -53,6 +53,7 @@ let readFileCalls: [any, ...any[]][] = [];
 let writeFileCalls: [any, any, ...any[]][] = [];
 let mkdirCalls: any[][] = [];
 let rmCalls: any[][] = [];
+let readdirCalls: any[][] = [];
 let copyFileCalls: any[][] = [];
 let chmodCalls: any[][] = [];
 let statCalls: any[][] = [];
@@ -76,6 +77,20 @@ let execImpl: (cmd: string, opts?: any) => Promise<any> = async () => ({ stdout:
 let execFileImpl: (file: string, args: string[], opts?: any) => Promise<any> = async () => ({ stdout: '', stderr: '' });
 let swapSlotImpl: (slot: 'a' | 'b') => Promise<void> = async () => {};
 let fetchImpl: (...args: any[]) => Promise<any> = async () => ({ ok: true, json: async () => ({}) });
+// `cleanGeneratedOutputs` walks `<slot>/packages/<pkg>/{dist,tsconfig.tsbuildinfo}`
+// and additionally wipes packages/cli's generated `network/` + `project.json`
+// (copied from repo root by the cli build script).
+// Default to a couple of canned package entries so the full flow runs end-to-end
+// in tests that don't care; tests targeting the cleaner override this directly.
+const DEFAULT_READDIR_PKG_ENTRIES = [
+  { name: 'core', isDirectory: () => true },
+  { name: 'cli', isDirectory: () => true },
+  { name: 'README.md', isDirectory: () => false },
+];
+let readdirImpl: (path: any, opts?: any) => Promise<any[]> = async (path: any) => {
+  if (String(path).endsWith('/packages')) return DEFAULT_READDIR_PKG_ENTRIES.slice();
+  return [];
+};
 
 let mockActiveSlot = 'a';
 
@@ -84,6 +99,7 @@ function resetMocks() {
   writeFileCalls = [];
   mkdirCalls = [];
   rmCalls = [];
+  readdirCalls = [];
   copyFileCalls = [];
   chmodCalls = [];
   statCalls = [];
@@ -106,6 +122,10 @@ function resetMocks() {
   execFileImpl = async (_file, _args, _opts) => ({ stdout: '', stderr: '' });
   swapSlotImpl = async () => {};
   fetchImpl = async () => ({ ok: true, json: async () => ({}) });
+  readdirImpl = async (path: any) => {
+    if (String(path).endsWith('/packages')) return DEFAULT_READDIR_PKG_ENTRIES.slice();
+    return [];
+  };
 }
 
 function installMocks() {
@@ -119,6 +139,10 @@ function installMocks() {
   }) as any;
   _autoUpdateIo.mkdir = (async (...args: any[]) => { mkdirCalls.push(args); }) as any;
   _autoUpdateIo.rm = (async (...args: any[]) => { rmCalls.push(args); }) as any;
+  _autoUpdateIo.readdir = (async (path: any, opts?: any) => {
+    readdirCalls.push([path, opts]);
+    return readdirImpl(path, opts);
+  }) as any;
   _autoUpdateIo.chmod = (async (...args: any[]) => { chmodCalls.push(args); }) as any;
   _autoUpdateIo.copyFile = (async (...args: any[]) => { copyFileCalls.push(args); }) as any;
   _autoUpdateIo.stat = (async (...args: any[]) => { statCalls.push(args); return { mode: 0o755 }; }) as any;
@@ -361,7 +385,7 @@ describe('blue-green checkForUpdate', () => {
     expect(swapSlotCalls).toContain('b');
     expect(
       writeFileCalls.some((call) =>
-        normalizePathString(call[0]).endsWith('/tmp/dkg-test/.current-commit') && call[1] === latest)
+        normalizePathString(call[0]).includes('/tmp/dkg-test/.current-commit') && call[1] === latest)
     ).toBe(true);
   });
 
@@ -1294,4 +1318,322 @@ describe('compareSemver', () => {
   it('strips v prefix', () => {
     expect(compareSemver('v9.0.0', '9.0.0')).toBe(0);
   });
+});
+
+// ─── Hardening: incremental builds, configurable timeouts, fail-safe contract diff,
+//     persisted update status. See PR `autoupdater-hardening`.
+describe('autoupdater hardening', () => {
+  beforeEach(() => {
+    resetMocks();
+    mockActiveSlot = 'a';
+    installMocks();
+  });
+
+  afterEach(() => {
+    restoreIo();
+  });
+
+  it('does NOT run `git clean -fdx` by default — preserves node_modules/Hardhat cache for incremental rebuild', async () => {
+    readFileImpl = async () => 'aaa111';
+    makeFetchOk('bbb222');
+    await performUpdate(AU, () => {});
+    const cleanCall = getExecFileCalls().find(
+      c => c.file === 'git' && c.args[0] === 'clean',
+    );
+    expect(cleanCall).toBeUndefined();
+  });
+
+  it('runs `git clean -fdx` only when forceClean=true is passed', async () => {
+    readFileImpl = async () => 'aaa111';
+    makeFetchOk('bbb222');
+    await performUpdate(AU, () => {}, { forceClean: true });
+    const cleanCall = getExecFileCalls().find(
+      c => c.file === 'git' && c.args[0] === 'clean' && c.args[1] === '-fdx',
+    );
+    expect(cleanCall).toBeTruthy();
+  });
+
+  it('honours autoUpdate.buildTimeoutMs.install on pnpm install', async () => {
+    readFileImpl = async () => 'aaa111';
+    makeFetchOk('bbb222');
+    let installTimeout: number | undefined;
+    execImpl = async (cmd: string, opts?: any) => {
+      if (cmd.includes('pnpm install')) installTimeout = opts?.timeout;
+      return { stdout: '', stderr: '' };
+    };
+    const auWithTimeout: AutoUpdateConfig = {
+      ...AU,
+      buildTimeoutMs: { install: 600_000 },
+    };
+    await performUpdate(auWithTimeout as any, () => {});
+    expect(installTimeout).toBe(600_000);
+  });
+
+  it('honours autoUpdate.buildTimeoutMs.contracts when contracts rebuild', async () => {
+    readFileImpl = async () => 'aaa111';
+    makeFetchOk('bbb222');
+    let contractsTimeout: number | undefined;
+    execImpl = async (cmd: string, opts?: any) => {
+      if (cmd.includes('pnpm --filter @origintrail-official/dkg-evm-module build')) {
+        contractsTimeout = opts?.timeout;
+      }
+      return { stdout: '', stderr: '' };
+    };
+    // Force a runtime build path + contract rebuild trigger via diff.
+    execFileImpl = async (file: string, args: string[]) => {
+      if (file === 'git' && args[0] === 'diff') {
+        return { stdout: 'packages/evm-module/contracts/Foo.sol\n', stderr: '' };
+      }
+      return { stdout: '', stderr: '' };
+    };
+    const auWithTimeout: AutoUpdateConfig = {
+      ...AU,
+      buildTimeoutMs: { contracts: 1_200_000 },
+    };
+    await performUpdate(auWithTimeout as any, () => {});
+    expect(contractsTimeout).toBe(1_200_000);
+  });
+
+  it('contract-diff fails closed: skips contract build when diff errors and parent fetch also errors (matches legacy behaviour)', async () => {
+    readFileImpl = async () => 'aaa111';
+    makeFetchOk('bbb222');
+    let contractsBuilt = false;
+    execImpl = async (cmd: string) => {
+      if (cmd.includes('pnpm --filter @origintrail-official/dkg-evm-module build')) {
+        contractsBuilt = true;
+      }
+      return { stdout: '', stderr: '' };
+    };
+    execFileImpl = async (file: string, args: string[]) => {
+      if (file === 'git' && args[0] === 'diff') {
+        throw new Error('fatal: bad revision aaa111..bbb222');
+      }
+      if (file === 'git' && args[0] === 'fetch' && args.includes('--depth=1')) {
+        throw new Error('fatal: remote unreachable');
+      }
+      return { stdout: '', stderr: '' };
+    };
+    await performUpdate(AU, () => {});
+    expect(contractsBuilt).toBe(false);
+  });
+
+  it('runs `hardhat clean` before the contract rebuild so stale artifacts/abi/typechain from renamed/deleted contracts do not survive into the slot', async () => {
+    // Default path skips `git clean -fdx` (cold-solc on ARM64 trips the
+    // build timeout) and cleanGeneratedOutputs intentionally spares
+    // evm-module/{cache,artifacts}/. So when contract sources actually
+    // change we run `hardhat clean` first to drop ghost outputs from
+    // deleted contracts. Scoped to the same trigger as the rebuild so
+    // no-change updates still benefit from the Hardhat compile cache.
+    readFileImpl = async () => 'aaa111';
+    makeFetchOk('bbb222');
+    const order: string[] = [];
+    execImpl = async (cmd: string) => {
+      if (cmd.includes('pnpm --filter @origintrail-official/dkg-evm-module clean')) order.push('clean');
+      if (cmd.includes('pnpm --filter @origintrail-official/dkg-evm-module build')) order.push('build');
+      return { stdout: '', stderr: '' };
+    };
+    execFileImpl = async (file: string, args: string[]) => {
+      if (file === 'git' && args[0] === 'diff') {
+        return { stdout: 'packages/evm-module/contracts/Foo.sol\n', stderr: '' };
+      }
+      return { stdout: '', stderr: '' };
+    };
+    await performUpdate(AU, () => {});
+    expect(order).toEqual(['clean', 'build']);
+  });
+
+  it('contract-diff retries via `git fetch --depth=1` for the missing parent commit before giving up', async () => {
+    readFileImpl = async () => 'aaa111';
+    makeFetchOk('bbb222');
+    let firstDiffSeen = false;
+    let retryFetchArgs: string[] | null = null;
+    let secondDiffSeen = false;
+    execFileImpl = async (file: string, args: string[]) => {
+      if (file === 'git' && args[0] === 'diff') {
+        if (!firstDiffSeen) {
+          firstDiffSeen = true;
+          throw new Error('fatal: bad revision');
+        }
+        secondDiffSeen = true;
+        return { stdout: 'packages/evm-module/contracts/Foo.sol\n', stderr: '' };
+      }
+      if (file === 'git' && args.includes('fetch') && args.includes('--depth=1')) {
+        retryFetchArgs = args;
+      }
+      return { stdout: '', stderr: '' };
+    };
+    let contractsBuilt = false;
+    execImpl = async (cmd: string) => {
+      if (cmd.includes('pnpm --filter @origintrail-official/dkg-evm-module build')) {
+        contractsBuilt = true;
+      }
+      return { stdout: '', stderr: '' };
+    };
+    await performUpdate({ ...AU, repo: 'owner/repo' }, () => {});
+    expect(firstDiffSeen).toBe(true);
+    expect(retryFetchArgs).toBeTruthy();
+    expect(secondDiffSeen).toBe(true);
+    expect(contractsBuilt).toBe(true);
+    // Slots are initialized with bare `git init` and have no `origin` remote;
+    // the retry must use the explicit fetch URL, not the literal 'origin'.
+    expect(retryFetchArgs!.includes('origin')).toBe(false);
+    expect(retryFetchArgs!.some(a => a.includes('github.com/owner/repo'))).toBe(true);
+  });
+
+  it('atomic bookkeeping writes go through a temp path then rename to final', async () => {
+    // Reproduces the dkg-v9-relay-01 corruption scenario: a partial / retried
+    // writeFile to `.current-commit` left an 80-char doubled SHA on disk. With
+    // writeFileAtomic, the actual writeFile lands at a tmp path and only the
+    // rename produces the live file — so an interrupted write can never be
+    // observed by the daemon as a corrupted live file.
+    readFileImpl = async () => 'aaa111';
+    makeFetchOk('bbb222');
+    const renameCalls: Array<[string, string]> = [];
+    _autoUpdateIo.rename = (async (from: any, to: any) => {
+      renameCalls.push([String(from), String(to)]);
+    }) as any;
+    await performUpdate(AU, () => {});
+    const commitRename = renameCalls.find(([, to]) => to.endsWith('/.current-commit'));
+    expect(commitRename).toBeTruthy();
+    expect(commitRename?.[0]).toMatch(/\.current-commit\.tmp\./);
+  });
+
+  it('self-heals pre-existing `.current-commit` corruption (>64 chars) by re-deriving from git HEAD', async () => {
+    // Exact dkg-v9-relay-01 reproduction: the file on disk contained the same
+    // 40-char SHA written twice end-to-end (80 chars total). The daemon should
+    // detect the malformed value, fall back to `git rev-parse HEAD`, and on
+    // the next swap rewrite the file (atomically) with the real SHA.
+    const corrupted = 'a'.repeat(40) + 'a'.repeat(40); // 80 chars
+    readFileImpl = async (path: any) => {
+      const p = String(path);
+      if (p.endsWith('.current-commit')) return corrupted;
+      return '';
+    };
+    makeFetchOk('bbb222');
+    let revParseCalled = false;
+    execImpl = async (cmd: string) => {
+      if (cmd.includes('git rev-parse HEAD')) {
+        revParseCalled = true;
+        return { stdout: 'aaa111\n', stderr: '' };
+      }
+      return { stdout: '', stderr: '' };
+    };
+    const logCalls: string[] = [];
+    await performUpdate(AU, (m) => logCalls.push(m));
+    expect(revParseCalled).toBe(true);
+    expect(logCalls.some((m) => m.includes('malformed value') && m.includes('len=80'))).toBe(true);
+  });
+
+  // ─── Bot-review fixes (PR #303) ─────────────────────────────────────────
+
+  it('clears stale dist/ + tsconfig.tsbuildinfo + cli/network/ + cli/project.json (preserves node_modules + Hardhat caches)', async () => {
+    readFileImpl = async () => 'aaa111';
+    makeFetchOk('bbb222');
+    // Default readdir mock returns two packages: 'core' and 'cli'. Each must
+    // get its `dist/` and `tsconfig.tsbuildinfo` rm'd. Additionally, the
+    // packages/cli build script copies repo-root `network/*.json` into
+    // `packages/cli/network/` and `project.json` into `packages/cli/project.json`,
+    // so those must also be wiped — otherwise a deleted/renamed root network
+    // config can survive in the inactive slot and be loaded via candidateRoots().
+    await performUpdate(AU, () => {});
+    const rmTargets = rmCalls.map(args => String(args[0]));
+    const wipesDistCore = rmTargets.some(p => p.endsWith('/packages/core/dist'));
+    const wipesDistCli = rmTargets.some(p => p.endsWith('/packages/cli/dist'));
+    const wipesTsBuildInfoCore = rmTargets.some(p => p.endsWith('/packages/core/tsconfig.tsbuildinfo'));
+    const wipesTsBuildInfoCli = rmTargets.some(p => p.endsWith('/packages/cli/tsconfig.tsbuildinfo'));
+    const wipesCliNetworkDir = rmTargets.some(p => p.endsWith('/packages/cli/network'));
+    const wipesCliProjectJson = rmTargets.some(p => p.endsWith('/packages/cli/project.json'));
+    expect(wipesDistCore).toBe(true);
+    expect(wipesDistCli).toBe(true);
+    expect(wipesTsBuildInfoCore).toBe(true);
+    expect(wipesTsBuildInfoCli).toBe(true);
+    expect(wipesCliNetworkDir).toBe(true);
+    expect(wipesCliProjectJson).toBe(true);
+    // Sanity: no node_modules wipe and no Hardhat cache/artifacts wipe.
+    const touchesNodeModules = rmTargets.some(p => p.includes('node_modules'));
+    const touchesHardhatCache = rmTargets.some(p =>
+      p.endsWith('/cache') || p.endsWith('/artifacts'),
+    );
+    expect(touchesNodeModules).toBe(false);
+    expect(touchesHardhatCache).toBe(false);
+    // Sanity: we did NOT shell out to `find` (the legacy implementation).
+    const findCalls = getExecFileCalls().filter(c => c.file === 'find');
+    expect(findCalls.length).toBe(0);
+    // Regression: cli/network/ is rm'd recursively (so a stale per-network
+    // file, e.g. `packages/cli/network/devnet.json` left behind after the
+    // root `network/devnet.json` was deleted in a later commit, gets wiped
+    // along with the directory). `force: true` makes the rm a no-op when
+    // the dir is absent (fresh clone path).
+    const cliNetworkRmCall = rmCalls.find(args => String(args[0]).endsWith('/packages/cli/network'));
+    expect(cliNetworkRmCall).toBeDefined();
+    expect(cliNetworkRmCall?.[1]).toMatchObject({ recursive: true, force: true });
+    const cliProjectRmCall = rmCalls.find(args => String(args[0]).endsWith('/packages/cli/project.json'));
+    expect(cliProjectRmCall).toBeDefined();
+    expect(cliProjectRmCall?.[1]).toMatchObject({ force: true });
+  });
+
+  it('orphan-process sweep is scoped to the slot dir (no host-wide pkill -f)', async () => {
+    readFileImpl = async () => 'aaa111';
+    makeFetchOk('bbb222');
+    const sweepCalls: Array<{ cmd: string; env: any }> = [];
+    _autoUpdateIo.execSync = ((cmd: any, opts?: any) => {
+      sweepCalls.push({ cmd: String(cmd), env: opts?.env ?? null });
+      return '';
+    }) as any;
+    // Make pnpm install time out → triggers the sweep.
+    execImpl = async (cmd: string) => {
+      if (cmd.includes('pnpm install')) {
+        const err: any = new Error('Command failed: pnpm install ETIMEDOUT');
+        err.killed = true;
+        err.signal = 'SIGTERM';
+        throw err;
+      }
+      return { stdout: '', stderr: '' };
+    };
+    await performUpdate(AU, () => {});
+    expect(sweepCalls.length).toBeGreaterThan(0);
+    for (const call of sweepCalls) {
+      // No host-wide command-line pattern matching.
+      expect(call.cmd).not.toMatch(/pkill\s+(-\S+\s+)*-f/);
+      // Scoping happens via env vars, not embedded in the script. EUID is
+      // resolved in Node and passed as DKG_AU_UID — we MUST NOT depend on
+      // bash-only `$EUID` because /bin/sh on Ubuntu/Debian is dash.
+      expect(call.cmd).toContain('$DKG_AU_SLOT');
+      expect(call.cmd).toContain('pgrep -u "$DKG_AU_UID"');
+      expect(call.cmd).not.toContain('$EUID');
+      expect(call.cmd).toContain('/proc/$pid/cwd');
+      expect(call.env?.DKG_AU_SLOT).toMatch(/\/releases\/[ab]$/);
+      expect(call.env?.DKG_AU_UID).toMatch(/^\d+$/);
+    }
+  });
+
+  it('aborts the update if pre-build clean fails (no swap of a potentially dirty slot)', async () => {
+    readFileImpl = async () => 'aaa111';
+    makeFetchOk('bbb222');
+    // readdir() must succeed and return entries — otherwise cleanGeneratedOutputs
+    // returns early ("nothing to pre-clean") on ENOENT and never reaches rm,
+    // which would silently bypass this regression test.
+    readdirImpl = async (path: any) => {
+      if (String(path).endsWith('/packages')) return DEFAULT_READDIR_PKG_ENTRIES.slice();
+      return [];
+    };
+    // Force the Node-based clean to throw on rm of dist (EACCES-ish), and
+    // also force the git clean -fdx fallback to fail. Update must abort.
+    _autoUpdateIo.rm = (async () => {
+      throw new Error('EACCES: simulated permission denied on dist');
+    }) as any;
+    execFileImpl = async (file: string, args: string[]) => {
+      if (file === 'git' && args[0] === 'clean' && args[1] === '-fdx') {
+        throw new Error('EACCES: simulated permission denied on git clean');
+      }
+      return { stdout: '', stderr: '' };
+    };
+    const logs: string[] = [];
+    const result = await performUpdate(AU, (m) => logs.push(m));
+    expect(result).toBe(false);
+    expect(logs.some(m => m.includes('pre-build clean failed') && m.includes('Aborting'))).toBe(true);
+    // No slot swap should have happened.
+    expect(swapSlotCalls.length).toBe(0);
+  });
+
 });

@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { createServer } from 'node:http';
 import { DkgChannelPlugin, CHANNEL_NAME, formatInboundTurnDiagnostic } from '../src/DkgChannelPlugin.js';
 import { DkgDaemonClient } from '../src/dkg-client.js';
 import type { OpenClawPluginApi } from '../src/types.js';
@@ -272,6 +273,118 @@ describe('DkgChannelPlugin', () => {
     plugin.register(api);
 
     expect(plugin.isUsingGatewayRoute).toBe(false);
+  });
+
+  // Issue #272: in OpenClaw versions where the gateway also binds the
+  // configured channel port (e.g. 2026.3.31 with channels.dkg-ui.port = 9201),
+  // the standalone bridge can't bind on its configured port. Earlier we
+  // tried skipping the bridge entirely when gateway routes were registered,
+  // but the gateway-side `/api/dkg-channel/health` route is auth:'gateway'
+  // and rejects the daemon's no-auth probe — leaving the UI with no usable
+  // health target. The bridge is the only transport the daemon trusts (via
+  // the bridge auth token), so it must always start. start() now falls back
+  // to an OS-allocated free port on EADDRINUSE so it always comes up.
+  describe('issue #272 — standalone bridge always starts (with port fallback)', () => {
+    it('calls start() when registerHttpRoute is available (gateway-route mode)', () => {
+      const startSpy = vi.spyOn(plugin, 'start').mockResolvedValue(undefined);
+      const api = makeApi({ registerHttpRoute: trackFn() });
+
+      plugin.register(api);
+
+      expect(plugin.isUsingGatewayRoute).toBe(true);
+      expect(startSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('calls start() when registerHttpRoute is unavailable (fallback bridge mode)', () => {
+      const startSpy = vi.spyOn(plugin, 'start').mockResolvedValue(undefined);
+      const api = makeApi(); // no registerHttpRoute
+
+      plugin.register(api);
+
+      expect(plugin.isUsingGatewayRoute).toBe(false);
+      expect(startSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('calls start() when registerChannel and registerHttpRoute are both available', () => {
+      const startSpy = vi.spyOn(plugin, 'start').mockResolvedValue(undefined);
+      const registerChannel = trackFn();
+      const registerHttpRoute = trackFn();
+      const api = makeApi({ registerChannel, registerHttpRoute });
+
+      plugin.register(api);
+
+      expect(plugin.isUsingGatewayRoute).toBe(true);
+      expect(registerChannel.calls).toHaveLength(1);
+      expect(registerHttpRoute.calls).toHaveLength(2);
+      expect(startSpy).toHaveBeenCalledTimes(1);
+    });
+
+    // Drives the port-fallback path: pre-bind a server on a port, then ask
+    // the plugin to listen on the same port. start() must catch EADDRINUSE
+    // and re-listen on an OS-allocated port; the bound port surfaces via
+    // bridgePort, and a diagnostic info log captures the fallback. A
+    // refactor that drops the fallback silently regresses both #272 envs.
+    it('falls back to an OS-allocated port on EADDRINUSE', async () => {
+      const blocker = createServer(() => {});
+      try {
+        await new Promise<void>((resolve, reject) => {
+          blocker.once('error', reject);
+          blocker.listen(0, '127.0.0.1', () => resolve());
+        });
+        const blockerAddr = blocker.address();
+        const blockerPort = typeof blockerAddr === 'object' && blockerAddr ? blockerAddr.port : 0;
+        expect(blockerPort).toBeGreaterThan(0);
+
+        const conflictClient = new DkgDaemonClient({ baseUrl: 'http://localhost:9200', apiToken: 'test-token' });
+        const conflictPlugin = new DkgChannelPlugin({ enabled: true, port: blockerPort }, conflictClient);
+        // Capture info logs so we can lock the operator-greppable fallback
+        // diagnostic. register() wires api.logger into the plugin; start()
+        // emits the fallback line via api.logger.info when EADDRINUSE fires.
+        const infoCalls: unknown[][] = [];
+        const api = makeApi({ logger: { info: (...args: unknown[]) => infoCalls.push(args) } });
+        conflictPlugin.register(api);
+        await conflictPlugin.start();
+
+        try {
+          expect(conflictPlugin.bridgePort).toBeGreaterThan(0);
+          expect(conflictPlugin.bridgePort).not.toBe(blockerPort);
+          // Refactor that drops the fallback log silently regresses operator
+          // observability — issue #272 troubleshooting greps for this line.
+          expect(
+            infoCalls.some((call) => String(call[0]).includes('falling back to an OS-allocated free port')),
+          ).toBe(true);
+        } finally {
+          await conflictPlugin.stop();
+        }
+      } finally {
+        await new Promise<void>((resolve) => blocker.close(() => resolve()));
+      }
+    });
+
+    // Symmetric to the env-A fallback test: when the configured port is FREE,
+    // start() must bind it directly with no fallback log. Uses port 0 — the
+    // OS guarantees an available port and assigns a real one — so there is
+    // no TOCTOU race against another process and no possibility of EADDRINUSE
+    // forcing an unintended fallback. The discriminator vs the env-A test is
+    // the absence of the fallback log; if start() ever silently fell back on
+    // this path (it shouldn't with a free port), this assertion catches it.
+    it('binds the configured port directly when no conflict (no fallback)', async () => {
+      const directClient = new DkgDaemonClient({ baseUrl: 'http://localhost:9200', apiToken: 'test-token' });
+      const directPlugin = new DkgChannelPlugin({ enabled: true, port: 0 }, directClient);
+      const infoCalls: unknown[][] = [];
+      const api = makeApi({ logger: { info: (...args: unknown[]) => infoCalls.push(args) } });
+      directPlugin.register(api);
+      await directPlugin.start();
+
+      try {
+        expect(directPlugin.bridgePort).toBeGreaterThan(0);
+        expect(
+          infoCalls.some((call) => String(call[0]).includes('falling back to an OS-allocated free port')),
+        ).toBe(false);
+      } finally {
+        await directPlugin.stop();
+      }
+    });
   });
 
   it('processInbound should use the current object-style runtime dispatch when plugin-sdk helpers are unavailable', async () => {

@@ -73,6 +73,7 @@ import {
   loadConfig,
   saveConfig,
   loadNetworkConfig,
+  resolveChainConfig,
   dkgDir,
   writePid,
   removePid,
@@ -656,7 +657,7 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
           gasCost: chain.gasCostWei,
           tracCost: chain.tokenAmount,
         });
-        const chainId = (config.chain ?? network?.chain)?.chainId;
+        const chainId = resolveChainConfig(config, network)?.chainId;
         tracker.setTxHash(
           ctx,
           chain.txHash,

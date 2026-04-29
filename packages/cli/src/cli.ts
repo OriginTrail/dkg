@@ -14,9 +14,11 @@ import yaml from 'js-yaml';
 import {
   loadConfig, saveConfig, configExists, configPath,
   readPid, readApiPort, isProcessRunning, dkgDir, logPath, ensureDkgDir,
-  loadNetworkConfig, loadProjectConfig, resolveAutoUpdateConfig, releasesDir, activeSlot, swapSlot,
+  loadNetworkConfig, loadProjectConfig, resolveAutoUpdateConfig, resolveChainConfig,
+  releasesDir, activeSlot, swapSlot,
   slotEntryPoint, isStandaloneInstall,
   resolveContextGraphs, resolveNetworkDefaultContextGraphs,
+  type AutoUpdateConfig,
 } from './config.js';
 import { ApiClient } from './api-client.js';
 import { parsePositiveMsOption } from './publisher-runner.js';
@@ -289,17 +291,25 @@ program
     if (enableAutoUpdate) {
       // Effective upstream defaults — what the node would use if nothing were
       // persisted in ~/.dkg/config.json. Network config beats project.json.
-      // We persist repo/branch only when they differ from these, so future
-      // changes to the shipped network or project config propagate on the
-      // next daemon run without requiring a config rewrite.
+      // We persist a field only when it differs from the upstream default, so
+      // future changes to the shipped network or project config propagate on
+      // the next daemon run without requiring a config rewrite. Without this
+      // guard, every accepted-default ends up pinned in the custom config
+      // forever.
       const proj = loadProjectConfig();
       const effectiveRepo = network?.autoUpdate?.repo ?? proj.repo;
       const effectiveBranch = network?.autoUpdate?.branch ?? proj.defaultBranch;
+      const effectiveAllowPrerelease = network?.autoUpdate?.allowPrerelease ?? true;
+      const effectiveSshKeyPath = network?.autoUpdate?.sshKeyPath ?? '';
+      // Keep this in sync with `resolveAutoUpdateConfig` in config.ts.
+      const effectiveInterval = network?.autoUpdate?.checkIntervalMinutes ?? 30;
+
       const defaultRepo = existing.autoUpdate?.repo ?? effectiveRepo;
       const defaultBranch = existing.autoUpdate?.branch ?? effectiveBranch;
-      const defaultAllowPrerelease = existing.autoUpdate?.allowPrerelease ?? network?.autoUpdate?.allowPrerelease ?? true;
-      const defaultSshKeyPath = existing.autoUpdate?.sshKeyPath ?? network?.autoUpdate?.sshKeyPath ?? '';
-      const defaultInterval = existing.autoUpdate?.checkIntervalMinutes ?? network?.autoUpdate?.checkIntervalMinutes ?? 5;
+      const defaultAllowPrerelease = existing.autoUpdate?.allowPrerelease ?? effectiveAllowPrerelease;
+      const defaultSshKeyPath = existing.autoUpdate?.sshKeyPath ?? effectiveSshKeyPath;
+      const defaultInterval = existing.autoUpdate?.checkIntervalMinutes ?? effectiveInterval;
+
       const repo = await ask('Git repo/path (owner/name, URL, or git@host:org/repo.git)', defaultRepo);
       const branch = await ask('Branch', defaultBranch);
       const allowPrerelease = (await ask(
@@ -308,20 +318,31 @@ program
       )).toLowerCase() === 'y';
       const sshKeyPath = (await ask('SSH private key path (optional; blank uses agent/default SSH config)', defaultSshKeyPath)).trim();
       const interval = parseInt(await ask('Check interval (minutes)', String(defaultInterval)), 10);
+
       autoUpdate = {
         enabled: true,
         ...(repo && repo !== effectiveRepo ? { repo } : {}),
         ...(branch && branch !== effectiveBranch ? { branch } : {}),
-        allowPrerelease,
-        sshKeyPath: sshKeyPath || undefined,
-        checkIntervalMinutes: interval,
-      };
+        ...(allowPrerelease !== effectiveAllowPrerelease ? { allowPrerelease } : {}),
+        ...(sshKeyPath && sshKeyPath !== effectiveSshKeyPath ? { sshKeyPath } : {}),
+        ...(Number.isFinite(interval) && interval !== effectiveInterval ? { checkIntervalMinutes: interval } : {}),
+        // Preserve advanced fields the wizard does not prompt for so a
+        // rerun of `dkg init` doesn't silently revert operator tuning:
+        //  - `buildTimeoutMs`: per-step overrides for slow ARM64 hosts
+        //  - `sshCommand`: custom GIT_SSH_COMMAND (jump hosts, non-default
+        //    port, custom IdentityFile, etc.)
+        ...(existing.autoUpdate?.buildTimeoutMs ? { buildTimeoutMs: existing.autoUpdate.buildTimeoutMs } : {}),
+        ...(existing.autoUpdate?.sshCommand ? { sshCommand: existing.autoUpdate.sshCommand } : {}),
+      } as AutoUpdateConfig;
     }
 
-    // Chain configuration
-    const defaultRpcUrl = existing.chain?.rpcUrl ?? network?.chain?.rpcUrl;
-    const defaultHubAddress = existing.chain?.hubAddress ?? network?.chain?.hubAddress;
-    const defaultChainId = existing.chain?.chainId ?? network?.chain?.chainId;
+    // Chain configuration. Field-merge: existing config wins per-field over
+    // network defaults so an operator who's only customised RPC keeps that
+    // override even after `dkg init` re-prompts.
+    const chainDefaults = resolveChainConfig(existing, network);
+    const defaultRpcUrl = chainDefaults?.rpcUrl;
+    const defaultHubAddress = chainDefaults?.hubAddress;
+    const defaultChainId = chainDefaults?.chainId;
 
     console.log('\nBlockchain Configuration:');
     const rpcUrl = await ask('RPC URL', defaultRpcUrl);
@@ -391,7 +412,14 @@ program
         }`,
       );
     }
-    console.log(`  chain:      ${config.chain ? `${config.chain.rpcUrl} (hub: ${config.chain.hubAddress?.slice(0, 10)}...)` : '(not configured)'}`);
+    {
+      // Display the effective (config + network) merged view, so an operator
+      // who only set rpcUrl still sees the inherited hub from the network.
+      const effective = resolveChainConfig(config, network);
+      console.log(`  chain:      ${effective?.rpcUrl && effective?.hubAddress
+        ? `${effective.rpcUrl} (hub: ${effective.hubAddress.slice(0, 10)}...)`
+        : '(not configured)'}`);
+    }
     if (network) {
       console.log(`  network:    ${network.networkName}`);
     }
@@ -2545,9 +2573,10 @@ program
         process.exit(1);
       }
 
-      const rpcUrl = config.chain?.rpcUrl ?? network?.chain?.rpcUrl;
-      const hubAddress = config.chain?.hubAddress ?? network?.chain?.hubAddress;
-      const chainId = config.chain?.chainId ?? network?.chain?.chainId ?? '(unknown)';
+      const chainResolved = resolveChainConfig(config, network);
+      const rpcUrl = chainResolved?.rpcUrl;
+      const hubAddress = chainResolved?.hubAddress;
+      const chainId = chainResolved?.chainId ?? '(unknown)';
 
       let provider: ethers.JsonRpcProvider | null = null;
       let token: ethers.Contract | null = null;
@@ -2614,8 +2643,9 @@ program
         process.exit(1);
       }
 
-      const rpcUrl = config.chain?.rpcUrl ?? network?.chain?.rpcUrl;
-      const hubAddress = config.chain?.hubAddress ?? network?.chain?.hubAddress;
+      const chainResolved = resolveChainConfig(config, network);
+      const rpcUrl = chainResolved?.rpcUrl;
+      const hubAddress = chainResolved?.hubAddress;
       if (!rpcUrl || !hubAddress) {
         console.error('Chain not configured. Run "dkg init" and set RPC URL + Hub address.');
         process.exit(1);
