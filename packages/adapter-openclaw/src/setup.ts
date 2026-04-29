@@ -478,6 +478,20 @@ export function writeDkgConfig(
     config.relay = existing.relay;
   }
 
+  // Persist only the `enabled` flag mirrored from the network default.
+  // `repo`/`branch`/`checkIntervalMinutes`/etc. are intentionally omitted
+  // (see big comment above on the resolver contract), but the `enabled`
+  // flag has to stay because several consumers — `/api/status`,
+  // `/api/info`, the telemetry log pusher in `lifecycle.ts`, and
+  // `resolveAutoUpdateEnabled` itself — read `config.autoUpdate?.enabled`
+  // directly without falling back to `network.autoUpdate.enabled`.
+  // Dropping the whole block would make those report auto-update as
+  // disabled on fresh testnet OpenClaw installs even though the updater
+  // is in fact running.
+  if (!existing.autoUpdate && network.autoUpdate?.enabled !== undefined) {
+    config.autoUpdate = { enabled: network.autoUpdate.enabled };
+  }
+
   writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n');
   log(`Wrote ${configPath} (${network.networkName}, ${config.nodeRole}, port ${config.apiPort})`);
 }

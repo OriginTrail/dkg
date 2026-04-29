@@ -231,10 +231,15 @@ describe('writeDkgConfig', () => {
       expect(config.apiPort).toBe(9200);
       expect(config.nodeRole).toBe('edge');
       expect(config.contextGraphs).toEqual(['testing']);
-      // Chain and autoUpdate are intentionally NOT persisted on a fresh setup —
-      // the daemon resolves them at runtime from network/<env>.json via the
-      // field-level mergers in cli/src/config.ts so future hub/branch
-      // rotations propagate without a config rewrite.
+      // Chain is intentionally NOT persisted on a fresh setup — the daemon
+      // resolves it at runtime from network/<env>.json via resolveChainConfig
+      // (cli/src/config.ts), so future hub/RPC rotations propagate without
+      // a config rewrite. autoUpdate likewise omits repo/branch/etc. but
+      // keeps the `enabled` flag mirrored from the network default because
+      // several consumers (/api/status, /api/info, telemetry log pusher,
+      // resolveAutoUpdateEnabled) read `config.autoUpdate?.enabled` directly
+      // without a network fallback. fakeNetwork has no autoUpdate, so
+      // nothing should be written at all here.
       expect(config.chain).toBeUndefined();
       expect(config.autoUpdate).toBeUndefined();
       expect(config.relay).toBeUndefined();
@@ -276,17 +281,20 @@ describe('writeDkgConfig', () => {
     }
   });
 
-  it('preserves an explicit existing autoUpdate block but never pins network defaults on a fresh setup', () => {
-    // Regression: previously `writeDkgConfig` copied `network.autoUpdate`
-    // wholesale into the user's config when absent, which froze the auto-
-    // updater's repo/branch/checkInterval at first-run values and broke
-    // future branch rotations (main -> release/v10) shipped via
+  it('mirrors only autoUpdate.enabled from network default and preserves existing pins', () => {
+    // Regression: previously `writeDkgConfig` copied the entire
+    // `network.autoUpdate` block into the user's config when absent,
+    // which froze repo/branch/checkInterval at first-run values and broke
+    // future rotations (main -> release/v10) shipped via
     // `network/<env>.json#autoUpdate`. The daemon's
-    // `resolveAutoUpdateConfig` already handles field-level fall-through,
-    // so we should only persist what the operator explicitly set.
+    // `resolveAutoUpdateConfig` already does field-level fall-through, so
+    // we drop everything *except* `enabled` — that one flag stays because
+    // /api/status, /api/info, the telemetry log pusher in lifecycle.ts,
+    // and `resolveAutoUpdateEnabled` itself read
+    // `config.autoUpdate?.enabled` directly without a network fallback.
     //
-    // (1) Fresh setup with a network that DOES define autoUpdate -> we must
-    //     NOT pin it into the user's config.
+    // (1) Fresh setup, network has autoUpdate.enabled=true with extra
+    //     pins -> persist ONLY { enabled: true }, no repo/branch.
     const fresh = join(testDir, '.dkg-fresh');
     const original = process.env.DKG_HOME;
     process.env.DKG_HOME = fresh;
@@ -296,15 +304,28 @@ describe('writeDkgConfig', () => {
         autoUpdate: { enabled: true, repo: 'OriginTrail/dkg', branch: 'main' },
       } as any, 9200);
       const cfg = JSON.parse(readFileSync(join(fresh, 'config.json'), 'utf-8'));
-      expect(cfg.autoUpdate).toBeUndefined();
+      expect(cfg.autoUpdate).toEqual({ enabled: true });
       expect(cfg.chain).toBeUndefined();
     } finally {
       process.env.DKG_HOME = original;
     }
 
-    // (2) Existing config with an operator-set autoUpdate must round-trip
-    //     unchanged — operators who DID pin a custom branch keep their
-    //     override, this PR only changes the default-write path.
+    // (2) Fresh setup, network explicitly disables autoUpdate -> mirror it.
+    const disabled = join(testDir, '.dkg-disabled');
+    process.env.DKG_HOME = disabled;
+    try {
+      writeDkgConfig('test-agent', {
+        ...fakeNetwork,
+        autoUpdate: { enabled: false, repo: 'OriginTrail/dkg', branch: 'main' },
+      } as any, 9200);
+      const cfg = JSON.parse(readFileSync(join(disabled, 'config.json'), 'utf-8'));
+      expect(cfg.autoUpdate).toEqual({ enabled: false });
+    } finally {
+      process.env.DKG_HOME = original;
+    }
+
+    // (3) Existing config with an operator-pinned autoUpdate must round-trip
+    //     unchanged — only the default-write path changes here.
     const persisted = join(testDir, '.dkg-persisted');
     mkdirSync(persisted, { recursive: true });
     writeFileSync(join(persisted, 'config.json'), JSON.stringify({
