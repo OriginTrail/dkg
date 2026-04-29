@@ -353,6 +353,11 @@ create_node_config() {
   ${relay_value}
   ${store_block}
   "contextGraphs": ["devnet-test", "devnet-isolation"],
+  "publisher": {
+    "enabled": true,
+    "pollIntervalMs": 12000,
+    "errorBackoffMs": 5000
+  },
   ${devnet_auth_block}
   "chain": {
     "type": "evm",
@@ -743,7 +748,7 @@ cmd_start() {
       reg_resp=$(curl -sS --max-time 30 -X POST \
         -H "$register_auth_header" \
         -H "Content-Type: application/json" \
-        -d "{\"id\":\"$cg\"}" \
+        -d "{\"id\":\"$cg\",\"accessPolicy\":0}" \
         "$register_endpoint" 2>&1 || true)
       if echo "$reg_resp" | grep -q '"onChainId"'; then
         on_chain_id=$(echo "$reg_resp" | python3 -c "import sys,json;print(json.load(sys.stdin).get('onChainId',''))" 2>/dev/null || echo '')

@@ -153,3 +153,4 @@ export { UpdateHandler } from './update-handler.js';
 export { ChainEventPoller, type ChainEventPollerConfig, type OnContextGraphCreated } from './chain-event-poller.js';
 export { AccessHandler, type AccessPolicy } from './access-handler.js';
 export { AccessClient, type AccessResult } from './access-client.js';
+export * from './share-batching.js';

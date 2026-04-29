@@ -142,7 +142,9 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
 
   async update(jobId: string, status: LiftJobState, data: Partial<LiftJob> = {}): Promise<void> {
     await this.ensureGraph();
-    const next = this.refreshActiveLease(this.mergeJob(await this.getRequiredJob(jobId), status, data));
+    const current = await this.getRequiredJob(jobId);
+    await this.assertActiveClaimFence(current);
+    const next = this.refreshActiveLease(this.mergeJob(current, status, data));
     this.assertJobMatchesStatus(next);
     await this.writeJob(next);
     await this.syncWalletLockForJob(next);
@@ -733,6 +735,24 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
       return lock.claimToken === job.claim.claimToken;
     }
     return true;
+  }
+
+  private async assertActiveClaimFence(job: LiftJob): Promise<void> {
+    const walletId = job.claim?.walletId;
+    if (!walletId) return;
+    const currentLock = await this.readWalletLock(walletId);
+    if (!currentLock) {
+      throw new Error(`stale_claim: wallet lock missing for ${walletId}`);
+    }
+    if (!this.lockMatchesJob(currentLock, job)) {
+      throw new Error(`fence_token_mismatch: wallet lock for ${walletId} no longer matches job ${job.jobId}`);
+    }
+    if (currentLock.status !== 'active') {
+      throw new Error(`stale_claim: wallet lock for ${walletId} is not active`);
+    }
+    if (typeof currentLock.expiresAt === 'number' && currentLock.expiresAt <= this.now()) {
+      throw new Error(`stale_claim: wallet lock for ${walletId} expired`);
+    }
   }
 
   private async withClaimLock<T>(fn: () => Promise<T>): Promise<T> {

@@ -53,3 +53,4 @@ export {
   type ExtractionPipeline,
   ExtractionPipelineRegistry,
 } from './extraction-pipeline.js';
+export * from './transducers.js';

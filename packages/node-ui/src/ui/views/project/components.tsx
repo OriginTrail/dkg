@@ -2356,7 +2356,7 @@ export function SubGraphDetailView({
   const profile = useProjectProfileContext();
   const binding = profile?.forSubGraph(slug);
   const chips = profile?.chipsFor(slug) ?? [];
-  const savedQueries = profile?.savedQueriesFor(slug) ?? [];
+  const queryCatalogs = profile?.savedQueryCatalogsFor(slug) ?? [];
   const timelinePredicate = binding?.timelinePredicate;
 
   const [activeTab, setActiveTab] = useState<SubGraphTab>('items');
@@ -2601,27 +2601,38 @@ export function SubGraphDetailView({
         />
       </div>
 
-      {savedQueries.length > 0 && (
+      {queryCatalogs.length > 0 && (
         <div className="v10-subgraph-savedqueries">
-          <span className="v10-subgraph-savedqueries-label">Saved queries</span>
-          {savedQueries.map(q => {
-            const isActive = activeQuerySlug === q.slug;
-            return (
-              <button
-                key={q.slug}
-                type="button"
-                className={`v10-subgraph-savedquery${isActive ? ' active' : ''}`}
-                onClick={() => isActive ? clearQuery() : runQuery(q)}
-                title={q.description || q.name}
-                disabled={queryLoading && !isActive}
+          <span className="v10-subgraph-savedqueries-label">Query catalog</span>
+          {queryCatalogs.map(catalog => (
+            <React.Fragment key={catalog.slug}>
+              <span
+                className="v10-subgraph-savedqueries-label"
+                title={catalog.description || catalog.name}
+                style={{ marginLeft: 8, opacity: 0.8 }}
               >
-                <span className="v10-subgraph-savedquery-glyph">
-                  {queryLoading && isActive ? '…' : isActive ? '✓' : '◎'}
-                </span>
-                {q.name}
-              </button>
-            );
-          })}
+                {catalog.name}
+              </span>
+              {catalog.queries.map(q => {
+                const isActive = activeQuerySlug === q.slug;
+                return (
+                  <button
+                    key={q.slug}
+                    type="button"
+                    className={`v10-subgraph-savedquery${isActive ? ' active' : ''}`}
+                    onClick={() => isActive ? clearQuery() : runQuery(q)}
+                    title={q.description || q.name}
+                    disabled={queryLoading && !isActive}
+                  >
+                    <span className="v10-subgraph-savedquery-glyph">
+                      {queryLoading && isActive ? '…' : isActive ? '✓' : '◎'}
+                    </span>
+                    {q.name}
+                  </button>
+                );
+              })}
+            </React.Fragment>
+          ))}
           {queryError && (
             <span className="v10-subgraph-savedquery-error" title={queryError}>✕ query failed</span>
           )}
@@ -2763,4 +2774,3 @@ export function SubGraphDetailView({
     </div>
   );
 }
-

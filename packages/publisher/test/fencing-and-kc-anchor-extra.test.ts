@@ -184,7 +184,7 @@ describe('P-2 (CRITICAL): fencing token — stale worker after health-check rese
     },
   );
 
-  it('PROD-BUG: update() accepts an in-memory LiftJob even when the on-disk claim token has been overwritten by a different worker', async () => {
+  it('rejects update() when the on-disk claim token or wallet lock no longer matches the in-memory job claim', async () => {
     const publisher = createPublisher();
     const jobId = await publisher.lift(request());
     const claimedByA = await publisher.claimNext('wallet-A');
@@ -225,25 +225,11 @@ describe('P-2 (CRITICAL): fencing token — stale worker after health-check rese
     } catch (err) {
       caughtStale = err;
     }
-    // PROD-BUG: update() signs off on this mutation with no fence check,
-    // and the publisher even rewrites the wallet lock for wallet-A
-    // (re-acquiring a lease that the control plane had explicitly
-    // invalidated). Observe: lock came back.
-    expect(caughtStale).toBeNull();
-    expect(await walletLockRowCount('wallet-A')).toBeGreaterThan(0);
-
-    // Make the spec expectation explicit: under a correct fencing
-    // implementation, either the update or the lock recreation would
-    // fail. The two assertions below codify "at least one of these
-    // must be false".
-    const staleWriteAccepted = caughtStale === null;
-    const lockSilentlyRecreated = (await walletLockRowCount('wallet-A')) > 0;
-    // PROD-BUG evidence: BOTH are currently true.
-    expect(
-      staleWriteAccepted && lockSilentlyRecreated,
-      'PROD-BUG: stale worker was allowed to write AND silently regained ' +
-        'a wallet lock the control plane had invalidated. See BUGS_FOUND.md P-2.',
-    ).toBe(false);
+    expect(caughtStale).toBeInstanceOf(Error);
+    if (caughtStale instanceof Error) {
+      expect(caughtStale.message).toMatch(/fenc|stale|lock|claim/i);
+    }
+    expect(await walletLockRowCount('wallet-A')).toBe(0);
   });
 });
 

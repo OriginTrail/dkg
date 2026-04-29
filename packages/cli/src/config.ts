@@ -53,6 +53,7 @@ export interface NetworkConfig {
     type: 'evm';
     rpcUrl: string;
     hubAddress: string;
+    tokenAddress?: string;
     chainId: string;
   };
   faucet?: {
@@ -68,6 +69,8 @@ export interface ChainConfig {
   rpcUrl: string;
   /** Hub contract address */
   hubAddress: string;
+  /** Optional token contract address override. When omitted, resolve from Hub.Token. */
+  tokenAddress?: string;
   /** Chain identifier (e.g., 'base:84532') */
   chainId?: string;
   /**

@@ -605,12 +605,12 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
     }
     try {
       const provider = new ethers.JsonRpcProvider(rpcUrl);
-      const hub = new ethers.Contract(
-        hubAddress,
-        ["function getContractAddress(string) view returns (address)"],
-        provider,
-      );
-      const tokenAddr = await hub.getContractAddress("Token").catch(() => null);
+      const tokenAddr = config.chain?.tokenAddress
+        ?? (await new ethers.Contract(
+          hubAddress,
+          ["function getContractAddress(string) view returns (address)"],
+          provider,
+        ).getContractAddress("Token").catch(() => null));
       let token: ethers.Contract | null = null;
       let tokenSymbol = "TRAC";
       if (tokenAddr && tokenAddr !== ethers.ZeroAddress) {

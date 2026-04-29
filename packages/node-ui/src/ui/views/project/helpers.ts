@@ -369,7 +369,8 @@ export function formatTimelineBucket(ym: string): string {
 // Graph / (optional) Timeline / Documents tabs as the layer views. The
 // layer axis becomes a secondary filter in the header via the mini
 // pyramid chips; `profile:FilterChip` rows filter by predicate value;
-// `profile:SavedQuery` pills run SPARQL and narrow the entity list.
+// `profile:QueryCatalog` + `profile:SavedQuery` render grouped SPARQL
+// pills that narrow the entity list.
 export type SubGraphTab = 'items' | 'graph' | 'timeline' | 'docs';
 
 export type SubGraphEntitySort = 'created-desc' | 'created-asc' | 'triples' | 'label';

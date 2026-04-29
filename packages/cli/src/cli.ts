@@ -20,6 +20,7 @@ import {
 } from './config.js';
 import { ApiClient } from './api-client.js';
 import { parsePositiveMsOption } from './publisher-runner.js';
+import { runConfiguredSourceWorker } from './source-worker-runner.js';
 
 function isDaemonUnreachable(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
@@ -2125,6 +2126,26 @@ sharedMemoryCmd
     }
   });
 
+// ─── dkg source-worker ────────────────────────────────────────────────
+
+const sourceWorkerCmd = program
+  .command('source-worker')
+  .description('Run generic source workers against the DKG daemon');
+
+sourceWorkerCmd
+  .command('run')
+  .description('Run a source worker from a JSON config file')
+  .requiredOption('--config <path>', 'Worker config JSON file')
+  .option('--once', 'Run a single iteration and exit')
+  .action(async (opts: ActionOpts) => {
+    try {
+      await runConfiguredSourceWorker(String(opts.config), { once: opts.once === true });
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
 // ─── dkg publisher ────────────────────────────────────────────────────
 
 const publisherCmd = program
@@ -2547,6 +2568,7 @@ program
 
       const rpcUrl = config.chain?.rpcUrl ?? network?.chain?.rpcUrl;
       const hubAddress = config.chain?.hubAddress ?? network?.chain?.hubAddress;
+      const tokenAddress = config.chain?.tokenAddress ?? network?.chain?.tokenAddress;
       const chainId = config.chain?.chainId ?? network?.chain?.chainId ?? '(unknown)';
 
       let provider: ethers.JsonRpcProvider | null = null;
@@ -2556,7 +2578,10 @@ program
       if (rpcUrl) {
         try {
           provider = new ethers.JsonRpcProvider(rpcUrl);
-          if (hubAddress) {
+          if (tokenAddress && tokenAddress !== ethers.ZeroAddress) {
+            token = new ethers.Contract(tokenAddress, ['function balanceOf(address) view returns (uint256)', 'function symbol() view returns (string)'], provider);
+            tokenSymbol = await token.symbol().catch(() => 'TRAC');
+          } else if (hubAddress) {
             const hub = new ethers.Contract(hubAddress, ['function getContractAddress(string) view returns (address)'], provider);
             const tokenAddr = await hub.getContractAddress('Token');
             if (tokenAddr !== ethers.ZeroAddress) {
