@@ -1,6 +1,11 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { createServer, type Server } from 'node:http';
-import { fetchMemorySessionGraphDelta, streamLocalAgentChat, streamOpenClawLocalChat } from '../src/ui/api.js';
+import {
+  fetchMemorySessionGraphDelta,
+  streamHermesLocalChat,
+  streamLocalAgentChat,
+  streamOpenClawLocalChat,
+} from '../src/ui/api.js';
 
 let server: Server;
 let baseUrl: string;
@@ -19,6 +24,15 @@ function startTestServer(): Promise<string> {
         res.write('data: {"type":"text_delta","delta":"Hel"}\n\n');
         res.write('data: {"type":"text_delta","delta":"lo"}\n\n');
         res.write('data: {"type":"final","text":"Hello","correlationId":"c1"}\n\n');
+        res.end();
+        return;
+      }
+
+      if (url.includes('/api/hermes-channel/stream')) {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        res.write('data: {"type":"text_delta","delta":"Her"}\n\n');
+        res.write('data: {"type":"text_delta","delta":"mes"}\n\n');
+        res.write('data: {"type":"final","text":"Hermes","correlationId":"h1"}\n\n');
         res.end();
         return;
       }
@@ -116,6 +130,59 @@ describe('ui local-agent stream api', () => {
     }
   });
 
+  it('parses Hermes SSE frames and resolves the final payload', async () => {
+    requestLog.length = 0;
+
+    const events: string[] = [];
+    const res = await streamHermesLocalChat('hi', {
+      sessionId: 'hermes:dkg-ui',
+      onEvent: (event) => events.push(event.type),
+    });
+
+    expect(res.text).toBe('Hermes');
+    expect(res.correlationId).toBe('h1');
+    expect(events).toEqual(['text_delta', 'text_delta', 'final']);
+    expect(requestLog.some(r => r.url.includes('/api/hermes-channel/stream'))).toBe(true);
+  });
+
+  it('normalizes Hermes delta/text SSE frames into local-agent text deltas', async () => {
+    const prevFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      const encoder = new TextEncoder();
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(encoder.encode('data: {"type":"delta","text":"Her","correlationId":"h2"}\n\n'));
+          controller.enqueue(encoder.encode('data: {"type":"delta","text":"mes","correlationId":"h2"}\n\n'));
+          controller.enqueue(encoder.encode('data: {"type":"final","text":"Hermes","correlationId":"h2","sessionId":"bridge-session","turnId":"bridge-turn"}\n\n'));
+          controller.close();
+        },
+      });
+      return new Response(stream, {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream' },
+      });
+    }) as typeof globalThis.fetch;
+
+    const events: Array<{ type: string; delta?: string }> = [];
+    try {
+      const res = await streamHermesLocalChat('hi', {
+        onEvent: (event) => events.push(event),
+      });
+
+      expect(res.text).toBe('Hermes');
+      expect(res.correlationId).toBe('h2');
+      expect(res.sessionId).toBe('bridge-session');
+      expect(res.turnId).toBe('bridge-turn');
+      expect(events).toMatchObject([
+        { type: 'text_delta', delta: 'Her' },
+        { type: 'text_delta', delta: 'mes' },
+        { type: 'final', sessionId: 'bridge-session', turnId: 'bridge-turn' },
+      ]);
+    } finally {
+      globalThis.fetch = prevFetch;
+    }
+  });
+
   it('requests session graph delta with turn watermark query params', async () => {
     requestLog.length = 0;
 
@@ -155,6 +222,34 @@ describe('ui local-agent stream api', () => {
       expect(result.text).toBe('Attached response');
       const payload = JSON.parse(String(fetchCalls[0]?.[1]?.body));
       expect(payload.attachmentRefs).toEqual(attachments);
+      expect(payload.text).toBe('hello');
+    } finally {
+      globalThis.fetch = savedFetch;
+    }
+  });
+
+  it('forwards session metadata through the Hermes local-agent chat transport', async () => {
+    const fetchCalls: [string | URL | Request, RequestInit | undefined][] = [];
+    const savedFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      fetchCalls.push([url, init]);
+      return new Response(
+        JSON.stringify({ text: 'Hermes response', correlationId: 'h3' }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    }) as typeof globalThis.fetch;
+
+    try {
+      const result = await streamLocalAgentChat('hermes', 'hello', {
+        sessionId: 'hermes:dkg-ui',
+        contextGraphId: 'project-1',
+      });
+
+      expect(result.text).toBe('Hermes response');
+      expect(String(fetchCalls[0]?.[0])).toBe('/api/hermes-channel/stream');
+      const payload = JSON.parse(String(fetchCalls[0]?.[1]?.body));
+      expect(payload.sessionId).toBe('hermes:dkg-ui');
+      expect(payload.contextGraphId).toBe('project-1');
       expect(payload.text).toBe('hello');
     } finally {
       globalThis.fetch = savedFetch;

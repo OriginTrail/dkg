@@ -110,6 +110,16 @@ describe('ChatMemoryManager', () => {
     expect(failureReasonQuad.object).toBe('"timeout"');
   });
 
+  it('checks a chat turn directly by turnId without scanning session history', async () => {
+    mockQuery.returns.push({ bindings: [] }, { bindings: [{ turn: 'urn:dkg:chat:turn:turn-1' }] });
+
+    await expect(manager.hasChatTurn('session-1', 'turn-1')).resolves.toBe(true);
+
+    const turnQuery = mockQuery.calls.at(-1)?.[0] as string;
+    expect(turnQuery).toContain('turnId> "turn-1"');
+    expect(turnQuery).toContain('LIMIT 1');
+  });
+
   it('stores attachment refs inline on the user message when provided', async () => {
     mockQuery.returns.push({ bindings: [] });
     await manager.storeChatExchange(
@@ -500,7 +510,7 @@ describe('ChatMemoryManager', () => {
 
   // The 'getSessionRootEntities widens the openclaw local session to
   // imported memory roots' test was removed with the retirement of the
-  // /api/memory/import V9 relic and the ImportedMemory / MemoryImport
+  // /api/memory/import endpoint and the ImportedMemory / MemoryImport
   // special-case branch inside buildSessionRootPattern.
 
   it('getSessionRootEntities keeps regular chat sessions scoped to their own graph roots', async () => {

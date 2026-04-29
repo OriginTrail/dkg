@@ -488,8 +488,8 @@ export async function handleNodeUIRequest(
   }
 
   // B52: POST /api/memory/import was retired as part of the
-  // openclaw-dkg-primary-memory work. It was a V9 relic that required LLM
-  // API keys on the node and wrote dkg:ImportedMemory ad-hoc types into a
+  // openclaw-dkg-primary-memory work. It required LLM API keys on the node
+  // and wrote dkg:ImportedMemory ad-hoc types into a
   // throwaway sidecar graph. Rather than let existing callers fall
   // through to the generic 404 (wire-level contract break with no
   // migration signal), serve a 410 Gone stub that names the two
@@ -501,7 +501,7 @@ export async function handleNodeUIRequest(
       error: 'POST /api/memory/import is retired in v1',
       errorCode: 'memory_import_endpoint_retired_v1',
       reason:
-        'This endpoint was a V9 relic that required LLM API keys on the node and wrote ' +
+        'This retired endpoint required LLM API keys on the node and wrote ' +
         'ad-hoc `dkg:ImportedMemory` triples into a throwaway sidecar graph. It was retired ' +
         'as part of the openclaw-dkg-primary-memory workstream.',
       // Codex B64: callers following this pointer for the first write to

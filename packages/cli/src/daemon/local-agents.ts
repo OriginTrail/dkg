@@ -53,6 +53,11 @@ import {
   loadBridgeAuthToken,
   localOpenclawConfigPath,
 } from './openclaw.js';
+import {
+  type HermesChannelHealthReport,
+  probeHermesChannelHealth,
+  transportPatchFromHermesTarget,
+} from './hermes.js';
 
 const daemonRequire = createRequire(import.meta.url);
 
@@ -100,12 +105,19 @@ export const LOCAL_AGENT_INTEGRATION_DEFINITIONS: Record<string, LocalAgentInteg
     id: 'hermes',
     name: 'Hermes',
     description: 'Connect a local Hermes agent through the DKG node.',
+    transportKind: 'hermes-channel',
     capabilities: {
+      localChat: true,
+      chatAttachments: true,
       connectFromUi: true,
       installNode: true,
       dkgPrimaryMemory: true,
       wmImportPipeline: true,
       nodeServedSkill: true,
+    },
+    manifest: {
+      packageName: '@origintrail-official/dkg-adapter-hermes',
+      setupEntry: './setup-entry.mjs',
     },
   },
 };
@@ -389,6 +401,14 @@ export function hasStoredLocalAgentTransportConfig(
   );
 }
 
+export type LocalAgentUiAttachDeps = OpenClawUiAttachDeps & {
+  probeHermesHealth?: (
+    config: DkgConfig,
+    bridgeAuthToken: string | undefined,
+    opts?: { timeoutMs?: number },
+  ) => Promise<HermesChannelHealthReport>;
+};
+
 /**
  * CONTRACT (issue #198): This handler MUST leave ~/.openclaw/openclaw.json in a state
  * where the OpenClaw gateway, on next restart, will load the adapter from the
@@ -399,7 +419,7 @@ export async function connectLocalAgentIntegrationFromUi(
   config: DkgConfig,
   body: Record<string, unknown>,
   bridgeAuthToken: string | undefined,
-  deps: OpenClawUiAttachDeps = {},
+  deps: LocalAgentUiAttachDeps = {},
 ): Promise<{ integration: LocalAgentIntegrationRecord; notice?: string }> {
   const requestedId = typeof body.id === 'string' ? normalizeIntegrationId(body.id) : '';
   const existingBeforeConnect = requestedId ? getLocalAgentIntegration(config, requestedId) : null;
@@ -412,6 +432,37 @@ export async function connectLocalAgentIntegrationFromUi(
       lastError: null,
     },
   });
+  if (requested.id === 'hermes') {
+    const probeHermesHealth = deps.probeHermesHealth ?? probeHermesChannelHealth;
+    const health = await probeHermesHealth(config, bridgeAuthToken, { timeoutMs: 3_000 });
+    if (health.ok) {
+      const integration = updateLocalAgentIntegration(config, requested.id, {
+        transport: transportPatchFromHermesTarget(config, health.target),
+        runtime: {
+          status: 'ready',
+          ready: true,
+          lastError: null,
+        },
+      });
+      return {
+        integration,
+        notice: `${integration.name} is connected and chat-ready.`,
+      };
+    }
+
+    const integration = updateLocalAgentIntegration(config, requested.id, {
+      runtime: {
+        status: 'degraded',
+        ready: false,
+        lastError: health.error ?? 'Hermes bridge offline',
+      },
+    });
+    return {
+      integration,
+      notice: 'Hermes was registered, but its local chat bridge is not responding yet. Run `dkg hermes setup` or refresh after Hermes starts.',
+    };
+  }
+
   if (requested.id !== 'openclaw') {
     return {
       integration: requested,
@@ -657,6 +708,31 @@ export async function refreshLocalAgentIntegrationFromUi(
     throw new Error(`Unknown integration: ${id}`);
   }
   if (normalizedId !== 'openclaw') {
+    if (normalizedId === 'hermes') {
+      const health = await probeHermesChannelHealth(config, bridgeAuthToken, {
+        timeoutMs: 3_000,
+      });
+
+      if (health.ok) {
+        return updateLocalAgentIntegration(config, normalizedId, {
+          transport: transportPatchFromHermesTarget(config, health.target),
+          runtime: {
+            status: 'ready',
+            ready: true,
+            lastError: null,
+          },
+        });
+      }
+
+      return updateLocalAgentIntegration(config, normalizedId, {
+        runtime: {
+          status: 'degraded',
+          ready: false,
+          lastError: health.error ?? 'Hermes bridge offline',
+        },
+      });
+    }
+
     return existing;
   }
 

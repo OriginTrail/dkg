@@ -127,6 +127,29 @@ describe('PanelRight logic helpers', () => {
     })).toBe(false);
   });
 
+  it('does not preserve an old generated Hermes default session after profile changes', () => {
+    const integrations = [
+      integration(),
+      integration({
+        id: 'hermes',
+        name: 'Hermes',
+        persistentChat: true,
+        defaultSessionId: 'hermes:dkg-ui:profile-new-profile',
+      }),
+    ];
+
+    expect(shouldPreserveSessionOnReconnect({
+      integrationId: 'hermes',
+      selectedSessionId: 'hermes:dkg-ui:profile-old-profile',
+      integrations,
+    })).toBe(false);
+    expect(shouldPreserveSessionForIntegrationSelection({
+      integrationId: 'hermes',
+      selectedSessionId: 'hermes:manual-thread',
+      integrations,
+    })).toBe(true);
+  });
+
   it('resolves local agent selection state from saved sessions and message history', () => {
     const integrations = [integration(), integration({ id: 'hermes', name: 'Hermes', persistentChat: false })];
     const state = resolveLocalAgentSelectionState({
@@ -218,7 +241,7 @@ describe('ConnectedAgentsTab rendering', () => {
     const markup = renderConnectedAgentsTab({
       integrations: [
         integration({ persistentChat: false, configured: false, detected: false, bridgeOnline: false, chatReady: false, status: 'available', statusLabel: 'Ready to connect' }),
-        integration({ id: 'hermes', name: 'Hermes', persistentChat: false, configured: false, detected: false, bridgeOnline: false, chatReady: false, status: 'coming_soon', statusLabel: 'Coming next', connectSupported: false }),
+        integration({ id: 'hermes', name: 'Hermes', persistentChat: false, configured: false, detected: false, bridgeOnline: false, chatReady: false, status: 'available', statusLabel: 'Ready to connect', connectSupported: true }),
       ],
       selectedIntegrationId: '__add_agent__',
       selectedIntegration: null,
@@ -231,7 +254,8 @@ describe('ConnectedAgentsTab rendering', () => {
     expect(markup).toContain('Connecting...');
     expect(markup).toContain('Docs');
     expect(markup).toContain('Release Notes');
-    expect(markup).toContain('Hermes will plug into this same local-agent contract next');
+    expect(markup).toContain('Connect Hermes');
+    expect(markup).toContain('local Hermes profile');
     expect(markup).toContain('connected');
     expect(markup).toContain('error');
   });
@@ -266,6 +290,25 @@ describe('ConnectedAgentsTab rendering', () => {
     expect(markup).toContain('Upload file');
     expect(markup).toContain('Message OpenClaw');
     expect(markup).toContain('Send');
+  });
+
+  it('renders degraded connected-agent status dots', () => {
+    const degraded = integration({
+      id: 'hermes',
+      name: 'Hermes',
+      bridgeOnline: false,
+      chatReady: false,
+      status: 'degraded',
+      statusLabel: 'Degraded',
+      bridgeStatusLabel: 'Degraded',
+    });
+    const markup = renderConnectedAgentsTab({
+      integrations: [degraded],
+      selectedIntegrationId: 'hermes',
+      selectedIntegration: degraded,
+      selectedSessionId: 'hermes:dkg-ui',
+    });
+    expect(markup).toContain('v10-agents-stat-dot degraded');
   });
 
   it('renders disconnected history warnings and empty-state messaging', () => {

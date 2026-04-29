@@ -2043,10 +2043,7 @@ describe('OpenClaw UI Connect/Disconnect/Refresh fresh-HOME integration (issue #
     }
   });
 
-  it('scenario 3c: refresh on a non-openclaw known integration (hermes) returns the record without probing bridge health (Codex #3)', async () => {
-    // Regression test for https://github.com/OriginTrail/dkg-v9/pull/228#discussion_r3117710821
-    // The refresh route accepts any known integration id, not just openclaw. For non-openclaw
-    // ids the helper short-circuits and returns the existing record without a health probe.
+  it('scenario 3c: refresh on Hermes probes bridge health and preserves the known integration record', async () => {
     const config = makeConfig();
 
     const origFetch = globalThis.fetch;
@@ -2060,7 +2057,9 @@ describe('OpenClaw UI Connect/Disconnect/Refresh fresh-HOME integration (issue #
       const integration = await refreshLocalAgentIntegrationFromUi(config, 'hermes', 'bridge-token');
       expect(integration).toBeTruthy();
       expect(integration.id).toBe('hermes');
-      expect(fetchCalls).toBe(0); // no bridge probe for non-openclaw
+      expect(fetchCalls).toBe(1);
+      expect(integration.runtime.status).toBe('degraded');
+      expect(integration.runtime.ready).toBe(false);
     } finally {
       globalThis.fetch = origFetch;
     }

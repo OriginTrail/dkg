@@ -23,8 +23,8 @@ def register_cli(cli_group):
     @dkg.command("status")
     def dkg_status():
         """Show DKG node connection, context graphs, and assertion stats."""
-        from plugins.memory.dkg.client import DKGClient
-        from plugins.memory.dkg import _load_config, _load_cache
+        from .client import DKGClient
+        from . import _load_config, _load_cache
 
         config = _load_config()
         agent_name = config.get("agent_name", "")
@@ -57,8 +57,8 @@ def register_cli(cli_group):
     @click.argument("sparql")
     def dkg_query(sparql):
         """Run a SPARQL query against the DKG node."""
-        from plugins.memory.dkg.client import DKGClient
-        from plugins.memory.dkg import _load_config
+        from .client import DKGClient
+        from . import _load_config
 
         config = _load_config()
         client = DKGClient(base_url=config.get("daemon_url", "http://127.0.0.1:9200"))
@@ -80,8 +80,8 @@ def register_cli(cli_group):
         once per affected target.  This preserves semantics — removes
         actually delete facts, and replaces overwrite them.
         """
-        from plugins.memory.dkg.client import DKGClient
-        from plugins.memory.dkg import _load_config, _load_cache, _save_cache
+        from .client import DKGClient
+        from . import _load_config, _load_cache, _save_cache
 
         config = _load_config()
         agent_name = config.get("agent_name", "")

@@ -72,6 +72,16 @@ describe('PanelRight chat history rehydration on mount (issue #255)', () => {
     };
   }
 
+  function readyHermesIntegration(overrides: Record<string, unknown> = {}) {
+    return readyOpenclawIntegration({
+      id: 'hermes',
+      name: 'Hermes',
+      defaultSessionId: 'hermes:dkg-ui:profile-dkg-smoke:home-abcd',
+      target: 'bridge',
+      ...overrides,
+    });
+  }
+
   async function flushAll(times = 8): Promise<void> {
     for (let i = 0; i < times; i += 1) {
       await act(async () => { await Promise.resolve(); });
@@ -110,6 +120,10 @@ describe('PanelRight chat history rehydration on mount (issue #255)', () => {
         && args[2]?.sessionId === 'openclaw:dkg-ui',
     );
     expect(earlyCall, 'chat history must be fetched on mount even before integrations resolve').toBeTruthy();
+    const hermesEarlyCall = fetchLocalAgentHistoryMock.mock.calls.find(
+      (args) => args[0] === 'hermes',
+    );
+    expect(hermesEarlyCall, 'Hermes history waits for profile-aware integration metadata').toBeFalsy();
 
     await act(async () => {
       resolveIntegrations?.({ integrations: [readyOpenclawIntegration()] });
@@ -143,6 +157,31 @@ describe('PanelRight chat history rehydration on mount (issue #255)', () => {
 
     expect(container.textContent).toContain('hello from before refresh');
     expect(container.textContent).toContain('and here is the prior reply');
+
+    root.unmount();
+    container.remove();
+  });
+
+  it('hydrates Hermes history from its profile-aware default session after integrations resolve', async () => {
+    fetchLocalAgentIntegrationsMock.mockResolvedValue({ integrations: [readyHermesIntegration()] });
+    fetchLocalAgentHistoryMock.mockResolvedValue([]);
+
+    const { PanelRight } = await import('../src/ui/components/Shell/PanelRight.js');
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(React.createElement(PanelRight));
+    });
+    await flushAll();
+
+    const hermesProfileCall = fetchLocalAgentHistoryMock.mock.calls.find(
+      (args) => args[0] === 'hermes'
+        && args[2]?.sessionId === 'hermes:dkg-ui:profile-dkg-smoke:home-abcd',
+    );
+    expect(hermesProfileCall, 'Hermes history should use the profile-aware default session').toBeTruthy();
 
     root.unmount();
     container.remove();

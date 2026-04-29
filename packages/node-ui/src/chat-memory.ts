@@ -592,6 +592,32 @@ export class ChatMemoryManager {
     }
   }
 
+  async hasChatTurn(sessionId: string, turnId: string): Promise<boolean> {
+    return (await this.getChatTurnPersistenceState(sessionId, turnId)) !== null;
+  }
+
+  async getChatTurnPersistenceState(sessionId: string, turnId: string): Promise<'stored' | 'failed' | 'pending' | null> {
+    await this.ensureInitialized();
+    const trimmedTurnId = turnId.trim();
+    if (!trimmedTurnId) return null;
+    const sessionUri = `${CHAT_NS}session:${sessionId}`;
+    const result = await this.tools.query(
+      `SELECT ?persistenceState WHERE {
+        ?turn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
+        ?turn <${SCHEMA}isPartOf> <${sessionUri}> .
+        ?turn <${DKG_ONT}turnId> ${JSON.stringify(trimmedTurnId)} .
+        ?turn <${DKG_ONT}persistenceState> ?persistenceState .
+      }`,
+      this.wmReadOpts(),
+    );
+    const states = (result.bindings ?? [])
+      .map((binding: Record<string, string>) => stripRdfLiteral(binding.persistenceState ?? '').trim());
+    if (states.includes('stored')) return 'stored';
+    if (states.includes('failed')) return 'failed';
+    if (states.includes('pending')) return 'pending';
+    return null;
+  }
+
   private async extractAndWriteMentions(
     userMsgUri: string,
     userMessage: string,
@@ -1320,8 +1346,8 @@ export class ChatMemoryManager {
 
   // importMemories / parseMemoriesWithLlm / parseMemoriesHeuristic /
   // extractKnowledgeFromImport are retired as part of the openclaw-dkg-primary-memory
-  // work. /api/memory/import is a V9 relic that required LLM API keys on the
-  // node and wrote dkg:ImportedMemory / dkg:MemoryImport ad-hoc types into a
+  // work. /api/memory/import required LLM API keys on the node and wrote
+  // dkg:ImportedMemory / dkg:MemoryImport ad-hoc types into a
   // throwaway sidecar graph. v1 replaces it with the assertion-route write
   // path inside the adapter (DkgMemoryPlugin.dkg_memory_import), which
   // targets the 'memory' WM assertion of a resolved project context graph.

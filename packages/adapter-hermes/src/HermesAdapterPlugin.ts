@@ -6,9 +6,10 @@
  * - No game plugin
  * - No write-capture (daemon's importMemories handles entity extraction)
  *
- * The Hermes Python plugin (plugins/memory/dkg/) talks to this adapter
- * via HTTP at localhost:9200/api/hermes/*. All heavy lifting (triple store,
- * P2P networking, publishing) is delegated to the daemon's DKGAgent.
+ * The Hermes Python plugin installed into $HERMES_HOME/plugins/dkg persists turns
+ * through the daemon's /api/hermes-channel/persist-turn route. Node UI chat
+ * health/send/stream dispatch is owned by the DKG daemon integration, not by this
+ * package-level plugin.
  */
 
 import type { DaemonPluginApi, HermesAdapterConfig } from './types.js';
@@ -36,9 +37,9 @@ export class HermesAdapterPlugin {
     }
     this.initialized = true;
 
-    // Register Hermes-specific HTTP routes
+    // Register Hermes provider persistence/status routes.
     registerHermesRoutes(api);
-    api.logger.info?.('[hermes] Hermes adapter routes registered (/api/hermes/*)');
+    api.logger.info?.('[hermes] Hermes adapter provider routes registered');
 
     // Register cleanup hook
     api.registerHook('session_end', async () => {

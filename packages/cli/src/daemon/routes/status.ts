@@ -554,20 +554,27 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
     const body = await readBody(req, SMALL_BODY_BYTES);
     let parsed: Record<string, unknown>;
     try { parsed = JSON.parse(body); } catch { return jsonResponse(res, 400, { error: 'Invalid JSON body' }); }
-    if (parsed.id !== undefined && parsed.id !== 'openclaw') {
-      return jsonResponse(res, 400, { error: `Unknown adapter id: ${String(parsed.id)}` });
+    const adapterId = typeof parsed.id === 'string' && parsed.id.trim()
+      ? normalizeIntegrationId(parsed.id)
+      : 'openclaw';
+    const definition = LOCAL_AGENT_INTEGRATION_DEFINITIONS[adapterId];
+    if (!definition || adapterId !== 'openclaw') {
+      return jsonResponse(res, 400, { error: `Unknown adapter id: ${String(parsed.id ?? adapterId)}` });
     }
     try {
       const integration = connectLocalAgentIntegration(config, {
         ...parsed,
-        id: parsed.id ?? 'openclaw',
+        id: adapterId,
+        transport: {
+          kind: definition.transportKind,
+          ...(isPlainRecord(parsed.transport) ? parsed.transport : {}),
+        },
+        manifest: {
+          ...(definition.manifest ?? {}),
+          ...(isPlainRecord(parsed.manifest) ? parsed.manifest : {}),
+        },
         capabilities: {
-          localChat: true,
-          connectFromUi: true,
-          installNode: true,
-          dkgPrimaryMemory: true,
-          wmImportPipeline: true,
-          nodeServedSkill: true,
+          ...definition.capabilities,
           ...(isPlainRecord(parsed.capabilities) ? parsed.capabilities : {}),
         },
       });

@@ -161,6 +161,13 @@ describe('httpAuthGuard', () => {
     expect(body.error).toContain('Unauthorized');
   });
 
+  it('rejects Hermes provider persistence without token', async () => {
+    const res = await fetch(`${baseUrl}/api/hermes-channel/persist-turn`, { method: 'POST' });
+    expect(res.status).toBe(401);
+    const body = await res.json();
+    expect(body.error).toContain('Unauthorized');
+  });
+
   it('rejects protected endpoint with invalid token', async () => {
     const res = await fetch(`${baseUrl}/api/agents`, {
       headers: { Authorization: 'Bearer wrong-token' },

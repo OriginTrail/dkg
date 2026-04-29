@@ -1745,6 +1745,114 @@ openclawCmd
 
 // ─── dkg ccl ────────────────────────────────────────────────────────
 
+type HermesAdapterModule = Record<string, unknown>;
+type HermesAdapterAction = (opts: any) => Promise<void>;
+
+async function importHermesAdapterModule(): Promise<HermesAdapterModule> {
+  const dynamicImport = new Function('specifier', 'return import(specifier)') as (
+    specifier: string,
+  ) => Promise<HermesAdapterModule>;
+  return dynamicImport('@origintrail-official/dkg-adapter-hermes');
+}
+
+function resolveHermesAdapterAction(
+  adapter: HermesAdapterModule,
+  commandName: string,
+  candidates: readonly string[],
+): HermesAdapterAction {
+  for (const candidate of candidates) {
+    const value = adapter[candidate];
+    if (typeof value === 'function') return value as HermesAdapterAction;
+  }
+  throw new Error(`@origintrail-official/dkg-adapter-hermes does not export a ${commandName} helper yet`);
+}
+
+async function loadHermesAdapterAction(
+  commandName: string,
+  candidates: readonly string[],
+): Promise<HermesAdapterAction> {
+  let adapter: HermesAdapterModule;
+  try {
+    adapter = await importHermesAdapterModule();
+  } catch (err: any) {
+    console.error(`\n[dkg hermes ${commandName}] Hermes adapter is not available.`);
+    console.error(`  Reason: ${err?.message ?? err}`);
+    console.error('  In a monorepo dev checkout: run `pnpm install` and build the Hermes adapter workspace.');
+    console.error('  With a global install: reinstall with Hermes adapter support included.\n');
+    process.exit(1);
+  }
+
+  try {
+    return resolveHermesAdapterAction(adapter, commandName, candidates);
+  } catch (err: any) {
+    console.error(`\n[dkg hermes ${commandName}] ${err?.message ?? err}\n`);
+    process.exit(1);
+  }
+}
+
+const hermesCmd = program
+  .command('hermes')
+  .description('Hermes adapter management');
+
+hermesCmd
+  .command('setup')
+  .description('Set up DKG node + Hermes adapter (non-interactive, idempotent)')
+  .option('--profile <name>', 'Hermes profile name')
+  .option('--daemon-url <url>', 'DKG daemon URL')
+  .option('--bridge-url <url>', 'Hermes loopback bridge URL for local same-host chat')
+  .option('--gateway-url <url>', 'Hermes gateway URL for WSL2 or remote chat')
+  .option('--bridge-health-url <url>', 'Hermes bridge health URL override')
+  .option('--port <port>', 'Override daemon API port (default: 9200)')
+  .option('--memory-mode <mode>', 'Memory mode: primary or tools-only')
+  .option('--dry-run', 'Preview changes without writing anything')
+  .option('--no-verify', 'Skip post-setup verification')
+  .option('--no-start', 'Skip daemon start (configure only)')
+  .action(async (opts, command) => {
+    const runSetup = await loadHermesAdapterAction('setup', ['runSetup', 'setup']);
+    const { hermesSetupAction } = await import('./hermes-setup.js');
+    try {
+      await hermesSetupAction(opts, command, { runSetup });
+    } catch (err: any) {
+      console.error(`\n[hermes setup] ERROR: ${err?.message ?? err}\n`);
+      process.exit(1);
+    }
+  });
+
+for (const [commandName, candidates, description] of [
+  ['status', ['runStatus', 'status'], 'Show Hermes adapter status'],
+  ['verify', ['runVerify', 'verify'], 'Verify Hermes adapter configuration'],
+  ['doctor', ['runDoctor', 'doctor'], 'Diagnose Hermes adapter issues'],
+  ['disconnect', ['runDisconnect', 'disconnect'], 'Disconnect this node from a Hermes profile'],
+  ['reconnect', ['runReconnect', 'reconnect'], 'Reconnect this node to a Hermes profile'],
+  ['uninstall', ['runUninstall', 'uninstall'], 'Uninstall the Hermes adapter wiring'],
+] as const) {
+  const command = hermesCmd
+    .command(commandName)
+    .description(description)
+    .option('--profile <name>', 'Hermes profile name')
+    .option('--dry-run', 'Preview changes without writing anything');
+  if (commandName === 'reconnect') {
+    command
+      .option('--daemon-url <url>', 'DKG daemon URL')
+      .option('--bridge-url <url>', 'Hermes loopback bridge URL for local same-host chat')
+      .option('--gateway-url <url>', 'Hermes gateway URL for WSL2 or remote chat')
+      .option('--bridge-health-url <url>', 'Hermes bridge health URL override')
+      .option('--port <port>', 'Override daemon API port (default: 9200)')
+      .option('--memory-mode <mode>', 'Memory mode: primary or tools-only')
+      .option('--no-verify', 'Skip post-reconnect verification')
+      .option('--no-start', 'Skip daemon start (configure only)');
+  }
+  command.action(async (opts) => {
+    const action = await loadHermesAdapterAction(commandName, candidates);
+    try {
+      await action(opts);
+    } catch (err: any) {
+      console.error(`\n[hermes ${commandName}] ERROR: ${err?.message ?? err}\n`);
+      process.exit(1);
+    }
+  });
+}
+
 const cclCmd = program
   .command('ccl')
   .description('Manage paranet-scoped CCL policies');

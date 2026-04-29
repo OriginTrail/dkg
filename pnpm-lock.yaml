@@ -210,6 +210,9 @@ importers:
       '@origintrail-official/dkg-adapter-openclaw':
         specifier: workspace:*
         version: link:../adapter-openclaw
+      '@origintrail-official/dkg-adapter-hermes':
+        specifier: workspace:*
+        version: link:../adapter-hermes
       '@origintrail-official/dkg-agent':
         specifier: workspace:*
         version: link:../agent

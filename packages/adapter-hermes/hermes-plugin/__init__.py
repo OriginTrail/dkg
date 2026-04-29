@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import hashlib
 import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -40,9 +41,11 @@ def _load_config() -> dict:
     from hermes_constants import get_hermes_home
 
     config = {
-        "daemon_url": os.environ.get("DKG_DAEMON_URL", "http://127.0.0.1:9200"),
-        "context_graph": os.environ.get("DKG_CONTEXT_GRAPH", "hermes-memory"),
-        "agent_name": os.environ.get("DKG_AGENT_NAME", ""),
+        "daemon_url": "http://127.0.0.1:9200",
+        "context_graph": "hermes-memory",
+        "agent_name": "",
+        "publish_tool": "request-only",
+        "allow_direct_publish": False,
     }
 
     config_path = get_hermes_home() / "dkg.json"
@@ -51,8 +54,31 @@ def _load_config() -> dict:
             file_cfg = json.loads(config_path.read_text(encoding="utf-8"))
             config.update({k: v for k, v in file_cfg.items()
                            if v is not None and v != ""})
+            publish_guard = file_cfg.get("publish_guard")
+            if isinstance(publish_guard, dict):
+                exposure = publish_guard.get("defaultToolExposure") or publish_guard.get("default_tool_exposure")
+                if exposure is not None:
+                    config["publish_tool"] = exposure
+                if publish_guard.get("allowDirectPublish") is not None:
+                    config["allow_direct_publish"] = publish_guard.get("allowDirectPublish")
+                elif publish_guard.get("allow_direct_publish") is not None:
+                    config["allow_direct_publish"] = publish_guard.get("allow_direct_publish")
         except Exception:
             pass
+
+    for env_name, config_key in (
+        ("DKG_DAEMON_URL", "daemon_url"),
+        ("DKG_CONTEXT_GRAPH", "context_graph"),
+        ("DKG_AGENT_NAME", "agent_name"),
+        ("DKG_PUBLISH_TOOL", "publish_tool"),
+    ):
+        env_value = os.environ.get(env_name)
+        if env_value is not None and env_value != "":
+            config[config_key] = env_value
+
+    direct_publish_env = os.environ.get("DKG_ALLOW_DIRECT_PUBLISH")
+    if direct_publish_env is not None and direct_publish_env != "":
+        config["allow_direct_publish"] = direct_publish_env.lower() in ("1", "true", "yes")
 
     return config
 
@@ -83,6 +109,37 @@ def _save_cache(cache: dict, agent_name: str = "") -> None:
         tmp.replace(cp)
     except Exception as e:
         logger.warning(f"[dkg] Failed to save cache: {e}")
+
+
+def _stable_scope_hash(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8", errors="ignore")).hexdigest()[:12]
+
+
+def _session_segment(value: str) -> str:
+    cleaned = []
+    for char in value.strip():
+        cleaned.append(char.lower() if char.isalnum() or char in "._-" else "-")
+    segment = "-".join(part for part in "".join(cleaned).split("-") if part)
+    return segment or _stable_scope_hash(value)
+
+
+def _scoped_session_id(raw_session_id: str, config: Optional[dict] = None) -> str:
+    """Scope Hermes session IDs by profile/home before DKG persistence."""
+    session_id = str(raw_session_id or "default")
+    if session_id.startswith("hermes:dkg:") or session_id.startswith("hermes:dkg-ui:"):
+        return session_id
+
+    from hermes_constants import get_hermes_home
+
+    hermes_home = str(get_hermes_home())
+    profile_name = ""
+    if config:
+        profile_name = str(config.get("profile_name") or "").strip()
+    if not profile_name:
+        profile_name = Path(hermes_home).name or "default"
+
+    scope = f"profile-{_session_segment(profile_name)}:home-{_stable_scope_hash(hermes_home)}"
+    return f"hermes:dkg:{scope}:{session_id}"
 
 
 # ---------------------------------------------------------------------------
@@ -394,7 +451,7 @@ class DKGMemoryProvider(MemoryProvider):
 
     def initialize(self, session_id: str, **kwargs) -> None:
         self._config = _load_config()
-        self._session_id = session_id
+        self._session_id = _scoped_session_id(session_id, self._config)
         self._agent_name = (
             self._config.get("agent_name")
             or kwargs.get("agent_identity", "")
@@ -404,7 +461,7 @@ class DKGMemoryProvider(MemoryProvider):
         self._context_graph = self._config.get("context_graph", "hermes-memory")
 
         # Create HTTP client
-        from plugins.memory.dkg.client import DKGClient
+        from .client import DKGClient
         self._client = DKGClient(
             base_url=self._config.get("daemon_url", "http://127.0.0.1:9200")
         )
@@ -414,11 +471,6 @@ class DKGMemoryProvider(MemoryProvider):
             logger.warning("[dkg] Daemon unreachable — starting in offline mode")
             self._offline = True
             return
-
-        # Register adapter with daemon
-        result = self._client.register_adapter("hermes", "hermes-agent")
-        if result.get("success") is False:
-            logger.warning(f"[dkg] Adapter registration failed: {result.get('error')}")
 
         # Create or resolve assertion for this agent's Working Memory
         result = self._client.create_assertion(
@@ -444,8 +496,8 @@ class DKGMemoryProvider(MemoryProvider):
         if not facts:
             return (
                 "DKG memory is connected but empty. Use dkg_memory to store facts, "
-                "dkg_query to search, dkg_share to share with team, dkg_publish "
-                "to publish on-chain."
+                "dkg_query to search, and dkg_share to share with team. "
+                "Direct Verified Memory publish is guarded by the operator."
             )
 
         memory_facts = [f for f in facts if f.get("target") == "memory"]
@@ -478,7 +530,7 @@ class DKGMemoryProvider(MemoryProvider):
             "\n"
             "COLLABORATION WORKFLOW:\n"
             "  dkg_share — Share findings to Shared Working Memory (team-visible, free)\n"
-            "  dkg_publish — Publish to Verified Memory (chain-anchored, costs TRAC)\n"
+            "  Direct Verified Memory publish is guarded and not a default model tool\n"
             "  dkg_wallet_balances — Check TRAC balance BEFORE publishing\n"
             "\n"
             "NETWORK & DISCOVERY:\n"
@@ -501,11 +553,10 @@ class DKGMemoryProvider(MemoryProvider):
         return "\n\n".join(blocks)
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
-        return [
+        schemas = [
             DKG_MEMORY_SCHEMA,
             DKG_QUERY_SCHEMA,
             DKG_SHARE_SCHEMA,
-            DKG_PUBLISH_SCHEMA,
             DKG_STATUS_SCHEMA,
             DKG_WALLET_SCHEMA,
             DKG_FIND_AGENTS_SCHEMA,
@@ -515,6 +566,9 @@ class DKGMemoryProvider(MemoryProvider):
             DKG_SUBSCRIBE_SCHEMA,
             DKG_CREATE_CONTEXT_GRAPH_SCHEMA,
         ]
+        if self._direct_publish_allowed():
+            schemas.insert(3, DKG_PUBLISH_SCHEMA)
+        return schemas
 
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
         handlers = {
@@ -555,7 +609,7 @@ class DKGMemoryProvider(MemoryProvider):
                 result = self._client.query_assertion(self._assertion_id, self._context_graph, sparql)
             else:
                 result = self._client.query(sparql, self._context_graph)
-            bindings = result.get("results", {}).get("bindings", [])
+            bindings = _extract_query_bindings(result)
             if not bindings:
                 return ""
 
@@ -575,31 +629,32 @@ class DKGMemoryProvider(MemoryProvider):
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
         """Send turn to daemon for entity extraction + persistence."""
-        self._turn_count += 1
+        effective_session_id = _scoped_session_id(session_id or self._session_id, self._config)
+        turn_sequence = self._next_turn_sequence(effective_session_id)
+        turn_id = self._build_turn_id(effective_session_id, turn_sequence, user_content, assistant_content)
+        idempotency_key = f"hermes:{turn_id}"
         if self._offline or not self._client:
             # Queue for later sync
-            with self._lock:
-                self._cache.setdefault("queued_writes", []).append({
-                    "type": "turn",
-                    "session_id": self._session_id,
-                    "user": user_content[:2000],
-                    "assistant": assistant_content[:2000],
-                })
-                _save_cache(self._cache, self._agent_name)
+            self._queue_turn(effective_session_id, turn_id, idempotency_key, user_content, assistant_content)
             return
 
         # Fire-and-forget in background thread
         agent_name = self._agent_name
         def _sync():
             try:
-                self._client.store_turn(
-                    self._session_id,
+                result = self._client.store_turn(
+                    effective_session_id,
                     user_content[:2000],
                     assistant_content[:2000],
                     agent_name=agent_name,
+                    turn_id=turn_id,
+                    idempotency_key=idempotency_key,
                 )
+                if _client_result_failed(result):
+                    self._queue_turn(effective_session_id, turn_id, idempotency_key, user_content, assistant_content)
             except Exception as e:
                 logger.debug(f"[dkg] sync_turn failed: {e}")
+                self._queue_turn(effective_session_id, turn_id, idempotency_key, user_content, assistant_content)
 
         threading.Thread(target=_sync, daemon=True).start()
 
@@ -618,12 +673,6 @@ class DKGMemoryProvider(MemoryProvider):
 
     def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
         """Finalize session: flush state to DKG and update local cache."""
-        if self._client and not self._offline:
-            try:
-                self._client.end_session(self._session_id, self._turn_count)
-            except Exception as e:
-                logger.debug(f"[dkg] end_session failed: {e}")
-
         # Snapshot current facts to local cache for offline fallback
         facts = self._recall_facts()
         if facts:
@@ -667,7 +716,9 @@ class DKGMemoryProvider(MemoryProvider):
 
     def save_config(self, values: Dict[str, Any], hermes_home: str) -> None:
         config_path = Path(hermes_home) / "dkg.json"
-        config_path.write_text(json.dumps(values, indent=2), encoding="utf-8")
+        owned_values = dict(values)
+        owned_values.setdefault("managedBy", "@origintrail-official/dkg-adapter-hermes")
+        config_path.write_text(json.dumps(owned_values, indent=2) + "\n", encoding="utf-8")
 
     # -- Internal: memory operations -------------------------------------------
 
@@ -700,30 +751,17 @@ class DKGMemoryProvider(MemoryProvider):
             self._cache[target] = entries
             _save_cache(self._cache, self._agent_name)
 
-        # Write to DKG assertion if online
-        if self._client and not self._offline and self._assertion_id:
-            quads = []
-            for e in entries:
-                quads.append({
-                    "subject": f"urn:hermes:{self._agent_name}:{target}",
-                    "predicate": "urn:hermes:content",
-                    "object": f"[{e.get('target', target)}]\n{e['content']}",
-                })
-            try:
-                self._client.write_assertion(
-                    self._assertion_id,
-                    self._context_graph,
-                    quads,
-                )
-            except Exception as e:
-                logger.debug(f"[dkg] Assertion write failed: {e}")
-                self._cache.setdefault("queued_writes", []).append({
-                    "type": "memory",
-                    "action": action,
-                    "target": target,
-                    "content": content,
-                })
-                _save_cache(self._cache, self._agent_name)
+        write_queued = False
+        if not self._write_memory_target_to_assertion(target):
+            write_queued = True
+            self._cache.setdefault("queued_writes", []).append({
+                "type": "memory",
+                "action": action,
+                "target": target,
+                "content": content,
+                "old_text": old_text,
+            })
+            _save_cache(self._cache, self._agent_name)
 
         count = len(entries)
         return json.dumps({
@@ -732,6 +770,7 @@ class DKGMemoryProvider(MemoryProvider):
             "target": target,
             "entries": count,
             "store": "dkg" if not self._offline else "local_cache",
+            "queued": write_queued,
         })
 
     def _handle_query(self, args: Dict[str, Any]) -> str:
@@ -760,6 +799,11 @@ class DKGMemoryProvider(MemoryProvider):
         return json.dumps(result)
 
     def _handle_publish(self, args: Dict[str, Any]) -> str:
+        if not self._direct_publish_allowed():
+            return tool_error(
+                "Direct DKG publish is disabled by the adapter publish guard. "
+                "Use an operator-reviewed publish request or enable DKG_ALLOW_DIRECT_PUBLISH explicitly."
+            )
         if self._offline:
             return tool_error("DKG daemon is offline. Cannot publish to chain.")
         cg = args.get("context_graph", self._context_graph)
@@ -820,7 +864,7 @@ class DKGMemoryProvider(MemoryProvider):
     def _handle_wallet(self, args: Dict[str, Any]) -> str:
         if self._offline:
             return tool_error("DKG daemon is offline.")
-        return json.dumps(self._client._get("/api/wallet/balances"))
+        return json.dumps(self._client._get("/api/wallets/balances"))
 
     def _handle_find_agents(self, args: Dict[str, Any]) -> str:
         if self._offline:
@@ -950,13 +994,15 @@ class DKGMemoryProvider(MemoryProvider):
             return self._cache.get("memory", []) + self._cache.get("user", [])
 
         try:
-            sparql = "SELECT ?content WHERE { ?s <urn:hermes:content> ?content }"
-            result = self._client.query_assertion(self._assertion_id, self._context_graph, sparql)
-            bindings = result.get("results", {}).get("bindings", [])
-            if bindings:
+            result = self._client.query_assertion(self._assertion_id, self._context_graph)
+            quads = [
+                quad for quad in _extract_quads(result)
+                if _quad_predicate(quad) == "urn:hermes:content"
+            ]
+            if quads:
                 facts = []
-                for b in bindings:
-                    content = b.get("content", {}).get("value", "")
+                for quad in quads:
+                    content = _quad_object(quad)
                     if content.startswith("[user]"):
                         facts.append({"target": "user", "content": content[6:].strip()})
                     elif content.startswith("[memory]"):
@@ -971,7 +1017,7 @@ class DKGMemoryProvider(MemoryProvider):
 
     def _flush_queued_writes(self) -> None:
         """Flush any writes queued during offline period. Only removes items that succeeded."""
-        queued = self._cache.get("queued_writes", [])
+        queued = list(self._cache.get("queued_writes", []))
         if not queued or self._offline:
             return
 
@@ -980,23 +1026,108 @@ class DKGMemoryProvider(MemoryProvider):
         for item in queued:
             try:
                 if item.get("type") == "turn":
-                    self._client.store_turn(
+                    result = self._client.store_turn(
                         item["session_id"],
                         item.get("user", ""),
                         item.get("assistant", ""),
+                        agent_name=self._agent_name,
+                        turn_id=item.get("turn_id", ""),
+                        idempotency_key=item.get("idempotency_key", ""),
                     )
+                    if _client_result_failed(result):
+                        failed.append(item)
                 elif item.get("type") == "memory":
-                    self._handle_memory({
-                        "action": item["action"],
-                        "target": item["target"],
-                        "content": item["content"],
-                    })
+                    target = item.get("target", "memory")
+                    if not self._write_memory_target_to_assertion(target):
+                        failed.append(item)
             except Exception as e:
                 logger.debug(f"[dkg] Failed to flush queued write: {e}")
                 failed.append(item)
 
         with self._lock:
             self._cache["queued_writes"] = failed
+            _save_cache(self._cache, self._agent_name)
+
+    def _write_memory_target_to_assertion(self, target: str) -> bool:
+        if not (self._client and not self._offline and self._assertion_id):
+            return False
+
+        entries = list(self._cache.get(target, []))
+        quads = []
+        for e in entries:
+            quads.append({
+                "subject": f"urn:hermes:{self._agent_name}:{target}",
+                "predicate": "urn:hermes:content",
+                "object": f"[{e.get('target', target)}]\n{e['content']}",
+            })
+        try:
+            result = self._client.write_assertion(
+                self._assertion_id,
+                self._context_graph,
+                quads,
+            )
+            if _client_result_failed(result):
+                raise RuntimeError(result.get("error", "DKG assertion write failed"))
+            return True
+        except Exception as e:
+            logger.debug(f"[dkg] Assertion write failed: {e}")
+            return False
+
+    def _direct_publish_allowed(self) -> bool:
+        allow = self._config.get("allow_direct_publish")
+        return (
+            allow is True
+            or str(allow).lower() in ("1", "true", "yes")
+            or str(self._config.get("publish_tool", "")).lower() == "direct"
+        )
+
+    def _next_turn_sequence(self, session_id: str) -> int:
+        with self._lock:
+            raw_sequences = self._cache.setdefault("turn_sequences", {})
+            if not isinstance(raw_sequences, dict):
+                raw_sequences = {}
+                self._cache["turn_sequences"] = raw_sequences
+            try:
+                current = int(raw_sequences.get(session_id, 0))
+            except Exception:
+                current = 0
+            next_sequence = current + 1
+            raw_sequences[session_id] = next_sequence
+            self._turn_count = max(self._turn_count, next_sequence)
+            _save_cache(self._cache, self._agent_name)
+            return next_sequence
+
+    def _build_turn_id(self, session_id: str, turn_sequence: int, user_content: str, assistant_content: str) -> str:
+        digest = hashlib.sha256()
+        digest.update(session_id.encode("utf-8", errors="ignore"))
+        digest.update(b"\0")
+        digest.update(str(turn_sequence).encode("ascii"))
+        digest.update(b"\0")
+        digest.update(user_content[:2000].encode("utf-8", errors="ignore"))
+        digest.update(b"\0")
+        digest.update(assistant_content[:2000].encode("utf-8", errors="ignore"))
+        return f"{session_id}:{turn_sequence}:{digest.hexdigest()[:16]}"
+
+    def _queue_turn(
+        self,
+        session_id: str,
+        turn_id: str,
+        idempotency_key: str,
+        user_content: str,
+        assistant_content: str,
+    ) -> None:
+        queued = {
+            "type": "turn",
+            "session_id": session_id,
+            "turn_id": turn_id,
+            "idempotency_key": idempotency_key,
+            "user": user_content[:2000],
+            "assistant": assistant_content[:2000],
+        }
+        with self._lock:
+            existing = self._cache.setdefault("queued_writes", [])
+            if not any(item.get("type") == "turn" and item.get("idempotency_key") == idempotency_key for item in existing):
+                existing.append(queued)
             _save_cache(self._cache, self._agent_name)
 
 
@@ -1021,6 +1152,53 @@ def _short(uri: str) -> str:
     if "/" in uri:
         return uri.split("/")[-1]
     return uri
+
+
+def _client_result_failed(result: Any) -> bool:
+    if not isinstance(result, dict):
+        return False
+    return result.get("success") is False or result.get("ok") is False or bool(result.get("error"))
+
+
+def _extract_quads(result: Dict[str, Any]) -> List[Dict[str, Any]]:
+    query_result = result.get("result", {}) if isinstance(result.get("result"), dict) else {}
+    quads = result.get("quads", []) or query_result.get("quads", [])
+    return [quad for quad in quads if isinstance(quad, dict)]
+
+
+def _extract_query_bindings(result: Dict[str, Any]) -> List[Dict[str, Any]]:
+    if not isinstance(result, dict):
+        return []
+    if isinstance(result.get("result"), dict):
+        bindings = result["result"].get("bindings", [])
+    elif isinstance(result.get("results"), dict):
+        bindings = result["results"].get("bindings", [])
+    else:
+        bindings = result.get("bindings", [])
+    return [binding for binding in bindings if isinstance(binding, dict)]
+
+
+def _quad_subject(quad: Dict[str, Any]) -> str:
+    return _term_value(quad.get("subject") or quad.get("s"))
+
+
+def _quad_predicate(quad: Dict[str, Any]) -> str:
+    return _term_value(quad.get("predicate") or quad.get("p"))
+
+
+def _quad_object(quad: Dict[str, Any]) -> str:
+    return _term_value(quad.get("object") or quad.get("o"))
+
+
+def _term_value(term: Any) -> str:
+    if isinstance(term, dict):
+        value = term.get("value") or term.get("id") or term.get("term") or ""
+    else:
+        value = term
+    text = str(value or "")
+    if len(text) >= 2 and text[0] == '"' and text[-1] == '"':
+        text = text[1:-1]
+    return text.replace('\\"', '"').replace("\\n", "\n")
 
 
 # ---------------------------------------------------------------------------

@@ -72,6 +72,7 @@ interface LocalAgentSessionSummary {
 const OPENCLAW_DOCS_URL = 'https://docs.openclaw.ai/';
 const OPENCLAW_RELEASE_URL = 'https://github.com/openclaw/openclaw/releases';
 const ADD_AGENT_TAB_ID = '__add_agent__';
+const STATIC_DEFAULT_LOCAL_AGENT_HISTORY_INTEGRATIONS = ['openclaw'] as const;
 
 let localMessageId = 0;
 
@@ -269,8 +270,11 @@ export function getLocalAgentConversationStateKey(
 function resolveLocalAgentConversation(args: {
   integrationId: string;
   sessionId: string | null;
+  defaultSessionId?: string | null;
 }): { integrationId: string; sessionId: string | null; stateKey: string } {
-  const resolvedSessionId = args.sessionId ?? getDefaultLocalAgentSessionId(args.integrationId);
+  const resolvedSessionId = args.sessionId
+    ?? args.defaultSessionId
+    ?? getDefaultLocalAgentSessionId(args.integrationId);
   return {
     integrationId: args.integrationId,
     sessionId: resolvedSessionId,
@@ -295,8 +299,19 @@ export function shouldPreserveSessionForIntegrationSelection(args: {
   selectedSessionId: string | null;
   integrations: LocalAgentIntegration[];
 }): boolean {
-  return args.selectedSessionId != null
-    && integrationIdFromSessionId(args.selectedSessionId, args.integrations)?.id === args.integrationId;
+  if (args.selectedSessionId == null) return false;
+  const integration = args.integrations.find((item) => item.id === args.integrationId);
+  if (integrationIdFromSessionId(args.selectedSessionId, args.integrations)?.id !== args.integrationId) {
+    return false;
+  }
+  if (
+    integration?.defaultSessionId
+    && args.selectedSessionId !== integration.defaultSessionId
+    && isGeneratedDefaultLocalAgentSession(args.integrationId, args.selectedSessionId)
+  ) {
+    return false;
+  }
+  return true;
 }
 
 export function shouldPreserveSessionOnReconnect(args: {
@@ -305,6 +320,13 @@ export function shouldPreserveSessionOnReconnect(args: {
   integrations: LocalAgentIntegration[];
 }): boolean {
   return shouldPreserveSessionForIntegrationSelection(args);
+}
+
+function isGeneratedDefaultLocalAgentSession(integrationId: string, sessionId: string): boolean {
+  return sessionId === `${integrationId}:dkg-ui`
+    || sessionId.startsWith(`${integrationId}:dkg-ui:profile-`)
+    || sessionId.startsWith(`${integrationId}:dkg-ui:home-`)
+    || sessionId.startsWith(`${integrationId}:dkg-ui:transport-`);
 }
 
 function summarizeLocalAgentSessions(
@@ -340,10 +362,12 @@ function hasLocalAgentConversation(
   selectedSessionId: string | null,
   localMessagesByConversation: Record<string, LocalAgentMessage[]>,
   sessions: LocalAgentSessionSummary[],
+  defaultSessionId?: string | null,
 ): boolean {
   const conversation = resolveLocalAgentConversation({
     integrationId,
     sessionId: selectedSessionId,
+    defaultSessionId,
   });
   return (localMessagesByConversation[conversation.stateKey]?.length ?? 0) > 0
     || (conversation.sessionId
@@ -379,6 +403,7 @@ export function resolveLocalAgentSelectionState(args: {
     ? resolveLocalAgentConversation({
       integrationId: selectedIntegration.id,
       sessionId: args.selectedSessionId,
+      defaultSessionId: selectedIntegration.defaultSessionId,
     })
     : null;
   const selectedHasConversation = selectedIntegration
@@ -387,6 +412,7 @@ export function resolveLocalAgentSelectionState(args: {
       args.selectedSessionId,
       args.localMessagesByConversation,
       args.sessions,
+      selectedIntegration.defaultSessionId,
     )
     : false;
   const selectedIntegrationHasAnyConversation = selectedIntegration
@@ -490,14 +516,16 @@ export function shouldPreserveSelectedLocalAgentTab(args: {
   localMessagesByConversation: Record<string, LocalAgentMessage[]>;
   sessionSummaries: LocalAgentSessionSummary[];
 }): boolean {
+  const selectedItem = args.selectedItem;
   return args.selectedIntegrationId === ADD_AGENT_TAB_ID
-    || (Boolean(args.selectedItem)
-      && (args.selectedItem.persistentChat
+    || (selectedItem != null
+      && (selectedItem.persistentChat
         || hasLocalAgentConversation(
           args.selectedIntegrationId,
           args.selectedSessionId,
           args.localMessagesByConversation,
           args.sessionSummaries,
+          selectedItem.defaultSessionId,
         )
         || hasAnyLocalAgentConversation(
           args.selectedIntegrationId,
@@ -509,6 +537,7 @@ export function shouldPreserveSelectedLocalAgentTab(args: {
 function bridgeStatusDotClass(integration: LocalAgentIntegration): string {
   if (integration.bridgeOnline) return 'connected';
   if (integration.status === 'connecting') return 'known';
+  if (integration.status === 'degraded') return 'degraded';
   return 'offline';
 }
 
@@ -528,6 +557,9 @@ function localAgentToolbarLabel(
   }
   if (integration.status === 'connecting') {
     return `${integration.name} is connecting…`;
+  }
+  if (integration.status === 'degraded') {
+    return `${integration.name} degraded`;
   }
   return `${integration.name} is unavailable`;
 }
@@ -651,6 +683,7 @@ export function ConnectedAgentsTab(props: {
                 selectedSessionId,
                 integrations,
               }),
+              sessionId: integration.defaultSessionId,
             })}
             role="tab"
             aria-selected={selected?.id === integration.id && !showAddFlow}
@@ -717,9 +750,22 @@ export function ConnectedAgentsTab(props: {
                   </>
                 )}
                 {integration.id === 'hermes' && (
-                  <p className="v10-local-agent-copy">
-                    Hermes will plug into this same local-agent contract next, using the same side-panel chat surface once its runtime bridge is ready.
-                  </p>
+                  <>
+                    <p className="v10-local-agent-copy">
+                      Connect a local Hermes profile through the node, then this tab becomes the persistent chat surface for that profile.
+                    </p>
+                    {integration.connectSupported && (
+                      <div className="v10-local-agent-actions">
+                        <button
+                          className="v10-agent-send-btn secondary"
+                          onClick={() => onConnectIntegration(integration.id)}
+                          disabled={connectBusyId === integration.id}
+                        >
+                          {connectBusyId === integration.id ? 'Connecting...' : 'Connect Hermes'}
+                        </button>
+                      </div>
+                    )}
+                  </>
                 )}
               </div>
             ))}
@@ -763,6 +809,8 @@ export function ConnectedAgentsTab(props: {
                   ? `${selected.name} is not currently attached to this node. Session history remains available here; reconnect from the + tab when you want live chat again.`
                   : selected.status === 'connecting'
                   ? `${selected.name} is still finishing setup. This chat tab stays in place and will go live automatically when the connection is ready.`
+                  : selected.status === 'degraded'
+                  ? selected.detail
                   : showingStoredSessions
                   ? `${selected.name} has saved sessions on this node. Open one from Sessions or reconnect from the + tab to resume live chat here.`
                   : `${selected.name} is temporarily unavailable. Refresh after it recovers to resume chatting here.`}
@@ -1330,12 +1378,13 @@ export function PanelRight() {
         sessionSummaries,
       });
       if (!preserveSelected) {
-        setSelectedIntegration(connected[0]?.id ?? ADD_AGENT_TAB_ID);
+        const next = connected[0];
+        setSelectedIntegration(next?.id ?? ADD_AGENT_TAB_ID, { sessionId: next?.defaultSessionId ?? null });
       }
       const preferred = connected[0];
       if (preferred && !autoFocusedLocalAgentRef.current && selectedIntegrationId !== ADD_AGENT_TAB_ID) {
         autoFocusedLocalAgentRef.current = true;
-        setSelectedIntegration(preferred.id);
+        setSelectedIntegration(preferred.id, { sessionId: preferred.defaultSessionId });
         setMode('agents');
       } else if (!preferred && !preserveSelected) {
         autoFocusedLocalAgentRef.current = false;
@@ -1347,8 +1396,12 @@ export function PanelRight() {
     }
   }, [setSelectedIntegration]);
 
-  const loadLocalHistory = useCallback(async (integrationId: string, sessionId: string | null = null) => {
-    const conversation = resolveLocalAgentConversation({ integrationId, sessionId });
+  const loadLocalHistory = useCallback(async (
+    integrationId: string,
+    sessionId: string | null = null,
+    defaultSessionId: string | null = null,
+  ) => {
+    const conversation = resolveLocalAgentConversation({ integrationId, sessionId, defaultSessionId });
     setLocalHistoryLoadedByConversation((prev) => ({
       ...prev,
       [conversation.stateKey]: false,
@@ -1376,10 +1429,12 @@ export function PanelRight() {
     refreshLocalIntegrations();
   }, [loadSessions, refreshPeers, refreshLocalIntegrations]);
 
-  // Mount-time hydrate from the stable openclaw session so chat history
-  // paints before the bridge probe completes (issue #255).
+  // Mount-time hydrate stable local-agent sessions so chat history paints
+  // before bridge probes complete (issue #255).
   useEffect(() => {
-    void loadLocalHistory('openclaw', getDefaultLocalAgentSessionId('openclaw'));
+    for (const integrationId of STATIC_DEFAULT_LOCAL_AGENT_HISTORY_INTEGRATIONS) {
+      void loadLocalHistory(integrationId, getDefaultLocalAgentSessionId(integrationId));
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -1420,7 +1475,11 @@ export function PanelRight() {
     }
     let cancelled = false;
     (async () => {
-      await loadLocalHistory(selectedIntegration.id, selectedConversation?.sessionId ?? null);
+      await loadLocalHistory(
+        selectedIntegration.id,
+        selectedConversation?.sessionId ?? null,
+        selectedIntegration.defaultSessionId ?? null,
+      );
       if (cancelled) return;
     })();
     return () => {
@@ -1431,6 +1490,7 @@ export function PanelRight() {
     selectedConversation?.sessionId,
     selectedConversationKey,
     selectedHasConversation,
+    selectedIntegration?.defaultSessionId,
     selectedIntegration?.chatSupported,
     selectedIntegration?.id,
     selectedIntegration?.persistentChat,
@@ -1563,12 +1623,16 @@ export function PanelRight() {
       const result = await connectLocalAgentIntegration(integrationId);
       setIntegrations((prev) => upsertLocalAgentIntegrationState(prev, result.integration));
       await refreshLocalIntegrations();
+      const nextIntegrations = upsertLocalAgentIntegrationState(integrations, result.integration);
       const preserveSession = shouldPreserveSessionOnReconnect({
         integrationId,
         selectedSessionId,
-        integrations,
+        integrations: nextIntegrations,
       });
-      setSelectedIntegration(integrationId, { preserveSession });
+      setSelectedIntegration(integrationId, {
+        preserveSession,
+        sessionId: result.integration.defaultSessionId,
+      });
       autoFocusedLocalAgentRef.current = true;
       setConnectNotice(
         result.notice
@@ -1609,6 +1673,7 @@ export function PanelRight() {
     const conversation = resolveLocalAgentConversation({
       integrationId,
       sessionId: selectedIntegrationId === integrationId ? selectedSessionIdRef.current : null,
+      defaultSessionId: integrations.find((item) => item.id === integrationId)?.defaultSessionId,
     });
     const [refreshOutcome, historyOutcome] = await Promise.allSettled([
       refreshLocalAgentIntegration(integrationId),
@@ -1638,7 +1703,7 @@ export function PanelRight() {
     } finally {
       setRefreshBusyId(null);
     }
-  }, [refreshBusyId, selectedIntegrationId, updateLocalMessages]);
+  }, [integrations, refreshBusyId, selectedIntegrationId, updateLocalMessages]);
 
   const openSession = useCallback((session: LocalAgentSessionSummary) => {
     setSelectedIntegration(session.integrationId, { sessionId: session.sessionId });
