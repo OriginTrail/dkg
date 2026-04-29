@@ -1485,12 +1485,16 @@ export class DkgNodePlugin {
         // the same tick) will await the same peer-ID promise instead
         // of firing a duplicate /api/status call. Codex Bug B9.
         await this.ensureNodePeerId();
-        // T31 — Read the agent eth address from the keystore. Same
-        // debouncing pattern; runs in parallel with the peer-ID
-        // probe but neither blocks the other (different sources).
-        // The keystore read is sync filesystem I/O — fast enough to
-        // sit in this register-time bootstrap without warranting a
-        // separate timeout/retry harness.
+        // T31/T63 — Resolve the agent eth address. Combines a sync
+        // keystore read for the agent auth token + an async
+        // `/api/agent/identity` HTTP probe for the canonical eth
+        // (daemon stores `defaultAgentAddress` in EIP-55 form via
+        // `verifyWallet.address`; adapter trusts the response
+        // verbatim). Same debouncing pattern as `ensureNodePeerId`;
+        // runs sequentially after it but neither blocks the other
+        // on retry. Probe completion is awaited so the resolver
+        // cache is warm by the time the first slot-backed search /
+        // dkg_query / before_prompt_build hook fires.
         await this.ensureNodeAgentAddress();
         try {
           const result = await this.client.listContextGraphs();

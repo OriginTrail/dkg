@@ -4130,7 +4130,7 @@ describe('DkgNodePlugin', () => {
     });
 
     it('multi-agent keystore without DKG_AGENT_ADDRESS fails loud (refuses to guess)', async () => {
-      writeKeystore([ETH_PRIMARY, ETH_SECONDARY]);
+      writeKeystore([ETH_PRIMARY_LC, ETH_SECONDARY_LC]);
       const api = makeMockApi();
       const plugin = new DkgNodePlugin({
         daemonUrl: 'http://localhost:9200',
@@ -4259,7 +4259,7 @@ describe('DkgNodePlugin', () => {
       // would silently scope WM queries to the wrong agent. Adapter
       // must skip the read, leave nodeAgentAddress undefined, and
       // surface an operator-actionable warn.
-      writeKeystore([ETH_PRIMARY]);
+      writeKeystore([ETH_PRIMARY_LC]);
       const api = makeMockApi();
       const plugin = new DkgNodePlugin({
         daemonUrl: 'http://daemon.example.com:9200',
@@ -4282,7 +4282,7 @@ describe('DkgNodePlugin', () => {
       // localhost gate. Pre-fix: truthy-string check passed → gate
       // skipped → keystore read with no env override → scoped WM
       // to the gateway's local identity for a remote-daemon setup.
-      writeKeystore([ETH_PRIMARY]);
+      writeKeystore([ETH_PRIMARY_LC]);
       process.env.DKG_AGENT_ADDRESS = 'foo';
       const api = makeMockApi();
       const plugin = new DkgNodePlugin({
