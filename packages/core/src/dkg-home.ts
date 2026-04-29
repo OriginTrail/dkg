@@ -61,7 +61,16 @@ export function dkgAuthTokenPath(dkgHome?: string): string {
   return join(dkgHome ?? dkgHomeDir(), 'auth.token');
 }
 
-/** Return true when `dir` is the DKG monorepo root. */
+/**
+ * Return true when `dir` is the DKG monorepo root.
+ *
+ * Combines structural markers (`pnpm-workspace.yaml`, `packages/`,
+ * `project.json`) with a DKG-specific sub-marker:
+ * `packages/cli/package.json` whose `name` is `@origintrail-official/dkg`.
+ * The structural markers can match an unrelated pnpm/Nx workspace; the
+ * canonical package name is reserved for us on npm and cannot be spoofed
+ * without colliding with our published package.
+ */
 export function isDkgMonorepoRoot(dir: string): boolean {
   try {
     if (!existsSync(join(dir, 'pnpm-workspace.yaml'))) return false;
