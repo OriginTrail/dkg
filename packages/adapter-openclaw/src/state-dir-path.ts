@@ -1,5 +1,5 @@
 import { existsSync, realpathSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 
 export function canonicalPathForCompare(path: string): string {
   const absolute = resolve(path);
@@ -8,7 +8,7 @@ export function canonicalPathForCompare(path: string): string {
   while (!existsSync(existing)) {
     const parent = dirname(existing);
     if (parent === existing) break;
-    missingParts.unshift(existing.slice(parent.length + 1));
+    missingParts.unshift(basename(existing));
     existing = parent;
   }
 
