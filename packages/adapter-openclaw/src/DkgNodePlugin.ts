@@ -45,6 +45,7 @@ import type {
   OpenClawToolResult,
 } from './types.js';
 import { homedir } from 'node:os';
+import { join, resolve } from 'node:path';
 
 // T44 — same regex as `dkg-core/src/dkg-home.ts` ETH_ADDR_RE. Kept
 // duplicated rather than exposed from dkg-core because the adapter's
@@ -584,9 +585,10 @@ export class DkgNodePlugin {
     // state. Fall back order:
     //   1. `runtime.state.resolveStateDir()` — gateway-provided, workspace-scoped.
     //   2. `OPENCLAW_STATE_DIR` env override — operator-controlled, opt-in.
-    //   3. `api.workspaceDir + .openclaw` — gateway-provided current workspace.
-    //   4. `config.stateDir` — setup-persisted fallback for older gateways.
-    //   5. `~/.openclaw` — last resort; logged as a warning so ops can fix.
+    //   3. explicit `config.stateDir` — user-controlled config override.
+    //   4. `api.workspaceDir + .openclaw` — gateway-provided current workspace.
+    //   5. setup-owned `config.stateDir` — fallback for older gateways.
+    //   6. `~/.openclaw` — last resort; logged as a warning so ops can fix.
     const workspaceDir = (api as any)?.workspaceDir;
     const homeDir = `${homedir()}/.openclaw`;
     // T26 — Normalize each source through trim+non-empty before the
@@ -602,11 +604,24 @@ export class DkgNodePlugin {
       return t.length > 0 ? t : undefined;
     };
     const trimmedWorkspaceDir = trimmedNonEmpty(workspaceDir);
+    const configuredStateDir = trimmedNonEmpty(this.config.stateDir);
+    const setupWorkspaceDir = trimmedNonEmpty(this.config.installedWorkspace);
+    const setupDefaultStateDir = setupWorkspaceDir ? join(setupWorkspaceDir, '.openclaw') : undefined;
+    const normalizeForCompare = (path: string): string => {
+      const normalized = resolve(path);
+      return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+    };
+    const configuredIsSetupDefault =
+      !!configuredStateDir &&
+      !!setupDefaultStateDir &&
+      normalizeForCompare(configuredStateDir) === normalizeForCompare(setupDefaultStateDir);
+    const workspaceStateDir = trimmedWorkspaceDir ? join(trimmedWorkspaceDir, '.openclaw') : undefined;
     const stateDir =
       trimmedNonEmpty((api as any)?.runtime?.state?.resolveStateDir?.()) ??
       trimmedNonEmpty(process.env.OPENCLAW_STATE_DIR) ??
-      (trimmedWorkspaceDir ? `${trimmedWorkspaceDir}/.openclaw` : undefined) ??
-      trimmedNonEmpty(this.config.stateDir) ??
+      (!configuredIsSetupDefault ? configuredStateDir : undefined) ??
+      workspaceStateDir ??
+      configuredStateDir ??
       homeDir;
 
     if (this.chatTurnWriter) {
@@ -661,7 +676,7 @@ export class DkgNodePlugin {
 
     if (stateDir === homeDir) {
       api.logger.warn?.(
-        '[dkg] Could not resolve a workspace-scoped state dir (api.runtime.state.resolveStateDir / OPENCLAW_STATE_DIR / api.workspaceDir / config.stateDir all unavailable); ' +
+        '[dkg] Could not resolve a workspace-scoped state dir (api.runtime.state.resolveStateDir / OPENCLAW_STATE_DIR / config.stateDir / api.workspaceDir all unavailable); ' +
         `falling back to '${homeDir}'. Two workspaces on the same machine will share chat-turn watermarks. ` +
         'Set config.stateDir or OPENCLAW_STATE_DIR explicitly to silence this.',
       );

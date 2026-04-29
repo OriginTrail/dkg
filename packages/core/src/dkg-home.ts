@@ -56,9 +56,9 @@ export function resolveDkgConfigHome(opts: ResolveDkgConfigHomeOptions = {}): st
   return defaultDir;
 }
 
-/** Resolve `<dkgHome>/auth.token`. Defaults to the legacy simple DKG home. */
+/** Resolve `<dkgHome>/auth.token`. Defaults to the config-writing DKG home. */
 export function dkgAuthTokenPath(dkgHome?: string): string {
-  return join(dkgHome ?? dkgHomeDir(), 'auth.token');
+  return join(dkgHome ?? resolveDkgConfigHome(), 'auth.token');
 }
 
 /**

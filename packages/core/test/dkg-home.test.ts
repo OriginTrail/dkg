@@ -93,6 +93,30 @@ describe('dkgAuthTokenPath', () => {
   it('formats the auth-token path from the resolved DKG home', () => {
     expect(dkgAuthTokenPath('/tmp/dkg-home')).toBe(join('/tmp/dkg-home', 'auth.token'));
   });
+
+  it('defaults through the config-home resolver', async () => {
+    const original = {
+      DKG_HOME: process.env.DKG_HOME,
+      HOME: process.env.HOME,
+      USERPROFILE: process.env.USERPROFILE,
+    };
+    const tempHome = join(tmpdir(), `dkg-auth-token-home-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    await mkdir(tempHome, { recursive: true });
+    delete process.env.DKG_HOME;
+    process.env.HOME = tempHome;
+    process.env.USERPROFILE = tempHome;
+    try {
+      expect(dkgAuthTokenPath()).toBe(join(tempHome, '.dkg-dev', 'auth.token'));
+    } finally {
+      if (original.DKG_HOME === undefined) delete process.env.DKG_HOME;
+      else process.env.DKG_HOME = original.DKG_HOME;
+      if (original.HOME === undefined) delete process.env.HOME;
+      else process.env.HOME = original.HOME;
+      if (original.USERPROFILE === undefined) delete process.env.USERPROFILE;
+      else process.env.USERPROFILE = original.USERPROFILE;
+      await rm(tempHome, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('resolveDkgHome', () => {

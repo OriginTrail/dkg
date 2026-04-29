@@ -410,6 +410,13 @@ export interface DkgOpenClawConfig {
    */
   stateDir?: string;
 
+  /**
+   * Setup-owned metadata for the workspace that installed this adapter entry.
+   * Runtime uses it only to distinguish setup-written stateDir defaults from
+   * explicit user stateDir overrides.
+   */
+  installedWorkspace?: string;
+
   /** DKG memory integration config. */
   memory?: {
     enabled?: boolean;
