@@ -32,10 +32,10 @@ export interface IAgentRuntime {
  *                    threading even without running through the chat
  *                    memory reader.
  *
- * Exposing these on the PUBLIC adapter type (PR #229 bot review
- * round 13, r13-3) means downstream TypeScript consumers can't satisfy
- * `Memory` and still deterministically throw at runtime — the
- * contract is enforced at compile time.
+ * Exposing these on the PUBLIC adapter type means downstream
+ * TypeScript consumers can't satisfy `Memory` and still
+ * deterministically throw at runtime — the contract is enforced
+ * at compile time.
  */
 export interface Memory {
   userId: string;
@@ -55,7 +55,7 @@ export interface Memory {
  * requires. `id` is the stable turn-source identifier — when
  * missing, `persistChatTurnImpl` throws deterministically because
  * fabricating a time-based id would break idempotence across
- * retries. Splitting the type (PR #229 bot review round 16, r16-4)
+ * retries. Splitting the type
  * lets downstream TypeScript callers see this requirement at
  * COMPILE TIME instead of discovering it via a runtime exception.
  *
@@ -71,7 +71,7 @@ export interface Memory {
  *   }
  *
  *   // assistant-reply path (onAssistantReply):
- *   // r19-2: `userTurnPersisted` is MANDATORY on the typed
+ *   // `userTurnPersisted` is MANDATORY on the typed
  *   // assistant-reply options — callers that don't know whether
  *   // the preceding user-turn hook persisted should pass `false`
  *   // to route through the safe full-envelope branch.
@@ -90,8 +90,6 @@ export type PersistableMemory = Memory & { readonly id: string };
  * `dkgService.persistChatTurn` / `hooks.onChatTurn` /
  * `hooks.onAssistantReply` surfaces. Exposed as a named type so
  * callers get full type checking on every field they rely on.
- *
- * See PR #229 bot review round 13 (r13-1, r13-3).
  */
 export interface ChatTurnPersistOptions {
   readonly contextGraphId?: string;
@@ -122,7 +120,7 @@ export interface ChatTurnPersistOptions {
    */
   readonly userTurnPersisted?: boolean;
   /**
-   * PR #229 bot review (r31-1 — actions.ts:1107 / actions.ts:1149).
+   * actions.ts:1107 / actions.ts:1149).
    *
    * Explicit signal from the caller that the ASSISTANT leg of this
    * turn has already been persisted by a prior write — typically the
@@ -146,8 +144,6 @@ export interface ChatTurnPersistOptions {
    */
   readonly assistantAlreadyPersisted?: boolean;
   /**
-   * PR #229 bot review r31-9 (service.ts:70).
-   *
    * Explicit signal that the matching user-turn write embedded a
    * PROVISIONAL assistant string (e.g. partial-streaming completion)
    * and the current assistant-reply write brings DIFFERENT final

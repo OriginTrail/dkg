@@ -467,7 +467,7 @@ describe('E2E: Context graph registration rejected with insufficient participant
       { subContextGraphId: contextGraphId },
     );
 
-    // Spec §06_PUBLISH / BUGS_FOUND.md A-5 (FIXED): the per-CG
+    // Spec §06_PUBLISH /
     // `requiredSignatures` IS enforced at publish time. With a per-CG
     // quorum of 2 and only the self-signed ACK collectable (no peers),
     // the publish must NOT confirm — it stays tentative until the
@@ -565,7 +565,7 @@ describe('E2E: Edge node participates in context graph governance', () => {
       },
     );
 
-    // Spec §06_PUBLISH / BUGS_FOUND.md A-5 (FIXED): per-CG `requiredSignatures`
+    // Spec §06_PUBLISH /
     // gates publish at the publisher boundary. The edge node cannot sign
     // StorageACKs (it's not a core node — see `Node role is 'edge' — skipping
     // StorageACK handler registration`), and the dummy `contextGraphSignatures`

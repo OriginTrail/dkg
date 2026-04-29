@@ -44,7 +44,7 @@ const state = {
     outputData: new TextEncoder().encode('pong'),
     error: undefined as string | undefined,
   },
-  // Bot review A1/A3: let individual tests opt in to having
+  // let individual tests opt in to having
   // assertion.write throw, mirroring the old publish-error path.
   assertionWriteError: null as Error | null,
 };
@@ -69,7 +69,7 @@ function fakeAgent() {
       state.invokes.push({ peerId, skillUri, input });
       return state.invokeResult;
     },
-    // Bot review A1/A3: chat-turn persistence routes through the
+    // chat-turn persistence routes through the
     // WM assertion surface, not publish().
     assertion: {
       write: async (cgId: string, name: string, quads: any[]) => {
@@ -610,7 +610,7 @@ describe('DKG_INVOKE_SKILL handler', () => {
 // DKG_PERSIST_CHAT_TURN — happy path via the stubbed agent
 // ───────────────────────────────────────────────────────────────────────────
 describe('DKG_PERSIST_CHAT_TURN handler', () => {
-  it('writes the turn quads via agent.assertion.write using the canonical schema:Conversation/Message shape (bot review A* 2nd pass)', async () => {
+  it('writes the turn quads via agent.assertion.write using the canonical schema:Conversation/Message shape', async () => {
     const { calls, cb } = captureCb();
     const ok = await dkgPersistChatTurn.handler(
       makeRuntime({ DKG_CHAT_CG: 'chat-room' }),

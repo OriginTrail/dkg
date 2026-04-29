@@ -1,7 +1,7 @@
 /**
  * packages/mcp-server — extra QA coverage.
  *
- * Findings covered (see .test-audit/BUGS_FOUND.md):
+ * Findings covered (see .test-audit/
  *
  *   K-1  HIDES-BUG  `tools.test.ts` inlines a copy of registration logic and
  *                   never imports the production entry point. A tool removed
@@ -12,10 +12,10 @@
  *                   is added / removed in production, this test fails.
  *
  *   K-2  SPEC-GAP   No `mcp_auth` tool exists in the mcp-server package. If
- *                   the spec requires it (see BUGS_FOUND.md K-2) this test
+ *                   the spec requires it (
  *                   stays RED until the tool is added. Per QA policy, a red
  *                   test is the bug evidence.
- *                   // PROD-BUG: mcp_auth is absent — see BUGS_FOUND.md K-2
+ *                   // PROD-BUG: mcp_auth is absent —
  *
  *   K-3  SPEC-GAP   The existing `connection.test.ts` mocks `globalThis.fetch`
  *                   and never exercises a real HTTP socket. We spin up a real
@@ -67,7 +67,7 @@ describe('[K-1] production parity — tool list scanned from src/index.ts', () =
     // If production drops or renames any tool, the two lists diverge and this
     // test fails (whereas tools.test.ts — which uses a hand-rolled clone —
     // would still pass). The list grew to 8 with the K-2 mcp_auth tool
-    // (BUGS_FOUND.md K-2): every MCP server that talks to a remote DKG
+    // (
     // node must expose a credential-introspection / rotation entry point.
     expect(prodTools).toEqual([
       'dkg_file_summary',
@@ -82,7 +82,7 @@ describe('[K-1] production parity — tool list scanned from src/index.ts', () =
   });
 
   it('each DKG-namespaced tool begins with the dkg_ prefix; mcp_auth is whitelisted', () => {
-    // K-2 (BUGS_FOUND.md): the spec name for the auth tool is
+    // K-2 (
     // `mcp_auth` (it's part of the MCP convention, not a DKG verb), so
     // the dkg_ prefix rule has a single, well-known exception. Any
     // OTHER non-dkg_ name still trips the regression.
@@ -114,7 +114,7 @@ describe('[K-1] production parity — tool list scanned from src/index.ts', () =
 // K-2  mcp_auth tool — spec-gap / PROD-BUG evidence
 // ─────────────────────────────────────────────────────────────────────────────
 describe('[K-2] mcp_auth tool — spec requires it (RED until implemented)', () => {
-  // PROD-BUG: mcp_auth is absent from packages/mcp-server/src — see BUGS_FOUND.md K-2
+  // PROD-BUG: mcp_auth is absent from packages/mcp-server/src —
   it('src/index.ts registers an mcp_auth tool', async () => {
     const src = await readFile(PROD_SRC, 'utf8');
     const tools = extractRegisteredToolNames(src);

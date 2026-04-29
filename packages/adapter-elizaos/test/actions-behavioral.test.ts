@@ -2,7 +2,7 @@
  * Behavioral coverage for the adapter-elizaos action-handler internals
  * and the persistChatTurnImpl cross-surface implementation.
  *
- * SECOND-PASS BOT REVIEW (PR #229):
+ * SECOND-PASS BOT REVIEW:
  *   - persistChatTurnImpl now emits the CANONICAL chat-turn shape used by
  *     `node-ui/src/chat-memory.ts` (`schema:Conversation` /
  *     `schema:Message` / `dkg:ChatTurn` + `urn:dkg:chat:` URIs) instead of
@@ -38,7 +38,7 @@ function makeRuntime(settings: Record<string, string> = {}, characterName?: stri
 function makeMessage(text: string, overrides: Partial<Memory> & { id?: string } = {}): Memory {
   return {
     content: { text },
-    // Bot review PR #229 round 6 (actions.ts:635) — persistChatTurnImpl
+    // persistChatTurnImpl
     // now REQUIRES a stable `message.id` and will throw if it's missing
     // (instead of fabricating a Date.now() fallback that broke retry
     // idempotence). Keep a deterministic default here so existing tests
@@ -83,16 +83,16 @@ function makeCapturingAgent(_kcIdUnused?: bigint | string) {
 
 // ===========================================================================
 // persistChatTurnImpl — canonical user-turn shape (schema:Conversation /
-// schema:Message / dkg:ChatTurn) — second-pass bot review
+// schema:Message / dkg:ChatTurn)
 // ===========================================================================
 
 describe('persistChatTurnImpl — canonical user-turn shape (matches node-ui ChatMemoryManager)', () => {
   it('defaults to the agent-context CG and chat-turns assertion (interop with rest of monorepo)', async () => {
     const { agent, publishes, ensures } = makeCapturingAgent();
     await persistChatTurnImpl(agent, makeRuntime(), makeMessage('hi'), {} as State, {});
-    // Second-pass bot review: ChatMemoryManager reads from `agent-context`
-    // / `chat-turns`. Defaulting to anything else (the prior default was
-    // `chat`) breaks out-of-the-box interop on every fresh install.
+    // ChatMemoryManager reads from `agent-context` / `chat-turns`.
+    // Defaulting to anything else (the prior default was `chat`)
+    // breaks out-of-the-box interop on every fresh install.
     expect(publishes[0].cgId).toBe('agent-context');
     expect(publishes[0].name).toBe('chat-turns');
     expect(ensures[0].id).toBe('agent-context');
@@ -105,7 +105,7 @@ describe('persistChatTurnImpl — canonical user-turn shape (matches node-ui Cha
   });
 
   it('assistant message timestamp sorts strictly AFTER the user message timestamp on the same turn', async () => {
-    // Bot review PR #229 round 6, actions.ts:662 — `schema:dateCreated`
+    // `schema:dateCreated`
     // on the assistant message MUST be > the user message timestamp so
     // downstream readers that order by timestamp always see user → agent.
     // The previous code reused the same `ts` for both, leaving the
@@ -130,7 +130,7 @@ describe('persistChatTurnImpl — canonical user-turn shape (matches node-ui Cha
   });
 
   it('user + assistant message subjects both carry dkg:turnId so readers can join without walking the turn envelope', async () => {
-    // Bot review PR #229 round 6 — the canonical `dkg:turnId` edge was
+    // the canonical `dkg:turnId` edge was
     // only on the turn envelope, which forced every join query to walk
     // `schema:isPartOf → ^dkg:hasUserMessage → dkg:turnId`. Emit it on
     // the message subjects too so `?msg dkg:turnId ?t` is a 1-hop join.
@@ -155,7 +155,7 @@ describe('persistChatTurnImpl — canonical user-turn shape (matches node-ui Cha
   });
 
   it('keeps the canonical session URI unencoded (roomId drops in verbatim so node-ui reads match)', async () => {
-    // Bot review PR #229 round 6, actions.ts:649 — the canonical
+    // the canonical
     // `${CHAT_NS}session:${sessionId}` URI must be byte-identical to
     // what `ChatMemoryManager` reads. Running roomId through
     // encodeURIComponent mangles common shapes (e.g. `room:alpha` →
@@ -173,7 +173,7 @@ describe('persistChatTurnImpl — canonical user-turn shape (matches node-ui Cha
   });
 
   it('REJECTS roomIds that would corrupt the N-Quads serializer (whitespace, angle brackets, quotes)', async () => {
-    // Bot review PR #229 round 6, actions.ts:649 — because the
+    // because the
     // canonical session URI drops the raw roomId into an IRI position
     // verbatim, unsafe characters must be refused at the boundary.
     const { agent } = makeCapturingAgent();
@@ -286,7 +286,7 @@ describe('persistChatTurnImpl — canonical user-turn shape (matches node-ui Cha
 });
 
 // ===========================================================================
-// persistChatTurnImpl — assistant-reply MERGE path (second-pass bot review)
+// persistChatTurnImpl — assistant-reply MERGE path
 // ===========================================================================
 
 describe('persistChatTurnImpl — assistant-reply mode is append-only (no user-text corruption, no duplicate envelope)', () => {
@@ -299,9 +299,9 @@ describe('persistChatTurnImpl — assistant-reply mode is append-only (no user-t
       agent, makeRuntime(),
       makeMessage('the answer is 42', { id: 'asst-mem', roomId: 'r', userId: 'agent-eliza' } as any),
       {} as State,
-      // PR #229 bot review round 20 (r20-1): append-only path now
+      // append-only path now
       // requires the EXPLICIT `userTurnPersisted: true` opt-in.
-      // Pre-r20 we relied on legacy inference (presence of
+      // we relied on legacy inference (presence of
       // userMessageId), but that conflated addressing with
       // durability. Callers that genuinely know the user-turn write
       // succeeded (the in-process `onAssistantReplyHandler` after
@@ -328,7 +328,7 @@ describe('persistChatTurnImpl — assistant-reply mode is append-only (no user-t
   });
 
   // ---------------------------------------------------------------------
-  // Bot review (PR #229 round 8, actions.ts:746): the original round-7
+  // the original round-7
   // headless-assistant fix emitted a dkg:ChatTurn envelope WITHOUT a
   // `dkg:hasUserMessage` edge. That shape is technically valid RDF but
   // the chat reader contract in `packages/node-ui/src/chat-memory.ts`
@@ -354,7 +354,7 @@ describe('persistChatTurnImpl — assistant-reply mode is append-only (no user-t
       { mode: 'assistant-reply' }, // deliberately omit userMessageId
     );
     const quads = publishes[0].quads;
-    // PR #229 round 21 (r21-1): the headless envelope now lands on a
+    // the headless envelope now lands on a
     // DEDICATED `headless-turn:` URI so it cannot overwrite a
     // canonical `turn:` URI that a real `onChatTurn` write may have
     // already populated (the prior revision wrote onto
@@ -365,10 +365,10 @@ describe('persistChatTurnImpl — assistant-reply mode is append-only (no user-t
     // subject so the assertions are real (otherwise the assertion
     // would silently pass on an absent canonical-turn quad).
     const turnUri = 'urn:dkg:chat:headless-turn:r:asst-only-mem';
-    // r15-2: stub lives in `msg:user-stub:` namespace keyed on the
+    // stub lives in `msg:user-stub:` namespace keyed on the
     // assistant memory id.
     const userStubUri = 'urn:dkg:chat:msg:user-stub:r:asst-only-mem';
-    // r21-1: the headless assistant message also gets a dedicated
+    // the headless assistant message also gets a dedicated
     // `msg:agent-headless:` URI keyed on the stub turn key so it
     // cannot collide with a canonical `msg:agent:` URI written by
     // a real user-first onChatTurn → onAssistantReply pair.
@@ -384,7 +384,7 @@ describe('persistChatTurnImpl — assistant-reply mode is append-only (no user-t
     expect(quads).toContainEqual(expect.objectContaining({
       subject: turnUri, predicate: `${DKG_ONT}hasAssistantMessage`, object: assistantMsgUri,
     }));
-    // PR #229 bot review (r31-3 — actions.ts:622): headless turns
+    // actions.ts:622): headless turns
     // carry the DISTINCT `headless:${turnKey}` literal as
     // `dkg:turnId`, NOT the canonical `${turnKey}`. This keeps the
     // `LIMIT 1` lookup-by-id in `getSessionGraphDelta()`
@@ -411,7 +411,7 @@ describe('persistChatTurnImpl — assistant-reply mode is append-only (no user-t
     // Stub user message: empty text + system author, NOT the regular
     // CHAT_USER_ACTOR — so UIs don't render an empty user bubble.
     //
-    // PR #229 bot review (r31-3 — actions.ts:584): the stub MUST
+    // actions.ts:584): the stub MUST
     // NOT carry `rdf:type schema:Message`. `getStats()` runs an
     // unconditional `?s rdf:type schema:Message` count to compute
     // `messageCount` and the chat-vs-knowledge split, so every
@@ -457,7 +457,7 @@ describe('persistChatTurnImpl — assistant-reply mode is append-only (no user-t
       { mode: 'assistant-reply' },
     );
     const tsQuad = (i: number) => publishes[i].quads.find(
-      // r21-1: headless turn lives under `headless-turn:` now, NOT
+      // headless turn lives under `headless-turn:` now, NOT
       // `turn:`. Match the new prefix so this idempotence test
       // exercises the actual headless envelope — matching `turn:`
       // would silently return undefined on every call and the
@@ -465,14 +465,14 @@ describe('persistChatTurnImpl — assistant-reply mode is append-only (no user-t
       // (false-positive green).
       (q) => q.predicate === `${SCHEMA}dateCreated` && q.subject.startsWith('urn:dkg:chat:headless-turn:'),
     )!;
-    // Bot review (PR #229 follow-up, actions.ts:539): re-firing the same
+    // re-firing the same
     // hook must not mint a fresh `schema:dateCreated`, otherwise downstream
     // readers see conflicting timestamps for the "same" turn.
     expect(tsQuad(0).object).toBe(tsQuad(1).object);
   });
 
   it('targets the SAME turnUri as the matching user-turn call when both userMessageId and userTurnPersisted are supplied (append-only)', async () => {
-    // PR #229 round 21 (r21-2): the append-only path requires BOTH
+    // the append-only path requires BOTH
     // `userMessageId` AND `userTurnPersisted: true`. Anything less
     // (the previous test shape `{ userMessageId: 'mem-1' }` alone)
     // takes the safe headless path and lands the assistant link on
@@ -504,7 +504,7 @@ describe('persistChatTurnImpl — assistant-reply mode is append-only (no user-t
   });
 
   // ---------------------------------------------------------------------
-  // Bot review (PR #229 follow-up, actions.ts:539): stable timestamp on
+  // stable timestamp on
   // retries for user-turn mode as well. Readers that dedupe by
   // schema:dateCreated must see byte-identical values across re-fires.
   // ---------------------------------------------------------------------
@@ -548,14 +548,14 @@ describe('persistChatTurnImpl — assistant-reply mode is append-only (no user-t
     expect(turnTs.object).toBe(`"2026-06-10T12:00:00.000Z"^^<${XSD_DATETIME}>`);
   });
 
-  // PR #229 bot review round 11 (actions.ts:550). Prior revisions
+  // Prior revisions
   // returned string-valued timestamp fields verbatim and then emitted
   // the result under `^^xsd:dateTime`. ElizaOS frequently serializes
   // `createdAt` / `timestamp` as epoch-ms strings (`"1718049600000"`),
   // so the quad became an invalid literal that breaks SPARQL ORDER BY
   // and FILTER arithmetic. The new contract coerces every incoming
   // shape to a real ISO-8601 string before emitting the quad.
-  it('coerces a string epoch-ms timestamp to ISO-8601 before emitting xsd:dateTime (bot review r11-4)', async () => {
+  it('coerces a string epoch-ms timestamp to ISO-8601 before emitting xsd:dateTime', async () => {
     const { agent, publishes } = makeCapturingAgent();
     const msg = makeMessage('hi', { id: 'ms-string', roomId: 'r' } as any);
     // Matches ElizaOS serializers that stringify epoch ms.
@@ -571,7 +571,7 @@ describe('persistChatTurnImpl — assistant-reply mode is append-only (no user-t
     expect(turnTs.object).not.toContain('"1718049600000"');
   });
 
-  it('normalises an already-ISO string timestamp via Date (no verbatim passthrough) (bot review r11-4)', async () => {
+  it('normalises an already-ISO string timestamp via Date (no verbatim passthrough)', async () => {
     const { agent, publishes } = makeCapturingAgent();
     const msg = makeMessage('hi', { id: 'iso-string', roomId: 'r' } as any);
     // Missing-millisecond ISO form — MUST be normalised to the
@@ -584,7 +584,7 @@ describe('persistChatTurnImpl — assistant-reply mode is append-only (no user-t
     expect(turnTs.object).toBe(`"2026-01-02T03:04:05.000Z"^^<${XSD_DATETIME}>`);
   });
 
-  it('falls through to the deterministic synthetic stamp when a string timestamp is unparseable (bot review r11-4)', async () => {
+  it('falls through to the deterministic synthetic stamp when a string timestamp is unparseable', async () => {
     const { agent, publishes } = makeCapturingAgent();
     const msg = makeMessage('hi', { id: 'bogus-string', roomId: 'r' } as any);
     (msg as any).createdAt = 'not-a-date-at-all';
@@ -600,7 +600,7 @@ describe('persistChatTurnImpl — assistant-reply mode is append-only (no user-t
     expect(new Date(body!).toISOString()).toBe(body);
   });
 
-  it('also coerces an `opts.ts` override when it is a string epoch-ms value (bot review r11-4)', async () => {
+  it('also coerces an `opts.ts` override when it is a string epoch-ms value', async () => {
     const { agent, publishes } = makeCapturingAgent();
     await persistChatTurnImpl(
       agent, makeRuntime(),
@@ -616,10 +616,10 @@ describe('persistChatTurnImpl — assistant-reply mode is append-only (no user-t
 });
 
 // ===========================================================================
-// persistChatTurnImpl — turnUri encoding (still bot review A5: reversible)
+// persistChatTurnImpl — turnUri reversible encoding
 // ===========================================================================
 
-describe('persistChatTurnImpl — turnUri reversible encoding (bot review A5)', () => {
+describe('persistChatTurnImpl — turnUri reversible encoding', () => {
   it('uses encodeURIComponent so different chars produce different turnUris (no collision)', async () => {
     const { agent } = makeCapturingAgent();
     const out1 = await persistChatTurnImpl(
@@ -638,7 +638,7 @@ describe('persistChatTurnImpl — turnUri reversible encoding (bot review A5)', 
   });
 
   it('REJECTS calls without a stable message.id instead of fabricating a timestamp fallback', async () => {
-    // Bot review PR #229 round 6, actions.ts:635 — a `mem-${Date.now()}`
+    // a `mem-${Date.now()}`
     // fallback silently broke idempotence across retries (every call
     // got a different turnUri). The new contract is: require a stable
     // id from the caller and throw loudly when it's missing, so the
@@ -683,7 +683,7 @@ describe('persistChatTurnImpl — rdfString escaping + dateTime literal', () => 
     const { agent, publishes } = makeCapturingAgent();
     await persistChatTurnImpl(agent, makeRuntime(), makeMessage('hi'), {} as State, {});
     const ts = publishes[0].quads.find((q) => q.predicate === `${SCHEMA}dateCreated` && q.subject.startsWith('urn:dkg:chat:msg:'))!;
-    // PR #229 CodeQL js/incomplete-hostname-regexp (alert 54): the
+    // the
     // previous form `new RegExp(\`\\^\\^<${XSD_DATETIME}>$\`)`
     // interpolated the literal URL `http://www.w3.org/...` straight
     // into a regex without escaping the `.` chars, so the pattern would
@@ -797,12 +797,12 @@ describe('dkgKnowledgeProvider — keyword extraction branches', () => {
 });
 
 // ===========================================================================
-// PR #229 bot review round 13 — r13-1 + r13-2 behavioral pins
+// r13-1 + al pins
 // ===========================================================================
 
-describe('persistChatTurnImpl — PR #229 round 13 (r13-1): userTurnPersisted explicit signal', () => {
+describe('persistChatTurnImpl — userTurnPersisted explicit signal', () => {
   // -------------------------------------------------------------------
-  // r13-1: the previous revision inferred `headlessAssistantReply` ONLY
+  // the previous revision inferred `headlessAssistantReply` ONLY
   // from `!optsAny.userMessageId`. That conflated two different things
   // (do we know the parent id vs. did the user-turn write succeed) and
   // let the append-only path win when the user-turn envelope had never
@@ -823,7 +823,7 @@ describe('persistChatTurnImpl — PR #229 round 13 (r13-1): userTurnPersisted ex
       { mode: 'assistant-reply', userMessageId: 'mem-1', userTurnPersisted: false },
     );
     const quads = publishes[0].quads;
-    // r21-1: headless envelope subject MUST be the dedicated
+    // headless envelope subject MUST be the dedicated
     // `headless-turn:` URI so it cannot stomp on the canonical
     // `turn:r:mem-1` subject (which a real `onChatTurn` write may
     // have populated even though the caller passed
@@ -831,13 +831,13 @@ describe('persistChatTurnImpl — PR #229 round 13 (r13-1): userTurnPersisted ex
     // turn via `?turn rdf:type dkg:ChatTurn`, but the canonical
     // turn URI is left untouched.
     const turnUri = 'urn:dkg:chat:headless-turn:r:mem-1';
-    // r15-2: the headless stub lives in the `msg:user-stub:` namespace
+    // the headless stub lives in the `msg:user-stub:` namespace
     // keyed on the turnKey (which uses `userMessageId` when present)
     // so it can't collide with any canonical `msg:user:` URI the
     // user-turn hook wrote under the same turnKey — the dedicated
     // namespace prefix is sufficient for that distinctness.
     //
-    // r31-1: pre-r31 the stub key was derived from the assistant
+    // the stub key was derived from the assistant
     // memory id (`asst-2` here), but that broke retry idempotence —
     // every reconnect with a fresh assistant memory id produced a
     // FRESH stub URI on the SAME `headless-turn:` envelope, leaving
@@ -888,8 +888,8 @@ describe('persistChatTurnImpl — PR #229 round 13 (r13-1): userTurnPersisted ex
     )).toBe(false);
   });
 
-  it('r20-1: caller passes userMessageId WITHOUT explicit userTurnPersisted → FULL safe envelope (legacy inference removed)', async () => {
-    // PR #229 bot review round 20 (r20-1). The pre-r20 revision used
+  it('caller passes userMessageId WITHOUT explicit userTurnPersisted → FULL safe envelope (legacy inference removed)', async () => {
+    // The revision used
     // `presence-of-userMessageId` as a proxy for "user turn was
     // persisted", which conflates addressing (parent id known) with
     // durability (paired write succeeded). External callers using the
@@ -917,7 +917,7 @@ describe('persistChatTurnImpl — PR #229 round 13 (r13-1): userTurnPersisted ex
     // would drop the reply, which is the exact unreadable-reply bug
     // r20-1 prevents.
     //
-    // r21-1: the typed envelope now lives on the dedicated
+    // the typed envelope now lives on the dedicated
     // `headless-turn:` URI (NOT canonical `turn:`), so the reader
     // contract is checked there instead.
     const turnUri = 'urn:dkg:chat:headless-turn:r:mem-1';
@@ -940,7 +940,7 @@ describe('persistChatTurnImpl — PR #229 round 13 (r13-1): userTurnPersisted ex
     )).toBe(true);
   });
 
-  it('r20-1: omitted userTurnPersisted (any non-true value) takes the safe path — explicit false still works', async () => {
+  it('omitted userTurnPersisted (any non-true value) takes the safe path — explicit false still works', async () => {
     // Defence-in-depth: the new rule is `optsAny.userTurnPersisted === true`,
     // so explicit `false` and any non-boolean (e.g. caller passes a
     // string or a typo'd key) MUST also fall to the safe headless
@@ -963,7 +963,7 @@ describe('persistChatTurnImpl — PR #229 round 13 (r13-1): userTurnPersisted ex
       { mode: 'assistant-reply', userMessageId: 'mem-r20-b', userTurnPersisted: 'true' as unknown as boolean },
     );
     for (const [i, suffix] of [[0, 'mem-r20-a'], [1, 'mem-r20-b']] as const) {
-      // r21-1: headless turn lives under `headless-turn:` now.
+      // headless turn lives under `headless-turn:` now.
       const turnUri = `urn:dkg:chat:headless-turn:r:${suffix}`;
       expect(publishes[i].quads).toContainEqual(expect.objectContaining({
         subject: turnUri, predicate: RDF_TYPE, object: `${DKG_ONT}ChatTurn`,
@@ -988,7 +988,7 @@ describe('persistChatTurnImpl — PR #229 round 13 (r13-1): userTurnPersisted ex
       { mode: 'assistant-reply' },
     );
     const quads = publishes[0].quads;
-    // r21-1: headless envelope landed on the dedicated subject.
+    // headless envelope landed on the dedicated subject.
     const turnUri = 'urn:dkg:chat:headless-turn:r:asst-5';
     expect(quads).toContainEqual(expect.objectContaining({
       subject: turnUri, predicate: RDF_TYPE, object: `${DKG_ONT}ChatTurn`,
@@ -999,14 +999,14 @@ describe('persistChatTurnImpl — PR #229 round 13 (r13-1): userTurnPersisted ex
   });
 
   // -------------------------------------------------------------------
-  // PR #229 bot review (r31-1 — actions.ts:1107 / actions.ts:1149).
+  // actions.ts:1107 / actions.ts:1149).
   //
   // Root cause: the user-turn branch in `persistChatTurnImpl` emits
   // the assistant Message + `hasAssistantMessage` link when the
   // caller plumbs `assistantText` / `assistantReply.text` /
   // `state.lastAssistantReply` into the same call (typical ElizaOS
   // shape — the assistant text is captured on the user-turn callback
-  // and a separate `onAssistantReply` hook fires later). Pre-r31 the
+  // and a separate `onAssistantReply` hook fires later). the
   // append-only branch in the second call would re-emit
   // `buildAssistantMessageQuads(...)` onto the SAME
   // `msg:agent:${turnKey}` URI — stacking duplicate
@@ -1023,7 +1023,7 @@ describe('persistChatTurnImpl — PR #229 round 13 (r13-1): userTurnPersisted ex
   // directly so callers that bypass the wrapper get the same
   // protection.
   // -------------------------------------------------------------------
-  it('r31-1: assistantAlreadyPersisted=true short-circuits the assistant-reply path (no quads written)', async () => {
+  it('assistantAlreadyPersisted=true short-circuits the assistant-reply path (no quads written)', async () => {
     const { agent, publishes } = makeCapturingAgent();
     const out = await persistChatTurnImpl(
       agent, makeRuntime(),
@@ -1033,7 +1033,7 @@ describe('persistChatTurnImpl — PR #229 round 13 (r13-1): userTurnPersisted ex
         mode: 'assistant-reply',
         userMessageId: 'mem-1',
         userTurnPersisted: true,
-        // r31-1: the user-turn branch has already emitted the
+        // the user-turn branch has already emitted the
         // assistant Message + hasAssistantMessage link for this
         // turn (because the matching onChatTurn carried
         // assistantText). Re-emitting them here would stack
@@ -1056,7 +1056,7 @@ describe('persistChatTurnImpl — PR #229 round 13 (r13-1): userTurnPersisted ex
     expect(publishes).toHaveLength(0);
   });
 
-  it('r31-1: assistantAlreadyPersisted=true short-circuits the headless variant too (no stub envelope re-emitted)', async () => {
+  it('assistantAlreadyPersisted=true short-circuits the headless variant too (no stub envelope re-emitted)', async () => {
     const { agent, publishes } = makeCapturingAgent();
     const out = await persistChatTurnImpl(
       agent, makeRuntime(),
@@ -1079,7 +1079,7 @@ describe('persistChatTurnImpl — PR #229 round 13 (r13-1): userTurnPersisted ex
     expect(publishes).toHaveLength(0);
   });
 
-  it('r31-1: assistantAlreadyPersisted=false (or undefined) still writes normally (regression guard)', async () => {
+  it('assistantAlreadyPersisted=false (or undefined) still writes normally (regression guard)', async () => {
     // Regression guard: the no-op branch must fire ONLY when the
     // flag is `=== true`. Anything else (false, undefined, missing
     // option, or non-boolean truthy) keeps the existing
@@ -1126,9 +1126,9 @@ describe('persistChatTurnImpl — PR #229 round 13 (r13-1): userTurnPersisted ex
   });
 });
 
-describe('persistChatTurnImpl — PR #229 round 13 (r13-2): headless user stub does NOT leak into session', () => {
+describe('persistChatTurnImpl — headless user stub does NOT leak into session', () => {
   // -------------------------------------------------------------------
-  // r13-2: `ChatMemoryManager.getSession()` enumerates every
+  // `ChatMemoryManager.getSession()` enumerates every
   // `?msg schema:isPartOf <session>` subject. Before this round the
   // headless user stub carried that edge, so it was listed alongside
   // real messages — and node-ui maps any non-`user` author to
@@ -1146,10 +1146,10 @@ describe('persistChatTurnImpl — PR #229 round 13 (r13-2): headless user stub d
       { mode: 'assistant-reply' },
     );
     const quads = publishes[0].quads;
-    // r15-2: stub lives in `msg:user-stub:` namespace, keyed on the
+    // stub lives in `msg:user-stub:` namespace, keyed on the
     // assistant memory id.
     const userStubUri = 'urn:dkg:chat:msg:user-stub:r:asst-stub-1';
-    // r31-3: stub is typed `dkg:HeadlessUserStub` (not `schema:Message`)
+    // stub is typed `dkg:HeadlessUserStub` (not `schema:Message`)
     // — see `buildHeadlessUserStubQuads` rationale block. The
     // dedicated type satisfies `dkg:hasUserMessage` envelope
     // resolution while keeping `getStats()` `?s rdf:type
@@ -1172,7 +1172,7 @@ describe('persistChatTurnImpl — PR #229 round 13 (r13-2): headless user stub d
       { mode: 'assistant-reply' },
     );
     const quads = publishes[0].quads;
-    // r21-1: headless turn landed on the dedicated subject.
+    // headless turn landed on the dedicated subject.
     const turnUri = 'urn:dkg:chat:headless-turn:r:asst-stub-2';
     // The ChatTurn itself IS partOf the session (turn enumeration works).
     expect(quads).toContainEqual(expect.objectContaining({
@@ -1189,9 +1189,9 @@ describe('persistChatTurnImpl — PR #229 round 13 (r13-2): headless user stub d
       { mode: 'assistant-reply' },
     );
     const quads = publishes[0].quads;
-    // r21-1: headless turn landed on the dedicated subject.
+    // headless turn landed on the dedicated subject.
     const turnUri = 'urn:dkg:chat:headless-turn:r:asst-stub-3';
-    // r15-2: reader contract is satisfied via the stub URI, not the
+    // reader contract is satisfied via the stub URI, not the
     // canonical user-message URI (so a concurrent real user-turn can
     // coexist without clobbering each other).
     const userStubUri = 'urn:dkg:chat:msg:user-stub:r:asst-stub-3';
@@ -1202,11 +1202,11 @@ describe('persistChatTurnImpl — PR #229 round 13 (r13-2): headless user stub d
 });
 
 // ===========================================================================
-// PR #229 bot review round 15 — r15-2: headless stub URI MUST NOT collide
+// headless stub URI MUST NOT collide
 // with the real user-message URI, even when the caller provides a
 // `userMessageId` that matches an earlier onChatTurn write.
 //
-// r31-1 update: the stub URI is now keyed on the same `turnKey` the
+// the stub URI is now keyed on the same `turnKey` the
 // headless envelope uses (which itself derives from `userMessageId`
 // when present). The dedicated `msg:user-stub:` / `msg:agent-headless:`
 // namespace prefixes are sufficient to keep the stub from colliding
@@ -1217,9 +1217,9 @@ describe('persistChatTurnImpl — PR #229 round 13 (r13-2): headless user stub d
 // `getSessionGraphDelta`'s `LIMIT 1` query nondeterministic across
 // replays).
 // ===========================================================================
-describe('persistChatTurnImpl — PR #229 round 15 (r15-2): headless stub URI namespace isolation', () => {
+describe('persistChatTurnImpl — headless stub URI namespace isolation', () => {
   // -------------------------------------------------------------------
-  // r15-2: the r14-2 default (`userTurnPersisted=false` when the
+  // the r14-2 default (`userTurnPersisted=false` when the
   // caller doesn't assert otherwise) means the headless branch can
   // run even when onChatTurn ALREADY wrote the real user message. If
   // the stub shared `msg:user:${turnKey}` with the real user msg, we
@@ -1238,13 +1238,13 @@ describe('persistChatTurnImpl — PR #229 round 15 (r15-2): headless stub URI na
       { mode: 'assistant-reply', userMessageId: 'user-r15-1', userTurnPersisted: false },
     );
     const quads = publishes[0].quads;
-    // r31-1: stub URI is keyed on the same `turnKey` the envelope
+    // stub URI is keyed on the same `turnKey` the envelope
     // uses (`r:user-r15-1` here, derived from `userMessageId`),
     // NOT on the assistant memory id. The `msg:user-stub:` namespace
     // prefix keeps it disjoint from the canonical `msg:user:` URI
     // for the same turnKey.
     const stubUri = 'urn:dkg:chat:msg:user-stub:r:user-r15-1';
-    // r31-3: stub is typed `dkg:HeadlessUserStub`, NOT `schema:Message`
+    // stub is typed `dkg:HeadlessUserStub`, NOT `schema:Message`
     // — see the rationale block in `buildHeadlessUserStubQuads`. The
     // dedicated type satisfies the `dkg:hasUserMessage` reader
     // contract (URI just needs to be a typed subject) while
@@ -1263,7 +1263,7 @@ describe('persistChatTurnImpl — PR #229 round 15 (r15-2): headless stub URI na
   });
 
   // ---------------------------------------------------------------------
-  // PR #229 bot review (r31-1 — actions.ts:1048): the previous
+  // actions.ts:1048): the previous
   // revision keyed the stub URI off the assistant memory id, which
   // produced a NEW stub on every retry that arrived with a fresh
   // assistant `Memory.id`. Because the `headless-turn:${turnKey}`
@@ -1279,7 +1279,7 @@ describe('persistChatTurnImpl — PR #229 round 15 (r15-2): headless stub URI na
   // quads (idempotent). The dedicated namespace prefixes keep the
   // stub disjoint from any canonical user/assistant URI.
   // ---------------------------------------------------------------------
-  it('r31-1: two headless retries with the SAME userMessageId produce IDENTICAL stub + assistant URIs (idempotent)', async () => {
+  it('two headless retries with the SAME userMessageId produce IDENTICAL stub + assistant URIs (idempotent)', async () => {
     const { agent: a1, publishes: p1 } = makeCapturingAgent();
     await persistChatTurnImpl(
       a1, makeRuntime(),
@@ -1308,7 +1308,7 @@ describe('persistChatTurnImpl — PR #229 round 15 (r15-2): headless stub URI na
       .map((q) => q.subject);
     // Both retries land on the SAME stub URI (keyed on the
     // envelope's turnKey, which is stable across assistant-id
-    // rotation). Pre-r31 these were `asst-r31-a` vs `asst-r31-b`
+    // rotation). these were `asst-r31-a` vs `asst-r31-b`
     // — a fresh pair on every reconnect.
     expect(stubSubjects1).toContain('urn:dkg:chat:msg:user-stub:r:same-parent');
     expect(stubSubjects2).toContain('urn:dkg:chat:msg:user-stub:r:same-parent');
@@ -1320,7 +1320,7 @@ describe('persistChatTurnImpl — PR #229 round 15 (r15-2): headless stub URI na
     // And both retries point the envelope's hasUserMessage /
     // hasAssistantMessage edges at the SAME stub/assistant pair so
     // `getSessionGraphDelta()`'s `LIMIT 1` resolves deterministically
-    // across replays. Pre-r31 the second retry stacked a fresh pair
+    // across replays. the second retry stacked a fresh pair
     // onto the same envelope and the reader bound an arbitrary one.
     const envelopeUri = 'urn:dkg:chat:headless-turn:r:same-parent';
     const userEdges1 = p1[0].quads
@@ -1342,7 +1342,7 @@ describe('persistChatTurnImpl — PR #229 round 15 (r15-2): headless stub URI na
       { mode: 'assistant-reply', userMessageId: 'parent-msg', userTurnPersisted: false },
     );
     const quads = publishes[0].quads;
-    // r21-1: headless envelope landed on the dedicated subject so it
+    // headless envelope landed on the dedicated subject so it
     // cannot stomp on the canonical `turn:r:parent-msg` URI which a
     // real `onChatTurn` write may have populated.
     const turnUri = 'urn:dkg:chat:headless-turn:r:parent-msg';
@@ -1351,7 +1351,7 @@ describe('persistChatTurnImpl — PR #229 round 15 (r15-2): headless stub URI na
     );
     // Exactly one hasUserMessage edge, pointing at the stub.
     expect(hasUserEdges).toHaveLength(1);
-    // r31-1: stub URI is keyed on the envelope's `turnKey` (which
+    // stub URI is keyed on the envelope's `turnKey` (which
     // is `r:parent-msg` here, derived from `userMessageId`), not on
     // the assistant memory id `asst-r15-c`. The dedicated
     // `msg:user-stub:` namespace keeps it disjoint from the
@@ -1381,7 +1381,7 @@ describe('persistChatTurnImpl — PR #229 round 15 (r15-2): headless stub URI na
 });
 
 // ===========================================================================
-// PR #229 bot review (r31-3 — actions.ts:622, actions.ts:584).
+// actions.ts:622, actions.ts:584).
 // Two new regressions on the headless-reply RDF shape, both tested
 // against the same `makeCapturingAgent()` harness as the rest of
 // this file:
@@ -1407,7 +1407,7 @@ describe('persistChatTurnImpl — PR #229 round 15 (r15-2): headless stub URI na
 //      reader only requires a typed subject — it does NOT check
 //      the type itself).
 // ===========================================================================
-describe('persistChatTurnImpl — PR #229 round 31 (r31-3): headless turn id + stub type isolation', () => {
+describe('persistChatTurnImpl — headless turn id + stub type isolation', () => {
   // -------------------------------------------------------------------
   // Bug 1 (ElAv): the headless envelope's `dkg:turnId` literal MUST
   // be distinct from the canonical user-first turn id. Tested
@@ -1606,7 +1606,7 @@ describe('persistChatTurnImpl — PR #229 round 31 (r31-3): headless turn id + s
 });
 
 // ===========================================================================
-// PR #229 bot review (r31-5 — actions.ts:1173).
+// actions.ts:1173).
 //
 // The headless branch was reusing `buildAssistantMessageQuads(...)` verbatim,
 // which emits `?msg schema:isPartOf <session>`. That edge is also the
@@ -1627,7 +1627,7 @@ describe('persistChatTurnImpl — PR #229 round 31 (r31-3): headless turn id + s
 // headless assistant message so a headless-only session (no canonical
 // user-first replay) is still surfaced by the standard enumeration.
 // ===========================================================================
-describe('persistChatTurnImpl — PR #229 round 31 (r31-5): headless assistant marker for getSession() dedupe', () => {
+describe('persistChatTurnImpl — headless assistant marker for getSession() dedupe', () => {
   it('headless assistant message carries dkg:headlessAssistantMessage "true" marker (so getSession() can dedupe against canonical replay)', async () => {
     const { agent, publishes } = makeCapturingAgent();
     await persistChatTurnImpl(
@@ -1701,7 +1701,7 @@ describe('persistChatTurnImpl — PR #229 round 31 (r31-5): headless assistant m
 });
 
 // ===========================================================================
-// PR #229 bot review (r31-6 — adapter-elizaos/src/index.ts:521).
+// adapter-elizaos/src/index.ts:521).
 //
 // The wrapper sets `assistantSupersedesCanonical: true` on the
 // `persistChatTurnImpl` options bag when the user-turn cache holds a
@@ -1715,7 +1715,7 @@ describe('persistChatTurnImpl — PR #229 round 31 (r31-5): headless assistant m
 //
 // These tests pin that contract at the writer layer.
 // ===========================================================================
-describe('persistChatTurnImpl — PR #229 round 31 (r31-6): supersede-canonical-assistant marker on the headless write', () => {
+describe('persistChatTurnImpl — supersede-canonical-assistant marker on the headless write', () => {
   it('headless write with assistantSupersedesCanonical=true tags the message dkg:supersedesCanonicalAssistant "true"', async () => {
     const { agent, publishes } = makeCapturingAgent();
     await persistChatTurnImpl(
@@ -1794,7 +1794,7 @@ describe('persistChatTurnImpl — PR #229 round 31 (r31-6): supersede-canonical-
 });
 
 // ===========================================================================
-// PR #229 bot review (r31-6 — adapter-elizaos/src/actions.ts:941).
+// adapter-elizaos/src/actions.ts:941).
 //
 // `persistChatTurnImpl` must honour `optsAny.userMessageId` on BOTH the
 // `assistant-reply` AND the `user-turn` paths. Pre-fix the user-turn
@@ -1805,7 +1805,7 @@ describe('persistChatTurnImpl — PR #229 round 31 (r31-6): supersede-canonical-
 // `onAssistantReply` reported a cache hit but wrote `hasAssistantMessage`
 // onto a turn URI that didn't exist.
 // ===========================================================================
-describe('persistChatTurnImpl — PR #229 round 31 (r31-6): user-turn path honours optsAny.userMessageId for turnSourceId', () => {
+describe('persistChatTurnImpl — user-turn path honours optsAny.userMessageId for turnSourceId', () => {
   it('user-turn write with explicit userMessageId mints the canonical user URI under userMessageId (NOT message.id)', async () => {
     const { agent, publishes } = makeCapturingAgent();
     // message.id is DELIBERATELY different from userMessageId — this
@@ -1819,8 +1819,8 @@ describe('persistChatTurnImpl — PR #229 round 31 (r31-6): user-turn path honou
     );
     const quads = publishes[0].quads;
     // The canonical user URI MUST be keyed by the pre-minted id, NOT
-    // by the message.id (which would be 'mem-id-DIFFERENT'). This is
-    // the cache-key alignment the bot review demanded.
+    // by the message.id (which would be 'mem-id-DIFFERENT'). The
+    // cache-key alignment requires this convergence.
     const expectedUserUri = 'urn:dkg:chat:msg:user:r:pre-minted-r31-6';
     const wrongUserUri = 'urn:dkg:chat:msg:user:r:mem-id-DIFFERENT';
     expect(quads.some((q) => q.subject === expectedUserUri)).toBe(true);
@@ -1845,9 +1845,9 @@ describe('persistChatTurnImpl — PR #229 round 31 (r31-6): user-turn path honou
   });
 });
 
-describe('types — PR #229 round 13 (r13-3): Memory includes runtime-required fields', () => {
+describe('types — Memory includes runtime-required fields', () => {
   // -------------------------------------------------------------------
-  // r13-3: the public `Memory` type previously exposed only
+  // the public `Memory` type previously exposed only
   // `{ userId, agentId, roomId, content }` — `persistChatTurnImpl`
   // relied on `id`, `createdAt`, `timestamp`, etc. at runtime, so
   // downstream TypeScript consumers could satisfy the contract at
@@ -1874,7 +1874,7 @@ describe('types — PR #229 round 13 (r13-3): Memory includes runtime-required f
 });
 
 // ===========================================================================
-// PR #229 round 21 — r21-3: schema:Conversation session root is emitted at
+// schema:Conversation session root is emitted at
 // MOST ONCE per (runtime, session) per process. Emitting it on every turn
 // trips DKG Working-Memory Rule 4 (entity exclusivity) and rejects the
 // second persisted turn in the same room — see node-ui/src/chat-memory.ts
@@ -1903,7 +1903,7 @@ describe('persistChatTurnImpl — r21-3: schema:Conversation session root emitte
         && q.object === `${SCHEMA}Conversation`,
     );
     expect(conversationQuad(0)).toHaveLength(1);
-    // r21-3: second turn must NOT re-declare `?session a schema:Conversation`.
+    // second turn must NOT re-declare `?session a schema:Conversation`.
     // Storage already has the triple from turn 1; re-emitting it forces
     // the WM Rule-4 entity-exclusivity guard to reject the whole write.
     expect(conversationQuad(1)).toHaveLength(0);
@@ -1992,14 +1992,14 @@ describe('persistChatTurnImpl — r21-3: schema:Conversation session root emitte
   });
 
   // ===========================================================================
-  // PR #229 round 24 — r24-1: the per-runtime session-root cache MUST include
+  // the per-runtime session-root cache MUST include
   // the destination assertion graph. A runtime that writes the same session
   // into two different `(contextGraphId, assertionName)` targets MUST emit
   // `?session rdf:type schema:Conversation` in BOTH destinations, otherwise
   // the second store has no `schema:Conversation` root and readers like
   // `ChatMemoryManager` enumerating by type triple surface zero sessions.
   // ===========================================================================
-  it('r24-1: same (runtime, session) routed into TWO different context graphs emits a session root in BOTH', async () => {
+  it('same (runtime, session) routed into TWO different context graphs emits a session root in BOTH', async () => {
     __resetEmittedSessionRootsForTests();
     const { agent, publishes } = makeCapturingAgent();
     const runtime = makeRuntime();
@@ -2028,7 +2028,7 @@ describe('persistChatTurnImpl — r21-3: schema:Conversation session root emitte
     expect(convRoot(publishes[1].quads)).toHaveLength(1);
   });
 
-  it('r24-1: same (runtime, session, contextGraphId) but DIFFERENT assertionName still emits in both assertions', async () => {
+  it('same (runtime, session, contextGraphId) but DIFFERENT assertionName still emits in both assertions', async () => {
     __resetEmittedSessionRootsForTests();
     const { agent, publishes } = makeCapturingAgent();
     const runtime = makeRuntime();
@@ -2053,7 +2053,7 @@ describe('persistChatTurnImpl — r21-3: schema:Conversation session root emitte
     expect(convRoot(publishes[1].quads)).toHaveLength(1);
   });
 
-  it('r24-1: second turn into the SAME destination still de-dupes the session root (the WM-Rule-4 invariant survives)', async () => {
+  it('second turn into the SAME destination still de-dupes the session root (the WM-Rule-4 invariant survives)', async () => {
     __resetEmittedSessionRootsForTests();
     const { agent, publishes } = makeCapturingAgent();
     const runtime = makeRuntime();
@@ -2111,7 +2111,7 @@ describe('persistChatTurnImpl — r21-3: schema:Conversation session root emitte
 });
 
 // ===========================================================================
-// PR #229 round 31 — r31-11 regression tests
+// r31-11 regression tests
 //
 // Bug IoNR (actions.ts:460): the previous "peek-then-mark-after-success"
 // session-root cache pattern split the gate into a peek
@@ -2321,7 +2321,7 @@ describe('persistChatTurnImpl — r31-11 (IoNR): session-root reservation race +
 });
 
 // ===========================================================================
-// PR #229 round 31 (r31-13 — actions.ts:1172, KK3X): the assistantText
+// actions.ts:1172, KK3X): the assistantText
 // fallback chain used `??`, which only bridges null/undefined and
 // SHORT-CIRCUITS on `''`. The bug fires in TWO places: the
 // `mode: 'assistant-reply'` branch (where an ElizaOS assistant memory
@@ -2334,7 +2334,7 @@ describe('persistChatTurnImpl — r31-11 (IoNR): session-root reservation race +
 // branches use a first-non-empty selector that mirrors the wrapper
 // boundary in `src/index.ts`.
 // ===========================================================================
-describe('persistChatTurnImpl — PR #229 round 31 (r31-13, KK3X): assistantText fallback honours ALL non-empty candidates', () => {
+describe('persistChatTurnImpl — assistantText fallback honours ALL non-empty candidates', () => {
   const findAssistantText = (quads: any[], assistantMsgUri: string): string | undefined => {
     const match = quads.find(
       (q) => q.subject === assistantMsgUri && q.predicate === `${SCHEMA}text`,

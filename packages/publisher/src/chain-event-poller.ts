@@ -54,7 +54,7 @@ export interface ChainEventPollerConfig {
   /** Persistent cursor for surviving restarts. */
   cursorPersistence?: CursorPersistence;
   /**
-   * PR #229 bot review (post-v10-rc-merge, r21-5): post-restart WAL
+   * post-restart WAL
    * reconciler. Called when an on-chain `KnowledgeBatchCreated`
    * arrives whose `merkleRoot` does NOT match any in-memory pending
    * publish (the common case after a process crash that wiped
@@ -75,7 +75,7 @@ export interface ChainEventPollerConfig {
     blockNumber: number;
   }) => Promise<boolean | void>;
   /**
-   * PR #229 bot review (r3148... — chain-event-poller.ts:271).
+   * — chain-event-poller.ts:271).
    * Optional accessor for "is there actually any recoverable WAL
    * right now?". Pre-fix, the poller treated `onUnmatchedBatchCreated`
    * being installed as a proxy for "WAL recovery is needed" — but
@@ -204,7 +204,7 @@ export class ChainEventPoller {
    *     occasionally call `eth_getLogs` with `toBlock` momentarily
    *     past the current head between our `getBlockNumber()` and the
    *     `eth_getLogs` round-trip. The cursor does not advance on
-   *     failure and the next tick retries. (PR #229 r12 fix.)
+   *     failure and the next tick retries.
    *   - `upstream RPC` — public RPC endpoints (e.g. sepolia.base.org)
    *     periodically return 5xx gateway errors or close the socket
    *     mid-request. ethers wraps these as `code=SERVER_ERROR`. Same
@@ -279,13 +279,12 @@ export class ChainEventPoller {
     const watchUpdates = !!this.onCollectionUpdated;
     const watchAllowList = !!this.onAllowListUpdated;
     const watchProfiles = !!this.onProfileEvent;
-    // PR #229 bot review round 24 (r24-4) + r30-4 follow-up
-    // (chain-event-poller.ts:271). The unmatched-batch reconciler
-    // (`onUnmatchedBatchCreated`) is the durable path that drains the
-    // WAL after a restart, but the callback being installed is NOT
-    // the right gate — `DKGAgent` wires it unconditionally for every
-    // node, so testing `!!this.onUnmatchedBatchCreated` would force
-    // every brand-new node with an empty journal to scan from genesis
+    // The unmatched-batch reconciler (`onUnmatchedBatchCreated`) is
+    // the durable path that drains the WAL after a restart, but the
+    // callback being installed is NOT the right gate — `DKGAgent`
+    // wires it unconditionally for every node, so testing
+    // `!!this.onUnmatchedBatchCreated` would force every brand-new
+    // node with an empty journal to scan from genesis
     // (and refuse to seed near tip — see the `headKnown` block below).
     //
     // The honest gate is "is there actually any recoverable WAL right
@@ -296,7 +295,7 @@ export class ChainEventPoller {
     const walRecoveryActive =
       !!this.onUnmatchedBatchCreated &&
       (this.hasRecoverableWal ? this.hasRecoverableWal() : true);
-    // PR #229 bot review (chain-event-poller.ts:305). The previous gate
+    // The previous gate
     // tested `!!this.onUnmatchedBatchCreated`, but `DKGAgent` now wires
     // that callback unconditionally for every node, so the flag was
     // effectively `true` everywhere and the early-return at the bottom
@@ -337,7 +336,7 @@ export class ChainEventPoller {
     // when there are no pending publishes whose confirmations we might skip.
     // Full-history context graph discovery is handled by discoverContextGraphsFromChain().
     //
-    // PR #229 bot review round 25 (r25-1). WAL recovery is ALSO a reason
+    // WAL recovery is ALSO a reason
     // not to seed near the tip: on restart the in-memory pending map is
     // empty by construction, but the unmatched-batch reconciler
     // (`onUnmatchedBatchCreated`, installed by the agent for WAL drain)
@@ -460,7 +459,7 @@ export class ChainEventPoller {
       return;
     }
 
-    // r21-5: in-memory pending map didn't match. After a process
+    // in-memory pending map didn't match. After a process
     // restart the map is empty by construction, so the only durable
     // record of "we signed and were about to broadcast this batch"
     // is the WAL. Hand the event off to the unmatched-batch reconciler

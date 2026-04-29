@@ -97,7 +97,7 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
     failedPeers: 0,
   };
 
-  // Bot review PR #229 (post-round-5): each context graph is synced in
+  // each context graph is synced in
   // its own try/catch so that a transient failure on one CG does NOT
   // cascade into "skip every remaining CG for this peer". The previous
   // shape wrapped the entire loop in a single try/catch, which meant

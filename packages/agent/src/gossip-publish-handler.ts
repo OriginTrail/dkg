@@ -63,7 +63,7 @@ export class GossipPublishHandler {
     onPhase?: GossipPhaseCallback,
     fromPeerId?: string,
     /**
-     * r23-4 (PR #229 bot review round 23): the EVM address recovered
+     * r23-4: the EVM address recovered
      * from the outer GossipEnvelope signature, if ingress came via a
      * signed envelope. The envelope authenticates the BYTES, but the
      * inner `PublishRequestMsg.publisherAddress` is a self-reported
@@ -105,7 +105,7 @@ export class GossipPublishHandler {
         phase?.('decode', 'end');
       }
 
-      // r23-4: if the ingress layer produced a recovered envelope
+      // if the ingress layer produced a recovered envelope
       // signer, enforce that it matches the claimed publisher address
       // on the inner PublishRequest. This is the cryptographic link
       // between "who signed the envelope" and "who the payload

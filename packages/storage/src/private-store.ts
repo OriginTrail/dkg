@@ -18,7 +18,7 @@ import type { ContextGraphManager } from './graph-manager.js';
  *  breaking existing data. */
 const ENC_PREFIX = 'enc:gcm:v1:';
 
-/** Encryption key resolution order (PR #229 bot review round 12, r12-2):
+/** Encryption key resolution order:
  *   1. Explicit constructor `encryptionKey` (32 bytes, hex/base64/raw or
  *      shorter passphrase — short inputs are SHA-256-stretched so AES-256
  *      always sees a full 256-bit key).
@@ -39,7 +39,7 @@ const ENC_PREFIX = 'enc:gcm:v1:';
  *      `DKG_PRIVATE_STORE_STRICT_KEY=1` (or `strictKey: true`), which
  *      turns step 4 into a hard error.
  *
- * Pre-r12 behaviour: step 3 did not exist, so every node without an
+ * behaviour: step 3 did not exist, so every node without an
  * explicit key shared `sha256(DEFAULT_KEY_DOMAIN)` — any attacker with
  * repo source could decrypt the stored "private" triples across the
  * whole fleet.
@@ -48,14 +48,13 @@ const DEFAULT_KEY_DOMAIN = 'dkg-v10/private-store/default-key/v1';
 const PERSISTED_KEY_FILENAME = 'private-store.key';
 let defaultKeyWarned = false;
 /**
- * Per-path cache of persisted keys (PR #229 bot review round 16,
- * r16-3). The previous revision used a single module-global
- * `cachedPersistedKey: Buffer | null`, which silently aliased
- * multiple `PrivateContentStore` instances onto the FIRST node's key
- * whenever one process hosted several nodes with different
- * `DKG_HOME` / `DKG_PRIVATE_STORE_KEY_FILE` values (test fixtures,
- * multi-tenant daemons, simulation harnesses). The second node
- * would:
+ * Per-path cache of persisted keys. An earlier revision used a
+ * single module-global `cachedPersistedKey: Buffer | null`, which
+ * silently aliased multiple `PrivateContentStore` instances onto
+ * the FIRST node's key whenever one process hosted several nodes
+ * with different `DKG_HOME` / `DKG_PRIVATE_STORE_KEY_FILE` values
+ * (test fixtures, multi-tenant daemons, simulation harnesses).
+ * The second node would:
  *   1. call `resolvePersistedKeyPath()` → get its OWN path
  *   2. call `loadOrCreatePersistedKey()` → hit the module-global
  *      cache populated by node #1, return node #1's key
@@ -114,12 +113,12 @@ function resolvePersistedKeyPath(): string {
  */
 function loadOrCreatePersistedKey(): Buffer | null {
   const path = resolvePersistedKeyPath();
-  // r16-3: per-path cache, so two nodes in the same process with
+  // per-path cache, so two nodes in the same process with
   // different key files each get THEIR OWN key.
   const cached = persistedKeyByPath.get(path);
   if (cached) return cached;
 
-  // PR #229 bot review (r3148998566 — private-store.ts:124). The
+  // private-store.ts:124). The
   // previous logic had two correctness holes around persistent key
   // loading:
   //
@@ -231,7 +230,7 @@ export function __resetPrivateStoreKeyCacheForTests(): void {
 /**
  * Decode a string-encoded key/passphrase into raw bytes.
  *
- * Bot review N2: previously any non-hex string fell through to
+ * previously any non-hex string fell through to
  * `Buffer.from(s, 'base64')`, which silently interprets non-base64 input
  * as truncated garbage. Two callers passing the passphrases `"hunter2"`
  * and `"hunter2!"` would end up with the SAME key because both decode
@@ -265,17 +264,17 @@ function decodeKeyOrPassphrase(s: string): Buffer {
 /**
  * Compute the deterministic legacy fallback key.
  *
- * Pre-r12 nodes (no `DKG_PRIVATE_STORE_KEY` configured) all shared
- * `sha256(DEFAULT_KEY_DOMAIN)`. The r12-2 fix rightly stopped using
+ * nodes (no `DKG_PRIVATE_STORE_KEY` configured) all shared
+ * `sha256(DEFAULT_KEY_DOMAIN)`. the rightly stopped using
  * that as the preferred key, but a straight flip would strand every
  * private triple written before the upgrade — the fresh per-node key
  * cannot decrypt ciphertext sealed under the deterministic key.
  *
- * PR #229 bot review round 15 (r15-1): keep the legacy key around as
+ * keep the legacy key around as
  * a **decrypt-only** fallback so existing data remains readable after
  * upgrade. New writes always use the primary key. The legacy key is
  * never used to encrypt anything (the confidentiality regression that
- * r12-2 fixed is preserved — no one sharing a public constant for
+ * ed is preserved — no one sharing a public constant for
  * fresh data). Once all legacy ciphertext has been re-encrypted or
  * deleted, operators can drop the fallback entirely by setting
  * `DKG_PRIVATE_STORE_STRICT_KEY=1` (which disables unconfigured-key
@@ -334,9 +333,9 @@ function tryDecryptWithKeyChain(
  * process round-trips to identical bytes. Non-encrypted literals,
  * URIs, and blank nodes are returned unchanged.
  *
- * PR #229 bot review round 15 (r15-1): when the primary key can't
+ * when the primary key can't
  * decrypt (typical on nodes just upgraded past r12-2 that still hold
- * pre-r12 private triples sealed under the legacy default-domain
+ * private triples sealed under the legacy default-domain
  * key), fall back to the legacy `sha256(DEFAULT_KEY_DOMAIN)` key so
  * old data remains readable.
  */
@@ -399,7 +398,7 @@ function resolveEncryptionKey(
     }
     return buf;
   }
-  // Bot review N3 / r12-2: no key configured. If the caller (or the
+  // no key configured. If the caller (or the
   // operator via DKG_PRIVATE_STORE_STRICT_KEY) has opted into strict
   // mode, refuse to fall back to ANY unconfigured key — strict callers
   // want a managed secret or nothing at all.
@@ -412,7 +411,7 @@ function resolveEncryptionKey(
         'configure a managed secret explicitly.',
     );
   }
-  // Preferred default (PR #229 bot review r12-2): per-node persisted
+  // Preferred default: per-node persisted
   // key. This gives every unconfigured node a unique secret so
   // "private" triples are not cross-decryptable across the fleet.
   const persisted = loadOrCreatePersistedKey();
@@ -445,16 +444,16 @@ export class PrivateContentStore {
   /** Tracks which rootEntities have private triples on this node. */
   private readonly privateEntities = new Map<string, Set<string>>();
   /** AES-256-GCM key — used to seal literal objects of private quads
-   *  before they reach the underlying TripleStore (BUGS_FOUND.md ST-2). */
+   *  before they reach the underlying TripleStore (. */
   private readonly encryptionKey: Buffer;
   /**
-   * PR #229 bot review (private-store.ts:560 — dedup race). The
+   * dedup race). The
    * read-then-insert sequence in {@link storePrivateTriples} would,
    * under concurrent invocation for the same private graph, let two
    * writers both observe an empty `existingPlainKeys`, then each
    * insert their own ciphertext for the SAME `(s,p,o)` plaintext.
    * Because {@link encryptLiteral} now uses a fresh random IV per
-   * call (bot review N1), the two ciphertexts are byte-distinct, so
+   * call, the two ciphertexts are byte-distinct, so
    * the underlying triple store happily keeps both — duplicating the
    * private quad. This map serialises `storePrivateTriples` calls per
    * `graphUri` so the read-and-insert pair is atomic from the caller's
@@ -479,7 +478,7 @@ export class PrivateContentStore {
    * is released when `fn` resolves OR rejects; queued waiters then
    * fire in order.
    *
-   * PR #229 bot review (r31-14 — private-store.ts:491). The lock chain
+   * private-store.ts:491). The lock chain
    * MUST decouple from the predecessor's success/failure: pre-r31-14
    * the chain was `prev.then(() => next)` and `await prev` was
    * outside the try/finally. If any prior writer rejected, `prev`
@@ -532,7 +531,7 @@ export class PrivateContentStore {
    * the original literal shape (language tag / datatype IRI) by
    * embedding it in the plaintext payload before encryption.
    *
-   * Bot review N1: the previous implementation derived the IV as
+   * the previous implementation derived the IV as
    * HMAC-SHA256(key, plaintext) truncated to 96 bits. That is NOT RFC
    * 8452 AES-GCM-SIV; it is plain AES-GCM with a deterministic IV. Two
    * identical plaintexts sealed under the same key produce identical
@@ -552,12 +551,12 @@ export class PrivateContentStore {
     // Blank nodes are node-local and carry no externally-meaningful
     // identity, so sealing them would only break dedup — leave as-is.
     if (serialized.startsWith('_:')) return serialized;
-    // Seal IRI objects in the SAME envelope as literals (PR #229 bot
-    // review round 6 — IRI objects leaking from private graphs). Prior
-    // to this fix `encryptLiteral` only wrapped values starting with `"`
-    // and passed IRI objects through unchanged, so the N-Quads dump of
-    // a private graph leaked every outgoing edge's target IRI (e.g.
-    // `ex:ssn`, `http://foo/creditCard`). We mark the wrapped term with
+    // Seal IRI objects in the SAME envelope as literals: an earlier
+    // revision had `encryptLiteral` only wrap values starting with
+    // `"` and pass IRI objects through unchanged, so the N-Quads
+    // dump of a private graph leaked every outgoing edge's target
+    // IRI (e.g. `ex:ssn`, `http://foo/creditCard`). We mark the
+    // wrapped term with
     // an extra `TAG|` byte inside the ciphertext so the decrypt side
     // can restore the original term shape (IRI vs literal vs blank).
     //
@@ -590,11 +589,11 @@ export class PrivateContentStore {
       const iv = buf.subarray(0, 12);
       const tag = buf.subarray(12, 28);
       const ct = buf.subarray(28);
-      // PR #229 bot review round 15 (r15-1): fall back to the legacy
+      // fall back to the legacy
       // `sha256(DEFAULT_KEY_DOMAIN)` key when the primary key fails
       // to authenticate. This is decrypt-only — `encryptLiteral`
       // always uses `this.encryptionKey` — so a freshly-upgraded node
-      // whose pre-r12 private triples were sealed under the legacy
+      // whose private triples were sealed under the legacy
       // deterministic key can still read them, while every new write
       // goes to the unique per-node key.
       const legacyKeys = resolveLegacyDecryptionKeys(this.encryptionKey);
@@ -643,7 +642,7 @@ export class PrivateContentStore {
     }
     if (subjects.size === 0 || predicates.size === 0) return new Set();
 
-    // PR #229 bot review (r3148... — private-store.ts:553). The
+    // — private-store.ts:553). The
     // dedup query previously assumed every subject was an IRI and
     // ran `assertSafeIri()` over each — but private RDF can legally
     // contain blank-node subjects (`_:b0`) and `assertSafeIri()`
@@ -699,7 +698,7 @@ export class PrivateContentStore {
     }
 
     const incomingSubjects = [...subjects];
-    // PR #229 bot review (r3148... — private-store.ts:553) — note on
+    // — private-store.ts:553) — note on
     // detection. `assertSafeIri()` only rejects characters that would
     // break SPARQL `<...>` framing; it accepts strings like `_:bn`
     // because `_` and `:` aren't unsafe glyphs. That meant a previous
@@ -795,27 +794,27 @@ export class PrivateContentStore {
     assertSafeIri(rootEntity);
 
     const graphUri = this.privateGraph(contextGraphId, subGraphName);
-    // ST-2: encrypt the literal `object` BEFORE handing the quad to the
-    // underlying TripleStore. URIs and blank nodes carry no payload and
-    // are passed through unchanged. The resulting on-disk N-Quads dump
-    // contains only ciphertext envelopes (`enc:gcm:v1:<base64>`),
-    // satisfying the BUGS_FOUND.md ST-2 invariant. Callers retrieve
-    // plaintext via `getPrivateTriples`, which reverses the seal.
+    // ST-2: encrypt the literal `object` BEFORE handing the quad to
+    // the underlying TripleStore. URIs and blank nodes carry no
+    // payload and are passed through unchanged. The resulting
+    // on-disk N-Quads dump contains only ciphertext envelopes
+    // (`enc:gcm:v1:<base64>`); callers retrieve plaintext via
+    // `getPrivateTriples`, which reverses the seal.
     //
-    // PR #229 bot review round 7 — private-store.ts:226. Because
-    // `encryptLiteral` now uses a fresh random IV per call (bot review
-    // N1 rightly forbids deterministic IVs for AES-GCM), a plain
-    // `insert()` would duplicate the quad on every retry / replay of
-    // the same private KA: the store dedups by byte-identical terms,
-    // but ciphertext is never byte-identical across writes. Dedup here
-    // by decrypting the set of existing ciphertext objects at each
-    // `(s, p)` position in this private graph and skipping any incoming
-    // plaintext that is already there. The comparison is on
-    // **plaintext** triple identity, which is the semantic we want; it
-    // preserves random-IV confidentiality while making the write
-    // idempotent.
-    // PR #229 bot review (private-store.ts:560 — dedup race). Hold a
-    // per-graph mutex for the whole "scan existing plaintext + insert
+    // Because `encryptLiteral` uses a fresh random IV per call
+    // (deterministic IVs are forbidden for AES-GCM), a plain
+    // `insert()` would duplicate the quad on every retry / replay
+    // of the same private KA: the store dedups by byte-identical
+    // terms, but ciphertext is never byte-identical across writes.
+    // Dedup here by decrypting the set of existing ciphertext
+    // objects at each `(s, p)` position in this private graph and
+    // skipping any incoming plaintext that is already there. The
+    // comparison is on **plaintext** triple identity, which is the
+    // semantic we want; it preserves random-IV confidentiality
+    // while making the write idempotent.
+    //
+    // Hold a per-graph mutex for the whole "scan existing plaintext
+    // + insert
     // missing quads" sequence so a second concurrent caller cannot
     // observe an empty key set in parallel and wind up inserting a
     // byte-distinct (random-IV) ciphertext for the same `(s,p,o)`
@@ -873,7 +872,7 @@ export class PrivateContentStore {
       subject: row['s'],
       predicate: row['p'],
       // Reverse the AES-GCM seal applied at write time so callers see
-      // the original literal value (BUGS_FOUND.md ST-2). Non-encrypted
+      // the original literal value (. Non-encrypted
       // values (legacy data, URIs, blank nodes) flow through unchanged.
       object: this.decryptLiteral(row['o']),
       graph: graphUri,

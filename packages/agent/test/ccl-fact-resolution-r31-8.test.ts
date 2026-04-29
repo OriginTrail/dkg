@@ -1,6 +1,4 @@
 /**
- * PR #229 bot review r31-8 (ccl-fact-resolution.ts:270).
- *
  * `resolveEndorsementFacts()` was rewritten in r19-3 to use the new
  * per-event endorsement-resource shape:
  *
@@ -25,7 +23,7 @@
  *   - new-shape endorsements still resolve (no regression),
  *   - legacy endorsements resolve again (back-compat),
  *   - a single agent endorsing the same UAL under both shapes counts
- *     as ONE endorsement (BUGS_FOUND.md#CCL-2: the policy semantic
+ *     as ONE endorsement (
  *     is "distinct endorsers", not "endorsement events").
  *
  * No mocks — uses a real {@link OxigraphStore} with quads written
@@ -68,7 +66,7 @@ function newShapeQuads(endorsementUri: string, endorser: string, ual: string): Q
 }
 
 function legacyShapeQuads(endorser: string, ual: string): Quad[] {
-  // Pre-r19-3 emission: agent IS the subject. No intermediate
+  // emission: agent IS the subject. No intermediate
   // endorsement-event resource, no `dkg:endorsedBy` quad.
   return [{ subject: endorser, predicate: DKG_ENDORSES, object: `<${ual}>`, graph: dataGraph }];
 }

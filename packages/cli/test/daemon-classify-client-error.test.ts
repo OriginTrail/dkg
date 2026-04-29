@@ -1,12 +1,12 @@
 /**
  * Unit tests for the daemon's HTTP error classification helper.
  *
- * Covers the PR #229 bot-review fix to {@link classifyClientError}: pre-fix
- * the same regex that recognised malformed peer-ids ALSO matched
- * `timed out` / `unable to dial`, which downgraded transient transport
- * failures from a retryable 504 to a non-retryable client-side 400.
- * The CLI / SDK then never retried even though the next dial attempt
- * would have succeeded.
+ * Covers a subtle behaviour of {@link classifyClientError}: an
+ * earlier revision had a single regex that recognised malformed
+ * peer-ids AND `timed out` / `unable to dial`, which downgraded
+ * transient transport failures from a retryable 504 to a
+ * non-retryable client-side 400. The CLI / SDK then never retried
+ * even though the next dial attempt would have succeeded.
  */
 import { describe, it, expect } from 'vitest';
 import { classifyClientError } from '../src/daemon.js';

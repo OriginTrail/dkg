@@ -1,6 +1,4 @@
 /**
- * PR #229 bot review round 11 (dkg-publisher.ts:1471).
- *
  * The `perCgRequiredSignatures` gate used to short-circuit to
  * tentative as soon as ANY peer ACK had been collected, because
  * `selfSignEligible` was keyed on `v10ACKs.length === 0`. In an
@@ -40,7 +38,7 @@ function baseInputs(overrides: Partial<Parameters<typeof computePerCgQuorumState
   };
 }
 
-describe('computePerCgQuorumState (bot review r11-1)', () => {
+describe('computePerCgQuorumState', () => {
   it('single-node baseline: no peer ACKs, self-sign is the ONE ACK, meets required=1', () => {
     const s = computePerCgQuorumState(baseInputs({ perCgRequiredSignatures: 1 }));
     expect(s.collectedAckCount).toBe(0);
@@ -150,7 +148,7 @@ describe('computePerCgQuorumState (bot review r11-1)', () => {
     expect(s.perCgQuorumUnmet).toBe(false);
   });
 
-  // Pre-r11-1 behaviour guard: the OLD gate would have reported
+  // behaviour guard: the OLD gate would have reported
   // effectiveAckCount === 1 here (because `selfSignEligible` was
   // keyed on `collectedAckCount === 0`). Asserting effective=2
   // explicitly ensures we notice if the broadened eligibility
@@ -166,7 +164,7 @@ describe('computePerCgQuorumState (bot review r11-1)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// PR #229 bot review (post-v10-rc-merge, r21-6): selfSignEligible must
+// selfSignEligible must
 // also gate on actual CG participation. Counting a self-sign that the V10
 // contract would reject as `InvalidSignerNotParticipant` silently turned
 // every non-participant publish into a guaranteed reverted on-chain tx

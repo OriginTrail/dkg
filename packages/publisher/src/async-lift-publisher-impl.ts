@@ -73,7 +73,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
   /**
    * Cached key plumbed through to `subtractFinalizedExactQuads` so
    * authoritative private quads decrypt under the SAME key the caller's
-   * `PrivateContentStore` sealed them with (PR #229 bot review r9).
+   * `PrivateContentStore` sealed them with.
    */
   private readonly privateStoreEncryptionKey?: Uint8Array | string;
   private readonly graphManager: GraphManager;
@@ -155,7 +155,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     // forward (claimed → validated → broadcast → included). Terminal
     // / cleanup transitions (failed, cancelled, finalized, recovered,
     // accepted) bypass the fence so a worker can still record its
-    // own terminal failure even after a takeover. See BUGS_FOUND.md
+    // own terminal failure even after a takeover.
     // P-2.
     await this.assertCallerLockIntact(current, status);
     const next = this.refreshActiveLease(this.mergeJob(current, status, data));

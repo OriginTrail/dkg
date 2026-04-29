@@ -1,28 +1,28 @@
 /**
  * Unit tests for daemon HTTP-utils security helpers.
  *
- * Both helpers under test were flagged on PR #229 review:
+ *   - `isValidContextGraphId` —
+ *       The earlier CLI-16 fix used a blanket `id.includes('..')`
+ *       to reject path traversal. That over-rejected valid
+ *       URI/DID-shaped context-graph IDs (e.g.
+ *       `https://example.com/a..b`, `urn:cg:v1..2`) which never
+ *       resolve to a parent-directory segment. The segment-aware
+ *       check below is the only check the OS / URL resolver
+ *       actually treats as a traversal vector.
  *
- *   - r3146360283 / `isValidContextGraphId` —
- *       The original CLI-16 fix used a blanket `id.includes('..')` to
- *       reject path traversal. That over-rejected valid URI/DID-shaped
- *       context-graph IDs (e.g. `https://example.com/a..b`,
- *       `urn:cg:v1..2`) which never resolve to a parent-directory
- *       segment.  The segment-aware check below is the only check the
- *       OS / URL resolver actually treats as a traversal vector.
- *
- *   - r3146360288 / `sanitizeRevertMessage` —
- *       The original sanitiser only redacted `data="0x…"`. Providers
+ *   - `sanitizeRevertMessage` —
+ *       The earlier sanitiser only redacted `data="0x…"`. Providers
  *       (ethers, viem, hardhat) also serialise revert blobs as
  *       `data=0x…`, `errorData="0x…"`, `errorData=0x…`, and JSON
- *       `"data":"0x…"`. Any of those slipping through the sanitiser
- *       leaks a custom-error selector to operators (PR #229 CLI-9
- *       leak class).
+ *       `"data":"0x…"`. Any of those slipping through the
+ *       sanitiser leaks a custom-error selector to operators
+ *       (CLI-9 leak class).
  *
- * These tests pin the contract at the HELPER level so we don't depend
- * on a full daemon spin-up to detect a regression. The integration-level
- * sibling assertions live in `daemon-http-behavior-extra.test.ts`
- * (CLI-9, CLI-16 blocks) and continue to exercise the wired-up daemon.
+ * These tests pin the contract at the HELPER level so we don't
+ * depend on a full daemon spin-up to detect a regression. The
+ * integration-level sibling assertions live in
+ * `daemon-http-behavior-extra.test.ts` (CLI-9, CLI-16 blocks) and
+ * continue to exercise the wired-up daemon.
  */
 import { describe, it, expect } from 'vitest';
 import { ServerResponse } from 'node:http';
@@ -52,7 +52,7 @@ describe('isValidContextGraphId — segment-aware path-traversal rejection', () 
     });
   }
 
-  // Bot review r3146360283: these URI / DID shaped IDs contain `..`
+  // these URI / DID shaped IDs contain `..`
   // INSIDE a single segment but never resolve to a parent dir. The
   // pre-fix sanitiser broke them. They must validate as legitimate
   // context-graph IDs.
@@ -98,7 +98,7 @@ describe('sanitizeRevertMessage — redacts every revert-blob shape recognised b
     expect(out).not.toContain('0xdeadbeef');
   });
 
-  // PR #229 r3146360288 — these ALL leaked pre-fix.
+  // these ALL leaked pre-fix.
   it('redacts `data=0x…` (unquoted, `=`)', () => {
     const out = sanitizeRevertMessage('CALL_EXCEPTION: data=0xabcdef0123');
     expect(out).toContain('data=<redacted>');
@@ -156,7 +156,6 @@ describe('sanitizeRevertMessage — redacts every revert-blob shape recognised b
 });
 
 /**
- * PR #229 CodeQL js/stack-trace-exposure (http-utils.ts:206) —
  * `jsonResponse` is the single egress point for every JSON HTTP body the
  * daemon writes. Forty-plus call sites pass `{ error: err.message }`
  * straight to it, and Node.js / ethers / libp2p errors regularly embed
@@ -250,7 +249,7 @@ describe('jsonResponse — stack-trace / path scrubbing on egress', () => {
     expect(body.count).toBe('42');
   });
 
-  // PR #229 CodeQL js/redos (alerts 56 + 57): the path-redaction regex
+  // the path-redaction regex
   // used `(?:[^\\s()]+\\/)+[^\\s()]+`, where the inner class included
   // the `/` separator. That made the match ambiguous and produced
   // catastrophic backtracking on adversarial inputs starting with `/`
@@ -297,7 +296,7 @@ describe('jsonResponse — stack-trace / path scrubbing on egress', () => {
     });
   });
 
-  // PR #229 CodeQL js/stack-trace-exposure (alert 47): the egress
+  // the egress
   // barrier in `jsonResponse` does a final-mile `String.replace` on the
   // serialised JSON body to strip any `\n   at <fn> (...)` continuation
   // lines that escaped the structural scrub above (e.g. because they
@@ -329,7 +328,7 @@ describe('jsonResponse — stack-trace / path scrubbing on egress', () => {
       expect(body).toEqual({ ok: true, msg: 'all systems nominal' });
     });
 
-    // PR #229 bot review (r3146733046, http-utils.ts:206/307). The
+    // The
     // CodeQL js/stack-trace-exposure alert remained against
     // `res.end(body)` because the prior egress regex only matched the
     // JSON-escaped continuation form `\n   at <fn>`. CodeQL's taint
@@ -376,7 +375,7 @@ describe('jsonResponse — stack-trace / path scrubbing on egress', () => {
     });
 
     // -----------------------------------------------------------
-    // PR #229 bot review (r3148... — http-utils.ts:328). The earlier
+    // — http-utils.ts:328). The earlier
     // expanded egress regex `\s+at\s+(?:[^\s()"]+\s+)?\([^)"\n]+\)`
     // matched any `(stuff)` after an `at <word>`, so a perfectly
     // legitimate body like
@@ -389,7 +388,7 @@ describe('jsonResponse — stack-trace / path scrubbing on egress', () => {
     // negative behaviour so the regex cannot drift back to the loose
     // form that ate user data.
     // -----------------------------------------------------------
-    it('r30-6: preserves "at WORD (PARENS)" payloads that are NOT stack frames (the original "meet at lunch (cafeteria)" lure)', () => {
+    it('preserves "at WORD (PARENS)" payloads that are NOT stack frames (the original "meet at lunch (cafeteria)" lure)', () => {
       const { body } = captureJsonResponse(200, {
         ok: true,
         text: 'meet at lunch (cafeteria)',
@@ -397,7 +396,7 @@ describe('jsonResponse — stack-trace / path scrubbing on egress', () => {
       expect(body.text).toBe('meet at lunch (cafeteria)');
     });
 
-    it('r30-6: preserves the bot\'s exact reproduction case verbatim', () => {
+    it('preserves the bot\'s exact reproduction case verbatim', () => {
       // The bot showed `jsonResponse(res, 200, { text: "meet at lunch (cafeteria)" })`
       // collapsing to `{"text":"meet"}`. Pin the exact shape so any
       // future regression of this regex tightening is caught.
@@ -406,7 +405,7 @@ describe('jsonResponse — stack-trace / path scrubbing on egress', () => {
       expect(body).toEqual(data);
     });
 
-    it('r30-6: preserves a wide variety of "at <word> (<word>)" prose shapes', () => {
+    it('preserves a wide variety of "at <word> (<word>)" prose shapes', () => {
       const phrases = [
         'meet at lunch (cafeteria)',
         'served at table (window seat)',
@@ -426,7 +425,7 @@ describe('jsonResponse — stack-trace / path scrubbing on egress', () => {
       }
     });
 
-    it('r30-6: STILL strips a real v8-shaped frame `at fn (file.js:LINE:COL)` from non-error keys (positive case)', () => {
+    it('STILL strips a real v8-shaped frame `at fn (file.js:LINE:COL)` from non-error keys (positive case)', () => {
       // Make sure tightening did NOT regress the actual stack-frame
       // stripping responsibility — the `:NUM:NUM` suffix branch must
       // continue to fire.
@@ -441,7 +440,7 @@ describe('jsonResponse — stack-trace / path scrubbing on egress', () => {
       expect(body.payload.context).toContain('trailing');
     });
 
-    it('r30-6: STILL strips `at <anonymous>` and `at native` v8 sentinels', () => {
+    it('STILL strips `at <anonymous>` and `at native` v8 sentinels', () => {
       // Anonymous and native frames have no `:LINE:COL`, so the
       // tightened regex must include them as explicit alternatives
       // (otherwise tightening would have leaked anonymous frames).
@@ -455,7 +454,7 @@ describe('jsonResponse — stack-trace / path scrubbing on egress', () => {
       }
     });
 
-    it('r30-6: tightening does not introduce ReDoS on adversarial "at WORD (...)" inputs', () => {
+    it('tightening does not introduce ReDoS on adversarial "at WORD (...)" inputs', () => {
       // Belt-and-suspenders: the new regex has a non-greedy `*?` and
       // anchors. Hammer it with a long input that almost matches but
       // doesn't, to make sure backtracking stays linear.
@@ -488,7 +487,7 @@ describe('jsonResponse — stack-trace / path scrubbing on egress', () => {
     });
 
     // -----------------------------------------------------------
-    // PR #229 bot review (r31-10 — http-utils.ts:343). The 3-step
+    // http-utils.ts:343). The 3-step
     // last-mile regex chain (the .replace(/\\n\s+at .../g, "") /
     // expanded `at … (…)` / standalone `at file:NUM:NUM` cleanup
     // pass) used to run on EVERY response body unconditionally.
@@ -507,7 +506,7 @@ describe('jsonResponse — stack-trace / path scrubbing on egress', () => {
     // -----------------------------------------------------------
     it('[r31-10] success (200) body containing v8-shaped frames round-trips VERBATIM (CodeQL pacifier must NOT corrupt successful payloads)', () => {
       // The bot's exact concern: a 200 response with literal text
-      // containing v8 frame syntax. Pre-r31-10 the third
+      // containing v8 frame syntax. the third
       // last-mile regex (`/\s+at\s+[^\s()":]+:\d+:\d+/g`) would
       // have stripped " at fn:10:5" from the title — silently
       // mutating the user's data.

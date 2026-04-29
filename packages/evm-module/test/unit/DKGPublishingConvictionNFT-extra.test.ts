@@ -1,7 +1,7 @@
 /**
  * DKGPublishingConvictionNFT-extra.test.ts — audit coverage.
  *
- * Covers findings (see .test-audit/BUGS_FOUND.md, evm-module):
+ * Covers findings (see .test-audit/, evm-module):
  *   - E-6 (HIGH, SPEC-GAP): both `topUp` and `coverPublishingCost` contain
  *     an `AccountExpired` revert when the current epoch crosses the account
  *     lifetime (`currentEpoch >= expiresAtEpoch`). Neither branch was

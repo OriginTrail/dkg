@@ -6,7 +6,7 @@
  * and reject envelopes whose signer is not a member of the context graph.
  *
  * Spec: §08_PROTOCOL_WIRE — every GossipSub message MUST be wrapped in a
- * signed GossipEnvelope. See BUGS_FOUND.md A-15.
+ * signed GossipEnvelope.
  */
 import { ethers } from 'ethers';
 import {
@@ -64,7 +64,7 @@ export function buildSignedGossipEnvelope(p: SignEnvelopeParams): Uint8Array {
  * closes the hole where a forged/tampered envelope would otherwise fall
  * through to the "legacy raw bytes" fallback path in callers and reach the
  * publish/SWM/update/finalization handlers as if it were authenticated
- * (bot review C1/E1).
+ * .
  *
  * If a caller legitimately needs to inspect the envelope bytes after a bad
  * signature (e.g. for structured telemetry), it can call
@@ -121,7 +121,7 @@ export function tryUnwrapSignedEnvelope(
  * Classification helper used by ingress logging/metrics to distinguish
  * "legacy raw" from "tampered" without relaxing the dispatch rule.
  *
- * PR #229 bot review r3131820480 (signed-gossip.ts:136): pre-fix this
+ * pre-fix this
  * helper classified parsed envelopes with a wrong `version` (or empty
  * signature/payload) as `'raw'`. With `strictGossipEnvelope` disabled
  * for rolling upgrades, the dispatcher would then accept those bytes
@@ -175,7 +175,7 @@ export function classifyGossipBytes(data: Uint8Array): 'raw' | 'verified' | 'for
 /**
  * Sign the body of a `PublishRequestMsg` so the existing R/Vs signature
  * fields carry a real EIP-2098 compact signature receivers can verify.
- * Required by BUGS_FOUND.md A-15: the gossip-signing-extra static-scan
+ * Required by
  * forbids any source-line containing the empty-signature pattern.
  */
 export interface PublishRequestSig {

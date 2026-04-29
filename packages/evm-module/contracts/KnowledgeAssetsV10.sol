@@ -145,14 +145,14 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
     /// @notice Legacy V8/V9 batch storage. KAV10 invokes
     /// `emitV10KnowledgeBatchCreated` here so V10-aware indexers can
     /// subscribe to a batch-shaped audit record from the KAS address
-    /// for every V10 publish (BUGS_FOUND.md#E-9). The emitted event is
-    /// `V10KnowledgeBatchEmitted`, NOT the legacy `KnowledgeBatchCreated`
-    /// — see bot review PR #229 (post-round-5) and the comment in
+    /// for every V10 publish. The emitted event is
+    /// `V10KnowledgeBatchEmitted`, NOT the legacy
+    /// `KnowledgeBatchCreated` — see the comment in
     /// `KnowledgeAssetsStorage.sol` for why: reusing the legacy event
-    /// would trick V8/V9 indexers into calling legacy getters that have
-    /// no V10 data. Resolved best-effort in `initialize` — if the legacy
-    /// storage is not Hub-registered the shim emit is silently skipped
-    /// (graceful degrade for V10-only deploys).
+    /// would trick V8/V9 indexers into calling legacy getters that
+    /// have no V10 data. Resolved best-effort in `initialize` — if
+    /// the legacy storage is not Hub-registered the shim emit is
+    /// silently skipped (graceful degrade for V10-only deploys).
     KnowledgeAssetsStorage public knowledgeAssetsStorage;
     Chronos public chronos;
     IERC20 public tokenContract;
@@ -175,8 +175,8 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
     /// batch-shaped audit emit on the legacy storage via
     /// `KnowledgeAssetsStorage.emitV10KnowledgeBatchCreated`, which now
     /// emits `V10KnowledgeBatchEmitted` (NOT `KnowledgeBatchCreated`)
-    /// so V8/V9 indexers are not fooled into calling legacy getters for
-    /// data that lives only in V10 (BUGS_FOUND.md#E-9).
+    /// so V8/V9 indexers are not fooled into calling legacy getters
+    /// for data that lives only in V10.
     event KnowledgeBatchCreated(
         uint256 indexed batchId,
         uint256 contextGraphId,
@@ -193,10 +193,10 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
     error ZeroAddressDependency(string name);
     error ZeroContextGraphId();
     error ZeroEpochs();
-    /// @dev PR #229 bot review round 9 (KAV10:510): an otherwise valid
-    /// publish with `knowledgeAssetsAmount == 0` would overflow
-    /// `kcId + 0 - 1` when projecting the legacy KAS shim range. Reject
-    /// the zero case explicitly at the entry point so the caller sees a
+    /// @dev An otherwise valid publish with
+    /// `knowledgeAssetsAmount == 0` would overflow `kcId + 0 - 1`
+    /// when projecting the legacy KAS shim range. Reject the zero
+    /// case explicitly at the entry point so the caller sees a
     /// deterministic custom error instead of a generic panic.
     error ZeroKnowledgeAssetsAmount();
 
@@ -234,7 +234,7 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
         // Legacy V8/V9 batch storage — best-effort resolve so V10-only
         // deploys don't fail initialize. If it IS deployed, KAV10 will
         // dual-emit `KnowledgeBatchCreated` from there for indexer
-        // symmetry (BUGS_FOUND.md#E-9). Hub.getAssetStorageAddress
+        // symmetry (. Hub.getAssetStorageAddress
         // reverts `ContractDoesNotExist` when the key is missing, so the
         // lookup is wrapped in try/catch to allow graceful degradation.
         try hub.getAssetStorageAddress("KnowledgeAssetsStorage") returns (address kasAddr) {
@@ -421,7 +421,7 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
         // Decision #3: contextGraphId == 0 is forbidden. No legacy path.
         if (p.contextGraphId == 0) revert ZeroContextGraphId();
 
-        // PR #229 bot review round 9 (KAV10:510): reject zero-asset
+        // reject zero-asset
         // publishes BEFORE any state mutation or child-contract call so
         // the legacy KAS shim range computation (`kcId + N - 1`) can't
         // underflow. A publish with no assets carries no data anyway —
@@ -495,19 +495,19 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
             p.isImmutable
         );
         if (address(knowledgeAssetsStorage) != address(0)) {
-            // E-9 / bot review: legacy KnowledgeBatchCreated has a (startKAId,
-            // endKAId) range. KAV10 does NOT mint into the legacy KAS id space,
-            // so we emit a synthetic but INTERNALLY CONSISTENT range — the
-            // previous implementation hard-coded startKAId == endKAId == kcId
-            // regardless of knowledgeAssetsAmount, which tells pre-V10 indexers
-            // that every V10 batch contains exactly one KA even when it has
-            // N > 1. We now emit [kcId, kcId + N − 1] so the endKAId − startKAId
+            // E-9: legacy KnowledgeBatchCreated has a (startKAId, endKAId)
+            // range. KAV10 does NOT mint into the legacy KAS id space, so
+            // we emit a synthetic but INTERNALLY CONSISTENT range — the
+            // earlier implementation hard-coded startKAId == endKAId == kcId
+            // regardless of knowledgeAssetsAmount, which tells pre-V10
+            // indexers that every V10 batch contains exactly one KA even
+            // when it has N > 1. We now emit [kcId, kcId + N − 1] so the
+            // endKAId − startKAId
             // + 1 == knowledgeAssetsAmount invariant holds. Range IDs remain
             // synthetic (they live in KCS's id space, not KAS's) — legacy
             // consumers that need real KAS-space IDs must continue to read
             // from V9 publishes. The canonical, topic-unique V10 event is the
             // one emitted above from KAV10 itself.
-            // PR #229 bot review (r3146974254, KnowledgeAssetsV10.sol:510).
             // The shim projects V10 values into LEGACY widths
             // (kcId/startKAId/endKAId → uint64, byteSize → uint64,
             // knowledgeAssetsAmount → uint32). Once a real V10 publish
@@ -534,7 +534,7 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
             if (legacyShimSafe) {
                 uint64 startKAId = uint64(kcId);
                 uint64 endKAId = uint64(endKAIdRaw);
-                // PR #229 bot review round 9 (KAV10:512): during a rolling
+                // during a rolling
                 // upgrade the Hub-registered `KnowledgeAssetsStorage` slot may
                 // still point at a legacy V8/V9 KAS that predates
                 // `emitV10KnowledgeBatchCreated`. A direct call would hit an

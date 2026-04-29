@@ -33,7 +33,7 @@ export class FinalizationHandler {
     data: Uint8Array,
     contextGraphId: string,
     /**
-     * r23-4 (PR #229 bot review round 23): EVM address recovered from
+     * r23-4: EVM address recovered from
      * the outer GossipEnvelope signature. When present, MUST equal the
      * inner `msg.publisherAddress`; otherwise a peer with a legitimate
      * wallet could wrap a forged finalization claiming another
@@ -55,7 +55,7 @@ export class FinalizationHandler {
         return;
       }
 
-      // r23-4: reject forged-attribution finalizations before chain RPC.
+      // reject forged-attribution finalizations before chain RPC.
       if (envelopeSigner && msg.publisherAddress) {
         const claimed = msg.publisherAddress.toLowerCase();
         const recovered = envelopeSigner.toLowerCase();

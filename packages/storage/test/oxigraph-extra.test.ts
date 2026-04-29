@@ -3,7 +3,7 @@
  * runs against a real in-process Oxigraph engine (+ real N-Quads file
  * for durability).
  *
- * Findings covered (see .test-audit/BUGS_FOUND.md "packages/storage"):
+ * Findings covered (see .test-audit/
  *
  *   ST-5  oxigraph-persistent durability — close and re-open from the
  *          same path must recover every quad.
@@ -92,7 +92,7 @@ describe('oxigraph-persistent — durability [ST-5]', () => {
     ).rejects.toThrow(/oxigraph-persistent requires options\.path/);
   });
 
-  // PR #229 M-follow-up (bot review): the numeric-subtype side-table used
+  // the numeric-subtype side-table used
   // to live only in memory, so `oxigraph-persistent` lost every publisher-
   // declared `xsd:long` / `xsd:int` / `xsd:short` / `xsd:byte` on restart
   // and `restoreOriginalDatatype*()` collapsed them back to Oxigraph's
@@ -131,7 +131,7 @@ describe('oxigraph-persistent — durability [ST-5]', () => {
     }
   });
 
-  // PR #229 bot review (r3146902138, oxigraph.ts:157). Pre-fix the
+  // Pre-fix the
   // numeric-datatype sidecar was hydrated unconditionally — even when
   // the primary N-Quads dump was missing, empty, or corrupt. That left
   // stale subtype metadata in `originalNumericDatatype` while the store
@@ -146,7 +146,7 @@ describe('oxigraph-persistent — durability [ST-5]', () => {
   //   4. Read it back. The literal MUST come back as
   //      `"…"^^<xsd:integer>`, NOT silently re-typed to the stale
   //      `xsd:long` from the surviving sidecar.
-  it('PR #229 bugbot: sidecar is NOT hydrated when the primary dump is missing (no stale subtype leak)', async () => {
+  it('sidecar is NOT hydrated when the primary dump is missing (no stale subtype leak)', async () => {
     try {
       const LONG = 'http://www.w3.org/2001/XMLSchema#long';
       const INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
@@ -195,7 +195,7 @@ describe('oxigraph-persistent — durability [ST-5]', () => {
 
   // Companion regression: an EMPTY primary dump must also skip the
   // sidecar (treats empty-but-present the same as missing).
-  it('PR #229 bugbot: sidecar is NOT hydrated when the primary dump is present-but-empty', async () => {
+  it('sidecar is NOT hydrated when the primary dump is present-but-empty', async () => {
     try {
       const LONG = 'http://www.w3.org/2001/XMLSchema#long';
       const INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
@@ -485,7 +485,7 @@ describe('N-Quads typed-literal round-trip — regression for issue #34 [ST-12]'
   // `packages/publisher/src/dkg-publisher.ts#parseRdfInt`, which enumerates
   // xsd:integer / xsd:long explicitly) can mis-parse or drop values.
   // This is the spec-drift that issue #34 tracks — see
-  // BUGS_FOUND.md ST-12 / DUP #34. The test stays RED to keep the bug
+  // . The test stays RED to keep the bug
   // visible until the storage layer either (a) stops normalising or
   // (b) documents the normalisation and callers are updated.
 
@@ -562,7 +562,7 @@ describe('N-Quads typed-literal round-trip — regression for issue #34 [ST-12]'
 });
 
 // =======================================================================
-// PR #229 bot review r31-8 (oxigraph.ts:48): per-position numeric-
+// per-position numeric-
 // subtype conflict detection. The previous side-table happily let a
 // later insert at the SAME `(s, p, value, g)` overwrite a different
 // declared subtype, so a SELECT readback silently returned the
@@ -692,11 +692,11 @@ describe('OxigraphStore — per-position numeric-subtype conflict (r31-8 regress
 });
 
 // =======================================================================
-// PR #229 bot review (r31-13 — oxigraph.ts:169, KK3b): when the last
+// oxigraph.ts:169, KK3b): when the last
 // per-key conflict marker for a lexeme is evicted (because the
 // contributing quad was deleted, the graph dropped, or the subject
 // prefix wiped) the COMPANION lexeme-level marker MUST also be
-// recomputed against ground truth. Pre-r31-13 the lexeme marker was
+// recomputed against ground truth. the lexeme marker was
 // kept "pessimistically" forever, so once `"V"` had a transient
 // conflict at any position EVERY future write of any
 // `"V"^^xsd:<numeric>` literal across the entire store fell back to

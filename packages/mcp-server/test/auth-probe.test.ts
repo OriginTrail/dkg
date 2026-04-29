@@ -1,11 +1,10 @@
 /**
- * mcp-server / auth-probe — behavioural coverage for the two probes that
- * back the `mcp_auth status` tool output.
+ * mcp-server / auth-probe — behavioural coverage for the two probes
+ * that back the `mcp_auth status` tool output.
  *
- * Bot review on PR #229 flagged that the original single probe hit
- * `/api/status` (a public-allowlist endpoint on the DKG daemon), so
- * `mcp_auth status` could report OK for an invalid credential. We now
- * expose two independent probes:
+ * The earlier single probe hit `/api/status` (a public-allowlist
+ * endpoint on the DKG daemon), so `mcp_auth status` could report OK
+ * for an invalid credential. We now expose two independent probes:
  *
  *   - probeStatus → hits /api/status (liveness only)
  *   - probeAuth   → hits /api/agents (auth-gated; fails closed if the
@@ -111,7 +110,7 @@ describe('auth-probe — probeAuth (bearer credential validation)', () => {
     expect(r.code).toBe(401);
   });
 
-  // PR #229 bot review round 7 (auth-probe.ts:69). An empty token is
+  // An empty token is
   // NOT a hard failure: if the daemon runs with `auth.enabled=false`
   // the unauthenticated probe returns 200 and every MCP request would
   // succeed. We report that as `authDisabled` so the host can render
@@ -155,9 +154,9 @@ describe('auth-probe — probeAuth (bearer credential validation)', () => {
   });
 
   it('hits an auth-GATED path (/api/agents), NOT /api/status (the public allowlist)', async () => {
-    // The whole point of the PR #229 bot fix: probing /api/status would
-    // succeed even with a broken credential. Pin the path so a future
-    // refactor that reverts to /api/status fails here.
+    // Probing /api/status would succeed even with a broken
+    // credential. Pin the path so a future refactor that reverts to
+    // /api/status fails here.
     await probeAuth(`http://127.0.0.1:${ctx.port}`, GOOD_TOKEN);
     const paths = ctx.seen.map((r) => r.url);
     expect(paths).toContain('/api/agents');

@@ -163,8 +163,8 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # ST-1 (BUGS_FOUND.md packages/storage): the BlazegraphStore parity
-    # gate in adapter-parity-extra.test.ts intentionally fails red when
+    # ST-1: the BlazegraphStore parity gate in
+    # adapter-parity-extra.test.ts intentionally fails red when
     # `BLAZEGRAPH_URL` is missing so a green pass cannot lie about
     # parity coverage. We boot a real `lyrasis/blazegraph` service
     # container (NanoSparqlServer on :9999) so the parity test
@@ -223,13 +223,13 @@ jobs:
         # surprising results (deleteByPattern over-deletes because all
         # triples land in the default graph regardless of intent).
         #
-        # PR #229 bot review (r31-10 — ci.yml:256). We provision TWO
-        # quads-mode namespaces, not one. Vitest runs files in parallel
-        # by default, and `storage.test.ts` issues `DROP ALL` before
-        # every Blazegraph conformance test in its suite — pointing
-        # `adapter-parity-extra.test.ts` at the SAME namespace meant
-        # the conformance suite's `DROP ALL` could fire mid-parity and
-        # wipe its inserted fixture, making the parity lane flaky.
+        # We provision TWO quads-mode namespaces, not one. Vitest runs
+        # files in parallel by default, and `storage.test.ts` issues
+        # `DROP ALL` before every Blazegraph conformance test in its
+        # suite — pointing `adapter-parity-extra.test.ts` at the SAME
+        # namespace meant the conformance suite's `DROP ALL` could
+        # fire mid-parity and wipe its inserted fixture, making the
+        # parity lane flaky.
         # Isolating per file (not per worker) is sufficient: vitest
         # serialises tests WITHIN a file, so the conformance suite's
         # `DROP ALL` between its own tests is fine, and the parity

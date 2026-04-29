@@ -830,7 +830,7 @@ export class EVMChainAdapter implements ChainAdapter {
           }
         }
 
-        // Bot review H1 follow-up: the previous revision ALSO subscribed to
+        // the previous revision ALSO subscribed to
         // KAV10's OWN KnowledgeBatchCreated(batchId, contextGraphId, amount,
         // byteSize, startEpoch, endEpoch, tokenAmount, isImmutable) and
         // yielded a normalized event with `merkleRoot: undefined` and
@@ -846,7 +846,7 @@ export class EVMChainAdapter implements ChainAdapter {
         // startId/endId), so re-emitting from KAV10 was both redundant and
         // broken.
         //
-        // Bot review PR #229 (post-round-5): V10 publishes now surface a
+        // V10 publishes now surface a
         // batch-shaped audit record via `V10KnowledgeBatchEmitted`
         // (distinct topic from legacy `KnowledgeBatchCreated`) so this
         // subscription path does NOT pick them up. Legacy V8/V9 indexers
@@ -857,7 +857,7 @@ export class EVMChainAdapter implements ChainAdapter {
         // batch-shaped projection.
       }
 
-      // PR #229 bot review round 10 (evm-adapter.ts:815). The PR
+      // The PR
       // introduced `V10KnowledgeBatchEmitted` on KASStorage (distinct
       // from legacy `KnowledgeBatchCreated`) and explicitly tells
       // V10-aware consumers to subscribe to this topic directly. The
@@ -1789,7 +1789,7 @@ export class EVMChainAdapter implements ChainAdapter {
       throw new Error('DKGStakingConvictionNFT contract not deployed.');
     }
 
-    // PR #229 follow-up: TRAC flows
+    // TRAC flows
     //   user --(token.transferFrom by StakingV10)--> StakingStorage
     // i.e. the ERC-20 caller in the inner `token.transferFrom(staker,
     // stakingStorage, amount)` is `StakingV10`, NOT the NFT wrapper.
@@ -1799,7 +1799,7 @@ export class EVMChainAdapter implements ChainAdapter {
     // `require(false)` because the staking-conviction tests look at
     // the outer `eth_estimateGas`). Approve `StakingV10` directly so
     // its `transferFrom` succeeds.
-    // PR #229 bot review (r3147347... — evm-adapter.ts:1809).
+    // — evm-adapter.ts:1809).
     // Pre-fix: `resolveContract('StakingV10')` failure silently set
     // `stakingV10 = undefined`, which made the allowance update
     // condition `amount > 0n && stakingV10` false. The adapter
@@ -2025,7 +2025,7 @@ export class EVMChainAdapter implements ChainAdapter {
    * Throws on contract-level errors so callers can decide whether to fall
    * back to the global minimum or fail loud.
    *
-   * Spec §06_PUBLISH / BUGS_FOUND.md A-5.
+   * Spec §06_PUBLISH /.
    */
   async getContextGraphRequiredSignatures(contextGraphId: bigint): Promise<number> {
     await this.init();

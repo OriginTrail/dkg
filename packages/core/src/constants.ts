@@ -121,7 +121,7 @@ export function contextGraphSubGraphPrivateUri(contextGraphId: string, subGraphN
 export function validateContextGraphId(id: string): { valid: boolean; reason?: string } {
   if (!id || id.length === 0) return { valid: false, reason: 'Context graph ID cannot be empty' };
   if (id.length > 256) return { valid: false, reason: 'Context graph ID exceeds 256 characters' };
-  // CLI-16 (BUGS_FOUND.md dup #87) + PR #229 r3146360283 follow-up:
+  // CLI-16 (
   // reject path-traversal patterns at the segment level only. The
   // character whitelist below allows `.` and `/` because URNs / DIDs
   // / URLs legitimately use them — including identifiers like

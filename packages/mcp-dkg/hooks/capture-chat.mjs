@@ -751,7 +751,7 @@ export function buildPerTurnReminder(sessionKey) {
 // covers the most common case (agent referencing existing entities).
 // Agent-emitted richer triples (chat:examines / chat:proposes / etc.)
 // remain additive on top.
-// PR #229 CodeQL js/redos (high-severity, error): the previous
+// the previous
 //   /urn:dkg:[\w@:%./-]+(?:\/[\w@:%./-]+)*[\w%]/g
 // nested two character classes that BOTH already accepted `/`. That
 // gives the engine multiple ways to partition the input across the

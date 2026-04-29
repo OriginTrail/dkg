@@ -223,7 +223,7 @@ export interface V10PublishDirectParams {
    * broadcast; adapters that cannot provide tx-broadcast granularity
    * (e.g. `NoChainAdapter`) SHOULD NOT invoke it at all.
    *
-   * See P-1 / P-1.2 in BUGS_FOUND.md and the `chain:writeahead` phase
+   * See P-1 / P-1.2 in
    * in `packages/publisher/src/dkg-publisher.ts`.
    *
    * Return type is `Promise<void> | void` so async WAL writes
@@ -393,7 +393,7 @@ export interface ChainAdapter {
    * Spec §06_PUBLISH: every publish to a CG must collect at least
    * `requiredSignatures` participant ACKs before it can confirm on chain.
    * This is per-CG governance and supersedes the global ParametersStorage
-   * minimum, which is only the network-wide floor. See BUGS_FOUND.md A-5.
+   * minimum, which is only the network-wide floor.
    */
   getContextGraphRequiredSignatures?(contextGraphId: bigint): Promise<number>;
 

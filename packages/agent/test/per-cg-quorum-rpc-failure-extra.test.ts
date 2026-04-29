@@ -1,7 +1,8 @@
 /**
- * PR #229 bot review (r31-4 — packages/agent/src/dkg-agent.ts:2701).
+ * Anti-drift structural guards for the per-CG `requiredSignatures`
+ * resolution path in `dkg-agent.ts`.
  *
- * The pre-r31-4 implementation wrapped BOTH the `BigInt(onChainId)`
+ * An earlier implementation wrapped BOTH the `BigInt(onChainId)`
  * parse AND the chain-RPC call to `getContextGraphRequiredSignatures()`
  * in a single catch block:
  *
@@ -17,15 +18,15 @@
  *
  * The catch block was supposed to swallow the legitimate "mock-only
  * graph has a non-numeric id" case (the BigInt parse throws a
- * `SyntaxError`). But because the await on the RPC call lives inside
+ * `SyntaxError`). But because the await on the RPC call lived inside
  * the same try, ANY transient chain-RPC failure (provider timeout,
  * contract revert, RPC node 502) was also swallowed silently — and
  * `perCgRequiredSignatures` quietly stayed `undefined`. The publish
- * path then fell back to the global `ParametersStorage.minimumRequiredSignatures`
- * and could confirm an M-of-N context graph with too few ACKs. That
- * is the EXACT regression r26-1 was supposed to prevent.
+ * path then fell back to the global
+ * `ParametersStorage.minimumRequiredSignatures` and could confirm
+ * an M-of-N context graph with too few ACKs.
  *
- * The r31-4 fix splits the two failure modes:
+ * The current implementation splits the two failure modes:
  *   (a) BigInt parse failure → mock-only on-chain id, skip the gate;
  *   (b) RPC / contract failure → propagate so the publish fails
  *       loudly instead of silently downgrading the quorum.
@@ -36,16 +37,16 @@
  *      that wraps both the `BigInt(onChainId)` parse AND the
  *      `await this.chain.getContextGraphRequiredSignatures(...)`
  *      RPC call.
- *   2. Source-level: the RPC call MUST live OUTSIDE the catch block,
- *      so RPC errors propagate to the caller.
+ *   2. Source-level: the RPC call MUST live OUTSIDE the catch
+ *      block, so RPC errors propagate to the caller.
  *   3. Both call sites (the `_publish()` direct path AND the
  *      `publishFromSharedMemory()` SWM path) get the same treatment.
  *
  * No chain spin-up is needed — these are structural anti-drift
  * guards that read the source file directly. Behavioural coverage
  * for the per-CG quorum gate itself lives in
- * `per-cg-quorum-extra.test.ts` (real chain, real publisher) and is
- * the source of truth for the "tentative vs confirmed" outcome.
+ * `per-cg-quorum-extra.test.ts` (real chain, real publisher) and
+ * is the source of truth for the "tentative vs confirmed" outcome.
  */
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -56,11 +57,11 @@ const here = dirname(fileURLToPath(import.meta.url));
 const dkgAgentPath = resolve(here, '..', 'src', 'dkg-agent.ts');
 const src = readFileSync(dkgAgentPath, 'utf-8');
 
-describe('[r31-4] per-CG `requiredSignatures` resolution: chain-RPC errors must propagate (NOT be silently swallowed by the BigInt-parse catch)', () => {
-  it('the catch block must NOT wrap the `await this.chain.getContextGraphRequiredSignatures(...)` RPC call (regression guard for the r26-1 swallow-all)', () => {
+describe('per-CG `requiredSignatures` resolution: chain-RPC errors must propagate (NOT be silently swallowed by the BigInt-parse catch)', () => {
+  it('the catch block must NOT wrap the `await this.chain.getContextGraphRequiredSignatures(...)` RPC call (regression guard against swallow-all)', () => {
     // The legacy shape used `const id = BigInt(onChainId)` and then
     // `await this.chain.getContextGraphRequiredSignatures(id)` ALL
-    // inside the same `try { ... } catch` block. The r31-4 fix
+    // inside the same `try { ... } catch` block. the
     // renames the parsed value to `candidate` and moves the await
     // OUTSIDE the catch (gated on a separate `parsedId !== null`
     // check). So if we find `const id = BigInt(onChainId)` paired
@@ -128,22 +129,17 @@ describe('[r31-4] per-CG `requiredSignatures` resolution: chain-RPC errors must 
     }
   });
 
-  it('both publish call sites (`_publish` direct path AND `publishFromSharedMemory` SWM path) get the r31-4 split — anti-drift across BOTH paths', () => {
-    // The bot explicitly noted "the same pattern appears in the
-    // shared-memory publish path below". The fix MUST land in both
-    // spots — otherwise an SWM publish could still silently downgrade
-    // the quorum even though the direct publish does not.
+  it('both publish call sites (`_publish` direct path AND `publishFromSharedMemory` SWM path) get the split — anti-drift across BOTH paths', () => {
+    // The same pattern appears in both publish paths. The fix MUST
+    // land in both spots — otherwise an SWM publish could still
+    // silently downgrade the quorum even though the direct publish
+    // does not.
     //
-    // Both paths now use the `parsedId` discriminator (the new shape
-    // post-r31-4), so we count the discriminator occurrences. Two
-    // sites = both paths fixed; <2 means one path drifted back to
-    // the legacy catch-all.
+    // Both paths use the `parsedId` discriminator, so we count the
+    // discriminator occurrences. Two sites = both paths fixed; <2
+    // means one path drifted back to the legacy catch-all.
     const parsedIdGates = src.match(/if\s*\(\s*parsedId\s*!==\s*null\s*\)/g) ?? [];
     expect(parsedIdGates.length).toBeGreaterThanOrEqual(2);
-
-    // Both r31-4 fix-comment markers must be present (one per path).
-    const r314Markers = src.match(/r31-4\s+—\s+dkg-agent\.ts:2701/g) ?? [];
-    expect(r314Markers.length).toBeGreaterThanOrEqual(2);
   });
 
   it('no `catch` block in the per-CG-quorum resolution swallows ALL errors silently (each catch must have a narrow purpose)', () => {

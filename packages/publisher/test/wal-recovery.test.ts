@@ -1,5 +1,5 @@
 /**
- * publisher / WAL recovery — PR #229 bot review round 8
+ * publisher / WAL recovery
  * ------------------------------------------------------------------
  * Round 6 added a synchronous fsync'd write-ahead-log entry BEFORE
  * every on-chain broadcast so the publish intent would survive a
@@ -149,11 +149,11 @@ describe('readWalEntriesSync', () => {
   });
 
   // ─────────────────────────────────────────────────────────────────
-  // PR #229 bot review (r31-10 — dkg-publisher.ts:87).
+  // dkg-publisher.ts:87).
   //
   // `v10ContextGraphId` and `publishDigest` are NEW WAL fields,
   // added AFTER the original r6 fsync-based WAL implementation
-  // shipped. Pre-r31-10 the validator required them unconditionally,
+  // shipped. the validator required them unconditionally,
   // so legacy WAL rows (written by the older publisher build before
   // either field existed) were silently DROPPED on every startup.
   // That defeated the WAL recovery contract on the very upgrade
@@ -189,7 +189,7 @@ describe('readWalEntriesSync', () => {
     }
 
     it('legacy entries WITHOUT v10ContextGraphId/publishDigest are recovered (NOT silently dropped)', async () => {
-      // The bot's exact concern: an undrained pre-r31-10 WAL must
+      // The bot's exact concern: an undrained WAL must
       // still surface its surviving intent on the new build, or
       // crashed-mid-broadcast records vanish on operator upgrade.
       await writeFile(walPath, legacyEntryJson() + '\n', 'utf-8');
@@ -390,7 +390,7 @@ describe('DKGPublisher.findWalEntryByMerkleRoot', () => {
 });
 
 // ---------------------------------------------------------------------------
-// r21-5 (PR #229 bot review, post-v10-rc-merge): the WAL recovery loop now
+// r21-5: the WAL recovery loop now
 // has a real runtime caller. These tests pin the contract that
 // `recoverFromWalByMerkleRoot` is what closes the loop opened in r6/r8 and
 // that `ChainEventPoller.handleBatchCreated` actually invokes it.
@@ -490,14 +490,14 @@ describe('DKGPublisher.recoverFromWalByMerkleRoot (r21-5)', () => {
   });
 
   // ---------------------------------------------------------------------------
-  // PR #229 bot review round 26 (r26-4): if two WAL entries share the same
+  // if two WAL entries share the same
   // `merkleRoot` AND the same publisher, we must refuse auto-recovery rather
   // than silently promoting whichever happens to come first in the journal.
   // Identical content can legitimately produce the same KC merkle root on
   // multiple publish attempts (retries, republishes). Picking the wrong one
   // would leave the real outstanding intent behind or promote the wrong KC.
   // ---------------------------------------------------------------------------
-  it('r26-4: REFUSES auto-recovery and emits `publisher.walRecoveryAmbiguous` when two WAL entries share the same merkleRoot AND publisher', async () => {
+  it('REFUSES auto-recovery and emits `publisher.walRecoveryAmbiguous` when two WAL entries share the same merkleRoot AND publisher', async () => {
     const merkleRoot = '0x' + 'ba'.repeat(32);
     const publisherAddr = '0xcafe000000000000000000000000000000000001';
     const first = makeEntry({
@@ -568,7 +568,7 @@ describe('DKGPublisher.recoverFromWalByMerkleRoot (r21-5)', () => {
   });
 
   // ---------------------------------------------------------------------------
-  // PR #229 bot review (r3147347... — dkg-publisher.ts:888).
+  // — dkg-publisher.ts:888).
   // The PRIVATE helper `promoteTentativeKcByMerkleRoot` (called from the
   // recovery path) used to take `rows[0]` unconditionally. When two
   // tentative KCs in the SAME context graph share the SAME merkleRoot
@@ -580,7 +580,7 @@ describe('DKGPublisher.recoverFromWalByMerkleRoot (r21-5)', () => {
   // is to refuse the promotion and log — letting an explicit follow-up
   // `confirmPublish` (which carries the UAL) reconcile the right one.
   // ---------------------------------------------------------------------------
-  it('r30-2: promoteTentativeKcByMerkleRoot REFUSES to promote when multiple tentative KCs share the same merkleRoot in the same CG', async () => {
+  it('promoteTentativeKcByMerkleRoot REFUSES to promote when multiple tentative KCs share the same merkleRoot in the same CG', async () => {
     // Real OxigraphStore so the SPARQL SELECT actually runs.
     const realStore = new OxigraphStore();
     const cg = 'cg-ambiguous-promote';
@@ -610,7 +610,7 @@ describe('DKGPublisher.recoverFromWalByMerkleRoot (r21-5)', () => {
     // call the WAL recovery path makes. A minimal opCtx shape is
     // sufficient — the helper only uses it for log routing.
     const opCtx = { traceId: 'trace-promote-ambiguous', operation: 'walRecover' } as any;
-    // PR #229 bot review (r3148... — dkg-publisher.ts:813). Helper
+    // — dkg-publisher.ts:813). Helper
     // now returns a discriminated result so the WAL caller can
     // distinguish 'ambiguous' (RETAIN WAL) from 'none' / 'promoted'.
     const promoted = await (publisher as any).promoteTentativeKcByMerkleRoot(
@@ -642,8 +642,8 @@ describe('DKGPublisher.recoverFromWalByMerkleRoot (r21-5)', () => {
   });
 
   // ---------------------------------------------------------------------------
-  // PR #229 bot review (r3148... — dkg-publisher.ts:813).
-  // The earlier r30-2 fix made the helper REFUSE to promote on
+  // — dkg-publisher.ts:813).
+  // The earlier made the helper REFUSE to promote on
   // ambiguity, but the recovery caller still spliced the WAL
   // unconditionally. This regression-pinned both ends together: when
   // two same-merkleRoot retries collide on a single chain `Confirmed`
@@ -651,7 +651,7 @@ describe('DKGPublisher.recoverFromWalByMerkleRoot (r21-5)', () => {
   // `confirmPublish` (which carries the actual UAL) can later
   // reconcile.
   // ---------------------------------------------------------------------------
-  it('r30-4: ambiguous promotion RETAINS the WAL entry instead of severing the recovery record', async () => {
+  it('ambiguous promotion RETAINS the WAL entry instead of severing the recovery record', async () => {
     const contextGraphId = 'cg-r30-4-retain';
     const merkleRootHex = '0x' + '7d'.repeat(32);
     const ualA = 'did:dkg:test/0xa1/1';
@@ -730,7 +730,7 @@ describe('DKGPublisher.recoverFromWalByMerkleRoot (r21-5)', () => {
     expect(observed[0].promotedUal).toBeNull();
   });
 
-  it('r30-4: unambiguous promotion still SPLICES the WAL (regression guard so the retain-path does not over-fire)', async () => {
+  it('unambiguous promotion still SPLICES the WAL (regression guard so the retain-path does not over-fire)', async () => {
     const contextGraphId = 'cg-r30-4-splice';
     const merkleRootHex = '0x' + '8e'.repeat(32);
     const ual = 'did:dkg:test/0xc3/3';
@@ -780,7 +780,7 @@ describe('DKGPublisher.recoverFromWalByMerkleRoot (r21-5)', () => {
     expect(askConfirmed.type === 'boolean' && askConfirmed.value).toBe(true);
   });
 
-  it('r30-2: promoteTentativeKcByMerkleRoot still promotes the unique tentative KC (regression guard for the single-row path)', async () => {
+  it('promoteTentativeKcByMerkleRoot still promotes the unique tentative KC (regression guard for the single-row path)', async () => {
     const realStore = new OxigraphStore();
     const cg = 'cg-unique-promote';
     const metaGraph = `did:dkg:context-graph:${cg}/_meta`;
@@ -815,7 +815,7 @@ describe('DKGPublisher.recoverFromWalByMerkleRoot (r21-5)', () => {
     expect(askConfirmed.type === 'boolean' && askConfirmed.value).toBe(true);
   });
 
-  it('r26-4: a single WAL match STILL recovers normally when another collision belongs to a DIFFERENT publisher (cross-publisher collision is the legacy path)', async () => {
+  it('a single WAL match STILL recovers normally when another collision belongs to a DIFFERENT publisher (cross-publisher collision is the legacy path)', async () => {
     const merkleRoot = '0x' + 'cd'.repeat(32);
     const mine = makeEntry({
       publishOperationId: 'op-mine',
@@ -993,7 +993,7 @@ describe('ChainEventPoller → DKGPublisher.recoverFromWalByMerkleRoot wiring (r
 });
 
 // ---------------------------------------------------------------------------
-// r23-3 (PR #229 bot review round 23): the previous WAL-recovery fix dropped
+// r23-3: the previous WAL-recovery fix dropped
 // the WAL entry but never promoted the tentative KC status quad in the store
 // to `confirmed`. Query paths that gate on `dkg:status "confirmed"` (or
 // `view: 'verified-memory'`) saw the KC as permanently unfinalised even
@@ -1167,7 +1167,7 @@ describe('DKGPublisher.recoverFromWalByMerkleRoot — tentative→confirmed prom
 });
 
 // ---------------------------------------------------------------------------
-// PR #229 bot review (r31-10 — dkg-publisher.ts:141): durability dance
+// dkg-publisher.ts:141): durability dance
 // for `rewriteWalSync`. The previous implementation `fsync`'d the temp
 // file's BYTES then `renameSync`'d into place — but on POSIX the dir
 // entry that names the file is part of the parent directory inode,

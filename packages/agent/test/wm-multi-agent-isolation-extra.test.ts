@@ -63,7 +63,7 @@ beforeAll(async () => {
     skills: [],
     chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     nodeRole: 'core',
-    // PR #229 bot review round 12: strict WM cross-agent auth is now
+    // strict WM cross-agent auth is now
     // the DEFAULT (fail-closed). Passing `true` here is redundant but
     // kept for readability — the matrix below assumes strict mode and
     // adding the flag makes the intent obvious even if the default
@@ -171,7 +171,7 @@ describe('A-1: WM is per-agent — two agents co-hosted on one node', () => {
     // `callerAgentAddress` — see packages/cli/src/daemon.ts /api/query.
     // Per spec §04 and RFC-29 this impersonation attempt MUST be
     // denied at the DKGAgent.query boundary (0 bindings, no data
-    // leakage). Tracks BUGS_FOUND.md A-1.
+    // leakage). Tracks.
     const defaultA = node!.getDefaultAgentAddress()!;
     const leak = await node!.query(
       `SELECT ?s ?o WHERE { ?s <http://schema.org/description> ?o }`,
@@ -363,7 +363,7 @@ describe('A-1: WM is per-agent — two agents co-hosted on one node', () => {
 });
 
 // --------------------------------------------------------------------------
-// Bot review PR #229 (post-round-5): `agentAuthSignature` must be bound to
+// `agentAuthSignature` must be bound to
 // a freshness window AND a per-request nonce so a once-observed signature
 // cannot be replayed forever. The previous challenge was the fixed string
 // `dkg-wm-auth:<addr>`, which made every valid signature a permanent
@@ -416,7 +416,7 @@ describe('A-1 follow-up: WM-auth challenge is nonce/timestamp-bound (no permanen
     );
     expect(
       replay.bindings.length,
-      'replayed WM-auth token must be rejected (strict mode) — bot review PR #229 (post-round-5)',
+      'replayed WM-auth token must be rejected (strict mode)',
     ).toBe(0);
   });
 
@@ -503,12 +503,12 @@ describe('A-1 follow-up: WM-auth challenge is nonce/timestamp-bound (no permanen
   });
 
   // -------------------------------------------------------------------------
-  // PR #229 bot review round 12 (r12-1): the gate defaults to
+  // the gate defaults to
   // fail-closed. The three probes below flip `config.strictWmCrossAgentAuth`
   // and `process.env.DKG_STRICT_WM_AUTH` at runtime to exercise the
   // effective mode without spinning up a second heavyweight DKGAgent.
   // -------------------------------------------------------------------------
-  it('r12-1: default (no strictWmCrossAgentAuth set) is fail-closed — impersonation without signature returns 0', async () => {
+  it('default (no strictWmCrossAgentAuth set) is fail-closed — impersonation without signature returns 0', async () => {
     const defaultA = node!.getDefaultAgentAddress()!;
     const cgId = freshCgId('wm-default');
     await node!.createContextGraph({ id: cgId, name: 'WM Default', description: '' });
@@ -537,7 +537,7 @@ describe('A-1 follow-up: WM-auth challenge is nonce/timestamp-bound (no permanen
     }
   });
 
-  it('r12-1: explicit config opt-out (strictWmCrossAgentAuth=false) degrades to warn (impersonation succeeds)', async () => {
+  it('explicit config opt-out (strictWmCrossAgentAuth=false) degrades to warn (impersonation succeeds)', async () => {
     const defaultA = node!.getDefaultAgentAddress()!;
     const cgId = freshCgId('wm-optout');
     await node!.createContextGraph({ id: cgId, name: 'WM Optout', description: '' });
@@ -566,7 +566,7 @@ describe('A-1 follow-up: WM-auth challenge is nonce/timestamp-bound (no permanen
     }
   });
 
-  it('r12-1: env opt-in (DKG_STRICT_WM_AUTH=1) overrides config=false — strict wins', async () => {
+  it('env opt-in (DKG_STRICT_WM_AUTH=1) overrides config=false — strict wins', async () => {
     const defaultA = node!.getDefaultAgentAddress()!;
     const cgId = freshCgId('wm-envwin');
     await node!.createContextGraph({ id: cgId, name: 'WM EnvWin', description: '' });
@@ -636,7 +636,7 @@ describe('A-1 follow-up: WM-auth challenge is nonce/timestamp-bound (no permanen
   });
 
   // -------------------------------------------------------------------------
-  // PR #229 bot review round 17 (r17-2): WM cross-agent deny paths must
+  // WM cross-agent deny paths must
   // preserve the *shape* the caller asked for. A `CONSTRUCT` caller branches
   // on `result.quads !== undefined` to decide whether it got graph data back;
   // returning `{ bindings: [] }` on a deny (as we did before r17-2) makes a
@@ -644,7 +644,7 @@ describe('A-1 follow-up: WM-auth challenge is nonce/timestamp-bound (no permanen
   // response, which is exactly the kind of silent shape-mismatch that
   // breaks downstream consumers in production. Pin the contract.
   // -------------------------------------------------------------------------
-  it('r17-2: CONSTRUCT deny on WM cross-agent impersonation returns quads:[] (shape preserved)', async () => {
+  it('CONSTRUCT deny on WM cross-agent impersonation returns quads:[] (shape preserved)', async () => {
     const defaultA = node!.getDefaultAgentAddress()!;
     const cgId = freshCgId('wm-r17-2-construct');
     await node!.createContextGraph({ id: cgId, name: 'WM r17-2 CONSTRUCT', description: '' });
@@ -683,7 +683,7 @@ describe('A-1 follow-up: WM-auth challenge is nonce/timestamp-bound (no permanen
     expect(res.bindings.length).toBe(0);
   });
 
-  it('r17-2: ASK deny on WM cross-agent impersonation returns bindings=[{result:"false"}]', async () => {
+  it('ASK deny on WM cross-agent impersonation returns bindings=[{result:"false"}]', async () => {
     const defaultA = node!.getDefaultAgentAddress()!;
     const cgId = freshCgId('wm-r17-2-ask');
     await node!.createContextGraph({ id: cgId, name: 'WM r17-2 ASK', description: '' });
@@ -714,7 +714,7 @@ describe('A-1 follow-up: WM-auth challenge is nonce/timestamp-bound (no permanen
     expect(res.bindings[0]?.result).toBe('false');
   });
 
-  it('r17-2: SELECT deny on WM cross-agent impersonation returns bindings=[] without a quads key', async () => {
+  it('SELECT deny on WM cross-agent impersonation returns bindings=[] without a quads key', async () => {
     const defaultA = node!.getDefaultAgentAddress()!;
     const cgId = freshCgId('wm-r17-2-select');
     await node!.createContextGraph({ id: cgId, name: 'WM r17-2 SELECT', description: '' });

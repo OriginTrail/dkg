@@ -46,9 +46,9 @@ contract KnowledgeAssetsStorage is INamed, IVersioned, IERC1155DeltaQueryable, E
         bool isPermanent
     );
 
-    /// @notice Bot review PR #229 (post-round-5) — `KnowledgeBatchCreated`
-    /// is the V8/V9 batch-creation signal and legacy indexers subscribe to
-    /// its topic under the assumption that `knowledgeBatches[batchId]`,
+    /// @notice `KnowledgeBatchCreated` is the V8/V9 batch-creation signal
+    /// and legacy indexers subscribe to its topic under the assumption
+    /// that `knowledgeBatches[batchId]`,
     /// `kaIdToBatch[publisher][id]`, `getBatchPublisher(batchId)`, and
     /// `_totalTokenAmount` / `_totalKnowledgeAssets` were also mutated.
     /// V10 publishes go through `KnowledgeCollectionStorage`, NOT this
@@ -175,11 +175,11 @@ contract KnowledgeAssetsStorage is INamed, IVersioned, IERC1155DeltaQueryable, E
         return (r.startId, r.endId);
     }
 
-    /// @notice Spec §07_EVM_MODULE / BUGS_FOUND.md#E-9 — V10 publish
-    /// surfaces a batch-shaped audit record from this contract's address
-    /// so V10-aware consumers that want a legacy-shaped projection can
-    /// subscribe to it without having to join `KnowledgeCollectionCreated`
-    /// + `KnowledgeAssetsMinted`. Bot review PR #229 (post-round-5): the
+    /// @notice Spec §07_EVM_MODULE — V10 publish surfaces a
+    /// batch-shaped audit record from this contract's address so
+    /// V10-aware consumers that want a legacy-shaped projection
+    /// can subscribe to it without having to join
+    /// `KnowledgeCollectionCreated` + `KnowledgeAssetsMinted`. The
     /// event was renamed from `KnowledgeBatchCreated` to
     /// `V10KnowledgeBatchEmitted` so legacy V8/V9 indexers — which call
     /// `getBatchPublisher(batchId)` and expect `knowledgeBatches[batchId]`
@@ -201,7 +201,6 @@ contract KnowledgeAssetsStorage is INamed, IVersioned, IERC1155DeltaQueryable, E
         uint96 tokenAmount,
         bool isPermanent
     ) external {
-        // PR #229 bot review round 7 (KnowledgeAssetsStorage.sol:202).
         // `onlyContracts` allows every Hub-registered contract to emit
         // `V10KnowledgeBatchEmitted` — a buggy or compromised registered
         // contract could then forge batch-audit events that look like
@@ -209,7 +208,6 @@ contract KnowledgeAssetsStorage is INamed, IVersioned, IERC1155DeltaQueryable, E
         // contract to cross-check. Lock the caller to the one contract
         // that owns the V10 publish pipeline: `KnowledgeAssetsV10`.
         //
-        // PR #229 bot review (r3146974251, KnowledgeAssetsStorage.sol:214).
         // The earlier revision kept `hub.owner()` as a break-glass on
         // the emitter itself, but this contract stores no state that
         // indexers can reconcile against the audit event — a single

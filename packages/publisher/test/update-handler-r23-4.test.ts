@@ -4,7 +4,7 @@ import { TypedEventBus, encodeKAUpdateRequest } from '@origintrail-official/dkg-
 import { UpdateHandler } from '../src/update-handler.js';
 
 /**
- * r23-4 (PR #229 bot review round 23): forged-attribution defence.
+ * r23-4: forged-attribution defence.
  *
  * A peer with its own legitimate wallet could historically wrap a
  * KAUpdateRequest whose `publisherAddress` claims a DIFFERENT

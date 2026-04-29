@@ -86,12 +86,12 @@ describe('DkgClient', () => {
       await expect(DkgClient.connect()).rejects.toThrow(/Cannot read API port/);
     });
 
-    // PR #229 bot review round 9 (mcp-server/index.ts:441): `mcp_auth
+    // `mcp_auth
     // set` mutates `process.env.DKG_NODE_TOKEN`, but the tool-call path
     // used to read ONLY from the on-disk auth.token file via
     // `loadAuthToken()`, so the rotation was invisible to real traffic.
     // `connect()` now prefers `DKG_NODE_TOKEN` when set.
-    describe('mcp_auth override plumbing (bot review r9-2)', () => {
+    describe('mcp_auth override plumbing', () => {
       it('connect honors DKG_NODE_TOKEN over on-disk auth.token', async () => {
         process.env.DKG_API_PORT = '9201';
         await writeFile(join(tempDir, 'auth.token'), 'file-token\n');
@@ -167,8 +167,8 @@ describe('DkgClient', () => {
         expect(calls[0].url).toBe('http://127.0.0.1:9999/api/status');
       });
 
-      it('r18-1: connect rejects a malformed DKG_NODE_URL instead of silently falling back to the local daemon', async () => {
-        // PR #229 bot review round 18 (r18-1). Pre-r18 an unusable
+      it('connect rejects a malformed DKG_NODE_URL instead of silently falling back to the local daemon', async () => {
+        // an unusable
         // `DKG_NODE_URL` (malformed, wrong scheme, reverse-proxy
         // path prefix) silently fell through to the local
         // `daemon.port` file — so a misconfigured operator ended up
@@ -181,14 +181,14 @@ describe('DkgClient', () => {
       });
     });
 
-    // PR #229 bot review round 10 (connection.ts:40). Until r10 the
+    // Until r10 the
     // env overrides collapsed `DKG_NODE_URL` to a port number and
     // hard-coded `http://127.0.0.1`, silently dropping remote hosts,
     // HTTPS, and base paths. These tests pin the fix: the full base
     // URL now routes through to the `fetch()` call site.
-    describe('DKG_NODE_URL full base URL routing (bot review r10-2 + r11-2)', () => {
+    describe('DKG_NODE_URL full base URL routing', () => {
       it('routes to a remote HTTPS host with an explicit port (origin-only)', async () => {
-        // r17-4: the base URL MUST be origin-only. Callers that
+        // the base URL MUST be origin-only. Callers that
         // previously set `DKG_NODE_URL=https://host:8443/api` now
         // fail-fast at `normalizeBaseUrl`; they should drop the
         // trailing `/api` (DkgClient already hard-codes that prefix).
@@ -222,7 +222,7 @@ describe('DkgClient', () => {
       });
 
       it('tolerates a single trailing slash on the env URL (pathname=`/` is still origin-only)', async () => {
-        // r17-4: a single trailing slash resolves to `u.pathname === '/'`
+        // a single trailing slash resolves to `u.pathname === '/'`
         // which the guard treats as the origin case (not rejected).
         // Anything deeper (`/api`, `/api/`) is rejected — pinned in
         // the dedicated `normalizeBaseUrl` test block above.
@@ -242,7 +242,7 @@ describe('DkgClient', () => {
     });
   });
 
-  describe('normalizeBaseUrl (bot review r10-2 + r11-2 + r17-4)', () => {
+  describe('normalizeBaseUrl', () => {
     it('returns origin-only (scheme + host + port) for root-path URLs', () => {
       expect(normalizeBaseUrl('http://10.0.0.1:7777')).toBe(
         'http://10.0.0.1:7777',
@@ -264,8 +264,8 @@ describe('DkgClient', () => {
       );
     });
 
-    it('r17-4: rejects URLs with a non-root pathname instead of silently stripping it', () => {
-      // Pre-r17-4 these all reduced to `https://host:port` — which
+    it('rejects URLs with a non-root pathname instead of silently stripping it', () => {
+      // these all reduced to `https://host:port` — which
       // silently bypassed any reverse-proxy prefix. Now they return
       // `undefined` so DkgClient.connect surfaces the misconfig.
       expect(normalizeBaseUrl('https://remote.example:8443/api')).toBeUndefined();
@@ -283,20 +283,20 @@ describe('DkgClient', () => {
       expect(normalizeBaseUrl('ftp://node.example:21')).toBeUndefined();
     });
 
-    // PR #229 bot review round 22 (r22-4, connection.ts:327). The
-    // pre-r22-4 code composed `${u.hostname}:${u.port}`, which strips
+    // The
+    // code composed `${u.hostname}:${u.port}`, which strips
     // the square brackets IPv6 literals require in a URL. The result
     // was `http://::1:9200` — malformed and rejected by `fetch`. Pin
     // that brackets round-trip through normalization for both the
     // explicit-port and implicit-port paths.
-    it('r22-4: preserves IPv6 literal brackets (explicit port)', () => {
+    it('preserves IPv6 literal brackets (explicit port)', () => {
       expect(normalizeBaseUrl('http://[::1]:9200')).toBe('http://[::1]:9200');
       expect(normalizeBaseUrl('https://[2001:db8::1]:8443')).toBe(
         'https://[2001:db8::1]:8443',
       );
     });
 
-    it('r22-4: synthesises the default port for IPv6 while preserving brackets', () => {
+    it('synthesises the default port for IPv6 while preserving brackets', () => {
       // `http://[::1]` with no port must normalize to `http://[::1]:80`
       // (not `http://::1:80`, which `fetch` cannot parse).
       expect(normalizeBaseUrl('http://[::1]')).toBe('http://[::1]:80');
@@ -304,12 +304,12 @@ describe('DkgClient', () => {
     });
   });
 
-  // PR #229 bot review round 10 (mcp-server/index.ts:449). `mcp_auth
+  // `mcp_auth
   // status/whoami` diverged from `DkgClient.connect()` on discovery —
   // this helper centralizes the logic so both surfaces agree.
-  describe('resolveDaemonEndpoint (bot review r10-3)', () => {
+  describe('resolveDaemonEndpoint', () => {
     it('resolves from DKG_NODE_URL + DKG_NODE_TOKEN when set (origin-only)', async () => {
-      // r17-4: the URL MUST be origin-only (no path); supplying a
+      // the URL MUST be origin-only (no path); supplying a
       // pathname like `/api` now fails-fast in `normalizeBaseUrl`.
       process.env.DKG_NODE_URL = 'https://remote.example:8443';
       process.env.DKG_NODE_TOKEN = 'env-tok';
@@ -321,8 +321,8 @@ describe('DkgClient', () => {
       expect(r.urlSource).toBe('env');
     });
 
-    it('r18-1: DKG_NODE_URL with a non-root pathname throws instead of silently falling back to the local daemon', async () => {
-      // Pre-r18-1 this fell through to the file-port path and the
+    it('DKG_NODE_URL with a non-root pathname throws instead of silently falling back to the local daemon', async () => {
+      // this fell through to the file-port path and the
       // operator's reverse-proxy URL was silently ignored — a
       // classic configuration footgun. Now the resolver throws a
       // diagnostic error naming the offending URL and the expected
@@ -337,7 +337,7 @@ describe('DkgClient', () => {
       ).rejects.toThrow(/DKG_NODE_URL.*"https:\/\/remote\.example:8443\/dkg".*cannot be used/i);
     });
 
-    it('r18-1: DKG_NODE_URL rejection also surfaces in requireReachable=false so the display UI cannot lie', async () => {
+    it('DKG_NODE_URL rejection also surfaces in requireReachable=false so the display UI cannot lie', async () => {
       // Even the lenient "just render a status line" path must NOT
       // silently claim the local daemon when the operator asked for
       // a remote one. Surfacing the error in the tool UI is strictly
@@ -349,7 +349,7 @@ describe('DkgClient', () => {
       ).rejects.toThrow(/DKG_NODE_URL.*"ftp:\/\/remote\.example:21".*cannot be used/i);
     });
 
-    it('r18-1: empty DKG_NODE_URL (the default) still falls back to the local file-port path', async () => {
+    it('empty DKG_NODE_URL (the default) still falls back to the local file-port path', async () => {
       // Guard against over-reach: the r18-1 fail-fast only applies
       // to non-empty-but-unparseable inputs. Unset / empty should
       // still work as before and route to the local daemon.
@@ -389,14 +389,13 @@ describe('DkgClient', () => {
       expect(r.displayUrl).toContain('daemon not running');
     });
 
-    // PR #229 bot review round 22 (r22-3, mcp-server/index.ts:497).
     // The synthetic 127.0.0.1:7777 placeholder returned when the
     // daemon is down could be probed by `mcp_auth status`, and if
     // any unrelated service happened to listen on 7777 the tool
     // reported "OK" even with no DKG daemon running. Flag the
     // placeholder with `daemonDown: true` so callers can skip the
     // probe and report the real state.
-    it('r22-3: non-reachable branch sets daemonDown=true so callers can skip probing the synthetic endpoint', async () => {
+    it('non-reachable branch sets daemonDown=true so callers can skip probing the synthetic endpoint', async () => {
       delete process.env.DKG_NODE_URL;
       delete process.env.DKG_API_PORT;
       const r = await resolveDaemonEndpoint({ requireReachable: false });
@@ -409,7 +408,7 @@ describe('DkgClient', () => {
       expect(r.baseOrPort).toBe(7777);
     });
 
-    it('r22-3: a live daemon (DKG_API_PORT set + port file present) does NOT set daemonDown', async () => {
+    it('a live daemon (DKG_API_PORT set + port file present) does NOT set daemonDown', async () => {
       process.env.DKG_API_PORT = '9201';
       await writeFile(join(tempDir, 'auth.token'), 'file-tok\n');
       const r = await resolveDaemonEndpoint({ requireReachable: false });
@@ -418,26 +417,25 @@ describe('DkgClient', () => {
     });
 
     // -----------------------------------------------------------------
-    // PR #229 bot review round 25 (r25-3, mcp-server/connection.ts).
     //
     // When `DKG_NODE_URL` is set (so `urlSource === 'env'`) and
-    // `DKG_NODE_TOKEN` is unset, the pre-r25-3 code fell back to
+    // `DKG_NODE_TOKEN` is unset, the code fell back to
     // `loadAuthToken()` — the LOCAL daemon's admin credential. An
     // operator pointing their MCP at `https://some.remote.node`
     // would therefore send the local admin bearer to that remote,
     // which is a textbook confused-deputy credential exfiltration.
     //
-    // Post-r25-3 the local-token fallback is scoped to endpoints
+    // the local-token fallback is scoped to endpoints
     // that demonstrably point AT the local machine (either
     // `urlSource === 'file'` or a loopback host in `DKG_NODE_URL`).
     // Remote targets with no explicit `DKG_NODE_TOKEN` must get an
     // empty bearer — the operator can set `DKG_NODE_TOKEN` to the
     // remote's credential if they need authenticated access.
     // -----------------------------------------------------------------
-    it('r25-3: remote DKG_NODE_URL + unset DKG_NODE_TOKEN MUST NOT forward the local auth.token', async () => {
+    it('remote DKG_NODE_URL + unset DKG_NODE_TOKEN MUST NOT forward the local auth.token', async () => {
       process.env.DKG_NODE_URL = 'https://remote.example:8443';
       delete process.env.DKG_NODE_TOKEN;
-      // Plant a LOCAL auth token. The pre-r25-3 code would have
+      // Plant a LOCAL auth token. The code would have
       // read this file and returned it as the remote's credential.
       await writeFile(join(tempDir, 'auth.token'), 'local-admin-token\n');
 
@@ -448,7 +446,7 @@ describe('DkgClient', () => {
       expect(r.tokenSource).toBe('none');
     });
 
-    it('r25-3: remote DKG_NODE_URL + explicit DKG_NODE_TOKEN passes the ENV token (not the local file)', async () => {
+    it('remote DKG_NODE_URL + explicit DKG_NODE_TOKEN passes the ENV token (not the local file)', async () => {
       process.env.DKG_NODE_URL = 'https://remote.example:8443';
       process.env.DKG_NODE_TOKEN = 'remote-specific-token';
       await writeFile(join(tempDir, 'auth.token'), 'local-admin-token\n');
@@ -458,7 +456,7 @@ describe('DkgClient', () => {
       expect(r.tokenSource).toBe('env');
     });
 
-    it('r25-3: loopback DKG_NODE_URL (127.0.0.1) WITH unset DKG_NODE_TOKEN still uses the local auth.token', async () => {
+    it('loopback DKG_NODE_URL (127.0.0.1) WITH unset DKG_NODE_TOKEN still uses the local auth.token', async () => {
       // Loopback overrides are equivalent to the implicit local
       // daemon path — forwarding `auth.token` to `127.0.0.1` is
       // safe because it IS the local daemon. We MUST NOT regress
@@ -472,7 +470,7 @@ describe('DkgClient', () => {
       expect(r.tokenSource).toBe('file');
     });
 
-    it('r25-3: localhost DKG_NODE_URL is also treated as local for the token fallback', async () => {
+    it('localhost DKG_NODE_URL is also treated as local for the token fallback', async () => {
       process.env.DKG_NODE_URL = 'http://localhost:9201';
       delete process.env.DKG_NODE_TOKEN;
       await writeFile(join(tempDir, 'auth.token'), 'localhost-ok-tok\n');
@@ -482,7 +480,7 @@ describe('DkgClient', () => {
       expect(r.tokenSource).toBe('file');
     });
 
-    it('r25-3: IPv6 loopback [::1] is treated as local for the token fallback', async () => {
+    it('IPv6 loopback [::1] is treated as local for the token fallback', async () => {
       process.env.DKG_NODE_URL = 'http://[::1]:9201';
       delete process.env.DKG_NODE_TOKEN;
       await writeFile(join(tempDir, 'auth.token'), 'ipv6-ok-tok\n');
@@ -492,7 +490,7 @@ describe('DkgClient', () => {
       expect(r.tokenSource).toBe('file');
     });
 
-    it('r25-3: public IP like 8.8.8.8 is NOT misclassified as local even if the first octet is not 127', async () => {
+    it('public IP like 8.8.8.8 is NOT misclassified as local even if the first octet is not 127', async () => {
       process.env.DKG_NODE_URL = 'http://8.8.8.8:443';
       delete process.env.DKG_NODE_TOKEN;
       await writeFile(join(tempDir, 'auth.token'), 'should-not-leak\n');
@@ -502,7 +500,7 @@ describe('DkgClient', () => {
       expect(r.tokenSource).toBe('none');
     });
 
-    it('r25-3: a 127.0.0.2 address (valid /8 loopback) is treated as local', async () => {
+    it('a 127.0.0.2 address (valid /8 loopback) is treated as local', async () => {
       // Defensive: `127.0.0.0/8` is the RFC-1122 loopback block,
       // not just `127.0.0.1`. We honour the full block so operators
       // binding an alias on `127.0.0.2` get the same ergonomics.
@@ -516,7 +514,7 @@ describe('DkgClient', () => {
     });
   });
 
-  describe('extractPortFromUrl (bot review r9-2)', () => {
+  describe('extractPortFromUrl', () => {
     it('extracts explicit port', () => {
       expect(extractPortFromUrl('http://127.0.0.1:9999')).toBe(9999);
       expect(extractPortFromUrl('https://node.example.com:8443')).toBe(8443);
@@ -594,16 +592,15 @@ describe('DkgClient', () => {
     });
 
     // -----------------------------------------------------------------
-    // PR #229 bot review round 22 (r22-2, connection.ts:27).
     //
-    // Pre-r22-2 the string-form constructor kept an arbitrary pathname
+    // the string-form constructor kept an arbitrary pathname
     // verbatim, so `new DkgClient('https://host/dkg')` produced
     // `https://host/dkg/api/status` and `new DkgClient('https://host/api')`
     // produced the double-prefixed `https://host/api/api/status`.
     // Every per-request helper hard-codes `/api/...` (status / query /
     // publish / agents / …) — the base must be origin-only.
     // -----------------------------------------------------------------
-    it('r22-2: normalises an origin-only string base URL (no path segment, no double /api)', async () => {
+    it('normalises an origin-only string base URL (no path segment, no double /api)', async () => {
       const { fn, calls } = createTrackingFetch([
         jsonRes({
           name: 'n', peerId: 'p', uptimeMs: 1,
@@ -616,8 +613,7 @@ describe('DkgClient', () => {
       expect(calls[0].url).toBe('https://host.example:9443/api/status');
     });
 
-    it('r22-2: rejects a base URL with a non-root path segment instead of double-appending /api', () => {
-      // These are the exact regressions the bot flagged on PR #229.
+    it('rejects a base URL with a non-root path segment instead of double-appending /api', () => {
       expect(() => new DkgClient('https://host.example/dkg')).toThrow(
         /invalid or unsupported base URL.*\/dkg/i,
       );
@@ -629,13 +625,13 @@ describe('DkgClient', () => {
       );
     });
 
-    it('r22-2: rejects empty / non-http(s) base URLs with a diagnostic error', () => {
+    it('rejects empty / non-http(s) base URLs with a diagnostic error', () => {
       expect(() => new DkgClient('')).toThrow(/invalid or unsupported/i);
       expect(() => new DkgClient('not-a-url')).toThrow(/invalid or unsupported/i);
       expect(() => new DkgClient('ftp://host.example:21')).toThrow(/invalid or unsupported/i);
     });
 
-    it('r22-2: tolerates a single trailing slash (pathname=`/` is origin-only)', async () => {
+    it('tolerates a single trailing slash (pathname=`/` is origin-only)', async () => {
       const { fn, calls } = createTrackingFetch([
         jsonRes({
           name: 'n', peerId: 'p', uptimeMs: 1,
@@ -648,7 +644,7 @@ describe('DkgClient', () => {
       expect(calls[0].url).toBe('http://host.example:9999/api/status');
     });
 
-    it('r22-2: the numeric-port form still works (backwards compatible local-daemon path)', async () => {
+    it('the numeric-port form still works (backwards compatible local-daemon path)', async () => {
       const { fn, calls } = createTrackingFetch([
         jsonRes({
           name: 'n', peerId: 'p', uptimeMs: 1,

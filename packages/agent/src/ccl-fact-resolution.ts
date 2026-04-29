@@ -252,7 +252,7 @@ async function resolveEndorsementFacts(
   // view's named-graph URI (e.g. contextGraphVerifiedMemoryUri). The view
   // value is included in factQueryHash via the caller, ensuring snapshot
   // determinism. Full view-graph filtering deferred to CCL v1.0.
-  // PR #229 bot review round 19 (r19-3): endorsement quads moved
+  // endorsement quads moved
   // from `<agent> dkg:endorses <ual>` to a per-event subject so that
   // two endorsements by the same agent can't collide on the
   // signature / nonce / timestamp tuple. CCL fact resolution now
@@ -265,7 +265,7 @@ async function resolveEndorsementFacts(
   // three predicates off `?endorsement` — they are no longer spread
   // across the agent subject and are no longer ambiguous.
   //
-  // PR #229 bot review r31-8 (ccl-fact-resolution.ts:270): the
+  // the
   // r19-3 query above ONLY matches the new endorsement-resource
   // shape. Every endorsement that was published BEFORE r19-3 lives
   // as the legacy direct shape `<agent> dkg:endorses <ual>` (no
@@ -321,7 +321,7 @@ async function resolveEndorsementFacts(
       const endorser = row['endorser'] ?? '';
       const ual = row['ual'] ?? '';
       if (!endorser || !ual) continue;
-      // Per (endorser, ual) dedupe: BUGS_FOUND.md#CCL-2 — a single
+      // Per (endorser, ual) dedupe:
       // agent's two endorsements of the same UAL count as one
       // endorsement for `endorsement_count` purposes (the policy
       // semantics are "how many distinct endorsers", not "how many

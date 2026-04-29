@@ -164,7 +164,7 @@ export function resolveViewGraphs(
       //     SPARQL so every subject MUST carry an explicit
       //     `<http://dkg.io/ontology/trustLevel> "N"` literal with
       //     `N ≥ minTrust`. Subjects without such metadata are
-      //     silently rejected (fail-closed — see bot review L1).
+      //     silently rejected (fail-closed).
       //
       // Together this satisfies spec §14 for values above `Endorsed`:
       // even though the engine cannot yet distinguish a
@@ -318,7 +318,7 @@ export class DKGQueryEngine implements QueryEngine {
     // `http://dkg.io/ontology/trustLevel` literal whose integer value is
     // ≥ minTrust. Subjects with no trust metadata are rejected.
     //
-    // Bot review L1: previously, when `injectMinTrustFilter()` could not
+    // previously, when `injectMinTrustFilter()` could not
     // safely rewrite the query (e.g. explicit GRAPH, non-BGP first
     // clause, multi-subject WHERE), we silently ran the ORIGINAL
     // unfiltered SPARQL. That turned the trust threshold into a no-op in
@@ -337,7 +337,6 @@ export class DKGQueryEngine implements QueryEngine {
     // every quad that lacks a `dkg:trustLevel` literal (i.e. every
     // pre-Q-1 quad).
     //
-    // PR #229 bot review (r3146759642, dkg-query-engine.ts:342):
     // we ALSO skip the per-triple filter at `Endorsed`. The graph-
     // scope resolution above already drops the root data graph and
     // unions only over `<…>/_verified_memory/{quorum}` sub-graphs,
@@ -512,7 +511,7 @@ export class DKGQueryEngine implements QueryEngine {
  * keyword detection): we do NOT want a stray `{` near the end of a
  * truncated query body to confuse the surrounding scanner.
  *
- * PR #229 bot review (r3148998562 — dkg-query-engine.ts:848). The
+ * dkg-query-engine.ts:848). The
  * previous helpers (`stripSparqlLineComments`, `scrubStringsAndComments`,
  * `findMatchingCloseBrace`, `findWhereBraceStart`, and
  * `splitTopLevelTripleStatements`) all had their own copy of the
@@ -583,8 +582,6 @@ export function skipSparqlStringLiteral(src: string, i: number): number {
  * none is found at top level. Case-insensitive on the keyword
  * itself, but the surrounding word boundary is enforced (so
  * identifiers like `WHEREVER` / `aWHERE` do NOT match).
- *
- * PR #229 bot review r31-8 (dkg-query-engine.ts:598).
  */
 function findExplicitWhereTokenIdx(sparql: string): number {
   const n = sparql.length;
@@ -667,8 +664,6 @@ function findExplicitWhereTokenIdx(sparql: string): number {
  * — SPARQL grammar does not allow a string literal between the
  * `WHERE` keyword and its opening `{`, so encountering one means
  * the input is malformed and we should bail (return `-1`).
- *
- * PR #229 bot review r31-8 (dkg-query-engine.ts:598).
  */
 function nextSignificantBraceAfter(sparql: string, startIdx: number): number {
   const n = sparql.length;
@@ -710,13 +705,10 @@ function nextSignificantBraceAfter(sparql: string, startIdx: number): number {
  *      `CONSTRUCT WHERE { ... }` already matches the primary path.
  *
  * Returns `null` when no top-level `{...}` block is balanced.
- *
- * Bot review: PR #229 r3147347827 (dkg-query-engine.ts:718).
  */
 function findWhereBraceStart(sparql: string): number {
-  // PR #229 bot review r31-8 (dkg-query-engine.ts:598). Until r31-8
-  // the fast path used a raw regex `/\bWHERE\s*\{/i` which matches
-  // ANY `WHERE` followed by `{` — including ones embedded inside
+  // The earlier fast path used a raw regex `/\bWHERE\s*\{/i` which
+  // matches ANY `WHERE` followed by `{` — including ones embedded inside
   // string literals or comments. Adversarial / obfuscated input
   // like
   //   SELECT ("WHERE {" AS ?x) WHERE { ... }
@@ -745,7 +737,6 @@ function findWhereBraceStart(sparql: string): number {
   // can all contain stray `{` chars that the regex would
   // misinterpret as block openers.
   //
-  // PR #229 bot review (r3147347820 follow-up + r30 follow-up —
   // dkg-query-engine.ts:559). The classifier rejects obvious
   // comparison shapes after `<` and falls back to a forward scan
   // that confirms a balanced IRIREF body. The r30 cut only rejected
@@ -838,7 +829,7 @@ function findWhereBraceStart(sparql: string): number {
       continue;
     }
     if (ch === '"' || ch === "'") {
-      // PR #229 bot review (r3148998562 — dkg-query-engine.ts:848).
+      // dkg-query-engine.ts:848).
       // Centralised triple-quoted-aware skip — see skipSparqlStringLiteral.
       i = skipSparqlStringLiteral(sparql, i);
       continue;
@@ -861,7 +852,7 @@ function findWhereBraceStart(sparql: string): number {
  * `{` / `}` chars that appear inside SPARQL string literals, line
  * comments, or IRIREFs.
  *
- * PR #229 bot review (r3148... — dkg-query-engine.ts:939). The naive
+ * — dkg-query-engine.ts:939). The naive
  * brace-balance loop in `injectMinTrustFilter`, `wrapWithGraph`, and
  * `wrapWithGraphUnion` counted `{`/`}` blindly. A query like
  *
@@ -890,7 +881,7 @@ function findMatchingCloseBrace(sparql: string, openIdx: number): number {
       continue;
     }
     if (ch === '"' || ch === "'") {
-      // PR #229 bot review (r3148998562). Centralised triple-quoted-aware skip.
+      // Centralised triple-quoted-aware skip.
       i = skipSparqlStringLiteral(sparql, i);
       continue;
     }
@@ -939,7 +930,7 @@ function wrapWithGraph(sparql: string, graphUri: string): string {
   const braceStart = findWhereBraceStart(sparql);
   if (braceStart === -1) return sparql;
 
-  // PR #229 bot review (r3148... — dkg-query-engine.ts:939). Use the
+  // — dkg-query-engine.ts:939). Use the
   // literal/comment/IRI-aware helper so a `{` or `}` inside a SPARQL
   // string literal, line comment, or IRI does NOT confuse the depth
   // counter and we stop wrapping queries with literal-heavy bodies.
@@ -957,7 +948,7 @@ function wrapWithGraph(sparql: string, graphUri: string): string {
  * Wrap a query so it runs over a union of named graphs in a single execution,
  * preserving LIMIT/ORDER BY/DISTINCT/aggregate semantics.
  *
- * Bot review (PR #229 L-follow-up): the previous revision injected
+ * the previous revision injected
  * `VALUES ?_viewGraph { <g1> <g2> … } GRAPH ?_viewGraph { inner }` directly
  * into the caller's WHERE block. Two failure modes:
  *
@@ -983,7 +974,7 @@ function wrapWithGraphUnion(sparql: string, graphUris: string[]): string {
   const braceStart = findWhereBraceStart(sparql);
   if (braceStart === -1) return sparql;
 
-  // PR #229 bot review (r3148... — dkg-query-engine.ts:939). See
+  // — dkg-query-engine.ts:939). See
   // `findMatchingCloseBrace` and the `wrapWithGraph` cousin above.
   const braceEnd = findMatchingCloseBrace(sparql, braceStart);
   if (braceEnd === -1) return sparql;
@@ -1008,10 +999,10 @@ function wrapWithGraphUnion(sparql: string, graphUris: string[]): string {
  * with an integer value ≥ `minTrust`. Subjects with no trust metadata
  * are filtered out (the required triple is absent).
  *
- * The rewriter scans the WHERE block for top-level triple patterns and
- * collects every distinct subject variable (bot review L3 — previously
- * only the first subject var was captured, so multi-subject queries
- * like `?a <p> ?o . ?b <q> ?r` had `?b` pass through unfiltered).
+ * The rewriter scans the WHERE block for top-level triple patterns
+ * and collects every distinct subject variable so multi-subject
+ * queries like `?a <p> ?o . ?b <q> ?r` have BOTH `?a` and `?b`
+ * trust-filtered.
  *
  * Returns `null` when:
  *   - no `WHERE { ... }` block can be located;
@@ -1022,7 +1013,7 @@ function wrapWithGraphUnion(sparql: string, graphUris: string[]): string {
  *     cannot attach a filter to a constant, and silently ignoring the
  *     constant row would leak sub-threshold data (L1 fail-closed);
  *   - no subject var is found at all.
- * Callers treat `null` as "refuse to run" (see bot review L1).
+ * Callers treat `null` as "refuse to run".
  */
 /**
  * Strip SPARQL line comments (`# … EOL`) from a fragment of SPARQL
@@ -1052,7 +1043,7 @@ function stripSparqlLineComments(src: string): string {
       continue;
     }
     if (ch === '"' || ch === "'") {
-      // PR #229 bot review (r3148998562). Centralised triple-quoted-aware skip.
+      // Centralised triple-quoted-aware skip.
       const j = skipSparqlStringLiteral(src, i);
       out += src.slice(i, j);
       i = j;
@@ -1078,7 +1069,7 @@ function stripSparqlLineComments(src: string): string {
  * that must not be confused by user payloads such as
  * `"{json: 1}"` or `# OPTIONAL: ...`.
  *
- * PR #229 bot review (dkg-query-engine.ts:851). Triple-quoted
+ * Triple-quoted
  * (`"""…"""` / `'''…'''`) literals are NOT recognised because
  * `injectMinTrustFilter`'s outer pipeline already refuses any WHERE
  * carrying tokens from the multi-line literal grammar (FILTER EXISTS,
@@ -1101,7 +1092,7 @@ function scrubStringsAndComments(src: string): string {
       continue;
     }
     if (ch === '"' || ch === "'") {
-      // PR #229 bot review (r3148998562). Centralised triple-quoted-aware skip.
+      // Centralised triple-quoted-aware skip.
       const j = skipSparqlStringLiteral(src, i);
       for (let k = i; k < j; k++) buf[k] = src[k] === '\n' ? '\n' : ' ';
       i = j;
@@ -1123,11 +1114,11 @@ function scrubStringsAndComments(src: string): string {
 /**
  * Split a SPARQL WHERE body on **top-level** triple terminators, i.e.
  * dots that live outside quoted literals and outside IRI angle
- * brackets. PR #229 bot review round 8 (dkg-query-engine.ts:576): the
- * previous `/\.(?=\s|$)/` regex broke on literal dots in messages like
- * `?s <p> "hello. world"`, silently fragmenting the statement so the
- * subject scanner returned garbage and `_minTrust` fail-closed to `[]`
- * for every text/chat query. This tokenizer walks the body character
+ * brackets. The earlier `/\.(?=\s|$)/` regex broke on literal dots
+ * in messages like `?s <p> "hello. world"`, silently fragmenting
+ * the statement so the subject scanner returned garbage and
+ * `_minTrust` fail-closed to `[]` for every text/chat query. This
+ * tokenizer walks the body character
  * by character, tracks `<…>` and `"…"` / `'…'` scopes (with `\`-escape
  * handling), and only treats `.` as a separator when it sits at depth
  * zero and is followed by whitespace or end-of-input. Comments have
@@ -1156,7 +1147,7 @@ function splitTopLevelTripleStatements(body: string): string[] {
       continue;
     }
     if (ch === '"' || ch === "'") {
-      // PR #229 bot review (r3148998562). Centralised triple-quoted-aware skip.
+      // Centralised triple-quoted-aware skip.
       i = skipSparqlStringLiteral(body, i);
       continue;
     }
@@ -1182,7 +1173,7 @@ function splitTopLevelTripleStatements(body: string): string[] {
 }
 
 function injectMinTrustFilter(sparql: string, minTrust: number): string | null {
-  // PR #229 bot review (r3147347827, dkg-query-engine.ts:718). The
+  // The
   // pre-fix rewriter only recognised `WHERE\s*\{`, so SPARQL 1.1
   // shorthand forms (`SELECT ?x { … }`, `ASK { … }`,
   // `DESCRIBE ?x { … }`, `CONSTRUCT { tmpl } { where }`) returned
@@ -1193,7 +1184,7 @@ function injectMinTrustFilter(sparql: string, minTrust: number): string | null {
   const braceStart = findWhereBraceStart(sparql);
   if (braceStart === -1) return null;
 
-  // PR #229 bot review (r3148... — dkg-query-engine.ts:939). The
+  // — dkg-query-engine.ts:939). The
   // earlier brace-balance loop counted `{`/`}` inside SPARQL string
   // literals (e.g. `FILTER(STR(?t) = "{")`), so a literal-heavy WHERE
   // ended at depth 1 and `injectMinTrustFilter` returned `null` —
@@ -1206,7 +1197,7 @@ function injectMinTrustFilter(sparql: string, minTrust: number): string | null {
 
   const inner = sparql.slice(braceStart + 1, braceEnd);
 
-  // PR #229 bot review round 23 (r23-2, dkg-query-engine.ts). A
+  // A
   // leading top-level `VALUES` clause is the canonical SPARQL shape
   // for batched exact-subject lookups:
   //
@@ -1215,7 +1206,7 @@ function injectMinTrustFilter(sparql: string, minTrust: number): string | null {
   //       ?s <p> ?o .
   //     }
   //
-  // Pre-r23 the forbidden-tokens regex treated any VALUES as
+  // the forbidden-tokens regex treated any VALUES as
   // "unsupported" and `_minTrust` fell through to
   // `emptyResultForForm(...)`, which turns into a silent `[]` / `false`
   // even when the bound subjects satisfy the threshold. The contract
@@ -1233,7 +1224,7 @@ function injectMinTrustFilter(sparql: string, minTrust: number): string | null {
   const { valuesClause, bodyAfterValues } = peelLeadingValues(inner);
   const scanTarget = bodyAfterValues ?? inner;
 
-  // PR #229 bot review (r3147347... — dkg-query-engine.ts:851).
+  // — dkg-query-engine.ts:851).
   // Pre-fix the unsupported-nesting guard `/\{|\}/.test(scanTarget)`
   // and the keyword guard below ran on the RAW WHERE body. Any
   // `{`, `}`, or sensitive keyword that happened to appear inside a
@@ -1263,13 +1254,13 @@ function injectMinTrustFilter(sparql: string, minTrust: number): string | null {
   // extremely common `rdf:type` shape
   // `<http://www.w3.org/1999/02/22-rdf-syntax-ns#type>` whenever
   // `_minTrust` was set, which fail-closes the entire query to `[]`
-  // (PR #229 bot review round 7 — dkg-query-engine.ts:513).
+  // .
   const innerCodeOnly = stripSparqlLineComments(scanTarget);
   const trimmedInner = innerCodeOnly.trim();
   if (trimmedInner.length === 0) return null;
 
   // Split on the top-level `.` separator to walk each triple pattern.
-  // PR #229 bot review round 8 (dkg-query-engine.ts:576): use a
+  // use a
   // quote/IRI-aware tokenizer instead of a naive regex so `?s <p>
   // "hello. world"` isn't fragmented into broken statements that the
   // subject scanner then refuses, fail-closing `_minTrust` to `[]`
@@ -1281,7 +1272,6 @@ function injectMinTrustFilter(sparql: string, minTrust: number): string | null {
   const subjectIris = new Set<string>();
   const subjectPrefixed = new Set<string>();
   for (const stmt of statements) {
-    // PR #229 bot review r3131942426 (dkg-query-engine.ts:754):
     // top-level `FILTER(...)` / `BIND(... AS ?x)` clauses share the
     // statement-list with triple patterns and have no subject token.
     // Pre-fix the subject regex below didn't match either keyword,
@@ -1310,12 +1300,11 @@ function injectMinTrustFilter(sparql: string, minTrust: number): string | null {
     //   - absolute IRI (`<urn:x>`)
     //   - blank node (`_:b`)
     //   - RDF literal (`"…"` with optional type/lang tag)
-    //   - prefixed name (`ex:item`) — SPARQL `PNAME_LN` / `PNAME_NS`
-    //     (PR #229 bot review round 11 / dkg-query-engine.ts:654;
-    //     previous revisions fail-closed `_minTrust` to `[]` for
+    //   - prefixed name (`ex:item`) — SPARQL `PNAME_LN` / `PNAME_NS`.
+    //     Earlier revisions fail-closed `_minTrust` to `[]` for
     //     every query that used standard `PREFIX ex: <urn:> …`
     //     syntax, which is the recommended SPARQL shape for exact
-    //     entity lookups.)
+    //     entity lookups.
     const m = stmt.match(
       /^\s*([?$]([A-Za-z_]\w*)|<[^>]+>|_:[A-Za-z_]\w*|"[^"]*"(?:\^\^<[^>]+>|@[A-Za-z-]+)?|[A-Za-z][\w-]*:[A-Za-z_][\w-]*|[A-Za-z][\w-]*:)/,
     );
@@ -1325,7 +1314,6 @@ function injectMinTrustFilter(sparql: string, minTrust: number): string | null {
       subjectVars.add(subj);
       continue;
     }
-    // Bot review (PR #229 follow-up, dkg-query-engine.ts:534):
     // exact-entity lookups like `SELECT ?o WHERE { <e> <p> ?o }` are
     // the most common SPARQL shape in DKG and must NOT fail closed on
     // `_minTrust`. The threshold is perfectly enforceable against a
@@ -1375,7 +1363,7 @@ function injectMinTrustFilter(sparql: string, minTrust: number): string | null {
     );
   }
 
-  // Bot review L2: the previous implementation unconditionally inserted
+  // the previous implementation unconditionally inserted
   // `" . "` between `inner.trim()` and the injected clauses, which
   // produced `... . . ?s <trustLevel> ...` when the original WHERE
   // already ended with a dot (the common case) — a SPARQL syntax error
@@ -1387,7 +1375,7 @@ function injectMinTrustFilter(sparql: string, minTrust: number): string | null {
   const separator = endsWithDot ? ' ' : ' . ';
   const rewrittenBody = `${trimmedInner}${separator}${extraClauses.join(' ')}`;
 
-  // r23-2: if the WHERE started with a `VALUES ?s { … }` clause the
+  // if the WHERE started with a `VALUES ?s { … }` clause the
   // peeler set aside, re-emit it at the top of the rewritten body so
   // the bindings it introduces still drive the trust-filtered BGP.
   const rewrittenInner = valuesClause
@@ -1400,7 +1388,7 @@ function injectMinTrustFilter(sparql: string, minTrust: number): string | null {
 }
 
 /**
- * r23-2: peel a single leading top-level `VALUES ?var { … }` clause
+ * peel a single leading top-level `VALUES ?var { … }` clause
  * off the WHERE body. Returns the clause text (verbatim, including the
  * trailing `}`) and the remainder so the caller can reason about
  * triples alone. If the WHERE does NOT start with a VALUES clause, or

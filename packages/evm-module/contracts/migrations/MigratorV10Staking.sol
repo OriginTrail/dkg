@@ -15,7 +15,7 @@ import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IER
 
 /**
  * @title MigratorV10Staking
- * @notice Zero-token V8 → V10 delegator state migrator (BUGS_FOUND.md E-11).
+ * @notice Zero-token V8 → V10 delegator state migrator (.
  *
  * Background
  * ----------
@@ -50,11 +50,10 @@ contract MigratorV10Staking is ContractStatus, INamed, IVersioned, IInitializabl
     error MigrationAlreadyFinalized();
     error DelegatorAlreadyMigrated(uint72 identityId, address delegator);
     error NodeAlreadyMigrated(uint72 identityId);
-    /// PR #229 bot review round 24 (r24-3): raised when
-    /// `migrateDelegator` is called for an identity that has ALREADY
-    /// been marked migrated via `markNodeMigrated`. The previous
-    /// implementation only guarded `delegatorMigrated[id][d]`, so a
-    /// replay of an older snapshot row could still extend
+    /// Raised when `migrateDelegator` is called for an identity that
+    /// has ALREADY been marked migrated via `markNodeMigrated`. An
+    /// earlier implementation only guarded `delegatorMigrated[id][d]`,
+    /// so a replay of an older snapshot row could still extend
     /// `delegatorsInfo`, `nodeStake` and `totalStake` past the value
     /// that `markNodeMigrated` already validated against
     /// `expectedTotalStake`. The integrity gate assumed `nodeStake`
@@ -62,7 +61,6 @@ contract MigratorV10Staking is ContractStatus, INamed, IVersioned, IInitializabl
     /// makes that invariant explicit on chain.
     error NodeAlreadyFrozen(uint72 identityId);
     error InvalidIdentityId();
-    /// PR #229 bot review round 10 (MigratorV10Staking.sol:137).
     /// Raised when the supplied `identityId` is non-zero but does not
     /// correspond to an existing profile in `ProfileStorage`. Until
     /// round 10 a fat-fingered snapshot row (e.g. a typo in the
@@ -134,9 +132,8 @@ contract MigratorV10Staking is ContractStatus, INamed, IVersioned, IInitializabl
         emit MigrationInitiated();
     }
 
-    /// PR #229 bot review (r3146902144, MigratorV10Staking.sol:137).
-    /// Pre-fix `finalizeMigration` had no guard against being called
-    /// before `initiateMigration`. A single fat-finger by an operator
+    /// Without this guard `finalizeMigration` could be called before
+    /// `initiateMigration`. A single fat-finger by an operator
     /// (or any caller able to satisfy `onlyOwnerOrMultiSigOwner`) would
     /// flip `migrationFinalized` to `true` permanently, bricking the
     /// migrator: every subsequent write surface checks
@@ -173,7 +170,6 @@ contract MigratorV10Staking is ContractStatus, INamed, IVersioned, IInitializabl
         uint96 stakeBase
     ) external onlyOwnerOrMultiSigOwner whenInitiated {
         if (identityId == 0) revert InvalidIdentityId();
-        // PR #229 bot review round 10 (MigratorV10Staking.sol:137).
         // `identityId != 0` alone does NOT prove the id belongs to a
         // real profile — `DelegatorsInfo.addDelegator`,
         // `StakingStorage.setDelegatorStakeBase`,
@@ -185,7 +181,7 @@ contract MigratorV10Staking is ContractStatus, INamed, IVersioned, IInitializabl
         if (!profileStorage.profileExists(identityId)) {
             revert UnknownIdentityId(identityId);
         }
-        // PR #229 bot review round 24 (r24-3). Once
+        // Once
         // `markNodeMigrated` has flipped `nodeMigrated[identityId]`
         // to true, the integrity check for THIS identity has been
         // satisfied against `expectedTotalStake` and downstream

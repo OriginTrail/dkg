@@ -22,7 +22,7 @@ export async function subtractFinalizedExactQuads(params: {
    * Explicit encryption key used when sealing private literals (same
    * value the caller's `PrivateContentStore` was constructed with).
    *
-   * PR #229 bot review round 9 (async-lift-subtraction.ts:147): without
+   * without
    * this, the subtraction called `decryptPrivateLiteral` with no
    * override and resolved ONLY the env/default key. A deployment that
    * uses a non-default key therefore never matched any plaintext input
@@ -48,7 +48,7 @@ export async function subtractFinalizedExactQuads(params: {
     params.graphManager.dataGraphUri(params.request.contextGraphId),
     confirmedRoots,
   );
-  // Private quads land on disk as AES-GCM-SIV ciphertext (BUGS_FOUND.md
+  // Private quads land on disk as AES-GCM-SIV ciphertext (
   // ST-2). The deterministic IV guarantees identical plaintexts produce
   // identical ciphertexts, but the authoritative-key set still has to
   // be in plaintext form so callers can match against the
@@ -161,7 +161,6 @@ async function loadAuthoritativeQuadKeys(
 
   return new Set(
     result.quads.map((quad) => {
-      // PR #229 bot review round 9 (async-lift-subtraction.ts:147):
       // forward the store's explicit `encryptionKey` (when the caller
       // supplied one) so the decrypt here uses the SAME key the
       // backing `PrivateContentStore` sealed under. Without this,

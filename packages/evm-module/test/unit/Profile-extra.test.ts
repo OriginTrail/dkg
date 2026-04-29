@@ -1,7 +1,7 @@
 /**
  * Profile-extra.test.ts — audit coverage (E-17).
  *
- * Finding E-17 (MEDIUM, see .test-audit/BUGS_FOUND.md): originally tagged
+ * Finding E-17 (MEDIUM, see .test-audit/
  * SPEC-GAP because the audit author believed the V10 spec required a
  * 50K-TRAC gate inside `Profile.createProfile`. Re-reading the trust-layer
  * spec (`docs/SPEC_TRUST_LAYER.md` line 548 / `docs/plans/PLAN_TRUST_LAYER.md`

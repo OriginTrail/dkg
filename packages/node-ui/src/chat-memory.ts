@@ -273,7 +273,7 @@ function sumBindingValues(bindings: Array<Record<string, string>> | undefined, k
   return bindings.reduce((sum, b) => sum + parseRdfInt(b[key] ?? '0'), 0);
 }
 
-// PR #229 bot review (r31-12 — chat-memory.ts:1003, JNLL).
+// chat-memory.ts:1003, JNLL).
 //
 // The r31-5 / r31-6 dedupe between the canonical `msg:agent:K` and
 // the headless `msg:agent-headless:K` assistant-message pair was
@@ -285,10 +285,10 @@ function sumBindingValues(bindings: Array<Record<string, string>> | undefined, k
 // Centralising the arbitration into a single helper means every
 // reader observes the same logical message set:
 //   - default: a non-headless assistant message wins; the headless
-//     duplicate (if any) is dropped (r31-5).
+//     duplicate (if any) is dropped.
 //   - inversion: when the headless variant carries
 //     `dkg:supersedesCanonicalAssistant "true"`, the canonical
-//     assistant is dropped instead and the headless wins (r31-6).
+//     assistant is dropped instead and the headless wins.
 //   - lone headless / lone canonical: untouched.
 //   - user messages and unrelated keys: untouched.
 //
@@ -834,7 +834,7 @@ export class ChatMemoryManager {
       );
       const rawMessageCount = sumBindingValues(msgs.bindings, 'c');
 
-      // PR #229 bot review (r31-12 — chat-memory.ts:835, JNLL).
+      // chat-memory.ts:835, JNLL).
       //
       // The raw `?s a schema:Message` count above includes BOTH
       // `msg:agent:K` (canonical) AND `msg:agent-headless:K`
@@ -1014,14 +1014,14 @@ export class ChatMemoryManager {
             const reason = stripRdfLiteral(mb.failureReason ?? '').trim();
             return reason.length > 0 ? reason : undefined;
           })(),
-          // r31-5 (PR #229 bot review — actions.ts:1173): used ONLY by
+          // r31-5: used ONLY by
           // the dedupe pass below, then stripped from the public shape.
           // `true` iff the writer tagged the message
           // `dkg:headlessAssistantMessage "true"` (i.e. it came from
           // the proactive/recovery headless reply path, not the
           // canonical user-first turn).
           isHeadlessAssistant: headlessFlag === 'true',
-          // r31-6 (PR #229 bot review — adapter-elizaos/src/index.ts:521):
+          // r31-6:
           // used ONLY by the dedupe pass below, then stripped from the
           // public shape. `true` iff the writer tagged the message
           // `dkg:supersedesCanonicalAssistant "true"` — set on a
@@ -1032,7 +1032,6 @@ export class ChatMemoryManager {
           supersedesCanonicalAssistant: supersedesFlag === 'true',
         };
       });
-      // PR #229 bot review (r31-5 / r31-6 / r31-10 / r31-12).
       //
       // The canonical-vs-headless assistant arbitration originally
       // lived inline here. r31-12 (JNLL) extracted it into the
@@ -1091,13 +1090,13 @@ export class ChatMemoryManager {
         .map((entry: { sessionUri: string; sessionId: string }) => `<${entry.sessionUri}>`)
         .join(' ');
 
-      // PR #229 bot review (r31-12 — chat-memory.ts:1132, JNLL).
+      // chat-memory.ts:1132, JNLL).
       // Pull the same `dkg:turnId` /
       // `dkg:headlessAssistantMessage` /
       // `dkg:supersedesCanonicalAssistant` columns that
       // `getSession()` reads so the shared
       // `applySupersedeDedupe()` arbitration can drop the
-      // canonical-vs-headless duplicates here too. Pre-r31-12 this
+      // canonical-vs-headless duplicates here too. this
       // query joined ONLY on `?m a schema:Message`, so the recents
       // panel rendered the same assistant reply twice for any turn
       // that had both a `msg:agent:K` and a `msg:agent-headless:K`
@@ -1198,7 +1197,7 @@ export class ChatMemoryManager {
       };
     }
 
-    // PR #229 bot review (r30-8 — adapter-elizaos/src/actions.ts:965).
+    // adapter-elizaos/src/actions.ts:965).
     // The adapter's writer emits two URI shapes for the canonical
     // `dkg:ChatTurn` envelope:
     //
@@ -1213,7 +1212,7 @@ export class ChatMemoryManager {
     //      URI so a stub `dkg:hasUserMessage` doesn't collide with
     //      a real one already stamped on the canonical turn.
     //
-    // Pre-r30-8 this reader hard-coded `${CHAT_NS}turn:${turnId}` and
+    // this reader hard-coded `${CHAT_NS}turn:${turnId}` and
     // therefore could not find headless-turn quads at all — every
     // assistant-only turn round-tripped as `turn_not_found` even
     // though its triples lived in the WM. We now resolve the actual
@@ -1222,7 +1221,7 @@ export class ChatMemoryManager {
     // contract still uses `${CHAT_NS}turn:` for the cache-friendly
     // delta path (CONSTRUCT subjectSet below), but the lookup itself
     // is now URI-agnostic.
-    // PR #229 bot review (r31-3 — adapter-elizaos/src/actions.ts:622).
+    // adapter-elizaos/src/actions.ts:622).
     // The writer now stamps a DISTINCT `dkg:turnId = "headless:${turnKey}"`
     // literal on headless envelopes (the canonical user-first turn
     // continues to use the bare `turnKey`). That keeps the
@@ -1244,7 +1243,7 @@ export class ChatMemoryManager {
     const tryResolveTurn = async (literal: string): Promise<{
       uri: string;
       ts: string;
-      // PR #229 bot review (r31-4 — chat-memory.ts:1091).
+      // chat-memory.ts:1091).
       // The actual `dkg:turnId` literal that joined this row. For the
       // bare-literal lookup this is just the input `turnId`; for the
       // headless fallback it's `"headless:<turnId>"`. Downstream
@@ -1275,7 +1274,7 @@ export class ChatMemoryManager {
     };
     // Try the bare literal first (canonical user-first turn).
     let resolution = await tryResolveTurn(turnId);
-    // PR #229 bot review (r31-11 — chat-memory.ts:1213). The
+    // chat-memory.ts:1213). The
     // canonical-first lookup above conflicts with the new r31-6
     // `dkg:supersedesCanonicalAssistant` arbitration that
     // `getSession()` performs. When a PROVISIONAL canonical
@@ -1345,7 +1344,7 @@ export class ChatMemoryManager {
     // logical turn id might map to canonical OR headless.
     const currentTurnId = resolvedTurnUri ? turnId : '';
     const currentTurnTs = resolution?.ts ?? '';
-    // PR #229 bot review (r31-4 — chat-memory.ts:1091).
+    // chat-memory.ts:1091).
     // Use the resolved `dkg:turnId` literal for SPARQL comparisons
     // against stored `dkg:turnId` values, NOT the caller's bare
     // `turnId`. For canonical turns these are equal (`"t2"`); for
@@ -1465,8 +1464,8 @@ export class ChatMemoryManager {
       };
     }
 
-    // PR #229 bot review (r31-11 — chat-memory.ts:1213) +
-    // PR #229 bot review (r31-12 — chat-memory.ts:1419, JNLF).
+    // chat-memory.ts:1213) +
+    // chat-memory.ts:1419, JNLF).
     //
     // When the superseding-headless twin was discovered above, route
     // ONLY the assistant-message resolution to the HEADLESS turn so
@@ -1475,7 +1474,7 @@ export class ChatMemoryManager {
     // are projected — the same arbitration `getSession()` applies on
     // its full-replay path.
     //
-    // The USER side STAYS on the canonical turn. Pre-r31-12 the fix
+    // The USER side STAYS on the canonical turn. the fix
     // used a single `effectiveTurnUri` for BOTH `?user` and
     // `?assistant`, so when we swapped to the headless URI the
     // `dkg:hasUserMessage` lookup bound the SYNTHETIC stub

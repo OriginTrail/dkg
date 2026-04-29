@@ -83,7 +83,7 @@ describe('verifySignedRequest', () => {
     expect(out).toEqual({ ok: false, reason: 'missing-fields' });
   });
 
-  it('returns missing-fields when nonce is absent (bot review F3 — nonce is now required)', () => {
+  it('returns missing-fields when nonce is absent', () => {
     const ts = new Date().toISOString();
     const out = verifySignedRequest({
       method: 'POST', path: '/x', body: BODY,
@@ -216,12 +216,12 @@ describe('verifySignedRequest', () => {
     expect(out).toEqual({ ok: true });
   });
 
-  // PR #229 bot review round 9 (auth.ts:293): the replay cache used to
+  // the replay cache used to
   // be keyed by the raw nonce string, so two different bearer tokens
   // that happened to pick the same nonce would reject each other for
   // the full freshness window (cross-client DoS + false-positive
   // replays). Scope the key by the token as well.
-  describe('replay-cache scope (bot review r9-3)', () => {
+  describe('replay-cache scope', () => {
     it('nonce collision across different tokens does NOT cross-block', () => {
       const ts = new Date().toISOString();
       const nonce = freshNonce();
@@ -327,14 +327,14 @@ describe('rotateToken / revokeToken', () => {
     expect(await revokeToken('not-present', tokens)).toBe(false);
   });
 
-  // PR #229 bot review round 19 (r19-4): pin the persistence
+  // pin the persistence
   // contract for file-backed tokens. Pre-r19-4, `revokeToken` was a
   // synchronous in-memory `Set.delete` only — and `verifyToken()`'s
   // per-call reconcile would silently re-import the still-on-disk
   // entry on the very next request. The fix rewrites `auth.token` to
   // exclude the revoked token; this test pins both the rewrite and
   // the cross-check that `verifyToken()` no longer re-accepts it.
-  it('r19-4: revokeToken persists removal of a file-backed token across verifyToken reconciliation', async () => {
+  it('revokeToken persists removal of a file-backed token across verifyToken reconciliation', async () => {
     const { verifyToken } = await import('../src/auth.js');
     const tokenA = 'file-backed-token-a-' + randomBytes(8).toString('hex');
     const tokenB = 'file-backed-token-b-' + randomBytes(8).toString('hex');
@@ -359,7 +359,7 @@ describe('rotateToken / revokeToken', () => {
 
     // Cross-check the bug bot's specific concern: the very next
     // `verifyToken()` call MUST NOT silently re-import the revoked
-    // token. The pre-r19-4 implementation would have had
+    // token. The implementation would have had
     // reconcileFileTokens re-add tokenA from disk on the next call,
     // so calling verifyToken(tokenA, ...) would still return true.
     // After r19-4, the file no longer contains tokenA, so even when
@@ -373,7 +373,7 @@ describe('rotateToken / revokeToken', () => {
   });
 
   // -------------------------------------------------------------
-  // PR #229 bot review (r31-14 — auth.ts:203, KwIE). Pre-fix the
+  // auth.ts:203, KwIE). Pre-fix the
   // file-vs-config provenance was lost: `loadTokens()` merges both
   // sources into one `Set` AND tracks them all in `snapshot.fileTokens`
   // when the value happens to also appear on disk (a real-world
@@ -390,7 +390,7 @@ describe('rotateToken / revokeToken', () => {
   // branch of `revokeToken`) skips tokens that are still pinned by
   // config. Tests below pin the four corners.
   // -------------------------------------------------------------
-  describe('r31-14 (KwIE) — config provenance survives file reconciliation', () => {
+  describe('(KwIE) — config provenance survives file reconciliation', () => {
     it('reconcileFileTokens does NOT revoke a token that lives in BOTH auth.token and config.auth.tokens when the file rewrite removes it', async () => {
       const { verifyToken } = await import('../src/auth.js');
       const tokPath = join(tempDir, 'auth.token');
@@ -430,7 +430,7 @@ describe('rotateToken / revokeToken', () => {
       const tokens = await loadTokens({ tokens: [overlap] });
 
       const fresh = await rotateToken(tokens);
-      // Post-r31-14 contract:
+      // contract:
       //   - the rotation introduced a new file-derived token
       //   - the overlap token survives because config still pins it
       //     (pre-fix this assertion FAILED — overlap was removed from
@@ -462,7 +462,7 @@ describe('rotateToken / revokeToken', () => {
       // File vanishes (rm + race, common during `dkg auth wipe`).
       await unlink(tokPath);
 
-      // Operator revokes the file-only token. Pre-r31-14 the ENOENT
+      // Operator revokes the file-only token. the ENOENT
       // path bulk-revoked snapshot.fileTokens, which included
       // `overlap` because it was present on disk too — the
       // configured admin credential was silently nuked. Post-r31-14
@@ -482,7 +482,7 @@ describe('rotateToken / revokeToken', () => {
       await unlink(tokPath);
 
       // Operator explicitly asks: kill THIS token. Provenance does
-      // not matter — operator intent wins. Post-r31-14 the
+      // not matter — operator intent wins. the
       // belt-and-suspenders `validTokens.delete(token)` at the end
       // of the ENOENT branch ensures the explicitly-named target is
       // always removed, even if it's config-pinned.
@@ -513,7 +513,7 @@ describe('rotateToken / revokeToken', () => {
     });
   });
 
-  it('r19-4: revokeToken on a config-pinned (non-file) token leaves the file alone', async () => {
+  it('revokeToken on a config-pinned (non-file) token leaves the file alone', async () => {
     const fileToken = 'file-tok-' + randomBytes(8).toString('hex');
     const tokPath = join(tempDir, 'auth.token');
     await writeFile(tokPath, `${fileToken}\n`, { mode: 0o600 });
@@ -531,7 +531,7 @@ describe('rotateToken / revokeToken', () => {
     expect(tokens.has(fileToken)).toBe(true);
   });
 
-  it('r19-4: revokeToken returns false (and does not touch the file) when the token was never registered', async () => {
+  it('revokeToken returns false (and does not touch the file) when the token was never registered', async () => {
     const fileToken = 'file-tok-' + randomBytes(8).toString('hex');
     const tokPath = join(tempDir, 'auth.token');
     await writeFile(tokPath, `${fileToken}\n`, { mode: 0o600 });
@@ -546,7 +546,7 @@ describe('rotateToken / revokeToken', () => {
   });
 
   // ---------------------------------------------------------------------------
-  // PR #229 bot review (r3148... — auth.ts:315). The earlier r19-4
+  // — auth.ts:315). The earlier r19-4
   // ENOENT branch handled "file vanished mid-revoke" by:
   //
   //   - removing ONLY the requested token from the in-memory set
@@ -567,7 +567,7 @@ describe('rotateToken / revokeToken', () => {
   //   2. `verifyToken()` on the sibling reflects the revocation on
   //      the very next call (no stale-survival window)
   // ---------------------------------------------------------------------------
-  it('r30-4: revokeToken ENOENT branch eagerly revokes ALL file-backed tokens (no orphan stays valid)', async () => {
+  it('revokeToken ENOENT branch eagerly revokes ALL file-backed tokens (no orphan stays valid)', async () => {
     const { verifyToken } = await import('../src/auth.js');
     const tokenA = 'enoent-orphan-a-' + randomBytes(8).toString('hex');
     const tokenB = 'enoent-orphan-b-' + randomBytes(8).toString('hex');
@@ -602,7 +602,7 @@ describe('rotateToken / revokeToken', () => {
     expect(verifyToken(tokenC, tokens)).toBe(false);
   });
 
-  it('r30-4: revokeToken ENOENT branch is idempotent (second call returns false, set stays empty)', async () => {
+  it('revokeToken ENOENT branch is idempotent (second call returns false, set stays empty)', async () => {
     const tokenA = 'enoent-idem-a-' + randomBytes(8).toString('hex');
     const tokenB = 'enoent-idem-b-' + randomBytes(8).toString('hex');
     const tokPath = join(tempDir, 'auth.token');
@@ -621,7 +621,7 @@ describe('rotateToken / revokeToken', () => {
     expect(await revokeToken('never-existed-' + randomBytes(4).toString('hex'), tokens)).toBe(false);
   });
 
-  it('r30-4: ENOENT eager-revoke does NOT touch config-pinned tokens (only file-backed ones get cleaned)', async () => {
+  it('ENOENT eager-revoke does NOT touch config-pinned tokens (only file-backed ones get cleaned)', async () => {
     const fileTok = 'enoent-mixed-file-' + randomBytes(8).toString('hex');
     const configTok = 'enoent-mixed-config-' + randomBytes(8).toString('hex');
     const tokPath = join(tempDir, 'auth.token');
@@ -660,7 +660,7 @@ describe('rotateToken / revokeToken', () => {
     expect(verifyToken(original, tokens)).toBe(false);
   });
 
-  // PR #229 bot review round 7 (auth.ts:162). Coarse-mtime filesystems
+  // Coarse-mtime filesystems
   // (HFS+ 1s, some SMB mounts, certain CI tmpfs) re-use the same mtime
   // tick on quick rewrites. `loadTokens` creates `auth.token` with a
   // 64-byte hex token; a rotation replaces it with ANOTHER 64-byte hex
@@ -773,7 +773,7 @@ describe('httpAuthGuard — advanced branches', () => {
     expect(res.status).toBe(200);
   });
 
-  it('does NOT reject legitimate duplicate body-less POST retries (bot review PR #229 regression fix)', async () => {
+  it('does NOT reject legitimate duplicate body-less POST retries', async () => {
     // Previous behaviour: the CLI-10 fingerprint dedup 401-rejected the
     // second identical body-less POST within 60 s. That broke every
     // idempotent retry like `POST /api/local-agent-integrations/:id/refresh`
@@ -872,7 +872,7 @@ describe('httpAuthGuard — advanced branches', () => {
 });
 
 // ---------------------------------------------------------------------------
-// PR #229 F2 follow-up: enforceSignedRequestPostBody must reject tampered /
+// enforceSignedRequestPostBody must reject tampered /
 // missing / stale signatures once the body is buffered. The previous revision
 // pre-validated the headers and trusted the request if the bearer token was
 // valid — this test pins the NEW enforcement path.
@@ -966,7 +966,7 @@ describe('enforceSignedRequestPostBody — centralised body-binding enforcement'
 });
 
 // ---------------------------------------------------------------------------
-// PR #229 F2 second follow-up: httpAuthGuard must fail closed on signed
+// httpAuthGuard must fail closed on signed
 // GET / HEAD / zero-body requests that never reach readBody*(), so the
 // daemon can't accept a forged x-dkg-signature just because the token is
 // valid and the timestamp is fresh. Previously httpAuthGuard stashed
@@ -1080,7 +1080,7 @@ describe('httpAuthGuard — signed GET/HEAD requests verify HMAC synchronously',
   });
 
   // -------------------------------------------------------------------
-  // PR #229 bot review round 19 (r19-1). Pre-r19 the guard treated a
+  // the guard treated a
   // POST/PUT/PATCH/DELETE as body-less ONLY when the client sent an
   // explicit `Content-Length: 0`. A signed client that OMITTED
   // `Content-Length` entirely (and didn't use Transfer-Encoding:
@@ -1120,7 +1120,7 @@ describe('httpAuthGuard — signed GET/HEAD requests verify HMAC synchronously',
     });
   }
 
-  it('r19-1: rejects a signed body-less POST with a tampered signature even when Content-Length is OMITTED', async () => {
+  it('rejects a signed body-less POST with a tampered signature even when Content-Length is OMITTED', async () => {
     // This test would PASS pre-r19-1 — because the guard silently
     // waved the request through to the deferred hook, and a handler
     // that doesn't read the body never fires the deferred verify.
@@ -1142,7 +1142,7 @@ describe('httpAuthGuard — signed GET/HEAD requests verify HMAC synchronously',
     expect(handlerCallCount).toBe(0);
   });
 
-  it('r19-1: accepts a correctly-signed body-less POST with no Content-Length (verifier binds to empty body)', async () => {
+  it('accepts a correctly-signed body-less POST with no Content-Length (verifier binds to empty body)', async () => {
     // Positive control: a client that correctly signs the empty
     // body MUST still pass, and the route handler MUST fire exactly
     // once. This locks that the fix doesn't over-reject — only the
@@ -1165,7 +1165,7 @@ describe('httpAuthGuard — signed GET/HEAD requests verify HMAC synchronously',
     expect(handlerCallCount).toBe(1);
   });
 
-  it('r19-1: rejects a signed body-less DELETE with a tampered signature when Content-Length is OMITTED', async () => {
+  it('rejects a signed body-less DELETE with a tampered signature when Content-Length is OMITTED', async () => {
     // Same attack shape as the POST case but on DELETE — which
     // round-7 explicitly removed from the "definitely body-less"
     // short-circuit because DELETE *can* carry a body. Here there
@@ -1188,8 +1188,8 @@ describe('httpAuthGuard — signed GET/HEAD requests verify HMAC synchronously',
     expect(handlerCallCount).toBe(0);
   });
 
-  it('r23-1 + r25-2: a chunked POST with a TAMPERED signature whose handler IGNORES the body is fail-closed to 401', async () => {
-    // PR #229 bot review round 23 (r23-1, cli/auth.ts). The chunked
+  it('+ r25-2: a chunked POST with a TAMPERED signature whose handler IGNORES the body is fail-closed to 401', async () => {
+    // The chunked
     // path used to be described as "caller's responsibility to read
     // the body — the deferred verify runs when the handler reads
     // the body". That let a signed request with
@@ -1199,13 +1199,13 @@ describe('httpAuthGuard — signed GET/HEAD requests verify HMAC synchronously',
     // The bearer token alone was enough, any `x-dkg-signature`
     // value was accepted.
     //
-    // Post-r23 the guard installs a response-level fail-closed
+    // the guard installs a response-level fail-closed
     // wrapper on `res.writeHead`/`res.end`: if the handler tries
     // to emit ANY response while `__dkgSignedAuth.verified` is
     // still false, the wrapper rewrites the status to 401 and
     // the original body is never sent.
     //
-    // PR #229 bot review round 25 (r25-2). r23-1 as originally
+    // r23-1 as originally
     // shipped was overcautious: a LEGITIMATE chunked empty-body
     // POST whose HMAC binds cleanly to `""` was ALSO 401'd,
     // because the guard didn't try the empty-body verification
@@ -1232,8 +1232,8 @@ describe('httpAuthGuard — signed GET/HEAD requests verify HMAC synchronously',
     expect(res.status).toBe(401);
   });
 
-  it('r28: a body-carrying POST with `Transfer-Encoding: gzip, chunked` (comma-list) is NOT short-circuited as zero-body — tampered body still 401s', async () => {
-    // PR #229 bot review (r3147347820, auth.ts:813). The pre-fix
+  it('a body-carrying POST with `Transfer-Encoding: gzip, chunked` (comma-list) is NOT short-circuited as zero-body — tampered body still 401s', async () => {
+    // The pre-fix
     // chunked check did `req.headers['transfer-encoding'] === 'chunked'`,
     // which Node only satisfies when the wire header is the EXACT
     // lowercase string "chunked". A signed client could ship
@@ -1245,7 +1245,7 @@ describe('httpAuthGuard — signed GET/HEAD requests verify HMAC synchronously',
     // read. With a valid bearer token an attacker could PUT/POST
     // arbitrary bytes against any signed route.
     //
-    // Post-r28 we share the parsing rule with `isFramingBodylessByHeaders`
+    // we share the parsing rule with `isFramingBodylessByHeaders`
     // (case-insensitive `/chunked/i.test(joined)`), so the comma-list
     // shape is correctly classified as "body-carrying chunked" and
     // the request flows through the deferred drain-and-verify guard.
@@ -1273,7 +1273,7 @@ describe('httpAuthGuard — signed GET/HEAD requests verify HMAC synchronously',
     expect(res.status).toBe(401);
   });
 
-  it('r28: a body-carrying POST with `Transfer-Encoding: Chunked` (mixed-case) is NOT short-circuited as zero-body', async () => {
+  it('a body-carrying POST with `Transfer-Encoding: Chunked` (mixed-case) is NOT short-circuited as zero-body', async () => {
     // Same r28 fix as above: the strict lowercase comparison missed
     // `Chunked` / `CHUNKED`. Even though most HTTP libraries
     // lowercase the header before exposing it, the auth path must
@@ -1302,8 +1302,8 @@ describe('httpAuthGuard — signed GET/HEAD requests verify HMAC synchronously',
     expect(res.status).toBe(401);
   });
 
-  it('r25-2: a chunked POST with a CORRECTLY-signed empty body whose handler IGNORES the body returns 200 (not 401)', async () => {
-    // PR #229 bot review round 25 (r25-2, cli/auth.ts). The r23-1
+  it('a chunked POST with a CORRECTLY-signed empty body whose handler IGNORES the body returns 200 (not 401)', async () => {
+    // The r23-1
     // response-guard unconditionally 401'd any chunked request whose
     // handler didn't call readBody*(), even when the signature
     // verified cleanly against the empty body that actually arrived
@@ -1334,8 +1334,8 @@ describe('httpAuthGuard — signed GET/HEAD requests verify HMAC synchronously',
     expect(res.status).toBe(200);
   });
 
-  it('r25-2: a chunked POST with a CORRECTLY-signed NON-EMPTY body whose handler IGNORES the body returns 200 (guard drains-and-verifies)', async () => {
-    // Post-r25-2 the response guard drains whatever body the wire
+  it('a chunked POST with a CORRECTLY-signed NON-EMPTY body whose handler IGNORES the body returns 200 (guard drains-and-verifies)', async () => {
+    // the response guard drains whatever body the wire
     // actually delivered and runs the full HMAC verification bound
     // to that payload. A genuine signature over a non-empty body
     // is therefore accepted even when the route handler chose to
@@ -1365,7 +1365,7 @@ describe('httpAuthGuard — signed GET/HEAD requests verify HMAC synchronously',
     expect(res.status).toBe(200);
   });
 
-  it('r25-2: a chunked POST with a TAMPERED non-empty body still fails closed to 401 after drain-and-verify', async () => {
+  it('a chunked POST with a TAMPERED non-empty body still fails closed to 401 after drain-and-verify', async () => {
     // Sign for "intended-body", wire "tampered-body". The guard
     // drains the wire payload, runs verifyHttpSignedRequestAfterBody
     // against those bytes, sees the HMAC mismatch, and emits 401.
@@ -1392,8 +1392,8 @@ describe('httpAuthGuard — signed GET/HEAD requests verify HMAC synchronously',
     expect(res.status).toBe(401);
   });
 
-  it('r23-1 + r25-2: a signed POST with Content-Length > 0 and a TAMPERED signature is fail-closed to 401 after drain-and-verify', async () => {
-    // Post-r25-2 the guard drains the wire body and runs the full
+  it('+ r25-2: a signed POST with Content-Length > 0 and a TAMPERED signature is fail-closed to 401 after drain-and-verify', async () => {
+    // the guard drains the wire body and runs the full
     // HMAC verification against it. A tampered/forged signature
     // cannot match the drained bytes, so the route handler's
     // intended response is replaced with 401. This preserves the
@@ -1435,7 +1435,6 @@ describe('httpAuthGuard — signed GET/HEAD requests verify HMAC synchronously',
   });
 
   // -------------------------------------------------------------
-  // PR #229 bot review r3146563616 (auth.ts:1170 fast-empty path)
   //
   // The original `tryPassiveEmptyBodyVerification` accepted on
   // `req.complete && drainedBytes === 0`, which is satisfiable by a
@@ -1449,7 +1448,7 @@ describe('httpAuthGuard — signed GET/HEAD requests verify HMAC synchronously',
   // Content-Length>0 body whose handler ignores the body, the guard
   // must now drain → verify the actual bytes → 401 on mismatch.
   // -------------------------------------------------------------
-  it('r3146563616: signed POST with Content-Length>0 + tampered sig + IGNORED body returns 401 (not silently 200)', async () => {
+  it('signed POST with Content-Length>0 + tampered sig + IGNORED body returns 401 (not silently 200)', async () => {
     // The body the handler ignores. Pre-fix the empty-body fast path
     // would have accepted a tampered signature because it never read
     // these bytes.
@@ -1484,7 +1483,7 @@ describe('httpAuthGuard — signed GET/HEAD requests verify HMAC synchronously',
   });
 
   // -------------------------------------------------------------
-  // PR #229 bot review (r3148... — auth.ts:1205). The previous
+  // — auth.ts:1205). The previous
   // `waitForRequestEnd()` had `if (req.complete || req.readableEnded)
   // resolve()` as a fast-path. `req.complete === true` only means
   // the HTTP parser has finished reading the body off the socket —
@@ -1504,7 +1503,7 @@ describe('httpAuthGuard — signed GET/HEAD requests verify HMAC synchronously',
   // our `data` listener and `drainedChunks` reflects the true
   // wire body.
   // -------------------------------------------------------------
-  it('r30-5: signed POST whose body fits in the TCP segment alongside headers (parser completes pre-handler) — tampered body is fail-closed to 401', async () => {
+  it('signed POST whose body fits in the TCP segment alongside headers (parser completes pre-handler) — tampered body is fail-closed to 401', async () => {
     // Sign the EMPTY body. Send Content-Length>0 with a different
     // payload so the wire body diverges from what the signature
     // attests to. With the headers + body in one socket write the
@@ -1539,7 +1538,7 @@ describe('httpAuthGuard — signed GET/HEAD requests verify HMAC synchronously',
   });
 
   // -----------------------------------------------------------------
-  // PR #229 bot review (r3148998554 — auth.ts:1202).
+  // auth.ts:1202).
   //
   // Pre-fix `waitForRequestEnd` had no deadline. A signed request that
   // declared `Transfer-Encoding: chunked` and never sent the
@@ -1553,7 +1552,7 @@ describe('httpAuthGuard — signed GET/HEAD requests verify HMAC synchronously',
   // chunked body that NEVER terminates; the response must be 401
   // strictly within `5x` the deadline (the 5x is for CI noise tolerance).
   // -----------------------------------------------------------------
-  it('r30-7: signed request whose body never ends (chunked slowloris) is fail-closed within the drain deadline', async () => {
+  it('signed request whose body never ends (chunked slowloris) is fail-closed within the drain deadline', async () => {
     // Spin up an isolated server with a short drain budget. We use a
     // process-env override (the production code reads
     // `DKG_SIGNED_REQUEST_DRAIN_TIMEOUT_MS` once per `httpAuthGuard`
@@ -1638,7 +1637,7 @@ describe('httpAuthGuard — signed GET/HEAD requests verify HMAC synchronously',
     }
   });
 
-  it('r30-7: legitimate slow-but-completing chunked request still succeeds (timeout does not kill honest clients)', async () => {
+  it('legitimate slow-but-completing chunked request still succeeds (timeout does not kill honest clients)', async () => {
     // Counterpoint: if the body DOES terminate before the deadline,
     // the request must succeed. Honest mobile / lossy-link clients
     // commonly emit chunked bodies with a few hundred ms of inter-
@@ -1706,7 +1705,7 @@ describe('httpAuthGuard — signed GET/HEAD requests verify HMAC synchronously',
     }
   });
 
-  it('r30-5: a sequence of independent signed POST/empty-body lures using random bodies all fail closed (no flaky timing window survives)', async () => {
+  it('a sequence of independent signed POST/empty-body lures using random bodies all fail closed (no flaky timing window survives)', async () => {
     // Run the same scenario back-to-back with fresh nonces and
     // randomly-sized bodies. The previous fast-path bug was timing-
     // dependent (it only triggered when `complete` happened to be
@@ -1739,7 +1738,7 @@ describe('httpAuthGuard — signed GET/HEAD requests verify HMAC synchronously',
     }
   });
 
-  it('r3146563616: signed POST with Content-Length>0 and HONESTLY-signed body (handler ignores body) still returns 200', async () => {
+  it('signed POST with Content-Length>0 and HONESTLY-signed body (handler ignores body) still returns 200', async () => {
     // Counterpoint: a legitimate signed body whose handler chose not
     // to read it must still pass — the drain-and-verify path is
     // expected to bind the HMAC to the actual wire bytes and pass.
@@ -1764,7 +1763,6 @@ describe('httpAuthGuard — signed GET/HEAD requests verify HMAC synchronously',
   });
 
   // -------------------------------------------------------------
-  // PR #229 bot review r3146563620 (auth.ts:1244 write/flushHeaders)
   //
   // The response guard wrapped writeHead+end but NOT res.write or
   // res.flushHeaders, so a handler calling res.write() before the
@@ -1774,7 +1772,7 @@ describe('httpAuthGuard — signed GET/HEAD requests verify HMAC synchronously',
   // until verification succeeds, then replay; or get rewritten to
   // 401 on failure.
   // -------------------------------------------------------------
-  it('r3146563620: handler that streams via res.write() with TAMPERED sig + non-empty body still 401s (no leaked bytes)', async () => {
+  it('handler that streams via res.write() with TAMPERED sig + non-empty body still 401s (no leaked bytes)', async () => {
     // Spin up a dedicated server whose handler calls res.write()
     // BEFORE res.end(), without ever calling readBody*(). Pre-fix
     // the wrap-only-writeHead/end guard would have let those
@@ -1823,7 +1821,7 @@ describe('httpAuthGuard — signed GET/HEAD requests verify HMAC synchronously',
     }
   });
 
-  it('r3146563620: handler that streams via res.write() with VALID sig replays writes after verification (no truncation)', async () => {
+  it('handler that streams via res.write() with VALID sig replays writes after verification (no truncation)', async () => {
     // Counterpoint: a correctly-signed request whose handler streams
     // via res.write must still receive the full streamed body. The
     // queued chunks are flushed in order after the deferred drain +
@@ -1894,9 +1892,9 @@ describe('httpAuthGuard — signed GET/HEAD requests verify HMAC synchronously',
 });
 
 // ---------------------------------------------------------------------------
-// PR #229 bot review round 10 (cli/auth.ts:678). The pre-body replay
+// The pre-body replay
 // check inside `httpAuthGuard` used to key on the raw nonce string
-// while `verifySignedRequest` (r9-3) keys on `sha256(token):nonce`.
+// while `verifySignedRequest` keys on `sha256(token):nonce`.
 // Two different bearer credentials that reused the same nonce would
 // 401 each other at the pre-body gate even though the full signed
 // request would verify cleanly — exactly the cross-client
@@ -1904,7 +1902,7 @@ describe('httpAuthGuard — signed GET/HEAD requests verify HMAC synchronously',
 // parity: both gates enforce identical replay semantics.
 // ---------------------------------------------------------------------------
 
-describe('httpAuthGuard — pre-body nonce replay cache scope (bot review r10-1)', () => {
+describe('httpAuthGuard — pre-body nonce replay cache scope', () => {
   const TOK_A = 'tok-A-' + 'a'.repeat(16);
   const TOK_B = 'tok-B-' + 'b'.repeat(16);
   let server: Server;
@@ -1982,7 +1980,7 @@ describe('httpAuthGuard — pre-body nonce replay cache scope (bot review r10-1)
 });
 
 // ---------------------------------------------------------------------------
-// PR #229 follow-up: signed HMAC must bind the FULL request path
+// signed HMAC must bind the FULL request path
 // (pathname + search), not just pathname. Previously an attacker could
 // swap query parameters after signing and the signature stayed valid.
 // ---------------------------------------------------------------------------
@@ -2092,7 +2090,7 @@ describe('httpAuthGuard — signed-request HMAC binds path+query (pathname + sea
 });
 
 // ---------------------------------------------------------------------------
-// PR #229 follow-up: strict hex validation for x-dkg-signature.
+// strict hex validation for x-dkg-signature.
 // `Buffer.from(hex, 'hex')` silently truncates at the first non-hex
 // character, so `<valid-hmac>zz` decoded to the valid bytes and then
 // passed timingSafeEqual. Must reject malformed hex up front.

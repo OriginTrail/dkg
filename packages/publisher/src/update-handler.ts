@@ -61,7 +61,7 @@ export class UpdateHandler {
     data: Uint8Array,
     fromPeerId: string,
     /**
-     * r23-4 (PR #229 bot review round 23): EVM address recovered from
+     * r23-4: EVM address recovered from
      * the outer GossipEnvelope signature, if ingress came via a signed
      * envelope. Must equal the inner `publisherAddress`; otherwise a
      * peer with a legitimate wallet could wrap a forged KA update
@@ -89,7 +89,7 @@ export class UpdateHandler {
         txHash,
       } = request;
 
-      // r23-4: reject forged-attribution updates before chain RPC.
+      // reject forged-attribution updates before chain RPC.
       if (envelopeSigner && publisherAddress) {
         const claimed = publisherAddress.toLowerCase();
         const recovered = envelopeSigner.toLowerCase();

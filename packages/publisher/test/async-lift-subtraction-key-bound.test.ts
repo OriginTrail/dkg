@@ -1,6 +1,4 @@
 /**
- * PR #229 bot review round 9 (async-lift-subtraction.ts:147).
- *
  * The async-lift `subtractFinalizedExactQuads` step decrypts
  * authoritative private quads so it can match them against the
  * caller's plaintext input for exact dedup. Until round 9 the helper
@@ -66,7 +64,7 @@ function makeResolved(): LiftResolvedPublishSlice {
   } as unknown as LiftResolvedPublishSlice;
 }
 
-describe('subtractFinalizedExactQuads — encryption-key plumbing (bot review r9-5)', () => {
+describe('subtractFinalizedExactQuads — encryption-key plumbing', () => {
   let store: OxigraphStore;
   let graphManager: GraphManager;
 

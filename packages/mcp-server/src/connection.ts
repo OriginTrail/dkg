@@ -10,7 +10,7 @@ export class DkgClient {
   private token?: string;
 
   constructor(portOrBaseUrl: number | string, token?: string) {
-    // PR #229 bot review round 10 (connection.ts:13). Until r10 the
+    // Until r10 the
     // constructor took only a port and hard-coded `http://127.0.0.1`.
     // `DKG_NODE_URL=https://remote.example:8443/api` silently
     // collapsed to `http://127.0.0.1:8443`, dropping the host, the
@@ -20,7 +20,7 @@ export class DkgClient {
     // backwards compatibility (local daemons discovered via
     // `readDkgApiPort()`).
     //
-    // PR #229 bot review round 22 (r22-2, connection.ts:27). The
+    // The
     // initial r10 implementation kept any pathname verbatim, so
     // `new DkgClient('https://host/dkg')` produced `.../dkg/api/status`
     // and `new DkgClient('https://host/api')` the double-prefixed
@@ -148,7 +148,7 @@ export class DkgClient {
  * `undefined` if the URL is unset, malformed, uses a non-http(s)
  * protocol, or has no parseable port.
  *
- * PR #229 bot review round 10: prefer `normalizeBaseUrl` for new
+ * prefer `normalizeBaseUrl` for new
  * call sites — this helper only returns the port and silently drops
  * host/scheme/path. Kept exported for regression-test coverage of
  * the pre-round-10 behavior.
@@ -171,7 +171,7 @@ export function extractPortFromUrl(raw: string): number | undefined {
  * mirror `DkgClient.connect()`'s discovery path (notably
  * `mcp_auth status` / `mcp_auth whoami`).
  *
- * PR #229 bot review round 10 (mcp-server/index.ts:449). `mcp_auth`
+ * `mcp_auth`
  * used to resolve URL + credential from env vars only — so a normal
  * install with no env overrides reported `127.0.0.1:7777` with an
  * empty bearer and "auth broken" even though the tool channel could
@@ -197,8 +197,6 @@ export interface ResolvedDaemonEndpoint {
    * `baseOrPort` in this state — it's a placeholder, and any
    * unrelated process happening to listen on `127.0.0.1:7777` would
    * otherwise make `mcp_auth status` lie about liveness.
-   *
-   * PR #229 bot review round 22 (r22-3, mcp-server/index.ts:497).
    */
   readonly daemonDown?: boolean;
 }
@@ -212,7 +210,7 @@ export async function resolveDaemonEndpoint(options: {
    */
   readonly requireReachable: boolean;
 } = { requireReachable: true }): Promise<ResolvedDaemonEndpoint> {
-  // PR #229 bot review round 9 (mcp-server/index.ts:441): `mcp_auth
+  // `mcp_auth
   // set` mutates `process.env.DKG_NODE_TOKEN` and clears the cached
   // client so the NEXT invocation reconnects — but the reconnect
   // path used to read ONLY from the local auth-token file
@@ -232,10 +230,10 @@ export async function resolveDaemonEndpoint(options: {
     displayUrl = envBaseUrl;
     urlSource = 'env';
   } else if (envUrl) {
-    // PR #229 bot review round 18 (r18-1): if the operator SET
+    // if the operator SET
     // `DKG_NODE_URL` but we couldn't normalize it (malformed URL,
     // non-http(s) scheme, reverse-proxy path prefix rejected by
-    // r17-4, unusable port, missing hostname), the pre-r18-1 code
+    // r17-4, unusable port, missing hostname), the code
     // silently fell through to the local-daemon discovery path
     // below. That was the exact footgun r17-4 meant to close: an
     // operator who configured `DKG_NODE_URL=https://proxy/dkg`
@@ -268,7 +266,7 @@ export async function resolveDaemonEndpoint(options: {
       }
       // Best-effort fallback for display so `mcp_auth status` can
       // still render something useful when the daemon is not up.
-      // r22-3: flag the endpoint as `daemonDown` so callers skip
+      // flag the endpoint as `daemonDown` so callers skip
       // probing the synthetic 127.0.0.1:7777 placeholder — a probe
       // there could hit an unrelated service and falsely report OK.
       return {
@@ -288,7 +286,7 @@ export async function resolveDaemonEndpoint(options: {
   let token = envToken;
   let tokenSource: 'env' | 'file' | 'none' = envToken ? 'env' : 'none';
   if (!token) {
-    // PR #229 bot review round 25 (r25-3, connection.ts). Before r25-3
+    // Before r25-3
     // we unconditionally fell back to `loadAuthToken()` when the env
     // didn't supply a bearer. That file is the LOCAL daemon's admin
     // credential (persisted next to the local pid / port files by
@@ -323,7 +321,7 @@ export async function resolveDaemonEndpoint(options: {
 }
 
 /**
- * PR #229 bot review round 25 (r25-3). True iff the resolved base URL
+ * True iff the resolved base URL
  * (or numeric port, which is always `http://127.0.0.1:<port>` from
  * {@link DkgClient}'s constructor) points at the local machine.
  *
@@ -360,16 +358,15 @@ function isLoopbackBaseUrl(baseOrPort: string | number): boolean {
  * scheme, and the explicit port so an override like
  * `https://remote.example:8443` routes correctly instead of silently
  * collapsing to plaintext `http://127.0.0.1:8443`.
- * (PR #229 bot review round 10.)
- *
- * PR #229 bot review round 11 (connection.ts:276). Earlier revisions
+ * 
+ * Earlier revisions
  * of this helper preserved the URL pathname (e.g. `/api`), but every
  * {@link DkgClient} route already starts with `/api/...`, so an
  * override of `DKG_NODE_URL=https://remote.example:8443/api` produced
  * `.../api/api/status` on the wire — the remote daemon was
  * unreachable.
  *
- * PR #229 bot review round 17 (r17-4). Silently dropping the pathname
+ * Silently dropping the pathname
  * was still a footgun: a daemon exposed behind a reverse-proxy prefix
  * like `https://host/dkg` LOOKED configured, but traffic silently
  * went to `https://host/api/...` — past the prefix. We now FAIL FAST
@@ -395,11 +392,11 @@ export function normalizeBaseUrl(raw: string): string | undefined {
   if (!Number.isFinite(explicitPort) || explicitPort <= 0 || explicitPort > 65535) return undefined;
   if (!u.hostname) return undefined;
 
-  // r17-4: reject any non-root pathname instead of silently dropping
+  // reject any non-root pathname instead of silently dropping
   // it. URL normalizes a missing path to `/`, so origin-only inputs
   // like `https://host:443` parse as `u.pathname === '/'`.
   // Anything else (e.g. `/api`, `/dkg`, `/dkg/api`) would be thrown
-  // away by the pre-r17-4 code, leaving the operator with a base URL
+  // away by the code, leaving the operator with a base URL
   // that looks right but silently bypasses their reverse-proxy
   // prefix. Fail-fast: return undefined so DkgClient.connect reports
   // "daemon unreachable" and the misconfiguration is visible.
@@ -411,7 +408,7 @@ export function normalizeBaseUrl(raw: string): string | undefined {
   // protocol default — keeping the shape deterministic makes logs
   // and test assertions easier to reason about.
   //
-  // PR #229 bot review round 22 (r22-4, connection.ts:327). The
+  // The
   // previous revision composed `${u.hostname}:${u.port}`, which
   // silently dropped the square brackets that IPv6 literals require
   // in a URL: `http://[::1]:9200` normalized to `http://::1:9200`, a

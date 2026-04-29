@@ -1,7 +1,7 @@
 /**
  * chain-event-poller-r24-4.test.ts
  *
- * PR #229 bot review round 24 (r24-4). `ChainEventPoller.poll()` used
+ * `ChainEventPoller.poll()` used
  * to short-circuit on:
  *
  *   if (!hasPending && !watchContextGraphs && !watchUpdates
@@ -138,7 +138,7 @@ describe('ChainEventPoller.poll() — r24-4 early-return gate must include onUnm
 });
 
 /**
- * PR #229 bot review round 25 (r25-1): the near-tip seed that runs on
+ * the near-tip seed that runs on
  * first successful head fetch MUST be skipped when WAL recovery is
  * active, otherwise a surviving WAL entry older than 500 blocks is
  * silently unreachable via KnowledgeBatchCreated scanning and its
@@ -191,7 +191,7 @@ describe('ChainEventPoller.poll() — r25-1 MUST NOT seed near head when WAL rec
       // lets us into poll() without needing WAL recovery or pending
       // publishes. We're specifically pinning the old seeding
       // behaviour for non-WAL pollers — it MUST NOT regress as a
-      // side-effect of the r25-1 fix.
+      // side-effect of the
       onContextGraphCreated: async () => {},
     });
 
@@ -224,7 +224,7 @@ describe('ChainEventPoller.poll() — r25-1 MUST NOT seed near head when WAL rec
 
     const lastBlock = (poller as unknown as { lastBlock: number }).lastBlock;
     // Cursor advances from 750_000 by up to MAX_RANGE=9000 — but the
-    // important assertion is that the r25-1 fix did NOT clobber the
+    // important assertion is that the did NOT clobber the
     // persisted checkpoint back to 0 in a misguided "scan from
     // genesis" gesture. Producers that already have a real cursor
     // MUST keep it.
@@ -234,7 +234,7 @@ describe('ChainEventPoller.poll() — r25-1 MUST NOT seed near head when WAL rec
 });
 
 /**
- * PR #229 bot review (r3148... — chain-event-poller.ts:271). The r25-1
+ * — chain-event-poller.ts:271). The r25-1
  * fix above gated the "refuse to seed near tip" decision on
  * `!!onUnmatchedBatchCreated`, but `DKGAgent` always wires that
  * callback. So a brand-new node with an empty WAL would refuse the
@@ -250,14 +250,14 @@ describe('ChainEventPoller.poll() — r25-1 MUST NOT seed near head when WAL rec
  *      (the legitimate WAL-drain case)
  *   3. callback present + `hasRecoverableWal` not provided → refuse seed
  *      (legacy callers / tests that pre-date the accessor still get the
- *      r25-1 behaviour)
+ *      )
  */
 describe('ChainEventPoller.poll() — r30-4 hasRecoverableWal gates the seed-near-tip suppression', () => {
   it('does SEED near tip when callback is wired but hasRecoverableWal returns false (brand-new node, empty WAL)', async () => {
     const chain = makeMockChain();
     chain.getBlockNumber = async () => 1_000_000;
     const handler = makeHandler();
-    // PR #229 bot review (r31-7) follow-up: keep the original r30-4
+    // keep the original r30-4
     // intent — "an empty-WAL node still seeds near tip" — but give the
     // poller an INDEPENDENT reason to scan this tick (a registered
     // context-graph watcher). Without a reason to scan, the new
@@ -347,7 +347,7 @@ describe('ChainEventPoller.poll() — r30-4 hasRecoverableWal gates the seed-nea
   });
 
   // -------------------------------------------------------------------
-  // PR #229 bot review (r31-7, chain-event-poller.ts:305). After r30-4
+  // After r30-4
   // introduced `hasRecoverableWal()`, the early-return gate inside
   // `poll()` STILL keyed off `watchUnmatchedBatches = !!onUnmatchedBatchCreated`.
   // Because `DKGAgent` always wires that callback for every node, the
@@ -357,7 +357,7 @@ describe('ChainEventPoller.poll() — r30-4 hasRecoverableWal gates the seed-nea
   // gate to `walRecoveryActive` (which honours `hasRecoverableWal`),
   // matching the seed-near-tip decision below it.
   // -------------------------------------------------------------------
-  describe('r31-7: tick early-return must key on walRecoveryActive (NOT bare callback presence)', () => {
+  describe('tick early-return must key on walRecoveryActive (NOT bare callback presence)', () => {
     it('idle node (callback wired, hasRecoverableWal === false, no other watchers, no pending) skips listenForEvents', async () => {
       const chain = makeMockChain();
       const handler = makeHandler();

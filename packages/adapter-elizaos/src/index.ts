@@ -17,7 +17,7 @@
 import type { Plugin, IAgentRuntime, Memory, PersistableMemory, State } from './types.js';
 import {
   dkgService,
-  // PR #229 bot review (r30-8): the public `DKGService` no longer
+  // the public `DKGService` no longer
   // carries the catch-all `Record<string, unknown>` options overload
   // — that was the smuggling path for `{ mode: 'assistant-reply' }`
   // literals past the strict typed contract. Adapter plugin wiring
@@ -43,7 +43,7 @@ import {
 } from './actions.js';
 
 /**
- * PR #229 bot review round 16 (r16-2) + round 17 (r17-1): bounded cache
+ * bounded cache
  * of user-message ids whose `onChatTurn` write completed successfully
  * IN THIS PROCESS, SCOPED PER RUNTIME.
  *
@@ -60,7 +60,7 @@ import {
  * surface a blank turn.
  *
  * r16-2's first pass made the cache a single process-global Map.
- * r17-1 fixed the cross-agent leak: one process can legitimately
+ * ed the cross-agent leak: one process can legitimately
  * host MULTIPLE Eliza runtimes (multi-tenant daemon, test harness,
  * orchestrator). A successful `onChatTurn` in runtime A must NOT
  * make runtime B's `onAssistantReply` silently take the append-only
@@ -121,7 +121,7 @@ function resolveRuntimeCache(runtime: unknown): Map<string, true> {
 }
 
 /**
- * Bot review PR #229 round 24 (r24-2): the persisted-user-turn cache
+ * the persisted-user-turn cache
  * MUST key by the destination assertion graph as well as
  * `(roomId, userMsgId)`.
  *
@@ -231,7 +231,7 @@ function hasUserTurnBeenPersisted(
  * WeakMap (the WeakMap itself cannot be cleared in-place, so we
  * rebind it — old entries become unreachable and GC-eligible).
  *
- * r31-1: also resets the parallel `persistedAssistantMessages`
+ * also resets the parallel `persistedAssistantMessages`
  * cache (see below) so tests that exercise the
  * "user-turn embeds assistant + onAssistantReply" double-write
  * guard can isolate each scenario.
@@ -248,7 +248,7 @@ export function __resetPersistedUserTurnCacheForTests(): void {
 }
 
 /**
- * PR #229 bot review (r31-1 — actions.ts:1107 / actions.ts:1149).
+ * actions.ts:1107 / actions.ts:1149).
  *
  * Parallel cache to {@link persistedUserTurnsByRuntime}, but tracking
  * which `(roomId, userMsgId, contextGraphId, assertionName)` tuples
@@ -283,7 +283,7 @@ export function __resetPersistedUserTurnCacheForTests(): void {
  * `assertionName`) so a successful write into store A does NOT
  * silently short-circuit an assistant-reply heading into store B.
  */
-// PR #229 bot review (r31-5 — adapter-elizaos/src/index.ts:555).
+// adapter-elizaos/src/index.ts:555).
 //
 // The cache used to store a bare `true` per `(roomId, userMsgId,
 // dest)` key, treating any prior user-turn write that carried a
@@ -332,7 +332,7 @@ function markAssistantPersisted(
 ): void {
   const k = persistedUserTurnKey(roomId, userMsgId, destContextGraphId, destAssertionName);
   if (!k) return;
-  // r31-5: empty string defeats the payload comparison (would match
+  // empty string defeats the payload comparison (would match
   // every empty incoming reply). Refuse to cache empty values so an
   // explicit caller mistake doesn't silently freeze "" as the final
   // reply text. Any non-empty value is recorded verbatim — the
@@ -412,7 +412,7 @@ async function onAssistantReplyHandler(
     mode: 'assistant-reply' as const,
   };
   if (userMessageId) opts.userMessageId = String(userMessageId);
-  // PR #229 bot review round 16 (r16-2): resolve `userTurnPersisted`
+  // resolve `userTurnPersisted`
   // from a REAL in-process signal instead of the r14-2 "default
   // false" — which made every reply take the headless path (stub
   // user message + full envelope) even when onChatTurn had just
@@ -438,12 +438,12 @@ async function onAssistantReplyHandler(
     opts.userTurnPersisted = (options as any).userTurnPersisted;
   } else {
     const roomId = (message as any)?.roomId;
-    // r17-1: scope cache lookup by runtime identity — different
+    // scope cache lookup by runtime identity — different
     // Eliza runtimes in the same process MUST NOT see each
     // other's user-turn writes, otherwise runtime B's
     // onAssistantReply would take the append-only path for a
     // turn envelope that only exists in runtime A's graph.
-    // r24-2: look up cache under the RESOLVED destination tuple
+    // look up cache under the RESOLVED destination tuple
     // (contextGraphId, assertionName) — same defaulting chain as
     // `persistChatTurnImpl`. Prevents a successful onChatTurn in
     // store A from silently short-circuiting onAssistantReply in
@@ -457,7 +457,7 @@ async function onAssistantReplyHandler(
       dest.assertionName,
     );
   }
-  // PR #229 bot review (r31-1 — actions.ts:1107 / actions.ts:1149).
+  // actions.ts:1107 / actions.ts:1149).
   // If the matching user-turn write embedded the assistant leg
   // (i.e., the host plumbed `assistantText` /
   // `assistantReply.text` / `state.lastAssistantReply` into the
@@ -488,7 +488,7 @@ async function onAssistantReplyHandler(
       dest.contextGraphId,
       dest.assertionName,
     );
-    // PR #229 bot review (r31-5 — adapter-elizaos/src/index.ts:555).
+    // adapter-elizaos/src/index.ts:555).
     //
     // Pre-fix the cache held a bare `true` and we set
     // `assistantAlreadyPersisted=true` for ANY hit. Hosts that
@@ -525,7 +525,7 @@ async function onAssistantReplyHandler(
       if (incomingReplyText === cachedAssistantText) {
         opts.assistantAlreadyPersisted = true;
       } else if (incomingReplyText.length === 0) {
-        // PR #229 bot review (r31-11 — index.ts:527).
+        // index.ts:527).
         //
         // The empty-incoming follow-up case used to be a fall-
         // through: neither the equality branch nor the supersede
@@ -557,7 +557,7 @@ async function onAssistantReplyHandler(
         // empty supersedes nothing.
         opts.assistantAlreadyPersisted = true;
       } else {
-        // PR #229 bot review (r31-6 — adapter-elizaos/src/index.ts:521).
+        // adapter-elizaos/src/index.ts:521).
         //
         // The cached text disagrees with the incoming reply. Pre-fix the
         // r31-5 branch above set `assistantAlreadyPersisted` only on a
@@ -612,7 +612,7 @@ async function onAssistantReplyHandler(
       }
     }
   }
-  // r30-8: route through the internal-only loose handle. The public
+  // route through the internal-only loose handle. The public
   // `dkgService.persistChatTurn` no longer accepts a generic
   // `Record<string, unknown>` options bag (the catch-all overload
   // was the smuggling path the bot called out). The runtime guards
@@ -622,7 +622,7 @@ async function onAssistantReplyHandler(
 
 /**
  * Wrapper around `dkgService.onChatTurn` that records a successful
- * user-turn persistence in the in-process cache (r16-2). Failures
+ * user-turn persistence in the in-process cache. Failures
  * are re-thrown unchanged and DELIBERATELY NOT recorded so the
  * later `onAssistantReply` falls through to the safe headless
  * branch instead of the append-only path that would assume a turn
@@ -634,7 +634,7 @@ async function onChatTurnHandler(
   state?: Parameters<typeof _dkgServiceLoose.onChatTurn>[2],
   options?: Parameters<typeof _dkgServiceLoose.onChatTurn>[3],
 ) {
-  // PR #229 bot review (r31-2 — adapter-elizaos/src/index.ts:635).
+  // adapter-elizaos/src/index.ts:635).
   //
   // Defence-in-depth dispatch: a host that wires this handler into a
   // reply path (or that calls the public `chatPersistenceHook` /
@@ -657,23 +657,23 @@ async function onChatTurnHandler(
   if (optsForDispatch?.mode === 'assistant-reply') {
     return onAssistantReplyHandler(runtime, message, state, optsForDispatch);
   }
-  // r30-8: route through the loose internal handle (see comment in
+  // route through the loose internal handle (see comment in
   // `onAssistantReplyHandler`).
   const result = await _dkgServiceLoose.persistChatTurn(runtime, message, state, options);
-  // r31-2: the assistant-reply branch is handled by the dispatch
+  // the assistant-reply branch is handled by the dispatch
   // above, so reaching this point implies user-turn mode. We still
   // read `optsAny` because downstream cache calls need
-  // `optsAny?.userMessageId` (r29-2) and the `assistantText`
-  // fields (r31-1).
+  // `optsAny?.userMessageId` and the `assistantText`
+  // fields.
   //
-  // r17-1: scope the record by the runtime identity so runtime B
+  // scope the record by the runtime identity so runtime B
   // never sees runtime A's successful user-turn writes. r24-2:
   // ALSO scope by the destination tuple so the same (roomId,
   // userMsgId) routed into a second store re-emits the full
   // envelope there.
   const optsAny = options as Record<string, unknown> | undefined;
   const roomId = (message as any)?.roomId;
-  // r29-2: when the caller intentionally drove the user-turn path
+  // when the caller intentionally drove the user-turn path
   // with an explicit `options.userMessageId` (rare but legal —
   // e.g. multi-step pipelines that pre-mint a user-turn id before
   // the message lands) prefer that id over `message.id` so the
@@ -684,7 +684,7 @@ async function onChatTurnHandler(
       : (message as any)?.id;
   const dest = resolveDestinationFromOptions(runtime, options);
   markUserTurnPersisted(runtime, roomId, userMsgId, dest.contextGraphId, dest.assertionName);
-  // PR #229 bot review (r31-1 — actions.ts:1107 / actions.ts:1149).
+  // actions.ts:1107 / actions.ts:1149).
   // The user-turn branch in `persistChatTurnImpl` ALSO writes the
   // assistant leg when the host plumbed
   // `assistantText` / `assistantReply.text` /
@@ -705,7 +705,7 @@ async function onChatTurnHandler(
   // user-turn path; the assistant leg comes exclusively from
   // `options` / `state`.
   //
-  // PR #229 bot review (r31-5 — adapter-elizaos/src/index.ts:555).
+  // adapter-elizaos/src/index.ts:555).
   // The cache now stores the FULL assistant text (not a bare
   // `true`) so `onAssistantReplyHandler` can compare incoming
   // reply text against the recorded value and avoid suppressing
@@ -731,7 +731,6 @@ async function onChatTurnHandler(
   return result;
 }
 
-// PR #229 bot review (r3131820494, adapter-elizaos/src/index.ts:355).
 // Pre-fix the plugin's hook surface declared its callable type as
 // `(...args: Parameters<typeof dkgService.onChatTurn>) => ReturnType<…>`.
 // `Parameters<>` on an OVERLOADED method only sees the LAST overload
@@ -739,7 +738,7 @@ async function onChatTurnHandler(
 // for the loose `dkgService as any` legacy callers), so direct
 // downstream callers of `dkgPlugin.hooks.onChatTurn` lost the
 // compile-time enforcement of `userMessageId` / `userTurnPersisted`
-// that round 18 (r18-2) added to `DKGService`. The runtime guards in
+// that round 18 added to `DKGService`. The runtime guards in
 // `persistChatTurnImpl` still caught violations, but the bot's point
 // was that the typed surface should also enforce them.
 //
@@ -749,7 +748,7 @@ async function onChatTurnHandler(
 // `dkgPlugin.hooks.onAssistantReply` /
 // `dkgPlugin.chatPersistenceHook`.
 //
-// PR #229 bot review (r30-8 — service.ts:128): the third "catch-all"
+// service.ts:128): the third "catch-all"
 // overload was REMOVED from the public hook contract for the same
 // reason it was removed from `DKGService`: `options?:
 // Record<string, unknown>` silently accepted
@@ -778,7 +777,7 @@ export interface DkgChatTurnHook {
 }
 
 /**
- * PR #229 bot review (r31-2 — adapter-elizaos/src/index.ts:602).
+ * adapter-elizaos/src/index.ts:602).
  *
  * Reply-only hook surface. Pre-fix, `onAssistantReply` was typed as
  * `DkgChatTurnHook`, which still includes the user-turn overload —
@@ -808,7 +807,7 @@ export interface DkgAssistantReplyHook {
 }
 
 /**
- * PR #229 bot review (r31-2 — adapter-elizaos/src/index.ts:635).
+ * adapter-elizaos/src/index.ts:635).
  *
  * User-turn-only hook surface for the `chatPersistenceHook` alias.
  * Pre-fix, `chatPersistenceHook` was typed as `DkgChatTurnHook` (the
@@ -852,11 +851,10 @@ export const dkgPlugin: Plugin & {
   providers: [dkgKnowledgeProvider],
   services: [dkgService],
   hooks: {
-    // r16-2: route onChatTurn through `onChatTurnHandler` so
+    // route onChatTurn through `onChatTurnHandler` so
     // successful writes are recorded in the in-process cache that
     // onAssistantReply consults.
     //
-    // PR #229 bot review (r3131820494, adapter-elizaos/src/index.ts).
     // The hook surface is now declared as an explicit overloaded
     // callable (`DkgChatTurnHook`) so direct callers see the typed
     // user-turn / assistant-reply split. The internal handlers below
@@ -869,7 +867,7 @@ export const dkgPlugin: Plugin & {
       onChatTurnHandler(runtime, message, state, options as Record<string, unknown> | undefined)) as DkgChatTurnHook,
     // A6: dedicated handler — merges assistant text into the matching
     // turnUri rather than duplicating the whole turn.
-    // r31-2: `DkgAssistantReplyHook` rejects the user-turn overload
+    // `DkgAssistantReplyHook` rejects the user-turn overload
     // at compile time so direct callers can't accidentally route a
     // user-turn-shaped payload through this hook.
     onAssistantReply: ((runtime, message, state, options) =>
@@ -877,7 +875,7 @@ export const dkgPlugin: Plugin & {
         runtime,
         message,
         state,
-        // r31-2: `DkgAssistantReplyHook` types `options` as the
+        // `DkgAssistantReplyHook` types `options` as the
         // strict `AssistantReplyChatTurnOptions` (no `string` index
         // signature), so direct cast to `Record<string, unknown>`
         // is rejected by `--strict`. Bounce through `unknown` —
@@ -886,7 +884,7 @@ export const dkgPlugin: Plugin & {
         options as unknown as Record<string, unknown> | undefined,
       )) as DkgAssistantReplyHook,
   },
-  // r31-2: `DkgUserTurnHook` rejects the assistant-reply overload at
+  // `DkgUserTurnHook` rejects the assistant-reply overload at
   // compile time. Hosts that need reply semantics use
   // `dkgPlugin.hooks.onAssistantReply` instead. The runtime dispatch
   // inside `onChatTurnHandler` (`mode: 'assistant-reply'` →
@@ -898,7 +896,7 @@ export const dkgPlugin: Plugin & {
 };
 
 export { dkgService, dkgServiceLegacy, getAgent } from './service.js';
-// PR #229 bot review (r31-4 — packages/adapter-elizaos/src/service.ts:359).
+// packages/adapter-elizaos/src/service.ts:359).
 // Re-export the legacy loose-typed service surface from the package
 // entrypoint so consumers importing
 // `@origintrail-official/dkg-adapter-elizaos` can actually reach the

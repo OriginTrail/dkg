@@ -52,7 +52,7 @@ export class BlazegraphStore implements TripleStore {
   }
 
   async deleteByPattern(pattern: Partial<DKGQuad>): Promise<number> {
-    // PR #229 bot review follow-up (blazegraph.ts:55). The pattern
+    // The pattern
     // subject can legitimately be a blank node when callers passed
     // through a previously-materialised quad row (e.g. the cleanup
     // path that re-deletes specific bnode-subject quads). Funnel it
@@ -99,7 +99,7 @@ export class BlazegraphStore implements TripleStore {
         const key = `${sx}\u0001${px}\u0001${ox}`;
         if (seen.has(key)) continue;
         seen.add(key);
-        // PR #229 bot review (blazegraph.ts:94). The SELECT above
+        // The SELECT above
         // materialises every matching row, which in quads mode
         // includes blank-node subjects (`_:b0`). Re-serialising
         // `sx` as `<${escapeUri(sx)}>` turned `_:b0` into the
@@ -148,7 +148,7 @@ export class BlazegraphStore implements TripleStore {
         const ox = pattern.object ?? row['o'];
         const g = row['g'];
         if (!sx || !px || !ox || !g) continue;
-        // PR #229 bot review (blazegraph.ts:131). Same blank-node
+        // Same blank-node
         // round-trip bug as the single-graph branch above: `sx` may
         // be a bnode (`_:b0`), so funnel it through `formatTerm`
         // instead of the IRI-only `<${escapeUri(sx)}>` to avoid
@@ -164,7 +164,7 @@ export class BlazegraphStore implements TripleStore {
         removed++;
       }
     }
-    // Bot review (PR #229 follow-up, blazegraph.ts:131): the previous
+    // the previous
     // revision skipped the default-graph DELETE for any (s,p,o) that
     // matched a named-graph row earlier in this call. In Blazegraph's
     // quads mode the unquoted `{ ${triple} }` pattern returns rows
@@ -187,7 +187,7 @@ export class BlazegraphStore implements TripleStore {
         const px = pattern.predicate ?? row['p'];
         const ox = pattern.object ?? row['o'];
         if (!sx || !px || !ox) continue;
-        // PR #229 bot review (blazegraph.ts:164). Same blank-node
+        // Same blank-node
         // round-trip bug as the named-graph branch: route `sx`
         // through `formatTerm` so a bnode (`_:b0`) is emitted as
         // `_:b0` and not the invalid IRI `<_:b0>`. Without this the

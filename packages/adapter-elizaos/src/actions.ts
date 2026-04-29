@@ -276,7 +276,7 @@ export const dkgInvokeSkill: Action = {
  * persistence contract. Stores the user message + assistant reply (when
  * present) into the agent's working-memory graph as RDF triples so that
  * downstream queries can recover the chat history through the DKG node
- * itself. See BUGS_FOUND.md K-11.
+ * itself.
  */
 export const dkgPersistChatTurn: Action = {
   name: 'DKG_PERSIST_CHAT_TURN',
@@ -316,7 +316,7 @@ export const dkgPersistChatTurn: Action = {
 /**
  * Minimal agent contract required by {@link persistChatTurnImpl}.
  *
- * Bot review A1/A3: chat-turn persistence MUST NOT go through the canonical
+ * chat-turn persistence MUST NOT go through the canonical
  * `agent.publish()` pipeline — that writes finalized data to the broadcast
  * data graph (and requires the CG to already exist on-chain), which means
  * every user/assistant message would be shipped to the network and charged
@@ -325,7 +325,7 @@ export const dkgPersistChatTurn: Action = {
  * stays local to the node and satisfies the `view: 'working-memory'`
  * retrieval contract this hook advertises.
  *
- * Bot review A2: fresh installs don't have a `chat` context graph. Before
+ * fresh installs don't have a `chat` context graph. Before
  * writing we best-effort call `ensureContextGraphLocal` so the CG exists
  * locally (this is idempotent if it already exists) and won't throw on
  * the first turn persisted. In production this method is on `DKGAgent`;
@@ -355,7 +355,7 @@ export interface ChatTurnPersistenceAgent {
 /**
  * Canonical chat-turn vocabulary, copied from
  * `packages/node-ui/src/chat-memory.ts` so this adapter does NOT introduce
- * a parallel ad-hoc shape (bot review A* second pass). Keeping the constants
+ * a parallel ad-hoc shape. Keeping the constants
  * here avoids a hard dep on `dkg-node-ui` (which would cycle), but the
  * IRIs MUST match `chat-memory.ts` byte-for-byte so `ChatMemoryManager` and
  * the node-ui session view can read these turns immediately.
@@ -379,7 +379,7 @@ const CHAT_AGENT_ACTOR = `${CHAT_NS}actor:agent`;
 type ChatQuad = { subject: string; predicate: string; object: string; graph: string };
 
 /**
- * PR #229 bot review (post-v10-rc-merge, r21-3): per-runtime tracker
+ * per-runtime tracker
  * of which `schema:Conversation` session roots have already been
  * emitted by THIS process. The canonical writer in
  * `packages/node-ui/src/chat-memory.ts` (search for `isNewSession`)
@@ -403,7 +403,7 @@ let emittedSessionRootsByRuntime: WeakMap<object, Set<string>> = new WeakMap();
 let emittedSessionRootsAnon: Set<string> = new Set();
 
 /**
- * Bot review PR #229 round 24 (r24-1): the per-runtime cache MUST key
+ * the per-runtime cache MUST key
  * by the destination assertion graph as well as the session URI.
  *
  * Before this fix the cache used only `(runtime, sessionUri)`. That
@@ -431,7 +431,7 @@ function sessionRootCacheKey(
   return `${destContextGraphId}\u0000${destAssertionName}\u0000${sessionUri}`;
 }
 
-// PR #229 bot review r3131820483 (actions.ts:453): the previous
+// the previous
 // implementation marked the session root as emitted at the moment we
 // DECIDED to emit it, before `ensureContextGraphLocal()` and
 // `assertion.write()` had a chance to fail. If the persist threw,
@@ -439,7 +439,7 @@ function sessionRootCacheKey(
 // emitted", skipped the `schema:Conversation` root, and the room was
 // permanently missing its session-root triple.
 //
-// PR #229 bot review (r31-11 — actions.ts:460). The earlier fix
+// actions.ts:460). The earlier fix
 // split the cache into a peek (`wouldEmitSessionRoot`) + a
 // post-success mark (`markSessionRootEmitted`). That preserved
 // crash-safety BUT introduced a race window between the peek and
@@ -479,7 +479,7 @@ function getSessionRootSeenSet(runtime: unknown): Set<string> {
 }
 
 /**
- * PR #229 bot review (r31-11 — actions.ts:460). Synchronous atomic
+ * actions.ts:460). Synchronous atomic
  * check-and-set. Returns `true` ONLY for the caller that won the
  * reservation; that caller MUST emit the `schema:Conversation`
  * root quads AND, on a downstream write failure, MUST call
@@ -506,7 +506,7 @@ function reserveSessionRoot(
 }
 
 /**
- * PR #229 bot review (r31-11 — actions.ts:460). Roll back a
+ * actions.ts:460). Roll back a
  * `reserveSessionRoot()` reservation. Call this from the failure
  * path of any `agent.assertion.write()` (or earlier
  * `ensureContextGraphLocal()`) that would have written the
@@ -552,7 +552,7 @@ function buildUserMessageQuads(
     { subject: userMsgUri, predicate: `${SCHEMA_NS}author`, object: CHAT_USER_ACTOR, graph: '' },
     { subject: userMsgUri, predicate: `${SCHEMA_NS}dateCreated`, object: `${rdfString(ts)}^^<${XSD_DATETIME_IRI}>`, graph: '' },
     { subject: userMsgUri, predicate: `${SCHEMA_NS}text`, object: rdfString(userText), graph: '' },
-    // Bot review PR #229 round 6, actions.ts:388 — message subjects
+    // message subjects
     // carry the canonical `dkg:turnId` too so SPARQL readers that join
     // `?msg dkg:turnId ?t . ?turn dkg:turnId ?t` (instead of walking
     // `schema:isPartOf` + inverse `dkg:hasUserMessage`) can locate the
@@ -578,14 +578,14 @@ function buildAssistantMessageQuads(
     { subject: assistantMsgUri, predicate: `${SCHEMA_NS}text`, object: rdfString(assistantText), graph: '' },
     { subject: assistantMsgUri, predicate: `${DKG_ONT_NS}replyTo`, object: userMsgUri, graph: '' },
     // See `buildUserMessageQuads` — same `dkg:turnId` shape so reader
-    // joins work for both sides of a turn (bot review round 6).
+    // joins work for both sides of a turn.
     { subject: assistantMsgUri, predicate: `${DKG_ONT_NS}turnId`, object: rdfString(turnKey), graph: '' },
   ];
 }
 
 /**
  * Stub user-message quads for the "headless assistant reply" case.
- * PR #229 bot review round 8 (actions.ts:746): the current chat
+ * the current chat
  * reader contract in `packages/node-ui/src/chat-memory.ts` requires
  * BOTH `dkg:hasUserMessage` AND `dkg:hasAssistantMessage` to be
  * present on a turn (it does a single `SELECT ?user ?assistant
@@ -612,7 +612,7 @@ function buildHeadlessUserStubQuads(
   ts: string,
   turnIdLiteral: string,
 ): ChatQuad[] {
-  // PR #229 bot review round 13 (r13-2): deliberately NO
+  // deliberately NO
   // `schema:isPartOf` edge. The previous stub declared itself a
   // `schema:Message` partitioned into the session, which caused
   // `ChatMemoryManager.getSession()` to enumerate it alongside the
@@ -630,7 +630,7 @@ function buildHeadlessUserStubQuads(
   // so any code path that does discover the stub via a turnId join
   // can filter it out.
   //
-  // PR #229 bot review (r31-3 — actions.ts:584): the previous
+  // actions.ts:584): the previous
   // revision typed the stub as `schema:Message`. That prevented
   // session enumeration (we already dropped `isPartOf`), but
   // `ChatMemoryManager.getStats()` runs an UNCONDITIONAL `?s
@@ -659,7 +659,7 @@ function buildHeadlessUserStubQuads(
     { subject: userMsgUri, predicate: `${SCHEMA_NS}dateCreated`, object: `${rdfString(ts)}^^<${XSD_DATETIME_IRI}>`, graph: '' },
     // Explicit empty text — readers that concatenate "user: …" skip it.
     { subject: userMsgUri, predicate: `${SCHEMA_NS}text`, object: rdfString(''), graph: '' },
-    // r31-3: the literal here is the DISTINCT headless turn id
+    // the literal here is the DISTINCT headless turn id
     // (`headless:${turnKey}`), NOT the canonical `turnKey`. See the
     // r31-3 block in `buildHeadlessAssistantTurnEnvelopeQuads` for
     // the full rationale — keeping all three subjects (stub,
@@ -681,8 +681,7 @@ function buildHeadlessUserStubQuads(
  * to resolve a turn — finds the reply. The user side points at the
  * stub emitted by {@link buildHeadlessUserStubQuads}. Marked
  * `dkg:headlessTurn "true"` so the turn itself is distinguishable
- * from a regular user-first turn at query time. See bot review PR
- * #229, actions.ts:517 / actions.ts:746.
+ * from a regular user-first turn at query time.
  */
 function buildHeadlessAssistantTurnEnvelopeQuads(
   turnUri: string,
@@ -695,7 +694,7 @@ function buildHeadlessAssistantTurnEnvelopeQuads(
   userId: string,
   roomId: string,
 ): ChatQuad[] {
-  // PR #229 bot review (r31-3 — actions.ts:622): the previous
+  // actions.ts:622): the previous
   // revision wrote `dkg:turnId = "${turnKey}"` here — i.e. the
   // canonical turn key with no prefix. Combined with the
   // `headless-turn:${turnKey}` URI shape that already kept the
@@ -731,7 +730,7 @@ function buildHeadlessAssistantTurnEnvelopeQuads(
     { subject: turnUri, predicate: `${DKG_ONT_NS}turnId`, object: rdfString(turnIdLiteral), graph: '' },
     { subject: turnUri, predicate: `${SCHEMA_NS}dateCreated`, object: `${rdfString(ts)}^^<${XSD_DATETIME_IRI}>`, graph: '' },
     // Both edges present — reader contract (hasUserMessage AND
-    // hasAssistantMessage) is satisfied (PR #229 round 8).
+    // hasAssistantMessage) is satisfied.
     { subject: turnUri, predicate: `${DKG_ONT_NS}hasUserMessage`, object: userMsgUri, graph: '' },
     { subject: turnUri, predicate: `${DKG_ONT_NS}hasAssistantMessage`, object: assistantMsgUri, graph: '' },
     { subject: turnUri, predicate: `${DKG_ONT_NS}headlessTurn`, object: rdfString('true'), graph: '' },
@@ -757,8 +756,6 @@ function buildHeadlessAssistantTurnEnvelopeQuads(
  * callers that don't carry a clock. It is NOT a real wall-clock — it
  * is a stable *identifier* formatted as an ISO-8601 string so the
  * downstream `xsd:dateTime` literal is well-formed.
- *
- * See bot review PR #229, actions.ts:539.
  */
 /**
  * Coerce a timestamp candidate (string | number) to a well-formed
@@ -766,7 +763,7 @@ function buildHeadlessAssistantTurnEnvelopeQuads(
  * possible. Returns just the lexical form (callers are responsible
  * for wrapping it in quotes + the `^^xsd:dateTime` type tag).
  *
- * PR #229 bot review round 11 (actions.ts:550). Prior revisions
+ * Prior revisions
  * returned string timestamps verbatim and then emitted them under
  * `^^xsd:dateTime`. ElizaOS frequently serializes epoch milliseconds
  * as strings (`"1718049600000"`), so the rewritten quad became the
@@ -925,7 +922,7 @@ export async function persistChatTurnImpl(
   state: State,
   options: Record<string, unknown>,
 ): Promise<{ tripleCount: number; turnUri: string; kcId: string }> {
-  // r13-3: the full runtime surface lives in the public
+  // the full runtime surface lives in the public
   // `ChatTurnPersistOptions` type. We still accept `Record<string,
   // unknown>` at the entry point (matches ElizaOS' loose `options`
   // contract) but type the internal alias so every property access
@@ -935,7 +932,7 @@ export async function persistChatTurnImpl(
   const mode = optsAny.mode ?? 'user-turn';
   const userId = (message as any).userId ?? 'anonymous';
   const roomId = (message as any).roomId ?? 'default';
-  // PR #229 bot review round 13 (r13-1): whether the preceding
+  // whether the preceding
   // user-turn envelope (dkg:ChatTurn subject + real user Message +
   // hasUserMessage edge) has ALREADY been persisted. Previously this
   // was inferred from `!optsAny.userMessageId` alone, which conflates
@@ -952,7 +949,7 @@ export async function persistChatTurnImpl(
   // wrote a lone `hasAssistantMessage` onto a turn URI that never got
   // typed, and the reader dropped the reply entirely.
   //
-  // PR #229 bot review round 20 (r20-1): require the EXPLICIT
+  // require the EXPLICIT
   // `userTurnPersisted` signal. The previous revision still fell
   // back to the legacy "presence of userMessageId === user turn
   // persisted" inference when the explicit flag was absent. That
@@ -977,7 +974,7 @@ export async function persistChatTurnImpl(
   // here, so this only changes behaviour for ambiguous external
   // callers — and the change is in the safe direction.
   const userTurnPersistedRaw = optsAny.userTurnPersisted === true;
-  // Bot review PR #229 round 6, actions.ts:635 — a `mem-${Date.now()}`
+  // a `mem-${Date.now()}`
   // fallback is NOT stable: two separate calls for the same logical
   // message (e.g. retry, rebroadcast) would fabricate different turn
   // source ids, produce different `turnUri`s, and defeat the whole
@@ -987,13 +984,12 @@ export async function persistChatTurnImpl(
   // neither is present so the adapter boundary surfaces the missing
   // upstream contract instead of silently corrupting the chat graph.
   const rawMemoryId = (message as any)?.id;
-  // PR #229 bot review (r31-6, adapter-elizaos/src/index.ts:596).
   //
   // Pre-fix this only honoured `optsAny.userMessageId` on the
   // `assistant-reply` path. The user-turn path silently dropped any
   // pre-minted id and keyed `turnSourceId` off `message.id`. The
   // wrapper (`onChatTurnHandler`) however cached the persisted-turn
-  // marker under `optsAny.userMessageId ?? message.id` (r29-2),
+  // marker under `optsAny.userMessageId ?? message.id`,
   // explicitly to support hosts that pre-mint a user-turn id. The
   // result was a SILENT key mismatch: when a host did pre-mint
   // `userMessageId`, the cache said the turn existed under
@@ -1011,7 +1007,7 @@ export async function persistChatTurnImpl(
     typeof optsAny.userMessageId === 'string' && (optsAny.userMessageId as string).length > 0
       ? (optsAny.userMessageId as string)
       : undefined;
-  // PR #229 bot review (post-v10-rc-merge, r21-2): on the
+  // on the
   // append-only assistant path, falling back to `message.id`
   // (the assistant-reply Memory's own id) when `userMessageId`
   // is missing produces a `turnSourceId` based on the assistant
@@ -1055,7 +1051,7 @@ export async function persistChatTurnImpl(
   // assistantMsgUri the user-turn hook produced.
   const turnKey = `${encodeIriSegment(roomId)}:${encodeIriSegment(turnSourceId)}`;
   const sessionId = String(roomId);
-  // Bot review PR #229 round 6, actions.ts:649 — keep the *canonical*
+  // keep the *canonical*
   // session URI byte-identical to what `ChatMemoryManager` / node-ui
   // read. That reader composes `${CHAT_NS}session:${sessionId}` with
   // the raw session id (roomId) and filters SPARQL binding comparisons
@@ -1070,7 +1066,7 @@ export async function persistChatTurnImpl(
   const userMsgUri = `${CHAT_NS}msg:user:${turnKey}`;
   const assistantMsgUri = `${CHAT_NS}msg:agent:${turnKey}`;
   const turnUri = `${CHAT_NS}turn:${turnKey}`;
-  // PR #229 bot review (post-v10-rc-merge, r21-1): the headless
+  // the headless
   // assistant-reply path MUST NOT mutate the canonical
   // `${CHAT_NS}turn:${turnKey}` subject. If the real user-turn
   // was actually persisted earlier (typical case: the caller
@@ -1095,7 +1091,7 @@ export async function persistChatTurnImpl(
   // existing `msg:user:` ↔ `msg:user-stub:` separation r15-2
   // introduced.
   const headlessTurnUri = `${CHAT_NS}headless-turn:${turnKey}`;
-  // Bot review (PR #229 follow-up, actions.ts:539): `new Date().toISOString()`
+  // `new Date().toISOString()`
   // broke idempotence. Re-firing onChatTurn / onAssistantReply for the
   // same message reuses the same {turnUri, userMsgUri, assistantMsgUri}
   // but would stamp a FRESH schema:dateCreated every time, so readers
@@ -1105,7 +1101,7 @@ export async function persistChatTurnImpl(
   // from the turnSourceId so a retry is byte-identical with the
   // original write.
   const ts = resolveStableTurnTimestamp(message, optsAny, turnSourceId);
-  // Bot review PR #229 round 6, actions.ts:662 — assistant timestamp
+  // assistant timestamp
   // MUST sort strictly after the user message timestamp so clients
   // that order a turn by `schema:dateCreated` always see `user → agent`.
   // Adding +1ms is sufficient because we only store ISO-8601 with ms
@@ -1116,7 +1112,7 @@ export async function persistChatTurnImpl(
   const assistantTs = deriveAssistantTimestamp(ts);
 
   let quads: ChatQuad[];
-  // PR #229 r3131820483: tracked across both branches so we can
+  // tracked across both branches so we can
   // promote the session-root cache AFTER assertion.write() succeeds.
   let didIncludeSessionRoot = false;
 
@@ -1128,16 +1124,16 @@ export async function persistChatTurnImpl(
     // We only add the assistant Message subject and the single
     // dkg:hasAssistantMessage link onto the existing turn.
     //
-    // When `userMessageId` is absent (bot review actions.ts:517: a
-    // reply without a matching user turn — e.g. proactive agent
-    // message, or the user-turn hook was skipped), the turn envelope
+    // When `userMessageId` is absent (a reply without a matching
+    // user turn — e.g. proactive agent message, or the user-turn
+    // hook was skipped), the turn envelope
     // does NOT exist yet, so we emit the full session + turn envelope
     // ourselves. We skip the user-message quads because there is no
     // user message, but we still produce a `dkg:ChatTurn` subject so
     // ChatMemoryManager queries filtered on `?turn a dkg:ChatTurn`
     // can find this reply.
 
-    // PR #229 bot review (r31-1 — actions.ts:1107 / actions.ts:1149):
+    // actions.ts:1107 / actions.ts:1149):
     // the user-turn path can ALSO write the assistant leg when the
     // caller plumbs `assistantText` / `assistantReply.text` /
     // `state.lastAssistantReply`. If a separate `onAssistantReply`
@@ -1169,9 +1165,9 @@ export async function persistChatTurnImpl(
       };
     }
 
-    // PR #229 bot review (r31-13 — actions.ts:1172, KK3X).
+    // actions.ts:1172, KK3X).
     //
-    // Pre-r31-13 used `??` for the entire fallback chain. `??` only
+    // used `??` for the entire fallback chain. `??` only
     // bridges null/undefined — `''` is a defined-but-empty string and
     // SHORT-CIRCUITS the chain, so an assistant hook that delivers
     // the final text in `options.assistantText` /
@@ -1212,7 +1208,7 @@ export async function persistChatTurnImpl(
       (state as any)?.lastAssistantReply,
     );
     if (headlessAssistantReply) {
-      // PR #229 bot review round 8 (actions.ts:746): the reader in
+      // the reader in
       // `packages/node-ui/src/chat-memory.ts` requires BOTH
       // `dkg:hasUserMessage` AND `dkg:hasAssistantMessage` on a turn
       // or it returns `turn_not_found`. Emit a stub user Message so
@@ -1221,7 +1217,7 @@ export async function persistChatTurnImpl(
       // adds (there is no real user message to reply to here — the
       // stub is a placeholder, not a user turn).
       //
-      // PR #229 bot review round 15 (r15-2): the stub MUST NOT share
+      // the stub MUST NOT share
       // the canonical user-message URI (`msg:user:${turnKey}`). Under
       // the r14-2 default (`userTurnPersisted=false` when the caller
       // does not assert otherwise) we will enter the headless branch
@@ -1234,7 +1230,7 @@ export async function persistChatTurnImpl(
       // predicates are multi-valued in RDF, so the store keeps BOTH
       // the real user's author/text AND the stub's).
       //
-      // PR #229 bot review (r31-1 — actions.ts:1048): the previous
+      // actions.ts:1048): the previous
       // revision derived `stubTurnKey` from `rawMemoryId` (the
       // assistant memory's own id) "to keep the stub distinct from
       // the canonical msg:user URI". That distinctness is ALREADY
@@ -1264,7 +1260,7 @@ export async function persistChatTurnImpl(
       // many times the assistant Memory id rotated.
       const userStubUri = `${CHAT_NS}msg:user-stub:${turnKey}`;
       const headlessAssistantMsgUri = `${CHAT_NS}msg:agent-headless:${turnKey}`;
-      // PR #229 bot review (r31-3 — actions.ts:622): the dkg:turnId
+      // actions.ts:622): the dkg:turnId
       // LITERAL stamped on every quad in the headless turn's
       // subject set is the DISTINCT `headless:${turnKey}` form,
       // NOT the canonical `${turnKey}`. Without this distinction
@@ -1279,7 +1275,7 @@ export async function persistChatTurnImpl(
       // coherent within the headless turn while staying disjoint
       // from any canonical turn for the same `turnKey`.
       const headlessTurnIdLiteral = `headless:${turnKey}`;
-      // PR #229 bot review (r31-5 — actions.ts:1173): the headless
+      // actions.ts:1173): the headless
       // branch was reusing `buildAssistantMessageQuads(...)` verbatim,
       // which emits `?msg schema:isPartOf <session>`. That edge is
       // ALSO the predicate `ChatMemoryManager.getSession()` enumerates
@@ -1308,7 +1304,7 @@ export async function persistChatTurnImpl(
       // canonical turn key.
       //
       // Mirrors the established `dkg:headlessUserMessage "true"`
-      // marker on the user stub (r13-2) — the markers give downstream
+      // marker on the user stub — the markers give downstream
       // consumers two independent ways to filter headless content
       // (URI namespace + explicit predicate).
       const assistantQuads = buildAssistantMessageQuads(
@@ -1325,7 +1321,7 @@ export async function persistChatTurnImpl(
         object: rdfString('true'),
         graph: '',
       });
-      // PR #229 bot review (r31-6 — adapter-elizaos/src/index.ts:521).
+      // adapter-elizaos/src/index.ts:521).
       //
       // When the matching user-turn write embedded a PROVISIONAL
       // assistant string (e.g. partial-streaming completion the host
@@ -1356,7 +1352,7 @@ export async function persistChatTurnImpl(
           graph: '',
         });
       }
-      // PR #229 r3131820483 + r31-11: synchronous atomic
+      // synchronous atomic
       // reservation. Only the caller that wins the reservation
       // includes the root quads — concurrent persists for the same
       // (runtime, sessionUri, dest) skip the root, eliminating the
@@ -1371,12 +1367,12 @@ export async function persistChatTurnImpl(
         assertionName,
       );
       quads = [
-        // r21-3: only emit the session root the first time this
+        // only emit the session root the first time this
         // runtime sees this `sessionUri` in the current process.
         // Re-emitting `?session rdf:type schema:Conversation`
         // on every turn trips DKG WM Rule 4 (entity exclusivity)
         // and fails the second persisted turn in the same room.
-        // r24-1: scope by the destination (contextGraphId,
+        // scope by the destination (contextGraphId,
         // assertionName) so writing the same session into two
         // different stores still emits a `schema:Conversation`
         // root in BOTH places.
@@ -1386,12 +1382,12 @@ export async function persistChatTurnImpl(
         ...buildHeadlessUserStubQuads(userStubUri, sessionUri, ts, headlessTurnIdLiteral),
         ...assistantQuads,
         ...buildHeadlessAssistantTurnEnvelopeQuads(
-          // r21-1: headless envelope MUST land on the dedicated
+          // headless envelope MUST land on the dedicated
           // `headless-turn:` URI so it cannot pollute the
           // canonical `turn:` URI used by the user-first path.
           headlessTurnUri,
           sessionUri,
-          // r31-3: distinct `headless:${turnKey}` literal — see
+          // distinct `headless:${turnKey}` literal — see
           // the rationale block in `buildHeadlessAssistantTurnEnvelopeQuads`.
           headlessTurnIdLiteral,
           ts,
@@ -1413,7 +1409,7 @@ export async function persistChatTurnImpl(
     // message, the turn envelope, and (if the same call has captured an
     // assistant reply on `state` / `options`) the assistant message.
     const userText = message.content?.text ?? '';
-    // PR #229 bot review (r31-13 — actions.ts:1172, KK3X). Same
+    // actions.ts:1172, KK3X). Same
     // short-circuit hazard as the assistant-reply branch above:
     // `??` only bridges null/undefined, so an explicit `''` on
     // `optsAny.assistantText` (or `optsAny.assistantReply.text`)
@@ -1439,7 +1435,7 @@ export async function persistChatTurnImpl(
       (state as any)?.lastAssistantReply,
     );
 
-    // PR #229 r3131820483 + r31-11: synchronous atomic reservation.
+    // synchronous atomic reservation.
     // See the rationale block above on the headless branch — same
     // semantics here. On a write failure we MUST
     // `rollbackSessionRoot()` so a retry re-emits.
@@ -1450,14 +1446,14 @@ export async function persistChatTurnImpl(
       assertionName,
     );
     quads = [
-      // r21-3: only emit the session root the first time this
+      // only emit the session root the first time this
       // runtime sees this `sessionUri` in the current process —
       // identical guard to the headless branch above and to the
       // canonical writer in `node-ui/src/chat-memory.ts:519`.
       // Re-emitting `?session rdf:type schema:Conversation` on
       // every turn trips DKG WM Rule 4 and rejects the second
       // persisted turn in the same room.
-      // r24-1: scope by the destination (contextGraphId,
+      // scope by the destination (contextGraphId,
       // assertionName) so the root re-emits in a second
       // store that has not yet received it.
       ...(didIncludeSessionRoot
@@ -1483,7 +1479,7 @@ export async function persistChatTurnImpl(
     );
   }
 
-  // PR #229 bot review (r31-11 — actions.ts:460). The session-root
+  // actions.ts:460). The session-root
   // reservation was taken SYNCHRONOUSLY above before the first
   // await. If anything between here and `agent.assertion.write()`
   // throws (CG ensure, the assertion write itself), we MUST roll
@@ -1518,12 +1514,12 @@ export async function persistChatTurnImpl(
     }
     throw err;
   }
-  // PR #229 r31-11: with `reserveSessionRoot()` taking the
+  // with `reserveSessionRoot()` taking the
   // reservation synchronously above, the reservation IS the "this
   // root has been emitted" signal — so no post-success mark is
   // needed. The catch block above is the only place that releases
   // a reservation (write failure → retry should re-emit).
-  // r21-1: callers that take the headless assistant-reply path get
+  // callers that take the headless assistant-reply path get
   // back the dedicated `headlessTurnUri` so any follow-up
   // attribution (e.g. `recordPersistedUserTurn`) keys against the
   // turn URI we actually wrote to. Returning `turnUri` here would
@@ -1537,7 +1533,7 @@ export async function persistChatTurnImpl(
 }
 
 /**
- * Bot review A5: reversible URI-segment encoding. Replacing every non-[A-Za-z0-9_.-]
+ * reversible URI-segment encoding. Replacing every non-[A-Za-z0-9_.-]
  * byte with `_` is lossy — `room/a` and `room:a` both collapse to `room_a`,
  * silently merging distinct rooms (or distinct messages) onto the same
  * `turnUri`. `encodeURIComponent` is round-trippable via `decodeURIComponent`
@@ -1554,7 +1550,7 @@ function encodeIriSegment(s: string): string {
 }
 
 /**
- * Bot review PR #229 round 6, actions.ts:649 companion — validate a
+ * validate a
  * raw session id (roomId) before it's dropped verbatim into the
  * canonical `urn:dkg:chat:session:<id>` IRI. We MUST NOT run it
  * through `encodeURIComponent` (that forks the graph from readers),
@@ -1582,7 +1578,7 @@ function assertSafeSessionId(sessionId: string): string {
 }
 
 /**
- * Bot review PR #229 round 6, actions.ts:662 — assistant reply
+ * assistant reply
  * timestamp MUST sort strictly after the user message timestamp on
  * the same turn so downstream readers that order by
  * `schema:dateCreated` always observe `user → agent`. We add +1ms.

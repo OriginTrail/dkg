@@ -33,7 +33,7 @@
  *                  are expected to STAY RED until `enrichEvmError` is
  *                  generalized.
  *
- * Per QA policy: the red tests ARE the finding — see BUGS_FOUND.md CH-10.
+ * Per QA policy: the red tests ARE the finding
  */
 import { describe, it, expect } from 'vitest';
 import { Interface } from 'ethers';

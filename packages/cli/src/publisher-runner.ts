@@ -192,8 +192,7 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
         keypair: args.keypair,
         publisherNodeIdentityId: identityId,
         publisherPrivateKey: wallet.privateKey,
-        // PR #229 bot review round 26 (r26-3, publisher-runner.ts).
-        // The WAL durability path added in BUGS_FOUND.md P-1 was
+        // The WAL durability path added in
         // dead code in production because no caller wired
         // `publishWalFilePath`; every publisher fell back to an
         // in-memory journal that evaporated on restart. Persist one
@@ -227,7 +226,7 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
     return typeof chain?.resolvePublishByTxHash === 'function';
   });
 
-  // PR #229 bot review round 9: forward the PrivateContentStore
+  // forward the PrivateContentStore
   // encryption key (if any) into the async-lift publisher so its
   // `subtractFinalizedExactQuads` dedup step decrypts authoritative
   // private quads with the SAME key every `DKGPublisher` in the map

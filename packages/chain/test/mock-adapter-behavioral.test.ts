@@ -217,7 +217,7 @@ describe('MockChainAdapter — UAL ranges, publishing, verify', () => {
   });
 
   // ─────────────────────────────────────────────────────────────────────────
-  // PR #229 bot review (r3148... — mock-adapter.ts:868). The real EVM
+  // — mock-adapter.ts:868). The real EVM
   // adapter ALSO emits a `V10KnowledgeBatchEmitted` event alongside
   // `KnowledgeBatchCreated` whenever a V10 batch is published; downstream
   // V10 consumers (the chain-event-poller's `onUnmatchedBatchCreated` WAL
@@ -234,7 +234,7 @@ describe('MockChainAdapter — UAL ranges, publishing, verify', () => {
   // endKAId / isPermanent / txHash). If the mock regresses to NOT emitting
   // this event, V10 WAL recovery silently fails to find its match.
   // ─────────────────────────────────────────────────────────────────────────
-  it('r30-6: publishKnowledgeAssets emits V10KnowledgeBatchEmitted with shape parity to the real EVM adapter', async () => {
+  it('publishKnowledgeAssets emits V10KnowledgeBatchEmitted with shape parity to the real EVM adapter', async () => {
     const params = makePublishParams(1);
     const out = await m.publishKnowledgeAssets(params);
     const evs: any[] = [];
@@ -254,7 +254,7 @@ describe('MockChainAdapter — UAL ranges, publishing, verify', () => {
     expect(ev.data.isPermanent).toBe(false);
   });
 
-  it('r30-6: publishKnowledgeAssetsPermanent emits V10KnowledgeBatchEmitted with isPermanent=true', async () => {
+  it('publishKnowledgeAssetsPermanent emits V10KnowledgeBatchEmitted with isPermanent=true', async () => {
     const params = makePublishParams(1);
     const out = await m.publishKnowledgeAssetsPermanent(params);
     const evs: any[] = [];
@@ -267,7 +267,7 @@ describe('MockChainAdapter — UAL ranges, publishing, verify', () => {
     expect(evs[0].data.txHash).toBe(out.txHash);
   });
 
-  it('r30-6: V10KnowledgeBatchEmitted is emitted IN THE SAME BLOCK as KnowledgeBatchCreated for the same publish', async () => {
+  it('V10KnowledgeBatchEmitted is emitted IN THE SAME BLOCK as KnowledgeBatchCreated for the same publish', async () => {
     // The real EVM adapter emits the two events in the same transaction
     // receipt. Downstream consumers that correlate by blockNumber rely
     // on this. The mock must mirror that ordering.
@@ -289,7 +289,7 @@ describe('MockChainAdapter — UAL ranges, publishing, verify', () => {
     expect(created[0].data.batchId).toBe(out.batchId.toString());
   });
 
-  // PR #229 bot review (r31-12 — mock-adapter.ts:200, J8hn).
+  // mock-adapter.ts:200, J8hn).
   //
   // Bot's exact concern: "This new V10KnowledgeBatchEmitted shim
   // hardcodes publicByteSize and tokenAmount to "0" here (and again
@@ -303,7 +303,7 @@ describe('MockChainAdapter — UAL ranges, publishing, verify', () => {
   // Pin the byte-size + token-amount projection from params on both
   // V10 publish paths so the mock can never silently regress to the
   // original "always zero" shape.
-  it('r31-12 (J8hn): publishKnowledgeAssets V10KnowledgeBatchEmitted carries publicByteSize + tokenAmount from PublishParams (no hardcoded zeros)', async () => {
+  it('(J8hn): publishKnowledgeAssets V10KnowledgeBatchEmitted carries publicByteSize + tokenAmount from PublishParams (no hardcoded zeros)', async () => {
     // makePublishParams ships publicByteSize=1024n and tokenAmount=500n.
     // The shape pins the EXACT values the real EVM adapter would
     // decode off the on-chain log (evm-adapter.ts:890 / :896).
@@ -315,7 +315,7 @@ describe('MockChainAdapter — UAL ranges, publishing, verify', () => {
     }
     expect(evs.length).toBe(1);
     const ev = evs[0];
-    // Pre-r31-12 these were `'0'` regardless of params — the J8hn bug.
+    // these were `'0'` regardless of params — the J8hn bug.
     expect(ev.data.publicByteSize).toBe('1024');
     expect(ev.data.tokenAmount).toBe('500');
     // Defence-in-depth — the values are SERIALISED bigint strings so
@@ -328,7 +328,7 @@ describe('MockChainAdapter — UAL ranges, publishing, verify', () => {
     expect(BigInt(ev.data.tokenAmount)).toBe(params.tokenAmount);
   });
 
-  it('r31-12 (J8hn): publishKnowledgeAssetsPermanent V10KnowledgeBatchEmitted carries publicByteSize + tokenAmount from PermanentPublishParams (parity with regular publish)', async () => {
+  it('(J8hn): publishKnowledgeAssetsPermanent V10KnowledgeBatchEmitted carries publicByteSize + tokenAmount from PermanentPublishParams (parity with regular publish)', async () => {
     // Mirror the regular-publish test against the permanent path —
     // the bot called out BOTH emission sites; both must project from
     // params, not hardcode zero.
@@ -345,10 +345,10 @@ describe('MockChainAdapter — UAL ranges, publishing, verify', () => {
     expect(ev.data.isPermanent).toBe(true);
   });
 
-  it('r31-12 (J8hn): distinct publish-cost params produce DISTINCT V10KnowledgeBatchEmitted payloads (no constant-zero collapse)', async () => {
+  it('(J8hn): distinct publish-cost params produce DISTINCT V10KnowledgeBatchEmitted payloads (no constant-zero collapse)', async () => {
     // Pin the projection's actual differentiation: two publishes with
     // different byte-size / token-amount must land as DIFFERENT events
-    // on the stream. Pre-r31-12 both events would have `'0' / '0'` so
+    // on the stream. both events would have `'0' / '0'` so
     // any consumer aggregating on these fields couldn't tell them
     // apart — and that aggregation regression was the J8hn risk.
     await m.publishKnowledgeAssets(makePublishParams(1, { publicByteSize: 100n, tokenAmount: 10n }));
@@ -369,7 +369,7 @@ describe('MockChainAdapter — UAL ranges, publishing, verify', () => {
     expect(evs[1].data.tokenAmount).not.toBe('0');
   });
 
-  it('r30-6: multiple V10 publishes each produce one V10KnowledgeBatchEmitted (no missed emissions, no spurious extras)', async () => {
+  it('multiple V10 publishes each produce one V10KnowledgeBatchEmitted (no missed emissions, no spurious extras)', async () => {
     // WAL recovery iterates events looking for a matching merkleRoot;
     // missing OR duplicated emissions both break it. Pin both shapes.
     const a = await m.publishKnowledgeAssets(makePublishParams(1));
@@ -593,7 +593,7 @@ describe('MockChainAdapter — conviction accounts', () => {
   });
 });
 
-// PR #229 cleanup: the FairSwap lifecycle test block previously
+// the FairSwap lifecycle test block previously
 // referenced a `MockChainAdapter` API surface (`initiatePurchase`,
 // `fulfillPurchase`, `revealKey`, `claimPayment`, `disputeDelivery`,
 // `claimRefund`, `getFairSwapPurchase`) that was never implemented on

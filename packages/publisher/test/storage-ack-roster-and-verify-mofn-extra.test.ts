@@ -23,7 +23,7 @@
  *                shows up as a RED test (bug evidence).
  *
  * Per QA policy: no production code changed; failing tests ARE the bug
- * evidence — see BUGS_FOUND.md P-8 / P-9.
+ * evidence
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
@@ -296,7 +296,7 @@ describe('P-9: StorageACKHandler roster gap — core-flagged node signs with ANY
 
   it(
     'PROD-BUG: handler signs an ACK even when the signerWallet has no on-chain roster membership ' +
-      '— the handler has no roster hook to reject rogue core-flagged nodes. See BUGS_FOUND.md P-9.',
+      '— the handler has no roster hook to reject rogue core-flagged nodes.',
     async () => {
       // Freshly-generated wallet that has never been registered as a
       // core node. In a correctly-specced handler, signing MUST be
@@ -366,7 +366,7 @@ describe('P-9: StorageACKHandler roster gap — core-flagged node signs with ANY
       });
 
       // The handler accepted a wallet with no chain presence.
-      // PROD-BUG: signerWallet roster check missing — see BUGS_FOUND.md P-9.
+      // PROD-BUG: signerWallet roster check missing
       expect(recovered.toLowerCase()).toBe(rogueWallet.address.toLowerCase());
     },
   );

@@ -33,7 +33,7 @@ const READ_ONLY_FORMS = /^\s*(?:(?:PREFIX|BASE)\s+[^\n]*\n\s*)*(SELECT|CONSTRUCT
 export type SparqlQueryForm = 'SELECT' | 'CONSTRUCT' | 'ASK' | 'DESCRIBE' | 'UNKNOWN';
 
 /**
- * PR #229 bot review round 17 (r17-2): classify a read-only SPARQL
+ * classify a read-only SPARQL
  * query so callers can produce a result shape that MATCHES what the
  * query engine would return for a successful-but-empty execution of
  * the same form:
@@ -81,7 +81,7 @@ export type EmptyQueryResultShape = QueryResult;
  * it (append bindings on a subsequent fallthrough, e.g.) without
  * worrying about cross-call aliasing.
  *
- * PR #229 bot review (r3148... — sparql-guard.ts:56). This is the
+ * — sparql-guard.ts:56). This is the
  * SINGLE canonical empty-shape builder for the package — there is no
  * parallel `emptyQueryResultForKind` helper anymore. Any future
  * change to `QueryResult` only has to update this function and
@@ -104,7 +104,7 @@ export function emptyResultForForm(form: SparqlQueryForm): QueryResult {
  * solely so callers that don't already need the form for branching
  * don't have to write the two-step every time.
  *
- * PR #229 bot review (r3148... — sparql-guard.ts:56) consolidation:
+ * — sparql-guard.ts:56) consolidation:
  * before this consolidation, two parallel pairs lived in this file
  * (`detectSparqlQueryForm` + `emptyResultForForm` AND
  * `classifySparqlForm` + `emptyQueryResultForKind`). The legacy pair
@@ -116,7 +116,7 @@ export function emptyResultForSparql(sparql: string): QueryResult {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// PR #229 bot review (r31-2 — packages/query/src/index.ts:7).
+// packages/query/src/index.ts:7).
 //
 // r30-3 consolidated two parallel SPARQL form classifier pairs onto
 // the canonical `detectSparqlQueryForm` + `emptyResultForForm` pair
@@ -147,7 +147,7 @@ export function emptyResultForSparql(sparql: string): QueryResult {
 // ─────────────────────────────────────────────────────────────────────
 
 /**
- * @deprecated PR #229 bot review (r31-2 — packages/query/src/index.ts:7).
+ * @deprecated
  *
  * Legacy SPARQL form type. The canonical replacement is
  * {@link SparqlQueryForm}, which adds an explicit `'UNKNOWN'`
@@ -159,7 +159,7 @@ export function emptyResultForSparql(sparql: string): QueryResult {
 export type SparqlForm = 'SELECT' | 'CONSTRUCT' | 'ASK' | 'DESCRIBE';
 
 /**
- * @deprecated PR #229 bot review (r31-2 — packages/query/src/index.ts:7).
+ * @deprecated
  *
  * Legacy classifier preserved as a thin wrapper. Use
  * {@link detectSparqlQueryForm} for new code — it returns the
@@ -172,8 +172,8 @@ export type SparqlForm = 'SELECT' | 'CONSTRUCT' | 'ASK' | 'DESCRIBE';
  * on the returned string keeps branching identically across the
  * deprecation window. New code should call `detectSparqlQueryForm`
  * directly and handle the `'UNKNOWN'` variant explicitly — the
- * silent SELECT coercion is exactly the drift hazard r30-3 set out
- * to close.
+ * silent SELECT coercion is exactly the drift hazard the canonical
+ * helper closes.
  */
 export function classifySparqlForm(sparql: string): SparqlForm {
   const form = detectSparqlQueryForm(sparql);
@@ -182,8 +182,7 @@ export function classifySparqlForm(sparql: string): SparqlForm {
 }
 
 /**
- * @deprecated PR #229 bot review (r31-2 — packages/query/src/index.ts:7;
- * r31-4 — packages/query/src/sparql-guard.ts:201).
+ * @deprecated
  *
  * Legacy one-shot helper preserved as a thin composition over the
  * canonical primitives. Use {@link emptyResultForSparql} for new
@@ -191,16 +190,16 @@ export function classifySparqlForm(sparql: string): SparqlForm {
  * "single call" reason this helper did) or
  * {@link emptyResultForForm} when the form is already known.
  *
- * **r31-4 signature compat**: the legacy `emptyQueryResultForKind`
+ * **Signature compat**: the legacy `emptyQueryResultForKind`
  * accepted the raw SPARQL **string** and classified it internally.
- * The r31-2 version of this wrapper changed the parameter type to
- * `SparqlForm`, which silently broke `JS`/`any` callers — they now
- * passed a SPARQL string into a slot typed as a form discriminator,
+ * Changing the parameter type to `SparqlForm` would silently break
+ * `JS`/`any` callers — they would pass a SPARQL string into a
+ * slot typed as a form discriminator,
  * and the function returned the SELECT-shaped empty result for
  * `ASK` / `CONSTRUCT` queries (because the string didn't match any
  * variant). The signature is restored to `string` here so existing
  * `emptyQueryResultForKind(query)` call sites compile and behave
- * identically to the pre-r31-2 surface, with the form classification
+ * identically to the surface, with the form classification
  * delegated to {@link emptyResultForSparql}.
  *
  * Behaviour matches the legacy implementation: for unparseable

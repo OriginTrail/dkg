@@ -126,7 +126,7 @@ export interface PublishOptions {
    * V10 ACK count is below this value, the publisher SKIPS the self-sign
    * fallback and the on-chain tx, returning `status: 'tentative'`.
    *
-   * Spec §06_PUBLISH / BUGS_FOUND.md A-5 — per-CG quorum supersedes the
+   * Spec §06_PUBLISH /
    * global ParametersStorage minimum.
    */
   perCgRequiredSignatures?: number;

@@ -1,7 +1,7 @@
 /**
  * Extra keystore hardening tests.
  *
- * Covers audit findings from `.test-audit/BUGS_FOUND.md` → `packages/cli (BURA)`:
+ * Covers audit findings from `.test-audit/
  *   - CLI-1  (CRITICAL, dup #11) — scrypt KDF parameter floor is not enforced.
  *     A keystore file with dangerously weak N/r/p parameters loads successfully,
  *     defeating the whole point of scrypt memory-hardness.
@@ -14,7 +14,7 @@
  * verbatim and derives the key with whatever values the (untrusted) keystore
  * file provides. There is no minimum-cost gate. Until a floor check lands in
  * `src/keystore.ts`, the "refuse weak" assertions stay RED — see
- * `.test-audit/BUGS_FOUND.md` CLI-1 (dup of open issue #11).
+ * `.test-audit/.
  */
 
 import { describe, it, expect, afterEach } from 'vitest';

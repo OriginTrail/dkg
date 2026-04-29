@@ -266,14 +266,14 @@ describe('GossipPublishHandler', () => {
   });
 
   // ---------------------------------------------------------------------------
-  // r23-4 (PR #229 bot review round 23): the envelope's recovered signer was
+  // r23-4: the envelope's recovered signer was
   // previously discarded, which meant a peer with a legitimate wallet could
   // wrap a PublishRequest claiming ANY `publisherAddress` and the envelope
   // would still verify. These tests pin the fix: when an envelopeSigner is
   // passed through ingress, the handler MUST reject gossip whose inner
   // PublishRequest.publisherAddress disagrees with the envelope signer.
   // ---------------------------------------------------------------------------
-  describe('r23-4 — envelope signer MUST match PublishRequest.publisherAddress', () => {
+  describe('envelope signer MUST match PublishRequest.publisherAddress', () => {
     const TRUE_PUBLISHER = '0x1111111111111111111111111111111111111111';
     const ATTACKER = '0x2222222222222222222222222222222222222222';
 
@@ -330,7 +330,7 @@ describe('GossipPublishHandler', () => {
 
     it('does NOT enforce the check when envelopeSigner is undefined (legacy rolling-upgrade path stays open)', async () => {
       // Without a signer (envelope absent / strictGossipEnvelope off),
-      // the handler falls back to the pre-r23-4 behaviour. We pin this
+      // the handler falls back to the behaviour. We pin this
       // so that enabling the check in the signed path doesn't break
       // deployments still carrying raw gossip during rolling upgrade.
       const { store, handler } = createHandler();

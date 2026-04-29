@@ -2,7 +2,7 @@
  * Extra coverage for PrivateContentStore and named-graph confidentiality
  * model. No mocks — every test runs against a real OxigraphStore.
  *
- * Findings covered (see .test-audit/BUGS_FOUND.md, "packages/storage"):
+ * Findings covered (see .test-audit/
  *
  *   ST-2  PROD-BUG — PrivateContentStore is documented as encrypted private
  *          storage but src/private-store.ts only remaps the graph URI. The
@@ -49,7 +49,7 @@ describe('PrivateContentStore — at-rest confidentiality [ST-2]', () => {
   // The literal object is persisted verbatim by Oxigraph. Any operator
   // with read access to the on-disk N-Quads file or the SPARQL endpoint
   // can recover the plaintext. README claims otherwise — see
-  // BUGS_FOUND.md ST-2. Leaving this test RED is the evidence.
+  // . Leaving this test RED is the evidence.
 
   const SECRET = 'SECRET_PLAINTEXT_AAAA';
   let tempDir: string;
@@ -114,8 +114,8 @@ describe('PrivateContentStore — at-rest confidentiality [ST-2]', () => {
     expect(decrypted.map((q) => q.object)).toContain(`"${SECRET}"`);
   });
 
-  // PR #229 bot review round 7 (private-store.ts:226). Random IV is
-  // required (bot review N1 forbids deterministic IVs for AES-GCM), but
+  // Random IV is
+  // required, but
   // the write path MUST stay idempotent on plaintext identity — otherwise
   // every replay / retry of the same private KA stacks another
   // ciphertext row and `getPrivateTriples` starts returning duplicates.
@@ -151,7 +151,7 @@ describe('PrivateContentStore — at-rest confidentiality [ST-2]', () => {
     ]);
   });
 
-  it('PR #229 bugbot: concurrent storePrivateTriples for the same (s,p,o) cannot bypass dedup (read-then-insert race)', async () => {
+  it('concurrent storePrivateTriples for the same (s,p,o) cannot bypass dedup (read-then-insert race)', async () => {
     // Pre-fix: `storePrivateTriples` snapshotted existing plaintext keys
     // BEFORE inserting, with no mutual exclusion. Two concurrent writers
     // for the same (s,p,o) plaintext would both observe an empty key
@@ -192,7 +192,7 @@ describe('PrivateContentStore — at-rest confidentiality [ST-2]', () => {
     expect(decrypted[0].object).toBe(`"${SECRET}"`);
   });
 
-  // PR #229 bot review (r3148... — private-store.ts:553). Pre-fix
+  // — private-store.ts:553). Pre-fix
   // the dedup query unconditionally wrapped every incoming subject
   // in `<${assertSafeIri(subject)}>`. RDF allows blank-node subjects
   // (`_:b0`), and `assertSafeIri()` throws on them — that throw
@@ -201,7 +201,7 @@ describe('PrivateContentStore — at-rest confidentiality [ST-2]', () => {
   // failed outright instead of falling back to the no-dedup path.
   // Tests below pin both the now-survives behaviour and that
   // dedup STILL works correctly for blank-node-subject quads.
-  it('r30-5: storePrivateTriples accepts blank-node subjects (does not throw on _:b0)', async () => {
+  it('storePrivateTriples accepts blank-node subjects (does not throw on _:b0)', async () => {
     const store = new OxigraphStore();
     const gm = new ContextGraphManager(store);
     const ps = new PrivateContentStore(store, gm);
@@ -226,7 +226,7 @@ describe('PrivateContentStore — at-rest confidentiality [ST-2]', () => {
     expect(raw.bindings.length).toBe(2);
   });
 
-  it('r30-5: storePrivateTriples with a MIX of IRI and blank-node subjects survives — IRI subjects still dedup, blank-node subjects do not (correct RDF semantics)', async () => {
+  it('storePrivateTriples with a MIX of IRI and blank-node subjects survives — IRI subjects still dedup, blank-node subjects do not (correct RDF semantics)', async () => {
     const store = new OxigraphStore();
     const gm = new ContextGraphManager(store);
     const ps = new PrivateContentStore(store, gm);
@@ -284,7 +284,7 @@ describe('PrivateContentStore — at-rest confidentiality [ST-2]', () => {
     expect(bnRows.length).toBe(2);
   });
 
-  it('r30-5: storePrivateTriples with a MIX of IRI and blank-node subjects — replaying ONLY the IRI subject still dedups (regression guard for the silent-catch bug)', async () => {
+  it('storePrivateTriples with a MIX of IRI and blank-node subjects — replaying ONLY the IRI subject still dedups (regression guard for the silent-catch bug)', async () => {
     // The mixed-batch case above shows the IRI dedup survives
     // when blank-node subjects are also present in the SAME batch.
     // This test pins the inverse case: if a later call replays
@@ -318,7 +318,7 @@ describe('PrivateContentStore — at-rest confidentiality [ST-2]', () => {
     expect(raw.bindings.filter((r) => r['s'] === ROOT).length).toBe(1);
   });
 
-  it('r30-5: blank-node-only batch still benefits from predicate-narrowed dedup path (no full-graph scan)', async () => {
+  it('blank-node-only batch still benefits from predicate-narrowed dedup path (no full-graph scan)', async () => {
     // Plant an unrelated row in the private graph that uses a
     // DIFFERENT predicate and therefore must NOT show up in the
     // predicate-narrowed query. If the fallback accidentally
@@ -371,7 +371,7 @@ describe('PrivateContentStore — at-rest confidentiality [ST-2]', () => {
   });
 
   // =======================================================================
-  // PR #229 bot review (r31-14 — private-store.ts:491, KwH_): the
+  // private-store.ts:491, KwH_): the
   // per-graph write lock built its chain off `prev.then(() => next)`
   // and `await prev` was OUTSIDE the try/finally that would call
   // `release()`. A single rejected `storePrivateTriples()` therefore:
@@ -385,7 +385,7 @@ describe('PrivateContentStore — at-rest confidentiality [ST-2]', () => {
   // process restart. Fix: chain off `prev.catch(() => undefined)` so
   // a predecessor's rejection is decoupled from queue progress.
   // =======================================================================
-  it('r31-14 (KwH_): a rejected storePrivateTriples does NOT brick the per-graph write lock — subsequent writers still drain', async () => {
+  it('(KwH_): a rejected storePrivateTriples does NOT brick the per-graph write lock — subsequent writers still drain', async () => {
     const store = new OxigraphStore();
     const gm = new ContextGraphManager(store);
     const ps = new PrivateContentStore(store, gm);
@@ -412,7 +412,7 @@ describe('PrivateContentStore — at-rest confidentiality [ST-2]', () => {
     };
 
     // 1. First write throws (the simulated fault), and the lock MUST
-    //    NOT permanently brick. Pre-r31-14 this leaked a pending
+    //    NOT permanently brick. this leaked a pending
     //    `next` — every subsequent caller hung forever.
     await expect(
       ps.storePrivateTriples(CONTEXT_GRAPH, ROOT, [goodQuad]),
@@ -447,7 +447,7 @@ describe('PrivateContentStore — at-rest confidentiality [ST-2]', () => {
     expect(decrypted[0].object).toBe(`"${SECRET}"`);
   });
 
-  it('r31-14 (KwH_): concurrent waiters queued behind a rejecting writer all complete (no waiter inherits the rejection)', async () => {
+  it('(KwH_): concurrent waiters queued behind a rejecting writer all complete (no waiter inherits the rejection)', async () => {
     const store = new OxigraphStore();
     const gm = new ContextGraphManager(store);
     const ps = new PrivateContentStore(store, gm);
@@ -480,7 +480,7 @@ describe('PrivateContentStore — at-rest confidentiality [ST-2]', () => {
 
     const writerA = ps.storePrivateTriples(CONTEXT_GRAPH, ROOT, [sharedQuad]);
     // Force the lock chain to register two more queued waiters
-    // BEFORE the first writer rejects. Pre-r31-14 these inherited
+    // BEFORE the first writer rejects. these inherited
     // the rejected `prev` and never even started.
     const writerB = ps.storePrivateTriples(CONTEXT_GRAPH, ROOT, [sharedQuad]);
     const writerC = ps.storePrivateTriples(CONTEXT_GRAPH, ROOT, [sharedQuad]);
@@ -504,7 +504,7 @@ describe('PrivateContentStore — at-rest confidentiality [ST-2]', () => {
     expect(decrypted.length).toBe(1);
   });
 
-  it('r31-14 (KwH_): a poisoned (rejected) predecessor in the lock map does NOT cascade-reject queued writers', async () => {
+  it('(KwH_): a poisoned (rejected) predecessor in the lock map does NOT cascade-reject queued writers', async () => {
     // White-box test for the strongest bug variant (cli/private-store.ts:491).
     // The fix's defensive contract is: even if a rejected promise ends
     // up as the predecessor in `perGraphWriteLocks` (whether by
@@ -562,7 +562,7 @@ describe('PrivateContentStore — at-rest confidentiality [ST-2]', () => {
     expect(decrypted[0].object).toBe(`"${SECRET}"`);
   });
 
-  it('r31-14 (KwH_): per-graph rejection does NOT poison OTHER graphs (independent locks stay clean)', async () => {
+  it('(KwH_): per-graph rejection does NOT poison OTHER graphs (independent locks stay clean)', async () => {
     const store = new OxigraphStore();
     const gm = new ContextGraphManager(store);
     const ps = new PrivateContentStore(store, gm);
@@ -846,7 +846,6 @@ describe('PrivateContentStore — SPARQL injection defence [ST-7]', () => {
     // no immediate SPARQL injection, but a later hasPrivateTriples /
     // getPrivateTriples / deletePrivateTriples call with the same string
     // will blow up. Tracker should reject unsafe IRIs at the entry point.
-    // See BUGS_FOUND.md ST-7.
     const unsafe = 'did:dkg:agent:evil> <http://attacker/';
     await expect(
       ps.storePrivateTriples(CONTEXT_GRAPH, unsafe, [

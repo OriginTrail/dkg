@@ -18,7 +18,7 @@ describe('buildEndorsementQuads', () => {
       'ml-research',
     );
 
-    // PR #229 bot review round 19 (r19-3): the endorsement now has
+    // the endorsement now has
     // its own per-event resource (a deterministic URN) carrying the
     // UAL, endorser, timestamp, nonce, and signature tuple. The
     // agent URI is the OBJECT of `endorsedBy`, not the subject, so
@@ -38,7 +38,7 @@ describe('buildEndorsementQuads', () => {
 
     const byQuad = quads.find((q) => q.predicate === DKG_ENDORSED_BY);
     expect(byQuad).toBeDefined();
-    // r19-3: the agent is the object of `endorsedBy`, not the subject
+    // the agent is the object of `endorsedBy`, not the subject
     // of `endorses`. This is what keeps proof quads paired.
     expect(byQuad!.subject).toBe(endorseQuad!.subject);
     expect(byQuad!.object).toBe('did:dkg:agent:0xAbc123');
@@ -70,12 +70,12 @@ describe('buildEndorsementQuads', () => {
     }
   });
 
-  // PR #229 bot review round 19 (r19-3). The core bug the bot
+  // The core bug the bot
   // flagged: before the fix, two endorsements by the same agent
   // in the same context graph piled FOUR timestamps, FOUR nonces,
   // and FOUR signatures on a single `did:dkg:agent:<address>`
   // subject with no way to pair them. These tests lock the fix.
-  it('r19-3: two endorsements by the SAME agent in the SAME context graph produce DISTINCT endorsement subjects', () => {
+  it('two endorsements by the SAME agent in the SAME context graph produce DISTINCT endorsement subjects', () => {
     const q1 = buildEndorsementQuads('0xSameAgent', 'ual:asset-1', 'cg');
     const q2 = buildEndorsementQuads('0xSameAgent', 'ual:asset-2', 'cg');
     const e1 = q1.find((q) => q.predicate === DKG_ENDORSES)!.subject;
@@ -106,7 +106,7 @@ describe('buildEndorsementQuads', () => {
     expect(nonce1!.object).not.toBe(nonce2!.object);
   });
 
-  it('r19-3: the endorsement URN is DETERMINISTIC — same inputs regenerate byte-identical quads', () => {
+  it('the endorsement URN is DETERMINISTIC — same inputs regenerate byte-identical quads', () => {
     // Idempotence: retries (same agent, UAL, CG, ts, nonce) must
     // produce the same quads so duplicate publishes don't accumulate
     // multiple endorsement resources for what is logically one
@@ -126,7 +126,7 @@ describe('buildEndorsementQuads', () => {
     expect(e1).not.toBe(e3);
   });
 
-  it('r19-3: every quad in a single endorsement emission shares one subject', () => {
+  it('every quad in a single endorsement emission shares one subject', () => {
     // Shape invariant: verifiers expect to reconstruct the canonical
     // digest from six quads hanging off a SINGLE endorsement subject.
     // If a future refactor ever split a subset onto a different URI,

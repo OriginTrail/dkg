@@ -1,7 +1,7 @@
 /**
  * packages/attested-assets — extra QA coverage.
  *
- * Findings covered (see .test-audit/BUGS_FOUND.md):
+ * Findings covered (see .test-audit/
  *
  *   AA-1  TEST-DEBT  `session-routes.test.ts` uses an in-memory stub manager.
  *                    We replace it with a REAL `SessionManager` wired to a
@@ -337,7 +337,7 @@ describe('[AA-2] full quorum round setup: two real SessionManagers over shared g
     // should have delivered to peer-2 already, but asynchronous validation
     // happens via `await verifyAKASignature` inside handleSessionProposed).
     //
-    // PR #229 bot review (post-v10-rc-merge): the previous version
+    // the previous version
     // yielded a fixed number of microtasks (`setTimeout(r, 0)` ×2)
     // which CI repeatedly raced against on slower runners — the
     // ed25519 verification inside `handleSessionProposed` had not

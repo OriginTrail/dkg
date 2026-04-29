@@ -138,7 +138,7 @@ describe('P-2 (CRITICAL): fencing token — stale worker after health-check rese
   it(
     'PROD-BUG: after the wallet lock is cleared, a stale worker can still ' +
       'flip `claimed → validated` on its own job — update() has no fence on ' +
-      'the caller claim token. See BUGS_FOUND.md P-2.',
+      'the caller claim token.',
     async () => {
       const publisher = createPublisher();
       const jobId = await publisher.lift(request());
@@ -225,7 +225,7 @@ describe('P-2 (CRITICAL): fencing token — stale worker after health-check rese
     } catch (err) {
       caughtStale = err;
     }
-    // FIXED (BUGS_FOUND.md P-2): update() now refuses to mutate a job
+    // FIXED (
     // when the caller's wallet lock has been cleared by the control
     // plane, and `syncWalletLockForJob` no longer silently resurrects
     // the lock during refresh. The spec invariant is therefore that

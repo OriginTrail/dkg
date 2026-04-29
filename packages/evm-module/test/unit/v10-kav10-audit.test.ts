@@ -1,7 +1,7 @@
 /**
  * DKG v10 KnowledgeAssetsV10 audit coverage.
  *
- * Findings covered (see .test-audit/BUGS_FOUND.md):
+ * Findings covered (see .test-audit/
  *   E-4 (HIGH, TEST-DEBT): ACK signed-vs-submitted cost-param mismatch —
  *        sign ACK over one (epochs, tokenAmount, byteSize, knowledgeAssetsAmount)
  *        set, submit with a tampered value, assert signature recovery fails.
@@ -17,7 +17,7 @@
  *        §Publish Flow) prescribes dual emission of
  *        `KnowledgeBatchCreated` + `KnowledgeCollectionCreated`. Current V10
  *        code only emits the latter. Test asserts both are present and is
- *        intentionally left RED. See BUGS_FOUND.md#E-9.
+ *        intentionally left RED.
  */
 
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
@@ -393,7 +393,7 @@ describe('@unit v10 KnowledgeAssetsV10 audit', () => {
       const knowledgeAssetsAmount = 10;
       const byteSize = 1000;
 
-      // Foreign KAV10 address (KAV10_ADDRESS_A in BUGS_FOUND.md). We use
+      // Foreign KAV10 address (KAV10_ADDRESS_A in. We use
       // accounts[19] — a valid checksummed address that is NOT the deployed
       // KAV10. Signatures bind to this address but the tx lands on the real
       // contract, so `address(this)` mismatch → recovery yields a different
@@ -771,16 +771,16 @@ describe('@unit v10 KnowledgeAssetsV10 audit', () => {
     it('emits V10KnowledgeBatchEmitted (distinct topic) alongside KnowledgeCollectionCreated for V10-aware indexers', async () => {
       // Precondition: the legacy KnowledgeAssetsStorage must be deployed —
       // the PRD expects V10 publish to fan out an audit-shaped record
-      // through it for indexer symmetry with V8/V9. Bot review PR #229
-      // (post-round-5): the emitted event is deliberately NOT named
-      // `KnowledgeBatchCreated` (that would trick legacy V8/V9 indexers
-      // into calling `getBatchPublisher(batchId)` which has no data for
-      // V10 publishes). A dedicated `V10KnowledgeBatchEmitted` topic
+      // through it for indexer symmetry with V8/V9. The emitted event
+      // is deliberately NOT named `KnowledgeBatchCreated` (that would
+      // trick legacy V8/V9 indexers into calling
+      // `getBatchPublisher(batchId)` which has no data for V10
+      // publishes). A dedicated `V10KnowledgeBatchEmitted` topic
       // preserves the batch-shaped payload while signalling that it is
       // a V10 shim record, not a real V8/V9 batch.
       if (KASStorage == null) {
         throw new Error(
-          'KnowledgeAssetsStorage not deployed — V10 publish cannot surface a batch-shaped audit record (BUGS_FOUND.md#E-9)',
+          'KnowledgeAssetsStorage not deployed — V10 publish cannot surface a batch-shaped audit record',
         );
       }
 
@@ -831,7 +831,7 @@ describe('@unit v10 KnowledgeAssetsV10 audit', () => {
 
       const kasAddr = (KASStorage.target as string).toLowerCase();
 
-      // Bot review PR #229 (post-round-5): V10 publish MUST NOT emit
+      // V10 publish MUST NOT emit
       // `KnowledgeBatchCreated` from KAS — that would mislead legacy
       // V8/V9 indexers into calling `getBatchPublisher(batchId)` for a
       // batch that never gets written to `knowledgeBatches` /
@@ -862,7 +862,7 @@ describe('@unit v10 KnowledgeAssetsV10 audit', () => {
       );
       expect(
         v10ShimEvents.length,
-        'spec requires V10 batch-shaped audit emit from KAS via V10KnowledgeBatchEmitted (BUGS_FOUND.md#E-9)',
+        'spec requires V10 batch-shaped audit emit from KAS via V10KnowledgeBatchEmitted',
       ).to.equal(1);
 
       // Decode the payload and pin publisher + merkle root so any drift
@@ -880,7 +880,6 @@ describe('@unit v10 KnowledgeAssetsV10 audit', () => {
       expect(decoded.publicByteSize).to.equal(1000n);
     });
 
-    // PR #229 bot review round 9 (KnowledgeAssetsV10.sol:457).
     //
     // `_executePublishCore` used to compute `endKAIdRaw = startKAIdRaw
     // + p.knowledgeAssetsAmount - 1` without first checking that
@@ -892,7 +891,7 @@ describe('@unit v10 KnowledgeAssetsV10 audit', () => {
     // revert happens and (b) it carries the specific custom-error
     // selector (not a Panic) so the client can surface a meaningful
     // message.
-    it('publishDirect reverts with ZeroKnowledgeAssetsAmount when knowledgeAssetsAmount == 0 (bot review r9-4)', async () => {
+    it('publishDirect reverts with ZeroKnowledgeAssetsAmount when knowledgeAssetsAmount == 0', async () => {
       const creator = getDefaultKCCreator(accounts);
       const {
         publishingNode,

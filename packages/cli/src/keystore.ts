@@ -40,7 +40,7 @@ const SCRYPT_P = 1;
 const DKLEN = 32;
 
 /**
- * CLI-1 (BUGS_FOUND.md dup #11): floor values that `decryptKeystore`
+ * CLI-1 (
  * MUST enforce on the (untrusted) `kdfparams` block before deriving
  * a key. Without these, an attacker who can write a keystore file
  * can advertise toy scrypt parameters (e.g. N=256, r=1) and force the
@@ -120,7 +120,7 @@ export async function decryptKeystore(
 
   const { kdfparams } = keystore.crypto;
 
-  // CLI-1 (BUGS_FOUND.md dup #11): enforce KDF parameter floor BEFORE
+  // CLI-1 (
   // calling scryptSync. Previously, weak params either (a) produced a
   // generic "Decryption failed" (because `deriveKey` always re-derived
   // with the global SCRYPT_N regardless of what the file advertised —
@@ -150,7 +150,7 @@ export async function decryptKeystore(
       `Refusing to load weak keystore: dklen must be ${REQUIRED_DKLEN} for AES-256-GCM (got ${kdfparams.dklen}). invalid dklen.`,
     );
   }
-  // Bot review G1: compute saltHex into a local FIRST, defensively
+  // compute saltHex into a local FIRST, defensively
   // falling back to '' for missing/non-string values. The previous
   // `kdfparams.salt.length / 2` expression in the throw message would
   // itself throw (TypeError: Cannot read properties of undefined) when
@@ -159,7 +159,7 @@ export async function decryptKeystore(
   // "scrypt failed" three call frames higher. Now the validator
   // reports the intended weak-keystore error in both cases.
   //
-  // PR #229 bugbot follow-up: explicitly reject odd-length hex strings
+  // explicitly reject odd-length hex strings
   // before decoding. `Buffer.from('aa…', 'hex')` silently drops the
   // dangling nibble, so a 33-character salt would advertise 16.5 bytes
   // (>= MIN_SALT_BYTES under integer division) and slip through the

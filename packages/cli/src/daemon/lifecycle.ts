@@ -1379,7 +1379,7 @@ export async function runDaemonInner(
       if (!shouldBypassRateLimitForLoopbackTraffic(clientIp, reqUrl.pathname)
         && !rateLimiter.isAllowed(clientIp, reqUrl.pathname)) {
         // Route through jsonResponse so the egress scrubber & sanitiser
-        // chain runs uniformly on every error response (PR #229 alert 47).
+        // chain runs uniformly on every error response.
         // 429 needs a Retry-After hint passed via the extraHeaders param.
         jsonResponse(res, 429, { error: 'Too many requests' }, reqCorsOrigin, { 'Retry-After': '60' });
         return;
@@ -1404,7 +1404,7 @@ export async function runDaemonInner(
 
       // Auth guard — rejects with 401 if token is invalid/missing.
       //
-      // PR #229 bot review r31-7 (auth.ts:947). For body-carrying
+      // For body-carrying
       // signed requests `httpAuthGuard` returns a `Promise<boolean>`
       // that resolves only after the request body has been drained
       // and the HMAC verified — `await`ing here is what guarantees
@@ -1547,14 +1547,14 @@ export async function runDaemonInner(
     } catch (err: any) {
       if (res.headersSent || res.writableEnded) return;
       if (err instanceof SignedRequestRejectedError) {
-        // PR #229 F2 follow-up: the body-reading helpers throw this when
+        // the body-reading helpers throw this when
         // the post-body HMAC verification fails for a request that opted
         // into signed mode. Map to 401 with the same wire shape as the
         // pre-body signed-mode rejections in httpAuthGuard so clients see
         // a single consistent error surface.
         //
         // Route through jsonResponse so the egress scrubber & sanitiser
-        // run on this error path too (PR #229 alert 47). `err.reason` is
+        // run on this error path too. `err.reason` is
         // an enum-like discriminant ('missing-fields' / 'bad-signature' /
         // …) and never contains a stack trace, but routing every error
         // sink through the central scrubber removes the
@@ -1588,7 +1588,7 @@ export async function runDaemonInner(
       } else {
         enrichEvmError(err);
         const rawMsg = typeof err?.message === "string" ? err.message : String(err);
-        // CLI-9 (BUGS_FOUND.md dup #159): scrub raw chain-revert
+        // CLI-9 (
         // hex / `unknown custom error` markers from the 500 body so
         // ANY endpoint that bubbles a chain error gets the same
         // privacy-safe treatment, not just /api/verify. Endpoints

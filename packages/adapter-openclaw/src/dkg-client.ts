@@ -125,7 +125,7 @@ export class DkgDaemonClient {
    * to a single per-agent assertion), `subGraphName`, `verifiedGraph`,
    * `graphSuffix`, `includeSharedMemory`.
    *
-   * PR #229 bot review round 22 (r22-1): when the daemon runs with more
+   * when the daemon runs with more
    * than one co-hosted local agent, `view: 'working-memory'` reads are
    * gated by a fail-closed `agentAuthSignature` check (RFC-29 / spec §04
    * isolation). Forward the signature when the caller provides one so

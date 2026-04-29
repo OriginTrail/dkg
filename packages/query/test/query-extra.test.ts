@@ -1,7 +1,7 @@
 /**
  * packages/query — extra QA coverage for spec-gap & prod-bug findings.
  *
- * Findings covered (see .test-audit/BUGS_FOUND.md):
+ * Findings covered (see .test-audit/
  *
  *   Q-1  PROD-BUG  `QueryOptions.minTrust` on `verified-memory` view is a
  *                  *graph-scope* filter, not a per-triple filter. P-13
@@ -79,7 +79,7 @@ describe('[Q-1] DKGQueryEngine minTrust is graph-scope only — PROD-BUG', () =>
   // writer ever stamps mixed-trust quads into a single sub-graph, the
   // graph-scope filter cannot catch it. This test pins that gap.
   //
-  // PR #229 bot review (r3146759642): the per-triple filter is now
+  // the per-triple filter is now
   // skipped at `Endorsed` because no production writer emits
   // `dkg:trustLevel` literals — applying the join at Endorsed would
   // collapse legitimate queries against real data. The per-triple
@@ -123,7 +123,7 @@ describe('[Q-1] DKGQueryEngine minTrust is graph-scope only — PROD-BUG', () =>
     expect(names).toEqual(['"HighTrust"']);
   });
 
-  // PR #229 bot review (r3146759642): explicit pin that the new
+  // explicit pin that the new
   // `> Endorsed` threshold leaves Endorsed queries reading from
   // /_verified_memory/* sub-graphs without applying the per-triple
   // join. Real production data lands in those sub-graphs WITHOUT a
@@ -163,7 +163,7 @@ describe('[Q-1] DKGQueryEngine minTrust is graph-scope only — PROD-BUG', () =>
     expect(names).toEqual(['"Production1"', '"Production2"']);
   });
 
-  // PR #229 bot review (r3146759642): pin that ConsensusVerified
+  // pin that ConsensusVerified
   // STILL fails closed on un-tagged production data — the higher
   // tier requires explicit per-triple metadata, and a fail-closed
   // empty result is the correct behaviour when writers haven't
@@ -190,7 +190,7 @@ describe('[Q-1] DKGQueryEngine minTrust is graph-scope only — PROD-BUG', () =>
   });
 
   // ─────────────────────────────────────────────────────────────────────────
-  // Bot review (PR #229 follow-up, dkg-query-engine.ts:534): concrete-
+  // concrete-
   // subject queries like `SELECT ?o WHERE { <entity> <p> ?o }` are the
   // most common SPARQL shape for exact lookups and MUST honor `_minTrust`
   // (not fail closed with an empty result). The fix attaches
@@ -245,7 +245,7 @@ describe('[Q-1] DKGQueryEngine minTrust is graph-scope only — PROD-BUG', () =>
     expect(result.bindings).toEqual([]);
   });
 
-  // PR #229 bot review round 7 (dkg-query-engine.ts:513) — `rdf:type` style
+  // `rdf:type` style
   // IRIs contain a `#` fragment. The prior naive `replace(/#[^\n]*/g,'')`
   // would mangle the IRI into `<http://www.w3.org/1999/02/22-rdf-syntax-ns`
   // and fail-close every such query to `[]`. Lock the happy path so the
@@ -285,7 +285,7 @@ describe('[Q-1] DKGQueryEngine minTrust is graph-scope only — PROD-BUG', () =>
     expect(result.bindings.map((b) => b['n'])).toEqual(['"ok"']);
   });
 
-  // PR #229 bot review round 8 (dkg-query-engine.ts:576): the naive
+  // the naive
   // `/\.(?=\s|$)/` split fragmented any query whose literal contained
   // a sentence-terminating dot ("hello. world", an email address
   // ending a chat message, a float "3.14 " — anything where `.` was
@@ -344,7 +344,7 @@ describe('[Q-1] DKGQueryEngine minTrust is graph-scope only — PROD-BUG', () =>
     expect(result.bindings.map((b) => b['name'])).toEqual(['"q-name"']);
   });
 
-  // PR #229 bot review round 11 (dkg-query-engine.ts:654) — before this
+  // before this
   // round the `_minTrust` subject matcher only accepted variables,
   // `<iri>`, blank nodes, and literals. Standard SPARQL with a
   // `PREFIX ex: <urn:> ...` header and a prefixed-name subject
@@ -352,7 +352,7 @@ describe('[Q-1] DKGQueryEngine minTrust is graph-scope only — PROD-BUG', () =>
   // to `[]` — even though the exact-entity trust filter is perfectly
   // enforceable. These tests pin the fix: the rewritten WHERE accepts
   // prefixed-name subjects and attaches the trust-level clause inline.
-  it('honors _minTrust when the subject is a prefixed name (PNAME_LN) — bot review r11-3', async () => {
+  it('honors _minTrust when the subject is a prefixed name (PNAME_LN)', async () => {
     const store = new OxigraphStore();
     const engine = new DKGQueryEngine(store);
     const consensus = contextGraphVerifiedMemoryUri(CG, 'consensus-verified');
@@ -372,7 +372,7 @@ describe('[Q-1] DKGQueryEngine minTrust is graph-scope only — PROD-BUG', () =>
     expect(result.bindings.map((b) => b['n'])).toEqual(['"Alice"']);
   });
 
-  it('filters out below-threshold results for prefixed-name subjects — bot review r11-3', async () => {
+  it('filters out below-threshold results for prefixed-name subjects', async () => {
     const store = new OxigraphStore();
     const engine = new DKGQueryEngine(store);
     const consensus = contextGraphVerifiedMemoryUri(CG, 'consensus-verified');
@@ -394,7 +394,7 @@ describe('[Q-1] DKGQueryEngine minTrust is graph-scope only — PROD-BUG', () =>
     expect(result.bindings).toEqual([]);
   });
 
-  it('honors _minTrust on mixed prefixed + variable subjects (multi-triple BGP) — bot review r11-3', async () => {
+  it('honors _minTrust on mixed prefixed + variable subjects (multi-triple BGP)', async () => {
     const store = new OxigraphStore();
     const engine = new DKGQueryEngine(store);
     const consensus = contextGraphVerifiedMemoryUri(CG, 'consensus-verified');
@@ -415,7 +415,7 @@ describe('[Q-1] DKGQueryEngine minTrust is graph-scope only — PROD-BUG', () =>
     expect(result.bindings.map((b) => b['name'])).toEqual(['"q-name"']);
   });
 
-  // PR #229 bot review round 23 (r23-2, dkg-query-engine.ts). The
+  // The
   // canonical SPARQL shape for batched exact-subject lookups is a
   // leading `VALUES ?s { … }` clause followed by a BGP that binds
   // `?s`. Before r23-2 `injectMinTrustFilter` treated ANY occurrence
@@ -426,7 +426,7 @@ describe('[Q-1] DKGQueryEngine minTrust is graph-scope only — PROD-BUG', () =>
   // a single-variable leading VALUES clause is peeled off, the trust
   // filter is attached to the BGP, and the VALUES binding is
   // re-emitted verbatim so the engine still restricts subjects.
-  it('honors _minTrust on a leading VALUES ?s { … } clause — bot review r23-2', async () => {
+  it('honors _minTrust on a leading VALUES ?s { … } clause', async () => {
     const store = new OxigraphStore();
     const engine = new DKGQueryEngine(store);
     const consensus = contextGraphVerifiedMemoryUri(CG, 'consensus-verified');
@@ -450,7 +450,7 @@ describe('[Q-1] DKGQueryEngine minTrust is graph-scope only — PROD-BUG', () =>
     expect(result.bindings.map((b) => b['l'])).toEqual(['"A"', '"B"']);
   });
 
-  it('filters VALUES-bound subjects that fall below _minTrust — bot review r23-2', async () => {
+  it('filters VALUES-bound subjects that fall below _minTrust', async () => {
     const store = new OxigraphStore();
     const engine = new DKGQueryEngine(store);
     const consensus = contextGraphVerifiedMemoryUri(CG, 'consensus-verified');
@@ -476,7 +476,6 @@ describe('[Q-1] DKGQueryEngine minTrust is graph-scope only — PROD-BUG', () =>
   });
 
   // ─────────────────────────────────────────────────────────────────────
-  // PR #229 bot review r3131942426 (dkg-query-engine.ts:754)
   //
   // A query like
   //     SELECT ?o WHERE { ?s <p> ?o . FILTER(?o > 10) }
@@ -489,7 +488,7 @@ describe('[Q-1] DKGQueryEngine minTrust is graph-scope only — PROD-BUG', () =>
   // verbatim in the rewritten WHERE (since the rewriter appends trust-
   // filter triples to the original trimmed inner).
   // ─────────────────────────────────────────────────────────────────────
-  it('honors _minTrust on a BGP whose top-level statements include a FILTER — bot review r3131942426', async () => {
+  it('honors _minTrust on a BGP whose top-level statements include a FILTER', async () => {
     const store = new OxigraphStore();
     const engine = new DKGQueryEngine(store);
     const consensus = contextGraphVerifiedMemoryUri(CG, 'consensus-verified');
@@ -515,7 +514,7 @@ describe('[Q-1] DKGQueryEngine minTrust is graph-scope only — PROD-BUG', () =>
     expect(result.bindings.map((b) => b['s'])).toEqual(['urn:doc2']);
   });
 
-  it('honors _minTrust on a BGP whose top-level statements include a BIND — bot review r3131942426', async () => {
+  it('honors _minTrust on a BGP whose top-level statements include a BIND', async () => {
     const store = new OxigraphStore();
     const engine = new DKGQueryEngine(store);
     const consensus = contextGraphVerifiedMemoryUri(CG, 'consensus-verified');
@@ -913,7 +912,7 @@ describe('[Q-6] QueryHandler error taxonomy', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PR #229 bot review (r3147347827, dkg-query-engine.ts:718). The pre-fix
+// The pre-fix
 // `injectMinTrustFilter` only matched `WHERE\s*\{`. SPARQL 1.1 allows
 // the `WHERE` keyword to be omitted from `SELECT`, `ASK`, and
 // `DESCRIBE` queries, and from the second `GroupGraphPattern` of a
@@ -922,7 +921,7 @@ describe('[Q-6] QueryHandler error taxonomy', () => {
 // `emptyQueryResultForKind(...)` whenever `minTrust > Endorsed`,
 // turning a valid query into a fail-closed empty result.
 // ─────────────────────────────────────────────────────────────────────────────
-describe('[Q-1] minTrust handles SPARQL 1.1 shorthand WHERE forms (bot review r3147347827)', () => {
+describe('[Q-1] minTrust handles SPARQL 1.1 shorthand WHERE forms', () => {
   it('rewrites a SELECT shorthand (no WHERE keyword) when minTrust > Endorsed', async () => {
     const store = new OxigraphStore();
     const engine = new DKGQueryEngine(store);
@@ -980,7 +979,7 @@ describe('[Q-1] minTrust handles SPARQL 1.1 shorthand WHERE forms (bot review r3
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PR #229 bot review (r3147347... — dkg-query-engine.ts:540 follow-up).
+// — dkg-query-engine.ts:540 follow-up).
 // `findWhereBraceStart` previously treated EVERY `<` as the start of an IRI
 // and skipped to the next `>`. SPARQL `<` is overloaded as a comparison
 // operator, so queries like `FILTER(?n < 10)` ate the rest of the query
@@ -1032,7 +1031,7 @@ describe('[Q-1] findWhereBraceStart distinguishes IRI from comparison operator',
   });
 
   // ─────────────────────────────────────────────────────────────────────
-  // PR #229 bot review (r3147347... — dkg-query-engine.ts:559).
+  // — dkg-query-engine.ts:559).
   // The r30 cut only rejected `=`, `<`, and whitespace as next-byte
   // shapes after `<`. Compact comparison forms like `?n<10&&?m>5`
   // (no whitespace, common in machine-generated SPARQL) made the
@@ -1072,7 +1071,7 @@ describe('[Q-1] findWhereBraceStart distinguishes IRI from comparison operator',
       quad('urn:e1', 'http://dkg.io/ontology/trustLevel', `"${TrustLevel.ConsensusVerified}"`, consensusGraph),
     ]);
 
-    // `<(` is not IRIREF-legal; pre-r30-2 the next-byte rejecter let
+    // `<(` is not IRIREF-legal; the next-byte rejecter let
     // `(` through and the forward scan happened to find no `>`,
     // returning -1. The positive allow-list rejects `(` as a first
     // IRI byte and treats this as a comparison, advancing one byte.
@@ -1140,7 +1139,7 @@ describe('[Q-1] findWhereBraceStart distinguishes IRI from comparison operator',
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PR #229 bot review (r3147347... — dkg-query-engine.ts:851).
+// — dkg-query-engine.ts:851).
 // The unsupported-nesting brace check ran on the RAW WHERE body, so any
 // `{`/`}` inside a string literal (or sensitive keyword inside a comment)
 // caused `injectMinTrustFilter` to bail and the caller fell through to an
@@ -1214,7 +1213,7 @@ describe('[Q-1] minTrust survives literals/comments containing braces or keyword
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PR #229 bot review (r3148... — dkg-query-engine.ts:939). Three call sites
+// — dkg-query-engine.ts:939). Three call sites
 // in the engine were finding the WHERE-block close-brace by counting `{` and
 // `}` characters with no awareness of strings/comments/IRIs:
 //
@@ -1319,7 +1318,7 @@ describe('[Q-1] minTrust + view wrapping survive UNBALANCED literal braces (bot 
   });
 
   // ───────────────────────────────────────────────────────────────────────
-  // PR #229 bot review (r3148998562 — dkg-query-engine.ts:848). The literal
+  // dkg-query-engine.ts:848). The literal
   // scanners only recognised single-line `"…"` and `'…'` literals. SPARQL
   // 1.1 ALSO supports long-form (triple-quoted) literals — `"""…"""` and
   // `'''…'''` — which can legally contain raw `"`, `'`, newlines, and any
@@ -1330,7 +1329,7 @@ describe('[Q-1] minTrust + view wrapping survive UNBALANCED literal braces (bot 
   // the surrounding rewriters (minTrust injection, wrapWithGraph) all
   // fail-closed to empty. These tests pin the long-form handling end-to-end.
   // ───────────────────────────────────────────────────────────────────────
-  it('r30-7: minTrust honors a triple-double-quoted (`"""…"""`) literal containing `{`/`}`/`#`/`.`', async () => {
+  it('minTrust honors a triple-double-quoted (`"""…"""`) literal containing `{`/`}`/`#`/`.`', async () => {
     const store = new OxigraphStore();
     const engine = new DKGQueryEngine(store);
     const consensusGraph = contextGraphVerifiedMemoryUri(CG, 'consensus-verified');
@@ -1356,7 +1355,7 @@ describe('[Q-1] minTrust + view wrapping survive UNBALANCED literal braces (bot 
     expect(result.bindings.length).toBe(1);
   });
 
-  it('r30-7: minTrust honors a triple-single-quoted (`\'\'\'…\'\'\'`) literal containing structural chars', async () => {
+  it('minTrust honors a triple-single-quoted (`\'\'\'…\'\'\'`) literal containing structural chars', async () => {
     const store = new OxigraphStore();
     const engine = new DKGQueryEngine(store);
     const consensusGraph = contextGraphVerifiedMemoryUri(CG, 'consensus-verified');
@@ -1377,7 +1376,7 @@ describe('[Q-1] minTrust + view wrapping survive UNBALANCED literal braces (bot 
     expect(result.bindings.length).toBe(1);
   });
 
-  it('r30-7: triple-quoted literal containing a SINGLE quote char does not prematurely terminate', async () => {
+  it('triple-quoted literal containing a SINGLE quote char does not prematurely terminate', async () => {
     // The scanner must require all THREE terminating quote chars
     // before treating the literal as closed; a stray `"` inside a
     // triple-double-quoted literal must not be misread as the close.
@@ -1404,7 +1403,7 @@ describe('[Q-1] minTrust + view wrapping survive UNBALANCED literal braces (bot 
     expect(result.bindings.length).toBe(1);
   });
 
-  it('r30-7: skipSparqlStringLiteral atomicity — directly exercises the centralised lex helper', async () => {
+  it('skipSparqlStringLiteral atomicity — directly exercises the centralised lex helper', async () => {
     // Direct unit test of the exported helper. This is the smallest
     // reproduction of the bot's concern: every other test exercises
     // it through the engine, which is integration-shaped. Pin the
@@ -1457,7 +1456,6 @@ describe('[Q-1] minTrust + view wrapping survive UNBALANCED literal braces (bot 
   });
 
   // ───────────────────────────────────────────────────────────────────────
-  // PR #229 bot review r31-8 (dkg-query-engine.ts:598).
   // Pre-fix the WHERE-locator's fast path was a raw regex
   // `/\bWHERE\s*\{/i` that matched ANY `WHERE` followed by `{` —
   // including substrings inside a string literal, a `# …` comment, or
@@ -1473,7 +1471,7 @@ describe('[Q-1] minTrust + view wrapping survive UNBALANCED literal braces (bot 
   // double/triple-quoted literals, and IRIREFs) so the FIRST `WHERE`
   // it can see is the real top-level one.
   // ───────────────────────────────────────────────────────────────────────
-  it('r31-8: minTrust honors a SELECT whose PROJECTION ALIAS literal contains "WHERE {"', async () => {
+  it('minTrust honors a SELECT whose PROJECTION ALIAS literal contains "WHERE {"', async () => {
     const store = new OxigraphStore();
     const engine = new DKGQueryEngine(store);
     const consensusGraph = contextGraphVerifiedMemoryUri(CG, 'consensus-verified');
@@ -1497,7 +1495,7 @@ describe('[Q-1] minTrust + view wrapping survive UNBALANCED literal braces (bot 
     expect(result.bindings[0]['fake']).toBe('"WHERE {"');
   });
 
-  it('r31-8: minTrust honors a query whose `# …` COMMENT precedes the real WHERE and contains "WHERE {"', async () => {
+  it('minTrust honors a query whose `# …` COMMENT precedes the real WHERE and contains "WHERE {"', async () => {
     const store = new OxigraphStore();
     const engine = new DKGQueryEngine(store);
     const consensusGraph = contextGraphVerifiedMemoryUri(CG, 'consensus-verified');
@@ -1522,7 +1520,7 @@ describe('[Q-1] minTrust + view wrapping survive UNBALANCED literal braces (bot 
     expect(result.bindings[0]['n']).toBe('"Alice"');
   });
 
-  it('r31-8: minTrust honors a query whose IRI fragment contains the bytes "WHERE"', async () => {
+  it('minTrust honors a query whose IRI fragment contains the bytes "WHERE"', async () => {
     const store = new OxigraphStore();
     const engine = new DKGQueryEngine(store);
     const consensusGraph = contextGraphVerifiedMemoryUri(CG, 'consensus-verified');
@@ -1543,7 +1541,7 @@ describe('[Q-1] minTrust + view wrapping survive UNBALANCED literal braces (bot 
     expect(result.bindings[0]['n']).toBe('"Sofia"');
   });
 
-  it('r31-8: triple-quoted (`"""…"""`) literal containing "WHERE {" does NOT confuse the locator', async () => {
+  it('triple-quoted (`"""…"""`) literal containing "WHERE {" does NOT confuse the locator', async () => {
     const store = new OxigraphStore();
     const engine = new DKGQueryEngine(store);
     const consensusGraph = contextGraphVerifiedMemoryUri(CG, 'consensus-verified');
@@ -1554,7 +1552,7 @@ describe('[Q-1] minTrust + view wrapping survive UNBALANCED literal braces (bot 
     ]);
 
     // Triple-quoted literal in the FILTER carries an entire fake
-    // SELECT … WHERE { … } shape. Any pre-r31-8 regex would match
+    // SELECT … WHERE { … } shape. Any regex would match
     // this `WHERE {` first and `wrapWithGraph` would land on the
     // brace inside the literal, producing a malformed wrapped query.
     const sparql =
@@ -1566,7 +1564,7 @@ describe('[Q-1] minTrust + view wrapping survive UNBALANCED literal braces (bot 
     expect(result.bindings.length).toBe(1);
   });
 
-  it('r31-8: word-boundary check — `WHEREVER` / `aWHERE` identifiers MUST NOT match (no false-positive keyword promotion)', async () => {
+  it('word-boundary check — `WHEREVER` / `aWHERE` identifiers MUST NOT match (no false-positive keyword promotion)', async () => {
     const store = new OxigraphStore();
     const engine = new DKGQueryEngine(store);
     const consensusGraph = contextGraphVerifiedMemoryUri(CG, 'consensus-verified');

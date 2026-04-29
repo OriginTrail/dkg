@@ -1,5 +1,5 @@
 /**
- * PR #229 bot review round 17 (r17-2): the fail-closed branches in
+ * the fail-closed branches in
  * `DKGAgent.query()` (WM cross-agent auth denial, private-CG leak
  * guard, unreadable context graph) must emit a `QueryResult` whose
  * SHAPE matches the form the caller asked for — otherwise a
@@ -133,7 +133,7 @@ describe('round-trip: form → empty result preserves the `quads` presence disti
 });
 
 // ─────────────────────────────────────────────────────────────────────
-// PR #229 bot review (r3148... — sparql-guard.ts:56). Before this
+// — sparql-guard.ts:56). Before this
 // consolidation, `sparql-guard.ts` exported TWO parallel pairs:
 //   (a) detectSparqlQueryForm + emptyResultForForm
 //   (b) classifySparqlForm    + emptyQueryResultForKind
@@ -194,7 +194,7 @@ describe('[r30-3] consolidation: single canonical form-classifier + empty-result
     expect(b.bindings).toEqual([]);
   });
 
-  // PR #229 bot review (r31-2 — packages/query/src/index.ts:7).
+  // packages/query/src/index.ts:7).
   //
   // r30-3 deleted the legacy `classifySparqlForm` /
   // `emptyQueryResultForKind` / `SparqlForm` symbols outright; the
@@ -283,7 +283,7 @@ describe('[r30-3] consolidation: single canonical form-classifier + empty-result
     // below.
   });
 
-  // PR #229 bot review (r31-4 — packages/query/src/sparql-guard.ts:201).
+  // packages/query/src/sparql-guard.ts:201).
   //
   // r31-2 restored the `@deprecated` `emptyQueryResultForKind` wrapper
   // but accidentally CHANGED its parameter type from the legacy
@@ -299,7 +299,7 @@ describe('[r30-3] consolidation: single canonical form-classifier + empty-result
   //
   // r31-4 restores the legacy `string` parameter type and delegates to
   // `emptyResultForSparql()` so existing call sites compile and behave
-  // identically to the pre-r31-2 surface. These tests pin the contract
+  // identically to the surface. These tests pin the contract
   // structurally so a future "tighten the signature" change can't
   // re-introduce the regression.
   it('[r31-4] @deprecated `emptyQueryResultForKind` accepts a raw SPARQL STRING (not a SparqlForm) and routes onto the right empty shape', async () => {
@@ -336,7 +336,7 @@ describe('[r30-3] consolidation: single canonical form-classifier + empty-result
   });
 
   it('[r31-4] `emptyQueryResultForKind` is byte-compatible with `emptyResultForSparql` for every parseable input', async () => {
-    // Composition pin: post-r31-4 the wrapper IS `emptyResultForSparql`
+    // Composition pin: the wrapper IS `emptyResultForSparql`
     // (no parallel logic path). If anyone ever reintroduces local
     // form-classification inside the wrapper, this assertion catches
     // the divergence on every call site.

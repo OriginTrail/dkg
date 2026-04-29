@@ -89,7 +89,6 @@ describe('dkgPlugin.hooks wiring', () => {
     }
   });
 
-  // PR #229 bot review (r3131820494, adapter-elizaos/src/index.ts:355).
   // The previous declaration `(...args: Parameters<typeof
   // dkgService.onChatTurn>) => …` collapsed the overloaded service
   // signature into the catch-all `Memory + Record<string, unknown>`
@@ -109,7 +108,7 @@ describe('dkgPlugin.hooks wiring', () => {
   // the pre-fix `Parameters<>`-derived signature the @ts-expect-error
   // marker would itself error ("unused @ts-expect-error directive"),
   // so this is a real regression guard, not a stylistic comment.
-  it('PR #229 r3131820494: hook surface enforces the assistant-reply contract at compile time', async () => {
+  it('hook surface enforces the assistant-reply contract at compile time', async () => {
     type Hook = typeof dkgPlugin.hooks.onAssistantReply;
     const runtime = { getSetting: () => undefined, character: { name: 'x' } } as any;
     const msg = { content: { text: 'hi' }, id: 'm', userId: 'u', roomId: 'r' } as any;
@@ -119,7 +118,7 @@ describe('dkgPlugin.hooks wiring', () => {
     // because a real call would need a live DKGAgent; the test only
     // pins the SHAPE.
     //
-    // r19-2 update: `userTurnPersisted` is now MANDATORY on the
+    // `userTurnPersisted` is now MANDATORY on the
     // typed assistant-reply overload — explicit `false` routes
     // through the safe full-envelope branch.
     const positive: Parameters<Hook> = [
@@ -138,7 +137,7 @@ describe('dkgPlugin.hooks wiring', () => {
     // overload creeping back in), the @ts-expect-error directive
     // becomes unused and this test fails to compile.
     //
-    // r30-8 update: `Parameters<Hook>` resolves to the LAST overload
+    // `Parameters<Hook>` resolves to the LAST overload
     // signature, which is the assistant-reply one. We narrow the
     // 4th element's type to `AssistantReplyChatTurnOptions` so the
     // `@ts-expect-error` lands on a single, predictable line — the
@@ -154,12 +153,12 @@ describe('dkgPlugin.hooks wiring', () => {
 });
 
 // -----------------------------------------------------------------------
-// PR #229 bot review round 14 — r14-2: onAssistantReply MUST plumb an
+// onAssistantReply MUST plumb an
 // explicit `userTurnPersisted` signal when the caller doesn't.
 // -----------------------------------------------------------------------
 describe('dkgPlugin.hooks.onAssistantReply — r14-2 userTurnPersisted plumbing', () => {
   beforeEach(() => {
-    // r16-2: the plugin now consults an in-process cache of successful
+    // the plugin now consults an in-process cache of successful
     // onChatTurn writes. Reset between tests so r14-2 semantics (default
     // false absent explicit caller signal) remain observable in
     // isolation — the r16-2 suite below tests the cache-hit path.
@@ -177,7 +176,7 @@ describe('dkgPlugin.hooks.onAssistantReply — r14-2 userTurnPersisted plumbing'
       expect(spy).toHaveBeenCalledTimes(1);
       const opts = spy.mock.calls[0][3] as any;
       expect(opts.mode).toBe('assistant-reply');
-      // The key r14-2 invariant: the handler must set userTurnPersisted
+      // The key the handler must set userTurnPersisted
       // explicitly so persistChatTurnImpl's legacy inference (presence of
       // userMessageId == "persisted") cannot be reached by accident.
       expect(opts.userTurnPersisted).toBe(false);
@@ -249,7 +248,7 @@ describe('dkgPlugin.hooks.onAssistantReply — r14-2 userTurnPersisted plumbing'
 });
 
 // -----------------------------------------------------------------------
-// PR #229 bot review round 16 — r16-2: the plugin's own
+// the plugin's own
 // onChatTurn → onAssistantReply chain must take the APPEND-ONLY path
 // (userTurnPersisted=true) when it knows onChatTurn just persisted the
 // matching user message in this same process. r14-2's "default false"
@@ -388,7 +387,7 @@ describe('dkgPlugin.hooks — r16-2: onChatTurn → onAssistantReply in-process 
 });
 
 // -----------------------------------------------------------------------
-// PR #229 bot review round 17 — r17-1: the persistedUserTurns cache
+// the persistedUserTurns cache
 // MUST be scoped per-runtime. Process hosting multiple Eliza runtimes
 // (multi-tenant daemon, orchestrator, test harness) would otherwise
 // cross-contaminate: runtime A's successful onChatTurn would make
@@ -423,7 +422,7 @@ describe('dkgPlugin.hooks — r17-1: persisted-user-turn cache is per-runtime', 
 
       const replyOpts = spy.mock.calls[1][3] as any;
       expect(replyOpts.userMessageId).toBe('shared-msg');
-      // r17-1 invariant: B must NOT take the append-only path.
+      // B must NOT take the append-only path.
       // Pre-r17-1 (process-global cache) this flipped to `true` and
       // B's reply became unreadable in B's graph.
       expect(replyOpts.userTurnPersisted).toBe(false);
@@ -447,7 +446,7 @@ describe('dkgPlugin.hooks — r17-1: persisted-user-turn cache is per-runtime', 
       await (dkgPlugin as any).hooks.onAssistantReply(runtime, reply, {}, {});
 
       const replyOpts = spy.mock.calls[1][3] as any;
-      // Same runtime → cache hit → append-only path (r16-2 behaviour
+      // Same runtime → cache hit → append-only path (
       // preserved; only the SCOPE of the cache changed).
       expect(replyOpts.userTurnPersisted).toBe(true);
     } finally {
@@ -505,7 +504,7 @@ describe('dkgPlugin.hooks — r17-1: persisted-user-turn cache is per-runtime', 
 });
 
 // -----------------------------------------------------------------------
-// PR #229 bot review round 24 — r24-2: the onChatTurn → onAssistantReply
+// the onChatTurn → onAssistantReply
 // in-process cache MUST scope by the destination `(contextGraphId,
 // assertionName)` tuple as well as `(roomId, userMsgId)`.
 //
@@ -631,7 +630,7 @@ describe('dkgPlugin.hooks — r24-2: cache is scoped by destination assertion gr
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PR #229 bot review (r3147347... — adapter-elizaos/src/index.ts:353).
+// — adapter-elizaos/src/index.ts:353).
 // `onChatTurnHandler` recorded the persisted-user-turn cache entry
 // UNCONDITIONALLY using `(message as any).id`. The exported
 // `DkgChatTurnHook` interface ALSO accepts the assistant-reply overload
@@ -748,7 +747,7 @@ describe('dkgPlugin.hooks.onChatTurn — r29-2: assistant-reply mode does NOT po
 });
 
 // -----------------------------------------------------------------------
-// PR #229 bot review (r31-1 — adapter-elizaos/src/actions.ts:1107 /
+// adapter-elizaos/src/actions.ts:1107 /
 // adapter-elizaos/src/actions.ts:1149).
 //
 // The user-turn branch in `persistChatTurnImpl` ALSO writes the
@@ -798,9 +797,9 @@ describe('dkgPlugin.hooks — r31-1: assistant-message double-write guard', () =
 
       expect(spy).toHaveBeenCalledTimes(2);
       const replyOpts = spy.mock.calls[1][3] as any;
-      // r16-2 invariant: cache hit on the user-turn → append-only.
+      // cache hit on the user-turn → append-only.
       expect(replyOpts.userTurnPersisted).toBe(true);
-      // r31-1 invariant: cache hit on the ASSISTANT side → wrapper
+      // cache hit on the ASSISTANT side → wrapper
       // plumbs the guard flag → impl returns synthetic no-op so no
       // duplicate `msg:agent:${turnKey}` quads land.
       expect(replyOpts.assistantAlreadyPersisted).toBe(true);
@@ -828,9 +827,9 @@ describe('dkgPlugin.hooks — r31-1: assistant-message double-write guard', () =
 
       const replyOpts = spy.mock.calls[1][3] as any;
       expect(replyOpts.userTurnPersisted).toBe(true);
-      // r31-1: no cache hit on the assistant side → guard flag MUST
+      // no cache hit on the assistant side → guard flag MUST
       // be absent so the impl writes the assistant Message + link.
-      // (Pre-r31 this was always undefined; post-r31 we must
+      // (this was always undefined; we must
       // preserve that for the legitimate "user turn only, assistant
       // reply later" flow — flipping it on here would silently
       // drop the assistant leg entirely.)
@@ -846,7 +845,7 @@ describe('dkgPlugin.hooks — r31-1: assistant-message double-write guard', () =
     try {
       const runtime = { getSetting: () => undefined, character: { name: 'x' } } as any;
       const userMsg = { content: { text: 'hello' }, id: 'user-r31-3', userId: 'u', roomId: 'room-r31-3' } as any;
-      // r31-5: the cache stores the FULL assistant text persisted on
+      // the cache stores the FULL assistant text persisted on
       // the user-turn write, and `onAssistantReplyHandler` only sets
       // `assistantAlreadyPersisted=true` when the incoming reply text
       // matches (idempotent retry). So the parity assertion across
@@ -883,7 +882,7 @@ describe('dkgPlugin.hooks — r31-1: assistant-message double-write guard', () =
     try {
       const runtime = { getSetting: () => undefined, character: { name: 'x' } } as any;
       const userMsg = { content: { text: 'hello' }, id: 'user-r31-4', userId: 'u', roomId: 'room-r31-4' } as any;
-      // r31-5: see the matching state.lastAssistantReply test —
+      // see the matching state.lastAssistantReply test —
       // payload comparison means the cache only suppresses when
       // the recorded text matches the incoming reply.
       const persistedText = 'reply via assistantReply';
@@ -905,7 +904,7 @@ describe('dkgPlugin.hooks — r31-1: assistant-message double-write guard', () =
   });
 
   // -----------------------------------------------------------------------
-  // PR #229 bot review (r31-5 — adapter-elizaos/src/index.ts:555).
+  // adapter-elizaos/src/index.ts:555).
   //
   // Pre-fix the cache stored a bare `true` per `(roomId, userMsgId,
   // dest)` key, so ANY non-empty `assistantText` /
@@ -936,7 +935,6 @@ describe('dkgPlugin.hooks — r31-1: assistant-message double-write guard', () =
         const userMsg = { content: { text: 'hello' }, id: 'user-r31-5-stale', userId: 'u', roomId: 'room-r31-5-stale' } as any;
         // Host plumbs an in-flight LLM PARTIAL — typical for the
         // streaming-completion / provisional-state pattern the bot
-        // bot review called out.
         await (dkgPlugin as any).hooks.onChatTurn(
           runtime, userMsg, { lastAssistantReply: 'partial reply…' }, {},
         );
@@ -950,7 +948,7 @@ describe('dkgPlugin.hooks — r31-1: assistant-message double-write guard', () =
         await (dkgPlugin as any).hooks.onAssistantReply(runtime, finalReply, {}, {});
 
         const replyOpts = spy.mock.calls[1][3] as any;
-        // r31-5 invariant: cached text differs from incoming reply
+        // cached text differs from incoming reply
         // text → wrapper MUST NOT set the suppression flag, so the
         // impl writes the (final, correct) reply quads. Pre-fix this
         // would have been `true` and the stale "partial reply…"
@@ -978,7 +976,7 @@ describe('dkgPlugin.hooks — r31-1: assistant-message double-write guard', () =
         await (dkgPlugin as any).hooks.onAssistantReply(runtime, reply, {}, {});
 
         const replyOpts = spy.mock.calls[1][3] as any;
-        // r31-5: matching text means the second call is genuinely a
+        // matching text means the second call is genuinely a
         // duplicate — suppression fires (preserves the r31-1
         // protection against stacking duplicate `schema:text`
         // triples on the same `msg:agent:${turnKey}` URI).
@@ -1069,9 +1067,9 @@ describe('dkgPlugin.hooks — r31-1: assistant-message double-write guard', () =
     });
 
     // -----------------------------------------------------------------------
-    // PR #229 bot review (r31-11 — adapter-elizaos/src/index.ts:527).
+    // adapter-elizaos/src/index.ts:527).
     //
-    // Bug IoNQ: pre-r31-11 the wrapper handled exactly TWO cases when
+    // Bug IoNQ: the wrapper handled exactly TWO cases when
     // the cached assistant text was defined:
     //   1. incoming text === cached text  → `assistantAlreadyPersisted=true`
     //   2. incoming text !== cached text  → `assistantSupersedesCanonical=true`
@@ -1088,7 +1086,7 @@ describe('dkgPlugin.hooks — r31-1: assistant-message double-write guard', () =
     // The cached text is strictly better than blank — treat it like the
     // equality case and SUPPRESS the empty write entirely.
     // -----------------------------------------------------------------------
-    it('r31-11 (IoNQ): empty incoming reply with cached non-empty text → assistantAlreadyPersisted=true (no empty write, no headless supersede)', async () => {
+    it('(IoNQ): empty incoming reply with cached non-empty text → assistantAlreadyPersisted=true (no empty write, no headless supersede)', async () => {
       const spy = vi.spyOn(dkgService, 'persistChatTurn' as any)
         .mockResolvedValue({ tripleCount: 0, turnUri: '', kcId: '' } as any);
       try {
@@ -1106,7 +1104,7 @@ describe('dkgPlugin.hooks — r31-1: assistant-message double-write guard', () =
         await (dkgPlugin as any).hooks.onAssistantReply(runtime, emptyReply, {}, {});
 
         const replyOpts = spy.mock.calls[1][3] as any;
-        // r31-11 invariant: empty incoming + non-empty cached →
+        // empty incoming + non-empty cached →
         // suppression (NOT supersede). Pre-fix this would have set
         // `assistantSupersedesCanonical=true` and the impl would have
         // routed the EMPTY text to a headless URI marked
@@ -1119,7 +1117,7 @@ describe('dkgPlugin.hooks — r31-1: assistant-message double-write guard', () =
       }
     });
 
-    it('r31-11 (IoNQ): empty incoming reply via options.assistantText with cached non-empty text → assistantAlreadyPersisted=true (parity with message.content path)', async () => {
+    it('(IoNQ): empty incoming reply via options.assistantText with cached non-empty text → assistantAlreadyPersisted=true (parity with message.content path)', async () => {
       const spy = vi.spyOn(dkgService, 'persistChatTurn' as any)
         .mockResolvedValue({ tripleCount: 0, turnUri: '', kcId: '' } as any);
       try {
@@ -1147,7 +1145,7 @@ describe('dkgPlugin.hooks — r31-1: assistant-message double-write guard', () =
       }
     });
 
-    it('r31-11 (IoNQ): non-empty incoming reply with cached text → still routes through SUPERSEDE branch (the IoNQ guard does not over-fire)', async () => {
+    it('(IoNQ): non-empty incoming reply with cached text → still routes through SUPERSEDE branch (the IoNQ guard does not over-fire)', async () => {
       const spy = vi.spyOn(dkgService, 'persistChatTurn' as any)
         .mockResolvedValue({ tripleCount: 0, turnUri: '', kcId: '' } as any);
       try {
@@ -1314,7 +1312,7 @@ describe('dkgPlugin.hooks — r31-1: assistant-message double-write guard', () =
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PR #229 bot review (r31-2 — adapter-elizaos/src/index.ts:602 + :635).
+// adapter-elizaos/src/index.ts:602 + :635).
 //
 // Pre-r31-2:
 //   - `dkgPlugin.hooks.onAssistantReply` was typed as `DkgChatTurnHook`,
@@ -1437,7 +1435,7 @@ describe('dkgPlugin.hooks — r31-2: hook-surface narrowing + dispatch', () => {
       const callOpts = spy.mock.calls[0][3] as any;
       expect(callOpts.mode).toBe('assistant-reply');
       expect(callOpts.userMessageId).toBe('parent-user-msg');
-      // r14-2: `userTurnPersisted` defaulted to `false` (no cache hit).
+      // `userTurnPersisted` defaulted to `false` (no cache hit).
       expect(callOpts.userTurnPersisted).toBe(false);
     } finally {
       spy.mockRestore();
@@ -1561,7 +1559,7 @@ describe('dkgPlugin.hooks — r31-2: hook-surface narrowing + dispatch', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PR #229 bot review (r31-6 — adapter-elizaos/src/index.ts:521).
+// adapter-elizaos/src/index.ts:521).
 //
 // Pre-r31-6: when the user-turn write embedded a PROVISIONAL assistant
 // string (e.g. partial-streaming completion the host parked on
@@ -1618,7 +1616,7 @@ describe('dkgPlugin.hooks — r31-6: assistant text supersede (route to headless
       await (dkgPlugin as any).hooks.onAssistantReply(runtime, finalReply, {}, {});
 
       const replyOpts = spy.mock.calls[1][3] as any;
-      // r31-6 invariant: mismatch + non-empty incoming → wrapper
+      // mismatch + non-empty incoming → wrapper
       // forces the impl onto the headless branch (userTurnPersisted=false)
       // AND tags the write with the supersede marker. Pre-fix
       // `userTurnPersisted` would have stayed `true` (from the cache hit),
@@ -1626,7 +1624,7 @@ describe('dkgPlugin.hooks — r31-6: assistant text supersede (route to headless
       // duplicated `schema:text` triples on `msg:agent:K`.
       expect(replyOpts.userTurnPersisted).toBe(false);
       expect(replyOpts.assistantSupersedesCanonical).toBe(true);
-      // r31-5 invariant preserved: assistantAlreadyPersisted is NOT set
+      // preserved: assistantAlreadyPersisted is NOT set
       // — the impl must actually write the new (final) reply.
       expect(replyOpts.assistantAlreadyPersisted).toBeUndefined();
     } finally {
@@ -1736,13 +1734,13 @@ describe('dkgPlugin.hooks — r31-6: assistant text supersede (route to headless
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PR #229 bot review (r31-6 — adapter-elizaos/src/actions.ts:941).
+// adapter-elizaos/src/actions.ts:941).
 //
 // Pre-r31-6: `persistChatTurnImpl` only honoured `optsAny.userMessageId`
 // on the `assistant-reply` path. The user-turn path silently dropped
 // any pre-minted id and keyed `turnSourceId` off `message.id`. Meanwhile
 // `onChatTurnHandler` cached the persisted-turn marker under
-// `optsAny.userMessageId ?? message.id` (r29-2). Result: when a host
+// `optsAny.userMessageId ?? message.id`. Result: when a host
 // pre-minted `userMessageId` in user-turn mode, the cache said the turn
 // existed under `userMessageId` but the RDF was written under
 // `message.id`. The matching `onAssistantReply` looked up the cache
@@ -1791,7 +1789,7 @@ describe('dkgPlugin.hooks — r31-6: user-turn path honours optsAny.userMessageI
       await (dkgPlugin as any).hooks.onAssistantReply(runtime, reply, {}, {});
 
       const replyOpts = spy.mock.calls[1][3] as any;
-      // r31-6 invariant: cache key ↔ RDF key alignment means the
+      // cache key ↔ RDF key alignment means the
       // assistant-reply path correctly identifies the user-turn as
       // persisted (so it takes the cheap append-only branch, NOT the
       // headless full-envelope branch which would emit a stub user

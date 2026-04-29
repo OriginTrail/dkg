@@ -51,7 +51,7 @@ export interface AsyncLiftPublisherConfig {
    * match the key the backing `PrivateContentStore` was constructed
    * with, otherwise a non-default-key deployment will never match any
    * previously-published private quad and the lift step republishes
-   * duplicates (PR #229 bot review round 9). `undefined` keeps the
+   * duplicates. `undefined` keeps the
    * legacy env/default resolution.
    */
   privateStoreEncryptionKey?: Uint8Array | string;

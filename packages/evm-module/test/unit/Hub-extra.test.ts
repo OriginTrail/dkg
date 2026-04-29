@@ -1,7 +1,7 @@
 /**
  * Hub-extra.test.ts — targeted QA tests for the storage/Hub.sol contract.
  *
- * Covers audit findings (see .test-audit/BUGS_FOUND.md, evm-module section):
+ * Covers audit findings (see .test-audit/
  *   - E-1 (CRITICAL, SPEC-GAP): `Hub.setAndReinitializeContracts` is the
  *     atomic V10 mainnet contract-swap entry point. Pre-audit it had zero
  *     tests for happy path, partial-failure bubbling, atomic rollback on
@@ -64,12 +64,12 @@ describe('@unit Hub — extra audit coverage (E-1, E-7)', () => {
   //
   // RED TEST: captures ALL `NewContract` events emitted by setContractAddress
   // and asserts count == 1 per spec. Currently fails because of the tail
-  // emit. This failure IS the bug evidence — see BUGS_FOUND.md E-7.
+  // emit. This failure IS the bug evidence —
   // ======================================================================
   describe('E-7: NewContract double-emit (PROD-BUG, red test)', () => {
     it('emits NewContract exactly once when registering a NEW contract (currently fails — PROD-BUG)', async () => {
       // PROD-BUG: Hub._setContractAddress emits NewContract twice on create
-      // (lines 193 + 204 of storage/Hub.sol). See BUGS_FOUND.md E-7.
+      // (lines 193 + 204 of storage/Hub.sol).
       const tx = await HubContract.setContractAddress('TestContractE7', accounts[1].address);
       const receipt = await tx.wait();
       const topic = HubContract.interface.getEvent('NewContract').topicHash;
@@ -86,7 +86,7 @@ describe('@unit Hub — extra audit coverage (E-1, E-7)', () => {
       // the tail `emit NewContract(...)` (Hub.sol line 204), firing one
       // spurious NewContract alongside the correct `ContractChanged`. Spec
       // behavior: NewContract should only fire on the CREATE branch. See
-      // BUGS_FOUND.md E-7.
+      // .
       await HubContract.setContractAddress('TestContractE7u', accounts[1].address);
 
       const tx = await HubContract.setContractAddress('TestContractE7u', accounts[2].address);
@@ -148,7 +148,7 @@ describe('@unit Hub — extra audit coverage (E-1, E-7)', () => {
 
         it('non-owner (EOA) call reverts (auth gate closes)', async () => {
           // `setAndReinitializeContracts` carries `onlyOwnerOrMultiSigOwner`.
-          // After alignment with OZ Ownable v5 (BUGS_FOUND.md
+          // After alignment with OZ Ownable v5 (
           // "OwnableUnauthorizedAccount vs UnauthorizedAccess") the gate
           // raises the standard `OwnableUnauthorizedAccount(msg.sender)` so
           // indexers + clients can route on the same selector that

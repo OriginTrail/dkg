@@ -188,7 +188,7 @@ export function parsePublishRequestBody(
 }
 
 /**
- * PR #229 CodeQL js/stack-trace-exposure: route handlers across the
+ * route handlers across the
  * daemon return errors as `{ error: err.message }`, and `err.message`
  * sometimes carries the *first frame* of a stack — e.g. node's built-in
  * `TypeError`s embed `(/abs/path/file.js:line:col)` directly in the
@@ -296,7 +296,7 @@ export function jsonResponse(
   // and the response sink is the canonical sanitiser the CodeQL query
   // recognises, so we do one final last-mile pass on the serialised body.
   //
-  // PR #229 bot review (r3146733046, http-utils.ts:206/307). The
+  // The
   // previous last-mile pass only matched `\n   at <fn> (...)` — a v8
   // continuation line as it appears INSIDE a JSON-escaped string.
   // CodeQL's data-flow analysis still flagged the `res.end(body)`
@@ -319,7 +319,7 @@ export function jsonResponse(
   // misses, so `body === rawBody` and there is no observable
   // behaviour change.
   //
-  // PR #229 bot review (r3148... — http-utils.ts:328). The earlier
+  // — http-utils.ts:328). The earlier
   // shape `\s+at\s+(?:[^\s()"]+\s+)?\([^)"\n]+\)` recognised any
   // `(stuff)` after an `at <word>` token, so a perfectly-legitimate
   // payload like `{"text":"meet at lunch (cafeteria)"}` matched the
@@ -341,7 +341,7 @@ export function jsonResponse(
   // unique role per branch — the same anti-backtracking shape as
   // the existing `stripStackFrames` regex (CodeQL alerts 56 / 57).
   //
-  // PR #229 bot review (r31-10 — http-utils.ts:343). The previous
+  // http-utils.ts:343). The previous
   // revision applied this last-mile regex chain to EVERY response
   // body unconditionally. That meant successful 2xx payloads like
   // a `/api/query` SELECT result that legitimately carries a string
@@ -581,7 +581,7 @@ export function readBody(
   req: IncomingMessage,
   maxBytes = MAX_BODY_BYTES,
 ): Promise<string> {
-  // PR #229 bot review r31-7 follow-up. When `httpAuthGuard` ran the
+  // When `httpAuthGuard` ran the
   // eager pre-handler drain for a body-carrying signed request, the
   // wire bytes are already buffered on `req.__dkgPrebufferedBody`
   // and the underlying stream is exhausted. Re-attaching `data`
@@ -635,7 +635,7 @@ export function readBody(
     req.on("end", () => {
       if (rejected) return;
       const buf = Buffer.concat(chunks);
-      // PR #229 F2 follow-up (bot review): enforce the post-body
+      // enforce the post-body
       // signed-request HMAC check here, centrally, so every route that
       // reads a body automatically validates the signature against the
       // actual bytes. Previously httpAuthGuard only pre-validated the
@@ -665,7 +665,7 @@ export function readBodyBuffer(
   req: IncomingMessage,
   maxBytes = MAX_BODY_BYTES,
 ): Promise<Buffer> {
-  // PR #229 bot review r31-7 follow-up. See `readBody()` above for
+  // See `readBody()` above for
   // the rationale — when the eager drain inside `httpAuthGuard` has
   // already buffered the body, the underlying stream is exhausted
   // and we must resolve from the prebuffer instead of re-attaching
@@ -831,7 +831,7 @@ export function shouldBypassRateLimitForLoopbackTraffic(ip: string, pathname: st
 export function isValidContextGraphId(id: string): boolean {
   if (!id || typeof id !== "string") return false;
   if (id.length > 256) return false;
-  // CLI-16 (BUGS_FOUND.md dup #87) + PR #229 r3146360283 follow-up:
+  // CLI-16 (
   // reject path-traversal patterns where it actually matters — i.e.
   // segments that the OS / URL resolver will interpret as the
   // parent / current directory. The character whitelist below
@@ -853,7 +853,7 @@ export function isValidContextGraphId(id: string): boolean {
 }
 
 /**
- * CLI-9 (BUGS_FOUND.md dup #159) + PR #229 r3146360288 follow-up:
+ * CLI-9 (
  * scrub raw chain-revert payloads from error messages before they
  * reach the HTTP body. Providers (ethers, viem, hardhat) serialise
  * the same revert data under multiple keys: `data="0x…"`, `data=0x…`,
@@ -902,7 +902,7 @@ export function classifyClientError(
   ) {
     return { status: 404, sanitized };
   }
-  // PR #229 bot review (daemon.ts:1952): pre-fix, the same regex that
+  // pre-fix, the same regex that
   // catches malformed peer-ids ALSO matched `timed out` / `unable to
   // dial`, which downgraded transient transport failures from a
   // retryable 504 to a client-side 400. The CLI / SDK then never

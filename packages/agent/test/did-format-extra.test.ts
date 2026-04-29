@@ -71,7 +71,7 @@ describe('A-12: agent DID format scan', () => {
     // Spec §03 says agent DIDs are Ethereum-address form. Leaving this as a
     // hard assertion so future PRs that introduce more drift fail loudly;
     // current baseline is expected to surface the known debt. See
-    // BUGS_FOUND.md A-12.
+    // .
     expect(offenders, JSON.stringify(offenders, null, 2)).toEqual([]);
   });
 

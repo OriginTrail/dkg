@@ -153,7 +153,7 @@ describe('resolveEncryptionKey via PrivateContentStore constructor — branch co
     }
   });
 
-  // PR #229 bot review round 12 (r12-2): with no explicit key, two
+  // with no explicit key, two
   // instances in the same PROCESS now share the persisted per-node key
   // (either by reading the existing file or by the in-process cache
   // populated when ps1 generated it). This preserves the intra-process
@@ -217,14 +217,14 @@ describe('resolveEncryptionKey via PrivateContentStore constructor — branch co
 });
 
 // -------------------------------------------------------------------------
-// PR #229 bot review round 12 (r12-2): the unconfigured-key fallback
+// the unconfigured-key fallback
 // MUST no longer share `sha256(DEFAULT_KEY_DOMAIN)` across nodes. The
 // new behaviour: generate and persist a per-node 32-byte random key at
 // `DKG_PRIVATE_STORE_KEY_FILE` (or `<DKG_HOME>/private-store.key`, or
 // `<homedir()>/.dkg/private-store.key`). Two nodes with different key
 // files must be cryptographically isolated.
 // -------------------------------------------------------------------------
-describe('r12-2: per-node persisted key isolates unconfigured nodes from each other', () => {
+describe('per-node persisted key isolates unconfigured nodes from each other', () => {
   const savedEnv = {
     DKG_PRIVATE_STORE_KEY: process.env.DKG_PRIVATE_STORE_KEY,
     DKG_PRIVATE_STORE_KEY_FILE: process.env.DKG_PRIVATE_STORE_KEY_FILE,
@@ -363,7 +363,7 @@ describe('r12-2: per-node persisted key isolates unconfigured nodes from each ot
   });
 
   // ────────────────────────────────────────────────────────────────────────
-  // PR #229 bot review (r3148998566 — private-store.ts:124). Pre-fix, a
+  // private-store.ts:124). Pre-fix, a
   // truncated / corrupted persisted key file silently fell through to the
   // "generate a fresh key" branch, re-keying the node in place and stranding
   // every previously encrypted private triple under the now-overwritten
@@ -372,7 +372,7 @@ describe('r12-2: per-node persisted key isolates unconfigured nodes from each ot
   // `DKG_PRIVATE_STORE_KEY_AUTO_RESET=1` env opt-in restores the old auto-
   // regenerate behaviour for operators who explicitly accept the data loss.
   // ────────────────────────────────────────────────────────────────────────
-  it('r30-7: corrupted persisted key file (length < 32) THROWS instead of silently re-keying the node', async () => {
+  it('corrupted persisted key file (length < 32) THROWS instead of silently re-keying the node', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'dkg-ps-corrupt-'));
     const keyFile = join(dir, 'private-store.key');
     const { store, cleanup } = makeFreshStore();
@@ -407,7 +407,7 @@ describe('r12-2: per-node persisted key isolates unconfigured nodes from each ot
     }
   });
 
-  it('r30-7: empty persisted key file (zero bytes — partial write before any data flushed) ALSO throws', async () => {
+  it('empty persisted key file (zero bytes — partial write before any data flushed) ALSO throws', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'dkg-ps-empty-'));
     const keyFile = join(dir, 'private-store.key');
     const { store, cleanup } = makeFreshStore();
@@ -431,7 +431,7 @@ describe('r12-2: per-node persisted key isolates unconfigured nodes from each ot
     }
   });
 
-  it('r30-7: DKG_PRIVATE_STORE_KEY_AUTO_RESET=1 lets the operator opt back into auto-regenerate after explicit acceptance', async () => {
+  it('DKG_PRIVATE_STORE_KEY_AUTO_RESET=1 lets the operator opt back into auto-regenerate after explicit acceptance', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'dkg-ps-reset-'));
     const keyFile = join(dir, 'private-store.key');
     const { store, cleanup } = makeFreshStore();
@@ -469,7 +469,7 @@ describe('r12-2: per-node persisted key isolates unconfigured nodes from each ot
     }
   });
 
-  it('r30-7: a HEALTHY persisted key file is still loaded normally (no false positives on the corruption check)', async () => {
+  it('a HEALTHY persisted key file is still loaded normally (no false positives on the corruption check)', async () => {
     // Counterpoint: a 32-byte file (or a 33-byte file — the helper
     // takes the first 32 bytes) must continue to load without
     // throwing. This pins the normal happy-path against the new
@@ -507,7 +507,7 @@ describe('r12-2: per-node persisted key isolates unconfigured nodes from each ot
 });
 
 // -------------------------------------------------------------------------
-// PR #229 bot review round 15 (r15-1): when the r12-2 flip switched the
+// when the r12-2 flip switched the
 // preferred unconfigured-node key from `sha256(DEFAULT_KEY_DOMAIN)` to a
 // per-node persisted key, every node that previously ran without
 // `DKG_PRIVATE_STORE_KEY` had its existing private ciphertext stranded.
@@ -515,7 +515,7 @@ describe('r12-2: per-node persisted key isolates unconfigured nodes from each ot
 // so old data remains readable after upgrade while new writes still go
 // to the unique per-node key.
 // -------------------------------------------------------------------------
-describe('r15-1: legacy DEFAULT_KEY_DOMAIN fallback keeps pre-r12 private ciphertext readable after upgrade', () => {
+describe('legacy DEFAULT_KEY_DOMAIN fallback keeps pre-r12 private ciphertext readable after upgrade', () => {
   const savedEnv = {
     DKG_PRIVATE_STORE_KEY: process.env.DKG_PRIVATE_STORE_KEY,
     DKG_PRIVATE_STORE_KEY_FILE: process.env.DKG_PRIVATE_STORE_KEY_FILE,
@@ -542,7 +542,7 @@ describe('r15-1: legacy DEFAULT_KEY_DOMAIN fallback keeps pre-r12 private cipher
     const keyDir = mkdtempSync(join(tmpdir(), 'dkg-ps-r15-'));
     const keyFile = join(keyDir, 'private-store.key');
     try {
-      // Step 1: simulate pre-r12 node behaviour by explicitly sealing with
+      // Step 1: simulate node behaviour by explicitly sealing with
       // the deterministic legacy key. We pass `DEFAULT_KEY_DOMAIN` as a
       // passphrase — the constructor SHA-256-stretches it, reproducing
       // the exact bytes `resolveEncryptionKey` used as the legacy
@@ -570,7 +570,7 @@ describe('r15-1: legacy DEFAULT_KEY_DOMAIN fallback keeps pre-r12 private cipher
       expect(read).toHaveLength(1);
       expect(read[0].object).toBe('"legacy-payload"');
       // The persisted file must have been created with 32 bytes —
-      // proves we're genuinely on a post-r12-2 instance, not falling
+      // proves we're genuinely on a instance, not falling
       // back to the legacy path for writes.
       expect(existsSync(keyFile)).toBe(true);
       expect(readFileSync(keyFile).length).toBe(32);
@@ -677,12 +677,12 @@ describe('r15-1: legacy DEFAULT_KEY_DOMAIN fallback keeps pre-r12 private cipher
 });
 
 // ---------------------------------------------------------------------------
-// PR #229 bot review round 16 — r16-3: the persisted-key cache must be keyed
+// the persisted-key cache must be keyed
 // by file path, NOT module-global. Otherwise a single process hosting two
 // nodes (test fixtures, multi-tenant daemon, simulation harness) silently
 // aliases both onto the FIRST node's key, breaking crypto isolation.
 // ---------------------------------------------------------------------------
-describe('r16-3 — persisted key cache is keyed by resolved file path', () => {
+describe('persisted key cache is keyed by resolved file path', () => {
   let prevKeyFile: string | undefined;
   let prevHome: string | undefined;
   beforeEach(() => {
@@ -729,7 +729,7 @@ describe('r16-3 — persisted key cache is keyed by resolved file path', () => {
       const keyB = readFileSync(fileB);
 
       // r16-3 core invariant: distinct paths → distinct keys. Under the
-      // pre-r16-3 module-global cache, B would have returned A's key
+      // module-global cache, B would have returned A's key
       // without ever touching disk at `fileB`.
       expect(keyA.length).toBe(32);
       expect(keyB.length).toBe(32);
@@ -770,7 +770,7 @@ describe('r16-3 — persisted key cache is keyed by resolved file path', () => {
       const nodeB = new PrivateContentStore(store, gm);
       const readB = await nodeB.getPrivateTriples('cg-iso', 'did:dkg:agent:S');
       expect(readB).toHaveLength(1);
-      // B must NOT see A's plaintext — under the pre-r16-3 alias bug
+      // B must NOT see A's plaintext — under the alias bug
       // this returned "secret-on-A". Now B sees only the envelope.
       expect(readB[0].object).not.toBe('"secret-on-A"');
       expect(readB[0].object.startsWith('"enc:gcm:v1:')).toBe(true);

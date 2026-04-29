@@ -280,14 +280,14 @@ describe('EVM E2E: Full on-chain publishing lifecycle', () => {
     await setMinimumRequiredSignatures(ctx.provider, ctx.hubAddress, HARDHAT_KEYS.DEPLOYER, 1);
   }, 60_000);
 
-  // PR #229 bot review round 10 (evm-adapter.ts:815). The PR
+  // The PR
   // introduced `V10KnowledgeBatchEmitted` on KASStorage and
   // documented it as the topic V10-aware consumers should subscribe
   // to, but `listenForEvents()` had no branch for it — any
   // subscriber following the docs got an empty stream. This test
   // pins the adapter-side fix by asserting the event is now reachable
   // through the same API as every other chain event.
-  it('listenForEvents exposes V10KnowledgeBatchEmitted after a V10 publish (bot review r10-4)', async () => {
+  it('listenForEvents exposes V10KnowledgeBatchEmitted after a V10 publish', async () => {
     const adapter = new EVMChainAdapter(makeAdapterConfig(ctx.rpcUrl, ctx.hubAddress, HARDHAT_KEYS.DEPLOYER));
 
     const events: Array<{ type: string; data: Record<string, unknown> }> = [];

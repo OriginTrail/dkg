@@ -1,7 +1,7 @@
 /**
  * KnowledgeAssetsV10-extra.test.ts — audit coverage.
  *
- * Covers findings (see .test-audit/BUGS_FOUND.md, evm-module):
+ * Covers findings (see .test-audit/, evm-module):
  *   - E-4  (HIGH): ACK signed-vs-submitted cost-param mismatch matrix.
  *                  Each of (tokenAmount, epochs, byteSize,
  *                  knowledgeAssetsAmount) must be part of the ACK digest

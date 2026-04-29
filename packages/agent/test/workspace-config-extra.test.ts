@@ -43,7 +43,7 @@ interface WorkspaceConfigNode {
 
 interface WorkspaceConfig {
   contextGraph: string;
-  // r31-6 (PR #229 bot review — workspace-config.ts:55): the schema now
+  // r31-6: the schema now
   // normalises `node:` to a structured object (`{api, tokenFile?,
   // token?}`). The bare-string form is still accepted as input (and is
   // normalised to `{api: <string>}`) so existing configs keep working,
@@ -54,7 +54,7 @@ interface WorkspaceConfig {
   extractionPolicy: string;
 }
 
-// PR #229 follow-up: the suite originally shipped a LOCAL reference
+// the suite originally shipped a LOCAL reference
 // loader to keep the schema test green even before the production
 // module landed (see SPEC-GAP test below). The production
 // `workspace-config.ts` now exports the same surface AND has been
@@ -83,7 +83,7 @@ describe('A-13: workspace config schema (.dkg/config.yaml)', () => {
     const cfg = parseWorkspaceConfig(yaml.load(src));
     expect(cfg).toEqual({
       contextGraph: 'my-project',
-      // r31-6: bare-string `node:` normalises to `{ api: <string> }`.
+      // bare-string `node:` normalises to `{ api: <string> }`.
       node: { api: 'http://127.0.0.1:9201' },
       autoShare: true,
       extractionPolicy: 'structural-plus-semantic',
@@ -147,7 +147,7 @@ describe('A-13: alternative config locations', () => {
     const cfg = parseWorkspaceConfig(raw);
     expect(cfg).toEqual({
       contextGraph: 'p',
-      // r31-6: bare-string `node:` normalises to `{ api: <string> }`.
+      // bare-string `node:` normalises to `{ api: <string> }`.
       node: { api: 'http://n' },
       autoShare: false,
       extractionPolicy: 'structural-only',
@@ -169,14 +169,14 @@ describe('A-13: alternative config locations', () => {
     ].join('\n');
     const cfg = parseAgentsMdFrontmatter(md);
     expect(cfg.contextGraph).toBe('my-project');
-    // r31-6: bare-string `node:` normalises to `{ api: <string> }`.
+    // bare-string `node:` normalises to `{ api: <string> }`.
     expect(cfg.node).toEqual({ api: 'http://127.0.0.1:9201' });
     expect(cfg.autoShare).toBe(true);
   });
 
   it('rejects AGENTS.md with no frontmatter AND no dkg-config fence', () => {
     const md = '# just a heading\n';
-    // PR #229 bot review (r21-4): the diagnostic now mentions BOTH
+    // the diagnostic now mentions BOTH
     // carriers because we tried both before failing.
     expect(() => parseAgentsMdFrontmatter(md)).toThrow(
       /frontmatter|dkg-config/,
@@ -188,14 +188,14 @@ describe('A-13: alternative config locations', () => {
     expect(() => parseAgentsMdFrontmatter(md)).toThrow(/dkg/);
   });
 
-  // PR #229 bot review (r21-4 / r22-5): the AGENTS.md convention used
+  // the AGENTS.md convention used
   // by Cursor / Continue / Codex CLI is plain Markdown WITHOUT
-  // frontmatter. The pre-r21-4 code threw "missing YAML frontmatter"
+  // frontmatter. The code threw "missing YAML frontmatter"
   // and the documented third lookup tier was therefore unusable for
   // the projects that actually rely on it as a workspace-config
   // carrier. The fenced ```dkg-config``` block is the supported
   // alternate carrier.
-  it('PR #229 bugbot: parses plain-Markdown AGENTS.md via a ```dkg-config``` fence', () => {
+  it('parses plain-Markdown AGENTS.md via a ```dkg-config``` fence', () => {
     const md = [
       '# Project Agents',
       '',
@@ -209,12 +209,12 @@ describe('A-13: alternative config locations', () => {
     ].join('\n');
     const cfg = parseAgentsMdFrontmatter(md);
     expect(cfg.contextGraph).toBe('fence-only');
-    // r31-6: bare-string `node:` normalises to `{ api: <string> }`.
+    // bare-string `node:` normalises to `{ api: <string> }`.
     expect(cfg.node).toEqual({ api: 'http://127.0.0.1:9201' });
     expect(cfg.autoShare).toBe(false);
   });
 
-  it('PR #229 bugbot: also accepts ```yaml dkg-config``` and ```json dkg-config``` info-string variants', () => {
+  it('also accepts ```yaml dkg-config``` and ```json dkg-config``` info-string variants', () => {
     const yml = [
       '# header',
       '```yaml dkg-config',
@@ -233,30 +233,29 @@ describe('A-13: alternative config locations', () => {
     expect(parseAgentsMdFrontmatter(json).contextGraph).toBe('json-fence');
   });
 
-  // PR #229 bot review r3131820489 (workspace-config.ts:76): the
+  // the
   // previous frontmatter regex required a trailing newline AFTER the
   // closing `---`, so a valid AGENTS.md whose frontmatter block was
   // the entire file (no trailing body, no final newline) would never
   // match and fall through to the "no carrier found" diagnostic.
   // Lock in that frontmatter at EOF works.
-  it('PR #229 bugbot: parses frontmatter that is the whole file (no trailing newline)', () => {
+  it('parses frontmatter that is the whole file (no trailing newline)', () => {
     const md = '---\ndkg:\n  contextGraph: "eof-fm"\n  node: "http://n"\n---';
     const cfg = parseAgentsMdFrontmatter(md);
     expect(cfg.contextGraph).toBe('eof-fm');
   });
 
-  it('PR #229 bugbot: parses frontmatter that ends right at EOF with a trailing CR', () => {
+  it('parses frontmatter that ends right at EOF with a trailing CR', () => {
     const md = '---\r\ndkg:\r\n  contextGraph: "eof-cr"\r\n  node: "http://n"\r\n---\r\n';
     const cfg = parseAgentsMdFrontmatter(md);
     expect(cfg.contextGraph).toBe('eof-cr');
   });
 
-  // PR #229 CodeQL polynomial-regex warning (workspace-config.ts:138):
   // the previous mega-regex could backtrack super-linearly on inputs
   // with many candidate `\n` start positions. The new line-by-line
   // scan must remain linear; we exercise a few edge cases the lazy
   // regex would have hit hardest.
-  it('PR #229 bugbot: ignores fence-shaped lines that do not match the dkg-config info-string', () => {
+  it('ignores fence-shaped lines that do not match the dkg-config info-string', () => {
     const md = [
       '# header',
       '```bash',
@@ -273,7 +272,7 @@ describe('A-13: alternative config locations', () => {
   });
 
   // ───────────────────────────────────────────────────────────────────
-  // PR #229 bot review (r3148998568 — workspace-config.ts:130). The
+  // workspace-config.ts:130). The
   // pre-fix open/close fence regexes required column-0 anchors, so a
   // legitimate `dkg-config` block under a list item, a blockquote, or
   // emitted by a Markdown formatter that normalised indentation was
@@ -283,7 +282,7 @@ describe('A-13: alternative config locations', () => {
   // still rejected (because they're indented code blocks), (3) a tab-
   // indented fence is rejected (CommonMark only allows spaces here).
   // ───────────────────────────────────────────────────────────────────
-  it('r30-7: parses a `dkg-config` fence with 1 leading space (CommonMark indented-fence form)', () => {
+  it('parses a `dkg-config` fence with 1 leading space (CommonMark indented-fence form)', () => {
     const md = [
       '- list item',
       ' ```dkg-config',
@@ -295,7 +294,7 @@ describe('A-13: alternative config locations', () => {
     expect(cfg.contextGraph).toBe('indented-1');
   });
 
-  it('r30-7: parses a `dkg-config` fence with 2 leading spaces', () => {
+  it('parses a `dkg-config` fence with 2 leading spaces', () => {
     const md = [
       '> blockquote',
       '  ```dkg-config',
@@ -307,7 +306,7 @@ describe('A-13: alternative config locations', () => {
     expect(cfg.contextGraph).toBe('indented-2');
   });
 
-  it('r30-7: parses a `dkg-config` fence with 3 leading spaces (the CommonMark maximum)', () => {
+  it('parses a `dkg-config` fence with 3 leading spaces (the CommonMark maximum)', () => {
     const md = [
       '   ```dkg-config',
       '   contextGraph: "indented-3"',
@@ -318,7 +317,7 @@ describe('A-13: alternative config locations', () => {
     expect(cfg.contextGraph).toBe('indented-3');
   });
 
-  it('r30-7: REJECTS a `dkg-config` fence with 4 leading spaces (CommonMark indented code block boundary)', () => {
+  it('REJECTS a `dkg-config` fence with 4 leading spaces (CommonMark indented code block boundary)', () => {
     // 4+ leading spaces is an indented code block per CommonMark §4.4,
     // not a fenced one. The loader must NOT match this as a fence.
     const md = [
@@ -331,7 +330,7 @@ describe('A-13: alternative config locations', () => {
     expect(() => parseAgentsMdFrontmatter(md)).toThrow(/no workspace config found/i);
   });
 
-  it('r30-7: REJECTS a `dkg-config` fence indented by tabs (CommonMark fence indent grammar is space-only)', () => {
+  it('REJECTS a `dkg-config` fence indented by tabs (CommonMark fence indent grammar is space-only)', () => {
     const md = [
       '# header',
       '\t```dkg-config',
@@ -342,7 +341,7 @@ describe('A-13: alternative config locations', () => {
     expect(() => parseAgentsMdFrontmatter(md)).toThrow(/no workspace config found/i);
   });
 
-  it('r30-7: still requires the close fence to be present and CommonMark-indented (close fence at column 0 with open at +2 still works)', () => {
+  it('still requires the close fence to be present and CommonMark-indented (close fence at column 0 with open at +2 still works)', () => {
     // Real-world Markdown often has the open fence indented (under a
     // list / blockquote) and the close fence in column 0 (or vice
     // versa). The loader must accept ANY 0-3-space indent on EITHER
@@ -358,7 +357,7 @@ describe('A-13: alternative config locations', () => {
     expect(cfg.contextGraph).toBe('mixed-indent');
   });
 
-  it('PR #229 bugbot: an unterminated dkg-config fence falls through to the "no carrier" error', () => {
+  it('an unterminated dkg-config fence falls through to the "no carrier" error', () => {
     const md = [
       '# header',
       '',
@@ -370,12 +369,12 @@ describe('A-13: alternative config locations', () => {
     expect(() => parseAgentsMdFrontmatter(md)).toThrow(/no workspace config found/i);
   });
 
-  // PR #229 bot review (r22-5): when AGENTS.md has unrelated
+  // when AGENTS.md has unrelated
   // frontmatter (extremely common for tags/owner/prompt metadata in
   // the AI-agent ecosystem) but the dkg config lives in a fenced
   // block below, the loader MUST fall through to the fence parser
   // instead of throwing on the missing top-level `dkg:` key.
-  it('PR #229 bugbot: falls through to fence when frontmatter exists but lacks `dkg:` key', () => {
+  it('falls through to fence when frontmatter exists but lacks `dkg:` key', () => {
     const md = [
       '---',
       'title: project notes',
@@ -393,7 +392,6 @@ describe('A-13: alternative config locations', () => {
     expect(cfg.contextGraph).toBe('fallthrough-cg');
   });
 
-  // PR #229 bot review (r3146759647, workspace-config.ts:191):
   // before the fix, frontmatter that yaml.load() rejected (a
   // tab-indented block, a custom tag, an unsupported syntax) would
   // throw out of parseAgentsMdFrontmatter() before the fence
@@ -403,7 +401,7 @@ describe('A-13: alternative config locations', () => {
   // continues into the fence parser, and only after both carriers
   // have been considered do we throw the "no workspace config
   // found" diagnostic.
-  it('PR #229 bugbot: falls through to fence when frontmatter is unparseable YAML', () => {
+  it('falls through to fence when frontmatter is unparseable YAML', () => {
     const md = [
       '---',
       // Frontmatter whose body is intentionally invalid YAML (a
@@ -428,7 +426,7 @@ describe('A-13: alternative config locations', () => {
   // exists, the user gets the canonical "no carrier found"
   // diagnostic — NOT the js-yaml internal parse error, which leaks
   // implementation detail and doesn't tell the user what to add.
-  it('PR #229 bugbot: unparseable frontmatter + no fence yields the canonical "no carrier" diagnostic', () => {
+  it('unparseable frontmatter + no fence yields the canonical "no carrier" diagnostic', () => {
     const md = [
       '---',
       ': not valid yaml',
@@ -478,12 +476,12 @@ describe('A-13: file-system priority resolution', () => {
     expect(r.cfg.contextGraph).toBe('from-yaml');
   });
 
-  // PR #229 bot review (r21-4 / bugbot 1291): the agent's own
+  // the agent's own
   // `loadWorkspaceConfig` MUST resolve plain-Markdown AGENTS.md (no
   // YAML frontmatter, fenced ```dkg-config``` block) so the
   // documented third lookup tier is actually usable on this very
   // monorepo (whose AGENTS.md is plain Markdown).
-  it('PR #229 bugbot: loadWorkspaceConfig accepts plain-Markdown AGENTS.md with a dkg-config fence', async () => {
+  it('loadWorkspaceConfig accepts plain-Markdown AGENTS.md with a dkg-config fence', async () => {
     const { loadWorkspaceConfig } = await import('../src/workspace-config.js');
     const dir = mkdtempSync(join(tmpdir(), 'dkg-ws-fence-'));
     writeFileSync(
@@ -502,19 +500,19 @@ describe('A-13: file-system priority resolution', () => {
     const r = loadWorkspaceConfig(dir);
     expect(r.source.endsWith('AGENTS.md')).toBe(true);
     expect(r.cfg.contextGraph).toBe('fence-only-via-load');
-    // r31-6: bare-string `node:` normalises to `{ api: <string> }`.
+    // bare-string `node:` normalises to `{ api: <string> }`.
     expect(r.cfg.node).toEqual({ api: 'http://127.0.0.1:9201' });
   });
 
   // ───────────────────────────────────────────────────────────────────
-  // PR #229 bot review (r31-6, workspace-config.ts:55). The pre-fix
+  // The pre-fix
   // schema rejected the canonical `.dkg/config.yaml` shape (`node:` as
   // an object with `api`/`tokenFile`/...) — exactly the shape that
   // `mcp-dkg/config.yaml.example` ships and `mcp-dkg/src/config.ts`
   // reads. Pin: the loader MUST round-trip the canonical file end-to-
   // end, preserving `tokenFile` so downstream code can resolve auth.
   // ───────────────────────────────────────────────────────────────────
-  it('r31-6: loadWorkspaceConfig accepts the canonical `.dkg/config.yaml` shape (object node:)', async () => {
+  it('loadWorkspaceConfig accepts the canonical `.dkg/config.yaml` shape (object node:)', async () => {
     const { loadWorkspaceConfig } = await import('../src/workspace-config.js');
     const dir = mkdtempSync(join(tmpdir(), 'dkg-ws-r316-'));
     mkdirSync(join(dir, '.dkg'));
@@ -544,7 +542,7 @@ describe('A-13: file-system priority resolution', () => {
 describe('A-13: SPEC-GAP — `packages/agent/src` ships no workspace-config loader', () => {
   // PROD-BUG / SPEC-GAP: spec §22 requires agents to auto-discover their
   // configuration from `.dkg/config.yaml` and friends. Today, the agent
-  // package exposes no loader module — see BUGS_FOUND.md A-13. This test
+  // package exposes no loader module — This test
   // is intentionally RED: once a `workspace-config.ts` module lands that
   // exports a `loadWorkspaceConfig(workspaceDir)` function, it will go
   // green.
@@ -557,7 +555,7 @@ describe('A-13: SPEC-GAP — `packages/agent/src` ships no workspace-config load
     );
     expect(
       hasLoader,
-      'packages/agent/src has no workspace-config.ts / onboarding.ts module (BUGS_FOUND.md A-13)',
+      'packages/agent/src has no workspace-config.ts / onboarding.ts module',
     ).toBe(true);
   });
 });

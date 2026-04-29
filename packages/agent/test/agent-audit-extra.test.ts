@@ -1,6 +1,6 @@
 /**
  * QA audit tests for `packages/agent` — derived from
- * `.test-audit/BUGS_FOUND.md` findings A-1..A-15.
+ * `.test-audit/..A-15.
  *
  * Policy:
  * - Production code is NOT modified; failing tests expose real bugs.
@@ -355,7 +355,7 @@ describe('[A-7] ENDORSE signature + replay posture (FIXED)', () => {
     const predicates = quads.map(q => q.predicate);
     expect(predicates).toContain('https://dkg.network/ontology#endorses');
     expect(predicates).toContain('https://dkg.network/ontology#endorsedAt');
-    // r19-3: endorsedBy ties the endorsement resource back to the
+    // endorsedBy ties the endorsement resource back to the
     // agent so consumers can still query "who endorsed ual X?" with
     // a deterministic two-hop join.
     expect(predicates).toContain('https://dkg.network/ontology#endorsedBy');
@@ -377,7 +377,7 @@ describe('[A-7] ENDORSE signature + replay posture (FIXED)', () => {
     expect(nonce2).toBeDefined();
     expect(nonce1).not.toBe(nonce2);
 
-    // r19-3 invariant: subjects differ between the two endorsements
+    // subjects differ between the two endorsements
     // even though the agent + UAL + CG are identical.
     const subj1 = quads.find(q => q.predicate === 'https://dkg.network/ontology#endorses')!.subject;
     const subj2 = quads2.find(q => q.predicate === 'https://dkg.network/ontology#endorses')!.subject;
@@ -414,7 +414,7 @@ describe('[A-9] Storage-ACK transport protocol ID', () => {
 
 describe('[A-12] DID format drift in agent.endorse', () => {
   it('accepts an ETH-address agentAddress (spec form)', () => {
-    // PR #229 bot review round 19 (r19-3): post-r19-3 every quad subject
+    // every quad subject
     // is now the per-event endorsement URN (`urn:dkg:endorsement:HEX`),
     // not the agent DID. The agent DID moved into the OBJECT of the
     // `dkg:endorsedBy` quad. Update this test to enforce the spec-form
@@ -437,7 +437,7 @@ describe('[A-12] DID format drift in agent.endorse', () => {
   });
 
   it('PROD-BUG: passing a libp2p PeerId to buildEndorsementQuads yields a non-spec did:dkg:agent: URI', () => {
-    // PR #229 bot review round 19 (r19-3) + A-12 (v10-rc merge): the
+    // the
     // helper `buildEndorsementQuads` mints whatever subject form the
     // caller passes it. If a caller passes a libp2p Peer ID string
     // like `12D3KooW…` instead of the 0x-address form, the resulting

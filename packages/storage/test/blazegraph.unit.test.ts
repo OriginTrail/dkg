@@ -236,7 +236,7 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     expect(updateBodies).toHaveLength(0);
   });
 
-  // Bot review (PR #229 follow-up, blazegraph.ts:131): the previous
+  // the previous
   // revision blanket-skipped the default-graph delete whenever the same
   // (s,p,o) had any named-graph hit, which silently lost a real
   // default-graph row when BOTH intentionally existed. The fix runs the
@@ -355,7 +355,7 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     expect(defaultDelete).toBeUndefined();
   });
 
-  // PR #229 bot review (r31-7, blazegraph.ts:94/131/164). The previous
+  // The previous
   // revision unconditionally wrapped each materialised SELECT-row
   // subject (`sx`) as `<${escapeUri(sx)}>` before issuing the
   // `DELETE DATA`. SELECT bindings in quads mode include blank-node

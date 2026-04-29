@@ -1,5 +1,5 @@
 /**
- * PR #229 bot review round 14 — r14-1: gossip envelope signing
+ * gossip envelope signing
  * defaults to fail-closed.
  *
  * Before this round, `strictGossipEnvelope` defaulted to `false`
@@ -18,7 +18,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { resolveStrictGossipEnvelopeMode } from '../src/dkg-agent.js';
 
-describe('resolveStrictGossipEnvelopeMode — PR #229 round 14 (r14-1)', () => {
+describe('resolveStrictGossipEnvelopeMode', () => {
   // Guard against ambient DKG_STRICT_GOSSIP_ENVELOPE leaking in from a
   // developer shell — always pass the env value explicitly.
   const originalEnv = process.env.DKG_STRICT_GOSSIP_ENVELOPE;

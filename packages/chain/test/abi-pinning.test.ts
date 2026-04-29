@@ -93,7 +93,7 @@ function canonicalAbiDigest(contractName: string): string {
 // update this table intentionally after reviewing the ABI diff.
 const PINNED_DIGESTS: Record<string, string> = {
   // Critical V10 lifecycle contracts — drift here breaks publish/update.
-  // Bot review PR #229 (post-round-5): digest rolled after
+  // digest rolled after
   // `packages/chain/abi/KnowledgeAssetsV10.json` was resynced with the
   // canonical `packages/evm-module/abi/KnowledgeAssetsV10.json` (chain
   // snapshot was missing the V10 `KnowledgeBatchCreated` event and

@@ -182,7 +182,7 @@ export class MockChainAdapter implements ChainAdapter {
       txHash,
     });
 
-    // PR #229 bot review (r3148... — evm-adapter.ts:868). The EVM
+    // — evm-adapter.ts:868). The EVM
     // adapter exposes `V10KnowledgeBatchEmitted` as a first-class
     // event on `listenForEvents()`. KASStorage emits this distinct
     // topic for V10 publishes so V10-aware indexers can subscribe to
@@ -194,7 +194,7 @@ export class MockChainAdapter implements ChainAdapter {
     // would silently desync test fixtures from production
     // behaviour — bot's exact concern.)
     //
-    // PR #229 bot review (r31-12 — mock-adapter.ts:200, J8hn).
+    // mock-adapter.ts:200, J8hn).
     // `publicByteSize` and `tokenAmount` are first-class fields on
     // `PublishParams` and are decoded straight off the on-chain log
     // by the real EVM adapter (evm-adapter.ts:890 / :896). Pre-r31-12
@@ -282,13 +282,13 @@ export class MockChainAdapter implements ChainAdapter {
       txHash,
     });
 
-    // PR #229 bot review (r3148... — evm-adapter.ts:868). Mirror
+    // — evm-adapter.ts:868). Mirror
     // V10KnowledgeBatchEmitted for the permanent-publish path too
     // (real KASStorage emits the same topic for both
     // permanent/non-permanent V10 publishes; only the `isPermanent`
     // field differs).
     //
-    // PR #229 bot review (r31-12 — mock-adapter.ts:285, J8hn): same
+    // mock-adapter.ts:285, J8hn): same
     // fix as the regular publish path above — `publicByteSize` and
     // `tokenAmount` are on `PermanentPublishParams` and the real
     // adapter surfaces them on the event. Pull from `params` so

@@ -43,7 +43,7 @@ function generateToken(): string {
 export async function loadTokens(authConfig?: AuthConfig): Promise<Set<string>> {
   const tokens = new Set<string>();
   const fileTokens = new Set<string>();
-  // PR #229 bot review (r31-14 — auth.ts:203). Track config-pinned
+  // auth.ts:203). Track config-pinned
   // tokens separately from file-derived ones so reconciliation /
   // rotation can preserve them when a token happens to live in BOTH
   // sources (a real-world rollout shape — operators sync the same
@@ -114,7 +114,7 @@ export async function loadTokens(authConfig?: AuthConfig): Promise<Set<string>> 
 // ---------------------------------------------------------------------------
 
 /**
- * CLI-11 (BUGS_FOUND.md dup #11/CLI-11): hot-reload reconciliation.
+ * CLI-11 (.
  *
  * The original `verifyToken` was a pure `Set.has` lookup. That meant
  * once the daemon had loaded `auth.token` at boot, *no* file rewrite
@@ -139,7 +139,7 @@ export async function loadTokens(authConfig?: AuthConfig): Promise<Set<string>> 
  * second reconciliation and leave the previous token valid. Atomic
  * `rename(tmp, auth.token)` also preserves the destination mtime on
  * some platforms. Hashing the bytes closes the hole unconditionally
- * (PR #229 bot review round 6 — mtime-only rotation bypass).
+ * .
  *
  * Tokens added programmatically (e.g. via the future `rotateToken`
  * API or pinned in `config.auth.tokens`) are preserved across
@@ -147,7 +147,7 @@ export async function loadTokens(authConfig?: AuthConfig): Promise<Set<string>> 
  * with what's now on disk, removes the stale file tokens, and adds
  * the new ones — without touching tokens that never came from disk.
  */
-// PR #229 bot review (r31-14 — auth.ts:203). The snapshot now also
+// auth.ts:203). The snapshot now also
 // remembers `configTokens` — the tokens supplied via
 // `loadTokens({ tokens: [...] })` (config-pinned). Without this,
 // reconcileFileTokens could not tell whether a "file token" was ALSO
@@ -180,7 +180,7 @@ function reconcileFileTokens(validTokens: Set<string>): void {
     mtimeMs = st.mtimeMs;
     size = st.size;
   } catch (err: any) {
-    // PR #229 bot review round 7 (auth.ts:162 — ENOENT path). If the
+    // ENOENT path). If the
     // token file is missing AND we had previously loaded tokens from
     // it, those tokens MUST be revoked from `validTokens`: `dkg auth
     // revoke` rewrites the file to empty or deletes it, and operators
@@ -190,7 +190,7 @@ function reconcileFileTokens(validTokens: Set<string>): void {
     if (err && err.code === 'ENOENT') {
       const snapshot = lastFileSnapshot.get(validTokens);
       if (snapshot) {
-        // PR #229 bot review (r31-14 — auth.ts:203). When the token
+        // auth.ts:203). When the token
         // file vanishes, every token that was BACKED ONLY by the
         // file is now stale; tokens that are ALSO config-pinned
         // remain valid because the config never went away. Pre-r31-14
@@ -208,7 +208,7 @@ function reconcileFileTokens(validTokens: Set<string>): void {
     return;
   }
 
-  // PR #229 bot review round 7 (auth.ts:162 — fast-path gap). The
+  // fast-path gap). The
   // previous revision short-circuited on matching `{mtimeMs, size}`
   // before hashing. That's unsafe on coarse-mtime filesystems (HFS+
   // 1s resolution, certain network mounts, CI tmpfs): a rotate that
@@ -238,8 +238,8 @@ function reconcileFileTokens(validTokens: Set<string>): void {
     if (t.length > 0 && !t.startsWith('#')) newFileTokens.add(t);
   }
   if (snapshot) {
-    // PR #229 bot review (r31-14 — auth.ts:203). Preserve config-pinned
-    // tokens during file rotation. Pre-r31-14 the loop only checked
+    // auth.ts:203). Preserve config-pinned
+    // tokens during file rotation. the loop only checked
     // `!newFileTokens.has(oldTok)` and deleted from `validTokens`
     // unconditionally — but `loadTokens()` merges config-pinned and
     // file-derived tokens into the SAME `Set` (and into `fileTokens`
@@ -314,7 +314,7 @@ export async function rotateToken(validTokens: Set<string>): Promise<string> {
   );
   await chmod(filePath, 0o600);
   if (previous) {
-    // PR #229 bot review (r31-14 — auth.ts:203). Same overlap-aware
+    // auth.ts:203). Same overlap-aware
     // delete: tokens that are ALSO config-pinned MUST NOT be removed
     // from the in-memory set just because they no longer appear in
     // the rotated file. Operators rely on config-pinned admin tokens
@@ -329,7 +329,7 @@ export async function rotateToken(validTokens: Set<string>): Promise<string> {
   // resolution like ext3 / FAT32 / certain CI tmpfs).
   lastFileSnapshot.delete(validTokens);
   reconcileFileTokens(validTokens);
-  // PR #229 bot review (r31-14 — auth.ts:203). The reconcile above ran
+  // auth.ts:203). The reconcile above ran
   // with no snapshot, so the new snapshot it just wrote has an EMPTY
   // configTokens set (reconcile uses `snapshot?.configTokens ??
   // new Set()`). Re-seed the configTokens from the pre-rotation
@@ -356,7 +356,7 @@ export async function rotateToken(validTokens: Set<string>): Promise<string> {
  * been invalidated; returns `false` if the token was not present at
  * all.
  *
- * PR #229 bot review round 19 (r19-4): the previous revision was a
+ * the previous revision was a
  * synchronous `validTokens.delete(token)` only — but `verifyToken()`
  * calls `reconcileFileTokens()` on every invocation, and that
  * reconciliation re-adds any token that still appears on disk in
@@ -393,14 +393,14 @@ export async function revokeToken(
     try {
       raw = readFileSync(filePath).toString('utf-8');
     } catch (err: any) {
-      // File vanished between the snapshot and now. PR #229 bot review
-      // (r3148... — auth.ts:315). Pre-fix, this branch deleted ONLY
-      // the requested `token` from `validTokens` and then dropped the
-      // snapshot. But the snapshot is exactly what
-      // `reconcileFileTokens()` consults to subtract file-derived
-      // tokens on the ENOENT path — once it's gone, every OTHER
-      // token that was originally loaded from the now-missing file
-      // (`auth.token` containing `[A, B]`, `revokeToken(A)` after
+      // File vanished between the snapshot and now. Pre-fix, this
+      // branch deleted ONLY the requested `token` from `validTokens`
+      // and then dropped the snapshot. But the snapshot is exactly
+      // what `reconcileFileTokens()` consults to subtract
+      // file-derived tokens on the ENOENT path — once it's gone,
+      // every OTHER token that was originally loaded from the
+      // now-missing file (`auth.token` containing `[A, B]`,
+      // `revokeToken(A)` after
       // file deletion → only A removed; B stays valid forever).
       //
       // Fix: if the token file is gone, EVERY token it used to back
@@ -412,7 +412,7 @@ export async function revokeToken(
       if (err && err.code === 'ENOENT') {
         let removedAny = false;
         if (snapshot) {
-          // PR #229 bot review (r31-14 — auth.ts:203). Bulk-revoke
+          // auth.ts:203). Bulk-revoke
           // file-derived tokens, but preserve overlap with config —
           // a token that happened to live in BOTH `auth.token` and
           // `config.auth.tokens` should remain valid because the
@@ -553,12 +553,12 @@ export type SignedRequestOutcome =
  *   - against the same endpoint with a tampered body (body hash bound).
  *
  * Callers that still compute HMAC over the legacy `timestamp + body`
- * payload will fail verification — this is intentional (bot review F3).
+ * payload will fail verification — this is intentional.
  */
 /**
  * Strict lowercase-or-mixed-case hex validation.
  *
- * Bot review (PR #229 follow-up, auth.ts:376): `Buffer.from(hex, 'hex')`
+ * `Buffer.from(hex, 'hex')`
  * silently truncates at the first non-hex character, so a header like
  * `<valid-hmac>zz` decodes to the original valid bytes and then passes
  * `timingSafeEqual`. Validate the string is purely hex and of the
@@ -581,7 +581,7 @@ function isStrictHexOfLength(s: unknown, expectedCharLen: number): boolean {
 /**
  * Derive the canonical request path bound into the signed-request HMAC.
  *
- * Bot review (PR #229 follow-up, auth.ts:741): binding only `pathname`
+ * binding only `pathname`
  * left query parameters unsigned — an attacker could swap
  * `/api/query?graph=...` for `/api/query?graph=...&poison=...` without
  * invalidating the signature. Several protected daemon routes read
@@ -633,7 +633,7 @@ export function canonicalSignedRequestPayload(
  *   - tampering the body breaks the hash and invalidates the signature.
  *
  * Nonce is REQUIRED: a signature without a nonce is rejected as
- * `missing-fields` (bot review F3). Callers upgrading from the prior
+ * `missing-fields`. Callers upgrading from the prior
  * "timestamp + body only" scheme must regenerate signatures.
  *
  * Returns a discriminated result describing why a request was refused —
@@ -657,7 +657,7 @@ export function verifySignedRequest(input: SignedRequestInput): SignedRequestOut
   }
 
   pruneNonces(now);
-  // PR #229 bot review round 9 (auth.ts:293): the replay cache used to
+  // the replay cache used to
   // be keyed by the raw nonce string, so two different bearer tokens
   // that happened to pick the same nonce would reject each other for
   // the full freshness window. That's a trivial cross-client DoS (any
@@ -682,7 +682,7 @@ export function verifySignedRequest(input: SignedRequestInput): SignedRequestOut
   );
   const expected = createHmac('sha256', input.token).update(payload).digest('hex');
 
-  // Bot review (PR #229 follow-up): `Buffer.from(hex, 'hex')` does NOT
+  // `Buffer.from(hex, 'hex')` does NOT
   // reject malformed hex — Node silently truncates at the first non-hex
   // character. `<valid-hmac>zz` decodes to the original valid bytes,
   // which then passes length + timingSafeEqual. Validate the supplied
@@ -746,9 +746,9 @@ function isPublicPath(pathname: string): boolean {
 }
 
 /**
- * CLI-10 / BUGS_FOUND.md spec §18 — transport-layer replay protection.
+ * CLI-10 /.
  *
- * Bot review PR #229 (post-round-5): the previous revision of this file
+ * the previous revision of this file
  * added a coarse `token:method:pathname:content-length` fingerprint
  * dedup for body-less Bearer requests so a leaked Bearer could not be
  * silently replayed. That dedup was too aggressive: two consecutive
@@ -790,7 +790,7 @@ function isPublicPath(pathname: string): boolean {
  * returns a `Promise<boolean>` that resolves AFTER the body has been
  * drained and the HMAC has been verified — so callers that `await`
  * the result are guaranteed not to run their handler until the
- * signature is confirmed (PR #229 bot review r31-7, auth.ts:947). The
+ * signature is confirmed. The
  * older response-time guard remains installed as defense-in-depth for
  * legacy callers that don't `await`, but the supported contract is to
  * always `await` the return value.
@@ -858,7 +858,7 @@ export function httpAuthGuard(
       }
     }
 
-    // Bot review F1/F2/F3 (BUGS_FOUND.md spec §18): when the client
+    // when the client
     // actually opted INTO the signed-request scheme (by sending
     // `x-dkg-signature` and/or `x-dkg-nonce`) we MUST fail closed if
     // any of the required headers is missing or malformed — otherwise
@@ -896,9 +896,9 @@ export function httpAuthGuard(
       // nonce still fails the post-body HMAC (nonce is bound), but
       // catching a replayed nonce here saves the body parse.
       //
-      // PR #229 bot review round 10 (cli/auth.ts:678). Until r10 this
+      // Until r10 this
       // pre-body check keyed on the raw `nonceHeader` string, while
-      // the full verifier below (r9-3) keys on
+      // the full verifier below keys on
       // `sha256(token) + ":" + nonce`. Two different bearer
       // credentials that reused the same nonce would 401 each other
       // HERE even though the signed body would verify cleanly —
@@ -929,7 +929,7 @@ export function httpAuthGuard(
         signature: sigHeader,
       };
 
-      // Bot review (PR #229 F2 second follow-up): protected GET / HEAD
+      // protected GET / HEAD
       // routes never call readBody*(), so the post-body enforcement in
       // the daemon's body-reading helpers never runs for them. Without
       // this block, a signed request with arbitrary x-dkg-signature
@@ -944,7 +944,7 @@ export function httpAuthGuard(
       // methods) is a no-op.
       const clRaw = req.headers['content-length'];
       const clNum = typeof clRaw === 'string' ? Number(clRaw) : NaN;
-      // PR #229 bot review (r3147347820, auth.ts:813). Pre-fix this did
+      // Pre-fix this did
       // an exact lowercase string comparison `=== 'chunked'`. Node can
       // surface `Transfer-Encoding` with different casing
       // (`Chunked` / `CHUNKED`), as a comma-separated list
@@ -964,7 +964,7 @@ export function httpAuthGuard(
       const teHeader = Array.isArray(teRaw) ? teRaw.join(', ') : (teRaw ?? '');
       const isChunked = /chunked/i.test(teHeader);
       const method = req.method ?? 'GET';
-      // PR #229 bot review round 7 (auth.ts:692): DELETE was lumped in
+      // DELETE was lumped in
       // with GET/HEAD/OPTIONS as "definitely body-less", but RFC 9110
       // explicitly allows a DELETE request to carry a body and the DKG
       // daemon accepts them on a handful of routes (e.g. admin token
@@ -979,7 +979,7 @@ export function httpAuthGuard(
       // for HMAC binding; everything else must trip the explicit
       // Content-Length/Transfer-Encoding check).
       //
-      // PR #229 bot review round 19 (r19-1): pre-r19-1 `isFramingBodyless`
+      // pre-r19-1 `isFramingBodyless`
       // required an *explicit* `Content-Length: 0`. That let a signed
       // client omit the header entirely and — per HTTP/1.1 RFC 9112
       // §6.1, a non-chunked request with no `Content-Length` also has
@@ -1030,20 +1030,19 @@ export function httpAuthGuard(
         }
         pending.verified = true;
       } else {
-        // PR #229 bot review round 23 (r23-1) + r31-7 follow-up.
         //
         // Body-carrying signed requests cannot be verified
         // synchronously here because the HMAC binds the request body
         // and the body has not yet flowed off the wire. The legacy
-        // (r23-1) fix installed a response-level guard that rewrote
+        //  fix installed a response-level guard that rewrote
         // the handler's response to 401 if the HMAC was never
-        // verified — but the bot (r31-7) correctly pointed out that
+        // verified — but the bot correctly pointed out that
         // the handler had ALREADY RUN by then, so any state mutation
         // performed by a handler that ignores the body went through
         // with a forged signature even though the response was
         // blocked.
         //
-        // r31-7 fix: drain the request body and verify the HMAC
+        // drain the request body and verify the HMAC
         // BEFORE returning, by switching to a `Promise<boolean>`
         // return on this branch. Callers that `await` the result are
         // guaranteed not to invoke their handler until the signature
@@ -1071,7 +1070,7 @@ export function httpAuthGuard(
       return true;
     }
 
-    // Bot review PR #229 (post-round-5): the previous revision of this
+    // the previous revision of this
     // guard dedup'd body-less Bearer requests by `(token, method,
     // pathname, content-length)` fingerprint and 401-rejected the
     // second hit within a 60-second window. That turned every
@@ -1144,7 +1143,7 @@ export function verifyHttpSignedRequestAfterBody(
 ): SignedRequestOutcome {
   const pending = (req as unknown as { __dkgSignedAuth?: SignedAuthPending }).__dkgSignedAuth;
   if (!pending) return { ok: true };
-  // Bot review (PR #229 follow-up): bind the FULL request path
+  // bind the FULL request path
   // (pathname + search), not just pathname, so query-param tampering
   // invalidates the signature. See `canonicalRequestPath` for details.
   return verifySignedRequest({
@@ -1162,7 +1161,7 @@ export function verifyHttpSignedRequestAfterBody(
  * Thrown by {@link enforceSignedRequestPostBody} when the signed-request
  * post-body HMAC verification fails. The HTTP layer maps this to 401.
  *
- * Bot review (PR #229 F2 follow-up): the previous revision of
+ * the previous revision of
  * {@link httpAuthGuard} pre-validated the signed-request HEADERS, stashed
  * `__dkgSignedAuth`, and returned `true`. No call site actually invoked
  * `verifyHttpSignedRequestAfterBody` — so any request with a fresh
@@ -1212,16 +1211,15 @@ export function enforceSignedRequestPostBody(
 /**
  * @internal — test/operator helper to wipe the replay cache. Useful
  * when an integration test has a legitimate reason to repeat a signed
- * request and needs a clean slate. Bot review PR #229 (post-round-5):
- * the coarse body-less fingerprint cache has been removed; only the
- * per-nonce replay cache remains to be cleared.
+ * request and needs a clean slate. Only the per-nonce replay cache
+ * is cleared.
  */
 export function _clearReplayCacheForTesting(): void {
   seenNonces.clear();
 }
 
 /**
- * PR #229 bot review round 23 (r23-1, cli/auth.ts): response-level
+ * response-level
  * fail-closed enforcement for body-carrying signed requests.
  *
  * When `httpAuthGuard` stashes `__dkgSignedAuth` for a signed request
@@ -1230,7 +1228,7 @@ export function _clearReplayCacheForTesting(): void {
  * the body (refresh / revoke / fire-and-forget endpoints) never
  * trigger the lazy check, so the request is accepted on the bearer
  * token alone — any `x-dkg-signature` (fresh, stale, or forged)
- * slips through. The original r19-1 fix only closed the explicit
+ * slips through. The original only closed the explicit
  * `Content-Length: 0` path; chunked empty bodies and non-chunked
  * bodies on non-reading routes remained exploitable.
  *
@@ -1247,7 +1245,7 @@ export function _clearReplayCacheForTesting(): void {
  * wrappers don't recurse when we ourselves call writeHead/end to
  * emit the 401 response.
  *
- * PR #229 bot review r31-7 follow-up. This function now ALSO drives
+ * This function now ALSO drives
  * the eager pre-handler drain. The bot pointed out that the
  * response-time guard alone is insufficient: it rewrites the
  * response to 401, but the handler has already run and any
@@ -1288,7 +1286,7 @@ function installSignedRequestResponseGuard(
 
   const origWriteHead = res.writeHead.bind(res) as typeof res.writeHead;
   const origEnd = res.end.bind(res) as typeof res.end;
-  // PR #229 bot review r3146563620 (auth.ts:1244): a handler can leak
+  // a handler can leak
   // response bytes through `res.write()` (which auto-flushes implicit
   // headers on first call) or via the explicit `res.flushHeaders()`,
   // before the deferred HMAC verification flips `pending.verified`.
@@ -1304,7 +1302,7 @@ function installSignedRequestResponseGuard(
   // payload into a socket we've already closed.
   let spent = false;
 
-  // PR #229 bot review round 25 (r25-2). Legitimate clients can send a
+  // Legitimate clients can send a
   // signed request with `Transfer-Encoding: chunked` + an immediately-
   // terminating body (`0\r\n\r\n`) — for example a refresh/revoke POST
   // whose semantics don't need a payload but whose framing still opts
@@ -1349,7 +1347,7 @@ function installSignedRequestResponseGuard(
     (req as IncomingMessage).on('data', onData);
   };
 
-  // PR #229 bot review (r3148998554 — auth.ts:1202). The previous
+  // auth.ts:1202). The previous
   // implementation relied solely on the request emitting `end`/`close`/
   // `error` to resolve the wait. Under chunked Transfer-Encoding a
   // misbehaving / malicious client can send an incomplete chunked body
@@ -1379,7 +1377,7 @@ function installSignedRequestResponseGuard(
   const waitForRequestEnd = (): Promise<{ timedOut: boolean }> =>
     new Promise((resolve) => {
       const reqAny = req as IncomingMessage & { complete?: boolean; readableEnded?: boolean };
-      // PR #229 bot review (r3148... — auth.ts:1205). The previous
+      // — auth.ts:1205). The previous
       // fast-path `(complete || readableEnded)` was UNSAFE.
       // `req.complete === true` only means Node's HTTP parser has
       // finished reading the body off the socket — buffered body
@@ -1409,7 +1407,7 @@ function installSignedRequestResponseGuard(
         if (settled) return;
         settled = true;
         if (timer) { clearTimeout(timer); timer = null; }
-        // PR #229 bot review (r3148998554 — auth.ts:1202). DO NOT
+        // auth.ts:1202). DO NOT
         // destroy the request stream here. The caller (`deferAndResolve`)
         // needs the socket alive for the `failClosed` 401 write to
         // reach the wire. The caller is responsible for tearing down
@@ -1428,7 +1426,7 @@ function installSignedRequestResponseGuard(
       req.resume();
     });
 
-  // PR #229 bot review (r3148998554). After failClosed has written the
+  // After failClosed has written the
   // 401, tear down the request stream so the socket is released. This
   // is what actually closes the slowloris hold — the response is
   // already on the wire by the time we do this.
@@ -1440,7 +1438,7 @@ function installSignedRequestResponseGuard(
     }
   };
 
-  // PR #229 bot review r3146563616 (auth.ts:1170): the prior check
+  // the prior check
   //   `req.complete || req.readableEnded` && `drainedBytes === 0`
   // was wrong — `req.complete` only means "Node finished parsing" and
   // `drainedBytes === 0` only means "we have not attached our drain
@@ -1508,7 +1506,7 @@ function installSignedRequestResponseGuard(
   // exact order the handler emitted them so the status arrives before
   // the payload, preserving the semantics the handler intended.
   //
-  // PR #229 r3146563620 follow-up: the queue now also holds `write`
+  // the queue now also holds `write`
   // chunks and `flushHeaders` markers — those used to bypass the guard
   // entirely and stream response bytes to the wire while the HMAC was
   // still unverified.
@@ -1540,7 +1538,7 @@ function installSignedRequestResponseGuard(
     deferred = true;
     void (async () => {
       try {
-        // PR #229 bot review r31-7 follow-up. When the eager drain
+        // When the eager drain
         // (kicked off synchronously inside `httpAuthGuard` for the
         // body-carrying signed-request branch) is in flight or has
         // already completed, await its outcome instead of attaching
@@ -1585,7 +1583,7 @@ function installSignedRequestResponseGuard(
         attachDrainListeners();
         const waitOutcome = await waitForRequestEnd();
         if (waitOutcome.timedOut) {
-          // PR #229 bot review (r3148998554 — auth.ts:1202). A signed
+          // auth.ts:1202). A signed
           // request whose body never finishes arriving (e.g. chunked
           // framing held open by a slowloris attacker) used to keep
           // the queued response and the socket pinned indefinitely.
@@ -1644,7 +1642,7 @@ function installSignedRequestResponseGuard(
     return res;
   }) as ServerResponse['end'];
 
-  // PR #229 r3146563620: also wrap `write` so streaming response bytes
+  // also wrap `write` so streaming response bytes
   // cannot be flushed to the wire ahead of HMAC verification. Node will
   // implicitly call `writeHead(200)` on the first `write()` call if the
   // handler did not call it explicitly, so wrapping `write` is what
@@ -1676,7 +1674,7 @@ function installSignedRequestResponseGuard(
     }) as () => void;
   }
 
-  // PR #229 bot review r31-7. Kick off the eager pre-handler drain
+  // Kick off the eager pre-handler drain
   // and HMAC verification. The returned Promise is what
   // `httpAuthGuard` returns (and what the daemon `await`s) — until
   // it resolves, the route handler does NOT run, so any

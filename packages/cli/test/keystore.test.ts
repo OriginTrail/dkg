@@ -12,7 +12,7 @@ beforeAll(() => {
   // per derivation which OOMs constrained CI workers running 4 vitest
   // shards in parallel. Use 2^15 — the *minimum production floor*
   // enforced by `decryptKeystore` (see CLI-1 in
-  // .test-audit/BUGS_FOUND.md). This keeps the test fast while still
+  // . test-audit/. This keeps the test fast while still
   // exercising a parameter set that the production-hardened loader
   // accepts (a previous value of 2^14 was below the floor and would
   // now correctly be refused as a weak keystore).
@@ -93,7 +93,7 @@ describe('decryptKeystore error handling', () => {
   });
 
   it('rejects keystore whose hex salt has odd length (silent-truncation guard)', async () => {
-    // PR #229 bugbot regression: a 33-character hex salt advertises
+    // a 33-character hex salt advertises
     // floor(33/2)=16 bytes (>= MIN_SALT_BYTES under integer division) so
     // the previous length check let it through, but `Buffer.from(s, 'hex')`
     // silently drops the dangling nibble and derives from a 16-byte salt

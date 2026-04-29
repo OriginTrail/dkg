@@ -1,7 +1,7 @@
 /**
  * packages/adapter-openclaw — extra QA coverage.
  *
- * Findings covered (see .test-audit/BUGS_FOUND.md):
+ * Findings covered (see .test-audit/
  *
  *   K-7  TEST-DEBT   `dkg-client.test.ts` only mocks globalThis.fetch — never
  *                    exercises a real socket, real timeouts, or real abort
@@ -21,7 +21,7 @@
  *   K-9  SPEC-GAP    `openclaw.plugin.json` `id` must equal `package.json`
  *                    `name` per K-9 / dup #35. Today they disagree — red test
  *                    is the bug evidence.
- *                    // PROD-BUG: plugin id ≠ package name — see BUGS_FOUND.md K-9
+ *                    // PROD-BUG: plugin id ≠ package name —
  *
  * Per QA policy: no production-code edits.
  */

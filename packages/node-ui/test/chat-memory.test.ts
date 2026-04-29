@@ -358,7 +358,7 @@ describe('ChatMemoryManager', () => {
   });
 
   // ---------------------------------------------------------------------
-  // PR #229 bot review (r31-5 — adapter-elizaos/src/actions.ts:1173).
+  // adapter-elizaos/src/actions.ts:1173).
   //
   // The headless branch in `persistChatTurnImpl` re-uses
   // `buildAssistantMessageQuads(...)` which emits
@@ -530,7 +530,7 @@ describe('ChatMemoryManager', () => {
   });
 
   // -----------------------------------------------------------------------
-  // PR #229 bot review (r31-6 — adapter-elizaos/src/index.ts:521).
+  // adapter-elizaos/src/index.ts:521).
   //
   // INVERSION CASE for the r31-5 dedupe. When the user-turn write embeds
   // a PROVISIONAL assistant text (e.g. partial-streaming completion the
@@ -735,7 +735,7 @@ describe('ChatMemoryManager', () => {
   });
 
   // -----------------------------------------------------------------------
-  // PR #229 bot review (r31-10 — node-ui/src/chat-memory.ts:971).
+  // node-ui/src/chat-memory.ts:971).
   //
   // The r31-5 dedupe is exclusively an ASSISTANT-side concern: when
   // BOTH `msg:agent:K` (canonical) AND `msg:agent-headless:K` exist
@@ -801,7 +801,7 @@ describe('ChatMemoryManager', () => {
   });
 
   it('[r31-10] r31-5 canonical-wins dedupe STILL FIRES when the canonical ASSISTANT message exists alongside the headless variant (anti-regression)', async () => {
-    // Anti-regression for r31-5: the r31-10 fix narrows the "what
+    // Anti-regression for r31-5: the narrows the "what
     // counts as canonical" predicate to ASSISTANT messages only —
     // it must not regress the original r31-5 dedupe, which requires
     // dropping the headless variant when a CANONICAL ASSISTANT for
@@ -853,10 +853,10 @@ describe('ChatMemoryManager', () => {
     // Belt-and-braces for the original r31-5 "no canonical
     // counterpart" case: a session with a single headless
     // assistant message must surface regardless of whether a
-    // sibling user message exists. Pre-r31-10 a sibling user
+    // sibling user message exists. a sibling user
     // message was enough to drop the headless reply; this case
     // (no user message) was never broken, but pinning it here
-    // ensures the r31-10 fix did not accidentally regress it.
+    // ensures the did not accidentally regress it.
     mockQuery.returns.push(
       { bindings: [] },
       {
@@ -968,7 +968,7 @@ describe('ChatMemoryManager', () => {
       { bindings: [{ c: '10' }] },
       { bindings: [{ c: '3' }] },
       { bindings: [{ c: '6' }] },
-      // PR #229 r31-12 (JNLL): new dedupe-pair correction query —
+      // new dedupe-pair correction query —
       // returns 0 here so the test asserts unchanged behaviour when
       // no canonical/headless duplicates exist.
       { bindings: [{ c: '0' }] },
@@ -1305,7 +1305,7 @@ describe('ChatMemoryManager', () => {
     expect(delta.mode).toBe('full_refresh_required');
     expect(delta.reason).toBe('missing_watermark');
     expect(delta.triples).toHaveLength(0);
-    // r31-11: bumps from 6 → 7 calls (added supersede-twin probe between
+    // bumps from 6 → 7 calls (added supersede-twin probe between
     // bare-literal lookup and latest-turn watermark probe).
     expect(mockQuery.calls).toHaveLength(7);
   });
@@ -1336,18 +1336,18 @@ describe('ChatMemoryManager', () => {
     expect(delta.mode).toBe('full_refresh_required');
     expect(delta.reason).toBe('watermark_mismatch');
     expect(delta.triples).toHaveLength(0);
-    // r31-11: bumps from 6 → 7 calls (added supersede-twin probe).
+    // bumps from 6 → 7 calls (added supersede-twin probe).
     expect(mockQuery.calls).toHaveLength(7);
   });
 
-  // PR #229 r30-8 review (chat-memory.ts:1011) — assistant-only "headless"
+  // assistant-only "headless"
   // turns are stamped under `urn:dkg:chat:headless-turn:<id>` by the writer,
   // not `urn:dkg:chat:turn:<id>`. Pre-fix, the reader hard-coded the
   // `turn:` prefix and could never resolve the headless URI by id, so every
   // headless turn round-tripped as `turn_not_found`. The fix joins on
   // `dkg:turnId` literal so BOTH URI shapes resolve uniformly.
   //
-  // PR #229 r31-3 review (adapter-elizaos/src/actions.ts:622) — the writer
+  // the writer
   // now stamps a DISTINCT `dkg:turnId = "headless:${turnKey}"` literal on
   // headless envelopes (so the canonical user-first turn id-space stays
   // collision-free for `LIMIT 1` lookups). The reader correspondingly
@@ -1433,7 +1433,7 @@ describe('ChatMemoryManager', () => {
     expect(constructQuery).toContain('urn:dkg:chat:headless-turn:t2');
     // Inverse: must NOT contain the synthesised `turn:` URI.
     expect(constructQuery).not.toContain('<urn:dkg:chat:turn:t2>');
-    // r31-3 invariant: the bare-literal lookup runs FIRST so canonical
+    // the bare-literal lookup runs FIRST so canonical
     // turns always win over headless when both exist. Verify the
     // 4th query (the fallback) was issued with the prefixed literal.
     const fallbackCall = mockQuery.calls[3] as unknown[];
@@ -1441,11 +1441,11 @@ describe('ChatMemoryManager', () => {
     expect(fallbackSparql).toContain('"headless:t2"');
   });
 
-  // PR #229 r31-4 review (chat-memory.ts:1091) — when the headless
+  // when the headless
   // fallback resolves the turn, downstream previous-turn and
   // turn-index queries MUST compare against the resolved
   // `dkg:turnId` literal (`"headless:t2"`), not the caller's bare
-  // `turnId` (`"t2"`). The pre-r31-4 code force-set
+  // `turnId` (`"t2"`). The code force-set
   // `currentTurnId = turnId` for downstream comparisons, which
   // joined headless turns against canonical literals — yielding
   // wrong watermarks (the "previous" search would never find sibling
@@ -1510,7 +1510,7 @@ describe('ChatMemoryManager', () => {
 
     const allSparql = mockQuery.calls.map((c) => String((c as unknown[])[0] ?? ''));
 
-    // r31-4: the previous-turn query (call index 5, SPARQL #6) MUST
+    // the previous-turn query (call index 5, SPARQL #6) MUST
     // compare `?previousTurnId < "headless:t2"`, NOT `< "t2"`.
     const previousTurnSparql = allSparql[5] ?? '';
     expect(previousTurnSparql).toContain('"headless:t2"');
@@ -1520,7 +1520,7 @@ describe('ChatMemoryManager', () => {
     // strict regex that matches a standalone `"t2"` token.)
     expect(/[^:]"t2"/.test(previousTurnSparql)).toBe(false);
 
-    // r31-4: the turn-index query (call index 6, SPARQL #7) MUST
+    // the turn-index query (call index 6, SPARQL #7) MUST
     // also compare against the resolved literal.
     const turnIndexSparql = allSparql[6] ?? '';
     expect(turnIndexSparql).toContain('"headless:t2"');
@@ -1554,7 +1554,7 @@ describe('ChatMemoryManager', () => {
           },
         ],
       },
-      // r31-11: supersede-twin probe (no superseding-headless variant exists).
+      // supersede-twin probe (no superseding-headless variant exists).
       { bindings: [] }, // 3.5
       {
         bindings: [
@@ -1575,7 +1575,7 @@ describe('ChatMemoryManager', () => {
     expect(delta.mode).toBe('delta');
 
     const allSparql = mockQuery.calls.map((c) => String((c as unknown[])[0] ?? ''));
-    // r31-11: previous-turn shifted from index [4] → [5] because the
+    // previous-turn shifted from index [4] → [5] because the
     // supersede-twin probe is now at index [3] (right after the bare-
     // literal lookup at index [2]).
     const previousTurnSparql = allSparql[5] ?? '';
@@ -1609,7 +1609,7 @@ describe('ChatMemoryManager', () => {
           },
         ],
       },
-      // r31-11: supersede-twin probe — no superseding-headless variant
+      // supersede-twin probe — no superseding-headless variant
       // exists, so the canonical (which won the bare lookup above) is kept.
       { bindings: [] },
       {
@@ -1635,7 +1635,7 @@ describe('ChatMemoryManager', () => {
     const constructQuery = String(constructQueryArgs[0] ?? '');
     expect(constructQuery).toContain('<urn:dkg:chat:turn:t2>');
     expect(constructQuery).not.toContain('urn:dkg:chat:headless-turn:t2');
-    // r31-11: the supersede-twin probe DOES carry the `"headless:t2"`
+    // the supersede-twin probe DOES carry the `"headless:t2"`
     // literal (it's looking for the superseding twin), but no OTHER
     // call should — the bare-literal lookup hit and the headless
     // FALLBACK was not issued because resolution was already set.
@@ -1644,7 +1644,7 @@ describe('ChatMemoryManager', () => {
     // carries the headless literal (the probe itself).
     const headlessLiteralCallCount = allSparql.filter((q) => q.includes('"headless:t2"')).length;
     expect(headlessLiteralCallCount).toBe(1);
-    // r31-11: bumps from 9 → 10 calls (added supersede-twin probe).
+    // bumps from 9 → 10 calls (added supersede-twin probe).
     expect(mockQuery.calls).toHaveLength(10);
   });
 
@@ -1729,7 +1729,7 @@ describe('ChatMemoryManager', () => {
   });
 
   // -------------------------------------------------------------------------
-  // PR #229 bot review (r31-11 — chat-memory.ts:1213).
+  // chat-memory.ts:1213).
   //
   // Bug IoNL: pre-fix the `getSessionGraphDelta()` bare-literal canonical
   // lookup ALWAYS won when a canonical user-first turn existed for the
@@ -1747,7 +1747,7 @@ describe('ChatMemoryManager', () => {
   // watermark logic still uses the canonical id (so subsequent deltas
   // chain correctly off the same id space).
   // -------------------------------------------------------------------------
-  it('r31-11 (IoNL): canonical hit + superseding headless twin → delta projects headless URI (matches getSession() arbitration)', async () => {
+  it('(IoNL): canonical hit + superseding headless twin → delta projects headless URI (matches getSession() arbitration)', async () => {
     mockQuery.returns.push(
       { bindings: [] },
       // session-message count probe.
@@ -1765,7 +1765,7 @@ describe('ChatMemoryManager', () => {
       // key exists AND its assistant message carries the supersede marker.
       // The fix MUST react to this and re-resolve to the headless URI.
       { bindings: [{ marker: '"true"' }] },
-      // r31-11: when the supersede marker is found, the impl re-resolves
+      // when the supersede marker is found, the impl re-resolves
       // by issuing a FRESH bare-literal lookup with `"headless:t2"` —
       // returns the HEADLESS turn URI.
       {
@@ -1831,12 +1831,12 @@ describe('ChatMemoryManager', () => {
     // Watermark logic stays on the canonical id — delta callers chain
     // off the same id space they passed in.
     expect(delta.turnId).toBe('t2');
-    // PR #229 r31-12 (JNLF): the CONSTRUCT projection MUST seed BOTH
+    // the CONSTRUCT projection MUST seed BOTH
     // turn URIs — canonical for the user side (so the real
     // `msg:user:K` text is pulled, NOT the synthetic `msg:user-stub:K`
     // the headless writer emits to satisfy the "both edges resolve"
     // contract) AND the headless turn URI for the fresh assistant
-    // reply provenance. Pre-r31-12 the test asserted the canonical
+    // reply provenance. the test asserted the canonical
     // turn URI was ABSENT, which was the actual bug — the user text
     // would be lost.
     const allSparql = mockQuery.calls.map((c) => String((c as unknown[])[0] ?? ''));
@@ -1851,7 +1851,7 @@ describe('ChatMemoryManager', () => {
     expect(text?.object).toBe('FRESH headless reply that supersedes stale canonical');
   });
 
-  it('r31-11 (IoNL): canonical hit + headless twin WITHOUT supersede marker → delta KEEPS the canonical URI (no over-fire)', async () => {
+  it('(IoNL): canonical hit + headless twin WITHOUT supersede marker → delta KEEPS the canonical URI (no over-fire)', async () => {
     mockQuery.returns.push(
       { bindings: [] },
       { bindings: [{ c: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' }] },
@@ -1897,7 +1897,7 @@ describe('ChatMemoryManager', () => {
     expect(constructQuery).not.toContain('<urn:dkg:chat:headless-turn:t2>');
   });
 
-  it('r31-11 (IoNL): supersede probe is SKIPPED when caller already passes a `headless:`-prefixed turnId (no self-arbitration)', async () => {
+  it('(IoNL): supersede probe is SKIPPED when caller already passes a `headless:`-prefixed turnId (no self-arbitration)', async () => {
     // Caller is asking for a headless-prefixed id directly. The
     // supersede check exists to FIX a canonical → headless re-resolve;
     // when we're already on the headless side there's nothing to
@@ -1948,7 +1948,7 @@ describe('ChatMemoryManager', () => {
     expect(supersedeProbeIssued).toBe(false);
   });
 
-  // PR #229 bot review (r31-12 — chat-memory.ts:1419, JNLF).
+  // chat-memory.ts:1419, JNLF).
   //
   // Bot's exact concern: "When effectiveTurnUri points at a
   // superseding headless turn, this query now resolves ?user from the
@@ -1958,7 +1958,7 @@ describe('ChatMemoryManager', () => {
   // actual text and can regress incremental consumers to a blank /
   // system-authored user node. Keep the canonical turn's user
   // message and only swap the assistant side."
-  it('r31-12 (JNLF): canonical hit + superseding headless twin → SELECT splits ?user from canonical, ?assistant from headless (real user text preserved)', async () => {
+  it('(JNLF): canonical hit + superseding headless twin → SELECT splits ?user from canonical, ?assistant from headless (real user text preserved)', async () => {
     mockQuery.returns.push(
       { bindings: [] },
       { bindings: [{ c: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' }] },
@@ -2029,7 +2029,7 @@ describe('ChatMemoryManager', () => {
 
     // Pin the SPLIT shape directly: the SELECT must address the user
     // edge against the CANONICAL turn URI and the assistant edge
-    // against the HEADLESS turn URI. Pre-r31-12 the same effective
+    // against the HEADLESS turn URI. the same effective
     // (headless) URI was used for BOTH edges, which is the JNLF bug.
     const allSparql = mockQuery.calls.map((c) => String((c as unknown[])[0] ?? ''));
     const turnMessagesSelect = allSparql.find((q) =>
@@ -2070,7 +2070,7 @@ describe('ChatMemoryManager', () => {
     expect(assistantText?.object).toBe('Headless reply that supersedes canonical.');
   });
 
-  it('r31-12 (JNLF): NO superseding headless twin → SELECT keeps single canonical URI for both ?user and ?assistant (no over-split)', async () => {
+  it('(JNLF): NO superseding headless twin → SELECT keeps single canonical URI for both ?user and ?assistant (no over-split)', async () => {
     mockQuery.returns.push(
       { bindings: [] },
       { bindings: [{ c: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' }] },
@@ -2131,7 +2131,7 @@ describe('ChatMemoryManager', () => {
   });
 });
 
-// PR #229 bot review (r31-12 — chat-memory.ts:1003, JNLL).
+// chat-memory.ts:1003, JNLL).
 //
 // Bot's exact concern: "This arbitration only fixes getSession().
 // getRecentChats() and getStats() still read raw schema:isPartOf /
@@ -2188,8 +2188,8 @@ describe('ChatMemoryManager r31-12 (JNLL): supersede dedupe helper applied to AL
         ],
       },
       // Messages probe — three rows: user, canonical agent, headless
-      // agent (same turn key K). Pre-r31-12 the recents panel rendered
-      // both agent replies; post-r31-12 the headless variant is
+      // agent (same turn key K). the recents panel rendered
+      // both agent replies; the headless variant is
       // suppressed by the shared helper.
       {
         bindings: [
@@ -2330,7 +2330,7 @@ describe('ChatMemoryManager r31-12 (JNLL): supersede dedupe helper applied to AL
     expect(msgSelect).toContain('?headless');
     expect(msgSelect).toContain('?supersedes');
     // Optionals — backwards compat for legacy messages without these
-    // predicates (pre-r31-3 sessions). If we used non-optional joins
+    // predicates (sessions). If we used non-optional joins
     // the query would silently drop legacy chats from recents.
     expect(msgSelect).toContain('OPTIONAL { ?m <http://dkg.io/ontology/turnId> ?turnId }');
     expect(msgSelect).toContain('OPTIONAL { ?m <http://dkg.io/ontology/headlessAssistantMessage> ?headless }');

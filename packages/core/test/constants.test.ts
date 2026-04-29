@@ -133,7 +133,7 @@ describe('validateContextGraphId', () => {
       });
     }
 
-    // PR #229 r3146360283 follow-up: legitimate URI/DID-shaped IDs
+    // legitimate URI/DID-shaped IDs
     // that contain `..` INSIDE one segment are NOT traversal and
     // must validate. The pre-fix substring check broke them.
     for (const good of [

@@ -1,7 +1,7 @@
 /**
  * Signed-request auth & token rotation tests.
  *
- * Covers audit findings from `.test-audit/BUGS_FOUND.md` → `packages/cli (BURA)`:
+ * Covers audit findings from `.test-audit/
  *   - CLI-10 (HIGH) — signed-request auth (spec §18) is completely unimplemented
  *     in `packages/cli/src/auth.ts`. The module only exposes Bearer-token
  *     helpers; there is no signature/nonce verification surface. Spec §18
@@ -84,13 +84,13 @@ describe('CLI-10 — signed-request auth (spec §18)', () => {
       (name) => typeof (authModule as any)[name] === 'function',
     );
 
-    // RED ON PURPOSE — see BUGS_FOUND.md CLI-10. Remove this comment block
+    // RED ON PURPOSE — Remove this comment block
     // and flip the assertion once a signed-request verifier ships.
     expect(found).not.toEqual([]); // PROD-BUG: spec §18 verifier missing
   });
 
   it('rejects a replayed nonce when the client opts into the signed-request scheme', async () => {
-    // Bot review PR #229 (post-round-5): the previous revision of this
+    // the previous revision of this
     // test pinned the coarse `(token, method, path, content-length)`
     // body-less fingerprint cache — which was itself removed because it
     // rejected every idempotent body-less retry as a spurious replay.
@@ -128,7 +128,7 @@ describe('CLI-10 — signed-request auth (spec §18)', () => {
     }
   });
 
-  it('body-less Bearer-only retries are NOT rejected as replays (bot review PR #229 regression fix)', async () => {
+  it('body-less Bearer-only retries are NOT rejected as replays', async () => {
     // Companion regression: the removed coarse fingerprint cache used
     // to 401-reject a second identical body-less POST inside a 60 s
     // window, even for legitimate idempotent retries (concrete
@@ -218,7 +218,7 @@ describe('CLI-11 — token rotation & revocation', () => {
       (name) => typeof (authModule as any)[name] === 'function',
     );
 
-    // RED ON PURPOSE — see BUGS_FOUND.md CLI-11. The CLI command exists
+    // RED ON PURPOSE — The CLI command exists
     // but does not expose any in-process rotation surface the daemon can
     // call to hot-reload its token set.
     expect(found).not.toEqual([]); // PROD-BUG: no in-process rotation API

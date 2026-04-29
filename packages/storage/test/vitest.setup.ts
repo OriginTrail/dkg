@@ -1,7 +1,7 @@
 /**
  * Global vitest setup for `@origintrail-official/dkg-storage`.
  *
- * PR #229 bot review round 12 (r12-2): `PrivateContentStore` now
+ * `PrivateContentStore` now
  * generates and persists a per-node 32-byte random key at
  * `DKG_PRIVATE_STORE_KEY_FILE` (or `<DKG_HOME>/private-store.key`, or
  * `<homedir()>/.dkg/private-store.key`). Without this setup, tests

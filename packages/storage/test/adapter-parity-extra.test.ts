@@ -1,7 +1,7 @@
 /**
  * ST-1 — adapter-parity misleading-name evidence.
  *
- * See .test-audit/BUGS_FOUND.md "packages/storage" ST-1:
+ * See .test-audit/
  *
  *   `adapter-parity.test.ts` looks like it verifies that OxigraphStore
  *   and BlazegraphStore agree on count / delete semantics, but the
@@ -35,7 +35,7 @@ import { OxigraphStore, BlazegraphStore, type Quad } from '../src/index.js';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const EXISTING_PARITY = join(HERE, 'adapter-parity.test.ts');
 
-// PR #229 bot review (r31-10 — ci.yml:256). The storage CI lane
+// ci.yml:256). The storage CI lane
 // runs every test file in parallel by default, and `storage.test.ts`
 // issues `DROP ALL` against `BLAZEGRAPH_URL` before EVERY Blazegraph
 // conformance test. If both files target the same namespace, the

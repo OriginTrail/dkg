@@ -112,7 +112,7 @@ describe('workspace-config — parseWorkspaceConfig (schema + defaults)', () => 
   });
 
   // ───────────────────────────────────────────────────────────────────
-  // PR #229 bot review (r31-6, workspace-config.ts:55). The pre-fix
+  // The pre-fix
   // schema required `node:` to be a bare STRING, but the canonical
   // `.dkg/config.yaml` shape (see `packages/mcp-dkg/config.yaml.example`
   // and `packages/mcp-dkg/src/config.ts`) declares `node:` as an OBJECT
@@ -124,12 +124,12 @@ describe('workspace-config — parseWorkspaceConfig (schema + defaults)', () => 
   // branching), and the canonical object form preserves `tokenFile` /
   // `token` so downstream code can read them.
   // ───────────────────────────────────────────────────────────────────
-  it('r31-6: normalises bare-string `node` form to `{ api: <string> }`', () => {
+  it('normalises bare-string `node` form to `{ api: <string> }`', () => {
     const out = parseWorkspaceConfig({ contextGraph: 'cg', node: 'http://127.0.0.1:9201' });
     expect(out.node).toEqual({ api: 'http://127.0.0.1:9201' });
   });
 
-  it('r31-6: accepts canonical object `node:` shape with `api` + `tokenFile`', () => {
+  it('accepts canonical object `node:` shape with `api` + `tokenFile`', () => {
     const out = parseWorkspaceConfig({
       contextGraph: 'dkg-code-project',
       node: {
@@ -143,7 +143,7 @@ describe('workspace-config — parseWorkspaceConfig (schema + defaults)', () => 
     });
   });
 
-  it('r31-6: preserves explicit `token` literal on object `node:` shape', () => {
+  it('preserves explicit `token` literal on object `node:` shape', () => {
     const out = parseWorkspaceConfig({
       contextGraph: 'cg',
       node: { api: 'http://n', token: 'literal-token' },
@@ -151,21 +151,21 @@ describe('workspace-config — parseWorkspaceConfig (schema + defaults)', () => 
     expect(out.node).toEqual({ api: 'http://n', token: 'literal-token' });
   });
 
-  it('r31-6: rejects object `node:` missing `api`', () => {
+  it('rejects object `node:` missing `api`', () => {
     expect(() => parseWorkspaceConfig({
       contextGraph: 'cg',
       node: { tokenFile: '../auth.token' },
     })).toThrow(/`node\.api` is required/);
   });
 
-  it('r31-6: rejects object `node:` with empty `api`', () => {
+  it('rejects object `node:` with empty `api`', () => {
     expect(() => parseWorkspaceConfig({
       contextGraph: 'cg',
       node: { api: '' },
     })).toThrow(/`node\.api` is required/);
   });
 
-  it('r31-6: drops empty `tokenFile` / `token` strings from the normalised object (no spurious keys)', () => {
+  it('drops empty `tokenFile` / `token` strings from the normalised object (no spurious keys)', () => {
     const out = parseWorkspaceConfig({
       contextGraph: 'cg',
       node: { api: 'http://n', tokenFile: '', token: '' },
@@ -212,7 +212,7 @@ dkg:
     const cfg = parseAgentsMdFrontmatter(md);
     expect(cfg).toEqual({
       contextGraph: 'my-graph',
-      // r31-6: bare-string `node:` is normalised to `{ api: <string> }` so
+      // bare-string `node:` is normalised to `{ api: <string> }` so
       // every consumer can read `cfg.node.api` without branching.
       node: { api: 'node-a' },
       autoShare: true,
@@ -221,7 +221,7 @@ dkg:
   });
 
   it('throws a descriptive error when neither frontmatter nor a fenced `dkg-config` block is present', () => {
-    // r21-4: the message must list BOTH supported carriers so an
+    // the message must list BOTH supported carriers so an
     // adopter who tried (e.g.) `dkg_config` (underscore) instead of
     // `dkg-config` (hyphen) sees the canonical fence info-string in
     // the diagnostic rather than guessing.
@@ -229,17 +229,17 @@ dkg:
     expect(() => parseAgentsMdFrontmatter('# No frontmatter here')).toThrow(/dkg-config/);
   });
 
-  // Bot review (PR #229 r22-5, workspace-config.ts:125): the earlier
+  // the earlier
   // "frontmatter-present ⇒ must have `dkg`" contract silently blocked
   // the documented fenced-block fallback for any AGENTS.md that uses
   // frontmatter for OTHER tooling (tags, owner, prompt metadata, …).
-  // Post-r22-5 the parser falls through to the fence; we only throw
+  // the parser falls through to the fence; we only throw
   // when NEITHER carrier produced a config. Pin BOTH halves:
   //   a) frontmatter-without-`dkg` + NO fence ⇒ descriptive error that
   //      names both expected carriers (so an adopter sees they need
   //      either the frontmatter key or the fence info-string).
   //   b) frontmatter-without-`dkg` + a valid fence ⇒ fence wins.
-  it('r22-5: frontmatter lacking `dkg:` AND no fenced block → descriptive error naming both carriers', () => {
+  it('frontmatter lacking `dkg:` AND no fenced block → descriptive error naming both carriers', () => {
     const md = `---
 title: just a title
 owner: platform-team
@@ -250,12 +250,12 @@ body
     expect(() => parseAgentsMdFrontmatter(md)).toThrow(/dkg-config/);
   });
 
-  it('r22-5: frontmatter lacking `dkg:` FALLS THROUGH to a fenced `dkg-config` block', () => {
+  it('frontmatter lacking `dkg:` FALLS THROUGH to a fenced `dkg-config` block', () => {
     // Canonical regression for the r22-5 finding: the most common
     // real-world AGENTS.md shape keeps unrelated frontmatter (tags,
     // slug, prompt version, …) AND puts the DKG config in a fence.
-    // Pre-r22-5 the frontmatter short-circuit threw before the fence
-    // parser ran; post-r22-5 the fence body round-trips.
+    // the frontmatter short-circuit threw before the fence
+    // parser ran; the fence body round-trips.
     const md = [
       '---',
       'title: Project Agents',
@@ -273,12 +273,12 @@ body
     ].join('\n');
     const cfg = parseAgentsMdFrontmatter(md);
     expect(cfg.contextGraph).toBe('from-fence');
-    // r31-6: bare-string `node:` normalises to `{ api: <string> }`.
+    // bare-string `node:` normalises to `{ api: <string> }`.
     expect(cfg.node).toEqual({ api: 'n' });
   });
 
   // -------------------------------------------------------------------
-  // PR #229 round 21 — r21-4: plain-Markdown AGENTS.md MUST also be a
+  // plain-Markdown AGENTS.md MUST also be a
   // valid carrier for the workspace config (the canonical AGENTS.md
   // convention used by Cursor / Continue / Codex CLI is plain MD with
   // no YAML frontmatter — the spec's frontmatter-only third tier is
@@ -286,7 +286,7 @@ body
   // ```dkg-config```  block (with optional `yaml`/`yml`/`json`
   // language hint) anywhere in the document.
   // -------------------------------------------------------------------
-  it('r21-4: parses a plain-MD `dkg-config` fenced block with no frontmatter (raw fence)', () => {
+  it('parses a plain-MD `dkg-config` fenced block with no frontmatter (raw fence)', () => {
     const md = [
       '# Project Agents',
       '',
@@ -304,14 +304,14 @@ body
     const cfg = parseAgentsMdFrontmatter(md);
     expect(cfg).toEqual({
       contextGraph: 'my-graph',
-      // r31-6: bare-string `node:` normalises to `{ api: <string> }`.
+      // bare-string `node:` normalises to `{ api: <string> }`.
       node: { api: 'http://127.0.0.1:9201' },
       autoShare: false,
       extractionPolicy: 'structural-only',
     });
   });
 
-  it('r21-4: accepts the `yaml dkg-config` info-string variant for editor syntax-highlighting', () => {
+  it('accepts the `yaml dkg-config` info-string variant for editor syntax-highlighting', () => {
     const md = [
       '# Body',
       '',
@@ -323,7 +323,7 @@ body
     expect(parseAgentsMdFrontmatter(md).contextGraph).toBe('g');
   });
 
-  it('r21-4: accepts the `json dkg-config` info-string variant', () => {
+  it('accepts the `json dkg-config` info-string variant', () => {
     const md = [
       '# Body',
       '',
@@ -331,11 +331,11 @@ body
       '{ "contextGraph": "g", "node": "n" }',
       '```',
     ].join('\n');
-    // r31-6: bare-string `node:` normalises to `{ api: <string> }`.
+    // bare-string `node:` normalises to `{ api: <string> }`.
     expect(parseAgentsMdFrontmatter(md).node).toEqual({ api: 'n' });
   });
 
-  it('r21-4: frontmatter takes priority over a fenced block when both are present', () => {
+  it('frontmatter takes priority over a fenced block when both are present', () => {
     // Defence-in-depth: if a project somehow ends up with both
     // carriers, the canonical spec-§22 frontmatter wins so a single
     // pass of the parser produces a deterministic, predictable
@@ -355,7 +355,7 @@ body
     expect(parseAgentsMdFrontmatter(md).contextGraph).toBe('from-frontmatter');
   });
 
-  it('r21-4: surfaces a descriptive error when the fenced block contains malformed YAML', () => {
+  it('surfaces a descriptive error when the fenced block contains malformed YAML', () => {
     const md = [
       '# Body',
       '',
@@ -366,7 +366,7 @@ body
     expect(() => parseAgentsMdFrontmatter(md)).toThrow(/dkg-config.*did not parse/i);
   });
 
-  it('r21-4: ignores fenced blocks with a non-`dkg-config` info-string (no false positives on yaml snippets in docs)', () => {
+  it('ignores fenced blocks with a non-`dkg-config` info-string (no false positives on yaml snippets in docs)', () => {
     const md = [
       '# Body',
       '',
@@ -437,14 +437,14 @@ describe('workspace-config — loadWorkspaceConfig priority order (spec §22)', 
     expect(() => loadWorkspaceConfig(dir)).toThrow(/root must be an object/);
   });
 
-  it('r21-4: falls back to a plain-MD AGENTS.md with a fenced `dkg-config` block (no frontmatter)', () => {
-    // PR #229 round 21 (r21-4): the previous frontmatter-only third
+  it('falls back to a plain-MD AGENTS.md with a fenced `dkg-config` block (no frontmatter)', () => {
+    // the previous frontmatter-only third
     // tier was effectively dead in workspaces whose AGENTS.md is
     // plain Markdown (the canonical AGENTS.md convention). This
     // pin walks the full priority chain end-to-end: no
     // `.dkg/config.yaml`, no `.dkg/config.json`, AGENTS.md present
     // but with NO frontmatter — only a fenced `dkg-config` block.
-    // Pre-r21-4 this threw `missing YAML frontmatter`. Post-r21-4
+    // this threw `missing YAML frontmatter`. Post-r21-4
     // it must round-trip the fence body through `parseWorkspaceConfig`.
     writeFileSync(join(dir, 'AGENTS.md'), [
       '# Project Agents',
@@ -459,20 +459,20 @@ describe('workspace-config — loadWorkspaceConfig priority order (spec §22)', 
     ].join('\n'));
     const loaded = loadWorkspaceConfig(dir);
     expect(loaded.cfg.contextGraph).toBe('plain-md-graph');
-    // r31-6: bare-string `node:` normalises to `{ api: <string> }`.
+    // bare-string `node:` normalises to `{ api: <string> }`.
     expect(loaded.cfg.node).toEqual({ api: 'http://127.0.0.1:9201' });
     expect(loaded.source.endsWith('AGENTS.md')).toBe(true);
   });
 
   // ───────────────────────────────────────────────────────────────────
-  // PR #229 bot review (r31-6, workspace-config.ts:55). End-to-end pin
+  // End-to-end pin
   // for the canonical `.dkg/config.yaml` shape (the actual file
   // `mcp-dkg/config.yaml.example` ships): `node:` is an OBJECT, not a
   // bare string. Pre-r31-6 `loadWorkspaceConfig()` threw on this shape
   // and the loader was unusable. This regression locks the loader's
   // ability to round-trip the canonical file without any error.
   // ───────────────────────────────────────────────────────────────────
-  it('r31-6: loads the canonical `.dkg/config.yaml` shape (node-as-object) without throwing', () => {
+  it('loads the canonical `.dkg/config.yaml` shape (node-as-object) without throwing', () => {
     mkdirSync(join(dir, '.dkg'));
     writeFileSync(join(dir, '.dkg', 'config.yaml'), [
       'contextGraph: dkg-code-project',

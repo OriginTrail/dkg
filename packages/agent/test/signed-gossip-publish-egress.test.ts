@@ -1,5 +1,5 @@
 /**
- * PR #229 bot review round 16 (r16-1): signedGossipPublish MUST NOT
+ * signedGossipPublish MUST NOT
  * fall back to raw unsigned bytes when no wallet is available. Strict
  * peers (r14-1 default) would drop those, silently stopping propagation.
  *
@@ -92,7 +92,7 @@ describe('DKGAgent#signedGossipPublish — r16-1 egress invariant', () => {
   });
 
   // ---------------------------------------------------------------------
-  // PR #229 round 22 — r22-6: the wallet-unavailable error MUST be a
+  // the wallet-unavailable error MUST be a
   // *typed* `SignedGossipSigningError` so upstream `catch { log.warn(
   // 'no peers subscribed') }` blocks can discriminate "I cannot sign"
   // (a real correctness failure on strict-default meshes) from "libp2p
@@ -100,7 +100,7 @@ describe('DKGAgent#signedGossipPublish — r16-1 egress invariant', () => {
   // cases surfaced as a plain `Error` and got collapsed into the
   // misleading "no peers subscribed" path.
   // ---------------------------------------------------------------------
-  it('r22-6: wallet-unavailable throws a typed SignedGossipSigningError (name + instanceof)', async () => {
+  it('wallet-unavailable throws a typed SignedGossipSigningError (name + instanceof)', async () => {
     const { agent } = makeFakeAgent({ wallet: undefined });
     try {
       await agent.signedGossipPublish('topic-sg', 'PUBLISH_REQUEST', 'cg-sg', new Uint8Array([1]));
@@ -111,7 +111,7 @@ describe('DKGAgent#signedGossipPublish — r16-1 egress invariant', () => {
     }
   });
 
-  it('r22-6: transport (gossip.publish) errors pass through as the underlying Error, NOT SignedGossipSigningError', async () => {
+  it('transport (gossip.publish) errors pass through as the underlying Error, NOT SignedGossipSigningError', async () => {
     // A functional wallet is present; the envelope builds fine; only
     // the outbound libp2p publish fails. That error must remain the
     // native `Error` instance so the call-site catch can handle it as
@@ -127,7 +127,7 @@ describe('DKGAgent#signedGossipPublish — r16-1 egress invariant', () => {
     ).rejects.toBe(transportErr);
   });
 
-  it('r22-6: envelope-build failures are wrapped in SignedGossipSigningError (preserves `cause`)', async () => {
+  it('envelope-build failures are wrapped in SignedGossipSigningError (preserves `cause`)', async () => {
     // Simulate a wallet missing the signing API expected by
     // `buildSignedGossipEnvelope` — the adapter must wrap the thrown
     // TypeError in a SignedGossipSigningError so downstream catches

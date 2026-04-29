@@ -236,7 +236,7 @@ describe('A-15: PROD-BUG — DKGAgent publishes gossip WITHOUT signing', () => {
   //   }))
   // and never wraps the message in a `GossipEnvelope`. Receivers therefore
   // cannot authenticate the publisher or detect replay. See
-  // BUGS_FOUND.md A-15.
+  // .
   //
   // Both tests in this block are expected to be RED against the current
   // implementation. They go GREEN once the agent imports
@@ -257,7 +257,7 @@ describe('A-15: PROD-BUG — DKGAgent publishes gossip WITHOUT signing', () => {
     }
     expect(
       importsEnvelope && importsSigningPayload,
-      'packages/agent/src has no GossipEnvelope / computeGossipSigningPayload usage — unsigned gossip (BUGS_FOUND.md A-15)',
+      'packages/agent/src has no GossipEnvelope / computeGossipSigningPayload usage — unsigned gossip',
     ).toBe(true);
   });
 
@@ -274,13 +274,13 @@ describe('A-15: PROD-BUG — DKGAgent publishes gossip WITHOUT signing', () => {
     }
     expect(
       offenders.length,
-      `Empty publisher signatures found (BUGS_FOUND.md A-15):\n${JSON.stringify(offenders, null, 2)}`,
+      `Empty publisher signatures found:\n${JSON.stringify(offenders, null, 2)}`,
     ).toBe(0);
   });
 });
 
 // ---------------------------------------------------------------------------
-// PR #229 bot review r3131820480 (signed-gossip.ts:136) — parsed-but-invalid
+// parsed-but-invalid
 // envelopes MUST NOT be downgraded to `'raw'`. With `strictGossipEnvelope`
 // off (rolling upgrade), the dispatcher accepts `'raw'` as legacy unsigned
 // gossip; the original `classifyGossipBytes` branch returned `'raw'` for any

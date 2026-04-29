@@ -71,7 +71,7 @@ describe('Staking Conviction (EVMChainAdapter)', () => {
   });
 
   // ─────────────────────────────────────────────────────────────────────
-  // PR #229 bot review (r3147347... — evm-adapter.ts:1809).
+  // — evm-adapter.ts:1809).
   // Pre-fix: a `resolveContract('StakingV10')` failure silently set
   // `stakingV10 = undefined`, which made the allowance update fall
   // through and the adapter went straight into
@@ -82,7 +82,7 @@ describe('Staking Conviction (EVMChainAdapter)', () => {
   // as a chain revert instead of a clear adapter error.
   // The fix throws fast when `amount > 0n && stakingV10 === undefined`.
   // ─────────────────────────────────────────────────────────────────────
-  it('r30-3: stakeWithLock fails fast with a clear adapter error when StakingV10 is unavailable and amount > 0', async () => {
+  it('stakeWithLock fails fast with a clear adapter error when StakingV10 is unavailable and amount > 0', async () => {
     const { coreProfileId } = getSharedContext();
     const adapter = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     // Init the adapter once so internal contract resolution is set up;
@@ -107,7 +107,7 @@ describe('Staking Conviction (EVMChainAdapter)', () => {
     }
   });
 
-  it('r30-3: stakeWithLock with amount === 0n still works when StakingV10 is unavailable (no allowance needed)', async () => {
+  it('stakeWithLock with amount === 0n still works when StakingV10 is unavailable (no allowance needed)', async () => {
     const { coreProfileId } = getSharedContext();
     const adapter = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     await (adapter as any).init();

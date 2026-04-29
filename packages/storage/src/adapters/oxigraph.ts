@@ -24,9 +24,9 @@ export class OxigraphStore implements TripleStore {
    * Side-table preserving the ORIGINAL `^^<datatype>` of typed numeric
    * literals through round-trips. Oxigraph canonicalizes numeric
    * subtypes (e.g. `xsd:long` → `xsd:integer`), which loses the
-   * publisher's intent and breaks BUGS_FOUND.md#ST-12.
+   * publisher's intent and breaks.
    *
-   * Bot review M1: previously keyed by the lexical value alone, which
+   * previously keyed by the lexical value alone, which
    * corrupted results whenever two quads in the store used the same
    * lexeme with different declared types (e.g. `"1"^^xsd:int` and
    * `"1"^^xsd:positiveInteger`). The later insert clobbered the
@@ -37,7 +37,7 @@ export class OxigraphStore implements TripleStore {
    * Collisions only happen when the same position is written twice
    * with different declared types, which is a genuine overwrite.
    *
-   * PR #229 bot review r31-8 (oxigraph.ts:48): even with the
+   * even with the
    * per-position key, two quads at the same `(s, p, value, g)` with
    * DIFFERENT declared subtypes (e.g. `"1"^^xsd:int` and
    * `"1"^^xsd:positiveInteger`) collapse to the SAME single
@@ -61,7 +61,6 @@ export class OxigraphStore implements TripleStore {
    * {@link originalNumericDatatype} so we don't leak the
    * latest-write-wins value through `restoreOriginalDatatype`).
    * Persisted alongside the dump so the conflict survives restarts;
-   * bot review r31-8 (oxigraph.ts:48).
    */
   private conflictedNumericDatatypeKeys = new Set<string>();
 
@@ -74,7 +73,7 @@ export class OxigraphStore implements TripleStore {
    * entries for the same lexeme would otherwise resolve to a single
    * subtype. Without this guard, a SELECT row hit by the conflicted
    * position would silently inherit a sibling position's dtype.
-   * Persisted alongside the dump; bot review r31-8 (oxigraph.ts:48).
+   * Persisted alongside the dump.
    */
   private conflictedNumericDatatypeLexemes = new Set<string>();
 
@@ -98,7 +97,7 @@ export class OxigraphStore implements TripleStore {
    * caller treats them as "lexeme unknown — keep the marker
    * pessimistically" instead of falsely releasing it.
    *
-   * PR #229 bot review (r31-13 — oxigraph.ts:169, KK3b).
+   * oxigraph.ts:169, KK3b).
    */
   private static parseLexemeFromNumericDatatypeKey(key: string): string | undefined {
     const parts = key.split('\u0000');
@@ -118,7 +117,7 @@ export class OxigraphStore implements TripleStore {
    * permanently downgrades unrelated future writes for the same
    * lexeme to Oxigraph's canonical `xsd:integer`.
    *
-   * PR #229 bot review (r31-13 — oxigraph.ts:169, KK3b). Pre-r31-13
+   * oxigraph.ts:169, KK3b). Pre-r31-13
    * the lexeme marker was kept "pessimistically" forever — once
    * `"1"` had a transient conflict at any position, EVERY future
    * SELECT/CONSTRUCT of any `"1"^^xsd:long` literal across the
@@ -167,7 +166,7 @@ export class OxigraphStore implements TripleStore {
    * `xsd:byte` and friends into `xsd:integer`). The declared type is
    * keyed per-quad (see {@link originalNumericDatatype}) so two quads
    * sharing a lexeme but declaring different subtypes each retain
-   * their own declared type on read-back. BUGS_FOUND.md#ST-12.
+   * their own declared type on read-back..
    */
   private rememberNumericDatatype(q: DKGQuad): void {
     const term = q.object;
@@ -178,7 +177,7 @@ export class OxigraphStore implements TripleStore {
     const dtype = m[2];
     if (!isNumericSubtype(dtype)) return;
     const key = OxigraphStore.numericDatatypeKey(q.subject, q.predicate, value, q.graph);
-    // PR #229 bot review r31-8 (oxigraph.ts:48). Per-position conflict
+    // Per-position conflict
     // detection: if this key is already known-conflicted, no further
     // writes can disambiguate it. If the key already has a different
     // declared subtype recorded, mark it (and the lexeme) as conflicted
@@ -200,11 +199,11 @@ export class OxigraphStore implements TripleStore {
   }
 
   /**
-   * Drop the numeric-subtype side-table entry for a quad that was just
-   * removed from the store. PR #229 bot review round 7 (oxigraph.ts:164)
-   * — before this, `delete()` / `deleteByPattern()` / `dropGraph()` /
-   * `deleteBySubjectPrefix()` silently left stale entries behind, so
-   * `restoreOriginalDatatypeForSelectBinding()` could see phantom
+   * Drop the numeric-subtype side-table entry for a quad that was
+   * just removed from the store. Before this guard,
+   * `delete()` / `deleteByPattern()` / `dropGraph()` /
+   * `deleteBySubjectPrefix()` silently left stale entries behind,
+   * so `restoreOriginalDatatypeForSelectBinding()` could see phantom
    * subtype conflicts from data that no longer existed (and the
    * conflicts were persisted across restarts via the sidecar).
    */
@@ -218,17 +217,17 @@ export class OxigraphStore implements TripleStore {
     if (!isNumericSubtype(dtype)) return;
     const key = OxigraphStore.numericDatatypeKey(q.subject, q.predicate, value, q.graph);
     this.originalNumericDatatype.delete(key);
-    // PR #229 bot review r31-8 (oxigraph.ts:48). When the conflicting
+    // When the conflicting
     // canonical literal at this position is deleted, the conflict
     // marker becomes meaningless — Oxigraph collapsed both writes
     // into the single canonical literal that the caller is now
     // removing, so there is nothing left to restore-or-refuse for
     // this key. Drop the key marker.
     //
-    // PR #229 bot review (r31-13 — oxigraph.ts:169, KK3b). The
+    // oxigraph.ts:169, KK3b). The
     // companion lexeme marker MUST also be re-evaluated against
     // ground truth: if no remaining conflict-key still references
-    // this lexeme, the lexeme marker is dead too. Pre-r31-13 the
+    // this lexeme, the lexeme marker is dead too. the
     // lexeme marker was kept "pessimistically" forever, which made
     // subtype loss permanent for that literal — every later SELECT
     // of an otherwise unambiguous `"V"^^...` would fall back to
@@ -257,14 +256,14 @@ export class OxigraphStore implements TripleStore {
       if (subjectPrefix && !k.startsWith(subjectPrefix)) continue;
       this.originalNumericDatatype.delete(k);
     }
-    // PR #229 bot review r31-8 (oxigraph.ts:48). The conflict-key
+    // The conflict-key
     // markers (kept on a parallel Set keyed by the same `s\0p\0v\0g`
     // shape) must be evicted in lockstep; otherwise dropping the
     // graph would leave dangling conflict markers that block
     // unrelated future writes from the same key shape (e.g. a fresh
     // graph re-using a UAL pattern).
     //
-    // PR #229 bot review (r31-13 — oxigraph.ts:169, KK3b). Collect
+    // oxigraph.ts:169, KK3b). Collect
     // every lexeme that we drop a key for, then re-evaluate the
     // companion lexeme markers from ground truth. Without this, a
     // `dropGraph()` would erase the per-key conflict markers but
@@ -293,14 +292,14 @@ export class OxigraphStore implements TripleStore {
    * read the file back the original declared type is gone. Writing it
    * alongside the dump (and reading it on {@link hydrateSync}) is the
    * only way to keep the side-table useful in `oxigraph-persistent`
-   * across restarts (bot review PR #229 M-follow-up).
+   * across restarts.
    */
   private static numericDatatypeSidecarPath(persistPath: string): string {
     return `${persistPath}.numeric-datatypes.json`;
   }
 
   private hydrateSync(filePath: string): void {
-    // PR #229 bot review (r3146902138, oxigraph.ts:157). Track whether
+    // Track whether
     // the primary N-Quads dump was actually hydrated before deciding
     // whether to read the sidecar. Pre-fix the sidecar was loaded
     // unconditionally — if the dump file was missing, empty, or
@@ -328,7 +327,7 @@ export class OxigraphStore implements TripleStore {
       return;
     }
     if (!dumpLoaded) return;
-    // Bot review (PR #229 M-follow-up): `originalNumericDatatype` used
+    // `originalNumericDatatype` used
     // to only be populated by live `insert()` calls, so after a process
     // restart every `oxigraph-persistent` store lost all numeric-subtype
     // metadata and `restoreOriginalDatatype*()` collapsed the literals
@@ -342,7 +341,7 @@ export class OxigraphStore implements TripleStore {
       if (!raw.trim()) return;
       const parsed = JSON.parse(raw) as {
         entries?: Array<[string, string]>;
-        // PR #229 bot review r31-8 (oxigraph.ts:48). Persist the
+        // Persist the
         // per-position and per-lexeme conflict sets alongside the
         // entry map so a restart re-establishes "this position /
         // lexeme is ambiguous, never restore" instead of silently
@@ -396,14 +395,14 @@ export class OxigraphStore implements TripleStore {
       await mkdir(dirname(this.persistPath), { recursive: true });
       const nquads = this.store.dump({ format: 'application/n-quads' });
       await writeFile(this.persistPath, nquads, 'utf-8');
-      // Bot review (PR #229 M-follow-up): persist the numeric-subtype
+      // persist the numeric-subtype
       // side-table alongside the dump so hydrateSync() can restore it on
       // the next boot. Without this sidecar every restart re-canonicalises
       // `xsd:long`/`xsd:int`/... back to `xsd:integer` on read-back because
       // Oxigraph has already collapsed the subtype by the time it dumps.
       const sidecarPath = OxigraphStore.numericDatatypeSidecarPath(this.persistPath);
       const sidecar = JSON.stringify({
-        // PR #229 bot review r31-8 (oxigraph.ts:48). Bumped to v2
+        // Bumped to v2
         // because the schema now includes `conflictedKeys` /
         // `conflictedLexemes` arrays so a restart re-establishes
         // per-position / per-lexeme conflict markers. v1 sidecars
@@ -449,7 +448,7 @@ export class OxigraphStore implements TripleStore {
     for (const q of matches) {
       this.store.delete(q);
       // We have the concrete deleted quads in hand, so do an exact
-      // eviction rather than the graph-wide scan (bot review round 7).
+      // eviction rather than the graph-wide scan.
       this.forgetNumericDatatype(fromOxQuad(q));
     }
     if (matches.length > 0) this.scheduleFlush();
@@ -475,7 +474,7 @@ export class OxigraphStore implements TripleStore {
     if (first instanceof Map) {
       const bindings = (result as Map<string, OxTerm>[]).map((row) => {
         const obj: Record<string, string> = {};
-        // Bot review M1: SELECT results are keyed only by the
+        // SELECT results are keyed only by the
         // binding value (we don't know which quad each binding came
         // from), so we can only safely restore the declared subtype
         // when every remembered quad with this lexeme agreed on it.
@@ -502,12 +501,12 @@ export class OxigraphStore implements TripleStore {
   }
 
   /**
-   * Reverse of `rememberNumericDatatype` — if a CONSTRUCT row contains
-   * a typed literal whose datatype Oxigraph collapsed (e.g. `xsd:long`
-   * → `xsd:integer`), restore the publisher's original declared type
-   * from the side-table keyed by the full quad identity (bot review
-   * M1). Falls through unchanged when no entry exists or the key is
-   * not a known numeric subtype. BUGS_FOUND.md#ST-12.
+   * Reverse of `rememberNumericDatatype` — if a CONSTRUCT row
+   * contains a typed literal whose datatype Oxigraph collapsed
+   * (e.g. `xsd:long` → `xsd:integer`), restore the publisher's
+   * original declared type from the side-table keyed by the full
+   * quad identity. Falls through unchanged when no entry exists or
+   * the key is not a known numeric subtype.
    */
   private restoreOriginalDatatype(q: DKGQuad): string {
     const serialized = q.object;
@@ -517,11 +516,10 @@ export class OxigraphStore implements TripleStore {
     const value = m[1];
     const dtype = m[2];
     if (!isNumericSubtype(dtype)) return serialized;
-    // Prefer the exact quad-identity match (per bot review M1 — this
-    // is the unambiguous path when one position declared a specific
-    // subtype).
+    // Prefer the exact quad-identity match — the unambiguous path
+    // when one position declared a specific subtype.
     const key = OxigraphStore.numericDatatypeKey(q.subject, q.predicate, value, q.graph);
-    // PR #229 bot review r31-8 (oxigraph.ts:48). Per-position conflict
+    // Per-position conflict
     // short-circuit: if two writes at this exact `(s, p, value, g)`
     // declared different subtypes, the side-table cannot recover
     // either source's intent (Oxigraph collapsed both into one
@@ -547,7 +545,7 @@ export class OxigraphStore implements TripleStore {
   }
 
   /**
-   * Bot review M1: lexical-only restore for SELECT bindings. Only
+   * lexical-only restore for SELECT bindings. Only
    * returns the declared subtype when EVERY remembered quad that
    * carried this lexeme declared the SAME subtype — otherwise falls
    * back to Oxigraph's canonical form. This preserves the common
@@ -561,7 +559,7 @@ export class OxigraphStore implements TripleStore {
     const value = m[1];
     const dtype = m[2];
     if (!isNumericSubtype(dtype)) return serialized;
-    // PR #229 bot review r31-8 (oxigraph.ts:48). If ANY per-position
+    // If ANY per-position
     // write of this lexeme observed a per-position subtype conflict,
     // the lexical-only path cannot tell whether THIS binding row came
     // from the conflicted position or a clean sibling — refuse to
@@ -600,7 +598,7 @@ export class OxigraphStore implements TripleStore {
 
   async dropGraph(graphUri: string): Promise<void> {
     this.store.update(`DROP SILENT GRAPH <${escapeUri(graphUri)}>`);
-    // PR #229 bot review round 7 (oxigraph.ts:164): every numeric-
+    // every numeric-
     // subtype key that lived in this graph must be dropped too, so
     // `restoreOriginalDatatypeForSelectBinding` can't see phantom
     // conflicts from data that no longer exists (and the conflicts
@@ -634,7 +632,7 @@ export class OxigraphStore implements TripleStore {
     );
     const removed = before - this.store.size;
     if (removed > 0) {
-      // PR #229 bot review round 7 (oxigraph.ts:164): evict sidecar
+      // evict sidecar
       // entries for quads that just vanished. We filter by
       // `startsWith(subjectPrefix)` (keys are `s\0p\0v\0g`) which
       // mirrors the SPARQL `STRSTARTS(STR(?s), prefix)` filter above.

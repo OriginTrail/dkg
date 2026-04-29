@@ -1,5 +1,5 @@
 /**
- * PR #229 bot review round 18 (r18-2): the public `DKGService`
+ * the public `DKGService`
  * surface was widened to expose `persistChatTurn` / `onChatTurn`
  * as split user-turn / assistant-reply overloads so that downstream
  * TypeScript callers see the runtime contract at COMPILE TIME
@@ -68,7 +68,7 @@ function makePlainMemoryWithoutId(): Memory {
   };
 }
 
-describe('r18-2: DKGService overload contract', () => {
+describe('DKGService overload contract', () => {
   it('exposes the runtime object under the narrowed DKGService interface', () => {
     // Sanity: the exported symbol carries the right `name` and the
     // two method hooks. Using `typeof` here also keeps TypeScript's
@@ -109,7 +109,7 @@ describe('r18-2: DKGService overload contract', () => {
   it('the assistant-reply overload requires options.userMessageId at COMPILE TIME', async () => {
     const runtime = makeRuntime();
     const assistantMsg = makePlainMemoryWithoutId();
-    // r19-2: `userTurnPersisted` is now mandatory on the typed
+    // `userTurnPersisted` is now mandatory on the typed
     // assistant-reply overload. Explicit `false` is the safe default
     // a caller should pick when it genuinely doesn't know whether
     // the user-turn hook succeeded — it routes the persister
@@ -136,8 +136,8 @@ describe('r18-2: DKGService overload contract', () => {
     expect(missingUserMsgId).toBeDefined();
   });
 
-  it('r19-2: the assistant-reply overload ALSO requires options.userTurnPersisted at COMPILE TIME', () => {
-    // PR #229 bot review round 19 (r19-2). Pre-r19-2 the typed
+  it('the assistant-reply overload ALSO requires options.userTurnPersisted at COMPILE TIME', () => {
+    // the typed
     // assistant-reply overload made `userMessageId` mandatory but
     // left `userTurnPersisted` optional. That reintroduced the
     // unreadable-reply footgun r13-1 closed: if a caller knew the
@@ -198,7 +198,7 @@ describe('r18-2: DKGService overload contract', () => {
     expect(typeof persistChatTurn).toBe('function');
   });
 
-  // PR #229 bot review (r30-8 → r31-2 → r31-3 — service.ts:133/180).
+  // service.ts:133/180).
   //
   // History:
   //   - Pre-r30-8: `DKGService` carried a public `Record<string,
@@ -230,7 +230,7 @@ describe('r18-2: DKGService overload contract', () => {
   //     doesn't pick "the closest match"; it picks "any match",
   //     and a wide catch-all matches everything.
   //
-  // Final shape (r31-3): `DKGService` carries ONLY the two typed
+  // Final shape: `DKGService` carries ONLY the two typed
   // overloads. The compile-time tolerance for dynamic-bag callers
   // moves to a SEPARATELY NAMED `dkgServiceLegacy` export (also
   // `@deprecated`, also routes to the same runtime impl). Callers
@@ -238,7 +238,7 @@ describe('r18-2: DKGService overload contract', () => {
   // import `dkgServiceLegacy` instead of `dkgService` — that
   // import-site choice is the new opt-out signal, replacing the
   // implicit "smuggle through the catch-all" path.
-  describe('r31-3: deprecated catch-all relocated from `DKGService` to `dkgServiceLegacy`', () => {
+  describe('deprecated catch-all relocated from `DKGService` to `dkgServiceLegacy`', () => {
     it('`dkgService.persistChatTurn` REJECTS `{ mode: "assistant-reply" }` without `userMessageId` at COMPILE TIME (smuggling hole closed)', () => {
       // The crucial r31-3 property: the public `dkgService` surface
       // does NOT compile the smuggling shape. If TS stops flagging
@@ -376,7 +376,7 @@ describe('r18-2: DKGService overload contract', () => {
       expect(typeof (pending as Promise<unknown>)).toBe('object');
     });
 
-    // PR #229 bot review (r31-4 — packages/adapter-elizaos/src/service.ts:359).
+    // packages/adapter-elizaos/src/service.ts:359).
     //
     // r31-3 introduced `dkgServiceLegacy` as a separate `@deprecated`
     // export on `service.ts` for downstream `as any` callers. The bot
@@ -432,7 +432,7 @@ describe('r18-2: DKGService overload contract', () => {
     it('[r31-4] the public entrypoint exposes BOTH the strict `dkgService` and the deprecated `dkgServiceLegacy` (consumers can pick their migration speed)', async () => {
       // Anti-removal guard: a future refactor that strips
       // `dkgServiceLegacy` from the entrypoint reintroduces the
-      // exact breaking change r31-4 fixes. Pin both names at the
+      // exact breaking change es. Pin both names at the
       // package boundary so the deprecation path stays observable
       // until the next major bump.
       const indexExports = (await import('../src/index.js')) as Record<
@@ -481,7 +481,6 @@ describe('r18-2: DKGService overload contract', () => {
   });
 
   // ─────────────────────────────────────────────────────────────────
-  // PR #229 bot review r31-9 (service.ts:70 + service.ts:86).
   //
   // r31-6 plumbed `options.userMessageId` through the user-turn write
   // path (so a host can pre-mint an id and have the persisted-turn
@@ -497,11 +496,11 @@ describe('r18-2: DKGService overload contract', () => {
   // both knobs to the typed surface so the declared API and the
   // runtime behaviour stay aligned.
   // ─────────────────────────────────────────────────────────────────
-  describe('r31-9: typed surface aligns with r31-6 runtime contract', () => {
+  describe('typed surface aligns with r31-6 runtime contract', () => {
     it('UserTurnChatTurnOptions ACCEPTS userMessageId (pre-mint flow now type-checks without `as any`)', async () => {
       // Positive control: a typed user-turn caller that pre-mints
       // its `userMessageId` MUST compile against `UserTurnChatTurnOptions`.
-      // Pre-r31-9 this required `as any` (or routing through
+      // this required `as any` (or routing through
       // `dkgServiceLegacy`) because the field was declared `?: never`.
       const runtime = makeRuntime();
       const userMsg = makePersistableMemory();
@@ -537,9 +536,9 @@ describe('r18-2: DKGService overload contract', () => {
 
     it('AssistantReplyChatTurnOptions EXPOSES assistantSupersedesCanonical so direct callers can opt into the supersede branch', async () => {
       // Positive control: a typed assistant-reply caller that wants
-      // the headless-supersede branch (the wrapper's r31-6 behaviour)
+      // the headless-supersede branch (the wrapper's )
       // can now express it through the public type without `as any`.
-      // Pre-r31-9 the field didn't exist on the public surface so a
+      // the field didn't exist on the public surface so a
       // direct integration that detected stale-provisional vs final
       // text in its own caching had no way to opt in, and the
       // canonical assistant message ended up with stacked
@@ -594,7 +593,7 @@ describe('r18-2: DKGService overload contract', () => {
     });
 
     it('source-level pin: `assistantSupersedesCanonical` is declared on AssistantReplyChatTurnOptions (matches the runtime branch in actions.ts)', () => {
-      // The r31-6 fix in actions.ts:1265 reads
+      // the in actions.ts:1265 reads
       // `optsAny.assistantSupersedesCanonical === true` to emit the
       // `dkg:supersedesCanonicalAssistant` marker on the headless
       // branch. Pin the public type declaration so the runtime read

@@ -133,7 +133,6 @@ describe('A-7: buildEndorsementQuads MUST emit a signature quad (currently fails
   // DKG_ENDORSED_AT — it never attaches a signature over a canonical
   // endorsement digest, so any peer can forge an endorsement. This test
   // pins the spec expectation; it is RED against the current impl.
-  // See BUGS_FOUND.md A-7.
   it('includes a signature / proof quad alongside DKG_ENDORSES + DKG_ENDORSED_AT', () => {
     const quads = buildEndorsementQuads(
       '0x0000000000000000000000000000000000000001',
@@ -154,7 +153,7 @@ describe('A-7: buildEndorsementQuads MUST emit a signature quad (currently fails
     );
     expect(
       hasProof,
-      'buildEndorsementQuads does not attach a signature over a canonical endorsement digest (BUGS_FOUND.md A-7)',
+      'buildEndorsementQuads does not attach a signature over a canonical endorsement digest',
     ).toBe(true);
   });
 
@@ -174,12 +173,12 @@ describe('A-7: buildEndorsementQuads MUST emit a signature quad (currently fails
     );
     expect(
       hasNonce,
-      'buildEndorsementQuads does not attach a nonce (BUGS_FOUND.md A-7)',
+      'buildEndorsementQuads does not attach a nonce',
     ).toBe(true);
   });
 });
 
-// Bot review D1 follow-up: the previous DKGAgent.endorse() implementation
+// the previous DKGAgent.endorse() implementation
 // pulled the signer from `(this.wallet as { ethWallet }).ethWallet`, but
 // `DKGAgentWallet` does not expose an `ethWallet` field, so the signer was
 // always `undefined` in production and the signature quad silently held the
@@ -197,8 +196,8 @@ describe('A-7: buildEndorsementQuads MUST emit a signature quad (currently fails
 //     MUST cause recovery to land on a different address.
 //
 // Together with the production fix in dkg-agent.ts (which now selects the
-// signer via getDefaultPublisherWallet → ethers.Wallet.signMessage), these
-// tests catch the exact regression flagged on PR #229.
+// signer via getDefaultPublisherWallet → ethers.Wallet.signMessage),
+// these tests catch the canonicalisation regression.
 describe('A-7 / D1: buildEndorsementQuadsAsync with a real ethers.Wallet signer', () => {
   it('emits a real EIP-191 signature that recovers to the signing wallet', async () => {
     const wallet = ethers.Wallet.createRandom();
@@ -288,7 +287,7 @@ describe('A-7 / D1: buildEndorsementQuadsAsync with a real ethers.Wallet signer'
     expect(nonceQuad.object).toContain(fixedNonce);
   });
 
-  // PR #229 D1 (2nd follow-up, bot review): the signer MUST match the
+  // the signer MUST match the
   // `agentAddress` embedded in the quads, otherwise recovery yields a
   // different address than the one peers see in the payload and the
   // endorsement is unverifiable (or worse, silently attributed to the
@@ -325,7 +324,7 @@ describe('A-7 / D1: buildEndorsementQuadsAsync with a real ethers.Wallet signer'
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PR #229 bot review (r3147347... — dkg-agent.ts:5424).
+// — dkg-agent.ts:5424).
 // Pre-fix `DKGAgent.endorse()` fell through to
 // `buildEndorsementQuadsAsync(..., {})` (NO signer) when the supplied
 // `opts.agentAddress` was not backed by any local wallet, publishing

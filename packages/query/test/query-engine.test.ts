@@ -97,7 +97,7 @@ describe('DKGQueryEngine', () => {
     expect(result.bindings.length).toBe(2);
   });
 
-  // PR #229 L-follow-up (bot review): the multi-graph wrapper used to
+  // the multi-graph wrapper used to
   // inject `VALUES ?_viewGraph { ... } GRAPH ?_viewGraph { inner }` into
   // the caller's WHERE block, which leaked an extra `_viewGraph` column
   // into every `SELECT *` result and collided with user queries that

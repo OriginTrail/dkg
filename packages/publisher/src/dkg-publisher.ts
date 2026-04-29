@@ -32,7 +32,7 @@ import { openSync, writeSync, fsyncSync, closeSync, mkdirSync, readFileSync, exi
 import { dirname } from 'node:path';
 
 /**
- * PR #229 bot review (r31-10 — dkg-publisher.ts:141).
+ * dkg-publisher.ts:141).
  *
  * On POSIX filesystems, `fsync(fd)` on a file's contents is NOT
  * sufficient to make a `rename()` or `unlink()` directory-entry
@@ -66,7 +66,7 @@ function fsyncDirSync(dirPath: string): void {
     // that vanished between rename and fsync (race with cleanup)
     // both degrade to "post-rename dir entry might not be durable
     // until the next sync(2)". This is strictly an improvement
-    // over the pre-r31-10 behaviour where the dir was NEVER
+    // over the behaviour where the dir was NEVER
     // explicitly synced, so we tolerate the failure.
   } finally {
     if (fd !== undefined) {
@@ -89,7 +89,7 @@ export { RESERVED_SUBJECT_PREFIXES, findReservedSubjectPrefix, isReservedSubject
  * lines so a partial write from the pre-fsync crash window can't
  * poison the whole recovery pass. Returns entries in append order.
  *
- * PR #229 bot review round 8 (publisher.ts:1479): the round-6 WAL fix
+ * the round-6 WAL fix
  * fsync'd entries to disk but never reloaded them on startup, so the
  * pre-broadcast crash window was still unrecoverable — the in-memory
  * `preBroadcastJournal` was wiped and nothing ever reconstructed it.
@@ -133,7 +133,7 @@ export function readWalEntriesSync(filePath: string): PreBroadcastJournalEntry[]
 }
 
 /**
- * PR #229 bot review (r31-10 — dkg-publisher.ts:87).
+ * dkg-publisher.ts:87).
  *
  * `v10ContextGraphId` and `publishDigest` are NEW WAL fields added
  * AFTER the original r6 fsync-based WAL implementation shipped. WAL
@@ -195,7 +195,7 @@ function isValidJournalEntry(value: unknown): value is PreBroadcastJournalEntry 
 }
 
 /**
- * PR #229 bot review (post-v10-rc-merge, r21-5): atomically rewrite the
+ * atomically rewrite the
  * NDJSON WAL with `entries` only. Used by the chain-event reconciler
  * to drop a single pre-broadcast journal entry once the matching
  * on-chain `KnowledgeBatchCreated` is observed — without this, the
@@ -279,7 +279,7 @@ function appendWalEntrySync(filePath: string, entry: PreBroadcastJournalEntry): 
 }
 
 /**
- * Pre-broadcast write-ahead journal entry (BUGS_FOUND.md P-1).
+ * Pre-broadcast write-ahead journal entry (.
  *
  * Captures the publisher's intent to broadcast a V10 publish tx
  * BEFORE eth_sendRawTransaction crosses the wire. The fields are
@@ -340,7 +340,7 @@ export interface DKGPublisherConfig {
    * the in-memory `preBroadcastJournal` is wiped by a process crash, so
    * without the file the publisher loses every "we signed and were
    * about to send" record the recovery routine needs to reconcile
-   * against chain events (PR #229 bot review round 6 — WAL durability).
+   * against chain events.
    *
    * When undefined the journal is still appended in memory (existing
    * behaviour) so the phase event stays observable; this preserves the
@@ -351,7 +351,7 @@ export interface DKGPublisherConfig {
   /**
    * Explicit encryption key for the backing {@link PrivateContentStore}.
    *
-   * PR #229 bot review round 9 (async-lift-subtraction.ts:147) — when a
+   * when a
    * deployment constructs the store with an explicit non-default key,
    * the `subtractFinalizedExactQuads` dedup step used to call the
    * global `decryptPrivateLiteral()` helper, which only resolves the
@@ -513,8 +513,8 @@ function isInternalOrigin(options: PublishOptions): boolean {
 // NSS-level content.
 //
 // Earlier rounds used a byte-level `subject.startsWith(prefix)` check
-// at both the Bucket A write-boundary guard (Round 9 Bug 25) AND the
-// Round 4 promote-time filter (Round 12 Bug 35 SSOT). Both were
+// at both the Bucket A write-boundary guard AND the
+// Round 4 promote-time filter. Both were
 // case-sensitive, so a malicious or accidentally-mixed-case subject
 // like `URN:dkg:file:keccak256:<hex>` bypassed both defenses. Codex
 // Bug 41 flagged this. The fix replaces both byte-level comparisons
@@ -528,7 +528,7 @@ function isInternalOrigin(options: PublishOptions): boolean {
  * {@link computePerCgQuorumState} for the semantics and
  * {@link DKGPublisher.publish} for the call site.
  *
- * PR #229 bot review round 11 (dkg-publisher.ts:1471). Earlier
+ * Earlier
  * revisions inlined this logic and tied `selfSignEligible` to
  * `v10ACKs.length === 0`, which forced every M-of-N publish where a
  * peer ACK had already arrived to stay tentative even though the
@@ -555,7 +555,7 @@ export interface PerCgQuorumInputs {
   readonly publisherNodeIdentityId: bigint;
   readonly v10ChainReady: boolean;
   /**
-   * PR #229 bot review (post-v10-rc-merge, r21-6): authoritative
+   * authoritative
    * answer to "is this publisher's identity allowed to ACK for this
    * specific context graph?" sourced from the on-chain participant
    * set (`ChainAdapter.getContextGraphParticipants(cgId)`).
@@ -588,7 +588,7 @@ export function computePerCgQuorumState(
     !!input.collectedAcks &&
     input.publisherNodeIdentityId > 0n &&
     input.collectedAcks.some((a) => a.nodeIdentityId === input.publisherNodeIdentityId);
-  // r21-6: when the chain authoritatively says the publisher is NOT a
+  // when the chain authoritatively says the publisher is NOT a
   // CG participant, the self-signed ACK cannot satisfy quorum — the
   // V10 contract will reject the tx as `InvalidSignerNotParticipant`,
   // and counting it toward `effectiveAckCount` here would silently
@@ -640,7 +640,7 @@ export class DKGPublisher implements Publisher {
    * Cached copy of the key the backing `PrivateContentStore` is using
    * so the async-lift subtraction helper can decrypt authoritative
    * private quads with the SAME key the store sealed them under
-   * (PR #229 bot review round 9). `undefined` when no explicit key was
+   * . `undefined` when no explicit key was
    * configured — callers fall back to the env/default resolution in
    * `decryptPrivateLiteral`.
    */
@@ -656,7 +656,7 @@ export class DKGPublisher implements Publisher {
   private readonly log = new Logger('DKGPublisher');
   private readonly sessionId = Date.now().toString(36);
   private tentativeCounter = 0;
-  /** Pre-broadcast write-ahead journal (BUGS_FOUND.md P-1). Populated
+  /** Pre-broadcast write-ahead journal (. Populated
    *  after the publisher signs but BEFORE the chain adapter is allowed
    *  to broadcast, so a process crash between sign and confirm leaves
    *  enough state on this node to reconcile against the chain. Capped
@@ -698,7 +698,7 @@ export class DKGPublisher implements Publisher {
     this.knownBatchContextGraphs = config.knownBatchContextGraphs ?? new Map();
     this.writeLocks = config.writeLocks ?? new Map();
 
-    // PR #229 bot review round 8 (publisher.ts:1479): reload the
+    // reload the
     // fsync'd WAL entries into `preBroadcastJournal` at construction
     // time so the recovery path actually HAS something to reconcile
     // against the chain after a process restart. Without this the
@@ -726,7 +726,7 @@ export class DKGPublisher implements Publisher {
         // Startup must not be blocked by WAL hydration: a corrupt
         // file yields an empty journal which the chain poller will
         // treat the same as "no surviving intent", i.e. the worst
-        // case degrades to the pre-r6 behaviour.
+        // case degrades to the behaviour.
         this.log.warn(
           createOperationContext('init'),
           `WAL recovery SKIPPED (${this.publishWalFilePath}): ${walErr instanceof Error ? walErr.message : String(walErr)}`,
@@ -741,7 +741,7 @@ export class DKGPublisher implements Publisher {
    * `KnowledgeBatchCreated` / `KCCreated` events. Used by the chain
    * adapter / publisher recovery to decide whether an observed
    * on-chain batch was one this node was mid-flight when it crashed
-   * (PR #229 bot review round 8).
+   * .
    */
   findWalEntryByMerkleRoot(merkleRootHex: string): PreBroadcastJournalEntry | undefined {
     const needle = merkleRootHex.toLowerCase();
@@ -753,7 +753,7 @@ export class DKGPublisher implements Publisher {
   }
 
   /**
-   * PR #229 bot review round 26 (r26-4, dkg-publisher.ts). Previously
+   * Previously
    * WAL recovery keyed off `merkleRoot` alone, but identical content
    * can legitimately produce the same KC merkle root on multiple
    * publish attempts (retries, republishes, idempotent lifts). The
@@ -776,7 +776,7 @@ export class DKGPublisher implements Publisher {
   }
 
   /**
-   * PR #229 bot review (post-v10-rc-merge, r21-5): runtime caller of
+   * runtime caller of
    * the recovered WAL. The previous round (r6/r8) added the WAL
    * fsync + reload but left the in-memory `preBroadcastJournal`
    * unconsumed — `confirmByMerkleRoot` only walked
@@ -803,7 +803,7 @@ export class DKGPublisher implements Publisher {
    *      stream end-to-end (matches the existing
    *      `WAL recovery: loaded …` log on the constructor side).
    *
-   * PR #229 bot review round 23 (r23-3, dkg-publisher.ts): in
+   * in
    * addition to dropping the WAL entry we now ALSO promote the
    * tentative KC status quad to `confirmed` in the context graph's
    * meta graph, matching what `PublishHandler.confirmPublish` does
@@ -832,7 +832,6 @@ export class DKGPublisher implements Publisher {
   ): Promise<PreBroadcastJournalEntry | undefined> {
     const opCtx = ctx ?? createOperationContext('publish');
 
-    // PR #229 bot review round 26 (r26-4, dkg-publisher.ts).
     // Refuse auto-recovery when more than one WAL entry shares the
     // same merkleRoot. Identical content can legitimately produce
     // the same KC merkle root across multiple publish attempts
@@ -871,7 +870,7 @@ export class DKGPublisher implements Publisher {
       return undefined;
     }
 
-    // r26-4: prefer the same-signer match when one exists so a
+    // prefer the same-signer match when one exists so a
     // cross-publisher collision (different publisher with identical
     // merkleRoot) doesn't bury our real surviving entry. When there
     // is no same-signer match, fall back to the (potentially
@@ -899,7 +898,7 @@ export class DKGPublisher implements Publisher {
       return undefined;
     }
 
-    // r23-3: before dropping the WAL entry, promote any surviving
+    // before dropping the WAL entry, promote any surviving
     // `status "tentative"` KC quad in the context graph's _meta to
     // `status "confirmed"` (mirrors `PublishHandler.confirmPublish`).
     // A missing tentative quad is not fatal — it just means the KC
@@ -907,7 +906,7 @@ export class DKGPublisher implements Publisher {
     // timeout already cleared it. We log the outcome either way so
     // operators can reconcile against the chain.
     //
-    // PR #229 bot review (r3148... — dkg-publisher.ts:813). The
+    // — dkg-publisher.ts:813). The
     // promoter now returns a discriminated result so this caller can
     // RETAIN the WAL entry on `'ambiguous'`. Pre-fix, two same-
     // merkleRoot retries shared a single chain `Confirmed` event:
@@ -928,7 +927,7 @@ export class DKGPublisher implements Publisher {
       // Transient store / SPARQL failures: log and continue. The chain
       // confirmation IS real even if the local store can't reflect
       // it right now. Splicing the WAL on this branch matches the
-      // pre-r30-4 behaviour (callers that needed retry-on-store-
+      // behaviour (callers that needed retry-on-store-
       // outage have always relied on the chain re-event, not on the
       // WAL). If we retained the WAL here a wedged store would also
       // wedge the journal forever.
@@ -1007,7 +1006,7 @@ export class DKGPublisher implements Publisher {
   }
 
   /**
-   * r23-3: locate the KC UAL whose `dkg:merkleRoot` matches `merkleRootHex`
+   * locate the KC UAL whose `dkg:merkleRoot` matches `merkleRootHex`
    * in `<did:dkg:context-graph:{contextGraphId}/_meta>` and still carries
    * `dkg:status "tentative"`, then flip that quad to `"confirmed"`. The
    * merkleRoot hex written to the store uses a lowercase `0x` prefix
@@ -1030,7 +1029,7 @@ export class DKGPublisher implements Publisher {
    *     an explicit follow-up `confirmPublish` (which carries the
    *     UAL) can reconcile the right one.
    *
-   * PR #229 bot review (r3148... — dkg-publisher.ts:813). Pre-fix this
+   * — dkg-publisher.ts:813). Pre-fix this
    * helper returned `null` for both `'none'` AND `'ambiguous'` and the
    * caller's WAL splice was unconditional. The chain confirmation for
    * the FIRST of two same-merkleRoot retries would therefore drop the
@@ -1064,7 +1063,7 @@ export class DKGPublisher implements Publisher {
     const rows = res.type === 'bindings' ? res.bindings : [];
     if (rows.length === 0) return { status: 'none' };
 
-    // PR #229 bot review (r3147347... — dkg-publisher.ts:888).
+    // — dkg-publisher.ts:888).
     // Two or more tentative KCs in the SAME context graph can share
     // the SAME merkleRoot when callers retry/republish identical
     // content (deterministic merkle root → identical hex). Pre-fix
@@ -2076,7 +2075,7 @@ export class DKGPublisher implements Publisher {
       v10KavAddress = undefined;
     }
 
-    // Spec §06_PUBLISH / BUGS_FOUND.md A-5 — per-CG quorum gate. When the
+    // Spec §06_PUBLISH /. When the
     // caller passed an explicit per-CG `requiredSignatures` (M-of-N) and we
     // cannot meet that floor (peer ACKs + at most one self-signed ACK), the
     // publish MUST stay tentative. We short-circuit BEFORE the self-sign
@@ -2091,16 +2090,16 @@ export class DKGPublisher implements Publisher {
     // from a valid participant" so a non-participant self-sign is rejected
     // on-chain.
     //
-    // PR #229 bot review round 6 originally argued this should be a strict
-    // `perCgRequired > 0 && collectedAckCount < perCgRequired` check, but
-    // that blocks every single-node publish path (curated CG with the
-    // creator as sole participant, integration tests exercising the
-    // single-node happy path) even though the on-chain contract would
+    // The earlier strict `perCgRequired > 0 && collectedAckCount <
+    // perCgRequired` check blocked every single-node publish path
+    // (curated CG with the creator as sole participant, integration
+    // tests exercising the single-node happy path) even though the
+    // on-chain contract would
     // accept the self-signed participant ACK. The right semantic is:
     // "after accounting for the one self-sign we *would* add, do we still
     // fall short?" — which is what `effectiveAckCount` captures below.
     //
-    // PR #229 bot review round 11 (r11-1): the earlier gate scoped
+    // the earlier gate scoped
     // `selfSignEligible` to `v10ACKs.length === 0`, which incorrectly denied
     // the publisher's own participant ACK whenever ANY peer ACK had already
     // arrived. In an M-of-N context graph where (peer ACKs + local
@@ -2109,7 +2108,7 @@ export class DKGPublisher implements Publisher {
     // combined set. The eligibility check is now "publisher identity is not
     // already represented in v10ACKs"; the self-sign block below then
     // APPENDS (not replaces) and dedupes by identityId.
-    // r21-6: ask the chain whether our identity is actually allowed
+    // ask the chain whether our identity is actually allowed
     // to ACK for this CG before letting the self-sign satisfy quorum
     // locally. The V10 contract rejects "self-sign by a non-
     // participant" with `InvalidSignerNotParticipant`, so without
@@ -2125,9 +2124,9 @@ export class DKGPublisher implements Publisher {
     // contract not deployed); we preserve the historical lenient
     // path by treating the answer as unknown.
     let publisherIsCgParticipant: boolean | undefined;
-    // PR #229 bot review round 26 (r26-2, dkg-publisher.ts). The
+    // The
     // participant set is authoritative for BOTH the self-sign
-    // eligibility decision AND the peer-ACK accounting. Pre-r26-2 we
+    // eligibility decision AND the peer-ACK accounting. we
     // only consulted it for the publisher's own ACK; any peer ACK
     // from a non-participant identity was still counted toward
     // `perCgRequiredSignatures`, so:
@@ -2170,7 +2169,7 @@ export class DKGPublisher implements Publisher {
       }
     }
 
-    // r26-2: filter peer ACKs to participants-only before quorum math.
+    // filter peer ACKs to participants-only before quorum math.
     // Keep the original count for the diagnostic so operators can see
     // when someone was submitting rogue ACKs against this CG.
     if (v10ACKs && participantSet) {
@@ -2202,7 +2201,7 @@ export class DKGPublisher implements Publisher {
         `Per-CG quorum not met: collected ${collectedAckCount}/${perCgRequired} peer ACKs ` +
         `(self-sign eligible=${selfSignEligible}, effective=${effectiveAckCount}/${perCgRequired}) ` +
         `for context graph ${v10CgDomain} — skipping on-chain tx, publish stays tentative ` +
-        `(spec §06_PUBLISH / BUGS_FOUND.md A-5)`,
+        `(spec §06_PUBLISH)`,
       );
     }
 
@@ -2210,9 +2209,9 @@ export class DKGPublisher implements Publisher {
     // it is not already represented in the collected set. This covers:
     //   (a) single-node mode (no provider) — v10ACKs empty;
     //   (b) ACK collection skipped for private data / failed — v10ACKs empty;
-    //   (c) PR #229 bot review r11-1: M-of-N CG where peer ACKs arrived but
-    //       the publisher's own participant ACK is still needed to meet
-    //       quorum. We APPEND (dedupe by identityId) rather than overwrite.
+    //   (c) M-of-N CG where peer ACKs arrived but the publisher's own
+    //       participant ACK is still needed to meet quorum. We APPEND
+    //       (dedupe by identityId) rather than overwrite.
     // On networks whose on-chain minimumRequiredSignatures still cannot be
     // met, the V10 contract rejects the tx — this gate only prevents us
     // from DROPPING a legitimate participant ACK we could have produced
@@ -2319,7 +2318,7 @@ export class DKGPublisher implements Publisher {
           await this.publisherWallet.signMessage(pubMsgHash),
         );
 
-        // Spec axiom 4 (BUGS_FOUND.md P-1): persist a write-ahead journal
+        // Spec axiom 4 (
         // entry BEFORE the chain adapter is allowed to broadcast. The
         // entry encodes the publish intent (publisher digest, signer,
         // identityId, merkle root, token amount, expected ACK count)
@@ -2360,7 +2359,7 @@ export class DKGPublisher implements Publisher {
           // whole point of P-1 is that the on-chain broadcast below MUST
           // NOT happen until the intent is on stable storage, so this
           // cannot be `setImmediate` or a background flush
-          // (PR #229 bot review round 6 — in-memory WAL bypass).
+          // .
           if (this.publishWalFilePath) {
             try {
               appendWalEntrySync(this.publishWalFilePath, writeAheadEntry);
@@ -2399,7 +2398,7 @@ export class DKGPublisher implements Publisher {
         // the previous behaviour (no `:start`/`:end` on that path) —
         // the durable WAL above still runs, so recovery is unaffected.
         // Adapters upgrading to the new hook regain the precise
-        // transaction-level boundary. See P-1 / P-1.2 in BUGS_FOUND.md.
+        // transaction-level boundary. See P-1 / P-1.2 in.
         let wroteAhead = false;
         const emitWriteAheadStart = (info?: { txHash?: string }) => {
           if (wroteAhead) return;
@@ -2408,7 +2407,7 @@ export class DKGPublisher implements Publisher {
           // generic `chain:writeahead:start` so WAL listeners can
           // persist the signed-but-not-yet-broadcast tx identity
           // (spec axiom 4 / §06 "txHash persisted" requirement, P-1.2
-          // in BUGS_FOUND.md). The phase name encodes the hash because
+          // in. The phase name encodes the hash because
           // `PhaseCallback` is a 2-arg function; adding a detail
           // parameter would be a source-level break for existing
           // onPhase consumers. Listeners can regex the phase string
@@ -3133,7 +3132,7 @@ export class DKGPublisher implements Publisher {
     // ── Bug 8 (Codex Round 4) + Round 9 Bug 25 — import-bookkeeping filter ──
     // Defense-in-depth: reserved-prefix subjects SHOULD already have
     // been rejected at the write boundary by `rejectReservedSubjectPrefixes`
-    // (Round 9 Bug 25 per `19_MARKDOWN_CONTENT_TYPE.md §10.2`). User-
+    // . User-
     // authored writes with `urn:dkg:file:*` or `urn:dkg:extraction:*`
     // subjects are short-circuited at `assertionWrite`, `share`,
     // `conditionalShare`, and non-`fromSharedMemory` `publish` entry

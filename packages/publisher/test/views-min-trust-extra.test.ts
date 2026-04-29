@@ -56,7 +56,7 @@ describe('P-13: resolveViewGraphs handles minTrust for verified-memory', () => {
 
   it(
     'minTrust=Endorsed drops the root data graph — prevents SelfAttested triples ' +
-      'from leaking into Endorsed queries (see BUGS_FOUND.md P-13).',
+      'from leaking into Endorsed queries (',
     () => {
       const res = resolveViewGraphs('verified-memory', CG, {
         minTrust: TrustLevel.Endorsed,

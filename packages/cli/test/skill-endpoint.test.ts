@@ -128,7 +128,7 @@ describe('SKILL.md file', () => {
   });
 
   it('stays within a reasonable size budget (Agent Skills best practice)', () => {
-    // PR #229 follow-up: the previous hard cap of 500 lines was set
+    // the previous hard cap of 500 lines was set
     // when the skill doc only covered Phase-3 endpoints (publish /
     // query / status). It has since grown to document the assertion
     // API surface (PR #108: create/write/query/promote/discard, plus

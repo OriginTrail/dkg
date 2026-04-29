@@ -10,13 +10,13 @@
  *      (via `main()`), which would block any test that imports the
  *      probes directly from there. Extracting them keeps the probes
  *      unit-testable against a real http.Server.
- *   2. The bot review on PR #229 flagged that the original
- *      `probeStatus` only hit `/api/status` — a path on the daemon's
- *      public allow-list — so `mcp_auth status` could report OK for
- *      an invalid credential. Splitting liveness (`probeStatus`) from
- *      authenticated reachability (`probeAuth`) lets us expose both
- *      signals in the tool output *and* pin them individually in
- *      tests.
+ *   2. Liveness vs auth must be reported as distinct signals: the
+ *      original `probeStatus` only hit `/api/status` (on the
+ *      daemon's public allow-list), so `mcp_auth status` could
+ *      report OK for an invalid credential. Splitting liveness
+ *      (`probeStatus`) from authenticated reachability
+ *      (`probeAuth`) lets us expose both signals in the tool
+ *      output *and* pin them individually in tests.
  */
 
 export interface ProbeResult {
@@ -28,9 +28,8 @@ export interface ProbeResult {
    * without supplying any credential and the daemon accepted the
    * request anyway — the only way that can happen in practice is if
    * the daemon is running with `auth.enabled=false` (CLI-8). Callers
-   * render this as a distinct `auth disabled` status instead of lumping
-   * it in with `ok` or `FAILED` (PR #229 bot review round 7,
-   * auth-probe.ts:69).
+   * render this as a distinct `auth disabled` status instead of
+   * lumping it in with `ok` or `FAILED`.
    */
   authDisabled?: boolean;
 }
@@ -74,7 +73,7 @@ export async function probeStatus(
  * request would succeed; we surface that as `{ok: true, authDisabled:
  * true}` so the caller can render a distinct "auth disabled" state
  * instead of the hard `FAILED` the previous short-circuit produced
- * (PR #229 bot review round 7, auth-probe.ts:69). A 4xx response on
+ * . A 4xx response on
  * the unauthenticated probe means auth IS enabled and no credential
  * is configured — still a failure, but one the caller can distinguish
  * from a rejected-credential failure.

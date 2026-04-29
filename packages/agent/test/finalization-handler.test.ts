@@ -184,11 +184,11 @@ describe('FinalizationHandler', () => {
     if (result.type === 'boolean') expect(result.value).toBe(false);
   });
 
-  // r23-4 (PR #229 bot review round 23): forged-attribution defence
+  // r23-4: forged-attribution defence
   // at the gossip envelope layer. The outer GossipEnvelope is signed
   // by one peer but claims another peer's EVM address in the inner
   // payload. The handler MUST reject before hitting chain RPC.
-  describe('r23-4 — envelope signer MUST match FinalizationMessage.publisherAddress', () => {
+  describe('envelope signer MUST match FinalizationMessage.publisherAddress', () => {
     it('rejects a finalization whose envelope signer mismatches the claimed publisherAddress', async () => {
       const entity = 'urn:test:entity';
       const wsGraph = `did:dkg:context-graph:${PARANET}/_shared_memory`;

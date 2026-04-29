@@ -5,7 +5,7 @@ import type { Quad } from '@origintrail-official/dkg-storage';
 /**
  * Ontology predicate: endorsement → knowledge asset.
  *
- * PR #229 bot review round 19 (r19-3): previously this predicate
+ * previously this predicate
  * was emitted as `<agent> dkg:endorses <ual>`. Combined with the
  * agent-keyed `endorsedAt`/`endorsementNonce`/`endorsementSignature`
  * quads that also sat on `<agent>`, two endorsements by the same
@@ -35,7 +35,7 @@ export const DKG_ENDORSES = 'https://dkg.network/ontology#endorses';
 /**
  * Ontology predicate: endorsement → agent.
  *
- * PR #229 bot review round 19 (r19-3). The round-18-and-earlier
+ * The round-18-and-earlier
  * shape had no link back from the endorsement resource to the
  * endorsing agent because there WAS no endorsement resource — all
  * quads were agent-keyed. Introducing this predicate lets
@@ -92,7 +92,7 @@ export const DKG_ENDORSEMENT_SIGNATURE = 'https://dkg.network/ontology#endorseme
  * earlier revision exposed `signer` on the sync builder as well, but the
  * sync path cannot call it (signing is async), so callers who passed one
  * still got the raw digest hex in `endorsementSignature` and believed
- * they had produced a verifiable endorsement (bot review D1). Removing
+ * they had produced a verifiable endorsement. Removing
  * the option from the sync surface makes the contract honest.
  */
 export interface BuildEndorsementQuadsOptions {
@@ -156,8 +156,6 @@ interface EndorsementCore {
  * nonce) regenerates byte-identical quads — idempotence across
  * retries is the whole point. Different UAL / ts / nonce → different
  * digest → different URN.
- *
- * PR #229 bot review round 19 (r19-3).
  */
 export function endorsementUri(digest: Uint8Array): string {
   // Drop the 0x-prefix for a compact URN — the digest is always a
@@ -194,7 +192,7 @@ function prepareEndorsementCore(
 }
 
 function buildQuadsFromCore(core: EndorsementCore, proofValue: string): Quad[] {
-  // PR #229 bot review round 19 (r19-3): every proof quad is now
+  // every proof quad is now
   // keyed on the per-event `core.endorsementUri` instead of the
   // agent URI, so multiple endorsements by the same agent in the
   // same context graph no longer collide on a single subject. The

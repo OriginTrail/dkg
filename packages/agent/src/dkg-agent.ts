@@ -157,7 +157,7 @@ class SyncAccessDeniedError extends Error {
  * the operator has not opted into the legacy `DKG_GOSSIP_ALLOW_UNSIGNED_EGRESS=1`
  * escape hatch) or envelope construction fails outright.
  *
- * PR #229 bot review (r22-6, dkg-agent.ts:7411): every call site of
+ * every call site of
  * `signedGossipPublish()` was previously wrapped with a blanket
  * `catch { log.warn('No peers subscribed to …') }`. On observer /
  * self-sovereign nodes that silently turned a real correctness
@@ -193,12 +193,12 @@ function isSignedGossipSigningError(err: unknown): err is SignedGossipSigningErr
 
 /**
  * Central handler for a broadcast failure at a `signedGossipPublish`
- * call site. The distinction PR #229 r22-6 demands is a VISIBILITY
- * one, not a control-flow one:
+ * call site. The distinction is a VISIBILITY one, not a control-flow
+ * one:
  *
  *   - `SignedGossipSigningError` → a correctness-class failure
  *     (missing/broken wallet, envelope construction refused) that
- *     strict peers (r14-1 default) will drop. Log as **ERROR** with
+ *     strict peers (the default) will drop. Log as **ERROR** with
  *     a distinctive message that names the signing problem so
  *     operators can see it in `dkg logs` / monitoring. The underlying
  *     operation (local publish / share / promote) is already
@@ -403,10 +403,10 @@ export interface DKGAgentConfig {
    * hosts >1 local agent, explicit `agentAddress` `working-memory`
    * queries MUST include a valid `agentAuthSignature`.
    *
-   * **Default (undefined) is STRICT / fail-closed** (PR #229 bot review
-   * round 12): missing or invalid signatures return `[]` so a caller
-   * that merely knows another agent's address cannot read that agent's
-   * WM. Operators still on a rolling upgrade where some HTTP/CLI/UI
+   * **Default (undefined) is STRICT / fail-closed**: missing or
+   * invalid signatures return `[]` so a caller that merely knows
+   * another agent's address cannot read that agent's WM. Operators
+   * still on a rolling upgrade where some HTTP/CLI/UI
    * surfaces have not yet plumbed `agentAuthSignature` can temporarily
    * opt out via `strictWmCrossAgentAuth: false` or
    * `DKG_STRICT_WM_AUTH=0`, but doing so accepts that any in-process
@@ -420,13 +420,13 @@ export interface DKGAgentConfig {
    * `contextGraphId` matches the subscription's context graph. Raw
    * (un-enveloped) bytes are dropped.
    *
-   * PR #229 bot review round 14 (r14-1): previously the default was
+   * previously the default was
    * `false` (lenient-with-warn) to ease rolling upgrades. That made
    * the new signing layer opt-in rather than protective — an attacker
    * could simply omit the envelope and their payload would be treated
    * as legacy gossip and dispatched anyway. The fix: strict mode is
    * now the fail-closed default, matching the same flip we made for
-   * `strictWmCrossAgentAuth` in round 12 (r12-1).
+   * `strictWmCrossAgentAuth` in round 12.
    *
    * Operators still on a partially-upgraded mesh can opt OUT via
    * `strictGossipEnvelope: false` or `DKG_STRICT_GOSSIP_ENVELOPE=0`
@@ -445,7 +445,7 @@ export interface DKGAgentConfig {
 /**
  * Resolve whether ingress gossip MUST be a signed `GossipEnvelope`.
  *
- * Exported for unit tests (PR #229 bot review round 14 — r14-1) so the
+ * Exported for unit tests so the
  * precedence can be exercised without instantiating a real DKGAgent.
  *
  * Precedence (highest to lowest):
@@ -670,11 +670,10 @@ export class DKGAgent {
       publisherPrivateKey: opKeys?.[0],
       sharedMemoryOwnedEntities: workspaceOwnedEntities,
       writeLocks,
-      // PR #229 bot review round 26 (r26-3, dkg-agent.ts). Thread a
+      // Thread a
       // persistent WAL path through from `config.dataDir` so the
       // pre-broadcast journal is actually durable across restarts.
       // Without this, the write-ahead-log recovery added for
-      // BUGS_FOUND.md P-1 was dead code in production — every agent
       // crash between the sign step and the chain confirmation
       // left the tentative KC unrecoverable, and the ChainEvent-
       // Poller's WAL-drain path (r24-4 / r25-1) had nothing to
@@ -888,7 +887,7 @@ export class DKGAgent {
       this.chainPoller = new ChainEventPoller({
         chain: this.chain,
         publishHandler,
-        // r21-5 (PR #229 bot review, post-v10-rc-merge): wire the
+        // r21-5: wire the
         // publisher's WAL reconciler so chain confirmations that
         // arrive after a process restart actually drain the
         // pre-broadcast journal. Without this, `recoverFromWalByMerkleRoot`
@@ -903,7 +902,7 @@ export class DKGAgent {
           );
           return recovered !== undefined;
         },
-        // PR #229 bot review (r3148... — chain-event-poller.ts:271).
+        // — chain-event-poller.ts:271).
         // The agent installs `onUnmatchedBatchCreated` for every
         // node, but a brand-new node has nothing in its journal and
         // should NOT scan from genesis on first boot. Expose the
@@ -1137,10 +1136,10 @@ export class DKGAgent {
     // ms). Without this close handler, a peer that dropped and
     // reconnected 10–20s later — exactly the flaky-relay case this
     // catch-up hook is meant to repair — would be silently skipped for
-    // up to a minute, so catch-up would stall until some other trigger
-    // fires. `connection:close` fires per connection, so we only forget
-    // the timestamp once no live connection to the peer remains. Codex
-    // tier-4i finding at packages/agent/src/dkg-agent.ts:1105.
+    // up to a minute, so catch-up would stall until some other
+    // trigger fires. `connection:close` fires per connection, so we
+    // only forget the timestamp once no live connection to the peer
+    // remains.
     this.node.libp2p.addEventListener('connection:close', (evt) => {
       const remotePeer = evt.detail.remotePeer.toString();
       if (remotePeer === this.node.libp2p.peerId.toString()) return;
@@ -2000,7 +1999,7 @@ export class DKGAgent {
    * Challenge-message prefix used to authenticate a working-memory
    * query. Spec §04 / RFC-29.
    *
-   * Bot review PR #229 (post-round-5): the v1 challenge was the fixed
+   * the v1 challenge was the fixed
    * string `dkg-wm-auth:<addr>` which the caller signed once — making
    * the resulting signature a permanent bearer credential for that
    * address. Anyone who ever observed the signature (HTTP logs,
@@ -2147,7 +2146,7 @@ export class DKGAgent {
 
   /**
    * Return an `ethers.Wallet` for the default agent if its private key is
-   * available locally. Used to sign GossipEnvelopes (BUGS_FOUND.md A-15)
+   * available locally. Used to sign GossipEnvelopes (
    * and `PublishRequestMsg` bodies. Returns undefined for self-sovereign
    * agents whose key material is held by the user.
    */
@@ -2164,8 +2163,7 @@ export class DKGAgent {
    * (self-sovereign agents). Used by endorse() and any other signing
    * path that MUST sign with the exact key that matches the address
    * embedded in the payload — otherwise recovery yields a different
-   * address than the one peers see in the quad (bot review PR #229 D1
-   * follow-up).
+   * address than the one peers see in the quad.
    */
   getLocalAgentWallet(addr: string): ethers.Wallet | undefined {
     if (!addr) return undefined;
@@ -2186,7 +2184,7 @@ export class DKGAgent {
    * Wrap `payload` in a signed `GossipEnvelope` (spec §08_PROTOCOL_WIRE)
    * and publish to `topic`.
    *
-   * PR #229 bot review round 16 (r16-1): previously we "fell back to
+   * previously we "fell back to
    * raw publish" when no wallet was available (pre-bootstrap /
    * self-sovereign / observer nodes). After the r14-1 ingress flip
    * that made `strictGossipEnvelope` fail-closed by default, any peer
@@ -2214,7 +2212,7 @@ export class DKGAgent {
    * Rolling upgrades that need to ship with no wallet temporarily
    * should flip the env var, then remove it once every node has a
    * wallet — mirrors the `strictGossipEnvelope` opt-out on the
-   * ingress side (r14-1) so both sides of the upgrade have a
+   * ingress side so both sides of the upgrade have a
    * matching escape hatch.
    */
   async signedGossipPublish(
@@ -2260,7 +2258,7 @@ export class DKGAgent {
         signerWallet: wallet,
       });
     } catch (err) {
-      // Bot review (PR #229 r22-6): envelope-building failures (e.g.
+      // envelope-building failures (e.g.
       // wallet that can't sign, malformed payload encoding) are
       // correctness bugs, NOT "no peers subscribed" situations. Tag
       // them so call-site catches can distinguish and surface them
@@ -2681,7 +2679,7 @@ export class DKGAgent {
 
     const onChainId = await this.getContextGraphOnChainId(contextGraphId);
 
-    // PR #229 bot review round 26 (r26-1, dkg-agent.ts:_publish). The
+    // The
     // per-CG quorum resolution below mirrors `publishFromSharedMemory()`
     // (spec §06 / A-5): direct `agent.publish()` on an on-chain CG
     // MUST wait for the CG's M-of-N signatures, not the global
@@ -2690,7 +2688,7 @@ export class DKGAgent {
     // `perCgRequiredSignatures === undefined` and fell back to the
     // global default — a CG that required 3 core-node ACKs could
     // confirm on-chain with just 1 via the self-sign fallback.
-    // PR #229 bot review (r31-4 — dkg-agent.ts:2701).
+    // dkg-agent.ts:2701).
     // The previous catch-all swallowed BOTH the `BigInt(onChainId)` parse
     // case (legitimate mock-only graph) AND any real chain-RPC failure
     // raised by `getContextGraphRequiredSignatures()`. With the catch
@@ -2789,13 +2787,13 @@ export class DKGAgent {
           timestampMs: Date.now(),
           operationId: ctx.operationId,
         });
-        // Signed-envelope wrap (PR #229 bot review round 6): update messages
+        // Signed-envelope wrap: update messages
         // must carry a recoverable signer so subscribers can reject envelopes
         // whose recovered signer does not match the KC's publisher.
         await this.signedGossipPublish(topic, 'KA_UPDATE', contextGraphId, message);
         this.log.info(ctx, `Broadcast KA update for batchId=${kcId} on ${topic}`);
       } catch (err) {
-        // r22-6: signing vs transport classification — signing errors
+        // signing vs transport classification — signing errors
         // log as ERROR with a distinctive message so operators see
         // the correctness issue; transport blips stay as a routine
         // "Failed to broadcast" WARN.
@@ -2830,7 +2828,7 @@ export class DKGAgent {
       try {
         await this.signedGossipPublish(topic, 'SHARE', contextGraphId, message);
       } catch (err) {
-        // Bot review (PR #229 r22-6): distinguish signing/envelope
+        // distinguish signing/envelope
         // correctness bugs from benign "no subscribers" transport
         // blips. Both previously collapsed into a single `log.warn`
         // that made observer / wallet-less nodes falsely report
@@ -2871,7 +2869,7 @@ export class DKGAgent {
       try {
         await this.signedGossipPublish(topic, 'SHARE_CAS', contextGraphId, message);
       } catch (err) {
-        // r22-6: see SHARE catch above for rationale.
+        // see SHARE catch above for rationale.
         logSignedGossipFailure(this.log, ctx, topic, err);
       }
     }
@@ -2904,16 +2902,16 @@ export class DKGAgent {
 
     const onChainId = ctxGraphIdStr ?? (await this.getContextGraphOnChainId(contextGraphId)) ?? undefined;
 
-    // Resolve per-CG quorum (spec §06_PUBLISH / BUGS_FOUND.md A-5). When the
+    // Resolve per-CG quorum (spec §06_PUBLISH /. When the
     // adapter exposes the lookup AND the CG has an on-chain id, plumb the
     // per-CG `requiredSignatures` through to the publisher so the on-chain
     // tx is gated on collected ACK count even when the global
     // ParametersStorage minimum is 1.
-    // PR #229 bot review (r31-4 — dkg-agent.ts:2701).
+    // dkg-agent.ts:2701).
     // See the comment block above the matching block in `_publish()` for
     // the full rationale: previous catch-all swallowed real chain-RPC
     // failures and silently downgraded the per-CG quorum to the global
-    // minimum, defeating the r26-1 fix. Split into:
+    // minimum, defeating the Split into:
     //   (a) BigInt parse failure → mock-only on-chain id, skip the gate;
     //   (b) RPC / contract failure → propagate so publishFromSharedMemory
     //       fails loudly instead of confirming an M-of-N CG with too few
@@ -2970,14 +2968,14 @@ export class DKGAgent {
       try {
         // Sign the FinalizationMessage envelope so subscribers can verify
         // the signer is the expected publisher and reject forged/replayed
-        // envelopes. Pre-r6 this was published raw, which made the new
+        // envelopes. this was published raw, which made the new
         // ingress-side `classifyGossipBytes()` path fall through as 'raw'
         // and bypass the envelope-signing hardening entirely
-        // (PR #229 bot review round 6 — signed-gossip envelope bypass).
+        // .
         await this.signedGossipPublish(topic, 'FINALIZATION', contextGraphId, encodeFinalizationMessage(msg));
         this.log.info(ctx, `Broadcast finalization for ${result.ual} to ${topic}${ctxGraphIdStr ? ` (contextGraph=${ctxGraphIdStr})` : ''}${result.contextGraphError ? ' (ctx-graph registration failed, omitting contextGraphId)' : ''}`);
       } catch (err) {
-        // r22-6: signing failures logged as ERROR (distinct from
+        // signing failures logged as ERROR (distinct from
         // "no peers"); finalization itself is already confirmed
         // on-chain so the local state is authoritative.
         logSignedGossipFailure(this.log, ctx, topic, err);
@@ -3084,7 +3082,7 @@ export class DKGAgent {
       /**
        * Proof that the caller controls the private key matching `agentAddress`.
        *
-       * Wire format (PR #229 bot review round 17, r17-3):
+       * Wire format:
        *
        *   `<timestampMs>.<nonce>.<eip191HexSignature>`
        *
@@ -3103,13 +3101,13 @@ export class DKGAgent {
        *     returns a ready-to-use token string using a wallet this
        *     agent already holds (and `undefined` when it doesn't).
        *
-       * Pre-r17-3 this field's docstring described the legacy v1
+       * this field's docstring described the legacy v1
        * payload `dkg-wm-auth:<agentAddress>`; that format is no
        * longer accepted by `verifyWmAuthSignature()` — every signer
        * that follows the old doc emits a token that always fails.
        *
        * REQUIRED for `view: 'working-memory'` queries on multi-agent
-       * nodes to prevent cross-agent WM impersonation (BUGS_FOUND.md
+       * nodes to prevent cross-agent WM impersonation (
        * A-1). The gate is fail-closed by default; see
        * `strictWmCrossAgentAuth` / `DKG_STRICT_WM_AUTH` for the
        * escape hatches.
@@ -3198,12 +3196,11 @@ export class DKGAgent {
       throw new Error(`SPARQL rejected: ${readOnlyGuard.reason}`);
     }
 
-    // PR #229 bot review round 17 (r17-2) + A-1 follow-up + r30-3
-    // consolidation: fail-closed denials MUST preserve the `QueryResult`
-    // shape for the SPARQL form the caller issued — otherwise a
+    // Fail-closed denials MUST preserve the `QueryResult` shape for
+    // the SPARQL form the caller issued — otherwise a
     // `CONSTRUCT`/`DESCRIBE` caller branching on
-    // `result.quads !== undefined` misinterprets an auth denial as an
-    // empty-bindings SELECT success, and an ASK caller sees
+    // `result.quads !== undefined` misinterprets an auth denial as
+    // an empty-bindings SELECT success, and an ASK caller sees
     // `bindings: []` instead of the expected `[{ result: 'false' }]`.
     //
     // `detectSparqlQueryForm` + `emptyResultForForm` is the SINGLE
@@ -3280,9 +3277,9 @@ export class DKGAgent {
     // `agentAddress` for a `working-memory` view requires a signature
     // proving the caller owns the private key. Otherwise any
     // in-process caller could read another co-hosted agent's WM by
-    // knowing/guessing the address. See BUGS_FOUND.md A-1.
+    // knowing/guessing the address.
     //
-    // PR #229 bot review round 12: the gate is now **fail-closed by
+    // the gate is now **fail-closed by
     // default**. Any call that lacks a valid `agentAuthSignature`
     // returns an empty form-shaped result. Operators still on a
     // rolling upgrade where some HTTP/CLI/UI/adapter surfaces have
@@ -3617,7 +3614,7 @@ export class DKGAgent {
     const existing = this.subscribedContextGraphs.get(contextGraphId);
     this.subscribedContextGraphs.set(contextGraphId, { ...existing, subscribed: true, synced: existing?.synced ?? false });
 
-    // Ingress-side envelope enforcement (bot review C1/E1). Bytes fall into
+    // Ingress-side envelope enforcement. Bytes fall into
     // one of three classes:
     //   - 'verified' → envelope parsed, signature recovered, and recovered
     //                  signer equals `envelope.agentAddress`. Safe to
@@ -3634,7 +3631,7 @@ export class DKGAgent {
     // Map subscription label → set of envelope `type` values accepted on
     // that topic. Keeps subscribers from accidentally processing an
     // envelope whose declared type belongs to a different topic
-    // (PR #229 bot review round 6 — subscription/type mismatch).
+    // .
     const ACCEPTED_ENVELOPE_TYPES: Record<string, ReadonlySet<string>> = {
       publish: new Set(['PUBLISH_REQUEST']),
       swm: new Set(['SHARE', 'SHARE_CAS', 'ASSERTION_PROMOTE']),
@@ -3642,7 +3639,7 @@ export class DKGAgent {
       finalization: new Set(['FINALIZATION']),
     };
 
-    // PR #229 bot review round 14 (r14-1): resolve strict mode via the
+    // resolve strict mode via the
     // exported `resolveStrictGossipEnvelopeMode` helper so the precedence
     // is testable without spinning up a full DKGAgent. See the helper's
     // docstring for the exact rules — mirrors the r12-1 flip for
@@ -3703,7 +3700,7 @@ export class DKGAgent {
         return { payload: env.envelope.payload, recoveredSigner: env.recoveredSigner };
       }
       // `kind === 'raw'`: bytes were not an envelope at all (legacy
-      // pre-r6 gossip). When the mesh has been fully upgraded, enable
+      // gossip). When the mesh has been fully upgraded, enable
       // `strictGossipEnvelope` (or `DKG_STRICT_GOSSIP_ENVELOPE=1`) to
       // drop raw gossip entirely. During rolling upgrade we still accept
       // raw so legacy peers don't fall off the mesh, but we log each one
@@ -3720,7 +3717,7 @@ export class DKGAgent {
       const ing = dispatchIngress('publish', data);
       if (!ing) return;
       const gph = this.getOrCreateGossipPublishHandler();
-      // r23-4: pass the envelope's recovered signer so
+      // pass the envelope's recovered signer so
       // GossipPublishHandler can enforce the cryptographic link
       // between the envelope signature and the inner PublishRequest's
       // claimed publisher address.
@@ -3742,7 +3739,7 @@ export class DKGAgent {
       const ing = dispatchIngress('update', data);
       if (!ing) return;
       const uh = this.getOrCreateUpdateHandler();
-      // r23-4: thread envelope signer so UpdateHandler can enforce the
+      // thread envelope signer so UpdateHandler can enforce the
       // publisher-attribution link before hitting chain RPC.
       await uh.handle(ing.payload, from, ing.recoveredSigner);
     });
@@ -3753,7 +3750,7 @@ export class DKGAgent {
       const ing = dispatchIngress('finalization', data);
       if (!ing) return;
       const fh = this.getOrCreateFinalizationHandler();
-      // r23-4: thread envelope signer so FinalizationHandler can
+      // thread envelope signer so FinalizationHandler can
       // enforce attribution before chain RPC.
       await fh.handleFinalizationMessage(ing.payload, contextGraphId, ing.recoveredSigner);
     });
@@ -4126,7 +4123,7 @@ export class DKGAgent {
         try {
           await this.signedGossipPublish(ontologyTopic, 'PUBLISH_REQUEST', SYSTEM_PARANETS.ONTOLOGY, msg);
         } catch (err) {
-          // r22-6: surface signing failures with a distinctive ERROR
+          // surface signing failures with a distinctive ERROR
           // so operators can see them; transport "no subscribers" is
           // expected during local-only / pre-bootstrap flows.
           logSignedGossipFailure(this.log, ctx, ontologyTopic, err);
@@ -4421,7 +4418,7 @@ export class DKGAgent {
       });
       await this.signedGossipPublish(ontologyTopic, 'PUBLISH_REQUEST', SYSTEM_PARANETS.ONTOLOGY, regMsg);
     } catch (err) {
-      // r22-6: signing failures surfaced as ERROR (distinct from
+      // signing failures surfaced as ERROR (distinct from
       // the quiet-network debug case). `logSignedGossipFailure`
       // uses WARN for the non-signing branch; preserve the original
       // debug-only behaviour for the no-subscribers case here by
@@ -5397,7 +5394,7 @@ export class DKGAgent {
     knowledgeAssetUal: string;
     agentAddress?: string;
   }): Promise<PublishResult> {
-    // Bot review D1: use the ASYNC endorsement builder and pass the local
+    // use the ASYNC endorsement builder and pass the local
     // agent wallet as the signer whenever one is available, so the resulting
     // `endorsementSignature` quad carries a real EIP-191 signature that
     // verifiers can recover the endorsing address from. When no wallet is
@@ -5407,7 +5404,7 @@ export class DKGAgent {
     // reject it. The previous sync `buildEndorsementQuads` path silently
     // ignored any `signer` option and always emitted the unsigned digest.
     const { buildEndorsementQuadsAsync } = await import('./endorse.js');
-    // Bot review D1 (2nd follow-up, PR #229): the signer MUST match the
+    // the signer MUST match the
     // `agentAddress` we embed in the endorsement quad, otherwise peers
     // recover a different address from the EIP-191 signature than the
     // one they see in the payload and reject the endorsement (or worse,
@@ -5442,7 +5439,7 @@ export class DKGAgent {
     const agentAddress = canonicalAgentDidSubject(agentAddressRaw);
     const walletForEndorsement = this.getLocalAgentWallet(agentAddress);
     if (!walletForEndorsement) {
-      // PR #229 bot review (r3147347... — dkg-agent.ts:5424).
+      // — dkg-agent.ts:5424).
       // Pre-fix the "no local wallet" branch fell through to
       // `buildEndorsementQuadsAsync(..., {})` and emitted an
       // endorsement carrying ONLY the unsigned digest. Verifiers
@@ -7319,7 +7316,7 @@ export class DKGAgent {
     try {
       await this.signedGossipPublish(ontologyTopic, 'PUBLISH_REQUEST', SYSTEM_PARANETS.ONTOLOGY, msg);
     } catch (err) {
-      // r22-6: signing/envelope failures surface as ERROR; "no
+      // signing/envelope failures surface as ERROR; "no
       // subscribers" remains benign for local-only operation.
       logSignedGossipFailure(this.log, ctx, ontologyTopic, err);
     }
@@ -7777,7 +7774,7 @@ export class DKGAgent {
         );
       }
 
-      // Per-CG quorum (spec §06_PUBLISH / BUGS_FOUND.md A-5) supersedes the
+      // Per-CG quorum (spec §06_PUBLISH /
       // global ParametersStorage minimum, which is only the network-wide
       // floor. Read both, use whichever is HIGHER so neither gate is bypassed.
       const globalMin = typeof chain.getMinimumRequiredSignatures === 'function'
@@ -7860,7 +7857,7 @@ export class DKGAgent {
     try {
       await this.signedGossipPublish(topic, 'PUBLISH_REQUEST', contextGraphId, msg);
     } catch (err) {
-      // Bot review (PR #229 r22-6, dkg-agent.ts:7411): observer /
+      // observer /
       // wallet-less nodes previously saw `signedGossipPublish`
       // throwing a SignedGossipSigningError and the blanket
       // `catch { log.warn("no subscribers") }` reported a successful
@@ -7925,10 +7922,10 @@ export class DKGAgent {
           try {
             // Wrap in signed envelope so subscribers can verify the
             // promote broadcast's signer matches an allowed CG member
-            // (PR #229 bot review round 6 — signed-gossip envelope bypass).
+            // .
             await agent.signedGossipPublish(topic, 'ASSERTION_PROMOTE', contextGraphId, gossipMessage);
           } catch (err: any) {
-            // r22-6: local SWM mutation already succeeded. Signing
+            // local SWM mutation already succeeded. Signing
             // failures mean the promote WILL NOT be propagated to
             // any strict peer — surface this loudly as ERROR via
             // `logSignedGossipFailure` (distinct from the routine

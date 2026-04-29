@@ -1,7 +1,7 @@
 /**
  * packages/network-sim — extra QA coverage.
  *
- * Findings covered (see .test-audit/BUGS_FOUND.md):
+ * Findings covered (see .test-audit/
  *
  *   K-4  SPEC-GAP   Determinism — the sim engine seeds entity URIs and op
  *                   routing with `Math.random()` / `Date.now()` and exposes
@@ -10,7 +10,7 @@
  *                   bug: (a) the production source HAS no seeded RNG API,
  *                   (b) the `SimConfig` type has no `seed` field. Both stay
  *                   RED until a deterministic entry point is added.
- *                   // PROD-BUG: no seeded RNG / reproducible run — see BUGS_FOUND.md K-4
+ *                   // PROD-BUG: no seeded RNG / reproducible run —
  *
  *   K-5  SPEC-GAP   libp2p parity — the sim drives REAL devnet daemons over
  *                   HTTP but exposes no "simulated-network" mode and no
@@ -20,7 +20,7 @@
  *                   counts. This file documents the absence statically and
  *                   pins the current behaviour of handleSimRequest so that
  *                   a future parity refactor shows up as a semantic change.
- *                   // PROD-BUG: no libp2p-parity harness — see BUGS_FOUND.md K-5
+ *                   // PROD-BUG: no libp2p-parity harness —
  *
  * Per QA policy: no production-code edits.
  */
@@ -102,7 +102,7 @@ describe('[K-4] sim engine — determinism / seeded RNG (RED until implemented)'
   });
 
   it('sim-engine exposes a seeded RNG entry point (fails until the sim is made reproducible)', () => {
-    // PROD-BUG: no seeded RNG / reproducible run — see BUGS_FOUND.md K-4.
+    // PROD-BUG: no seeded RNG / reproducible run —
     // We look for any of the common "seed" touchpoints in the production
     // source. This test is intentionally RED; the failing test IS the
     // bug evidence.
@@ -117,7 +117,7 @@ describe('[K-4] sim engine — determinism / seeded RNG (RED until implemented)'
   });
 
   // ─────────────────────────────────────────────────────────────────────────
-  // Bot review (PR #229 follow-up, sim-engine.ts:112): seeded runs were
+  // seeded runs were
   // still non-reproducible because `rndId()` baked `Date.now()` and a
   // process-global counter into every id. Two runs with the same seed
   // and config produced DIFFERENT sim-<id> URIs and therefore
@@ -163,7 +163,7 @@ describe('[K-4] sim engine — determinism / seeded RNG (RED until implemented)'
     }
   });
 
-  // PR #229 bot review round 8 (sim-engine.ts:665): two runs with the
+  // two runs with the
   // same seed must now produce the SAME op sequence even when
   // `concurrency > 1`. The previous revision drew each op's opType +
   // node pick at `launchOne()` time, which was triggered by whichever
@@ -278,7 +278,7 @@ describe('[K-5] libp2p parity harness (RED until implemented)', () => {
   });
 
   it('exports a scenario/replay surface comparable against real libp2p (fails — no such surface exists)', () => {
-    // PROD-BUG: no libp2p-parity harness — see BUGS_FOUND.md K-5.
+    // PROD-BUG: no libp2p-parity harness —
     // We look for the kind of symbols a parity harness would expose:
     // a scenario recorder, a libp2p-backed runner, or a message-count
     // comparator. None exist today — red test documents the gap.
@@ -311,7 +311,7 @@ describe('[sim-engine] fmtError edge cases (additional positive coverage)', () =
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PR #229 bot review (r3147347829, sim-engine.ts:1004). The pre-fix
+// The pre-fix
 // `runOnLibp2p` silently delegated to `runScenario`, so the K-5 parity
 // surface was model-vs-model and ALWAYS looked green. The fix makes
 // `runOnLibp2p` fail closed with `Libp2pRunnerNotImplementedError` until a
@@ -321,7 +321,7 @@ describe('[sim-engine] fmtError edge cases (additional positive coverage)', () =
 //   - `runOnLibp2p` rejects loudly so a caller cannot accidentally
 //     compare the model against itself.
 // ─────────────────────────────────────────────────────────────────────────────
-describe('[sim-engine] K-5 parity surface (bot review r3147347829)', () => {
+describe('[sim-engine] K-5 parity surface', () => {
   const scenario: SimScenario = {
     name: 'parity-fixture',
     seed: 42,

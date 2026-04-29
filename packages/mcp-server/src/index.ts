@@ -387,7 +387,7 @@ server.registerTool(
 );
 
 // ---------------------------------------------------------------------------
-// mcp_auth — credentialing & connection state (BUGS_FOUND.md K-2)
+// mcp_auth — credentialing & connection state (
 // ---------------------------------------------------------------------------
 //
 // Spec requirement: every MCP server that talks to a remote DKG node MUST
@@ -446,7 +446,7 @@ server.registerTool(
         );
       }
 
-      // PR #229 bot review round 10 (mcp-server/index.ts:449). Until
+      // Until
       // round 10 this path resolved the URL + credential from env vars
       // ONLY. With no env overrides it reported `127.0.0.1:7777` and
       // an empty bearer even though `DkgClient.connect()` would have
@@ -478,7 +478,7 @@ server.registerTool(
         );
       }
 
-      // Bot review (PR #229): `/api/status` is on the daemon's public
+      // `/api/status` is on the daemon's public
       // allowlist (no auth required), so probing it only reports
       // reachability — it says nothing about whether the configured
       // bearer token is actually accepted. `mcp_auth status` used to
@@ -498,7 +498,6 @@ server.registerTool(
         typeof resolved.baseOrPort === 'number'
           ? `http://127.0.0.1:${resolved.baseOrPort}`
           : resolved.baseOrPort;
-      // PR #229 bot review round 22 (r22-3, mcp-server/index.ts:497):
       // when the resolver explicitly reports `daemonDown`, the
       // `baseOrPort` is a SYNTHETIC 127.0.0.1:7777 placeholder and
       // anything listening on that port belongs to a different
@@ -512,7 +511,7 @@ server.registerTool(
       const authProbe = resolved.daemonDown
         ? { ok: false, code: 0, body: '', authDisabled: false }
         : await probeAuth(probeUrl, cred);
-      // PR #229 bot review round 7 (auth-probe.ts:69): when no
+      // when no
       // credential is configured AND the daemon accepts the
       // unauthenticated `/api/agents` probe, surface that as a
       // distinct `AUTH DISABLED` state instead of conflating it

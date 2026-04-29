@@ -11,7 +11,7 @@
  * The loader performs schema validation, applies defaults, and returns a
  * normalised `WorkspaceConfig` so the rest of the agent can consume a
  * stable shape regardless of source file. See A-13 in
- * `.test-audit/BUGS_FOUND.md` for the audit context that motivated this
+ * `.test-audit/
  * module.
  */
 import { readFileSync, statSync } from 'node:fs';
@@ -33,9 +33,9 @@ export type ExtractionPolicy = 'structural-only' | 'structural-plus-semantic' | 
  * and `packages/mcp-dkg/src/config.ts`) declares `node` as an OBJECT with
  * `api`, `tokenFile`, and friends — that's what every running daemon and the
  * existing capture-chat hook already consume. The earlier draft of this
- * loader (PR #229) accepted ONLY a bare-string `node:` field, which made
+ * loader accepted ONLY a bare-string `node:` field, which made
  * `loadWorkspaceConfig()` throw on every real workspace config it
- * encountered (PR #229 bot review r31-6, workspace-config.ts:55).
+ * encountered.
  *
  * We now accept BOTH shapes and always return the structured form so
  * downstream callers can read `cfg.node.api` / `cfg.node.tokenFile` without
@@ -66,7 +66,7 @@ export interface LoadedWorkspaceConfig {
  * Validate a raw parsed config object and apply defaults. Throws with a
  * descriptive error if the schema is violated.
  *
- * PR #229 bot review (r31-6, workspace-config.ts:55): the spec section §22
+ * the spec section §22
  * pinned `node:` as a bare string, but the canonical
  * `.dkg/config.yaml` shape that the rest of the toolchain (mcp-dkg loader,
  * capture-chat hook, README example) consumes uses an OBJECT here — so the
@@ -141,7 +141,6 @@ function parseNodeField(node: unknown): WorkspaceConfigNode {
   throw new Error('workspace config: `node` is required (string or {api})');
 }
 
-// PR #229 bot review r3131820489 (workspace-config.ts:76):
 // the original regex required a trailing newline AFTER the closing
 // `---`, so a valid AGENTS.md whose entire body is just the YAML
 // frontmatter — or whose frontmatter block is the LAST thing in the
@@ -155,7 +154,7 @@ function parseNodeField(node: unknown): WorkspaceConfigNode {
 const FRONTMATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/;
 
 /**
- * PR #229 bot review (post-v10-rc-merge, r21-4): also accept a fenced
+ * also accept a fenced
  * code block tagged with the `dkg-config` info-string anywhere in
  * the document. The repo's own `AGENTS.md` (and the wider AGENTS.md
  * convention popularised by Cursor / Continue / Codex CLI) is plain
@@ -180,7 +179,6 @@ const FRONTMATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/;
  * fence wins; later ones are ignored so a project can demote a
  * draft block by renaming the info-string to something else.
  */
-// PR #229 CodeQL polynomial-regex warning (workspace-config.ts:138):
 // the previous mega-regex
 //   /(^|\n)```(?:\s*(?:yaml|yml|json)\s+)?dkg-config\s*\r?\n([\s\S]*?)\r?\n```/i
 // combined a lazy `[\s\S]*?` body with a non-anchored opening
@@ -195,7 +193,7 @@ const FRONTMATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/;
 // next line whose content matches the close-fence shape. Each char
 // of the input is now visited a bounded number of times — the whole
 // scan is strictly linear and impossible to backtrack.
-// PR #229 bot review (r3148998568 — workspace-config.ts:130). CommonMark
+// workspace-config.ts:130). CommonMark
 // allows code-block fences to be indented by up to THREE spaces (anything
 // from four onwards reverts to an indented code block). The strict
 // column-0 anchor rejected legitimate `dkg-config` blocks that lived
@@ -255,7 +253,7 @@ function extractDkgConfigFenceBody(src: string): string | undefined {
  * configuration found".
  */
 export function parseAgentsMdFrontmatter(src: string): WorkspaceConfig {
-  // Bot review (PR #229 r22-5, workspace-config.ts:125): the previous
+  // the previous
   // revision threw as soon as YAML frontmatter existed without a top-
   // level `dkg:` key, which meant any AGENTS.md that already uses
   // frontmatter for OTHER tooling (tags, owner, prompt metadata —
@@ -265,7 +263,7 @@ export function parseAgentsMdFrontmatter(src: string): WorkspaceConfig {
   // honour it by treating frontmatter-without-`dkg` as "keep looking"
   // and only erroring after BOTH carriers have been checked.
   //
-  // PR #229 bot review (r3146759647, workspace-config.ts:191): the
+  // the
   // prior revision called `yaml.load(fm[1])` directly. If the
   // frontmatter is unrelated to DKG and uses a YAML extension or
   // shape that `js-yaml` rejects (a tab-indented block, a bare

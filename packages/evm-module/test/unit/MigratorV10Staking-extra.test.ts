@@ -1,20 +1,19 @@
 /**
  * MigratorV10Staking-extra.test.ts — audit coverage (E-11).
  *
- * Finding E-11 (MEDIUM, SPEC-GAP, see .test-audit/BUGS_FOUND.md):
+ * Finding E-11 (MEDIUM, SPEC-GAP):
  *   "MigratorV10Staking does not exist in the repo. Spec mentions
  *    zero-token migration of V8 delegator state."
  *
  * This file pins the contract's existence + compiled artifact + the
- * critical custom-error guards that PR #229 bot review (rounds 10
- * and 24) added to `migrateDelegator()`. The original "baseline
- * sanity" assertion that other historical migrators DO exist was
- * dropped because main has deliberately removed them as part of the
- * V10 fresh-chain bring-up (see `chore(evm): remove orphan + out-of-
- * scope contracts from V10.0 release`); enumerating them no longer
- * applies. The remaining assertions stay valid because our branch
- * still ships `MigratorV10Staking.sol` for the zero-token V8 → V10
- * delegator state replay.
+ * critical custom-error guards on `migrateDelegator()`. The earlier
+ * "baseline sanity" assertion that other historical migrators DO
+ * exist was dropped because main has deliberately removed them as
+ * part of the V10 fresh-chain bring-up (see `chore(evm): remove
+ * orphan + out-of-scope contracts from V10.0 release`); enumerating
+ * them no longer applies. The remaining assertions stay valid
+ * because our branch still ships `MigratorV10Staking.sol` for the
+ * zero-token V8 → V10 delegator state replay.
  */
 import { expect } from 'chai';
 import * as fs from 'fs';
@@ -52,13 +51,11 @@ describe('@unit MigratorV10Staking — extra audit coverage (E-11)', () => {
 
   it('SPEC-GAP: contracts/migrations/MigratorV10Staking.sol must exist', () => {
     // Spec says zero-token V8 → V10 delegator migration must ship as
-    // `MigratorV10Staking`. PR #229 (commit 7c76f07f) flipped this
-    // gate green by adding the contract. Keep the assertion as a
-    // regression pin so a future cleanup that drops the file is
-    // caught immediately.
+    // `MigratorV10Staking`. Keep this assertion as a regression pin
+    // so a future cleanup that drops the file is caught immediately.
     expect(
       fs.existsSync(contractPath),
-      `Expected ${contractPath} to exist (V10 zero-token migration). See BUGS_FOUND.md E-11.`,
+      `Expected ${contractPath} to exist (V10 zero-token migration).`,
     ).to.equal(true);
   });
 
@@ -73,7 +70,7 @@ describe('@unit MigratorV10Staking — extra audit coverage (E-11)', () => {
     // syntax-broken contract would leave artifacts/ empty.
     expect(
       fs.existsSync(artifactPath),
-      `Expected compiled artifact ${artifactPath} to exist after compile. See BUGS_FOUND.md E-11.`,
+      `Expected compiled artifact ${artifactPath} to exist after compile.`,
     ).to.equal(true);
 
     // Sanity-check the artifact actually contains a non-empty bytecode
@@ -98,7 +95,6 @@ describe('@unit MigratorV10Staking — extra audit coverage (E-11)', () => {
     }
   });
 
-  // PR #229 bot review round 10 (MigratorV10Staking.sol:137).
   //
   // Before the round-10 fix `migrateDelegator` / `markNodeMigrated`
   // only rejected `identityId == 0`. Any non-zero id (including a
@@ -109,7 +105,7 @@ describe('@unit MigratorV10Staking — extra audit coverage (E-11)', () => {
   // reverts with `UnknownIdentityId(uint72)`. Pin the new custom
   // error at the ABI/artifact layer so a refactor that drops the
   // guard also breaks this test.
-  it('bot review r10-5: UnknownIdentityId error is present in the compiled ABI', () => {
+  it('UnknownIdentityId error is present in the compiled ABI', () => {
     const artifact = JSON.parse(fs.readFileSync(artifactPath, 'utf8')) as {
       abi: Array<{ type: string; name?: string; inputs?: Array<{ type: string; name?: string }> }>;
     };
@@ -119,13 +115,13 @@ describe('@unit MigratorV10Staking — extra audit coverage (E-11)', () => {
     );
     expect(
       unknownIdErr,
-      'MigratorV10Staking ABI must expose the UnknownIdentityId error (bot review r10-5)',
+      'MigratorV10Staking ABI must expose the UnknownIdentityId error',
     ).to.not.equal(undefined);
     expect(unknownIdErr!.inputs).to.have.length(1);
     expect(unknownIdErr!.inputs![0].type).to.equal('uint72');
   });
 
-  // PR #229 bot review round 24 (r24-3). Before this fix,
+  // Before this fix,
   // `markNodeMigrated()` flipped `nodeMigrated[id] = true` but
   // `migrateDelegator()` never re-checked the flag. A snapshot
   // replay that landed AFTER markNodeMigrated would therefore
@@ -138,7 +134,7 @@ describe('@unit MigratorV10Staking — extra audit coverage (E-11)', () => {
   // at the top of `migrateDelegator`. Pin the new custom error at
   // the ABI layer so a refactor that drops the guard also breaks
   // this test.
-  it('bot review r24-3: NodeAlreadyFrozen error is present in the compiled ABI', () => {
+  it('NodeAlreadyFrozen error is present in the compiled ABI', () => {
     const artifact = JSON.parse(fs.readFileSync(artifactPath, 'utf8')) as {
       abi: Array<{ type: string; name?: string; inputs?: Array<{ type: string; name?: string }> }>;
     };
@@ -148,13 +144,12 @@ describe('@unit MigratorV10Staking — extra audit coverage (E-11)', () => {
     );
     expect(
       frozenErr,
-      'MigratorV10Staking ABI must expose the NodeAlreadyFrozen error (bot review r24-3)',
+      'MigratorV10Staking ABI must expose the NodeAlreadyFrozen error',
     ).to.not.equal(undefined);
     expect(frozenErr!.inputs).to.have.length(1);
     expect(frozenErr!.inputs![0].type).to.equal('uint72');
   });
 
-  // PR #229 bot review (r3146902144, MigratorV10Staking.sol:137).
   // Before the fix, `finalizeMigration()` only required
   // `onlyOwnerOrMultiSigOwner` and irreversibly flipped
   // `migrationFinalized = true` even when `initiateMigration` had
@@ -168,7 +163,7 @@ describe('@unit MigratorV10Staking — extra audit coverage (E-11)', () => {
   // finalisation succeeds. We pin the source-level guard at the
   // statement granularity so a refactor that drops it can't slip
   // back in unnoticed.
-  it('bot review r3146902144: finalizeMigration requires migrationInitiated before flipping the kill switch', () => {
+  it('finalizeMigration requires migrationInitiated before flipping the kill switch', () => {
     const src = fs.readFileSync(contractPath, 'utf8');
 
     // Locate the body of finalizeMigration without depending on

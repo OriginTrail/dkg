@@ -1,7 +1,7 @@
 /**
  * DKG v10 Hub audit coverage.
  *
- * Findings covered (see .test-audit/BUGS_FOUND.md):
+ * Findings covered (see .test-audit/
  *   E-1 (CRITICAL, SPEC-GAP): `Hub.setAndReinitializeContracts` atomic V10
  *        mainnet-swap mechanism — partial-failure rollback, non-owner revert,
  *        happy-path success.
@@ -11,7 +11,7 @@
  *        at Hub.sol:204 is removed.
  *
  * Do NOT modify production code from these tests. Any red assertion is the
- * finding being surfaced; leave it red and reference BUGS_FOUND.md.
+ * finding being surfaced; leave it red and reference.
  */
 
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
@@ -87,10 +87,10 @@ describe('@unit v10 Hub audit', function () {
       // BUG E-7: contract currently emits `NewContract` twice on the new-name
       // branch (Hub.sol:193 in the `else` branch + unconditional Hub.sol:204).
       // This assertion is intentionally left RED — fixing the contract to
-      // emit once is the remediation. See BUGS_FOUND.md#E-7.
+      // emit once is the remediation.
       expect(
         newContractLogs.length,
-        'NewContract emitted more than once on create (BUGS_FOUND.md#E-7)',
+        'NewContract emitted more than once on create',
       ).to.equal(1);
     });
 
@@ -125,7 +125,7 @@ describe('@unit v10 Hub audit', function () {
       expect(changedLogs.length).to.equal(1);
       expect(
         newContractLogs.length,
-        'NewContract incorrectly emitted on update path (BUGS_FOUND.md#E-7)',
+        'NewContract incorrectly emitted on update path',
       ).to.equal(0);
     });
   });
@@ -137,7 +137,7 @@ describe('@unit v10 Hub audit', function () {
   describe('E-1 — `Hub.setAndReinitializeContracts` atomic contract swap', () => {
     it('non-owner cannot call setAndReinitializeContracts', async () => {
       const HubAsNonOwner = HubContract.connect(accounts[1]);
-      // After alignment with OZ Ownable v5 (BUGS_FOUND.md
+      // After alignment with OZ Ownable v5 (
       // "OwnableUnauthorizedAccount vs UnauthorizedAccess") the gate raises
       // the standard `OwnableUnauthorizedAccount(msg.sender)` selector so
       // indexers + clients can route on the same selector that
@@ -169,7 +169,7 @@ describe('@unit v10 Hub audit', function () {
       // actually wired against real storage contracts here — that case
       // is covered exhaustively by `DKGStakingConvictionNFT.test.ts`).
       //
-      // PR #229 follow-up: previously the placeholders were skipped and
+      // previously the placeholders were skipped and
       // the test reverted with `ContractDoesNotExist("StakingV10")` from
       // `DKGStakingConvictionNFT.initialize` line 234. The audit's
       // intent is to pin the success path of the **Hub** mechanism, not

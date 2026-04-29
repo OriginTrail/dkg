@@ -57,7 +57,7 @@ export function createSeededRng(seed: number): () => number {
     t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   }) as SeededRng;
-  // Bot review (PR #229 follow-up): brand the returned RNG so `rndId()`
+  // brand the returned RNG so `rndId()`
   // takes the deterministic, no-wall-clock path. Same seed → same
   // sequence of ids regardless of when the sim runs.
   mulberry32[SEEDED_RNG_MARK] = true;
@@ -120,7 +120,7 @@ interface NodeInfo {
 let globalRndIdCounter = 0;
 
 /**
- * Bot review (PR #229 follow-up, sim-engine.ts:112): the previous
+ * the previous
  * implementation concatenated `Date.now()` and a process-global
  * counter even when called with a seeded RNG. Two sim runs started
  * with the same seed/config at different wall-clock times therefore
@@ -133,10 +133,9 @@ let globalRndIdCounter = 0;
  *     wall-clock-plus-global-counter shape (legacy behaviour preserved
  *     for callers that did NOT opt into reproducibility).
  */
-// Exported for the sim-engine reproducibility unit tests only. NOT part
-// of the public API of this package — bot review PR #229 follow-up
-// pinned this as the primary place where seeded runs were broken, so
-// the test needs a handle on it.
+// Exported for the sim-engine reproducibility unit tests only. NOT
+// part of the public API of this package — the test needs a handle
+// on it to pin seeded runs.
 export function _rndIdForTesting(rng?: () => number): string {
   return rndId(rng);
 }
@@ -630,7 +629,7 @@ async function ensureContextGraph(nodes: NodeInfo[], contextGraphId: string, sig
 async function runSimulation(config: SimConfig, signal: AbortSignal) {
   const nodes = getNodes();
 
-  // Bot review J1: resolve the RNG ONCE per sim run and thread it into
+  // resolve the RNG ONCE per sim run and thread it into
   // every executor / helper that was previously calling Math.random().
   // Two runs with the same numeric seed now replay identical operation
   // types, node round-robin, query LIMITs, entity URIs, and chat-peer
@@ -687,7 +686,7 @@ async function runSimulation(config: SimConfig, signal: AbortSignal) {
       tryDispatch();
     }
 
-    // PR #229 bot review round 8 (sim-engine.ts:665): when a numeric
+    // when a numeric
     // seed is provided the run MUST be reproducible at any
     // `concurrency`. The previous revision drew the opType + node pick
     // inside `launchOne()`, which is triggered by whichever in-flight
@@ -720,7 +719,7 @@ async function runSimulation(config: SimConfig, signal: AbortSignal) {
       inflight++;
       lastDispatchTime = Date.now();
 
-      // PR #229 bot review round 8 (sim-engine.ts:665): the executors
+      // the executors
       // below draw their per-op entropy (entity URIs, LIMITs, chat
       // peers…) from the shared `rng`. When `concurrency > 1` and the
       // run is seeded, those draws could still interleave based on op
@@ -1007,7 +1006,7 @@ export class Libp2pRunnerNotImplementedError extends Error {
 /**
  * libp2p-backed runner for the same scenario surface (K-5).
  *
- * PR #229 bot review (r3147347829, sim-engine.ts:1004). The previous
+ * The previous
  * implementation silently delegated to {@link runScenario}, so any
  * parity check `compareMessageCounts(runScenario(s), runOnLibp2p(s))`
  * was comparing the deterministic model against itself and ALWAYS

@@ -376,7 +376,7 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       parsed.includeSharedMemory ?? parsed.includeWorkspace;
     const view = parsed.view;
     const agentAddress = parsed.agentAddress;
-    // PR #229 bot review round 22 (r22-1, dkg-agent.ts:3226): the
+    // the
     // RFC-29 multi-agent WM isolation gate is fail-closed by default.
     // For cross-agent `view: 'working-memory'` reads on nodes with
     // more than one local agent, the caller MUST supply
@@ -556,7 +556,7 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
         assertionName,
         subGraphName,
         callerAgentAddress,
-        // PR #229 follow-up (round 12 hardening): the daemon admin
+        // the daemon admin
         // token is the authorisation anchor for cross-agent WM reads
         // (adapter-openclaw and the CLI rely on this). Pass it through
         // so DKGAgent.query knows to skip the multi-agent signed-proof
@@ -838,7 +838,7 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       return jsonResponse(res, 200, response);
     } catch (err) {
       tracker.fail(ctx, err);
-      // CLI-7 (BUGS_FOUND.md dup #72 #85): the previous behaviour was
+      // CLI-7 (
       // to re-throw and let the global catch emit a 500 with the raw
       // libp2p / agent message. That conflates "I couldn't reach the
       // peer" with "the daemon crashed", which the audit flagged as a
@@ -908,7 +908,7 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
     }
     const validatedRequiredSigs = parsedSigs.value || undefined;
 
-    // CLI-9 (BUGS_FOUND.md dup #158): batchId is user-controlled; an
+    // CLI-9 (
     // unparseable value used to throw `SyntaxError: Cannot convert ...
     // to a BigInt` deep inside `BigInt()` and bubble up as a 500 with
     // a stack trace. Pre-validate so the operator gets a crisp 400.

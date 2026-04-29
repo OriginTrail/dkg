@@ -313,7 +313,6 @@ contract Hub is INamed, IVersioned, Ownable {
         // Spec: align with OZ Ownable v5 — privileged-call rejection raises
         // `OwnableUnauthorizedAccount(msg.sender)` so indexers + clients can
         // route on the same selector that `_checkOwner` produces.
-        // See BUGS_FOUND.md "OwnableUnauthorizedAccount vs UnauthorizedAccess"
         // (Solidity coverage shards 3/4 + 4/4).
         if (msg.sender != hubOwner && !_isMultiSigOwner(hubOwner)) {
             revert OwnableUnauthorizedAccount(msg.sender);
