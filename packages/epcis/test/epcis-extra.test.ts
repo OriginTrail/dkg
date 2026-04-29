@@ -1,7 +1,7 @@
 /**
  * packages/epcis — extra QA coverage.
  *
- * Findings covered (see .test-audit/BUGS_FOUND.md):
+ * Findings covered (see .test-audit/):
  *
  *   K-6  TEST-DEBT  `epcis-api.e2e.test.ts` wraps every `it` in a
  *                   `beforeEach(({skip}) => { if (!nodeReachable) skip(); })`

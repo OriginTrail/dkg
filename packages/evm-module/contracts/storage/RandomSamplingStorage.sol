@@ -763,6 +763,12 @@ contract RandomSamplingStorage is INamed, IVersioned, IInitializable, ContractSt
      * @return True if the caller is an owner of the multisig, false otherwise
      */
     function _isMultiSigOwner(address multiSigAddress) internal view returns (bool) {
+        // EOA-safe: short-circuit when target has no code to avoid empty
+        // reverts from the compiler-inserted extcodesize guard preempting
+        // the caller's typed error.
+        if (multiSigAddress.code.length == 0) {
+            return false;
+        }
         try ICustodian(multiSigAddress).getOwners() returns (address[] memory multiSigOwners) {
             for (uint256 i = 0; i < multiSigOwners.length; i++) {
                 if (msg.sender == multiSigOwners[i]) {

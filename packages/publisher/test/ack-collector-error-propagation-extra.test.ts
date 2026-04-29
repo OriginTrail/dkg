@@ -31,7 +31,7 @@
  *
  * Per QA policy: no production code touched. If the collector throws
  * an unexpected error class, THESE tests fail — making the hidden bug
- * visible, per BUGS_FOUND.md P-10 / P-11.
+ * visible, per / P-11.
  */
 import { describe, expect, it } from 'vitest';
 import { ethers } from 'ethers';

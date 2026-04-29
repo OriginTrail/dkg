@@ -13,6 +13,15 @@ playwright-report/
 .cache/
 data/
 
+# Local node runtime fixtures (private keys, auth tokens, daemon logs,
+# RDF stores, sqlite DBs). These are produced by integration tests that
+# spin up real daemons under a per-test home dir. They MUST never be
+# committed: the wallets.json files contain reusable private keys that
+# anyone who clones the repo could re-use for signed publishes / chain
+# txs. PR #229 review r3146360279 caught this regression once already.
+.test-nodes/
+**/.test-nodes/
+
 # Hardhat build output
 packages/evm-module/artifacts/
 packages/evm-module/cache/

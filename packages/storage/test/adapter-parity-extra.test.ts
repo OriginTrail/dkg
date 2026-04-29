@@ -1,7 +1,7 @@
 /**
  * ST-1 — adapter-parity misleading-name evidence.
  *
- * See .test-audit/BUGS_FOUND.md "packages/storage" ST-1:
+ * See .test-audit/
  *
  *   `adapter-parity.test.ts` looks like it verifies that OxigraphStore
  *   and BlazegraphStore agree on count / delete semantics, but the
@@ -35,7 +35,20 @@ import { OxigraphStore, BlazegraphStore, type Quad } from '../src/index.js';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const EXISTING_PARITY = join(HERE, 'adapter-parity.test.ts');
 
-const BLAZEGRAPH_URL = process.env.BLAZEGRAPH_URL;
+// ci.yml:256). The storage CI lane
+// runs every test file in parallel by default, and `storage.test.ts`
+// issues `DROP ALL` against `BLAZEGRAPH_URL` before EVERY Blazegraph
+// conformance test. If both files target the same namespace, the
+// conformance suite's `DROP ALL` can fire mid-`adapter-parity-extra`
+// and wipe its inserted fixture — making this lane flaky.
+//
+// Resolution: prefer `BLAZEGRAPH_PARITY_URL` when it's set so the
+// parity suite runs against an isolated namespace (CI provisions
+// `dkgq-parity` in addition to the conformance namespace `dkgq`).
+// Fall back to `BLAZEGRAPH_URL` for local dev / older CI configs
+// that still share a single namespace — local devs can opt into
+// the isolated namespace by exporting both env vars.
+const BLAZEGRAPH_URL = process.env.BLAZEGRAPH_PARITY_URL ?? process.env.BLAZEGRAPH_URL;
 
 // ---------------------------------------------------------------------------
 // (1) Real parity harness — skip with a loud reason when unavailable.

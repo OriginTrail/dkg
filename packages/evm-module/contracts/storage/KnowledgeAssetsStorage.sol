@@ -9,6 +9,7 @@ import {KnowledgeAssetsLib} from "../libraries/KnowledgeAssetsLib.sol";
 import {INamed} from "../interfaces/INamed.sol";
 import {IVersioned} from "../interfaces/IVersioned.sol";
 import {LibBitmap} from "solady/src/utils/LibBitmap.sol";
+import {HubLib} from "../libraries/HubLib.sol";
 
 /**
  * @title KnowledgeAssetsStorage
@@ -32,6 +33,35 @@ contract KnowledgeAssetsStorage is INamed, IVersioned, IERC1155DeltaQueryable, E
     );
 
     event KnowledgeBatchCreated(
+        uint256 indexed batchId,
+        address indexed publisher,
+        bytes32 merkleRoot,
+        uint64 publicByteSize,
+        uint32 knowledgeAssetsCount,
+        uint64 startKAId,
+        uint64 endKAId,
+        uint40 startEpoch,
+        uint40 endEpoch,
+        uint96 tokenAmount,
+        bool isPermanent
+    );
+
+    /// @notice `KnowledgeBatchCreated` is the V8/V9 batch-creation signal
+    /// and legacy indexers subscribe to its topic under the assumption
+    /// that `knowledgeBatches[batchId]`,
+    /// `kaIdToBatch[publisher][id]`, `getBatchPublisher(batchId)`, and
+    /// `_totalTokenAmount` / `_totalKnowledgeAssets` were also mutated.
+    /// V10 publishes go through `KnowledgeCollectionStorage`, NOT this
+    /// contract, so reusing `KnowledgeBatchCreated` for a V10 shim emit
+    /// would tell legacy indexers "a batch exists" while every legacy
+    /// getter returns zero/default data or `BatchNotFound` — a silent
+    /// data-integrity bug. The V10 emit-shim now uses a dedicated event
+    /// with the SAME payload shape but a DISTINCT topic hash so legacy
+    /// indexers ignore it, and V10-aware consumers that want the legacy-
+    /// shaped projection can subscribe to this event explicitly. The
+    /// payload intentionally mirrors `KnowledgeBatchCreated` so v10
+    /// adapters can share the decoding path — only the topic differs.
+    event V10KnowledgeBatchEmitted(
         uint256 indexed batchId,
         address indexed publisher,
         bytes32 merkleRoot,
@@ -143,6 +173,69 @@ contract KnowledgeAssetsStorage is INamed, IVersioned, IERC1155DeltaQueryable, E
     ) external view returns (uint64 startId, uint64 endId) {
         KnowledgeAssetsLib.PublisherRange storage r = publisherRanges[publisher][index];
         return (r.startId, r.endId);
+    }
+
+    /// @notice Spec §07_EVM_MODULE — V10 publish surfaces a
+    /// batch-shaped audit record from this contract's address so
+    /// V10-aware consumers that want a legacy-shaped projection
+    /// can subscribe to it without having to join
+    /// `KnowledgeCollectionCreated` + `KnowledgeAssetsMinted`. The
+    /// event was renamed from `KnowledgeBatchCreated` to
+    /// `V10KnowledgeBatchEmitted` so legacy V8/V9 indexers — which call
+    /// `getBatchPublisher(batchId)` and expect `knowledgeBatches[batchId]`
+    /// / `kaIdToBatch` to be populated — do not mistake a V10 shim emit
+    /// for a real V8/V9 batch. This function performs no state mutation,
+    /// no minting, and no counter advance: the V10 source of truth lives
+    /// in `KnowledgeCollectionStorage`. KAV10 calls it from
+    /// `_executePublishCore` after the KCS create succeeds.
+    function emitV10KnowledgeBatchCreated(
+        uint256 batchId,
+        address publisherAddress,
+        bytes32 merkleRoot,
+        uint64 publicByteSize,
+        uint32 knowledgeAssetsCount,
+        uint64 startKAId,
+        uint64 endKAId,
+        uint40 startEpoch,
+        uint40 endEpoch,
+        uint96 tokenAmount,
+        bool isPermanent
+    ) external {
+        // `onlyContracts` allows every Hub-registered contract to emit
+        // `V10KnowledgeBatchEmitted` — a buggy or compromised registered
+        // contract could then forge batch-audit events that look like
+        // real V10 publishes, and indexers have no state change in this
+        // contract to cross-check. Lock the caller to the one contract
+        // that owns the V10 publish pipeline: `KnowledgeAssetsV10`.
+        //
+        // The earlier revision kept `hub.owner()` as a break-glass on
+        // the emitter itself, but this contract stores no state that
+        // indexers can reconcile against the audit event — a single
+        // owner call could forge an arbitrary `V10KnowledgeBatchEmitted`
+        // that downstream tooling treats as a real V10 publish. We
+        // remove the owner bypass so the audit event is now strictly
+        // 1:1 with `KnowledgeAssetsV10`-driven publishes. Operators
+        // who need to emit a synthetic record (migrations, recovery,
+        // index rebuilds) must do so via a separate admin-only
+        // pipeline that emits a DISTINCT event — not by laundering
+        // the call through the production audit channel.
+        address v10 = hub.getContractAddress("KnowledgeAssetsV10");
+        if (msg.sender != v10) {
+            revert HubLib.UnauthorizedAccess("Only KnowledgeAssetsV10");
+        }
+        emit V10KnowledgeBatchEmitted(
+            batchId,
+            publisherAddress,
+            merkleRoot,
+            publicByteSize,
+            knowledgeAssetsCount,
+            startKAId,
+            endKAId,
+            startEpoch,
+            endEpoch,
+            tokenAmount,
+            isPermanent
+        );
     }
 
     // --- Knowledge Batch CRUD ---

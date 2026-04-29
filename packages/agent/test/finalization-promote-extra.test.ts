@@ -107,7 +107,7 @@ describe('A-4: promoteSharedMemoryToCanonical lands data in the CANONICAL data g
     if (result.type === 'boolean') {
       expect(
         result.value,
-        'promoteSharedMemoryToCanonical must write the quad into the canonical data graph (BUGS_FOUND.md A-4)',
+        'promoteSharedMemoryToCanonical must write the quad into the canonical data graph',
       ).toBe(true);
     }
   });
@@ -135,7 +135,7 @@ describe('A-4: e2e — agent.publish() data lands in canonical (verified-memory)
     );
     expect(
       qr.bindings.length,
-      'canonical (verified-memory) graph must contain the published triple after confirmed publish (BUGS_FOUND.md A-4)',
+      'canonical (verified-memory) graph must contain the published triple after confirmed publish',
     ).toBe(1);
     expect(qr.bindings[0]['o']).toBe('"E2E-A4"');
 

@@ -97,8 +97,18 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
     failedPeers: 0,
   };
 
+  // each context graph is synced in
+  // its own try/catch so that a transient failure on one CG does NOT
+  // cascade into "skip every remaining CG for this peer". The previous
+  // shape wrapped the entire loop in a single try/catch, which meant
+  // `syncFromPeer(peer, ['cg-a', 'cg-b'])` would allocate a deadline
+  // for cg-a, throw on cg-a, and return WITHOUT ever touching cg-b.
+  // The per-context-graph deadline invariant — fresh deadline per CG
+  // regardless of prior-CG outcome — is what `agent.test.ts`'s
+  // "allocates a fresh sync deadline per context graph" test pins.
   try {
     for (const [index, pid] of contextGraphIds.entries()) {
+     try {
       const dataGraph = paranetDataGraphUri(pid);
       const metaGraph = paranetMetaGraphUri(pid);
       const deadline = createContextGraphSyncDeadline(contextGraphIds.length - index);
@@ -187,11 +197,23 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
         logWarn(ctx, `Rejected ${processed.rejectedKcs} KCs with invalid merkle roots from ${remotePeerId}`);
         summary.rejectedKcs += processed.rejectedKcs;
       }
+     } catch (err) {
+      // Per-CG failure: log, account for it in the summary, and keep
+      // iterating. Downstream CGs get their own deadline allocated by
+      // the next loop iteration (see per-CG try/catch rationale above).
+      logWarn(ctx, `Sync of context graph "${pid}" from ${remotePeerId} failed: ${err instanceof Error ? err.message : String(err)}`);
+      if ((err as Error & { syncDenied?: boolean }).syncDenied) {
+        summary.deniedPhases += 1;
+      }
+     }
     }
     if (summary.insertedTriples > 0) {
       logInfo(ctx, `Sync complete: ${summary.insertedTriples} verified triples from ${remotePeerId}`);
     }
   } catch (err) {
+    // Outer catch retained for non-iteration-level failures
+    // (e.g. the loop itself being unable to start). Per-iteration
+    // failures are handled above so they cannot cascade.
     logWarn(ctx, `Sync from ${remotePeerId} failed: ${err instanceof Error ? err.message : String(err)}`);
     if ((err as Error & { syncDenied?: boolean }).syncDenied) {
       summary.deniedPhases += 1;

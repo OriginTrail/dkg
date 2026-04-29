@@ -18,6 +18,51 @@ interface SimConfig {
   kasPerPublish: number;
   contextGraph: string;
   enabledOps: string[];
+  /**
+   * Optional RNG seed for deterministic / reproducible sim runs (K-4).
+   * When omitted the sim falls back to the non-deterministic Math.random()
+   * paths still in use for URI generation. Setting a seed makes the sim
+   * pick a seeded RNG (see `createSeededRng`) so the same seed + config
+   * produces the same scenario end-to-end.
+   */
+  seed?: number;
+}
+
+/**
+ * Weak marker we tag onto a seeded rng closure so `rndId()` can detect
+ * that the caller has supplied a seeded RNG and take the deterministic
+ * path (no `Date.now()`, per-run counter managed on the closure). Using
+ * a Symbol means the tag is invisible to user code and doesn't collide
+ * with anything on the function prototype.
+ */
+const SEEDED_RNG_MARK = Symbol.for('dkg.network-sim.seededRng');
+const SEEDED_RNG_COUNTER = Symbol.for('dkg.network-sim.seededRngCounter');
+
+type SeededRng = (() => number) & {
+  [SEEDED_RNG_MARK]?: true;
+  [SEEDED_RNG_COUNTER]?: number;
+};
+
+/**
+ * Minimal mulberry32 seeded RNG (K-4). Returns a function that yields
+ * pseudo-random floats in [0,1) given an explicit 32-bit seed. Used to
+ * make sim runs reproducible when `SimConfig.seed` is set.
+ */
+export function createSeededRng(seed: number): () => number {
+  let state = seed >>> 0;
+  const mulberry32: SeededRng = (function mulberry32() {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let t = state;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  }) as SeededRng;
+  // brand the returned RNG so `rndId()`
+  // takes the deterministic, no-wall-clock path. Same seed → same
+  // sequence of ids regardless of when the sim runs.
+  mulberry32[SEEDED_RNG_MARK] = true;
+  mulberry32[SEEDED_RNG_COUNTER] = 0;
+  return mulberry32;
 }
 
 interface OpEvent {
@@ -65,8 +110,90 @@ interface NodeInfo {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function rndId(): string {
-  return Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+/**
+ * Process-global counter used for UNSEEDED calls only (Math.random
+ * fallback). Seeded runs maintain their own per-run counter inside the
+ * closure returned by `makeSeededRndId(rng)` so two simulations started
+ * with the same seed produce byte-identical URIs regardless of when or
+ * in what order they ran.
+ */
+let globalRndIdCounter = 0;
+
+/**
+ * the previous
+ * implementation concatenated `Date.now()` and a process-global
+ * counter even when called with a seeded RNG. Two sim runs started
+ * with the same seed/config at different wall-clock times therefore
+ * produced DIFFERENT `sim-<id>` URIs and thus different CONSTRUCT
+ * results, defeating the whole reproducibility contract. Now:
+ *   - if `rng` is branded by `makeSeededRng()`, we derive the id from
+ *     ONLY the RNG + an rng-local counter — no Date.now(), no global
+ *     counter. Same seed → same sequence of ids across runs.
+ *   - if `rng` is the default `Math.random`, we fall back to the old
+ *     wall-clock-plus-global-counter shape (legacy behaviour preserved
+ *     for callers that did NOT opt into reproducibility).
+ */
+// Exported for the sim-engine reproducibility unit tests only. NOT
+// part of the public API of this package — the test needs a handle
+// on it to pin seeded runs.
+export function _rndIdForTesting(rng?: () => number): string {
+  return rndId(rng);
+}
+
+/**
+ * Build the deterministic dispatch schedule a seeded run follows.
+ * Exposed (and named with a `precompute` prefix instead of a `_test`
+ * suffix because it's actually called by `runSimulation` too) so PR
+ * #229 round 8 regression tests can pin the invariant without
+ * booting the full HTTP harness: two schedules with the same seed +
+ * inputs must be byte-identical regardless of which order the
+ * callers' in-flight ops complete in.
+ */
+export function precomputeSeededSchedule(
+  enabledOps: string[],
+  nodeCount: number,
+  opCount: number,
+  rng: () => number,
+): Array<{ opType: string; nodeIdx: number }> {
+  if (nodeCount <= 0) {
+    throw new Error('precomputeSeededSchedule: nodeCount must be > 0');
+  }
+  const out: Array<{ opType: string; nodeIdx: number }> = [];
+  let nodeIdx = 0;
+  for (let i = 0; i < opCount; i++) {
+    const opType = pickRandom(enabledOps, rng);
+    nodeIdx = (nodeIdx + 1) % nodeCount;
+    out.push({ opType, nodeIdx });
+  }
+  return out;
+}
+
+/**
+ * Reset the seeded counter embedded in the closure returned by
+ * `createSeededRng(seed)`. Useful in tests that want to start two
+ * reproducibility probes from the same RNG state.
+ */
+export function _resetSeededRngCounterForTesting(rng: () => number): void {
+  const r = rng as SeededRng;
+  if (r[SEEDED_RNG_MARK] === true) r[SEEDED_RNG_COUNTER] = 0;
+}
+
+function rndId(rng: (() => number) | SeededRng = Math.random): string {
+  const seeded = (rng as SeededRng)[SEEDED_RNG_MARK] === true;
+  if (seeded) {
+    const r = rng as SeededRng;
+    const c = ((r[SEEDED_RNG_COUNTER] ?? 0) + 1) >>> 0;
+    r[SEEDED_RNG_COUNTER] = c;
+    // Two 8-character rng draws give 64 bits of entropy; combined with
+    // the per-run counter the risk of a collision inside a single run
+    // is negligible while keeping the output purely seed-driven.
+    const rand1 = rng().toString(36).slice(2, 10).padEnd(8, '0');
+    const rand2 = rng().toString(36).slice(2, 10).padEnd(8, '0');
+    return 's-' + rand1 + rand2 + '-' + c.toString(36);
+  }
+  globalRndIdCounter = (globalRndIdCounter + 1) >>> 0;
+  const rand = rng().toString(36).slice(2, 10).padEnd(8, '0');
+  return Date.now().toString(36) + '-' + rand + '-' + globalRndIdCounter.toString(36);
 }
 
 /** Devnet auth token path for a node (node1, node2, … not node-1). Used by loadNodeTokens; exported for tests. */
@@ -101,8 +228,8 @@ async function loadNodeTokens(nodes: NodeInfo[]): Promise<void> {
   );
 }
 
-function pickRandom<T>(arr: T[]): T {
-  return arr[Math.floor(Math.random() * arr.length)];
+function pickRandom<T>(arr: T[], rng: () => number = Math.random): T {
+  return arr[Math.floor(rng() * arr.length)];
 }
 
 function readBody(req: IncomingMessage): Promise<string> {
@@ -241,15 +368,16 @@ async function execPublish(
   node: NodeInfo,
   config: SimConfig,
   signal: AbortSignal,
+  rng: () => number = Math.random,
 ): Promise<OpEvent> {
   const t0 = Date.now();
   const graph = `did:dkg:context-graph:${config.contextGraph}`;
   const quads = Array.from({ length: config.kasPerPublish }, () => {
-    const entity = `did:dkg:entity:sim-${rndId()}`;
+    const entity = `did:dkg:entity:sim-${rndId(rng)}`;
     return {
       subject: entity,
       predicate: 'http://schema.org/name',
-      object: `"SimEntity-${rndId()}"`,
+      object: `"SimEntity-${rndId(rng)}"`,
       graph,
     };
   });
@@ -313,9 +441,10 @@ async function execQuery(
   node: NodeInfo,
   config: SimConfig,
   signal: AbortSignal,
+  rng: () => number = Math.random,
 ): Promise<OpEvent> {
   const t0 = Date.now();
-  const limit = 5 + Math.floor(Math.random() * 21);
+  const limit = 5 + Math.floor(rng() * 21);
   const sparql = `SELECT * WHERE { ?s ?p ?o } LIMIT ${limit}`;
 
   try {
@@ -354,15 +483,16 @@ async function execWorkspace(
   node: NodeInfo,
   config: SimConfig,
   signal: AbortSignal,
+  rng: () => number = Math.random,
 ): Promise<OpEvent> {
   const t0 = Date.now();
   const graph = `did:dkg:context-graph:${config.contextGraph}`;
-  const entity = `did:dkg:entity:sim-ws-${rndId()}`;
+  const entity = `did:dkg:entity:sim-ws-${rndId(rng)}`;
   const quads = [
     {
       subject: entity,
       predicate: 'http://schema.org/name',
-      object: `"WsEntity-${rndId()}"`,
+      object: `"WsEntity-${rndId(rng)}"`,
       graph,
     },
   ];
@@ -402,6 +532,7 @@ async function execChat(
   node: NodeInfo,
   nodes: NodeInfo[],
   signal: AbortSignal,
+  rng: () => number = Math.random,
 ): Promise<OpEvent> {
   const t0 = Date.now();
   const peers = nodes.filter((n) => n.id !== node.id && n.peerId);
@@ -417,12 +548,12 @@ async function execChat(
     };
   }
 
-  const target = pickRandom(peers);
+  const target = pickRandom(peers, rng);
   try {
     const res = await fetch(`http://127.0.0.1:${node.port}/api/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeaders(node) },
-      body: JSON.stringify({ to: target.peerId, text: `sim-ping-${rndId()}` }),
+      body: JSON.stringify({ to: target.peerId, text: `sim-ping-${rndId(rng)}` }),
       signal: opSignal(signal, 'chat'),
     });
     const body = (await res.json()) as { delivered?: boolean; error?: string; phases?: Record<string, number> };
@@ -498,6 +629,16 @@ async function ensureContextGraph(nodes: NodeInfo[], contextGraphId: string, sig
 async function runSimulation(config: SimConfig, signal: AbortSignal) {
   const nodes = getNodes();
 
+  // resolve the RNG ONCE per sim run and thread it into
+  // every executor / helper that was previously calling Math.random().
+  // Two runs with the same numeric seed now replay identical operation
+  // types, node round-robin, query LIMITs, entity URIs, and chat-peer
+  // picks. Runs without `config.seed` keep the old non-deterministic
+  // Math.random() path for backwards compatibility with existing UIs.
+  const rng: () => number = typeof config.seed === 'number'
+    ? createSeededRng(config.seed)
+    : Math.random;
+
   await loadNodeTokens(nodes);
 
   await ensureContextGraph(nodes, config.contextGraph, signal);
@@ -545,32 +686,66 @@ async function runSimulation(config: SimConfig, signal: AbortSignal) {
       tryDispatch();
     }
 
+    // when a numeric
+    // seed is provided the run MUST be reproducible at any
+    // `concurrency`. The previous revision drew the opType + node pick
+    // inside `launchOne()`, which is triggered by whichever in-flight
+    // operation finishes first — at `concurrency > 1` a sub-millisecond
+    // network-timing jitter on op #1 could swap the opType that op #2
+    // was going to get, and every subsequent pick cascaded from there.
+    // Pre-compute the whole dispatch schedule up front (opType + node
+    // index per slot) so the order of in-flight completions can no
+    // longer influence the schedule. Unseeded runs keep the on-demand
+    // pick path for backwards compatibility with every exploratory UI.
+    const seededSchedule = typeof config.seed === 'number'
+      ? precomputeSeededSchedule(config.enabledOps, nodes.length, config.opCount, rng)
+      : null;
     let nodeRR = 0;
     function launchOne() {
       if (dispatched >= config.opCount) return; // cap so we never exceed opCount (avoids race overshoot)
-      const opType = pickRandom(config.enabledOps);
-      nodeRR = (nodeRR + 1) % nodes.length;
-      const node = nodes[nodeRR];
+      let opType: string;
+      let node: typeof nodes[number];
+      if (seededSchedule) {
+        const slot = seededSchedule[dispatched];
+        opType = slot.opType;
+        node = nodes[slot.nodeIdx];
+        nodeRR = slot.nodeIdx;
+      } else {
+        opType = pickRandom(config.enabledOps, rng);
+        nodeRR = (nodeRR + 1) % nodes.length;
+        node = nodes[nodeRR];
+      }
       dispatched++;
       inflight++;
       lastDispatchTime = Date.now();
 
+      // the executors
+      // below draw their per-op entropy (entity URIs, LIMITs, chat
+      // peers…) from the shared `rng`. When `concurrency > 1` and the
+      // run is seeded, those draws could still interleave based on op
+      // arrival order. The pre-computed schedule keeps the opType +
+      // node assignment stable; draws made inside each executor share
+      // the same sequence because the executors run to completion
+      // before the next draw is needed. If we ever need per-op
+      // determinism across executor internals too, the fix is to fork
+      // a sub-RNG (seed = rng()⊕slotIdx) here and pass it in — the
+      // schedule already exposes `dispatched` as the slot index.
       let promise: Promise<OpEvent>;
       switch (opType) {
         case 'publish':
-          promise = execPublish(node, config, signal);
+          promise = execPublish(node, config, signal, rng);
           break;
         case 'query':
-          promise = execQuery(node, config, signal);
+          promise = execQuery(node, config, signal, rng);
           break;
         case 'workspace':
-          promise = execWorkspace(node, config, signal);
+          promise = execWorkspace(node, config, signal, rng);
           break;
         case 'chat':
-          promise = execChat(node, nodes, signal);
+          promise = execChat(node, nodes, signal, rng);
           break;
         default:
-          promise = execPublish(node, config, signal);
+          promise = execPublish(node, config, signal, rng);
       }
 
       promise.then(onOpDone).catch(() => {
@@ -664,12 +839,16 @@ export async function handleSimRequest(req: IncomingMessage, res: ServerResponse
     config.concurrency = config.concurrency ?? 10;
     config.kasPerPublish = config.kasPerPublish ?? 1;
     config.contextGraph = config.contextGraph ?? 'devnet-test';
-    config.name = config.name ?? `Sim-${rndId()}`;
+    const nameRng: () => number = typeof config.seed === 'number'
+      ? createSeededRng(config.seed)
+      : Math.random;
+    config.name = config.name ?? `Sim-${rndId(nameRng)}`;
 
     const abort = new AbortController();
     activeAbort = abort;
 
-    jsonResponse(res, 200, { started: true, name: config.name });
+    const seedEcho = typeof config.seed === 'number' ? { seed: config.seed } : {};
+    jsonResponse(res, 200, { started: true, name: config.name, ...seedEcho });
 
     runSimulation(config, abort.signal)
       .catch((err) => {
@@ -763,4 +942,116 @@ export function simEngine(): Plugin {
       });
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// libp2p parity harness (K-5) — scenario replay + runner scaffolding.
+//
+// The implementations below are intentionally lightweight. They define the
+// contract a future real libp2p-backed runner will satisfy and give the
+// HTTP sim a deterministic / reproducible entry point for scenario replay.
+// Callers that compare sim vs libp2p message counts can use
+// `compareMessageCounts` today; swapping in a real libp2p implementation is
+// a local change inside `runOnLibp2p`.
+// ---------------------------------------------------------------------------
+
+export interface SimScenario {
+  /** Human-readable scenario id (used when diffing parity runs). */
+  name: string;
+  /** Deterministic RNG seed for reproducible replay. */
+  seed: number;
+  /** Ordered sim operations to replay. */
+  ops: Array<{ type: string; nodeId: number; payload?: unknown }>;
+}
+
+export interface ScenarioRunResult {
+  scenario: string;
+  seed: number;
+  messageCount: number;
+  perNode: Record<number, number>;
+}
+
+/**
+ * Deterministic scenario runner (K-5). Replays the operations in
+ * `scenario.ops` in order, using a seeded RNG so two runs with the same
+ * seed produce the same `perNode` counts.
+ */
+export async function runScenario(scenario: SimScenario): Promise<ScenarioRunResult> {
+  const rng = createSeededRng(scenario.seed);
+  const perNode: Record<number, number> = {};
+  for (const op of scenario.ops) {
+    const bucket = perNode[op.nodeId] ?? 0;
+    // RNG consumption kept deterministic so future randomised variants
+    // (delay jitter, loss rate) stay reproducible under the same seed.
+    rng();
+    perNode[op.nodeId] = bucket + 1;
+  }
+  return {
+    scenario: scenario.name,
+    seed: scenario.seed,
+    messageCount: scenario.ops.length,
+    perNode,
+  };
+}
+
+/**
+ * Sentinel error thrown by {@link runOnLibp2p} until a real libp2p host
+ * is wired up. Exported so callers can `instanceof`-narrow on it
+ * without parsing error messages.
+ */
+export class Libp2pRunnerNotImplementedError extends Error {
+  override readonly name = 'Libp2pRunnerNotImplementedError';
+}
+
+/**
+ * libp2p-backed runner for the same scenario surface (K-5).
+ *
+ * The previous
+ * implementation silently delegated to {@link runScenario}, so any
+ * parity check `compareMessageCounts(runScenario(s), runOnLibp2p(s))`
+ * was comparing the deterministic model against itself and ALWAYS
+ * looked green — turning the K-5 parity surface into theatre rather
+ * than a real protective check.
+ *
+ * Until a real libp2p host is wired up, `runOnLibp2p` fails closed
+ * with {@link Libp2pRunnerNotImplementedError}. The export still
+ * exists (so the K-5 contract test in `network-sim-extra.test.ts` —
+ * which asserts the symbol is reachable — keeps passing) but callers
+ * who try to USE it for a parity diff get a loud, attributable
+ * failure instead of a misleading "looks identical" result.
+ *
+ * To swap in a real implementation: replace this body with a libp2p-
+ * backed scenario replay that mirrors the deterministic runner's
+ * `ScenarioRunResult` shape. The unused `_scenario` parameter is
+ * intentional — it pins the contract a real implementation must
+ * satisfy.
+ */
+export async function runOnLibp2p(_scenario: SimScenario): Promise<ScenarioRunResult> {
+  throw new Libp2pRunnerNotImplementedError(
+    'runOnLibp2p: no real libp2p-backed runner is wired up yet. ' +
+      'Comparing this against runScenario would be model-vs-model and ' +
+      'misrepresent parity. Implement a real libp2p host or use ' +
+      'runScenario directly.',
+  );
+}
+
+/**
+ * Compare two scenario runs and report per-node message-count drift.
+ * Returned object is empty iff the runs are message-count identical.
+ */
+export function compareMessageCounts(
+  a: ScenarioRunResult,
+  b: ScenarioRunResult,
+): Record<number, { a: number; b: number }> {
+  const drift: Record<number, { a: number; b: number }> = {};
+  const nodeIds = new Set<number>([
+    ...Object.keys(a.perNode).map(Number),
+    ...Object.keys(b.perNode).map(Number),
+  ]);
+  for (const n of nodeIds) {
+    const ca = a.perNode[n] ?? 0;
+    const cb = b.perNode[n] ?? 0;
+    if (ca !== cb) drift[n] = { a: ca, b: cb };
+  }
+  return drift;
 }

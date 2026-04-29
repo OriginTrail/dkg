@@ -110,6 +110,44 @@ describe('validateContextGraphId', () => {
     expect(validateContextGraphId('a'.repeat(257)).valid).toBe(false);
     expect(validateContextGraphId('a'.repeat(256)).valid).toBe(true);
   });
+
+  // CLI-16 (path traversal) — segment-aware: rejects only segments
+  // that the OS / URL resolver actually treats as a parent-dir hop.
+  describe('CLI-16 — path-traversal segment rejection', () => {
+    for (const bad of [
+      '..',
+      '.',
+      '../etc/passwd',
+      '../../root',
+      'legit/../../other',
+      'a/./b',
+      'a/../b',
+      './cg',
+      'cg/.',
+      'cg/..',
+    ]) {
+      it(`rejects "${bad}" with a traversal-flavoured reason`, () => {
+        const r = validateContextGraphId(bad);
+        expect(r.valid).toBe(false);
+        expect(r.reason ?? '').toMatch(/traversal|\.\./);
+      });
+    }
+
+    // legitimate URI/DID-shaped IDs
+    // that contain `..` INSIDE one segment are NOT traversal and
+    // must validate. The pre-fix substring check broke them.
+    for (const good of [
+      'urn:cg:v1..2',
+      'did:dkg:context-graph:semver..rc',
+      'project..staging',
+      'a..b',
+      'company..product/branch-v2',
+    ]) {
+      it(`accepts URI/DID-style id "${good}" (\`..\` inside single segment)`, () => {
+        expect(validateContextGraphId(good).valid).toBe(true);
+      });
+    }
+  });
 });
 
 describe('validateAssertionName', () => {

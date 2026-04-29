@@ -721,6 +721,12 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
     }
 
     function _isMultiSigOwner(address multiSigAddress) internal view returns (bool) {
+        // EOA-safe: short-circuit when target has no code, otherwise the
+        // compiler-inserted extcodesize guard on the try-external call
+        // reverts with empty data and preempts typed error emission.
+        if (multiSigAddress.code.length == 0) {
+            return false;
+        }
         try ICustodian(multiSigAddress).getOwners() returns (address[] memory multiSigOwners) {
             for (uint256 i = 0; i < multiSigOwners.length; i++) {
                 if (msg.sender == multiSigOwners[i]) {

@@ -1,7 +1,7 @@
 /**
  * packages/adapter-openclaw — extra QA coverage.
  *
- * Findings covered (see .test-audit/BUGS_FOUND.md):
+ * Findings covered (see .test-audit/
  *
  *   K-7  TEST-DEBT   `dkg-client.test.ts` only mocks globalThis.fetch — never
  *                    exercises a real socket, real timeouts, or real abort
@@ -21,7 +21,7 @@
  *   K-9  SPEC-GAP    `openclaw.plugin.json` `id` must equal `package.json`
  *                    `name` per K-9 / dup #35. Today they disagree — red test
  *                    is the bug evidence.
- *                    // PROD-BUG: plugin id ≠ package name — see BUGS_FOUND.md K-9
+ *                    // PROD-BUG: plugin id ≠ package name —
  *
  * Per QA policy: no production-code edits.
  */
@@ -270,20 +270,35 @@ describe('[K-8] DkgMemorySearchManager over the real /api/query envelope', () =>
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// K-9  plugin.json id ↔ package.json name
+// K-9 / Bot review B1: plugin.json id and package.json name are
+// intentionally DIFFERENT identifiers.
+//
+// A previous attempt to "reconcile" them (making `plugin.id` equal to
+// `pkg.name`) broke OpenClaw slot election because the rest of the
+// adapter (`setup.ts`, `DkgMemoryPlugin.ts`, `openclaw-entry.mjs`) still
+// hard-codes the short `adapter-openclaw` string for `plugins.slots.memory`,
+// `plugins.entries`, and `plugins.allow` lookups. The npm package name
+// and the plugin slot id serve different purposes and must stay
+// decoupled unless every call site is migrated in the same PR.
+//
+// These tests now enforce the split so the two identifiers can't
+// accidentally drift back into each other.
 // ─────────────────────────────────────────────────────────────────────────────
-describe('[K-9] openclaw.plugin.json id matches package.json name (RED until reconciled)', () => {
-  // PROD-BUG: plugin id ≠ package name — see BUGS_FOUND.md K-9
-  it('plugin id equals package name', async () => {
+describe('[B1] openclaw.plugin.json id ↔ package.json name — intentional split', () => {
+  it('plugin.id is the short slot key ("adapter-openclaw")', async () => {
+    const plugin = JSON.parse(await readFile(PLUGIN_JSON_PATH, 'utf8'));
+    expect(plugin.id).toBe('adapter-openclaw');
+  });
+
+  it('pkg.name is the scoped npm package name', async () => {
+    const pkg = JSON.parse(await readFile(PKG_JSON_PATH, 'utf8'));
+    expect(pkg.name).toBe('@origintrail-official/dkg-adapter-openclaw');
+  });
+
+  it('the two identifiers MUST remain distinct (renaming plugin.id requires migrating every hard-coded slot lookup)', async () => {
     const pkg = JSON.parse(await readFile(PKG_JSON_PATH, 'utf8'));
     const plugin = JSON.parse(await readFile(PLUGIN_JSON_PATH, 'utf8'));
-    // The registry / gateway expects the plugin manifest id to equal the
-    // npm package name so that installed packages can be looked up by the
-    // same identity OpenClaw references. Today these diverge:
-    //   pkg.name   = "@origintrail-official/dkg-adapter-openclaw"
-    //   plugin.id  = "adapter-openclaw"
-    // Red test is the bug evidence.
-    expect(plugin.id).toBe(pkg.name);
+    expect(plugin.id).not.toBe(pkg.name);
   });
 
   it('positive-control: plugin.json has an id field at all', async () => {

@@ -1,7 +1,7 @@
 /**
  * v10-kc-helpers-extra.test.ts — audit coverage (E-15).
  *
- * Finding E-15 (MEDIUM, TEST-DEBT, see .test-audit/BUGS_FOUND.md):
+ * Finding E-15 (MEDIUM, TEST-DEBT, see .test-audit/):
  *   "Helpers (v10-kc-helpers.ts etc.) mirror contract behavior but are
  *    not tested themselves. Parallel bug in helper + contract → false
  *    positive."

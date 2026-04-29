@@ -1,6 +1,6 @@
 /**
  * QA audit tests for `packages/agent` — derived from
- * `.test-audit/BUGS_FOUND.md` findings A-1..A-15.
+ * `.test-audit/..A-15.
  *
  * Policy:
  * - Production code is NOT modified; failing tests expose real bugs.
@@ -339,36 +339,49 @@ describe('[A-4] Finalization promotes ONLY when merkle matches', () => {
   }, 15_000);
 });
 
-describe('[A-7] ENDORSE signature + replay posture', () => {
-  it('endorsement quads carry no inline signature or nonce (prod-bug: relies entirely on outer publish envelope)', () => {
+describe('[A-7] ENDORSE signature + replay posture (FIXED)', () => {
+  it('endorsement quads carry an inline signature/proof AND a nonce (fix for A-7 + r19-3)', () => {
     const agentAddress = '0x' + '1'.repeat(40);
     const ual = 'did:dkg:knowledge-asset:0xabc/1';
     const quads = buildEndorsementQuads(agentAddress, ual, CG);
 
-    // The endorsement structurally includes exactly two triples: the
-    // endorsement edge and the timestamp. No signature, no nonce.
-    expect(quads.length).toBe(2);
+    // A-7 fix (original): buildEndorsementQuads now emits the
+    //   ENDORSES + ENDORSED_AT + ENDORSEMENT_NONCE + ENDORSEMENT_SIGNATURE
+    // predicates. r19-3 extended the shape with rdf:type +
+    // ENDORSED_BY on a per-event endorsement resource so two
+    // endorsements by the same agent can't collide on the proof
+    // tuple. Net predicate count is now six.
+    expect(quads.length).toBe(6);
     const predicates = quads.map(q => q.predicate);
     expect(predicates).toContain('https://dkg.network/ontology#endorses');
     expect(predicates).toContain('https://dkg.network/ontology#endorsedAt');
+    // endorsedBy ties the endorsement resource back to the
+    // agent so consumers can still query "who endorsed ual X?" with
+    // a deterministic two-hop join.
+    expect(predicates).toContain('https://dkg.network/ontology#endorsedBy');
 
     const hasSignature = quads.some(q => /signature|sig|proof/i.test(q.predicate));
     const hasNonce = quads.some(q => /nonce|replay/i.test(q.predicate));
-    // PROD-BUG (audit A-7): no inline cryptographic binding; replay
-    // protection is delegated to the PUBLISH protocol envelope that
-    // carries these quads. Test pins this behavior so any future
-    // addition of an inline signature triple is noticed.
-    expect(hasSignature).toBe(false);
-    expect(hasNonce).toBe(false);
+    expect(hasSignature).toBe(true);
+    expect(hasNonce).toBe(true);
 
-    // Two back-to-back builds with the same (agent, ual) produce
-    // STRUCTURALLY IDENTICAL triples modulo timestamp — proving there
-    // is no per-call replay-resistance nonce on the quad level.
+    // Two back-to-back builds produce distinct nonces → distinct
+    // proofs → distinct per-event endorsement subjects, proving
+    // per-call replay-resistance AND the r19-3 "no-collision"
+    // invariant.
     const quads2 = buildEndorsementQuads(agentAddress, ual, CG);
-    expect(quads2.length).toBe(2);
-    expect(quads2[0].subject).toBe(quads[0].subject);
-    expect(quads2[0].predicate).toBe(quads[0].predicate);
-    expect(quads2[0].object).toBe(quads[0].object);
+    expect(quads2.length).toBe(6);
+    const nonce1 = quads.find(q => /nonce/i.test(q.predicate))?.object;
+    const nonce2 = quads2.find(q => /nonce/i.test(q.predicate))?.object;
+    expect(nonce1).toBeDefined();
+    expect(nonce2).toBeDefined();
+    expect(nonce1).not.toBe(nonce2);
+
+    // subjects differ between the two endorsements
+    // even though the agent + UAL + CG are identical.
+    const subj1 = quads.find(q => q.predicate === 'https://dkg.network/ontology#endorses')!.subject;
+    const subj2 = quads2.find(q => q.predicate === 'https://dkg.network/ontology#endorses')!.subject;
+    expect(subj1).not.toBe(subj2);
   });
 });
 
@@ -401,35 +414,56 @@ describe('[A-9] Storage-ACK transport protocol ID', () => {
 
 describe('[A-12] DID format drift in agent.endorse', () => {
   it('accepts an ETH-address agentAddress (spec form)', () => {
+    // every quad subject
+    // is now the per-event endorsement URN (`urn:dkg:endorsement:HEX`),
+    // not the agent DID. The agent DID moved into the OBJECT of the
+    // `dkg:endorsedBy` quad. Update this test to enforce the spec-form
+    // 0x-address shape there instead, and to verify the new
+    // endorsement-URN subject shape — the original drift this test
+    // pinned (peer-id leaking into the quads) would still surface as
+    // either a non-0x `endorsedBy` object or a malformed URN subject.
     const addr = '0x' + '1'.repeat(40);
     const quads = buildEndorsementQuads(addr, 'did:dkg:ka:0x1/1', CG);
+    expect(quads.length).toBeGreaterThan(0);
     for (const q of quads) {
-      expect(q.subject).toBe(`did:dkg:agent:${addr}`);
-      expect(q.subject).toMatch(/^did:dkg:agent:0x[0-9a-fA-F]{40}$/);
+      expect(q.subject).toMatch(/^urn:dkg:endorsement:[0-9a-f]{64}$/);
     }
+    const endorsedByQuad = quads.find(
+      (q) => q.predicate === 'https://dkg.network/ontology#endorsedBy',
+    );
+    expect(endorsedByQuad).toBeDefined();
+    expect(endorsedByQuad!.object).toBe(`did:dkg:agent:${addr}`);
+    expect(endorsedByQuad!.object).toMatch(/^did:dkg:agent:0x[0-9a-fA-F]{40}$/);
   });
 
   it('PROD-BUG: passing a libp2p PeerId to buildEndorsementQuads yields a non-spec did:dkg:agent: URI', () => {
-    // Historical (pre-A-12): dkg-agent.ts passed `this.peerId` (a libp2p
-    // Peer ID string like 12D3KooW…) into `buildEndorsementQuads`,
-    // producing a `did:dkg:agent:${peerId}` URI, which violates spec §5
-    // (agent DIDs MUST be the 0x-address form). The caller has been
-    // migrated to pass `opts.agentAddress ?? this.defaultAgentAddress`,
-    // but this helper-level test still pins the invariant that the
-    // helper itself mints whatever subject form you give it — so a
-    // raw peer-id argument still yields a non-0x DID shape. That keeps
-    // the boundary honest and catches future callers that reintroduce
-    // the bug by once again passing peer-id here.
-    // This test pins the prod-bug so any code change silently "fixing"
-    // this path without updating the caller also flips this assertion.
+    // the
+    // helper `buildEndorsementQuads` mints whatever subject form the
+    // caller passes it. If a caller passes a libp2p Peer ID string
+    // like `12D3KooW…` instead of the 0x-address form, the resulting
+    // `dkg:endorsedBy` quad OBJECT is `did:dkg:agent:12D3KooW…`,
+    // violating spec §5 (agent DIDs MUST be the 0x-address form).
+    //
+    // dkg-agent.ts has been migrated to always pass an EVM address
+    // (via `opts.agentAddress ?? this.defaultAgentAddress` and
+    // `canonicalAgentDidSubject`), but this helper-level test pins
+    // the invariant at the boundary so any future caller that
+    // reintroduces the bug by passing a peer-id flips this
+    // assertion. The regression target is the OBJECT of the
+    // `dkg:endorsedBy` predicate (see the sibling test above).
     const peerIdStr = '12D3KooWFakePeerIdDoesNotMatterForShapeAssertion';
     const quads = buildEndorsementQuads(peerIdStr, 'did:dkg:ka:0x1/1', CG);
 
     for (const q of quads) {
-      expect(q.subject.startsWith(`did:dkg:agent:${peerIdStr}`)).toBe(true);
-      // Spec-form regex must FAIL here — the produced URI is NOT 0x-form.
-      expect(q.subject).not.toMatch(/^did:dkg:agent:0x[0-9a-fA-F]{40}$/);
+      expect(q.subject).toMatch(/^urn:dkg:endorsement:[0-9a-f]{64}$/);
     }
+    const endorsedByQuad = quads.find(
+      (q) => q.predicate === 'https://dkg.network/ontology#endorsedBy',
+    );
+    expect(endorsedByQuad).toBeDefined();
+    expect(endorsedByQuad!.object.startsWith(`did:dkg:agent:${peerIdStr}`)).toBe(true);
+    // Spec-form regex must FAIL here — the produced agent URI is NOT 0x-form.
+    expect(endorsedByQuad!.object).not.toMatch(/^did:dkg:agent:0x[0-9a-fA-F]{40}$/);
   });
 
   it('PROD-BUG: agent test fixtures hard-code non-spec did:dkg:agent: URIs (drift scan)', async () => {
@@ -442,19 +476,17 @@ describe('[A-12] DID format drift in agent.endorse', () => {
     const { join } = await import('node:path');
     const testDir = fileURLToPath(new URL('.', import.meta.url));
     const entries = await readdir(testDir);
-    const offenders: string[] = [];
-    // The following test files are exempt from the fixture scan
-    // because they intentionally carry peer-id-form DIDs as negative
-    // regex targets / comment diagnostics — their whole purpose is to
-    // document and assert against the non-spec form. Anything else in
-    // this folder must migrate to the 0x-address form.
-    const SCAN_EXEMPT = new Set([
+    // Files that intentionally reference the legacy peer-ID form as
+    // *negative* fixtures (i.e. documenting the A-12 drift itself). They
+    // must not count as offenders in this scan.
+    const NEGATIVE_FIXTURES = new Set<string>([
       'agent-audit-extra.test.ts',
       'did-format-extra.test.ts',
       'ack-eip191-agent-extra.test.ts',
     ]);
+    const offenders: string[] = [];
     for (const f of entries) {
-      if (!f.endsWith('.ts') || SCAN_EXEMPT.has(f)) continue;
+      if (!f.endsWith('.ts') || NEGATIVE_FIXTURES.has(f)) continue;
       const body = await readFile(join(testDir, f), 'utf8');
       // Match `did:dkg:agent:X` where X is not `0x...` and not a template
       // expression like `${addr}`. Catches peer-ID form (Qm…, 12D3KooW…)
@@ -467,8 +499,13 @@ describe('[A-12] DID format drift in agent.endorse', () => {
 });
 
 describe('[A-15] Publisher signs every gossip message (SWM share)', () => {
-  it('PROD-BUG: DKGAgent.share emits raw WorkspacePublishRequest bytes — NOT wrapped in a signed GossipEnvelope', async () => {
+  it('FIXED: DKGAgent.share wraps WorkspacePublishRequest in a signed GossipEnvelope', async () => {
     const agent = await makeAgent('A15-Share');
+
+    // makeAgent() wires the operational private key into autoRegisterDefaultAgent,
+    // so the agent already has an EOA wallet available to sign the GossipEnvelope.
+    const expectedSigner = agent.getDefaultAgentAddress()?.toLowerCase();
+    expect(expectedSigner, 'default agent address must be auto-registered').toBeDefined();
 
     // Intercept libp2p pubsub publish to capture the raw wire bytes without
     // installing a listener on another node (keeps the test a single-process
@@ -477,7 +514,6 @@ describe('[A-15] Publisher signs every gossip message (SWM share)', () => {
     const originalPublish = (agent as any).gossip.publish.bind((agent as any).gossip);
     (agent as any).gossip.publish = async (topic: string, data: Uint8Array) => {
       captured.push({ topic, data: new Uint8Array(data) });
-      // Still delegate so any downstream in-process listeners behave normally.
       try { return await originalPublish(topic, data); } catch { /* no peers */ }
     };
 
@@ -485,35 +521,35 @@ describe('[A-15] Publisher signs every gossip message (SWM share)', () => {
       { subject: 'urn:a15:x', predicate: 'http://schema.org/name', object: '"A15"', graph: '' },
     ]);
 
-    // Topic is `dkg/context-graph/<cgId>/shared-memory` per V10 spec
-    // (see contextGraphSharedMemoryTopic).
     const shareMsg = captured.find(c => c.topic.includes('shared-memory'));
     expect(shareMsg, `expected a shared-memory gossip publish; saw: ${captured.map(c => c.topic).join(', ')}`).toBeTruthy();
 
-    // ① The bytes successfully decode as WorkspacePublishRequest (raw payload).
-    const decoded = decodeWorkspacePublishRequest(shareMsg!.data);
-    expect(decoded.paranetId).toBe(CG);
-    expect(decoded.publisherPeerId).toBe(agent.peerId);
+    // The wire bytes MUST decode as a signed GossipEnvelope (spec §08).
+    const envelope = decodeGossipEnvelope(shareMsg!.data);
+    expect(envelope.version).toBe('10.0.0');
+    expect(envelope.contextGraphId).toBe(CG);
+    expect(envelope.signature, 'envelope must carry a non-empty signature').toBeDefined();
+    expect(envelope.signature!.length).toBeGreaterThan(0);
+    expect(envelope.payload, 'envelope must wrap the inner payload').toBeDefined();
+    expect(envelope.payload!.length).toBeGreaterThan(0);
 
-    // ② When decoded as a GossipEnvelope (spec — §GossipEnvelopeSchema),
-    //    the signature field is EMPTY. Protobuf decode will not throw
-    //    because the wire types happen to align, but `signature.length`
-    //    is zero, proving nothing was signed.
-    let envelopeView: any = undefined;
-    try {
-      envelopeView = decodeGossipEnvelope(shareMsg!.data);
-    } catch {
-      // Some permutations of wire layout will throw — that is ALSO a pass
-      // for this assertion: if it doesn't even parse as a GossipEnvelope,
-      // then it certainly isn't a signed GossipEnvelope.
-    }
-    if (envelopeView) {
-      const sig: Uint8Array | undefined = envelopeView.signature;
-      const sigLen = sig ? sig.length : 0;
-      // PROD-BUG (audit A-15): V10 requires every gossip message to ride
-      // inside a signed envelope. The WM share path bypasses the envelope
-      // entirely, so there is no signature to verify.
-      expect(sigLen).toBe(0);
-    }
+    // Inner payload must still decode as the original WorkspacePublishRequest.
+    const inner = decodeWorkspacePublishRequest(envelope.payload!);
+    expect(inner.paranetId).toBe(CG);
+    expect(inner.publisherPeerId).toBe(agent.peerId);
+
+    // Recover the signer from the envelope and assert it matches the
+    // registered local agent address.
+    const { computeGossipSigningPayload } = await import('@origintrail-official/dkg-core');
+    const signingPayload = computeGossipSigningPayload(
+      envelope.type,
+      envelope.contextGraphId,
+      envelope.timestamp,
+      envelope.payload!,
+    );
+    const recovered = ethers
+      .verifyMessage(signingPayload, ethers.hexlify(envelope.signature!))
+      .toLowerCase();
+    expect(recovered).toBe(expectedSigner);
   }, 20_000);
 });

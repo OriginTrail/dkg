@@ -57,9 +57,28 @@ export class SyncVerifyWorker {
   }>();
 
   constructor() {
-    const jsWorkerUrl = new URL('./sync-verify-worker-impl.js', import.meta.url);
-    const tsWorkerUrl = new URL('./sync-verify-worker-impl.ts', import.meta.url);
-    const workerUrl = existsSync(fileURLToPath(jsWorkerUrl)) ? jsWorkerUrl : tsWorkerUrl;
+    // Worker threads cannot natively load `.ts` — so when this module
+    // is imported from the compiled `dist/` we target the sibling
+    // `.js`; when it is imported from `src/` (tests, tsx/vitest) we
+    // must redirect to the compiled `dist/sync-verify-worker-impl.js`
+    // built by `pnpm build`. Fall back to the `.ts` URL only as a
+    // last resort so a missing build surfaces an obvious error from
+    // the Worker constructor rather than a silent hang.
+    const jsSibling = new URL('./sync-verify-worker-impl.js', import.meta.url);
+    const distSibling = new URL('../dist/sync-verify-worker-impl.js', import.meta.url);
+    const tsSibling = new URL('./sync-verify-worker-impl.ts', import.meta.url);
+    const pick = (u: URL) => {
+      try {
+        return existsSync(fileURLToPath(u));
+      } catch {
+        return false;
+      }
+    };
+    const workerUrl = pick(jsSibling)
+      ? jsSibling
+      : pick(distSibling)
+        ? distSibling
+        : tsSibling;
     this.worker = new Worker(fileURLToPath(workerUrl));
     this.worker.on('message', (message: { id: number; result?: SyncVerifyResult; error?: string }) => {
       const pending = this.pending.get(message.id);

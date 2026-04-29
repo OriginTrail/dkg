@@ -22,7 +22,7 @@
  *         exact wording.
  *
  * Per QA policy: do NOT modify production code. If the FSM disagrees with the
- * spec, the failing test IS the bug signal — see BUGS_FOUND.md P-* entries.
+ * spec, the failing test IS the bug signal
  */
 import { describe, it, expect } from 'vitest';
 import {
