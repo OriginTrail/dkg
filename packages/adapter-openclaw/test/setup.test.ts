@@ -231,7 +231,17 @@ describe('writeDkgConfig', () => {
       expect(config.apiPort).toBe(9200);
       expect(config.nodeRole).toBe('edge');
       expect(config.contextGraphs).toEqual(['testing']);
-      expect(config.chain.rpcUrl).toBe('https://rpc.test');
+      // Chain is intentionally NOT persisted on a fresh setup — the daemon
+      // resolves it at runtime from network/<env>.json via resolveChainConfig
+      // (cli/src/config.ts), so future hub/RPC rotations propagate without
+      // a config rewrite. autoUpdate likewise omits repo/branch/etc. but
+      // keeps the `enabled` flag mirrored from the network default because
+      // several consumers (/api/status, /api/info, telemetry log pusher,
+      // resolveAutoUpdateEnabled) read `config.autoUpdate?.enabled` directly
+      // without a network fallback. fakeNetwork has no autoUpdate, so
+      // nothing should be written at all here.
+      expect(config.chain).toBeUndefined();
+      expect(config.autoUpdate).toBeUndefined();
       expect(config.relay).toBeUndefined();
     } finally {
       process.env.DKG_HOME = original;
@@ -266,6 +276,184 @@ describe('writeDkgConfig', () => {
       expect(config.chain.rpcUrl).toBe('https://custom.rpc');
       expect(config.openclawAdapter).toBeUndefined();
       expect(config.openclawChannel).toBeUndefined();
+    } finally {
+      process.env.DKG_HOME = original;
+    }
+  });
+
+  it('mirrors only autoUpdate.enabled from network default and preserves existing pins', () => {
+    // Regression: previously `writeDkgConfig` copied the entire
+    // `network.autoUpdate` block into the user's config when absent,
+    // which froze repo/branch/checkInterval at first-run values and broke
+    // future rotations (main -> release/v10) shipped via
+    // `network/<env>.json#autoUpdate`. The daemon's
+    // `resolveAutoUpdateConfig` already does field-level fall-through, so
+    // we drop everything *except* `enabled` — that one flag stays because
+    // /api/status, /api/info, the telemetry log pusher in lifecycle.ts,
+    // and `resolveAutoUpdateEnabled` itself read
+    // `config.autoUpdate?.enabled` directly without a network fallback.
+    //
+    // (1) Fresh setup, network has autoUpdate.enabled=true with extra
+    //     pins -> persist ONLY { enabled: true }, no repo/branch.
+    const fresh = join(testDir, '.dkg-fresh');
+    const original = process.env.DKG_HOME;
+    process.env.DKG_HOME = fresh;
+    try {
+      writeDkgConfig('test-agent', {
+        ...fakeNetwork,
+        autoUpdate: { enabled: true, repo: 'OriginTrail/dkg', branch: 'main' },
+      } as any, 9200);
+      const cfg = JSON.parse(readFileSync(join(fresh, 'config.json'), 'utf-8'));
+      expect(cfg.autoUpdate).toEqual({ enabled: true });
+      expect(cfg.chain).toBeUndefined();
+    } finally {
+      process.env.DKG_HOME = original;
+    }
+
+    // (2) Fresh setup, network explicitly disables autoUpdate -> mirror it.
+    const disabled = join(testDir, '.dkg-disabled');
+    process.env.DKG_HOME = disabled;
+    try {
+      writeDkgConfig('test-agent', {
+        ...fakeNetwork,
+        autoUpdate: { enabled: false, repo: 'OriginTrail/dkg', branch: 'main' },
+      } as any, 9200);
+      const cfg = JSON.parse(readFileSync(join(disabled, 'config.json'), 'utf-8'));
+      expect(cfg.autoUpdate).toEqual({ enabled: false });
+    } finally {
+      process.env.DKG_HOME = original;
+    }
+
+    // (3) Existing config with an operator-pinned autoUpdate must round-trip
+    //     unchanged — only the default-write path changes here.
+    const persisted = join(testDir, '.dkg-persisted');
+    mkdirSync(persisted, { recursive: true });
+    writeFileSync(join(persisted, 'config.json'), JSON.stringify({
+      name: 'pinned-node',
+      apiPort: 9300,
+      autoUpdate: { enabled: true, repo: 'OriginTrail/dkg', branch: 'release/v10' },
+    }));
+    process.env.DKG_HOME = persisted;
+    try {
+      writeDkgConfig('pinned-node', {
+        ...fakeNetwork,
+        autoUpdate: { enabled: true, repo: 'OriginTrail/dkg', branch: 'main' },
+      } as any, 9300);
+      const cfg = JSON.parse(readFileSync(join(persisted, 'config.json'), 'utf-8'));
+      expect(cfg.autoUpdate).toEqual({
+        enabled: true,
+        repo: 'OriginTrail/dkg',
+        branch: 'release/v10',
+      });
+    } finally {
+      process.env.DKG_HOME = original;
+    }
+  });
+
+  it('heals legacy auto-pinned chain/autoUpdate copies on rerun (PR #322 follow-up)', () => {
+    // Earlier `dkg openclaw setup` runs blindly copied the entire `chain` and
+    // `autoUpdate` blocks from `network/<env>.json` into ~/.dkg/config.json.
+    // After PR #322 fresh installs no longer do that, but operators who
+    // already ran the buggy version were stuck on stale snapshots — a hub or
+    // RPC rotation in network config would NOT propagate, exactly the failure
+    // mode that broke the testnet relays. The heal pass strips fields that
+    // still equal the current network default (= clearly auto-copies, never
+    // deliberate overrides) while leaving real customisations alone.
+    const original = process.env.DKG_HOME;
+    const networkV2 = {
+      ...fakeNetwork,
+      chain: {
+        type: 'evm',
+        rpcUrl: 'https://sepolia.base.org',
+        hubAddress: '0xNEW_HUB_AFTER_ROTATION',
+        chainId: 'base:84532',
+      },
+      autoUpdate: {
+        enabled: true,
+        repo: 'OriginTrail/dkg',
+        branch: 'main',
+        checkIntervalMinutes: 5,
+      },
+    } as any;
+
+    // (1) Pure auto-copy of an OLD network snapshot: every field happens to
+    //     match the *previous* defaults (old hub address, old branch, …) but
+    //     is now stale. We mimic that by writing a config whose chain/auto
+    //     blocks are byte-identical to the *current* network — i.e. the
+    //     operator was on the same defaults before. Heal must strip both
+    //     blocks so the resolver re-derives them from network at runtime.
+    const legacy = join(testDir, '.dkg-legacy-autopin');
+    mkdirSync(legacy, { recursive: true });
+    writeFileSync(join(legacy, 'config.json'), JSON.stringify({
+      name: 'legacy-node',
+      apiPort: 9300,
+      chain: { ...networkV2.chain },
+      autoUpdate: { ...networkV2.autoUpdate },
+    }));
+    process.env.DKG_HOME = legacy;
+    try {
+      writeDkgConfig('legacy-node', networkV2, 9300);
+      const cfg = JSON.parse(readFileSync(join(legacy, 'config.json'), 'utf-8'));
+      expect(cfg.chain).toBeUndefined();
+      expect(cfg.autoUpdate).toEqual({ enabled: true });
+    } finally {
+      process.env.DKG_HOME = original;
+    }
+
+    // (2) Operator pinned a private RPC and a release-branch override. The
+    //     hubAddress and chainId in their config still match the network
+    //     default (auto-copied), so those should be stripped, but the
+    //     overridden rpcUrl + branch + repo (matches default) ride along
+    //     correctly: rpcUrl differs -> kept; branch differs -> kept; repo
+    //     matches -> dropped; hubAddress matches -> dropped.
+    const mixed = join(testDir, '.dkg-mixed-overrides');
+    mkdirSync(mixed, { recursive: true });
+    writeFileSync(join(mixed, 'config.json'), JSON.stringify({
+      name: 'mixed-node',
+      apiPort: 9301,
+      chain: {
+        type: networkV2.chain.type,
+        rpcUrl: 'https://my-private.rpc.example',
+        hubAddress: networkV2.chain.hubAddress,
+        chainId: networkV2.chain.chainId,
+      },
+      autoUpdate: {
+        enabled: true,
+        repo: networkV2.autoUpdate.repo,
+        branch: 'release/v10',
+        checkIntervalMinutes: networkV2.autoUpdate.checkIntervalMinutes,
+      },
+    }));
+    process.env.DKG_HOME = mixed;
+    try {
+      writeDkgConfig('mixed-node', networkV2, 9301);
+      const cfg = JSON.parse(readFileSync(join(mixed, 'config.json'), 'utf-8'));
+      expect(cfg.chain).toEqual({ rpcUrl: 'https://my-private.rpc.example' });
+      expect(cfg.autoUpdate).toEqual({ enabled: true, branch: 'release/v10' });
+    } finally {
+      process.env.DKG_HOME = original;
+    }
+
+    // (3) Operator deliberately disabled auto-update while the network has it
+    //     enabled. `enabled` differs from network -> the whole autoUpdate
+    //     block must survive the heal (we keep the disagreeing `enabled`
+    //     even though all other fields would otherwise be pruned).
+    const disabledOverride = join(testDir, '.dkg-disabled-override');
+    mkdirSync(disabledOverride, { recursive: true });
+    writeFileSync(join(disabledOverride, 'config.json'), JSON.stringify({
+      name: 'opt-out-node',
+      apiPort: 9302,
+      autoUpdate: {
+        enabled: false,
+        repo: networkV2.autoUpdate.repo,
+        branch: networkV2.autoUpdate.branch,
+      },
+    }));
+    process.env.DKG_HOME = disabledOverride;
+    try {
+      writeDkgConfig('opt-out-node', networkV2, 9302);
+      const cfg = JSON.parse(readFileSync(join(disabledOverride, 'config.json'), 'utf-8'));
+      expect(cfg.autoUpdate).toEqual({ enabled: false });
     } finally {
       process.env.DKG_HOME = original;
     }

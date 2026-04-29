@@ -386,6 +386,57 @@ export interface DkgConfigOverrides {
   portExplicit?: boolean;
 }
 
+/**
+ * Strip fields under `existing.chain` and `existing.autoUpdate` whose values
+ * equal the corresponding network default — those are leftovers from earlier
+ * setup runs that auto-copied the whole block (the bug fixed in PR #322).
+ *
+ * Heuristic is safe: if an operator deliberately overrode a field, the value
+ * differs from the current network default and is preserved. If the value
+ * matches the default, it's either (a) an auto-copy we want to drop so future
+ * rotations propagate, or (b) a coincidence where the operator picked the same
+ * value — in which case dropping it is still functionally a no-op (the
+ * resolver will re-derive the same value at runtime). `autoUpdate.enabled` is
+ * kept regardless: status/telemetry endpoints read it directly without
+ * falling back to the network value.
+ */
+function pruneNetworkPinnedDefaults(
+  existing: Record<string, any>,
+  network: NetworkConfig,
+): void {
+  if (existing.chain && typeof existing.chain === 'object' && network.chain) {
+    for (const key of Object.keys(existing.chain) as Array<keyof NonNullable<NetworkConfig['chain']>>) {
+      if (existing.chain[key] === network.chain[key]) {
+        delete existing.chain[key];
+      }
+    }
+    if (Object.keys(existing.chain).length === 0) {
+      delete existing.chain;
+    }
+  }
+
+  if (existing.autoUpdate && typeof existing.autoUpdate === 'object' && network.autoUpdate) {
+    for (const key of Object.keys(existing.autoUpdate)) {
+      if (key === 'enabled') continue;
+      if (existing.autoUpdate[key] === (network.autoUpdate as any)[key]) {
+        delete existing.autoUpdate[key];
+      }
+    }
+    // Drop the parent if only `enabled` survived AND it matches the network
+    // default — the dedicated `enabled`-mirroring branch below will re-add it.
+    // Otherwise keep whatever the operator actually pinned (different enabled,
+    // custom field we don't know about, etc.).
+    const keys = Object.keys(existing.autoUpdate);
+    if (
+      keys.length === 0 ||
+      (keys.length === 1 && keys[0] === 'enabled'
+        && existing.autoUpdate.enabled === network.autoUpdate.enabled)
+    ) {
+      delete existing.autoUpdate;
+    }
+  }
+}
+
 function migrateLegacyOpenClawTransport(existing: Record<string, any>): void {
   const legacyTransport = existing.openclawChannel;
   if (!legacyTransport || typeof legacyTransport !== 'object') return;
@@ -445,8 +496,32 @@ export function writeDkgConfig(
   delete existing.openclawAdapter;
   delete existing.openclawChannel;
 
+  // Heal legacy configs: earlier setup runs auto-copied the entire `chain`
+  // and `autoUpdate` blocks from `network/<env>.json`. Those copies look
+  // identical to operator overrides on disk via `...existing`, so a rerun
+  // after a hub/RPC/branch rotation would NOT pick up the new defaults —
+  // exactly the failure mode we hit on the testnet relays after the hub
+  // rotated. Strip any field whose value equals the current network default
+  // (= clearly a stale auto-copy, never a deliberate override). Real
+  // operator customisations (e.g. private RPC) won't match a default and
+  // are left intact. `autoUpdate.enabled` is kept regardless because the
+  // status/telemetry consumers below depend on it being present.
+  pruneNetworkPinnedDefaults(existing, network);
+
   // Explicit CLI overrides (--name, --port) take precedence over existing config.
   // Auto-detected values only fill in when no existing value is present.
+  //
+  // We intentionally do NOT persist `chain` or `autoUpdate` from
+  // `network/<env>.json` into the user's config when they're absent —
+  // the daemon already does field-level merging at runtime via
+  // `resolveChainConfig` (cli/src/config.ts) and `resolveAutoUpdateConfig`
+  // (same file, see docstring at "dkg init intentionally omits repo/branch").
+  // Pinning the network defaults here would cement them and break future
+  // hub rotations / branch rotations / RPC swaps in `network/<env>.json`,
+  // which is exactly the failure mode we just had to fight through on the
+  // testnet relay nodes after the hub address was rotated. The `...existing`
+  // spread above still preserves any chain/autoUpdate the operator added
+  // manually (e.g. private RPC override).
   const config: Record<string, any> = {
     ...existing,
     name: overrides?.nameExplicit ? agentName : (existing.name ?? agentName),
@@ -456,7 +531,6 @@ export function writeDkgConfig(
       ?? existing.paranets
       ?? network.defaultContextGraphs
       ?? network.defaultParanets,
-    chain: existing.chain ?? network.chain,
     auth: existing.auth ?? { enabled: true },
   };
 
@@ -467,9 +541,18 @@ export function writeDkgConfig(
     config.relay = existing.relay;
   }
 
-  // Preserve auto-update from network defaults if not set
-  if (!existing.autoUpdate && network.autoUpdate) {
-    config.autoUpdate = network.autoUpdate;
+  // Persist only the `enabled` flag mirrored from the network default.
+  // `repo`/`branch`/`checkIntervalMinutes`/etc. are intentionally omitted
+  // (see big comment above on the resolver contract), but the `enabled`
+  // flag has to stay because several consumers — `/api/status`,
+  // `/api/info`, the telemetry log pusher in `lifecycle.ts`, and
+  // `resolveAutoUpdateEnabled` itself — read `config.autoUpdate?.enabled`
+  // directly without falling back to `network.autoUpdate.enabled`.
+  // Dropping the whole block would make those report auto-update as
+  // disabled on fresh testnet OpenClaw installs even though the updater
+  // is in fact running.
+  if (!existing.autoUpdate && network.autoUpdate?.enabled !== undefined) {
+    config.autoUpdate = { enabled: network.autoUpdate.enabled };
   }
 
   writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n');
