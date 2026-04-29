@@ -51,6 +51,9 @@ describe('A-12: agent DID format scan', () => {
       // mention the Qm form as negative regex.
       if (f.endsWith('did-format-extra.test.ts')) continue;
       if (f.endsWith('ack-eip191-agent-extra.test.ts')) continue;
+      // agent-audit-extra.test.ts intentionally documents the peer-ID
+      // form as a negative case to prove the spec regex rejects it.
+      if (f.endsWith('agent-audit-extra.test.ts')) continue;
 
       const src = readFileSync(f, 'utf8');
       for (const m of src.matchAll(ANY_AGENT_DID_RE)) {
@@ -68,7 +71,7 @@ describe('A-12: agent DID format scan', () => {
     // Spec §03 says agent DIDs are Ethereum-address form. Leaving this as a
     // hard assertion so future PRs that introduce more drift fail loudly;
     // current baseline is expected to surface the known debt. See
-    // BUGS_FOUND.md A-12.
+    // .
     expect(offenders, JSON.stringify(offenders, null, 2)).toEqual([]);
   });
 

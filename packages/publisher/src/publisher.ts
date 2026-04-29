@@ -120,6 +120,16 @@ export interface PublishOptions {
   fromSharedMemory?: boolean;
   /** When true, the KC was created via V10 and updates should use the V10 path. */
   v10Origin?: boolean;
+  /**
+   * Per-Context-Graph quorum (`requiredSignatures`) that the publisher MUST
+   * collect before submitting the on-chain tx. When set and the collected
+   * V10 ACK count is below this value, the publisher SKIPS the self-sign
+   * fallback and the on-chain tx, returning `status: 'tentative'`.
+   *
+   * Spec §06_PUBLISH /
+   * global ParametersStorage minimum.
+   */
+  perCgRequiredSignatures?: number;
 }
 
 export interface PublishResult {

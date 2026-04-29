@@ -45,4 +45,14 @@ export interface AsyncLiftPublisherConfig {
   chainRecoveryResolver?: AsyncLiftPublisherRecoveryResolver;
   publishExecutor?: (input: AsyncLiftPublishExecutionInput) => Promise<PublishResult>;
   resolvedSliceOverrides?: Partial<LiftResolvedPublishSlice>;
+  /**
+   * Explicit encryption key used when reading authoritative private
+   * quads back for deduplication in `subtractFinalizedExactQuads`. Must
+   * match the key the backing `PrivateContentStore` was constructed
+   * with, otherwise a non-default-key deployment will never match any
+   * previously-published private quad and the lift step republishes
+   * duplicates. `undefined` keeps the
+   * legacy env/default resolution.
+   */
+  privateStoreEncryptionKey?: Uint8Array | string;
 }

@@ -308,20 +308,44 @@ describe('E2E: workspace-first publish with real blockchain', () => {
     expect(aData.bindings.length).toBe(1);
     expect(aData.bindings[0]['name']).toBe('"Finalization Chain Draft"');
 
-    // Poll until B promotes the data to its canonical graph
+    // Poll until B processes the FinalizationMessage and promotes to canonical.
+    // We key on `confirmed` status in B's meta graph (inserted by
+    // FinalizationHandler.promoteSharedMemoryToCanonical) rather than just
+    // "ENTITY_1 is in B's data graph", because B can obtain the data through
+    // the periodic durable sync with A *before* finalization — that would let
+    // this test pass even when finalization is broken. The `confirmed` status
+    // quad only appears after FinalizationHandler runs end-to-end (canonical
+    // insert → meta insert → shared-memory cleanup), so polling on it makes
+    // tests #5 (confirmed metadata) and #6 (SWM cleanup) deterministic.
     const deadline = Date.now() + 15000;
     let bData: any;
+    let bHasConfirmed = false;
+    let bSwmCleaned = false;
     while (Date.now() < deadline) {
       bData = await nodeB.query(
         `SELECT ?name WHERE { <${ENTITY_1}> <http://schema.org/name> ?name }`,
         PARANET,
       );
-      if (bData.bindings.length > 0) break;
+      const confirmedAsk = await nodeB.query(
+        `ASK { GRAPH ?g { ?kc <http://dkg.io/ontology/status> "confirmed" } }`,
+      );
+      // DKGQueryEngine normalizes ASK into `{ bindings: [{ result: 'true'|'false' }] }`.
+      bHasConfirmed =
+        confirmedAsk.bindings.length > 0 &&
+        String((confirmedAsk.bindings[0] as Record<string, string>)['result']) === 'true';
+      const bSwm = await nodeB.query(
+        `SELECT ?name WHERE { <${ENTITY_1}> <http://schema.org/name> ?name }`,
+        { contextGraphId: PARANET, graphSuffix: '_shared_memory' },
+      );
+      bSwmCleaned = bSwm.bindings.length === 0;
+      if (bData.bindings.length > 0 && bHasConfirmed && bSwmCleaned) break;
       await sleep(500);
     }
 
     expect(bData.bindings.length).toBe(1);
     expect(bData.bindings[0]['name']).toBe('"Finalization Chain Draft"');
+    expect(bHasConfirmed).toBe(true);
+    expect(bSwmCleaned).toBe(true);
   }, 60_000);
 
   it('B has confirmed KC metadata with real chain provenance', async (ctx) => {

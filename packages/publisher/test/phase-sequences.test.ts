@@ -117,9 +117,24 @@ describe('Phase-sequence contracts', () => {
       'chain:sign:start',
       'chain:sign:end',
       'chain:submit:start',
-      // P-1 write-ahead boundary: straddles the adapter call so phase
-      // listeners (e.g. the CLI daemon's operations journal) can
-      // checkpoint BEFORE `eth_sendRawTransaction` hits the wire.
+      // Two write-ahead boundaries, emitted in order:
+      //   1. `journal:writeahead` — durable intent journal persisted
+      //      BEFORE any adapter RPC (TRAC approve / gas estimate /
+      //      broadcast). Crash-safe at this point: on restart, the WAL
+      //      lets the recovery path reconcile against chain state by
+      //      matching `merkleRoot` in KnowledgeBatchCreated events.
+      //   2. `chain:writeahead` — per-broadcast boundary fired from
+      //      inside the adapter via the `onBroadcast` callback,
+      //      immediately before `eth_sendRawTransaction` hits the
+      //      wire. Listeners (e.g. the CLI daemon's operations
+      //      journal) record the signed-but-not-yet-broadcast tx
+      //      identity so a crash between "tx on wire" and "receipt
+      //      observed" can resume without a double-submit. The
+      //      corresponding RPC-spy test
+      //      (`publish-ordering-rpc-spy-extra`) verifies the actual
+      //      ordering against the live JSON-RPC stream.
+      'journal:writeahead:start',
+      'journal:writeahead:end',
       'chain:writeahead:start',
       'chain:writeahead:end',
       'chain:submit:end',
