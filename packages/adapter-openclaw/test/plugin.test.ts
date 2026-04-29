@@ -3685,6 +3685,51 @@ describe('DkgNodePlugin', () => {
     }
   });
 
+  it('T75 - setup-owned stateDir detection handles symlink aliases at runtime', async () => {
+    const prevEnv = process.env.OPENCLAW_STATE_DIR;
+    delete process.env.OPENCLAW_STATE_DIR;
+    const realWorkspace = path.join(require('os').tmpdir(), `dkg-t75-real-workspace-${Date.now()}`);
+    const aliasWorkspace = path.join(require('os').tmpdir(), `dkg-t75-alias-workspace-${Date.now()}`);
+    const currentWorkspace = path.join(require('os').tmpdir(), `dkg-t75-current-after-alias-${Date.now()}`);
+    fs.mkdirSync(realWorkspace, { recursive: true });
+    fs.mkdirSync(currentWorkspace, { recursive: true });
+    try {
+      fs.symlinkSync(realWorkspace, aliasWorkspace, 'dir');
+    } catch {
+      return;
+    }
+    try {
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        installedWorkspace: realWorkspace,
+        stateDir: path.join(aliasWorkspace, '.openclaw'),
+        channel: { enabled: false },
+        memory: { enabled: false },
+      } as any);
+      const mockApi: OpenClawPluginApi = {
+        config: {},
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+        workspaceDir: currentWorkspace,
+      } as unknown as OpenClawPluginApi;
+      plugin.register(mockApi);
+      const watermarkPath: string = ((plugin as any).chatTurnWriter as any).watermarkFilePath;
+      expect(watermarkPath.replace(/\\/g, '/')).toContain(
+        currentWorkspace.replace(/\\/g, '/') + '/.openclaw/dkg-adapter/chat-turn-watermarks.json',
+      );
+      await plugin.stop();
+    } finally {
+      if (prevEnv === undefined) delete process.env.OPENCLAW_STATE_DIR;
+      else process.env.OPENCLAW_STATE_DIR = prevEnv;
+      try { fs.rmSync(aliasWorkspace, { recursive: true, force: true }); } catch { /* best effort */ }
+      try { fs.rmSync(realWorkspace, { recursive: true, force: true }); } catch { /* best effort */ }
+      try { fs.rmSync(currentWorkspace, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+  });
+
   it('T75 - OPENCLAW_STATE_DIR still overrides configured stateDir', async () => {
     const prevEnv = process.env.OPENCLAW_STATE_DIR;
     const envStateDir = path.join(require('os').tmpdir(), `dkg-t75-env-state-${Date.now()}`);

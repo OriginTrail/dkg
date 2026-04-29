@@ -45,7 +45,8 @@ import type {
   OpenClawToolResult,
 } from './types.js';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { existsSync, realpathSync } from 'node:fs';
 
 // T44 — same regex as `dkg-core/src/dkg-home.ts` ETH_ADDR_RE. Kept
 // duplicated rather than exposed from dkg-core because the adapter's
@@ -54,6 +55,24 @@ import { join, resolve } from 'node:path';
 const ETH_ADDR_RE_LC = /^0x[0-9a-f]{40}$/;
 function isValidEthAddressString(value: string | undefined): boolean {
   return typeof value === 'string' && ETH_ADDR_RE_LC.test(value.trim().toLowerCase());
+}
+
+function canonicalPathForCompare(path: string): string {
+  const absolute = resolve(path);
+  const missingParts: string[] = [];
+  let existing = absolute;
+  while (!existsSync(existing)) {
+    const parent = dirname(existing);
+    if (parent === existing) break;
+    missingParts.unshift(existing.slice(parent.length + 1));
+    existing = parent;
+  }
+
+  let canonicalBase = existing;
+  try { canonicalBase = realpathSync(existing); } catch { /* keep resolved fallback */ }
+  const canonical = missingParts.reduce((acc, part) => join(acc, part), canonicalBase);
+  const normalized = resolve(canonical);
+  return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
 }
 
 const OPENCLAW_LOCAL_AGENT_CAPABILITIES = {
@@ -607,14 +626,10 @@ export class DkgNodePlugin {
     const configuredStateDir = trimmedNonEmpty(this.config.stateDir);
     const setupWorkspaceDir = trimmedNonEmpty(this.config.installedWorkspace);
     const setupDefaultStateDir = setupWorkspaceDir ? join(setupWorkspaceDir, '.openclaw') : undefined;
-    const normalizeForCompare = (path: string): string => {
-      const normalized = resolve(path);
-      return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
-    };
     const configuredIsSetupDefault =
       !!configuredStateDir &&
       !!setupDefaultStateDir &&
-      normalizeForCompare(configuredStateDir) === normalizeForCompare(setupDefaultStateDir);
+      canonicalPathForCompare(configuredStateDir) === canonicalPathForCompare(setupDefaultStateDir);
     const workspaceStateDir = trimmedWorkspaceDir ? join(trimmedWorkspaceDir, '.openclaw') : undefined;
     const stateDir =
       trimmedNonEmpty((api as any)?.runtime?.state?.resolveStateDir?.()) ??
