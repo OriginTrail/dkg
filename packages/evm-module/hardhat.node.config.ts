@@ -44,27 +44,11 @@ const config: HardhatUserConfig = {
         interval: 0,
       },
     },
-    base_sepolia_dev: {
-      environment: 'devnet',
-      chainId: 84532,
-      url: rpc('BASE_SEPOLIA_DEV') || 'https://sepolia.base.org',
-      gasPrice: 1_000_000_000,
-      accounts: accounts('BASE_SEPOLIA_DEV'),
-      saveDeployments: false,
-    },
-    base_sepolia_test: {
+    base_sepolia_v10: {
       environment: 'testnet',
       chainId: 84532,
-      url: rpc('BASE_SEPOLIA_TEST') || 'https://sepolia.base.org',
-      gasPrice: 1_000_000_000,
-      accounts: accounts('BASE_SEPOLIA_TEST'),
-      saveDeployments: false,
-    },
-    base_sepolia_v9: {
-      environment: 'development',
-      chainId: 84532,
-      url: rpc('BASE_SEPOLIA_V9') || 'https://sepolia.base.org',
-      accounts: accounts('BASE_SEPOLIA_V9'),
+      url: rpc('BASE_SEPOLIA_V10') || 'https://sepolia.base.org',
+      accounts: accounts('BASE_SEPOLIA_V10'),
       saveDeployments: false,
     },
     base_mainnet: {

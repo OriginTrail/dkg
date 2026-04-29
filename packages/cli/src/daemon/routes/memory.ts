@@ -73,6 +73,7 @@ import {
   loadConfig,
   saveConfig,
   loadNetworkConfig,
+  resolveChainConfig,
   dkgDir,
   writePid,
   removePid,
@@ -479,7 +480,7 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
           gasUsed: chain.gasUsed,
           gasPrice: chain.effectiveGasPrice,
         });
-        const chainId = (config.chain ?? network?.chain)?.chainId;
+        const chainId = resolveChainConfig(config, network)?.chainId;
         tracker.setTxHash(
           ctx,
           chain.txHash,

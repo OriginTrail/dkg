@@ -4,7 +4,7 @@ import { EVMChainAdapter, NoChainAdapter } from '@origintrail-official/dkg-chain
 import { TypedEventBus, type Ed25519Keypair } from '@origintrail-official/dkg-core';
 import { ACKCollector, AsyncLiftRunner, DKGPublisher, TripleStoreAsyncLiftPublisher, type AsyncLiftPublishExecutionInput, type AsyncLiftPublisher, type AsyncLiftPublisherRecoveryResult, type LiftJobBroadcast, type LiftJobIncluded, type PublishOptions } from '@origintrail-official/dkg-publisher';
 import { createTripleStore, type TripleStore } from '@origintrail-official/dkg-storage';
-import { loadNetworkConfig, type DkgConfig } from './config.js';
+import { loadNetworkConfig, resolveChainConfig, type DkgConfig } from './config.js';
 import { loadPublisherWallets } from './publisher-wallets.js';
 
 export interface PublisherRuntime {
@@ -98,11 +98,20 @@ export async function createPublisherRuntime(args: {
   const network = await loadNetworkConfig();
   const keypair = await loadOrCreateAgentWallet(args.dataDir);
   const store = await createPublisherStore(args.dataDir, args.config);
+  // Field-merge config + network/<env>.json#chain, then guard for the
+  // strict { rpcUrl, hubAddress, chainId? } shape the publisher runtime
+  // expects. If either required field is missing, pass undefined and let
+  // the runtime fall back to NoChainAdapter (publisher won't have on-chain
+  // finality but still functions).
+  const merged = resolveChainConfig(args.config, network);
+  const chainBase = merged?.rpcUrl && merged?.hubAddress
+    ? { rpcUrl: merged.rpcUrl, hubAddress: merged.hubAddress, chainId: merged.chainId }
+    : undefined;
   return createPublisherRuntimeFromBase({
     dataDir: args.dataDir,
     keypair: keypair.keypair,
     store,
-    chainBase: args.config.chain ?? network?.chain,
+    chainBase,
     pollIntervalMs: args.pollIntervalMs,
     errorBackoffMs: args.errorBackoffMs,
     closeStoreOnStop: true,
