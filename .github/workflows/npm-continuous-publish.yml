@@ -57,12 +57,12 @@ jobs:
       # workflow runs the full TORNADO / BURA / KOSAVA matrix in parallel on
       # the same commit and is the authoritative test gate (enforced via
       # branch protection on merges to v10-rc). Re-running `pnpm turbo test`
-      # in this publish workflow was redundant with `ci.yml` AND incompatible
-      # with the `accept-red-ci` policy on v10-rc: a deliberately-red
-      # PROD-BUG sentinel test (e.g. network-sim K-4/K-5 — no seeded RNG, no
-      # libp2p-parity harness) would fail this step and block every dev
-      # pre-release, even though CI was already reporting the same red state
-      # as documented bug evidence. See .test-audit/BUGS_FOUND.md.
+      # in this publish workflow was redundant with `ci.yml` AND
+      # incompatible with the `accept-red-ci` policy on v10-rc: a
+      # deliberately-red PROD-BUG sentinel test (e.g. network-sim
+      # K-4/K-5 — no seeded RNG, no libp2p-parity harness) would fail
+      # this step and block every dev pre-release, even though CI was
+      # already reporting the same red state as documented bug evidence.
 
       - name: Compute dev version suffix
         id: version

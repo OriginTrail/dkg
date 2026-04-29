@@ -165,7 +165,7 @@ describe('chain-lifecycle-extra — V10 lifecycle + adapter invariants', () => {
       // contract. If this assertion flips to include the function,
       // double-review that the adapter does NOT then also chain
       // `createKnowledgeAssetsV10` — otherwise each call becomes two
-      // on-chain publishes and a double-charge. See BUGS_FOUND.md CH-2.
+      // on-chain publishes and a double-charge.
       expect(functionNames).not.toContain('publishToContextGraph');
     });
 

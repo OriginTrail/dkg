@@ -7,6 +7,7 @@ import {EpochStorage} from "./storage/EpochStorage.sol";
 import {PaymasterManager} from "./storage/PaymasterManager.sol";
 import {Chronos} from "./storage/Chronos.sol";
 import {KnowledgeCollectionStorage} from "./storage/KnowledgeCollectionStorage.sol";
+import {KnowledgeAssetsStorage} from "./storage/KnowledgeAssetsStorage.sol";
 import {IdentityStorage} from "./storage/IdentityStorage.sol";
 import {ParametersStorage} from "./storage/ParametersStorage.sol";
 import {StakingStorage} from "./storage/StakingStorage.sol";
@@ -141,6 +142,18 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
     EpochStorage public epochStorage;
     PaymasterManager public paymasterManager;
     KnowledgeCollectionStorage public knowledgeCollectionStorage;
+    /// @notice Legacy V8/V9 batch storage. KAV10 invokes
+    /// `emitV10KnowledgeBatchCreated` here so V10-aware indexers can
+    /// subscribe to a batch-shaped audit record from the KAS address
+    /// for every V10 publish. The emitted event is
+    /// `V10KnowledgeBatchEmitted`, NOT the legacy
+    /// `KnowledgeBatchCreated` — see the comment in
+    /// `KnowledgeAssetsStorage.sol` for why: reusing the legacy event
+    /// would trick V8/V9 indexers into calling legacy getters that
+    /// have no V10 data. Resolved best-effort in `initialize` — if
+    /// the legacy storage is not Hub-registered the shim emit is
+    /// silently skipped (graceful degrade for V10-only deploys).
+    KnowledgeAssetsStorage public knowledgeAssetsStorage;
     Chronos public chronos;
     IERC20 public tokenContract;
     ParametersStorage public parametersStorage;
@@ -151,11 +164,41 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
     ContextGraphValueStorage public contextGraphValueStorage;
     IDKGPublishingConvictionNFT public publishingConvictionNFT;
 
+    // --- Events ---
+
+    /// @notice Spec §07_EVM_MODULE — V10 batch-shaped event emitted on
+    /// every publish so v10 indexers receive a CG-aware projection of
+    /// the publish without having to join `KnowledgeCollectionCreated`
+    /// + `registerKnowledgeCollection`. Distinct from the V8/V9
+    /// `KnowledgeAssetsStorage.KnowledgeBatchCreated` (different
+    /// signature → different topic hash); KAV10 ALSO triggers a
+    /// batch-shaped audit emit on the legacy storage via
+    /// `KnowledgeAssetsStorage.emitV10KnowledgeBatchCreated`, which now
+    /// emits `V10KnowledgeBatchEmitted` (NOT `KnowledgeBatchCreated`)
+    /// so V8/V9 indexers are not fooled into calling legacy getters
+    /// for data that lives only in V10.
+    event KnowledgeBatchCreated(
+        uint256 indexed batchId,
+        uint256 contextGraphId,
+        uint256 knowledgeAssetsAmount,
+        uint256 byteSize,
+        uint256 startEpoch,
+        uint256 endEpoch,
+        uint96 tokenAmount,
+        bool isImmutable
+    );
+
     // --- Errors ---
 
     error ZeroAddressDependency(string name);
     error ZeroContextGraphId();
     error ZeroEpochs();
+    /// @dev An otherwise valid publish with
+    /// `knowledgeAssetsAmount == 0` would overflow `kcId + 0 - 1`
+    /// when projecting the legacy KAS shim range. Reject the zero
+    /// case explicitly at the entry point so the caller sees a
+    /// deterministic custom error instead of a generic panic.
+    error ZeroKnowledgeAssetsAmount();
 
     // --- Update-specific errors (V10 Phase 8 Task 2) ---
 
@@ -188,6 +231,19 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
         knowledgeCollectionStorage = KnowledgeCollectionStorage(
             hub.getAssetStorageAddress("KnowledgeCollectionStorage")
         );
+        // Legacy V8/V9 batch storage — best-effort resolve so V10-only
+        // deploys don't fail initialize. If it IS deployed, KAV10 will
+        // dual-emit `KnowledgeBatchCreated` from there for indexer
+        // symmetry (. Hub.getAssetStorageAddress
+        // reverts `ContractDoesNotExist` when the key is missing, so the
+        // lookup is wrapped in try/catch to allow graceful degradation.
+        try hub.getAssetStorageAddress("KnowledgeAssetsStorage") returns (address kasAddr) {
+            if (kasAddr != address(0)) {
+                knowledgeAssetsStorage = KnowledgeAssetsStorage(kasAddr);
+            }
+        } catch {
+            knowledgeAssetsStorage = KnowledgeAssetsStorage(address(0));
+        }
         chronos = Chronos(hub.getContractAddress("Chronos"));
         tokenContract = IERC20(hub.getContractAddress("Token"));
         parametersStorage = ParametersStorage(hub.getContractAddress("ParametersStorage"));
@@ -365,6 +421,14 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
         // Decision #3: contextGraphId == 0 is forbidden. No legacy path.
         if (p.contextGraphId == 0) revert ZeroContextGraphId();
 
+        // reject zero-asset
+        // publishes BEFORE any state mutation or child-contract call so
+        // the legacy KAS shim range computation (`kcId + N - 1`) can't
+        // underflow. A publish with no assets carries no data anyway —
+        // turning this into a custom-error revert keeps the failure
+        // deterministic and cheap for the caller.
+        if (p.knowledgeAssetsAmount == 0) revert ZeroKnowledgeAssetsAmount();
+
         // Same-contract input validation — without this, epochs == 0 would
         // flow through `_validateTokenAmount` (which computes 0), through
         // KCS create, and only revert downstream in
@@ -409,6 +473,106 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
             p.tokenAmount,
             p.isImmutable
         );
+
+        // E-9 dual-emit:
+        //   1. V10 batch-shaped projection (this contract) — gives
+        //      indexers a CG-aware event without a join.
+        //   2. Legacy V8/V9 `KnowledgeBatchCreated` from KASStorage so
+        //      pre-V10 indexers keep working unmodified.
+        //
+        // The legacy emit is best-effort — if KASStorage isn't deployed
+        // (V10-only stacks) the call is skipped. It performs no state
+        // mutation: KAV10 publish does not mint into KASStorage's ID
+        // space; only the projected event is emitted there.
+        emit KnowledgeBatchCreated(
+            kcId,
+            p.contextGraphId,
+            p.knowledgeAssetsAmount,
+            uint256(p.byteSize),
+            uint256(currentEpoch),
+            uint256(currentEpoch + p.epochs),
+            p.tokenAmount,
+            p.isImmutable
+        );
+        if (address(knowledgeAssetsStorage) != address(0)) {
+            // E-9: legacy KnowledgeBatchCreated has a (startKAId, endKAId)
+            // range. KAV10 does NOT mint into the legacy KAS id space, so
+            // we emit a synthetic but INTERNALLY CONSISTENT range — the
+            // earlier implementation hard-coded startKAId == endKAId == kcId
+            // regardless of knowledgeAssetsAmount, which tells pre-V10
+            // indexers that every V10 batch contains exactly one KA even
+            // when it has N > 1. We now emit [kcId, kcId + N − 1] so the
+            // endKAId − startKAId
+            // + 1 == knowledgeAssetsAmount invariant holds. Range IDs remain
+            // synthetic (they live in KCS's id space, not KAS's) — legacy
+            // consumers that need real KAS-space IDs must continue to read
+            // from V9 publishes. The canonical, topic-unique V10 event is the
+            // one emitted above from KAV10 itself.
+            // The shim projects V10 values into LEGACY widths
+            // (kcId/startKAId/endKAId → uint64, byteSize → uint64,
+            // knowledgeAssetsAmount → uint32). Once a real V10 publish
+            // exceeds any of those widths a naked downcast would silently
+            // wrap/truncate and indexers consuming the legacy event would
+            // see the wrong KA range / count / size — a quiet data-
+            // integrity bug. We refuse to emit the legacy shim when ANY
+            // value overflows. The canonical V10 `KnowledgeBatchCreated`
+            // emitted above already carries the full-precision payload,
+            // so dropping the projection is the strictly safer outcome
+            // (matches the "best-effort" contract already documented for
+            // the try/catch fallback below).
+            //
+            // For the (extremely common) in-range case we still emit the
+            // shim through the same try/catch as before so a pre-upgrade
+            // KAS without `emitV10KnowledgeBatchCreated` doesn't revert
+            // the V10 publish.
+            uint256 endKAIdRaw = kcId + p.knowledgeAssetsAmount - 1;
+            bool legacyShimSafe =
+                kcId <= type(uint64).max
+                && endKAIdRaw <= type(uint64).max
+                && uint256(p.byteSize) <= type(uint64).max
+                && p.knowledgeAssetsAmount <= type(uint32).max;
+            if (legacyShimSafe) {
+                uint64 startKAId = uint64(kcId);
+                uint64 endKAId = uint64(endKAIdRaw);
+                // during a rolling
+                // upgrade the Hub-registered `KnowledgeAssetsStorage` slot may
+                // still point at a legacy V8/V9 KAS that predates
+                // `emitV10KnowledgeBatchCreated`. A direct call would hit an
+                // unknown selector and revert the WHOLE V10 publish, not just
+                // the legacy audit emit. The audit emit is documented as
+                // best-effort (the canonical V10 event is already emitted by
+                // this contract above), so wrap the call in `try/catch` — on
+                // any failure (missing selector, out-of-gas on child, Guardian
+                // reject) we silently drop the legacy shim emit and let the
+                // V10 event carry the payload. `catch` matches every Solidity
+                // revert family (string, panic, custom, bubbled OOG from the
+                // callee up to 1/64 remaining gas).
+                try knowledgeAssetsStorage.emitV10KnowledgeBatchCreated(
+                    kcId,
+                    msg.sender,
+                    p.merkleRoot,
+                    uint64(p.byteSize),
+                    uint32(p.knowledgeAssetsAmount),
+                    startKAId,
+                    endKAId,
+                    currentEpoch,
+                    currentEpoch + p.epochs,
+                    p.tokenAmount,
+                    p.isImmutable
+                ) {
+                    // success: V8/V9 legacy consumers see the V10 audit projection
+                } catch {
+                    // pre-upgrade KAS or transient child-call failure; the
+                    // canonical V10 `KnowledgeBatchCreated` event above is
+                    // unaffected, so skip silently (matches the "best-effort"
+                    // contract documented in the comment block above).
+                }
+            }
+            // (legacyShimSafe == false) → values exceed legacy event
+            // widths; skip the projection entirely so no truncated
+            // record reaches indexers. Operators relying on the legacy
+            // shim must reconcile via the canonical V10 event.
+        }
 
         // --- 4. N20: atomic CG↔KC binding + CG value diff ---
 
