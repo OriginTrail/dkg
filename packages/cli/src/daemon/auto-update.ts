@@ -39,6 +39,7 @@ import {
   currentBundledMarkItDownAssetName,
   carryForwardBundledMarkItDownBinary,
 } from './manifest.js';
+import { writeFileAtomic } from './fs-utils.js';
 import { daemonState } from './state.js';
 import {
   expectedBundledMarkItDownBuildMetadata,
@@ -250,9 +251,8 @@ export async function clearPendingUpdateState(): Promise<void> {
 export async function writePendingUpdateState(
   state: PendingUpdateState,
 ): Promise<void> {
-  const { dkgDir, writeFile } = _autoUpdateIo;
-  const pendingFile = join(dkgDir(), ".update-pending.json");
-  await writeFile(pendingFile, JSON.stringify(state, null, 2));
+  const pendingFile = join(_autoUpdateIo.dkgDir(), ".update-pending.json");
+  await writeFileAtomic(pendingFile, JSON.stringify(state, null, 2));
 }
 
 // ─── NPM-based auto-update helpers ──────────────────────────────────
@@ -393,7 +393,7 @@ async function _performNpmUpdateInner(
   if (pending) {
     const active = await activeSlot();
     if (active === pending.target && pending.version === targetVersion) {
-      await writeFile(versionFile, pending.version);
+      await writeFileAtomic(versionFile, pending.version);
       await clearPendingUpdateState();
       log(
         `Auto-update (npm): recovered pending update state for slot ${pending.target} (v${pending.version}).`,
@@ -524,7 +524,7 @@ async function _performNpmUpdateInner(
   try {
     log(`Auto-update (npm): swapping active slot to ${target}...`);
     await swapSlot(target as "a" | "b");
-    await writeFile(versionFile, resolvedVersion);
+    await writeFileAtomic(versionFile, resolvedVersion);
     await clearPendingUpdateState();
     log(
       `Auto-update (npm): slot ${target} active (${CLI_NPM_PACKAGE}@${resolvedVersion}).`,
@@ -591,9 +591,7 @@ export async function checkForNewCommitWithStatus(
       log,
       gitEnv,
     );
-    if (!latestCommit) {
-      return { status: "error" };
-    }
+    if (!latestCommit) return { status: "error" };
     if (latestCommit === currentCommit) return { status: "up-to-date" };
     return { status: "available", commit: latestCommit };
   } catch (err: any) {
@@ -677,19 +675,312 @@ export async function releaseUpdateLock(): Promise<void> {
   _lockToken = null;
 }
 
+// ─── Build-step helpers ────────────────────────────────────────────────
+
+/** Default per-step build timeouts (milliseconds). Override via config. */
+export const DEFAULT_BUILD_TIMEOUTS = {
+  install: 180_000,
+  build: 180_000,
+  contracts: 300_000,
+  markitdown: 900_000,
+} as const;
+
+export function resolveBuildTimeouts(
+  au: Pick<ResolvedAutoUpdateConfig, 'buildTimeoutMs'>,
+): { install: number; build: number; contracts: number; markitdown: number } {
+  const t = au.buildTimeoutMs ?? {};
+  return {
+    install: positiveOr(t.install, DEFAULT_BUILD_TIMEOUTS.install),
+    build: positiveOr(t.build, DEFAULT_BUILD_TIMEOUTS.build),
+    contracts: positiveOr(t.contracts, DEFAULT_BUILD_TIMEOUTS.contracts),
+    markitdown: positiveOr(t.markitdown, DEFAULT_BUILD_TIMEOUTS.markitdown),
+  };
+}
+
+function positiveOr(value: number | undefined, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? value
+    : fallback;
+}
+
+/**
+ * Run a build command with a timeout, then best-effort sweep orphan build
+ * subprocesses on failure. Node's `exec` SIGTERMs the direct child on timeout
+ * but pnpm's grandchildren (notably `solcjs-runner`) survive and pin a CPU,
+ * which has caused subsequent update attempts on the same host to time out
+ * even faster ("doom loop" observed on dkg-v9-relay-02/04). The sweep targets
+ * narrow process-name patterns so we never kill unrelated workloads.
+ */
+export async function runBuildStep(
+  execAsync: (cmd: string, opts: any) => Promise<any>,
+  cmd: string,
+  opts: { cwd: string; timeoutMs: number; label: string; log: (m: string) => void; env?: NodeJS.ProcessEnv },
+): Promise<{ stdout: string; stderr: string }> {
+  const startedAt = Date.now();
+  try {
+    const result = await execAsync(cmd, {
+      cwd: opts.cwd,
+      encoding: 'utf-8',
+      timeout: opts.timeoutMs,
+      ...(opts.env ? { env: opts.env } : {}),
+    });
+    return { stdout: String(result?.stdout ?? ''), stderr: String(result?.stderr ?? '') };
+  } catch (err: any) {
+    const elapsedMs = Date.now() - startedAt;
+    const timedOut =
+      err?.killed === true ||
+      err?.signal === 'SIGTERM' ||
+      (typeof err?.message === 'string' && /timed? ?out/i.test(err.message));
+    opts.log(
+      `Auto-update: build step "${opts.label}" failed after ${elapsedMs}ms` +
+        `${timedOut ? ` (timeout ${opts.timeoutMs}ms)` : ''} — ${err?.message ?? String(err)}`,
+    );
+    if (timedOut) {
+      sweepOrphanBuildProcesses(opts.cwd, opts.log);
+    }
+    throw err;
+  }
+}
+
+/**
+ * After a build-step timeout, Node's `exec` SIGTERMs only the immediate child
+ * (pnpm); grandchildren like `solcjs-runner`/`hardhat compile`/`tsc` survive
+ * and pin a CPU, which has caused subsequent updates on the same host to time
+ * out even faster ("doom loop" observed on dkg-v9-relay-02/04).
+ *
+ * We deliberately do NOT pattern-match command lines here: a host-wide
+ * `pkill -f pnpm|hardhat|...` would also kill an operator's interactive
+ * `pnpm install` or any unrelated workload running under the same user.
+ * Instead we scope by:
+ *   1) only OUR EUID's processes (`pgrep -u "$EUID"`), and
+ *   2) only those whose `/proc/<pid>/cwd` resolves under the slot directory
+ *      we're rebuilding.
+ *
+ * Build subprocesses inherit cwd from pnpm (which we run in `cwd: targetDir`),
+ * so they all match. Anything outside the slot — interactive shells, other
+ * services, builds in unrelated repos — is untouched.
+ */
+function sweepOrphanBuildProcesses(slotDir: string, log: (m: string) => void): void {
+  const { execSync } = _autoUpdateIo;
+  if (!slotDir || !slotDir.startsWith('/')) return;
+  // EUID is a bash-only variable. Production hosts (Ubuntu/Debian) symlink
+  // /bin/sh -> dash, where `$EUID` is unset and `set -u` aborts the whole
+  // script before pgrep ever runs — silently disabling the sweep. Resolve
+  // the EUID in Node and pass it through env so the script works under any
+  // POSIX shell.
+  const euid = typeof process.geteuid === 'function' ? process.geteuid() : null;
+  if (euid === null) return;
+  try {
+    const script =
+      'set -u; ' +
+      'for pid in $(pgrep -u "$DKG_AU_UID" 2>/dev/null); do ' +
+      '  cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null || true); ' +
+      '  case "$cwd" in ' +
+      '    "$DKG_AU_SLOT"|"$DKG_AU_SLOT/"*) kill -KILL "$pid" 2>/dev/null || true ;; ' +
+      '  esac; ' +
+      'done';
+    execSync(script, {
+      stdio: 'ignore',
+      timeout: 5_000,
+      shell: '/bin/sh',
+      env: {
+        ...process.env,
+        DKG_AU_SLOT: slotDir.replace(/\/+$/, ''),
+        DKG_AU_UID: String(euid),
+      },
+    });
+    log(`Auto-update: swept orphan build subprocesses with cwd under ${slotDir} (best-effort).`);
+  } catch {
+    /* best effort, never throw */
+  }
+}
+
+/**
+ * Wipe per-package `dist/` directories and `tsconfig.tsbuildinfo` files in
+ * the slot before building. Called on the default (`forceClean: false`) path
+ * because most upstream packages build with bare `tsc`, which does not
+ * remove generated files when their source is deleted/renamed. Without this,
+ * a fetch-and-rebuild cycle could leave stale `.js` in `dist/` and quietly
+ * activate it on the next slot swap. The `forceClean: true` path runs
+ * `git clean -fdx` instead (which already covers dist/), so this helper is
+ * not called there. We deliberately do NOT touch:
+ *   - `node_modules/` (preserved → pnpm install stays incremental)
+ *   - `packages/evm-module/cache/` and `.../artifacts/` (Hardhat compile
+ *     cache; cold solc builds on ARM64 routinely exceed the build-step
+ *     timeout, so this cache is critical to keep)
+ *
+ * Implemented in pure Node (`readdir` + `rm`/`unlink`) so it has no
+ * dependency on POSIX `find`/`rm`. If even the Node implementation fails
+ * (e.g. EACCES on `packages/`), we fall back to `git clean -fdx` so we
+ * never proceed to build/swap with potentially stale `dist/*.js` from a
+ * previous commit. If the fallback also fails the caller throws — better
+ * to fail the update than to silently activate stale code.
+ */
+async function cleanGeneratedOutputs(
+  targetDir: string,
+  log: (m: string) => void,
+): Promise<void> {
+  const { execFile: execFileAsync, readdir, rm } = _autoUpdateIo;
+  try {
+    const packagesDir = join(targetDir, 'packages');
+    let pkgEntries: Array<{ name: string; isDirectory: () => boolean }>;
+    try {
+      pkgEntries = await readdir(packagesDir, { withFileTypes: true });
+    } catch (err: any) {
+      // No packages/ dir is unusual but not fatal — nothing to clean.
+      if (err?.code === 'ENOENT') {
+        log('Auto-update: no packages/ directory found; nothing to pre-clean.');
+        return;
+      }
+      throw err;
+    }
+    let removedDist = 0;
+    let removedTsBuildInfo = 0;
+    for (const entry of pkgEntries) {
+      if (!entry.isDirectory()) continue;
+      const distPath = join(packagesDir, entry.name, 'dist');
+      const tsBuildInfoPath = join(packagesDir, entry.name, 'tsconfig.tsbuildinfo');
+      // `rm({ recursive: true, force: true })` is a no-op on missing paths.
+      await rm(distPath, { recursive: true, force: true });
+      await rm(tsBuildInfoPath, { force: true });
+      removedDist += 1;
+      removedTsBuildInfo += 1;
+    }
+    // Also wipe packages/cli's generated repo-root copies. The cli build
+    // script (`packages/cli/package.json#build`) copies repo-root
+    // `network/*.json` into `packages/cli/network/` and `project.json` into
+    // `packages/cli/project.json`. Without this step, deleting or renaming a
+    // root network config (e.g. removing `network/devnet.json`) leaves the
+    // stale package-local copy in the inactive slot, and `candidateRoots()`
+    // picks it up after the swap (monorepo-root precedence saves us in dev,
+    // but published-NPM / detached layouts do not have a monorepo ancestor).
+    // Use `force: true` so missing paths are a no-op (e.g. fresh clone where
+    // these have never been generated).
+    const cliPkgDir = join(packagesDir, 'cli');
+    await rm(join(cliPkgDir, 'network'), { recursive: true, force: true });
+    await rm(join(cliPkgDir, 'project.json'), { force: true });
+    log(
+      `Auto-update: cleared stale dist/ (${removedDist} pkgs) + tsconfig.tsbuildinfo (${removedTsBuildInfo} pkgs) + cli/network/ + cli/project.json before build (incremental caches preserved).`,
+    );
+  } catch (primaryErr: any) {
+    log(
+      `Auto-update: Node-based pre-build clean failed (${primaryErr?.message ?? String(primaryErr)}); falling back to git clean -fdx.`,
+    );
+    // Fallback wipes more than we'd like (also nukes node_modules + Hardhat
+    // cache, so the next build is cold) but is correct: the alternative is
+    // proceeding with possibly-stale dist/*.js, which is exactly the bug
+    // we're trying to prevent. If even this fails, throw — abort the update
+    // rather than swap a dirty slot.
+    await execFileAsync('git', ['clean', '-fdx'], {
+      cwd: targetDir,
+      encoding: 'utf-8',
+      timeout: 120_000,
+    });
+    log('Auto-update: fallback git clean -fdx completed.');
+  }
+}
+
+/**
+ * Decide whether to rebuild Solidity contracts. Same semantics as the original
+ * inline check (skip on terminal diff failure) plus one robustness improvement:
+ * if the parent commit isn't reachable in the slot's pack files (most common
+ * cause is a shallow clone or upstream force-push rebase), try a single
+ * `git fetch --depth=1 origin <currentCommit>` and retry the diff once before
+ * giving up. We've never observed an ABI/JS mismatch from this skipping in
+ * practice, so we err toward "less work" rather than "build to be safe".
+ */
+async function shouldRebuildContracts(args: {
+  au: ResolvedAutoUpdateConfig;
+  fetchUrl: string;
+  currentCommit: string;
+  checkedOutCommit: string;
+  targetDir: string;
+  execFileAsync: (file: string, args: string[], opts: any) => Promise<any>;
+  log: (m: string) => void;
+}): Promise<boolean> {
+  const { au, fetchUrl, currentCommit, checkedOutCommit, targetDir, execFileAsync, log } = args;
+  if (
+    !/^[0-9a-f]{6,40}$/i.test(currentCommit) ||
+    !/^[0-9a-f]{6,40}$/i.test(checkedOutCommit)
+  ) {
+    log('Auto-update: contract-change check skipped (commit SHAs invalid); skipping contract build.');
+    return false;
+  }
+  const tryDiff = async (): Promise<{ ok: boolean; stdout?: string; err?: any }> => {
+    try {
+      const result = await execFileAsync(
+        'git',
+        ['diff', '--name-only', `${currentCommit}..${checkedOutCommit}`],
+        { cwd: targetDir, encoding: 'utf-8', timeout: 30_000 },
+      );
+      return { ok: true, stdout: String(result?.stdout ?? '') };
+    } catch (err: any) {
+      return { ok: false, err };
+    }
+  };
+  let diff = await tryDiff();
+  if (!diff.ok) {
+    // Most common cause: the parent commit isn't in the slot's pack files.
+    // Fetch it explicitly (depth=1 on the SHA), then retry once. The slots
+    // are initialized with bare `git init` and fetched via direct URL — no
+    // `origin` remote is configured — so we must mirror the main fetch and
+    // pass the URL + auth args explicitly. Best-effort: if the fetch itself
+    // errors, skip the build (legacy behaviour); we've never observed a
+    // real ABI/JS mismatch from this path.
+    try {
+      log(`Auto-update: contract-diff failed; fetching parent commit ${currentCommit.slice(0, 8)} to retry.`);
+      await execFileAsync(
+        'git',
+        [...gitCommandArgs(fetchUrl, au), 'fetch', '--depth=1', fetchUrl, currentCommit],
+        {
+          cwd: targetDir,
+          encoding: 'utf-8',
+          timeout: 30_000,
+          env: gitCommandEnv(au),
+        },
+      );
+      diff = await tryDiff();
+    } catch (fetchErr: any) {
+      log(`Auto-update: parent-commit fetch failed (${fetchErr?.message ?? fetchErr}); skipping contract build.`);
+      return false;
+    }
+  }
+  if (!diff.ok) {
+    log(
+      `Auto-update: contract-change check failed (${diff.err?.message ?? diff.err}); skipping contract build.`,
+    );
+    return false;
+  }
+  const changedPaths = String(diff.stdout ?? '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+  return changedPaths.some((p) => p.startsWith('packages/evm-module/contracts/'));
+}
+
 /**
  * Core blue-green update logic. Builds the new version in the inactive slot,
  * then atomically swaps the `releases/current` symlink.
  * Returns true if an update was applied (caller should SIGTERM to restart).
  */
+export interface PerformUpdateOptions {
+  refOverride?: string;
+  allowPrerelease?: boolean;
+  verifyTagSignature?: boolean;
+  /**
+   * If true, run `git clean -fdx` in the inactive slot before building.
+   * Default false: preserve `node_modules/` and the Hardhat compile cache so
+   * the build is incremental. Cold rebuilds on ARM64 historically exceeded
+   * the 5-minute build-step timeout. Operators who want a known-clean state
+   * should set this explicitly.
+   */
+  forceClean?: boolean;
+}
+
 export async function performUpdate(
   au: ResolvedAutoUpdateConfig,
   log: (msg: string) => void,
-  opts: {
-    refOverride?: string;
-    allowPrerelease?: boolean;
-    verifyTagSignature?: boolean;
-  } = {},
+  opts: PerformUpdateOptions = {},
 ): Promise<boolean> {
   const status = await performUpdateWithStatus(au, log, opts);
   return status === "updated";
@@ -698,11 +989,7 @@ export async function performUpdate(
 export async function performUpdateWithStatus(
   au: ResolvedAutoUpdateConfig,
   log: (msg: string) => void,
-  opts: {
-    refOverride?: string;
-    allowPrerelease?: boolean;
-    verifyTagSignature?: boolean;
-  } = {},
+  opts: PerformUpdateOptions = {},
 ): Promise<UpdateStatus> {
   if (_updateInProgress) {
     log("Auto-update: another update is already in progress, skipping");
@@ -725,11 +1012,7 @@ export async function performUpdateWithStatus(
 async function _performUpdateInner(
   au: ResolvedAutoUpdateConfig,
   log: (msg: string) => void,
-  opts: {
-    refOverride?: string;
-    allowPrerelease?: boolean;
-    verifyTagSignature?: boolean;
-  },
+  opts: PerformUpdateOptions,
 ): Promise<UpdateStatus> {
   const { readFile, writeFile, mkdir, existsSync, exec: execAsync, execFile: execFileAsync, dkgDir, releasesDir, activeSlot, inactiveSlot, swapSlot, hasVerifiedBundledMarkItDownBinary, expectedBundledMarkItDownBuildMetadata } = _autoUpdateIo;
   const rDir = releasesDir();
@@ -748,17 +1031,35 @@ async function _performUpdateInner(
   const commitFile = join(dkgDir(), ".current-commit");
   const versionFile = join(dkgDir(), ".current-version");
 
+  // Read the persisted current commit. Defensive length check: witnessed
+  // corruption on dkg-v9-relay-01 (Apr 28 2026) had the file containing the
+  // same 40-char SHA written twice end-to-end with no separator (80 chars),
+  // which made the auto-updater spin because the value never matched any
+  // real remote SHA. Anything longer than SHA-256 (64 chars) is by definition
+  // corrupt; treat as missing and re-derive from `git rev-parse HEAD`. This
+  // also self-heals pre-existing on-disk corruption on the next update cycle
+  // because the next write goes through `writeFileAtomic`.
   let currentCommit = "";
   try {
-    currentCommit = (await readFile(commitFile, "utf-8")).trim();
+    const raw = (await readFile(commitFile, "utf-8")).trim();
+    if (raw && raw.length <= 64) {
+      currentCommit = raw;
+    } else if (raw) {
+      log(
+        `Auto-update: ${commitFile} contains malformed value (len=${raw.length}); re-deriving from active slot HEAD.`,
+      );
+    }
   } catch {
+    /* file missing — fall through to derive from HEAD */
+  }
+  if (!currentCommit) {
     try {
       const { stdout } = await execAsync("git rev-parse HEAD", {
         encoding: "utf-8",
         cwd: activeDir,
       });
       currentCommit = stdout.trim();
-      await writeFile(commitFile, currentCommit);
+      await writeFileAtomic(commitFile, currentCommit);
     } catch {
       return "failed";
     }
@@ -768,8 +1069,8 @@ async function _performUpdateInner(
   if (pending) {
     const active = await activeSlot();
     if (active === pending.target) {
-      if (pending.commit) await writeFile(commitFile, pending.commit);
-      if (pending.version) await writeFile(versionFile, pending.version);
+      if (pending.commit) await writeFileAtomic(commitFile, pending.commit);
+      if (pending.version) await writeFileAtomic(versionFile, pending.version);
       await clearPendingUpdateState();
       currentCommit = pending.commit || currentCommit;
       log(
@@ -854,14 +1155,31 @@ async function _performUpdateInner(
       encoding: "utf-8",
       timeout: 60_000,
     });
-    log(
-      `Auto-update: cleaning slot ${target} working tree (git clean -fdx)...`,
-    );
-    await execFileAsync("git", ["clean", "-fdx"], {
-      cwd: targetDir,
-      encoding: "utf-8",
-      timeout: 120_000,
-    });
+    // Intentionally NOT running `git clean -fdx` by default here: untracked
+    // files in the slot are dominated by `node_modules/` and the Hardhat
+    // compile cache, which we want to PRESERVE so the subsequent build is
+    // incremental (cold rebuilds on ARM64 routinely exceed 5 minutes due to
+    // WASM solc and historically tripped the build-step timeout).
+    //
+    // BUT: a lot of packages here build with bare `tsc`, which doesn't
+    // delete files removed/renamed in the source tree. If we just left
+    // untracked files alone, an update could activate stale `dist/*.js`
+    // from an older commit. So we DO wipe generated outputs (`dist/` and
+    // `tsconfig.tsbuildinfo` per package) before each build — narrow enough
+    // to leave incremental caches intact, broad enough to prevent stale
+    // module activation. Operators wanting a fully cold rebuild can still
+    // pass `opts.forceClean: true` (manual rebuild path) to also wipe
+    // node_modules + caches.
+    if (opts.forceClean) {
+      log(
+        `Auto-update: forceClean=true; running git clean -fdx in slot ${target} (cold rebuild)...`,
+      );
+      await execFileAsync("git", ["clean", "-fdx"], {
+        cwd: targetDir,
+        encoding: "utf-8",
+        timeout: 120_000,
+      });
+    }
     const { stdout } = await execFileAsync("git", ["rev-parse", "HEAD"], {
       cwd: targetDir,
       encoding: "utf-8",
@@ -881,11 +1199,29 @@ async function _performUpdateInner(
     return "failed";
   }
 
+  // Stale-output cleanup is its own phase: failing here MUST abort the
+  // update, otherwise we'd swap a slot that may still hold `dist/*.js`
+  // from an older commit (the bug this whole helper exists to prevent).
+  if (!opts.forceClean) {
+    try {
+      await cleanGeneratedOutputs(targetDir, log);
+    } catch (cleanErr: any) {
+      log(
+        `Auto-update: pre-build clean failed in slot ${target} — ${cleanErr?.message ?? String(cleanErr)}. ` +
+          `Aborting update rather than swap a potentially dirty slot. Active slot untouched.`,
+      );
+      return "failed";
+    }
+  }
+
+  const timeouts = resolveBuildTimeouts(au);
+
   try {
-    await execAsync("pnpm install --frozen-lockfile", {
+    await runBuildStep(execAsync, "pnpm install --frozen-lockfile", {
       cwd: targetDir,
-      encoding: "utf-8",
-      timeout: 180_000,
+      timeoutMs: timeouts.install,
+      label: "pnpm install",
+      log,
     });
     let usedFullBuildFallback = false;
     let hasRuntimeBuildScript = false;
@@ -904,19 +1240,21 @@ async function _performUpdateInner(
     }
 
     if (hasRuntimeBuildScript) {
-      await execAsync("pnpm build:runtime", {
+      await runBuildStep(execAsync, "pnpm build:runtime", {
         cwd: targetDir,
-        encoding: "utf-8",
-        timeout: 180_000,
+        timeoutMs: timeouts.build,
+        label: "pnpm build:runtime",
+        log,
       });
     } else {
       log(
         "Auto-update: target repo has no build:runtime script; falling back to pnpm build.",
       );
-      await execAsync("pnpm build", {
+      await runBuildStep(execAsync, "pnpm build", {
         cwd: targetDir,
-        encoding: "utf-8",
-        timeout: 180_000,
+        timeoutMs: timeouts.build,
+        label: "pnpm build",
+        log,
       });
       usedFullBuildFallback = true;
     }
@@ -926,46 +1264,59 @@ async function _performUpdateInner(
         "Auto-update: contract build check skipped (full build fallback already executed).",
       );
     } else {
-      let shouldBuildContracts = false;
-      try {
-        if (
-          /^[0-9a-f]{6,40}$/i.test(currentCommit) &&
-          /^[0-9a-f]{6,40}$/i.test(checkedOutCommit)
-        ) {
-          const { stdout } = await execFileAsync(
-            "git",
-            ["diff", "--name-only", `${currentCommit}..${checkedOutCommit}`],
-            {
-              cwd: targetDir,
-              encoding: "utf-8",
-              timeout: 30_000,
-            },
-          );
-          const changedPaths = String(stdout)
-            .split("\n")
-            .map((line) => line.trim())
-            .filter(Boolean);
-          shouldBuildContracts = changedPaths.some((p) =>
-            p.startsWith("packages/evm-module/contracts/"),
-          );
-        }
-      } catch (diffErr: any) {
-        log(
-          `Auto-update: contract-change check failed (${diffErr.message}); skipping contract build.`,
-        );
-        shouldBuildContracts = false;
-      }
+      const shouldBuildContracts = await shouldRebuildContracts({
+        au,
+        fetchUrl,
+        currentCommit,
+        checkedOutCommit,
+        targetDir,
+        execFileAsync,
+        log,
+      });
 
       if (shouldBuildContracts) {
         log(
           "Auto-update: contract folder changes detected; building @origintrail-official/dkg-evm-module...",
         );
-        await execAsync(
+        // Run `hardhat clean` first so stale artifacts/, abi/, and typechain
+        // outputs from a deleted/renamed contract don't survive into the
+        // inactive slot. We deliberately scope this to the
+        // `shouldBuildContracts` branch:
+        //   - the no-change branch keeps the Hardhat compile cache intact,
+        //     which is what saves us from the cold-solc / ARM64 build
+        //     timeout that the rest of this helper exists to prevent;
+        //   - when contract sources actually changed we're already paying
+        //     for a recompile, so wiping the cache here is essentially free
+        //     and guarantees the swap doesn't activate ghost ABIs/types.
+        // Best-effort: a clean failure must not abort an otherwise-valid
+        // contract rebuild — `hardhat compile` will still recreate every
+        // artifact that the new source tree references; only stale outputs
+        // for *deleted* contracts would be missed, which is a strict
+        // improvement over today's behaviour anyway.
+        try {
+          await runBuildStep(
+            execAsync,
+            "pnpm --filter @origintrail-official/dkg-evm-module clean",
+            {
+              cwd: targetDir,
+              timeoutMs: timeouts.contracts,
+              label: "pnpm --filter dkg-evm-module clean",
+              log,
+            },
+          );
+        } catch (cleanErr: any) {
+          log(
+            `Auto-update: hardhat clean failed (${cleanErr?.message ?? String(cleanErr)}); proceeding with rebuild — stale artifacts for renamed/deleted contracts may persist.`,
+          );
+        }
+        await runBuildStep(
+          execAsync,
           "pnpm --filter @origintrail-official/dkg-evm-module build",
           {
             cwd: targetDir,
-            encoding: "utf-8",
-            timeout: 300_000,
+            timeoutMs: timeouts.contracts,
+            label: "pnpm --filter dkg-evm-module build",
+            log,
           },
         );
         log(
@@ -980,17 +1331,19 @@ async function _performUpdateInner(
 
     log("Auto-update: staging MarkItDown binary for the inactive slot...");
     try {
-      await execAsync(
+      await runBuildStep(
+        execAsync,
         "node packages/cli/scripts/bundle-markitdown-binaries.mjs --build-current-platform --best-effort",
         {
           cwd: targetDir,
-          encoding: "utf-8",
-          timeout: 900_000,
+          timeoutMs: timeouts.markitdown,
+          label: "bundle-markitdown",
+          log,
         },
       );
     } catch (markItDownErr: any) {
       log(
-        `Auto-update: MarkItDown staging failed in slot ${target} â€” ${markItDownErr.message}. Continuing without document conversion on this node.`,
+        `Auto-update: MarkItDown staging failed in slot ${target} — ${markItDownErr.message}. Continuing without document conversion on this node.`,
       );
     }
   } catch (err: any) {
@@ -1083,8 +1436,8 @@ async function _performUpdateInner(
     const swapStartedAt = Date.now();
     log(`Auto-update: swapping active slot to ${target}...`);
     await swapSlot(target);
-    await writeFile(commitFile, checkedOutCommit);
-    if (nextVersion) await writeFile(versionFile, nextVersion);
+    await writeFileAtomic(commitFile, checkedOutCommit);
+    if (nextVersion) await writeFileAtomic(versionFile, nextVersion);
     await clearPendingUpdateState();
     const swapElapsedMs = Date.now() - swapStartedAt;
     log(
@@ -1099,7 +1452,6 @@ async function _performUpdateInner(
     `Auto-update: build succeeded in slot ${target}` +
       `${nextVersion ? ` (version ${nextVersion})` : ""}. Swapped symlink. Restarting...`,
   );
-  log("v9 auto-update test live leeroy jenkins");
   return "updated";
 }
 

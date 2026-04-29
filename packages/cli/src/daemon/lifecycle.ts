@@ -70,6 +70,7 @@ import {
   saveConfig,
   loadNetworkConfig,
   resolveAutoUpdateConfig,
+  resolveChainConfig,
   dkgDir,
   writePid,
   removePid,
@@ -473,8 +474,10 @@ export async function runDaemonInner(
     log(`  ${w.address}`);
   }
 
-  // Build chain config from CLI config or network config
-  const chainBase = config.chain ?? network?.chain;
+  // Field-level merge of CLI config + network/<env>.json#chain.
+  // Operators can override individual fields (e.g. just rpcUrl) without
+  // restating the rest; missing fields fall back to the network defaults.
+  const chainBase = resolveChainConfig(config, network);
 
   // Relay: prefer config.relay, fall back to network testnet.json relays so
   // local nodes connect without having run init or set relay manually.
@@ -531,7 +534,10 @@ export async function runDaemonInner(
       options: config.store.options,
     } : undefined,
     chainAdapter: mockChainAdapter,
-    chainConfig: chainBase ? {
+    // Only forward chain to the agent when both required fields resolved.
+    // resolveChainConfig() may return a partial block if neither config nor
+    // network supplies one of them; the agent expects rpcUrl + hubAddress.
+    chainConfig: chainBase?.rpcUrl && chainBase?.hubAddress ? {
       rpcUrl: chainBase.rpcUrl,
       hubAddress: chainBase.hubAddress,
       operationalKeys: opWallets.wallets.map((w) => w.privateKey),
@@ -592,12 +598,19 @@ export async function runDaemonInner(
   await agent.start();
   await agent.publishProfile();
 
+  const publisherChainBase = chainBase?.rpcUrl && chainBase?.hubAddress
+    ? {
+        rpcUrl: chainBase.rpcUrl,
+        hubAddress: chainBase.hubAddress,
+        chainId: chainBase.chainId,
+      }
+    : undefined;
   publisherRuntime = await startPublisherRuntimeIfEnabled({
     dataDir: dkgDir(),
     config,
     store: agent.store,
     keypair: agent.wallet.keypair,
-    chainBase,
+    chainBase: publisherChainBase,
     ackTransportFactory: () => ({
       publisherPeerId: agent.peerId,
       gossipPublish: async (topic: string, data: Uint8Array) => {

@@ -29,11 +29,6 @@
                 "proofingPeriodDurationInBlocks": "100",
                 "W1": "0",
                 "W2": "2"
-            },
-            "base_sepolia_v9": {
-                "proofingPeriodDurationInBlocks": "900",
-                "W1": "0",
-                "W2": "2"
             }
         }
     },
@@ -59,11 +54,6 @@
             "uriBase": "did:dkg"
         },
         "RandomSamplingStorage": {
-            "base_sepolia_dev": {
-                "proofingPeriodDurationInBlocks": "900",
-                "W1": "0",
-                "W2": "2"
-            },
             "base_sepolia_stable_dev_staging": {
                 "proofingPeriodDurationInBlocks": "900",
                 "W1": "0",
@@ -112,12 +102,7 @@
                 "W1": "0",
                 "W2": "2"
             },
-            "base_sepolia_test": {
-                "proofingPeriodDurationInBlocks": "900",
-                "W1": "0",
-                "W2": "2"
-            },
-            "base_sepolia_v9": {
+            "base_sepolia_v10": {
                 "proofingPeriodDurationInBlocks": "900",
                 "W1": "0",
                 "W2": "2"

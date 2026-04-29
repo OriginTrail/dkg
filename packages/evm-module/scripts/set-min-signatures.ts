@@ -5,8 +5,8 @@
  *   npx ts-node --esm scripts/set-min-signatures.ts [value]
  *
  * Defaults to 1 if no value provided.
- * Reads deployer key from .env (EVM_PRIVATE_KEY_BASE_SEPOLIA_V9) and
- * ParametersStorage address from deployments/base_sepolia_v9_contracts.json.
+ * Reads deployer key from .env (EVM_PRIVATE_KEY_BASE_SEPOLIA_V10) and
+ * ParametersStorage address from deployments/base_sepolia_v10_contracts.json.
  */
 
 import { ethers } from 'ethers';
@@ -19,15 +19,15 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 config({ path: join(__dirname, '..', '.env') });
 
 const value = BigInt(process.argv[2] ?? '1');
-const rpcUrl = process.env.RPC_BASE_SEPOLIA_V9 ?? 'https://sepolia.base.org';
-const privateKey = process.env.EVM_PRIVATE_KEY_BASE_SEPOLIA_V9;
+const rpcUrl = process.env.RPC_BASE_SEPOLIA_V10 ?? 'https://sepolia.base.org';
+const privateKey = process.env.EVM_PRIVATE_KEY_BASE_SEPOLIA_V10;
 if (!privateKey) {
-  console.error('Missing EVM_PRIVATE_KEY_BASE_SEPOLIA_V9 in .env');
+  console.error('Missing EVM_PRIVATE_KEY_BASE_SEPOLIA_V10 in .env');
   process.exit(1);
 }
 
 const contracts = JSON.parse(
-  readFileSync(join(__dirname, '..', 'deployments', 'base_sepolia_v9_contracts.json'), 'utf-8'),
+  readFileSync(join(__dirname, '..', 'deployments', 'base_sepolia_v10_contracts.json'), 'utf-8'),
 );
 const psAddress = contracts.contracts.ParametersStorage.evmAddress;
 if (!psAddress) {

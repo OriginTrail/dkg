@@ -4,6 +4,24 @@ import { homedir } from 'node:os';
 import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
+/**
+ * Per-step build timeouts (milliseconds) used by the git-based auto-update
+ * path. Slow hosts (notably ARM64 nodes compiling Solidity contracts via the
+ * WASM solc fallback) can exceed the defaults; operators set overrides via
+ * `~/.dkg/config.json` -> `autoUpdate.buildTimeoutMs`. All keys are optional;
+ * unset keys fall back through network/<env>.json -> built-in defaults.
+ */
+export interface AutoUpdateBuildTimeouts {
+  /** `pnpm install --frozen-lockfile` (default 180_000). */
+  install?: number;
+  /** `pnpm build:runtime` / `pnpm build` (default 180_000). */
+  build?: number;
+  /** `pnpm --filter dkg-evm-module build` (default 300_000; bump to 900_000 on ARM64). */
+  contracts?: number;
+  /** MarkItDown bundling step (default 900_000). */
+  markitdown?: number;
+}
+
 export interface AutoUpdateConfig {
   enabled: boolean;
   /** Optional in ~/.dkg/config.json: omit to inherit from network/project config. */
@@ -16,7 +34,13 @@ export interface AutoUpdateConfig {
   sshKeyPath?: string;
   /** Optional raw GIT_SSH_COMMAND override for git-based update fetches/clones. */
   sshCommand?: string;
-  checkIntervalMinutes: number;
+  /**
+   * Optional in ~/.dkg/config.json: omit to inherit from network/project config.
+   * `resolveAutoUpdateConfig()` falls back to network -> 30 (minutes).
+   */
+  checkIntervalMinutes?: number;
+  /** Optional per-step build timeout overrides for the git-based update path. */
+  buildTimeoutMs?: AutoUpdateBuildTimeouts;
 }
 
 /**
@@ -29,6 +53,7 @@ export interface AutoUpdateConfig {
 export type ResolvedAutoUpdateConfig = AutoUpdateConfig & {
   repo: string;
   branch: string;
+  checkIntervalMinutes: number;
 };
 
 export interface NetworkConfig {
@@ -48,6 +73,7 @@ export interface NetworkConfig {
     sshKeyPath?: string;
     sshCommand?: string;
     checkIntervalMinutes: number;
+    buildTimeoutMs?: AutoUpdateBuildTimeouts;
   };
   chain?: {
     type: 'evm';
@@ -156,7 +182,15 @@ export interface DkgConfig {
   contextGraphs?: string[];
   paranets?: string[];
   autoUpdate?: AutoUpdateConfig;
-  chain?: ChainConfig;
+  /**
+   * Chain config. Field-merged on top of `network/<env>.json#chain` via
+   * `resolveChainConfig()`, so an operator can override individual fields
+   * (e.g. just `rpcUrl` to point at a private RPC) without having to
+   * restate `hubAddress` and `chainId`. Fields omitted here inherit the
+   * network defaults — including future hub rotations propagated by the
+   * auto-updater pulling a fresh network/<env>.json.
+   */
+  chain?: Partial<ChainConfig>;
   /** Optional LLM for the Node UI chatbot (natural language → SPARQL, answers). */
   llm?: LlmConfig;
   /** Block explorer URL for TX links (default: derived from chainId). */
@@ -395,6 +429,20 @@ export function resolveAutoUpdateConfig(
   const sshCommand = cfg?.sshCommand ?? net?.sshCommand;
   const checkIntervalMinutes = cfg?.checkIntervalMinutes ?? net?.checkIntervalMinutes ?? 30;
 
+  // Merge build timeouts per-key so operators can override one step (e.g.
+  // `contracts` on slow ARM hosts) without re-specifying the rest.
+  const buildTimeoutMs: AutoUpdateBuildTimeouts | undefined = (() => {
+    const c = cfg?.buildTimeoutMs;
+    const n = net?.buildTimeoutMs;
+    if (!c && !n) return undefined;
+    return {
+      ...(c?.install ?? n?.install ? { install: c?.install ?? n?.install } : {}),
+      ...(c?.build ?? n?.build ? { build: c?.build ?? n?.build } : {}),
+      ...(c?.contracts ?? n?.contracts ? { contracts: c?.contracts ?? n?.contracts } : {}),
+      ...(c?.markitdown ?? n?.markitdown ? { markitdown: c?.markitdown ?? n?.markitdown } : {}),
+    };
+  })();
+
   return {
     enabled: true,
     repo,
@@ -403,7 +451,63 @@ export function resolveAutoUpdateConfig(
     ...(sshKeyPath ? { sshKeyPath } : {}),
     ...(sshCommand ? { sshCommand } : {}),
     checkIntervalMinutes,
+    ...(buildTimeoutMs ? { buildTimeoutMs } : {}),
   };
+}
+
+/**
+ * Field-level merge of the effective chain configuration.
+ *
+ * Precedence per field: `~/.dkg/config.json#chain` → `network/<env>.json#chain`.
+ * Returns `undefined` when neither source provides a chain block.
+ *
+ * Rationale: the daemon previously read chain via `config.chain ?? network.chain`
+ * (whole-object fallback), which meant an operator who set just `rpcUrl` in their
+ * local config would lose `hubAddress` / `chainId` from the network file and
+ * crash deeper inside ethers. With per-field merge, operators can override
+ * individual fields (e.g. swap public RPC for a private one) and still inherit
+ * the rest — including future hub rotations the auto-updater pulls down.
+ *
+ * The return type is `Partial<ChainConfig>` because either source may be
+ * partial; consumers that need both `rpcUrl` and `hubAddress` (lifecycle,
+ * publisher-runner) MUST guard for those fields before passing to the agent.
+ */
+export function resolveChainConfig(
+  config: Pick<DkgConfig, 'chain'> | null | undefined,
+  network: Pick<NetworkConfig, 'chain'> | null | undefined,
+): Partial<ChainConfig> | undefined {
+  const cfg = config?.chain;
+  const net = network?.chain;
+  if (!cfg && !net) return undefined;
+
+  // Short-circuit when the operator opts in to mock mode. We strip
+  // rpcUrl/hubAddress entirely (both inherited-from-network AND any stale
+  // values left over in the operator's own config from a previous EVM
+  // setup) so no downstream consumer can hit a real chain by accident.
+  // Without this, lifecycle.ts/publisher-runner.ts/status.ts/`dkg set-ask`
+  // all gate on `rpcUrl && hubAddress` but not on `type`, so a hybrid
+  // `{ type: 'mock', rpcUrl: '<real>', hubAddress: '<real>' }` would wire
+  // up MockChainAdapter (correct) AND open a real ethers.JsonRpcProvider
+  // / EVMChainAdapter against the live network in parallel. MockChainAdapter
+  // only needs chainId; rpcUrl/hubAddress are meaningless in mock mode.
+  if (cfg?.type === 'mock') {
+    const mockMerged: Partial<ChainConfig> = { type: 'mock' };
+    if (cfg.chainId !== undefined) mockMerged.chainId = cfg.chainId;
+    if (cfg.mockIdentityId !== undefined) mockMerged.mockIdentityId = cfg.mockIdentityId;
+    return mockMerged;
+  }
+
+  const merged: Partial<ChainConfig> = {
+    type: cfg?.type ?? net?.type ?? 'evm',
+  };
+  const rpcUrl = cfg?.rpcUrl ?? net?.rpcUrl;
+  if (rpcUrl !== undefined) merged.rpcUrl = rpcUrl;
+  const hubAddress = cfg?.hubAddress ?? net?.hubAddress;
+  if (hubAddress !== undefined) merged.hubAddress = hubAddress;
+  const chainId = cfg?.chainId ?? net?.chainId;
+  if (chainId !== undefined) merged.chainId = chainId;
+  if (cfg?.mockIdentityId !== undefined) merged.mockIdentityId = cfg.mockIdentityId;
+  return merged;
 }
 
 /**

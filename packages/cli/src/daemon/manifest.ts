@@ -12,7 +12,7 @@ import {
   writeFileSync as fsWriteFileSync,
 } from 'node:fs';
 import {
-  appendFile, chmod, copyFile, mkdir, readFile, rename, rm, stat, unlink, writeFile,
+  appendFile, chmod, copyFile, mkdir, readFile, readdir, rename, rm, stat, unlink, writeFile,
 } from 'node:fs/promises';
 import { execSync, exec, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -521,6 +521,7 @@ export function buildManifestInstallContext(
 
 export const _autoUpdateIo = {
   readFile,
+  readdir: readdir as (...args: any[]) => Promise<any[]>,
   writeFile,
   mkdir,
   rm,
