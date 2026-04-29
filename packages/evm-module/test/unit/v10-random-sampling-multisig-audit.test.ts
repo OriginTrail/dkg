@@ -1,7 +1,7 @@
 /**
  * DKG v10 RandomSampling multisig-access-control audit coverage.
  *
- * Finding covered (see .test-audit/BUGS_FOUND.md):
+ * Finding covered (see .test-audit/):
  *   E-3 (CRITICAL, TEST-DEBT): Re-enable the multisig-as-Hub-owner access-control
  *        tests that were commented out in the existing suites with TODO notes:
  *          - `test/unit/RandomSampling.test.ts:332-338`
@@ -20,7 +20,7 @@
  * This file re-instates those tests in a dedicated describe tagged E-3 so a
  * regression in the modifier (e.g. a bypass) trips immediately. If any of the
  * tests goes RED, DO NOT modify production code — record the finding back into
- * BUGS_FOUND.md as a new E-* entry.
+ * as a new E-* entry.
  */
 
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';

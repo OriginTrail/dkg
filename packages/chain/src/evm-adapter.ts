@@ -91,14 +91,36 @@ export function decodeEvmError(data: string | Uint8Array): { name: string; args:
  */
 export function enrichEvmError(err: unknown): string | null {
   if (!(err instanceof Error)) return null;
-  const match = err.message.match(/data="(0x[0-9a-fA-F]+)"/);
-  if (!match) return null;
-  const decoded = decodeEvmError(match[1]);
-  if (!decoded) return null;
-  const argsStr = decoded.args.length > 0 ? `(${decoded.args.join(', ')})` : '';
-  const decodedStr = `${decoded.name}${argsStr}`;
-  err.message = err.message.replace('unknown custom error', decodedStr);
-  return decoded.name;
+  // CH-10: match multiple RPC revert-data shapes so we don't leak raw
+  // selectors to operators (issue #159 class). Providers serialize revert
+  // data under many keys — `data`, `errorData`, JSON-encoded `"data"` — and
+  // with or without quotes / with a space after the colon. We try each
+  // shape in order and use the first hex blob that decodes into a known
+  // custom error selector.
+  const candidates: string[] = [];
+  const patterns = [
+    /(?:^|[^a-zA-Z])(?:errorData|data)\s*[=:]\s*"(0x[0-9a-fA-F]+)"/g,
+    /(?:^|[^a-zA-Z])(?:errorData|data)\s*[=:]\s*(0x[0-9a-fA-F]+)/g,
+    /"data"\s*:\s*"(0x[0-9a-fA-F]+)"/g,
+  ];
+  for (const re of patterns) {
+    for (const m of err.message.matchAll(re)) {
+      if (m[1]) candidates.push(m[1]);
+    }
+  }
+  for (const hex of candidates) {
+    const decoded = decodeEvmError(hex);
+    if (!decoded) continue;
+    const argsStr = decoded.args.length > 0 ? `(${decoded.args.join(', ')})` : '';
+    const decodedStr = `${decoded.name}${argsStr}`;
+    if (err.message.includes('unknown custom error')) {
+      err.message = err.message.replace('unknown custom error', decodedStr);
+    } else {
+      err.message = `${err.message} [${decodedStr}]`;
+    }
+    return decoded.name;
+  }
+  return null;
 }
 
 export interface EVMAdapterConfig {
@@ -805,6 +827,79 @@ export class EVMChainAdapter implements ChainAdapter {
                 txHash: log.transactionHash,
               },
             };
+          }
+        }
+
+        // the previous revision ALSO subscribed to
+        // KAV10's OWN KnowledgeBatchCreated(batchId, contextGraphId, amount,
+        // byteSize, startEpoch, endEpoch, tokenAmount, isImmutable) and
+        // yielded a normalized event with `merkleRoot: undefined` and
+        // `publisherAddress: undefined`. That breaks downstream:
+        // `ChainEventPoller.handleBatchCreated()` calls
+        // `ethers.hexlify(merkleRoot)` (publish-handler.ts:103) which throws
+        // on undefined, and matches confirmation by exact merkleRoot equality
+        // — so the synthetic event would either crash the poller loop or
+        // never confirm any tentative publish. V10-only deployments are
+        // already covered by the `KCCreated` path below
+        // (KnowledgeCollectionStorage.KnowledgeCollectionCreated emits
+        // `merkleRoot` and `KnowledgeAssetsMinted` carries publisher +
+        // startId/endId), so re-emitting from KAV10 was both redundant and
+        // broken.
+        //
+        // V10 publishes now surface a
+        // batch-shaped audit record via `V10KnowledgeBatchEmitted`
+        // (distinct topic from legacy `KnowledgeBatchCreated`) so this
+        // subscription path does NOT pick them up. Legacy V8/V9 indexers
+        // that subscribe here continue to see only real V8/V9 batches
+        // (where the backing state is actually populated). V10-aware
+        // indexers subscribe to KCCreated above and/or to the
+        // `V10KnowledgeBatchEmitted` topic directly if they want the
+        // batch-shaped projection.
+      }
+
+      // The PR
+      // introduced `V10KnowledgeBatchEmitted` on KASStorage (distinct
+      // from legacy `KnowledgeBatchCreated`) and explicitly tells
+      // V10-aware consumers to subscribe to this topic directly. The
+      // adapter had no branch for it, so any caller following that
+      // guidance got an empty stream. Add the branch so the event is
+      // consumable through the same `listenForEvents()` API as every
+      // other chain event.
+      if (eventType === 'V10KnowledgeBatchEmitted') {
+        const kasStorage = this.contracts.knowledgeAssetsStorage;
+        if (kasStorage) {
+          const eventFilter = kasStorage.filters.V10KnowledgeBatchEmitted();
+          const logs = await kasStorage.queryFilter(
+            eventFilter,
+            filter.fromBlock ?? 0,
+            filter.toBlock,
+          );
+          for (const log of logs) {
+            const parsed = kasStorage.interface.parseLog({
+              topics: [...log.topics],
+              data: log.data,
+            });
+            if (parsed) {
+              yield {
+                type: 'V10KnowledgeBatchEmitted',
+                blockNumber: log.blockNumber,
+                data: {
+                  batchId: parsed.args.batchId.toString(),
+                  publisherAddress: parsed.args.publisher?.toString(),
+                  merkleRoot: parsed.args.merkleRoot,
+                  publicByteSize: parsed.args.publicByteSize?.toString(),
+                  knowledgeAssetsCount: parsed.args.knowledgeAssetsCount?.toString(),
+                  startKAId: parsed.args.startKAId.toString(),
+                  endKAId: parsed.args.endKAId.toString(),
+                  startEpoch: parsed.args.startEpoch?.toString(),
+                  endEpoch: parsed.args.endEpoch?.toString(),
+                  tokenAmount: parsed.args.tokenAmount?.toString(),
+                  // Event field is `isPermanent` (see KASStorage.sol:75).
+                  isPermanent: Boolean(parsed.args.isPermanent),
+                  txHash: log.transactionHash,
+                },
+              };
+            }
           }
         }
       }
@@ -1693,16 +1788,70 @@ export class EVMChainAdapter implements ChainAdapter {
     } catch {
       throw new Error('DKGStakingConvictionNFT contract not deployed.');
     }
-    const nftAddr = await nft.getAddress();
 
-    if (this.contracts.token && amount > 0n) {
-      const currentAllowance: bigint = await this.contracts.token.allowance(this.signer.address, nftAddr);
+    // TRAC flows
+    //   user --(token.transferFrom by StakingV10)--> StakingStorage
+    // i.e. the ERC-20 caller in the inner `token.transferFrom(staker,
+    // stakingStorage, amount)` is `StakingV10`, NOT the NFT wrapper.
+    // The previous version of this adapter granted allowance to the
+    // NFT contract address, which `transferFrom` ignores; the call
+    // therefore reverted with `ERC20InsufficientAllowance` (caught as
+    // `require(false)` because the staking-conviction tests look at
+    // the outer `eth_estimateGas`). Approve `StakingV10` directly so
+    // its `transferFrom` succeeds.
+    // — evm-adapter.ts:1809).
+    // Pre-fix: `resolveContract('StakingV10')` failure silently set
+    // `stakingV10 = undefined`, which made the allowance update
+    // condition `amount > 0n && stakingV10` false. The adapter
+    // then proceeded straight to `nft.createConviction(amount)`,
+    // which under the hood calls
+    //   StakingV10.token.transferFrom(staker, stakingStorage, amount)
+    // — i.e. requires the StakingV10 contract address to hold an
+    // ERC-20 allowance. With StakingV10 unresolved AND amount > 0
+    // we have neither a spender to grant allowance to nor any way
+    // for the inner `transferFrom` to succeed; the call always
+    // reverts with an opaque `ERC20InsufficientAllowance`
+    // (surfaced as a `require(false)`-style chain revert several
+    // call frames deep) instead of a clear adapter-level error.
+    //
+    // Fail fast: a missing/misconfigured StakingV10 deployment is
+    // an environment problem, not a transient runtime condition,
+    // so refusing to call `createConviction` is safe — there is no
+    // legitimate code path where `amount > 0` should call into
+    // `DKGStakingConvictionNFT` without `StakingV10` available as
+    // the spender. `amount === 0n` (rare but legal — pure lock
+    // refresh) keeps working because no allowance is needed.
+    let stakingV10: Contract | undefined;
+    let stakingV10ResolveErr: unknown;
+    try {
+      stakingV10 = await this.resolveContract('StakingV10');
+    } catch (err) {
+      stakingV10ResolveErr = err;
+      stakingV10 = undefined;
+    }
+
+    if (amount > 0n && !stakingV10) {
+      const cause = stakingV10ResolveErr instanceof Error
+        ? stakingV10ResolveErr.message
+        : String(stakingV10ResolveErr ?? 'contract not found');
+      throw new Error(
+        `stakeWithLock: cannot stake ${amount} TRAC (>0) — StakingV10 contract is unavailable ` +
+        `(${cause}). Without StakingV10 the inner token.transferFrom in ` +
+        `DKGStakingConvictionNFT.createConviction has no spender to draw from and the ` +
+        `transaction would revert with ERC20InsufficientAllowance several frames deep. ` +
+        `Deploy / configure StakingV10 before calling stakeWithLock with a positive amount.`,
+      );
+    }
+
+    if (this.contracts.token && amount > 0n && stakingV10) {
+      const stakingV10Addr = await stakingV10.getAddress();
+      const currentAllowance: bigint = await this.contracts.token.allowance(this.signer.address, stakingV10Addr);
       if (currentAllowance < amount) {
-        await (await this.contracts.token.approve(nftAddr, ethers.MaxUint256)).wait();
+        await (await this.contracts.token.approve(stakingV10Addr, ethers.MaxUint256)).wait();
       }
     }
 
-    const tx = await nft.stake(identityId, amount, lockEpochs);
+    const tx = await nft.createConviction(identityId, amount, lockEpochs);
     const receipt = await tx.wait();
 
     return {
@@ -1868,6 +2017,23 @@ export class EVMChainAdapter implements ChainAdapter {
     await this.init();
     if (!this.contracts.parametersStorage) return 3;
     return Number(await this.contracts.parametersStorage.minimumRequiredSignatures());
+  }
+
+  /**
+   * Read the per-CG `requiredSignatures` value from `ContextGraphStorage`.
+   * Returns 0 when the CG is not registered or the contract is unavailable.
+   * Throws on contract-level errors so callers can decide whether to fall
+   * back to the global minimum or fail loud.
+   *
+   * Spec §06_PUBLISH /.
+   */
+  async getContextGraphRequiredSignatures(contextGraphId: bigint): Promise<number> {
+    await this.init();
+    const storage = this.contracts.contextGraphStorage;
+    if (!storage) return 0;
+    if (contextGraphId <= 0n) return 0;
+    const raw: bigint = await storage.getContextGraphRequiredSignatures(contextGraphId);
+    return Number(raw);
   }
 
   async verifyACKIdentity(recoveredAddress: string, claimedIdentityId: bigint): Promise<boolean> {

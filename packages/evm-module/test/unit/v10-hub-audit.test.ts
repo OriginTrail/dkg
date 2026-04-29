@@ -1,7 +1,7 @@
 /**
  * DKG v10 Hub audit coverage.
  *
- * Findings covered (see .test-audit/BUGS_FOUND.md):
+ * Findings covered (see .test-audit/
  *   E-1 (CRITICAL, SPEC-GAP): `Hub.setAndReinitializeContracts` atomic V10
  *        mainnet-swap mechanism — partial-failure rollback, non-owner revert,
  *        happy-path success.
@@ -11,7 +11,7 @@
  *        at Hub.sol:204 is removed.
  *
  * Do NOT modify production code from these tests. Any red assertion is the
- * finding being surfaced; leave it red and reference BUGS_FOUND.md.
+ * finding being surfaced; leave it red and reference.
  */
 
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
@@ -87,10 +87,10 @@ describe('@unit v10 Hub audit', function () {
       // BUG E-7: contract currently emits `NewContract` twice on the new-name
       // branch (Hub.sol:193 in the `else` branch + unconditional Hub.sol:204).
       // This assertion is intentionally left RED — fixing the contract to
-      // emit once is the remediation. See BUGS_FOUND.md#E-7.
+      // emit once is the remediation.
       expect(
         newContractLogs.length,
-        'NewContract emitted more than once on create (BUGS_FOUND.md#E-7)',
+        'NewContract emitted more than once on create',
       ).to.equal(1);
     });
 
@@ -125,7 +125,7 @@ describe('@unit v10 Hub audit', function () {
       expect(changedLogs.length).to.equal(1);
       expect(
         newContractLogs.length,
-        'NewContract incorrectly emitted on update path (BUGS_FOUND.md#E-7)',
+        'NewContract incorrectly emitted on update path',
       ).to.equal(0);
     });
   });
@@ -137,23 +137,67 @@ describe('@unit v10 Hub audit', function () {
   describe('E-1 — `Hub.setAndReinitializeContracts` atomic contract swap', () => {
     it('non-owner cannot call setAndReinitializeContracts', async () => {
       const HubAsNonOwner = HubContract.connect(accounts[1]);
-      // HubLib.UnauthorizedAccess("Only Hub Owner or Multisig Owner") is the
-      // concrete selector. hardhat-chai-matchers resolves library errors
-      // through the passed-in contract's ABI, so we can pin both the error
-      // name AND its message arg — this catches regressions that change
-      // the ACL text (e.g., to "Only Hub Owner") or swap the selector for
-      // a different unauthorized path.
+      // After alignment with OZ Ownable v5 (
+      // "OwnableUnauthorizedAccount vs UnauthorizedAccess") the gate raises
+      // the standard `OwnableUnauthorizedAccount(msg.sender)` selector so
+      // indexers + clients can route on the same selector that
+      // `_checkOwner` produces. Pinning the selector AND the address arg
+      // catches regressions that drop the gate, swap to a different
+      // unauthorized path, or accidentally accept a non-owner.
       await expect(
         HubAsNonOwner.setAndReinitializeContracts([], [], [], []),
       )
-        .to.be.revertedWithCustomError(HubContract, 'UnauthorizedAccess')
-        .withArgs('Only Hub Owner or Multisig Owner');
+        .to.be.revertedWithCustomError(HubContract, 'OwnableUnauthorizedAccount')
+        .withArgs(accounts[1].address);
     });
 
     it('success path: sets new contracts and re-initializes them', async () => {
-      // Deploy a disposable DKGStakingConvictionNFT whose `initialize()`
-      // tolerates missing StakingStorage/Chronos and reads Token from the
-      // Hub. This exercises the full setAndReinitializeContracts sequence.
+      // E-1 happy path. We exercise the full
+      // `setAndReinitializeContracts` sequence (phase 1: register names;
+      // phase 3: call `initialize()` on each `reinitializeContracts`
+      // entry) using `DKGStakingConvictionNFT` as the disposable
+      // candidate. The NFT's `initialize()` resolves several names from
+      // the Hub (`StakingV10`, `StakingStorage`, `ConvictionStakingStorage`,
+      // `Chronos`, `RandomSamplingStorage`, `ShardingTableStorage`,
+      // `ShardingTable`, `Ask`, `ProfileStorage`, `Token`); the audit
+      // fixture only deploys `Hub`, `ParametersStorage`, `Token`, so we
+      // pre-register placeholder addresses for the remaining names. The
+      // NFT casts each one to a typed interface but never calls into them
+      // during `initialize()`, so a non-zero EOA placeholder is fine for
+      // the purpose of this audit (we only care that the reinit
+      // **succeeds and registers `E1StakingNFT`**, not that the NFT is
+      // actually wired against real storage contracts here — that case
+      // is covered exhaustively by `DKGStakingConvictionNFT.test.ts`).
+      //
+      // previously the placeholders were skipped and
+      // the test reverted with `ContractDoesNotExist("StakingV10")` from
+      // `DKGStakingConvictionNFT.initialize` line 234. The audit's
+      // intent is to pin the success path of the **Hub** mechanism, not
+      // the NFT's wiring; pre-registering the placeholders is the
+      // correct setup for a hub-level audit.
+      // The Hub set is keyed by address, so the placeholders MUST be
+      // pairwise distinct — `_setContractAddress` reverts with
+      // `AddressAlreadyInSet` when a single address is registered under
+      // two different names. Pull a unique signer slot for each name.
+      const requiredNames = [
+        'StakingV10',
+        'StakingStorage',
+        'ConvictionStakingStorage',
+        'Chronos',
+        'RandomSamplingStorage',
+        'ShardingTableStorage',
+        'ShardingTable',
+        'Ask',
+        'ProfileStorage',
+      ];
+      for (let i = 0; i < requiredNames.length; i++) {
+        // Skip account[0] (deployer / hub owner) and accounts already
+        // bound to other roles in `deployFixture`. Slot `i + 5` lands
+        // safely after `HubOwner` (slot 0) and any other reserved
+        // accounts; hardhat exposes 20 signers so this fits.
+        await HubContract.setContractAddress(requiredNames[i], accounts[i + 5].address);
+      }
+
       const NFTFactory = await hre.ethers.getContractFactory(
         'DKGStakingConvictionNFT',
       );

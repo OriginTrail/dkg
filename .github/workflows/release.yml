@@ -100,12 +100,12 @@ jobs:
 
       # NOTE: tests are intentionally NOT re-run here. The main `ci.yml`
       # workflow is the authoritative test gate on the source commit.
-      # Re-running `pnpm turbo test` in release-preflight was redundant with
-      # `ci.yml` AND incompatible with the `accept-red-ci` policy on v10-rc:
-      # deliberately-red PROD-BUG sentinel tests (e.g. network-sim K-4/K-5)
-      # would block every tagged release even though CI was already reporting
-      # the same red state as documented bug evidence. See
-      # .test-audit/BUGS_FOUND.md for the sentinel inventory.
+      # Re-running `pnpm turbo test` in release-preflight was redundant
+      # with `ci.yml` AND incompatible with the `accept-red-ci` policy on
+      # v10-rc: deliberately-red PROD-BUG sentinel tests (e.g.
+      # network-sim K-4/K-5) would block every tagged release even though
+      # CI was already reporting the same red state as documented bug
+      # evidence.
 
   markitdown-assets:
     needs:

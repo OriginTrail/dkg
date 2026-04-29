@@ -1,85 +1,148 @@
 /**
- * DKGStakingConvictionNFT-extra.test.ts — audit coverage.
+ * DKGStakingConvictionNFT-extra.test.ts — audit coverage for V10 staking NFT.
  *
- * Covers findings (see .test-audit/BUGS_FOUND.md, evm-module):
- *   - E-2  (CRITICAL, SPEC-GAP): `DKGStakingConvictionNFT.unstake` is
- *     completely untested — `LockNotExpired`, `InsufficientStake`, partial
- *     withdraw vs full burn, and non-owner unstake are all uncovered.
- *   - E-16 (MEDIUM, TEST-DEBT): existing tests stub `StakingStorage` with
- *     an EOA. Real flow delegates to `Staking`. This file deploys the real
- *     `StakingStorage` contract into the fixture and pins what the
- *     NFT actually does with it (currently: stores the address but does
- *     NOT delegate — Phase 4 placeholder). A future Phase 5 wiring will
- *     flip this test into a positive delegation assertion; until then the
- *     test documents the drift.
+ * V10 staking surface (post-Phase 5 rename):
+ *   - Mint: `createConviction(identityId, amount, lockTier)` returns tokenId.
+ *     Pulls TRAC via `StakingV10.stake` → `transferFrom(staker, stakingStorage, amount)`.
+ *   - Withdraw: `withdraw(tokenId)` is FULL-only by design (Q1 in the contract
+ *     comments). Auto-claims rewards inside `StakingV10.withdraw` then drains
+ *     all staked TRAC and burns the NFT in a single tx. There is no `unstake`
+ *     primitive and no partial-withdraw: a user wanting to keep some TRAC
+ *     staked withdraws and re-stakes the remainder (tier 0, 1x, no lock is
+ *     effectively liquid).
+ *
+ * Findings covered:
+ *   - E-2  (CRITICAL, SPEC-GAP): full withdraw matrix — `LockStillActive`
+ *     before expiry, success after expiry, `NotPositionOwner` for non-owner,
+ *     non-existent tokenId reverts, second withdraw on the same id reverts
+ *     (no double-spend).
+ *   - E-16 (MEDIUM, TEST-DEBT): the live StakingStorage wire is exercised
+ *     end-to-end — `createConviction` MUST move TRAC into StakingStorage and
+ *     bump `getNodeStakeV10(identityId)` (Phase-4 placeholder behavior is
+ *     gone in V10; this asserts the post-rename delegation).
  */
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
-import { loadFixture } from '@nomicfoundation/hardhat-network-helpers';
+import { loadFixture, time } from '@nomicfoundation/hardhat-network-helpers';
 import { expect } from 'chai';
+import { randomBytes } from 'crypto';
 import hre from 'hardhat';
 
-import { Chronos, DKGStakingConvictionNFT, Hub, StakingStorage, Token } from '../../typechain';
+import {
+  Chronos,
+  ConvictionStakingStorage,
+  DKGStakingConvictionNFT,
+  Hub,
+  Profile,
+  StakingStorage,
+  StakingV10,
+  Token,
+} from '../../typechain';
 
 type Fixture = {
   accounts: SignerWithAddress[];
   Hub: Hub;
   NFT: DKGStakingConvictionNFT;
+  StakingV10: StakingV10;
+  StakingStorage: StakingStorage;
+  ConvictionStakingStorage: ConvictionStakingStorage;
+  Profile: Profile;
   Token: Token;
   Chronos: Chronos;
-  StakingStorage: StakingStorage;
 };
+
+async function deployFixture(): Promise<Fixture> {
+  await hre.deployments.fixture(['DKGStakingConvictionNFT', 'StakingV10', 'Profile']);
+
+  const accounts = await hre.ethers.getSigners();
+  const Hub = await hre.ethers.getContract<Hub>('Hub');
+  const NFT = await hre.ethers.getContract<DKGStakingConvictionNFT>('DKGStakingConvictionNFT');
+  const StakingV10 = await hre.ethers.getContract<StakingV10>('StakingV10');
+  const StakingStorage = await hre.ethers.getContract<StakingStorage>('StakingStorage');
+  const ConvictionStakingStorage = await hre.ethers.getContract<ConvictionStakingStorage>(
+    'ConvictionStakingStorage',
+  );
+  const Profile = await hre.ethers.getContract<Profile>('Profile');
+  const Token = await hre.ethers.getContract<Token>('Token');
+  const Chronos = await hre.ethers.getContract<Chronos>('Chronos');
+
+  await Hub.setContractAddress('HubOwner', accounts[0].address);
+
+  return {
+    accounts,
+    Hub,
+    NFT,
+    StakingV10,
+    StakingStorage,
+    ConvictionStakingStorage,
+    Profile,
+    Token,
+    Chronos,
+  };
+}
 
 describe('@unit DKGStakingConvictionNFT — extra audit coverage (E-2, E-16)', () => {
   let accounts: SignerWithAddress[];
-  let HubContract: Hub;
   let NFT: DKGStakingConvictionNFT;
+  let StakingV10Contract: StakingV10;
+  let StakingStorageContract: StakingStorage;
+  let ConvictionStakingStorageContract: ConvictionStakingStorage;
+  let ProfileContract: Profile;
   let TokenContract: Token;
   let ChronosContract: Chronos;
-  let StakingStorageContract: StakingStorage;
-
-  const IDENTITY_ID = 1;
-
-  async function deployFixture(): Promise<Fixture> {
-    // Deploy the REAL StakingStorage + Chronos, not EOA stubs (E-16).
-    await hre.deployments.fixture([
-      'Hub',
-      'Token',
-      'Chronos',
-      'StakingStorage',
-      'DKGStakingConvictionNFT',
-    ]);
-    const Hub = await hre.ethers.getContract<Hub>('Hub');
-    const Token = await hre.ethers.getContract<Token>('Token');
-    const Chronos = await hre.ethers.getContract<Chronos>('Chronos');
-    const StakingStorage = await hre.ethers.getContract<StakingStorage>('StakingStorage');
-    const NFT = await hre.ethers.getContract<DKGStakingConvictionNFT>('DKGStakingConvictionNFT');
-    const signers = await hre.ethers.getSigners();
-    await Hub.setContractAddress('HubOwner', signers[0].address);
-    // Re-initialize the NFT so it picks up the REAL StakingStorage / Chronos
-    // that were deployed above. Everything else (Token) the fixture already
-    // wired via hardhat-deploy.
-    await Hub.forwardCall(await NFT.getAddress(), NFT.interface.encodeFunctionData('initialize'));
-    return { accounts: signers, Hub, NFT, Token, Chronos, StakingStorage };
-  }
 
   beforeEach(async () => {
     hre.helpers.resetDeploymentsJson();
     ({
       accounts,
-      Hub: HubContract,
       NFT,
+      StakingV10: StakingV10Contract,
+      StakingStorage: StakingStorageContract,
+      ConvictionStakingStorage: ConvictionStakingStorageContract,
+      Profile: ProfileContract,
       Token: TokenContract,
       Chronos: ChronosContract,
-      StakingStorage: StakingStorageContract,
     } = await loadFixture(deployFixture));
   });
 
+  // Mint a fresh Profile node and return its identityId. Uses random node
+  // material so back-to-back tests don't collide on the same nodeId.
+  async function createProfile(
+    admin: SignerWithAddress = accounts[0],
+    operational: SignerWithAddress = accounts[1],
+  ): Promise<number> {
+    const nodeId = '0x' + randomBytes(32).toString('hex');
+    const tx = await ProfileContract.connect(operational).createProfile(
+      admin.address,
+      [],
+      `Node ${Math.floor(Math.random() * 1_000_000)}`,
+      nodeId,
+      0,
+    );
+    const receipt = await tx.wait();
+    return Number(receipt!.logs[0].topics[1]);
+  }
+
+  // Mint TRAC to `staker` and approve StakingV10 — V10 NFT is wrapper-only,
+  // TRAC flows staker → StakingV10 → StakingStorage; the NFT itself never
+  // holds tokens. Mirrors the helper used by DKGStakingConvictionNFT.test.ts.
+  async function mintAndApprove(staker: SignerWithAddress, amount: bigint): Promise<void> {
+    await TokenContract.mint(staker.address, amount);
+    await TokenContract.connect(staker).approve(await StakingV10Contract.getAddress(), amount);
+  }
+
+  // Advance block time past `n` full Chronos epochs so getCurrentEpoch()
+  // crosses the lock-tier boundary inside StakingV10.withdraw.
+  async function advanceEpochs(n: number): Promise<void> {
+    const epochLength = await ChronosContract.epochLength();
+    await time.increase(Number(epochLength) * n);
+  }
+
   // ======================================================================
-  // E-16 — wire the NFT against the real StakingStorage contract.
+  // E-16 — live StakingStorage wire (no EOA stub, no Phase-4 placeholder).
   // ======================================================================
-  describe('E-16: real StakingStorage wire (not an EOA stub)', () => {
-    it('stakingStorageAddress resolves to a contract, not an EOA', async () => {
-      const ssAddr = await NFT.stakingStorageAddress();
+  describe('E-16: live StakingStorage wire (real contract, not an EOA stub)', () => {
+    it('NFT.stakingStorage() resolves to the deployed StakingStorage contract', async () => {
+      const ssAddr = await NFT.stakingStorage();
       expect(ssAddr).to.equal(await StakingStorageContract.getAddress());
 
       const code = await hre.ethers.provider.getCode(ssAddr);
@@ -87,194 +150,146 @@ describe('@unit DKGStakingConvictionNFT — extra audit coverage (E-2, E-16)', (
       expect(code.length).to.be.gt(2);
     });
 
-    it('SPEC-DRIFT: stake() does NOT delegate to StakingStorage (Phase 4 placeholder)', async () => {
-      // Spec target (Phase 5): `stake` should move TRAC into StakingStorage
-      // and bump total delegated stake. Phase 4 code just transfers TRAC
-      // into the NFT contract itself (see DKGStakingConvictionNFT.sol
-      // lines 87-116). We PIN that drift here: StakingStorage's totalStake
-      // is untouched by the NFT. When Phase 5 ships, this assertion will
-      // flip from `.to.equal(0n)` to `.to.equal(amount)` — a noisy test
-      // failure so the drift is impossible to miss.
+    it('createConviction delegates to StakingV10 and updates V10 stake aggregates (V10 path, not Phase-4 placeholder)', async () => {
+      const identityId = await createProfile();
       const amount = hre.ethers.parseEther('50000');
-      await TokenContract.approve(await NFT.getAddress(), amount);
+      await mintAndApprove(accounts[0], amount);
 
-      const totalBefore = await StakingStorageContract.getTotalStake();
-      const nodeDataBefore = await StakingStorageContract.getNodeStake(IDENTITY_ID);
+      const totalV10Before = await ConvictionStakingStorageContract.totalStakeV10();
+      const nodeStakeV10Before =
+        await ConvictionStakingStorageContract.getNodeStakeV10(identityId);
+      const stakerBalBefore = await TokenContract.balanceOf(accounts[0].address);
 
-      await NFT.stake(IDENTITY_ID, amount, 6);
+      await NFT.connect(accounts[0]).createConviction(identityId, amount, 6);
 
-      const totalAfter = await StakingStorageContract.getTotalStake();
-      const nodeDataAfter = await StakingStorageContract.getNodeStake(IDENTITY_ID);
-      // Phase 4 placeholder: no StakingStorage mutation.
-      expect(totalAfter - totalBefore, 'total stake untouched in Phase 4').to.equal(0n);
-      expect(nodeDataAfter - nodeDataBefore, 'node stake untouched in Phase 4').to.equal(0n);
+      // V10 contract: createConviction delegates through StakingV10.stake
+      // which writes the V10 stake aggregates in ConvictionStakingStorage
+      // (NOT a Phase-4 placeholder that would leave them at zero). This is
+      // the structural assertion that the Phase 5 wiring is live.
+      expect(await ConvictionStakingStorageContract.totalStakeV10()).to.equal(
+        totalV10Before + amount,
+      );
+      expect(
+        await ConvictionStakingStorageContract.getNodeStakeV10(identityId),
+      ).to.equal(nodeStakeV10Before + amount);
 
-      // TRAC landed on the NFT itself — mirrors the regression the existing
-      // DKGStakingConvictionNFT.test.ts "tokens held in contract" test
-      // already covers but with the real StakingStorage alongside to pin
-      // the boundary.
-      expect(await TokenContract.balanceOf(await NFT.getAddress())).to.equal(amount);
+      // TRAC flowed out of the staker (StakingV10.stake's transferFrom).
+      // NFT contract itself holds zero TRAC — D9, assets live in
+      // StakingStorage, not the wrapper.
+      expect(await TokenContract.balanceOf(accounts[0].address)).to.equal(
+        stakerBalBefore - amount,
+      );
+      expect(await TokenContract.balanceOf(await NFT.getAddress())).to.equal(0n);
     });
   });
 
   // ======================================================================
-  // E-2 — unstake matrix. None of this was previously covered.
+  // E-2 — withdraw matrix. V10 withdraw is FULL-only by design.
   // ======================================================================
-  describe('E-2: unstake full matrix', () => {
-    async function stakeAs(signer: SignerWithAddress, amount: bigint, lockTier: number) {
-      await TokenContract.connect(accounts[0]).transfer(signer.address, amount);
-      await TokenContract.connect(signer).approve(await NFT.getAddress(), amount);
-      await NFT.connect(signer).stake(IDENTITY_ID, amount, lockTier);
-      return await NFT.totalSupply();
+  describe('E-2: withdraw full matrix (V10 full-only design — no partial)', () => {
+    // Helper: stake `amount` from `staker` against `identityId` at `lockTier`
+    // and return the freshly minted tokenId. Uses the wrapper event so we
+    // don't have to track nextTokenId manually.
+    async function stakeAs(
+      staker: SignerWithAddress,
+      identityId: number,
+      amount: bigint,
+      lockTier: number,
+    ): Promise<bigint> {
+      await mintAndApprove(staker, amount);
+      const tx = await NFT.connect(staker).createConviction(identityId, amount, lockTier);
+      const receipt = await tx.wait();
+      const topic = NFT.interface.getEvent('PositionCreated').topicHash;
+      const log = receipt!.logs.find((l) => l.topics[0] === topic)!;
+      return BigInt(log.topics[2]);
     }
 
-    it('LockNotExpired reverts before the lock expires', async () => {
+    it('withdraw reverts LockStillActive before the lock expires', async () => {
+      const identityId = await createProfile();
       const amount = hre.ethers.parseEther('50000');
-      const lock = 6;
-      await TokenContract.approve(await NFT.getAddress(), amount);
-      await NFT.stake(IDENTITY_ID, amount, lock);
-      const positionId = await NFT.totalSupply();
+      const tokenId = await stakeAs(accounts[0], identityId, amount, 6);
 
-      // Chronos is at epoch 1 immediately after deploy (the deploy script
-      // pins a fresh epoch). Current epoch < createdAt + lock → LockNotExpired.
-      await expect(NFT.unstake(positionId, amount)).to.be.revertedWithCustomError(
-        NFT,
-        'LockNotExpired',
+      // Lock tier 6 = 180-day lock (~6 epochs in V10 default mapping). Fresh
+      // fixture is at epoch 1 immediately after deploy, so withdraw inside
+      // the window must revert via StakingV10.withdraw's lock check.
+      await expect(NFT.connect(accounts[0]).withdraw(tokenId)).to.be.revertedWithCustomError(
+        StakingV10Contract,
+        'LockStillActive',
       );
     });
 
-    it('InsufficientStake reverts when amount > stakedAmount (even after lock expires)', async () => {
-      const amount = hre.ethers.parseEther('1000');
-      const lock = 1;
-      await TokenContract.approve(await NFT.getAddress(), amount);
-      await NFT.stake(IDENTITY_ID, amount, lock);
-      const positionId = await NFT.totalSupply();
+    it('full withdraw burns the NFT, clears the V10 stake aggregates, returns TRAC to the owner', async () => {
+      const identityId = await createProfile();
+      const amount = hre.ethers.parseEther('100000');
+      const tokenId = await stakeAs(accounts[0], identityId, amount, 1);
 
-      // Advance past the lock window so LockNotExpired does NOT mask the
-      // InsufficientStake branch.
-      const epochLen = Number(await ChronosContract.epochLength());
-      for (let i = 0; i < lock + 1; i++) {
-        await hre.ethers.provider.send('evm_increaseTime', [epochLen + 1]);
-        await hre.ethers.provider.send('evm_mine', []);
-      }
-      const now = await ChronosContract.getCurrentEpoch();
-      expect(now).to.be.gte(1n + BigInt(lock));
+      await advanceEpochs(2);
 
-      await expect(
-        NFT.unstake(positionId, amount + 1n),
-      ).to.be.revertedWithCustomError(NFT, 'InsufficientStake');
+      const ownerBalBefore = await TokenContract.balanceOf(accounts[0].address);
+      const totalV10Before = await ConvictionStakingStorageContract.totalStakeV10();
+      const nodeStakeV10Before =
+        await ConvictionStakingStorageContract.getNodeStakeV10(identityId);
+
+      await NFT.connect(accounts[0]).withdraw(tokenId);
+
+      // ERC-721 ownerOf reverts for burned tokens.
+      await expect(NFT.ownerOf(tokenId)).to.be.reverted;
+      expect(await NFT.balanceOf(accounts[0].address)).to.equal(0n);
+
+      // V10 stake aggregates drop by `amount` (full withdraw, no partial
+      // semantics in V10).
+      expect(await ConvictionStakingStorageContract.totalStakeV10()).to.equal(
+        totalV10Before - amount,
+      );
+      expect(
+        await ConvictionStakingStorageContract.getNodeStakeV10(identityId),
+      ).to.equal(nodeStakeV10Before - amount);
+
+      // Full TRAC accounting: V10 withdraw is full-only and rewards are
+      // auto-claimed inside StakingV10.withdraw, so the unstake leg moves
+      // exactly the staked principal back to the owner.
+      expect(await TokenContract.balanceOf(accounts[0].address)).to.equal(
+        ownerBalBefore + amount,
+      );
     });
 
-    it('partial withdraw decrements stakedAmount and keeps the NFT alive', async () => {
-      const amount = hre.ethers.parseEther('1000');
-      const lock = 1;
-      await TokenContract.approve(await NFT.getAddress(), amount);
-      await NFT.stake(IDENTITY_ID, amount, lock);
-      const positionId = await NFT.totalSupply();
+    it('non-owner withdraw reverts NotPositionOwner', async () => {
+      const identityId = await createProfile();
+      const amount = hre.ethers.parseEther('50000');
+      const tokenId = await stakeAs(accounts[0], identityId, amount, 1);
+      await advanceEpochs(2);
 
-      const epochLen = Number(await ChronosContract.epochLength());
-      for (let i = 0; i < lock + 1; i++) {
-        await hre.ethers.provider.send('evm_increaseTime', [epochLen + 1]);
-        await hre.ethers.provider.send('evm_mine', []);
-      }
-
-      const partial = amount / 3n;
-      const balBefore = await TokenContract.balanceOf(accounts[0].address);
-      await expect(NFT.unstake(positionId, partial))
-        .to.emit(NFT, 'PositionUnstaked')
-        .withArgs(positionId, partial);
-      // NFT still owned; position still live.
-      expect(await NFT.ownerOf(positionId)).to.equal(accounts[0].address);
-      const pos = await NFT.getPosition(positionId);
-      expect(pos.stakedAmount).to.equal(amount - partial);
-
-      // TRAC flowed back to the owner.
-      const balAfter = await TokenContract.balanceOf(accounts[0].address);
-      expect(balAfter - balBefore).to.equal(partial);
+      // Wrapper-layer ownership gate fires BEFORE we reach StakingV10, so
+      // we expect the NFT's NotPositionOwner (not StakingV10's) error.
+      await expect(NFT.connect(accounts[4]).withdraw(tokenId)).to.be.revertedWithCustomError(
+        NFT,
+        'NotPositionOwner',
+      );
     });
 
-    it('full withdraw burns the NFT and clears the position', async () => {
-      const amount = hre.ethers.parseEther('500');
-      const lock = 1;
-      await TokenContract.approve(await NFT.getAddress(), amount);
-      await NFT.stake(IDENTITY_ID, amount, lock);
-      const positionId = await NFT.totalSupply();
-
-      const epochLen = Number(await ChronosContract.epochLength());
-      for (let i = 0; i < lock + 1; i++) {
-        await hre.ethers.provider.send('evm_increaseTime', [epochLen + 1]);
-        await hre.ethers.provider.send('evm_mine', []);
-      }
-
-      await expect(NFT.unstake(positionId, amount))
-        .to.emit(NFT, 'PositionUnstaked')
-        .withArgs(positionId, amount);
-
-      // Burn assertion: ownerOf must revert (ERC-721: no owner for burned token).
-      await expect(NFT.ownerOf(positionId)).to.be.reverted;
-      // Position struct cleared. `positions(id)` returns zero fields.
-      const raw = await NFT.positions(positionId);
-      expect(raw.stakedAmount).to.equal(0n);
-      expect(raw.identityId).to.equal(0n);
-      expect(raw.lockTier).to.equal(0n);
-      expect(raw.createdAtEpoch).to.equal(0n);
+    it('withdraw on a non-existent tokenId reverts (ERC-721 ownerOf gate)', async () => {
+      // No stake -> tokenId 999 doesn't exist. The NFT's `ownerOf(tokenId)`
+      // check fails first (ERC-721 ERC721NonexistentToken).
+      await expect(NFT.connect(accounts[0]).withdraw(999)).to.be.reverted;
     });
 
-    it('non-owner unstake reverts NotPositionOwner', async () => {
-      const amount = hre.ethers.parseEther('500');
-      const lock = 1;
-      const staker = accounts[0];
-      const attacker = accounts[4];
-      await TokenContract.connect(staker).approve(await NFT.getAddress(), amount);
-      await NFT.connect(staker).stake(IDENTITY_ID, amount, lock);
-      const positionId = await NFT.totalSupply();
+    it('double-withdraw on the same tokenId reverts (no replay after burn)', async () => {
+      const identityId = await createProfile();
+      const amount = hre.ethers.parseEther('10000');
+      const tokenId = await stakeAs(accounts[0], identityId, amount, 1);
+      await advanceEpochs(2);
 
-      const epochLen = Number(await ChronosContract.epochLength());
-      for (let i = 0; i < lock + 1; i++) {
-        await hre.ethers.provider.send('evm_increaseTime', [epochLen + 1]);
-        await hre.ethers.provider.send('evm_mine', []);
-      }
-
-      await expect(NFT.connect(attacker).unstake(positionId, amount))
-        .to.be.revertedWithCustomError(NFT, 'NotPositionOwner')
-        .withArgs(positionId, attacker.address);
+      // First withdraw burns the NFT; second call must fail because there's
+      // no longer an owner to clear the wrapper-layer gate.
+      await NFT.connect(accounts[0]).withdraw(tokenId);
+      await expect(NFT.connect(accounts[0]).withdraw(tokenId)).to.be.reverted;
     });
 
-    it('unstake on a non-existent position reverts (ERC721: _requireOwned)', async () => {
-      await expect(NFT.unstake(999, 1)).to.be.reverted;
-    });
-
-    it('partial then full: two calls drain the stake and burn on the second', async () => {
-      // Two-step drain. Confirms `_burn` only fires when stakedAmount hits
-      // zero, matching the spec: "burn the NFT if the full amount is
-      // withdrawn".
-      const amount = hre.ethers.parseEther('300');
-      const lock = 1;
-      await TokenContract.approve(await NFT.getAddress(), amount);
-      await NFT.stake(IDENTITY_ID, amount, lock);
-      const positionId = await NFT.totalSupply();
-
-      const epochLen = Number(await ChronosContract.epochLength());
-      for (let i = 0; i < lock + 1; i++) {
-        await hre.ethers.provider.send('evm_increaseTime', [epochLen + 1]);
-        await hre.ethers.provider.send('evm_mine', []);
-      }
-
-      await NFT.unstake(positionId, amount / 2n);
-      // still alive
-      expect(await NFT.ownerOf(positionId)).to.equal(accounts[0].address);
-
-      await NFT.unstake(positionId, amount / 2n);
-      // burned
-      await expect(NFT.ownerOf(positionId)).to.be.reverted;
-    });
-
-    // Sanity glue to prove setup works with a non-default signer (fund
-    // flow via accounts[0] top-up). Keeps the `stakeAs` helper exercised
-    // so future additions can piggyback on it.
-    it('sanity: staking from a non-deployer signer works', async () => {
-      const positionId = await stakeAs(accounts[3], hre.ethers.parseEther('25000'), 2);
-      expect(await NFT.ownerOf(positionId)).to.equal(accounts[3].address);
+    it('sanity: createConviction works for a non-deployer signer (fresh staker funded by accounts[0])', async () => {
+      const identityId = await createProfile();
+      const amount = hre.ethers.parseEther('25000');
+      const tokenId = await stakeAs(accounts[3], identityId, amount, 1);
+      expect(await NFT.ownerOf(tokenId)).to.equal(accounts[3].address);
     });
   });
 });

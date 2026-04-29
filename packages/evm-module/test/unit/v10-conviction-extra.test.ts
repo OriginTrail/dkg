@@ -3,177 +3,255 @@
  *
  * Finding E-14 (MEDIUM, TEST-DEBT, see .test-audit/BUGS_FOUND.md):
  *   "v10-conviction.test.ts is shallow on Flow 1/2 (no lock tiers via
- *    staking NFT, no unstake). Only Flow 3 is strong."
+ *    staking NFT, no withdraw). Only Flow 3 is strong."
  *
  * Flow 1/2 in the V10 conviction spec = user locks TRAC for N epochs via
- * `DKGStakingConvictionNFT.stake(identityId, amount, lockTier)` and
- * inherits a conviction multiplier from the 5-tier ladder:
+ * `DKGStakingConvictionNFT.createConviction(identityId, amount, lockTier)`
+ * and inherits a conviction multiplier from the active tier table seeded
+ * in `ConvictionStakingStorage._tiers`:
  *
- *   lockTier  | multiplier
- *   ------------|-----------
- *        0      |  0 (sentinel: "no lock")
- *        1      |  1.0x  (SCALE18)
- *        2..2   |  1.5x
- *        3..5   |  2.0x
- *        6..11  |  3.5x
- *      >=12     |  6.0x
+ *   lockTier  | multiplier (1x = 1e18)
+ *   ----------|------------------------
+ *        0    |  1.0x  (rest state, no lock)
+ *        1    |  1.0x  (Flow 1 floor — 30-day lock)
+ *        3    |  2.0x  (Flow 1 — 90-day lock)
+ *        6    |  3.5x  (Flow 2 floor — 180-day lock)
+ *       12    |  6.0x  (Flow 2 max — 366-day lock)
  *
- * Conviction = stakedAmount * lockTier (the RAW amount, NOT multiplied —
- * the multiplier is a separate read via `getMultiplier`).
+ * Per Phase 5 the legacy 1.5x tier (lockTier=2) was removed; tiers 4/5/7-11
+ * were never registered (the active set is {0, 1, 3, 6, 12}). Unregistered
+ * tiers revert `InvalidLockTier` at the wrapper layer via
+ * `_convictionMultiplier`. Position fields (raw, lockTier, multiplier18) are
+ * read from `ConvictionStakingStorage.getPosition(tokenId)` — the V10 NFT
+ * is a thin wrapper and intentionally does NOT proxy storage reads.
  *
- * This file pins every boundary of the ladder + snap-downs + the
- * conviction formula. Unstake paths are already covered in
+ * Withdraw paths are already covered in
  * `DKGStakingConvictionNFT-extra.test.ts` (E-2).
  */
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 import { loadFixture } from '@nomicfoundation/hardhat-network-helpers';
 import { expect } from 'chai';
+import { randomBytes } from 'crypto';
 import hre from 'hardhat';
 
-import { DKGStakingConvictionNFT, Hub, Token } from '../../typechain';
+import {
+  Chronos,
+  ConvictionStakingStorage,
+  DKGStakingConvictionNFT,
+  Hub,
+  Profile,
+  StakingV10,
+  Token,
+} from '../../typechain';
 
 const SCALE18 = 10n ** 18n;
-const IDENTITY_ID = 1;
 
 describe('@unit V10 conviction lock-tier ladder — Flow 1/2 (E-14)', () => {
   let accounts: SignerWithAddress[];
-  let HubContract: Hub;
   let NFT: DKGStakingConvictionNFT;
+  let StakingV10Contract: StakingV10;
+  let ConvictionStakingStorageContract: ConvictionStakingStorage;
+  let ProfileContract: Profile;
   let TokenContract: Token;
+  let identityId: number;
 
   async function deployFixture() {
-    await hre.deployments.fixture(['DKGStakingConvictionNFT', 'Token']);
+    await hre.deployments.fixture(['DKGStakingConvictionNFT', 'StakingV10', 'Profile']);
     const Hub = await hre.ethers.getContract<Hub>('Hub');
-    const NFT = await hre.ethers.getContract<DKGStakingConvictionNFT>('DKGStakingConvictionNFT');
+    const NFT = await hre.ethers.getContract<DKGStakingConvictionNFT>(
+      'DKGStakingConvictionNFT',
+    );
+    const StakingV10 = await hre.ethers.getContract<StakingV10>('StakingV10');
+    const ConvictionStakingStorage = await hre.ethers.getContract<ConvictionStakingStorage>(
+      'ConvictionStakingStorage',
+    );
+    const Profile = await hre.ethers.getContract<Profile>('Profile');
     const Token = await hre.ethers.getContract<Token>('Token');
+    const Chronos = await hre.ethers.getContract<Chronos>('Chronos');
     const signers = await hre.ethers.getSigners();
     await Hub.setContractAddress('HubOwner', signers[0].address);
-    // Existing unit tests stub StakingStorage with an EOA to satisfy the
-    // Hub lookup (the NFT doesn't actually call into it — Phase 4). We
-    // do the same here so `stake()` runs without a Hub.getContractAddress
-    // revert.
-    await Hub.setContractAddress('StakingStorage', signers[18].address);
-    await Hub.forwardCall(await NFT.getAddress(), NFT.interface.encodeFunctionData('initialize'));
-    return { accounts: signers, Hub, NFT, Token };
+    return {
+      accounts: signers,
+      NFT,
+      StakingV10,
+      ConvictionStakingStorage,
+      Profile,
+      Token,
+      Chronos,
+    };
   }
 
   beforeEach(async () => {
     hre.helpers.resetDeploymentsJson();
-    ({ accounts, Hub: HubContract, NFT, Token: TokenContract } = await loadFixture(deployFixture));
+    ({
+      accounts,
+      NFT,
+      StakingV10: StakingV10Contract,
+      ConvictionStakingStorage: ConvictionStakingStorageContract,
+      Profile: ProfileContract,
+      Token: TokenContract,
+    } = await loadFixture(deployFixture));
+
+    // Mint a fresh node profile so every stake call has a real identity to
+    // delegate against (StakingV10.stake fail-fasts on a non-existent
+    // identityId via `profileStorage.profileExists`).
+    const nodeId = '0x' + randomBytes(32).toString('hex');
+    const tx = await ProfileContract.connect(accounts[1]).createProfile(
+      accounts[0].address,
+      [],
+      `Node ${Math.floor(Math.random() * 1_000_000)}`,
+      nodeId,
+      0,
+    );
+    const receipt = await tx.wait();
+    identityId = Number(receipt!.logs[0].topics[1]);
   });
 
-  async function stakeLock(amount: bigint, lockTier: number) {
-    await TokenContract.approve(await NFT.getAddress(), amount);
-    await NFT.stake(IDENTITY_ID, amount, lockTier);
-    return await NFT.totalSupply();
+  // Helper: stake `amount` from the deployer at `lockTier` and return the
+  // freshly minted tokenId (parsed off the wrapper-layer PositionCreated
+  // event so we don't have to track nextTokenId externally).
+  async function stakeLock(amount: bigint, lockTier: number): Promise<bigint> {
+    await TokenContract.mint(accounts[0].address, amount);
+    await TokenContract.connect(accounts[0]).approve(
+      await StakingV10Contract.getAddress(),
+      amount,
+    );
+    const tx = await NFT.connect(accounts[0]).createConviction(identityId, amount, lockTier);
+    const receipt = await tx.wait();
+    const topic = NFT.interface.getEvent('PositionCreated').topicHash;
+    const log = receipt!.logs.find((l) => l.topics[0] === topic)!;
+    return BigInt(log.topics[2]);
   }
 
   // ======================================================================
-  // Multiplier ladder boundary matrix
+  // Active-tier multiplier matrix. Phase 5 dropped the 1.5x tier and the
+  // 4-5/7-11 snap-down rows the legacy ladder used: only the seeded active
+  // tiers {0, 1, 3, 6, 12} are accepted by `_convictionMultiplier`.
   // ======================================================================
-  describe('getMultiplier ladder (Flow 1 short-lock + Flow 2 long-lock)', () => {
+  describe('createConviction multiplier ladder (active tiers only)', () => {
+    // Seeded baseline (see ConvictionStakingStorage._seedBaselineTiers):
+    //   tier 0  → 1.0x (rest state, 0 days)
+    //   tier 1  → 1.5x (30 days)
+    //   tier 3  → 2.0x (90 days)
+    //   tier 6  → 3.5x (180 days)
+    //   tier 12 → 6.0x (366 days)
     const cases: Array<[number, bigint, string]> = [
-      [1, 1n * SCALE18, 'lock=1   → 1.0x (Flow 1 floor)'],
-      [2, (15n * SCALE18) / 10n, 'lock=2   → 1.5x (Flow 1)'],
-      [3, 2n * SCALE18, 'lock=3   → 2.0x (Flow 1)'],
-      [4, 2n * SCALE18, 'lock=4   → 2.0x (snap-down to 3-tier)'],
-      [5, 2n * SCALE18, 'lock=5   → 2.0x (snap-down to 3-tier)'],
-      [6, (35n * SCALE18) / 10n, 'lock=6   → 3.5x (Flow 2 floor)'],
-      [11, (35n * SCALE18) / 10n, 'lock=11  → 3.5x (snap-down to 6-tier)'],
-      [12, 6n * SCALE18, 'lock=12  → 6.0x (max tier lower bound)'],
-      [24, 6n * SCALE18, 'lock=24  → 6.0x (clamp at max tier)'],
-      [100, 6n * SCALE18, 'lock=100 → 6.0x (clamp)'],
+      [0, SCALE18, 'lock=0  → 1.0x (rest-state, no lock — first-class V10 position)'],
+      [1, (15n * SCALE18) / 10n, 'lock=1  → 1.5x (30-day lock, Flow 1 floor)'],
+      [3, 2n * SCALE18, 'lock=3  → 2.0x (90-day lock, Flow 1)'],
+      [6, (35n * SCALE18) / 10n, 'lock=6  → 3.5x (180-day lock, Flow 2 floor)'],
+      [12, 6n * SCALE18, 'lock=12 → 6.0x (366-day lock, Flow 2 max)'],
     ];
 
     for (const [lock, expectedMultiplier, label] of cases) {
       it(`${label}`, async () => {
-        const positionId = await stakeLock(hre.ethers.parseEther('1000'), lock);
-        expect(await NFT.getMultiplier(positionId)).to.equal(expectedMultiplier);
-        // Sanity: getPosition returns the same value in the struct field.
-        const pos = await NFT.getPosition(positionId);
-        expect(pos.multiplier).to.equal(expectedMultiplier);
+        const tokenId = await stakeLock(hre.ethers.parseEther('1000'), lock);
+        const pos = await ConvictionStakingStorageContract.getPosition(tokenId);
+        expect(pos.multiplier18).to.equal(expectedMultiplier);
+        expect(pos.lockTier).to.equal(BigInt(lock));
       });
     }
 
-    it('lock=0 is REJECTED at stake time (InvalidLockTier) — multiplier is only ever read after stake', async () => {
-      const amount = hre.ethers.parseEther('1000');
-      await TokenContract.approve(await NFT.getAddress(), amount);
-      await expect(
-        NFT.stake(IDENTITY_ID, amount, 0),
-      ).to.be.revertedWithCustomError(NFT, 'InvalidLockTier');
-    });
+    // Negative-tier matrix: Phase 5 explicitly DROPPED tier 2, and 4/5/7-11
+    // were never registered. `_convictionMultiplier` must reject every one
+    // of them via `InvalidLockTier`.
+    const rejected = [2, 4, 5, 7, 11, 13, 24, 100];
+    for (const lock of rejected) {
+      it(`lock=${lock} reverts InvalidLockTier (not in the active tier set)`, async () => {
+        const amount = hre.ethers.parseEther('1000');
+        await TokenContract.mint(accounts[0].address, amount);
+        await TokenContract.connect(accounts[0]).approve(
+          await StakingV10Contract.getAddress(),
+          amount,
+        );
+        await expect(
+          NFT.connect(accounts[0]).createConviction(identityId, amount, lock),
+        ).to.be.revertedWithCustomError(NFT, 'InvalidLockTier');
+      });
+    }
   });
 
   // ======================================================================
-  // Conviction formula pin: conviction = stakedAmount * lockTier
-  // (multiplier is NOT applied inside getConviction — it's a separate read).
+  // Position raw amount + lockTier are pinned per-position (the storage
+  // ledger). Flow 1/2 conviction = raw stake at the chosen tier: rewards
+  // get COMPOUNDED into `raw` later (D19) but `lockTier` never changes
+  // for a given position. This locks the tier-table read so a future
+  // refactor can't silently drop a multiplier row.
   // ======================================================================
-  describe('getConviction: stakedAmount * lockTier (raw)', () => {
+  describe('Position storage records raw stake + lock tier', () => {
     const matrix: Array<[bigint, number]> = [
       [hre.ethers.parseEther('1000'), 1],
       [hre.ethers.parseEther('25000'), 3],
       [hre.ethers.parseEther('100000'), 6],
       [hre.ethers.parseEther('500000'), 12],
-      [hre.ethers.parseEther('1'), 24],
     ];
     for (const [amount, lock] of matrix) {
-      it(`stake=${hre.ethers.formatEther(amount)} TRAC, lock=${lock} → conviction = amount * lock`, async () => {
-        const positionId = await stakeLock(amount, lock);
-        const expected = amount * BigInt(lock);
-        expect(await NFT.getConviction(positionId)).to.equal(expected);
-        const pos = await NFT.getPosition(positionId);
-        expect(pos.conviction).to.equal(expected);
+      it(`stake=${hre.ethers.formatEther(amount)} TRAC, lock=${lock} → position.raw=amount, position.lockTier=lock`, async () => {
+        const tokenId = await stakeLock(amount, lock);
+        const pos = await ConvictionStakingStorageContract.getPosition(tokenId);
+        expect(pos.raw).to.equal(amount);
+        expect(pos.lockTier).to.equal(BigInt(lock));
       });
     }
   });
 
   // ======================================================================
-  // Parallel positions (Flow 1 vs Flow 2): two positions, two tiers,
-  // each minted independently, multipliers/conviction untouched by the
-  // other. Confirms the ladder is per-position, not per-identity-id.
+  // Two parallel positions on the same identityId stay independent: each
+  // has its own multiplier + raw stake + tokenId. Confirms the ladder is
+  // per-position, not per-identity-id (D21 — NFTs are ephemeral, the
+  // tokenId is the unit of accounting, not the staker × identity tuple).
   // ======================================================================
-  it('two parallel positions for the same identityId are INDEPENDENT in multiplier + conviction', async () => {
+  it('two parallel positions for the same identityId are INDEPENDENT (multiplier + raw + tokenId)', async () => {
     const a = hre.ethers.parseEther('1000');
     const b = hre.ethers.parseEther('2500');
 
-    const posA = await stakeLock(a, 2); // Flow 1 short lock → 1.5x
-    const posB = await stakeLock(b, 12); // Flow 2 long lock → 6.0x
+    const posA = await stakeLock(a, 3); // Flow 1 → 2.0x
+    const posB = await stakeLock(b, 12); // Flow 2 max → 6.0x
 
     expect(posA).to.not.equal(posB);
-    expect(await NFT.getMultiplier(posA)).to.equal((15n * SCALE18) / 10n);
-    expect(await NFT.getMultiplier(posB)).to.equal(6n * SCALE18);
-    expect(await NFT.getConviction(posA)).to.equal(a * 2n);
-    expect(await NFT.getConviction(posB)).to.equal(b * 12n);
 
-    // Position struct fields are the raw stake + lock, not any weighted sum.
-    const posAInfo = await NFT.getPosition(posA);
-    const posBInfo = await NFT.getPosition(posB);
-    expect(posAInfo.stakedAmount).to.equal(a);
-    expect(posAInfo.lockTier).to.equal(2n);
-    expect(posBInfo.stakedAmount).to.equal(b);
+    const posAInfo = await ConvictionStakingStorageContract.getPosition(posA);
+    const posBInfo = await ConvictionStakingStorageContract.getPosition(posB);
+
+    expect(posAInfo.multiplier18).to.equal(2n * SCALE18);
+    expect(posBInfo.multiplier18).to.equal(6n * SCALE18);
+    expect(posAInfo.raw).to.equal(a);
+    expect(posBInfo.raw).to.equal(b);
+    expect(posAInfo.lockTier).to.equal(3n);
     expect(posBInfo.lockTier).to.equal(12n);
+    // Same identity on both — Flow 1 and Flow 2 stack on the same node.
+    expect(posAInfo.identityId).to.equal(posBInfo.identityId);
+    expect(posAInfo.identityId).to.equal(BigInt(identityId));
   });
 
   // ======================================================================
-  // Pure-function `isLockExpired` behavior at fixture time (epoch=1).
-  // With the NFT's `chronosAddress == address(0)` fallback (see
-  // `_getCurrentEpoch` in the contract), current epoch is 1. A fresh
-  // position with lock=1 is expired immediately; lock>=2 is not.
-  // Locks this behavior so a Chronos wiring change becomes a loud test
-  // failure instead of a silent tier-0 lock.
+  // Lock-expiry semantics. `expiryTimestamp == 0` is the rest-state
+  // sentinel (tier 0, permanent), every other tier sets a future
+  // timestamp computed inside `_computeExpiryTimestamp` from the active
+  // tier's `durationSeconds`. Pinning these so a Chronos / tier-table
+  // wiring change becomes a loud test failure instead of a silent
+  // never-expiring lock.
   // ======================================================================
-  describe('isLockExpired (Chronos-fallback path)', () => {
-    it('lock=1 at fresh fixture → isLockExpired true (epoch 1 >= 1+1? actually 1 < 2, so false)', async () => {
-      // _getCurrentEpoch falls back to 1 with no Chronos.
-      // expiresAt = createdAtEpoch(1) + lockTier(1) = 2.
-      // currentEpoch(1) >= 2 → false.
-      const posId = await stakeLock(hre.ethers.parseEther('100'), 1);
-      expect(await NFT.isLockExpired(posId)).to.equal(false);
+  describe('Position expiryTimestamp (rest-state sentinel + non-zero locks)', () => {
+    it('lock=0 (rest state) sets expiryTimestamp=0 (permanent — no boost to decay)', async () => {
+      const tokenId = await stakeLock(hre.ethers.parseEther('100'), 0);
+      const pos = await ConvictionStakingStorageContract.getPosition(tokenId);
+      expect(pos.expiryTimestamp).to.equal(0n);
     });
 
-    it('lock=2 at fresh fixture → isLockExpired false (1 >= 1+2 is false)', async () => {
-      const posId = await stakeLock(hre.ethers.parseEther('100'), 2);
-      expect(await NFT.isLockExpired(posId)).to.equal(false);
+    it('lock=1 sets expiryTimestamp > current block timestamp (non-zero, future)', async () => {
+      const tokenId = await stakeLock(hre.ethers.parseEther('100'), 1);
+      const pos = await ConvictionStakingStorageContract.getPosition(tokenId);
+      const block = await hre.ethers.provider.getBlock('latest');
+      expect(pos.expiryTimestamp).to.be.gt(BigInt(block!.timestamp));
+    });
+
+    it('lock=12 expiry timestamp is strictly later than lock=1 expiry timestamp', async () => {
+      const tokenIdShort = await stakeLock(hre.ethers.parseEther('100'), 1);
+      const tokenIdLong = await stakeLock(hre.ethers.parseEther('100'), 12);
+      const posShort = await ConvictionStakingStorageContract.getPosition(tokenIdShort);
+      const posLong = await ConvictionStakingStorageContract.getPosition(tokenIdLong);
+      expect(posLong.expiryTimestamp).to.be.gt(posShort.expiryTimestamp);
     });
   });
 });

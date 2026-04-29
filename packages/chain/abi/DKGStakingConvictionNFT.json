@@ -136,7 +136,17 @@
   },
   {
     "inputs": [],
-    "name": "InvalidLockEpochs",
+    "name": "EmptyBatch",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "InvalidIdentityId",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "InvalidLockTier",
     "type": "error"
   },
   {
@@ -238,12 +248,31 @@
       },
       {
         "indexed": false,
-        "internalType": "uint8",
-        "name": "lockEpochs",
-        "type": "uint8"
+        "internalType": "uint40",
+        "name": "lockTier",
+        "type": "uint40"
+      },
+      {
+        "indexed": false,
+        "internalType": "bool",
+        "name": "isAdmin",
+        "type": "bool"
       }
     ],
     "name": "ConvertedFromV8",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "v10LaunchEpoch",
+        "type": "uint256"
+      }
+    ],
+    "name": "MigrationBatchFinalized",
     "type": "event"
   },
   {
@@ -275,9 +304,9 @@
       },
       {
         "indexed": false,
-        "internalType": "uint8",
-        "name": "lockEpochs",
-        "type": "uint8"
+        "internalType": "uint40",
+        "name": "lockTier",
+        "type": "uint40"
       }
     ],
     "name": "PositionCreated",
@@ -314,17 +343,42 @@
       {
         "indexed": true,
         "internalType": "uint256",
+        "name": "oldTokenId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "newTokenId",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint40",
+        "name": "newLockTier",
+        "type": "uint40"
+      }
+    ],
+    "name": "PositionRelocked",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
         "name": "tokenId",
         "type": "uint256"
       },
       {
         "indexed": false,
-        "internalType": "uint8",
-        "name": "newLockEpochs",
-        "type": "uint8"
+        "internalType": "uint96",
+        "name": "amount",
+        "type": "uint96"
       }
     ],
-    "name": "PositionRelocked",
+    "name": "PositionWithdrawn",
     "type": "event"
   },
   {
@@ -353,51 +407,6 @@
     "type": "event"
   },
   {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": true,
-        "internalType": "uint256",
-        "name": "tokenId",
-        "type": "uint256"
-      }
-    ],
-    "name": "WithdrawalCancelled",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": true,
-        "internalType": "uint256",
-        "name": "tokenId",
-        "type": "uint256"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint96",
-        "name": "amount",
-        "type": "uint96"
-      }
-    ],
-    "name": "WithdrawalCreated",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": true,
-        "internalType": "uint256",
-        "name": "tokenId",
-        "type": "uint256"
-      }
-    ],
-    "name": "WithdrawalFinalized",
-    "type": "event"
-  },
-  {
     "inputs": [],
     "name": "SCALE18",
     "outputs": [
@@ -411,16 +420,61 @@
     "type": "function"
   },
   {
-    "inputs": [],
-    "name": "WITHDRAWAL_DELAY",
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "delegator",
+        "type": "address"
+      },
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      },
+      {
+        "internalType": "uint40",
+        "name": "lockTier",
+        "type": "uint40"
+      }
+    ],
+    "name": "adminMigrateV8",
     "outputs": [
       {
         "internalType": "uint256",
-        "name": "",
+        "name": "tokenId",
         "type": "uint256"
       }
     ],
-    "stateMutability": "view",
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address[]",
+        "name": "delegators",
+        "type": "address[]"
+      },
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      },
+      {
+        "internalType": "uint40",
+        "name": "lockTier",
+        "type": "uint40"
+      }
+    ],
+    "name": "adminMigrateV8Batch",
+    "outputs": [
+      {
+        "internalType": "uint256[]",
+        "name": "tokenIds",
+        "type": "uint256[]"
+      }
+    ],
+    "stateMutability": "nonpayable",
     "type": "function"
   },
   {
@@ -474,19 +528,6 @@
     "type": "function"
   },
   {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "tokenId",
-        "type": "uint256"
-      }
-    ],
-    "name": "cancelWithdrawal",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
     "inputs": [],
     "name": "chronos",
     "outputs": [
@@ -513,27 +554,16 @@
     "type": "function"
   },
   {
-    "inputs": [
-      {
-        "internalType": "uint72",
-        "name": "identityId",
-        "type": "uint72"
-      },
-      {
-        "internalType": "uint8",
-        "name": "lockEpochs",
-        "type": "uint8"
-      }
-    ],
-    "name": "convertToNFT",
+    "inputs": [],
+    "name": "contractName",
     "outputs": [
       {
-        "internalType": "uint256",
-        "name": "tokenId",
-        "type": "uint256"
+        "internalType": "string",
+        "name": "",
+        "type": "string"
       }
     ],
-    "stateMutability": "nonpayable",
+    "stateMutability": "pure",
     "type": "function"
   },
   {
@@ -562,9 +592,9 @@
         "type": "uint96"
       },
       {
-        "internalType": "uint8",
-        "name": "lockEpochs",
-        "type": "uint8"
+        "internalType": "uint40",
+        "name": "lockTier",
+        "type": "uint40"
       }
     ],
     "name": "createConviction",
@@ -582,42 +612,11 @@
     "inputs": [
       {
         "internalType": "uint256",
-        "name": "tokenId",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint96",
-        "name": "amount",
-        "type": "uint96"
-      }
-    ],
-    "name": "createWithdrawal",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "delegatorsInfo",
-    "outputs": [
-      {
-        "internalType": "contract DelegatorsInfo",
-        "name": "",
-        "type": "address"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "tokenId",
+        "name": "v10LaunchEpoch",
         "type": "uint256"
       }
     ],
-    "name": "finalizeWithdrawal",
+    "name": "finalizeMigrationBatch",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
@@ -695,7 +694,7 @@
         "type": "string"
       }
     ],
-    "stateMutability": "pure",
+    "stateMutability": "view",
     "type": "function"
   },
   {
@@ -791,17 +790,23 @@
     "inputs": [
       {
         "internalType": "uint256",
-        "name": "tokenId",
+        "name": "oldTokenId",
         "type": "uint256"
       },
       {
-        "internalType": "uint8",
-        "name": "newLockEpochs",
-        "type": "uint8"
+        "internalType": "uint40",
+        "name": "newLockTier",
+        "type": "uint40"
       }
     ],
     "name": "relock",
-    "outputs": [],
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "newTokenId",
+        "type": "uint256"
+      }
+    ],
     "stateMutability": "nonpayable",
     "type": "function"
   },
@@ -859,6 +864,30 @@
   {
     "inputs": [
       {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      },
+      {
+        "internalType": "uint40",
+        "name": "lockTier",
+        "type": "uint40"
+      }
+    ],
+    "name": "selfMigrateV8",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
         "internalType": "address",
         "name": "operator",
         "type": "address"
@@ -906,19 +935,6 @@
     "outputs": [
       {
         "internalType": "contract ShardingTableStorage",
-        "name": "",
-        "type": "address"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "stakingContract",
-    "outputs": [
-      {
-        "internalType": "contract IStaking",
         "name": "",
         "type": "address"
       }
@@ -1119,6 +1135,25 @@
       }
     ],
     "stateMutability": "pure",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
+      }
+    ],
+    "name": "withdraw",
+    "outputs": [
+      {
+        "internalType": "uint96",
+        "name": "amount",
+        "type": "uint96"
+      }
+    ],
+    "stateMutability": "nonpayable",
     "type": "function"
   }
 ]

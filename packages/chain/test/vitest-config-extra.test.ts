@@ -15,7 +15,7 @@
  *
  * This test asserts the raw config file does NOT carry those excludes. It
  * will stay RED until the excludes are removed — that RED state IS the bug
- * evidence. See BUGS_FOUND.md CH-1.
+ * evidence.
  *
  * Per QA policy: do NOT modify production code / configs. The failing test
  * is the finding.
@@ -64,7 +64,7 @@ describe('vitest.config.ts — default run must include full lifecycle suite [CH
     // PROD-BUG (config): today the config ships with
     //   exclude: ['test/evm-adapter.test.ts', 'test/evm-e2e.test.ts']
     // which silently drops lifecycle coverage. This expectation will stay
-    // red until that line is removed. See BUGS_FOUND.md CH-1.
+    // red until that line is removed.
     expect(excludes).not.toContain('test/evm-adapter.test.ts');
   });
 
