@@ -36,10 +36,15 @@ export function dkgHomeDir(): string {
  *      daemon is actually running. The dir whose pid is dead is rejected
  *      (handles the both-folders-on-disk-with-stale-state case where a
  *      developer alternates monorepo and npm daemons on the same machine).
- *   3. Two-daemon tiebreak — when both pids are alive (rare; e.g. two
- *      daemons bound to different ports), match `api.port` to the caller's
- *      `daemonUrl` port to identify which daemon we're talking to.
- *   4. Cold-start fallback — when no daemon is running yet, pick the dir
+ *   3. `api.port` ↔ `daemonUrl` port match — fires whenever exactly one
+ *      home's `api.port` matches the gateway's configured target. Covers
+ *      both the two-daemon tiebreak (both pids alive on different ports)
+ *      AND the cold-start case (gateway starts before its target daemon).
+ *      Trusting the gateway's configured target as the source of truth
+ *      avoids the failure mode where mtime alone picks a different
+ *      home than the gateway is actually talking to (T72).
+ *   4. Cold-start fallback — when daemonUrl can't disambiguate (no
+ *      daemonUrl, or both/neither home matches the port), pick the dir
  *      whose `api.port` was most recently modified. This is overwhelmingly
  *      the dir the user is about to start the daemon in again.
  *   5. `~/.dkg` (npm default) — final fallback for fresh installs.
@@ -63,16 +68,35 @@ export function resolveDkgHome(opts?: { daemonUrl?: string }): string {
   if (dkgAlive && !dkgDevAlive) return dkg;
   if (dkgDevAlive && !dkgAlive) return dkgDev;
 
-  // (2) Both alive (rare): use daemonUrl port to disambiguate.
-  if (dkgAlive && dkgDevAlive && opts?.daemonUrl) {
+  // (2) `api.port` matches `daemonUrl` port — fires whenever both pids
+  //     agree (both alive: two-daemon disambiguation) AND in the cold-start
+  //     case where both pids are dead. T72 — previously gated on
+  //     `dkgAlive && dkgDevAlive`, which silently fell back to mtime when
+  //     the gateway started before its target daemon. If the freshest
+  //     `api.port` belonged to a DIFFERENT daemon than the one `daemonUrl`
+  //     is configured for, the adapter would cache the wrong
+  //     `auth.token` / `agent-keystore.json` for its lifetime.
+  //
+  //     Only fires when EXACTLY ONE home matches the target port. If both
+  //     home dirs have the same port written (typical when an operator
+  //     switches between npm and monorepo daemons that both default to
+  //     9200), the port match is ambiguous and we fall through to mtime
+  //     for tiebreak. If neither matches, the gateway is talking to a
+  //     daemon neither home has ever hosted — fall through to mtime for
+  //     a defensible default.
+  if (opts?.daemonUrl) {
     const target = extractPort(opts.daemonUrl);
     if (target != null) {
-      if (readDkgApiPortSync(dkgDev) === target) return dkgDev;
-      if (readDkgApiPortSync(dkg) === target) return dkg;
+      const dkgPortMatch = readDkgApiPortSync(dkg) === target;
+      const dkgDevPortMatch = readDkgApiPortSync(dkgDev) === target;
+      if (dkgDevPortMatch && !dkgPortMatch) return dkgDev;
+      if (dkgPortMatch && !dkgDevPortMatch) return dkg;
     }
   }
 
-  // (3) Neither alive (cold start): pick freshest by api.port mtime.
+  // (3) No daemonUrl, or daemonUrl port matched neither home: pick freshest
+  //     by api.port mtime. Overwhelmingly the dir the user is about to
+  //     restart the daemon in.
   const dkgMtime = mtimeOfMs(join(dkg, 'api.port'));
   const dkgDevMtime = mtimeOfMs(join(dkgDev, 'api.port'));
   if (dkgDevMtime != null && (dkgMtime == null || dkgDevMtime > dkgMtime)) return dkgDev;

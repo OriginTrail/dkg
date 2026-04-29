@@ -158,6 +158,47 @@ describe('resolveDkgHome', () => {
     await writePid(dkgDev, ALIVE);
     expect(resolveDkgHome()).toBe(dkgDev);
   });
+
+  it("T72 — cold start, both pids dead, daemonUrl matches ~/.dkg's stale api.port → returns ~/.dkg even when ~/.dkg-dev/api.port is more recent", async () => {
+    // Codex T72: previously the cold-start branch ignored daemonUrl and
+    // fell back to mtime alone. If the freshest api.port belonged to a
+    // DIFFERENT daemon than the one daemonUrl is configured for, the
+    // adapter would cache the wrong auth.token for its lifetime.
+    // Concrete scenario: user ran monorepo daemon yesterday at 9200,
+    // today the gateway is configured for the npm daemon at 9201 (which
+    // hasn't started yet).
+    await writePid(dkg, DEAD);
+    await writePid(dkgDev, DEAD);
+    const fresh = new Date();
+    const old = new Date(Date.now() - 60_000);
+    await writePort(dkgDev, 9200, fresh); // monorepo daemon, more recent
+    await writePort(dkg, 9201, old);       // npm daemon, older but matches daemonUrl
+    expect(resolveDkgHome({ daemonUrl: 'http://127.0.0.1:9201' })).toBe(dkg);
+  });
+
+  it("T72 — cold start, both pids dead, daemonUrl matches ~/.dkg-dev's stale api.port → returns ~/.dkg-dev even when ~/.dkg/api.port is more recent", async () => {
+    await writePid(dkg, DEAD);
+    await writePid(dkgDev, DEAD);
+    const fresh = new Date();
+    const old = new Date(Date.now() - 60_000);
+    await writePort(dkg, 9201, fresh);    // npm daemon, more recent
+    await writePort(dkgDev, 9200, old);   // monorepo daemon, older but matches daemonUrl
+    expect(resolveDkgHome({ daemonUrl: 'http://127.0.0.1:9200' })).toBe(dkgDev);
+  });
+
+  it('T72 — both pids dead, both api.port files have the same port (ambiguous) → falls back to mtime tiebreak', async () => {
+    // When both homes have the same api.port written (typical when an
+    // operator alternates npm and monorepo daemons that both default to
+    // 9200), the port match is ambiguous. Resolver falls through to
+    // mtime so the most recently active home wins.
+    await writePid(dkg, DEAD);
+    await writePid(dkgDev, DEAD);
+    const fresh = new Date();
+    const old = new Date(Date.now() - 60_000);
+    await writePort(dkg, 9200, fresh);
+    await writePort(dkgDev, 9200, old);
+    expect(resolveDkgHome({ daemonUrl: 'http://127.0.0.1:9200' })).toBe(dkg);
+  });
 });
 
 describe('isProcessAlive', () => {
