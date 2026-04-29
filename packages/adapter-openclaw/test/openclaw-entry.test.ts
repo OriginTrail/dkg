@@ -35,6 +35,7 @@ describe('openclaw-entry', () => {
     const root = mkdtempSync(join(tmpdir(), 'openclaw-entry-test-'));
     tempRoots.push(root);
     mkdirSync(join(root, 'dist'), { recursive: true });
+    writeFileSync(join(root, 'package.json'), JSON.stringify({ type: 'module' }), 'utf8');
     copyFileSync(new URL('../openclaw-entry.mjs', import.meta.url), join(root, 'openclaw-entry.mjs'));
     writeFileSync(
       join(root, 'dist', 'index.js'),
