@@ -18,6 +18,7 @@ import {
   isDkgMonorepo,
   dkgDir,
   repoDir,
+  resolveChainConfig,
 } from '../src/config.js';
 
 describe('removePid / removeApiPort (catch path)', () => {
@@ -178,5 +179,84 @@ describe('localAgentIntegrations config round-trip', () => {
     expect(loaded.localAgentIntegrations?.openclaw?.transport?.gatewayUrl).toBe('http://gateway.local:3030');
     expect(loaded.localAgentIntegrations?.openclaw?.manifest?.version).toBe('2026.4.12');
     expect(loaded.localAgentIntegrations?.openclaw?.runtime?.status).toBe('ready');
+  });
+});
+
+describe('resolveChainConfig (field-level merge)', () => {
+  const fullNetworkChain = {
+    type: 'evm' as const,
+    rpcUrl: 'https://network.example/rpc',
+    hubAddress: '0xNETWORKHUB000000000000000000000000000000',
+    chainId: 'base:84532',
+  };
+
+  it('returns undefined when neither config nor network supplies a chain block', () => {
+    expect(resolveChainConfig({}, null)).toBeUndefined();
+    expect(resolveChainConfig({}, { chain: undefined })).toBeUndefined();
+    expect(resolveChainConfig(null, null)).toBeUndefined();
+  });
+
+  it('falls back to the network chain when config has no override', () => {
+    const merged = resolveChainConfig({}, { chain: fullNetworkChain });
+    expect(merged).toEqual({
+      type: 'evm',
+      rpcUrl: fullNetworkChain.rpcUrl,
+      hubAddress: fullNetworkChain.hubAddress,
+      chainId: fullNetworkChain.chainId,
+    });
+  });
+
+  it('overrides only the fields the operator set, inheriting the rest from network', () => {
+    // Operator wants their private RPC but should inherit hub + chainId.
+    const merged = resolveChainConfig(
+      { chain: { rpcUrl: 'https://my-private-rpc.example/abc' } },
+      { chain: fullNetworkChain },
+    );
+    expect(merged?.rpcUrl).toBe('https://my-private-rpc.example/abc');
+    expect(merged?.hubAddress).toBe(fullNetworkChain.hubAddress);
+    expect(merged?.chainId).toBe(fullNetworkChain.chainId);
+    expect(merged?.type).toBe('evm');
+  });
+
+  it('overrides hub independently of rpcUrl (multichain forward-compat)', () => {
+    const merged = resolveChainConfig(
+      { chain: { hubAddress: '0xOPERATORHUB0000000000000000000000000000' } },
+      { chain: fullNetworkChain },
+    );
+    expect(merged?.hubAddress).toBe('0xOPERATORHUB0000000000000000000000000000');
+    expect(merged?.rpcUrl).toBe(fullNetworkChain.rpcUrl);
+    expect(merged?.chainId).toBe(fullNetworkChain.chainId);
+  });
+
+  it('returns a partial block when only config supplies fields (no network)', () => {
+    const merged = resolveChainConfig(
+      { chain: { rpcUrl: 'https://standalone.example/rpc' } },
+      null,
+    );
+    expect(merged?.rpcUrl).toBe('https://standalone.example/rpc');
+    expect(merged?.hubAddress).toBeUndefined();
+    expect(merged?.chainId).toBeUndefined();
+    // Callers (lifecycle, publisher-runner) MUST guard for the missing
+    // hubAddress before passing to the agent.
+  });
+
+  it('preserves explicit `type: "mock"` and `mockIdentityId` override (test-only path)', () => {
+    const merged = resolveChainConfig(
+      { chain: { type: 'mock', mockIdentityId: '42' } },
+      { chain: fullNetworkChain },
+    );
+    expect(merged?.type).toBe('mock');
+    expect(merged?.mockIdentityId).toBe('42');
+    // Hub/RPC inherit, but the daemon's mock branch ignores them.
+    expect(merged?.hubAddress).toBe(fullNetworkChain.hubAddress);
+  });
+
+  it('does not return undefined fields as own keys (clean shape for downstream spread)', () => {
+    const merged = resolveChainConfig(
+      { chain: { rpcUrl: 'https://only-rpc.example' } },
+      null,
+    );
+    expect(merged).toBeDefined();
+    expect(Object.keys(merged ?? {})).toEqual(['type', 'rpcUrl']);
   });
 });

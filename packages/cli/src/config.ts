@@ -156,7 +156,15 @@ export interface DkgConfig {
   contextGraphs?: string[];
   paranets?: string[];
   autoUpdate?: AutoUpdateConfig;
-  chain?: ChainConfig;
+  /**
+   * Chain config. Field-merged on top of `network/<env>.json#chain` via
+   * `resolveChainConfig()`, so an operator can override individual fields
+   * (e.g. just `rpcUrl` to point at a private RPC) without having to
+   * restate `hubAddress` and `chainId`. Fields omitted here inherit the
+   * network defaults — including future hub rotations propagated by the
+   * auto-updater pulling a fresh network/<env>.json.
+   */
+  chain?: Partial<ChainConfig>;
   /** Optional LLM for the Node UI chatbot (natural language → SPARQL, answers). */
   llm?: LlmConfig;
   /** Block explorer URL for TX links (default: derived from chainId). */
@@ -404,6 +412,43 @@ export function resolveAutoUpdateConfig(
     ...(sshCommand ? { sshCommand } : {}),
     checkIntervalMinutes,
   };
+}
+
+/**
+ * Field-level merge of the effective chain configuration.
+ *
+ * Precedence per field: `~/.dkg/config.json#chain` → `network/<env>.json#chain`.
+ * Returns `undefined` when neither source provides a chain block.
+ *
+ * Rationale: the daemon previously read chain via `config.chain ?? network.chain`
+ * (whole-object fallback), which meant an operator who set just `rpcUrl` in their
+ * local config would lose `hubAddress` / `chainId` from the network file and
+ * crash deeper inside ethers. With per-field merge, operators can override
+ * individual fields (e.g. swap public RPC for a private one) and still inherit
+ * the rest — including future hub rotations the auto-updater pulls down.
+ *
+ * The return type is `Partial<ChainConfig>` because either source may be
+ * partial; consumers that need both `rpcUrl` and `hubAddress` (lifecycle,
+ * publisher-runner) MUST guard for those fields before passing to the agent.
+ */
+export function resolveChainConfig(
+  config: Pick<DkgConfig, 'chain'> | null | undefined,
+  network: Pick<NetworkConfig, 'chain'> | null | undefined,
+): Partial<ChainConfig> | undefined {
+  const cfg = config?.chain;
+  const net = network?.chain;
+  if (!cfg && !net) return undefined;
+  const merged: Partial<ChainConfig> = {
+    type: cfg?.type ?? net?.type ?? 'evm',
+  };
+  const rpcUrl = cfg?.rpcUrl ?? net?.rpcUrl;
+  if (rpcUrl !== undefined) merged.rpcUrl = rpcUrl;
+  const hubAddress = cfg?.hubAddress ?? net?.hubAddress;
+  if (hubAddress !== undefined) merged.hubAddress = hubAddress;
+  const chainId = cfg?.chainId ?? net?.chainId;
+  if (chainId !== undefined) merged.chainId = chainId;
+  if (cfg?.mockIdentityId !== undefined) merged.mockIdentityId = cfg.mockIdentityId;
+  return merged;
 }
 
 /**

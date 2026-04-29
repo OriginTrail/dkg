@@ -14,7 +14,8 @@ import yaml from 'js-yaml';
 import {
   loadConfig, saveConfig, configExists, configPath,
   readPid, readApiPort, isProcessRunning, dkgDir, logPath, ensureDkgDir,
-  loadNetworkConfig, loadProjectConfig, resolveAutoUpdateConfig, releasesDir, activeSlot, swapSlot,
+  loadNetworkConfig, loadProjectConfig, resolveAutoUpdateConfig, resolveChainConfig,
+  releasesDir, activeSlot, swapSlot,
   slotEntryPoint, isStandaloneInstall,
   resolveContextGraphs, resolveNetworkDefaultContextGraphs,
 } from './config.js';
@@ -318,10 +319,13 @@ program
       };
     }
 
-    // Chain configuration
-    const defaultRpcUrl = existing.chain?.rpcUrl ?? network?.chain?.rpcUrl;
-    const defaultHubAddress = existing.chain?.hubAddress ?? network?.chain?.hubAddress;
-    const defaultChainId = existing.chain?.chainId ?? network?.chain?.chainId;
+    // Chain configuration. Field-merge: existing config wins per-field over
+    // network defaults so an operator who's only customised RPC keeps that
+    // override even after `dkg init` re-prompts.
+    const chainDefaults = resolveChainConfig(existing, network);
+    const defaultRpcUrl = chainDefaults?.rpcUrl;
+    const defaultHubAddress = chainDefaults?.hubAddress;
+    const defaultChainId = chainDefaults?.chainId;
 
     console.log('\nBlockchain Configuration:');
     const rpcUrl = await ask('RPC URL', defaultRpcUrl);
@@ -391,7 +395,14 @@ program
         }`,
       );
     }
-    console.log(`  chain:      ${config.chain ? `${config.chain.rpcUrl} (hub: ${config.chain.hubAddress?.slice(0, 10)}...)` : '(not configured)'}`);
+    {
+      // Display the effective (config + network) merged view, so an operator
+      // who only set rpcUrl still sees the inherited hub from the network.
+      const effective = resolveChainConfig(config, network);
+      console.log(`  chain:      ${effective?.rpcUrl && effective?.hubAddress
+        ? `${effective.rpcUrl} (hub: ${effective.hubAddress.slice(0, 10)}...)`
+        : '(not configured)'}`);
+    }
     if (network) {
       console.log(`  network:    ${network.networkName}`);
     }
@@ -2545,9 +2556,10 @@ program
         process.exit(1);
       }
 
-      const rpcUrl = config.chain?.rpcUrl ?? network?.chain?.rpcUrl;
-      const hubAddress = config.chain?.hubAddress ?? network?.chain?.hubAddress;
-      const chainId = config.chain?.chainId ?? network?.chain?.chainId ?? '(unknown)';
+      const chainResolved = resolveChainConfig(config, network);
+      const rpcUrl = chainResolved?.rpcUrl;
+      const hubAddress = chainResolved?.hubAddress;
+      const chainId = chainResolved?.chainId ?? '(unknown)';
 
       let provider: ethers.JsonRpcProvider | null = null;
       let token: ethers.Contract | null = null;
@@ -2614,8 +2626,9 @@ program
         process.exit(1);
       }
 
-      const rpcUrl = config.chain?.rpcUrl ?? network?.chain?.rpcUrl;
-      const hubAddress = config.chain?.hubAddress ?? network?.chain?.hubAddress;
+      const chainResolved = resolveChainConfig(config, network);
+      const rpcUrl = chainResolved?.rpcUrl;
+      const hubAddress = chainResolved?.hubAddress;
       if (!rpcUrl || !hubAddress) {
         console.error('Chain not configured. Run "dkg init" and set RPC URL + Hub address.');
         process.exit(1);
