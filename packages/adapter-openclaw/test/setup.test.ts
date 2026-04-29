@@ -665,6 +665,44 @@ describe('mergeOpenClawConfig', () => {
     expect(config.plugins.entries['adapter-openclaw'].config.installedWorkspace).toBe(secondWs);
   });
 
+  it('updates setup-owned stateDir when the existing value uses a symlink alias', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    const realWs = join(testDir, 'workspace-real');
+    const aliasWs = join(testDir, 'workspace-alias');
+    const secondWs = join(testDir, 'workspace-next');
+    mkdirSync(realWs, { recursive: true });
+    mkdirSync(secondWs, { recursive: true });
+    try {
+      symlinkSync(realWs, aliasWs, 'dir');
+    } catch {
+      return;
+    }
+    writeFileSync(configPath, JSON.stringify({
+      plugins: {
+        entries: {
+          'adapter-openclaw': {
+            enabled: true,
+            config: {
+              installedWorkspace: realWs,
+              stateDir: join(aliasWs, '.openclaw'),
+            },
+          },
+        },
+      },
+    }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', {
+      daemonUrl: 'http://127.0.0.1:9200',
+      stateDir: join(secondWs, '.openclaw'),
+      memory: { enabled: true },
+      channel: { enabled: true },
+    }, secondWs);
+
+    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    expect(config.plugins.entries['adapter-openclaw'].config.stateDir).toBe(join(secondWs, '.openclaw'));
+    expect(config.plugins.entries['adapter-openclaw'].config.installedWorkspace).toBe(secondWs);
+  });
+
   it('overrideDaemonUrl option replaces existing daemonUrl (used when --port is explicit)', () => {
     const configPath = join(testDir, 'openclaw.json');
     writeFileSync(configPath, JSON.stringify({
