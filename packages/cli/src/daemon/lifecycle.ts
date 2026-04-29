@@ -347,6 +347,77 @@ export function resolveMemoryAgentAddress(agent: {
   return agent.getDefaultAgentAddress() ?? agent.peerId;
 }
 
+/**
+ * Result of the daemon's "should this fatal error actually be fatal?"
+ * check, used by the top-level `uncaughtException` / `unhandledRejection`
+ * handlers in `runDaemonInner`.
+ *
+ *   suppress=true  → log a warning and keep the daemon alive
+ *   suppress=false → log [fatal] + process.exit(1)
+ *
+ * `category` is included in the warning line so log readers know which
+ * known-bad-pattern fired (and so the suppression list stays auditable
+ * when something goes wrong upstream and we have to widen it again).
+ */
+export interface FatalSuppressionVerdict {
+  suppress: boolean;
+  category: string | null;
+}
+
+/**
+ * Pure helper that classifies an uncaught exception or unhandled
+ * rejection. Each entry pins one specific upstream bug we already
+ * know about — keep this list explicit and auditable.
+ *
+ *  1. GossipSub stream-state errors — libp2p-pubsub races where the
+ *     daemon writes to a stream that's been closed mid-publish.
+ *     Long-standing, harmless, suppressed since the original handler
+ *     shipped.
+ *
+ *  2. libp2p `@libp2p/utils` job-queue `JobRecipient.onProgress`
+ *     recursion — issue #286. A `RangeError: Maximum call stack size
+ *     exceeded` raised from inside `node_modules/@libp2p/utils/.../
+ *     queue/job.js` when the dispatcher's `forEach` is re-entered by
+ *     one of the recipients. We can't catch it at the call site (the
+ *     recursive emit happens in a microtask outside our `await dial()`
+ *     try block), so we have to swallow it here. The DKG-side trigger
+ *     is the reconnect-on-gossip dial in `dkg-agent.ts::
+ *     maybeDialGossipSender`, which is best-effort by design — losing
+ *     a single dial attempt is fine; crashing the whole daemon for it
+ *     is not.
+ *
+ *     Match policy: `RangeError` + `"Maximum call stack size exceeded"`
+ *     + a stack frame mentioning `@libp2p/utils` (or the explicit
+ *     `JobRecipient.onProgress` site). Both checks together prevent
+ *     us from accidentally swallowing a legitimate stack overflow in
+ *     our own code.
+ */
+export function shouldSuppressFatal(err: unknown): FatalSuppressionVerdict {
+  const msg = err instanceof Error ? err.message : String(err ?? '');
+  const stack = err instanceof Error ? err.stack ?? '' : '';
+
+  if (
+    msg.includes('Cannot write to a stream that is') ||
+    msg.includes('StreamStateError')
+  ) {
+    return { suppress: true, category: 'GossipSub stream error' };
+  }
+
+  if (
+    err instanceof RangeError &&
+    msg.includes('Maximum call stack size exceeded') &&
+    (stack.includes('@libp2p/utils') ||
+      stack.includes('JobRecipient.onProgress'))
+  ) {
+    return {
+      suppress: true,
+      category: 'libp2p JobRecipient.onProgress re-entrancy (issue #286)',
+    };
+  }
+
+  return { suppress: false, category: null };
+}
+
 export async function runDaemon(foreground: boolean): Promise<void> {
   await ensureDkgDir();
   const config = await loadConfig();
@@ -396,12 +467,10 @@ export async function runDaemonInner(
   }
 
   process.on("uncaughtException", (err) => {
+    const verdict = shouldSuppressFatal(err);
     const msg = err?.message ?? String(err);
-    if (
-      msg.includes("Cannot write to a stream that is") ||
-      msg.includes("StreamStateError")
-    ) {
-      log(`[warn] Suppressed GossipSub stream error: ${msg}`);
+    if (verdict.suppress) {
+      log(`[warn] Suppressed ${verdict.category}: ${msg}`);
       return;
     }
     log(`[fatal] Uncaught exception: ${err?.stack ?? msg}`);
@@ -411,12 +480,10 @@ export async function runDaemonInner(
   });
 
   process.on("unhandledRejection", (reason) => {
+    const verdict = shouldSuppressFatal(reason);
     const msg = reason instanceof Error ? reason.message : String(reason);
-    if (
-      msg.includes("Cannot write to a stream that is") ||
-      msg.includes("StreamStateError")
-    ) {
-      log(`[warn] Suppressed GossipSub stream rejection: ${msg}`);
+    if (verdict.suppress) {
+      log(`[warn] Suppressed ${verdict.category} (rejection): ${msg}`);
       return;
     }
     log(
