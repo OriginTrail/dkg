@@ -273,6 +273,68 @@ function sumBindingValues(bindings: Array<Record<string, string>> | undefined, k
   return bindings.reduce((sum, b) => sum + parseRdfInt(b[key] ?? '0'), 0);
 }
 
+// chat-memory.ts:1003, JNLL).
+//
+// The r31-5 / r31-6 dedupe between the canonical `msg:agent:K` and
+// the headless `msg:agent-headless:K` assistant-message pair was
+// originally implemented inline inside `getSession()`. `getRecentChats()`
+// and `getStats()` reads went straight through `?m a schema:Message`
+// joins, so each duplicated pair surfaced TWICE in recents and
+// inflated `messageCount` by exactly the number of duplicate pairs.
+//
+// Centralising the arbitration into a single helper means every
+// reader observes the same logical message set:
+//   - default: a non-headless assistant message wins; the headless
+//     duplicate (if any) is dropped.
+//   - inversion: when the headless variant carries
+//     `dkg:supersedesCanonicalAssistant "true"`, the canonical
+//     assistant is dropped instead and the headless wins.
+//   - lone headless / lone canonical: untouched.
+//   - user messages and unrelated keys: untouched.
+//
+// `getStats` doesn't have message-level rows; it uses the companion
+// `applySupersedeDedupeMessageCountAdjustment()` SPARQL fragment
+// below to correct the COUNT.
+interface SupersedeDedupeMessage {
+  readonly turnId: string | undefined;
+  readonly author: 'user' | 'agent';
+  readonly isHeadlessAssistant: boolean;
+  readonly supersedesCanonicalAssistant: boolean;
+}
+const SUPERSEDE_HEADLESS_PREFIX = 'headless:';
+function canonicalSupersedeTurnKey(turnId: string | undefined): string | null {
+  if (!turnId) return null;
+  return turnId.startsWith(SUPERSEDE_HEADLESS_PREFIX)
+    ? turnId.slice(SUPERSEDE_HEADLESS_PREFIX.length)
+    : turnId;
+}
+function applySupersedeDedupe<T extends SupersedeDedupeMessage>(messages: T[]): T[] {
+  const groupHasNonHeadless = new Map<string, boolean>();
+  const groupHasSupersedingHeadless = new Map<string, boolean>();
+  for (const m of messages) {
+    const key = canonicalSupersedeTurnKey(m.turnId);
+    if (key === null) continue;
+    if (!m.isHeadlessAssistant && m.author === 'agent') {
+      groupHasNonHeadless.set(key, true);
+    }
+    if (m.isHeadlessAssistant && m.supersedesCanonicalAssistant) {
+      groupHasSupersedingHeadless.set(key, true);
+    }
+  }
+  return messages.filter((m) => {
+    const key = canonicalSupersedeTurnKey(m.turnId);
+    if (key === null) return true;
+    if (
+      !m.isHeadlessAssistant
+      && m.author === 'agent'
+      && groupHasSupersedingHeadless.get(key)
+    ) {
+      return false;
+    }
+    if (!m.isHeadlessAssistant) return true;
+    return !groupHasNonHeadless.get(key) || groupHasSupersedingHeadless.get(key) === true;
+  });
+}
 
 function buildSessionRootPattern(sessionUri: string): string {
   const clauses = [
@@ -770,7 +832,45 @@ export class ChatMemoryManager {
         `SELECT (COUNT(*) AS ?c) WHERE { ?s <${RDF_TYPE}> <${SCHEMA}Message> }`,
         this.wmReadOpts(),
       );
-      base.messageCount = sumBindingValues(msgs.bindings, 'c');
+      const rawMessageCount = sumBindingValues(msgs.bindings, 'c');
+
+      // chat-memory.ts:835, JNLL).
+      //
+      // The raw `?s a schema:Message` count above includes BOTH
+      // `msg:agent:K` (canonical) AND `msg:agent-headless:K`
+      // (headless) for any turn key where both exist — the same
+      // duplicate pair `applySupersedeDedupe()` collapses for
+      // `getSession()` and `getRecentChats()`. Subtract the
+      // duplicate-pair count so `messageCount` reflects what the
+      // user-visible chat readers will actually surface.
+      //
+      // The dedupe drops EXACTLY ONE message per pair regardless of
+      // direction (default → headless dropped; supersede → canonical
+      // dropped), so the correction is the count of pairs.
+      //
+      // `knowledgeTriples` is intentionally NOT corrected here. It is
+      // computed as `totalTriples − chatRelatedTriples` where
+      // `chatRelatedTriples` already attributes EVERY `schema:Message`
+      // triple to the chat namespace (both canonical AND headless).
+      // The duplicate triples therefore neither leak into nor inflate
+      // `knowledgeTriples`; they only inflate `messageCount`, which
+      // is what we correct here.
+      const dedupePairs = await this.tools.query(
+        `SELECT (COUNT(*) AS ?c) WHERE {
+          ?canonical <${RDF_TYPE}> <${SCHEMA}Message> .
+          ?canonical <${SCHEMA}author> <urn:dkg:chat:actor:agent> .
+          ?canonical <${DKG_ONT}turnId> ?key .
+          FILTER(!STRSTARTS(STR(?key), "headless:"))
+          FILTER NOT EXISTS { ?canonical <${DKG_ONT}headlessAssistantMessage> ?h }
+          ?headless <${RDF_TYPE}> <${SCHEMA}Message> .
+          ?headless <${DKG_ONT}headlessAssistantMessage> "true" .
+          ?headless <${DKG_ONT}turnId> ?headlessKey .
+          FILTER(STR(?headlessKey) = CONCAT("headless:", STR(?key)))
+        }`,
+        this.wmReadOpts(),
+      );
+      const duplicatePairCount = sumBindingValues(dedupePairs.bindings, 'c');
+      base.messageCount = Math.max(0, rawMessageCount - duplicatePairCount);
 
       const chatRelatedTriples = await this.tools.query(
         `SELECT (COUNT(*) AS ?c) WHERE {
@@ -859,13 +959,15 @@ export class ChatMemoryManager {
       const order = opts.order === 'desc' ? 'DESC' : 'ASC';
       const sessionUri = `${CHAT_NS}session:${sessionId}`;
       const msgsResult = await this.tools.query(
-        `SELECT ?m ?author ?text ?ts ?turnId ?persistenceState ?attachmentRefs ?failureReason WHERE {
+        `SELECT ?m ?author ?text ?ts ?turnId ?persistenceState ?attachmentRefs ?failureReason ?headlessAssistantFlag ?supersedesCanonicalFlag WHERE {
           ?m <${SCHEMA}isPartOf> <${sessionUri}> .
           ?m <${SCHEMA}author> ?author .
           ?m <${SCHEMA}text> ?text .
           ?m <${SCHEMA}dateCreated> ?ts
           OPTIONAL { ?m <${DKG_ONT}turnId> ?turnId }
           OPTIONAL { ?m <${CHAT_ATTACHMENT_REFS_PREDICATE}> ?attachmentRefs }
+          OPTIONAL { ?m <${DKG_ONT}headlessAssistantMessage> ?headlessAssistantFlag }
+          OPTIONAL { ?m <${DKG_ONT}supersedesCanonicalAssistant> ?supersedesCanonicalFlag }
           OPTIONAL {
             ?turn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
             ?turn <${SCHEMA}isPartOf> <${sessionUri}> .
@@ -878,14 +980,28 @@ export class ChatMemoryManager {
       );
       const bindings = msgsResult.bindings ?? [];
       if (bindings.length === 0) return null;
-      return {
-        session: sessionId,
-        messages: bindings.map((mb: any) => ({
+      type RawMessage = {
+        uri: string;
+        author: 'user' | 'agent';
+        text: string;
+        ts: string;
+        turnId: string | undefined;
+        attachmentRefs: ChatAttachmentRef[] | undefined;
+        persistStatus: 'pending' | 'in_progress' | 'stored' | 'failed' | 'skipped' | undefined;
+        failureReason: string | undefined;
+        isHeadlessAssistant: boolean;
+        supersedesCanonicalAssistant: boolean;
+      };
+      const rawMessages: RawMessage[] = bindings.map((mb: any): RawMessage => {
+        const turnIdLiteral = stripRdfLiteral(mb.turnId ?? '') || undefined;
+        const headlessFlag = stripRdfLiteral(mb.headlessAssistantFlag ?? '').trim();
+        const supersedesFlag = stripRdfLiteral(mb.supersedesCanonicalFlag ?? '').trim();
+        return {
           uri: String(mb.m ?? '').replace(/[<>]/g, ''),
           author: mb.author?.includes('user') ? 'user' : 'agent',
           text: stripRdfLiteral(mb.text ?? ''),
           ts: stripRdfLiteral(mb.ts ?? ''),
-          turnId: stripRdfLiteral(mb.turnId ?? '') || undefined,
+          turnId: turnIdLiteral,
           attachmentRefs: parseAttachmentRefsLiteral(String(mb.attachmentRefs ?? '')),
           persistStatus: (() => {
             const status = stripRdfLiteral(mb.persistenceState ?? '').trim();
@@ -898,7 +1014,41 @@ export class ChatMemoryManager {
             const reason = stripRdfLiteral(mb.failureReason ?? '').trim();
             return reason.length > 0 ? reason : undefined;
           })(),
-        })),
+          // r31-5: used ONLY by
+          // the dedupe pass below, then stripped from the public shape.
+          // `true` iff the writer tagged the message
+          // `dkg:headlessAssistantMessage "true"` (i.e. it came from
+          // the proactive/recovery headless reply path, not the
+          // canonical user-first turn).
+          isHeadlessAssistant: headlessFlag === 'true',
+          // r31-6:
+          // used ONLY by the dedupe pass below, then stripped from the
+          // public shape. `true` iff the writer tagged the message
+          // `dkg:supersedesCanonicalAssistant "true"` — set on a
+          // headless assistant write that the wrapper specifically
+          // routed to the headless URI to OVERRIDE a stale provisional
+          // canonical reply. Inverts the default canonical-wins
+          // dedupe for that specific turn key only.
+          supersedesCanonicalAssistant: supersedesFlag === 'true',
+        };
+      });
+      //
+      // The canonical-vs-headless assistant arbitration originally
+      // lived inline here. r31-12 (JNLL) extracted it into the
+      // shared `applySupersedeDedupe()` helper at the top of this
+      // module so `getRecentChats()` and the r31-13 `getStats()`
+      // adjustment observe the same logic. Behaviour preserved
+      // verbatim: default is "canonical wins, drop the headless
+      // duplicate"; inversion when the headless carries
+      // `dkg:supersedesCanonicalAssistant "true"` swaps that and
+      // drops the canonical. Lone headless turns and non-assistant
+      // (user) messages are untouched. See the helper's docstring
+      // for the full rule history.
+      const dedupedMessages = applySupersedeDedupe(rawMessages)
+        .map(({ isHeadlessAssistant: _ignored, supersedesCanonicalAssistant: _ignoredS, ...publicShape }) => publicShape);
+      return {
+        session: sessionId,
+        messages: dedupedMessages,
       };
     } catch {
       return null;
@@ -940,29 +1090,68 @@ export class ChatMemoryManager {
         .map((entry: { sessionUri: string; sessionId: string }) => `<${entry.sessionUri}>`)
         .join(' ');
 
+      // chat-memory.ts:1132, JNLL).
+      // Pull the same `dkg:turnId` /
+      // `dkg:headlessAssistantMessage` /
+      // `dkg:supersedesCanonicalAssistant` columns that
+      // `getSession()` reads so the shared
+      // `applySupersedeDedupe()` arbitration can drop the
+      // canonical-vs-headless duplicates here too. this
+      // query joined ONLY on `?m a schema:Message`, so the recents
+      // panel rendered the same assistant reply twice for any turn
+      // that had both a `msg:agent:K` and a `msg:agent-headless:K`
+      // (the r31-5 / r31-6 shapes), and headless-supersedes turns
+      // surfaced the STALE provisional canonical text alongside the
+      // FRESH headless one. Optionals keep the query backwards
+      // compatible with sessions written before r31-3 (no
+      // `dkg:turnId` on legacy messages).
       const allMsgs = await this.tools.query(
-        `SELECT ?session ?author ?text ?ts WHERE {
+        `SELECT ?session ?author ?text ?ts ?turnId ?headless ?supersedes WHERE {
           VALUES ?session { ${values} }
           ?m <${SCHEMA}isPartOf> ?session .
           ?m <${SCHEMA}author> ?author .
           ?m <${SCHEMA}text> ?text .
           ?m <${SCHEMA}dateCreated> ?ts
+          OPTIONAL { ?m <${DKG_ONT}turnId> ?turnId }
+          OPTIONAL { ?m <${DKG_ONT}headlessAssistantMessage> ?headless }
+          OPTIONAL { ?m <${DKG_ONT}supersedesCanonicalAssistant> ?supersedes }
         } ORDER BY ?session ?ts`,
         this.wmReadOpts(),
       );
 
-      const bySession = new Map<string, Array<{ author: string; text: string; ts: string }>>();
+      type RawRecentMsg = {
+        author: 'user' | 'agent';
+        text: string;
+        ts: string;
+        turnId: string | undefined;
+        isHeadlessAssistant: boolean;
+        supersedesCanonicalAssistant: boolean;
+      };
+      const bySessionRaw = new Map<string, RawRecentMsg[]>();
       for (const row of allMsgs.bindings ?? []) {
         const sessionUri = String(row.session ?? '').replace(/[<>]/g, '');
         if (!sessionUri) continue;
-        if (!bySession.has(sessionUri)) bySession.set(sessionUri, []);
-        const msgs = bySession.get(sessionUri)!;
-        if (msgs.length >= 100) continue;
+        if (!bySessionRaw.has(sessionUri)) bySessionRaw.set(sessionUri, []);
+        const msgs = bySessionRaw.get(sessionUri)!;
+        const turnIdLit = stripRdfLiteral(row.turnId ?? '').trim();
+        const headlessLit = stripRdfLiteral(row.headless ?? '').trim();
+        const supersedesLit = stripRdfLiteral(row.supersedes ?? '').trim();
         msgs.push({
           author: row.author?.includes('user') ? 'user' : 'agent',
           text: stripRdfLiteral(row.text ?? ''),
           ts: stripRdfLiteral(row.ts ?? ''),
+          turnId: turnIdLit.length > 0 ? turnIdLit : undefined,
+          isHeadlessAssistant: headlessLit === 'true',
+          supersedesCanonicalAssistant: supersedesLit === 'true',
         });
+      }
+
+      const bySession = new Map<string, Array<{ author: string; text: string; ts: string }>>();
+      for (const [sessionUri, raw] of bySessionRaw) {
+        const deduped = applySupersedeDedupe(raw)
+          .slice(0, 100)
+          .map(({ isHeadlessAssistant: _h, supersedesCanonicalAssistant: _s, turnId: _t, ...publicShape }) => publicShape);
+        bySession.set(sessionUri, deduped);
       }
 
       return sessionEntries.map((entry: { sessionUri: string; sessionId: string }) => ({
@@ -1008,19 +1197,164 @@ export class ChatMemoryManager {
       };
     }
 
-    const turnUri = `${CHAT_NS}turn:${turnId}`;
-    const currentTurnResult = await this.tools.query(
-      `SELECT ?tid ?ts WHERE {
-        <${turnUri}> <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
-        <${turnUri}> <${SCHEMA}isPartOf> <${sessionUri}> .
-        <${turnUri}> <${DKG_ONT}turnId> ?tid .
-        OPTIONAL { <${turnUri}> <${SCHEMA}dateCreated> ?ts }
-      } LIMIT 1`,
-      this.wmReadOpts(),
-    );
-    const currentTurn = (currentTurnResult.bindings ?? [])[0];
-    const currentTurnId = stripRdfLiteral(currentTurn?.tid ?? '').trim();
-    const currentTurnTs = stripRdfLiteral(currentTurn?.ts ?? '').trim();
+    // adapter-elizaos/src/actions.ts:965).
+    // The adapter's writer emits two URI shapes for the canonical
+    // `dkg:ChatTurn` envelope:
+    //
+    //   1. `${CHAT_NS}turn:${turnKey}` — normal user-first turn (the
+    //      `onChatTurn → onAssistantReply` chain or the local
+    //      `chat-memory.ts` writer at line 517 above);
+    //   2. `${CHAT_NS}headless-turn:${turnKey}` — assistant-only
+    //      headless turn (assistant-reply hook fires without a
+    //      matching user-turn, e.g. the prior `onChatTurn` write
+    //      failed, the hook was disabled, or a reconnect replayed
+    //      only the reply). The writer routes these onto a distinct
+    //      URI so a stub `dkg:hasUserMessage` doesn't collide with
+    //      a real one already stamped on the canonical turn.
+    //
+    // this reader hard-coded `${CHAT_NS}turn:${turnId}` and
+    // therefore could not find headless-turn quads at all — every
+    // assistant-only turn round-tripped as `turn_not_found` even
+    // though its triples lived in the WM. We now resolve the actual
+    // turn URI by joining on the `dkg:turnId` literal inside the
+    // session, which matches BOTH URI shapes uniformly. The writer
+    // contract still uses `${CHAT_NS}turn:` for the cache-friendly
+    // delta path (CONSTRUCT subjectSet below), but the lookup itself
+    // is now URI-agnostic.
+    // adapter-elizaos/src/actions.ts:622).
+    // The writer now stamps a DISTINCT `dkg:turnId = "headless:${turnKey}"`
+    // literal on headless envelopes (the canonical user-first turn
+    // continues to use the bare `turnKey`). That keeps the
+    // `LIMIT 1` lookup-by-id deterministic when both turns exist
+    // for the same `turnKey`, but it changes the call contract
+    // for callers that previously used the bare `turnKey` to
+    // address either kind: now `?turn dkg:turnId "K"` only matches
+    // the canonical turn.
+    //
+    // To preserve the old "find whatever exists for this id"
+    // behaviour for callers that don't know whether a canonical
+    // user-first turn ever arrived (the common case for an
+    // assistant-only `onAssistantReply` flow), we fall back to the
+    // `headless:` prefixed literal if the bare lookup returns no
+    // binding. The fallback is order-preserving: canonical turns
+    // ALWAYS win when both exist (because we try the bare literal
+    // first), so the disambiguation the writer change introduced
+    // is still in force.
+    const tryResolveTurn = async (literal: string): Promise<{
+      uri: string;
+      ts: string;
+      // chat-memory.ts:1091).
+      // The actual `dkg:turnId` literal that joined this row. For the
+      // bare-literal lookup this is just the input `turnId`; for the
+      // headless fallback it's `"headless:<turnId>"`. Downstream
+      // previous-turn / turn-index queries MUST use this literal
+      // (not the caller's `turnId`) because they compare the stored
+      // `dkg:turnId` values in WM, which for headless turns are
+      // always prefixed.
+      literal: string;
+    } | null> => {
+      const sparqlLit = JSON.stringify(literal);
+      const result = await this.tools.query(
+        `SELECT ?turn ?ts WHERE {
+          ?turn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
+          ?turn <${SCHEMA}isPartOf> <${sessionUri}> .
+          ?turn <${DKG_ONT}turnId> ${sparqlLit} .
+          OPTIONAL { ?turn <${SCHEMA}dateCreated> ?ts }
+        } LIMIT 1`,
+        this.wmReadOpts(),
+      );
+      const row = (result.bindings ?? [])[0];
+      const uri = String(row?.turn ?? '').replace(/[<>]/g, '');
+      if (!uri || !isSafeIri(uri)) return null;
+      return {
+        uri,
+        ts: stripRdfLiteral(row?.ts ?? '').trim(),
+        literal,
+      };
+    };
+    // Try the bare literal first (canonical user-first turn).
+    let resolution = await tryResolveTurn(turnId);
+    // chat-memory.ts:1213). The
+    // canonical-first lookup above conflicts with the new r31-6
+    // `dkg:supersedesCanonicalAssistant` arbitration that
+    // `getSession()` performs. When a PROVISIONAL canonical
+    // assistant exists AND a SUPERSEDING headless variant for the
+    // same turn key carries `dkg:supersedesCanonicalAssistant
+    // "true"` on its assistant message, `getSession()` (post r31-6)
+    // returns the FRESH headless text, but the delta path here
+    // would still bind to the STALE canonical turn URI and ship
+    // its assistant-message triples to incremental consumers —
+    // the two reader surfaces would observably disagree.
+    //
+    // Fix: when the bare canonical lookup hit, check whether a
+    // superseding-headless twin exists for the same turn key; if so,
+    // re-route the CONSTRUCT projection (`turnUri`, `userMsgUri`,
+    // `assistantMsgUri`) to the headless variant. The WATERMARK
+    // logic (`currentTurnId`, `currentTurnTs`,
+    // `resolvedTurnIdLiteral` used in previous-turn / turn-index
+    // FILTERs) deliberately continues to use the CANONICAL turn's
+    // literal so the previous-turn search excludes the headless
+    // twin (their timestamps and lexicographic IDs would otherwise
+    // alias and the canonical version of the same turn key would
+    // surface as the "previous" turn, breaking the watermark
+    // contract). Only the URI surface used for the delta CONSTRUCT
+    // changes — the watermark stays canonical.
+    //
+    // Gated on `canonicalHit` (NOT on `resolution`): in the headless-
+    // fallback branch below the resolution IS the only headless
+    // variant and there's nothing to supersede, so the check is a
+    // no-op and would just consume a SPARQL round trip unnecessarily.
+    const canonicalHit = !!resolution;
+    let supersedingTwinResolution: { uri: string; ts: string; literal: string } | null = null;
+    if (canonicalHit && !turnId.startsWith('headless:')) {
+      const headlessLiteral = `headless:${turnId}`;
+      const headlessLiteralSparql = JSON.stringify(headlessLiteral);
+      const supersedeCheck = await this.tools.query(
+        `SELECT ?marker WHERE {
+          ?turn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
+          ?turn <${SCHEMA}isPartOf> <${sessionUri}> .
+          ?turn <${DKG_ONT}turnId> ${headlessLiteralSparql} .
+          ?turn <${DKG_ONT}hasAssistantMessage> ?msg .
+          ?msg <${DKG_ONT}supersedesCanonicalAssistant> ?marker .
+        } LIMIT 1`,
+        this.wmReadOpts(),
+      );
+      const markerRow = (supersedeCheck.bindings ?? [])[0];
+      const isSupersedingHeadless =
+        stripRdfLiteral(markerRow?.marker ?? '').trim() === 'true';
+      if (isSupersedingHeadless) {
+        supersedingTwinResolution = await tryResolveTurn(headlessLiteral);
+      }
+    }
+    // Fallback: try the `headless:` prefixed literal so callers
+    // that pass the original `userMessageId` (without knowing
+    // whether the canonical user-turn ever made it to disk) still
+    // discover the headless envelope. Skip the fallback when the
+    // input already starts with `headless:` to avoid the redundant
+    // `headless:headless:K` lookup.
+    if (!resolution && !turnId.startsWith('headless:')) {
+      resolution = await tryResolveTurn(`headless:${turnId}`);
+    }
+    const resolvedTurnUri = resolution?.uri ?? '';
+    const turnUri = resolvedTurnUri || `${CHAT_NS}turn:${turnId}`;
+    // The caller's lookup key is preserved in `currentTurnId` for
+    // downstream watermark / cache-key purposes — even if the
+    // resolved URI was found via the headless fallback. This keeps
+    // the watermark contract stable across replays where the same
+    // logical turn id might map to canonical OR headless.
+    const currentTurnId = resolvedTurnUri ? turnId : '';
+    const currentTurnTs = resolution?.ts ?? '';
+    // chat-memory.ts:1091).
+    // Use the resolved `dkg:turnId` literal for SPARQL comparisons
+    // against stored `dkg:turnId` values, NOT the caller's bare
+    // `turnId`. For canonical turns these are equal (`"t2"`); for
+    // headless turns the resolved literal is `"headless:t2"` and
+    // the bare-literal comparison would have returned the wrong
+    // previous-turn / turn-index because the WM stores the prefixed
+    // form. The caller-facing `currentTurnId` (above) stays as the
+    // input `turnId` so the watermark / result.turnId contracts are
+    // unchanged.
+    const resolvedTurnIdLiteral = resolution?.literal ?? currentTurnId;
     const latestTurnResult = await this.tools.query(
       `SELECT ?latestTurnId ?latestTs WHERE {
         ?latestTurn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
@@ -1049,7 +1383,7 @@ export class ChatMemoryManager {
       };
     }
 
-    const currentTurnIdLiteral = JSON.stringify(currentTurnId);
+    const currentTurnIdLiteral = JSON.stringify(resolvedTurnIdLiteral);
     const currentTsLiteral = currentTurnTs
       ? `"${currentTurnTs}"^^<${XSD_DATETIME}>`
       : null;
@@ -1130,11 +1464,49 @@ export class ChatMemoryManager {
       };
     }
 
+    // chat-memory.ts:1213) +
+    // chat-memory.ts:1419, JNLF).
+    //
+    // When the superseding-headless twin was discovered above, route
+    // ONLY the assistant-message resolution to the HEADLESS turn so
+    // the FRESH `msg:agent-headless:${turnKey}` subject + its
+    // `schema:text` / `schema:dateCreated` / `schema:author` triples
+    // are projected — the same arbitration `getSession()` applies on
+    // its full-replay path.
+    //
+    // The USER side STAYS on the canonical turn. the fix
+    // used a single `effectiveTurnUri` for BOTH `?user` and
+    // `?assistant`, so when we swapped to the headless URI the
+    // `dkg:hasUserMessage` lookup bound the SYNTHETIC stub
+    // (`msg:user-stub:${turnKey}`) the headless writer emits to keep
+    // the reader's "both edges must resolve" contract happy. That
+    // stub has empty `schema:text` and is typed `dkg:HeadlessUserStub`
+    // (NOT `schema:Message`), so the delta payload then dropped the
+    // user's actual text and could regress incremental consumers to
+    // a blank/system-authored user node — the JNLF failure mode.
+    //
+    // The fix performs a SPLIT lookup: `?user` from the canonical
+    // turn URI (the writer guarantees it exists when we reach this
+    // branch — `supersedingTwinResolution` is only set after
+    // `canonicalHit === true`); `?assistant` from the headless turn
+    // URI. Both are projected into the same downstream
+    // `relatedSubjects` + `CONSTRUCT` pipeline so the delta carries
+    // BOTH the real canonical user message AND the fresh headless
+    // assistant reply.
+    //
+    // The watermark queries (latestTurnId / previousTurnId /
+    // turnIndex) deliberately continued to use the CANONICAL
+    // `turnUri` so the headless twin doesn't alias as the "previous"
+    // turn for its own canonical sibling (their timestamps and
+    // lexicographic IDs would otherwise collide).
+    const headlessAssistantTurnUri = supersedingTwinResolution?.uri ?? null;
+    const userResolutionTurnUri = turnUri;
+    const assistantResolutionTurnUri = headlessAssistantTurnUri ?? turnUri;
     const turnMessagesResult = await this.tools.query(
       `SELECT ?user ?assistant WHERE {
-        <${turnUri}> <${SCHEMA}isPartOf> <${sessionUri}> .
-        <${turnUri}> <${DKG_ONT}hasUserMessage> ?user .
-        <${turnUri}> <${DKG_ONT}hasAssistantMessage> ?assistant .
+        <${userResolutionTurnUri}> <${SCHEMA}isPartOf> <${sessionUri}> .
+        <${userResolutionTurnUri}> <${DKG_ONT}hasUserMessage> ?user .
+        <${assistantResolutionTurnUri}> <${DKG_ONT}hasAssistantMessage> ?assistant .
       } LIMIT 1`,
       this.wmReadOpts(),
     );
@@ -1159,11 +1531,21 @@ export class ChatMemoryManager {
       };
     }
 
+    // r31-12 (JNLF): the related-subjects projection ALSO needs to
+    // walk BOTH turn URIs when a headless twin supersedes — the
+    // canonical turn carries the real `dkg:hasUserMessage` edge
+    // and the headless turn carries the fresh
+    // `dkg:hasAssistantMessage` edge plus any assistant-side
+    // provenance (e.g. `dkg:supersedesCanonicalAssistant`,
+    // assistant-message timestamp). Folding the headless turn
+    // into the seed set ensures its envelope quads land in the
+    // CONSTRUCT projection too, not just the assistant message.
     const relatedSubjectsResult = await this.tools.query(
       `SELECT DISTINCT ?s WHERE {
         VALUES ?msg { <${userMsgUri}> <${assistantMsgUri}> }
         { BIND(<${sessionUri}> AS ?s) }
-        UNION { BIND(<${turnUri}> AS ?s) }
+        UNION { BIND(<${userResolutionTurnUri}> AS ?s) }
+        ${headlessAssistantTurnUri ? `UNION { BIND(<${headlessAssistantTurnUri}> AS ?s) }` : ''}
         UNION { BIND(?msg AS ?s) }
         UNION { <${assistantMsgUri}> <${DKG_ONT}usedTool> ?s }
         UNION { ?s <${DKG_ONT}mentionedIn> ?msg }
@@ -1175,7 +1557,13 @@ export class ChatMemoryManager {
       } LIMIT 5000`,
       this.wmReadOpts(),
     );
-    const subjectSet = new Set<string>([sessionUri, turnUri, userMsgUri, assistantMsgUri]);
+    const subjectSet = new Set<string>([
+      sessionUri,
+      userResolutionTurnUri,
+      ...(headlessAssistantTurnUri ? [headlessAssistantTurnUri] : []),
+      userMsgUri,
+      assistantMsgUri,
+    ]);
     for (const b of relatedSubjectsResult.bindings ?? []) {
       const iri = String(b.s ?? '').replace(/[<>]/g, '');
       if (!iri || !isSafeIri(iri)) continue;
