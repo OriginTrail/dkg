@@ -29,6 +29,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { requestFaucetFunding, resolveDkgConfigHome } from '@origintrail-official/dkg-core';
 import type { DkgOpenClawConfig } from './types.js';
 import { resolveDkgCli } from './resolve-dkg-cli.js';
+import { sameResolvedPath } from './state-dir-path.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -824,28 +825,6 @@ export type AdapterEntryConfig = Pick<
 
 function defaultStateDirForWorkspace(workspaceDir: string): string {
   return join(workspaceDir, '.openclaw');
-}
-
-function canonicalPathForCompare(path: string): string {
-  const absolute = resolve(path);
-  const missingParts: string[] = [];
-  let existing = absolute;
-  while (!existsSync(existing)) {
-    const parent = dirname(existing);
-    if (parent === existing) break;
-    missingParts.unshift(existing.slice(parent.length + 1));
-    existing = parent;
-  }
-
-  let canonicalBase = existing;
-  try { canonicalBase = realpathSync(existing); } catch { /* keep resolved fallback */ }
-  const canonical = missingParts.reduce((acc, part) => join(acc, part), canonicalBase);
-  const normalized = resolve(canonical);
-  return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
-}
-
-function sameResolvedPath(a: string, b: string): boolean {
-  return canonicalPathForCompare(a) === canonicalPathForCompare(b);
 }
 
 export function mergeOpenClawConfig(
