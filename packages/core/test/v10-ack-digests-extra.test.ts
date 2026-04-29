@@ -141,7 +141,7 @@ describe('computeACKDigest (6-field) — H5 cost-parameter binding [C-2]', () =>
 // Golden vectors below are the CORRECT contract-layout vectors (308 bytes,
 // computed via ethers.solidityPackedKeccak256 with the exact field order from
 // the contract). The "matches the contract-layout golden vector" test SHOULD
-// pass; while it fails, that failure IS the bug signal — see BUGS_FOUND.md
+// pass; while it fails, that failure IS the bug signal
 // finding C-1 (upgraded to PROD-BUG).
 //
 // QA policy (per user instruction "trust the code more"): do NOT modify

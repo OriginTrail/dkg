@@ -205,6 +205,7 @@ export function computePublishACKDigest(
  *     p.mintKnowledgeAssetsAmount,            // uint256 (32)
  *     keccak256(abi.encodePacked(burnIds))    // bytes32 (32)
  *   ))                                        // total packed width = 308 bytes
+ *                                              // (32+20+32+32+32+32+32+32+32+32)
  */
 export function computeUpdateACKDigest(
   chainId: bigint,

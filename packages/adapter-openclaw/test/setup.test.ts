@@ -324,8 +324,18 @@ describe('writeDkgConfig', () => {
       process.env.DKG_HOME = original;
     }
 
-    // (3) Existing config with an operator-pinned autoUpdate must round-trip
-    //     unchanged — only the default-write path changes here.
+    // (3) Existing config with an operator-pinned autoUpdate. The heal-legacy
+    //     pass (`pruneNetworkPinnedDefaults`) operates per-field: any field
+    //     whose value equals the current network default is treated as a
+    //     stale auto-copy from a pre-PR-322 setup run and dropped, while
+    //     fields that differ from the network default are preserved as
+    //     genuine operator overrides. Here `repo` matches the network value
+    //     so it gets dropped (the resolver will re-derive it at runtime),
+    //     `branch` differs ('release/v10' vs 'main') so it's preserved as a
+    //     real override, and `enabled` is kept regardless. This matches the
+    //     companion expectation in the "heals legacy auto-pinned" test
+    //     below — see case (2) at line ~432 which asserts the same
+    //     per-field semantics directly.
     const persisted = join(testDir, '.dkg-persisted');
     mkdirSync(persisted, { recursive: true });
     writeFileSync(join(persisted, 'config.json'), JSON.stringify({
@@ -342,7 +352,6 @@ describe('writeDkgConfig', () => {
       const cfg = JSON.parse(readFileSync(join(persisted, 'config.json'), 'utf-8'));
       expect(cfg.autoUpdate).toEqual({
         enabled: true,
-        repo: 'OriginTrail/dkg',
         branch: 'release/v10',
       });
     } finally {
@@ -1942,9 +1951,26 @@ describe('verifyUnmergeInvariants', () => {
 describe('openclaw.plugin.json manifest', () => {
   it('declares kind: "memory" so the adapter is eligible for memory-slot election', () => {
     const manifestPath = join(__dirname, '..', 'openclaw.plugin.json');
+    const packagePath = join(__dirname, '..', 'package.json');
     const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8'));
+    const pkg = JSON.parse(readFileSync(packagePath, 'utf-8'));
     expect(manifest.kind).toBe('memory');
+    // the manifest `id` and the published npm `name` are
+    // intentionally DIFFERENT identifiers. The `id` is the plugin slot
+    // key used by OpenClaw's slot resolution (`plugins.slots.memory`,
+    // `plugins.entries`, `plugins.allow`) — this must stay short and
+    // stable (`adapter-openclaw`) because it is hard-coded across
+    // `setup.ts`, `DkgMemoryPlugin.ts`, and `openclaw-entry.mjs`. The
+    // `pkg.name` is the scoped npm package name used for installation.
+    // A previous iteration of this PR renamed `manifest.id` to
+    // `pkg.name` in the manifest alone, which split the plugin identity
+    // in two and silently broke slot election; the rename has been
+    // reverted and the slot id is once again the short `adapter-openclaw`.
     expect(manifest.id).toBe('adapter-openclaw');
+    // Sanity check that both the adapter code AND this test agree on
+    // the slot identifier — any future rename must update every call
+    // site that matches on `plugins.slots.memory`.
+    expect(pkg.name).toBe('@origintrail-official/dkg-adapter-openclaw');
   });
 });
 
@@ -2178,7 +2204,7 @@ describe('resolveWorkspaceDirFromConfig', () => {
     }
   });
 
-  // R9-1: the default-fallback must derive from `dirname(openclawConfigPath)`
+  // the default-fallback must derive from `dirname(openclawConfigPath)`
   // rather than the process-wide `$OPENCLAW_HOME`. A legacy install whose
   // openclaw.json lives at a non-default path (e.g. a user-specified
   // `--config-path`-style location in scripts, or a `OPENCLAW_HOME`-shadowed
@@ -2875,7 +2901,7 @@ describe('runSetup openclaw.json preflight (R6-2 + R8-2)', () => {
     }
   });
 
-  // R8-2: the contextEngine wrong-slot guard is merge-time deep inside
+  // the contextEngine wrong-slot guard is merge-time deep inside
   // mergeOpenClawConfig. The preflight must replicate it so a user who
   // misconfigured `plugins.slots.contextEngine = "adapter-openclaw"`
   // fails fast BEFORE step 5 writes the skill file.

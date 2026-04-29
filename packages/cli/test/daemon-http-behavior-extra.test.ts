@@ -1,7 +1,7 @@
 /**
  * Daemon HTTP behavior tests.
  *
- * Covers audit findings from `.test-audit/BUGS_FOUND.md` → `packages/cli (BURA)`:
+ * Covers audit findings from `.test-audit/` → `packages/cli (BURA)`:
  *   - CLI-2  (dup #76) — CORS policy for JSON API: foreign-origin preflight must
  *                       not be echoed; whitelist must hold.
  *   - CLI-4  (dup #78) — Malformed JSON body → 400 with clear error message.

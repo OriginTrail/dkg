@@ -13,6 +13,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import type { DkgConfig } from '../config.js';
+import { enforceSignedRequestPostBody } from '../auth.js';
 
 // Co-located here because the body parser is their only semantic
 // consumer; moving them to `./types.ts` would just add an import
@@ -186,22 +187,192 @@ export function parsePublishRequestBody(
   };
 }
 
+/**
+ * route handlers across the
+ * daemon return errors as `{ error: err.message }`, and `err.message`
+ * sometimes carries the *first frame* of a stack — e.g. node's built-in
+ * `TypeError`s embed `(/abs/path/file.js:line:col)` directly in the
+ * message, and ethers/libp2p re-throw with file paths spliced into the
+ * message too. CodeQL flags every reachable `res.end(JSON.stringify(...))`
+ * sink for this; rather than auditing all 40+ call sites individually we
+ * scrub the egress here so a malformed callsite physically cannot leak
+ * server-internal paths or `at <fn> (path:line:col)` frames to the wire.
+ *
+ * The redaction is deliberately narrow:
+ *   1. Strip `\n   at <fn> (...)` continuation lines (Node.js v8 stack
+ *      frame format).
+ *   2. Replace any absolute filesystem path containing a line:col suffix
+ *      with `<redacted-path>` — covers the common `(/Users/.../foo.ts:12:34)`
+ *      and `at /Users/.../foo.ts:12:34` patterns produced by Error.stack.
+ *   3. Leave purely human messages untouched (no file path, no line:col).
+ */
+function stripStackFrames(input: string): string {
+  return input
+    // Multi-frame stack: drop everything from the first newline that
+    // begins with whitespace + "at " onwards.
+    .replace(/\n\s+at [\s\S]*$/m, '')
+    // Absolute POSIX path with optional :line:col (with or without
+    // surrounding parens). Matches `/Users/.../foo.ts:12:34` and
+    // `/usr/.../foo.ts`.
+    //
+    // CodeQL js/redos (alert 56): a previous revision of this regex
+    // used `(?:[^\s()]+\/)+[^\s()]+`, where the inner class
+    // `[^\s()]` includes `/` itself. That made the partition between
+    // segments ambiguous (the engine could explore many ways to
+    // split `/!/!/!/.txt` across the alternatives) and produced
+    // catastrophic backtracking on adversarial inputs starting with
+    // `/` and many repetitions of `!/`. Excluding `/` from the
+    // segment class makes the tokenisation unambiguous: every
+    // character belongs to exactly one branch, so backtracking is
+    // impossible. The bounded `{0,2}` on the line:col suffix is
+    // the same shape as the original two `(?::\d+)?` groups but
+    // expressed without the redundant alternation.
+    .replace(/\(?\/(?:[^/\s()]+\/)+[^/\s()]+\.(?:js|ts|cjs|mjs|jsx|tsx)(?::\d+){0,2}\)?/g, '<redacted-path>')
+    // Windows-style absolute path with optional :line:col
+    // (defence-in-depth even though the daemon doesn't run on
+    // Windows in CI). CodeQL js/redos (alert 57): same fix as above
+    // — exclude the separator chars `\` and `/` from the inner
+    // segment class so each character has exactly one role.
+    .replace(/\(?[A-Za-z]:[\\/](?:[^\\/\s()]+[\\/])+[^\\/\s()]+\.(?:js|ts|cjs|mjs|jsx|tsx)(?::\d+){0,2}\)?/g, '<redacted-path>');
+}
+
+const ERROR_SHAPED_KEYS = new Set(['error', 'message', 'detail', 'details']);
+
+function scrubResponseBody(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(scrubResponseBody);
+  if (value !== null && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      if (ERROR_SHAPED_KEYS.has(k) && typeof v === 'string') {
+        // Conventional error fields → scrub stack-frame patterns.
+        // Successful-response fields with the same key would also be
+        // scrubbed, which is acceptable: they should never contain stack
+        // traces and `<redacted-path>` is harmless on legitimate strings
+        // that don't match the pattern (the regex never fires).
+        out[k] = stripStackFrames(v);
+      } else if (v !== null && typeof v === 'object') {
+        // Recurse into arrays/objects so nested error fields (common in
+        // batch / aggregate responses) are scrubbed too.
+        out[k] = scrubResponseBody(v);
+      } else {
+        // Leaf primitives (string/number/bool/bigint/null) outside the
+        // error-shaped key set are passed through untouched. This keeps
+        // success-shape fields like `filePath`, `uri`, `contextGraphId`
+        // — which legitimately contain `/` — pristine.
+        out[k] = v;
+      }
+    }
+    return out;
+  }
+  // Top-level non-object values (string/number/etc.) — leave alone.
+  // We never scrub a bare string at the top level because callers pass
+  // structured objects; bare strings would be ambiguous re: error vs
+  // legitimate identifier.
+  return value;
+}
+
 export function jsonResponse(
   res: ServerResponse,
   status: number,
   data: unknown,
   corsOrigin?: string | null,
+  extraHeaders?: Record<string, string>,
 ): void {
   const origin =
     corsOrigin !== undefined
       ? corsOrigin
       : (((res as any).__corsOrigin as string | null) ?? null);
-  const body = JSON.stringify(data, (_key, value) =>
+  const scrubbed = scrubResponseBody(data);
+  const rawBody = JSON.stringify(scrubbed, (_key, value) =>
     typeof value === "bigint" ? value.toString() : value,
   );
+  // CodeQL js/stack-trace-exposure (alert 47): the structural scrub in
+  // `scrubResponseBody` already neutralises stack-frame patterns inside
+  // error-shaped fields, but CodeQL's data-flow analysis cannot always
+  // follow the recursive descent through `Array.isArray` / `Object.entries`
+  // — it sees `err.message` flowing into `data` and `data` flowing into
+  // `res.end(body)` and conservatively flags every reachable callsite.
+  // A direct `String.prototype.replace` between the JSON serialisation
+  // and the response sink is the canonical sanitiser the CodeQL query
+  // recognises, so we do one final last-mile pass on the serialised body.
+  //
+  // The
+  // previous last-mile pass only matched `\n   at <fn> (...)` — a v8
+  // continuation line as it appears INSIDE a JSON-escaped string.
+  // CodeQL's data-flow analysis still flagged the `res.end(body)`
+  // sink because the regex did not sanitise the additional stack-
+  // shaped patterns it recognises:
+  //   - bare "at <fn> (...)" frames at the head of an err.message
+  //     (no leading newline — surfaced by libp2p / ethers wrappers
+  //     that splice the first frame straight into the message);
+  //   - top-level multi-frame Error.stack copies that did make it
+  //     through the structural scrub via a non-error-shaped key.
+  //
+  // The replacement chain below targets ONLY recognisable stack-frame
+  // tokens (`at <fn> (...)` shapes) at the egress boundary; it does
+  // NOT touch bare absolute paths because legitimate non-error
+  // response fields (`filePath`, `path`, `endpoint`, …) routinely
+  // contain `/`-delimited identifiers and absolute paths that MUST be
+  // preserved. Path-with-line:col redaction stays inside
+  // `stripStackFrames`, which only runs on the curated
+  // `ERROR_SHAPED_KEYS` set. On already-clean payloads every regex
+  // misses, so `body === rawBody` and there is no observable
+  // behaviour change.
+  //
+  // — http-utils.ts:328). The earlier
+  // shape `\s+at\s+(?:[^\s()"]+\s+)?\([^)"\n]+\)` recognised any
+  // `(stuff)` after an `at <word>` token, so a perfectly-legitimate
+  // payload like `{"text":"meet at lunch (cafeteria)"}` matched the
+  // ` at lunch (cafeteria)` slice and the response degraded to
+  // `{"text":"meet"}`. The fix is to require the parenthesised body
+  // to actually look like a v8 stack frame location:
+  //   - either contain `:NUM:NUM` (the file:line:col suffix that
+  //     every real frame carries — `at fn (file.js:10:20)`); OR
+  //   - be one of the special sentinels v8 emits without a location
+  //     (`<anonymous>`, `native`, `eval at ...`).
+  // The async-continuation shape `(index N)` from
+  // `at async Promise.all (index 0)` does NOT match — but those
+  // continuation lines are always interleaved with real `:line:col`
+  // frames in a stack trace, so the surrounding pass still removes
+  // the parent stack and the lone continuation is harmless.
+  //
+  // ReDoS safety: every alternative is anchored by literal tokens
+  // (`:`, `<anonymous>`, `native`) and each character class has a
+  // unique role per branch — the same anti-backtracking shape as
+  // the existing `stripStackFrames` regex (CodeQL alerts 56 / 57).
+  //
+  // http-utils.ts:343). The previous
+  // revision applied this last-mile regex chain to EVERY response
+  // body unconditionally. That meant successful 2xx payloads like
+  // a `/api/query` SELECT result that legitimately carries a string
+  // literal containing v8-frame-shaped text (e.g. an indexed user
+  // tweet, an issue title that copy-pastes a stack trace, a SPARQL
+  // literal embedding source-position metadata) would have those
+  // substrings silently elided from the response — the data
+  // returned to the client would not match what the route handler
+  // actually emitted, with NO indication of the rewrite. CodeQL's
+  // js/stack-trace-exposure data-flow concern is about `err.message`
+  // → `data` → `res.end(body)`, which is exclusively an error-path
+  // concern. Successful responses do not have err.message reaching
+  // the response sink (no `try/catch` injects err.message into a
+  // 2xx body in this codebase), so the pacifier only needs to run
+  // on error responses (status >= 400). Scoping it there preserves
+  // the CodeQL silence on the flagged sink while making
+  // success-path payload corruption impossible.
+  const isErrorResponse = status >= 400;
+  const body = isErrorResponse
+    ? rawBody
+        .replace(/\\n\s+at [^"\n]+/g, "")
+        .replace(
+          /\s+at\s+(?:[^\s()"]+\s+)?\((?:[^)"\n]*?:\d+(?::\d+)?|<anonymous>|native|eval[^)"\n]*)\)/g,
+          "",
+        )
+        .replace(/\s+at\s+[^\s()":]+:\d+:\d+/g, "")
+    : rawBody;
   res.writeHead(status, {
     "Content-Type": "application/json",
     ...corsHeaders(origin),
+    ...(extraHeaders ?? {}),
   });
   res.end(body);
 }
@@ -410,6 +581,39 @@ export function readBody(
   req: IncomingMessage,
   maxBytes = MAX_BODY_BYTES,
 ): Promise<string> {
+  // When `httpAuthGuard` ran the
+  // eager pre-handler drain for a body-carrying signed request, the
+  // wire bytes are already buffered on `req.__dkgPrebufferedBody`
+  // and the underlying stream is exhausted. Re-attaching `data`
+  // listeners would observe nothing and the resulting `'end'` would
+  // resolve to an empty body — which then ALSO bypasses the
+  // post-body HMAC check (since the eager drain already flipped
+  // `pending.verified = true`, `enforceSignedRequestPostBody` is a
+  // no-op). Routes that legitimately need the body (e.g. PUT
+  // /api/settings/...) would receive an empty payload instead of
+  // their JSON, which would silently corrupt config writes.
+  //
+  // Fix: if a prebuffer is present, resolve from it directly
+  // (re-checking the size limit so callers that lower `maxBytes`
+  // still get the same 413). The signed-request HMAC was already
+  // verified by the eager drain, so re-running
+  // `enforceSignedRequestPostBody` here would be redundant — but we
+  // call it anyway to preserve the centralised invariant that
+  // EVERY body-reading site flows through the verifier.
+  const prebuffered = (req as IncomingMessage & {
+    __dkgPrebufferedBody?: Buffer;
+  }).__dkgPrebufferedBody;
+  if (Buffer.isBuffer(prebuffered)) {
+    if (prebuffered.length > maxBytes) {
+      return Promise.reject(new PayloadTooLargeError(maxBytes));
+    }
+    try {
+      enforceSignedRequestPostBody(req, prebuffered);
+    } catch (err) {
+      return Promise.reject(err);
+    }
+    return Promise.resolve(prebuffered.toString());
+  }
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let total = 0;
@@ -429,7 +633,23 @@ export function readBody(
     };
     req.on("data", onData);
     req.on("end", () => {
-      if (!rejected) resolve(Buffer.concat(chunks).toString());
+      if (rejected) return;
+      const buf = Buffer.concat(chunks);
+      // enforce the post-body
+      // signed-request HMAC check here, centrally, so every route that
+      // reads a body automatically validates the signature against the
+      // actual bytes. Previously httpAuthGuard only pre-validated the
+      // headers and stashed `__dkgSignedAuth`, but no caller invoked
+      // verifyHttpSignedRequestAfterBody — which meant a valid bearer
+      // token plus an arbitrary x-dkg-signature still reached the
+      // handler with the body-binding guarantee silently disabled.
+      try {
+        enforceSignedRequestPostBody(req, buf);
+      } catch (err) {
+        reject(err);
+        return;
+      }
+      resolve(buf.toString());
     });
     req.on("error", (err) => {
       if (!rejected) reject(err);
@@ -445,6 +665,28 @@ export function readBodyBuffer(
   req: IncomingMessage,
   maxBytes = MAX_BODY_BYTES,
 ): Promise<Buffer> {
+  // See `readBody()` above for
+  // the rationale — when the eager drain inside `httpAuthGuard` has
+  // already buffered the body, the underlying stream is exhausted
+  // and we must resolve from the prebuffer instead of re-attaching
+  // listeners. The signed-request HMAC check is still routed
+  // through `enforceSignedRequestPostBody` so the post-body
+  // invariant ("every body reader runs the verifier") is preserved
+  // verbatim.
+  const prebuffered = (req as IncomingMessage & {
+    __dkgPrebufferedBody?: Buffer;
+  }).__dkgPrebufferedBody;
+  if (Buffer.isBuffer(prebuffered)) {
+    if (prebuffered.length > maxBytes) {
+      return Promise.reject(new PayloadTooLargeError(maxBytes));
+    }
+    try {
+      enforceSignedRequestPostBody(req, prebuffered);
+    } catch (err) {
+      return Promise.reject(err);
+    }
+    return Promise.resolve(prebuffered);
+  }
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let total = 0;
@@ -464,7 +706,18 @@ export function readBodyBuffer(
     };
     req.on("data", onData);
     req.on("end", () => {
-      if (!rejected) resolve(Buffer.concat(chunks));
+      if (rejected) return;
+      const buf = Buffer.concat(chunks);
+      // See readBody() for the rationale — the signed-request post-body
+      // check must run here too so multipart / binary routes cannot be
+      // used to bypass the HMAC / body-binding check.
+      try {
+        enforceSignedRequestPostBody(req, buf);
+      } catch (err) {
+        reject(err);
+        return;
+      }
+      resolve(buf);
     });
     req.on("error", (err) => {
       if (!rejected) reject(err);
@@ -578,8 +831,119 @@ export function shouldBypassRateLimitForLoopbackTraffic(ip: string, pathname: st
 export function isValidContextGraphId(id: string): boolean {
   if (!id || typeof id !== "string") return false;
   if (id.length > 256) return false;
+  // CLI-16 (
+  // reject path-traversal patterns where it actually matters — i.e.
+  // segments that the OS / URL resolver will interpret as the
+  // parent / current directory. The character whitelist below
+  // allows `.` and `/` because URNs / DIDs / URLs legitimately
+  // contain version markers like `v1..2`, schema fragments like
+  // `https://example.com/a..b`, etc.
+  //
+  // The earlier blanket `id.includes('..')` check broke those
+  // legitimate identifiers without adding any defence-in-depth: a
+  // segment-aware check is both stricter (still rejects every real
+  // traversal) and tighter (does not produce false-positive 4xx
+  // for valid context-graph IDs that happen to contain `..` inside
+  // a single segment).
+  for (const seg of id.split("/")) {
+    if (seg === "." || seg === "..") return false;
+  }
   // Allow URNs, DIDs, simple slug-like identifiers, and URIs
   return /^[\w:/.@\-]+$/.test(id);
+}
+
+/**
+ * CLI-9 (
+ * scrub raw chain-revert payloads from error messages before they
+ * reach the HTTP body. Providers (ethers, viem, hardhat) serialise
+ * the same revert data under multiple keys: `data="0x…"`, `data=0x…`,
+ * `errorData="0x…"`, `errorData=0x…`, and JSON `"data":"0x…"`. The
+ * matching set here mirrors `enrichEvmError()` in
+ * `packages/chain/src/evm-adapter.ts` so any selector that survived
+ * decoding still gets redacted before reaching the operator. Note
+ * that we redact AFTER `enrichEvmError` has had a chance to splice
+ * the decoded custom-error name in — so the operator still sees the
+ * human-readable error, just without the raw selector blob.
+ */
+export function sanitizeRevertMessage(raw: string): string {
+  return raw
+    // Quoted variants (data / errorData with `=` or `:`).
+    .replace(/((?:errorData|data)\s*[=:]\s*)"0x[0-9a-fA-F]+"/g, '$1"<redacted>"')
+    // Unquoted variants (data / errorData with `=` or `:`).
+    .replace(/((?:errorData|data)\s*[=:]\s*)0x[0-9a-fA-F]+/g, '$1<redacted>')
+    // JSON-shape that ethers' provider error sometimes embeds:
+    // `{"data":"0x…","message":"…"}`. The unquoted-data branch above
+    // already covers `data:0x…` inside JSON, but JSON keeps quotes.
+    .replace(/("data"\s*:\s*)"0x[0-9a-fA-F]+"/g, '$1"<redacted>"')
+    .replace(/unknown custom error[^.\n]*\.?/gi, "request rejected by chain")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * CLI-7/9 helper: classify a thrown error as a "client mistake" (4xx)
+ * vs an "infrastructure failure" (5xx). The vocabulary is conservative
+ * — only well-known not-found / invalid-input / unreachable-peer
+ * patterns map to 4xx; everything else stays 5xx so a real internal
+ * problem still surfaces via the top-level catch.
+ */
+export function classifyClientError(
+  msg: string,
+):
+  | { status: 404; sanitized: string }
+  | { status: 400; sanitized: string }
+  | { status: 504; sanitized: string }
+  | null {
+  const sanitized = sanitizeRevertMessage(msg);
+  if (
+    /\b(not found|does not exist|no such|unknown (policy|paranet|context.?graph|peer|verified.?memory)|peer is not connected|cannot resolve|no addresses)\b/i.test(
+      msg,
+    )
+  ) {
+    return { status: 404, sanitized };
+  }
+  // pre-fix, the same regex that
+  // catches malformed peer-ids ALSO matched `timed out` / `unable to
+  // dial`, which downgraded transient transport failures from a
+  // retryable 504 to a client-side 400. The CLI / SDK then never
+  // retried — even though the next dial attempt would have succeeded.
+  // Split the classification so transport-layer transients map to
+  // 504 (Gateway Timeout) and only true input-validation problems
+  // stay on 400. Order matters: check the transient set first because
+  // libp2p sometimes embeds the word "invalid" inside a dial-timeout
+  // error string (`invalid response: timed out`) and we want such
+  // hybrids classified as transient.
+  if (
+    /\b(timed? ?out|timeout|deadline (exceeded|expired)|unable to dial|could not dial|connection (refused|reset|closed)|aborted|ECONNREFUSED|ECONNRESET|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|EAI_AGAIN)\b/i.test(
+      msg,
+    )
+  ) {
+    return { status: 504, sanitized };
+  }
+  if (
+    /\b(invalid (peer|peerId|multihash|base|batchId|verifiedMemoryId|contextGraphId|policyUri|paranetId)|could not parse|parse (peer|peerId)|peer (id|ID) (is not valid|invalid)|malformed|bad request|incorrect length)\b/i.test(
+      msg,
+    )
+  ) {
+    return { status: 400, sanitized };
+  }
+  // multiformats / @multiformats/multibase throws "Non-base58btc
+  // character" / "Non-base32 character" / "Unknown base" when handed
+  // a malformed peer-id / multihash / CID. These are unambiguous
+  // client-side input errors — surfacing them as 500 misleads
+  // operators into thinking the daemon itself is broken.
+  if (/Non-base[0-9]+(btc|hex|z)? character|Unknown base|expected (base|prefix|multibase)/i.test(msg)) {
+    return { status: 400, sanitized };
+  }
+  // Last-resort heuristic: libp2p / multiformats throws errors with
+  // codes like ERR_INVALID_PEER_ID / ERR_INVALID_MULTIHASH that don't
+  // include human-readable English. Match the canonical ERR_INVALID_*
+  // shape so a fresh dependency-version upgrade doesn't silently
+  // start returning 500 on what's plainly a malformed-input 400.
+  if (/ERR_INVALID_(PEER|MULTIHASH|MULTIADDR|CID|BASE)/.test(msg)) {
+    return { status: 400, sanitized };
+  }
+  return null;
 }
 
 export function shortId(peerId: string): string {
