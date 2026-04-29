@@ -3612,6 +3612,42 @@ describe('DkgNodePlugin', () => {
     }
   });
 
+  it('T75 - api.workspaceDir overrides configured stateDir to avoid stale setup defaults', async () => {
+    const prevEnv = process.env.OPENCLAW_STATE_DIR;
+    delete process.env.OPENCLAW_STATE_DIR;
+    const workspaceDir = path.join(require('os').tmpdir(), `dkg-t75-current-workspace-${Date.now()}`);
+    const staleConfigStateDir = path.join(require('os').tmpdir(), `dkg-t75-stale-config-${Date.now()}`);
+    try {
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        stateDir: staleConfigStateDir,
+        channel: { enabled: false },
+        memory: { enabled: false },
+      } as any);
+      const mockApi: OpenClawPluginApi = {
+        config: {},
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+        workspaceDir,
+      } as unknown as OpenClawPluginApi;
+      plugin.register(mockApi);
+      const watermarkPath: string = ((plugin as any).chatTurnWriter as any).watermarkFilePath;
+      expect(watermarkPath.replace(/\\/g, '/')).toContain(
+        workspaceDir.replace(/\\/g, '/') + '/.openclaw/dkg-adapter/chat-turn-watermarks.json',
+      );
+      expect(watermarkPath.replace(/\\/g, '/')).not.toContain(staleConfigStateDir.replace(/\\/g, '/'));
+      await plugin.stop();
+    } finally {
+      if (prevEnv === undefined) delete process.env.OPENCLAW_STATE_DIR;
+      else process.env.OPENCLAW_STATE_DIR = prevEnv;
+      try { fs.rmSync(workspaceDir, { recursive: true, force: true }); } catch { /* best effort */ }
+      try { fs.rmSync(staleConfigStateDir, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+  });
+
   it('T75 - OPENCLAW_STATE_DIR still overrides configured stateDir', async () => {
     const prevEnv = process.env.OPENCLAW_STATE_DIR;
     const envStateDir = path.join(require('os').tmpdir(), `dkg-t75-env-state-${Date.now()}`);

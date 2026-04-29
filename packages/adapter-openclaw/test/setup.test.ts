@@ -17,9 +17,10 @@ vi.mock('@origintrail-official/dkg-core', async () => {
   return {
     ...actual,
     requestFaucetFunding: vi.fn(async () => ({ success: true, funded: ['0.01 ETH', '1000 TRAC'] })),
+    resolveDkgConfigHome: vi.fn((opts) => actual.resolveDkgConfigHome(opts)),
   };
 });
-import { requestFaucetFunding } from '@origintrail-official/dkg-core';
+import { requestFaucetFunding, resolveDkgConfigHome } from '@origintrail-official/dkg-core';
 
 import {
   discoverWorkspace,
@@ -3211,6 +3212,23 @@ describe('runSetup Step 5 — faucet funding', () => {
       else process.env.USERPROFILE = originalUserProfile;
       if (originalOpenclaw === undefined) delete process.env.OPENCLAW_HOME;
       else process.env.OPENCLAW_HOME = originalOpenclaw;
+    }
+  });
+
+  it('passes adapter setup startDir into the shared DKG-home resolver', async () => {
+    const env = setupFaucetEnv();
+    const resolver = vi.mocked(resolveDkgConfigHome);
+    resolver.mockClear();
+    try {
+      await runSetup({ workspace: env.workspace, start: false, verify: false, fund: false });
+
+      expect(resolver.mock.calls.some(([opts]) => {
+        const startDir = (opts as any)?.startDir;
+        return typeof startDir === 'string'
+          && startDir.replace(/\\/g, '/').includes('/packages/adapter-openclaw/src');
+      })).toBe(true);
+    } finally {
+      env.restore();
     }
   });
 

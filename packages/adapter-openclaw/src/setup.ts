@@ -122,7 +122,7 @@ function isEphemeralPath(p: string): boolean {
 }
 
 function dkgDir(): string {
-  return resolveDkgConfigHome();
+  return resolveDkgConfigHome({ startDir: __dirname });
 }
 
 function openclawDir(): string {
