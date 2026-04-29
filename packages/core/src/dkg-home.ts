@@ -32,18 +32,19 @@ export function dkgHomeDir(): string {
  *
  * Resolution priority:
  *   1. `process.env.DKG_HOME` — explicit operator/user override wins.
- *   2. Live `daemon.pid` — `process.kill(pid, 0)` confirms the dir whose
- *      daemon is actually running. The dir whose pid is dead is rejected
- *      (handles the both-folders-on-disk-with-stale-state case where a
- *      developer alternates monorepo and npm daemons on the same machine).
- *   3. `api.port` ↔ `daemonUrl` port match — fires whenever exactly one
- *      home's `api.port` matches the gateway's configured target. Covers
- *      both the two-daemon tiebreak (both pids alive on different ports)
- *      AND the cold-start case (gateway starts before its target daemon).
- *      Trusting the gateway's configured target as the source of truth
- *      avoids the failure mode where mtime alone picks a different
- *      home than the gateway is actually talking to (T72).
- *   4. Cold-start fallback — when daemonUrl can't disambiguate (no
+ *   2. Liveness + `daemonUrl` port match (combined) — `process.kill(pid, 0)`
+ *      confirms the home's daemon is running, AND its `api.port` matches
+ *      the gateway's configured target. Both checks together defend
+ *      against PID reuse (T73 — Codex): a stale `daemon.pid` whose PID
+ *      has been recycled to an unrelated process passes the bare
+ *      liveness check but its api.port won't match daemonUrl. When
+ *      `daemonUrl` is absent, this degrades to liveness alone.
+ *   3. `api.port` ↔ `daemonUrl` port match (alone) — fires when step 2
+ *      couldn't disambiguate (e.g., both pids dead in cold-start, or a
+ *      live PID in one home conflicts with a port match in another from
+ *      PID reuse). Returns the home whose recorded port matches the
+ *      gateway's target — operator intent wins.
+ *   4. mtime fallback — when daemonUrl can't disambiguate (no
  *      daemonUrl, or both/neither home matches the port), pick the dir
  *      whose `api.port` was most recently modified. This is overwhelmingly
  *      the dir the user is about to start the daemon in again.
@@ -64,18 +65,69 @@ export function resolveDkgHome(opts?: { daemonUrl?: string }): string {
   const dkgAlive = dkgPid != null && isProcessAlive(dkgPid);
   const dkgDevAlive = dkgDevPid != null && isProcessAlive(dkgDevPid);
 
-  // (1) Liveness — the active daemon's home is the right answer.
-  if (dkgAlive && !dkgDevAlive) return dkg;
-  if (dkgDevAlive && !dkgAlive) return dkgDev;
+  // T73 — Compute port match against daemonUrl up-front; used by both the
+  // step-1 combined check (defends against PID reuse) and the step-2
+  // standalone port-match (cold start, both pids dead).
+  let dkgPortMatch = false;
+  let dkgDevPortMatch = false;
+  let dkgPortAbsent = true;
+  let dkgDevPortAbsent = true;
+  let havePortTarget = false;
+  if (opts?.daemonUrl) {
+    const target = extractPort(opts.daemonUrl);
+    if (target != null) {
+      havePortTarget = true;
+      const dkgPortFile = readDkgApiPortSync(dkg);
+      const dkgDevPortFile = readDkgApiPortSync(dkgDev);
+      dkgPortAbsent = dkgPortFile == null;
+      dkgDevPortAbsent = dkgDevPortFile == null;
+      dkgPortMatch = dkgPortFile === target;
+      dkgDevPortMatch = dkgDevPortFile === target;
+    }
+  }
 
-  // (2) `api.port` matches `daemonUrl` port — fires whenever both pids
-  //     agree (both alive: two-daemon disambiguation) AND in the cold-start
-  //     case where both pids are dead. T72 — previously gated on
-  //     `dkgAlive && dkgDevAlive`, which silently fell back to mtime when
-  //     the gateway started before its target daemon. If the freshest
-  //     `api.port` belonged to a DIFFERENT daemon than the one `daemonUrl`
-  //     is configured for, the adapter would cache the wrong
-  //     `auth.token` / `agent-keystore.json` for its lifetime.
+  // (1) Liveness + port match — for a home to win at this step, its daemon
+  //     PID must be alive AND (when daemonUrl is set) its api.port must
+  //     either match the target OR be absent. T73 — Codex flagged that
+  //     bare `process.kill(pid, 0)` only proves SOME process owns that
+  //     PID; a stale daemon.pid whose PID has been recycled to an
+  //     unrelated process (firefox, systemd, anything) passes the
+  //     liveness check and beats the later port-match step, returning
+  //     the wrong home. Cross-checking api.port closes that gap when
+  //     the homes have distinct ports.
+  //
+  //     The "or absent" relaxation handles two real cases:
+  //     (a) Narrow startup race: daemon wrote daemon.pid but hasn't yet
+  //         bound HTTP and written api.port. Without this relaxation,
+  //         a fresh daemon would briefly resolve to the wrong home.
+  //     (b) Test setups that mock liveness without api.port (legitimate
+  //         per the daemon's own file-write order: pid first, port
+  //         after bind).
+  //
+  //     PID reuse is still caught: a recycled PID inherits the OLD
+  //     daemon's api.port file (which persists across crashes — the
+  //     daemon never cleans it up at shutdown), so api.port WILL be
+  //     present, and if it doesn't match daemonUrl this home is
+  //     correctly rejected.
+  //
+  //     When the homes share a port (default 9200 on both), no port-based
+  //     check can disambiguate; that case relies on liveness alone, with
+  //     PID reuse there a much narrower risk (collision would have to be
+  //     on the active daemon, not a stale dir).
+  //
+  //     When daemonUrl is absent, falls back to liveness alone.
+  const dkgPortOK = !havePortTarget || dkgPortMatch || dkgPortAbsent;
+  const dkgDevPortOK = !havePortTarget || dkgDevPortMatch || dkgDevPortAbsent;
+  const dkgAuthoritative = dkgAlive && dkgPortOK;
+  const dkgDevAuthoritative = dkgDevAlive && dkgDevPortOK;
+  if (dkgAuthoritative && !dkgDevAuthoritative) return dkg;
+  if (dkgDevAuthoritative && !dkgAuthoritative) return dkgDev;
+
+  // (2) Port match alone — fires when step (1) couldn't disambiguate
+  //     (e.g., both pids dead in cold-start, or live pid in one home
+  //     conflicts with port match in the other from PID-reuse). T72 —
+  //     previously gated on both-alive only; now generalized so the
+  //     gateway's configured target wins regardless of liveness state.
   //
   //     Only fires when EXACTLY ONE home matches the target port. If both
   //     home dirs have the same port written (typical when an operator
@@ -84,14 +136,9 @@ export function resolveDkgHome(opts?: { daemonUrl?: string }): string {
   //     for tiebreak. If neither matches, the gateway is talking to a
   //     daemon neither home has ever hosted — fall through to mtime for
   //     a defensible default.
-  if (opts?.daemonUrl) {
-    const target = extractPort(opts.daemonUrl);
-    if (target != null) {
-      const dkgPortMatch = readDkgApiPortSync(dkg) === target;
-      const dkgDevPortMatch = readDkgApiPortSync(dkgDev) === target;
-      if (dkgDevPortMatch && !dkgPortMatch) return dkgDev;
-      if (dkgPortMatch && !dkgDevPortMatch) return dkg;
-    }
+  if (havePortTarget) {
+    if (dkgDevPortMatch && !dkgPortMatch) return dkgDev;
+    if (dkgPortMatch && !dkgDevPortMatch) return dkg;
   }
 
   // (3) No daemonUrl, or daemonUrl port matched neither home: pick freshest

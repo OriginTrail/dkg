@@ -186,6 +186,53 @@ describe('resolveDkgHome', () => {
     expect(resolveDkgHome({ daemonUrl: 'http://127.0.0.1:9200' })).toBe(dkgDev);
   });
 
+  it("T73 — PID reuse: stale daemon.pid recycled to an unrelated process loses to the port-match check (different ports)", async () => {
+    // Codex T73: process.kill(pid, 0) only proves SOME process owns that
+    // PID. After daemon crash + OS PID recycling, a stale daemon.pid
+    // points to an unrelated alive process (firefox, systemd, anything).
+    // With bare liveness alone, that home wrongly wins step 1 and beats
+    // the later port-match step.
+    //
+    // The combined check (alive + port match) closes that gap: the
+    // recycled-PID home passes alive but fails the port match (since
+    // its api.port is for a different daemon than daemonUrl points at),
+    // so it's not authoritative at step 1. Step 2's port-match alone
+    // then picks the actually-correct home.
+    //
+    // Setup: dkgDev's daemon.pid is "alive" (using ALIVE = process.pid
+    // as the recycled-PID surrogate; in production this would be an
+    // unrelated process at the recycled PID), but its api.port=9200
+    // doesn't match daemonUrl=9201. dkg has matching api.port=9201
+    // but no live PID — that's the home daemonUrl is configured for.
+    await writePid(dkgDev, ALIVE);  // recycled-PID "alive"
+    await writePort(dkgDev, 9200);  // stale port from old daemon
+    await writePid(dkg, DEAD);
+    await writePort(dkg, 9201);     // matches daemonUrl
+    expect(resolveDkgHome({ daemonUrl: 'http://127.0.0.1:9201' })).toBe(dkg);
+  });
+
+  it("T73 — documented tradeoff: recycled-PID with NO api.port file still wins step 1 over dead+matching home (narrow startup-race relaxation)", async () => {
+    // Locks in the documented relaxation: at step 1, a home with a live
+    // PID and an ABSENT api.port file is treated as authoritative
+    // ("startup race" — daemon wrote pid before binding HTTP). This
+    // means a recycled PID in an empty home dir (genuinely orphaned —
+    // someone deleted api.port but left daemon.pid) still wins over a
+    // home with a stale-but-matching api.port whose daemon is dead.
+    //
+    // Acceptable because: (a) real daemons always write api.port after
+    // binding HTTP, so a "no api.port" recycled-PID home is contrived;
+    // (b) tightening this would break the legitimate startup-race case;
+    // (c) the full fix would require an async HTTP probe, out of scope.
+    //
+    // This test pins the behavior so future refactors don't accidentally
+    // change it thinking they're closing a real gap.
+    await writePid(dkgDev, ALIVE);    // recycled-PID, no port file
+    // (no port file in dkgDev — that's the contrived state)
+    await writePid(dkg, DEAD);
+    await writePort(dkg, 9201);       // dead daemon's port file matches daemonUrl
+    expect(resolveDkgHome({ daemonUrl: 'http://127.0.0.1:9201' })).toBe(dkgDev);
+  });
+
   it('T72 — both pids dead, both api.port files have the same port (ambiguous) → falls back to mtime tiebreak', async () => {
     // When both homes have the same api.port written (typical when an
     // operator alternates npm and monorepo daemons that both default to
