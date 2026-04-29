@@ -3,7 +3,7 @@ import { writeFile, mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { homedir } from 'node:os';
-import { dkgHomeDir, isProcessAlive, readDaemonPid, readDkgApiPort, loadAuthToken, loadAuthTokenSync, loadAgentEthAddressSync, loadAgentEthAddress, MultipleAgentsError, toEip55Checksum } from '../src/dkg-home.js';
+import { dkgHomeDir, isProcessAlive, readDaemonPid, readDkgApiPort, loadAuthToken, loadAuthTokenSync, loadAgentAuthTokenSync, loadAgentAuthToken, MultipleAgentsError, toEip55Checksum } from '../src/dkg-home.js';
 
 describe('dkgHomeDir', () => {
   const originalEnv = process.env.DKG_HOME;
@@ -197,15 +197,15 @@ describe('loadAuthToken / loadAuthTokenSync', () => {
   });
 });
 
-describe('loadAgentEthAddress / loadAgentEthAddressSync', () => {
+describe('loadAgentAuthToken / loadAgentAuthTokenSync (T63)', () => {
   let tempDir: string;
-  // T62 — Test fixtures are LOWERCASE inputs (the form the keystore JSON keys
-  // ship in). The helper now returns EIP-55 checksum form, so assertions
-  // compare against the checksummed expected value.
-  const ETH_A_LC = '0x26c9b05a30138b35e84e60a5b778d580065ffbb8';
-  const ETH_B_LC = '0x949ec97ab4ed1c9fb4c9a70c2dd368065d817b0c';
-  const ETH_A = toEip55Checksum(ETH_A_LC);
-  const ETH_B = toEip55Checksum(ETH_B_LC);
+  // T63 — Helpers return `{ authToken }`, not the eth address. The eth comes
+  // from the daemon's `/api/agent/identity` HTTP probe in the adapter call
+  // site. Test fixtures are LOWERCASE keystore JSON keys (the standard form
+  // the daemon writes); explicit-address inputs to the helper are ALSO
+  // lowercased for case-insensitive matching against keystore keys.
+  const ETH_A = '0x26c9b05a30138b35e84e60a5b778d580065ffbb8';
+  const ETH_B = '0x949ec97ab4ed1c9fb4c9a70c2dd368065d817b0c';
 
   beforeEach(async () => {
     tempDir = join(tmpdir(), `dkg-test-keystore-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -216,35 +216,23 @@ describe('loadAgentEthAddress / loadAgentEthAddressSync', () => {
     await rm(tempDir, { recursive: true, force: true });
   });
 
-  it('returns the single eth address from a single-agent keystore (sync + async)', async () => {
+  it('returns the single agent auth token from a single-agent keystore (sync + async)', async () => {
     await writeFile(
       join(tempDir, 'agent-keystore.json'),
-      JSON.stringify({ [ETH_A_LC]: { authToken: 'tok', privateKey: '0xpk' } }),
+      JSON.stringify({ [ETH_A]: { authToken: 'tok-a', privateKey: '0xpk' } }),
     );
-    // T62 — return value is EIP-55 checksum form, not the lowercase keystore key.
-    expect(loadAgentEthAddressSync(tempDir)).toBe(ETH_A);
-    expect(await loadAgentEthAddress(tempDir)).toBe(ETH_A);
-  });
-
-  it('normalises mixed-case eth address keys to canonical EIP-55 (T62)', async () => {
-    const mixed = '0x26C9b05a30138B35E84e60A5B778D580065ffbb8';
-    await writeFile(
-      join(tempDir, 'agent-keystore.json'),
-      JSON.stringify({ [mixed]: { authToken: 'tok' } }),
-    );
-    // Whatever case the keystore key has, output is canonical checksum.
-    expect(loadAgentEthAddressSync(tempDir)).toBe(ETH_A);
+    expect(loadAgentAuthTokenSync(tempDir)).toEqual({ authToken: 'tok-a' });
+    expect(await loadAgentAuthToken(tempDir)).toEqual({ authToken: 'tok-a' });
   });
 
   it('returns undefined when keystore file does not exist', async () => {
-    expect(loadAgentEthAddressSync(tempDir)).toBeUndefined();
-    expect(await loadAgentEthAddress(tempDir)).toBeUndefined();
+    expect(loadAgentAuthTokenSync(tempDir)).toBeUndefined();
+    expect(await loadAgentAuthToken(tempDir)).toBeUndefined();
   });
 
   it('returns undefined for an empty object keystore', async () => {
     await writeFile(join(tempDir, 'agent-keystore.json'), '{}');
-    expect(loadAgentEthAddressSync(tempDir)).toBeUndefined();
-    expect(await loadAgentEthAddress(tempDir)).toBeUndefined();
+    expect(loadAgentAuthTokenSync(tempDir)).toBeUndefined();
   });
 
   it('returns undefined for keystore with only non-eth-shaped keys', async () => {
@@ -252,102 +240,102 @@ describe('loadAgentEthAddress / loadAgentEthAddressSync', () => {
       join(tempDir, 'agent-keystore.json'),
       JSON.stringify({ 'not-an-eth-key': { authToken: 'tok' }, '12D3KooWPeerLike': {} }),
     );
-    expect(loadAgentEthAddressSync(tempDir)).toBeUndefined();
+    expect(loadAgentAuthTokenSync(tempDir)).toBeUndefined();
   });
 
   it('returns undefined for malformed JSON (treat as missing, do not throw)', async () => {
     await writeFile(join(tempDir, 'agent-keystore.json'), '{ this is not json');
-    expect(loadAgentEthAddressSync(tempDir)).toBeUndefined();
-    expect(await loadAgentEthAddress(tempDir)).toBeUndefined();
+    expect(loadAgentAuthTokenSync(tempDir)).toBeUndefined();
+    expect(await loadAgentAuthToken(tempDir)).toBeUndefined();
   });
 
-  it('throws MultipleAgentsError when keystore has multiple eth keys', async () => {
+  it('returns undefined when the matched entry is missing the authToken field', async () => {
+    // Malformed entry — eth key present but no authToken.
     await writeFile(
       join(tempDir, 'agent-keystore.json'),
-      JSON.stringify({ [ETH_A_LC]: { authToken: 'a' }, [ETH_B_LC]: { authToken: 'b' } }),
+      JSON.stringify({ [ETH_A]: { privateKey: '0xpk' } }),
     );
-    expect(() => loadAgentEthAddressSync(tempDir)).toThrow(MultipleAgentsError);
-    await expect(loadAgentEthAddress(tempDir)).rejects.toBeInstanceOf(MultipleAgentsError);
+    expect(loadAgentAuthTokenSync(tempDir)).toBeUndefined();
   });
 
-  it('MultipleAgentsError exposes the conflicting addresses (EIP-55 checksum)', async () => {
+  it('returns undefined when authToken field is empty string', async () => {
     await writeFile(
       join(tempDir, 'agent-keystore.json'),
-      JSON.stringify({ [ETH_A_LC.toUpperCase()]: {}, [ETH_B_LC]: {} }),
+      JSON.stringify({ [ETH_A]: { authToken: '' } }),
     );
-    try {
-      loadAgentEthAddressSync(tempDir);
-      expect.fail('should have thrown');
-    } catch (err) {
-      expect(err).toBeInstanceOf(MultipleAgentsError);
-      const e = err as MultipleAgentsError;
-      // T62 — addresses surface in EIP-55 checksum form (canonical for graph URIs).
-      expect(e.addresses).toContain(ETH_A);
-      expect(e.addresses).toContain(ETH_B);
-    }
+    expect(loadAgentAuthTokenSync(tempDir)).toBeUndefined();
   });
 
-  it('T46 — dedupes same address recorded in checksum AND lowercase form (single-agent, not multi)', async () => {
-    // Operator hand-edited the keystore (or two writer paths used
-    // different normalisation), recording the same identity as both
-    // mixed-case (checksum) and lowercase. Pre-fix the lowercase
-    // pass left two equal entries → MultipleAgentsError fired and
-    // disabled WM lookup. Post-fix the dedupe collapses them.
-    const checksumA = ETH_A;
-    const lowercase = ETH_A_LC;
+  it('throws MultipleAgentsError when keystore has multiple eth keys and no explicit override', async () => {
+    await writeFile(
+      join(tempDir, 'agent-keystore.json'),
+      JSON.stringify({ [ETH_A]: { authToken: 'a' }, [ETH_B]: { authToken: 'b' } }),
+    );
+    expect(() => loadAgentAuthTokenSync(tempDir)).toThrow(MultipleAgentsError);
+    await expect(loadAgentAuthToken(tempDir)).rejects.toBeInstanceOf(MultipleAgentsError);
+  });
+
+  it('explicit override disambiguates a multi-agent keystore (case-insensitive match)', async () => {
+    await writeFile(
+      join(tempDir, 'agent-keystore.json'),
+      JSON.stringify({ [ETH_A]: { authToken: 'tok-a' }, [ETH_B]: { authToken: 'tok-b' } }),
+    );
+    // Lowercase input.
+    expect(
+      loadAgentAuthTokenSync(tempDir, { explicitAddress: ETH_B }),
+    ).toEqual({ authToken: 'tok-b' });
+    // Mixed-case input — same result.
+    expect(
+      loadAgentAuthTokenSync(tempDir, { explicitAddress: '0x949eC97aB4eD1C9fb4C9A70C2dD368065d817B0c' }),
+    ).toEqual({ authToken: 'tok-b' });
+    // All-caps input — same result.
+    expect(
+      loadAgentAuthTokenSync(tempDir, { explicitAddress: ETH_B.toUpperCase() }),
+    ).toEqual({ authToken: 'tok-b' });
+  });
+
+  it('explicit override that does not match any keystore entry throws MultipleAgentsError', async () => {
+    await writeFile(
+      join(tempDir, 'agent-keystore.json'),
+      JSON.stringify({ [ETH_A]: { authToken: 'a' }, [ETH_B]: { authToken: 'b' } }),
+    );
+    // Valid eth address, but no entry — refuse to silently fall back.
+    expect(() => loadAgentAuthTokenSync(tempDir, {
+      explicitAddress: '0x1111111111111111111111111111111111111111',
+    })).toThrow(MultipleAgentsError);
+  });
+
+  it('explicit override is ignored on a single-agent keystore (override only matters when disambiguating)', async () => {
+    await writeFile(
+      join(tempDir, 'agent-keystore.json'),
+      JSON.stringify({ [ETH_A]: { authToken: 'only-tok' } }),
+    );
+    // The single-agent path always returns the only entry's token, regardless
+    // of any explicit override (override is for multi-agent disambiguation only).
+    expect(
+      loadAgentAuthTokenSync(tempDir, { explicitAddress: ETH_B }),
+    ).toEqual({ authToken: 'only-tok' });
+  });
+
+  it('T46 — dedupes same address recorded in both checksum AND lowercase form (single-agent, not multi)', async () => {
+    const checksumA = '0x26C9B05A30138b35E84E60A5b778d580065FFBB8';
+    const lowercase = ETH_A;
     await writeFile(
       join(tempDir, 'agent-keystore.json'),
       JSON.stringify({ [checksumA]: { authToken: 'a' }, [lowercase]: { authToken: 'b' } }),
     );
-    // T62 — return value is the canonical EIP-55 form regardless of which
-    // case happened to be recorded in the keystore.
-    expect(loadAgentEthAddressSync(tempDir)).toBe(ETH_A);
-    expect(await loadAgentEthAddress(tempDir)).toBe(ETH_A);
+    // Dedupe collapses them to one identity. Either entry's `authToken` is
+    // acceptable because `Object.entries` ordering is engine-defined; we just
+    // need to confirm a token returns and no `MultipleAgentsError`.
+    const result = loadAgentAuthTokenSync(tempDir);
+    expect(result).toBeDefined();
+    expect(['a', 'b']).toContain(result!.authToken);
   });
 
-  it('honors explicitAddress override (skips keystore read)', async () => {
-    // No keystore file at all — override still resolves.
-    expect(
-      loadAgentEthAddressSync(tempDir, { explicitAddress: ETH_A_LC }),
-    ).toBe(ETH_A);
-    expect(
-      await loadAgentEthAddress(tempDir, { explicitAddress: ETH_A_LC }),
-    ).toBe(ETH_A);
-  });
-
-  it('explicit override normalises mixed-case input to EIP-55 (T62)', () => {
-    expect(
-      loadAgentEthAddressSync(tempDir, { explicitAddress: '0x26C9B05A30138b35E84E60A5b778d580065FFBB8' }),
-    ).toBe(ETH_A);
-  });
-
-  it('explicit override is ignored when not eth-shaped (falls through to keystore)', async () => {
-    await writeFile(
-      join(tempDir, 'agent-keystore.json'),
-      JSON.stringify({ [ETH_A_LC]: { authToken: 'tok' } }),
-    );
-    // Garbage override → fall through to keystore → returns ETH_A (checksum).
-    expect(
-      loadAgentEthAddressSync(tempDir, { explicitAddress: 'not-an-address' }),
-    ).toBe(ETH_A);
-    // Empty / whitespace override → same.
-    expect(loadAgentEthAddressSync(tempDir, { explicitAddress: '   ' })).toBe(ETH_A);
-  });
-
-  it('explicit override disambiguates a multi-agent keystore', async () => {
-    await writeFile(
-      join(tempDir, 'agent-keystore.json'),
-      JSON.stringify({ [ETH_A_LC]: {}, [ETH_B_LC]: {} }),
-    );
-    expect(
-      loadAgentEthAddressSync(tempDir, { explicitAddress: ETH_B_LC }),
-    ).toBe(ETH_B);
-    // Without override → throw.
-    expect(() => loadAgentEthAddressSync(tempDir)).toThrow(MultipleAgentsError);
-  });
-
-  it('T62 — toEip55Checksum produces canonical EIP-55 form for known vectors', () => {
-    // Reference vectors from EIP-55 spec.
+  it('T62 / T63 — toEip55Checksum produces canonical EIP-55 form for known vectors', () => {
+    // Helper retained narrowly for `DKG_AGENT_ADDRESS` env-override
+    // normalization on remote-daemon paths. Spec-vector validation stays so
+    // a future refactor can't silently break it.
     expect(toEip55Checksum('0x52908400098527886e0f7030069857d2e4169ee7'))
       .toBe('0x52908400098527886E0F7030069857D2E4169EE7');
     expect(toEip55Checksum('0x8617e340b3d01fa5f11f306f4090fd50e238070d'))
@@ -356,13 +344,13 @@ describe('loadAgentEthAddress / loadAgentEthAddressSync', () => {
       .toBe('0xde709f2102306220921060314715629080e2fb77');
     expect(toEip55Checksum('0x27b1fdb04752bbc536007a920d24acb045561c26'))
       .toBe('0x27b1fdb04752bbc536007a920d24acb045561c26');
-    // "Normal" mixed-case vectors from the EIP-55 spec.
     expect(toEip55Checksum('0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed'))
       .toBe('0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed');
     expect(toEip55Checksum('0xfb6916095ca1df60bb79ce92ce3ea74c37c5d359'))
       .toBe('0xfB6916095ca1df60bB79Ce92cE3Ea74c37c5d359');
     // Round-trip: checksumming a checksum value yields the same string.
-    expect(toEip55Checksum(ETH_A)).toBe(ETH_A);
+    const checksumA = toEip55Checksum(ETH_A);
+    expect(toEip55Checksum(checksumA)).toBe(checksumA);
     // Throws on bad input shape.
     expect(() => toEip55Checksum('not-an-address')).toThrow();
     expect(() => toEip55Checksum('0x123')).toThrow();

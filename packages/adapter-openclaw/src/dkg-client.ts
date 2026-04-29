@@ -77,6 +77,23 @@ export interface LocalAgentIntegrationRecord extends LocalAgentIntegrationPayloa
   updatedAt?: string;
 }
 
+/**
+ * T63 — Shape of `/api/agent/identity` response.
+ *
+ * Mirrors the daemon route handler at
+ * `packages/cli/src/daemon/routes/agent-chat.ts:391`. `agentAddress` is the
+ * canonical EIP-55 form (set from `verifyWallet.address` at agent
+ * registration). The adapter trusts this verbatim and never re-checksums.
+ */
+export interface AgentIdentity {
+  agentAddress: string;
+  agentDid: string;
+  name: string;
+  framework?: string;
+  peerId: string;
+  nodeIdentityId: string;
+}
+
 export class DkgDaemonClient {
   readonly baseUrl: string;
   private readonly timeoutMs: number;
@@ -109,6 +126,51 @@ export class DkgDaemonClient {
     try {
       const data = await this.get<Record<string, unknown>>('/api/status');
       return { ok: true, peerId: data.peerId as string | undefined };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  /**
+   * T63 — Probe the daemon's `/api/agent/identity` route to discover the
+   * canonical agent identity for the supplied agent-bound auth token.
+   *
+   * This replaces the previous T62 path of reading the keystore JSON key
+   * and EIP-55-checksumming it client-side. The daemon already returns
+   * `agentAddress` in canonical EIP-55 form (set from `verifyWallet.address`
+   * at registration), so the adapter trusts the response verbatim and the
+   * checksum helper no longer needs to be applied to keystore reads.
+   *
+   * The endpoint requires AGENT-bound auth (not the node-level token in
+   * `auth.token`). Callers extract the per-agent token from
+   * `agent-keystore.json` (via `loadAgentAuthTokenSync` in dkg-core) and
+   * pass it through `opts.authToken`. The constructor's default node-level
+   * Bearer is bypassed for this call.
+   *
+   * Failure shape mirrors `getStatus()`: `{ ok: false, error }` for
+   * transport / 401 / 5xx so the probe site can branch without try/catch.
+   */
+  async getAgentIdentity(opts: { authToken: string }): Promise<{
+    ok: boolean;
+    identity?: AgentIdentity;
+    error?: string;
+  }> {
+    try {
+      const data = await this.get<Record<string, unknown>>(
+        '/api/agent/identity',
+        { Authorization: `Bearer ${opts.authToken}` },
+      );
+      return {
+        ok: true,
+        identity: {
+          agentAddress: String(data.agentAddress ?? ''),
+          agentDid: String(data.agentDid ?? ''),
+          name: String(data.name ?? ''),
+          framework: typeof data.framework === 'string' ? data.framework : undefined,
+          peerId: String(data.peerId ?? ''),
+          nodeIdentityId: String(data.nodeIdentityId ?? ''),
+        },
+      };
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
@@ -690,10 +752,27 @@ export class DkgDaemonClient {
   // HTTP primitives
   // ---------------------------------------------------------------------------
 
-  private async get<T>(path: string): Promise<T> {
+  /**
+   * T63 — `headersOverride` lets callers replace the constructor's
+   * node-level Bearer for a single request. Used by `getAgentIdentity`
+   * which requires the agent-bound auth token (loaded per-request from
+   * the keystore), not the node-level `auth.token`. Without this, the
+   * request would fail with 401 because `/api/agent/identity` rejects
+   * node-level tokens.
+   */
+  private async get<T>(
+    path: string,
+    headersOverride?: Record<string, string>,
+  ): Promise<T> {
+    const headers: Record<string, string> = { 'Accept': 'application/json' };
+    if (headersOverride) {
+      Object.assign(headers, headersOverride);
+    } else {
+      Object.assign(headers, this.authHeaders());
+    }
     const res = await fetch(`${this.baseUrl}${path}`, {
       method: 'GET',
-      headers: { 'Accept': 'application/json', ...this.authHeaders() },
+      headers,
       signal: AbortSignal.timeout(this.timeoutMs),
     });
     if (!res.ok) {

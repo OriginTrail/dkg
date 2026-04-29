@@ -44,8 +44,8 @@ export {
   readDkgApiPort,
   loadAuthTokenSync,
   loadAuthToken,
-  loadAgentEthAddressSync,
-  loadAgentEthAddress,
+  loadAgentAuthTokenSync,
+  loadAgentAuthToken,
   MultipleAgentsError,
   toEip55Checksum,
 } from './dkg-home.js';

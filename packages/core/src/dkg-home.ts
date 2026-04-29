@@ -107,16 +107,19 @@ export async function loadAuthToken(dkgHome?: string): Promise<string | undefine
 const ETH_ADDR_RE = /^0x[0-9a-f]{40}$/;
 
 /**
- * T62 — EIP-55 mixed-case checksum for an eth address.
+ * T62 / T63 — EIP-55 mixed-case checksum for an eth address.
  *
- * Live-test against the daemon revealed chat-turn assertions are stored at
- * graph URIs that use the agent address in CHECKSUM case (the daemon's
- * `defaultAgentAddress` is set from `verifyWallet.address`, which ethers
- * returns in EIP-55 form), but the adapter was reading the keystore JSON
- * KEY (lowercase) and querying with the lowercase form. SPARQL graph URIs
- * are case-sensitive, so reads silently missed every triple. Apply EIP-55
- * to the keystore read so the adapter's outbound `agentAddress` matches
- * the daemon's storage form.
+ * Originally added to convert lowercase keystore JSON keys to checksum form
+ * because the daemon stores chat-turn graph URIs in EIP-55 case. T63 retired
+ * that path: the adapter now HTTP-probes `/api/agent/identity` and gets the
+ * canonical form directly from the daemon, so this helper's keystore-read
+ * use is gone.
+ *
+ * Retained narrow purpose: normalize the `DKG_AGENT_ADDRESS` env override on
+ * remote-daemon deployments (where there's no keystore + no HTTP probe to
+ * derive the canonical case). Operators are likely to supply lowercase
+ * (matches the keystore JSON they peeked at); silent SPARQL miss is a
+ * worse failure mode than a one-shot normalization.
  *
  * @param address - hex-encoded eth address, with or without `0x` prefix.
  *                  Case-insensitive on input.
@@ -146,7 +149,7 @@ export function toEip55Checksum(address: string): string {
 }
 
 /**
- * Thrown by `loadAgentEthAddress*` when the keystore contains more than one
+ * Thrown by `loadAgentAuthToken*` when the keystore contains more than one
  * eth-address top-level key and no `explicitAddress` override was provided.
  *
  * The single-agent path is the common gateway/dev shape; multi-agent
@@ -176,24 +179,28 @@ export class MultipleAgentsError extends Error {
  * as multi-agent and disable WM lookup even though it's a single identity.
  * `Set` over the post-lowercase keys collapses the duplicate to one entry
  * before the multi-agent guardrail counts them.
+ *
+ * T63 — No longer applies EIP-55 checksumming. The adapter resolves the
+ * canonical eth via the daemon's `/api/agent/identity` HTTP probe; this
+ * helper is now only used to enumerate keys for the multi-agent guardrail
+ * and for case-insensitive matching against an explicit env override.
  */
 function extractEthAddressKeys(parsed: unknown): string[] {
   if (!parsed || typeof parsed !== 'object') return [];
   const lc = Object.keys(parsed as Record<string, unknown>)
     .map((k) => k.toLowerCase())
     .filter((k) => ETH_ADDR_RE.test(k));
-  // T46 — Dedupe lowercased keys (covers checksum + lowercase both being
-  // present for the same identity).
-  // T62 — Return EIP-55 checksum form so the adapter's outbound queries
-  // match the daemon's checksum-case graph URIs.
-  return Array.from(new Set(lc)).map((addr) => toEip55Checksum(addr));
+  return Array.from(new Set(lc));
 }
 
 /**
  * Resolve an explicit override (typically `process.env.DKG_AGENT_ADDRESS`)
- * against the eth-address shape. Lowercased for stable comparison with the
- * daemon's keystore-write normalization (`packages/agent/src/dkg-agent.ts`
- * uses `.toLowerCase()` on every store).
+ * against the eth-address shape.
+ *
+ * T63 — Returns the LOWERCASE form for case-insensitive comparison against
+ * keystore keys. Callers that need the canonical EIP-55 form for downstream
+ * use (the remote-daemon `nodeAgentAddress` set-direct path) should call
+ * `toEip55Checksum` themselves on the result.
  *
  * Returns `undefined` if the override is absent or not a valid eth address —
  * the helper's caller then falls through to the keystore read path.
@@ -202,40 +209,43 @@ function resolveExplicitAddress(explicit: string | undefined): string | undefine
   if (typeof explicit !== 'string') return undefined;
   const t = explicit.trim().toLowerCase();
   if (!ETH_ADDR_RE.test(t)) return undefined;
-  // T62 — Normalize env override to EIP-55 checksum form to match the
-  // daemon's storage URI case. Operators can supply lowercase, checksum,
-  // or all-uppercase; output is always canonical EIP-55.
-  return toEip55Checksum(t);
+  return t;
 }
 
 /**
- * Load the agent's eth address from `<DKG_HOME>/agent-keystore.json`.
+ * Load the agent's auth token from `<DKG_HOME>/agent-keystore.json`.
+ *
+ * T63 — Replaces `loadAgentEthAddressSync`. The adapter no longer derives
+ * the eth address from the keystore JSON key; instead it reads the agent's
+ * auth token here, then HTTP-probes the daemon's `/api/agent/identity`
+ * endpoint with that token to get the canonical eth (the daemon already
+ * stores it in EIP-55 form via `verifyWallet.address`). Single source of
+ * truth, no case-conversion plumbing in the adapter.
  *
  * The keystore is written by `packages/agent/src/dkg-agent.ts:saveToKeystore`
- * as a map of lowercase eth address → `{ authToken, privateKey? }`. The
- * daemon resolves its own writer-side identifier (`defaultAgentAddress`) from
- * the first registered agent in the same store, so the adapter must read
- * from the same source for read-side WM SPARQL `agentAddress` to align with
- * write-side graph URIs (otherwise the daemon's query engine scopes WM to
- * `…/assertion/<peerId>/` while data lives at `…/assertion/<eth>/`).
+ * as `{ <lowercase-eth>: { authToken, privateKey? } }`.
  *
- * Returns `undefined` if the keystore is missing, unreadable, malformed, or
- * empty. Throws `MultipleAgentsError` if the keystore has more than one eth
- * key and no `explicitAddress` override is provided — refusing to guess in
- * the multi-agent case is intentional: silent mis-routing across identities
- * is a security/correctness footgun.
+ * - Single-agent keystore: returns `{ authToken: parsed[onlyKey].authToken }`.
+ * - Multi-agent keystore + no `explicitAddress`: throws `MultipleAgentsError`
+ *   (refuse to guess — silent mis-routing across identities is a
+ *   security/correctness footgun).
+ * - Multi-agent keystore + `explicitAddress` matching one entry (case-
+ *   insensitive): returns that entry's `authToken`.
+ * - Missing/empty/malformed keystore: returns `undefined` (caller's
+ *   "keystore absent" path takes over).
+ * - Missing `authToken` field on a present eth entry: returns `undefined`
+ *   (treated as malformed entry).
  *
- * `opts.explicitAddress` (typically `process.env.DKG_AGENT_ADDRESS`) is
- * checked first so operators can disambiguate multi-agent setups without
- * touching the keystore file.
+ * `opts.explicitAddress` (typically `process.env.DKG_AGENT_ADDRESS`) is the
+ * disambiguator for multi-agent setups. The eth address sent on the wire
+ * comes from the daemon's HTTP response, NOT from this argument — operators
+ * who want to override the daemon's reported identity entirely (remote-daemon
+ * deployments) handle that at the call site, not here.
  */
-export function loadAgentEthAddressSync(
+export function loadAgentAuthTokenSync(
   dkgHome?: string,
   opts?: { explicitAddress?: string },
-): string | undefined {
-  const explicit = resolveExplicitAddress(opts?.explicitAddress);
-  if (explicit) return explicit;
-
+): { authToken: string } | undefined {
   const filePath = join(dkgHome ?? dkgHomeDir(), 'agent-keystore.json');
   if (!existsSync(filePath)) return undefined;
 
@@ -243,28 +253,17 @@ export function loadAgentEthAddressSync(
   try {
     parsed = JSON.parse(readFileSync(filePath, 'utf-8'));
   } catch {
-    // Unreadable / malformed JSON / EACCES — treat as missing. The caller's
-    // existing "agent identity not yet provisioned" path already handles
-    // a missing identity gracefully (search returns []), and operators see
-    // the gap via the existing `[dkg-memory] DkgMemorySearchManager.search
-    // skipped: peer ID not yet available` warn.
     return undefined;
   }
 
-  const keys = extractEthAddressKeys(parsed);
-  if (keys.length === 0) return undefined;
-  if (keys.length > 1) throw new MultipleAgentsError(keys);
-  return keys[0];
+  return resolveAuthTokenFromParsed(parsed, opts?.explicitAddress);
 }
 
-/** Async variant of `loadAgentEthAddressSync`. */
-export async function loadAgentEthAddress(
+/** Async variant of `loadAgentAuthTokenSync`. */
+export async function loadAgentAuthToken(
   dkgHome?: string,
   opts?: { explicitAddress?: string },
-): Promise<string | undefined> {
-  const explicit = resolveExplicitAddress(opts?.explicitAddress);
-  if (explicit) return explicit;
-
+): Promise<{ authToken: string } | undefined> {
   const filePath = join(dkgHome ?? dkgHomeDir(), 'agent-keystore.json');
   if (!existsSync(filePath)) return undefined;
 
@@ -275,8 +274,40 @@ export async function loadAgentEthAddress(
     return undefined;
   }
 
+  return resolveAuthTokenFromParsed(parsed, opts?.explicitAddress);
+}
+
+/**
+ * Shared resolution body for sync + async `loadAgentAuthToken*`.
+ * Walks the parsed keystore, applies the multi-agent guardrail, picks the
+ * matching entry, and extracts its `authToken` field.
+ */
+function resolveAuthTokenFromParsed(
+  parsed: unknown,
+  explicitAddress: string | undefined,
+): { authToken: string } | undefined {
   const keys = extractEthAddressKeys(parsed);
   if (keys.length === 0) return undefined;
-  if (keys.length > 1) throw new MultipleAgentsError(keys);
-  return keys[0];
+
+  let chosenKey: string;
+  if (keys.length === 1) {
+    chosenKey = keys[0];
+  } else {
+    const explicit = resolveExplicitAddress(explicitAddress);
+    if (!explicit) throw new MultipleAgentsError(keys);
+    const match = keys.find((k) => k === explicit);
+    if (!match) throw new MultipleAgentsError(keys);
+    chosenKey = match;
+  }
+
+  // The keystore JSON's keys may be in any case (typically lowercase per
+  // `saveToKeystore` normalization, but defensively also accept others).
+  // We've already lowercased and deduped via `extractEthAddressKeys`; pull
+  // the entry by case-insensitive lookup against the original parsed object.
+  const obj = parsed as Record<string, unknown>;
+  const entry = Object.entries(obj).find(([k]) => k.toLowerCase() === chosenKey)?.[1];
+  if (!entry || typeof entry !== 'object') return undefined;
+  const tok = (entry as Record<string, unknown>).authToken;
+  if (typeof tok !== 'string' || tok.length === 0) return undefined;
+  return { authToken: tok };
 }

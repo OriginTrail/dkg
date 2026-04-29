@@ -18,8 +18,9 @@
 import {
   GET_VIEWS,
   type GetView,
-  loadAgentEthAddressSync,
+  loadAgentAuthTokenSync,
   MultipleAgentsError,
+  toEip55Checksum,
 } from '@origintrail-official/dkg-core';
 import {
   DkgDaemonClient,
@@ -1670,79 +1671,61 @@ export class DkgNodePlugin {
    * concurrent-call dedup via the in-flight promise guard.
    */
   private async probeNodeAgentAddressOnce(api: OpenClawPluginApi): Promise<void> {
-    try {
-      // T38 — Local-keystore read is only safe when the daemon is
-      // co-located with the gateway. For remote/custom-daemon setups
-      // (`daemonUrl` pointing off-host), the gateway's `<DKG_HOME>/
-      // agent-keystore.json` either doesn't exist or belongs to a
-      // different identity, and using it would silently scope WM
-      // reads/writes to the wrong agent address. Until the daemon
-      // exposes an HTTP endpoint for the active agent address (filed
-      // as a follow-up against the daemon repo), gate the keystore
-      // read on a localhost daemonUrl. Honor `DKG_AGENT_ADDRESS` env
-      // override regardless — operators who need to point at a remote
-      // daemon can disambiguate manually.
-      // T44 — `DKG_AGENT_ADDRESS` must be a syntactically valid eth
-      // address before it counts as a "trusted operator override" for
-      // the localhost gate. `loadAgentEthAddressSync` silently ignores
-      // invalid override values and falls back to the keystore read,
-      // so a typo like `DKG_AGENT_ADDRESS=foo` would otherwise satisfy
-      // the truthy-string gate, skip the localhost guard, and scope
-      // WM to the gateway's local keystore — exactly what the gate
-      // exists to prevent for remote-daemon setups.
-      const rawExplicit = process.env.DKG_AGENT_ADDRESS;
-      const explicitAddress = isValidEthAddressString(rawExplicit) ? rawExplicit : undefined;
-      if (rawExplicit && !explicitAddress) {
-        api.logger.warn?.(
-          `[dkg-memory] DKG_AGENT_ADDRESS env value "${rawExplicit}" is not a valid 0x-prefixed eth address (must match /^0x[0-9a-f]{40}$/i). ` +
-          'Override ignored — falling through to localhost gate / keystore read.',
-        );
-      }
-      if (!explicitAddress && !this.daemonIsLocalhost()) {
-        api.logger.warn?.(
-          '[dkg-memory] Daemon URL is non-local; skipping keystore read. ' +
-          'Working-memory reads and writes will return needs_clarification ' +
-          'until either DKG_AGENT_ADDRESS env is set, daemonUrl points at ' +
-          'localhost, or the daemon exposes an active-agent-address endpoint.',
-        );
-        return;
-      }
-      // T42 — explicit `config.dkgHome` lets operators point at the
-      // daemon's home dir when it differs from the gateway process's
-      // own `DKG_HOME` (e.g., `dkg start --home /custom/path`,
-      // service-unit-managed daemon, container-isolated daemon).
-      // Undefined falls through to `dkgHomeDir()` which honors the
-      // env. Localhost gate above still applies — operators with a
-      // remote daemon must use `DKG_AGENT_ADDRESS` directly.
-      const dkgHomeOverride = this.config.dkgHome;
-      const address = loadAgentEthAddressSync(dkgHomeOverride, { explicitAddress });
-      if (address) {
-        this.nodeAgentAddress = address;
-        return;
-      }
-      // T60 — Confirmed local-no-keystore case. The daemon at this
-      // host writes WM under `defaultAgentAddress ?? peerId`, so its
-      // peerId IS the right scope key. The resolver's
-      // `nodeAgentAddress ?? nodePeerId` fallback can safely activate
-      // — gate it on this flag so remote-daemon (probe-skipped) and
-      // multi-agent (refuse-to-guess) cases stay at undefined.
-      this.localKeystoreCheckedAndAbsent = true;
-      const homeLabel = dkgHomeOverride
-        ? `\`${dkgHomeOverride}/agent-keystore.json\``
-        : '`<DKG_HOME>/agent-keystore.json`';
+    // T44 — `DKG_AGENT_ADDRESS` must be a syntactically valid eth address
+    // before it counts as a "trusted operator override" for the localhost
+    // gate. A typo like `DKG_AGENT_ADDRESS=foo` would otherwise satisfy the
+    // truthy-string gate and scope WM to the wrong identity.
+    // T62 — Normalize to canonical EIP-55 form so the value matches the
+    // daemon's storage URI case (the daemon stores `defaultAgentAddress`
+    // in checksum form via `verifyWallet.address`). Operators can supply
+    // lowercase / mixed / all-caps; output is always canonical.
+    const rawExplicit = process.env.DKG_AGENT_ADDRESS;
+    const explicitAddress = isValidEthAddressString(rawExplicit)
+      ? toEip55Checksum(rawExplicit!)
+      : undefined;
+    if (rawExplicit && !explicitAddress) {
       api.logger.warn?.(
-        `[dkg-memory] Agent eth address not found — ${homeLabel} is missing or empty. ` +
-        'Working-memory reads and writes will return needs_clarification until the daemon provisions an identity. ' +
-        'If the daemon was started with a custom home dir (e.g. `dkg start --home /path`), ' +
-        'set the adapter `dkgHome` config field or DKG_HOME env to that path. ' +
-        'If the daemon is in a separate container/service unit, set `DKG_AGENT_ADDRESS` to the daemon\'s active agent eth address.',
+        `[dkg-memory] DKG_AGENT_ADDRESS env value "${rawExplicit}" is not a valid 0x-prefixed eth address (must match /^0x[0-9a-f]{40}$/i). ` +
+        'Override ignored — falling through to localhost gate / keystore read.',
       );
+    }
+
+    // T38 — Remote daemon: probe is intentionally skipped unless an explicit
+    // env override is supplied. The gateway's local keystore (if any)
+    // belongs to a different identity, and the daemon is reachable only
+    // over HTTP — but `/api/agent/identity` requires the AGENT auth token,
+    // which the gateway doesn't have for the remote daemon's identity.
+    // With env override: trust verbatim (already EIP-55-normalized above).
+    if (!explicitAddress && !this.daemonIsLocalhost()) {
+      api.logger.warn?.(
+        '[dkg-memory] Daemon URL is non-local; skipping identity probe. ' +
+        'Working-memory reads and writes will return needs_clarification ' +
+        'until either DKG_AGENT_ADDRESS env is set, daemonUrl points at ' +
+        'localhost, or the daemon exposes a node-level identity endpoint.',
+      );
+      return;
+    }
+    if (explicitAddress && !this.daemonIsLocalhost()) {
+      // Operator-asserted identity for a remote daemon. No HTTP probe; we
+      // wouldn't have an agent token to authenticate against the remote.
+      this.nodeAgentAddress = explicitAddress;
+      return;
+    }
+
+    // Localhost: T42 — explicit `config.dkgHome` lets operators point at
+    // the daemon's home dir when it differs from the gateway process's
+    // own `DKG_HOME` (e.g., `dkg start --home /custom/path`).
+    const dkgHomeOverride = this.config.dkgHome;
+
+    // T63 — Read the agent's auth token from the keystore (no longer the
+    // eth address — that comes from the HTTP probe response).
+    let tokenRecord: { authToken: string } | undefined;
+    try {
+      tokenRecord = loadAgentAuthTokenSync(dkgHomeOverride, { explicitAddress });
     } catch (err: any) {
       if (err instanceof MultipleAgentsError) {
-        // No `error` channel on the typed logger surface (only info / warn /
-        // debug); a multi-agent guardrail miss is operationally an error
-        // condition but plumbed through `warn` so it surfaces at default
-        // log levels.
+        // T31 — multi-agent guardrail. Logger surface has only info/warn/
+        // debug (no `error`); guardrail miss surfaces as warn.
         api.logger.warn?.(
           `[dkg-memory] Multi-agent keystore detected (addresses: ${err.addresses.join(', ')}). ` +
           'Adapter refuses to guess which identity to scope WM queries against. ' +
@@ -1751,9 +1734,52 @@ export class DkgNodePlugin {
         return;
       }
       api.logger.warn?.(
-        `[dkg-memory] Agent eth address probe threw unexpectedly: ${err?.message ?? err}`,
+        `[dkg-memory] Agent auth-token probe threw unexpectedly: ${err?.message ?? err}`,
       );
+      return;
     }
+
+    if (!tokenRecord) {
+      // T60 — Confirmed local-no-keystore case. The daemon at this host
+      // writes WM under `defaultAgentAddress ?? peerId`, so its peerId is
+      // the correct scope key. The resolver's
+      // `nodeAgentAddress ?? nodePeerId` fallback activates via this flag.
+      // Remote-daemon (probe-skipped, returned above) and multi-agent
+      // (refuse-to-guess, returned in catch) leave the flag at false so
+      // the resolver returns undefined and the operator gets the "not
+      // ready" path with recovery knobs.
+      this.localKeystoreCheckedAndAbsent = true;
+      const homeLabel = dkgHomeOverride
+        ? `\`${dkgHomeOverride}/agent-keystore.json\``
+        : '`<DKG_HOME>/agent-keystore.json`';
+      api.logger.warn?.(
+        `[dkg-memory] Agent auth token not found — ${homeLabel} is missing, empty, or has no usable authToken field. ` +
+        'Working-memory reads and writes will return needs_clarification until the daemon provisions an identity. ' +
+        'If the daemon was started with a custom home dir (e.g. `dkg start --home /path`), ' +
+        'set the adapter `dkgHome` config field or DKG_HOME env to that path. ' +
+        'If the daemon is in a separate container/service unit, set `DKG_AGENT_ADDRESS` to the daemon\'s active agent eth address.',
+      );
+      return;
+    }
+
+    // T63 — HTTP-probe `/api/agent/identity` with the agent token. The
+    // daemon returns the canonical EIP-55 eth address in `agentAddress`;
+    // adapter trusts it verbatim (no client-side checksum conversion).
+    const result = await this.client.getAgentIdentity({ authToken: tokenRecord.authToken });
+    if (result.ok && result.identity?.agentAddress) {
+      this.nodeAgentAddress = result.identity.agentAddress;
+      return;
+    }
+
+    // HTTP probe failed (transport / 401 / 5xx). This is a transient
+    // condition — do NOT set `localKeystoreCheckedAndAbsent` here, because
+    // the keystore was found and parsed cleanly. The resolver returns
+    // undefined and the next probe retries.
+    api.logger.warn?.(
+      `[dkg-memory] Daemon /api/agent/identity probe failed: ${result.error ?? 'unknown error'}. ` +
+      'Working-memory reads and writes will return needs_clarification until the next probe lands. ' +
+      'This is normal during daemon startup; if it persists, check the daemon is healthy and the keystore authToken matches.',
+    );
   }
 
   /**
