@@ -1,9 +1,10 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { existsSync } from 'node:fs';
-import { mkdir, rm } from 'node:fs/promises';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
+import { dkgAuthTokenPath } from '@origintrail-official/dkg-core';
 import {
   loadNetworkConfig,
   loadConfig,
@@ -112,10 +113,16 @@ describe('isDkgMonorepo', () => {
 
 describe('dkgDir', () => {
   const origHome = process.env.DKG_HOME;
+  const origOsHome = process.env.HOME;
+  const origUserProfile = process.env.USERPROFILE;
 
   afterEach(() => {
     if (origHome === undefined) delete process.env.DKG_HOME;
     else process.env.DKG_HOME = origHome;
+    if (origOsHome === undefined) delete process.env.HOME;
+    else process.env.HOME = origOsHome;
+    if (origUserProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = origUserProfile;
   });
 
   it('returns ~/.dkg-dev when in monorepo without existing ~/.dkg/config.json, else ~/.dkg', () => {
@@ -131,6 +138,38 @@ describe('dkgDir', () => {
   it('respects DKG_HOME override', () => {
     process.env.DKG_HOME = '/tmp/custom-dkg';
     expect(dkgDir()).toBe('/tmp/custom-dkg');
+  });
+
+  it('uses ~/.dkg-dev for monorepo config writes when ~/.dkg/config.json is absent', async () => {
+    delete process.env.DKG_HOME;
+    const tempHome = join(tmpdir(), `dkg-cli-config-home-${randomBytes(4).toString('hex')}`);
+    await mkdir(tempHome, { recursive: true });
+    process.env.HOME = tempHome;
+    process.env.USERPROFILE = tempHome;
+    try {
+      const expected = isDkgMonorepo()
+        ? join(tempHome, '.dkg-dev')
+        : join(tempHome, '.dkg');
+      expect(dkgDir()).toBe(expected);
+      expect(dkgAuthTokenPath(dkgDir())).toBe(join(expected, 'auth.token'));
+    } finally {
+      await rm(tempHome, { recursive: true, force: true });
+    }
+  });
+
+  it('uses ~/.dkg for monorepo config writes when ~/.dkg/config.json already exists', async () => {
+    delete process.env.DKG_HOME;
+    const tempHome = join(tmpdir(), `dkg-cli-config-home-${randomBytes(4).toString('hex')}`);
+    const dkgHome = join(tempHome, '.dkg');
+    await mkdir(dkgHome, { recursive: true });
+    await writeFile(join(dkgHome, 'config.json'), '{}\n');
+    process.env.HOME = tempHome;
+    process.env.USERPROFILE = tempHome;
+    try {
+      expect(dkgDir()).toBe(dkgHome);
+    } finally {
+      await rm(tempHome, { recursive: true, force: true });
+    }
   });
 });
 

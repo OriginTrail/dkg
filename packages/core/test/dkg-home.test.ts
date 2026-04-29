@@ -3,7 +3,7 @@ import { writeFile, mkdir, rm, utimes } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { homedir } from 'node:os';
-import { dkgHomeDir, resolveDkgHome, isProcessAlive, readDaemonPid, readDkgApiPort, loadAuthToken, loadAuthTokenSync, loadAgentAuthTokenSync, loadAgentAuthToken, MultipleAgentsError, toEip55Checksum } from '../src/dkg-home.js';
+import { dkgHomeDir, resolveDkgConfigHome, dkgAuthTokenPath, resolveDkgHome, isProcessAlive, readDaemonPid, readDkgApiPort, loadAuthToken, loadAuthTokenSync, loadAgentAuthTokenSync, loadAgentAuthToken, MultipleAgentsError, toEip55Checksum } from '../src/dkg-home.js';
 
 describe('dkgHomeDir', () => {
   const originalEnv = process.env.DKG_HOME;
@@ -21,6 +21,77 @@ describe('dkgHomeDir', () => {
   it('defaults to ~/.dkg', () => {
     delete process.env.DKG_HOME;
     expect(dkgHomeDir()).toBe(join(homedir(), '.dkg'));
+  });
+});
+
+describe('resolveDkgConfigHome', () => {
+  let tempHome: string;
+
+  beforeEach(async () => {
+    tempHome = join(tmpdir(), `dkg-config-home-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    await mkdir(tempHome, { recursive: true });
+  });
+
+  afterEach(async () => {
+    await rm(tempHome, { recursive: true, force: true });
+  });
+
+  it('DKG_HOME wins over monorepo and config-file heuristics', () => {
+    expect(resolveDkgConfigHome({
+      env: { DKG_HOME: '/custom/dkg-home' },
+      homeDir: tempHome,
+      isDkgMonorepo: true,
+      configExists: false,
+    })).toBe('/custom/dkg-home');
+  });
+
+  it('treats an injected empty env as DKG_HOME unset', () => {
+    const originalDkgHome = process.env.DKG_HOME;
+    process.env.DKG_HOME = '/process/dkg-home';
+    try {
+      expect(resolveDkgConfigHome({
+        env: {},
+        homeDir: tempHome,
+        isDkgMonorepo: true,
+        configExists: false,
+      })).toBe(join(tempHome, '.dkg-dev'));
+    } finally {
+      if (originalDkgHome === undefined) delete process.env.DKG_HOME;
+      else process.env.DKG_HOME = originalDkgHome;
+    }
+  });
+
+  it('uses ~/.dkg-dev in a monorepo when ~/.dkg/config.json does not exist', () => {
+    expect(resolveDkgConfigHome({
+      env: {},
+      homeDir: tempHome,
+      isDkgMonorepo: true,
+      configExists: false,
+    })).toBe(join(tempHome, '.dkg-dev'));
+  });
+
+  it('uses ~/.dkg in a monorepo when ~/.dkg/config.json already exists', () => {
+    expect(resolveDkgConfigHome({
+      env: {},
+      homeDir: tempHome,
+      isDkgMonorepo: true,
+      configExists: true,
+    })).toBe(join(tempHome, '.dkg'));
+  });
+
+  it('uses ~/.dkg outside a monorepo', () => {
+    expect(resolveDkgConfigHome({
+      env: {},
+      homeDir: tempHome,
+      isDkgMonorepo: false,
+      configExists: false,
+    })).toBe(join(tempHome, '.dkg'));
+  });
+});
+
+describe('dkgAuthTokenPath', () => {
+  it('formats the auth-token path from the resolved DKG home', () => {
+    expect(dkgAuthTokenPath('/tmp/dkg-home')).toBe(join('/tmp/dkg-home', 'auth.token'));
   });
 });
 

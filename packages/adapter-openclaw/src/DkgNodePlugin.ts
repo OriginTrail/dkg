@@ -584,8 +584,9 @@ export class DkgNodePlugin {
     // state. Fall back order:
     //   1. `runtime.state.resolveStateDir()` — gateway-provided, workspace-scoped.
     //   2. `OPENCLAW_STATE_DIR` env override — operator-controlled, opt-in.
-    //   3. `api.workspaceDir + .openclaw` — workspace-scoped derived path.
-    //   4. `~/.openclaw` — last resort; logged as a warning so ops can fix.
+    //   3. `config.stateDir` — setup-persisted, workspace-scoped default.
+    //   4. `api.workspaceDir + .openclaw` — workspace-scoped derived path.
+    //   5. `~/.openclaw` — last resort; logged as a warning so ops can fix.
     const workspaceDir = (api as any)?.workspaceDir;
     const homeDir = `${homedir()}/.openclaw`;
     // T26 — Normalize each source through trim+non-empty before the
@@ -604,6 +605,7 @@ export class DkgNodePlugin {
     const stateDir =
       trimmedNonEmpty((api as any)?.runtime?.state?.resolveStateDir?.()) ??
       trimmedNonEmpty(process.env.OPENCLAW_STATE_DIR) ??
+      trimmedNonEmpty(this.config.stateDir) ??
       (trimmedWorkspaceDir ? `${trimmedWorkspaceDir}/.openclaw` : undefined) ??
       homeDir;
 
@@ -659,9 +661,9 @@ export class DkgNodePlugin {
 
     if (stateDir === homeDir) {
       api.logger.warn?.(
-        '[dkg] Could not resolve a workspace-scoped state dir (api.runtime.state.resolveStateDir / OPENCLAW_STATE_DIR / api.workspaceDir all unavailable); ' +
+        '[dkg] Could not resolve a workspace-scoped state dir (api.runtime.state.resolveStateDir / OPENCLAW_STATE_DIR / config.stateDir / api.workspaceDir all unavailable); ' +
         `falling back to '${homeDir}'. Two workspaces on the same machine will share chat-turn watermarks. ` +
-        'Set OPENCLAW_STATE_DIR explicitly to silence this.',
+        'Set config.stateDir or OPENCLAW_STATE_DIR explicitly to silence this.',
       );
     }
     this.chatTurnWriter = new ChatTurnWriter({ client: this.client, logger: api.logger, stateDir });

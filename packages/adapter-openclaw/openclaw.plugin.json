@@ -13,6 +13,10 @@
         "default": "http://127.0.0.1:9200",
         "description": "DKG daemon HTTP URL"
       },
+      "stateDir": {
+        "type": "string",
+        "description": "Directory for adapter runtime state such as chat-turn watermarks. Setup writes a workspace-scoped default when available."
+      },
       "memory": {
         "type": "object",
         "properties": {
