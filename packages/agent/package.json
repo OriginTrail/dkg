@@ -13,7 +13,7 @@
     "clean": "rm -rf dist tsconfig.tsbuildinfo"
   },
   "dependencies": {
-    "@libp2p/peer-id": "^6.0.4",
+    "@libp2p/peer-id": "^6.0.8",
     "@multiformats/multiaddr": "*",
     "@noble/ciphers": "^2.1.1",
     "@noble/curves": "^2",
