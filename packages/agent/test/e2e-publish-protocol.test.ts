@@ -467,12 +467,13 @@ describe('E2E: Context graph registration rejected with insufficient participant
       { subContextGraphId: contextGraphId },
     );
 
-    // V10: publishDirect enforces the *global* minimumRequiredSignatures
-    // (set via ParametersStorage), not the per-CG requiredSignatures.
-    // The per-CG quorum governs context-graph governance, not publish gating.
-    // With the global minimum at 1 and a valid self-signed ACK the publish
-    // succeeds even though the CG's own quorum is 2.
-    expect(result.status).toBe('confirmed');
+    // Spec §06_PUBLISH /
+    // `requiredSignatures` IS enforced at publish time. With a per-CG
+    // quorum of 2 and only the self-signed ACK collectable (no peers),
+    // the publish must NOT confirm — it stays tentative until the
+    // remaining participant ACKs are gathered. The dedicated unit test
+    // for this contract lives in `per-cg-quorum-extra.test.ts`.
+    expect(result.status).toBe('tentative');
   }, 20_000);
 });
 
@@ -564,12 +565,21 @@ describe('E2E: Edge node participates in context graph governance', () => {
       },
     );
 
-    expect(result.status).toBe('confirmed');
+    // Spec §06_PUBLISH /
+    // gates publish at the publisher boundary. The edge node cannot sign
+    // StorageACKs (it's not a core node — see `Node role is 'edge' — skipping
+    // StorageACK handler registration`), and the dummy `contextGraphSignatures`
+    // here are governance sigs, not StorageACKs. Only 1 ACK (self-signed by
+    // core) is collectable, the per-CG quorum is 2 → publish stays tentative.
+    expect(result.status).toBe('tentative');
 
-    const ctxDataGraph = `did:dkg:context-graph:${PARANET}/context/${contextGraphId}`;
-    const data = await coreNode.query(
-      `SELECT ?name WHERE { GRAPH <${ctxDataGraph}> { <${ENTITY_1}> <http://schema.org/name> ?name } }`,
+    // Data must still be queryable via the shared-working-memory view so
+    // peers can resync after additional ACKs are collected and the publish
+    // is finalised on chain.
+    const swmData = await coreNode.query(
+      `SELECT ?name WHERE { <${ENTITY_1}> <http://schema.org/name> ?name }`,
+      { contextGraphId: PARANET, view: 'shared-working-memory' },
     );
-    expect(data.bindings.length).toBe(1);
+    expect(swmData.bindings.length).toBe(1);
   }, 40_000);
 });

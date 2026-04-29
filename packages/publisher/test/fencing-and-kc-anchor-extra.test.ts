@@ -138,7 +138,7 @@ describe('P-2 (CRITICAL): fencing token — stale worker after health-check rese
   it(
     'PROD-BUG: after the wallet lock is cleared, a stale worker can still ' +
       'flip `claimed → validated` on its own job — update() has no fence on ' +
-      'the caller claim token. See BUGS_FOUND.md P-2.',
+      'the caller claim token.',
     async () => {
       const publisher = createPublisher();
       const jobId = await publisher.lift(request());
@@ -225,24 +225,32 @@ describe('P-2 (CRITICAL): fencing token — stale worker after health-check rese
     } catch (err) {
       caughtStale = err;
     }
-    // PROD-BUG: update() signs off on this mutation with no fence check,
-    // and the publisher even rewrites the wallet lock for wallet-A
-    // (re-acquiring a lease that the control plane had explicitly
-    // invalidated). Observe: lock came back.
-    expect(caughtStale).toBeNull();
-    expect(await walletLockRowCount('wallet-A')).toBeGreaterThan(0);
+    // FIXED (
+    // when the caller's wallet lock has been cleared by the control
+    // plane, and `syncWalletLockForJob` no longer silently resurrects
+    // the lock during refresh. The spec invariant is therefore that
+    // BOTH of these facts must hold simultaneously after the
+    // out-of-band wallet-lock delete:
+    //   1. the stale update is rejected with a fencing error, and
+    //   2. the wallet lock stays cleared.
+    expect(
+      caughtStale,
+      'FIXED: stale wallet-A update must be rejected with a fencing error.',
+    ).toBeInstanceOf(Error);
+    if (caughtStale instanceof Error) {
+      expect(caughtStale.message).toMatch(/fenc|stale|lock|claim/i);
+    }
+    expect(
+      await walletLockRowCount('wallet-A'),
+      'FIXED: a fenced update must NOT silently recreate a control-plane-cleared lock.',
+    ).toBe(0);
 
-    // Make the spec expectation explicit: under a correct fencing
-    // implementation, either the update or the lock recreation would
-    // fail. The two assertions below codify "at least one of these
-    // must be false".
     const staleWriteAccepted = caughtStale === null;
     const lockSilentlyRecreated = (await walletLockRowCount('wallet-A')) > 0;
-    // PROD-BUG evidence: BOTH are currently true.
+    // Spec axiom — neither failure mode may hold after the fix.
     expect(
       staleWriteAccepted && lockSilentlyRecreated,
-      'PROD-BUG: stale worker was allowed to write AND silently regained ' +
-        'a wallet lock the control plane had invalidated. See BUGS_FOUND.md P-2.',
+      'FIXED: stale worker is rejected and the cleared wallet lock is preserved.',
     ).toBe(false);
   });
 });

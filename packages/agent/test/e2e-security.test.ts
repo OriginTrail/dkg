@@ -25,7 +25,11 @@ import {
   generateEd25519Keypair,
   PROTOCOL_ACCESS,
 } from '@origintrail-official/dkg-core';
-import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import {
+  OxigraphStore,
+  PrivateContentStore,
+  ContextGraphManager,
+} from '@origintrail-official/dkg-storage';
 import { AccessClient, AccessHandler, DKGPublisher } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 
@@ -175,7 +179,12 @@ describe('Private triple confidentiality via GossipSub', () => {
     );
     expect(aPublicQuery.bindings).toHaveLength(0);
 
-    // But the underlying store DOES have them in the private graph
+    // But the underlying store DOES have them in the private graph.
+    // ST-2: literal objects are AES-GCM-sealed at rest, so a RAW
+    // SPARQL caller (no PrivateContentStore decrypt) sees only the
+    // `enc:gcm:v1:<base64>` envelope. The authorized round-trip via
+    // PrivateContentStore.getPrivateTriples reverses the seal and
+    // returns the original "top-secret-value".
     const privateGraph = `did:dkg:context-graph:${PARANET}/_private`;
     const directResult = await agentA.store.query(
       `SELECT ?val WHERE { GRAPH <${privateGraph}> { ?s <http://ex.org/secret> ?val } }`,
@@ -183,8 +192,17 @@ describe('Private triple confidentiality via GossipSub', () => {
     expect(directResult.type).toBe('bindings');
     if (directResult.type === 'bindings') {
       expect(directResult.bindings).toHaveLength(1);
-      expect(directResult.bindings[0]['val']).toBe('"top-secret-value"');
+      expect(directResult.bindings[0]['val']).toMatch(/^"enc:gcm:v1:/);
     }
+    const privateContent = new PrivateContentStore(
+      agentA.store,
+      new ContextGraphManager(agentA.store),
+    );
+    const decrypted = await privateContent.getPrivateTriples(
+      PARANET,
+      'did:dkg:test:Doc',
+    );
+    expect(decrypted.map((q) => q.object)).toContain('"top-secret-value"');
 
     // Receiver B should have public but NOT private
     const bSecrets = await agentB.query(

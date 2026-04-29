@@ -176,7 +176,10 @@ describe('AgentWallet', () => {
 
 describe('Profile Builder', () => {
   it('builds agent profile quads', () => {
-    // A-12 migration: profile DIDs are the EVM-address form, not peer-id.
+    // A-12: agent DIDs MUST be the 0x-address form per spec §03/§22.
+    // Pass the EVM address explicitly via `agentAddress`; `peerId` is
+    // kept as a legacy libp2p handle to prove the builder uses the
+    // canonical address form even when both are provided.
     const addr = '0x' + '1'.repeat(40);
     const { quads, rootEntity } = buildAgentProfile({
       peerId: 'QmTest123',
@@ -1409,12 +1412,22 @@ decisions: []
     const contextGraphUri = 'did:dkg:context-graph:register-foreign-peer-only';
     await store.deleteByPattern({ graph: 'did:dkg:context-graph:register-foreign-peer-only/_meta', subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_CURATOR });
     await store.deleteByPattern({ graph: 'did:dkg:context-graph:ontology', subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_CREATOR });
+    // A-12 spec drift: agent DIDs MUST be the 0x-address form per
+    // dkgv10-spec §03_AGENTS.md. Use a clearly-fictional address that
+    // is not the test agent's identity so the rejection path under test
+    // (registerContextGraph against a CG whose creator metadata names
+    // some *other* address-scoped agent and whose curator has been
+    // removed) still fires with the same "has no address-scoped curator"
+    // message. This preserves the original test intent while satisfying
+    // the agent-package DID-format scanners (did-format-extra +
+    // agent-audit-extra), which fail loudly on any non-0x agent DID
+    // baked into a fixture.
     await store.insert([
       {
         graph: 'did:dkg:context-graph:ontology',
         subject: contextGraphUri,
         predicate: DKG_ONTOLOGY.DKG_CREATOR,
-        object: 'did:dkg:agent:12D3KooWForeignCreatorPeer111111111111111111111111',
+        object: 'did:dkg:agent:0x000000000000000000000000000000000000dEaD',
       },
     ]);
 

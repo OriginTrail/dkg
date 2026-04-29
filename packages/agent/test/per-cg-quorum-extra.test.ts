@@ -19,7 +19,7 @@
  *            (spec-correct: insufficient signatures → fallback to SWM-only)
  *            while the current implementation returns `'confirmed'`.
  *
- *       The failure is the direct evidence for BUGS_FOUND.md A-5.
+ *       The failure is the direct evidence for.
  *
  * Paired commentary at `packages/agent/test/e2e-publish-protocol.test.ts`
  * §5 already documents the behaviour but asserts the (wrong) confirmed
@@ -110,10 +110,10 @@ describe('A-5: per-CG `requiredSignatures` gates publish (PROD-BUG: currently ig
     // quorum of 2, the publish must NOT confirm — it falls back to
     // tentative (SWM-only). The existing `e2e-publish-protocol.test.ts §5`
     // currently asserts `confirmed` to match buggy behaviour. See
-    // BUGS_FOUND.md A-5. Expected to go RED.
+    //. Expected to go RED.
     expect(
       result.status,
-      'per-CG requiredSignatures is ignored at publish time (BUGS_FOUND.md A-5)',
+      'per-CG requiredSignatures is ignored at publish time',
     ).toBe('tentative');
   });
 
@@ -143,7 +143,7 @@ describe('A-5: per-CG `requiredSignatures` gates publish (PROD-BUG: currently ig
     // This direction (requiredSignatures=1, 1 ACK) must always confirm —
     // both under the buggy global-only gate and the spec-correct per-CG
     // gate. It serves as a regression anchor: if this flips to tentative,
-    // the implementation has over-corrected. See BUGS_FOUND.md A-5.
+    // the implementation has over-corrected.
     expect(result.status).toBe('confirmed');
   });
 });

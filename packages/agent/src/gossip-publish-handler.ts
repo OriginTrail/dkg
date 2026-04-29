@@ -57,7 +57,29 @@ export class GossipPublishHandler {
     this.callbacks = callbacks;
   }
 
-  async handlePublishMessage(data: Uint8Array, contextGraphId: string, onPhase?: GossipPhaseCallback, fromPeerId?: string): Promise<void> {
+  async handlePublishMessage(
+    data: Uint8Array,
+    contextGraphId: string,
+    onPhase?: GossipPhaseCallback,
+    fromPeerId?: string,
+    /**
+     * r23-4: the EVM address recovered
+     * from the outer GossipEnvelope signature, if ingress came via a
+     * signed envelope. The envelope authenticates the BYTES, but the
+     * inner `PublishRequestMsg.publisherAddress` is a self-reported
+     * claim — without cross-checking the two, a malicious peer with
+     * a legitimate wallet could wrap ANY PublishRequest (including
+     * one whose `publisherAddress` points to another operator) and
+     * the envelope would still verify. When this argument is
+     * provided it MUST equal `request.publisherAddress`; a mismatch
+     * is a hard reject so forged-attribution publishes can't land.
+     * Undefined means "no envelope was present on ingress" (legacy
+     * rolling-upgrade path accepted when `strictGossipEnvelope` is
+     * off) and the check is skipped — the envelope-layer warning
+     * already documents that risk.
+     */
+    envelopeSigner?: string,
+  ): Promise<void> {
     let ctx = createOperationContext('gossip');
     const phase = onPhase ?? this.callbacks.onPhase;
     try {
@@ -81,6 +103,42 @@ export class GossipPublishHandler {
         }
       } finally {
         phase?.('decode', 'end');
+      }
+
+      // if the ingress layer produced a recovered envelope
+      // signer, enforce that it matches the claimed publisher address
+      // on the inner PublishRequest. This is the cryptographic link
+      // between "who signed the envelope" and "who the payload
+      // attributes the publish to" — the bot's finding was that
+      // previously we recovered but discarded the signer, so anyone
+      // with a legitimately signed envelope could attribute a publish
+      // to any address they liked.
+      if (envelopeSigner && request.publisherAddress) {
+        const claimed = request.publisherAddress.toLowerCase();
+        const recovered = envelopeSigner.toLowerCase();
+        if (claimed !== recovered) {
+          this.log.warn(
+            ctx,
+            `Gossip publish rejected: envelope signer ${envelopeSigner} ` +
+              `does not match claimed publisherAddress ${request.publisherAddress} ` +
+              `(forged-attribution defence, r23-4)`,
+          );
+          return;
+        }
+      } else if (envelopeSigner && !request.publisherAddress) {
+        // An envelope MUST only wrap PublishRequests whose publisher
+        // is explicitly claimed; accepting an envelope-signed but
+        // publisher-unclaimed publish would still carry the signer's
+        // identity into attribution-sensitive code paths (ownership
+        // claims, policy bindings) under an empty-string attribution
+        // the store can't dedupe. Reject and let the publisher
+        // resend with the correct claim.
+        this.log.warn(
+          ctx,
+          `Gossip publish rejected: envelope is signed by ${envelopeSigner} ` +
+            `but PublishRequest.publisherAddress is empty (r23-4)`,
+        );
+        return;
       }
 
       const nquadsStr = new TextDecoder().decode(request.nquads);
