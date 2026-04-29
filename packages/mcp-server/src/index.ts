@@ -3,7 +3,9 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
-import { DkgClient } from './connection.js';
+import { createHash } from 'node:crypto';
+import { DkgClient, resolveDaemonEndpoint } from './connection.js';
+import { probeStatus, probeAuth } from './auth-probe.js';
 import { escapeSparqlLiteral } from '@origintrail-official/dkg-core';
 
 const CONTEXT_GRAPH = 'dev-coordination';
@@ -385,10 +387,167 @@ server.registerTool(
 );
 
 // ---------------------------------------------------------------------------
+// mcp_auth — credentialing & connection state (
+// ---------------------------------------------------------------------------
+//
+// Spec requirement: every MCP server that talks to a remote DKG node MUST
+// expose an `mcp_auth` tool so the host (Claude / Cursor / openclaw) can
+// programmatically inspect the active credential, swap/rotate it, and
+// confirm the daemon is reachable with that credential — without forcing
+// the user to read DKG_NODE_TOKEN environment variables out-of-band.
+//
+// Operations:
+//
+//   - status   → current node URL, sanitized credential fingerprint,
+//                /api/status liveness probe, server version
+//   - set      → install a new bearer token in-process (overrides
+//                DKG_NODE_TOKEN for the lifetime of the server)
+//   - whoami   → minimal identity echo derived from the credential —
+//                ALWAYS returns a fingerprint (sha256[:8]) of the token,
+//                never the raw token, so transcripts can't leak it.
+//
+// The whole flow is read-only with respect to the underlying DKG node;
+// rotation against the daemon's on-disk auth.token is handled by the CLI
+// `dkg auth rotate` subcommand (CLI-11) — exposing rotation here would
+// mean leaking the token surface area into the MCP transcript.
+
+server.registerTool(
+  'mcp_auth',
+  {
+    title: 'MCP DKG Authentication',
+    description:
+      'Inspect or update the bearer credential the MCP server uses to reach the DKG node. ' +
+      'Use op="status" for a liveness probe + sanitized credential fingerprint; ' +
+      'op="set" to install a new bearer token in-process; ' +
+      'op="whoami" to echo the active credential fingerprint without the raw value.',
+    inputSchema: {
+      op: z
+        .enum(['status', 'set', 'whoami'])
+        .describe('Operation to perform: status | set | whoami'),
+      token: z
+        .string()
+        .optional()
+        .describe('Bearer token to install (required when op="set")'),
+    },
+  },
+  async ({ op, token }) => {
+    try {
+      if (op === 'set') {
+        if (!token || token.trim().length < 8) {
+          return err(
+            'mcp_auth: op="set" requires a non-empty `token` argument (>= 8 chars).',
+          );
+        }
+        process.env.DKG_NODE_TOKEN = token;
+        _client = null;
+        return ok(
+          `Bearer credential rotated in-process. Fingerprint: ${fingerprintCredential(token)}.\n` +
+            'The next DKG tool invocation will reconnect with the new token.',
+        );
+      }
+
+      // Until
+      // round 10 this path resolved the URL + credential from env vars
+      // ONLY. With no env overrides it reported `127.0.0.1:7777` and
+      // an empty bearer even though `DkgClient.connect()` would have
+      // successfully discovered the port via `readDkgApiPort()` and
+      // the token via `loadAuthToken()`. That meant `mcp_auth status`
+      // said "auth broken" on a normal install where tool calls
+      // worked fine. Mirror `DkgClient.connect()`'s discovery path so
+      // the displayed + probed endpoint matches what the tool channel
+      // actually uses.
+      const resolved = await resolveDaemonEndpoint({ requireReachable: false });
+      const url = resolved.displayUrl;
+      const cred = resolved.token;
+      const credSourceHint =
+        resolved.tokenSource === 'env'
+          ? ' (source: DKG_NODE_TOKEN env)'
+          : resolved.tokenSource === 'file'
+            ? ' (source: auth.token file)'
+            : '';
+      const fingerprint = cred
+        ? fingerprintCredential(cred) + credSourceHint
+        : '∅ (no credential configured)';
+
+      if (op === 'whoami') {
+        return ok(
+          `node = ${url}\n` +
+            `credential fingerprint = ${fingerprint}\n` +
+            `url source = ${resolved.urlSource === 'env' ? 'DKG_NODE_URL env' : 'daemon.port file'}\n` +
+            `(raw token deliberately not returned — use op="status" for the liveness probe)`,
+        );
+      }
+
+      // `/api/status` is on the daemon's public
+      // allowlist (no auth required), so probing it only reports
+      // reachability — it says nothing about whether the configured
+      // bearer token is actually accepted. `mcp_auth status` used to
+      // print "OK" even when the credential was wrong or absent, which
+      // is actively misleading for a tool whose whole purpose is to let
+      // the host verify the active auth state. Probe an authenticated
+      // endpoint (`/api/agents`) in addition to the liveness probe and
+      // report the two results independently. `auth probe = OK` now
+      // requires the credential to be accepted; a 401/403 from the
+      // authenticated probe surfaces as `auth probe = FAILED (401)`
+      // even when the node is reachable.
+      // Build a probe URL from the resolved endpoint. `displayUrl`
+      // may carry a human-readable suffix (e.g. "(daemon not running)")
+      // when `readDkgApiPort()` returned nothing, so we derive the
+      // actual fetch target from `baseOrPort` directly.
+      const probeUrl =
+        typeof resolved.baseOrPort === 'number'
+          ? `http://127.0.0.1:${resolved.baseOrPort}`
+          : resolved.baseOrPort;
+      // when the resolver explicitly reports `daemonDown`, the
+      // `baseOrPort` is a SYNTHETIC 127.0.0.1:7777 placeholder and
+      // anything listening on that port belongs to a different
+      // service. Probing it would make `mcp_auth status` lie
+      // ("liveness = OK" on a dead daemon). Skip both probes in that
+      // case and surface the real state — the synthetic displayUrl
+      // already says "(daemon not running)".
+      const status = resolved.daemonDown
+        ? { ok: false, code: 0, body: '' }
+        : await probeStatus(probeUrl, cred);
+      const authProbe = resolved.daemonDown
+        ? { ok: false, code: 0, body: '', authDisabled: false }
+        : await probeAuth(probeUrl, cred);
+      // when no
+      // credential is configured AND the daemon accepts the
+      // unauthenticated `/api/agents` probe, surface that as a
+      // distinct `AUTH DISABLED` state instead of conflating it
+      // with a hard `FAILED`. Any subsequent MCP request would
+      // succeed because the daemon has `auth.enabled=false`, so
+      // the host shouldn't see a red "authentication broken"
+      // signal — it's the operator's choice.
+      const authProbeLabel = authProbe.authDisabled
+        ? 'AUTH DISABLED'
+        : authProbe.ok
+          ? 'OK'
+          : 'FAILED';
+      return ok(
+        `node = ${url}\n` +
+          `credential fingerprint = ${fingerprint}\n` +
+          `liveness probe = ${status.ok ? 'OK' : 'FAILED'}${status.code ? ` (${status.code})` : ''}\n` +
+          `auth probe = ${authProbeLabel}${authProbe.code ? ` (${authProbe.code})` : ''}\n` +
+          (status.body ? `liveness body = ${status.body}\n` : '') +
+          (authProbe.body ? `auth body = ${authProbe.body}\n` : ''),
+      );
+    } catch (e) {
+      return err(`mcp_auth error: ${formatError(e)}`);
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
 const esc = escapeSparqlLiteral;
+
+function fingerprintCredential(token: string): string {
+  const hash = createHash('sha256').update(token, 'utf8').digest('hex');
+  return `sha256:${hash.slice(0, 12)}…`;
+}
 
 // ---------------------------------------------------------------------------
 // Adapter loading — DKG_ADAPTERS=autoresearch,other,...

@@ -13,7 +13,7 @@
  *     its own hardhat compile in-lane with its own cache.
  *   - We can't just drop evm-module from the turbo task graph via
  *     `--filter=!…` because `@dkg-chain#build` declares evm-module as a
- *     workspace dependency and turbo pulls it in transitively.
+ *     workspace dependency and turbo pulls it in transitively
  *
  * So ci.yml sets `DKG_SKIP_EVM_BUILD=1` for the shared build step, this
  * wrapper short-circuits, and the turbo task graph stays valid. Release

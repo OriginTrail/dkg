@@ -21,11 +21,14 @@ export { generateKCMetadata, generateTentativeMetadata, generateConfirmedFullMet
 export {
   DKGPublisher,
   StaleWriteError,
+  computePerCgQuorumState,
   type DKGPublisherConfig,
   type ShareOptions,
   type ShareResult,
   type ShareConditionalOptions,
   type CASCondition,
+  type PerCgQuorumInputs,
+  type PerCgQuorumState,
 } from './dkg-publisher.js';
 export {
   ACKCollector,

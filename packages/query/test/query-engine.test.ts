@@ -97,6 +97,47 @@ describe('DKGQueryEngine', () => {
     expect(result.bindings.length).toBe(2);
   });
 
+  // the multi-graph wrapper used to
+  // inject `VALUES ?_viewGraph { ... } GRAPH ?_viewGraph { inner }` into
+  // the caller's WHERE block, which leaked an extra `_viewGraph` column
+  // into every `SELECT *` result and collided with user queries that
+  // legitimately bound `?_viewGraph`. The fix is to use explicit UNION
+  // branches per graph, so no helper variable ever enters the user's
+  // variable scope.
+  it('multi-graph views do NOT leak a helper _viewGraph variable into SELECT * results', async () => {
+    await store.insert([
+      q('did:dkg:agent:QmTextBot', 'http://schema.org/name', '"TextBot"', 'did:dkg:context-graph:text-tools'),
+    ]);
+
+    const result = await engine.queryAllContextGraphs(
+      'SELECT * WHERE { ?s <http://schema.org/name> ?name }',
+    );
+    expect(result.bindings.length).toBe(2);
+    // The bindings must NOT include a `_viewGraph` (or any `view*`)
+    // variable — only the user's ?s and ?name.
+    for (const row of result.bindings) {
+      expect(Object.keys(row).sort()).toEqual(['name', 's']);
+    }
+  });
+
+  it('does not collide with user queries that bind a ?_viewGraph variable of their own', async () => {
+    await store.insert([
+      q('did:dkg:agent:QmTextBot', 'http://schema.org/name', '"TextBot"', 'did:dkg:context-graph:text-tools'),
+    ]);
+
+    // If the old implementation had been retained, the caller's
+    // ?_viewGraph binding would be silently clamped to the wrapper's
+    // VALUES list. With the UNION-based fix the caller's variable is
+    // independent and the wrapper introduces none of its own.
+    const result = await engine.queryAllContextGraphs(
+      'SELECT ?name ?_viewGraph WHERE { ?s <http://schema.org/name> ?name . BIND(<http://example.org/g> AS ?_viewGraph) }',
+    );
+    // Everyone gets the same user-supplied bind.
+    for (const row of result.bindings) {
+      expect(row['_viewGraph']).toBe('http://example.org/g');
+    }
+  });
+
   it('queries shared memory graph when graphSuffix is _shared_memory', async () => {
     const sharedMemoryGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/_shared_memory`;
     await store.insert([

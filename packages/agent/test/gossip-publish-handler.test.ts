@@ -170,8 +170,7 @@ describe('GossipPublishHandler', () => {
 
   it('rejects forged ontology policy approvals from non-owners', async () => {
     const { store, handler } = createHandler(undefined, {
-      getContextGraphOwner: async (id) => id === 'ops-policy' ? 'did:dkg:agent:0x1111111111111111111111111111111111111111' : null,
-    });
+      getContextGraphOwner: async (id) => id === 'ops-policy' ? 'did:dkg:agent:0x1111111111111111111111111111111111111111' : null,    });
 
     const data = makePublishMessage({
       contextGraphId: SYSTEM_PARANETS.ONTOLOGY,
@@ -180,8 +179,7 @@ describe('GossipPublishHandler', () => {
         '<did:dkg:policy-binding:ops-policy:incident-review:default:1> <https://dkg.network/ontology#appliesToParanet> <did:dkg:context-graph:ops-policy> <did:dkg:context-graph:ontology> .',
         '<did:dkg:policy-binding:ops-policy:incident-review:default:1> <https://schema.org/name> "incident-review" <did:dkg:context-graph:ontology> .',
         '<did:dkg:policy-binding:ops-policy:incident-review:default:1> <https://dkg.network/ontology#activePolicy> <did:dkg:policy:ops-policy:sha256-fake> <did:dkg:context-graph:ontology> .',
-        '<did:dkg:policy-binding:ops-policy:incident-review:default:1> <https://dkg.network/ontology#approvedBy> <did:dkg:agent:0x2222222222222222222222222222222222222222> <did:dkg:context-graph:ontology> .',
-        '<did:dkg:policy-binding:ops-policy:incident-review:default:1> <https://dkg.network/ontology#approvedAt> "2026-03-24T00:00:00.000Z" <did:dkg:context-graph:ontology> .',
+        '<did:dkg:policy-binding:ops-policy:incident-review:default:1> <https://dkg.network/ontology#approvedBy> <did:dkg:agent:0x2222222222222222222222222222222222222222> <did:dkg:context-graph:ontology> .',        '<did:dkg:policy-binding:ops-policy:incident-review:default:1> <https://dkg.network/ontology#approvedAt> "2026-03-24T00:00:00.000Z" <did:dkg:context-graph:ontology> .',
       ].join('\n'),
     });
 
@@ -196,8 +194,7 @@ describe('GossipPublishHandler', () => {
 
   it('rejects ontology policy approvals that omit approvedBy', async () => {
     const { store, handler } = createHandler(undefined, {
-      getContextGraphOwner: async (id) => id === 'ops-policy' ? 'did:dkg:agent:0x1111111111111111111111111111111111111111' : null,
-    });
+      getContextGraphOwner: async (id) => id === 'ops-policy' ? 'did:dkg:agent:0x1111111111111111111111111111111111111111' : null,    });
 
     const data = makePublishMessage({
       contextGraphId: SYSTEM_PARANETS.ONTOLOGY,
@@ -221,8 +218,7 @@ describe('GossipPublishHandler', () => {
 
   it('rejects ontology policy revocations that omit revokedBy', async () => {
     const { store, handler } = createHandler(undefined, {
-      getContextGraphOwner: async (id) => id === 'ops-policy' ? 'did:dkg:agent:0x1111111111111111111111111111111111111111' : null,
-    });
+      getContextGraphOwner: async (id) => id === 'ops-policy' ? 'did:dkg:agent:0x1111111111111111111111111111111111111111' : null,    });
 
     const data = makePublishMessage({
       contextGraphId: SYSTEM_PARANETS.ONTOLOGY,
@@ -231,8 +227,7 @@ describe('GossipPublishHandler', () => {
         '<did:dkg:policy-binding:ops-policy:incident-review:default:missing-revoked-by> <https://dkg.network/ontology#appliesToParanet> <did:dkg:context-graph:ops-policy> <did:dkg:context-graph:ontology> .',
         '<did:dkg:policy-binding:ops-policy:incident-review:default:missing-revoked-by> <https://schema.org/name> "incident-review" <did:dkg:context-graph:ontology> .',
         '<did:dkg:policy-binding:ops-policy:incident-review:default:missing-revoked-by> <https://dkg.network/ontology#activePolicy> <did:dkg:policy:ops-policy:sha256-missing-revoked-by> <did:dkg:context-graph:ontology> .',
-        '<did:dkg:policy-binding:ops-policy:incident-review:default:missing-revoked-by> <https://dkg.network/ontology#approvedBy> <did:dkg:agent:0x1111111111111111111111111111111111111111> <did:dkg:context-graph:ontology> .',
-        '<did:dkg:policy-binding:ops-policy:incident-review:default:missing-revoked-by> <https://dkg.network/ontology#approvedAt> "2026-03-24T00:00:00.000Z" <did:dkg:context-graph:ontology> .',
+        '<did:dkg:policy-binding:ops-policy:incident-review:default:missing-revoked-by> <https://dkg.network/ontology#approvedBy> <did:dkg:agent:0x1111111111111111111111111111111111111111> <did:dkg:context-graph:ontology> .',        '<did:dkg:policy-binding:ops-policy:incident-review:default:missing-revoked-by> <https://dkg.network/ontology#approvedAt> "2026-03-24T00:00:00.000Z" <did:dkg:context-graph:ontology> .',
         '<did:dkg:policy-binding:ops-policy:incident-review:default:missing-revoked-by> <https://dkg.network/ontology#revokedAt> "2026-03-25T00:00:00.000Z" <did:dkg:context-graph:ontology> .',
       ].join('\n'),
     });
@@ -248,8 +243,7 @@ describe('GossipPublishHandler', () => {
 
   it('accepts ontology policy approvals from the current paranet owner', async () => {
     const { store, handler } = createHandler(undefined, {
-      getContextGraphOwner: async (id) => id === 'ops-policy' ? 'did:dkg:agent:0x1111111111111111111111111111111111111111' : null,
-    });
+      getContextGraphOwner: async (id) => id === 'ops-policy' ? 'did:dkg:agent:0x1111111111111111111111111111111111111111' : null,    });
 
     const data = makePublishMessage({
       contextGraphId: SYSTEM_PARANETS.ONTOLOGY,
@@ -258,8 +252,7 @@ describe('GossipPublishHandler', () => {
         '<did:dkg:policy-binding:ops-policy:incident-review:default:1> <https://dkg.network/ontology#appliesToParanet> <did:dkg:context-graph:ops-policy> <did:dkg:context-graph:ontology> .',
         '<did:dkg:policy-binding:ops-policy:incident-review:default:1> <https://schema.org/name> "incident-review" <did:dkg:context-graph:ontology> .',
         '<did:dkg:policy-binding:ops-policy:incident-review:default:1> <https://dkg.network/ontology#activePolicy> <did:dkg:policy:ops-policy:sha256-real> <did:dkg:context-graph:ontology> .',
-        '<did:dkg:policy-binding:ops-policy:incident-review:default:1> <https://dkg.network/ontology#approvedBy> <did:dkg:agent:0x1111111111111111111111111111111111111111> <did:dkg:context-graph:ontology> .',
-        '<did:dkg:policy-binding:ops-policy:incident-review:default:1> <https://dkg.network/ontology#approvedAt> "2026-03-24T00:00:00.000Z" <did:dkg:context-graph:ontology> .',
+        '<did:dkg:policy-binding:ops-policy:incident-review:default:1> <https://dkg.network/ontology#approvedBy> <did:dkg:agent:0x1111111111111111111111111111111111111111> <did:dkg:context-graph:ontology> .',        '<did:dkg:policy-binding:ops-policy:incident-review:default:1> <https://dkg.network/ontology#approvedAt> "2026-03-24T00:00:00.000Z" <did:dkg:context-graph:ontology> .',
       ].join('\n'),
     });
 
@@ -270,5 +263,86 @@ describe('GossipPublishHandler', () => {
     );
     const bindings = result.type === 'bindings' ? result.bindings : [];
     expect(bindings).toHaveLength(1);
+  });
+
+  // ---------------------------------------------------------------------------
+  // r23-4: the envelope's recovered signer was
+  // previously discarded, which meant a peer with a legitimate wallet could
+  // wrap a PublishRequest claiming ANY `publisherAddress` and the envelope
+  // would still verify. These tests pin the fix: when an envelopeSigner is
+  // passed through ingress, the handler MUST reject gossip whose inner
+  // PublishRequest.publisherAddress disagrees with the envelope signer.
+  // ---------------------------------------------------------------------------
+  describe('envelope signer MUST match PublishRequest.publisherAddress', () => {
+    const TRUE_PUBLISHER = '0x1111111111111111111111111111111111111111';
+    const ATTACKER = '0x2222222222222222222222222222222222222222';
+
+    it('accepts a publish whose inner publisherAddress matches the recovered envelope signer', async () => {
+      const { store, handler } = createHandler();
+      const data = makePublishMessage({
+        contextGraphId: PARANET,
+        nquads: '<http://example.org/s> <http://example.org/p> <http://example.org/o> .',
+      });
+      await handler.handlePublishMessage(data, PARANET, undefined, 'peer-1', TRUE_PUBLISHER);
+      const res = await store.query(
+        `SELECT ?s WHERE { GRAPH <did:dkg:context-graph:${PARANET}> { ?s ?p ?o . FILTER(?s = <http://example.org/s>) } }`,
+      );
+      const bindings = res.type === 'bindings' ? res.bindings : [];
+      expect(bindings.length).toBeGreaterThan(0);
+    });
+
+    it('rejects a publish whose envelope signer does not match the claimed publisherAddress (forged attribution)', async () => {
+      const { store, handler } = createHandler();
+      const before = await store.countQuads(`did:dkg:context-graph:${PARANET}`);
+      const data = makePublishMessage({
+        contextGraphId: PARANET,
+        nquads: '<http://example.org/s> <http://example.org/p> <http://example.org/o> .',
+      });
+      // Attacker wraps a forged PublishRequest (publisherAddress =
+      // TRUE_PUBLISHER) in an envelope signed by the ATTACKER's own
+      // wallet. Envelope signature alone verifies, but the handler
+      // must now catch the attribution mismatch.
+      await handler.handlePublishMessage(data, PARANET, undefined, 'peer-attacker', ATTACKER);
+      const after = await store.countQuads(`did:dkg:context-graph:${PARANET}`);
+      expect(after).toBe(before);
+    });
+
+    it('rejects an envelope-signed publish with an empty PublishRequest.publisherAddress (attribution hole)', async () => {
+      const { store, handler } = createHandler();
+      const before = await store.countQuads(`did:dkg:context-graph:${PARANET}`);
+      const data = encodePublishRequest({
+        ual: '',
+        nquads: new TextEncoder().encode('<http://example.org/s> <http://example.org/p> <http://example.org/o> .'),
+        paranetId: PARANET,
+        kas: [],
+        publisherIdentity: new Uint8Array(32),
+        publisherAddress: '',
+        startKAId: 0,
+        endKAId: 0,
+        chainId: 'mock:31337',
+        publisherSignatureR: new Uint8Array(0),
+        publisherSignatureVs: new Uint8Array(0),
+      });
+      await handler.handlePublishMessage(data, PARANET, undefined, 'peer-attacker', ATTACKER);
+      const after = await store.countQuads(`did:dkg:context-graph:${PARANET}`);
+      expect(after).toBe(before);
+    });
+
+    it('does NOT enforce the check when envelopeSigner is undefined (legacy rolling-upgrade path stays open)', async () => {
+      // Without a signer (envelope absent / strictGossipEnvelope off),
+      // the handler falls back to the behaviour. We pin this
+      // so that enabling the check in the signed path doesn't break
+      // deployments still carrying raw gossip during rolling upgrade.
+      const { store, handler } = createHandler();
+      const data = makePublishMessage({
+        contextGraphId: PARANET,
+        nquads: '<http://example.org/s> <http://example.org/p> <http://example.org/o> .',
+      });
+      await handler.handlePublishMessage(data, PARANET, undefined, 'peer-1');
+      const res = await store.query(
+        `SELECT ?s WHERE { GRAPH <did:dkg:context-graph:${PARANET}> { ?s ?p ?o . FILTER(?s = <http://example.org/s>) } }`,
+      );
+      expect((res.type === 'bindings' ? res.bindings : []).length).toBeGreaterThan(0);
+    });
   });
 });

@@ -1,7 +1,7 @@
 /**
  * packages/attested-assets — extra QA coverage.
  *
- * Findings covered (see .test-audit/BUGS_FOUND.md):
+ * Findings covered (see .test-audit/
  *
  *   AA-1  TEST-DEBT  `session-routes.test.ts` uses an in-memory stub manager.
  *                    We replace it with a REAL `SessionManager` wired to a
@@ -127,6 +127,29 @@ function makeAppendReducer(): ReducerModule {
 }
 
 const quorumPolicy: QuorumPolicy = { type: 'THRESHOLD', numerator: 2, denominator: 3, minSigners: 2 };
+
+/**
+ * Poll `predicate` every ~10ms up to `timeoutMs`. Returns once the
+ * predicate is truthy; rethrows the predicate's last error or
+ * resolves with `false` if it never holds within the timeout.
+ *
+ * The two AA-2 assertions below used to fan-out a fixed number of
+ * `setTimeout(r, 0)` yields between an async gossip publish (which
+ * enqueues an async ed25519 verification on the receiver) and the
+ * assertion that observed the resulting event. On slower CI runners
+ * the verification didn't resolve before the assertions ran, so the
+ * test false-failed. Polling the OBSERVABLE we are about to assert
+ * against is both faster on the happy path and immune to that race.
+ */
+async function waitFor(predicate: () => boolean, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    let ok = false;
+    try { ok = predicate(); } catch { ok = false; }
+    if (ok) return;
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // AA-1  session-routes against a REAL SessionManager
@@ -313,17 +336,25 @@ describe('[AA-2] full quorum round setup: two real SessionManagers over shared g
     // Allow gossip to flush (our bus is synchronous so publish-in-createSession
     // should have delivered to peer-2 already, but asynchronous validation
     // happens via `await verifyAKASignature` inside handleSessionProposed).
-    // Yield once.
-    await new Promise((r) => setTimeout(r, 0));
-    await new Promise((r) => setTimeout(r, 0));
+    //
+    // the previous version
+    // yielded a fixed number of microtasks (`setTimeout(r, 0)` ×2)
+    // which CI repeatedly raced against on slower runners — the
+    // ed25519 verification inside `handleSessionProposed` had not
+    // resolved yet, so `proposedSeenBy2.length === 0` and the test
+    // false-failed even though the gossip path was healthy. We now
+    // poll the observable predicate (the array we are about to
+    // assert against) with a generous bound. If the event is never
+    // delivered the wait still expires and the assertion below
+    // fails as before, so a real regression is NOT masked.
+    await waitFor(() => proposedSeenBy2.length >= 1, 5_000);
 
     expect(proposedSeenBy2.length).toBe(1);
     expect((proposedSeenBy2[0] as any).sessionId).toBe(config.sessionId);
 
     // peer-2 accepts via the real manager (which publishes SessionAccepted).
     await mgr2.acceptSession(config.sessionId);
-    await new Promise((r) => setTimeout(r, 0));
-    await new Promise((r) => setTimeout(r, 0));
+    await waitFor(() => memberAcceptedSeenBy1.length >= 1, 5_000);
 
     expect(memberAcceptedSeenBy1.length).toBe(1);
     expect((memberAcceptedSeenBy1[0] as any).peerId).toBe('peer-2');
@@ -332,8 +363,16 @@ describe('[AA-2] full quorum round setup: two real SessionManagers over shared g
     // publishes SessionActivated; peer-2 also receives it and transitions
     // locally (once its async signature validation resolves).
     await mgr1.activateSession(config.sessionId);
-    // Give ed25519 signature verification + async gossip handlers enough ticks.
-    for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 5));
+    // Wait for both the local SESSION_ACTIVATED emission AND for peer-2
+    // to actually transition to active via the real gossip path. Same
+    // rationale as the proposal wait above — a fixed `setTimeout` loop
+    // raced on CI.
+    await waitFor(
+      () =>
+        activatedSeenBy1.length >= 1
+        && mgr2.getSession(config.sessionId)?.config.status === 'active',
+      5_000,
+    );
 
     // activateSession emits SESSION_ACTIVATED once locally, and then peer-1
     // re-receives its own SessionActivated event over gossip and re-emits it.

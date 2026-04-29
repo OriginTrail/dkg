@@ -103,7 +103,7 @@ import {
 } from '../config.js';
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../catchup-runner.js';
-import { loadTokens, httpAuthGuard } from '../auth.js';
+import { loadTokens, httpAuthGuard, SignedRequestRejectedError } from '../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../extraction/index.js';
 import {
@@ -212,6 +212,7 @@ import {
   shortId,
   sleep,
   deriveBlockExplorerUrl,
+  sanitizeRevertMessage,
 } from './http-utils.js';
 import {
   normalizeRepo,
@@ -1390,8 +1391,10 @@ export async function runDaemonInner(
       const clientIp = req.socket.remoteAddress ?? 'unknown';
       if (!shouldBypassRateLimitForLoopbackTraffic(clientIp, reqUrl.pathname)
         && !rateLimiter.isAllowed(clientIp, reqUrl.pathname)) {
-        res.writeHead(429, { 'Content-Type': 'application/json', 'Retry-After': '60', ...corsHeaders(reqCorsOrigin) });
-        res.end(JSON.stringify({ error: 'Too many requests' }));
+        // Route through jsonResponse so the egress scrubber & sanitiser
+        // chain runs uniformly on every error response.
+        // 429 needs a Retry-After hint passed via the extraHeaders param.
+        jsonResponse(res, 429, { error: 'Too many requests' }, reqCorsOrigin, { 'Retry-After': '60' });
         return;
       }
 
@@ -1412,15 +1415,25 @@ export async function runDaemonInner(
         return;
       }
 
-      // Auth guard — rejects with 401 if token is invalid/missing
+      // Auth guard — rejects with 401 if token is invalid/missing.
+      //
+      // For body-carrying
+      // signed requests `httpAuthGuard` returns a `Promise<boolean>`
+      // that resolves only after the request body has been drained
+      // and the HMAC verified — `await`ing here is what guarantees
+      // the route handler does NOT run on a forged signature, even
+      // for handlers that ignore the body (the bug the bot caught
+      // was that the response was rewritten to 401 too late, after
+      // a state-mutating handler had already executed). Body-less
+      // paths still resolve synchronously to a bare boolean.
       if (
-        !httpAuthGuard(
+        !(await httpAuthGuard(
           req,
           res,
           authEnabled,
           validTokens,
           resolveCorsOrigin(req, corsAllowed),
-        )
+        ))
       )
         return;
 
@@ -1506,6 +1519,7 @@ export async function runDaemonInner(
           return jsonResponse(res, 200, { ok: true, ttlMs, ttlDays });
         } catch (err: any) {
           if (err instanceof PayloadTooLargeError) throw err;
+          if (err instanceof SignedRequestRejectedError) throw err;
           return jsonResponse(res, 500, {
             error: err.message ?? "Failed to update shared memory TTL",
           });
@@ -1545,7 +1559,32 @@ export async function runDaemonInner(
       );
     } catch (err: any) {
       if (res.headersSent || res.writableEnded) return;
-      if (err instanceof PayloadTooLargeError) {
+      if (err instanceof SignedRequestRejectedError) {
+        // the body-reading helpers throw this when
+        // the post-body HMAC verification fails for a request that opted
+        // into signed mode. Map to 401 with the same wire shape as the
+        // pre-body signed-mode rejections in httpAuthGuard so clients see
+        // a single consistent error surface.
+        //
+        // Route through jsonResponse so the egress scrubber & sanitiser
+        // run on this error path too. `err.reason` is
+        // an enum-like discriminant ('missing-fields' / 'bad-signature' /
+        // …) and never contains a stack trace, but routing every error
+        // sink through the central scrubber removes the
+        // local-bypass-of-the-sanitiser pattern that CodeQL flags.
+        const status = err.reason === 'missing-fields' ? 400 : 401;
+        const extraHeaders: Record<string, string> =
+          status === 401
+            ? { 'WWW-Authenticate': 'Bearer realm="dkg-node"' }
+            : {};
+        jsonResponse(
+          res,
+          status,
+          { error: `Signed request rejected: ${err.reason}` },
+          undefined,
+          extraHeaders,
+        );
+      } else if (err instanceof PayloadTooLargeError) {
         jsonResponse(res, 413, { error: err.message });
       } else if (err instanceof SyntaxError) {
         jsonResponse(res, 400, { error: err.message });
@@ -1561,7 +1600,14 @@ export async function runDaemonInner(
         jsonResponse(res, 400, { error: err.message });
       } else {
         enrichEvmError(err);
-        jsonResponse(res, 500, { error: err.message });
+        const rawMsg = typeof err?.message === "string" ? err.message : String(err);
+        // CLI-9 (
+        // hex / `unknown custom error` markers from the 500 body so
+        // ANY endpoint that bubbles a chain error gets the same
+        // privacy-safe treatment, not just /api/verify. Endpoints
+        // that already mapped the error to a 4xx never reach here.
+        const sanitized = sanitizeRevertMessage(rawMsg);
+        jsonResponse(res, 500, { error: sanitized });
       }
     }
   });

@@ -303,6 +303,66 @@
   },
   {
     "inputs": [],
+    "name": "ZeroKnowledgeAssetsAmount",
+    "type": "error"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "batchId",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "contextGraphId",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "knowledgeAssetsAmount",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "byteSize",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "startEpoch",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "endEpoch",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "tokenAmount",
+        "type": "uint96"
+      },
+      {
+        "indexed": false,
+        "internalType": "bool",
+        "name": "isImmutable",
+        "type": "bool"
+      }
+    ],
+    "name": "KnowledgeBatchCreated",
+    "type": "event"
+  },
+  {
+    "inputs": [],
     "name": "askStorage",
     "outputs": [
       {
@@ -438,6 +498,19 @@
     "name": "initialize",
     "outputs": [],
     "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "knowledgeAssetsStorage",
+    "outputs": [
+      {
+        "internalType": "contract KnowledgeAssetsStorage",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
     "type": "function"
   },
   {

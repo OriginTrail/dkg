@@ -56,7 +56,7 @@ describe('P-13: resolveViewGraphs handles minTrust for verified-memory', () => {
 
   it(
     'minTrust=Endorsed drops the root data graph — prevents SelfAttested triples ' +
-      'from leaking into Endorsed queries (see BUGS_FOUND.md P-13).',
+      'from leaking into Endorsed queries (',
     () => {
       const res = resolveViewGraphs('verified-memory', CG, {
         minTrust: TrustLevel.Endorsed,
@@ -72,24 +72,34 @@ describe('P-13: resolveViewGraphs handles minTrust for verified-memory', () => {
   );
 
   it(
-    'minTrust > Endorsed REJECTS — Codex PR #239 review: /_verified_memory/* has no ' +
-      'per-graph trust metadata, so PartiallyVerified / ConsensusVerified cannot be proven',
+    'minTrust > Endorsed resolves to the /_verified_memory/ prefix — per-triple trust ' +
+      'filtering (Q-1) handles `PartiallyVerified` / `ConsensusVerified` downstream',
     () => {
-      // Without per-graph trust tagging (Q-1) the resolver would otherwise
-      // return the exact same graph set for `Endorsed`, `PartiallyVerified`,
-      // and `ConsensusVerified`, meaning a caller asking for a stricter tier
-      // could silently receive lower-tier data. Reject instead, until
-      // per-graph trust tagging lands.
-      expect(() =>
-        resolveViewGraphs('verified-memory', CG, {
-          minTrust: TrustLevel.PartiallyVerified,
-        }),
-      ).toThrow(/Invalid minTrust=2 for verified-memory/);
-      expect(() =>
-        resolveViewGraphs('verified-memory', CG, {
-          minTrust: TrustLevel.ConsensusVerified,
-        }),
-      ).toThrow(/Invalid minTrust=3 for verified-memory/);
+      // Pre-Q-1 the resolver rejected above-Endorsed because per-graph
+      // trust metadata was not available and returning the same graph
+      // set as Endorsed would silently serve lower-trust data. Q-1
+      // closed the hole at the PER-TRIPLE level (see
+      // `DKGQueryEngine.queryWithView` + `injectMinTrustFilter`): the
+      // user SPARQL is rewritten so every subject MUST carry
+      // `<http://dkg.io/ontology/trustLevel> "N"` with
+      // `N ≥ minTrust`, so sub-threshold triples in the sub-graph
+      // prefix are excluded. The graph-scope resolution therefore
+      // collapses to the same shape for `Endorsed` /
+      // `PartiallyVerified` / `ConsensusVerified`: drop the root
+      // data graph, union over the quorum prefix.
+      const partially = resolveViewGraphs('verified-memory', CG, {
+        minTrust: TrustLevel.PartiallyVerified,
+      });
+      const consensus = resolveViewGraphs('verified-memory', CG, {
+        minTrust: TrustLevel.ConsensusVerified,
+      });
+      for (const res of [partially, consensus]) {
+        expect(res.graphs).not.toContain(`did:dkg:context-graph:${CG}`);
+        expect(res.graphs).toEqual([]);
+        expect(res.graphPrefixes).toEqual([
+          `did:dkg:context-graph:${CG}/_verified_memory/`,
+        ]);
+      }
     },
   );
 
@@ -170,11 +180,16 @@ describe('P-13: resolveViewGraphs handles minTrust for verified-memory', () => {
           resolveViewGraphs('verified-memory', CG, { minTrust: mt as TrustLevel }),
         ).toThrow(/Invalid minTrust/);
       }
-      // SelfAttested and Endorsed are the two tiers the resolver can
-      // currently prove against the graph layout; PartiallyVerified and
-      // ConsensusVerified must be rejected until Q-1's per-graph trust
-      // tagging lands (see the "minTrust > Endorsed REJECTS" test above).
-      for (const mt of [TrustLevel.SelfAttested, TrustLevel.Endorsed]) {
+      // Every valid TrustLevel (SelfAttested..ConsensusVerified) must
+      // resolve without throwing — per-triple filtering (Q-1) handles
+      // the above-Endorsed tiers downstream at
+      // `DKGQueryEngine.queryWithView` via `injectMinTrustFilter`.
+      for (const mt of [
+        TrustLevel.SelfAttested,
+        TrustLevel.Endorsed,
+        TrustLevel.PartiallyVerified,
+        TrustLevel.ConsensusVerified,
+      ]) {
         expect(() =>
           resolveViewGraphs('verified-memory', CG, { minTrust: mt }),
         ).not.toThrow();
@@ -194,46 +209,61 @@ describe('P-13: resolveViewGraphs handles minTrust for verified-memory', () => {
       // MUST forward the legacy form through.
       //
       // To prove the alias is actually honoured (not silently dropped)
-      // we push a value the VALIDATOR rejects — `PartiallyVerified` —
-      // via `_minTrust` only. If the alias is threaded, the engine
-      // validator sees the above-Endorsed value and throws. If the
-      // alias gets silently lost, the engine sees `minTrust === undefined`
-      // and the query resolves normally — so resolve-vs-reject is a
-      // deterministic signal for the alias being alive.
+      // we rely on the graph-scope contract from `resolveViewGraphs`:
+      //   - `minTrust === undefined` (or SelfAttested) keeps the root
+      //     data graph in the resolution;
+      //   - `minTrust > SelfAttested` drops the root graph.
+      // We probe for the presence of the root graph by inserting a
+      // single root-graph quad and running a SELECT; if the alias is
+      // silently dropped the root graph stays in scope and the result
+      // carries at least one binding, otherwise the binding is
+      // filtered out at the graph-resolution layer.
       const { OxigraphStore } = await import('@origintrail-official/dkg-storage');
       const { DKGQueryEngine } = await import('@origintrail-official/dkg-query');
       const store = new OxigraphStore();
+      const rootGraph = `did:dkg:context-graph:${CG}`;
+      await store.insert([
+        {
+          subject: 'urn:probe',
+          predicate: 'http://schema.org/name',
+          object: '"probe"',
+          graph: rootGraph,
+        },
+      ]);
       const engine = new DKGQueryEngine(store);
-      await expect(
-        engine.query('SELECT ?s WHERE { ?s ?p ?o }', {
-          contextGraphId: CG,
-          view: 'verified-memory',
-          _minTrust: TrustLevel.PartiallyVerified,
-        }),
-      ).rejects.toThrow(/Invalid minTrust=2 for verified-memory/);
-      // Endorsed via the legacy key alone — must resolve. This
-      // separates "alias forwards the value" (rejection above) from
-      // "alias forwards + value is valid" (resolution here).
-      await expect(
-        engine.query('SELECT ?s WHERE { ?s ?p ?o }', {
-          contextGraphId: CG,
-          view: 'verified-memory',
-          _minTrust: TrustLevel.Endorsed,
-        }),
-      ).resolves.toBeDefined();
-      // Explicit `minTrust` wins over `_minTrust` — if we set
-      // `minTrust: SelfAttested` and `_minTrust: PartiallyVerified`,
-      // the engine must see the legal SelfAttested and resolve.
-      // Dropping `_minTrust` entirely would also resolve here, so this
-      // case only rules out the "alias overrides explicit field" bug.
-      await expect(
-        engine.query('SELECT ?s WHERE { ?s ?p ?o }', {
-          contextGraphId: CG,
-          view: 'verified-memory',
-          minTrust: TrustLevel.SelfAttested,
-          _minTrust: TrustLevel.PartiallyVerified,
-        }),
-      ).resolves.toBeDefined();
+      const probeSparql = 'SELECT ?s WHERE { ?s ?p ?o }';
+
+      // `_minTrust=Endorsed` via the legacy key alone — the alias
+      // MUST propagate to `resolveViewGraphs`, which drops the root
+      // data graph. Result: the probe quad is no longer visible.
+      const aliased = await engine.query(probeSparql, {
+        contextGraphId: CG,
+        view: 'verified-memory',
+        _minTrust: TrustLevel.Endorsed,
+      });
+      expect(aliased.bindings).toEqual([]);
+
+      // Control: omit both `minTrust` keys. The root graph is in scope
+      // and the probe quad surfaces — proves the emptiness above came
+      // from the alias being honoured, not from the engine being broken.
+      const unconstrained = await engine.query(probeSparql, {
+        contextGraphId: CG,
+        view: 'verified-memory',
+      });
+      expect(unconstrained.bindings.length).toBeGreaterThan(0);
+
+      // Explicit `minTrust` wins over `_minTrust`. With
+      // `minTrust: SelfAttested` the root graph stays in scope even
+      // when `_minTrust: Endorsed` would drop it, so the probe quad
+      // surfaces again — rules out the "alias overrides explicit
+      // field" bug.
+      const precedence = await engine.query(probeSparql, {
+        contextGraphId: CG,
+        view: 'verified-memory',
+        minTrust: TrustLevel.SelfAttested,
+        _minTrust: TrustLevel.Endorsed,
+      });
+      expect(precedence.bindings.length).toBeGreaterThan(0);
     },
   );
 
@@ -247,19 +277,32 @@ describe('P-13: resolveViewGraphs handles minTrust for verified-memory', () => {
       const { OxigraphStore } = await import('@origintrail-official/dkg-storage');
       const { DKGQueryEngine } = await import('@origintrail-official/dkg-query');
       const store = new OxigraphStore();
+      const rootGraph = `did:dkg:context-graph:${CG}`;
+      await store.insert([
+        {
+          subject: 'urn:probe-engine-side',
+          predicate: 'http://schema.org/name',
+          object: '"probe"',
+          graph: rootGraph,
+        },
+      ]);
       const engine = new DKGQueryEngine(store);
 
       // `DKGAgent.query` collapses `opts.minTrust ?? opts._minTrust`
       // before calling `engine.query`, so by the time the engine sees
       // it, only `minTrust` is set. The engine must honour that
-      // contract and reject above-Endorsed values on verified-memory.
-      await expect(
-        engine.query('SELECT ?s WHERE { ?s ?p ?o }', {
+      // contract and apply the graph-scope resolution — specifically
+      // above-SelfAttested drops the root data graph, so the probe
+      // quad (which lives in the root graph) must not be returned.
+      const aboveEndorsed = await engine.query(
+        'SELECT ?s WHERE { ?s ?p ?o }',
+        {
           contextGraphId: CG,
           view: 'verified-memory',
           minTrust: TrustLevel.PartiallyVerified,
-        }),
-      ).rejects.toThrow(/Invalid minTrust=2 for verified-memory/);
+        },
+      );
+      expect(aboveEndorsed.bindings).toEqual([]);
     },
   );
 

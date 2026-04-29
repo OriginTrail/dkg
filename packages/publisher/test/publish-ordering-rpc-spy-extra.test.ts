@@ -38,7 +38,7 @@
  *                    itself.
  *
  * Per QA policy: no production code is touched. Failing assertions
- * ARE the bug evidence — see BUGS_FOUND.md P-1 / P-6 / P-7.
+ * ARE the bug evidence
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { ethers } from 'ethers';

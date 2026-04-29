@@ -13,8 +13,9 @@
   },
   "scripts": {
     "build": "tsc",
-    "test": "vitest run --passWithNoTests",
-    "test:coverage": "vitest run --coverage --passWithNoTests",
+    "typecheck:tests": "tsc --noEmit -p tsconfig.test.json",
+    "test": "tsc --noEmit -p tsconfig.test.json && vitest run --passWithNoTests",
+    "test:coverage": "tsc --noEmit -p tsconfig.test.json && vitest run --coverage --passWithNoTests",
     "clean": "rm -rf dist tsconfig.tsbuildinfo"
   },
   "dependencies": {

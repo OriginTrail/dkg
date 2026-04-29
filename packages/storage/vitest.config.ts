@@ -4,6 +4,7 @@ import { tornadoStorageCoverage } from '../../vitest.coverage';
 export default defineConfig({
   test: {
     include: ['test/**/*.test.ts'],
+    setupFiles: ['./test/vitest.setup.ts'],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'html', 'lcov', 'json-summary'],

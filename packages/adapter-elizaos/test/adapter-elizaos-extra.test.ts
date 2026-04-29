@@ -1,7 +1,7 @@
 /**
  * packages/adapter-elizaos — extra QA coverage.
  *
- * Findings covered (see .test-audit/BUGS_FOUND.md):
+ * Findings covered (see .test-audit/
  *
  *   K-11 TEST-DEBT + SPEC-GAP
  *        `adapter-elizaos` currently ships only smoke tests. Spec
@@ -15,7 +15,7 @@
  *          3. action-handler behaviour contracts for all five actions
  *             (callback semantics, required-argument errors).
  *
- *        // PROD-BUG: no chat-persistence hook surface — see BUGS_FOUND.md K-11
+ *        // PROD-BUG: no chat-persistence hook surface —
  *
  * Per QA policy: no production-code edits.
  */
@@ -67,7 +67,7 @@ function makeCallback(): CallbackRecord {
 // K-11  Chat-persistence hook — missing (RED)
 // ─────────────────────────────────────────────────────────────────────────────
 describe('[K-11] chat-persistence hook required by spec §09A_FRAMEWORK_ADAPTERS', () => {
-  // PROD-BUG: no chat-persistence hook surface — see BUGS_FOUND.md K-11
+  // PROD-BUG: no chat-persistence hook surface —
   it('plugin exposes an action or hook that persists chat turns through the DKG node', () => {
     const actions = dkgPlugin.actions ?? [];
     const actionNames = actions.map((a) => a.name.toUpperCase());
@@ -92,11 +92,12 @@ describe('[K-11] chat-persistence hook required by spec §09A_FRAMEWORK_ADAPTERS
     });
   });
 
-  it('positive control: plugin still exposes the five documented actions', () => {
+  it('positive control: plugin still exposes the documented actions (incl. K-11 chat-persist)', () => {
     const names = (dkgPlugin.actions ?? []).map((a) => a.name).sort();
     expect(names).toEqual([
       'DKG_FIND_AGENTS',
       'DKG_INVOKE_SKILL',
+      'DKG_PERSIST_CHAT_TURN',
       'DKG_PUBLISH',
       'DKG_QUERY',
       'DKG_SEND_MESSAGE',

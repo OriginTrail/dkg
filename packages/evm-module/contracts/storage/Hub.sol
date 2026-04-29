@@ -14,6 +14,18 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 contract Hub is INamed, IVersioned, Ownable {
     using UnorderedNamedContractDynamicSet for UnorderedNamedContractDynamicSet.Set;
 
+    /// @dev Re-declared here purely so the error selector appears in Hub's ABI.
+    /// All HubDependent contracts revert with `HubLib.UnauthorizedAccess(...)`.
+    /// Tests historically pin `revertedWithCustomError(HubContract, 'UnauthorizedAccess')`
+    /// even when the actual revert originates in HubDependent. Without this
+    /// declaration, hardhat-chai-matchers cannot resolve the selector from
+    /// the Hub ABI and tests blow up with
+    /// "The given contract doesn't have a custom error named 'UnauthorizedAccess'".
+    /// This is a pure ABI-surface declaration; Hub itself never emits it
+    /// (it uses `OwnableUnauthorizedAccount` from OZ Ownable v5 — see
+    /// `_checkOwnerOrMultiSigOwner`).
+    error UnauthorizedAccess(string msg);
+
     event NewContract(string contractName, address newContractAddress);
     event ContractChanged(string contractName, address newContractAddress);
     event NewAssetStorage(string contractName, address newContractAddress);
@@ -200,8 +212,6 @@ contract Hub is INamed, IVersioned, Ownable {
                 // Best-effort: contract may not implement IContractStatus; ignore.
             }
         }
-
-        emit NewContract(contractName, newContractAddress);
     }
 
     function _setContracts(HubLib.Contract[] calldata newContracts) internal {
@@ -279,6 +289,12 @@ contract Hub is INamed, IVersioned, Ownable {
     }
 
     function _isMultiSigOwner(address multiSigAddress) internal view returns (bool) {
+        // EOA-safe: without this short-circuit the compiler-inserted
+        // extcodesize guard on the try-external call reverts with empty
+        // data instead of falling through to the caller's typed revert.
+        if (multiSigAddress.code.length == 0) {
+            return false;
+        }
         try ICustodian(multiSigAddress).getOwners() returns (address[] memory multiSigOwners) {
             for (uint256 i = 0; i < multiSigOwners.length; i++) {
                 if (msg.sender == multiSigOwners[i]) {
@@ -294,8 +310,12 @@ contract Hub is INamed, IVersioned, Ownable {
 
     function _checkOwnerOrMultiSigOwner() internal view virtual {
         address hubOwner = owner();
+        // Spec: align with OZ Ownable v5 — privileged-call rejection raises
+        // `OwnableUnauthorizedAccount(msg.sender)` so indexers + clients can
+        // route on the same selector that `_checkOwner` produces.
+        // (Solidity coverage shards 3/4 + 4/4).
         if (msg.sender != hubOwner && !_isMultiSigOwner(hubOwner)) {
-            revert HubLib.UnauthorizedAccess("Only Hub Owner or Multisig Owner");
+            revert OwnableUnauthorizedAccount(msg.sender);
         }
     }
 }

@@ -640,6 +640,13 @@ describe('Private context graph late join sync (3 nodes)', () => {
       private: true,
       participantIdentityIds: [idA, idB, idC],
     });
+    // PR #295: createContextGraph no longer auto-registers on-chain. The
+    // async-lift below calls publisher.publish, which requires a positive
+    // on-chain context-graph id; without explicit registerContextGraph the
+    // canonical publisher returns 'tentative' and the async-lift runner
+    // surfaces "Async publish job failed: …status tentative without
+    // onChainResult". Register the CG so the lift sees real chain state.
+    await curator.registerContextGraph(GUARDIAN_PARANET);
 
     await syncerA.syncFromPeer(curator.peerId, [SYSTEM_PARANETS.ONTOLOGY]);
 

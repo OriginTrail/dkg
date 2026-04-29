@@ -751,7 +751,18 @@ export function buildPerTurnReminder(sessionKey) {
 // covers the most common case (agent referencing existing entities).
 // Agent-emitted richer triples (chat:examines / chat:proposes / etc.)
 // remain additive on top.
-const URN_DKG_RE = /urn:dkg:[\w@:%./-]+(?:\/[\w@:%./-]+)*[\w%]/g;
+// the previous
+//   /urn:dkg:[\w@:%./-]+(?:\/[\w@:%./-]+)*[\w%]/g
+// nested two character classes that BOTH already accepted `/`. That
+// gives the engine multiple ways to partition the input across the
+// quantifier boundary and exponential backtracking on adversarial
+// strings. The two halves are equivalent: `[\w@:%./-]+` already
+// matches everything `(?:\/[\w@:%./-]+)*` could match, so the outer
+// group is pure backtracking surface. Collapse to a single linear
+// character class. Trailing `[\w%]` is preserved so the URN does not
+// end on punctuation (the existing `replace(/[.,;:)\]}>]+$/, '')`
+// pass strips trailing punct anyway, but keeping the anchor cheap).
+const URN_DKG_RE = /urn:dkg:[\w@:%./-]+[\w%]/g;
 export function extractMentionedUris(...texts) {
   const found = new Set();
   for (const t of texts) {

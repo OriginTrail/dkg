@@ -164,7 +164,27 @@ tripleStoreConformanceSuite('OxigraphStore (factory)', async () => createTripleS
 // Set BLAZEGRAPH_URL=http://127.0.0.1:9999/bigdata/namespace/test/sparql to enable.
 const blazeUrl = process.env.BLAZEGRAPH_URL;
 if (blazeUrl) {
-  tripleStoreConformanceSuite('BlazegraphStore', async () => new BlazegraphStore(blazeUrl));
+  // Blazegraph is a stateful, shared service — every test in the
+  // conformance suite is built around an empty store, so we must
+  // wipe the entire kb namespace before handing the adapter to a
+  // new test. The cheapest reliable wipe is `DROP ALL`, which
+  // removes every named graph and the default graph in a single
+  // SPARQL update. This keeps the conformance suite hermetic
+  // across re-runs and across the OxigraphStore baseline (which
+  // is naturally per-test because it's in-memory).
+  tripleStoreConformanceSuite('BlazegraphStore', async () => {
+    const store = new BlazegraphStore(blazeUrl);
+    const res = await fetch(blazeUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: `update=${encodeURIComponent('DROP ALL')}`,
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new Error(`Blazegraph DROP ALL failed (${res.status}): ${text.slice(0, 200)}`);
+    }
+    return store;
+  });
 }
 // NOTE: previously this branch ran `it.skip('requires a running Blazegraph …', () => {})`
 // as a placeholder to surface the skip in the reporter. That empty stub added

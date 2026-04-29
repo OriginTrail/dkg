@@ -21,7 +21,7 @@
  *                    mismatched `epochs`, mismatched `byteSize`.
  *                    Each submission must revert on-chain. If any of
  *                    them silently succeeds, the economic security of
- *                    V10 publishes is broken — see BUGS_FOUND.md P-3.
+ *                    V10 publishes is broken
  *
  * Per QA policy: no production code modified. Uses real Hardhat, real
  * EVMChainAdapter, real `LocalSignerPeer`-style signing — but with the

@@ -63,7 +63,13 @@ beforeAll(async () => {
     skills: [],
     chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     nodeRole: 'core',
-  });
+    // strict WM cross-agent auth is now
+    // the DEFAULT (fail-closed). Passing `true` here is redundant but
+    // kept for readability — the matrix below assumes strict mode and
+    // adding the flag makes the intent obvious even if the default
+    // later regresses.
+    strictWmCrossAgentAuth: true,
+  } as any);
   await node.start();
 
   // Register a second agent "B" co-hosted on the same node. The default
@@ -165,7 +171,7 @@ describe('A-1: WM is per-agent — two agents co-hosted on one node', () => {
     // `callerAgentAddress` — see packages/cli/src/daemon.ts /api/query.
     // Per spec §04 and RFC-29 this impersonation attempt MUST be
     // denied at the DKGAgent.query boundary (0 bindings, no data
-    // leakage). Tracks BUGS_FOUND.md A-1.
+    // leakage). Tracks.
     const defaultA = node!.getDefaultAgentAddress()!;
     const leak = await node!.query(
       `SELECT ?s ?o WHERE { ?s <http://schema.org/description> ?o }`,
@@ -353,5 +359,388 @@ describe('A-1: WM is per-agent — two agents co-hosted on one node', () => {
     expect(a).not.toBe(b);
     expect(a).toContain('0x1111111111111111111111111111111111111111');
     expect(b).toContain('0x2222222222222222222222222222222222222222');
+  });
+});
+
+// --------------------------------------------------------------------------
+// `agentAuthSignature` must be bound to
+// a freshness window AND a per-request nonce so a once-observed signature
+// cannot be replayed forever. The previous challenge was the fixed string
+// `dkg-wm-auth:<addr>`, which made every valid signature a permanent
+// bearer credential for that address.
+// --------------------------------------------------------------------------
+describe('A-1 follow-up: WM-auth challenge is nonce/timestamp-bound (no permanent bearer)', () => {
+  it('a freshly signed WM-auth token works exactly once and is rejected on replay', async () => {
+    const defaultA = node!.getDefaultAgentAddress()!;
+
+    // Stage data in A's WM so the cross-agent query has something to find.
+    const cgId = freshCgId('wm-replay');
+    await node!.createContextGraph({ id: cgId, name: 'WM Replay', description: '' });
+    await node!.assertion.create(cgId, 'replay');
+    await node!.assertion.write(cgId, 'replay', [
+      {
+        subject: 'urn:wm:alice:fact:replay',
+        predicate: 'http://schema.org/description',
+        object: '"replay-probe"',
+        graph: '',
+      },
+    ]);
+
+    const token = node!.signWmAuthChallenge(defaultA);
+    expect(token, 'a locally-registered agent can sign its challenge').toBeDefined();
+    expect(token!.split('.').length).toBe(3);
+
+    // First use: accepted — returns the staged quad.
+    const first = await node!.query(
+      `SELECT ?s ?o WHERE { ?s <http://schema.org/description> ?o }`,
+      {
+        contextGraphId: cgId,
+        view: 'working-memory',
+        agentAddress: defaultA,
+        agentAuthSignature: token,
+      },
+    );
+    expect(first.bindings.length).toBe(1);
+
+    // Second use (replay): nonce has already been recorded — MUST be
+    // rejected. With strictWmCrossAgentAuth on this fails closed and
+    // returns zero bindings.
+    const replay = await node!.query(
+      `SELECT ?s ?o WHERE { ?s <http://schema.org/description> ?o }`,
+      {
+        contextGraphId: cgId,
+        view: 'working-memory',
+        agentAddress: defaultA,
+        agentAuthSignature: token,
+      },
+    );
+    expect(
+      replay.bindings.length,
+      'replayed WM-auth token must be rejected (strict mode)',
+    ).toBe(0);
+  });
+
+  it('legacy fixed-string WM-auth signatures are rejected', async () => {
+    const defaultA = node!.getDefaultAgentAddress()!;
+
+    // Stage a quad the test would be able to read if auth succeeded.
+    const cgId = freshCgId('wm-legacy');
+    await node!.createContextGraph({ id: cgId, name: 'WM Legacy', description: '' });
+    await node!.assertion.create(cgId, 'legacy');
+    await node!.assertion.write(cgId, 'legacy', [
+      {
+        subject: 'urn:wm:alice:fact:legacy',
+        predicate: 'http://schema.org/description',
+        object: '"legacy-probe"',
+        graph: '',
+      },
+    ]);
+
+    // Build a legacy v1 signature: sign the fixed string
+    // `dkg-wm-auth:<addr>` directly, WITHOUT a timestamp or nonce.
+    // Locate A's private key via the test harness' registered wallet.
+    const agents = node!.listLocalAgents();
+    const aRec = agents.find(a => a.agentAddress.toLowerCase() === defaultA.toLowerCase());
+    expect(aRec).toBeDefined();
+    // listLocalAgents strips privateKey — use the dev-only getter.
+    const wallet = (node! as any).getLocalAgentWallet(defaultA);
+    expect(wallet, 'test presumes local wallet is available for A').toBeDefined();
+    const legacyMsg = `dkg-wm-auth:${defaultA.toLowerCase()}`;
+    const legacySig = wallet!.signMessageSync(legacyMsg);
+
+    const res = await node!.query(
+      `SELECT ?s ?o WHERE { ?s <http://schema.org/description> ?o }`,
+      {
+        contextGraphId: cgId,
+        view: 'working-memory',
+        agentAddress: defaultA,
+        agentAuthSignature: legacySig,
+      },
+    );
+    expect(
+      res.bindings.length,
+      'legacy fixed-string (prefix-only) v1 WM-auth signature must be rejected',
+    ).toBe(0);
+  });
+
+  it('stale WM-auth tokens (beyond freshness window) are rejected', async () => {
+    const defaultA = node!.getDefaultAgentAddress()!;
+
+    // Forge a stale token: sign a challenge with a timestamp far in the past.
+    const wallet = (node! as any).getLocalAgentWallet(defaultA);
+    expect(wallet).toBeDefined();
+    const staleTs = Date.now() - 5 * 60_000; // 5 min old
+    const nonce = 'aa'.repeat(16); // 32-char hex, valid shape
+    const msg = `dkg-wm-auth:v2:${defaultA.toLowerCase()}:${staleTs}:${nonce}`;
+    const sig = wallet!.signMessageSync(msg);
+    const staleToken = `${staleTs}.${nonce}.${sig}`;
+
+    const cgId = freshCgId('wm-stale');
+    await node!.createContextGraph({ id: cgId, name: 'WM Stale', description: '' });
+    await node!.assertion.create(cgId, 'stale');
+    await node!.assertion.write(cgId, 'stale', [
+      {
+        subject: 'urn:wm:alice:fact:stale',
+        predicate: 'http://schema.org/description',
+        object: '"stale-probe"',
+        graph: '',
+      },
+    ]);
+
+    const res = await node!.query(
+      `SELECT ?s ?o WHERE { ?s <http://schema.org/description> ?o }`,
+      {
+        contextGraphId: cgId,
+        view: 'working-memory',
+        agentAddress: defaultA,
+        agentAuthSignature: staleToken,
+      },
+    );
+    expect(
+      res.bindings.length,
+      'stale WM-auth token (outside freshness window) must be rejected',
+    ).toBe(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // the gate defaults to
+  // fail-closed. The three probes below flip `config.strictWmCrossAgentAuth`
+  // and `process.env.DKG_STRICT_WM_AUTH` at runtime to exercise the
+  // effective mode without spinning up a second heavyweight DKGAgent.
+  // -------------------------------------------------------------------------
+  it('default (no strictWmCrossAgentAuth set) is fail-closed — impersonation without signature returns 0', async () => {
+    const defaultA = node!.getDefaultAgentAddress()!;
+    const cgId = freshCgId('wm-default');
+    await node!.createContextGraph({ id: cgId, name: 'WM Default', description: '' });
+    await node!.assertion.create(cgId, 'd12');
+    await node!.assertion.write(cgId, 'd12', [
+      { subject: 'urn:wm:alice:fact:d12', predicate: 'http://schema.org/description', object: '"default-probe"', graph: '' },
+    ]);
+
+    const cfg = (node! as any).config as { strictWmCrossAgentAuth?: boolean };
+    const prevCfg = cfg.strictWmCrossAgentAuth;
+    const prevEnv = process.env.DKG_STRICT_WM_AUTH;
+    cfg.strictWmCrossAgentAuth = undefined;
+    delete process.env.DKG_STRICT_WM_AUTH;
+    try {
+      const res = await node!.query(
+        `SELECT ?s ?o WHERE { ?s <http://schema.org/description> ?o }`,
+        { contextGraphId: cgId, view: 'working-memory', agentAddress: defaultA },
+      );
+      expect(
+        res.bindings.length,
+        'undefined config must default to fail-closed (r12-1)',
+      ).toBe(0);
+    } finally {
+      cfg.strictWmCrossAgentAuth = prevCfg;
+      if (prevEnv !== undefined) process.env.DKG_STRICT_WM_AUTH = prevEnv;
+    }
+  });
+
+  it('explicit config opt-out (strictWmCrossAgentAuth=false) degrades to warn (impersonation succeeds)', async () => {
+    const defaultA = node!.getDefaultAgentAddress()!;
+    const cgId = freshCgId('wm-optout');
+    await node!.createContextGraph({ id: cgId, name: 'WM Optout', description: '' });
+    await node!.assertion.create(cgId, 'd12b');
+    await node!.assertion.write(cgId, 'd12b', [
+      { subject: 'urn:wm:alice:fact:d12b', predicate: 'http://schema.org/description', object: '"optout-probe"', graph: '' },
+    ]);
+
+    const cfg = (node! as any).config as { strictWmCrossAgentAuth?: boolean };
+    const prevCfg = cfg.strictWmCrossAgentAuth;
+    const prevEnv = process.env.DKG_STRICT_WM_AUTH;
+    cfg.strictWmCrossAgentAuth = false;
+    delete process.env.DKG_STRICT_WM_AUTH;
+    try {
+      const res = await node!.query(
+        `SELECT ?s ?o WHERE { ?s <http://schema.org/description> ?o }`,
+        { contextGraphId: cgId, view: 'working-memory', agentAddress: defaultA },
+      );
+      expect(
+        res.bindings.length,
+        'explicit config=false must allow un-signed cross-agent reads (documents the legacy hole)',
+      ).toBeGreaterThan(0);
+    } finally {
+      cfg.strictWmCrossAgentAuth = prevCfg;
+      if (prevEnv !== undefined) process.env.DKG_STRICT_WM_AUTH = prevEnv;
+    }
+  });
+
+  it('env opt-in (DKG_STRICT_WM_AUTH=1) overrides config=false — strict wins', async () => {
+    const defaultA = node!.getDefaultAgentAddress()!;
+    const cgId = freshCgId('wm-envwin');
+    await node!.createContextGraph({ id: cgId, name: 'WM EnvWin', description: '' });
+    await node!.assertion.create(cgId, 'd12c');
+    await node!.assertion.write(cgId, 'd12c', [
+      { subject: 'urn:wm:alice:fact:d12c', predicate: 'http://schema.org/description', object: '"envwin-probe"', graph: '' },
+    ]);
+
+    const cfg = (node! as any).config as { strictWmCrossAgentAuth?: boolean };
+    const prevCfg = cfg.strictWmCrossAgentAuth;
+    const prevEnv = process.env.DKG_STRICT_WM_AUTH;
+    cfg.strictWmCrossAgentAuth = false;
+    process.env.DKG_STRICT_WM_AUTH = '1';
+    try {
+      const res = await node!.query(
+        `SELECT ?s ?o WHERE { ?s <http://schema.org/description> ?o }`,
+        { contextGraphId: cgId, view: 'working-memory', agentAddress: defaultA },
+      );
+      expect(
+        res.bindings.length,
+        'env opt-in must override config opt-out (fleet-wide tighten scenario)',
+      ).toBe(0);
+    } finally {
+      cfg.strictWmCrossAgentAuth = prevCfg;
+      if (prevEnv === undefined) delete process.env.DKG_STRICT_WM_AUTH;
+      else process.env.DKG_STRICT_WM_AUTH = prevEnv;
+    }
+  });
+
+  it('WM-auth tokens carrying a malformed nonce shape are rejected', async () => {
+    const defaultA = node!.getDefaultAgentAddress()!;
+    const wallet = (node! as any).getLocalAgentWallet(defaultA);
+    expect(wallet).toBeDefined();
+
+    // Malformed: non-hex nonce with obvious injection characters. The
+    // verifier must reject this before reaching ethers.verifyMessage so
+    // that a broken client cannot pollute the nonce cache with
+    // arbitrary strings.
+    const ts = Date.now();
+    const badNonce = 'not-hex:@/bad';
+    const msg = `dkg-wm-auth:v2:${defaultA.toLowerCase()}:${ts}:${badNonce}`;
+    const sig = wallet!.signMessageSync(msg);
+    const badToken = `${ts}.${badNonce}.${sig}`;
+
+    const cgId = freshCgId('wm-malformed');
+    await node!.createContextGraph({ id: cgId, name: 'WM Malformed', description: '' });
+    await node!.assertion.create(cgId, 'malformed');
+    await node!.assertion.write(cgId, 'malformed', [
+      {
+        subject: 'urn:wm:alice:fact:bad',
+        predicate: 'http://schema.org/description',
+        object: '"bad-probe"',
+        graph: '',
+      },
+    ]);
+
+    const res = await node!.query(
+      `SELECT ?s ?o WHERE { ?s <http://schema.org/description> ?o }`,
+      {
+        contextGraphId: cgId,
+        view: 'working-memory',
+        agentAddress: defaultA,
+        agentAuthSignature: badToken,
+      },
+    );
+    expect(res.bindings.length).toBe(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // WM cross-agent deny paths must
+  // preserve the *shape* the caller asked for. A `CONSTRUCT` caller branches
+  // on `result.quads !== undefined` to decide whether it got graph data back;
+  // returning `{ bindings: [] }` on a deny (as we did before r17-2) makes a
+  // fail-closed denial look exactly like a legitimate SELECT-with-zero-rows
+  // response, which is exactly the kind of silent shape-mismatch that
+  // breaks downstream consumers in production. Pin the contract.
+  // -------------------------------------------------------------------------
+  it('CONSTRUCT deny on WM cross-agent impersonation returns quads:[] (shape preserved)', async () => {
+    const defaultA = node!.getDefaultAgentAddress()!;
+    const cgId = freshCgId('wm-r17-2-construct');
+    await node!.createContextGraph({ id: cgId, name: 'WM r17-2 CONSTRUCT', description: '' });
+    await node!.assertion.create(cgId, 'shape');
+    await node!.assertion.write(cgId, 'shape', [
+      {
+        subject: 'urn:wm:alice:fact:shape',
+        predicate: 'http://schema.org/description',
+        object: '"r17-2-shape-probe"',
+        graph: '',
+      },
+    ]);
+
+    // Impersonation attempt from B → A's WM with no auth signature at all.
+    // Strict mode is on (see beforeAll) so this MUST be denied.
+    const res: any = await node!.query(
+      `CONSTRUCT { ?s <http://schema.org/description> ?o } WHERE { ?s <http://schema.org/description> ?o }`,
+      {
+        contextGraphId: cgId,
+        view: 'working-memory',
+        agentAddress: defaultA,
+      },
+    );
+
+    // The denial MUST:
+    //  - return `quads` (the CONSTRUCT shape), not a bindings-only SELECT shape;
+    //  - return an empty `quads` array (no data leaked);
+    //  - return an empty `bindings` array alongside (stable `QueryResult` shape).
+    expect(
+      res.quads,
+      'CONSTRUCT deny must preserve quads shape — otherwise callers branching on result.quads misread the deny as a SELECT',
+    ).toBeDefined();
+    expect(Array.isArray(res.quads)).toBe(true);
+    expect(res.quads.length, 'denied CONSTRUCT must leak zero quads').toBe(0);
+    expect(Array.isArray(res.bindings)).toBe(true);
+    expect(res.bindings.length).toBe(0);
+  });
+
+  it('ASK deny on WM cross-agent impersonation returns bindings=[{result:"false"}]', async () => {
+    const defaultA = node!.getDefaultAgentAddress()!;
+    const cgId = freshCgId('wm-r17-2-ask');
+    await node!.createContextGraph({ id: cgId, name: 'WM r17-2 ASK', description: '' });
+    await node!.assertion.create(cgId, 'ask');
+    await node!.assertion.write(cgId, 'ask', [
+      {
+        subject: 'urn:wm:alice:fact:ask',
+        predicate: 'http://schema.org/description',
+        object: '"r17-2-ask-probe"',
+        graph: '',
+      },
+    ]);
+
+    const res: any = await node!.query(
+      `ASK { ?s <http://schema.org/description> ?o }`,
+      {
+        contextGraphId: cgId,
+        view: 'working-memory',
+        agentAddress: defaultA,
+      },
+    );
+
+    // ASK deny must be the canonical "false" boolean — NOT an empty
+    // bindings array (which would leak "true" to a caller that treats
+    // `bindings.length === 0` as a failure signal).
+    expect(Array.isArray(res.bindings)).toBe(true);
+    expect(res.bindings.length).toBe(1);
+    expect(res.bindings[0]?.result).toBe('false');
+  });
+
+  it('SELECT deny on WM cross-agent impersonation returns bindings=[] without a quads key', async () => {
+    const defaultA = node!.getDefaultAgentAddress()!;
+    const cgId = freshCgId('wm-r17-2-select');
+    await node!.createContextGraph({ id: cgId, name: 'WM r17-2 SELECT', description: '' });
+    await node!.assertion.create(cgId, 'sel');
+    await node!.assertion.write(cgId, 'sel', [
+      {
+        subject: 'urn:wm:alice:fact:sel',
+        predicate: 'http://schema.org/description',
+        object: '"r17-2-sel-probe"',
+        graph: '',
+      },
+    ]);
+
+    const res: any = await node!.query(
+      `SELECT ?s ?o WHERE { ?s <http://schema.org/description> ?o }`,
+      {
+        contextGraphId: cgId,
+        view: 'working-memory',
+        agentAddress: defaultA,
+      },
+    );
+
+    expect(Array.isArray(res.bindings)).toBe(true);
+    expect(res.bindings.length).toBe(0);
+    // SELECT must NOT carry `quads` (that would hint at graph data and
+    // confuse callers that normalize on `quads !== undefined`).
+    expect(res.quads).toBeUndefined();
   });
 });

@@ -182,6 +182,51 @@ export class MockChainAdapter implements ChainAdapter {
       txHash,
     });
 
+    // — evm-adapter.ts:868). The EVM
+    // adapter exposes `V10KnowledgeBatchEmitted` as a first-class
+    // event on `listenForEvents()`. KASStorage emits this distinct
+    // topic for V10 publishes so V10-aware indexers can subscribe to
+    // a batch-shaped projection without picking up legacy
+    // `KnowledgeBatchCreated` rows. Mirror that emission here so any
+    // consumer that subscribes via the shared `ChainAdapter`
+    // interface gets the same stream from the mock that it would
+    // from a real EVM chain. (Without this the mock-vs-real split
+    // would silently desync test fixtures from production
+    // behaviour — bot's exact concern.)
+    //
+    // mock-adapter.ts:200, J8hn).
+    // `publicByteSize` and `tokenAmount` are first-class fields on
+    // `PublishParams` and are decoded straight off the on-chain log
+    // by the real EVM adapter (evm-adapter.ts:890 / :896). Pre-r31-12
+    // the mock hardcoded both to `"0"`, which silently desynced
+    // mock-backed fixtures from production: any test or consumer that
+    // asserted on byte-size or token-cost accounting would pass
+    // against the mock while regressing against the real chain. Pull
+    // the values from `params` so the emitted event carries the same
+    // shape the real adapter would surface.
+    //
+    // Epoch fields stay zero — the mock doesn't model the on-chain
+    // epoch counter (real KASStorage computes startEpoch/endEpoch
+    // from `block.timestamp` at write time). `params.epochs` is the
+    // EPOCH COUNT the publisher requested, not the start/end window,
+    // so we cannot reconstruct the on-chain values without a wall
+    // clock — emit schema-compatible zeros and leave epoch-window
+    // assertions to the EVM e2e suite.
+    this.pushEvent('V10KnowledgeBatchEmitted', {
+      batchId: batchId.toString(),
+      publisherAddress: this.signerAddress,
+      merkleRoot: toHex(params.merkleRoot),
+      publicByteSize: params.publicByteSize.toString(),
+      knowledgeAssetsCount: params.kaCount.toString(),
+      startKAId: startId.toString(),
+      endKAId: endId.toString(),
+      startEpoch: '0',
+      endEpoch: '0',
+      tokenAmount: params.tokenAmount.toString(),
+      isPermanent: false,
+      txHash,
+    });
+
     const result = this.txResult(true);
     return {
       batchId,
@@ -233,6 +278,32 @@ export class MockChainAdapter implements ChainAdapter {
       startKAId: startId.toString(),
       endKAId: endId.toString(),
       kaCount: params.kaCount,
+      isPermanent: true,
+      txHash,
+    });
+
+    // — evm-adapter.ts:868). Mirror
+    // V10KnowledgeBatchEmitted for the permanent-publish path too
+    // (real KASStorage emits the same topic for both
+    // permanent/non-permanent V10 publishes; only the `isPermanent`
+    // field differs).
+    //
+    // mock-adapter.ts:285, J8hn): same
+    // fix as the regular publish path above — `publicByteSize` and
+    // `tokenAmount` are on `PermanentPublishParams` and the real
+    // adapter surfaces them on the event. Pull from `params` so
+    // permanent-publish mock fixtures stay aligned with production.
+    this.pushEvent('V10KnowledgeBatchEmitted', {
+      batchId: batchId.toString(),
+      publisherAddress: this.signerAddress,
+      merkleRoot: toHex(params.merkleRoot),
+      publicByteSize: params.publicByteSize.toString(),
+      knowledgeAssetsCount: params.kaCount.toString(),
+      startKAId: startId.toString(),
+      endKAId: endId.toString(),
+      startEpoch: '0',
+      endEpoch: '0',
+      tokenAmount: params.tokenAmount.toString(),
       isPermanent: true,
       txHash,
     });
@@ -656,6 +727,11 @@ export class MockChainAdapter implements ChainAdapter {
 
   async getMinimumRequiredSignatures(): Promise<number> {
     return this.minimumRequiredSignatures;
+  }
+
+  async getContextGraphRequiredSignatures(contextGraphId: bigint): Promise<number> {
+    if (contextGraphId <= 0n) return 0;
+    return this.contextGraphs.get(contextGraphId)?.requiredSignatures ?? 0;
   }
 
   async verifyACKIdentity(recoveredAddress: string, claimedIdentityId: bigint): Promise<boolean> {

@@ -223,7 +223,14 @@ describe('bulletproof: SYNC contract (real libp2p, real publish, delta-syncs new
     // A creates a PUBLIC CG and publishes entity1 through the real publish
     // pipeline (not a direct store.insert). This is the critical contract
     // check: sync must accept data that publish() produced.
+    //
+    // PR #295 (createContextGraph no longer auto-registers on-chain): publish()
+    // requires a positive on-chain context-graph id, so we must explicitly
+    // call registerContextGraph after createContextGraph. Without this the
+    // canonical publisher returns status='tentative' (no on-chain submission)
+    // and the sync sub-test below gets no real data to replicate.
     await nodeA.createContextGraph({ id: cgId, name: 'Bulletproof Sync', description: '' });
+    await nodeA.registerContextGraph(cgId);
     const pub1 = await nodeA.publish(cgId, [
       { subject: entity1, predicate: 'http://schema.org/name', object: '"SyncE1"', graph: '' },
     ]);
@@ -327,6 +334,10 @@ describe('bulletproof: INVITE contract (allowlist flips actual sync authorizatio
       private: true,
       allowedAgents: [walletA.address],
     });
+    // PR #295: explicit on-chain registration is required before publish()
+    // can produce a `confirmed` status (otherwise the canonical publisher
+    // returns `tentative` and we never reach the allowlist contract below).
+    await nodeA.registerContextGraph(cgId);
 
     // Publish a real quad so there is actually data to gate on. Using
     // publish() (not store.insert) means the allowlist gate has to
@@ -465,6 +476,10 @@ describe('bulletproof: INVITE contract (join-request path, B signs → A approve
       private: true,
       allowedAgents: [walletA.address],
     });
+    // PR #295: register on-chain so the curator's publish below produces a
+    // `confirmed` KC. Without this the publish returns 'tentative' and the
+    // join-request authorization flow we want to test never gets exercised.
+    await curator.registerContextGraph(cgId);
 
     const pub = await curator.publish(cgId, [
       { subject: entity, predicate: 'http://schema.org/name', object: '"JoinSecret"', graph: '' },
@@ -635,6 +650,11 @@ describe('bulletproof: SYNC set-reconciliation (regression for issue #2)', () =>
       description: 'public — B should auto-discover via ontology sync',
       // explicitly public — no allowedAgents
     });
+    // PR #295: explicit on-chain registration is mandatory for publish() to
+    // mint a confirmed KC. The reproducer's whole point is that B picks up
+    // *real* on-chain KCs without prior knowledge — so on-chain confirmation
+    // is a strict precondition, not an optimisation.
+    await nodeA.registerContextGraph(cgId);
     for (const entity of entities) {
       const pub = await nodeA.publish(cgId, [
         { subject: entity, predicate: 'http://schema.org/name', object: `"drift-${entity.split(':').pop()}"`, graph: '' },
@@ -803,6 +823,10 @@ describe('bulletproof: INVITE via legacy peer-ID path (UI-facing, /api/context-g
       private: true,
       allowedAgents: [walletA.address],
     });
+    // PR #295: register on-chain so publish() yields `confirmed`. The UI's
+    // "Invite member" path is downstream of on-chain CG presence — without
+    // a registered CG the test exercises the wrong code path.
+    await curator.registerContextGraph(cgId);
     const pub = await curator.publish(cgId, [
       { subject: entity, predicate: 'http://schema.org/name', object: '"PeerInviteSecret"', graph: '' },
     ]);

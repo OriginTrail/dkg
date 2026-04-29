@@ -70,6 +70,12 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
   private readonly chainRecoveryResolver?: AsyncLiftPublisherRecoveryResolver;
   private readonly publishExecutor?: AsyncLiftPublisherConfig['publishExecutor'];
   private readonly resolvedSliceOverrides?: Partial<LiftResolvedPublishSlice>;
+  /**
+   * Cached key plumbed through to `subtractFinalizedExactQuads` so
+   * authoritative private quads decrypt under the SAME key the caller's
+   * `PrivateContentStore` sealed them with.
+   */
+  private readonly privateStoreEncryptionKey?: Uint8Array | string;
   private readonly graphManager: GraphManager;
   private paused = false;
   private graphEnsured = false;
@@ -88,6 +94,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     this.chainRecoveryResolver = config.chainRecoveryResolver;
     this.publishExecutor = config.publishExecutor;
     this.resolvedSliceOverrides = config.resolvedSliceOverrides;
+    this.privateStoreEncryptionKey = config.privateStoreEncryptionKey;
     this.graphManager = new GraphManager(store);
   }
 
@@ -142,10 +149,58 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
 
   async update(jobId: string, status: LiftJobState, data: Partial<LiftJob> = {}): Promise<void> {
     await this.ensureGraph();
-    const next = this.refreshActiveLease(this.mergeJob(await this.getRequiredJob(jobId), status, data));
+    const current = await this.getRequiredJob(jobId);
+    // P-2 fence: any worker that already claimed this job MUST still
+    // hold a matching wallet lock before we let it push the FSM
+    // forward (claimed → validated → broadcast → included). Terminal
+    // / cleanup transitions (failed, cancelled, finalized, recovered,
+    // accepted) bypass the fence so a worker can still record its
+    // own terminal failure even after a takeover.
+    // P-2.
+    await this.assertCallerLockIntact(current, status);
+    const next = this.refreshActiveLease(this.mergeJob(current, status, data));
     this.assertJobMatchesStatus(next);
     await this.writeJob(next);
     await this.syncWalletLockForJob(next);
+  }
+
+  private async assertCallerLockIntact(job: LiftJob, targetStatus: LiftJobState): Promise<void> {
+    const walletId = job.claim?.walletId;
+    if (!walletId) return;
+    // Only fence forward-progress transitions on a fenced source
+    // state. Terminal / cleanup target states (failed, cancelled,
+    // finalized, recovered, accepted) are always allowed because they
+    // either release the lease or merely record bookkeeping; refusing
+    // them would leave dangling jobs after a takeover.
+    const FENCED_SOURCE_STATES: ReadonlySet<LiftJobState> = new Set([
+      'claimed',
+      'validated',
+      'broadcast',
+      'included',
+    ]);
+    const FENCED_TARGET_STATES: ReadonlySet<LiftJobState> = new Set([
+      'claimed',
+      'validated',
+      'broadcast',
+      'included',
+    ]);
+    if (!FENCED_SOURCE_STATES.has(job.status)) return;
+    if (!FENCED_TARGET_STATES.has(targetStatus)) return;
+
+    const currentLock = await this.readWalletLock(walletId);
+    if (!currentLock) {
+      throw new Error(
+        `stale_claim: wallet lock for ${walletId} (job=${job.jobId}) ` +
+          `was cleared by the control plane; refusing fenced update from a stale worker`,
+      );
+    }
+    if (!this.lockMatchesJob(currentLock, job)) {
+      throw new Error(
+        `fence_token_mismatch: wallet lock for ${walletId} now holds ` +
+          `job=${currentLock.jobId} (token=${currentLock.claimToken ?? '∅'}); ` +
+          `caller is stale for job=${job.jobId}`,
+      );
+    }
   }
 
   async getStatus(jobId: string): Promise<LiftJob | null> {
@@ -195,6 +250,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
       request: job.request,
       validation: validated.validation,
       resolved: validated.resolved,
+      privateStoreEncryptionKey: this.privateStoreEncryptionKey,
     });
 
     return {
@@ -246,6 +302,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
         request: claimed.request,
         validation: validated.validation,
         resolved: validated.resolved,
+        privateStoreEncryptionKey: this.privateStoreEncryptionKey,
       });
 
       if (subtracted.resolved.quads.length === 0 && (subtracted.resolved.privateQuads?.length ?? 0) === 0) {
@@ -594,6 +651,14 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
 
     if (job.status === 'claimed' || job.status === 'validated' || job.status === 'broadcast' || job.status === 'included') {
       if (currentLock && !this.lockMatchesJob(currentLock, job)) {
+        return;
+      }
+      // Belt-and-braces alongside the explicit `assertCallerLockIntact`
+      // fence in `update()`: never resurrect a wallet lock that the
+      // control plane has already cleared. This also covers internal
+      // call sites (e.g. `processNext` retries) so the refusal is
+      // uniform across every entry point that could reach the FSM.
+      if (!currentLock && job.status !== 'claimed') {
         return;
       }
       const acquiredAt = job.timestamps.claimedAt ?? this.now();
