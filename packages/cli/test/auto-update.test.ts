@@ -77,7 +77,9 @@ let execImpl: (cmd: string, opts?: any) => Promise<any> = async () => ({ stdout:
 let execFileImpl: (file: string, args: string[], opts?: any) => Promise<any> = async () => ({ stdout: '', stderr: '' });
 let swapSlotImpl: (slot: 'a' | 'b') => Promise<void> = async () => {};
 let fetchImpl: (...args: any[]) => Promise<any> = async () => ({ ok: true, json: async () => ({}) });
-// `cleanGeneratedOutputs` walks `<slot>/packages/<pkg>/{dist,tsconfig.tsbuildinfo,build}`.
+// `cleanGeneratedOutputs` walks `<slot>/packages/<pkg>/{dist,tsconfig.tsbuildinfo}`
+// and additionally wipes packages/cli's generated `network/` + `project.json`
+// (copied from repo root by the cli build script).
 // Default to a couple of canned package entries so the full flow runs end-to-end
 // in tests that don't care; tests targeting the cleaner override this directly.
 const DEFAULT_READDIR_PKG_ENTRIES = [
@@ -1499,28 +1501,29 @@ describe('autoupdater hardening', () => {
 
   // ─── Bot-review fixes (PR #303) ─────────────────────────────────────────
 
-  it('clears stale dist/ + tsconfig.tsbuildinfo + build/ before build (preserves node_modules + Hardhat caches)', async () => {
+  it('clears stale dist/ + tsconfig.tsbuildinfo + cli/network/ + cli/project.json (preserves node_modules + Hardhat caches)', async () => {
     readFileImpl = async () => 'aaa111';
     makeFetchOk('bbb222');
     // Default readdir mock returns two packages: 'core' and 'cli'. Each must
-    // get its `dist/`, `tsconfig.tsbuildinfo`, and `build/` rm'd — and nothing
-    // else. `build/` matters because `packages/cli/build` copies repo-root
-    // `network/*.json` and `project.json` into the package and a stale copy
-    // could otherwise shadow the new layout via candidateRoots() fallback.
+    // get its `dist/` and `tsconfig.tsbuildinfo` rm'd. Additionally, the
+    // packages/cli build script copies repo-root `network/*.json` into
+    // `packages/cli/network/` and `project.json` into `packages/cli/project.json`,
+    // so those must also be wiped — otherwise a deleted/renamed root network
+    // config can survive in the inactive slot and be loaded via candidateRoots().
     await performUpdate(AU, () => {});
     const rmTargets = rmCalls.map(args => String(args[0]));
     const wipesDistCore = rmTargets.some(p => p.endsWith('/packages/core/dist'));
     const wipesDistCli = rmTargets.some(p => p.endsWith('/packages/cli/dist'));
     const wipesTsBuildInfoCore = rmTargets.some(p => p.endsWith('/packages/core/tsconfig.tsbuildinfo'));
     const wipesTsBuildInfoCli = rmTargets.some(p => p.endsWith('/packages/cli/tsconfig.tsbuildinfo'));
-    const wipesBuildCore = rmTargets.some(p => p.endsWith('/packages/core/build'));
-    const wipesBuildCli = rmTargets.some(p => p.endsWith('/packages/cli/build'));
+    const wipesCliNetworkDir = rmTargets.some(p => p.endsWith('/packages/cli/network'));
+    const wipesCliProjectJson = rmTargets.some(p => p.endsWith('/packages/cli/project.json'));
     expect(wipesDistCore).toBe(true);
     expect(wipesDistCli).toBe(true);
     expect(wipesTsBuildInfoCore).toBe(true);
     expect(wipesTsBuildInfoCli).toBe(true);
-    expect(wipesBuildCore).toBe(true);
-    expect(wipesBuildCli).toBe(true);
+    expect(wipesCliNetworkDir).toBe(true);
+    expect(wipesCliProjectJson).toBe(true);
     // Sanity: no node_modules wipe and no Hardhat cache/artifacts wipe.
     const touchesNodeModules = rmTargets.some(p => p.includes('node_modules'));
     const touchesHardhatCache = rmTargets.some(p =>
@@ -1531,6 +1534,17 @@ describe('autoupdater hardening', () => {
     // Sanity: we did NOT shell out to `find` (the legacy implementation).
     const findCalls = getExecFileCalls().filter(c => c.file === 'find');
     expect(findCalls.length).toBe(0);
+    // Regression: cli/network/ is rm'd recursively (so a stale per-network
+    // file, e.g. `packages/cli/network/devnet.json` left behind after the
+    // root `network/devnet.json` was deleted in a later commit, gets wiped
+    // along with the directory). `force: true` makes the rm a no-op when
+    // the dir is absent (fresh clone path).
+    const cliNetworkRmCall = rmCalls.find(args => String(args[0]).endsWith('/packages/cli/network'));
+    expect(cliNetworkRmCall).toBeDefined();
+    expect(cliNetworkRmCall?.[1]).toMatchObject({ recursive: true, force: true });
+    const cliProjectRmCall = rmCalls.find(args => String(args[0]).endsWith('/packages/cli/project.json'));
+    expect(cliProjectRmCall).toBeDefined();
+    expect(cliProjectRmCall?.[1]).toMatchObject({ force: true });
   });
 
   it('orphan-process sweep is scoped to the slot dir (no host-wide pkill -f)', async () => {

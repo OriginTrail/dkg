@@ -871,28 +871,31 @@ async function cleanGeneratedOutputs(
     }
     let removedDist = 0;
     let removedTsBuildInfo = 0;
-    let removedBuild = 0;
     for (const entry of pkgEntries) {
       if (!entry.isDirectory()) continue;
       const distPath = join(packagesDir, entry.name, 'dist');
       const tsBuildInfoPath = join(packagesDir, entry.name, 'tsconfig.tsbuildinfo');
-      // Also wipe `build/` — packages/cli's build script copies repo-root
-      // `network/*.json` and `project.json` into `packages/cli/build/`, so a
-      // stale (deleted/renamed) network config could otherwise survive in the
-      // inactive slot and shadow the new layout via the package-local fallback
-      // in candidateRoots(). monorepo-root files always take precedence in dev,
-      // but published-NPM and detached layouts rely on `build/` being fresh.
-      const buildPath = join(packagesDir, entry.name, 'build');
       // `rm({ recursive: true, force: true })` is a no-op on missing paths.
       await rm(distPath, { recursive: true, force: true });
       await rm(tsBuildInfoPath, { force: true });
-      await rm(buildPath, { recursive: true, force: true });
       removedDist += 1;
       removedTsBuildInfo += 1;
-      removedBuild += 1;
     }
+    // Also wipe packages/cli's generated repo-root copies. The cli build
+    // script (`packages/cli/package.json#build`) copies repo-root
+    // `network/*.json` into `packages/cli/network/` and `project.json` into
+    // `packages/cli/project.json`. Without this step, deleting or renaming a
+    // root network config (e.g. removing `network/devnet.json`) leaves the
+    // stale package-local copy in the inactive slot, and `candidateRoots()`
+    // picks it up after the swap (monorepo-root precedence saves us in dev,
+    // but published-NPM / detached layouts do not have a monorepo ancestor).
+    // Use `force: true` so missing paths are a no-op (e.g. fresh clone where
+    // these have never been generated).
+    const cliPkgDir = join(packagesDir, 'cli');
+    await rm(join(cliPkgDir, 'network'), { recursive: true, force: true });
+    await rm(join(cliPkgDir, 'project.json'), { force: true });
     log(
-      `Auto-update: cleared stale dist/ (${removedDist} pkgs) + tsconfig.tsbuildinfo (${removedTsBuildInfo} pkgs) + build/ (${removedBuild} pkgs) before build (incremental caches preserved).`,
+      `Auto-update: cleared stale dist/ (${removedDist} pkgs) + tsconfig.tsbuildinfo (${removedTsBuildInfo} pkgs) + cli/network/ + cli/project.json before build (incremental caches preserved).`,
     );
   } catch (primaryErr: any) {
     log(
