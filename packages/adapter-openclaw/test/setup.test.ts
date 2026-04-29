@@ -231,7 +231,12 @@ describe('writeDkgConfig', () => {
       expect(config.apiPort).toBe(9200);
       expect(config.nodeRole).toBe('edge');
       expect(config.contextGraphs).toEqual(['testing']);
-      expect(config.chain.rpcUrl).toBe('https://rpc.test');
+      // Chain and autoUpdate are intentionally NOT persisted on a fresh setup —
+      // the daemon resolves them at runtime from network/<env>.json via the
+      // field-level mergers in cli/src/config.ts so future hub/branch
+      // rotations propagate without a config rewrite.
+      expect(config.chain).toBeUndefined();
+      expect(config.autoUpdate).toBeUndefined();
       expect(config.relay).toBeUndefined();
     } finally {
       process.env.DKG_HOME = original;
@@ -266,6 +271,59 @@ describe('writeDkgConfig', () => {
       expect(config.chain.rpcUrl).toBe('https://custom.rpc');
       expect(config.openclawAdapter).toBeUndefined();
       expect(config.openclawChannel).toBeUndefined();
+    } finally {
+      process.env.DKG_HOME = original;
+    }
+  });
+
+  it('preserves an explicit existing autoUpdate block but never pins network defaults on a fresh setup', () => {
+    // Regression: previously `writeDkgConfig` copied `network.autoUpdate`
+    // wholesale into the user's config when absent, which froze the auto-
+    // updater's repo/branch/checkInterval at first-run values and broke
+    // future branch rotations (main -> release/v10) shipped via
+    // `network/<env>.json#autoUpdate`. The daemon's
+    // `resolveAutoUpdateConfig` already handles field-level fall-through,
+    // so we should only persist what the operator explicitly set.
+    //
+    // (1) Fresh setup with a network that DOES define autoUpdate -> we must
+    //     NOT pin it into the user's config.
+    const fresh = join(testDir, '.dkg-fresh');
+    const original = process.env.DKG_HOME;
+    process.env.DKG_HOME = fresh;
+    try {
+      writeDkgConfig('test-agent', {
+        ...fakeNetwork,
+        autoUpdate: { enabled: true, repo: 'OriginTrail/dkg', branch: 'main' },
+      } as any, 9200);
+      const cfg = JSON.parse(readFileSync(join(fresh, 'config.json'), 'utf-8'));
+      expect(cfg.autoUpdate).toBeUndefined();
+      expect(cfg.chain).toBeUndefined();
+    } finally {
+      process.env.DKG_HOME = original;
+    }
+
+    // (2) Existing config with an operator-set autoUpdate must round-trip
+    //     unchanged — operators who DID pin a custom branch keep their
+    //     override, this PR only changes the default-write path.
+    const persisted = join(testDir, '.dkg-persisted');
+    mkdirSync(persisted, { recursive: true });
+    writeFileSync(join(persisted, 'config.json'), JSON.stringify({
+      name: 'pinned-node',
+      apiPort: 9300,
+      autoUpdate: { enabled: true, repo: 'OriginTrail/dkg', branch: 'release/v10' },
+    }));
+    process.env.DKG_HOME = persisted;
+    try {
+      writeDkgConfig('pinned-node', {
+        ...fakeNetwork,
+        autoUpdate: { enabled: true, repo: 'OriginTrail/dkg', branch: 'main' },
+      } as any, 9300);
+      const cfg = JSON.parse(readFileSync(join(persisted, 'config.json'), 'utf-8'));
+      expect(cfg.autoUpdate).toEqual({
+        enabled: true,
+        repo: 'OriginTrail/dkg',
+        branch: 'release/v10',
+      });
     } finally {
       process.env.DKG_HOME = original;
     }

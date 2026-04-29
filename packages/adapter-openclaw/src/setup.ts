@@ -447,6 +447,18 @@ export function writeDkgConfig(
 
   // Explicit CLI overrides (--name, --port) take precedence over existing config.
   // Auto-detected values only fill in when no existing value is present.
+  //
+  // We intentionally do NOT persist `chain` or `autoUpdate` from
+  // `network/<env>.json` into the user's config when they're absent —
+  // the daemon already does field-level merging at runtime via
+  // `resolveChainConfig` (cli/src/config.ts) and `resolveAutoUpdateConfig`
+  // (same file, see docstring at "dkg init intentionally omits repo/branch").
+  // Pinning the network defaults here would cement them and break future
+  // hub rotations / branch rotations / RPC swaps in `network/<env>.json`,
+  // which is exactly the failure mode we just had to fight through on the
+  // testnet relay nodes after the hub address was rotated. The `...existing`
+  // spread above still preserves any chain/autoUpdate the operator added
+  // manually (e.g. private RPC override).
   const config: Record<string, any> = {
     ...existing,
     name: overrides?.nameExplicit ? agentName : (existing.name ?? agentName),
@@ -456,7 +468,6 @@ export function writeDkgConfig(
       ?? existing.paranets
       ?? network.defaultContextGraphs
       ?? network.defaultParanets,
-    chain: existing.chain ?? network.chain,
     auth: existing.auth ?? { enabled: true },
   };
 
@@ -465,11 +476,6 @@ export function writeDkgConfig(
   // which is better than hard-coding a single relay into the user's config.
   if (existing.relay) {
     config.relay = existing.relay;
-  }
-
-  // Preserve auto-update from network defaults if not set
-  if (!existing.autoUpdate && network.autoUpdate) {
-    config.autoUpdate = network.autoUpdate;
   }
 
   writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n');
