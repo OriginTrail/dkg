@@ -233,6 +233,14 @@ export interface MemorySearchOptions {
   maxResults?: number;
   minScore?: number;
   sessionKey?: string;
+  /**
+   * T74 — Observability tag. Identifies the caller in the
+   * `[dkg-memory] search fired (caller=…)` log line so operators can
+   * distinguish W3 auto-recall hook firings from explicit `memory_search`
+   * tool calls (and other future callers). Free-form short string;
+   * defaults to `'unknown'` when not supplied.
+   */
+  caller?: string;
 }
 
 /**

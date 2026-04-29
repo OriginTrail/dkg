@@ -2673,7 +2673,7 @@ export class DkgNodePlugin {
       // tracking the underlying promise, two consecutive turns with
       // sub-250ms gaps could both bypass the guard and pile on the
       // daemon.
-      const recallPromise = manager.searchNarrow(query, { maxResults: 5 });
+      const recallPromise = manager.searchNarrow(query, { maxResults: 5, caller: 'hook' });
       this.autoRecallInFlight.add(recallSessionKey);
       // Fire-and-forget cleanup tied to the underlying promise. Survives
       // success, timeout, AND error.
@@ -2763,7 +2763,7 @@ export class DkgNodePlugin {
         resolver: this.memorySessionResolver,
         logger: this.memoryResolverApi?.logger,
       });
-      const hits = await manager.search(query, { maxResults: limit });
+      const hits = await manager.search(query, { maxResults: limit, caller: 'tool' });
       return this.json({
         query,
         count: hits.length,

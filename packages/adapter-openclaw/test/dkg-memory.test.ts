@@ -561,11 +561,15 @@ describe('DkgMemorySearchManager', () => {
       await manager.search('hello world');
 
       const searchFiredLogs = infoSpy.mock.calls.filter(c =>
-        typeof c[0] === 'string' && c[0].includes('[dkg-memory] search fired:'),
+        typeof c[0] === 'string' && c[0].includes('[dkg-memory] search fired'),
       );
       expect(searchFiredLogs).toHaveLength(1);
       const logLine = searchFiredLogs[0][0] as string;
       expect(logLine).not.toContain('query=');
+      // T74 — caller defaults to 'unknown' when not supplied; limit is the
+      // SPARQL LIMIT applied to each layer query.
+      expect(logLine).toContain('caller=unknown');
+      expect(logLine).toMatch(/limit=\d+/);
       expect(logLine).toContain('project=research-x');
       expect(logLine).toContain('layers=6');
       expect(logLine).toContain('raw_hits=3');
@@ -582,6 +586,28 @@ describe('DkgMemorySearchManager', () => {
       expect(debugLogs[0][0]).toContain('hello world');
     });
 
+    it('T74 — observability log includes the supplied `caller` tag (hook vs tool disambiguation)', async () => {
+      vi.spyOn(client, 'query').mockResolvedValue({ result: { bindings: [] } });
+      const infoSpy = vi.fn();
+      const manager = new DkgMemorySearchManager({
+        client,
+        resolver: makeResolver(),
+        logger: { info: infoSpy, warn: vi.fn(), debug: vi.fn() } as any,
+      });
+
+      await manager.search('hello world', { caller: 'tool' });
+      await manager.searchNarrow('hello world', { caller: 'hook' });
+
+      const searchFiredLogs = infoSpy.mock.calls
+        .map((c) => c[0] as string)
+        .filter((m) => typeof m === 'string' && m.includes('[dkg-memory] search fired'));
+      expect(searchFiredLogs).toHaveLength(2);
+      expect(searchFiredLogs[0]).toContain('caller=tool');
+      expect(searchFiredLogs[0]).toContain('limit=10'); // search default
+      expect(searchFiredLogs[1]).toContain('caller=hook');
+      expect(searchFiredLogs[1]).toContain('limit=5');  // searchNarrow default cap
+    });
+
     it('observability log uses ∅ for the project field when no project CG is resolved', async () => {
       vi.spyOn(client, 'query').mockResolvedValue({ result: { bindings: [] } });
       const infoSpy = vi.fn();
@@ -594,7 +620,7 @@ describe('DkgMemorySearchManager', () => {
       await manager.search('hello world');
 
       const searchFiredLogs = infoSpy.mock.calls.filter(c =>
-        typeof c[0] === 'string' && c[0].includes('[dkg-memory] search fired:'),
+        typeof c[0] === 'string' && c[0].includes('[dkg-memory] search fired'),
       );
       expect(searchFiredLogs).toHaveLength(1);
       const logLine = searchFiredLogs[0][0] as string;

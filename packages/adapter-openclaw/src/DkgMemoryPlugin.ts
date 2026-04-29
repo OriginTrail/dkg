@@ -151,7 +151,7 @@ export class DkgMemorySearchManager implements MemorySearchManager {
    */
   async searchNarrow(
     query: string,
-    options?: { maxResults?: number; minScore?: number; sessionKey?: string },
+    options?: MemorySearchOptions,
   ): Promise<MemorySearchResult[]> {
     const cap = options?.maxResults ?? 5;
     return this.runSearch(query, { ...options, maxResults: cap });
@@ -368,7 +368,8 @@ export class DkgMemorySearchManager implements MemorySearchManager {
     // contain secrets or PII, so it is logged at debug level only
     // (silent at default log verbosity).
     this.deps.logger?.info?.(
-      `[dkg-memory] search fired: ` +
+      `[dkg-memory] search fired ` +
+      `(caller=${options?.caller ?? 'unknown'}, limit=${limit}): ` +
       `project=${projectContextGraphId ?? '∅'}, ` +
       `layers=${plans.length}, ` +
       `raw_hits=${totalRawHits} (${perLayerBreakdown})`,
