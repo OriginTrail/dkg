@@ -272,12 +272,20 @@ export async function writePendingUpdateState(
  */
 async function writeFileAtomic(path: string, data: string): Promise<void> {
   const { writeFile, rename, unlink } = _autoUpdateIo;
+  if (typeof rename !== 'function') {
+    // Older test stubs may not provide `rename`. Production fs/promises
+    // always does, so this branch only matters in unit tests with partial
+    // IO surfaces. Falling back to a direct write keeps the helper usable
+    // (without atomicity) instead of throwing TypeError on destructure.
+    await writeFile(path, data);
+    return;
+  }
   const tmp = `${path}.tmp.${process.pid}.${Date.now().toString(36)}`;
   await writeFile(tmp, data);
   try {
     await rename(tmp, path);
   } catch (err) {
-    try { await unlink(tmp); } catch { /* best-effort cleanup */ }
+    try { await unlink?.(tmp); } catch { /* best-effort cleanup */ }
     throw err;
   }
 }
@@ -863,18 +871,28 @@ async function cleanGeneratedOutputs(
     }
     let removedDist = 0;
     let removedTsBuildInfo = 0;
+    let removedBuild = 0;
     for (const entry of pkgEntries) {
       if (!entry.isDirectory()) continue;
       const distPath = join(packagesDir, entry.name, 'dist');
       const tsBuildInfoPath = join(packagesDir, entry.name, 'tsconfig.tsbuildinfo');
+      // Also wipe `build/` — packages/cli's build script copies repo-root
+      // `network/*.json` and `project.json` into `packages/cli/build/`, so a
+      // stale (deleted/renamed) network config could otherwise survive in the
+      // inactive slot and shadow the new layout via the package-local fallback
+      // in candidateRoots(). monorepo-root files always take precedence in dev,
+      // but published-NPM and detached layouts rely on `build/` being fresh.
+      const buildPath = join(packagesDir, entry.name, 'build');
       // `rm({ recursive: true, force: true })` is a no-op on missing paths.
       await rm(distPath, { recursive: true, force: true });
       await rm(tsBuildInfoPath, { force: true });
+      await rm(buildPath, { recursive: true, force: true });
       removedDist += 1;
       removedTsBuildInfo += 1;
+      removedBuild += 1;
     }
     log(
-      `Auto-update: cleared stale dist/ (${removedDist} pkgs) + tsconfig.tsbuildinfo (${removedTsBuildInfo} pkgs) before build (incremental caches preserved).`,
+      `Auto-update: cleared stale dist/ (${removedDist} pkgs) + tsconfig.tsbuildinfo (${removedTsBuildInfo} pkgs) + build/ (${removedBuild} pkgs) before build (incremental caches preserved).`,
     );
   } catch (primaryErr: any) {
     log(

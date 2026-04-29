@@ -77,7 +77,7 @@ let execImpl: (cmd: string, opts?: any) => Promise<any> = async () => ({ stdout:
 let execFileImpl: (file: string, args: string[], opts?: any) => Promise<any> = async () => ({ stdout: '', stderr: '' });
 let swapSlotImpl: (slot: 'a' | 'b') => Promise<void> = async () => {};
 let fetchImpl: (...args: any[]) => Promise<any> = async () => ({ ok: true, json: async () => ({}) });
-// `cleanGeneratedOutputs` walks `<slot>/packages/<pkg>/{dist,tsconfig.tsbuildinfo}`.
+// `cleanGeneratedOutputs` walks `<slot>/packages/<pkg>/{dist,tsconfig.tsbuildinfo,build}`.
 // Default to a couple of canned package entries so the full flow runs end-to-end
 // in tests that don't care; tests targeting the cleaner override this directly.
 const DEFAULT_READDIR_PKG_ENTRIES = [
@@ -1499,21 +1499,28 @@ describe('autoupdater hardening', () => {
 
   // ─── Bot-review fixes (PR #303) ─────────────────────────────────────────
 
-  it('clears stale dist/ + tsconfig.tsbuildinfo before build (preserves node_modules + Hardhat caches)', async () => {
+  it('clears stale dist/ + tsconfig.tsbuildinfo + build/ before build (preserves node_modules + Hardhat caches)', async () => {
     readFileImpl = async () => 'aaa111';
     makeFetchOk('bbb222');
     // Default readdir mock returns two packages: 'core' and 'cli'. Each must
-    // get its `dist/` and `tsconfig.tsbuildinfo` rm'd — and nothing else.
+    // get its `dist/`, `tsconfig.tsbuildinfo`, and `build/` rm'd — and nothing
+    // else. `build/` matters because `packages/cli/build` copies repo-root
+    // `network/*.json` and `project.json` into the package and a stale copy
+    // could otherwise shadow the new layout via candidateRoots() fallback.
     await performUpdate(AU, () => {});
     const rmTargets = rmCalls.map(args => String(args[0]));
     const wipesDistCore = rmTargets.some(p => p.endsWith('/packages/core/dist'));
     const wipesDistCli = rmTargets.some(p => p.endsWith('/packages/cli/dist'));
     const wipesTsBuildInfoCore = rmTargets.some(p => p.endsWith('/packages/core/tsconfig.tsbuildinfo'));
     const wipesTsBuildInfoCli = rmTargets.some(p => p.endsWith('/packages/cli/tsconfig.tsbuildinfo'));
+    const wipesBuildCore = rmTargets.some(p => p.endsWith('/packages/core/build'));
+    const wipesBuildCli = rmTargets.some(p => p.endsWith('/packages/cli/build'));
     expect(wipesDistCore).toBe(true);
     expect(wipesDistCli).toBe(true);
     expect(wipesTsBuildInfoCore).toBe(true);
     expect(wipesTsBuildInfoCli).toBe(true);
+    expect(wipesBuildCore).toBe(true);
+    expect(wipesBuildCli).toBe(true);
     // Sanity: no node_modules wipe and no Hardhat cache/artifacts wipe.
     const touchesNodeModules = rmTargets.some(p => p.includes('node_modules'));
     const touchesHardhatCache = rmTargets.some(p =>
