@@ -113,6 +113,30 @@ describe('DkgChannelPlugin', () => {
     expect(CHANNEL_NAME).toBe('dkg-ui');
   });
 
+  it('calls the pre-dispatch memory-slot reassert callback before processInbound runs (R9.1/R9.7)', async () => {
+    const reassertSpy = vi.fn();
+    plugin.setPreDispatchReAssert(reassertSpy);
+
+    // Stub api so processInbound has the bare-minimum surface it needs;
+    // we don't care about the dispatch result, only that reassert fired
+    // before any further work.
+    const mockApi = {
+      logger: { info: vi.fn(), debug: vi.fn(), warn: vi.fn() },
+      runtime: undefined,
+      cfg: undefined,
+      routeInboundMessage: undefined,
+    } as any;
+    (plugin as any).api = mockApi;
+
+    // processInbound throws once it can't find a dispatch route, but the
+    // reassert is the FIRST thing it does — confirm spy fires exactly
+    // once before the throw.
+    await expect(
+      plugin.processInbound('hello', 'corr-1', 'owner', {}),
+    ).rejects.toThrow();
+    expect(reassertSpy).toHaveBeenCalledTimes(1);
+  });
+
   describe('formatInboundTurnDiagnostic (live-validation follow-up)', () => {
     // Diagnostic helper used by handleInboundHttp + handleInboundStreamHttp
     // to give operators runtime ground truth on envelope stamping. Without

@@ -158,6 +158,27 @@ describe('DkgMemoryPlugin.register', () => {
     expect(api.registerTool).not.toHaveBeenCalled();
   });
 
+  it('invalidateRegistration() clears cached capability so reAssertCapability becomes a no-op (R12.2)', () => {
+    // Step 1: successful registration caches capability + api.
+    const api1 = makeApi();
+    plugin.register(api1);
+    expect(api1.registerMemoryCapability).toHaveBeenCalledTimes(1);
+
+    // Step 2: another reAssertCapability call would re-stamp the cached
+    // capability — verify by counting the registerMemoryCapability calls.
+    plugin.reAssertCapability();
+    expect(api1.registerMemoryCapability).toHaveBeenCalledTimes(2);
+
+    // Step 3: invalidate — simulating slot ownership lost.
+    plugin.invalidateRegistration();
+
+    // Step 4: subsequent reAssertCapability MUST be a no-op. Without
+    // invalidation the cached api1+capability would be re-stamped
+    // and silently overwrite whatever provider currently owns the slot.
+    plugin.reAssertCapability();
+    expect(api1.registerMemoryCapability).toHaveBeenCalledTimes(2); // unchanged
+  });
+
   it('reads plugins.slots.memory from api.cfg when api.config is missing (Codex B58 gateway shim)', () => {
     const api = makeApi();
     (api as any).cfg = api.config;
@@ -540,11 +561,15 @@ describe('DkgMemorySearchManager', () => {
       await manager.search('hello world');
 
       const searchFiredLogs = infoSpy.mock.calls.filter(c =>
-        typeof c[0] === 'string' && c[0].includes('[dkg-memory] search fired:'),
+        typeof c[0] === 'string' && c[0].includes('[dkg-memory] search fired'),
       );
       expect(searchFiredLogs).toHaveLength(1);
       const logLine = searchFiredLogs[0][0] as string;
       expect(logLine).not.toContain('query=');
+      // T74 — caller defaults to 'unknown' when not supplied; limit is the
+      // SPARQL LIMIT applied to each layer query.
+      expect(logLine).toContain('caller=unknown');
+      expect(logLine).toMatch(/limit=\d+/);
       expect(logLine).toContain('project=research-x');
       expect(logLine).toContain('layers=6');
       expect(logLine).toContain('raw_hits=3');
@@ -561,6 +586,28 @@ describe('DkgMemorySearchManager', () => {
       expect(debugLogs[0][0]).toContain('hello world');
     });
 
+    it('T74 — observability log includes the supplied `caller` tag (hook vs tool disambiguation)', async () => {
+      vi.spyOn(client, 'query').mockResolvedValue({ result: { bindings: [] } });
+      const infoSpy = vi.fn();
+      const manager = new DkgMemorySearchManager({
+        client,
+        resolver: makeResolver(),
+        logger: { info: infoSpy, warn: vi.fn(), debug: vi.fn() } as any,
+      });
+
+      await manager.search('hello world', { caller: 'tool' });
+      await manager.searchNarrow('hello world', { caller: 'hook' });
+
+      const searchFiredLogs = infoSpy.mock.calls
+        .map((c) => c[0] as string)
+        .filter((m) => typeof m === 'string' && m.includes('[dkg-memory] search fired'));
+      expect(searchFiredLogs).toHaveLength(2);
+      expect(searchFiredLogs[0]).toContain('caller=tool');
+      expect(searchFiredLogs[0]).toContain('limit=10'); // search default
+      expect(searchFiredLogs[1]).toContain('caller=hook');
+      expect(searchFiredLogs[1]).toContain('limit=5');  // searchNarrow default cap
+    });
+
     it('observability log uses ∅ for the project field when no project CG is resolved', async () => {
       vi.spyOn(client, 'query').mockResolvedValue({ result: { bindings: [] } });
       const infoSpy = vi.fn();
@@ -573,7 +620,7 @@ describe('DkgMemorySearchManager', () => {
       await manager.search('hello world');
 
       const searchFiredLogs = infoSpy.mock.calls.filter(c =>
-        typeof c[0] === 'string' && c[0].includes('[dkg-memory] search fired:'),
+        typeof c[0] === 'string' && c[0].includes('[dkg-memory] search fired'),
       );
       expect(searchFiredLogs).toHaveLength(1);
       const logLine = searchFiredLogs[0][0] as string;

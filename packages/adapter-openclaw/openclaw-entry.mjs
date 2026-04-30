@@ -5,6 +5,8 @@ import { DkgNodePlugin } from './dist/index.js';
 
 /** Module-level singleton - prevents duplicate registration during gateway multi-phase init. */
 let instance = null;
+const lifecycleServiceApis = new WeakMap();
+let lifecycleOwnerToken = null;
 
 export default function (api) {
   const log = api.logger ?? console;
@@ -12,6 +14,7 @@ export default function (api) {
   if (instance) {
     log.info?.('[dkg-entry] Re-registering plugin surfaces (channel, memory, tools) into new registry (gateway multi-phase init)');
     instance.register(api);
+    registerLifecycleService(api, log);
     return;
   }
 
@@ -63,6 +66,7 @@ export default function (api) {
   const dkg = new DkgNodePlugin(config);
   dkg.register(api);
   instance = dkg;
+  registerLifecycleService(api, log);
 
   // Sync SKILL.md to workspace so the agent always reads the latest version.
   // The CLI dist ships the canonical template; the workspace copy goes stale
@@ -90,19 +94,34 @@ export default function (api) {
     log.debug?.(`[dkg-entry] SKILL.md sync skipped: ${err.message}`);
   }
 
-  // Reset singleton on gateway teardown so in-process restart re-registers fresh.
-  // Listen on multiple lifecycle events - whichever the gateway version supports.
-  if (typeof api.on === 'function') {
-    const reset = () => {
-      if (instance) {
-        instance.stop().catch(() => {});
-      }
-      instance = null;
-    };
-    for (const event of ['shutdown', 'close', 'restart', 'reload']) {
-      api.on(event, reset);
-    }
-  }
-
   log.info?.('[dkg-entry] DkgNodePlugin registered');
+}
+
+function registerLifecycleService(api, log) {
+  if (!instance || typeof api.registerService !== 'function') return;
+  if (lifecycleServiceApis.get(api) === instance) return;
+
+  const serviceInstance = instance;
+  const serviceToken = {};
+  try {
+    api.registerService({
+      name: 'dkg-adapter-openclaw-runtime',
+      start: async () => {},
+      stop: async () => {
+        if (lifecycleOwnerToken !== serviceToken) return;
+        lifecycleOwnerToken = null;
+        try {
+          await serviceInstance.stop();
+        } finally {
+          if (instance === serviceInstance) {
+            instance = null;
+          }
+        }
+      },
+    });
+    lifecycleServiceApis.set(api, serviceInstance);
+    lifecycleOwnerToken = serviceToken;
+  } catch (err) {
+    log.debug?.(`[dkg-entry] lifecycle service registration skipped: ${err.message}`);
+  }
 }

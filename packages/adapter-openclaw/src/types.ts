@@ -19,7 +19,19 @@ export interface OpenClawPluginApi {
   registrationMode?: 'full' | 'setup-only' | 'setup-runtime' | 'cli-metadata';
   registerTool(tool: OpenClawTool): void;
   registerHook(event: string, handler: (...args: any[]) => Promise<void>, opts?: { name: string }): void;
-  on(event: string, handler: (...args: any[]) => void): void;
+  /**
+   * Register a typed-hook handler. The OpenClaw upstream
+   * (`openclaw/src/plugins/registry.ts:registerTypedHook` →
+   * `registry.typedHooks` → `hooks.ts:runModifyingHook`) sequentially
+   * awaits handlers and reads their return value: modifying hooks like
+   * `before_prompt_build` honor `{ appendSystemContext, ... }`, and
+   * fire-and-forget hooks like `agent_end` ignore the return.
+   *
+   * The signature accepts `unknown | Promise<unknown>` to match this
+   * contract — the previous `=> void` was an under-specification that
+   * masked the dependency on return-value propagation (R16.1).
+   */
+  on(event: string, handler: (...args: any[]) => unknown | Promise<unknown>): void;
   logger: { info?(...args: any[]): void; warn?(...args: any[]): void; debug?(...args: any[]): void };
 
   /** Register a bidirectional channel plugin. */
@@ -221,6 +233,14 @@ export interface MemorySearchOptions {
   maxResults?: number;
   minScore?: number;
   sessionKey?: string;
+  /**
+   * T74 — Observability tag. Identifies the caller in the
+   * `[dkg-memory] search fired (caller=…)` log line so operators can
+   * distinguish W3 auto-recall hook firings from explicit `memory_search`
+   * tool calls (and other future callers). Free-form short string;
+   * defaults to `'unknown'` when not supplied.
+   */
+  caller?: string;
 }
 
 /**
@@ -365,6 +385,21 @@ export interface MemoryPluginCapability {
 export interface DkgOpenClawConfig {
   /** DKG daemon HTTP URL (default: "http://127.0.0.1:9200"). */
   daemonUrl?: string;
+
+  /**
+   * Explicit DKG home directory for the daemon the adapter targets via
+   * `daemonUrl`. T42 — when set, the adapter reads the agent eth address
+   * from `<dkgHome>/agent-keystore.json` regardless of the gateway
+   * process's own `DKG_HOME` env. This is the explicit override for
+   * "localhost daemon started with `dkg start --home /custom/path`",
+   * service-unit-managed daemons, or container-isolated daemons where
+   * the gateway's filesystem cannot see the daemon's home dir at the
+   * default path. Falls back to `process.env.DKG_HOME` when undefined.
+   * Ignored when `daemonUrl` is non-localhost (the localhost gate
+   * still applies — remote daemons need the `DKG_AGENT_ADDRESS` env
+   * override or the future daemon endpoint).
+   */
+  dkgHome?: string;
 
   /** DKG memory integration config. */
   memory?: {

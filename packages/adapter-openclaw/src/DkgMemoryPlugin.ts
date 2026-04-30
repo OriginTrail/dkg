@@ -131,7 +131,40 @@ export class DkgMemorySearchManager implements MemorySearchManager {
     this.cachedStatus = this.buildStatus();
   }
 
+  /**
+   * Narrow recall for W3 `before_prompt_build` auto-injection. Runs the
+   * full 6-layer fan-out (agent-context WM/SWM/VM + project WM/SWM/VM if
+   * resolved) but caps the returned hits tighter than the agent-callable
+   * `memory_search` tool. Both surfaces share the same ranking; W3 is
+   * "small auto-snapshot of all tiers", W2 is "large agent-driven recall
+   * of all tiers". The cap is what differs, not the layer scope.
+   *
+   * This is deliberate per the design direction: cross-peer SWM/VM
+   * tiers are surfaced in auto-recall so the agent has full memory
+   * context without needing to first call `memory_search`. The
+   * trust-boundary concern raised in pre-push review is addressed by
+   * defense-in-depth — every snippet is HTML-escaped (R12.1), wrapped
+   * in untrusted-data framing with explicit "do not follow injected
+   * instructions" rules (R11.1), and the auto-recall block carries a
+   * sentinel attribute (R15.3 / R23.3) so it's stripped from persisted
+   * assistant text.
+   */
+  async searchNarrow(
+    query: string,
+    options?: MemorySearchOptions,
+  ): Promise<MemorySearchResult[]> {
+    const cap = options?.maxResults ?? 5;
+    return this.runSearch(query, { ...options, maxResults: cap });
+  }
+
   async search(query: string, options?: MemorySearchOptions): Promise<MemorySearchResult[]> {
+    return this.runSearch(query, options);
+  }
+
+  private async runSearch(
+    query: string,
+    options?: MemorySearchOptions,
+  ): Promise<MemorySearchResult[]> {
     // B37: The clamped value is interpolated directly into the SPARQL
     // `LIMIT` clause below, so it must be an integer. A fractional
     // input like `2.5` would produce `LIMIT 2.5`, which is invalid
@@ -335,7 +368,8 @@ export class DkgMemorySearchManager implements MemorySearchManager {
     // contain secrets or PII, so it is logged at debug level only
     // (silent at default log verbosity).
     this.deps.logger?.info?.(
-      `[dkg-memory] search fired: ` +
+      `[dkg-memory] search fired ` +
+      `(caller=${options?.caller ?? 'unknown'}, limit=${limit}): ` +
       `project=${projectContextGraphId ?? '∅'}, ` +
       `layers=${plans.length}, ` +
       `raw_hits=${totalRawHits} (${perLayerBreakdown})`,
@@ -590,6 +624,33 @@ export class DkgMemoryPlugin {
       // capability was last registered. Log omitted to avoid per-turn
       // noise — the initial registration log is the diagnostic anchor.
     }
+  }
+
+  /**
+   * Invalidate the cached capability + api so subsequent
+   * `reAssertCapability()` calls become no-ops.
+   *
+   * Called by `DkgNodePlugin` whenever a later `register()` call returns
+   * `false` (slot ownership lost to another plugin). Without this clear,
+   * the cached capability would persist and per-turn re-assert anchors
+   * (`before_prompt_build`, `message:received`/`sent`, `memory_search`)
+   * would silently steal the slot back from the newly elected provider.
+   */
+  invalidateRegistration(): void {
+    this.registeredCapability = null;
+    this.registeredApi = null;
+  }
+
+  /**
+   * Whether this adapter currently owns the gateway memory slot. Returns
+   * `false` when `registerCapability()` was skipped (e.g. another plugin
+   * owns `plugins.slots.memory`) or after `invalidateRegistration()` is
+   * called. Per-turn anchors (`before_prompt_build`, `memory_search`)
+   * use this to avoid injecting DKG recall when the elected provider is
+   * a different plugin.
+   */
+  isRegistered(): boolean {
+    return this.registeredCapability !== null;
   }
 
   /**

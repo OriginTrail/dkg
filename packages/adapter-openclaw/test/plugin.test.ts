@@ -1,6 +1,11 @@
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
+import { homedir } from 'os';
+import * as fs from 'fs';
+import * as path from 'path';
+import { toEip55Checksum } from '@origintrail-official/dkg-core';
 import { DkgNodePlugin } from '../src/DkgNodePlugin.js';
 import { DkgChannelPlugin } from '../src/DkgChannelPlugin.js';
+import { INTERNAL_HOOK_SYMBOL } from '../src/HookSurface.js';
 import type { OpenClawPluginApi, OpenClawTool } from '../src/types.js';
 
 describe('DkgNodePlugin', () => {
@@ -18,6 +23,50 @@ describe('DkgNodePlugin', () => {
     expect(plugin).toBeDefined();
   });
 
+  it('bootstraps resolver state even when slot is owned by another plugin (R10.2)', async () => {
+    // Pre-fix: when memory slot was owned by a different plugin, the
+    // resolver bootstrap (`memoryResolverApi = api` + `refreshMemoryResolverState`)
+    // was inside the slot-registered branch and got skipped. The
+    // memory_search tool was still exposed but stuck in a permanent
+    // "backend not ready" response forever (no peer ID, no CG cache).
+    // Fix moves bootstrap OUT, runs whenever memory module is enabled.
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      memory: { enabled: true },
+      channel: { enabled: false },
+    });
+    const mockApi = {
+      config: { plugins: { slots: { memory: 'some-other-memory-plugin' } } },
+      registrationMode: 'full' as const,
+      registerTool: () => {},
+      registerHook: () => {},
+      registerMemoryCapability: vi.fn(),
+      on: () => {},
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    } as unknown as OpenClawPluginApi;
+
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockImplementation(async (input: any) => {
+      const url = typeof input === 'string' ? input : input?.url ?? '';
+      if (url.includes('/api/status')) return { ok: true, status: 200, json: async () => ({ peerId: 'p-r102' }) } as Response;
+      if (url.includes('/api/context-graph/list')) return { ok: true, status: 200, json: async () => ({ contextGraphs: [] }) } as Response;
+      return { ok: true, status: 200, json: async () => ({}) } as Response;
+    }) as any;
+    try {
+      plugin.register(mockApi);
+      // Slot owned by another plugin → registerMemoryCapability never called.
+      expect(mockApi.registerMemoryCapability).not.toHaveBeenCalled();
+      // But resolver bootstrap MUST still happen so memory_search works
+      // against the daemon directly. Wait for the async refresh to settle.
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+      expect((plugin as any).memoryResolverApi).toBe(mockApi);
+      expect((plugin as any).nodePeerId).toBe('p-r102');
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
   it('registers session_end hook and all exported tools via register()', () => {
     const plugin = new DkgNodePlugin();
     const registeredHooks: Array<{ event: string; name?: string }> = [];
@@ -33,7 +82,9 @@ describe('DkgNodePlugin', () => {
 
     plugin.register(mockApi);
 
-    expect(registeredHooks).toContainEqual({ event: 'session_end', name: 'dkg-node-stop' });
+    // T7 — `session_end` is now routed through `HookSurface.install('legacy', ...)`
+    // which uses the canonical `dkg-${event}` naming convention.
+    expect(registeredHooks).toContainEqual({ event: 'session_end', name: 'dkg-session_end' });
 
     const toolNames = registeredTools.map(t => t.name);
     // Existing active tools
@@ -55,7 +106,7 @@ describe('DkgNodePlugin', () => {
     expect(toolNames).toContain('dkg_send_message');
     expect(toolNames).toContain('dkg_read_messages');
     expect(toolNames).toContain('dkg_invoke_skill');
-    // 10 new tools (assertion lifecycle + sub-graph management + SWM→VM publish)
+    // 10 new tools from PR #254 (assertion lifecycle + sub-graph management + SWM→VM publish)
     expect(toolNames).toContain('dkg_assertion_create');
     expect(toolNames).toContain('dkg_assertion_write');
     expect(toolNames).toContain('dkg_assertion_promote');
@@ -66,10 +117,13 @@ describe('DkgNodePlugin', () => {
     expect(toolNames).toContain('dkg_sub_graph_create');
     expect(toolNames).toContain('dkg_sub_graph_list');
     expect(toolNames).toContain('dkg_shared_memory_publish');
-    // Legacy V9 paranet aliases are removed as of v10-rc (`dkg_list_paranets`, `dkg_paranet_create`).
+    // Legacy V9 paranet aliases are removed as of v10-rc.
     expect(toolNames).not.toContain('dkg_list_paranets');
     expect(toolNames).not.toContain('dkg_paranet_create');
-    expect(registeredTools.length).toBe(28);
+    // memory_search added by this feature branch (W2 — agent-callable recall button).
+    expect(toolNames).toContain('memory_search');
+    // 28 from main (originals + assertion/subgraph/SWM/CG-registration tools) + 1 memory_search = 29
+    expect(registeredTools.length).toBe(29);
   });
 
   it('new dkg_assertion_* and dkg_sub_graph_* tools have the expected schema shape', () => {
@@ -736,21 +790,25 @@ describe('DkgNodePlugin', () => {
       expect(msg).toMatch(/omit/i);
     });
 
-    it('dkg_query forwards an explicit agent_address to the daemon body for WM reads', async () => {
+    it('dkg_query forwards an explicit agent_address to the daemon body for WM reads (T65 — checksums eth)', async () => {
       // WM reads are agent-scoped; the daemon requires an agentAddress.
-      // The tool exposes `agent_address` so multi-agent callers can
-      // target another agent's WM namespace.
+      // T65 — Eth-shaped values are normalized to EIP-55 checksum form
+      // before forwarding so they match the daemon's checksum-case graph
+      // URI prefix. Caller-supplied lowercase wallet input → checksum on
+      // the wire.
       const { fetchMock, byName } = setupPluginWithFetch({ ok: true });
+      const ethLowercase = '0x26c9b05a30138b35e84e60a5b778d580065ffbb8';
+      const ethChecksum = '0x26c9B05a30138b35e84e60A5B778d580065Ffbb8';
       await byName.get('dkg_query')!.execute('tc', {
         sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1',
         context_graph_id: 'my-cg',
         view: 'working-memory',
-        agent_address: '0xabc123',
+        agent_address: ethLowercase,
       });
       expect(fetchMock).toHaveBeenCalledTimes(1);
       const body = JSON.parse(fetchMock.mock.calls[0][1]?.body as string);
       expect(body.view).toBe('working-memory');
-      expect(body.agentAddress).toBe('0xabc123');
+      expect(body.agentAddress).toBe(ethChecksum);
     });
 
     it('dkg_query rejects a whitespace-only agent_address (same silent-namespace-swap risk as non-string)', async () => {
@@ -811,13 +869,88 @@ describe('DkgNodePlugin', () => {
       expect(result.content[0].text).toContain('string');
     });
 
-    it('dkg_query normalizes DID-form agent_address for WM reads (Bug B43)', async () => {
-      // The daemon's WM view scopes graphs by the bare peer ID. A
-      // DID-prefixed value (`did:dkg:agent:<peerId>`) lands the query
-      // in a non-existent namespace and returns empty bindings. The
-      // handler must strip the prefix before forwarding — same B43
-      // normalization `DkgMemoryPlugin` applies at its boundary.
+    it('dkg_query normalizes DID-prefixed eth agent_address for WM reads (T31/T48)', async () => {
+      // T48 — Post-PR-264 WM is scoped by the daemon's eth address.
+      // T65 — DID-prefixed eth values: prefix stripped THEN checksummed
+      // (operator may supply lowercase under the DID wrapper; canonical
+      // EIP-55 must reach the daemon).
       const { fetchMock, byName } = setupPluginWithFetch({ ok: true });
+      const ethLowercase = '0x26c9b05a30138b35e84e60a5b778d580065ffbb8';
+      const ethChecksum = '0x26c9B05a30138b35e84e60A5B778d580065Ffbb8';
+      await byName.get('dkg_query')!.execute('tc', {
+        sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1',
+        context_graph_id: 'my-cg',
+        view: 'working-memory',
+        agent_address: `did:dkg:agent:${ethLowercase}`,
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const body = JSON.parse(fetchMock.mock.calls[0][1]?.body as string);
+      expect(body.agentAddress).toBe(ethChecksum);
+      // DID prefix gone.
+      expect(body.agentAddress).not.toContain('did:dkg:agent:');
+    });
+
+    it('dkg_query falls back to nodePeerId when agent_address is omitted on no-keystore nodes (T57/T60)', async () => {
+      // T57 — handler default for omitted agent_address must mirror
+      // the resolver's `nodeAgentAddress ?? nodePeerId` priority.
+      // T60 — fallback gates on `localKeystoreCheckedAndAbsent` so
+      // remote-daemon (probe-skipped) doesn't silently route to
+      // gateway's local peerId.
+      const { fetchMock, byName, plugin } = setupPluginWithFetch({ ok: true });
+      (plugin as any).nodeAgentAddress = undefined;
+      (plugin as any).nodePeerId = '12D3KooWNoKeystorePeer';
+      // T60 — explicitly mark the local-keystore-confirmed-absent
+      // state. Without this the resolver returns undefined on
+      // remote-daemon paths.
+      (plugin as any).localKeystoreCheckedAndAbsent = true;
+      await byName.get('dkg_query')!.execute('tc', {
+        sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1',
+        context_graph_id: 'my-cg',
+        view: 'working-memory',
+        // agent_address intentionally omitted
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const body = JSON.parse(fetchMock.mock.calls[0][1]?.body as string);
+      expect(body.view).toBe('working-memory');
+      expect(body.agentAddress).toBe('12D3KooWNoKeystorePeer');
+    });
+
+    it('dkg_query refuses to fall back to nodePeerId on remote-daemon (probe-skipped) — T60', async () => {
+      // T60 — On remote daemonUrl, `probeNodeAgentAddressOnce()`
+      // intentionally skips the keystore read (T38), so
+      // `nodeAgentAddress` stays undefined AND
+      // `localKeystoreCheckedAndAbsent` stays false. The fallback
+      // to gateway's local peerId would silently scope WM to a
+      // namespace the remote daemon has never heard of. Handler
+      // MUST error in that case so the operator sees the
+      // recovery knobs surfaced.
+      const { fetchMock, byName, plugin } = setupPluginWithFetch({ ok: true });
+      (plugin as any).nodeAgentAddress = undefined;
+      (plugin as any).nodePeerId = '12D3KooWGatewayLocal';
+      (plugin as any).localKeystoreCheckedAndAbsent = false;  // remote-daemon: probe skipped
+      const result = await byName.get('dkg_query')!.execute('tc', {
+        sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1',
+        context_graph_id: 'my-cg',
+        view: 'working-memory',
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+      const text = result.content[0].text;
+      expect(text).toContain('working-memory');
+      expect(text).toContain('agent identity');
+      // Error names the recovery knobs operators should reach for.
+      expect(text).toContain('DKG_AGENT_ADDRESS');
+      expect(text).toContain('dkgHome');
+    });
+
+    it('dkg_query forwards peerId-form WM agent_address verbatim (T48/T53 — daemon accepts as self-alias on no-keystore nodes)', async () => {
+      // T53 supersedes T48's hard-rejection. The daemon's `/api/query`
+      // accepts peerId as a valid self-alias for the default agent
+      // when no keystore identity exists (writes go to peerId in that
+      // case via `defaultAgentAddress ?? peerId`). Adapter-side hard-
+      // rejection broke a legitimate read path. Forward the value
+      // verbatim and let the daemon's scope rules decide.
+      const { fetchMock, byName } = setupPluginWithFetch({ ok: true });
+      // DID-wrapped peerId: legacy DID prefix stripped, peerId forwarded.
       await byName.get('dkg_query')!.execute('tc', {
         sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1',
         context_graph_id: 'my-cg',
@@ -825,10 +958,19 @@ describe('DkgNodePlugin', () => {
         agent_address: 'did:dkg:agent:12D3KooWExamplePeerId',
       });
       expect(fetchMock).toHaveBeenCalledTimes(1);
-      const body = JSON.parse(fetchMock.mock.calls[0][1]?.body as string);
+      let body = JSON.parse(fetchMock.mock.calls[0][1]?.body as string);
       expect(body.agentAddress).toBe('12D3KooWExamplePeerId');
-      // Bare peer IDs must pass through unchanged (no double-stripping).
-      expect(body.agentAddress).not.toContain('did:dkg:agent:');
+
+      // Bare peerId: passes through unchanged.
+      await byName.get('dkg_query')!.execute('tc', {
+        sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1',
+        context_graph_id: 'my-cg',
+        view: 'working-memory',
+        agent_address: '12D3KooWExamplePeerId',
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      body = JSON.parse(fetchMock.mock.calls[1][1]?.body as string);
+      expect(body.agentAddress).toBe('12D3KooWExamplePeerId');
     });
 
     it('dkg_query does NOT normalize agent_address on non-WM views (it only matters for WM routing)', async () => {
@@ -923,7 +1065,12 @@ describe('DkgNodePlugin', () => {
       expect(query.description).toContain('current_agent_address');
       expect(query.description).toMatch(/retry alternate identity forms/i);
       expect(agentAddress.description).toContain('current_agent_address');
-      expect(agentAddress.description).toMatch(/wallet\/address form, raw peer ID, or DID form/i);
+      // T48/T49/T53 — schema names eth-address shape as the recommended
+      // form, accepts peerId as self-alias on no-keystore nodes,
+      // documents the legacy `did:dkg:agent:` strip.
+      expect(agentAddress.description).toMatch(/0x-prefixed eth address/i);
+      expect(agentAddress.description).toMatch(/peer ID/i);
+      expect(agentAddress.description).toMatch(/did:dkg:agent:/);
     });
 
     it('share-flow tool descriptions prefer invite code output for friend-sharing requests', () => {
@@ -1070,6 +1217,59 @@ describe('DkgNodePlugin', () => {
     await expect(plugin.stop()).resolves.toBeUndefined();
   });
 
+  it('T30 — capabilities.dkgPrimaryMemory / wmImportPipeline mirror actual memory-slot registration state', async () => {
+    // Regression for T30: pre-fix the local-agent connect payload
+    // statically advertised `dkgPrimaryMemory: true` and
+    // `wmImportPipeline: true` from a frozen constant — even when
+    // memory was config-disabled, or another plugin owned the slot.
+    // Daemon/UI consumers would then offer DKG-backed memory actions
+    // that the slot's actual owner couldn't honour. Post-fix the
+    // flags are derived from `this.memoryPlugin?.isRegistered()`.
+    const originalFetch = globalThis.fetch;
+    const fetchCalls: Array<[RequestInfo | URL, RequestInit | undefined]> = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      fetchCalls.push([input, init]);
+      return {
+        ok: true,
+        json: async () => ({ ok: true, integration: { id: 'openclaw' } }),
+      };
+    }) as typeof fetch;
+    let plugin: DkgNodePlugin | null = null;
+    try {
+      // Memory enabled → registration succeeds → flags should be true.
+      plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: true, port: 0 },
+        memory: { enabled: true },
+      });
+      const mockApi: OpenClawPluginApi = {
+        config: { plugins: { slots: { memory: 'adapter-openclaw' } } },
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        registerMemoryCapability: vi.fn(),
+        on: () => {},
+        logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+      } as unknown as OpenClawPluginApi;
+      plugin.register(mockApi);
+      await vi.waitFor(() => {
+        const connectCall = fetchCalls.find((call) =>
+          String(call[0]).includes('/api/local-agent-integrations/connect'),
+        );
+        expect(connectCall).toBeTruthy();
+      });
+      const connectCall = fetchCalls.find((call) =>
+        String(call[0]).includes('/api/local-agent-integrations/connect'),
+      );
+      const body = JSON.parse(String(connectCall?.[1]?.body));
+      expect(body.capabilities.dkgPrimaryMemory).toBe(true);
+      expect(body.capabilities.wmImportPipeline).toBe(true);
+    } finally {
+      await plugin?.stop();
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it('getClient() returns the DkgDaemonClient after register()', () => {
     const plugin = new DkgNodePlugin({ daemonUrl: 'http://example.com:9200' });
     const mockApi: OpenClawPluginApi = {
@@ -1145,10 +1345,15 @@ describe('DkgNodePlugin', () => {
           lastError: null,
         },
       });
+      // T30 — `dkgPrimaryMemory` and `wmImportPipeline` are derived
+      // from the actual memory-slot registration state. This test
+      // configured `memory.enabled: false`, so the slot is NOT
+      // registered and these flags MUST be false.
       expect(connectBody.capabilities).toMatchObject({
         localChat: true,
         connectFromUi: true,
-        dkgPrimaryMemory: true,
+        dkgPrimaryMemory: false,
+        wmImportPipeline: false,
       });
       expect(connectBody.manifest).toEqual({
         packageName: '@origintrail-official/dkg-adapter-openclaw',
@@ -2355,6 +2560,1033 @@ describe('DkgNodePlugin', () => {
     expect(plugin.getClient().baseUrl).toBe('http://localhost:9200');
   });
 
+  it('R17.2 — setup-only registration must NOT construct ChatTurnWriter (no filesystem side effects)', () => {
+    // Regression for R17.2: previously `ChatTurnWriter` was constructed
+    // unconditionally before the `runtimeEnabled` gate, so setup-only
+    // metadata-only loads still ran `mkdirSync` and read the watermark
+    // file. In read-only workspaces that emitted warnings or errors
+    // during what should be a side-effect-free scan. The writer must
+    // now be created lazily inside the runtime-enabled branch.
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: true },
+      memory: { enabled: true },
+    });
+    const mockApi: OpenClawPluginApi = {
+      config: {},
+      registrationMode: 'setup-only',
+      registerTool: () => {},
+      registerHook: () => {},
+      on: () => {},
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    };
+    plugin.register(mockApi);
+    expect((plugin as any).chatTurnWriter).toBeNull();
+  });
+
+  it('R24.2 — DKG-Memory prompt section is NOT installed in setup-runtime mode (tools not registered there)', () => {
+    // Regression for R24.2: pre-fix, the "Prefer memory_search" prompt
+    // guidance was installed on every runtime-enabled registration
+    // including `setup-runtime`. But `memory_search` / `dkg_query` are
+    // registered only in `full` mode (the tool-registration loop in
+    // register() is `fullRuntime`-gated). So in setup-runtime the model
+    // would be told to use a tool that does not exist on this phase.
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: true },
+      memory: { enabled: true },
+    });
+    const promptSpy = vi.fn();
+    const mockApi: OpenClawPluginApi = {
+      config: {},
+      registrationMode: 'setup-runtime',
+      registerTool: () => {},
+      registerHook: () => {},
+      on: () => {},
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+      registerMemoryPromptSection: promptSpy,
+    } as unknown as OpenClawPluginApi;
+    plugin.register(mockApi);
+    expect(promptSpy).not.toHaveBeenCalled();
+  });
+
+  it('R24.2 — DKG-Memory prompt section is NOT installed when memory.enabled is false (tool would error)', () => {
+    // Regression for R24.2: when memory is config-disabled, `memory_search`
+    // returns "memory unavailable" and the prompt guidance is misleading.
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+      memory: { enabled: false },
+    });
+    const promptSpy = vi.fn();
+    const mockApi: OpenClawPluginApi = {
+      config: { plugins: { slots: { memory: 'adapter-openclaw' } } },
+      registrationMode: 'full',
+      registerTool: () => {},
+      registerHook: () => {},
+      on: () => {},
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+      registerMemoryPromptSection: promptSpy,
+    } as unknown as OpenClawPluginApi;
+    plugin.register(mockApi);
+    expect(promptSpy).not.toHaveBeenCalled();
+  });
+
+  it('R24.2 — DKG-Memory prompt section IS installed in full mode with memory enabled', () => {
+    // Positive control: confirms the gate is not too tight.
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+      memory: { enabled: true },
+    });
+    const promptSpy = vi.fn();
+    const mockApi: OpenClawPluginApi = {
+      config: { plugins: { slots: { memory: 'adapter-openclaw' } } },
+      registrationMode: 'full',
+      registerTool: () => {},
+      registerHook: () => {},
+      registerMemoryCapability: vi.fn(),
+      on: () => {},
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+      registerMemoryPromptSection: promptSpy,
+    } as unknown as OpenClawPluginApi;
+    plugin.register(mockApi);
+    expect(promptSpy).toHaveBeenCalledTimes(1);
+    const call = promptSpy.mock.calls[0][0];
+    expect(call.title).toBe('DKG Memory');
+    expect(call.body).toContain('memory_search');
+  });
+
+  it('T6 — same-api setup-runtime → full upgrade retries previously-failed typed installs', () => {
+    // Regression for T6: pre-fix, the same-api fast path in
+    // `installHooksIfNeeded` only retried INTERNAL installs whose
+    // previous `installedVia === 'none'`. If the gateway upgraded an
+    // existing registry in place (`api.on` becomes a function on the
+    // SAME api object after a setup-runtime → full transition), the
+    // typed installs that recorded `installedVia: 'none'` at first
+    // call stayed permanently uninstalled. W3 / W4a hooks would never
+    // wire up.
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+      memory: { enabled: true },
+    } as any);
+    // Mutable api object — `on` is undefined initially, becomes a
+    // function on the second register() call.
+    const onSpy = vi.fn();
+    const api: any = {
+      config: { plugins: { slots: { memory: 'adapter-openclaw' } } },
+      registrationMode: 'setup-runtime',
+      registerTool: () => {},
+      registerHook: () => {},
+      registerMemoryCapability: vi.fn(),
+      // No `on` initially — typed installs will record 'none'.
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    };
+    plugin.register(api);
+    // Tick 1 — typed installs failed (no api.on). onSpy not called.
+    expect(onSpy).not.toHaveBeenCalled();
+    const stats1 = (plugin as any).hookSurface.getDispatchStats();
+    expect(stats1['typed:before_prompt_build']?.installedVia).toBe('none');
+    expect(stats1['typed:agent_end']?.installedVia).toBe('none');
+
+    // Tick 2 — same api object, but now `api.on` is available
+    // (gateway upgraded the registry in place). registrationMode also
+    // flipped to 'full'.
+    api.on = onSpy;
+    api.registrationMode = 'full';
+    plugin.register(api);
+    // Typed installs MUST have been retried this time.
+    const events = onSpy.mock.calls.map((c: any) => c[0]);
+    expect(events).toContain('before_prompt_build');
+    expect(events).toContain('agent_end');
+  });
+
+  it('T31 — multi-phase init re-bind: typed hooks installed on EVERY api so emit-against-old-api still fires', async () => {
+    // Regression for T31 Bug B: pre-fix, the apiChanged branch destroyed
+    // the old hook surface and rebuilt against the new api. The gateway
+    // re-registers our plugin on each inbound turn against fresh api
+    // objects but doesn't always dispatch against the latest one — orphan
+    // handlers had `installedVia=on, fireCount=0` after multiple chats.
+    // Post-fix, every surface stays live; whichever api the gateway emits
+    // against has a bound handler.
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+      memory: { enabled: true },
+    } as any);
+
+    // Two distinct api objects, each with its own `on` registry.
+    const onSpy1 = vi.fn();
+    const api1 = {
+      config: { plugins: { slots: { memory: 'adapter-openclaw' } } },
+      registrationMode: 'full',
+      registerTool: () => {},
+      registerHook: () => {},
+      registerMemoryCapability: vi.fn(),
+      on: onSpy1,
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    } as unknown as OpenClawPluginApi;
+
+    const onSpy2 = vi.fn();
+    const api2 = {
+      config: { plugins: { slots: { memory: 'adapter-openclaw' } } },
+      registrationMode: 'full',
+      registerTool: () => {},
+      registerHook: () => {},
+      registerMemoryCapability: vi.fn(),
+      on: onSpy2,
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    } as unknown as OpenClawPluginApi;
+
+    plugin.register(api1);
+    // api1 received typed-hook installs.
+    const events1 = onSpy1.mock.calls.map((c: any) => c[0]);
+    expect(events1).toContain('before_prompt_build');
+    expect(events1).toContain('agent_end');
+
+    // Multi-phase init: gateway hands a NEW api on the next register.
+    plugin.register(api2);
+    // api2 ALSO received typed-hook installs (not just the latest — both
+    // are now live so whichever api the gateway dispatches against has
+    // a bound wrapper).
+    const events2 = onSpy2.mock.calls.map((c: any) => c[0]);
+    expect(events2).toContain('before_prompt_build');
+    expect(events2).toContain('agent_end');
+
+    // Critically: api1's handlers were NOT torn down. The `allHookSurfaces`
+    // set tracks both surfaces; a future emit against api1 would still
+    // reach a live handler. We don't have an emit primitive in the mock
+    // here, but the surface count is the load-bearing invariant.
+    expect((plugin as any).allHookSurfaces.size).toBe(2);
+  });
+
+  it('T7 — session_end goes through HookSurface so stop() → register() does NOT accumulate handlers', async () => {
+    // Regression for T7: pre-fix, `session_end` was registered via
+    // direct `api.registerHook(...)` on every install. After
+    // `stop() → register()` cycles, handlers accumulated in the
+    // upstream registry (no unsubscribe primitive) and one shutdown
+    // event would call `stop()` once per accumulated handler.
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+      memory: { enabled: true },
+    } as any);
+    const registerHookSpy = vi.fn();
+    const mockApi: OpenClawPluginApi = {
+      config: { plugins: { slots: { memory: 'adapter-openclaw' } } },
+      registrationMode: 'full',
+      registerTool: () => {},
+      registerHook: registerHookSpy,
+      registerMemoryCapability: vi.fn(),
+      on: () => {},
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    } as unknown as OpenClawPluginApi;
+
+    plugin.register(mockApi);
+    const sessionEndAfter1 = registerHookSpy.mock.calls.filter(
+      (c: any) => c[0] === 'session_end',
+    ).length;
+    expect(sessionEndAfter1).toBe(1);
+
+    // After stop() — the previously-registered session_end wrapper
+    // is still in the upstream registry (no real unsubscribe), but
+    // its destroyed-flag will short-circuit on fire (R21.1).
+    await plugin.stop();
+    plugin.register(mockApi);
+    const sessionEndAfter2 = registerHookSpy.mock.calls.filter(
+      (c: any) => c[0] === 'session_end',
+    ).length;
+    // Each register() call DOES make one new registerHook call (we
+    // can't avoid that without an unsubscribe primitive), but the
+    // OLD wrapper now short-circuits via its destroyed flag — so a
+    // single shutdown event won't call this.stop() twice. The
+    // important invariant: each register() makes exactly ONE new
+    // registration, and prior wrappers are no-ops post-destroy.
+    expect(sessionEndAfter2).toBe(2); // one per register, not unbounded
+  });
+
+  it('T12 — stop() resets promptSectionInstalled so a later register() reinstalls the section', async () => {
+    // Regression for T12: pre-fix, `promptSectionInstalled` was a global
+    // boolean on the plugin instance. After `stop() -> register()` (or
+    // any api swap), the flag stayed `true` and the new gateway api
+    // never received the DKG Memory prompt guidance.
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+      memory: { enabled: true },
+    } as any);
+    const promptSpy = vi.fn();
+    const mockApi: OpenClawPluginApi = {
+      config: { plugins: { slots: { memory: 'adapter-openclaw' } } },
+      registrationMode: 'full',
+      registerTool: () => {},
+      registerHook: () => {},
+      registerMemoryCapability: vi.fn(),
+      on: () => {},
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+      registerMemoryPromptSection: promptSpy,
+    } as unknown as OpenClawPluginApi;
+
+    plugin.register(mockApi);
+    expect(promptSpy).toHaveBeenCalledTimes(1);
+
+    await plugin.stop();
+    plugin.register(mockApi);
+    // Post-stop, the second register MUST install the section again
+    // because the api registry was effectively reset by the stop+restart
+    // cycle (and in production a different api object would be passed).
+    expect(promptSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it('T12 — apiChanged path resets promptSectionInstalled so the new api gets the section', () => {
+    // Regression for T12: api swap (different api object on second
+    // register) destroys the surface and rebuilds it, but pre-fix left
+    // `promptSectionInstalled = true`, so the prompt section was
+    // registered against the OLD api registry and never against the new.
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+      memory: { enabled: true },
+    } as any);
+    const promptSpy1 = vi.fn();
+    const api1: OpenClawPluginApi = {
+      config: { plugins: { slots: { memory: 'adapter-openclaw' } } },
+      registrationMode: 'full',
+      registerTool: () => {},
+      registerHook: () => {},
+      registerMemoryCapability: vi.fn(),
+      on: () => {},
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+      registerMemoryPromptSection: promptSpy1,
+    } as unknown as OpenClawPluginApi;
+    plugin.register(api1);
+    expect(promptSpy1).toHaveBeenCalledTimes(1);
+
+    // Second register with a DIFFERENT api object (gateway swapped registry).
+    const promptSpy2 = vi.fn();
+    const api2: OpenClawPluginApi = {
+      config: { plugins: { slots: { memory: 'adapter-openclaw' } } },
+      registrationMode: 'full',
+      registerTool: () => {},
+      registerHook: () => {},
+      registerMemoryCapability: vi.fn(),
+      on: () => {},
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+      registerMemoryPromptSection: promptSpy2,
+    } as unknown as OpenClawPluginApi;
+    plugin.register(api2);
+    // The new api MUST get the section installed against its own registry.
+    expect(promptSpy2).toHaveBeenCalledTimes(1);
+  });
+
+  it('T13 — auto-recall single-flight: a second turn fired while the first is in flight skips recall', async () => {
+    // Regression for T13: pre-fix, the 250ms `Promise.race` timeout in
+    // `handleBeforePromptBuild` only stopped *waiting*; the underlying
+    // SPARQL fan-out kept running. Successive turns fired during a slow
+    // daemon would all start their own searches, amplifying load.
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+      memory: { enabled: true },
+    } as any);
+    const mockApi: OpenClawPluginApi = {
+      config: { plugins: { slots: { memory: 'adapter-openclaw' } } },
+      registrationMode: 'full',
+      registerTool: () => {},
+      registerHook: () => {},
+      registerMemoryCapability: vi.fn(),
+      on: () => {},
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+      registerMemoryPromptSection: vi.fn(),
+    } as unknown as OpenClawPluginApi;
+    plugin.register(mockApi);
+    // Stub the daemon so searchNarrow's underlying queries hang until
+    // we explicitly release them. Track ALL pending resolvers so a
+    // single release call clears every in-flight query (the searchNarrow
+    // fan-out issues multiple queries per call).
+    const client = (plugin as any).client;
+    let queryCalls = 0;
+    const pendingResolvers: Array<() => void> = [];
+    client.query = vi.fn().mockImplementation(async () => {
+      queryCalls++;
+      await new Promise<void>((resolve) => { pendingResolvers.push(resolve); });
+      return { results: { bindings: [] } };
+    });
+    const releaseQueries = () => { while (pendingResolvers.length) pendingResolvers.shift()!(); };
+    // Give the manager a peer ID so the recall preflight doesn't early-return.
+    // T31 — Resolver returns `nodeAgentAddress` (eth) instead of `nodePeerId`.
+    (plugin as any).nodeAgentAddress = '0xabcabcabcabcabcabcabcabcabcabcabcabcabcd';
+
+    const event = { messages: [{ role: 'user', content: 'find something interesting' }] };
+    const ctx = { sessionKey: 'test-session-1' };
+
+    // Turn 1: hangs in searchNarrow, returns undefined after 250ms timeout.
+    const turn1 = (plugin as any).handleBeforePromptBuild(event, ctx);
+    // Wait for the timeout race to settle (~300ms).
+    await new Promise((r) => setTimeout(r, 300));
+    const result1 = await turn1;
+    expect(result1).toBeUndefined();
+    const queriesAfterTurn1 = queryCalls;
+    expect(queriesAfterTurn1).toBeGreaterThan(0); // some queries fired
+
+    // Turn 2: fires while turn 1's underlying queries still hang. The
+    // single-flight guard MUST short-circuit before manager.searchNarrow
+    // runs again, so queryCalls does NOT increase.
+    const result2 = await (plugin as any).handleBeforePromptBuild(event, ctx);
+    expect(result2).toBeUndefined();
+    expect(queryCalls).toBe(queriesAfterTurn1); // no new queries
+
+    // Release turn 1's hanging queries so the in-flight set clears.
+    releaseQueries();
+    // Wait for the underlying promise's finally hook to clear the
+    // single-flight reservation. Two macrotask hops are enough — first
+    // resolves the inner queries, second runs the .finally cleanup.
+    await new Promise((r) => setTimeout(r, 50));
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Turn 3: fires AFTER turn 1 settled. Single-flight has cleared; new
+    // queries fire as normal.
+    const result3 = await (plugin as any).handleBeforePromptBuild(event, ctx);
+    expect(queryCalls).toBeGreaterThan(queriesAfterTurn1);
+
+    await plugin.stop();
+  });
+
+  it('T20 — single-flight key includes projectContextGraphId; switching projects mid-conversation does NOT block recall under the old key', async () => {
+    // Regression for T20: pre-fix, the single-flight key only included
+    // the conversation tuple. searchNarrow's fan-out scopes through
+    // the resolver's projectContextGraphId, so two recalls in the same
+    // conversation but for DIFFERENT projects are semantically distinct
+    // queries. If a slow recall for project A hung and the user
+    // switched to project B in the same conversation, project B's
+    // recall would be falsely suppressed under A's key.
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+      memory: { enabled: true },
+    } as any);
+    const mockApi: OpenClawPluginApi = {
+      config: { plugins: { slots: { memory: 'adapter-openclaw' } } },
+      registrationMode: 'full',
+      registerTool: () => {},
+      registerHook: () => {},
+      registerMemoryCapability: vi.fn(),
+      on: () => {},
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+      registerMemoryPromptSection: vi.fn(),
+    } as unknown as OpenClawPluginApi;
+    plugin.register(mockApi);
+    const client = (plugin as any).client;
+    let queryCalls = 0;
+    const pendingResolvers: Array<() => void> = [];
+    client.query = vi.fn().mockImplementation(async () => {
+      queryCalls++;
+      await new Promise<void>((resolve) => { pendingResolvers.push(resolve); });
+      return { results: { bindings: [] } };
+    });
+    // T31 — Resolver returns `nodeAgentAddress` (eth) instead of `nodePeerId`.
+    (plugin as any).nodeAgentAddress = '0xabcabcabcabcabcabcabcabcabcabcabcabcabcd';
+
+    // Stub the resolver so we can flip the resolved project mid-test.
+    let currentProject = 'project-A';
+    (plugin as any).memorySessionResolver = {
+      getSession: () => ({ projectContextGraphId: currentProject, agentAddress: '12D3KooWTestT20' }),
+      getDefaultAgentAddress: () => '12D3KooWTestT20',
+      listAvailableContextGraphs: () => [],
+    };
+
+    const event = { messages: [{ role: 'user', content: 'find x' }] };
+    const ctx = { channelId: 'tg', accountId: 'a', conversationId: 'c', sessionKey: 'sk' };
+
+    // Turn 1: project A — recall hangs.
+    const turn1 = (plugin as any).handleBeforePromptBuild(event, ctx);
+    await new Promise((r) => setTimeout(r, 300));
+    await turn1;
+    const queriesAfterA = queryCalls;
+    expect(queriesAfterA).toBeGreaterThan(0);
+
+    // User switches to project B in the SAME conversation.
+    currentProject = 'project-B';
+
+    // Turn 2: same ctx, different project. Pre-fix, the in-flight key
+    // ignored project, so this would be suppressed. Post-fix, the
+    // key includes projectCG, so B issues fresh queries.
+    const turn2 = (plugin as any).handleBeforePromptBuild(event, ctx);
+    await new Promise((r) => setTimeout(r, 300));
+    await turn2;
+    expect(queryCalls).toBeGreaterThan(queriesAfterA);
+
+    // Cleanup.
+    while (pendingResolvers.length) pendingResolvers.shift()!();
+    await new Promise((r) => setTimeout(r, 50));
+    await plugin.stop();
+  });
+
+  it('T24 — chatTurnWriterStateDir is updated ONLY on successful migration; failure leaves state at fallback so future register() retries', async () => {
+    // Regression for T24: pre-fix, `chatTurnWriterStateDir = stateDir`
+    // was set BEFORE the async migration completed. If `setStateDir`
+    // failed (e.g., transient FS error), the field was already updated
+    // and the next register() with the same target stateDir
+    // short-circuited under the "same path" guard — never retrying.
+    // Post-fix the field flips ONLY on success; failure clears the
+    // separate `chatTurnWriterMigrationTarget` flag and leaves
+    // `chatTurnWriterStateDir` at the old value.
+    const prevEnv = process.env.OPENCLAW_STATE_DIR;
+    delete process.env.OPENCLAW_STATE_DIR;
+    const tmpRoot = require('os').tmpdir();
+    const workspaceDir = path.join(tmpRoot, `dkg-t24-workspace-${Date.now()}`);
+    const homeDir = `${require('os').homedir()}/.openclaw`;
+    try {
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: false },
+        memory: { enabled: false },
+      } as any);
+      const apiFallback: OpenClawPluginApi = {
+        config: {},
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+      } as unknown as OpenClawPluginApi;
+      plugin.register(apiFallback);
+      expect((plugin as any).chatTurnWriterStateDir).toBe(homeDir);
+
+      // Force setStateDir to fail.
+      const writer = (plugin as any).chatTurnWriter;
+      const originalSetStateDir = writer.setStateDir.bind(writer);
+      writer.setStateDir = vi.fn().mockRejectedValue(new Error('simulated migration failure'));
+
+      const apiBetter: OpenClawPluginApi = {
+        config: {},
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+        workspaceDir,
+      } as unknown as OpenClawPluginApi;
+      plugin.register(apiBetter);
+
+      // Wait for the fire-and-forget setStateDir to reject.
+      await new Promise((r) => setTimeout(r, 50));
+
+      // Failure: migration target cleared, but stateDir stays at fallback.
+      expect((plugin as any).chatTurnWriterStateDir).toBe(homeDir);
+      expect((plugin as any).chatTurnWriterMigrationTarget).toBe(null);
+
+      // A second register() with the SAME apiBetter MUST re-trigger the
+      // migration (proves the failure didn't poison the retry path).
+      writer.setStateDir = vi.fn().mockImplementation(originalSetStateDir);
+      plugin.register(apiBetter);
+      // The migration was triggered again — `chatTurnWriterMigrationTarget`
+      // should be set during the in-flight async work.
+      const target = (plugin as any).chatTurnWriterMigrationTarget;
+      expect(target?.replace(/\\/g, '/')).toBe(workspaceDir.replace(/\\/g, '/') + '/.openclaw');
+      // Wait for retry to settle.
+      await new Promise((r) => setTimeout(r, 50));
+      expect((plugin as any).chatTurnWriterStateDir.replace(/\\/g, '/')).toBe(
+        workspaceDir.replace(/\\/g, '/') + '/.openclaw',
+      );
+    } finally {
+      if (prevEnv !== undefined) process.env.OPENCLAW_STATE_DIR = prevEnv;
+      try { fs.rmSync(workspaceDir, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+  });
+
+  it('T18/T21 — ensureChatTurnWriter migrates writer in-place via setStateDir when a better stateDir becomes available', async () => {
+    // Regression for T18: pre-fix, once `chatTurnWriter` was constructed
+    // with the home-dir fallback (because setup-runtime register had
+    // no workspaceDir / resolveStateDir wired yet), it stayed pinned
+    // forever.
+    // Regression for T21: an earlier T18 fix REBUILT the writer and
+    // used `flushSync()` which doesn't await in-flight persists/resets
+    // — losing or duplicating turns mid-rebuild. Post-fix, the writer
+    // is migrated IN-PLACE via `setStateDir` which `await flush()`s
+    // before swapping paths.
+    const prevEnv = process.env.OPENCLAW_STATE_DIR;
+    delete process.env.OPENCLAW_STATE_DIR;
+    const tmpRoot = require('os').tmpdir();
+    const workspaceDir = path.join(tmpRoot, `dkg-t18-workspace-${Date.now()}`);
+    const homeDir = `${require('os').homedir()}/.openclaw`;
+    try {
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: false },
+        memory: { enabled: false },
+      } as any);
+      const apiFallback: OpenClawPluginApi = {
+        config: {},
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+      } as unknown as OpenClawPluginApi;
+      plugin.register(apiFallback);
+      const writer1 = (plugin as any).chatTurnWriter;
+      expect((plugin as any).chatTurnWriterStateDir).toBe(homeDir);
+
+      // Second register with workspaceDir → triggers in-place migration.
+      const apiBetter: OpenClawPluginApi = {
+        config: {},
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+        workspaceDir,
+      } as unknown as OpenClawPluginApi;
+      plugin.register(apiBetter);
+      const writer2 = (plugin as any).chatTurnWriter;
+      // SAME instance — migration is in-place (preserves in-flight state).
+      expect(writer2).toBe(writer1);
+      // T24 — `chatTurnWriterStateDir` is updated ONLY on successful
+      // migration. While the async `setStateDir` is in flight,
+      // `chatTurnWriterMigrationTarget` reflects the target.
+      expect((plugin as any).chatTurnWriterMigrationTarget?.replace(/\\/g, '/')).toBe(
+        workspaceDir.replace(/\\/g, '/') + '/.openclaw',
+      );
+      // Wait for the fire-and-forget setStateDir to complete.
+      await new Promise((r) => setTimeout(r, 100));
+      // After success, chatTurnWriterStateDir flips and migration
+      // target clears.
+      expect((plugin as any).chatTurnWriterStateDir.replace(/\\/g, '/')).toBe(
+        workspaceDir.replace(/\\/g, '/') + '/.openclaw',
+      );
+      expect((plugin as any).chatTurnWriterMigrationTarget).toBe(null);
+      const path2 = (writer2 as any).watermarkFilePath as string;
+      expect(path2.replace(/\\/g, '/')).toContain(
+        workspaceDir.replace(/\\/g, '/') + '/.openclaw/dkg-adapter/chat-turn-watermarks.json',
+      );
+    } finally {
+      if (prevEnv !== undefined) process.env.OPENCLAW_STATE_DIR = prevEnv;
+      try { fs.rmSync(workspaceDir, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+  });
+
+  it('T14 — single-flight key is per-conversation; a slow recall in one conversation does NOT block recall in a sibling conversation under the same sessionKey', async () => {
+    // Regression for T14: pre-fix, single-flight was keyed on raw
+    // `ctx.sessionKey`. Channels can multiplex several conversations
+    // under one sessionKey (the same composition that ChatTurnWriter
+    // uses for its FIFO queues), so a slow recall in conversation A
+    // would suppress recall in unrelated conversation B. Post-fix,
+    // the key is composed of channelId + accountId + conversationId +
+    // sessionKey so siblings stay independent.
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+      memory: { enabled: true },
+    } as any);
+    const mockApi: OpenClawPluginApi = {
+      config: { plugins: { slots: { memory: 'adapter-openclaw' } } },
+      registrationMode: 'full',
+      registerTool: () => {},
+      registerHook: () => {},
+      registerMemoryCapability: vi.fn(),
+      on: () => {},
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+      registerMemoryPromptSection: vi.fn(),
+    } as unknown as OpenClawPluginApi;
+    plugin.register(mockApi);
+    const client = (plugin as any).client;
+    let queryCalls = 0;
+    const pendingResolvers: Array<() => void> = [];
+    client.query = vi.fn().mockImplementation(async () => {
+      queryCalls++;
+      await new Promise<void>((resolve) => { pendingResolvers.push(resolve); });
+      return { results: { bindings: [] } };
+    });
+    // T31 — Resolver returns `nodeAgentAddress` (eth) instead of `nodePeerId`.
+    (plugin as any).nodeAgentAddress = '0xabcabcabcabcabcabcabcabcabcabcabcabcabcd';
+
+    const event = { messages: [{ role: 'user', content: 'find something' }] };
+    // Two ctx values share the SAME sessionKey but differ on
+    // conversationId — exactly the scenario T14 flags.
+    const ctxA = { channelId: 'tg', accountId: 'bot', conversationId: 'chat-A', sessionKey: 'shared-sk' };
+    const ctxB = { channelId: 'tg', accountId: 'bot', conversationId: 'chat-B', sessionKey: 'shared-sk' };
+
+    // Conversation A: hangs in searchNarrow.
+    const turnA = (plugin as any).handleBeforePromptBuild(event, ctxA);
+    await new Promise((r) => setTimeout(r, 300));
+    await turnA;
+    const queriesAfterA = queryCalls;
+    expect(queriesAfterA).toBeGreaterThan(0);
+
+    // Conversation B fires while A still has queries in flight. With
+    // the per-conversation key, B MUST issue its own queries (not be
+    // blocked by A's reservation under the shared sessionKey).
+    const turnB = (plugin as any).handleBeforePromptBuild(event, ctxB);
+    await new Promise((r) => setTimeout(r, 300));
+    await turnB;
+    expect(queryCalls).toBeGreaterThan(queriesAfterA);
+
+    // Cleanup.
+    while (pendingResolvers.length) pendingResolvers.shift()!();
+    await new Promise((r) => setTimeout(r, 50));
+    await plugin.stop();
+  });
+
+  it('R23.2 — stop() nulls out hookSurface refs so a later register() rebuilds the surface', async () => {
+    // Regression for R23.2: pre-fix, stop() called hookSurface.destroy()
+    // but left this.hookSurface and this.hookSurfaceApi populated.
+    // A later register() on the same plugin instance with the same api
+    // hit the existing-surface fast path in installHooksIfNeeded() and
+    // skipped reinstalling hooks. The old surface is permanently inert
+    // (destroyed=true), so W3 / W4a / W4b would silently never re-install.
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+      memory: { enabled: true },
+    } as any);
+    const onSpy = vi.fn();
+    const mockApi: OpenClawPluginApi = {
+      config: { plugins: { slots: { memory: 'adapter-openclaw' } } },
+      registrationMode: 'full',
+      registerTool: () => {},
+      registerHook: () => {},
+      registerMemoryCapability: vi.fn(),
+      on: onSpy,
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    } as unknown as OpenClawPluginApi;
+    plugin.register(mockApi);
+    // Initial register installed hooks.
+    expect((plugin as any).hookSurface).not.toBeNull();
+    const onCallCountAfterInitial = onSpy.mock.calls.length;
+    expect(onCallCountAfterInitial).toBeGreaterThan(0);
+
+    // Shutdown.
+    await plugin.stop();
+    // The hookSurface refs MUST be cleared by stop().
+    expect((plugin as any).hookSurface).toBeNull();
+    expect((plugin as any).hookSurfaceApi).toBeNull();
+
+    // Re-register on the same plugin instance.
+    plugin.register(mockApi);
+    // Hooks must have been reinstalled — api.on count goes up.
+    expect(onSpy.mock.calls.length).toBeGreaterThan(onCallCountAfterInitial);
+    expect((plugin as any).hookSurface).not.toBeNull();
+  });
+
+  it('R17.2 — setup-only → full re-entry constructs ChatTurnWriter and installs hooks', () => {
+    // Regression for the qa-engineer-flagged R17.2 follow-up: the
+    // first `setup-only` call correctly skips ChatTurnWriter construction
+    // (no FS work in metadata-only mode), but the SECOND call (full)
+    // must then construct it before installHooksIfNeeded runs —
+    // otherwise installHooksIfNeeded's `if (!this.chatTurnWriter) return`
+    // guard silently no-ops and W3 / W4a / W4b never wire up.
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: true },
+      memory: { enabled: true },
+    });
+    const onSpy = vi.fn();
+    const setupOnlyApi: OpenClawPluginApi = {
+      config: {},
+      registrationMode: 'setup-only',
+      registerTool: () => {},
+      registerHook: () => {},
+      on: onSpy,
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    };
+    plugin.register(setupOnlyApi);
+    // Tick 1: setup-only — no ChatTurnWriter, no hooks.
+    expect((plugin as any).chatTurnWriter).toBeNull();
+    expect(onSpy).not.toHaveBeenCalled();
+
+    // Tick 2: full — must construct ChatTurnWriter AND install hooks.
+    const fullApi: OpenClawPluginApi = {
+      config: {},
+      registrationMode: 'full',
+      registerTool: () => {},
+      registerHook: () => {},
+      on: onSpy,
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    };
+    plugin.register(fullApi);
+    expect((plugin as any).chatTurnWriter).not.toBeNull();
+    // At least one typed hook (`before_prompt_build` or `agent_end`)
+    // must have been registered against the now-full api.
+    const typedHookEvents = onSpy.mock.calls.map((c: any[]) => c[0]);
+    expect(typedHookEvents).toContain('before_prompt_build');
+    expect(typedHookEvents).toContain('agent_end');
+  });
+
+  it('R14.3 / T52 / T58 — setup-only registers only session_end (no channel server, no typed/internal hooks)', () => {
+    // R14.3: setup-only must NOT wire prompt-injection / turn-
+    // persistence handlers (`before_prompt_build`, `agent_end`,
+    // `message:received`, `message:sent`).
+    //
+    // T52: `session_end` legacy cleanup STILL installs so that any
+    // future runtime upgrade has a deterministic shutdown path.
+    //
+    // T58: `registerIntegrationModules` no longer brings up the
+    // channel HTTP server in setup-only — the documented
+    // metadata-only contract is honored. Channel registration is
+    // deferred to the runtime-enabled re-entry.
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: true },
+      memory: { enabled: true },
+    });
+    const onSpy = vi.fn();
+    const registerHookSpy = vi.fn();
+    const mockApi: OpenClawPluginApi = {
+      config: {},
+      registrationMode: 'setup-only',
+      registerTool: () => {},
+      registerHook: registerHookSpy,
+      on: onSpy,
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    };
+    plugin.register(mockApi);
+    // T52 — Surface MUST exist (session_end is the cleanup anchor).
+    expect((plugin as any).hookSurface).not.toBeNull();
+    // R14.3 — No typed-hook installs may have called api.on.
+    expect(onSpy).not.toHaveBeenCalled();
+    // T52 — `session_end` MUST be the only legacy registerHook call.
+    expect(registerHookSpy).toHaveBeenCalledTimes(1);
+    expect(registerHookSpy.mock.calls[0][0]).toBe('session_end');
+    // T58 — Channel must NOT have started in setup-only mode.
+    expect((plugin as any).channelPlugin).toBeFalsy();
+  });
+
+  it('T59 — setup-only → full upgrade on the same api installs runtime hooks (W3/W4) on re-entry', () => {
+    // T59: pre-fix the same-api retry path required `installedVia ===
+    // 'none'` (an explicit failure record) to fire a re-install. In
+    // setup-only the runtime hooks were never attempted, so their
+    // stats keys were absent — the retry predicate evaluated
+    // `undefined?.installedVia === 'none'` as false and the
+    // setup-only → full upgrade left W3/W4/internal permanently
+    // uninstalled. Post-fix the predicate treats `stats[key] ===
+    // undefined` as a first-time install when the dispatch primitive
+    // is now available.
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+      memory: { enabled: true },
+    });
+    const onSpy = vi.fn();
+    const registerHookSpy = vi.fn();
+    const mockApi: any = {
+      config: { plugins: { slots: { memory: 'adapter-openclaw' } } },
+      registrationMode: 'setup-only',
+      registerTool: () => {},
+      registerHook: registerHookSpy,
+      registerMemoryCapability: () => {},
+      on: onSpy,
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    };
+    // First register: setup-only — no W3/W4/internal installs.
+    plugin.register(mockApi);
+    expect(onSpy).not.toHaveBeenCalled();
+    expect(registerHookSpy).toHaveBeenCalledTimes(1);
+    expect(registerHookSpy.mock.calls[0][0]).toBe('session_end');
+
+    // Re-register on the SAME api with mode flipped to full. T59
+    // guarantees this path installs the typed hooks even though
+    // their stats keys are absent (never attempted in setup-only).
+    mockApi.registrationMode = 'full';
+    plugin.register(mockApi);
+
+    // api.on MUST have been called for each typed hook now.
+    const typedEvents = onSpy.mock.calls.map((c: any[]) => c[0]);
+    expect(typedEvents).toContain('before_prompt_build');
+    expect(typedEvents).toContain('agent_end');
+    expect(typedEvents).toContain('before_compaction');
+    expect(typedEvents).toContain('before_reset');
+  });
+
+  it('marks session_end and internal message hooks as rare-fire so startup timeout diagnostics stay quiet', async () => {
+    vi.useFakeTimers();
+    const previousHookMap = (globalThis as any)[INTERNAL_HOOK_SYMBOL];
+    (globalThis as any)[INTERNAL_HOOK_SYMBOL] = new Map();
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+      memory: { enabled: false },
+    });
+    const logger = { info: vi.fn(), warn: vi.fn(), debug: vi.fn() };
+    const mockApi: OpenClawPluginApi = {
+      config: {},
+      registrationMode: 'full',
+      registerTool: () => {},
+      registerHook: vi.fn(),
+      on: vi.fn(),
+      logger,
+    };
+
+    try {
+      plugin.register(mockApi);
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      const debugMessages = logger.debug.mock.calls.map((args) => String(args[0]));
+      const warnMessages = logger.warn.mock.calls.map((args) => String(args[0]));
+      expect(debugMessages.some((msg) => msg.includes("legacy:session_end"))).toBe(true);
+      expect(debugMessages.some((msg) => msg.includes("internal:message:received"))).toBe(true);
+      expect(debugMessages.some((msg) => msg.includes("internal:message:sent"))).toBe(true);
+      expect(warnMessages.some((msg) => msg.includes("legacy:session_end"))).toBe(false);
+      expect(warnMessages.some((msg) => msg.includes("internal:message:received"))).toBe(false);
+      expect(warnMessages.some((msg) => msg.includes("internal:message:sent"))).toBe(false);
+      expect(warnMessages.some((msg) => msg.includes("typed:agent_end"))).toBe(true);
+    } finally {
+      await plugin.stop();
+      if (previousHookMap === undefined) {
+        delete (globalThis as any)[INTERNAL_HOOK_SYMBOL];
+      } else {
+        (globalThis as any)[INTERNAL_HOOK_SYMBOL] = previousHookMap;
+      }
+      vi.useRealTimers();
+    }
+  });
+
+  it('R14.2 — handleBeforePromptBuild returns undefined when memoryPlugin exists but is not registered (slot owned by another plugin)', async () => {
+    // Regression for R14.2: when `plugins.slots.memory` points at a
+    // different plugin, `DkgMemoryPlugin.register()` returns false and
+    // `registeredCapability` stays null. The before_prompt_build hook
+    // must short-circuit instead of injecting DKG recall on top of the
+    // elected provider's prompt.
+    const plugin = new DkgNodePlugin({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+      memory: { enabled: true },
+    } as any);
+    const mockApi: OpenClawPluginApi = {
+      // No `plugins.slots.memory` set → registerCapability returns false
+      // → isRegistered() === false.
+      config: {},
+      registrationMode: 'full',
+      registerTool: () => {},
+      registerHook: () => {},
+      registerMemoryCapability: vi.fn(),
+      on: () => {},
+      logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    } as unknown as OpenClawPluginApi;
+    plugin.register(mockApi);
+
+    // memoryPlugin must exist — module is enabled — but it must NOT be
+    // registered, because the slot points elsewhere.
+    expect((plugin as any).memoryPlugin).not.toBeNull();
+    expect((plugin as any).memoryPlugin.isRegistered()).toBe(false);
+
+    const result = await (plugin as any).handleBeforePromptBuild(
+      { messages: [{ role: 'user', content: 'tatooine suns' }] },
+      { sessionKey: 'sk' },
+    );
+    expect(result).toBeUndefined();
+  });
+
+  it('T26 — empty / whitespace-only OPENCLAW_STATE_DIR does NOT short-circuit the fallback chain', () => {
+    // Regression for T26: pre-fix the `??` chain treated empty strings
+    // as real values, so `OPENCLAW_STATE_DIR=''` (or whitespace-only)
+    // bypassed `api.workspaceDir` and `~/.openclaw` and the writer
+    // ended up writing `./dkg-adapter/chat-turn-watermarks.json` from
+    // the process CWD — silent state leak across workspaces.
+    const prevEnv = process.env.OPENCLAW_STATE_DIR;
+    process.env.OPENCLAW_STATE_DIR = '';   // empty
+    try {
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: false },
+        memory: { enabled: false },
+      } as any);
+      const mockApi: OpenClawPluginApi = {
+        config: {},
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+        workspaceDir: '/tmp/dkg-t26-workspace',
+      } as unknown as OpenClawPluginApi;
+      plugin.register(mockApi);
+      const ctw = (plugin as any).chatTurnWriter;
+      const watermarkPath: string = (ctw as any).watermarkFilePath;
+      const normalized = watermarkPath.replace(/\\/g, '/');
+      // Must have fallen through empty env to workspaceDir-derived path.
+      expect(normalized).toContain('/tmp/dkg-t26-workspace/.openclaw/dkg-adapter/chat-turn-watermarks.json');
+    } finally {
+      if (prevEnv === undefined) delete process.env.OPENCLAW_STATE_DIR;
+      else process.env.OPENCLAW_STATE_DIR = prevEnv;
+    }
+
+    // Whitespace-only also normalizes to "missing".
+    process.env.OPENCLAW_STATE_DIR = '   ';
+    try {
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: false },
+        memory: { enabled: false },
+      } as any);
+      const mockApi: OpenClawPluginApi = {
+        config: {},
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+        workspaceDir: '/tmp/dkg-t26-workspace-ws',
+      } as unknown as OpenClawPluginApi;
+      plugin.register(mockApi);
+      const watermarkPath: string = ((plugin as any).chatTurnWriter as any).watermarkFilePath;
+      expect(watermarkPath.replace(/\\/g, '/')).toContain(
+        '/tmp/dkg-t26-workspace-ws/.openclaw/dkg-adapter/chat-turn-watermarks.json',
+      );
+    } finally {
+      if (prevEnv === undefined) delete process.env.OPENCLAW_STATE_DIR;
+      else process.env.OPENCLAW_STATE_DIR = prevEnv;
+    }
+  });
+
+  it('R16.2 — chat-turn watermark stateDir prefers api.workspaceDir over ~/.openclaw fallback', () => {
+    // Regression for R16.2: previously the stateDir fallback chain went
+    // straight to `~/.openclaw` when `runtime.state.resolveStateDir()` and
+    // `OPENCLAW_STATE_DIR` were both absent, so two workspaces on the
+    // same machine would share `chat-turn-watermarks.json`. The new
+    // fallback prefers `api.workspaceDir + '/.openclaw'` when present.
+    const prevEnv = process.env.OPENCLAW_STATE_DIR;
+    delete process.env.OPENCLAW_STATE_DIR;
+    try {
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: false },
+        memory: { enabled: false },
+      } as any);
+      const mockApi: OpenClawPluginApi = {
+        config: {},
+        registrationMode: 'full',
+        registerTool: () => {},
+        registerHook: () => {},
+        on: () => {},
+        logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+        workspaceDir: '/tmp/dkg-r162-workspace',
+      } as unknown as OpenClawPluginApi;
+      plugin.register(mockApi);
+      const ctw = (plugin as any).chatTurnWriter;
+      expect(ctw).toBeDefined();
+      // ChatTurnWriter stores the resolved stateDir privately and writes
+      // `<stateDir>/dkg-adapter/chat-turn-watermarks.json`. Inspecting
+      // `watermarkFilePath` confirms the workspace-derived path won.
+      const watermarkPath: string = (ctw as any).watermarkFilePath;
+      // Normalize separators for cross-platform path comparison (Windows
+      // path.join produces backslashes from a forward-slash workspaceDir).
+      const normalized = watermarkPath.replace(/\\/g, '/');
+      expect(normalized).toContain('/tmp/dkg-r162-workspace/.openclaw/dkg-adapter/chat-turn-watermarks.json');
+      // Must NOT have fallen back to the home dir.
+      expect(normalized).not.toContain(homedir().replace(/\\/g, '/') + '/.openclaw/dkg-adapter');
+      // The home-dir fallback warn must NOT have fired.
+      const warnSpy = mockApi.logger.warn as any;
+      const homeFallbackWarn = warnSpy.mock.calls.find((c: any[]) =>
+        String(c[0] ?? '').includes('Could not resolve a workspace-scoped state dir'),
+      );
+      expect(homeFallbackWarn).toBeUndefined();
+    } finally {
+      if (prevEnv !== undefined) process.env.OPENCLAW_STATE_DIR = prevEnv;
+    }
+  });
+
   it('warns once when legacy OriginTrail Game config is still present', () => {
     const plugin = new DkgNodePlugin({
       daemonUrl: 'http://localhost:9200',
@@ -2376,8 +3608,15 @@ describe('DkgNodePlugin', () => {
     plugin.register(mockApi);
     plugin.register(mockApi);
 
-    expect(warnCalls).toHaveLength(1);
-    expect(String(warnCalls[0]?.[0])).toContain('dkg-node.game.enabled');
+    // R16.2 introduced a separate warn when the state dir falls back to
+    // `~/.openclaw` because `workspaceDir` and `OPENCLAW_STATE_DIR` are
+    // both absent in this fixture. Filter to the game-config warn so the
+    // assertion remains scoped to the legacy-detection invariant.
+    const gameWarns = warnCalls.filter((args) =>
+      String(args?.[0] ?? '').includes('dkg-node.game.enabled'),
+    );
+    expect(gameWarns).toHaveLength(1);
+    expect(String(gameWarns[0]?.[0])).toContain('dkg-node.game.enabled');
   });
 
   it('upgrades from setup-runtime to full runtime and registers the memory slot capability', () => {
@@ -2545,13 +3784,16 @@ describe('DkgNodePlugin', () => {
       plugin.register(mockApi);
       expect(registeredCapability).not.toBeNull();
 
-      // Let the best-effort probes kicked off inside register() flush so
-      // nodePeerId is populated before we exercise the runtime path below.
-      // Codex B59: without this, the peer-ID probe is still pending and
-      // getMemorySearchManager returns { manager: null, error } — and the
-      // original `toBeDefined()` assertion passed only because `null` is
-      // "defined" in vitest's loose sense, silently masking the real
-      // B12 null-manager fallback path.
+      // T31 — The resolver now returns `nodeAgentAddress` (eth address from
+      // keystore) instead of `nodePeerId`. This dispatch-context test
+      // doesn't care about how the address is sourced, just that the
+      // resolver hands back A non-undefined address so getMemorySearchManager
+      // hits the manager-construction path (Codex B12 null-manager
+      // fallback otherwise). Directly seed the field; the keystore-load
+      // mechanics are tested in the dedicated B9-style tests below.
+      (plugin as any).nodeAgentAddress = '0xabcabcabcabcabcabcabcabcabcabcabcabcabcd';
+
+      // Let the best-effort probes kicked off inside register() flush.
       await new Promise((resolve) => setImmediate(resolve));
 
       // Before any dispatch: resolver returns no projectContextGraphId for
@@ -2647,9 +3889,16 @@ describe('DkgNodePlugin', () => {
       }
     };
 
+    // T31 — These four tests exercise `ensureNodePeerId` directly. They
+    // used to drive the lazy re-probe via `resolver.getDefaultAgentAddress()`,
+    // which now feeds `nodeAgentAddress` (keystore-driven) instead. The
+    // peerId machinery itself still exists for libp2p uses (relay/transport
+    // metadata) and the lazy-recovery semantic is still worth pinning, so
+    // these tests now drive `ensureNodePeerId()` directly. A separate
+    // `node agent address keystore (T31)` describe-block below covers the
+    // keystore-based equivalent that feeds the resolver.
+
     it('lazily re-probes peer ID when the register-time probe failed', async () => {
-      // First /api/status fire rejects (daemon not ready). Second fire
-      // (triggered lazily by a resolver call) succeeds.
       const { fetchFn, statusCalls } = makeFetchStub((idx) => {
         if (idx === 0) {
           return new Response('daemon starting', { status: 503 });
@@ -2669,21 +3918,17 @@ describe('DkgNodePlugin', () => {
       });
       try {
         plugin.register(makeMockApi());
-        // Drain the register-time probe (it fires-and-forgets).
         await flushMicrotasks();
-        // Register-time probe saw a 503, so peerId is still undefined and
-        // any call to getDefaultAgentAddress reflects that.
         expect((plugin as any).nodePeerId).toBeUndefined();
-        const resolver = (plugin as any).memorySessionResolver;
-        const firstCall = resolver.getDefaultAgentAddress();
-        expect(firstCall).toBeUndefined();
-        // That call triggered a lazy re-probe. Let it complete.
+        // Direct lazy re-probe — the resolver no longer triggers this
+        // (it now feeds `nodeAgentAddress`) but the recovery contract
+        // remains relevant for libp2p uses.
+        await (plugin as any).ensureNodePeerId();
         await flushMicrotasks();
-        // Now the cached peer ID is populated; subsequent resolver calls
-        // see it immediately, no further fetch fire.
+        expect((plugin as any).nodePeerId).toBe('did:dkg:agent:test-peer');
         const statusCallsBefore = statusCalls.length;
-        const secondCall = resolver.getDefaultAgentAddress();
-        expect(secondCall).toBe('did:dkg:agent:test-peer');
+        // Subsequent calls are no-ops once cached.
+        await (plugin as any).ensureNodePeerId();
         expect(statusCalls.length).toBe(statusCallsBefore);
       } finally {
         await plugin.stop();
@@ -2691,11 +3936,7 @@ describe('DkgNodePlugin', () => {
       }
     });
 
-    it('debounces concurrent resolver fires to a single in-flight probe', async () => {
-      // All /api/status fires succeed. But a single burst of 10 resolver
-      // calls before any drain must produce exactly ONE fetch to
-      // /api/status (1 from register + 0 from the burst, since the
-      // register-time probe is in flight and the burst should await it).
+    it('debounces concurrent ensureNodePeerId fires to a single in-flight probe', async () => {
       let resolveStatus: (() => void) | null = null;
       const gate = new Promise<void>((resolve) => {
         resolveStatus = resolve;
@@ -2718,23 +3959,14 @@ describe('DkgNodePlugin', () => {
       try {
         plugin.register(makeMockApi());
         await flushMicrotasks();
-        // The register-time probe has already started and is parked on
-        // the gate. 10 resolver calls in a burst must NOT each fire a
-        // new /api/status because the in-flight probe guard collapses
-        // them onto the same pending promise.
-        const resolver = (plugin as any).memorySessionResolver;
+        // 10 concurrent direct calls — must collapse to one in-flight probe.
         for (let i = 0; i < 10; i++) {
-          resolver.getDefaultAgentAddress();
+          void (plugin as any).ensureNodePeerId();
         }
-        // Only one /api/status call fired (the register-time one).
         expect(statusCalls.length).toBe(1);
-        // Release the gate; drain; probe completes.
         resolveStatus!();
         await flushMicrotasks();
-        // After drain, the cache is populated; a new resolver call returns
-        // the peerId without firing a third /api/status.
-        const finalCall = resolver.getDefaultAgentAddress();
-        expect(finalCall).toBe('did:dkg:agent:debounced');
+        expect((plugin as any).nodePeerId).toBe('did:dkg:agent:debounced');
         expect(statusCalls.length).toBe(1);
       } finally {
         await plugin.stop();
@@ -2743,10 +3975,6 @@ describe('DkgNodePlugin', () => {
     });
 
     it('recovers on every subsequent call when /api/status keeps failing', async () => {
-      // Permanent failure. Every resolver call returns undefined (so B2's
-      // retryable clarification surfaces to the caller), and every call
-      // triggers a re-probe attempt — but the in-flight debounce means
-      // bursts within a single drain window collapse to one fetch fire.
       const { fetchFn, statusCalls } = makeFetchStub(() => {
         return new Response('daemon down', { status: 503 });
       });
@@ -2761,27 +3989,19 @@ describe('DkgNodePlugin', () => {
       try {
         plugin.register(makeMockApi());
         await flushMicrotasks();
-        // One call from register-time probe (that saw the 503).
         const initialCalls = statusCalls.length;
         expect(initialCalls).toBeGreaterThanOrEqual(1);
 
-        const resolver = (plugin as any).memorySessionResolver;
-
-        // Call the resolver, let its probe resolve (to 503), call again.
-        // Each cycle should trigger ONE new /api/status call — not
-        // zero (previous "soft-brick" behavior), not ten.
-        expect(resolver.getDefaultAgentAddress()).toBeUndefined();
+        await (plugin as any).ensureNodePeerId();
         await flushMicrotasks();
+        expect((plugin as any).nodePeerId).toBeUndefined();
         const afterFirstLazy = statusCalls.length;
         expect(afterFirstLazy).toBe(initialCalls + 1);
 
-        expect(resolver.getDefaultAgentAddress()).toBeUndefined();
+        await (plugin as any).ensureNodePeerId();
         await flushMicrotasks();
         const afterSecondLazy = statusCalls.length;
         expect(afterSecondLazy).toBe(initialCalls + 2);
-
-        // Never throws, never loops forever. Just keeps returning
-        // undefined and keeps re-probing on demand.
       } finally {
         await plugin.stop();
         globalThis.fetch = originalFetch;
@@ -2789,9 +4009,6 @@ describe('DkgNodePlugin', () => {
     });
 
     it('does NOT re-probe when the register-time probe already succeeded', async () => {
-      // Register-time probe hits /api/status once and resolves. Burst of
-      // resolver calls afterwards hits exactly ZERO additional /api/status
-      // fires, because `nodePeerId` is cached.
       const { fetchFn, statusCalls } = makeFetchStub(() => {
         return new Response(JSON.stringify({ peerId: 'did:dkg:agent:happy-path' }), {
           status: 200,
@@ -2811,14 +4028,690 @@ describe('DkgNodePlugin', () => {
         await flushMicrotasks();
         expect((plugin as any).nodePeerId).toBe('did:dkg:agent:happy-path');
         const baselineCalls = statusCalls.length;
-        const resolver = (plugin as any).memorySessionResolver;
         for (let i = 0; i < 20; i++) {
-          expect(resolver.getDefaultAgentAddress()).toBe('did:dkg:agent:happy-path');
+          await (plugin as any).ensureNodePeerId();
         }
         expect(statusCalls.length).toBe(baselineCalls);
       } finally {
         await plugin.stop();
         globalThis.fetch = originalFetch;
+      }
+    });
+  });
+
+  describe('node agent address keystore (T31)', () => {
+    // T31 — The resolver returns `nodeAgentAddress` (eth address from
+    // `<DKG_HOME>/agent-keystore.json`) instead of `nodePeerId` (libp2p
+    // from `/api/status`). These tests exercise the new lazy-read pattern
+    // by setting DKG_HOME to a tmpdir and writing/mutating the keystore
+    // file mid-test. Mirrors the previous B9 lazy re-probe semantics for
+    // the keystore source.
+    // T63 — Adapter HTTP-probes `/api/agent/identity` to get the canonical
+    // eth (already EIP-55 from the daemon). Tests stub `client.getAgentIdentity`
+    // and assert resolver returns whatever the stub responded with.
+    // Test fixtures: keystore JSON keys are LOWERCASE (the form the daemon
+    // writes). Stubs return EIP-55 checksum form (what the daemon's HTTP
+    // response gives). Both forms are derived at runtime.
+    const ETH_PRIMARY_LC = '0x26c9b05a30138b35e84e60a5b778d580065ffbb8';
+    const ETH_SECONDARY_LC = '0x949ec97ab4ed1c9fb4c9a70c2dd368065d817b0c';
+    const ETH_PRIMARY = toEip55Checksum(ETH_PRIMARY_LC);
+    const ETH_SECONDARY = toEip55Checksum(ETH_SECONDARY_LC);
+
+    function makeMockApi(): OpenClawPluginApi {
+      return {
+        config: { plugins: { slots: { memory: 'adapter-openclaw' } } },
+        registrationMode: 'full' as const,
+        registerTool: () => {},
+        registerHook: () => {},
+        registerMemoryCapability: () => {},
+        on: () => {},
+        logger: { info: () => {}, warn: vi.fn(), debug: () => {} },
+      } as unknown as OpenClawPluginApi;
+    }
+
+    let tempHome: string;
+    let prevDkgHome: string | undefined;
+    let prevAgentEnv: string | undefined;
+
+    beforeEach(() => {
+      tempHome = path.join(require('os').tmpdir(), `dkg-node-keystore-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+      fs.mkdirSync(tempHome, { recursive: true });
+      prevDkgHome = process.env.DKG_HOME;
+      prevAgentEnv = process.env.DKG_AGENT_ADDRESS;
+      process.env.DKG_HOME = tempHome;
+      delete process.env.DKG_AGENT_ADDRESS;
+    });
+
+    afterEach(() => {
+      if (prevDkgHome === undefined) delete process.env.DKG_HOME;
+      else process.env.DKG_HOME = prevDkgHome;
+      if (prevAgentEnv === undefined) delete process.env.DKG_AGENT_ADDRESS;
+      else process.env.DKG_AGENT_ADDRESS = prevAgentEnv;
+      try { fs.rmSync(tempHome, { recursive: true, force: true }); } catch { /* best effort */ }
+    });
+
+    function writeKeystore(addresses: string[]): void {
+      const payload: Record<string, unknown> = {};
+      for (const addr of addresses) payload[addr] = { authToken: `tok-${addr.toLowerCase()}` };
+      fs.writeFileSync(path.join(tempHome, 'agent-keystore.json'), JSON.stringify(payload));
+    }
+
+    /**
+     * T63 — Stub `client.getAgentIdentity` to return a canned response.
+     * Tests that exercise the local-keystore-with-agent path need this so
+     * the probe doesn't try a real HTTP fetch. Returns the spy so callers
+     * can assert the auth token forwarded matches the keystore entry.
+     */
+    function stubAgentIdentity(plugin: DkgNodePlugin, ethAddress: string): ReturnType<typeof vi.fn> {
+      const spy = vi.fn().mockResolvedValue({
+        ok: true,
+        identity: {
+          agentAddress: ethAddress,
+          agentDid: `did:dkg:agent:${ethAddress}`,
+          name: 'test-agent',
+          peerId: '12D3KooWDaemonPeerFromIdentity',
+          nodeIdentityId: '0',
+        },
+      });
+      (plugin as any).client.getAgentIdentity = spy;
+      return spy;
+    }
+
+    it('resolver.getDefaultAgentAddress returns the eth address from the daemon HTTP probe (T31/T63)', async () => {
+      // T63 — Adapter now reads agent token from keystore and HTTP-probes
+      // `/api/agent/identity` to get the canonical eth (already EIP-55).
+      writeKeystore([ETH_PRIMARY_LC]);
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        memory: { enabled: true },
+        channel: { enabled: false },
+      });
+      try {
+        plugin.register(makeMockApi());
+        const spy = stubAgentIdentity(plugin, ETH_PRIMARY);
+        await (plugin as any).ensureNodeAgentAddress();
+        const resolver = (plugin as any).memorySessionResolver;
+        expect(resolver.getDefaultAgentAddress()).toBe(ETH_PRIMARY);
+        expect((plugin as any).nodeAgentAddress).toBe(ETH_PRIMARY);
+        // T63 regression — probe forwards the AGENT auth token from the
+        // keystore (NOT the constructor's node-level token).
+        expect(spy).toHaveBeenCalledWith({ authToken: `tok-${ETH_PRIMARY_LC}` });
+      } finally {
+        await plugin.stop();
+      }
+    });
+
+    it('lazily re-reads keystore when the register-time read found no file', async () => {
+      // Keystore absent at register; appears later (e.g. daemon provisions
+      // identity after gateway start).
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        memory: { enabled: true },
+        channel: { enabled: false },
+      });
+      try {
+        plugin.register(makeMockApi());
+        // Stub from the start so the eventual probe doesn't try real HTTP.
+        stubAgentIdentity(plugin, ETH_PRIMARY);
+        // Drive the register-time probe to completion explicitly. With no
+        // keystore, the probe sets `localKeystoreCheckedAndAbsent = true`
+        // and never reaches getAgentIdentity.
+        await (plugin as any).ensureNodeAgentAddress();
+        expect((plugin as any).nodeAgentAddress).toBeUndefined();
+        expect((plugin as any).localKeystoreCheckedAndAbsent).toBe(true);
+        // Drain the .finally microtask so the in-flight promise clears.
+        await new Promise((r) => setImmediate(r));
+
+        // Keystore appears.
+        writeKeystore([ETH_PRIMARY_LC]);
+        // Lazy re-read — fires a fresh probe; keystore now present, so
+        // probe reaches the HTTP stub and sets nodeAgentAddress.
+        await (plugin as any).ensureNodeAgentAddress();
+        expect((plugin as any).nodeAgentAddress).toBe(ETH_PRIMARY);
+      } finally {
+        await plugin.stop();
+      }
+    });
+
+    it('multi-agent keystore without DKG_AGENT_ADDRESS fails loud (refuses to guess)', async () => {
+      writeKeystore([ETH_PRIMARY_LC, ETH_SECONDARY_LC]);
+      const api = makeMockApi();
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        memory: { enabled: true },
+        channel: { enabled: false },
+      });
+      try {
+        plugin.register(api);
+        // Drive the probe directly — `refreshMemoryResolverState` is
+        // fire-and-forget at register-time and the keystore read may
+        // not have landed by the time the test reaches this point.
+        await (plugin as any).ensureNodeAgentAddress();
+        // Refused — `nodeAgentAddress` stays undefined, NOT silently
+        // picked from one of the two keys.
+        expect((plugin as any).nodeAgentAddress).toBeUndefined();
+        // Operator-visible warn fired.
+        const warnCalls = (api.logger.warn as any).mock.calls.map((c: any) => String(c[0]));
+        expect(warnCalls.some((m: string) => m.includes('Multi-agent keystore detected'))).toBe(true);
+      } finally {
+        await plugin.stop();
+      }
+    });
+
+    it('DKG_AGENT_ADDRESS env disambiguates a multi-agent keystore', async () => {
+      writeKeystore([ETH_PRIMARY_LC, ETH_SECONDARY_LC]);
+      process.env.DKG_AGENT_ADDRESS = ETH_SECONDARY;
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        memory: { enabled: true },
+        channel: { enabled: false },
+      });
+      try {
+        plugin.register(makeMockApi());
+        const spy = stubAgentIdentity(plugin, ETH_SECONDARY);
+        await (plugin as any).ensureNodeAgentAddress();
+        expect((plugin as any).nodeAgentAddress).toBe(ETH_SECONDARY);
+        // T63 — env disambiguates which keystore entry's authToken to forward.
+        expect(spy).toHaveBeenCalledWith({ authToken: `tok-${ETH_SECONDARY_LC}` });
+      } finally {
+        await plugin.stop();
+      }
+    });
+
+    it('falls back to nodePeerId when nodeAgentAddress is unresolved on confirmed-local-no-keystore (T56/T60)', async () => {
+      // T56 — On fresh / auth-disabled / no-keystore nodes, the
+      // daemon's writer-side falls back to peerId via
+      // `defaultAgentAddress ?? peerId`. Adapter resolver mirrors
+      // that priority. T60 — fallback gates on
+      // `localKeystoreCheckedAndAbsent`, set by `probeNodeAgentAddressOnce`
+      // when a localhost-gated probe legitimately found no keystore.
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        memory: { enabled: true },
+        channel: { enabled: false },
+      });
+      try {
+        plugin.register(makeMockApi());
+        // Drive the probe — empty tempDir yields no keystore →
+        // probe sets `localKeystoreCheckedAndAbsent = true`.
+        await (plugin as any).ensureNodeAgentAddress();
+        expect((plugin as any).nodeAgentAddress).toBeUndefined();
+        expect((plugin as any).localKeystoreCheckedAndAbsent).toBe(true);
+        (plugin as any).nodePeerId = '12D3KooWNoKeystorePeer';
+        const resolver = (plugin as any).memorySessionResolver;
+        expect(resolver.getDefaultAgentAddress()).toBe('12D3KooWNoKeystorePeer');
+        expect(resolver.getSession(undefined)?.agentAddress).toBe('12D3KooWNoKeystorePeer');
+      } finally {
+        await plugin.stop();
+      }
+    });
+
+    it('does NOT fall back to nodePeerId on remote-daemon (probe-skipped) — T60', async () => {
+      // T60 — `probeNodeAgentAddressOnce` skips the keystore read
+      // for non-localhost daemonUrl. `localKeystoreCheckedAndAbsent`
+      // stays false → resolver returns undefined even though
+      // nodePeerId is populated. Without the gate, remote-daemon
+      // recall would silently scope WM to gateway's local peerId
+      // (which the remote daemon has never heard of) instead of
+      // surfacing the actual misconfiguration via the "backend
+      // not ready" path.
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://daemon.example.com:9200',
+        memory: { enabled: true },
+        channel: { enabled: false },
+      });
+      try {
+        plugin.register(makeMockApi());
+        await (plugin as any).ensureNodeAgentAddress();
+        expect((plugin as any).nodeAgentAddress).toBeUndefined();
+        expect((plugin as any).localKeystoreCheckedAndAbsent).toBe(false);
+        (plugin as any).nodePeerId = '12D3KooWGatewayLocalPeer';
+        const resolver = (plugin as any).memorySessionResolver;
+        expect(resolver.getDefaultAgentAddress()).toBeUndefined();
+        expect(resolver.getSession(undefined)?.agentAddress).toBeUndefined();
+      } finally {
+        await plugin.stop();
+      }
+    });
+
+    it('keystore eth wins over peerId when both are available (T56 — keystore-present deployments)', async () => {
+      // T56 — Keystore-present deployments must keep using eth
+      // (the original Bug A / T31 fix). Fallback only kicks in when
+      // nodeAgentAddress is undefined.
+      writeKeystore([ETH_PRIMARY_LC]);
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        memory: { enabled: true },
+        channel: { enabled: false },
+      });
+      try {
+        plugin.register(makeMockApi());
+        stubAgentIdentity(plugin, ETH_PRIMARY);
+        await (plugin as any).ensureNodeAgentAddress();
+        (plugin as any).nodePeerId = '12D3KooWShouldNotBeReturned';
+        const resolver = (plugin as any).memorySessionResolver;
+        expect(resolver.getDefaultAgentAddress()).toBe(ETH_PRIMARY);
+        expect(resolver.getSession(undefined)?.agentAddress).toBe(ETH_PRIMARY);
+      } finally {
+        await plugin.stop();
+      }
+    });
+
+    it('skips keystore read for remote daemonUrl + warns operator (T38)', async () => {
+      // T38 — Remote/custom-daemon setup: gateway's local keystore is
+      // either absent or belongs to a different identity. Reading it
+      // would silently scope WM queries to the wrong agent. Adapter
+      // must skip the read, leave nodeAgentAddress undefined, and
+      // surface an operator-actionable warn.
+      writeKeystore([ETH_PRIMARY_LC]);
+      const api = makeMockApi();
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://daemon.example.com:9200',
+        memory: { enabled: true },
+        channel: { enabled: false },
+      });
+      try {
+        plugin.register(api);
+        await (plugin as any).ensureNodeAgentAddress();
+        expect((plugin as any).nodeAgentAddress).toBeUndefined();
+        const warnCalls = (api.logger.warn as any).mock.calls.map((c: any) => String(c[0]));
+        expect(warnCalls.some((m: string) => m.includes('Daemon URL is non-local'))).toBe(true);
+      } finally {
+        await plugin.stop();
+      }
+    });
+
+    it('rejects invalid DKG_AGENT_ADDRESS for the localhost gate, warns, falls through to remote-skip (T44)', async () => {
+      // T44 — `DKG_AGENT_ADDRESS=foo` (typo) must NOT bypass the
+      // localhost gate. Pre-fix: truthy-string check passed → gate
+      // skipped → keystore read with no env override → scoped WM
+      // to the gateway's local identity for a remote-daemon setup.
+      writeKeystore([ETH_PRIMARY_LC]);
+      process.env.DKG_AGENT_ADDRESS = 'foo';
+      const api = makeMockApi();
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://daemon.example.com:9200',
+        memory: { enabled: true },
+        channel: { enabled: false },
+      });
+      try {
+        plugin.register(api);
+        await (plugin as any).ensureNodeAgentAddress();
+        expect((plugin as any).nodeAgentAddress).toBeUndefined();
+        const warnCalls = (api.logger.warn as any).mock.calls.map((c: any) => String(c[0]));
+        expect(warnCalls.some((m: string) => m.includes('not a valid 0x-prefixed eth address'))).toBe(true);
+        expect(warnCalls.some((m: string) => m.includes('Daemon URL is non-local'))).toBe(true);
+      } finally {
+        await plugin.stop();
+      }
+    });
+
+    it('treats IPv6 loopback (`http://[::1]:…`) as localhost (T40)', async () => {
+      // T40 — `new URL('http://[::1]:9200').hostname` returns `[::1]`
+      // (with brackets) per WHATWG URL. Without bracket-stripping,
+      // the heuristic misclassifies a local IPv6 daemon as remote
+      // and skips the keystore read, leaving recall/search broken
+      // for an entirely valid local-only deployment.
+      writeKeystore([ETH_PRIMARY_LC]);
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://[::1]:9200',
+        memory: { enabled: true },
+        channel: { enabled: false },
+      });
+      try {
+        plugin.register(makeMockApi());
+        stubAgentIdentity(plugin, ETH_PRIMARY);
+        await (plugin as any).ensureNodeAgentAddress();
+        expect((plugin as any).nodeAgentAddress).toBe(ETH_PRIMARY);
+      } finally {
+        await plugin.stop();
+      }
+    });
+
+    it('config.dkgHome overrides DKG_HOME for the keystore read (T42)', async () => {
+      // T42 — Operator runs `dkg start --home /custom/path` (or daemon
+      // is service-unit-managed with its own home). Gateway process's
+      // DKG_HOME points elsewhere (or default). Explicit `dkgHome`
+      // config field must reach the keystore read so the adapter
+      // resolves the right identity without env-level coordination.
+      const otherHome = path.join(require('os').tmpdir(), `dkg-other-home-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+      fs.mkdirSync(otherHome, { recursive: true });
+      try {
+        // Write keystore at OTHER home; leave the env-DKG_HOME tempHome empty.
+        fs.writeFileSync(
+          path.join(otherHome, 'agent-keystore.json'),
+          JSON.stringify({ [ETH_PRIMARY_LC]: { authToken: 'other-home-tok' } }),
+        );
+        const plugin = new DkgNodePlugin({
+          daemonUrl: 'http://localhost:9200',
+          dkgHome: otherHome,
+          memory: { enabled: true },
+          channel: { enabled: false },
+        });
+        try {
+          plugin.register(makeMockApi());
+          stubAgentIdentity(plugin, ETH_PRIMARY);
+          await (plugin as any).ensureNodeAgentAddress();
+          expect((plugin as any).nodeAgentAddress).toBe(ETH_PRIMARY);
+        } finally {
+          await plugin.stop();
+        }
+      } finally {
+        try { fs.rmSync(otherHome, { recursive: true, force: true }); } catch { /* best effort */ }
+      }
+    });
+
+    it('localhost + DKG_AGENT_ADDRESS + missing keystore: env override wins, no peerId fallback (T68)', async () => {
+      // T68 — When the operator supplies `DKG_AGENT_ADDRESS` AND the local
+      // keystore is genuinely absent (e.g., container/service-unit split
+      // where the gateway can't see the daemon's home), the env value
+      // MUST flow into `nodeAgentAddress` directly. Pre-fix the probe
+      // unconditionally set `localKeystoreCheckedAndAbsent = true` on the
+      // missing-keystore branch and the env override was silently
+      // ignored — the resolver returned `nodePeerId` instead of the
+      // operator's asserted eth.
+      process.env.DKG_AGENT_ADDRESS = ETH_PRIMARY;
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        memory: { enabled: true },
+        channel: { enabled: false },
+      });
+      try {
+        plugin.register(makeMockApi());
+        const spy = stubAgentIdentity(plugin, 'unused');
+        await (plugin as any).ensureNodeAgentAddress();
+        expect((plugin as any).nodeAgentAddress).toBe(ETH_PRIMARY);
+        expect((plugin as any).localKeystoreCheckedAndAbsent).toBe(false);
+        // No HTTP probe — env override short-circuited the resolution.
+        expect(spy).not.toHaveBeenCalled();
+      } finally {
+        await plugin.stop();
+      }
+    });
+
+    it('malformed keystore JSON triggers kind=unusable, NO peerId fallback, transient retry (T64)', async () => {
+      // T64 — File present but malformed (operator mid-write, JSON parse
+      // error, EACCES). The peerId fallback is UNSAFE — the daemon may
+      // already be using eth on this same host. Probe must NOT set the
+      // `localKeystoreCheckedAndAbsent` flag, so the resolver returns
+      // undefined (operator sees "not ready"), and the next probe retries.
+      fs.writeFileSync(path.join(tempHome, 'agent-keystore.json'), '{ this is not json');
+      const api = makeMockApi();
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        memory: { enabled: true },
+        channel: { enabled: false },
+      });
+      try {
+        plugin.register(api);
+        await (plugin as any).ensureNodeAgentAddress();
+        expect((plugin as any).nodeAgentAddress).toBeUndefined();
+        expect((plugin as any).localKeystoreCheckedAndAbsent).toBe(false);
+        const warnCalls = (api.logger.warn as any).mock.calls.map((c: any) => String(c[0]));
+        expect(warnCalls.some((m: string) => m.includes('keystore present but unusable'))).toBe(true);
+      } finally {
+        await plugin.stop();
+      }
+    });
+
+    it('keystore eth entry without authToken triggers kind=unusable (T64)', async () => {
+      // Eth key present but no authToken field — malformed entry. Same
+      // semantics as malformed JSON: NO peerId fallback, transient retry.
+      fs.writeFileSync(
+        path.join(tempHome, 'agent-keystore.json'),
+        JSON.stringify({ [ETH_PRIMARY_LC]: { privateKey: '0xpk' } }),
+      );
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        memory: { enabled: true },
+        channel: { enabled: false },
+      });
+      try {
+        plugin.register(makeMockApi());
+        await (plugin as any).ensureNodeAgentAddress();
+        expect((plugin as any).nodeAgentAddress).toBeUndefined();
+        expect((plugin as any).localKeystoreCheckedAndAbsent).toBe(false);
+      } finally {
+        await plugin.stop();
+      }
+    });
+
+    it('localKeystoreCheckedAndAbsent resets on each probe (T64/T66 — sticky-flag fix)', async () => {
+      // T64/T66 — After a first probe that sets the flag (legitimate
+      // keystore-absent state), a second probe that finds the keystore
+      // present but mid-write (malformed) MUST clear the flag back to
+      // false. Pre-fix the flag was sticky and the resolver kept routing
+      // to peerId even after the keystore appeared.
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        memory: { enabled: true },
+        channel: { enabled: false },
+      });
+      try {
+        plugin.register(makeMockApi());
+        // Probe 1 — empty tempHome → kind=absent → flag set.
+        await (plugin as any).ensureNodeAgentAddress();
+        expect((plugin as any).localKeystoreCheckedAndAbsent).toBe(true);
+        await new Promise((r) => setImmediate(r));
+
+        // Probe 2 — malformed JSON appears → kind=unusable → flag MUST
+        // reset to false (transient).
+        fs.writeFileSync(path.join(tempHome, 'agent-keystore.json'), '{ this is not json');
+        await (plugin as any).ensureNodeAgentAddress();
+        expect((plugin as any).localKeystoreCheckedAndAbsent).toBe(false);
+        await new Promise((r) => setImmediate(r));
+
+        // Probe 3 — valid keystore appears → flag stays false (real
+        // success path), nodeAgentAddress set from HTTP probe.
+        writeKeystore([ETH_PRIMARY_LC]);
+        stubAgentIdentity(plugin, ETH_PRIMARY);
+        await (plugin as any).ensureNodeAgentAddress();
+        expect((plugin as any).nodeAgentAddress).toBe(ETH_PRIMARY);
+        expect((plugin as any).localKeystoreCheckedAndAbsent).toBe(false);
+      } finally {
+        await plugin.stop();
+      }
+    });
+
+    it('HTTP probe failure leaves nodeAgentAddress undefined and localKeystoreCheckedAndAbsent false (T63)', async () => {
+      // T63 — A transient HTTP failure (daemon down, 401, 5xx) is NOT a
+      // signal that the keystore is missing. The probe must keep the
+      // door open for retry: nodeAgentAddress stays undefined AND
+      // localKeystoreCheckedAndAbsent stays false (so the resolver
+      // returns undefined → "backend not ready" surfaces, NOT the
+      // peerId fallback which is only correct when keystore is genuinely
+      // absent).
+      writeKeystore([ETH_PRIMARY_LC]);
+      const api = makeMockApi();
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://localhost:9200',
+        memory: { enabled: true },
+        channel: { enabled: false },
+      });
+      try {
+        plugin.register(api);
+        const failingSpy = vi.fn().mockResolvedValue({ ok: false, error: 'ECONNREFUSED' });
+        (plugin as any).client.getAgentIdentity = failingSpy;
+        await (plugin as any).ensureNodeAgentAddress();
+        expect((plugin as any).nodeAgentAddress).toBeUndefined();
+        expect((plugin as any).localKeystoreCheckedAndAbsent).toBe(false);
+        // Forwarded the agent token from the keystore (regression).
+        expect(failingSpy).toHaveBeenCalledWith({ authToken: `tok-${ETH_PRIMARY_LC}` });
+        // Operator-visible warn fired.
+        const warnCalls = (api.logger.warn as any).mock.calls.map((c: any) => String(c[0]));
+        expect(warnCalls.some((m: string) => m.includes('/api/agent/identity probe failed'))).toBe(true);
+      } finally {
+        await plugin.stop();
+      }
+    });
+
+    it('honors DKG_AGENT_ADDRESS even when daemonUrl is remote (T38)', async () => {
+      // T38 — Operator escape hatch: setting DKG_AGENT_ADDRESS lets
+      // remote-daemon deployments scope WM correctly without waiting
+      // for the daemon-side endpoint to ship.
+      process.env.DKG_AGENT_ADDRESS = ETH_PRIMARY;
+      const plugin = new DkgNodePlugin({
+        daemonUrl: 'http://daemon.example.com:9200',
+        memory: { enabled: true },
+        channel: { enabled: false },
+      });
+      try {
+        plugin.register(makeMockApi());
+        await (plugin as any).ensureNodeAgentAddress();
+        expect((plugin as any).nodeAgentAddress).toBe(ETH_PRIMARY);
+      } finally {
+        await plugin.stop();
+      }
+    });
+
+    it('T70 — when resolved <dkgHome>/auth.token is briefly missing, client does NOT silently fall back to ~/.dkg/auth.token', async () => {
+      // T70 corner case (caught in QA review): the resolver picks the live
+      // daemon's home (~/.dkg-dev), but its auth.token is briefly absent
+      // (operator deleted it during a token rotation, mid-write, fresh
+      // checkout where the daemon hasn't yet written the token, etc.).
+      // The OTHER home (~/.dkg) has a stale auth.token from a previous
+      // npm-side install. Without `dkgHome` plumbed through DkgClientOptions,
+      // the constructor's `?? loadTokenFromFile()` no-arg fallback would
+      // read the default ~/.dkg/auth.token and silently authenticate with
+      // the wrong identity → 401 on every authenticated daemon call.
+      delete process.env.DKG_HOME;
+
+      const isolatedHome = path.join(require('os').tmpdir(), `dkg-t70-fallback-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+      const dkg = path.join(isolatedHome, '.dkg');
+      const dkgDev = path.join(isolatedHome, '.dkg-dev');
+      fs.mkdirSync(dkg, { recursive: true });
+      fs.mkdirSync(dkgDev, { recursive: true });
+
+      const prevHome = process.env.HOME;
+      const prevUserProfile = process.env.USERPROFILE;
+      process.env.HOME = isolatedHome;
+      process.env.USERPROFILE = isolatedHome;
+
+      try {
+        // Stale npm-side token that MUST NOT bleed into the client.
+        fs.writeFileSync(path.join(dkg, 'auth.token'), 'STALE-NPM-TOKEN');
+        // Live monorepo daemon with no auth.token (briefly missing).
+        fs.writeFileSync(path.join(dkgDev, 'daemon.pid'), String(process.pid));
+        // (no auth.token in dkgDev — that's the corner case)
+
+        const plugin = new DkgNodePlugin({
+          daemonUrl: 'http://127.0.0.1:9200',
+          memory: { enabled: true },
+          channel: { enabled: false },
+        });
+        try {
+          plugin.register(makeMockApi());
+          // Resolver correctly picks the live monorepo dir.
+          expect((plugin as any).dkgHome).toBe(dkgDev);
+          // CRITICAL invariant — apiToken must be undefined (the resolved
+          // home's auth.token is absent). It must NOT silently pick up
+          // 'STALE-NPM-TOKEN' from the other home.
+          expect((plugin as any).client.apiToken).toBeUndefined();
+        } finally {
+          await plugin.stop();
+        }
+      } finally {
+        if (prevHome === undefined) delete process.env.HOME;
+        else process.env.HOME = prevHome;
+        if (prevUserProfile === undefined) delete process.env.USERPROFILE;
+        else process.env.USERPROFILE = prevUserProfile;
+        try { fs.rmSync(isolatedHome, { recursive: true, force: true }); } catch { /* best effort */ }
+      }
+    });
+
+    it('T70 — auto-resolves dkgHome to the live daemon dir when both ~/.dkg and ~/.dkg-dev exist (no env override)', async () => {
+      // T70 — User's monorepo↔npm switch scenario: both home dirs exist on
+      // disk, but only the monorepo daemon is currently alive. Adapter
+      // should pick ~/.dkg-dev automatically, with no openclaw.json edit
+      // and no DKG_HOME env override.
+      //
+      // Test redirects `homedir()` by overriding HOME / USERPROFILE to a
+      // tmp dir, then writes:
+      //   <tmp>/.dkg/daemon.pid       = 999999999      (stale, dead)
+      //   <tmp>/.dkg/api.port         = 9200           (stale)
+      //   <tmp>/.dkg/auth.token       = "wrong-token"  (npm-side stale)
+      //   <tmp>/.dkg-dev/daemon.pid   = process.pid    (alive)
+      //   <tmp>/.dkg-dev/api.port     = 9200           (live)
+      //   <tmp>/.dkg-dev/auth.token   = "right-token"  (monorepo-side live)
+      //   <tmp>/.dkg-dev/agent-keystore.json = { ETH_PRIMARY_LC: { authToken: 'tok-…' } }
+      //
+      // Expected: plugin's resolved dkgHome === <tmp>/.dkg-dev,
+      // its DkgDaemonClient.apiToken === "right-token", and the keystore
+      // probe forwards the dkg-dev keystore's authToken (not dkg's).
+
+      // Force resolveDkgHome out of the env-wins shortcut so it actually
+      // exercises the liveness signal path.
+      delete process.env.DKG_HOME;
+
+      // Redirect `homedir()` to a fresh tmp dir.
+      const isolatedHome = path.join(require('os').tmpdir(), `dkg-t70-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+      const dkg = path.join(isolatedHome, '.dkg');
+      const dkgDev = path.join(isolatedHome, '.dkg-dev');
+      fs.mkdirSync(dkg, { recursive: true });
+      fs.mkdirSync(dkgDev, { recursive: true });
+
+      const prevHome = process.env.HOME;
+      const prevUserProfile = process.env.USERPROFILE;
+      process.env.HOME = isolatedHome;
+      process.env.USERPROFILE = isolatedHome; // Windows
+
+      try {
+        // Stale npm-side state.
+        fs.writeFileSync(path.join(dkg, 'daemon.pid'), '999999999');
+        fs.writeFileSync(path.join(dkg, 'api.port'), '9200');
+        fs.writeFileSync(path.join(dkg, 'auth.token'), 'wrong-token-from-npm-side');
+
+        // Live monorepo-side state — same port (the user's exact scenario).
+        fs.writeFileSync(path.join(dkgDev, 'daemon.pid'), String(process.pid));
+        fs.writeFileSync(path.join(dkgDev, 'api.port'), '9200');
+        fs.writeFileSync(path.join(dkgDev, 'auth.token'), 'right-token-from-monorepo-side');
+        fs.writeFileSync(
+          path.join(dkgDev, 'agent-keystore.json'),
+          JSON.stringify({ [ETH_PRIMARY_LC]: { authToken: `tok-${ETH_PRIMARY_LC}` } }),
+        );
+
+        const plugin = new DkgNodePlugin({
+          daemonUrl: 'http://127.0.0.1:9200',
+          memory: { enabled: true },
+          channel: { enabled: false },
+          // No `dkgHome` override — we want the auto-resolver to fire.
+        });
+        try {
+          plugin.register(makeMockApi());
+
+          // (a) Plugin resolved to the live monorepo dir, not the stale npm one.
+          expect((plugin as any).dkgHome).toBe(dkgDev);
+
+          // (b) DkgDaemonClient picked up the live dir's auth.token (not the
+          //     stale wrong-token from ~/.dkg/auth.token).
+          expect((plugin as any).client.apiToken).toBe('right-token-from-monorepo-side');
+
+          // (c) HTTP probe forwards the keystore's agent token (the keystore
+          //     was only written into ~/.dkg-dev — if the resolver had picked
+          //     ~/.dkg, this would fail with 'absent').
+          const spy = vi.fn().mockResolvedValue({
+            ok: true,
+            identity: {
+              agentAddress: ETH_PRIMARY,
+              agentDid: `did:dkg:agent:${ETH_PRIMARY}`,
+              name: 'test-agent',
+              peerId: '12D3KooWDaemonPeerFromIdentity',
+              nodeIdentityId: '0',
+            },
+          });
+          (plugin as any).client.getAgentIdentity = spy;
+          await (plugin as any).ensureNodeAgentAddress();
+          expect((plugin as any).nodeAgentAddress).toBe(ETH_PRIMARY);
+          expect(spy).toHaveBeenCalledWith({ authToken: `tok-${ETH_PRIMARY_LC}` });
+        } finally {
+          await plugin.stop();
+        }
+      } finally {
+        if (prevHome === undefined) delete process.env.HOME;
+        else process.env.HOME = prevHome;
+        if (prevUserProfile === undefined) delete process.env.USERPROFILE;
+        else process.env.USERPROFILE = prevUserProfile;
+        try { fs.rmSync(isolatedHome, { recursive: true, force: true }); } catch { /* best effort */ }
       }
     });
   });
