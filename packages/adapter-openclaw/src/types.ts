@@ -401,6 +401,29 @@ export interface DkgOpenClawConfig {
    */
   dkgHome?: string;
 
+  /**
+   * Explicit adapter state directory for file-backed runtime state such as
+   * ChatTurnWriter watermarks. Setup writes a workspace-scoped default when
+   * it can discover the workspace. Runtime honors explicit user config after
+   * gateway/env state sources and before the current `api.workspaceDir`;
+   * setup-owned defaults are only a fallback for older gateways.
+   */
+  stateDir?: string;
+
+  /**
+   * Setup-owned provenance marker for `stateDir`. Setup writes this as
+   * `"setup-default"` only when it writes its workspace-scoped default;
+   * absent means a matching `stateDir` must be treated as user-owned.
+   */
+  stateDirSource?: 'setup-default';
+
+  /**
+   * Setup-owned metadata for the workspace that installed this adapter entry.
+   * Runtime combines it with `stateDirSource` to distinguish setup-written
+   * stateDir defaults from explicit user stateDir overrides.
+   */
+  installedWorkspace?: string;
+
   /** DKG memory integration config. */
   memory?: {
     enabled?: boolean;

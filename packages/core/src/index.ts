@@ -39,6 +39,10 @@ export {
 } from './errors.js';
 export {
   dkgHomeDir,
+  resolveDkgConfigHome,
+  dkgAuthTokenPath,
+  isDkgMonorepoRoot,
+  findDkgMonorepoRoot,
   resolveDkgHome,
   readDaemonPid,
   isProcessAlive,

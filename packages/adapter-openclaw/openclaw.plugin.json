@@ -13,6 +13,19 @@
         "default": "http://127.0.0.1:9200",
         "description": "DKG daemon HTTP URL"
       },
+      "stateDir": {
+        "type": "string",
+        "description": "Directory for adapter runtime state such as chat-turn watermarks. Setup writes a workspace-scoped default when available."
+      },
+      "stateDirSource": {
+        "type": "string",
+        "enum": ["setup-default"],
+        "description": "Internal setup metadata marking stateDir as the setup-written workspace default."
+      },
+      "installedWorkspace": {
+        "type": "string",
+        "description": "Internal setup metadata for the workspace that installed this adapter entry."
+      },
       "memory": {
         "type": "object",
         "properties": {

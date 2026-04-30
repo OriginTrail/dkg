@@ -7,13 +7,96 @@
 
 import { readFile } from 'node:fs/promises';
 import { readFileSync, existsSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 import { keccak_256 } from '@noble/hashes/sha3.js';
 
 /** Resolve the DKG home directory ($DKG_HOME or ~/.dkg). */
 export function dkgHomeDir(): string {
   return process.env.DKG_HOME ?? join(homedir(), '.dkg');
+}
+
+export interface ResolveDkgConfigHomeOptions {
+  /** Test/embedding override for the environment object. Defaults to process.env. */
+  env?: Pick<NodeJS.ProcessEnv, 'DKG_HOME'>;
+  /** Test/embedding override for the OS home directory. Defaults to homedir(). */
+  homeDir?: string;
+  /** Explicit monorepo signal. When omitted, the helper detects from its own package path. */
+  isDkgMonorepo?: boolean;
+  /** Optional start directory for monorepo detection. Defaults to this module's directory. */
+  startDir?: string;
+  /** Optional test override for whether `<home>/.dkg/config.json` exists. */
+  configExists?: boolean;
+}
+
+/**
+ * Resolve the DKG home used by config-writing flows such as `dkg init` and
+ * adapter setup.
+ *
+ * This intentionally differs from `resolveDkgHome({ daemonUrl })`: that helper
+ * observes daemon pid/port files for runtime adapter reads, while this helper
+ * mirrors the CLI setup contract:
+ *
+ *   1. `DKG_HOME` wins.
+ *   2. In a DKG monorepo checkout, if `~/.dkg/config.json` does not already
+ *      exist, use `~/.dkg-dev` so development state stays separate from a
+ *      globally installed CLI.
+ *   3. Otherwise use `~/.dkg`.
+ */
+export function resolveDkgConfigHome(opts: ResolveDkgConfigHomeOptions = {}): string {
+  const envHome = opts.env ? opts.env.DKG_HOME : process.env.DKG_HOME;
+  if (envHome) return envHome;
+
+  const home = opts.homeDir ?? homedir();
+  const defaultDir = join(home, '.dkg');
+  const configExists = opts.configExists ?? existsSync(join(defaultDir, 'config.json'));
+  const isMonorepo = opts.isDkgMonorepo ?? findDkgMonorepoRoot(opts.startDir) !== null;
+  if (isMonorepo && !configExists) return join(home, '.dkg-dev');
+  return defaultDir;
+}
+
+/** Resolve `<dkgHome>/auth.token` for an already-resolved DKG home. */
+export function dkgAuthTokenPath(dkgHome: string): string {
+  return join(dkgHome, 'auth.token');
+}
+
+/**
+ * Return true when `dir` is the DKG monorepo root.
+ *
+ * Combines structural markers (`pnpm-workspace.yaml`, `packages/`,
+ * `project.json`) with a DKG-specific sub-marker:
+ * `packages/cli/package.json` whose `name` is `@origintrail-official/dkg`.
+ * The structural markers can match an unrelated pnpm/Nx workspace; the
+ * canonical package name is reserved for us on npm and cannot be spoofed
+ * without colliding with our published package.
+ */
+export function isDkgMonorepoRoot(dir: string): boolean {
+  try {
+    if (!existsSync(join(dir, 'pnpm-workspace.yaml'))) return false;
+    if (!existsSync(join(dir, 'packages'))) return false;
+    if (!existsSync(join(dir, 'project.json'))) return false;
+
+    const cliPkgPath = join(dir, 'packages', 'cli', 'package.json');
+    if (!existsSync(cliPkgPath)) return false;
+    const cliPkg = JSON.parse(readFileSync(cliPkgPath, 'utf-8'));
+    return cliPkg?.name === '@origintrail-official/dkg';
+  } catch {
+    return false;
+  }
+}
+
+/** Find the nearest DKG monorepo root at or above `startDir`. */
+export function findDkgMonorepoRoot(
+  startDir = dirname(fileURLToPath(import.meta.url)),
+): string | null {
+  let dir = resolve(startDir);
+  while (true) {
+    if (isDkgMonorepoRoot(dir)) return dir;
+    const parent = dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
 }
 
 /**

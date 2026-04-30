@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { writeFile, unlink } from 'node:fs/promises';
 import { ethers } from 'ethers';
-import { requestFaucetFunding, toErrorMessage, hasErrorCode } from '@origintrail-official/dkg-core';
+import { dkgAuthTokenPath, requestFaucetFunding, toErrorMessage, hasErrorCode } from '@origintrail-official/dkg-core';
 import yaml from 'js-yaml';
 import {
   loadConfig, saveConfig, configExists, configPath,
@@ -378,7 +378,7 @@ program
     console.log(`  relay:      ${relayDisplay}`);
     console.log(`  context graphs: ${contextGraphs.length ? contextGraphs.join(', ') : '(none)'}`);
     console.log(`  apiPort:    ${config.apiPort}`);
-    console.log(`  auth:       ${enableAuth ? 'enabled (token in ~/.dkg/auth.token)' : 'disabled'}`);
+    console.log(`  auth:       ${enableAuth ? `enabled (token in ${dkgAuthTokenPath(dkgDir())})` : 'disabled'}`);
     {
       const resolved = resolveAutoUpdateConfig(config, network);
       console.log(

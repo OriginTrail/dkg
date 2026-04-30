@@ -1,8 +1,8 @@
 import { readFile, writeFile, mkdir, symlink, rename, unlink, readlink } from 'node:fs/promises';
 import { join, dirname, resolve, basename } from 'node:path';
-import { homedir } from 'node:os';
 import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { isDkgMonorepoRoot, resolveDkgConfigHome } from '@origintrail-official/dkg-core';
 
 export interface AutoUpdateConfig {
   enabled: boolean;
@@ -267,33 +267,6 @@ function isDkgPackageRoot(dir: string): boolean {
 }
 
 /**
- * Return true when `dir` is the DKG monorepo root.
- *
- * We combine two layers of evidence so this never matches an unrelated
- * consumer workspace (e.g. a pnpm/Nx repo that also happens to have a
- * root `project.json`):
- *
- *  1. Structural markers — `pnpm-workspace.yaml`, `packages/`, and
- *     `project.json` — which are required but not sufficient.
- *  2. A DKG-specific sub-marker — `packages/cli/package.json` whose
- *     `name` is exactly `@origintrail-official/dkg`. The package name
- *     is reserved for us on npm and cannot be spoofed by a consumer
- *     repo without colliding with our own published package.
- */
-function isDkgMonorepoRoot(dir: string): boolean {
-  try {
-    if (!existsSync(join(dir, 'pnpm-workspace.yaml'))) return false;
-    if (!existsSync(join(dir, 'packages'))) return false;
-    if (!existsSync(join(dir, 'project.json'))) return false;
-
-    const cliPkgPath = join(dir, 'packages', 'cli', 'package.json');
-    if (!existsSync(cliPkgPath)) return false;
-    const cliPkg = JSON.parse(readFileSync(cliPkgPath, 'utf-8'));
-    return cliPkg?.name === '@origintrail-official/dkg';
-  } catch { return false; }
-}
-
-/**
  * Resolve candidate directories where repo-root files (project.json,
  * network/*.json) may live, in priority order.
  *
@@ -442,12 +415,7 @@ export async function loadNetworkConfig(network?: string): Promise<NetworkConfig
 }
 
 export function dkgDir(): string {
-  if (process.env.DKG_HOME) return process.env.DKG_HOME;
-  const defaultDir = join(homedir(), '.dkg');
-  if (isDkgMonorepo() && !existsSync(join(defaultDir, 'config.json'))) {
-    return join(homedir(), '.dkg-dev');
-  }
-  return defaultDir;
+  return resolveDkgConfigHome({ isDkgMonorepo: isDkgMonorepo() });
 }
 
 let _isDkgMonorepo: boolean | null = null;
