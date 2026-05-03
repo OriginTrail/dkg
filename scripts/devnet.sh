@@ -945,6 +945,17 @@ cmd_start() {
         } catch (e) { console.log('Ask failed for node ' + (i+1) + ': ' + e.message); }
       }
       console.log('Staked 50k TRAC for ' + staked + '/' + coreCount + ' core node(s), ask set for ' + asked + '/' + coreCount);
+      // Defense-in-depth: a partial-stake bootstrap (probe failure +
+      // skip, or createConviction revert + skip) currently logs
+      // 'staked X/Y' and continues. Operators may miss the count
+      // mismatch and only notice when downstream publish/ACK smoke
+      // tests fail with much less obvious symptoms. Refuse to
+      // declare bootstrap successful unless every core node is
+      // staked. Codex follow-up to PR #368.
+      if (staked < coreCount) {
+        console.error('FATAL: only ' + staked + '/' + coreCount + ' core node(s) staked — refusing to declare devnet ready');
+        process.exit(1);
+      }
     })();
   " 2>&1 | while read -r line; do log "$line"; done
 

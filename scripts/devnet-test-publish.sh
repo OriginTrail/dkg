@@ -135,11 +135,19 @@ const path = require("path");
   const devnetDir = process.env.DEVNET_DIR;
   const hostingCount = Number(process.env.HOSTING_NODE_COUNT || "6");
   if (!devnetDir) throw new Error("DEVNET_DIR not set");
+  // Distinguish FILE-level failures (missing/malformed wallets.json —
+  // unexpected post-bootstrap, treat as fatal) from NO-IDENTITY (edge
+  // nodes have valid wallets.json but no on-chain identity by design,
+  // so this is silently expected). Without this split, a corrupt
+  // wallets.json on one core node would silently shrink the roster
+  // and let the smoke test pass against fewer hosting nodes than
+  // intended. Codex follow-up to PR #368.
   const ids = [];
+  const failures = [];
   for (let i = 1; i <= hostingCount; i++) {
     const walletsPath = path.join(devnetDir, "node" + i, "wallets.json");
     if (!fs.existsSync(walletsPath)) {
-      console.error("node " + i + ": missing " + walletsPath + " — skipping");
+      failures.push("node " + i + ": missing " + walletsPath);
       continue;
     }
     let opAddr;
@@ -147,17 +155,22 @@ const path = require("path");
       const w = JSON.parse(fs.readFileSync(walletsPath, "utf8"));
       const op0 = Array.isArray(w.wallets) ? w.wallets[0] : null;
       if (!op0 || !op0.privateKey) {
-        console.error("node " + i + ": wallets.json has no wallets[0].privateKey — skipping");
+        failures.push("node " + i + ": wallets.json has no wallets[0].privateKey");
         continue;
       }
       opAddr = new ethers.Wallet(op0.privateKey).address;
     } catch (e) {
-      console.error("node " + i + ": failed to parse wallets.json: " + (e?.message || e));
+      failures.push("node " + i + ": failed to parse wallets.json: " + (e?.message || e));
       continue;
     }
     const id = await identity.getIdentityId(opAddr);
     if (id > 0n) ids.push(id);
-    else console.error("node " + i + ": opWallet " + opAddr + " has no identity — skipping");
+    // No identity → edge node, by design (dkg-agent.ts skips
+    // ensureProfile for effectiveRole==='edge'). Silent skip is
+    // intentional here.
+  }
+  if (failures.length > 0) {
+    throw new Error("hosting-node discovery failures (refusing partial roster):\n  " + failures.join("\n  "));
   }
   if (ids.length === 0) {
     throw new Error("no hosting-node identities found — devnet identity registration may still be pending");
