@@ -11,6 +11,11 @@
     "type": "constructor"
   },
   {
+    "inputs": [],
+    "name": "AdminEqualsOperational",
+    "type": "error"
+  },
+  {
     "inputs": [
       {
         "internalType": "uint72",
