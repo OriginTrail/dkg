@@ -154,12 +154,12 @@
             "deployed": true
         },
         "Identity": {
-            "evmAddress": "0xA7177E7FD876b6fb8de339C7a0954E9380286B86",
+            "evmAddress": "0xF6c3d694980d2D09F5a562de9E155610c04E90D1",
             "version": "1.0.0",
-            "gitBranch": "v10-contracts-deploy",
-            "gitCommitHash": "76488ce26c8d24555cbbd98e9b77205931232e3f",
-            "deploymentBlock": 40764059,
-            "deploymentTimestamp": 1777296406574,
+            "gitBranch": "deploy/profile-identity-v1.1.0-base-sepolia",
+            "gitCommitHash": "37fc93a673ce79ce1eafaab55230e2d15bec758e",
+            "deploymentBlock": 41039876,
+            "deploymentTimestamp": 1777848041963,
             "deployed": true
         },
         "ShardingTable": {
@@ -217,12 +217,12 @@
             "deployed": true
         },
         "Profile": {
-            "evmAddress": "0x4Ad9B99C67EA644df509330AFbaF39822F20493A",
-            "version": "1.0.0",
-            "gitBranch": "v10-contracts-deploy",
-            "gitCommitHash": "76488ce26c8d24555cbbd98e9b77205931232e3f",
-            "deploymentBlock": 40764079,
-            "deploymentTimestamp": 1777296448577,
+            "evmAddress": "0x405B46a2124F6C861d4E6Be32C633d0a606a6813",
+            "version": "1.1.0",
+            "gitBranch": "deploy/profile-identity-v1.1.0-base-sepolia",
+            "gitCommitHash": "37fc93a673ce79ce1eafaab55230e2d15bec758e",
+            "deploymentBlock": 41039879,
+            "deploymentTimestamp": 1777848048200,
             "deployed": true
         },
         "KnowledgeCollection": {
