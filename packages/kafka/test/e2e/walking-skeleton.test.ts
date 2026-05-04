@@ -53,28 +53,37 @@ async function waitForEndpointRow(
   contextGraphId: string,
   uri: string,
 ): Promise<Record<string, string>> {
+  // Endpoint triples land in a named graph (one per CG), so the WHERE
+  // pattern must be wrapped in GRAPH ?g. Default-graph patterns return
+  // empty bindings against this store — see daemon/routes/query.ts.
   const sparql = `
     PREFIX dcat: <http://www.w3.org/ns/dcat#>
     PREFIX dct: <http://purl.org/dc/terms/>
     PREFIX dkg: <https://ontology.dkg.io/dkg#>
     SELECT ?broker ?topic ?messageFormat ?publisher ?endpointUrl ?issued
     WHERE {
-      BIND(<${uri}> AS ?endpoint)
-      ?endpoint a dkg:KafkaTopicEndpoint, dcat:DataService ;
-        dkg:broker ?broker ;
-        dkg:topic ?topic ;
-        dkg:messageFormat ?messageFormat ;
-        dct:publisher ?publisher ;
-        dct:issued ?issued ;
-        dcat:endpointURL ?endpointUrl .
+      GRAPH ?g {
+        BIND(<${uri}> AS ?endpoint)
+        ?endpoint a dkg:KafkaTopicEndpoint, dcat:DataService ;
+          dkg:broker ?broker ;
+          dkg:topic ?topic ;
+          dkg:messageFormat ?messageFormat ;
+          dct:publisher ?publisher ;
+          dct:issued ?issued ;
+          dcat:endpointURL ?endpointUrl .
+      }
     }
   `;
 
   const deadline = Date.now() + 20_000;
   while (Date.now() < deadline) {
     const response = await client.query(sparql, contextGraphId);
-    if (response.result.type === 'bindings' && response.result.bindings.length > 0) {
-      return response.result.bindings[0]!;
+    // Daemon's /api/query response is { result: { bindings: [...] } } — the
+    // optional `type` discriminator on QueryResult is only set on a couple
+    // of legacy paths and is absent here, so we key off `bindings` directly.
+    const bindings = (response.result as { bindings?: Array<Record<string, string>> }).bindings;
+    if (Array.isArray(bindings) && bindings.length > 0) {
+      return bindings[0]!;
     }
     await new Promise((resolve) => setTimeout(resolve, 1_000));
   }
