@@ -220,6 +220,7 @@ export async function handleKafkaRoutes(ctx: RequestContext): Promise<void> {
               probe: {
                 status: probeResult.status,
                 probedAt: probeResult.probedAt,
+                ...(probeResult.error ? { error: probeResult.error } : {}),
               },
             }
           : {}),
@@ -232,16 +233,16 @@ export async function handleKafkaRoutes(ctx: RequestContext): Promise<void> {
         // Surface the probe outcome (sans credentials) so the CLI / API client
         // can render a meaningful failure. The `verificationStatus` reflects
         // what would have been written had the caller passed `force=true`.
+        // The probe error string is part of the typed outcome — already
+        // classified to a kafkajs class name, never carries credential
+        // substrings.
         return jsonResponse(res, 422, {
           error: err.message,
           probe: {
             status: err.outcome.status,
             probedAt: err.outcome.probedAt,
           },
-          // Surface the safe error string from the underlying probe call so
-          // the CLI can render it in the UX. Already classified to a type
-          // name, never carries a credential substring.
-          probeError: probeResult?.error,
+          ...(err.outcome.error ? { probeError: err.outcome.error } : {}),
         });
       }
       throw err;

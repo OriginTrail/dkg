@@ -30,6 +30,13 @@ export interface KafkaEndpointProbeOutcome {
   status: 'verified' | 'failed' | 'unreachable';
   /** ISO-8601 timestamp recorded at probe completion. */
   probedAt: string;
+  /**
+   * Sanitized error description from the underlying probe (already classified
+   * to a stable kafkajs error class name — never carries credential
+   * substrings). Present on `failed` / `unreachable` outcomes; absent on
+   * `verified`.
+   */
+  error?: string;
 }
 
 export interface RegisterKafkaEndpointInput {
