@@ -4164,11 +4164,76 @@ export class DKGAgent {
         );
       }
       effectiveParticipantIdentityIds = [selfIdentityId];
+      // Silent fallback to [self] is preserved for backwards-compatible solo
+      // dev/test flows, but operators on production chains hit this path by
+      // accident and end up with a CG that's permanently broken (every publish
+      // reverts with MinSignaturesRequirementNotMet because the global quorum
+      // floor exceeds 1). Surface the fallback explicitly so log scraping
+      // catches it, and let the global-quorum pre-flight below decide whether
+      // to refuse outright.
+      this.log.warn(
+        ctx,
+        `Context graph "${id}" has no recorded participant identity IDs in local _meta — ` +
+        `falling back to [self=${selfIdentityId}] for on-chain registration. ` +
+        `If you intended a multi-host CG, recreate it with explicit participants ` +
+        `before registering (existing on-chain registration will not be reused).`,
+      );
     }
 
     const effectiveRequiredSignatures = Number.isInteger(storedRequiredSignatures) && storedRequiredSignatures > 0
       ? storedRequiredSignatures
       : 1;
+
+    // Global-quorum pre-flight. ContextGraphStorage.createContextGraph itself
+    // only enforces `requiredSignatures <= hostingNodes.length` — it does NOT
+    // check the global ParametersStorage.minimumRequiredSignatures floor. That
+    // check happens later, inside KnowledgeAssetsV10.publishDirect. The
+    // result: a CG can be successfully created on-chain with hostingNodes=1
+    // and requiredSignatures=1, after which every publish reverts with
+    // `MinSignaturesRequirementNotMet(globalMin, hostingNodes.length)`.
+    //
+    // Refuse here when the chain adapter exposes the floor and the proposed
+    // CG configuration cannot satisfy it. Skip when the adapter does not
+    // implement `getMinimumRequiredSignatures` (mock/legacy adapters): the
+    // existing on-chain create call is still subject to its own constraints,
+    // and we don't want to regress test fixtures that use a permissive mock.
+    if (typeof this.chain.getMinimumRequiredSignatures === 'function') {
+      let globalMin: number;
+      try {
+        globalMin = await this.chain.getMinimumRequiredSignatures();
+      } catch (err) {
+        this.log.warn(
+          ctx,
+          `Could not read minimumRequiredSignatures from ParametersStorage while ` +
+          `validating registration of "${id}": ${(err as Error).message}. ` +
+          `Proceeding without global-quorum pre-flight.`,
+        );
+        globalMin = 0;
+      }
+      if (globalMin > 0) {
+        if (effectiveParticipantIdentityIds.length < globalMin) {
+          throw new Error(
+            `Context graph "${id}" cannot be registered on-chain: it has ` +
+            `${effectiveParticipantIdentityIds.length} hosting node` +
+            `${effectiveParticipantIdentityIds.length === 1 ? '' : 's'} ` +
+            `but the global minimum quorum (ParametersStorage.minimumRequiredSignatures) ` +
+            `is ${globalMin}. Recreate the CG with at least ${globalMin} hosting nodes — ` +
+            `otherwise every publish would revert with MinSignaturesRequirementNotMet(` +
+            `${globalMin}, ${effectiveParticipantIdentityIds.length}).`,
+          );
+        }
+        if (effectiveRequiredSignatures < globalMin) {
+          throw new Error(
+            `Context graph "${id}" cannot be registered on-chain: requiredSignatures=` +
+            `${effectiveRequiredSignatures} is below the global minimum quorum of ${globalMin}. ` +
+            `Recreate the CG with --required-signatures ${globalMin} (or higher) before registering — ` +
+            `otherwise every publish would revert with MinSignaturesRequirementNotMet(` +
+            `${globalMin}, ${effectiveRequiredSignatures}).`,
+          );
+        }
+      }
+    }
+
     const participantAgents = await this.getContextGraphParticipantAgentAddresses(id);
     if (participantAgents.length > MAX_CONTEXT_GRAPH_PARTICIPANT_AGENTS) {
       throw new Error(
