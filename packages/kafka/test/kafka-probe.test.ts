@@ -116,7 +116,7 @@ describe('probe — auth-mode wiring', () => {
     expect(captured.last!.config.sasl).toBeDefined();
   });
 
-  it('SSL (mTLS): cert + key required, no sasl', async () => {
+  it('SSL (mTLS): cert + key flow into kafkajs config alongside CA', async () => {
     const { probe } = await importProbe();
     await probe({
       brokers: ['localhost:9092'],
@@ -135,16 +135,30 @@ describe('probe — auth-mode wiring', () => {
     expect(captured.last!.config.sasl).toBeUndefined();
   });
 
-  it('SSL without cert+key throws — mTLS material is required', async () => {
+  it('SSL (one-way TLS): CA-only succeeds; the kafkajs config carries the CA bundle and rejectUnauthorized', async () => {
+    // Real-world SSL deployments are commonly server-cert-only (CA in the
+    // trust store, no client cert/key). The probe must NOT force mTLS.
     const { probe } = await importProbe();
-    await expect(
-      probe({
-        brokers: ['localhost:9092'],
-        topic: 'orders',
-        securityProtocol: 'SSL',
-        ssl: { caPem: '-----BEGIN CERTIFICATE-----\nCA\n-----END CERTIFICATE-----' },
-      }),
-    ).rejects.toThrow(/mTLS/);
+    const result = await probe({
+      brokers: ['localhost:9092'],
+      topic: 'orders',
+      securityProtocol: 'SSL',
+      ssl: { caPem: '-----BEGIN CERTIFICATE-----\nCA\n-----END CERTIFICATE-----' },
+    });
+    expect(result.status).toBe('verified');
+    const ssl = captured.last!.config.ssl as {
+      ca?: string[];
+      cert?: string;
+      key?: string;
+      rejectUnauthorized?: boolean;
+    };
+    expect(ssl.rejectUnauthorized).toBe(true);
+    expect(ssl.ca).toEqual([
+      '-----BEGIN CERTIFICATE-----\nCA\n-----END CERTIFICATE-----',
+    ]);
+    expect(ssl.cert).toBeUndefined();
+    expect(ssl.key).toBeUndefined();
+    expect(captured.last!.config.sasl).toBeUndefined();
   });
 
   it('SASL_PLAINTEXT without sasl creds throws', async () => {
@@ -562,17 +576,28 @@ describe('probe — error classification branches', () => {
 });
 
 describe('probe — SSL material defaults', () => {
-  it('SSL with no `ssl` block at all → falls back to {}, fails the mTLS guard', async () => {
-    // Exercises the `ssl ?? {}` path in `buildSsl`. The test asserts the
-    // mTLS guard still fires (cert+key are required) and that the error
-    // message is the stable, credential-free string.
+  it('SSL with no `ssl` block at all → falls back to {} and emits a TLS-only kafkajs config (rejectUnauthorized=true, no ca/cert/key)', async () => {
+    // Exercises the `ssl ?? {}` path in `buildSsl`. With no caller-supplied
+    // PEMs the probe still wires a TLS block — validation falls back to the
+    // host trust store (kafkajs default). This is a one-way-TLS handshake,
+    // not an mTLS handshake; brokers requiring mTLS will reject during the
+    // handshake and the failure surfaces as a structured probe outcome.
     const { probe } = await importProbe();
-    await expect(
-      probe({
-        brokers: ['localhost:9092'],
-        topic: 'orders',
-        securityProtocol: 'SSL',
-      }),
-    ).rejects.toThrow(/SSL mTLS requires both client cert and key/);
+    const result = await probe({
+      brokers: ['localhost:9092'],
+      topic: 'orders',
+      securityProtocol: 'SSL',
+    });
+    expect(result.status).toBe('verified');
+    const ssl = captured.last!.config.ssl as {
+      ca?: string[];
+      cert?: string;
+      key?: string;
+      rejectUnauthorized?: boolean;
+    };
+    expect(ssl.rejectUnauthorized).toBe(true);
+    expect(ssl.ca).toBeUndefined();
+    expect(ssl.cert).toBeUndefined();
+    expect(ssl.key).toBeUndefined();
   });
 });

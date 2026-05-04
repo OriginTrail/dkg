@@ -35,13 +35,19 @@ export type SecurityProtocol =
 /**
  * TLS material for SSL/SASL_SSL broker connections. PEMs accepted inline or
  * via filesystem paths (escape hatch).
+ *
+ * All fields are optional. Both one-way TLS (server cert validated against
+ * the host trust store, no client cert) and mTLS (client cert + key supplied)
+ * are supported. SASL_SSL behaves the same way: TLS to the broker is
+ * server-side only by default, and a client cert/key may be supplied if the
+ * broker also requires mutual auth.
  */
 export interface KafkaSslMaterial {
   /** PEM string (CA bundle). Preferred. */
   caPem?: string;
-  /** PEM string (mTLS client cert). Required for SSL mTLS. */
+  /** PEM string (mTLS client cert). Optional — only needed for mTLS. */
   certPem?: string;
-  /** PEM string (mTLS client key). Required for SSL mTLS. */
+  /** PEM string (mTLS client key). Optional — only needed for mTLS. */
   keyPem?: string;
   /**
    * Filesystem-path escape hatch. The daemon host must have the PEMs
@@ -66,6 +72,11 @@ export interface KafkaSaslCredentials {
 /**
  * Inputs to a one-shot Kafka admin probe. Credentials are passed once to
  * kafkajs and never returned, logged, or stored.
+ *
+ * For `SSL` and `SASL_SSL`, the `ssl` block may carry just a CA bundle
+ * (one-way TLS) or a CA bundle plus client cert + key (mTLS); both are
+ * supported. The probe does not enforce mTLS — supply cert + key only when
+ * the broker actually requires it.
  */
 export interface KafkaProbeOptions {
   brokers: string[];
@@ -110,7 +121,6 @@ const DEFAULT_CLIENT_ID = 'dkg-kafka-probe';
  *
  * Throws ONLY on ill-formed input options:
  *   - `securityProtocol` requires SASL but `opts.sasl` is missing,
- *   - `securityProtocol === 'SSL'` but no client cert/key was supplied,
  *   - a PEM filesystem path is unreadable,
  *   - `securityProtocol` is not one of the four supported values.
  *
@@ -225,9 +235,9 @@ async function buildKafkaConfig(opts: KafkaProbeOptions): Promise<KafkaConfig> {
     case 'SASL_PLAINTEXT':
       return { ...base, ssl: false, sasl: requireSasl(opts) };
     case 'SASL_SSL':
-      return { ...base, ssl: await buildSsl(opts.ssl, false), sasl: requireSasl(opts) };
+      return { ...base, ssl: await buildSsl(opts.ssl), sasl: requireSasl(opts) };
     case 'SSL':
-      return { ...base, ssl: await buildSsl(opts.ssl, true) };
+      return { ...base, ssl: await buildSsl(opts.ssl) };
     default: {
       const exhaustive: never = opts.securityProtocol;
       throw new Error(`Unsupported securityProtocol: ${String(exhaustive)}`);
@@ -254,18 +264,19 @@ interface SslConnectionOptions {
   key?: string;
 }
 
+// SSL/SASL_SSL TLS material is fully optional. Pass-through whatever the
+// caller supplied: a CA-only block produces a one-way-TLS config (server cert
+// validated against the bundle, no client cert), and a CA + cert + key block
+// produces an mTLS config. Brokers that demand mTLS will reject the handshake
+// without the cert/key — that failure surfaces as a structured probe outcome,
+// not a thrown exception, so callers can react uniformly.
 async function buildSsl(
   ssl: KafkaSslMaterial | undefined,
-  requireMtls: boolean,
 ): Promise<SslConnectionOptions> {
   const material = ssl ?? {};
   const ca = await loadOptionalPem(material.caPem, material.caPath);
   const cert = await loadOptionalPem(material.certPem, material.certPath);
   const key = await loadOptionalPem(material.keyPem, material.keyPath);
-
-  if (requireMtls && (!cert || !key)) {
-    throw new Error('SSL mTLS requires both client cert and key (inline or via path)');
-  }
 
   const tlsOpts: SslConnectionOptions = {
     rejectUnauthorized: material.rejectUnauthorized ?? true,
