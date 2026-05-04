@@ -101,10 +101,36 @@ ensure_built() {
 
 start_hardhat() {
   local pidfile="$DEVNET_DIR/hardhat.pid"
+  local marker="$DEVNET_DIR/hardhat/deployed"
+  local artifacts_dir="$REPO_ROOT/packages/evm-module/artifacts/contracts"
 
   if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
-    log "Hardhat node already running (PID $(cat "$pidfile"))"
-    return 0
+    # Stale-bytecode guard. When contracts are recompiled while hardhat
+    # keeps running, the on-chain bytecode lags the artifacts on disk.
+    # The next `devnet start` short-circuits hardhat reuse here, then
+    # `deploy_contracts` skips on the still-present marker, so daemons
+    # connect to addresses whose code is older than the source. View
+    # methods added since the live deploy revert with "function selector
+    # not recognized" (e.g. CSS.getNodeStakeV10 in the staking loop).
+    # Detect the mismatch by comparing artifact mtimes to the marker;
+    # if any artifact is newer, kill hardhat so the fresh-start path
+    # below clears the marker + deployments and `deploy_contracts`
+    # re-deploys onto a fresh chain.
+    if [ -f "$marker" ] && [ -d "$artifacts_dir" ] \
+        && [ -n "$(find "$artifacts_dir" -name '*.json' -newer "$marker" -print -quit 2>/dev/null)" ]; then
+      local stale_pid
+      stale_pid=$(cat "$pidfile")
+      log "Hardhat (PID $stale_pid) holds outdated contracts (artifacts newer than deploy marker) — restarting for fresh deploy"
+      kill "$stale_pid" 2>/dev/null || true
+      for _ in 1 2 3 4 5; do
+        kill -0 "$stale_pid" 2>/dev/null || break
+        sleep 1
+      done
+      rm -f "$pidfile"
+    else
+      log "Hardhat node already running (PID $(cat "$pidfile"))"
+      return 0
+    fi
   fi
 
   log "Starting Hardhat node on port $HARDHAT_PORT..."
