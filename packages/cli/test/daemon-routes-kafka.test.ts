@@ -187,4 +187,21 @@ describe('Kafka route adapter — privacy envelope', () => {
 
     expect(getResult().status).toBe(400);
   });
+
+  it('returns 400 when "private" is a non-boolean value (e.g. string "false")', async () => {
+    // The route enforces a strict boolean for `private` to keep the privacy
+    // contract unambiguous. Truthy/falsy coercion would create an unsafe
+    // ambiguity at a privacy boundary.
+    const req = makeFakeRequest({ ...VALID_BASE_BODY, private: 'false' });
+    const { res, getResult } = makeFakeResponse();
+    const { ctx, publishCalls } = makeContext(req, res);
+
+    await handleKafkaRoutes(ctx);
+
+    const { status, body } = getResult();
+    expect(status).toBe(400);
+    expect((body as Record<string, unknown>).error).toMatch(/"private" must be a boolean/);
+    // No publish should have happened
+    expect(publishCalls).toHaveLength(0);
+  });
 });

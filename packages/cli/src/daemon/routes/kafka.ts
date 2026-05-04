@@ -49,9 +49,21 @@ export async function handleKafkaRoutes(ctx: RequestContext): Promise<void> {
       return jsonResponse(res, 400, { error: '"messageFormat" must be a non-empty string' });
     }
 
+    // Privacy boundary: enforce a strict boolean to keep the contract
+    // unambiguous. Mirrors the strict typing applied above to
+    // broker/topic/messageFormat — string "false", numbers, etc. are
+    // rejected rather than silently coerced.
+    if (privateField !== undefined && typeof privateField !== 'boolean') {
+      return jsonResponse(res, 400, { error: '"private" must be a boolean' });
+    }
+
     // Default to private: true. Callers opt into a public KA by sending
-    // `private: false` in the request body. The envelope choice lives here
-    // in the adapter — the kafka package's publisher receives the bare KA.
+    // `private: false` in the request body. The `!== false` predicate is
+    // intentional: only the literal boolean `false` flips to public; any
+    // other accepted value (omitted/undefined, after the type-check above)
+    // resolves to private. This is the safe failure mode for a
+    // privacy-sensitive boundary — a future "tightening" to `=== true`
+    // would silently break the omitted-defaults-to-private semantic.
     const isPrivate = privateField !== false;
 
     const publisher: KafkaEndpointPublisher = {
