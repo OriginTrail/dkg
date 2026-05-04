@@ -1,4 +1,4 @@
-import { beforeAll, afterAll, describe, expect, it } from 'vitest';
+import { beforeAll, afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { createServer } from 'node:http';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -12,12 +12,17 @@ const execFileAsync = promisify(execFile);
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CLI_ENTRY = join(__dirname, '..', 'dist', 'cli.js');
 
+interface CapturedRequest {
+  url: string;
+  body: string;
+  authHeader: string;
+}
+
 describe.sequential('kafka CLI smoke', () => {
   let dkgHome: string;
   let server: ReturnType<typeof createServer>;
   let smokeApiPort: string;
-  let lastBody = '';
-  let lastAuthHeader = '';
+  let last: CapturedRequest = { url: '', body: '', authHeader: '' };
 
   beforeAll(async () => {
     dkgHome = await mkdtemp(join(tmpdir(), 'dkg-kafka-cli-'));
@@ -31,17 +36,19 @@ describe.sequential('kafka CLI smoke', () => {
     await writeFile(join(dkgHome, 'auth.token'), 'smoke-token\n');
 
     server = createServer(async (req, res) => {
-      if (req.method === 'POST' && req.url === '/api/kafka/endpoint') {
-        lastAuthHeader = String(req.headers.authorization ?? '');
+      if (req.method === 'POST' && (req.url ?? '').startsWith('/api/kafka/endpoint')) {
+        const authHeader = String(req.headers.authorization ?? '');
         const chunks: Buffer[] = [];
         for await (const chunk of req) {
           chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
         }
-        lastBody = Buffer.concat(chunks).toString('utf8');
+        const body = Buffer.concat(chunks).toString('utf8');
+        last = { url: req.url ?? '', body, authHeader };
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
           uri: 'urn:dkg:kafka-endpoint:0xabc:hash',
           contextGraphId: 'devnet-test',
+          verificationStatus: 'unattempted',
         }));
         return;
       }
@@ -60,12 +67,16 @@ describe.sequential('kafka CLI smoke', () => {
     });
   });
 
+  beforeEach(() => {
+    last = { url: '', body: '', authHeader: '' };
+  });
+
   afterAll(async () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     await rm(dkgHome, { recursive: true, force: true });
   });
 
-  it('registers a Kafka endpoint through the CLI', async () => {
+  it('registers a Kafka endpoint through the CLI (no creds)', async () => {
     const env = { ...process.env, DKG_HOME: dkgHome, DKG_API_PORT: smokeApiPort };
 
     const result = await execFileAsync('node', [
@@ -84,12 +95,95 @@ describe.sequential('kafka CLI smoke', () => {
     expect(result.stdout).toContain('Kafka endpoint registered:');
     expect(result.stdout).toContain('urn:dkg:kafka-endpoint:0xabc:hash');
     expect(result.stdout).toContain('devnet-test');
-    expect(lastAuthHeader).toBe('Bearer smoke-token');
-    expect(JSON.parse(lastBody)).toEqual({
+    expect(last.authHeader).toBe('Bearer smoke-token');
+    expect(last.url).toBe('/api/kafka/endpoint');
+    expect(JSON.parse(last.body)).toEqual({
       contextGraphId: 'devnet-test',
       broker: 'kafka.example.com:9092',
       topic: 'orders.created',
       messageFormat: 'application/json',
     });
+  }, 15000);
+
+  it('passes --username/--password into the request body', async () => {
+    const env = { ...process.env, DKG_HOME: dkgHome, DKG_API_PORT: smokeApiPort };
+
+    await execFileAsync('node', [
+      CLI_ENTRY,
+      'kafka',
+      'endpoint',
+      'register',
+      '--cg',
+      'devnet-test',
+      '--broker',
+      'kafka.example.com:9092',
+      '--topic',
+      'orders.created',
+      '--security-protocol',
+      'SASL_PLAINTEXT',
+      '--username',
+      'alice',
+      '--password',
+      'cli-secret-XYZ',
+    ], { env });
+
+    const body = JSON.parse(last.body);
+    expect(body.securityProtocol).toBe('SASL_PLAINTEXT');
+    expect(body.sasl).toEqual({ mechanism: 'plain', username: 'alice', password: 'cli-secret-XYZ' });
+  }, 15000);
+
+  it('reads --ca-pem-path and ships the contents in body.ssl.ca', async () => {
+    const env = { ...process.env, DKG_HOME: dkgHome, DKG_API_PORT: smokeApiPort };
+    const caPath = join(dkgHome, 'ca-from-cli.pem');
+    await writeFile(caPath, '-----BEGIN CERTIFICATE-----\nCLI-FILE-CA\n-----END CERTIFICATE-----');
+
+    await execFileAsync('node', [
+      CLI_ENTRY,
+      'kafka',
+      'endpoint',
+      'register',
+      '--cg',
+      'devnet-test',
+      '--broker',
+      'kafka.example.com:9093',
+      '--topic',
+      'orders.created',
+      '--security-protocol',
+      'SASL_SSL',
+      '--username',
+      'alice',
+      '--password',
+      'pw',
+      '--ca-pem-path',
+      caPath,
+    ], { env });
+
+    const body = JSON.parse(last.body);
+    expect(body.ssl.ca).toContain('CLI-FILE-CA');
+  }, 15000);
+
+  it('passes --force as a ?force=true query param', async () => {
+    const env = { ...process.env, DKG_HOME: dkgHome, DKG_API_PORT: smokeApiPort };
+
+    await execFileAsync('node', [
+      CLI_ENTRY,
+      'kafka',
+      'endpoint',
+      'register',
+      '--cg',
+      'devnet-test',
+      '--broker',
+      'kafka.example.com:9092',
+      '--topic',
+      'orders.created',
+      '--security-protocol',
+      'PLAINTEXT',
+      '--force',
+    ], { env });
+
+    expect(last.url).toBe('/api/kafka/endpoint?force=true');
+    const body = JSON.parse(last.body);
+    expect(body.force).toBeUndefined();
+    expect(body.securityProtocol).toBe('PLAINTEXT');
   }, 15000);
 });

@@ -7,7 +7,7 @@ import { spawn, execSync } from 'node:child_process';
 import { createReadStream } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
-import { writeFile, unlink } from 'node:fs/promises';
+import { readFile, writeFile, unlink } from 'node:fs/promises';
 import { ethers } from 'ethers';
 import { dkgAuthTokenPath, requestFaucetFunding, toErrorMessage, hasErrorCode } from '@origintrail-official/dkg-core';
 import yaml from 'js-yaml';
@@ -1732,18 +1732,55 @@ kafkaEndpointCmd
   .requiredOption('--broker <host:port>', 'Kafka broker host:port')
   .requiredOption('--topic <name>', 'Kafka topic name')
   .option('--format <mime>', 'Kafka message format MIME type', 'application/json')
+  // ── opportunistic verification flags (slice 04) ─────────────────────
+  // Without `--security-protocol` no probe runs and the KA records
+  // `verificationStatus: "unattempted"`. With it, the daemon attempts a
+  // one-shot probe and rejects the registration on failure unless
+  // `--force` is passed.
+  .option('--security-protocol <proto>', 'PLAINTEXT | SASL_PLAINTEXT | SASL_SSL | SSL')
+  .option('--username <user>', 'SASL username (SASL_PLAINTEXT or SASL_SSL)')
+  .option('--password <pass>', 'SASL password (SASL_PLAINTEXT or SASL_SSL)')
+  .option('--ca-pem-path <path>', 'Filesystem path to a CA PEM bundle (SASL_SSL or SSL)')
+  .option('--cert-pem-path <path>', 'Filesystem path to an mTLS client cert PEM (SSL)')
+  .option('--key-pem-path <path>', 'Filesystem path to an mTLS client key PEM (SSL)')
+  .option('--force', 'Register the KA even if the broker probe fails (verificationStatus="failed")')
   .action(async (opts: ActionOpts) => {
     try {
+      // Resolve filesystem PEMs at the CLI layer so the request body carries
+      // inline PEM strings — the daemon's "filesystem path" mode is a
+      // separate escape hatch for callers that prefer the daemon to read
+      // them, but the CLI prefers explicit transport.
+      const ssl: Record<string, string> = {};
+      if (opts.caPemPath) ssl.ca = await readFile(String(opts.caPemPath), 'utf8');
+      if (opts.certPemPath) ssl.cert = await readFile(String(opts.certPemPath), 'utf8');
+      if (opts.keyPemPath) ssl.key = await readFile(String(opts.keyPemPath), 'utf8');
+
       const client = await ApiClient.connect();
+      const securityProtocol = opts.securityProtocol
+        ? (String(opts.securityProtocol).toUpperCase() as
+            'PLAINTEXT' | 'SASL_PLAINTEXT' | 'SASL_SSL' | 'SSL')
+        : undefined;
       const result = await client.registerKafkaEndpoint({
         contextGraphId: opts.cg,
         broker: opts.broker,
         topic: opts.topic,
         messageFormat: opts.format,
+        ...(securityProtocol ? { securityProtocol } : {}),
+        ...(opts.username && opts.password
+          ? { sasl: { mechanism: 'plain' as const, username: String(opts.username), password: String(opts.password) } }
+          : {}),
+        ...(Object.keys(ssl).length > 0 ? { ssl } : {}),
+        ...(opts.force ? { force: true } : {}),
       });
       console.log('Kafka endpoint registered:');
-      console.log(`  URI:            ${result.uri}`);
-      console.log(`  Context graph:  ${result.contextGraphId}`);
+      console.log(`  URI:                  ${result.uri}`);
+      console.log(`  Context graph:        ${result.contextGraphId}`);
+      if ((result as any).verificationStatus) {
+        console.log(`  Verification status:  ${(result as any).verificationStatus}`);
+      }
+      if ((result as any).verifiedAt) {
+        console.log(`  Verified at:          ${(result as any).verifiedAt}`);
+      }
     } catch (err) {
       console.error(toErrorMessage(err));
       process.exit(1);

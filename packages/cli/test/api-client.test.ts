@@ -194,13 +194,14 @@ describe('ApiClient', () => {
       expect(body.name).toBe('incident');
     });
 
-    it('registerKafkaEndpoint() posts the endpoint payload', async () => {
+    it('registerKafkaEndpoint() posts the endpoint payload (no creds → no force)', async () => {
       const { fetch, calls } = createTrackingFetch({
         ok: true,
         status: 200,
         body: {
           uri: 'urn:dkg:kafka-endpoint:0xabc:hash',
           contextGraphId: 'devnet-test',
+          verificationStatus: 'unattempted',
         },
       });
       globalThis.fetch = fetch;
@@ -220,6 +221,77 @@ describe('ApiClient', () => {
         topic: 'orders.created',
         messageFormat: 'application/json',
       });
+    });
+
+    it('registerKafkaEndpoint() carries SASL_PLAINTEXT credentials in the request body', async () => {
+      const { fetch, calls } = createTrackingFetch({
+        ok: true,
+        status: 200,
+        body: { uri: 'urn:dkg:kafka-endpoint:0xabc:hash', contextGraphId: 'cg', verificationStatus: 'verified' },
+      });
+      globalThis.fetch = fetch;
+
+      await client.registerKafkaEndpoint({
+        contextGraphId: 'cg',
+        broker: 'kafka.example.com:9092',
+        topic: 'orders.created',
+        messageFormat: 'application/json',
+        securityProtocol: 'SASL_PLAINTEXT',
+        sasl: { mechanism: 'plain', username: 'alice', password: 'creds-MARKER-123' },
+      });
+
+      const body = JSON.parse(calls[0].opts.body as string);
+      expect(body.securityProtocol).toBe('SASL_PLAINTEXT');
+      expect(body.sasl).toEqual({ mechanism: 'plain', username: 'alice', password: 'creds-MARKER-123' });
+    });
+
+    it('registerKafkaEndpoint() sends ?force=true as a query param when force is set', async () => {
+      const { fetch, calls } = createTrackingFetch({
+        ok: true,
+        status: 200,
+        body: { uri: 'urn:dkg:kafka-endpoint:0xabc:hash', contextGraphId: 'cg', verificationStatus: 'failed' },
+      });
+      globalThis.fetch = fetch;
+
+      await client.registerKafkaEndpoint({
+        contextGraphId: 'cg',
+        broker: 'kafka.example.com:9092',
+        topic: 'orders.created',
+        messageFormat: 'application/json',
+        securityProtocol: 'PLAINTEXT',
+        force: true,
+      });
+
+      expect(calls[0].url).toBe(`http://127.0.0.1:${PORT}/api/kafka/endpoint?force=true`);
+      const body = JSON.parse(calls[0].opts.body as string);
+      expect(body.force).toBeUndefined();
+    });
+
+    it('registerKafkaEndpoint() carries inline SSL PEMs in the body under ssl.{ca,cert,key}', async () => {
+      const { fetch, calls } = createTrackingFetch({
+        ok: true,
+        status: 200,
+        body: { uri: 'urn:dkg:kafka-endpoint:0xabc:hash', contextGraphId: 'cg', verificationStatus: 'verified' },
+      });
+      globalThis.fetch = fetch;
+
+      await client.registerKafkaEndpoint({
+        contextGraphId: 'cg',
+        broker: 'kafka.example.com:9092',
+        topic: 'orders.created',
+        messageFormat: 'application/json',
+        securityProtocol: 'SSL',
+        ssl: {
+          ca: '-----BEGIN CERTIFICATE-----\nCA\n-----END CERTIFICATE-----',
+          cert: '-----BEGIN CERTIFICATE-----\nCERT\n-----END CERTIFICATE-----',
+          key: '-----BEGIN PRIVATE KEY-----\nKEY\n-----END PRIVATE KEY-----',
+        },
+      });
+
+      const body = JSON.parse(calls[0].opts.body as string);
+      expect(body.ssl.ca).toContain('CA');
+      expect(body.ssl.cert).toContain('CERT');
+      expect(body.ssl.key).toContain('KEY');
     });
 
     it('approveCclPolicy() posts approval payload', async () => {

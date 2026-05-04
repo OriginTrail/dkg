@@ -556,11 +556,35 @@ export class ApiClient {
     broker: string;
     topic: string;
     messageFormat: string;
+    // Opportunistic verification fields (slice 04). All optional; when omitted
+    // the daemon skips the probe and the KA records `verificationStatus:
+    // "unattempted"`.
+    securityProtocol?: 'PLAINTEXT' | 'SASL_PLAINTEXT' | 'SASL_SSL' | 'SSL';
+    sasl?: {
+      mechanism?: 'plain' | 'scram-sha-256' | 'scram-sha-512';
+      username: string;
+      password: string;
+    };
+    ssl?: {
+      ca?: string;
+      cert?: string;
+      key?: string;
+      caPath?: string;
+      certPath?: string;
+      keyPath?: string;
+      rejectUnauthorized?: boolean;
+    };
+    /** When true, KA is registered even if the probe fails. Sent as ?force=true. */
+    force?: boolean;
   }): Promise<{
     uri: string;
     contextGraphId: string;
+    verificationStatus?: 'unattempted' | 'verified' | 'failed';
+    verifiedAt?: string;
   }> {
-    return this.post('/api/kafka/endpoint', request);
+    const { force, ...body } = request;
+    const path = force ? '/api/kafka/endpoint?force=true' : '/api/kafka/endpoint';
+    return this.post(path, body);
   }
 
   async signJoinRequest(contextGraphId: string): Promise<{
