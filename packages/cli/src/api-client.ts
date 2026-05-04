@@ -551,6 +551,18 @@ export class ApiClient {
     return this.get(`/api/context-graph/${encodeURIComponent(contextGraphId)}/participants`);
   }
 
+  async registerKafkaEndpoint(request: {
+    contextGraphId: string;
+    broker: string;
+    topic: string;
+    messageFormat: string;
+  }): Promise<{
+    uri: string;
+    contextGraphId: string;
+  }> {
+    return this.post('/api/kafka/endpoint', request);
+  }
+
   async signJoinRequest(contextGraphId: string): Promise<{
     ok: boolean;
     status?: string;

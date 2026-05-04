@@ -1715,6 +1715,41 @@ assertionCmd
     }
   });
 
+// ─── dkg kafka ──────────────────────────────────────────────────────
+
+const kafkaCmd = program
+  .command('kafka')
+  .description('Kafka metadata registration commands');
+
+const kafkaEndpointCmd = kafkaCmd
+  .command('endpoint')
+  .description('Kafka topic endpoint operations');
+
+kafkaEndpointCmd
+  .command('register')
+  .description('Register a Kafka topic endpoint as a knowledge asset in a named context graph')
+  .requiredOption('--cg <id>', 'Target context graph')
+  .requiredOption('--broker <host:port>', 'Kafka broker host:port')
+  .requiredOption('--topic <name>', 'Kafka topic name')
+  .option('--format <mime>', 'Kafka message format MIME type', 'application/json')
+  .action(async (opts: ActionOpts) => {
+    try {
+      const client = await ApiClient.connect();
+      const result = await client.registerKafkaEndpoint({
+        contextGraphId: opts.cg,
+        broker: opts.broker,
+        topic: opts.topic,
+        messageFormat: opts.format,
+      });
+      console.log('Kafka endpoint registered:');
+      console.log(`  URI:            ${result.uri}`);
+      console.log(`  Context graph:  ${result.contextGraphId}`);
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
 // ─── dkg openclaw ───────────────────────────────────────────────────
 
 const openclawCmd = program

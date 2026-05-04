@@ -194,6 +194,34 @@ describe('ApiClient', () => {
       expect(body.name).toBe('incident');
     });
 
+    it('registerKafkaEndpoint() posts the endpoint payload', async () => {
+      const { fetch, calls } = createTrackingFetch({
+        ok: true,
+        status: 200,
+        body: {
+          uri: 'urn:dkg:kafka-endpoint:0xabc:hash',
+          contextGraphId: 'devnet-test',
+        },
+      });
+      globalThis.fetch = fetch;
+
+      await client.registerKafkaEndpoint({
+        contextGraphId: 'devnet-test',
+        broker: 'kafka.example.com:9092',
+        topic: 'orders.created',
+        messageFormat: 'application/json',
+      });
+
+      expect(calls[0].url).toBe(`http://127.0.0.1:${PORT}/api/kafka/endpoint`);
+      const body = JSON.parse(calls[0].opts.body as string);
+      expect(body).toEqual({
+        contextGraphId: 'devnet-test',
+        broker: 'kafka.example.com:9092',
+        topic: 'orders.created',
+        messageFormat: 'application/json',
+      });
+    });
+
     it('approveCclPolicy() posts approval payload', async () => {
       const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body: { policyUri: 'urn:policy', bindingUri: 'urn:binding', approvedAt: 'now' } });
       globalThis.fetch = fetch;

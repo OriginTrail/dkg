@@ -225,6 +225,9 @@ importers:
       '@origintrail-official/dkg-epcis':
         specifier: workspace:*
         version: link:../epcis
+      '@origintrail-official/dkg-kafka':
+        specifier: workspace:*
+        version: link:../kafka
       '@origintrail-official/dkg-mcp':
         specifier: workspace:*
         version: link:../mcp-dkg
