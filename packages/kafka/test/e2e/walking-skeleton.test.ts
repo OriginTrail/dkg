@@ -14,7 +14,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, '..', '..', '..', '..');
 const CLI_ENTRY = join(REPO_ROOT, 'packages', 'cli', 'dist', 'cli.js');
 const DEVNET_NODE1_HOME =
-  process.env.DKG_KAFKA_DEVNET_HOME ?? '/Users/zvonimir/projects/dkg/.devnet/node1';
+  process.env.DKG_KAFKA_DEVNET_HOME ?? join(REPO_ROOT, '.devnet', 'node1');
 const RUN_E2E =
   process.env.DKG_KAFKA_E2E === '1' || process.env.DKG_KAFKA_E2E === 'true';
 const CONTEXT_GRAPH_ID = 'devnet-test';
