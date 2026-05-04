@@ -488,10 +488,6 @@ importers:
         version: 8.3.3(web-streams-polyfill@3.3.3)
 
   packages/kafka:
-    dependencies:
-      '@origintrail-official/dkg-core':
-        specifier: workspace:*
-        version: link:../core
     devDependencies:
       '@vitest/coverage-v8':
         specifier: ^4.0.18
