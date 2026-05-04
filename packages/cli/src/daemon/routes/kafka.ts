@@ -189,7 +189,21 @@ export async function handleKafkaRoutes(ctx: RequestContext): Promise<void> {
         ...(reqBody.sasl ? { sasl: reqBody.sasl } : {}),
         ...(reqBody.ssl ? { ssl: reqBody.ssl } : {}),
       };
-      probeResult = await kafkaProbe(probeOpts);
+      // `probe()` returns network/auth failures as structured results, but
+      // throws on ill-formed input (e.g. SSL with no cert/key, unreadable PEM
+      // path). Translate those into a 400 — they are caller errors, not
+      // unexpected daemon faults. The error message is always a safe,
+      // credential-free string composed in the kafka package.
+      try {
+        probeResult = await kafkaProbe(probeOpts);
+      } catch (err) {
+        return jsonResponse(res, 400, {
+          error:
+            err instanceof Error
+              ? `Invalid Kafka probe options: ${err.message}`
+              : 'Invalid Kafka probe options',
+        });
+      }
     }
 
     try {

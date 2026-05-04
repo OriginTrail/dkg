@@ -87,10 +87,24 @@ const DEFAULT_TIMEOUT_MS = 5_000;
 const DEFAULT_CLIENT_ID = 'dkg-kafka-probe';
 
 /**
- * Single-function deep module. Opens a kafkajs admin client, calls
- * `fetchTopicMetadata([topic])`, and returns a structured result. Drops all
- * credentials before the function returns. Does not throw — broker reachability
- * failures are encoded as `status: 'failed' | 'unreachable'`.
+ * Runs a one-shot Kafka admin probe to verify a broker + topic combination.
+ *
+ * Network and auth failures are returned as structured results
+ * (`{ status: 'failed' | 'unreachable', error, ... }`).
+ *
+ * Throws ONLY on ill-formed input options:
+ *   - `securityProtocol` requires SASL but `opts.sasl` is missing,
+ *   - `securityProtocol === 'SSL'` but no client cert/key was supplied,
+ *   - a PEM filesystem path is unreadable,
+ *   - `securityProtocol` is not one of the four supported values.
+ *
+ * Callers (the route handler) are expected to validate input shape before
+ * invoking the probe; broker reachability is the function's domain.
+ *
+ * Credentials supplied in `opts` are passed once to the kafkajs admin client
+ * and never returned, logged, or persisted on the closure beyond the
+ * function's local scope. The `ProbeResult` deliberately omits any
+ * credential strings.
  */
 export async function probe(opts: KafkaProbeOptions): Promise<ProbeResult> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
