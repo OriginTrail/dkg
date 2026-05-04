@@ -2,6 +2,7 @@ import {
   isNonEmptyString,
   jsonResponse,
   readBody,
+  validateOptionalBoolean,
   validateRequiredContextGraphId,
 } from '../http-utils.js';
 import { wrapJsonLdContent } from '../json-ld-envelope.js';
@@ -51,13 +52,7 @@ export async function handleKafkaRoutes(ctx: RequestContext): Promise<void> {
       return jsonResponse(res, 400, { error: '"messageFormat" must be a non-empty string' });
     }
 
-    // Privacy boundary: enforce a strict boolean to keep the contract
-    // unambiguous. Mirrors the strict typing applied above to
-    // broker/topic/messageFormat — string "false", numbers, etc. are
-    // rejected rather than silently coerced.
-    if (privateField !== undefined && typeof privateField !== 'boolean') {
-      return jsonResponse(res, 400, { error: '"private" must be a boolean' });
-    }
+    if (!validateOptionalBoolean(privateField, 'private', res)) return;
 
     // Default to private: true. Callers opt into a public KA by sending
     // `private: false` in the request body. The `!== false` predicate is

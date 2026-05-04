@@ -270,6 +270,26 @@ export function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0;
 }
 
+/**
+ * Validate an optional boolean field. Returns true if the field is
+ * absent (undefined) or a real boolean. Returns false (and writes a
+ * 400 response) if the field is present but not a boolean.
+ *
+ * Use this at boundaries where the omitted-defaults-to-something
+ * semantic must be preserved AND truthy/falsy coercion would create
+ * an unsafe ambiguity (e.g., privacy flags).
+ */
+export function validateOptionalBoolean(
+  value: unknown,
+  fieldName: string,
+  res: ServerResponse,
+): boolean {
+  if (value === undefined) return true;
+  if (typeof value === 'boolean') return true;
+  jsonResponse(res, 400, { error: `"${fieldName}" must be a boolean` });
+  return false;
+}
+
 export function validateRequiredContextGraphId(
   contextGraphId: unknown,
   res: ServerResponse,
