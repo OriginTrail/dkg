@@ -6,6 +6,19 @@ All notable changes to the DKG V9 node are documented here. The format is based 
 
 ---
 
+## [10.0.0-rc.4] - 2026-05-04
+
+Hotfix on top of `v10.0.0-rc.3`. **Restores random-sampling proof submission for v9-style `<owner>/<slug>` context graphs on testnet** and brings the deployed Base Sepolia `Profile` contract into line with what the post-PR-#366 daemon expects, so `op[1]` / `op[2]` ACK signer auto-registration finally lands on-chain. No `chainResetMarker` change — per-node state (oxigraph store, RS WAL, publish journals) is preserved across the operator update.
+
+### Fixed
+- **V9-style `<owner>/<slug>` context graph names no longer fail `extractV10KCFromStore`** (#377): the kc-extractor's `resolveContextGraphNameFromOnChainId` previously rejected any CG name containing `/`, so finalized KCs surfaced as `KCNotFoundError` in `[rs.tick.kc-not-synced]` and silently dropped every random-sampling proof submission for slash-named CGs (which is the v9 namespacing convention `<owner_address>/<slug>`). Validation now uses `assertSafeIri` on the *derived* meta-graph URI — the actual SPARQL injection surface — instead of an over-tight name-level allowlist that was conflating namespacing with safety. Reproduced first as a unit test in `kc-extractor.test.ts` and then end-to-end in `e2e-hardhat-chain.test.ts`; both regression-tested by reverting the resolver fix and confirming the new tests fail.
+- **`scripts/devnet.sh` no longer crashes with `SyntaxError: Unexpected end of input` on startup** (#377): three JavaScript comments inside `node -e ...` blocks contained unescaped inner double-quotes that bash interpreted as string delimiters, truncating the script. Comments rephrased to avoid embedded double-quotes — necessary precondition for validating the kc-extractor fix on a local devnet.
+
+### Changed
+- **Base Sepolia (chainId 84532): `Profile` upgraded `v1.0.0` → `v1.1.0`, `Identity` re-deployed (`v1.0.0`, source-only zero-address-check tightening) so it stays in lockstep with the Profile that calls into it** (#372). The new Profile carries the `addOperationalWallets(uint72, address[])` external function the post-PR-#366 `ensureProfile` flow expects when registering the operational ACK wallet trio; without this upgrade the daemon failed silently with `Operational wallet auto-registration failed: missing revert data ... to: 0x4Ad9B99C…0493A` and only `op[0]` ever made it on-chain. Both contracts are pure logic (zero per-identity state) so no migration is required — existing identities 1-14, including freshly-recreated beacon-01 with 50,000 v9TRAC stake on identity 14, are unaffected. Hub mappings updated atomically via `Hub.setAndReinitializeContracts` (tx [`0xf7c8dfe2…1914`](https://sepolia.basescan.org/tx/0xf7c8dfe2c242bec2ee64f648757aba5b8d3b567b2129c3ebe89849abe8221914)).
+
+---
+
 ## [10.0.0-rc.3] - 2026-05-03
 
 Operator hardening on top of `v10.0.0-rc.2`. No contract redeploy — `chainResetMarker` unchanged, no per-node state wipe is triggered. Ships the admin / operational wallet key split, RandomSampling Hub-rotation self-refresh, prover stale-period detection, and devnet bootstrap fail-fast guards.
