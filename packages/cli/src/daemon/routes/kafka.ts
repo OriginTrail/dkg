@@ -355,20 +355,11 @@ async function handleList(ctx: RequestContext): Promise<void> {
 }
 
 async function handleGetByUri(ctx: RequestContext): Promise<void> {
-  const { res, url, path } = ctx;
+  const { res, url } = ctx;
   const uri = extractEndpointUri(ctx);
   if (uri === null) return; // response already sent
   const contextGraphId = url.searchParams.get('contextGraphId');
   if (!validateRequiredContextGraphId(contextGraphId, res)) return;
-
-  // Defensive guard: if the caller hits a sub-path beyond `/<uri>` (e.g.
-  // `/<uri>/something`), the URI extractor still treats it as a single segment
-  // because the uri itself contains colons but no slashes. Reject any
-  // unexpected trailing segment to avoid silent misroute.
-  const remainder = path.slice(`${ENDPOINT_BASE_PATH}/`.length);
-  if (remainder.includes('/')) {
-    return jsonResponse(res, 404, { error: 'Not found' });
-  }
 
   const queryEngine = buildKafkaEndpointQueryEngine(ctx);
   try {
@@ -580,16 +571,27 @@ async function handleVerify(ctx: RequestContext): Promise<void> {
 
 /**
  * Extract the URL-encoded URI from a `/api/kafka/endpoint/<urlencoded-uri>`
- * path. Returns `null` if the path is malformed (and a 400 has already been
+ * path. Returns `null` if the path is malformed (and a 4xx has already been
  * sent on the response). The `urn:dkg:kafka-endpoint:…` scheme contains
  * colons that must round-trip through `encodeURIComponent` /
  * `decodeURIComponent` cleanly.
+ *
+ * Sub-paths beyond `/<uri>` (e.g. `/<uri>/something`) are rejected as 404 —
+ * a URN never contains an unencoded `/`, so an extra segment means the
+ * caller hit a route that does not exist.
  */
 function extractEndpointUri(ctx: RequestContext): string | null {
   const { res, path } = ctx;
   const encoded = path.slice(`${ENDPOINT_BASE_PATH}/`.length);
   if (!encoded || encoded.startsWith('?')) {
     jsonResponse(res, 400, { error: 'Missing endpoint URI in path' });
+    return null;
+  }
+  // The encoded URI must be a single path segment. An unencoded `/` indicates
+  // either a sub-path (no such route) or a caller that forgot to URL-encode.
+  // 404 is the right code: the path doesn't map to a defined route.
+  if (encoded.includes('/')) {
+    jsonResponse(res, 404, { error: 'Not found' });
     return null;
   }
   const decoded = safeDecodeURIComponent(encoded, res);
