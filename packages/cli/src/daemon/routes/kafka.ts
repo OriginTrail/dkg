@@ -1,7 +1,7 @@
 import { jsonResponse, readBody, isValidContextGraphId } from '../http-utils.js';
 import type { RequestContext } from './context.js';
 import {
-  ensureKafkaLocalCg,
+  createKafkaLocalCgEnsurer,
   registerKafkaEndpoint,
   validateContextGraphSelection,
   type KafkaEndpointPublisher,
@@ -74,16 +74,19 @@ export async function handleKafkaRoutes(ctx: RequestContext): Promise<void> {
 
     // Bind the V10 free-CG primitive to the local-cg module's expected shape.
     // The `kafka-local` CG is a free CG: created locally via
-    // `agent.createContextGraph` with no on-chain registration.
-    const ensureLocalCg = () =>
-      ensureKafkaLocalCg({
-        contextGraphExists: (id) => agent.contextGraphExists(id),
-        createContextGraph: (opts) =>
-          agent.createContextGraph({
-            ...opts,
-            callerAgentAddress: requestAgentAddress,
-          }),
-      });
+    // `agent.createContextGraph` with no on-chain registration. The ensurer
+    // owns its own in-flight gate (per-request scope is fine — we'd benefit
+    // from hoisting it per-agent if concurrent registrations on the same
+    // agent become hot, but the underlying "already exists" guard plus the
+    // exists-check make repeat creates cheap and idempotent regardless).
+    const ensureLocalCg = createKafkaLocalCgEnsurer({
+      contextGraphExists: (id) => agent.contextGraphExists(id),
+      createContextGraph: (opts) =>
+        agent.createContextGraph({
+          ...opts,
+          callerAgentAddress: requestAgentAddress,
+        }),
+    });
 
     const result = await registerKafkaEndpoint({
       selection,

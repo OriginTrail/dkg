@@ -56,7 +56,10 @@ export function validateContextGraphSelection(
     if (trimmed.length === 0) {
       throw new Error('"contextGraphId" must be a non-empty string.');
     }
-    return { kind: 'shared', contextGraphId: input.contextGraphId };
+    // Return the trimmed form so the validation module is self-consistent:
+    // we already inspected the trimmed value to gate emptiness, and surface
+    // whitespace at the boundaries is never meaningful for a CG id.
+    return { kind: 'shared', contextGraphId: trimmed };
   }
 
   throw new Error(

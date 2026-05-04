@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { Command } from 'commander';
+import { Command, Option } from 'commander';
 import { readFileSync, existsSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { spawn, execSync } from 'node:child_process';
@@ -1733,8 +1733,17 @@ const kafkaEndpointCmd = kafkaCmd
 kafkaEndpointCmd
   .command('register')
   .description('Register a Kafka topic endpoint as a knowledge asset in a context graph (named or kafka-local)')
-  .option('--cg <id>', 'Target named context graph (mutually exclusive with --local)')
-  .option('--local', 'Publish into the node-local "kafka-local" free CG (mutually exclusive with --cg)')
+  // Mutual exclusion is wired declaratively via `Option#conflicts` so the
+  // pairing lives next to the option definition. commander throws before
+  // the action runs if both --cg and --local are passed.
+  .addOption(
+    new Option('--cg <id>', 'Target named context graph (mutually exclusive with --local)')
+      .conflicts('local'),
+  )
+  .addOption(
+    new Option('--local', 'Publish into the node-local "kafka-local" free CG (mutually exclusive with --cg)')
+      .conflicts('cg'),
+  )
   .requiredOption('--broker <host:port>', 'Kafka broker host:port')
   .requiredOption('--topic <name>', 'Kafka topic name')
   .option('--format <mime>', 'Kafka message format MIME type', 'application/json')
@@ -1746,10 +1755,11 @@ kafkaEndpointCmd
     const cgId = typeof opts.cg === 'string' ? opts.cg : undefined;
     const useLocal = opts.local === true;
 
-    // Mutual-exclusion is enforced at the parser level via .conflicts() below
-    // (commander throws before this action runs). The "neither" case is the
-    // only thing left to guard here: commander treats both options as
-    // optional, so we check that exactly one is set.
+    // Mutual-exclusion is enforced at the parser level via Option#conflicts
+    // on the addOption() declarations above (commander throws before this
+    // action runs). The "neither" case is the only thing left to guard here:
+    // commander treats both options as optional, so we check that exactly
+    // one is set.
     if (!cgId && !useLocal) {
       console.error(
         'Pass exactly one of "--cg <id>" (publish into a named shared CG) ' +
@@ -1783,17 +1793,6 @@ kafkaEndpointCmd
       process.exit(1);
     }
   });
-
-// commander supports parser-level mutual exclusion via .conflicts(). Looking
-// up the option object after the chain because commander returns the command
-// instance from .option().
-const kafkaRegisterCmd = kafkaEndpointCmd.commands.find((c) => c.name() === 'register');
-if (kafkaRegisterCmd) {
-  const cgOption = kafkaRegisterCmd.options.find((o) => o.long === '--cg');
-  const localOption = kafkaRegisterCmd.options.find((o) => o.long === '--local');
-  cgOption?.conflicts('local');
-  localOption?.conflicts('cg');
-}
 
 // ─── dkg openclaw ───────────────────────────────────────────────────
 

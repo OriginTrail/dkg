@@ -113,8 +113,10 @@ describe('registerKafkaEndpoint', () => {
   });
 
   it('defaults issuedAt to "now" when caller omits it', async () => {
+    const calls: Array<{ contextGraphId: string; content: unknown }> = [];
     const publisher = {
-      async publish() {
+      async publish(contextGraphId: string, content: unknown) {
+        calls.push({ contextGraphId, content });
         return { ual: 'did:dkg:test/1', kcId: '1', status: 'confirmed' as const };
       },
     };
@@ -130,8 +132,15 @@ describe('registerKafkaEndpoint', () => {
     });
     const after = Date.now();
 
-    // Sanity: no throws, and "now" was within the test window. The
-    // assertion only proves we exercised the default-issuedAt branch.
-    expect(after).toBeGreaterThanOrEqual(before);
+    // Verify the default-issuedAt branch by reading the timestamp the
+    // builder actually stamped onto the published KA, not by re-asserting
+    // wall-clock monotonicity. The KA carries it as a typed xsd:dateTime
+    // literal at `dct:issued.@value` — see ka-builder.ts.
+    expect(calls).toHaveLength(1);
+    const content = calls[0]!.content as { 'dct:issued': { '@value': string } };
+    const issuedMs = Date.parse(content['dct:issued']['@value']);
+    expect(Number.isNaN(issuedMs)).toBe(false);
+    expect(issuedMs).toBeGreaterThanOrEqual(before);
+    expect(issuedMs).toBeLessThanOrEqual(after);
   });
 });
