@@ -4,9 +4,14 @@ import { constants } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { ApiClient } from '../../../cli/src/api-client.js';
 import { buildKafkaEndpointUri } from '../../src/uri.js';
+import {
+  startPlaintextKafka,
+  type PlaintextKafka,
+} from '../helpers/kafka-container.js';
+import { createTopicAndProduce } from '../helpers/synthetic-producer.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -61,6 +66,7 @@ async function waitForEndpointRow(
     PREFIX dct: <http://purl.org/dc/terms/>
     PREFIX dkg: <https://ontology.dkg.io/dkg#>
     SELECT ?broker ?topic ?messageFormat ?publisher ?endpointUrl ?issued
+           ?verificationStatus ?verifiedAt ?securityProtocol
     WHERE {
       GRAPH ?g {
         BIND(<${uri}> AS ?endpoint)
@@ -71,6 +77,9 @@ async function waitForEndpointRow(
           dct:publisher ?publisher ;
           dct:issued ?issued ;
           dcat:endpointURL ?endpointUrl .
+        OPTIONAL { ?endpoint dkg:verificationStatus ?verificationStatus }
+        OPTIONAL { ?endpoint dkg:verifiedAt ?verifiedAt }
+        OPTIONAL { ?endpoint dkg:securityProtocol ?securityProtocol }
       }
     }
   `;
@@ -185,5 +194,80 @@ describe('kafka walking skeleton e2e', () => {
     expect(stripIriDelimiters(row.publisher ?? '')).toBe(`urn:dkg:agent:${owner}`);
     expect(stripIriDelimiters(row.endpointUrl ?? '')).toBe(`kafka://${broker}/${topic}`);
     expect(Number.isNaN(Date.parse(stripQuotedLiteral(row.issued ?? '')))).toBe(false);
+    // Slice 04: with no creds, the KA records `verificationStatus =
+    // "unattempted"` and carries neither verifiedAt nor securityProtocol.
+    expect(stripQuotedLiteral(row.verificationStatus ?? '')).toBe('unattempted');
   }, 90_000);
+
+  describe('live probe (slice 04)', () => {
+    let kafka: PlaintextKafka | undefined;
+
+    beforeAll(async () => {
+      if (!RUN_E2E || !devnetReachable) return;
+      kafka = await startPlaintextKafka();
+    }, 180_000);
+
+    afterAll(async () => {
+      if (kafka) await kafka.stop();
+    }, 60_000);
+
+    it(
+      'registers with creds + reachable topic → KA verified, verifiedAt within last minute',
+      async () => {
+        if (!kafka) throw new Error('kafka container should be up');
+        // Create the synthetic topic the daemon's probe will look for.
+        const topic = `walking-skeleton-probe.${Date.now()}`;
+        await createTopicAndProduce({ bootstrap: kafka.bootstrap, topic });
+
+        const broker = kafka.bootstrap;
+        const messageFormat = 'application/cloudevents+json';
+        const expectedUri = buildKafkaEndpointUri({ owner, broker, topic });
+
+        const before = Date.now();
+        const result = await execFileAsync(
+          'node',
+          [
+            CLI_ENTRY,
+            'kafka',
+            'endpoint',
+            'register',
+            '--cg',
+            CONTEXT_GRAPH_ID,
+            '--broker',
+            broker,
+            '--topic',
+            topic,
+            '--format',
+            messageFormat,
+            '--security-protocol',
+            'PLAINTEXT',
+          ],
+          {
+            cwd: REPO_ROOT,
+            env: {
+              ...process.env,
+              DKG_HOME: DEVNET_NODE1_HOME,
+              DKG_API_PORT: String(port),
+            },
+          },
+        );
+
+        expect(result.stdout).toContain('Kafka endpoint registered:');
+        expect(result.stdout).toContain('Verification status:  verified');
+
+        const row = await waitForEndpointRow(client, CONTEXT_GRAPH_ID, expectedUri);
+        expect(stripQuotedLiteral(row.verificationStatus ?? '')).toBe('verified');
+        expect(stripQuotedLiteral(row.securityProtocol ?? '')).toBe('PLAINTEXT');
+
+        const verifiedAt = stripQuotedLiteral(row.verifiedAt ?? '');
+        const verifiedAtMs = Date.parse(verifiedAt);
+        expect(Number.isNaN(verifiedAtMs)).toBe(false);
+        // Within the last minute means: between (before - 1s) and (now + 1s)
+        // for clock skew.
+        expect(verifiedAtMs).toBeGreaterThanOrEqual(before - 1_000);
+        expect(verifiedAtMs).toBeLessThanOrEqual(Date.now() + 1_000);
+      },
+      240_000,
+    );
+  });
 });
