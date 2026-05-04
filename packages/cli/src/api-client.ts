@@ -556,9 +556,11 @@ export class ApiClient {
     broker: string;
     topic: string;
     messageFormat: string;
+    private?: boolean;
   }): Promise<{
     uri: string;
     contextGraphId: string;
+    private: boolean;
   }> {
     return this.post('/api/kafka/endpoint', request);
   }

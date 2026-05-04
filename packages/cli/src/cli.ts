@@ -1732,6 +1732,7 @@ kafkaEndpointCmd
   .requiredOption('--broker <host:port>', 'Kafka broker host:port')
   .requiredOption('--topic <name>', 'Kafka topic name')
   .option('--format <mime>', 'Kafka message format MIME type', 'application/json')
+  .option('--public', 'Publish the endpoint as a public KA (default: private, encrypted to CG participants)')
   .action(async (opts: ActionOpts) => {
     try {
       const client = await ApiClient.connect();
@@ -1740,10 +1741,12 @@ kafkaEndpointCmd
         broker: opts.broker,
         topic: opts.topic,
         messageFormat: opts.format,
+        ...(opts.public ? { private: false } : {}),
       });
       console.log('Kafka endpoint registered:');
       console.log(`  URI:            ${result.uri}`);
       console.log(`  Context graph:  ${result.contextGraphId}`);
+      console.log(`  Private:        ${result.private}`);
     } catch (err) {
       console.error(toErrorMessage(err));
       process.exit(1);
