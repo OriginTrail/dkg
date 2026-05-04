@@ -29,7 +29,7 @@ const VALID_SASL_MECHANISMS: ReadonlySet<KafkaProbeSaslCredentials['mechanism']>
   'scram-sha-512',
 ]);
 
-interface KafkaEndpointRequestBody {
+export interface KafkaEndpointRequestBody {
   contextGraphId: string;
   broker: string;
   topic: string;
@@ -55,8 +55,11 @@ interface KafkaEndpointRequestBody {
  * advertise PLAINTEXT and ask for verification. In that case we still probe,
  * because reachability against PLAINTEXT is the most permissive case the
  * probe can answer.
+ *
+ * Exported so unit tests can pin the gate's behaviour without standing up
+ * the full daemon HTTP surface.
  */
-function shouldProbe(body: KafkaEndpointRequestBody): boolean {
+export function shouldProbe(body: KafkaEndpointRequestBody): boolean {
   if (!body.securityProtocol) return false;
   switch (body.securityProtocol) {
     case 'PLAINTEXT':
@@ -73,7 +76,7 @@ function shouldProbe(body: KafkaEndpointRequestBody): boolean {
   }
 }
 
-function parseSecurityProtocol(value: unknown): SecurityProtocol | undefined {
+export function parseSecurityProtocol(value: unknown): SecurityProtocol | undefined {
   if (typeof value !== 'string') return undefined;
   const upper = value.toUpperCase();
   return VALID_PROTOCOLS.has(upper as SecurityProtocol)
@@ -81,10 +84,14 @@ function parseSecurityProtocol(value: unknown): SecurityProtocol | undefined {
     : undefined;
 }
 
-function parseSasl(value: unknown): KafkaProbeSaslCredentials | undefined {
+export function parseSasl(value: unknown): KafkaProbeSaslCredentials | undefined {
   if (!value || typeof value !== 'object') return undefined;
   const v = value as Record<string, unknown>;
-  if (typeof v.username !== 'string' || typeof v.password !== 'string') return undefined;
+  // Empty-string username/password must collapse to "no creds present" so the
+  // `shouldProbe` gate skips the probe and the registration records
+  // `verificationStatus: "unattempted"`. Letting an empty password through
+  // would result in a confusing kafkajs auth failure downstream.
+  if (!isNonEmptyString(v.username) || !isNonEmptyString(v.password)) return undefined;
   const mechanism = typeof v.mechanism === 'string' ? v.mechanism.toLowerCase() : 'plain';
   if (!VALID_SASL_MECHANISMS.has(mechanism as KafkaProbeSaslCredentials['mechanism'])) {
     return undefined;
@@ -96,16 +103,20 @@ function parseSasl(value: unknown): KafkaProbeSaslCredentials | undefined {
   };
 }
 
-function parseSsl(value: unknown): KafkaProbeSslMaterial | undefined {
+export function parseSsl(value: unknown): KafkaProbeSslMaterial | undefined {
   if (!value || typeof value !== 'object') return undefined;
   const v = value as Record<string, unknown>;
+  // Empty-string PEMs / paths collapse to "absent". An empty inline PEM would
+  // make kafkajs reject the connection; an empty path would make `readFile`
+  // throw ENOENT. Either case is more useful as a skipped probe than a
+  // confusing failure mode.
   const out: KafkaProbeSslMaterial = {};
-  if (typeof v.ca === 'string') out.caPem = v.ca;
-  if (typeof v.cert === 'string') out.certPem = v.cert;
-  if (typeof v.key === 'string') out.keyPem = v.key;
-  if (typeof v.caPath === 'string') out.caPath = v.caPath;
-  if (typeof v.certPath === 'string') out.certPath = v.certPath;
-  if (typeof v.keyPath === 'string') out.keyPath = v.keyPath;
+  if (isNonEmptyString(v.ca)) out.caPem = v.ca;
+  if (isNonEmptyString(v.cert)) out.certPem = v.cert;
+  if (isNonEmptyString(v.key)) out.keyPem = v.key;
+  if (isNonEmptyString(v.caPath)) out.caPath = v.caPath;
+  if (isNonEmptyString(v.certPath)) out.certPath = v.certPath;
+  if (isNonEmptyString(v.keyPath)) out.keyPath = v.keyPath;
   if (typeof v.rejectUnauthorized === 'boolean') {
     out.rejectUnauthorized = v.rejectUnauthorized;
   }
