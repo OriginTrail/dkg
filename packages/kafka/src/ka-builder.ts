@@ -94,3 +94,36 @@ export function buildKafkaEndpointKnowledgeAsset(input: BuildKafkaEndpointKnowle
     ...optional,
   };
 }
+
+const KAFKA_ENDPOINT_REVOCATION_CONTEXT = {
+  dkg: 'https://ontology.dkg.io/dkg#',
+  xsd: 'http://www.w3.org/2001/XMLSchema#',
+} as const;
+
+/**
+ * The JSON-LD shape produced by `buildKafkaEndpointRevocationMutation`. Captured
+ * as a type alias so callers can describe their publisher signature without
+ * re-deriving the structural type.
+ */
+export type KafkaEndpointRevocationMutation = ReturnType<typeof buildKafkaEndpointRevocationMutation>;
+
+/**
+ * Build the revocation-mutation fragment for a Kafka endpoint KA. ADR 0004
+ * mandates soft-revoke: the existing KA stays in its CG with new
+ * `dkg:status "revoked"` + `dkg:revokedAt` triples added. This builder produces
+ * just the additive properties (no broker / topic / publisher echo); the
+ * caller composes them onto the existing KA's properties before handing the
+ * combined document to the V10 update flow, which replaces the KA's full
+ * data-graph footprint per `rootEntity`.
+ */
+export function buildKafkaEndpointRevocationMutation(uri: string, revokedAt: string) {
+  return {
+    '@context': KAFKA_ENDPOINT_REVOCATION_CONTEXT,
+    '@id': uri,
+    'dkg:status': 'revoked',
+    'dkg:revokedAt': {
+      '@value': revokedAt,
+      '@type': 'xsd:dateTime',
+    },
+  };
+}

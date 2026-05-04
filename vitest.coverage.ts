@@ -160,16 +160,15 @@ export const kosavaEpcisCoverage: CoverageThresholds = {
 };
 
 export const kosavaKafkaCoverage: CoverageThresholds = {
-  // Slice 04 ratchet, scoped to `src/**` (excluding the `src/index.ts`
-  // re-export barrel). All lines, statements, and functions are covered. The
-  // last two uncovered branches are micro-defensive paths: the
-  // `(err as { name?: string } | null)?.name ?? 'Error'` null-guard in
-  // `classifyError` (kafkajs never throws `null`) and the `if (timer)` clear
-  // in `runWithTimeout` (the timer is always assigned synchronously). 96 is
-  // the floor; current actual is 97.36.
+  // Slice 05 ratchet, scoped to `src/**` (excluding the `src/index.ts`
+  // re-export barrel). All lines, statements, and functions are covered.
+  // Two uncovered branches survive in `kafka-probe.ts` micro-defensive paths
+  // (the `(err as { name?: string } | null)?.name ?? 'Error'` null-guard in
+  // `classifyError` and the `if (timer)` clear in `runWithTimeout`); slice 05
+  // adds none of its own. 98 is the floor; current actual is 98.49.
   lines: 100,
   functions: 100,
-  branches: 96,
+  branches: 98,
   statements: 100,
 };
 
