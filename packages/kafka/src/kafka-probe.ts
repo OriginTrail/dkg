@@ -132,7 +132,7 @@ export async function probe(opts: KafkaProbeOptions): Promise<ProbeResult> {
   const kafka = new Kafka(config);
   const admin: Admin = kafka.admin();
 
-  let result: RawProbeOutcome;
+  let result: { status: ProbeStatus; error?: string };
   try {
     result = await runWithTimeout(probeAdmin(admin, opts.topic), timeoutMs);
   } catch (err) {
@@ -161,13 +161,7 @@ export async function probe(opts: KafkaProbeOptions): Promise<ProbeResult> {
   }
 }
 
-/** @internal */
-interface RawProbeOutcome {
-  status: ProbeStatus;
-  error?: string;
-}
-
-async function probeAdmin(admin: Admin, topic: string): Promise<RawProbeOutcome> {
+async function probeAdmin(admin: Admin, topic: string): Promise<{ status: ProbeStatus; error?: string }> {
   try {
     await admin.connect();
   } catch (err) {
