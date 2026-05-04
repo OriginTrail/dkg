@@ -98,6 +98,10 @@ export interface ProbeResult {
   error?: string;
 }
 
+// Wall-clock ceiling for the entire probe round-trip. The kafkajs internal
+// `connectionTimeout` (2_000) + `requestTimeout` (3_000) below should fit
+// inside this budget; if you raise either, raise this too. See the kafkajs
+// config block in `buildKafkaConfig` for the split rationale.
 const DEFAULT_TIMEOUT_MS = 5_000;
 const DEFAULT_CLIENT_ID = 'dkg-kafka-probe';
 
@@ -210,8 +214,12 @@ async function buildKafkaConfig(opts: KafkaProbeOptions): Promise<KafkaConfig> {
     // into our own logger because kafkajs occasionally embeds connection
     // details in its log payloads, and this probe must never emit credentials.
     logLevel: logLevel.NOTHING,
-    // Tight timeouts so an unreachable broker resolves quickly. The outer
-    // `runWithTimeout` is a hard ceiling on top of these.
+    // Split timeouts that fail fast on different failure modes:
+    //   `connectionTimeout` — TCP/TLS reach (unreachable broker → quick fail)
+    //   `requestTimeout`    — slow broker response after the connection is up
+    // Their sum (5_000 ms) deliberately matches `DEFAULT_TIMEOUT_MS` so the
+    // outer `runWithTimeout` only fires on a kafkajs hang that ignores both
+    // inner clocks.
     connectionTimeout: 2_000,
     requestTimeout: 3_000,
     // Disable retries — a single probe attempt is intentional. Retries would
