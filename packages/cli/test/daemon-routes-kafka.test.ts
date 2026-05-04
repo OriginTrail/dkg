@@ -6,101 +6,19 @@
  * before passing it to agent.publish(). The kafka package itself stays agnostic.
  *
  * These tests invoke handleKafkaRoutes directly with a minimal RequestContext
- * mock — no real daemon, no network, no chain.
+ * mock — no real daemon, no network, no chain. The fakes live in
+ * test/helpers/route-test-utils.ts and are reused by future route tests.
  */
 
 import { describe, it, expect } from 'vitest';
-import { EventEmitter } from 'node:events';
-import type { IncomingMessage, ServerResponse } from 'node:http';
 import { handleKafkaRoutes } from '../src/daemon/routes/kafka.js';
-import type { RequestContext } from '../src/daemon/routes/context.js';
+import {
+  makeFakeRequest,
+  makeFakeResponse,
+  makeRequestContext,
+} from './helpers/route-test-utils.js';
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/**
- * Make a minimal fake IncomingMessage for POST /api/kafka/endpoint with the
- * given JSON body.
- *
- * readBody() uses req.on('data' | 'end' | 'error') so we simulate an
- * EventEmitter that emits those events synchronously after the first tick.
- */
-function makeFakeRequest(body: object): IncomingMessage {
-  const bodyStr = JSON.stringify(body);
-  const emitter = new EventEmitter() as unknown as IncomingMessage;
-  emitter.method = 'POST';
-  emitter.url = '/api/kafka/endpoint';
-
-  // Emit data/end on the next tick so listeners are attached first
-  setImmediate(() => {
-    emitter.emit('data', Buffer.from(bodyStr));
-    emitter.emit('end');
-  });
-
-  return emitter;
-}
-
-/**
- * Make a fake ServerResponse that captures the status and JSON body.
- *
- * jsonResponse() calls writeHead(status, headers) then end(body), so we
- * must accept the (status, headers?) overload of writeHead.
- */
-function makeFakeResponse(): { res: ServerResponse; getResult: () => { status: number; body: unknown } } {
-  let capturedStatus = 0;
-  let capturedBody: unknown = null;
-
-  const res = new EventEmitter() as unknown as ServerResponse;
-  (res as any).writeHead = (status: number, _headers?: unknown) => {
-    capturedStatus = status;
-    return res;
-  };
-  (res as any).end = (data?: string) => {
-    try {
-      capturedBody = data ? JSON.parse(data) : null;
-    } catch {
-      capturedBody = data;
-    }
-    return res;
-  };
-
-  return {
-    res,
-    getResult: () => ({ status: capturedStatus, body: capturedBody }),
-  };
-}
-
-/**
- * Build a minimal RequestContext with a mock agent.publish that captures calls.
- */
-function makeContext(req: IncomingMessage, res: ServerResponse): {
-  ctx: RequestContext;
-  publishCalls: Array<{ cgId: string; envelope: unknown }>;
-} {
-  const publishCalls: Array<{ cgId: string; envelope: unknown }> = [];
-
-  const mockAgent = {
-    async publish(cgId: string, envelope: unknown) {
-      publishCalls.push({ cgId, envelope });
-      return { ual: 'did:dkg:test/1', kcId: '1', status: 'confirmed' as const };
-    },
-  };
-
-  const ctx: Partial<RequestContext> = {
-    req,
-    res,
-    agent: mockAgent as unknown as RequestContext['agent'],
-    requestAgentAddress: '0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef',
-    path: '/api/kafka/endpoint',
-  };
-
-  return { ctx: ctx as RequestContext, publishCalls };
-}
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+const KAFKA_ENDPOINT_URL = '/api/kafka/endpoint';
 
 const VALID_BASE_BODY = {
   contextGraphId: 'devnet-test',
@@ -111,9 +29,9 @@ const VALID_BASE_BODY = {
 
 describe('Kafka route adapter — privacy envelope', () => {
   it('wraps with { private: KA } when private: true is in request body', async () => {
-    const req = makeFakeRequest({ ...VALID_BASE_BODY, private: true });
+    const req = makeFakeRequest({ ...VALID_BASE_BODY, private: true }, { url: KAFKA_ENDPOINT_URL });
     const { res, getResult } = makeFakeResponse();
-    const { ctx, publishCalls } = makeContext(req, res);
+    const { ctx, publishCalls } = makeRequestContext(req, res);
 
     await handleKafkaRoutes(ctx);
 
@@ -130,9 +48,9 @@ describe('Kafka route adapter — privacy envelope', () => {
   });
 
   it('wraps with { public: KA } when private: false is in request body', async () => {
-    const req = makeFakeRequest({ ...VALID_BASE_BODY, private: false });
+    const req = makeFakeRequest({ ...VALID_BASE_BODY, private: false }, { url: KAFKA_ENDPOINT_URL });
     const { res, getResult } = makeFakeResponse();
-    const { ctx, publishCalls } = makeContext(req, res);
+    const { ctx, publishCalls } = makeRequestContext(req, res);
 
     await handleKafkaRoutes(ctx);
 
@@ -150,9 +68,9 @@ describe('Kafka route adapter — privacy envelope', () => {
 
   it('defaults to { private: KA } when private field is omitted from request body', async () => {
     // No `private` field — route defaults to private: true
-    const req = makeFakeRequest(VALID_BASE_BODY);
+    const req = makeFakeRequest(VALID_BASE_BODY, { url: KAFKA_ENDPOINT_URL });
     const { res, getResult } = makeFakeResponse();
-    const { ctx, publishCalls } = makeContext(req, res);
+    const { ctx, publishCalls } = makeRequestContext(req, res);
 
     await handleKafkaRoutes(ctx);
 
@@ -169,9 +87,12 @@ describe('Kafka route adapter — privacy envelope', () => {
   });
 
   it('returns 400 when contextGraphId is missing', async () => {
-    const req = makeFakeRequest({ broker: 'x:9092', topic: 't', messageFormat: 'application/json' });
+    const req = makeFakeRequest(
+      { broker: 'x:9092', topic: 't', messageFormat: 'application/json' },
+      { url: KAFKA_ENDPOINT_URL },
+    );
     const { res, getResult } = makeFakeResponse();
-    const { ctx } = makeContext(req, res);
+    const { ctx } = makeRequestContext(req, res);
 
     await handleKafkaRoutes(ctx);
 
@@ -179,9 +100,12 @@ describe('Kafka route adapter — privacy envelope', () => {
   });
 
   it('returns 400 when broker is missing', async () => {
-    const req = makeFakeRequest({ contextGraphId: 'devnet-test', topic: 't', messageFormat: 'application/json' });
+    const req = makeFakeRequest(
+      { contextGraphId: 'devnet-test', topic: 't', messageFormat: 'application/json' },
+      { url: KAFKA_ENDPOINT_URL },
+    );
     const { res, getResult } = makeFakeResponse();
-    const { ctx } = makeContext(req, res);
+    const { ctx } = makeRequestContext(req, res);
 
     await handleKafkaRoutes(ctx);
 
@@ -192,9 +116,9 @@ describe('Kafka route adapter — privacy envelope', () => {
     // The route enforces a strict boolean for `private` to keep the privacy
     // contract unambiguous. Truthy/falsy coercion would create an unsafe
     // ambiguity at a privacy boundary.
-    const req = makeFakeRequest({ ...VALID_BASE_BODY, private: 'false' });
+    const req = makeFakeRequest({ ...VALID_BASE_BODY, private: 'false' }, { url: KAFKA_ENDPOINT_URL });
     const { res, getResult } = makeFakeResponse();
-    const { ctx, publishCalls } = makeContext(req, res);
+    const { ctx, publishCalls } = makeRequestContext(req, res);
 
     await handleKafkaRoutes(ctx);
 
