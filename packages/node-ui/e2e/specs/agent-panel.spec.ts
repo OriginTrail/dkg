@@ -29,9 +29,10 @@ test.describe('Right Panel (Agent Panel)', () => {
       await expect(heading).toBeVisible();
     });
 
-    test('shows empty agent integration message', async ({ page }) => {
-      const msg = page.getByText('No additional local agent integrations are available yet.');
-      await expect(msg).toBeVisible();
+    test('CONNECT ANOTHER AGENT panel lists the OpenClaw integration option', async ({ page }) => {
+      // The empty integrations panel was a mock-only artefact; the real
+      // daemon ships the OpenClaw / Hermes options bundled.
+      await expect(page.getByText('OpenClaw').first()).toBeVisible();
     });
   });
 
@@ -45,14 +46,13 @@ test.describe('Right Panel (Agent Panel)', () => {
       expect(active?.trim()).toBe('Network');
     });
 
-    test('displays peer count "0 peers"', async ({ page }) => {
-      const peerText = page.getByText('0 peers', { exact: false });
-      await expect(peerText.first()).toBeVisible();
+    test('displays a peer count line', async ({ page }) => {
+      // Real daemon connects to live testnet relays — peer count drifts.
+      await expect(page.getByText(/\d+ peers?/).first()).toBeVisible();
     });
 
-    test('shows direct/relayed breakdown', async ({ page }) => {
-      const breakdown = page.getByText('0 direct / 0 relayed');
-      await expect(breakdown).toBeVisible();
+    test('shows the direct/relayed breakdown line', async ({ page }) => {
+      await expect(page.getByText(/\d+ direct \/ \d+ relayed/)).toBeVisible();
     });
 
     test('Refresh button is visible', async ({ page }) => {
@@ -72,9 +72,20 @@ test.describe('Right Panel (Agent Panel)', () => {
       await expect(heading).toBeVisible();
     });
 
-    test('shows empty peers message', async ({ page }) => {
-      const msg = page.getByText('No connected peers yet.');
-      await expect(msg).toBeVisible();
+    test('peers list either shows entries or the empty marker', async ({ page }) => {
+      const empty = page.getByText('No connected peers yet.');
+      const items = page.locator('.v10-peer-card, .v10-peer-row');
+      // One of the two surfaces must render — never both blank.
+      const someVisible = await Promise.race([
+        empty.waitFor({ state: 'visible', timeout: 5_000 }).then(() => true).catch(() => false),
+        items.first().waitFor({ state: 'visible', timeout: 5_000 }).then(() => true).catch(() => false),
+      ]);
+      expect(someVisible).toBe(true);
+    });
+
+    test('peer-count summary header is rendered', async ({ page }) => {
+      await expect(page.getByText(/\d+ peers?/).first()).toBeVisible();
+      await expect(page.getByText(/\d+ direct \/ \d+ relayed/)).toBeVisible();
     });
   });
 
@@ -106,5 +117,23 @@ test.describe('Right Panel (Agent Panel)', () => {
     expect((await rightPanel.getActiveMode())?.trim()).toBe('Sessions');
     await rightPanel.switchMode('Agents');
     expect((await rightPanel.getActiveMode())?.trim()).toBe('Agents');
+  });
+
+  test.describe('Add agent flow', () => {
+    test('+ Add tab is visible in the Agents subtabs', async ({ page }) => {
+      await expect(page.locator('.v10-agent-subtab.add')).toBeVisible();
+    });
+
+    test('clicking + Add does not crash the panel', async ({ page }) => {
+      await page.locator('.v10-agent-subtab.add').click();
+      await expect(page.locator('.v10-panel-right').first()).toBeVisible();
+    });
+
+    test('Network mode Refresh button is clickable', async ({ rightPanel, page }) => {
+      await rightPanel.switchMode('Network');
+      const refresh = page.locator('.v10-panel-right .v10-agents-refresh').first();
+      await expect(refresh).toBeVisible();
+      await refresh.click();
+    });
   });
 });

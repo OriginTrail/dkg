@@ -1,6 +1,9 @@
 import { test, expect } from '../fixtures/base.js';
 
 test.describe('Tab Management', () => {
+  // No global waitForReady — the Dashboard tab itself doesn't depend on
+  // the project tree, so simple smoke tests should not block on the
+  // bootstrap window. Tree-dependent tests opt in inline.
   test.beforeEach(async ({ shell }) => {
     await shell.goto();
   });
@@ -14,37 +17,41 @@ test.describe('Tab Management', () => {
     expect(await centerPanel.isTabClosable('Dashboard')).toBe(false);
   });
 
-  test('clicking a project opens a new closable tab', async ({ leftPanel, centerPanel }) => {
+  test('clicking a project opens a new closable tab', async ({ leftPanel, centerPanel, seed }) => {
+    await leftPanel.waitForReady();
     const before = await centerPanel.getTabCount();
-    await leftPanel.expandProject('Pharma Drug Interactions');
+    await leftPanel.expandProject(seed.contextGraphName);
     const after = await centerPanel.getTabCount();
     expect(after).toBeGreaterThan(before);
 
     const tabs = await centerPanel.getTabNames();
-    const projectTab = tabs.find(t => t.includes('Pharma'));
+    const projectTab = tabs.find(t => t.includes(seed.contextGraphName));
     expect(projectTab).toBeTruthy();
     expect(await centerPanel.isTabClosable(projectTab!)).toBe(true);
   });
 
-  test('clicking a memory layer opens a WM tab', async ({ leftPanel, centerPanel }) => {
-    await leftPanel.expandProject('Pharma Drug Interactions');
-    await leftPanel.clickLayer('Pharma Drug Interactions', 'wm');
+  test('clicking a memory layer opens a WM tab', async ({ leftPanel, centerPanel, seed }) => {
+    await leftPanel.waitForReady();
+    await leftPanel.expandProject(seed.contextGraphName);
+    await leftPanel.clickLayer(seed.contextGraphName, 'wm');
     const tabs = await centerPanel.getTabNames();
     expect(tabs.some(t => t.includes('WM'))).toBe(true);
   });
 
-  test('closing a tab removes it from the bar', async ({ leftPanel, centerPanel }) => {
-    await leftPanel.expandProject('Pharma Drug Interactions');
+  test('closing a tab removes it from the bar', async ({ leftPanel, centerPanel, seed }) => {
+    await leftPanel.waitForReady();
+    await leftPanel.expandProject(seed.contextGraphName);
     const tabs = await centerPanel.getTabNames();
-    const projectTab = tabs.find(t => t.includes('Pharma'))!;
+    const projectTab = tabs.find(t => t.includes(seed.contextGraphName))!;
     await centerPanel.closeTab(projectTab);
     const remaining = await centerPanel.getTabNames();
     expect(remaining).not.toContain(projectTab);
   });
 
-  test('closing active tab activates a neighbor', async ({ leftPanel, centerPanel }) => {
-    await leftPanel.expandProject('Climate Science');
-    await leftPanel.clickLayer('Climate Science', 'swm');
+  test('closing active tab activates a neighbor', async ({ leftPanel, centerPanel, seed }) => {
+    await leftPanel.waitForReady();
+    await leftPanel.expandProject(seed.contextGraphName);
+    await leftPanel.clickLayer(seed.contextGraphName, 'swm');
     const tabs = await centerPanel.getTabNames();
     const swmTab = tabs.find(t => t.includes('SWM'))!;
     await centerPanel.closeTab(swmTab);
@@ -52,29 +59,31 @@ test.describe('Tab Management', () => {
     expect(activeAfter).toBeTruthy();
   });
 
-  test('clicking existing tab switches to it', async ({ leftPanel, centerPanel }) => {
-    await leftPanel.expandProject('Pharma Drug Interactions');
+  test('clicking existing tab switches to it', async ({ leftPanel, centerPanel, seed }) => {
+    await leftPanel.waitForReady();
+    await leftPanel.expandProject(seed.contextGraphName);
     await centerPanel.switchTab('Dashboard');
     const active = await centerPanel.getActiveTabName();
     expect(active?.trim()).toBe('Dashboard');
   });
 
-  test('multiple views open as separate tabs', async ({ leftPanel, centerPanel }) => {
+  test('multiple views open as separate tabs', async ({ leftPanel, centerPanel, seed }) => {
+    await leftPanel.waitForReady();
     const before = await centerPanel.getTabCount();
-    await leftPanel.expandProject('Pharma Drug Interactions');
-    await leftPanel.clickLayer('Pharma Drug Interactions', 'wm');
-    await leftPanel.expandProject('Climate Science');
-    await leftPanel.clickLayer('Climate Science', 'swm');
+    await leftPanel.expandProject(seed.contextGraphName);
+    await leftPanel.clickLayer(seed.contextGraphName, 'wm');
+    await leftPanel.clickLayer(seed.contextGraphName, 'swm');
     const after = await centerPanel.getTabCount();
     expect(after).toBeGreaterThan(before + 1);
   });
 
-  test('reopening same view does not duplicate tab', async ({ leftPanel, centerPanel }) => {
-    await leftPanel.expandProject('Pharma Drug Interactions');
-    await leftPanel.clickLayer('Pharma Drug Interactions', 'wm');
+  test('reopening same view does not duplicate tab', async ({ leftPanel, centerPanel, seed }) => {
+    await leftPanel.waitForReady();
+    await leftPanel.expandProject(seed.contextGraphName);
+    await leftPanel.clickLayer(seed.contextGraphName, 'wm');
     const countBefore = await centerPanel.getTabCount();
     await centerPanel.switchTab('Dashboard');
-    await leftPanel.clickLayer('Pharma Drug Interactions', 'wm');
+    await leftPanel.clickLayer(seed.contextGraphName, 'wm');
     const countAfter = await centerPanel.getTabCount();
     expect(countAfter).toBe(countBefore);
   });

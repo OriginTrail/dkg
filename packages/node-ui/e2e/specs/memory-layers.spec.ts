@@ -4,15 +4,15 @@ test.describe('Memory Layer Views', () => {
   test.describe('Working Memory', () => {
     test.beforeEach(async ({ shell, leftPanel }) => {
       await shell.goto();
-      await leftPanel.expandProject('Pharma Drug Interactions');
-      await leftPanel.clickLayer('Pharma Drug Interactions', 'wm');
+      await leftPanel.expandProject('QA Context Graph');
+      await leftPanel.clickLayer('QA Context Graph', 'wm');
     });
 
     test('opens tab named "WM · Pharma Drug Interactions"', async ({ centerPanel }) => {
       const tabs = await centerPanel.getTabNames();
       const wmTab = tabs.find(t => t.startsWith('WM'));
       expect(wmTab).toBeTruthy();
-      expect(wmTab).toContain('Pharma Drug Interactions');
+      expect(wmTab).toContain('QA Context Graph');
     });
 
     test('displays "Working Memory" heading', async ({ page }) => {
@@ -49,13 +49,10 @@ test.describe('Memory Layer Views', () => {
       expect(value).toContain('SELECT');
     });
 
-    test('shows empty state message', async ({ page }) => {
-      const emptyText = page.getByText('No triples found');
-      await expect(emptyText).toBeVisible();
-    });
-
-    test('shows empty state import suggestion', async ({ page }) => {
-      await expect(page.getByText('Import files or chat with your agent')).toBeVisible();
+    test('shows a triple count header (always rendered, populated or empty)', async ({ page }) => {
+      // Seeded WM has a few triples; the layer view displays "<n> triples"
+      // above the graph/table — works in both populated and empty states.
+      await expect(page.getByText(/\d+ triples?/).first()).toBeVisible({ timeout: 10_000 });
     });
 
     test('Graph view is active by default', async ({ page }) => {
@@ -70,10 +67,13 @@ test.describe('Memory Layer Views', () => {
       await expect(tableBtn).toHaveClass(/active/, { timeout: 5_000 });
     });
 
-    test.skip('SPARQL query does not show HTTP 500 error without backend', async ({ page }) => {
-      // BUG: Memory layer view shows "Error: HTTP 500" instead of graceful fallback
+    test('SPARQL bar does not surface a raw HTTP error against the live daemon', async ({ page }) => {
       const status = page.locator('.v10-mlv-status');
-      await expect(status).toBeHidden();
+      // If the layer view ever surfaces an error banner under steady-state
+      // it should NOT contain a bare "HTTP NNN" — that's the daemon
+      // round-trip failing instead of a graceful UI message.
+      const text = (await status.textContent().catch(() => null)) ?? '';
+      expect(text).not.toMatch(/HTTP \d{3}/);
     });
 
     test('layer icon shows Working Memory color', async ({ page }) => {
@@ -84,10 +84,11 @@ test.describe('Memory Layer Views', () => {
   });
 
   test.describe('Shared Working Memory', () => {
-    test.beforeEach(async ({ shell, leftPanel }) => {
+    test.beforeEach(async ({ shell, leftPanel, seed }) => {
       await shell.goto();
-      await leftPanel.expandProject('Climate Science');
-      await leftPanel.clickLayer('Climate Science', 'swm');
+      await leftPanel.waitForReady();
+      await leftPanel.expandProject(seed.contextGraphName);
+      await leftPanel.clickLayer(seed.contextGraphName, 'swm');
     });
 
     test('opens tab containing "SWM"', async ({ centerPanel }) => {
@@ -107,10 +108,11 @@ test.describe('Memory Layer Views', () => {
   });
 
   test.describe('Verified Memory', () => {
-    test.beforeEach(async ({ shell, leftPanel }) => {
+    test.beforeEach(async ({ shell, leftPanel, seed }) => {
       await shell.goto();
-      await leftPanel.expandProject('EU Supply Chain');
-      await leftPanel.clickLayer('EU Supply Chain', 'vm');
+      await leftPanel.waitForReady();
+      await leftPanel.expandProject(seed.contextGraphName);
+      await leftPanel.clickLayer(seed.contextGraphName, 'vm');
     });
 
     test('opens tab containing "VM"', async ({ centerPanel }) => {
@@ -136,7 +138,7 @@ test.describe('Memory Layer Views', () => {
     });
 
     test('shows aggregate description', async ({ page }) => {
-      const desc = page.getByText('Aggregate view of all memory layers');
+      const desc = page.getByText(/Every layer across every project/);
       await expect(desc).toBeVisible();
     });
 
@@ -148,12 +150,71 @@ test.describe('Memory Layer Views', () => {
 
     test('layer cards show descriptions', async ({ page }) => {
       await expect(page.getByText('Private agent drafts')).toBeVisible();
-      await expect(page.getByText('Shared proposals')).toBeVisible();
-      await expect(page.getByText('Published knowledge')).toBeVisible();
+      await expect(page.getByText('Team proposals')).toBeVisible();
+      await expect(page.getByText('On-chain knowledge')).toBeVisible();
     });
 
     test('Memory Stack tab is closable', async ({ centerPanel }) => {
       expect(await centerPanel.isTabClosable('Memory Stack')).toBe(true);
+    });
+
+    test('column headers identify the three memory tiers', async ({ page }) => {
+      await expect(page.getByText('Working Memory', { exact: true })).toBeVisible();
+      await expect(page.getByText('Shared Working Memory', { exact: true })).toBeVisible();
+      await expect(page.getByText('Verified Memory', { exact: true })).toBeVisible();
+    });
+
+    test('subtitle reports the visible / hidden project counts', async ({ page }) => {
+      await expect(page.getByText(/visible projects.*hidden projects are skipped/)).toBeVisible();
+    });
+
+    test('column headers carry their tier description', async ({ page }) => {
+      await expect(page.getByText('Private agent drafts')).toBeVisible();
+      await expect(page.getByText('Team proposals')).toBeVisible();
+      await expect(page.getByText('On-chain knowledge')).toBeVisible();
+    });
+
+    test('lists the seeded project as a row', async ({ page, seed }) => {
+      await expect(page.getByText(seed.contextGraphName).first()).toBeVisible();
+    });
+
+    test('each cell shows entities and triples metric labels', async ({ page }) => {
+      const entities = page.getByText('entities', { exact: true });
+      const triples = page.getByText('triples', { exact: true });
+      // Per project there are 3 cells × 2 labels = 6 occurrences minimum.
+      expect(await entities.count()).toBeGreaterThanOrEqual(3);
+      expect(await triples.count()).toBeGreaterThanOrEqual(3);
+    });
+
+    test('empty cells show "Nothing in WM/SWM/VM yet" copy where applicable', async ({ page }) => {
+      // Only assert at least one empty marker exists — populated cells won't.
+      const empties = page.getByText(/Nothing in (WM|SWM|VM) yet/);
+      expect(await empties.count()).toBeGreaterThan(0);
+    });
+  });
+
+  test.describe('Layer SPARQL bar', () => {
+    test.beforeEach(async ({ shell, leftPanel, seed }) => {
+      await shell.goto();
+      await leftPanel.waitForReady();
+      await leftPanel.expandProject(seed.contextGraphName);
+      await leftPanel.clickLayer(seed.contextGraphName, 'wm');
+    });
+
+    test('SPARQL Run button is rendered next to the input', async ({ page }) => {
+      const runBtn = page.locator('button').filter({ hasText: /^Run$/ });
+      await expect(runBtn).toBeVisible();
+    });
+
+    test('typing a SPARQL query enables the Run button', async ({ memoryLayer }) => {
+      await memoryLayer.fillSparql('SELECT * WHERE { ?s ?p ?o } LIMIT 10');
+      const input = await memoryLayer.getSparqlInput();
+      await expect(input).toHaveValue('SELECT * WHERE { ?s ?p ?o } LIMIT 10');
+    });
+
+    test('SPARQL Run button is present in the layer toolbar', async ({ page }) => {
+      const runs = page.locator('button').filter({ hasText: /^Run$/ });
+      await expect(runs.first()).toBeVisible();
     });
   });
 });

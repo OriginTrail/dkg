@@ -19,6 +19,10 @@ packages/evm-module/cache/
 packages/evm-module/typechain/
 .devnet/
 
+# Playwright E2E harness — daemon state cache is written at run time and
+# contains a live bearer token. Never commit it.
+packages/node-ui/e2e/setup/.daemon-state.json
+
 packages/evm-module/deployments/hardhat_contracts.json
 packages/evm-module/deployments/localhost_contracts.json
 snapshots/_cache_phase1_neuroweb_epoch16.json

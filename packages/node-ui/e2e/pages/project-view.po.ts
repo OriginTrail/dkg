@@ -46,4 +46,27 @@ export class ProjectViewPage {
   async hasBackButton() {
     return this.root.locator('button').filter({ hasText: '←' }).isVisible().catch(() => false);
   }
+
+  layerSwitcher() {
+    return this.root.locator('.v10-layer-switcher');
+  }
+
+  layerBtn(layer: 'overview' | 'graph-overview' | 'wm' | 'swm' | 'vm') {
+    return this.root.locator(`.v10-layer-switch-btn[data-layer="${layer}"]`);
+  }
+
+  async switchLayer(layer: 'overview' | 'graph-overview' | 'wm' | 'swm' | 'vm') {
+    await this.layerBtn(layer).click();
+  }
+
+  async getActiveLayer() {
+    const active = this.root.locator('.v10-layer-switch-btn.active');
+    return active.getAttribute('data-layer');
+  }
+
+  async clickShare() {
+    // The Share action button lives in the layer-switcher toolbar, not the
+    // layer-name buttons (e.g. "Shared Memory") below.
+    await this.root.locator('.v10-layer-switcher .v10-layer-action-btn').filter({ hasText: 'Share' }).click();
+  }
 }

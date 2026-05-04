@@ -17,6 +17,7 @@ export class HeaderPage {
   readonly notifItems: Locator;
   readonly themeToggle: Locator;
   readonly rightPanelToggle: Locator;
+  readonly settingsBtn: Locator;
 
   constructor(page: Page) {
     this.page = page;
@@ -34,6 +35,11 @@ export class HeaderPage {
     this.notifItems = page.locator(sel.header.notifItem);
     this.themeToggle = page.locator(sel.header.themeToggle);
     this.rightPanelToggle = page.locator(sel.header.rightPanelToggle);
+    this.settingsBtn = page.locator(sel.header.settingsBtn);
+  }
+
+  async openSettings() {
+    await this.settingsBtn.click();
   }
 
   async toggleSidebar() {

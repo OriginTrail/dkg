@@ -68,4 +68,17 @@ export class DashboardPage {
   async clickViewAllOperations() {
     await this.viewAllLink.click();
   }
+
+  /**
+   * Wait for the dashboard's first data fetch to land. The dashboard's
+   * stat cards mount as part of the page shell, but the "View all" link
+   * inside Recent Operations only renders once the operations fetch
+   * resolves. Tests that interact with that link (or the Projects card,
+   * or recent ops rows) should call this in beforeEach to escape the
+   * bootstrap-window race.
+   */
+  async waitForReady(timeoutMs = 30_000): Promise<void> {
+    await this.root.waitFor({ state: 'visible', timeout: timeoutMs });
+    await this.viewAllLink.first().waitFor({ state: 'visible', timeout: timeoutMs });
+  }
 }

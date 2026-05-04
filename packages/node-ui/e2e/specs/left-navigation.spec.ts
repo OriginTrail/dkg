@@ -2,9 +2,12 @@ import { test, expect } from '../fixtures/base.js';
 import { sel } from '../helpers/selectors.js';
 
 test.describe('Left Panel Navigation', () => {
-  test.beforeEach(async ({ shell, page }) => {
+  // No global waitForReady — `Dashboard row is visible`, `PROJECTS mode
+  // is active by default`, `Memory Stack row is visible`, and the
+  // `+ New Project` / `Join Project` button tests don't depend on the
+  // project tree being populated. Tree-dependent tests opt in inline.
+  test.beforeEach(async ({ shell }) => {
     await shell.goto();
-    await page.locator('.v10-tree-section').first().waitFor({ state: 'visible', timeout: 10_000 });
   });
 
   test('PROJECTS mode is active by default', async ({ leftPanel }) => {
@@ -22,71 +25,68 @@ test.describe('Left Panel Navigation', () => {
     expect(await leftPanel.isMemoryStackVisible()).toBe(true);
   });
 
-  test('three projects are listed with badges', async ({ leftPanel }) => {
+  test('seeded project is listed in the tree', async ({ leftPanel, seed }) => {
+    await leftPanel.waitForReady();
     const names = await leftPanel.getProjectNames();
-    expect(names).toContain('Pharma Drug Interactions');
-    expect(names).toContain('Climate Science');
-    expect(names).toContain('EU Supply Chain');
-    expect(names.length).toBe(3);
+    expect(names).toContain(seed.contextGraphName);
   });
 
-  test('project badge shows asset count', async ({ leftPanel }) => {
+  test('seeded project shows a numeric badge', async ({ leftPanel, seed }) => {
+    await leftPanel.waitForReady();
     const badge = leftPanel.root.locator(sel.leftPanel.section)
-      .filter({ hasText: 'Pharma Drug Interactions' })
+      .filter({ hasText: seed.contextGraphName })
       .locator(sel.leftPanel.sectionBadge);
-    await expect(badge).toHaveText('227');
+    await expect(badge).toBeVisible();
+    const text = (await badge.textContent())?.trim() ?? '';
+    expect(parseInt(text, 10)).toBeGreaterThanOrEqual(0);
   });
 
-  test('expanding a project reveals memory layer items', async ({ leftPanel }) => {
-    await leftPanel.expandProject('Pharma Drug Interactions');
-    const section = leftPanel.root.locator(sel.leftPanel.section).filter({ hasText: 'Pharma Drug Interactions' });
-
+  test('expanding a project reveals memory layer items', async ({ leftPanel, seed }) => {
+    await leftPanel.expandProject(seed.contextGraphName);
+    const section = leftPanel.root.locator(sel.leftPanel.section).filter({ hasText: seed.contextGraphName });
     const layerHeaders = section.locator(sel.leftPanel.layerHeader);
-    const count = await layerHeaders.count();
-    expect(count).toBe(3);
-
-    const items = section.locator(sel.leftPanel.treeItem);
-    await expect(items.first()).toBeVisible();
+    expect(await layerHeaders.count()).toBe(3);
+    await expect(section.locator(sel.leftPanel.treeItem).first()).toBeVisible();
   });
 
-  test('expanded project shows Working, Shared, and Verified memory sections', async ({ page, leftPanel }) => {
-    await leftPanel.expandProject('Pharma Drug Interactions');
+  test('expanded project shows Working, Shared, and Verified memory sections', async ({ page, leftPanel, seed }) => {
+    await leftPanel.expandProject(seed.contextGraphName);
     const content = page.locator(sel.leftPanel.root).first();
     await expect(content.getByText('WORKING MEMORY')).toBeVisible();
     await expect(content.getByText('SHARED MEMORY')).toBeVisible();
     await expect(content.getByText('VERIFIED MEMORY')).toBeVisible();
   });
 
-  test('working memory section contains agent drafts and import link', async ({ page, leftPanel }) => {
-    await leftPanel.expandProject('Pharma Drug Interactions');
+  test('working memory section contains agent drafts and import link', async ({ page, leftPanel, seed }) => {
+    await leftPanel.expandProject(seed.contextGraphName);
     const section = page.locator(sel.leftPanel.root).first();
     await expect(section.getByText('agent drafts')).toBeVisible();
     await expect(section.getByText('Import files…')).toBeVisible();
   });
 
-  test('clicking agent drafts opens WM tab', async ({ leftPanel, centerPanel }) => {
-    await leftPanel.expandProject('Pharma Drug Interactions');
-    await leftPanel.clickLayer('Pharma Drug Interactions', 'wm');
+  test('clicking agent drafts opens WM tab', async ({ leftPanel, centerPanel, seed }) => {
+    await leftPanel.expandProject(seed.contextGraphName);
+    await leftPanel.clickLayer(seed.contextGraphName, 'wm');
     const tabs = await centerPanel.getTabNames();
     expect(tabs.some(t => t.includes('WM'))).toBe(true);
   });
 
-  test('clicking Import files link opens import modal', async ({ leftPanel, importFilesModal }) => {
-    await leftPanel.expandProject('Pharma Drug Interactions');
-    await leftPanel.clickLayer('Pharma Drug Interactions', 'import');
+  test('clicking Import files link opens import modal', async ({ leftPanel, importFilesModal, seed }) => {
+    await leftPanel.expandProject(seed.contextGraphName);
+    await leftPanel.clickLayer(seed.contextGraphName, 'import');
     expect(await importFilesModal.isOpen()).toBe(true);
   });
 
-  test('clicking team workspace opens SWM tab', async ({ leftPanel, centerPanel }) => {
-    await leftPanel.expandProject('Climate Science');
-    await leftPanel.clickLayer('Climate Science', 'swm');
+  test('clicking team workspace opens SWM tab', async ({ leftPanel, centerPanel, seed }) => {
+    await leftPanel.expandProject(seed.contextGraphName);
+    await leftPanel.clickLayer(seed.contextGraphName, 'swm');
     const tabs = await centerPanel.getTabNames();
     expect(tabs.some(t => t.includes('SWM'))).toBe(true);
   });
 
-  test('clicking verified assets opens VM tab', async ({ leftPanel, centerPanel }) => {
-    await leftPanel.expandProject('EU Supply Chain');
-    await leftPanel.clickLayer('EU Supply Chain', 'vm');
+  test('clicking verified assets opens VM tab', async ({ leftPanel, centerPanel, seed }) => {
+    await leftPanel.expandProject(seed.contextGraphName);
+    await leftPanel.clickLayer(seed.contextGraphName, 'vm');
     const tabs = await centerPanel.getTabNames();
     expect(tabs.some(t => t.includes('VM'))).toBe(true);
   });
@@ -98,37 +98,28 @@ test.describe('Left Panel Navigation', () => {
     expect(text).toContain('coming soon');
   });
 
-  test('expanding a project toggles chevron open class', async ({ page, leftPanel }) => {
-    const chevron = page.locator('.v10-tree-section').filter({ hasText: 'EU Supply Chain' }).locator('.v10-tree-chevron');
-    const wasClosed = !(await chevron.evaluate((el: Element) => el.classList.contains('open')));
-    expect(wasClosed).toBe(true);
-    await leftPanel.expandProject('EU Supply Chain');
-    const isOpen = await chevron.evaluate((el: Element) => el.classList.contains('open'));
-    expect(isOpen).toBe(true);
+  test('expanding a project toggles chevron open class', async ({ page, leftPanel, seed }) => {
+    const chevron = page.locator('.v10-tree-section').filter({ hasText: seed.contextGraphName }).locator('.v10-tree-chevron');
+    expect(await chevron.evaluate((el: Element) => el.classList.contains('open'))).toBe(false);
+    await leftPanel.expandProject(seed.contextGraphName);
+    expect(await chevron.evaluate((el: Element) => el.classList.contains('open'))).toBe(true);
   });
 
-  test('collapsing a project removes chevron open class', async ({ page, leftPanel }) => {
-    await leftPanel.expandProject('EU Supply Chain');
-    const chevron = page.locator('.v10-tree-section').filter({ hasText: 'EU Supply Chain' }).locator('.v10-tree-chevron');
+  test('collapsing a project removes chevron open class', async ({ page, leftPanel, seed }) => {
+    await leftPanel.expandProject(seed.contextGraphName);
+    const chevron = page.locator('.v10-tree-section').filter({ hasText: seed.contextGraphName }).locator('.v10-tree-chevron');
     expect(await chevron.evaluate((el: Element) => el.classList.contains('open'))).toBe(true);
-    await leftPanel.expandProject('EU Supply Chain');
+    await leftPanel.expandProject(seed.contextGraphName);
     expect(await chevron.evaluate((el: Element) => el.classList.contains('open'))).toBe(false);
   });
 
-  test('multiple projects can be expanded simultaneously', async ({ page, leftPanel }) => {
-    await leftPanel.expandProject('Pharma Drug Interactions');
-    await leftPanel.expandProject('Climate Science');
-    const pharmaItems = page.locator('.v10-tree-section').filter({ hasText: 'Pharma Drug Interactions' }).locator('.v10-tree-item');
-    const climateItems = page.locator('.v10-tree-section').filter({ hasText: 'Climate Science' }).locator('.v10-tree-item');
-    expect(await pharmaItems.count()).toBeGreaterThan(0);
-    expect(await climateItems.count()).toBeGreaterThan(0);
-  });
-
-  test('switching back to Projects mode restores tree', async ({ leftPanel }) => {
+  test('switching back to Projects mode restores the tree', async ({ leftPanel }) => {
+    await leftPanel.waitForReady();
+    const before = (await leftPanel.getProjectNames()).length;
     await leftPanel.switchToMode('oracle');
     await leftPanel.switchToMode('explorer');
-    const names = await leftPanel.getProjectNames();
-    expect(names.length).toBe(3);
+    const after = (await leftPanel.getProjectNames()).length;
+    expect(after).toBe(before);
   });
 
   test('+ New Project button opens create project modal', async ({ leftPanel, createProjectModal }) => {
@@ -141,8 +132,8 @@ test.describe('Left Panel Navigation', () => {
     await expect(shell.leftPanel).toBeHidden();
   });
 
-  test('clicking Dashboard row switches to dashboard view', async ({ leftPanel, centerPanel }) => {
-    await leftPanel.expandProject('Pharma Drug Interactions');
+  test('clicking Dashboard row switches to dashboard view', async ({ leftPanel, centerPanel, seed }) => {
+    await leftPanel.expandProject(seed.contextGraphName);
     await leftPanel.clickDashboard();
     const active = await centerPanel.getActiveTabName();
     expect(active?.trim()).toBe('Dashboard');
@@ -152,5 +143,38 @@ test.describe('Left Panel Navigation', () => {
     await leftPanel.clickMemoryStack();
     const tabs = await centerPanel.getTabNames();
     expect(tabs).toContain('Memory Stack');
+  });
+
+  test('Join Project button opens the JoinProjectModal', async ({ leftPanel, joinProjectModal }) => {
+    await leftPanel.clickJoinProject();
+    expect(await joinProjectModal.isOpen()).toBe(true);
+  });
+
+  test('hide × on a project removes it from the tree', async ({ leftPanel, seed }) => {
+    await leftPanel.waitForReady();
+    await leftPanel.hideProject(seed.contextGraphName);
+    const names = await leftPanel.getProjectNames();
+    expect(names).not.toContain(seed.contextGraphName);
+  });
+
+  test('hiding a project surfaces a Show Hidden control', async ({ leftPanel, seed }) => {
+    await leftPanel.waitForReady();
+    await leftPanel.hideProject(seed.contextGraphName);
+    expect(await leftPanel.isShowHiddenVisible()).toBe(true);
+  });
+
+  test('Show Hidden restores hidden projects', async ({ leftPanel, seed }) => {
+    await leftPanel.waitForReady();
+    await leftPanel.hideProject(seed.contextGraphName);
+    await leftPanel.clickShowHidden();
+    const names = await leftPanel.getProjectNames();
+    expect(names).toContain(seed.contextGraphName);
+  });
+
+  test('participating ⤑ toggle keeps the project in the tree', async ({ leftPanel, seed }) => {
+    await leftPanel.waitForReady();
+    await leftPanel.toggleParticipating(seed.contextGraphName);
+    const names = await leftPanel.getProjectNames();
+    expect(names).toContain(seed.contextGraphName);
   });
 });

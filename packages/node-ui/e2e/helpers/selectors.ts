@@ -19,6 +19,7 @@ export const sel = {
     notifItem: '.v10-header-notif-item',
     notifItemText: '.v10-header-notif-item-text',
     notifItemTime: '.v10-header-notif-item-time',
+    settingsBtn: 'button[title="Settings"]',
     themeToggle: 'button[title*="Switch to"]',
     rightPanelToggle: 'button[title="Toggle agent panel"]',
     actions: '.v10-header-actions',
@@ -46,6 +47,9 @@ export const sel = {
     layerHeader: '.v10-tree-layer-header',
     oraclePlaceholder: '.v10-oracle-placeholder',
     integrationDot: '.v10-tree-integration-dot',
+    moveBtn: '.v10-tree-move-btn',
+    hideBtn: '.v10-tree-hide-btn',
+    showHidden: '.v10-tree-show-hidden',
   },
 
   center: {
@@ -85,6 +89,10 @@ export const sel = {
     refreshBtn: '.v10-agents-refresh',
     sessionItem: '.v10-session-item',
     warning: '.v10-local-agent-warning',
+    addSurface: '.v10-agent-add-surface',
+    targetSelect: '.v10-local-agent-target-select',
+    inlineAttach: '.v10-local-agent-inline-attach',
+    inlineSend: '.v10-local-agent-inline-send',
   },
 
   dashboard: {
@@ -142,7 +150,47 @@ export const sel = {
     option: '.v10-import-option',
     progress: '.v10-import-progress',
     progressBar: '.v10-import-progress-bar',
+    progressFill: '.v10-import-progress-fill',
     result: '.v10-import-result',
+    resultRow: '.v10-import-result-row',
+  },
+
+  filePreview: {
+    modal: '.v10-file-preview-modal',
+    content: '.v10-file-preview-content',
+    text: '.v10-file-preview-text',
+    image: '.v10-file-preview-image',
+    binary: '.v10-file-preview-binary',
+    download: '.v10-file-preview-download',
+    meta: '.v10-file-preview-meta',
+    metaItem: '.v10-file-preview-meta-item',
+    close: '.v10-modal-close',
+  },
+
+  settings: {
+    pageTitle: '.page-title',
+    card: '.settings-card',
+    title: '.settings-title',
+    input: 'input.input, select.input',
+    btnGhost: '.btn-ghost',
+    badge: '.badge',
+  },
+
+  operations: {
+    section: '.page-section',
+    tab: '.v10-ops-tab',
+    typeFilter: '.v10-ops-type-filter',
+    statusFilter: '.v10-ops-status-filter',
+    searchInput: '.v10-ops-search',
+    phaseRow: '.v10-ops-phase-row',
+    hotspotRow: '.v10-ops-hotspot-row',
+    copyBtn: '.v10-ops-copy',
+  },
+
+  network: {
+    page: '.network-page',
+    statCard: '.network-stat-card',
+    table: '.network-table',
   },
 
   resizeHandle: '.v10-resize-handle-h',

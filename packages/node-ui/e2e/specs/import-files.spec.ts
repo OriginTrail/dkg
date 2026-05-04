@@ -6,10 +6,11 @@ const __filename = fileURLToPath(import.meta.url);
 const __dir = dirname(__filename);
 
 test.describe('Import Files Modal', () => {
-  test.beforeEach(async ({ shell, leftPanel, importFilesModal }) => {
+  test.beforeEach(async ({ shell, leftPanel, importFilesModal, seed }) => {
     await shell.goto();
-    await leftPanel.expandProject('Pharma Drug Interactions');
-    await leftPanel.clickLayer('Pharma Drug Interactions', 'import');
+    await leftPanel.waitForReady();
+    await leftPanel.expandProject(seed.contextGraphName);
+    await leftPanel.clickLayer(seed.contextGraphName, 'import');
     await expect(importFilesModal.overlay).toBeVisible();
   });
 
@@ -17,10 +18,10 @@ test.describe('Import Files Modal', () => {
     await expect(importFilesModal.title).toHaveText('Import to Working Memory');
   });
 
-  test('subtitle references the project name', async ({ page }) => {
+  test('subtitle references the project name', async ({ page, seed }) => {
     const subtitle = page.locator('.v10-modal-subtitle');
     const text = await subtitle.textContent();
-    expect(text).toContain('Pharma Drug Interactions');
+    expect(text).toContain(seed.contextGraphName);
   });
 
   test('dropzone area is visible', async ({ importFilesModal }) => {
@@ -105,13 +106,32 @@ test.describe('Import Files Modal', () => {
     await expect(page.getByText('Let agent extract structured knowledge from content')).toBeVisible();
   });
 
-  test.skip('modal opened from project view Import Files button', async ({ page, importFilesModal }) => {
-    // The "↑ Import Files" button only appears in the project view empty state.
-    // With demo data, projects are populated so this button is never visible.
-    // Enable when an empty-project scenario is testable.
-    await importFilesModal.cancel();
-    const projectImportBtn = page.locator('button').filter({ hasText: '↑ Import Files' });
-    await projectImportBtn.click();
-    expect(await importFilesModal.isOpen()).toBe(true);
+  test('selecting a file shows its size next to the file name', async ({ importFilesModal, page }) => {
+    const testFile = (await import('node:path')).join(
+      (await import('node:url')).fileURLToPath(new URL('.', import.meta.url)),
+      '..', 'helpers', 'selectors.ts'
+    );
+    await importFilesModal.selectFile(testFile);
+    await expect(page.locator('.v10-import-file-size').first()).toBeVisible();
+  });
+
+  test('removing the only file disables Start Import again', async ({ importFilesModal, page }) => {
+    const testFile = (await import('node:path')).join(
+      (await import('node:url')).fileURLToPath(new URL('.', import.meta.url)),
+      '..', 'helpers', 'selectors.ts'
+    );
+    await importFilesModal.selectFile(testFile);
+    await page.locator('.v10-import-file-remove').first().click();
+    const btn = page.locator('.v10-modal-footer .v10-modal-btn.primary');
+    await expect(btn).toBeDisabled();
+  });
+
+  test('dropzone shows hover styling target on dragover event', async ({ page }) => {
+    const dropzone = page.locator('.v10-import-dropzone');
+    await dropzone.dispatchEvent('dragenter');
+    await dropzone.dispatchEvent('dragover');
+    await expect(dropzone).toHaveClass(/drag-over/);
+    await dropzone.dispatchEvent('dragleave');
+    await expect(dropzone).not.toHaveClass(/drag-over/);
   });
 });
