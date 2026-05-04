@@ -232,7 +232,19 @@ describe('Random Sampling E2E (Hardhat)', () => {
     // We mirror that here so the extractor finds the KC.
     const store = new OxigraphStore();
     const cgIdStr = cgId.toString();
-    const cgName = `cg-${cgIdStr}`;
+    // Use a v9-style `<owner_address>/<slug>` cgName to exercise the
+    // FinalizationHandler ↔ kc-extractor seam end-to-end with the
+    // namespacing pattern that real beacons register on testnet
+    // (e.g. "0xb08…4794c/laptop-smoke"). A pre-PR-#377 build would
+    // short-circuit here in `resolveContextGraphNameFromOnChainId`,
+    // making `prover.tick()` return `kc-not-synced` instead of
+    // `submitted` — exactly the failure mode that suppressed every
+    // RS proof on testnet beacon-04 for 40+ minutes despite chain
+    // challenges firing within seconds of each `Finalization: promoted
+    // SWM snapshot` log line. The unit test in `kc-extractor.test.ts`
+    // covers the resolver in isolation; this one pins the whole
+    // chain-publish → local-store → prover-tick path.
+    const cgName = `0xb08A0F66d5A225D57Dee5fFa6C442e4DC2a4794c/cg-${cgIdStr}`;
     const cgUri = `did:dkg:context-graph:${cgName}`;
     await store.insert([
       {
