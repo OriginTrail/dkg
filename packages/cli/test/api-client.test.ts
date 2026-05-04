@@ -201,6 +201,10 @@ describe('ApiClient', () => {
         body: {
           uri: 'urn:dkg:kafka-endpoint:0xabc:hash',
           contextGraphId: 'devnet-test',
+          // Mirror the real route's response shape: it always echoes the
+          // resolved `private` flag (default-private when omitted from the
+          // request body, as is the case here).
+          private: true,
         },
       });
       globalThis.fetch = fetch;
