@@ -54,13 +54,8 @@ export async function handleKafkaRoutes(ctx: RequestContext): Promise<void> {
 
     if (!validateOptionalBoolean(privateField, 'private', res)) return;
 
-    // Default to private: true. Callers opt into a public KA by sending
-    // `private: false` in the request body. The `!== false` predicate is
-    // intentional: only the literal boolean `false` flips to public; any
-    // other accepted value (omitted/undefined, after the type-check above)
-    // resolves to private. This is the safe failure mode for a
-    // privacy-sensitive boundary — a future "tightening" to `=== true`
-    // would silently break the omitted-defaults-to-private semantic.
+    // `!== false` is intentional: only literal `false` opts in to public; omitted/undefined defaults to private.
+    // Do NOT tighten to `=== true` — that would silently break the omitted-defaults-to-private contract.
     const isPrivate = privateField !== false;
 
     const publisher: KafkaEndpointPublisher = {

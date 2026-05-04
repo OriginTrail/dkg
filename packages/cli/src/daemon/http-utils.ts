@@ -260,32 +260,18 @@ export function validateOptionalSubGraphName(
   return true;
 }
 
-/**
- * Generic guard: narrows `unknown` to a non-empty trimmed string. Useful in
- * route handlers that need to validate string fields without coupling each
- * one to a domain-specific validator. Does NOT write a response — caller
- * decides the error semantics.
- */
+/** Type guard: non-empty trimmed string. Does not write a response — caller handles the 400. */
 export function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0;
 }
 
-/**
- * Validate an optional boolean field. Returns true if the field is
- * absent (undefined) or a real boolean. Returns false (and writes a
- * 400 response) if the field is present but not a boolean.
- *
- * Use this at boundaries where the omitted-defaults-to-something
- * semantic must be preserved AND truthy/falsy coercion would create
- * an unsafe ambiguity (e.g., privacy flags).
- */
+/** Optional-boolean validator. Returns false (and writes a 400) if the field is present but not a boolean. */
 export function validateOptionalBoolean(
   value: unknown,
   fieldName: string,
   res: ServerResponse,
 ): boolean {
-  if (value === undefined) return true;
-  if (typeof value === 'boolean') return true;
+  if (value === undefined || typeof value === 'boolean') return true;
   jsonResponse(res, 400, { error: `"${fieldName}" must be a boolean` });
   return false;
 }

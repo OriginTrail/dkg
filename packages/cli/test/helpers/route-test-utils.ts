@@ -1,17 +1,4 @@
-/**
- * Shared in-process mocks for unit-testing daemon route handlers.
- *
- * Contract: each helper produces the minimum surface a route handler needs
- * (a fake IncomingMessage, a fake ServerResponse, a partial RequestContext)
- * with NO real daemon, NO network, NO chain, and NO Hardhat. Tests invoke
- * the route handler directly and assert on captured side effects.
- *
- * Used by:
- *   - daemon-routes-kafka.test.ts (slice 03 — privacy envelope)
- *   - reserved for slice 02 (local-vs-shared CG) and slice 07 (subscription)
- *     once those tickets land, both of which exercise routes/kafka.ts and
- *     need identical mocks.
- */
+/** Shared in-process mocks for unit-testing daemon route handlers. No real daemon, network, chain, or Hardhat. */
 
 import { EventEmitter } from 'node:events';
 import type { IncomingMessage, ServerResponse } from 'node:http';
@@ -19,14 +6,7 @@ import type { RequestContext } from '../../src/daemon/routes/context.js';
 
 const DEFAULT_AGENT_ADDRESS = '0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef';
 
-/**
- * Make a minimal fake IncomingMessage. Body (if provided) is JSON-encoded
- * and emitted via 'data'/'end' events on the next tick — matching what
- * readBody() in `http-utils.ts` consumes.
- *
- * Defaults to POST so the common case stays terse; pass `method`/`url`
- * overrides for routes that accept other verbs/paths.
- */
+/** Fake IncomingMessage; body is JSON-encoded and emitted via data/end events on the next tick. */
 export function makeFakeRequest(
   body: object | null,
   overrides: { method?: string; url?: string } = {},
@@ -35,7 +15,7 @@ export function makeFakeRequest(
   emitter.method = overrides.method ?? 'POST';
   emitter.url = overrides.url ?? '/';
 
-  // Emit data/end on the next tick so listeners are attached first
+  // Defer emit so listeners attach first.
   setImmediate(() => {
     if (body !== null) {
       emitter.emit('data', Buffer.from(JSON.stringify(body)));
@@ -51,11 +31,7 @@ export interface FakeResponse {
   getResult: () => { status: number; body: unknown };
 }
 
-/**
- * Make a fake ServerResponse that captures the status + JSON body written
- * via writeHead/end. jsonResponse() in http-utils.ts calls
- * writeHead(status, headers) then end(body), so both overloads must work.
- */
+/** Fake ServerResponse capturing status + JSON body. Supports the writeHead(status, headers?) overload jsonResponse uses. */
 export function makeFakeResponse(): FakeResponse {
   let capturedStatus = 0;
   let capturedBody: unknown = null;
@@ -88,18 +64,8 @@ export interface PublishCall {
 export type PublishHook = (cgId: string, envelope: unknown) => Promise<unknown>;
 
 /**
- * Build a minimal RequestContext with a mock agent.publish that captures
- * every call. All fields are overridable so route-specific tests can
- * inject a different `path`, `requestAgentAddress`, etc.
- *
- * The returned `publishCalls` array is shared mutable state — assert on it
- * after invoking the route handler.
- *
- * When `overrides.onPublish` is supplied, calls are still captured into
- * `publishCalls` (capture is unconditional); `onPublish` only controls what
- * `agent.publish()` returns to the route handler. This lets tests both
- * assert on the call shape AND drive custom return values (e.g., to
- * simulate a publish failure) without losing visibility into what was sent.
+ * Build a minimal RequestContext; the mock agent.publish appends every call to `publishCalls`.
+ * `overrides.onPublish` overrides the publish return value; `publishCalls` is still populated.
  */
 export function makeRequestContext(
   req: IncomingMessage,
@@ -107,7 +73,6 @@ export function makeRequestContext(
   overrides: Partial<RequestContext> & { onPublish?: PublishHook } = {},
 ): { ctx: RequestContext; publishCalls: PublishCall[] } {
   const publishCalls: PublishCall[] = [];
-  // Strip the test-only `onPublish` before merging the rest into the ctx.
   const { onPublish, ...ctxOverrides } = overrides;
 
   const mockAgent = {
