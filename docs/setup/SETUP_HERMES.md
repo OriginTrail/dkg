@@ -78,6 +78,19 @@ packaged `.dkg` installs.
 
 Provider facts are written to the `memory` assertion in `agent-context` by
 default. The fact subjects still carry the Hermes profile/agent identity.
+`dkg_memory` also accepts an advanced `context_graph_id` override for scoped
+notes in another graph. Scoped notes are cached and queued separately from the
+default provider memory so project notes do not mix into personal memory.
+Existing profiles that stored provider memory in a custom `context_graph` are
+read as a legacy fallback when the new `agent-context` assertion is empty, so
+older notes remain visible while new unscoped writes use the current default.
+
+Passive recall uses the same six-layer DKG memory search behavior as
+`memory_search`: `agent-context` WM/SWM/VM is always searched, and the selected
+or otherwise supplied project context graph is searched across WM/SWM/VM when
+present. If no project graph is supplied, both paths search only
+`agent-context`. Injected recall snippets include the exact context graph
+id, DKG view, OpenClaw layer label, source, and score.
 
 ## CLI Helpers
 
@@ -278,6 +291,9 @@ but the UI shows a degraded/offline bridge state.
 - Hermes `send` and `stream` require an enabled local-agent registration.
   `persist-turn` remains bearer-authenticated for provider persistence even
   when UI chat registration is unavailable.
+- Adapter-generated passive recall blocks are stripped before Hermes turn
+  persistence and extraction so recalled context does not get re-saved as a
+  fresh chat memory.
 - Adapter setup stores non-secret settings in `dkg.json`.
 - Setup and reconnect install the bundled node skill to
   `$HERMES_HOME/skills/dkg-node/SKILL.md`; this should be the canonical Hermes

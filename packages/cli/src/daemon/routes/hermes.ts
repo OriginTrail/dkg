@@ -603,6 +603,7 @@ async function persistHermesTurnUnlocked(
   verifiedAttachmentRefs: OpenClawAttachmentRef[] | undefined,
 ): Promise<HermesPersistRouteResult> {
   const { agent, memoryManager } = ctx;
+  const assistantReply = stripHermesAutoRecallBlocks(payload.assistantReply);
   try {
     let existingState: HermesTurnPersistenceState | null = null;
     try {
@@ -634,7 +635,12 @@ async function persistHermesTurnUnlocked(
           },
         };
       }
-      const transitioned = await recordHermesTurnPersistenceTransition(memoryManager, payload, verifiedAttachmentRefs);
+      const transitioned = await recordHermesTurnPersistenceTransition(
+        memoryManager,
+        payload,
+        verifiedAttachmentRefs,
+        assistantReply,
+      );
       if (!transitioned) {
         return {
           statusCode: 409,
@@ -645,7 +651,7 @@ async function persistHermesTurnUnlocked(
         };
       }
       if (payload.persistenceState === 'stored') {
-        await importHermesAssistantReply(agent, payload.sessionId, payload.turnId, payload.assistantReply);
+        await importHermesAssistantReply(agent, payload.sessionId, payload.turnId, assistantReply);
       }
       return {
         statusCode: 200,
@@ -660,7 +666,7 @@ async function persistHermesTurnUnlocked(
     await memoryManager.storeChatExchange(
       payload.sessionId,
       payload.userMessage,
-      payload.assistantReply,
+      assistantReply,
       payload.toolCalls,
       {
         turnId: payload.turnId || randomUUID(),
@@ -670,7 +676,7 @@ async function persistHermesTurnUnlocked(
       },
     );
     if (payload.persistenceState === 'stored') {
-      await importHermesAssistantReply(agent, payload.sessionId, payload.turnId, payload.assistantReply);
+      await importHermesAssistantReply(agent, payload.sessionId, payload.turnId, assistantReply);
     }
     return { statusCode: 200, body: { ok: true, turnId: payload.turnId } };
   } catch (err: any) {
@@ -684,10 +690,21 @@ function persistenceStateRank(state: HermesTurnPersistenceState): number {
   return 1;
 }
 
+function stripHermesAutoRecallBlocks(text: string): string {
+  if (!text || !text.toLowerCase().includes('recalled-memory')) return text;
+  const sentinelOpen =
+    /<recalled-memory\b(?=[^>]*\bdata-source\s*=\s*(?:"dkg-auto-recall"|'dkg-auto-recall'|dkg-auto-recall(?=[\s>/])))[^>]*>/i;
+  return text.replace(
+    new RegExp(sentinelOpen.source + /(?:[\s\S]*?<\/recalled-memory>|[\s\S]*$)/.source, 'gi'),
+    '',
+  );
+}
+
 async function recordHermesTurnPersistenceTransition(
   memoryManager: RequestContext['memoryManager'],
   payload: NormalizedHermesPersistTurnPayload,
   verifiedAttachmentRefs: OpenClawAttachmentRef[] | undefined,
+  assistantReply = stripHermesAutoRecallBlocks(payload.assistantReply),
 ): Promise<boolean> {
   const recorder = (memoryManager as unknown as {
     recordChatTurnPersistenceTransition?: (
@@ -705,7 +722,7 @@ async function recordHermesTurnPersistenceTransition(
   if (typeof recorder !== 'function') return false;
   await recorder.call(memoryManager, payload.sessionId, payload.turnId, payload.persistenceState, {
     failureReason: payload.failureReason ?? null,
-    assistantReply: payload.assistantReply,
+    assistantReply,
     toolCalls: payload.toolCalls,
     attachmentRefs: verifiedAttachmentRefs,
   });

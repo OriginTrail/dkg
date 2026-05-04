@@ -1700,6 +1700,64 @@ describe('Hermes daemon routes', () => {
     expect(importMemories).toHaveBeenCalledWith('hi', `hermes-session:hermes:default:turn:${body.turnId}`);
   });
 
+  it('strips Hermes auto-recall blocks before full chat persistence and extraction', async () => {
+    const storeChatExchange = vi.fn(async () => {});
+    const importMemories = vi.fn(async () => {});
+    const memoryManager = {
+      hasChatTurn: vi.fn(async () => false),
+      storeChatExchange,
+    };
+    const recalled = '<Recalled-Memory data-source=\'dkg-auto-recall\'><snippet>private recalled context</snippet></recalled-memory>';
+    const { ctx, res } = makeHermesRouteContext({
+      sessionId: 'hermes:default',
+      userMessage: 'hello',
+      assistantReply: `before ${recalled} after`,
+      turnId: 'turn-1',
+    }, memoryManager);
+    ctx.agent.importMemories = importMemories;
+
+    await handleHermesRoutes(ctx);
+
+    expect(res.statusCode).toBe(200);
+    expect(storeChatExchange).toHaveBeenCalledWith(
+      'hermes:default',
+      'hello',
+      'before  after',
+      undefined,
+      expect.objectContaining({ turnId: 'turn-1' }),
+    );
+    expect(importMemories).toHaveBeenCalledWith('before  after', 'hermes-session:hermes:default:turn:turn-1');
+  });
+
+  it('strips malformed Hermes auto-recall openings before persistence', async () => {
+    const storeChatExchange = vi.fn(async () => {});
+    const importMemories = vi.fn(async () => {});
+    const memoryManager = {
+      hasChatTurn: vi.fn(async () => false),
+      storeChatExchange,
+    };
+    const malformed = 'before <Recalled-Memory data-source=dkg-auto-recall><snippet>unfinished after';
+    const { ctx, res } = makeHermesRouteContext({
+      sessionId: 'hermes:default',
+      userMessage: 'hello',
+      assistantReply: malformed,
+      turnId: 'turn-1',
+    }, memoryManager);
+    ctx.agent.importMemories = importMemories;
+
+    await handleHermesRoutes(ctx);
+
+    expect(res.statusCode).toBe(200);
+    expect(storeChatExchange).toHaveBeenCalledWith(
+      'hermes:default',
+      'hello',
+      'before ',
+      undefined,
+      expect.objectContaining({ turnId: 'turn-1' }),
+    );
+    expect(importMemories).toHaveBeenCalledWith('before ', 'hermes-session:hermes:default:turn:turn-1');
+  });
+
   it('deduplicates Hermes persist-turn retries by correlation id when turn id is omitted', async () => {
     let stored = false;
     const storeChatExchange = vi.fn(async () => {
@@ -1853,6 +1911,40 @@ describe('Hermes daemon routes', () => {
     );
     expect(storeChatExchange).not.toHaveBeenCalled();
     expect(importMemories).toHaveBeenCalledWith('final reply', 'hermes-session:hermes:default:turn:turn-1');
+  });
+
+  it('strips Hermes auto-recall blocks before persistence state transitions', async () => {
+    const recordChatTurnPersistenceTransition = vi.fn(async () => {});
+    const importMemories = vi.fn(async () => {});
+    const memoryManager = {
+      hasChatTurn: vi.fn(async () => true),
+      getChatTurnPersistenceState: vi.fn(async () => 'pending'),
+      recordChatTurnPersistenceTransition,
+      storeChatExchange: vi.fn(async () => {}),
+    };
+    const recalled = '<recalled-memory data-source="dkg-auto-recall"><snippet>private recalled context</snippet></recalled-memory>';
+    const { ctx, res } = makeHermesRouteContext({
+      sessionId: 'hermes:default',
+      userMessage: 'hello',
+      assistantReply: `final ${recalled} reply`,
+      turnId: 'turn-1',
+      persistenceState: 'stored',
+    }, memoryManager);
+    ctx.agent.importMemories = importMemories;
+
+    await handleHermesRoutes(ctx);
+
+    expect(res.statusCode).toBe(200);
+    expect(recordChatTurnPersistenceTransition).toHaveBeenCalledWith(
+      'hermes:default',
+      'turn-1',
+      'stored',
+      expect.objectContaining({
+        assistantReply: 'final  reply',
+      }),
+    );
+    expect(memoryManager.storeChatExchange).not.toHaveBeenCalled();
+    expect(importMemories).toHaveBeenCalledWith('final  reply', 'hermes-session:hermes:default:turn:turn-1');
   });
 
   it('does not replay provisional Hermes retries through full chat persistence', async () => {

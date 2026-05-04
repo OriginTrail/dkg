@@ -211,12 +211,23 @@ SWM is for knowledge you've promoted from WM and want peers to see. Data arrives
 
 ### Querying
 
+**Hermes-native simple memory notes: `dkg_memory` tool.**
+
+Hermes exposes `dkg_memory` for lightweight persistent notes. It defaults to
+the `agent-context` / `memory` assertion. When the user explicitly asks to
+store a simple note in a project graph, pass `context_graph_id`; scoped notes
+are separate from default personal memory. Selected-project routing defaults do
+not apply to simple `dkg_memory` notes unless the user explicitly asks for a
+project-scoped note. For precise WM/SWM workflows, prefer
+the assertion tools (`dkg_assertion_create/write/promote/query/history`) and
+the shared-memory tools below.
+
 **Agent-initiated free-text recall: `memory_search` tool.**
 
-The `memory_search` tool is the recommended entry point for free-text memory recall. It fans out across all trust tiers (WM drafts, SWM consolidated, VM on-chain) in both the `agent-context` graph AND the currently-selected project context graph, then returns trust-weighted ranked snippets.
+The `memory_search` tool is the recommended entry point for free-text memory recall. It fans out across all trust tiers (WM drafts, SWM consolidated, VM on-chain) in the `agent-context` graph and, when a project context graph is supplied for the turn/tool call, that project's graph, then returns trust-weighted ranked snippets. If no project graph is supplied, it searches only `agent-context`.
 
-- Input: `{ query: string, limit?: number }` — a natural-language query; limit is a hint (default 20, capped at 100). The default is intentionally larger than the per-turn auto-recall (which caps at 5) so the agent gets a richer snapshot when it explicitly invokes recall. Shares the same fan-out and ranking as auto-recall.
-- Output: `{ query, count, scope, hits: [{ snippet, layer, source, score, path }] }`. `layer` is one of `agent-context-wm | agent-context-swm | agent-context-vm | project-wm | project-swm | project-vm`. Higher-trust layers outrank lower-trust ones on the same content (VM ×1.3, SWM ×1.15, WM ×1.0).
+- Input: `{ query: string, limit?: number, context_graph_id?: string }` — a natural-language query; limit is a hint (default 20, capped at 100). `context_graph_id` can override the selected project graph when the adapter exposes it. The default is intentionally larger than the per-turn auto-recall (which caps at 5) so the agent gets a richer snapshot when it explicitly invokes recall. Shares the same fan-out and ranking as auto-recall.
+- Output: `{ query, count, scope, hits: [{ snippet, layer, source, score, path, context_graph_id?, view? }] }`. `layer` is one of `agent-context-wm | agent-context-swm | agent-context-vm | project-wm | project-swm | project-vm`. `context_graph_id` and `view` identify the exact graph and memory layer when supplied by the adapter; `path` also encodes the graph/layer provenance. Higher-trust layers outrank lower-trust ones on the same content (VM ×1.3, SWM ×1.15, WM ×1.0).
 
 **When to prefer `memory_search` vs `dkg_query`:**
 
@@ -376,7 +387,7 @@ Context Graphs are scoped knowledge domains with configurable access and governa
 
 When the chat turn includes injected context with `target_context_graph`, treat that value as BOTH:
 
-1. **The authoritative target context graph for tool routing on this turn** — default all DKG reads, writes, imports, promotions, publishes, and queries in that turn to this value unless the user explicitly overrides it in the same message.
+1. **The authoritative target context graph for tool routing on this turn** — default all DKG reads, project writes, imports, promotions, publishes, and queries in that turn to this value unless the user explicitly overrides it in the same message. Exception: Hermes-native `dkg_memory` simple notes keep their `agent-context` default unless the user explicitly asks to store that note in the selected project.
 2. **The user's currently-selected project in the UI** — when the user asks introspective questions like "which project am I on?", "what is currently selected?", "do you see that I have X selected?", answer directly from this field. Do not claim you cannot see the UI state. The field IS the UI state: the right-side panel project dropdown stamps it onto every turn envelope before the turn reaches you, so its presence means the user has that project selected and its absence means they have nothing selected.
 
 ### Context-First Lookup
@@ -416,7 +427,7 @@ Implications:
 
 - If `target_context_graph` is present, the user is on that project. State this explicitly when asked.
 - If it is absent, the user has no project selected. Try to deduce the target project from the conversation context (e.g., "add this to my research project" → look up "research" via `GET /api/context-graph/list`). If the project is ambiguous or you are not confident, ask the user which project to use. Only suggest the right-side panel project dropdown if the user is chatting through the DKG UI — users on other channels (Telegram, API, etc.) do not have a panel to select from. When no project can be determined, route reads and writes to `agent-context` only.
-- Default all DKG reads, writes, imports, promotions, publishes, and queries in that turn to the injected target context graph.
+- Default all DKG reads, project writes, imports, promotions, publishes, and queries in that turn to the injected target context graph. Do not apply this broad project-write default to Hermes-native `dkg_memory` simple notes; pass `context_graph_id` there only for an explicit project-scoped note.
 - Do not keep using an older conversational context graph when a newer injected `target_context_graph` is present.
 - If the injected value includes both display name and ID, prefer the ID when calling tools or APIs, and reference the display name when answering the user.
 - If the user explicitly says to use a different context graph in the same turn, follow the user's explicit instruction instead.
