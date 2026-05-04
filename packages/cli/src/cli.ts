@@ -1775,11 +1775,11 @@ kafkaEndpointCmd
       console.log('Kafka endpoint registered:');
       console.log(`  URI:                  ${result.uri}`);
       console.log(`  Context graph:        ${result.contextGraphId}`);
-      if ((result as any).verificationStatus) {
-        console.log(`  Verification status:  ${(result as any).verificationStatus}`);
+      if (result.verificationStatus) {
+        console.log(`  Verification status:  ${result.verificationStatus}`);
       }
-      if ((result as any).verifiedAt) {
-        console.log(`  Verified at:          ${(result as any).verifiedAt}`);
+      if (result.verifiedAt) {
+        console.log(`  Verified at:          ${result.verifiedAt}`);
       }
     } catch (err) {
       console.error(toErrorMessage(err));
