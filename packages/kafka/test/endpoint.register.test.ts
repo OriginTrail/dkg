@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { registerKafkaEndpoint } from '../src/endpoint.js';
 
 describe('registerKafkaEndpoint', () => {
-  it('publishes the Kafka endpoint KA into the named context graph', async () => {
+  it('publishes the Kafka endpoint KA into the named context graph (shared scope)', async () => {
     const calls: Array<{ contextGraphId: string; content: unknown }> = [];
     const publisher = {
       async publish(contextGraphId: string, content: unknown) {
@@ -12,7 +12,7 @@ describe('registerKafkaEndpoint', () => {
     };
 
     const result = await registerKafkaEndpoint({
-      contextGraphId: 'devnet-test',
+      selection: { kind: 'shared', contextGraphId: 'devnet-test' },
       owner: '0xAbCDEFabcdefABCDEFabcdefABCDEFabcdefABCD',
       broker: 'kafka.example.com:9092',
       topic: 'orders.created',
@@ -25,6 +25,7 @@ describe('registerKafkaEndpoint', () => {
       uri: 'urn:dkg:kafka-endpoint:0xabcdefabcdefabcdefabcdefabcdefabcdefabcd:' +
         '33b58f60595c766739f72b29e4ee417888d1a46af8339a4b5bdb1c3a5692f652',
       contextGraphId: 'devnet-test',
+      cgScope: 'shared',
     });
 
     expect(calls).toHaveLength(1);
@@ -54,5 +55,60 @@ describe('registerKafkaEndpoint', () => {
         },
       },
     });
+  });
+
+  it('publishes into the resolved local CG when selection.kind is "local"', async () => {
+    const calls: Array<{ contextGraphId: string; content: unknown }> = [];
+    const publisher = {
+      async publish(contextGraphId: string, content: unknown) {
+        calls.push({ contextGraphId, content });
+        return { ual: 'did:dkg:test/1', kcId: '1', status: 'confirmed' as const };
+      },
+    };
+    let ensureCalls = 0;
+    const ensureLocalCg = async (): Promise<string> => {
+      ensureCalls += 1;
+      return 'kafka-local';
+    };
+
+    const result = await registerKafkaEndpoint({
+      selection: { kind: 'local' },
+      owner: '0xAbCDEFabcdefABCDEFabcdefABCDEFabcdefABCD',
+      broker: 'kafka.example.com:9092',
+      topic: 'orders.created',
+      messageFormat: 'application/json',
+      issuedAt: '2026-05-04T12:34:56.000Z',
+      publisher,
+      ensureLocalCg,
+    });
+
+    expect(ensureCalls).toBe(1);
+    expect(result).toEqual({
+      uri: 'urn:dkg:kafka-endpoint:0xabcdefabcdefabcdefabcdefabcdefabcdefabcd:' +
+        '33b58f60595c766739f72b29e4ee417888d1a46af8339a4b5bdb1c3a5692f652',
+      contextGraphId: 'kafka-local',
+      cgScope: 'local',
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.contextGraphId).toBe('kafka-local');
+  });
+
+  it('throws when selection.kind is "local" but ensureLocalCg is not provided', async () => {
+    const publisher = {
+      async publish() {
+        return { ual: 'did:dkg:test/1', kcId: '1', status: 'confirmed' as const };
+      },
+    };
+
+    await expect(
+      registerKafkaEndpoint({
+        selection: { kind: 'local' },
+        owner: '0xAbCDEFabcdefABCDEFabcdefABCDEFabcdefABCD',
+        broker: 'kafka.example.com:9092',
+        topic: 'orders.created',
+        messageFormat: 'application/json',
+        publisher,
+      }),
+    ).rejects.toThrow(/ensureLocalCg/);
   });
 });
