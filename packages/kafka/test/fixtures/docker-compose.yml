@@ -1,0 +1,33 @@
+# Manual-debug fixture for the kafka-probe integration tests.
+#
+# CI does NOT use this file — testcontainers spins up the same image
+# programmatically through `test/helpers/kafka-container.ts`. This compose
+# file exists so you can `docker compose -f packages/kafka/test/fixtures/docker-compose.yml up`
+# locally and point the probe at `localhost:9093` while iterating.
+#
+# IMPORTANT: keep the image tag and listener config in lockstep with
+# `test/helpers/kafka-container.ts` (KAFKA_IMAGE constant). If you bump
+# one, bump the other.
+
+services:
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: dkg-kafka-probe-debug
+    ports:
+      - "9093:9093"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: BROKER:PLAINTEXT,PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_LISTENERS: BROKER://0.0.0.0:9092,PLAINTEXT://0.0.0.0:9093,CONTROLLER://0.0.0.0:9094
+      KAFKA_ADVERTISED_LISTENERS: BROKER://kafka:9092,PLAINTEXT://localhost:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: BROKER
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9094
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_LOG_FLUSH_INTERVAL_MESSAGES: 9223372036854775807
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      CLUSTER_ID: 4L6g3nShT-eMCtK--X86sw
