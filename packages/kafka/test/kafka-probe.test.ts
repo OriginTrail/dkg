@@ -488,3 +488,91 @@ describe('probe — kafkajs config defaults', () => {
     expect(captured.last!.config.clientId).toBe('custom-client');
   });
 });
+
+describe('probe — buildKafkaConfig exhaustiveness guard', () => {
+  // The route is the only caller and validates `securityProtocol` before
+  // invoking the probe; the type system also narrows the switch arms via
+  // `never`. This test forces an unreachable arm by casting through the
+  // public input type, asserting the defensive throw fires and is not
+  // swallowed by the outer Promise.race / disconnect block. Driving this
+  // branch eliminates the last uncovered statements in `kafka-probe.ts` and
+  // guarantees a future contributor cannot silently delete the guard.
+  it('throws on an unrecognized securityProtocol value', async () => {
+    const { probe } = await importProbe();
+    await expect(
+      probe({
+        brokers: ['localhost:9092'],
+        topic: 'orders',
+        // Cast bypasses the type system to exercise the defensive default
+        // arm. Real callers can never reach this branch.
+        securityProtocol: 'ROT13' as unknown as 'PLAINTEXT',
+      }),
+    ).rejects.toThrow(/Unsupported securityProtocol: ROT13/);
+  });
+});
+
+describe('probe — error classification branches', () => {
+  // `classifyError` returns a fixed dictionary keyed by `err.name`. Each arm
+  // strips an attacker-controllable error message down to a stable class name,
+  // so a caller that logs the result can never accidentally surface a
+  // credential substring. We exercise every named arm so the dictionary
+  // can't silently regress.
+  const ERROR_NAMES = [
+    'KafkaJSBrokerNotFound',
+    'KafkaJSNumberOfRetriesExceeded',
+    'KafkaJSRequestTimeoutError',
+    'KafkaJSConnectionClosedError',
+  ] as const;
+
+  for (const name of ERROR_NAMES) {
+    it(`classifies ${name} thrown from connect`, async () => {
+      nextAdminBehavior = {
+        connect: async () => {
+          throw Object.assign(new Error('inner-message-with-CRED-MARKER'), { name });
+        },
+      };
+      const { probe } = await importProbe();
+      const result = await probe({
+        brokers: ['localhost:9092'],
+        topic: 'orders',
+        securityProtocol: 'PLAINTEXT',
+      });
+      expect(result.status).toBe('unreachable');
+      expect(result.error).toBe(name);
+      // Defence in depth: never echo the inner message.
+      expect(JSON.stringify(result)).not.toContain('CRED-MARKER');
+    });
+  }
+
+  it('falls back to err.name when the error is not a known kafkajs class', async () => {
+    nextAdminBehavior = {
+      connect: async () => {
+        throw Object.assign(new Error('inner-message'), { name: 'TypeError' });
+      },
+    };
+    const { probe } = await importProbe();
+    const result = await probe({
+      brokers: ['localhost:9092'],
+      topic: 'orders',
+      securityProtocol: 'PLAINTEXT',
+    });
+    expect(result.status).toBe('unreachable');
+    expect(result.error).toBe('TypeError');
+  });
+});
+
+describe('probe — SSL material defaults', () => {
+  it('SSL with no `ssl` block at all → falls back to {}, fails the mTLS guard', async () => {
+    // Exercises the `ssl ?? {}` path in `buildSsl`. The test asserts the
+    // mTLS guard still fires (cert+key are required) and that the error
+    // message is the stable, credential-free string.
+    const { probe } = await importProbe();
+    await expect(
+      probe({
+        brokers: ['localhost:9092'],
+        topic: 'orders',
+        securityProtocol: 'SSL',
+      }),
+    ).rejects.toThrow(/SSL mTLS requires both client cert and key/);
+  });
+});

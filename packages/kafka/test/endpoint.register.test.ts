@@ -79,6 +79,31 @@ describe('registerKafkaEndpoint — slice-01 backwards compat', () => {
       },
     });
   });
+
+  it('falls back to "now" when issuedAt is omitted', async () => {
+    // The default `issuedAt` is `new Date().toISOString()`. We assert the KA
+    // carries a fresh, well-formed ISO-8601 timestamp without dictating the
+    // exact moment — wall-clock equality is brittle.
+    const { publisher, calls } = makePublisher();
+    const before = new Date();
+
+    const { issuedAt: _drop, ...inputWithoutIssuedAt } = BASE_INPUT;
+    void _drop;
+    const result = await registerKafkaEndpoint({
+      ...inputWithoutIssuedAt,
+      publisher,
+    });
+
+    expect(result.verificationStatus).toBe('unattempted');
+    const ka = calls[0].content as Record<string, { '@value': string; '@type': string }>;
+    const issued = ka['dct:issued'];
+    expect(issued['@type']).toBe('xsd:dateTime');
+    const issuedDate = new Date(issued['@value']);
+    expect(Number.isNaN(issuedDate.getTime())).toBe(false);
+    // The default branch must produce a timestamp at or after the moment we
+    // entered the call. Allow 5 s of slack for slow CI clocks.
+    expect(issuedDate.getTime()).toBeGreaterThanOrEqual(before.getTime() - 5_000);
+  });
 });
 
 describe('registerKafkaEndpoint — opportunistic verification (ADR 0002)', () => {

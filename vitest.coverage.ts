@@ -160,16 +160,17 @@ export const kosavaEpcisCoverage: CoverageThresholds = {
 };
 
 export const kosavaKafkaCoverage: CoverageThresholds = {
-  // Slice 04 ratchet, scoped to `src/**` (excluding the `src/index.ts` re-export
-  // barrel). The remaining uncovered branches are the `??` fallback for
-  // `issuedAt` in `endpoint.ts` (callers always supply it today) and the
-  // exhaustive `never` `default` arm in `kafka-probe.ts`'s
-  // `buildKafkaConfig` switch — defensive code that the type system already
-  // proves unreachable.
-  lines: 97,
+  // Slice 04 ratchet, scoped to `src/**` (excluding the `src/index.ts`
+  // re-export barrel). All lines, statements, and functions are covered. The
+  // last two uncovered branches are micro-defensive paths: the
+  // `(err as { name?: string } | null)?.name ?? 'Error'` null-guard in
+  // `classifyError` (kafkajs never throws `null`) and the `if (timer)` clear
+  // in `runWithTimeout` (the timer is always assigned synchronously). 96 is
+  // the floor; current actual is 97.36.
+  lines: 100,
   functions: 100,
-  branches: 88,
-  statements: 94,
+  branches: 96,
+  statements: 100,
 };
 
 /**
