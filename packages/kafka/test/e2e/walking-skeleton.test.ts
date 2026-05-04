@@ -141,7 +141,9 @@ describe('kafka walking skeleton e2e', () => {
     if (!RUN_E2E || !devnetReachable) skip();
   });
 
-  it('registers a Kafka endpoint into the named context graph and discovers it via SPARQL', async () => {
+  it('registers a public Kafka endpoint into the named context graph and discovers it via SPARQL', async () => {
+    // Registers with --public so the KA is wrapped in { public: KA } and
+    // cleartext quads are stored. SPARQL query should return the endpoint row.
     const broker = 'kafka.e2e.local:9092';
     const topic = `walking-skeleton.${Date.now()}`;
     const messageFormat = 'application/cloudevents+json';
@@ -162,6 +164,7 @@ describe('kafka walking skeleton e2e', () => {
         topic,
         '--format',
         messageFormat,
+        '--public',
       ],
       {
         cwd: REPO_ROOT,
@@ -176,6 +179,8 @@ describe('kafka walking skeleton e2e', () => {
     expect(result.stdout).toContain('Kafka endpoint registered:');
     expect(result.stdout).toContain(expectedUri);
     expect(result.stdout).toContain(CONTEXT_GRAPH_ID);
+    // --public flag → response echoes Private: false
+    expect(result.stdout).toContain('Private:        false');
 
     const row = await waitForEndpointRow(client, CONTEXT_GRAPH_ID, expectedUri);
 
@@ -185,5 +190,59 @@ describe('kafka walking skeleton e2e', () => {
     expect(stripIriDelimiters(row.publisher ?? '')).toBe(`urn:dkg:agent:${owner}`);
     expect(stripIriDelimiters(row.endpointUrl ?? '')).toBe(`kafka://${broker}/${topic}`);
     expect(Number.isNaN(Date.parse(stripQuotedLiteral(row.issued ?? '')))).toBe(false);
+  }, 90_000);
+
+  it('registers a private (default) Kafka endpoint and confirms CLI reports Private: true', async () => {
+    // Registers WITHOUT --public so the KA is wrapped in { private: KA } and
+    // stored as encrypted data for CG participants.
+    //
+    // V10 private-KA semantics: on a single-node devnet the local participant
+    // IS the publisher, so the node may decrypt the KA for itself and surface
+    // it via SPARQL. On a multi-node network, other participants would need
+    // decryption keys. We do NOT assert SPARQL content here because:
+    //   1. Verifying encryption-to-CG-participants requires a full multi-node
+    //      devnet with participant key management — beyond this single-node e2e.
+    //   2. The route-adapter unit tests in daemon-routes-kafka.test.ts already
+    //      confirm { private: KA } is the envelope sent to agent.publish().
+    // This e2e test focuses on:
+    //   (a) CLI stdout reports Private: true
+    //   (b) the request was accepted (HTTP 200 → execFileAsync doesn't throw)
+    const broker = 'kafka.e2e.private:9092';
+    const topic = `walking-skeleton-private.${Date.now()}`;
+    const messageFormat = 'application/cloudevents+json';
+
+    const result = await execFileAsync(
+      'node',
+      [
+        CLI_ENTRY,
+        'kafka',
+        'endpoint',
+        'register',
+        '--cg',
+        CONTEXT_GRAPH_ID,
+        '--broker',
+        broker,
+        '--topic',
+        topic,
+        '--format',
+        messageFormat,
+        // NO --public flag: default is private
+      ],
+      {
+        cwd: REPO_ROOT,
+        env: {
+          ...process.env,
+          DKG_HOME: DEVNET_NODE1_HOME,
+          DKG_API_PORT: String(port),
+        },
+      },
+    );
+
+    expect(result.stdout).toContain('Kafka endpoint registered:');
+    expect(result.stdout).toContain(CONTEXT_GRAPH_ID);
+    // Default (no --public) → response echoes Private: true
+    expect(result.stdout).toContain('Private:        true');
+    // stdout does NOT say "Private:        false"
+    expect(result.stdout).not.toContain('Private:        false');
   }, 90_000);
 });
