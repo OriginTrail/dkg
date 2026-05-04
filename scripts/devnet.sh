@@ -713,12 +713,12 @@ cmd_start() {
         provider
       );
       // Identity-scoped read used by the duplicate-stake guard below.
-      // ERC-721 balanceOf(opWallet) would also signal "this wallet
-      // owns at least one position", but that's not what the guard
-      // needs to know — an op wallet can hold positions for OTHER
-      // identities, which would skip a needed createConviction for
-      // THIS identity. getNodeStakeV10(idId) reads the per-identity
-      // stake total directly. Codex round 7 on PR #368.
+      // ERC-721 balanceOf(opWallet) would also signal that the op wallet
+      // owns at least one position, but that is not what the guard needs
+      // to know - an op wallet can hold positions for OTHER identities,
+      // which would skip a needed createConviction for THIS identity.
+      // getNodeStakeV10(idId) reads the per-identity stake total
+      // directly. Codex round 7 on PR #368.
       const css = new ethers.Contract(
         c('ConvictionStakingStorage'),
         ['function getNodeStakeV10(uint72) view returns (uint256)'],
@@ -744,8 +744,8 @@ cmd_start() {
       // wallets.json was malformed silently kept the 'edge' default,
       // dropped out of coreIdxs, and the lostCores guard never fired.
       // Reading config first decouples the two failures: now lostCores
-      // correctly catches "I was supposed to be a core but my wallets
-      // are broken".
+      // correctly catches the case where a node was supposed to be a
+      // core but its wallets are broken.
       const configErrors = [];
       for (let i = 1; i <= n; i++) {
         const cPath = '$DEVNET_DIR/node' + i + '/config.json';
@@ -886,7 +886,7 @@ cmd_start() {
         // devnet stake. We detect this by reading the per-identity V10
         // stake total — if the daemon's stake succeeded it's >0 and we skip.
         //
-        // Codex round 5 on PR #368: do NOT fall through to "not staked"
+        // Codex round 5 on PR #368: do NOT fall through to a not-staked
         // on probe failure (transient RPC, decode error). That would
         // re-introduce the double-stake bug this guard exists to prevent.
         // Retry once with backoff; if the probe still fails, refuse to
