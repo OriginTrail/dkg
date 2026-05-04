@@ -1,4 +1,7 @@
-import { buildKafkaEndpointKnowledgeAsset } from './ka-builder.js';
+import {
+  buildKafkaEndpointKnowledgeAsset,
+  type KafkaEndpointKnowledgeAsset,
+} from './ka-builder.js';
 import { buildKafkaEndpointUri } from './uri.js';
 import type { KafkaContextGraphSelection } from './validation.js';
 
@@ -7,13 +10,11 @@ import type { KafkaContextGraphSelection } from './validation.js';
  * publish a JSON-LD knowledge asset. The package hands the bare KA across this
  * interface; envelope wrapping (e.g. `{ public: ... }`) belongs to the caller.
  */
-export type KafkaEndpointKnowledgeAsset = ReturnType<typeof buildKafkaEndpointKnowledgeAsset>;
-
 export interface KafkaEndpointPublisher {
   publish(
     contextGraphId: string,
     knowledgeAsset: KafkaEndpointKnowledgeAsset,
-  ): Promise<unknown>;
+  ): Promise<void>;
 }
 
 export type CgScope = 'local' | 'shared';
@@ -43,25 +44,26 @@ export interface RegisterKafkaEndpointResult {
   cgScope: CgScope;
 }
 
+async function resolveSelection(
+  selection: KafkaContextGraphSelection,
+  ensureLocalCg?: () => Promise<string>,
+): Promise<{ contextGraphId: string; cgScope: CgScope }> {
+  if (selection.kind === 'shared') {
+    return { contextGraphId: selection.contextGraphId, cgScope: 'shared' };
+  }
+  if (!ensureLocalCg) {
+    throw new Error('"ensureLocalCg" is required when selection.kind is "local".');
+  }
+  return { contextGraphId: await ensureLocalCg(), cgScope: 'local' };
+}
+
 export async function registerKafkaEndpoint(
   input: RegisterKafkaEndpointInput,
 ): Promise<RegisterKafkaEndpointResult> {
-  let resolvedContextGraphId: string;
-  let cgScope: CgScope;
-
-  if (input.selection.kind === 'shared') {
-    resolvedContextGraphId = input.selection.contextGraphId;
-    cgScope = 'shared';
-  } else {
-    if (!input.ensureLocalCg) {
-      throw new Error(
-        '"ensureLocalCg" is required when selection.kind is "local". ' +
-        'The route handler must bind a thunk that lazy-creates the kafka-local free CG.',
-      );
-    }
-    resolvedContextGraphId = await input.ensureLocalCg();
-    cgScope = 'local';
-  }
+  const { contextGraphId, cgScope } = await resolveSelection(
+    input.selection,
+    input.ensureLocalCg,
+  );
 
   const issuedAt = input.issuedAt ?? new Date().toISOString();
   const uri = buildKafkaEndpointUri(input);
@@ -73,11 +75,7 @@ export async function registerKafkaEndpoint(
     issuedAt,
   });
 
-  await input.publisher.publish(resolvedContextGraphId, knowledgeAsset);
+  await input.publisher.publish(contextGraphId, knowledgeAsset);
 
-  return {
-    uri,
-    contextGraphId: resolvedContextGraphId,
-    cgScope,
-  };
+  return { uri, contextGraphId, cgScope };
 }

@@ -4,8 +4,11 @@ import {
   createKafkaLocalCgEnsurer,
   registerKafkaEndpoint,
   validateContextGraphSelection,
-  type KafkaEndpointPublisher,
 } from '@origintrail-official/dkg-kafka';
+import {
+  kafkaLocalCgFromAgent,
+  kafkaPublisherFromAgent,
+} from './kafka-adapters.js';
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0;
@@ -37,10 +40,8 @@ export async function handleKafkaRoutes(ctx: RequestContext): Promise<void> {
       messageFormat,
     } = parsed as Record<string, unknown>;
 
-    // ADR-0004: explicit local-vs-shared CG choice. The pure validation
-    // module enforces "exactly one of contextGraphId or useLocalCg" — neither
-    // and both are 4xx with a clear message naming both options. We rethrow
-    // its message into the daemon's standard error envelope.
+    // ADR-0004: explicit local-vs-shared CG choice. We surface the pure
+    // validator's error message via the daemon's standard 400 envelope.
     let selection;
     try {
       selection = validateContextGraphSelection({ contextGraphId, useLocalCg });
@@ -63,39 +64,16 @@ export async function handleKafkaRoutes(ctx: RequestContext): Promise<void> {
       return jsonResponse(res, 400, { error: '"messageFormat" must be a non-empty string' });
     }
 
-    const publisher: KafkaEndpointPublisher = {
-      async publish(cgId, content) {
-        await agent.publish(
-          cgId,
-          { public: content } as Record<string, unknown>,
-        );
-      },
-    };
-
-    // Bind the V10 free-CG primitive to the local-cg module's expected shape.
-    // The `kafka-local` CG is a free CG: created locally via
-    // `agent.createContextGraph` with no on-chain registration. The ensurer
-    // owns its own in-flight gate (per-request scope is fine — we'd benefit
-    // from hoisting it per-agent if concurrent registrations on the same
-    // agent become hot, but the underlying "already exists" guard plus the
-    // exists-check make repeat creates cheap and idempotent regardless).
-    const ensureLocalCg = createKafkaLocalCgEnsurer({
-      contextGraphExists: (id) => agent.contextGraphExists(id),
-      createContextGraph: (opts) =>
-        agent.createContextGraph({
-          ...opts,
-          callerAgentAddress: requestAgentAddress,
-        }),
-    });
-
     const result = await registerKafkaEndpoint({
       selection,
       owner: requestAgentAddress.toLowerCase(),
       broker,
       topic,
       messageFormat,
-      publisher,
-      ensureLocalCg,
+      publisher: kafkaPublisherFromAgent(agent),
+      ensureLocalCg: createKafkaLocalCgEnsurer(
+        kafkaLocalCgFromAgent(agent, requestAgentAddress),
+      ),
     });
 
     return jsonResponse(res, 200, result);

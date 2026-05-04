@@ -15,7 +15,21 @@ export interface BuildKafkaEndpointKnowledgeAssetInput {
   issuedAt: string;
 }
 
-export function buildKafkaEndpointKnowledgeAsset(input: BuildKafkaEndpointKnowledgeAssetInput) {
+export interface KafkaEndpointKnowledgeAsset {
+  '@context': typeof KAFKA_ENDPOINT_CONTEXT;
+  '@id': string;
+  '@type': readonly [string, string];
+  'dcat:endpointURL': { '@id': string };
+  'dkg:broker': string;
+  'dkg:topic': string;
+  'dkg:messageFormat': string;
+  'dct:publisher': { '@id': string };
+  'dct:issued': { '@value': string; '@type': 'xsd:dateTime' };
+}
+
+export function buildKafkaEndpointKnowledgeAsset(
+  input: BuildKafkaEndpointKnowledgeAssetInput,
+): KafkaEndpointKnowledgeAsset {
   const owner = input.owner.toLowerCase();
 
   return {

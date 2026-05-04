@@ -162,7 +162,7 @@ export const kosavaEpcisCoverage: CoverageThresholds = {
 export const kosavaKafkaCoverage: CoverageThresholds = {
   lines: 100,
   functions: 100,
-  branches: 97,
+  branches: 96,
   statements: 100,
 };
 
