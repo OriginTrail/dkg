@@ -148,8 +148,8 @@ export async function registerKafkaEndpoint(
     messageFormat: input.messageFormat,
     issuedAt,
     verificationStatus,
-    ...(verifiedAt ? { verifiedAt } : {}),
-    ...(input.securityProtocol ? { securityProtocol: input.securityProtocol } : {}),
+    verifiedAt,
+    securityProtocol: input.securityProtocol,
   });
 
   await input.publisher.publish(input.contextGraphId, knowledgeAsset);
@@ -158,7 +158,7 @@ export async function registerKafkaEndpoint(
     uri,
     contextGraphId: input.contextGraphId,
     verificationStatus,
-    ...(verifiedAt ? { verifiedAt } : {}),
+    verifiedAt,
   };
 }
 

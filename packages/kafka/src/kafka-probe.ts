@@ -147,7 +147,7 @@ export async function probe(opts: KafkaProbeOptions): Promise<ProbeResult> {
       status: result.status,
       securityProtocol: opts.securityProtocol,
       probedAt: new Date().toISOString(),
-      ...(result.error ? { error: result.error } : {}),
+      error: result.error,
     };
   } finally {
     // Best-effort disconnect. If the connection never came up, kafkajs

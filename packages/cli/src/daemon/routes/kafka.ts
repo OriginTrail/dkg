@@ -60,15 +60,17 @@ export async function handleKafkaRoutes(ctx: RequestContext): Promise<void> {
         error: '"securityProtocol" must be one of PLAINTEXT, SASL_PLAINTEXT, SASL_SSL, SSL',
       });
     }
+    const sasl = parseSasl(raw.sasl);
+    const ssl = parseSsl(raw.ssl);
 
     const reqBody: KafkaEndpointRequestBody = {
       contextGraphId: targetContextGraphId,
       broker,
       topic,
       messageFormat,
-      ...(securityProtocol ? { securityProtocol } : {}),
-      ...(parseSasl(raw.sasl) ? { sasl: parseSasl(raw.sasl)! } : {}),
-      ...(parseSsl(raw.ssl) ? { ssl: parseSsl(raw.ssl)! } : {}),
+      securityProtocol,
+      sasl,
+      ssl,
     };
 
     // `?force=true` overrides a non-verified probe outcome. We honor `1`
@@ -92,8 +94,8 @@ export async function handleKafkaRoutes(ctx: RequestContext): Promise<void> {
         brokers: [reqBody.broker],
         topic: reqBody.topic,
         securityProtocol: reqBody.securityProtocol,
-        ...(reqBody.sasl ? { sasl: reqBody.sasl } : {}),
-        ...(reqBody.ssl ? { ssl: reqBody.ssl } : {}),
+        sasl: reqBody.sasl,
+        ssl: reqBody.ssl,
       };
       // `probe()` returns network/auth failures as structured results, but
       // throws on ill-formed input (e.g. SSL with no cert/key, unreadable PEM
@@ -120,8 +122,8 @@ export async function handleKafkaRoutes(ctx: RequestContext): Promise<void> {
         topic,
         messageFormat,
         publisher,
-        ...(reqBody.securityProtocol ? { securityProtocol: reqBody.securityProtocol } : {}),
-        ...(probeResult ? { probe: toKafkaEndpointProbeOutcome(probeResult) } : {}),
+        securityProtocol: reqBody.securityProtocol,
+        probe: probeResult ? toKafkaEndpointProbeOutcome(probeResult) : undefined,
         force,
       });
 
@@ -140,7 +142,7 @@ export async function handleKafkaRoutes(ctx: RequestContext): Promise<void> {
             status: err.outcome.status,
             probedAt: err.outcome.probedAt,
           },
-          ...(err.outcome.error ? { probeError: err.outcome.error } : {}),
+          probeError: err.outcome.error,
         });
       }
       throw err;
