@@ -1732,7 +1732,7 @@ kafkaEndpointCmd
   .requiredOption('--broker <host:port>', 'Kafka broker host:port')
   .requiredOption('--topic <name>', 'Kafka topic name')
   .option('--format <mime>', 'Kafka message format MIME type', 'application/json')
-  .option('--public', 'Publish the endpoint as a public KA (default: private, encrypted to CG participants)')
+  .option('--public', 'Publish the endpoint as a public KA (default: private)')
   .action(async (opts: ActionOpts) => {
     try {
       const client = await ApiClient.connect();
