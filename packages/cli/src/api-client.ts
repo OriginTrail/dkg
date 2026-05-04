@@ -4,6 +4,31 @@ import type { SecurityProtocol } from '@origintrail-official/dkg-kafka';
 import { readApiPort, readPid, isProcessRunning } from './config.js';
 import { loadTokens } from './auth.js';
 
+/**
+ * Wire shape of a Kafka endpoint KA returned by `listKafkaEndpoints` /
+ * `getKafkaEndpoint`. Mirrors the kafka package's `KafkaEndpointSummary`
+ * (kept here as a duplicate to keep the api-client free of a runtime dep on
+ * the kafka package — only the `SecurityProtocol` literal type is borrowed
+ * for parameter validation).
+ */
+export interface KafkaEndpointSummary {
+  uri: string;
+  contextGraphId: string;
+  broker: string;
+  topic: string;
+  messageFormat: string;
+  publisher: string;
+  endpointUrl: string;
+  issued: string;
+  verificationStatus?: string;
+  verifiedAt?: string;
+  securityProtocol?: string;
+  /** Present only on revoked KAs. */
+  status?: string;
+  /** Present only on revoked KAs. ISO-8601 timestamp. */
+  revokedAt?: string;
+}
+
 export type QueryResult =
   | { type: 'bindings'; bindings: Array<Record<string, string>> }
   | { type: 'boolean'; value: boolean }
@@ -588,6 +613,104 @@ export class ApiClient {
     return this.post(path, body);
   }
 
+  /**
+   * List Kafka endpoints in a context graph. Defaults to `status='active'` —
+   * the daemon excludes revoked KAs from the default listing (slice 05 / ADR
+   * 0004 default-active rule). Pass `'revoked'` for the inverse, or `'all'`
+   * for both.
+   */
+  async listKafkaEndpoints(request: {
+    contextGraphId: string;
+    status?: 'active' | 'revoked' | 'all';
+  }): Promise<{
+    contextGraphId: string;
+    status: 'active' | 'revoked' | 'all';
+    endpoints: KafkaEndpointSummary[];
+  }> {
+    const params = new URLSearchParams();
+    params.set('contextGraphId', request.contextGraphId);
+    if (request.status) params.set('status', request.status);
+    return this.get(`/api/kafka/endpoint?${params.toString()}`);
+  }
+
+  /**
+   * Fetch a single Kafka endpoint by URI, regardless of revocation state.
+   * The status filter from `listKafkaEndpoints` does NOT apply here — by
+   * design, callers can inspect a revoked KA (e.g. for a "show me what was
+   * deleted" UX, or to re-verify it).
+   */
+  async getKafkaEndpoint(request: {
+    contextGraphId: string;
+    uri: string;
+  }): Promise<KafkaEndpointSummary> {
+    const params = new URLSearchParams();
+    params.set('contextGraphId', request.contextGraphId);
+    return this.get(
+      `/api/kafka/endpoint/${encodeURIComponent(request.uri)}?${params.toString()}`,
+    );
+  }
+
+  /**
+   * Soft-revoke a Kafka endpoint. The KA stays in its CG with new
+   * `dkg:status "revoked"` + `dkg:revokedAt` triples added (mutate-by-add-only,
+   * ADR-0004). NOT delete-and-recreate — KA history is preserved.
+   */
+  async revokeKafkaEndpoint(request: {
+    contextGraphId: string;
+    uri: string;
+  }): Promise<{
+    uri: string;
+    contextGraphId: string;
+    status: 'revoked';
+    revokedAt: string;
+  }> {
+    const params = new URLSearchParams();
+    params.set('contextGraphId', request.contextGraphId);
+    return this.delete(
+      `/api/kafka/endpoint/${encodeURIComponent(request.uri)}?${params.toString()}`,
+    );
+  }
+
+  /**
+   * Re-verify an existing Kafka endpoint by running a fresh probe with the
+   * supplied credentials and updating the KA's `verifiedAt` /
+   * `verificationStatus`. Failure is recorded on the KA, not surfaced as a
+   * 4xx — the verb's contract is "tell me what the broker says, write it
+   * down" (ADR-0002).
+   */
+  async verifyKafkaEndpoint(request: {
+    contextGraphId: string;
+    uri: string;
+    /** Override the broker recorded on the KA. Defaults to the recorded value. */
+    broker?: string;
+    /** Override the topic recorded on the KA. Defaults to the recorded value. */
+    topic?: string;
+    securityProtocol?: SecurityProtocol;
+    sasl?: {
+      mechanism?: 'plain' | 'scram-sha-256' | 'scram-sha-512';
+      username: string;
+      password: string;
+    };
+    ssl?: {
+      ca?: string;
+      cert?: string;
+      key?: string;
+      caPath?: string;
+      certPath?: string;
+      keyPath?: string;
+      rejectUnauthorized?: boolean;
+    };
+  }): Promise<{
+    uri: string;
+    contextGraphId: string;
+    verificationStatus: 'unattempted' | 'verified' | 'failed';
+    verifiedAt: string;
+    probe: { status: 'verified' | 'failed' | 'unreachable'; probedAt: string };
+    probeError?: string;
+  }> {
+    return this.post('/api/kafka/endpoint/verify', request);
+  }
+
   async signJoinRequest(contextGraphId: string): Promise<{
     ok: boolean;
     status?: string;
@@ -914,6 +1037,18 @@ export class ApiClient {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...this.authHeaders() },
       body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({ error: res.statusText }));
+      throw ApiClient.httpError(res.status, ApiClient.errorMessageFromBody(data, res.statusText), data);
+    }
+    return res.json() as Promise<T>;
+  }
+
+  private async delete<T>(path: string): Promise<T> {
+    const res = await fetch(`${this.baseUrl}${path}`, {
+      method: 'DELETE',
+      headers: this.authHeaders(),
     });
     if (!res.ok) {
       const data = await res.json().catch(() => ({ error: res.statusText }));

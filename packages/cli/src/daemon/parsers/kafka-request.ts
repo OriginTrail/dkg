@@ -240,3 +240,50 @@ function assignStringField(
   // safe — the function is only called with string-typed destination keys.
   (dst as unknown as Record<string, string>)[dstKey as string] = raw;
 }
+
+/**
+ * Re-verify request body shape. URI is required; broker / topic /
+ * securityProtocol may be omitted, in which case the route falls back to the
+ * existing KA's values. Credentials follow the same parser conventions as
+ * the register flow.
+ *
+ * Per ADR 0002: verify with NO credentials at all is meaningless (the verb's
+ * whole point is "check what the broker says"). The route enforces that
+ * precondition via `hasAnyKafkaCredentials`; this parser only normalises
+ * shapes. Slice 04's `validateKafkaAuthConsistency` already runs separately
+ * on every register/verify body and rejects shape mismatches (e.g. a `sasl`
+ * block paired with `securityProtocol: "SSL"`).
+ */
+export interface KafkaEndpointVerifyRequestBody {
+  uri: string;
+  broker?: string;
+  topic?: string;
+  securityProtocol?: SecurityProtocol;
+  sasl?: KafkaSaslCredentials;
+  ssl?: KafkaSslMaterial;
+}
+
+/**
+ * Returns true iff the parsed body carries at least one credential surface
+ * the probe can act on. Used by the verify route to enforce the ADR 0002
+ * precondition: re-verify with no creds is meaningless and gets a 400.
+ *
+ * Differs from `validateKafkaAuthConsistency` (slice 04): that helper rejects
+ * shape mismatches between `securityProtocol` and the auth blocks; this one
+ * checks "is there *anything* the probe can act on", which is a verify-only
+ * concern (register accepts no-creds and writes `unattempted`).
+ */
+export function hasAnyKafkaCredentials(body: KafkaEndpointVerifyRequestBody): boolean {
+  if (body.sasl?.username && body.sasl?.password) return true;
+  if (body.ssl) {
+    const s = body.ssl;
+    if (s.caPem || s.certPem || s.keyPem || s.caPath || s.certPath || s.keyPath) {
+      return true;
+    }
+  }
+  // PLAINTEXT is the one explicit-protocol-without-creds case the probe
+  // accepts (mirrors `shouldProbe`). Verify with PLAINTEXT and no creds is
+  // meaningful — it asks "is the broker reachable at all".
+  if (body.securityProtocol === 'PLAINTEXT') return true;
+  return false;
+}

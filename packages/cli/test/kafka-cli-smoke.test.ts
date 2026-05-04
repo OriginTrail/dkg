@@ -42,6 +42,7 @@ interface CapturedRequest {
   url: string;
   body: string;
   authHeader: string;
+  method: string;
 }
 
 interface NextResponse {
@@ -53,11 +54,18 @@ describe.sequential('kafka CLI smoke', () => {
   let dkgHome: string;
   let server: ReturnType<typeof createServer>;
   let smokeApiPort: string;
-  let last: CapturedRequest = { url: '', body: '', authHeader: '' };
-  // Optional per-test override of the mock response. Tests that exercise
-  // error paths (e.g. 422 probe failure) set this in a beforeEach. When
-  // unset, the handler falls back to the success response below.
+  let last: CapturedRequest = { url: '', body: '', authHeader: '', method: '' };
+  // Optional per-test override of the POST /api/kafka/endpoint response.
+  // Tests that exercise error paths (e.g. 422 probe failure) set this in a
+  // beforeEach. When unset, the handler falls back to the success response.
   let nextResponse: NextResponse | null = null;
+  // Per-verb mock response slots for slice 05's list/show/revoke/verify
+  // routes — separate from `nextResponse` because each verb hits its own
+  // path and shape.
+  let listResponse: unknown = null;
+  let showResponse: unknown = null;
+  let revokeResponse: unknown = null;
+  let verifyResponse: unknown = null;
 
   beforeAll(async () => {
     dkgHome = await mkdtemp(join(tmpdir(), 'dkg-kafka-cli-'));
@@ -71,14 +79,24 @@ describe.sequential('kafka CLI smoke', () => {
     await writeFile(join(dkgHome, 'auth.token'), 'smoke-token\n');
 
     server = createServer(async (req, res) => {
-      if (req.method === 'POST' && (req.url ?? '').startsWith('/api/kafka/endpoint')) {
-        const authHeader = String(req.headers.authorization ?? '');
-        const chunks: Buffer[] = [];
-        for await (const chunk of req) {
-          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-        }
-        const body = Buffer.concat(chunks).toString('utf8');
-        last = { url: req.url ?? '', body, authHeader };
+      const url = req.url ?? '';
+      const method = req.method ?? '';
+      const authHeader = String(req.headers.authorization ?? '');
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      }
+      const body = Buffer.concat(chunks).toString('utf8');
+      last = { url, body, authHeader, method };
+
+      if (method === 'POST' && url === '/api/kafka/endpoint/verify') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(verifyResponse));
+        return;
+      }
+      if (method === 'POST' && url.startsWith('/api/kafka/endpoint')) {
+        // Slice 04: per-test response override for register error-path tests
+        // (e.g. 422 probe failure). When unset, fall back to the success body.
         if (nextResponse) {
           const { status, body: respBody } = nextResponse;
           nextResponse = null;
@@ -92,6 +110,22 @@ describe.sequential('kafka CLI smoke', () => {
           contextGraphId: 'devnet-test',
           verificationStatus: 'unattempted',
         }));
+        return;
+      }
+
+      if (method === 'GET' && url.startsWith('/api/kafka/endpoint?')) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(listResponse));
+        return;
+      }
+      if (method === 'GET' && url.startsWith('/api/kafka/endpoint/')) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(showResponse));
+        return;
+      }
+      if (method === 'DELETE' && url.startsWith('/api/kafka/endpoint/')) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(revokeResponse));
         return;
       }
 
@@ -110,8 +144,12 @@ describe.sequential('kafka CLI smoke', () => {
   });
 
   beforeEach(() => {
-    last = { url: '', body: '', authHeader: '' };
+    last = { url: '', body: '', authHeader: '', method: '' };
     nextResponse = null;
+    listResponse = null;
+    showResponse = null;
+    revokeResponse = null;
+    verifyResponse = null;
   });
 
   afterAll(async () => {
@@ -658,5 +696,199 @@ describe.sequential('kafka CLI smoke', () => {
     expect(stderr).toContain('Probe status: failed');
     expect(stderr).toContain('Probe error:');
     expect(stderr).toContain('KafkaJSSASLAuthenticationError');
+  }, 15000);
+
+  it('list defaults to status=active and renders the endpoint table', async () => {
+    listResponse = {
+      contextGraphId: 'devnet-test',
+      status: 'active',
+      endpoints: [
+        {
+          uri: 'urn:dkg:kafka-endpoint:0xabc:hash1',
+          contextGraphId: 'devnet-test',
+          broker: 'kafka.example.com:9092',
+          topic: 'orders.created',
+          messageFormat: 'application/json',
+          publisher: 'urn:dkg:agent:0xabc',
+          endpointUrl: 'kafka://kafka.example.com:9092/orders.created',
+          issued: '2026-05-04T12:34:56.000Z',
+          verificationStatus: 'verified',
+          verifiedAt: '2026-05-04T12:35:00.000Z',
+        },
+      ],
+    };
+    const env = { ...process.env, DKG_HOME: dkgHome, DKG_API_PORT: smokeApiPort };
+
+    const result = await execFileAsync('node', [
+      CLI_ENTRY,
+      'kafka',
+      'endpoint',
+      'list',
+      '--cg',
+      'devnet-test',
+    ], { env });
+
+    expect(last.method).toBe('GET');
+    expect(last.url).toContain('contextGraphId=devnet-test');
+    expect(last.url).toContain('status=active');
+    expect(result.stdout).toContain('Kafka endpoints in "devnet-test" (status=active)');
+    expect(result.stdout).toContain('urn:dkg:kafka-endpoint:0xabc:hash1');
+    expect(result.stdout).toContain('orders.created');
+  }, 15000);
+
+  it('list with --status revoked passes status=revoked through to the daemon', async () => {
+    listResponse = { contextGraphId: 'devnet-test', status: 'revoked', endpoints: [] };
+    const env = { ...process.env, DKG_HOME: dkgHome, DKG_API_PORT: smokeApiPort };
+
+    const result = await execFileAsync('node', [
+      CLI_ENTRY,
+      'kafka',
+      'endpoint',
+      'list',
+      '--cg',
+      'devnet-test',
+      '--status',
+      'revoked',
+    ], { env });
+
+    expect(last.url).toContain('status=revoked');
+    expect(result.stdout).toContain('(none)');
+  }, 15000);
+
+  it('show URL-encodes the URI in the path and renders all fields', async () => {
+    const uri =
+      'urn:dkg:kafka-endpoint:0xabcdefabcdefabcdefabcdefabcdefabcdefabcd:33b58f60595c766739f72b29e4ee417888d1a46af8339a4b5bdb1c3a5692f652';
+    showResponse = {
+      uri,
+      contextGraphId: 'devnet-test',
+      broker: 'kafka.example.com:9092',
+      topic: 'orders.created',
+      messageFormat: 'application/json',
+      publisher: 'urn:dkg:agent:0xabc',
+      endpointUrl: 'kafka://kafka.example.com:9092/orders.created',
+      issued: '2026-05-04T12:34:56.000Z',
+      status: 'revoked',
+      revokedAt: '2026-05-05T08:30:00.000Z',
+    };
+    const env = { ...process.env, DKG_HOME: dkgHome, DKG_API_PORT: smokeApiPort };
+
+    const result = await execFileAsync('node', [
+      CLI_ENTRY,
+      'kafka',
+      'endpoint',
+      'show',
+      uri,
+      '--cg',
+      'devnet-test',
+    ], { env });
+
+    // The URI must round-trip through encodeURIComponent (the colons would
+    // otherwise misroute the daemon's path matcher).
+    expect(last.method).toBe('GET');
+    expect(last.url).toBe(`/api/kafka/endpoint/${encodeURIComponent(uri)}?contextGraphId=devnet-test`);
+    expect(result.stdout).toContain('Kafka endpoint:');
+    expect(result.stdout).toContain('Status:               revoked');
+    expect(result.stdout).toContain('Revoked at:           2026-05-05T08:30:00.000Z');
+  }, 15000);
+
+  it('revoke uses DELETE and URL-encodes the URI', async () => {
+    const uri = 'urn:dkg:kafka-endpoint:0xabc:revokeme';
+    revokeResponse = {
+      uri,
+      contextGraphId: 'devnet-test',
+      status: 'revoked',
+      revokedAt: '2026-05-05T09:30:00.000Z',
+    };
+    const env = { ...process.env, DKG_HOME: dkgHome, DKG_API_PORT: smokeApiPort };
+
+    const result = await execFileAsync('node', [
+      CLI_ENTRY,
+      'kafka',
+      'endpoint',
+      'revoke',
+      uri,
+      '--cg',
+      'devnet-test',
+    ], { env });
+
+    expect(last.method).toBe('DELETE');
+    expect(last.url).toBe(`/api/kafka/endpoint/${encodeURIComponent(uri)}?contextGraphId=devnet-test`);
+    expect(result.stdout).toContain('Kafka endpoint revoked:');
+    expect(result.stdout).toContain('2026-05-05T09:30:00.000Z');
+  }, 15000);
+
+  it('verify posts uri + creds to /api/kafka/endpoint/verify and renders probe outcome', async () => {
+    const uri = 'urn:dkg:kafka-endpoint:0xabc:verifyme';
+    verifyResponse = {
+      uri,
+      contextGraphId: 'devnet-test',
+      verificationStatus: 'verified',
+      verifiedAt: '2026-05-05T10:00:00.000Z',
+      probe: { status: 'verified', probedAt: '2026-05-05T10:00:00.000Z' },
+    };
+    const env = { ...process.env, DKG_HOME: dkgHome, DKG_API_PORT: smokeApiPort };
+
+    const result = await execFileAsync('node', [
+      CLI_ENTRY,
+      'kafka',
+      'endpoint',
+      'verify',
+      uri,
+      '--cg',
+      'devnet-test',
+      '--security-protocol',
+      'SASL_PLAINTEXT',
+      '--username',
+      'alice',
+      '--password',
+      'verify-secret',
+    ], { env });
+
+    expect(last.method).toBe('POST');
+    expect(last.url).toBe('/api/kafka/endpoint/verify');
+    const body = JSON.parse(last.body);
+    expect(body).toMatchObject({
+      contextGraphId: 'devnet-test',
+      uri,
+      securityProtocol: 'SASL_PLAINTEXT',
+      sasl: { mechanism: 'plain', username: 'alice', password: 'verify-secret' },
+    });
+    expect(result.stdout).toContain('Kafka endpoint re-verified:');
+    expect(result.stdout).toContain('Verification status:  verified');
+  }, 15000);
+
+  it('verify --ca-pem-path reads the file and ships the PEM in body.ssl.ca', async () => {
+    const uri = 'urn:dkg:kafka-endpoint:0xabc:verifypem';
+    verifyResponse = {
+      uri,
+      contextGraphId: 'devnet-test',
+      verificationStatus: 'verified',
+      verifiedAt: '2026-05-05T10:01:00.000Z',
+      probe: { status: 'verified', probedAt: '2026-05-05T10:01:00.000Z' },
+    };
+    const env = { ...process.env, DKG_HOME: dkgHome, DKG_API_PORT: smokeApiPort };
+    const caPath = join(dkgHome, 'verify-ca.pem');
+    await writeFile(caPath, '-----BEGIN CERTIFICATE-----\nVERIFY-CA\n-----END CERTIFICATE-----');
+
+    await execFileAsync('node', [
+      CLI_ENTRY,
+      'kafka',
+      'endpoint',
+      'verify',
+      uri,
+      '--cg',
+      'devnet-test',
+      '--security-protocol',
+      'SASL_SSL',
+      '--username',
+      'alice',
+      '--password',
+      'pw',
+      '--ca-pem-path',
+      caPath,
+    ], { env });
+
+    const body = JSON.parse(last.body);
+    expect(body.ssl.ca).toContain('VERIFY-CA');
   }, 15000);
 });

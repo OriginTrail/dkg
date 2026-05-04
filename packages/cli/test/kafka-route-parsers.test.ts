@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  hasAnyKafkaCredentials,
   KafkaRequestParseError,
   parseSasl,
   parseSecurityProtocol,
@@ -7,6 +8,7 @@ import {
   shouldProbe,
   validateKafkaAuthConsistency,
   type KafkaEndpointRequestBody,
+  type KafkaEndpointVerifyRequestBody,
 } from '../src/daemon/parsers/kafka-request.js';
 
 // These tests pin the route-level input gate that decides whether the
@@ -405,5 +407,77 @@ describe('validateKafkaAuthConsistency', () => {
     // genuine slice-01 wire-compat requests that send neither auth nor TLS.
     const body: KafkaEndpointRequestBody = { ...baseBody };
     expect(() => validateKafkaAuthConsistency(body)).not.toThrow();
+  });
+});
+
+describe('hasAnyKafkaCredentials — verify-route precondition gate', () => {
+  // ADR 0002: verify with no creds is meaningless. The route uses this
+  // helper to reject early with a 400.
+  const baseBody: KafkaEndpointVerifyRequestBody = {
+    uri: 'urn:dkg:kafka-endpoint:owner:hash',
+  };
+
+  it('false when neither sasl nor ssl nor explicit PLAINTEXT', () => {
+    expect(hasAnyKafkaCredentials(baseBody)).toBe(false);
+  });
+
+  it('true when SASL username + password are both present', () => {
+    expect(
+      hasAnyKafkaCredentials({
+        ...baseBody,
+        sasl: { mechanism: 'plain', username: 'alice', password: 'pw' },
+      }),
+    ).toBe(true);
+  });
+
+  it('false when SASL block is present but a credential is empty', () => {
+    expect(
+      hasAnyKafkaCredentials({
+        ...baseBody,
+        // Note the parser would normally drop these to undefined; we test the
+        // helper directly to pin the inner check.
+        sasl: { mechanism: 'plain', username: '', password: 'pw' },
+      }),
+    ).toBe(false);
+  });
+
+  it('true when an SSL inline PEM is present (any of caPem/certPem/keyPem)', () => {
+    expect(
+      hasAnyKafkaCredentials({
+        ...baseBody,
+        ssl: { caPem: 'pem' },
+      }),
+    ).toBe(true);
+  });
+
+  it('true when an SSL filesystem path is present (any of caPath/certPath/keyPath)', () => {
+    expect(
+      hasAnyKafkaCredentials({
+        ...baseBody,
+        ssl: { keyPath: '/etc/key.pem' },
+      }),
+    ).toBe(true);
+  });
+
+  it('false when ssl is empty object', () => {
+    expect(hasAnyKafkaCredentials({ ...baseBody, ssl: {} })).toBe(false);
+  });
+
+  it('true when securityProtocol is "PLAINTEXT" alone (probes for reachability)', () => {
+    expect(
+      hasAnyKafkaCredentials({
+        ...baseBody,
+        securityProtocol: 'PLAINTEXT',
+      }),
+    ).toBe(true);
+  });
+
+  it('false when only an empty securityProtocol of SSL is set without cert/key', () => {
+    expect(
+      hasAnyKafkaCredentials({
+        ...baseBody,
+        securityProtocol: 'SSL',
+      }),
+    ).toBe(false);
   });
 });

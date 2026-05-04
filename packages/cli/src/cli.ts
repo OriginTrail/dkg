@@ -1928,6 +1928,223 @@ kafkaEndpointCmd
     }
   });
 
+kafkaEndpointCmd
+  .command('list')
+  .description('List Kafka topic endpoints in a context graph')
+  .requiredOption('--cg <id>', 'Target context graph')
+  .option('--status <status>', 'Filter: active (default), revoked, or all', 'active')
+  .action(async (opts: ActionOpts) => {
+    try {
+      const status = String(opts.status ?? 'active') as 'active' | 'revoked' | 'all';
+      if (status !== 'active' && status !== 'revoked' && status !== 'all') {
+        console.error('--status must be one of: active, revoked, all');
+        process.exit(1);
+      }
+      const client = await ApiClient.connect();
+      const result = await client.listKafkaEndpoints({
+        contextGraphId: opts.cg,
+        status,
+      });
+      console.log(`Kafka endpoints in "${result.contextGraphId}" (status=${result.status}):`);
+      if (result.endpoints.length === 0) {
+        console.log('  (none)');
+        return;
+      }
+      for (const ep of result.endpoints) {
+        console.log(`  - ${ep.uri}`);
+        console.log(`      broker:               ${ep.broker}`);
+        console.log(`      topic:                ${ep.topic}`);
+        console.log(`      messageFormat:        ${ep.messageFormat}`);
+        console.log(`      issued:               ${ep.issued}`);
+        if (ep.verificationStatus) {
+          console.log(`      verificationStatus:   ${ep.verificationStatus}`);
+        }
+        if (ep.verifiedAt) {
+          console.log(`      verifiedAt:           ${ep.verifiedAt}`);
+        }
+        if (ep.status) {
+          console.log(`      status:               ${ep.status}`);
+        }
+        if (ep.revokedAt) {
+          console.log(`      revokedAt:            ${ep.revokedAt}`);
+        }
+      }
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
+kafkaEndpointCmd
+  .command('show <uri>')
+  .description('Show a single Kafka endpoint by URI (returns revoked endpoints too)')
+  .requiredOption('--cg <id>', 'Target context graph')
+  .action(async (uri: string, opts: ActionOpts) => {
+    try {
+      const client = await ApiClient.connect();
+      const result = await client.getKafkaEndpoint({
+        contextGraphId: opts.cg,
+        uri,
+      });
+      console.log('Kafka endpoint:');
+      console.log(`  URI:                  ${result.uri}`);
+      console.log(`  Context graph:        ${result.contextGraphId}`);
+      console.log(`  Broker:               ${result.broker}`);
+      console.log(`  Topic:                ${result.topic}`);
+      console.log(`  Message format:       ${result.messageFormat}`);
+      console.log(`  Publisher:            ${result.publisher}`);
+      console.log(`  Endpoint URL:         ${result.endpointUrl}`);
+      console.log(`  Issued:               ${result.issued}`);
+      if (result.verificationStatus) {
+        console.log(`  Verification status:  ${result.verificationStatus}`);
+      }
+      if (result.verifiedAt) {
+        console.log(`  Verified at:          ${result.verifiedAt}`);
+      }
+      if (result.securityProtocol) {
+        console.log(`  Security protocol:    ${result.securityProtocol}`);
+      }
+      if (result.status) {
+        console.log(`  Status:               ${result.status}`);
+      }
+      if (result.revokedAt) {
+        console.log(`  Revoked at:           ${result.revokedAt}`);
+      }
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
+kafkaEndpointCmd
+  .command('revoke <uri>')
+  .description('Soft-revoke a Kafka endpoint (mutate-by-add: dkg:status="revoked", dkg:revokedAt; KA stays in CG)')
+  .requiredOption('--cg <id>', 'Target context graph')
+  .action(async (uri: string, opts: ActionOpts) => {
+    try {
+      const client = await ApiClient.connect();
+      const result = await client.revokeKafkaEndpoint({
+        contextGraphId: opts.cg,
+        uri,
+      });
+      console.log('Kafka endpoint revoked:');
+      console.log(`  URI:                  ${result.uri}`);
+      console.log(`  Context graph:        ${result.contextGraphId}`);
+      console.log(`  Status:               ${result.status}`);
+      console.log(`  Revoked at:           ${result.revokedAt}`);
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
+kafkaEndpointCmd
+  .command('verify <uri>')
+  .description('Re-verify an existing Kafka endpoint by running a fresh probe with the supplied credentials')
+  .requiredOption('--cg <id>', 'Target context graph')
+  .option('--broker <host:port>', 'Override the broker recorded on the KA (defaults to recorded value)')
+  .option('--topic <name>', 'Override the topic recorded on the KA (defaults to recorded value)')
+  .option('--security-protocol <proto>', 'PLAINTEXT | SASL_PLAINTEXT | SASL_SSL | SSL — defaults to KA value')
+  .option('--username <user>', 'SASL username (SASL_PLAINTEXT or SASL_SSL)')
+  // Slice 04 hardening, also applied to the verify verb: prefer
+  // --password-stdin or DKG_KAFKA_PASSWORD over --password to keep secrets
+  // out of shell history.
+  .option(
+    '--password <pass>',
+    'SASL password (NOT recommended — exposes secret in shell history; prefer --password-stdin or DKG_KAFKA_PASSWORD)',
+  )
+  .option(
+    '--password-stdin',
+    'Read SASL password from stdin (recommended; prevents shell-history exposure)',
+  )
+  .option(
+    '--sasl-mechanism <mechanism>',
+    'SASL mechanism: plain (default), scram-sha-256, scram-sha-512',
+    'plain',
+  )
+  .option('--ca-pem-path <path>', 'Filesystem path to a CA PEM bundle (SASL_SSL or SSL)')
+  .option('--cert-pem-path <path>', 'Filesystem path to an mTLS client cert PEM (SSL)')
+  .option('--key-pem-path <path>', 'Filesystem path to an mTLS client key PEM (SSL)')
+  .action(async (uri: string, opts: ActionOpts) => {
+    try {
+      // Mirror the register command's --sasl-mechanism validation so direct
+      // misconfig produces a single, consistent error message across both
+      // verbs. The valid set is the kafkajs / `KafkaSaslCredentials` mirror.
+      const VALID_SASL_MECHANISMS = ['plain', 'scram-sha-256', 'scram-sha-512'] as const;
+      type SaslMechanism = (typeof VALID_SASL_MECHANISMS)[number];
+      const saslMechanism = String(opts.saslMechanism ?? 'plain').toLowerCase();
+      if (!(VALID_SASL_MECHANISMS as readonly string[]).includes(saslMechanism)) {
+        throw new Error(
+          `--sasl-mechanism must be one of ${VALID_SASL_MECHANISMS.join(', ')}`,
+        );
+      }
+
+      const ssl: Record<string, string> = {};
+      if (opts.caPemPath) ssl.ca = await readFile(String(opts.caPemPath), 'utf8');
+      if (opts.certPemPath) ssl.cert = await readFile(String(opts.certPemPath), 'utf8');
+      if (opts.keyPemPath) ssl.key = await readFile(String(opts.keyPemPath), 'utf8');
+
+      // Slice 04: same password-resolution helper the register command uses
+      // (--password-stdin > --password > DKG_KAFKA_PASSWORD > undefined).
+      const resolvedPassword = await resolveKafkaPassword({
+        password: typeof opts.password === 'string' ? opts.password : undefined,
+        passwordStdin: Boolean(opts.passwordStdin),
+      });
+
+      const username = typeof opts.username === 'string' && opts.username.length > 0
+        ? opts.username
+        : undefined;
+      // Verify-only nuance vs. register: the daemon defaults
+      // securityProtocol from the existing KA when the caller omits the
+      // flag, so we don't enforce an exhaustive partial-creds check here —
+      // the daemon's `validateKafkaAuthConsistency` (slice 04) and
+      // `hasAnyKafkaCredentials` (slice 05) gates handle the missing-creds
+      // case with a clean 400. We still reject the "exactly one of
+      // user/password" misconfig up front because it's almost always a
+      // copy-paste error.
+      if ((username && !resolvedPassword) || (!username && resolvedPassword)) {
+        throw new Error(
+          '--username and --password (or --password-stdin / DKG_KAFKA_PASSWORD) must be supplied together',
+        );
+      }
+
+      const client = await ApiClient.connect();
+      const securityProtocol = opts.securityProtocol
+        ? (String(opts.securityProtocol).toUpperCase() as SecurityProtocol)
+        : undefined;
+      const result = await client.verifyKafkaEndpoint({
+        contextGraphId: opts.cg,
+        uri,
+        ...(opts.broker ? { broker: String(opts.broker) } : {}),
+        ...(opts.topic ? { topic: String(opts.topic) } : {}),
+        ...(securityProtocol ? { securityProtocol } : {}),
+        ...(username && resolvedPassword
+          ? {
+              sasl: {
+                mechanism: saslMechanism as SaslMechanism,
+                username,
+                password: resolvedPassword,
+              },
+            }
+          : {}),
+        ...(Object.keys(ssl).length > 0 ? { ssl } : {}),
+      });
+      console.log('Kafka endpoint re-verified:');
+      console.log(`  URI:                  ${result.uri}`);
+      console.log(`  Context graph:        ${result.contextGraphId}`);
+      console.log(`  Verification status:  ${result.verificationStatus}`);
+      console.log(`  Verified at:          ${result.verifiedAt}`);
+      console.log(`  Probe status:         ${result.probe.status}`);
+      console.log(`  Probed at:            ${result.probe.probedAt}`);
+      if (result.probeError) {
+        console.log(`  Probe error:          ${result.probeError}`);
+      }
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
 // ─── dkg openclaw ───────────────────────────────────────────────────
 
 const openclawCmd = program
