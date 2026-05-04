@@ -1,8 +1,18 @@
 import { buildKafkaEndpointKnowledgeAsset } from './ka-builder.js';
 import { buildKafkaEndpointUri } from './uri.js';
 
+/**
+ * Dependency-inversion boundary: the kafka package needs something that can
+ * publish a JSON-LD knowledge asset. The package hands the bare KA across this
+ * interface; envelope wrapping (e.g. `{ public: ... }`) belongs to the caller.
+ */
+export type KafkaEndpointKnowledgeAsset = ReturnType<typeof buildKafkaEndpointKnowledgeAsset>;
+
 export interface KafkaEndpointPublisher {
-  publish(contextGraphId: string, content: unknown): Promise<unknown>;
+  publish(
+    contextGraphId: string,
+    knowledgeAsset: KafkaEndpointKnowledgeAsset,
+  ): Promise<unknown>;
 }
 
 export interface RegisterKafkaEndpointInput {
@@ -33,7 +43,7 @@ export async function registerKafkaEndpoint(
     issuedAt,
   });
 
-  await input.publisher.publish(input.contextGraphId, { public: knowledgeAsset });
+  await input.publisher.publish(input.contextGraphId, knowledgeAsset);
 
   return {
     uri,

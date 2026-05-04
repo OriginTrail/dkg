@@ -50,7 +50,10 @@ export async function handleKafkaRoutes(ctx: RequestContext): Promise<void> {
 
     const publisher: KafkaEndpointPublisher = {
       async publish(targetContextGraphId, content) {
-        await agent.publish(targetContextGraphId, content as Record<string, unknown>);
+        await agent.publish(
+          targetContextGraphId,
+          { public: content } as Record<string, unknown>,
+        );
       },
     };
 

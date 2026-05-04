@@ -31,28 +31,26 @@ describe('registerKafkaEndpoint', () => {
     expect(calls[0]).toEqual({
       contextGraphId: 'devnet-test',
       content: {
-        public: {
-          '@context': {
-            dcat: 'http://www.w3.org/ns/dcat#',
-            dct: 'http://purl.org/dc/terms/',
-            dkg: 'https://ontology.dkg.io/dkg#',
-            xsd: 'http://www.w3.org/2001/XMLSchema#',
-          },
-          '@id': result.uri,
-          '@type': ['dkg:KafkaTopicEndpoint', 'dcat:DataService'],
-          'dcat:endpointURL': {
-            '@id': 'kafka://kafka.example.com:9092/orders.created',
-          },
-          'dkg:broker': 'kafka.example.com:9092',
-          'dkg:topic': 'orders.created',
-          'dkg:messageFormat': 'application/json',
-          'dct:publisher': {
-            '@id': 'urn:dkg:agent:0xabcdefabcdefabcdefabcdefabcdefabcdefabcd',
-          },
-          'dct:issued': {
-            '@value': '2026-05-04T12:34:56.000Z',
-            '@type': 'xsd:dateTime',
-          },
+        '@context': {
+          dcat: 'http://www.w3.org/ns/dcat#',
+          dct: 'http://purl.org/dc/terms/',
+          dkg: 'https://ontology.dkg.io/dkg#',
+          xsd: 'http://www.w3.org/2001/XMLSchema#',
+        },
+        '@id': result.uri,
+        '@type': ['dkg:KafkaTopicEndpoint', 'dcat:DataService'],
+        'dcat:endpointURL': {
+          '@id': 'kafka://kafka.example.com:9092/orders.created',
+        },
+        'dkg:broker': 'kafka.example.com:9092',
+        'dkg:topic': 'orders.created',
+        'dkg:messageFormat': 'application/json',
+        'dct:publisher': {
+          '@id': 'urn:dkg:agent:0xabcdefabcdefabcdefabcdefabcdefabcdefabcd',
+        },
+        'dct:issued': {
+          '@value': '2026-05-04T12:34:56.000Z',
+          '@type': 'xsd:dateTime',
         },
       },
     });
