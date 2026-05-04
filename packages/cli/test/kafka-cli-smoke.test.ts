@@ -186,4 +186,74 @@ describe.sequential('kafka CLI smoke', () => {
     expect(body.force).toBeUndefined();
     expect(body.securityProtocol).toBe('PLAINTEXT');
   }, 15000);
+
+  it('honors --sasl-mechanism scram-sha-256 in the request body', async () => {
+    const env = { ...process.env, DKG_HOME: dkgHome, DKG_API_PORT: smokeApiPort };
+
+    await execFileAsync('node', [
+      CLI_ENTRY,
+      'kafka',
+      'endpoint',
+      'register',
+      '--cg',
+      'devnet-test',
+      '--broker',
+      'kafka.example.com:9093',
+      '--topic',
+      'orders.created',
+      '--security-protocol',
+      'SASL_SSL',
+      '--username',
+      'alice',
+      '--password',
+      'cli-secret-XYZ',
+      '--sasl-mechanism',
+      'scram-sha-256',
+    ], { env });
+
+    const body = JSON.parse(last.body);
+    expect(body.sasl).toEqual({
+      mechanism: 'scram-sha-256',
+      username: 'alice',
+      password: 'cli-secret-XYZ',
+    });
+  }, 15000);
+
+  it('rejects an unknown --sasl-mechanism with a non-zero exit and a clear error', async () => {
+    const env = { ...process.env, DKG_HOME: dkgHome, DKG_API_PORT: smokeApiPort };
+
+    let exited = false;
+    let stderr = '';
+    try {
+      await execFileAsync('node', [
+        CLI_ENTRY,
+        'kafka',
+        'endpoint',
+        'register',
+        '--cg',
+        'devnet-test',
+        '--broker',
+        'kafka.example.com:9092',
+        '--topic',
+        'orders.created',
+        '--security-protocol',
+        'SASL_PLAINTEXT',
+        '--username',
+        'alice',
+        '--password',
+        'pw',
+        '--sasl-mechanism',
+        'gibberish',
+      ], { env });
+    } catch (err) {
+      exited = true;
+      stderr = String((err as { stderr?: string }).stderr ?? '');
+    }
+
+    expect(exited).toBe(true);
+    expect(stderr).toContain('--sasl-mechanism');
+    expect(stderr).toContain('plain');
+    expect(stderr).toContain('scram-sha-256');
+    expect(stderr).toContain('scram-sha-512');
+  }, 15000);
 });

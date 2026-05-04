@@ -1741,12 +1741,30 @@ kafkaEndpointCmd
   .option('--security-protocol <proto>', 'PLAINTEXT | SASL_PLAINTEXT | SASL_SSL | SSL')
   .option('--username <user>', 'SASL username (SASL_PLAINTEXT or SASL_SSL)')
   .option('--password <pass>', 'SASL password (SASL_PLAINTEXT or SASL_SSL)')
+  .option(
+    '--sasl-mechanism <mechanism>',
+    'SASL mechanism: plain (default), scram-sha-256, scram-sha-512',
+    'plain',
+  )
   .option('--ca-pem-path <path>', 'Filesystem path to a CA PEM bundle (SASL_SSL or SSL)')
   .option('--cert-pem-path <path>', 'Filesystem path to an mTLS client cert PEM (SSL)')
   .option('--key-pem-path <path>', 'Filesystem path to an mTLS client key PEM (SSL)')
   .option('--force', 'Register the KA even if the broker probe fails (verificationStatus="failed")')
   .action(async (opts: ActionOpts) => {
     try {
+      // Validate `--sasl-mechanism` here (rather than via commander's
+      // `Option.choices()`) so the error message matches the rest of this
+      // file's style and so the daemon and CLI produce identical wording for
+      // the same misconfig. The valid set mirrors `KafkaSaslCredentials`.
+      const VALID_SASL_MECHANISMS = ['plain', 'scram-sha-256', 'scram-sha-512'] as const;
+      type SaslMechanism = (typeof VALID_SASL_MECHANISMS)[number];
+      const saslMechanism = String(opts.saslMechanism ?? 'plain').toLowerCase();
+      if (!(VALID_SASL_MECHANISMS as readonly string[]).includes(saslMechanism)) {
+        throw new Error(
+          `--sasl-mechanism must be one of ${VALID_SASL_MECHANISMS.join(', ')}`,
+        );
+      }
+
       // Resolve filesystem PEMs at the CLI layer so the request body carries
       // inline PEM strings — the daemon's "filesystem path" mode is a
       // separate escape hatch for callers that prefer the daemon to read
@@ -1767,7 +1785,13 @@ kafkaEndpointCmd
         messageFormat: opts.format,
         ...(securityProtocol ? { securityProtocol } : {}),
         ...(opts.username && opts.password
-          ? { sasl: { mechanism: 'plain' as const, username: String(opts.username), password: String(opts.password) } }
+          ? {
+              sasl: {
+                mechanism: saslMechanism as SaslMechanism,
+                username: String(opts.username),
+                password: String(opts.password),
+              },
+            }
           : {}),
         ...(Object.keys(ssl).length > 0 ? { ssl } : {}),
         ...(opts.force ? { force: true } : {}),
