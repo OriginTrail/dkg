@@ -4,6 +4,7 @@ import {
   readBody,
   validateRequiredContextGraphId,
 } from '../http-utils.js';
+import { wrapJsonLdContent } from '../json-ld-envelope.js';
 import type { RequestContext } from './context.js';
 import {
   registerKafkaEndpoint,
@@ -69,10 +70,7 @@ export async function handleKafkaRoutes(ctx: RequestContext): Promise<void> {
 
     const publisher: KafkaEndpointPublisher = {
       async publish(cgId, content) {
-        const envelope = isPrivate
-          ? { private: content }
-          : { public: content };
-        await agent.publish(cgId, envelope as Record<string, unknown>);
+        await agent.publish(cgId, wrapJsonLdContent(content, { private: isPrivate }));
       },
     };
 

@@ -65,6 +65,7 @@ export {
   type PeerHealth,
 } from './dkg-agent.js';
 export type { CclPublishedEvaluationRecord, CclPublishedResultEntry } from './dkg-agent.js';
+export type { JsonLdContent, JsonLdDocument } from './dkg-agent-utils.js';
 export {
   bindRandomSampling,
   type RandomSamplingBindOptions,
