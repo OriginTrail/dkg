@@ -22,5 +22,11 @@
   "dct:issued": {
     "@value": "2026-05-04T12:34:56.000Z",
     "@type": "xsd:dateTime"
-  }
+  },
+  "dkg:verificationStatus": "verified",
+  "dkg:verifiedAt": {
+    "@value": "2026-05-04T12:35:00.000Z",
+    "@type": "xsd:dateTime"
+  },
+  "dkg:securityProtocol": "SASL_SSL"
 }
