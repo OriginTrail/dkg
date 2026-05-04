@@ -5,7 +5,7 @@ import {
   parseSsl,
   shouldProbe,
   type KafkaEndpointRequestBody,
-} from '../src/daemon/routes/kafka.js';
+} from '../src/daemon/parsers/kafka-request.js';
 
 // These tests pin the route-level input gate that decides whether the
 // opportunistic probe runs. The slice's UX promise: a request with empty-
