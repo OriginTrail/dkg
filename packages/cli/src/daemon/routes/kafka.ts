@@ -1,6 +1,7 @@
 import { jsonResponse, readBody, validateRequiredContextGraphId } from '../http-utils.js';
 import {
   isNonEmptyString,
+  KafkaRequestParseError,
   parseSasl,
   parseSecurityProtocol,
   parseSsl,
@@ -60,8 +61,24 @@ export async function handleKafkaRoutes(ctx: RequestContext): Promise<void> {
         error: '"securityProtocol" must be one of PLAINTEXT, SASL_PLAINTEXT, SASL_SSL, SSL',
       });
     }
-    const sasl = parseSasl(raw.sasl);
-    const ssl = parseSsl(raw.ssl);
+    // `parseSasl` / `parseSsl` throw `KafkaRequestParseError` on present-but-
+    // malformed payloads (wrong type, unknown mechanism, non-string PEM, ...).
+    // Translate those to HTTP 400 so the caller learns about the misconfig
+    // up front, instead of getting a confusing kafkajs auth failure later or
+    // — worse — a `verificationStatus: "unattempted"` registration that
+    // silently dropped the broken auth block. The error message is sanitized
+    // by the parser; safe to forward verbatim.
+    let sasl: KafkaEndpointRequestBody['sasl'];
+    let ssl: KafkaEndpointRequestBody['ssl'];
+    try {
+      sasl = parseSasl(raw.sasl);
+      ssl = parseSsl(raw.ssl);
+    } catch (err) {
+      if (err instanceof KafkaRequestParseError) {
+        return jsonResponse(res, 400, { error: err.publicMessage });
+      }
+      throw err;
+    }
 
     const reqBody: KafkaEndpointRequestBody = {
       contextGraphId: targetContextGraphId,

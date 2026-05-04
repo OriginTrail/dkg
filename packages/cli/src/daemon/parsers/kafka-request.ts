@@ -21,6 +21,23 @@ const VALID_SASL_MECHANISMS: ReadonlySet<KafkaSaslCredentials['mechanism']> = ne
   'scram-sha-512',
 ]);
 
+/**
+ * Thrown by `parseSasl` / `parseSsl` when the caller supplied a `sasl` or
+ * `ssl` block that is structurally present but malformed (wrong type, unknown
+ * mechanism, empty username, non-string PEM, ...). The route handler catches
+ * this class and translates it into HTTP 400.
+ *
+ * The `publicMessage` is intentionally a sanitized error string — it names
+ * the offending field and (where helpful) the valid alternatives, but never
+ * echoes credential values. Safe to send to the caller in the 400 body.
+ */
+export class KafkaRequestParseError extends Error {
+  constructor(public readonly publicMessage: string) {
+    super(publicMessage);
+    this.name = 'KafkaRequestParseError';
+  }
+}
+
 export interface KafkaEndpointRequestBody {
   contextGraphId: string;
   broker: string;
@@ -76,41 +93,107 @@ export function parseSecurityProtocol(value: unknown): SecurityProtocol | undefi
     : undefined;
 }
 
+/**
+ * Parse a SASL block from the request body.
+ *
+ * Returns `undefined` when the field is genuinely absent (`null` / `undefined`
+ * / missing). Throws `KafkaRequestParseError` when the field is present but
+ * malformed — e.g. wrong type, unknown mechanism, empty username/password.
+ * Empty strings are treated as misconfiguration, not as "no creds": a caller
+ * that wants no SASL block should omit the field entirely.
+ *
+ * Error messages name the offending field and (for unknown mechanisms) the
+ * valid alternatives; they never echo credential values.
+ */
 export function parseSasl(value: unknown): KafkaSaslCredentials | undefined {
-  if (!value || typeof value !== 'object') return undefined;
-  const v = value as Record<string, unknown>;
-  // Empty-string username/password must collapse to "no creds present" so the
-  // `shouldProbe` gate skips the probe and the registration records
-  // `verificationStatus: "unattempted"`. Letting an empty password through
-  // would result in a confusing kafkajs auth failure downstream.
-  if (!isNonEmptyString(v.username) || !isNonEmptyString(v.password)) return undefined;
-  const mechanism = typeof v.mechanism === 'string' ? v.mechanism.toLowerCase() : 'plain';
-  if (!VALID_SASL_MECHANISMS.has(mechanism as KafkaSaslCredentials['mechanism'])) {
-    return undefined;
+  if (value === null || value === undefined) return undefined;
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    throw new KafkaRequestParseError('"sasl" must be an object');
   }
+  const v = value as Record<string, unknown>;
+
+  if (!isNonEmptyString(v.username)) {
+    throw new KafkaRequestParseError('"sasl.username" must be a non-empty string');
+  }
+  if (!isNonEmptyString(v.password)) {
+    throw new KafkaRequestParseError('"sasl.password" must be a non-empty string');
+  }
+
+  let mechanism: KafkaSaslCredentials['mechanism'] = 'plain';
+  if (v.mechanism !== undefined) {
+    if (typeof v.mechanism !== 'string') {
+      throw new KafkaRequestParseError('"sasl.mechanism" must be a string');
+    }
+    const lower = v.mechanism.toLowerCase();
+    if (!VALID_SASL_MECHANISMS.has(lower as KafkaSaslCredentials['mechanism'])) {
+      throw new KafkaRequestParseError(
+        '"sasl.mechanism" must be one of plain, scram-sha-256, scram-sha-512',
+      );
+    }
+    mechanism = lower as KafkaSaslCredentials['mechanism'];
+  }
+
   return {
-    mechanism: mechanism as KafkaSaslCredentials['mechanism'],
+    mechanism,
     username: v.username,
     password: v.password,
   };
 }
 
+/**
+ * Parse an SSL block from the request body.
+ *
+ * Returns `undefined` when the field is genuinely absent (`null` / `undefined`
+ * / missing) OR when the caller passed `ssl: {}` (no recognized field set —
+ * functionally equivalent to no SSL block). Throws `KafkaRequestParseError`
+ * when the field is present but malformed — wrong outer type, non-string
+ * PEM/path, non-boolean `rejectUnauthorized`.
+ *
+ * Error messages name the offending field; they never echo PEM contents.
+ */
 export function parseSsl(value: unknown): KafkaSslMaterial | undefined {
-  if (!value || typeof value !== 'object') return undefined;
+  if (value === null || value === undefined) return undefined;
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    throw new KafkaRequestParseError('"ssl" must be an object');
+  }
   const v = value as Record<string, unknown>;
-  // Empty-string PEMs / paths collapse to "absent". An empty inline PEM would
-  // make kafkajs reject the connection; an empty path would make `readFile`
-  // throw ENOENT. Either case is more useful as a skipped probe than a
-  // confusing failure mode.
+
   const out: KafkaSslMaterial = {};
-  if (isNonEmptyString(v.ca)) out.caPem = v.ca;
-  if (isNonEmptyString(v.cert)) out.certPem = v.cert;
-  if (isNonEmptyString(v.key)) out.keyPem = v.key;
-  if (isNonEmptyString(v.caPath)) out.caPath = v.caPath;
-  if (isNonEmptyString(v.certPath)) out.certPath = v.certPath;
-  if (isNonEmptyString(v.keyPath)) out.keyPath = v.keyPath;
-  if (typeof v.rejectUnauthorized === 'boolean') {
+  assignStringField(v, 'ca', out, 'caPem', 'ssl.ca');
+  assignStringField(v, 'cert', out, 'certPem', 'ssl.cert');
+  assignStringField(v, 'key', out, 'keyPem', 'ssl.key');
+  assignStringField(v, 'caPath', out, 'caPath', 'ssl.caPath');
+  assignStringField(v, 'certPath', out, 'certPath', 'ssl.certPath');
+  assignStringField(v, 'keyPath', out, 'keyPath', 'ssl.keyPath');
+
+  if (v.rejectUnauthorized !== undefined) {
+    if (typeof v.rejectUnauthorized !== 'boolean') {
+      throw new KafkaRequestParseError('"ssl.rejectUnauthorized" must be a boolean');
+    }
     out.rejectUnauthorized = v.rejectUnauthorized;
   }
+
   return Object.keys(out).length > 0 ? out : undefined;
+}
+
+// Common assignment helper: `srcKey` is what the caller sent, `dstKey` is
+// the kafkajs-shaped field on `KafkaSslMaterial`. Throws on wrong type or
+// empty string; "field genuinely absent" is the only path that leaves `dst`
+// untouched.
+function assignStringField(
+  src: Record<string, unknown>,
+  srcKey: string,
+  dst: KafkaSslMaterial,
+  dstKey: keyof KafkaSslMaterial,
+  publicName: string,
+): void {
+  const raw = src[srcKey];
+  if (raw === undefined) return;
+  if (!isNonEmptyString(raw)) {
+    throw new KafkaRequestParseError(`"${publicName}" must be a non-empty string`);
+  }
+  // The keys we route to are all `string | undefined` on KafkaSslMaterial
+  // except `rejectUnauthorized` (handled separately above), so the cast is
+  // safe — the function is only called with string-typed destination keys.
+  (dst as unknown as Record<string, string>)[dstKey as string] = raw;
 }

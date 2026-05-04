@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  KafkaRequestParseError,
   parseSasl,
   parseSecurityProtocol,
   parseSsl,
@@ -8,10 +9,10 @@ import {
 } from '../src/daemon/parsers/kafka-request.js';
 
 // These tests pin the route-level input gate that decides whether the
-// opportunistic probe runs. The slice's UX promise: a request with empty-
-// string `username` / `password` / PEM material is treated as "no creds
-// present" and the registration records `verificationStatus: "unattempted"`,
-// not as a probe failure.
+// opportunistic probe runs. The slice's UX promise: a request with a
+// genuinely-absent `sasl` / `ssl` field results in `verificationStatus:
+// "unattempted"`, but a present-but-malformed block produces a HTTP 400 so
+// the caller is never silently downgraded into an unverified KA.
 
 describe('parseSecurityProtocol', () => {
   it('uppercases and accepts the four supported protocols', () => {
@@ -30,27 +31,70 @@ describe('parseSecurityProtocol', () => {
 });
 
 describe('parseSasl', () => {
-  it('returns undefined when value is null / non-object', () => {
+  it('returns undefined when the field is genuinely absent', () => {
+    expect(parseSasl(undefined)).toBeUndefined();
     expect(parseSasl(null)).toBeUndefined();
-    expect(parseSasl('plain')).toBeUndefined();
   });
 
-  it('returns undefined when username or password is empty / blank', () => {
-    expect(parseSasl({ username: 'a', password: '' })).toBeUndefined();
-    expect(parseSasl({ username: '', password: 'p' })).toBeUndefined();
-    expect(parseSasl({ username: '   ', password: 'p' })).toBeUndefined();
-    expect(parseSasl({ username: 'a', password: '   ' })).toBeUndefined();
+  it('throws on a non-object value', () => {
+    expect(() => parseSasl('plain')).toThrow(KafkaRequestParseError);
+    expect(() => parseSasl('plain')).toThrow(/"sasl" must be an object/);
+    expect(() => parseSasl(42)).toThrow(KafkaRequestParseError);
+    expect(() => parseSasl([])).toThrow(KafkaRequestParseError);
   });
 
-  it('returns undefined when username or password is missing', () => {
-    expect(parseSasl({ username: 'a' })).toBeUndefined();
-    expect(parseSasl({ password: 'p' })).toBeUndefined();
+  it('throws on missing username or password', () => {
+    expect(() => parseSasl({ password: 'p' })).toThrow(/"sasl.username"/);
+    expect(() => parseSasl({ username: 'a' })).toThrow(/"sasl.password"/);
   });
 
-  it('returns undefined for an unknown mechanism', () => {
-    expect(
-      parseSasl({ mechanism: 'totp', username: 'a', password: 'p' }),
-    ).toBeUndefined();
+  it('throws on empty / whitespace username', () => {
+    expect(() => parseSasl({ username: '', password: 'p' })).toThrow(
+      /"sasl.username" must be a non-empty string/,
+    );
+    expect(() => parseSasl({ username: '   ', password: 'p' })).toThrow(
+      /"sasl.username"/,
+    );
+  });
+
+  it('throws on empty / whitespace password', () => {
+    expect(() => parseSasl({ username: 'a', password: '' })).toThrow(
+      /"sasl.password" must be a non-empty string/,
+    );
+    expect(() => parseSasl({ username: 'a', password: '   ' })).toThrow(
+      /"sasl.password"/,
+    );
+  });
+
+  it('throws on an unknown mechanism, listing the valid alternatives', () => {
+    const fn = () =>
+      parseSasl({ mechanism: 'totp', username: 'a', password: 'p' });
+    expect(fn).toThrow(KafkaRequestParseError);
+    expect(fn).toThrow(/plain, scram-sha-256, scram-sha-512/);
+  });
+
+  it('throws on a non-string mechanism', () => {
+    expect(() =>
+      parseSasl({ mechanism: 42, username: 'a', password: 'p' }),
+    ).toThrow(/"sasl.mechanism" must be a string/);
+  });
+
+  it('error messages never echo the credential value', () => {
+    // Defence in depth: even if the message contained the field name, it
+    // must never contain the supplied secret.
+    try {
+      parseSasl({ username: 'CRED-MARKER-USER', password: '' });
+      throw new Error('expected throw');
+    } catch (err) {
+      expect(err).toBeInstanceOf(KafkaRequestParseError);
+      expect((err as Error).message).not.toContain('CRED-MARKER-USER');
+    }
+    try {
+      parseSasl({ username: 'a', password: 'CRED-MARKER-PASS' });
+    } catch {
+      // intentionally empty: this branch should not trigger because
+      // "CRED-MARKER-PASS" is non-empty and therefore valid.
+    }
   });
 
   it('defaults mechanism to plain and lowercases user input', () => {
@@ -66,13 +110,52 @@ describe('parseSasl', () => {
 });
 
 describe('parseSsl', () => {
-  it('returns undefined for null / non-object', () => {
+  it('returns undefined when the field is genuinely absent', () => {
+    expect(parseSsl(undefined)).toBeUndefined();
     expect(parseSsl(null)).toBeUndefined();
-    expect(parseSsl('PEM')).toBeUndefined();
   });
 
-  it('returns undefined when every PEM/path is empty/blank', () => {
-    expect(parseSsl({ ca: '', cert: '   ', key: '' })).toBeUndefined();
+  it('throws on a non-object value', () => {
+    expect(() => parseSsl('PEM')).toThrow(KafkaRequestParseError);
+    expect(() => parseSsl('PEM')).toThrow(/"ssl" must be an object/);
+    expect(() => parseSsl([])).toThrow(KafkaRequestParseError);
+  });
+
+  it('returns undefined for an empty object (caller intent: no SSL block)', () => {
+    expect(parseSsl({})).toBeUndefined();
+  });
+
+  it('throws on a non-string `ca`', () => {
+    expect(() => parseSsl({ ca: 12345 })).toThrow(/"ssl.ca" must be a non-empty string/);
+  });
+
+  it('throws on an empty / whitespace `ca`', () => {
+    expect(() => parseSsl({ ca: '' })).toThrow(/"ssl.ca"/);
+    expect(() => parseSsl({ ca: '   ' })).toThrow(/"ssl.ca"/);
+  });
+
+  it('throws on a non-string `cert`, `key`, `caPath`, `certPath`, or `keyPath`', () => {
+    expect(() => parseSsl({ cert: 1 })).toThrow(/"ssl.cert"/);
+    expect(() => parseSsl({ key: false })).toThrow(/"ssl.key"/);
+    expect(() => parseSsl({ caPath: {} })).toThrow(/"ssl.caPath"/);
+    expect(() => parseSsl({ certPath: 0 })).toThrow(/"ssl.certPath"/);
+    expect(() => parseSsl({ keyPath: null })).toThrow(/"ssl.keyPath"/);
+  });
+
+  it('omitting a field entirely is fine — only present-but-malformed fields throw', () => {
+    // A request that only sets `caPath` should pass through cleanly; the
+    // other PEM/path fields are simply absent.
+    const out = parseSsl({ caPath: '/etc/ca.pem' });
+    expect(out).toEqual({ caPath: '/etc/ca.pem' });
+  });
+
+  it('throws on a non-boolean `rejectUnauthorized`', () => {
+    expect(() => parseSsl({ rejectUnauthorized: 'true' })).toThrow(
+      /"ssl.rejectUnauthorized" must be a boolean/,
+    );
+    expect(() => parseSsl({ rejectUnauthorized: 1 })).toThrow(
+      /"ssl.rejectUnauthorized"/,
+    );
   });
 
   it('passes through non-empty inline PEMs and paths', () => {
@@ -95,19 +178,14 @@ describe('parseSsl', () => {
       rejectUnauthorized: false,
     });
   });
-
-  it('drops empty fields and keeps non-empty siblings', () => {
-    expect(parseSsl({ ca: '', certPath: '/etc/cert.pem' })).toEqual({
-      certPath: '/etc/cert.pem',
-    });
-  });
 });
 
-describe('shouldProbe — empty creds collapse', () => {
-  it('SASL_PLAINTEXT with empty password → no probe (parser drops the sasl block)', () => {
-    // Mirrors the route's wiring: parseSasl is called first, then the gate.
-    const sasl = parseSasl({ username: 'a', password: '' });
-    expect(sasl).toBeUndefined();
+describe('shouldProbe — valid inputs and explicit absences', () => {
+  // These tests now use parseSasl/parseSsl results that are guaranteed valid
+  // by the parser (or genuinely absent) — the old "empty creds collapse"
+  // path no longer exists; empty creds throw.
+  it('SASL_PLAINTEXT with valid creds → probe', () => {
+    const sasl = parseSasl({ username: 'a', password: 'p' });
     const body: KafkaEndpointRequestBody = {
       contextGraphId: 'cg',
       broker: 'b',
@@ -116,11 +194,11 @@ describe('shouldProbe — empty creds collapse', () => {
       securityProtocol: 'SASL_PLAINTEXT',
       ...(sasl ? { sasl } : {}),
     };
-    expect(shouldProbe(body)).toBe(false);
+    expect(shouldProbe(body)).toBe(true);
   });
 
-  it('SASL_SSL with empty username → no probe', () => {
-    const sasl = parseSasl({ username: '', password: 'p' });
+  it('SASL_SSL with no sasl field at all → no probe', () => {
+    const sasl = parseSasl(undefined);
     expect(sasl).toBeUndefined();
     const body: KafkaEndpointRequestBody = {
       contextGraphId: 'cg',
@@ -133,8 +211,8 @@ describe('shouldProbe — empty creds collapse', () => {
     expect(shouldProbe(body)).toBe(false);
   });
 
-  it('SSL with empty cert/key PEMs → no probe', () => {
-    const ssl = parseSsl({ cert: '', key: '   ' });
+  it('SSL with no ssl field at all → no probe', () => {
+    const ssl = parseSsl(undefined);
     expect(ssl).toBeUndefined();
     const body: KafkaEndpointRequestBody = {
       contextGraphId: 'cg',
@@ -166,19 +244,5 @@ describe('shouldProbe — empty creds collapse', () => {
       messageFormat: 'application/json',
     };
     expect(shouldProbe(body)).toBe(false);
-  });
-
-  it('SASL_PLAINTEXT with non-empty creds → probe', () => {
-    const sasl = parseSasl({ username: 'a', password: 'p' });
-    expect(sasl).toBeDefined();
-    const body: KafkaEndpointRequestBody = {
-      contextGraphId: 'cg',
-      broker: 'b',
-      topic: 't',
-      messageFormat: 'application/json',
-      securityProtocol: 'SASL_PLAINTEXT',
-      ...(sasl ? { sasl } : {}),
-    };
-    expect(shouldProbe(body)).toBe(true);
   });
 });
