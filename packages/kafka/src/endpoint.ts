@@ -6,12 +6,17 @@ import type { ProbeResult } from './kafka-probe.js';
 import { buildKafkaEndpointUri } from './uri.js';
 
 /**
+ * The JSON-LD shape produced by `buildKafkaEndpointKnowledgeAsset` and handed
+ * to the publisher. Captured as a type alias so callers can describe their
+ * publisher signature without re-deriving the structural type.
+ */
+export type KafkaEndpointKnowledgeAsset = ReturnType<typeof buildKafkaEndpointKnowledgeAsset>;
+
+/**
  * Dependency-inversion boundary: the kafka package needs something that can
  * publish a JSON-LD knowledge asset. The package hands the bare KA across this
  * interface; envelope wrapping (e.g. `{ public: ... }`) belongs to the caller.
  */
-export type KafkaEndpointKnowledgeAsset = ReturnType<typeof buildKafkaEndpointKnowledgeAsset>;
-
 export interface KafkaEndpointPublisher {
   publish(
     contextGraphId: string,
@@ -40,6 +45,11 @@ export interface KafkaEndpointProbeOutcome {
   error?: string;
 }
 
+/**
+ * Inputs to `registerKafkaEndpoint`. Captures the endpoint identity, the
+ * publisher to use, and the optional probe outcome the route handler ran on
+ * the caller's behalf (per ADR 0002).
+ */
 export interface RegisterKafkaEndpointInput {
   contextGraphId: string;
   owner: string;
@@ -67,6 +77,11 @@ export interface RegisterKafkaEndpointInput {
   force?: boolean;
 }
 
+/**
+ * Outcome of a successful `registerKafkaEndpoint` call: the endpoint URI, the
+ * target context graph, and the verification status that was advertised on
+ * the published KA.
+ */
 export interface RegisterKafkaEndpointResult {
   uri: string;
   contextGraphId: string;
@@ -90,6 +105,12 @@ export class KafkaEndpointProbeFailedError extends Error {
   }
 }
 
+/**
+ * Build and publish a Kafka topic endpoint KA into the named context graph.
+ * Consumes the route's probe decision (if any) per ADR 0002, applies the
+ * `force` override, and throws `KafkaEndpointProbeFailedError` when a
+ * non-verified probe runs without `force=true`.
+ */
 export async function registerKafkaEndpoint(
   input: RegisterKafkaEndpointInput,
 ): Promise<RegisterKafkaEndpointResult> {

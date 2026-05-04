@@ -23,6 +23,11 @@ export type KafkaEndpointVerificationStatus =
   | 'verified'
   | 'failed';
 
+/**
+ * Inputs to `buildKafkaEndpointKnowledgeAsset`. Verification fields
+ * (`verificationStatus`, `verifiedAt`, `securityProtocol`) are all optional
+ * and only land on the KA when the caller opts in.
+ */
 export interface BuildKafkaEndpointKnowledgeAssetInput {
   owner: string;
   broker: string;
@@ -43,6 +48,12 @@ export interface BuildKafkaEndpointKnowledgeAssetInput {
   securityProtocol?: string;
 }
 
+/**
+ * Build the JSON-LD knowledge asset for a Kafka topic endpoint. The KA is
+ * stable wire output: same inputs always produce the same shape, optional
+ * verification fields are appended only when supplied (slice-01 fixtures
+ * stay byte-compatible when probing is not opted into).
+ */
 export function buildKafkaEndpointKnowledgeAsset(input: BuildKafkaEndpointKnowledgeAssetInput) {
   const owner = input.owner.toLowerCase();
 

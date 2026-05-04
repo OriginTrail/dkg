@@ -26,12 +26,17 @@ import {
   type SASLOptions,
 } from 'kafkajs';
 
+/** Supported Kafka broker security/auth modes. */
 export type SecurityProtocol =
   | 'PLAINTEXT'
   | 'SASL_PLAINTEXT'
   | 'SASL_SSL'
   | 'SSL';
 
+/**
+ * TLS material for SSL/SASL_SSL broker connections. PEMs accepted inline or
+ * via filesystem paths (escape hatch).
+ */
 export interface KafkaSslMaterial {
   /** PEM string (CA bundle). Preferred. */
   caPem?: string;
@@ -52,6 +57,7 @@ export interface KafkaSslMaterial {
   rejectUnauthorized?: boolean;
 }
 
+/** SASL credentials for authenticated broker connections. */
 export interface KafkaSaslCredentials {
   /** SASL mechanism. kafkajs accepts lowercase identifiers. */
   mechanism: 'plain' | 'scram-sha-256' | 'scram-sha-512';
@@ -59,6 +65,10 @@ export interface KafkaSaslCredentials {
   password: string;
 }
 
+/**
+ * Inputs to a one-shot Kafka admin probe. Credentials are passed once to
+ * kafkajs and never returned, logged, or stored.
+ */
 export interface KafkaProbeOptions {
   brokers: string[];
   topic: string;
@@ -71,8 +81,13 @@ export interface KafkaProbeOptions {
   timeoutMs?: number;
 }
 
+/** Discriminator for the probe outcome. See {@link ProbeResult}. */
 export type ProbeStatus = 'verified' | 'failed' | 'unreachable';
 
+/**
+ * Structured outcome of a probe call. Network/auth failures are encoded as
+ * `status` ≠ `'verified'`; the probe never throws on broker errors.
+ */
 export interface ProbeResult {
   status: ProbeStatus;
   /** Echoed for the KA. Not a credential. */
@@ -142,6 +157,7 @@ export async function probe(opts: KafkaProbeOptions): Promise<ProbeResult> {
   }
 }
 
+/** @internal */
 interface RawProbeOutcome {
   status: ProbeStatus;
   error?: string;
@@ -231,6 +247,7 @@ function requireSasl(opts: KafkaProbeOptions): SASLOptions {
   };
 }
 
+/** @internal */
 interface SslConnectionOptions {
   rejectUnauthorized: boolean;
   ca?: string[];
