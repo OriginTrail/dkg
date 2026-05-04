@@ -1725,30 +1725,75 @@ const kafkaEndpointCmd = kafkaCmd
   .command('endpoint')
   .description('Kafka topic endpoint operations');
 
+// ADR-0004: explicit local-vs-shared CG choice. The caller must pick
+// `--cg <id>` (publish into a named shared CG) or `--local` (publish into the
+// node-local "kafka-local" free CG, lazy-created on first use). Passing
+// neither — or both — is rejected by commander before any network call so
+// the user gets a clean error pre-network.
 kafkaEndpointCmd
   .command('register')
-  .description('Register a Kafka topic endpoint as a knowledge asset in a named context graph')
-  .requiredOption('--cg <id>', 'Target context graph')
+  .description('Register a Kafka topic endpoint as a knowledge asset in a context graph (named or kafka-local)')
+  .option('--cg <id>', 'Target named context graph (mutually exclusive with --local)')
+  .option('--local', 'Publish into the node-local "kafka-local" free CG (mutually exclusive with --cg)')
   .requiredOption('--broker <host:port>', 'Kafka broker host:port')
   .requiredOption('--topic <name>', 'Kafka topic name')
   .option('--format <mime>', 'Kafka message format MIME type', 'application/json')
+  .addHelpText(
+    'after',
+    '\nExactly one of --cg or --local must be passed. There is no implicit default.',
+  )
   .action(async (opts: ActionOpts) => {
+    const cgId = typeof opts.cg === 'string' ? opts.cg : undefined;
+    const useLocal = opts.local === true;
+
+    // Mutual-exclusion is enforced at the parser level via .conflicts() below
+    // (commander throws before this action runs). The "neither" case is the
+    // only thing left to guard here: commander treats both options as
+    // optional, so we check that exactly one is set.
+    if (!cgId && !useLocal) {
+      console.error(
+        'Pass exactly one of "--cg <id>" (publish into a named shared CG) ' +
+        'or "--local" (publish into the local "kafka-local" free CG).',
+      );
+      process.exit(1);
+    }
+
     try {
       const client = await ApiClient.connect();
-      const result = await client.registerKafkaEndpoint({
-        contextGraphId: opts.cg,
-        broker: opts.broker,
-        topic: opts.topic,
-        messageFormat: opts.format,
-      });
+      const request = useLocal
+        ? {
+            useLocalCg: true as const,
+            broker: opts.broker,
+            topic: opts.topic,
+            messageFormat: opts.format,
+          }
+        : {
+            contextGraphId: cgId!,
+            broker: opts.broker,
+            topic: opts.topic,
+            messageFormat: opts.format,
+          };
+      const result = await client.registerKafkaEndpoint(request);
       console.log('Kafka endpoint registered:');
       console.log(`  URI:            ${result.uri}`);
       console.log(`  Context graph:  ${result.contextGraphId}`);
+      console.log(`  CG scope:       ${result.cgScope}`);
     } catch (err) {
       console.error(toErrorMessage(err));
       process.exit(1);
     }
   });
+
+// commander supports parser-level mutual exclusion via .conflicts(). Looking
+// up the option object after the chain because commander returns the command
+// instance from .option().
+const kafkaRegisterCmd = kafkaEndpointCmd.commands.find((c) => c.name() === 'register');
+if (kafkaRegisterCmd) {
+  const cgOption = kafkaRegisterCmd.options.find((o) => o.long === '--cg');
+  const localOption = kafkaRegisterCmd.options.find((o) => o.long === '--local');
+  cgOption?.conflicts('local');
+  localOption?.conflicts('cg');
+}
 
 // ─── dkg openclaw ───────────────────────────────────────────────────
 

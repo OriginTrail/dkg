@@ -176,6 +176,7 @@ describe('kafka walking skeleton e2e', () => {
     expect(result.stdout).toContain('Kafka endpoint registered:');
     expect(result.stdout).toContain(expectedUri);
     expect(result.stdout).toContain(CONTEXT_GRAPH_ID);
+    expect(result.stdout).toContain('CG scope:       shared');
 
     const row = await waitForEndpointRow(client, CONTEXT_GRAPH_ID, expectedUri);
 
@@ -186,4 +187,96 @@ describe('kafka walking skeleton e2e', () => {
     expect(stripIriDelimiters(row.endpointUrl ?? '')).toBe(`kafka://${broker}/${topic}`);
     expect(Number.isNaN(Date.parse(stripQuotedLiteral(row.issued ?? '')))).toBe(false);
   }, 90_000);
+
+  it('registers a Kafka endpoint into kafka-local with --local and discovers it via SPARQL', async () => {
+    const broker = 'kafka.e2e.local:9092';
+    const topic = `walking-skeleton-local.${Date.now()}`;
+    const messageFormat = 'application/cloudevents+json';
+    const expectedUri = buildKafkaEndpointUri({ owner, broker, topic });
+
+    const result = await execFileAsync(
+      'node',
+      [
+        CLI_ENTRY,
+        'kafka',
+        'endpoint',
+        'register',
+        '--local',
+        '--broker',
+        broker,
+        '--topic',
+        topic,
+        '--format',
+        messageFormat,
+      ],
+      {
+        cwd: REPO_ROOT,
+        env: {
+          ...process.env,
+          DKG_HOME: DEVNET_NODE1_HOME,
+          DKG_API_PORT: String(port),
+        },
+      },
+    );
+
+    expect(result.stdout).toContain('Kafka endpoint registered:');
+    expect(result.stdout).toContain(expectedUri);
+    expect(result.stdout).toContain('kafka-local');
+    expect(result.stdout).toContain('CG scope:       local');
+
+    const row = await waitForEndpointRow(client, 'kafka-local', expectedUri);
+
+    expect(stripQuotedLiteral(row.broker ?? '')).toBe(broker);
+    expect(stripQuotedLiteral(row.topic ?? '')).toBe(topic);
+    expect(stripQuotedLiteral(row.messageFormat ?? '')).toBe(messageFormat);
+    expect(stripIriDelimiters(row.publisher ?? '')).toBe(`urn:dkg:agent:${owner}`);
+    expect(stripIriDelimiters(row.endpointUrl ?? '')).toBe(`kafka://${broker}/${topic}`);
+    expect(Number.isNaN(Date.parse(stripQuotedLiteral(row.issued ?? '')))).toBe(false);
+  }, 90_000);
+
+  it('rejects a request with neither contextGraphId nor useLocalCg with a 4xx', async () => {
+    const broker = 'kafka.e2e.local:9092';
+    const topic = `walking-skeleton-bad-${Date.now()}`;
+    const messageFormat = 'application/json';
+
+    const response = await fetch(`http://127.0.0.1:${port}/api/kafka/endpoint`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ broker, topic, messageFormat }),
+    });
+
+    expect(response.status).toBe(400);
+    const payload = (await response.json()) as { error?: string };
+    expect(payload.error ?? '').toMatch(/contextGraphId/);
+    expect(payload.error ?? '').toMatch(/useLocalCg/);
+  }, 30_000);
+
+  it('rejects a request with both contextGraphId and useLocalCg with a 4xx', async () => {
+    const broker = 'kafka.e2e.local:9092';
+    const topic = `walking-skeleton-bad-${Date.now()}`;
+    const messageFormat = 'application/json';
+
+    const response = await fetch(`http://127.0.0.1:${port}/api/kafka/endpoint`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        contextGraphId: CONTEXT_GRAPH_ID,
+        useLocalCg: true,
+        broker,
+        topic,
+        messageFormat,
+      }),
+    });
+
+    expect(response.status).toBe(400);
+    const payload = (await response.json()) as { error?: string };
+    expect(payload.error ?? '').toMatch(/contextGraphId/);
+    expect(payload.error ?? '').toMatch(/useLocalCg/);
+  }, 30_000);
 });

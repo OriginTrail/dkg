@@ -551,14 +551,24 @@ export class ApiClient {
     return this.get(`/api/context-graph/${encodeURIComponent(contextGraphId)}/participants`);
   }
 
-  async registerKafkaEndpoint(request: {
-    contextGraphId: string;
-    broker: string;
-    topic: string;
-    messageFormat: string;
-  }): Promise<{
+  async registerKafkaEndpoint(
+    request:
+      | {
+          contextGraphId: string;
+          broker: string;
+          topic: string;
+          messageFormat: string;
+        }
+      | {
+          useLocalCg: true;
+          broker: string;
+          topic: string;
+          messageFormat: string;
+        },
+  ): Promise<{
     uri: string;
     contextGraphId: string;
+    cgScope: 'local' | 'shared';
   }> {
     return this.post('/api/kafka/endpoint', request);
   }
