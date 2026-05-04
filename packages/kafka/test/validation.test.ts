@@ -65,13 +65,11 @@ describe('validateContextGraphSelection', () => {
     ).toThrow(/useLocalCg/);
   });
 
-  // Strict-typing decision: `useLocalCg: false` collapses to "no CG selected"
-  // (the actionable "missing selection" message), while `useLocalCg: 0` (and
-  // any other non-boolean) is a type error at the API boundary. We keep this
-  // asymmetry on purpose: callers should pass a real boolean. Coercing
-  // truthy/falsy values to booleans here would mask the type bug at the
-  // boundary and make wrong-type usage feel valid. These two tests document
-  // and lock in that behavior.
+  // `useLocalCg: false` is treated as equivalent to omission, which matches
+  // typical JSON-default serialization patterns where a client emits every
+  // field with its default. Non-boolean values like `0` / `'true'` / `1` are
+  // still rejected as type errors at the API boundary — coercing them would
+  // silently mask caller bugs. These tests lock that behavior in.
   it('treats useLocalCg: false as "missing selection" (boolean false collapses)', () => {
     expect(() =>
       validateContextGraphSelection({ useLocalCg: false }),
@@ -82,5 +80,32 @@ describe('validateContextGraphSelection', () => {
     expect(() =>
       validateContextGraphSelection({ useLocalCg: 0 as unknown as boolean }),
     ).toThrow(/"useLocalCg" must be a boolean/);
+  });
+
+  // Bug 1 regression: a client that auto-emits boolean defaults (e.g. JSON
+  // serializing `useLocalCg: false`) alongside a real `contextGraphId` must
+  // be accepted as a shared selection, not rejected as "mutually exclusive".
+  it('accepts contextGraphId paired with useLocalCg: false as shared (trimmed)', () => {
+    expect(
+      validateContextGraphSelection({
+        contextGraphId: '  devnet-test  ',
+        useLocalCg: false,
+      }),
+    ).toEqual({ kind: 'shared', contextGraphId: 'devnet-test' });
+  });
+
+  // Bug 2 regression: `kafka-local` is reserved at the package level for the
+  // node-local free CG (see local-cg.ts). Passing it as a shared id would
+  // double-write into the reserved id and bypass the lazy-create path.
+  it('rejects contextGraphId: "kafka-local" with a hint to use useLocalCg: true', () => {
+    expect(() =>
+      validateContextGraphSelection({ contextGraphId: 'kafka-local' }),
+    ).toThrow(/"useLocalCg":\s*true/);
+  });
+
+  it('rejects whitespace-padded "kafka-local" (trim happens before the reserved-id check)', () => {
+    expect(() =>
+      validateContextGraphSelection({ contextGraphId: '  kafka-local  ' }),
+    ).toThrow(/kafka-local/);
   });
 });
