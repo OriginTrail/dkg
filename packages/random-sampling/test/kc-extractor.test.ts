@@ -222,6 +222,35 @@ describe('extractV10KCFromStore — happy path / publisher round-trip parity', (
     }
   });
 
+  it('resolves CG names that contain "/" (v9-style <owner>/<slug> namespacing)', async () => {
+    // Regression for a testnet incident where every random-sampling proof on every
+    // beacon went unsubmitted: the CG name resolver in `kc-extractor.ts` rejected
+    // any name containing "/", but real CGs were registered as
+    // "0xb08…4794c/laptop-smoke" — owner-prefixed slugs. The FinalizationHandler
+    // wrote canonical data under `did:dkg:context-graph:<owner>/<slug>/context/<cgId>/_meta`
+    // (which is correct), but the extractor returned `null` from name resolution
+    // and threw `KCNotFoundError` even after data was promoted, blocking proofs
+    // forever. The relevant log line on every beacon was:
+    //   `Finalization: promoted SWM snapshot to context graph 12 …`
+    //   `[rs.tick.kc-not-synced] {"kcId":"6","cgId":"12","err":"KCNotFoundError"}`
+    const fixture: KCFixture = {
+      cgId: 12n,
+      cgName: '0xb08A0F66d5A225D57Dee5fFa6C442e4DC2a4794c/laptop-smoke',
+      kcId: 6n,
+      ual: 'did:dkg:base:84532/0xb08A0F66d5A225D57Dee5fFa6C442e4DC2a4794c/5000001',
+      rootEntities: ['urn:entity:slash-cg'],
+      publicTriples: [
+        { subject: 'urn:entity:slash-cg', predicate: 'urn:p:name', object: '"slash"' },
+      ],
+    };
+    await seedKC(store, fixture);
+
+    const result = await extractV10KCFromStore(store, fixture.cgId, fixture.kcId);
+    expect(result.contextGraphName).toBe(fixture.cgName);
+    expect(result.ual).toBe(fixture.ual);
+    expect(result.triples).toHaveLength(1);
+  });
+
   it('mixes public-triple leaves with private sub-root leaves (publisher symmetry)', async () => {
     const PRIVATE_ROOT = new Uint8Array(32).fill(0xab);
     const fixture: KCFixture = {

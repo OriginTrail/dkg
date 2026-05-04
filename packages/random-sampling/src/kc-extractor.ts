@@ -153,9 +153,10 @@ export async function extractV10KCFromStore(
   }
   const metaGraph = contextGraphMetaUri(cgName, cgIdStr);
   const dataGraph = contextGraphDataUri(cgName, cgIdStr);
-  // No assertSafeIri on derived URIs — they are constructed from a
-  // numeric bigint stringification + a CG name we just round-tripped
-  // through SPARQL, and the helpers are part of the trusted core surface.
+  // No assertSafeIri on derived URIs — `cgIdStr` is a bigint stringification
+  // and `cgName` was already gated by an `assertSafeIri(contextGraphMetaUri(name, '0'))`
+  // probe inside `resolveContextGraphNameFromOnChainId`, so the derived URIs
+  // are safe by construction.
 
   // 1. Resolve UAL via dkg:batchId. Use a typed integer literal to
   //    avoid string-prefix collisions (kcId 1 vs 10) — same lookup
@@ -277,9 +278,21 @@ async function resolveContextGraphNameFromOnChainId(
   const cgUri = stripQuotes(result.bindings[0]['cgUri'] ?? '');
   if (!cgUri.startsWith(CG_URI_PREFIX)) return null;
   const name = cgUri.slice(CG_URI_PREFIX.length);
-  // Reject empty / dangerous names. CG names are normally safe slugs
-  // (lowercase + hyphens) but we don't gate that here.
-  if (!name || name.includes('/') || name.includes(' ')) return null;
+  if (!name) return null;
+  // The name is later interpolated into a SPARQL IRI (`<did:dkg:context-graph:<name>/...>`),
+  // so we must reject anything that would break out of an IRI literal — but we cannot
+  // reject `/` here, because v9-style CG names use the `<owner_address>/<slug>` namespacing
+  // pattern (e.g. "0xb08…4794c/laptop-smoke") and would otherwise be silently dropped,
+  // surfacing as `KCNotFoundError` even when the FinalizationHandler has already promoted
+  // the data to canonical. That mismatch broke RS proof submission across the entire
+  // testnet — see PR notes for the on-chain reproduction.
+  // Validate via `assertSafeIri` on the *derived* meta-graph URI, which is the actual
+  // injection surface; rely on it instead of an overly tight name-level allowlist.
+  try {
+    assertSafeIri(contextGraphMetaUri(name, '0'));
+  } catch {
+    return null;
+  }
   return name;
 }
 
