@@ -9,7 +9,6 @@ import {Ask} from "./Ask.sol";
 import {ShardingTable} from "./ShardingTable.sol";
 import {StakingV10} from "./StakingV10.sol";
 import {ShardingTableStorage} from "./storage/ShardingTableStorage.sol";
-import {StakingStorage} from "./storage/StakingStorage.sol";
 import {ConvictionStakingStorage} from "./storage/ConvictionStakingStorage.sol";
 import {ParametersStorage} from "./storage/ParametersStorage.sol";
 import {ProfileStorage} from "./storage/ProfileStorage.sol";
@@ -38,11 +37,12 @@ import {HubLib} from "./libraries/HubLib.sol";
  *      `StakingV10`, gated by `onlyConvictionNFT` so only this wrapper can
  *      invoke it. TRAC never touches this contract: users approve
  *      `StakingV10` directly and `StakingV10.stake` pulls TRAC via
- *      `token.transferFrom(staker, stakingStorage, amount)`. The wrapper
- *      never calls `StakingStorage.*` or `ConvictionStakingStorage.*`
- *      directly for mutations — the only storage read it does is
- *      `convictionStakingStorage.getPosition(tokenId)` in `redelegate`,
- *      to capture the pre-call `identityId` for the wrapper-layer event.
+ *      `token.transferFrom(staker, convictionStorage, amount)` — CSS is
+ *      the V10 vault as of v4.0.0. The wrapper never calls
+ *      `ConvictionStakingStorage.*` directly for mutations — the only
+ *      storage read it does is `convictionStakingStorage.getPosition(tokenId)`
+ *      in `redelegate`, to capture the pre-call `identityId` for the
+ *      wrapper-layer event.
  *
  *      User-facing entry points:
  *        - `createConviction`                             — mint path, fresh V10 stake
@@ -104,7 +104,6 @@ contract DKGStakingConvictionNFT is IVersioned, ContractStatus, IInitializable, 
     // ========================================================================
 
     StakingV10 public stakingV10;
-    StakingStorage public stakingStorage;
     ConvictionStakingStorage public convictionStakingStorage;
     Chronos public chronos;
     RandomSamplingStorage public randomSamplingStorage;
@@ -232,7 +231,6 @@ contract DKGStakingConvictionNFT is IVersioned, ContractStatus, IInitializable, 
 
     function initialize() public onlyHub {
         stakingV10 = StakingV10(hub.getContractAddress("StakingV10"));
-        stakingStorage = StakingStorage(hub.getContractAddress("StakingStorage"));
         convictionStakingStorage = ConvictionStakingStorage(hub.getContractAddress("ConvictionStakingStorage"));
         chronos = Chronos(hub.getContractAddress("Chronos"));
         randomSamplingStorage = RandomSamplingStorage(hub.getContractAddress("RandomSamplingStorage"));
@@ -350,8 +348,8 @@ contract DKGStakingConvictionNFT is IVersioned, ContractStatus, IInitializable, 
     //
     // TRAC never touches this contract: at `createConviction` the user has
     // approved `StakingV10` directly, and `StakingV10.stake` pulls TRAC via
-    // `token.transferFrom(staker, stakingStorage, amount)`. The NFT layer
-    // only mints/burns ERC-721 tokens.
+    // `token.transferFrom(staker, convictionStorage, amount)` — CSS is
+    // the v4.0.0 TRAC vault. The NFT layer only mints/burns ERC-721 tokens.
 
     /// @notice Mint a fresh NFT-backed staking position on `identityId` with
     ///         `amount` TRAC under the `lockTier` tier. Valid tiers are

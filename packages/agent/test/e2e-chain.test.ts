@@ -16,9 +16,10 @@ import {
 let ctx: HardhatContext;
 const agents: DKGAgent[] = [];
 
-function makeChainConfig(operationalKey: string) {
+function makeChainConfig(operationalKey: string, adminPrivateKey: string) {
   return {
     rpcUrl: ctx!.rpcUrl,
+    adminPrivateKey,
     operationalKeys: [operationalKey],
     hubAddress: ctx!.hubAddress,
     chainId: `evm:31337`,
@@ -66,7 +67,7 @@ describe('E2E: DKGAgent with real blockchain', () => {
       name: 'ChainNodeA',
       listenPort: 0,
       skills: [],
-      chainConfig: makeChainConfig(HARDHAT_KEYS.EXTRA1),
+      chainConfig: makeChainConfig(HARDHAT_KEYS.EXTRA1, HARDHAT_KEYS.EXTRA3),
     });
     agents.push(agentA);
 
@@ -74,7 +75,7 @@ describe('E2E: DKGAgent with real blockchain', () => {
       name: 'ChainNodeB',
       listenPort: 0,
       skills: [],
-      chainConfig: makeChainConfig(HARDHAT_KEYS.EXTRA2),
+      chainConfig: makeChainConfig(HARDHAT_KEYS.EXTRA2, HARDHAT_KEYS.PUBLISHER2),
     });
     agents.push(agentB);
 

@@ -3,24 +3,38 @@
 pragma solidity ^0.8.20;
 
 import {Chronos} from "./Chronos.sol";
-import {HubDependent} from "../abstract/HubDependent.sol";
+import {Guardian} from "../Guardian.sol";
 import {ICustodian} from "../interfaces/ICustodian.sol";
 import {INamed} from "../interfaces/INamed.sol";
 import {IVersioned} from "../interfaces/IVersioned.sol";
 import {HubLib} from "../libraries/HubLib.sol";
+import {StakingLib} from "../libraries/StakingLib.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 /**
  * @title ConvictionStakingStorage
- * @notice Primary accounting store for V10 staking.
+ * @notice Primary accounting store AND TRAC vault for V10 staking.
  *
- * V10 architecture (post-migration):
- *   - All V10 delegator state lives here (positions, per-node stake totals,
- *     per-epoch operator-fee/net-rewards flags). StakingStorage becomes a
- *     read-only V8 legacy archive and the TRAC vault.
+ * V10 architecture (post-consolidation, v4.0.0):
+ *   - CSS is the single source of truth for V10 staking: NFT-keyed positions,
+ *     per-node stake aggregates, per-epoch operator-fee/net-rewards flags,
+ *     per-node operator-fee balances + withdrawal queue, AND the TRAC vault.
+ *     There is no separate `StakingStorage` in the V10 hot path.
+ *   - The TRAC custody role moved here from V8 `StakingStorage` in v4.0.0:
+ *     CSS now extends `Guardian`, so its `tokenContract` reference and
+ *     `transferStake` outflow function come from the same base every V10
+ *     publish/payment contract uses for vault-routed deposits. Vault-target
+ *     consumers (`KnowledgeAssetsV10`, `KnowledgeCollection`, `Paymaster`,
+ *     `PublishingConvictionAccount`, `DKGPublishingConvictionNFT`,
+ *     `DKGStakingConvictionNFT`) resolve `hub.getContractAddress("ConvictionStakingStorage")`
+ *     for both deposits (TRAC `transferFrom` to CSS) and withdrawals
+ *     (`StakingV10` calls `cs.transferStake`).
  *   - Migration to V10 is MANDATORY: every V8 delegator becomes a V10 NFT
- *     position. `RandomSampling.calculateNodeScore` and the Phase 11
- *     `scorePerStake` denominator therefore read `nodeStakeV10` here, NOT
- *     `StakingStorage.nodes[id].stake`.
+ *     position. `RandomSampling.calculateNodeScore` therefore reads the
+ *     timestamp-accurate effective stake here (raw TRAC × active conviction
+ *     multipliers), while raw stake gates still read `nodeStakeV10`. V8
+ *     `StakingStorage` is deployed-but-unused dead code post-consolidation;
+ *     only `StakingV10._convertToNFT` reads it (V8→V10 drain at cutover).
  *
  * Rewards model (D19 — compound-into-raw):
  *   - The previous split-bucket model (separate `rewards` sidecar that
@@ -55,7 +69,7 @@ import {HubLib} from "../libraries/HubLib.sol";
  *     effective-stake snapshots are no longer reconstructable from CSS;
  *     consumers that need them should settle and read "current" state.
  */
-contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
+contract ConvictionStakingStorage is INamed, IVersioned, Guardian {
     string private constant _NAME = "ConvictionStakingStorage";
     // Version history:
     //   1.1.0 — split-bucket rewards, discrete tier ladder.
@@ -90,7 +104,24 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
     //             silently rebound).
     //           * L11 — `createPosition` no longer takes `multiplier18`;
     //             it reads the multiplier from the tier table.
-    string private constant _VERSION = "3.1.0";
+    //   4.0.0 — Storage consolidation: CSS absorbs the TRAC vault role and
+    //           operator-fee accounting from V8 `StakingStorage`.
+    //           * Base contract switched from `HubDependent` → `Guardian`
+    //             (CSS now holds `tokenContract`, exposes `transferStake`,
+    //             and inherits the misplaced-token rescue helpers).
+    //           * Added `nodeOperatorFeeBalance` (per-node fee accrual the
+    //             `StakingV10._claim` operator split previously wrote to
+    //             `StakingStorage.nodes[id].operatorFeeBalance`).
+    //           * Added `operatorFeeWithdrawals` (per-node request queue
+    //             with the V8 `StakeWithdrawalRequest` struct shape so the
+    //             `StakingV10` admin surface can be added without further
+    //             struct churn).
+    //           * Vault deposits across V10 (`KnowledgeAssetsV10`,
+    //             `KnowledgeCollection`, `Paymaster`, etc.) now route TRAC
+    //             into the CSS address. `StakingStorage` is no longer in
+    //             the V10 hot path; only `StakingV10._convertToNFT` reads
+    //             it (V8→V10 drain at cutover).
+    string private constant _VERSION = "4.0.0";
 
     // Multiplier scale, matches DKGStakingConvictionNFT._convictionMultiplier
     // (returns 1e18-scaled values so fractional tiers like 1.5x and 3.5x
@@ -266,6 +297,25 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
     mapping(uint72 => mapping(uint256 => uint256)) public netNodeEpochRewards;
 
     // ============================================================
+    //   v4.0.0 — Operator-fee balance + withdrawal queue (absorbed
+    //            from V8 StakingStorage)
+    //
+    // `nodeOperatorFeeBalance` accrues each time `StakingV10._claim`
+    // splits gross node rewards by `Profile.getLatestOperatorFeePercentage`
+    // (operator-fee-percentage cut, drained when the operator finalises a
+    // `requestOperatorFeeWithdrawal` / `cancelOperatorFeeWithdrawal` against
+    // their identity).
+    //
+    // `operatorFeeWithdrawals` is the per-identity request queue. The struct
+    // shape is reused from `StakingLib.StakeWithdrawalRequest` so the
+    // operator-side admin functions can be added on `StakingV10` (or on a
+    // future thin admin contract) without further struct churn. V10 never
+    // populates `indexedOutAmount`; it stays 0 for every entry.
+    // ============================================================
+    mapping(uint72 => uint96) public nodeOperatorFeeBalance;
+    mapping(uint72 => StakingLib.StakeWithdrawalRequest) public operatorFeeWithdrawals;
+
+    // ============================================================
     //                 D7 — V10 launch epoch marker
     // ============================================================
     uint256 public v10LaunchEpoch;
@@ -282,9 +332,29 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
     event TierAdded(uint40 indexed lockTier, uint256 duration, uint64 multiplier18);
     event TierDeactivated(uint40 indexed lockTier);
 
-    constructor(address hubAddress) HubDependent(hubAddress) {}
+    // ============================================================
+    //   v4.0.0 — Vault + operator-fee events (absorbed from V8 SS)
+    // ============================================================
+    event OperatorFeeBalanceUpdated(uint72 indexed identityId, uint96 feeBalance);
+    event OperatorFeeWithdrawalRequestCreated(
+        uint72 indexed identityId,
+        uint96 amount,
+        uint96 indexedOutAmount,
+        uint256 timestamp
+    );
+    event OperatorFeeWithdrawalRequestDeleted(uint72 indexed identityId);
+    event StakedTokensTransferred(address indexed receiver, uint96 amount);
 
-    function initialize() public onlyHub {
+    constructor(address hubAddress) Guardian(hubAddress) {}
+
+    /// @dev Overrides `Guardian.initialize()` so the CSS deploy step seeds
+    ///      both Guardian's TRAC reference AND CSS's V10 staking state in
+    ///      one call. Guardian only sets `tokenContract`; CSS additionally
+    ///      wires Chronos and seeds the D20 baseline tier ladder. Callable
+    ///      only by Hub; `_seedBaselineTiers` is idempotent across post-
+    ///      upgrade redeploys (existing tier ids short-circuit).
+    function initialize() public override onlyHub {
+        tokenContract = IERC20(hub.getContractAddress("Token"));
         chronos = Chronos(hub.getContractAddress("Chronos"));
 
         // Seed the baseline D20 ladder on the first call. Idempotent across
@@ -1251,6 +1321,89 @@ contract ConvictionStakingStorage is INamed, IVersioned, HubDependent {
 
     function getNodeTokenAt(uint72 identityId, uint256 index) external view returns (uint256) {
         return nodeTokens[identityId][index];
+    }
+
+    // ============================================================
+    //   v4.0.0 — Operator-fee balance accessors
+    //
+    // Mirrors the V8 `StakingStorage.{set,increase,decrease,get}OperatorFeeBalance`
+    // surface so `StakingV10._claim` can be rewired by handle swap.
+    // ============================================================
+
+    function setOperatorFeeBalance(uint72 identityId, uint96 newBalance) external onlyContracts {
+        nodeOperatorFeeBalance[identityId] = newBalance;
+        emit OperatorFeeBalanceUpdated(identityId, newBalance);
+    }
+
+    function increaseOperatorFeeBalance(uint72 identityId, uint96 addedFee) external onlyContracts {
+        nodeOperatorFeeBalance[identityId] += addedFee;
+        emit OperatorFeeBalanceUpdated(identityId, nodeOperatorFeeBalance[identityId]);
+    }
+
+    function decreaseOperatorFeeBalance(uint72 identityId, uint96 removedFee) external onlyContracts {
+        nodeOperatorFeeBalance[identityId] -= removedFee;
+        emit OperatorFeeBalanceUpdated(identityId, nodeOperatorFeeBalance[identityId]);
+    }
+
+    function getOperatorFeeBalance(uint72 identityId) external view returns (uint96) {
+        return nodeOperatorFeeBalance[identityId];
+    }
+
+    // ============================================================
+    //   v4.0.0 — Operator-fee withdrawal request queue
+    //
+    // Mirrors the V8 `StakingStorage.{create,delete,get,...}OperatorFeeWithdrawalRequest`
+    // surface; V10 never populates `indexedOutAmount` (always 0).
+    // ============================================================
+
+    function createOperatorFeeWithdrawalRequest(
+        uint72 identityId,
+        uint96 amount,
+        uint96 indexedOutAmount,
+        uint256 timestamp
+    ) external onlyContracts {
+        operatorFeeWithdrawals[identityId] = StakingLib.StakeWithdrawalRequest(amount, indexedOutAmount, timestamp);
+        emit OperatorFeeWithdrawalRequestCreated(identityId, amount, indexedOutAmount, timestamp);
+    }
+
+    function deleteOperatorFeeWithdrawalRequest(uint72 identityId) external onlyContracts {
+        delete operatorFeeWithdrawals[identityId];
+        emit OperatorFeeWithdrawalRequestDeleted(identityId);
+    }
+
+    function getOperatorFeeWithdrawalRequest(uint72 identityId) external view returns (uint96, uint96, uint256) {
+        StakingLib.StakeWithdrawalRequest memory wr = operatorFeeWithdrawals[identityId];
+        return (wr.amount, wr.indexedOutAmount, wr.timestamp);
+    }
+
+    function getOperatorFeeWithdrawalRequestAmount(uint72 identityId) external view returns (uint96) {
+        return operatorFeeWithdrawals[identityId].amount;
+    }
+
+    function getOperatorFeeWithdrawalRequestIndexedOutAmount(uint72 identityId) external view returns (uint96) {
+        return operatorFeeWithdrawals[identityId].indexedOutAmount;
+    }
+
+    function getOperatorFeeWithdrawalRequestTimestamp(uint72 identityId) external view returns (uint256) {
+        return operatorFeeWithdrawals[identityId].timestamp;
+    }
+
+    function operatorFeeWithdrawalRequestExists(uint72 identityId) external view returns (bool) {
+        return operatorFeeWithdrawals[identityId].amount != 0;
+    }
+
+    // ============================================================
+    //   v4.0.0 — TRAC vault outflow
+    //
+    // The CSS contract address is the V10 TRAC vault (deposits arrive via
+    // `transferFrom(staker, address(this), amount)` from publish/staking
+    // callers). `transferStake` is the only outflow path; gated to Hub-
+    // registered contracts, mirroring V8 `StakingStorage.transferStake`.
+    // ============================================================
+
+    function transferStake(address receiver, uint96 stakeAmount) external onlyContracts {
+        tokenContract.transfer(receiver, stakeAmount);
+        emit StakedTokensTransferred(receiver, stakeAmount);
     }
 
     // ============================================================

@@ -1,8 +1,14 @@
 import { readFile, writeFile, mkdir, symlink, rename, unlink, readlink } from 'node:fs/promises';
-import { join, dirname, resolve, basename } from 'node:path';
-import { homedir } from 'node:os';
+import { join, dirname, basename } from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import {
+  blueGreenSlotEntryPoint,
+  blueGreenSlotReady,
+  findPackageRepoDir,
+  isDkgMonorepoRoot,
+  resolveDkgConfigHome,
+} from '@origintrail-official/dkg-core';
 
 /**
  * Per-step build timeouts (milliseconds) used by the git-based auto-update
@@ -85,6 +91,23 @@ export interface NetworkConfig {
     url: string;
     mode: string;
   };
+  /**
+   * Maintainer-controlled marker bumped on every chain reset (e.g. testnet
+   * V10 staking consolidation, fresh contract redeploy with state wipe).
+   * The daemon's chain-reset-wipe hook compares this against the last value
+   * persisted in `<dataDir>/.network-state.json`; on mismatch it auto-wipes
+   * `store.nq` + `publish-journal.*` + `random-sampling.wal` so the node
+   * boots clean against the new chain. Operators do nothing.
+   *
+   * Distinct from `networkId` which is a SHA256 of the bundled genesis
+   * TriG and only changes when the genesis itself does — chain redeploys
+   * happen far more often than that, so they need a separate marker.
+   *
+   * Free-form string, suggested format: `<purpose>-<yyyy-mm-dd>` (e.g.
+   * `v10-rs-staking-consolidation-2026-04-30`). Maintainer bumps in the
+   * same commit that captures the post-deploy state.
+   */
+  chainResetMarker?: string;
 }
 
 export interface ChainConfig {
@@ -227,6 +250,35 @@ export interface DkgConfig {
   corsOrigins?: string | string[];
   /** HTTP rate limiting settings. */
   rateLimit?: { requestsPerMinute?: number; exempt?: string[] };
+  /**
+   * V10 Random Sampling prover (core-only). When the node is `core`
+   * AND has an on-chain identity, the agent automatically schedules
+   * `RandomSamplingProver.tick()` on `tickIntervalMs`. Edge nodes
+   * ignore this block. See `dkg-random-sampling` for the prover
+   * itself; the bind layer is in `dkg-agent/random-sampling-bind.ts`.
+   */
+  randomSampling?: {
+    /**
+     * Persistent WAL path. When set, prover state transitions are
+     * appended to this file (JSONL, fsync per write) for crash
+     * recovery + `dkg rs wal-tail`. When unset, the prover uses an
+     * in-memory WAL (test/dev only — production SHOULD set this).
+     */
+    walPath?: string;
+    /**
+     * Tick cadence in ms. Default 30_000. Set lower (e.g. 5_000) for
+     * devnet smoke tests where you want the prover to react quickly
+     * after a publish lands. The orchestrator is idempotent under
+     * fast double-ticks (already-solved short-circuit).
+     */
+    tickIntervalMs?: number;
+    /**
+     * Default true on core. When false, the V10 Merkle build runs on
+     * the agent's main thread. Useful in tests where spawning a
+     * worker is undesirable.
+     */
+    useWorkerThread?: boolean;
+  };
 }
 
 /**
@@ -297,33 +349,6 @@ function isDkgPackageRoot(dir: string): boolean {
     const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf-8'));
     return pkg?.name === '@origintrail-official/dkg'
       && existsSync(join(dir, 'project.json'));
-  } catch { return false; }
-}
-
-/**
- * Return true when `dir` is the DKG monorepo root.
- *
- * We combine two layers of evidence so this never matches an unrelated
- * consumer workspace (e.g. a pnpm/Nx repo that also happens to have a
- * root `project.json`):
- *
- *  1. Structural markers — `pnpm-workspace.yaml`, `packages/`, and
- *     `project.json` — which are required but not sufficient.
- *  2. A DKG-specific sub-marker — `packages/cli/package.json` whose
- *     `name` is exactly `@origintrail-official/dkg`. The package name
- *     is reserved for us on npm and cannot be spoofed by a consumer
- *     repo without colliding with our own published package.
- */
-function isDkgMonorepoRoot(dir: string): boolean {
-  try {
-    if (!existsSync(join(dir, 'pnpm-workspace.yaml'))) return false;
-    if (!existsSync(join(dir, 'packages'))) return false;
-    if (!existsSync(join(dir, 'project.json'))) return false;
-
-    const cliPkgPath = join(dir, 'packages', 'cli', 'package.json');
-    if (!existsSync(cliPkgPath)) return false;
-    const cliPkg = JSON.parse(readFileSync(cliPkgPath, 'utf-8'));
-    return cliPkg?.name === '@origintrail-official/dkg';
   } catch { return false; }
 }
 
@@ -546,12 +571,7 @@ export async function loadNetworkConfig(network?: string): Promise<NetworkConfig
 }
 
 export function dkgDir(): string {
-  if (process.env.DKG_HOME) return process.env.DKG_HOME;
-  const defaultDir = join(homedir(), '.dkg');
-  if (isDkgMonorepo() && !existsSync(join(defaultDir, 'config.json'))) {
-    return join(homedir(), '.dkg-dev');
-  }
-  return defaultDir;
+  return resolveDkgConfigHome({ isDkgMonorepo: isDkgMonorepo() });
 }
 
 let _isDkgMonorepo: boolean | null = null;
@@ -568,13 +588,7 @@ export function isDkgMonorepo(): boolean {
  * Works from packages/cli/dist/ (compiled) or packages/cli/src/ (dev).
  */
 export function findRepoDir(startDir: string): string | null {
-  let dir = resolve(startDir);
-  while (true) {
-    if (existsSync(join(dir, 'package.json')) && existsSync(join(dir, 'packages'))) return dir;
-    const parent = dirname(dir);
-    if (parent === dir) return null;
-    dir = parent;
-  }
+  return findPackageRepoDir(startDir);
 }
 
 export function repoDir(): string | null {
@@ -779,9 +793,10 @@ export function isStandaloneInstall(): boolean {
  * NPM layout (node_modules/@origintrail-official/dkg/dist/cli.js).
  */
 export function slotEntryPoint(slotDir: string): string | null {
-  const gitPath = join(slotDir, 'packages', 'cli', 'dist', 'cli.js');
-  if (existsSync(gitPath)) return gitPath;
-  const npmPath = join(slotDir, 'node_modules', '@origintrail-official', 'dkg', 'dist', 'cli.js');
-  if (existsSync(npmPath)) return npmPath;
-  return null;
+  return blueGreenSlotEntryPoint(slotDir);
+}
+
+/** Return true when a blue-green slot has an entry point and install metadata. */
+export function slotReady(slotDir: string): boolean {
+  return blueGreenSlotReady(slotDir);
 }

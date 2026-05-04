@@ -128,6 +128,8 @@ dkg update 9.0.0-beta.2 --allow-prerelease --no-verify-tag
 
 ## 7) Post-update verification
 
+Git-based blue-green updates run runtime packages and the Node UI static bundle as separate timed build steps, then verify `packages/node-ui/dist-ui/index.html` before activation. `build:runtime` remains a UI-inclusive compatibility wrapper so nodes updating from an older updater still prepare the UI through the target ref's build script.
+
 After each update:
 
 ```bash
@@ -136,6 +138,8 @@ cat "$DKG_HOME/releases/active"
 cat "$DKG_HOME/.current-commit"
 cat "$DKG_HOME/.current-version"
 test ! -f "$DKG_HOME/.update-pending.json" && echo "pending state cleared"
+SLOT="$(readlink -f "$DKG_HOME/releases/current")"
+test -f "$SLOT/packages/node-ui/dist-ui/index.html" && echo "Node UI static bundle ready"
 ```
 
 ## 8) Rollback

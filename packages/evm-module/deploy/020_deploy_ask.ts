@@ -9,11 +9,15 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
 
 export default func;
 func.tags = ['Ask'];
+// v4.0.0 — Ask reads V10 canonical stake from CSS in `recalculateActiveSet`.
+// CSS must be Hub-registered before `Ask.initialize()` runs (numeric prefix
+// only orders within tag set; cross-tag ordering is via `dependencies`).
 func.dependencies = [
   'Hub',
   'AskStorage',
   'ShardingTableStorage',
   'ParametersStorage',
   'StakingStorage',
+  'ConvictionStakingStorage',
   'ProfileStorage',
 ];

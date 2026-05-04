@@ -88,9 +88,12 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
 
 export default func;
 func.tags = ['ShardingTable'];
+// v4.0.0 — `getMultipleNodes` reads V10 canonical stake from CSS. CSS must
+// be Hub-registered before `ShardingTable.initialize()` runs.
 func.dependencies = [
   'Hub',
   'ProfileStorage',
   'ShardingTableStorage',
   'StakingStorage',
+  'ConvictionStakingStorage',
 ];

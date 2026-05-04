@@ -95,6 +95,24 @@ export class V10MerkleTree {
     return siblings;
   }
 
+  /**
+   * Returns the leaf bytes at the given **post-sort+dedupe** index (the
+   * same index space used by `proof(leafIndex)` and the on-chain
+   * `chunkId`). The Random Sampling prover passes this value as the
+   * `leaf` argument to `submitProof`; without it, callers would have to
+   * re-implement V10's sort+dedupe just to read back the canonical leaf
+   * the chain expects.
+   *
+   * Throws `RangeError` for indices outside `[0, leafCount)` — same
+   * boundary as `proof()` so a caller can do the bounds check once.
+   */
+  leafAt(leafIndex: number): Uint8Array {
+    if (leafIndex < 0 || leafIndex >= this._leafCount) {
+      throw new RangeError(`Leaf index ${leafIndex} out of range`);
+    }
+    return this.layers[0][leafIndex];
+  }
+
   static verify(
     root: Uint8Array,
     leaf: Uint8Array,

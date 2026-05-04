@@ -26,15 +26,28 @@ import { fileURLToPath } from 'node:url';
 import type {
   ChannelOutboundReply,
   DkgOpenClawConfig,
+  OpenClawChannelAdapter,
+  OpenClawGatewayLifecycleContext,
   OpenClawPluginApi,
 } from './types.js';
 import type { DkgDaemonClient, OpenClawAttachmentRef } from './dkg-client.js';
+import type { ChatTurnWriter } from './ChatTurnWriter.js';
+import {
+  extractAdapterPluginConfigOverlay,
+  isPartialAdapterConfigOverlay,
+  isObjectRecord,
+  mergeAdapterPluginConfigs,
+  resolveOpenClawMergedConfig,
+  resolveOpenClawRouteMetadataConfig,
+  scrubStaleWorkspaceAliases,
+} from './openclaw-config.js';
 
 export const CHANNEL_NAME = 'dkg-ui';
 const DEFAULT_CHANNEL_ACCOUNT_ID = 'default';
 const TURN_PERSIST_RETRY_DELAYS_MS = [250, 1_000] as const;
 const CHANNEL_RESPONSE_TIMEOUT_MS = 180_000;
 const STOP_DRAIN_TIMEOUT_MS = 1_500;
+const FINAL_MARKER_FLUSH_TIMEOUT_MS = 250;
 const NO_TEXT_RESPONSE_ERROR = 'Agent returned no text response';
 const CANCELLED_TURN_MESSAGE = '[OpenClaw reply cancelled before completion]';
 const FAILED_TURN_MESSAGE_PREFIX = '[OpenClaw reply failed before completion';
@@ -212,6 +225,17 @@ interface PersistTurnOptions {
   persistenceState?: 'stored' | 'failed' | 'pending';
   failureReason?: string | null;
   attachmentRefs?: OpenClawAttachmentRef[];
+  sessionKey?: string;
+  turnId?: string;
+  markerUser?: string;
+}
+
+interface ExternalTurnMarkerPersistOptions {
+  sessionKey?: string;
+  turnId: string;
+  user: string;
+  assistant: string;
+  correlationId: string;
 }
 
 interface InboundChatOptions {
@@ -351,15 +375,18 @@ export class DkgChannelPlugin {
   private server: Server | null = null;
   private serverStart: Promise<void> | null = null;
   private readonly pendingRequests = new Map<string, PendingRequest>();
-  private memoryReAssert: (() => void) | null = null;
-
-  setMemoryReAssert(fn: (() => void) | null): void {
-    this.memoryReAssert = fn;
-  }
   private readonly pendingTurnPersistence = new Map<string, {
     attempt: number;
     timer: ReturnType<typeof setTimeout> | null;
     allowDuringShutdown: boolean;
+    inFlight: Promise<void> | null;
+  }>();
+  private readonly pendingMarkerPersistence = new Map<string, {
+    attempt: number;
+    timer: ReturnType<typeof setTimeout> | null;
+    allowDuringShutdown: boolean;
+    opts: ExternalTurnMarkerPersistOptions;
+    inFlight: Promise<void> | null;
   }>();
   /**
    * Per-dispatch AsyncLocalStorage holding the UI-selected project
@@ -380,12 +407,47 @@ export class DkgChannelPlugin {
   private stopping = false;
   private readonly stopWaiters: Array<() => void> = [];
   private stopDrainDeadlineAt: number | null = null;
+  private serverStop: Promise<void> | null = null;
+  private serverStopShouldUpdateGatewayStatus = false;
+  private gatewayLifecycleStop: (() => void) | null = null;
+  private gatewayLifecycleOwner: object | null = null;
+  private gatewayLifecyclePendingOwner: object | null = null;
+  private gatewayLifecycleStatusContext: OpenClawGatewayLifecycleContext | null = null;
+  private gatewayLifecycleStatusOwner: object | null = null;
+  private readonly gatewayLifecycleOwnersByAccount = new Map<string, object>();
+  private readonly gatewayLifecyclePendingOwnersByAccount = new Map<string, object>();
+  private readonly gatewayLifecycleOwnersByContext = new WeakMap<object, object>();
+  private readonly gatewayLifecycleOwnersBySignal = new WeakMap<AbortSignal, object>();
+  private chatTurnWriter: ChatTurnWriter | null = null;
+  /**
+   * Pre-dispatch memory-slot re-assert callback. Set by `DkgNodePlugin`
+   * to `memoryPlugin.reAssertCapability.bind(memoryPlugin)`. Called
+   * once per `processInbound` / `processInboundStream` so the slot
+   * stays owned by this adapter even when another plugin's startup
+   * code overwrote `memoryPluginState.capability` after our
+   * registration ran. Mode-independent — fires for every UI dispatch
+   * regardless of `full` vs `setup-runtime`.
+   */
+  private preDispatchReAssert: (() => void) | null = null;
 
   constructor(
     private readonly config: NonNullable<DkgOpenClawConfig['channel']>,
-    private readonly client: DkgDaemonClient,
+    private client: DkgDaemonClient,
   ) {
     this.port = config.port ?? 9201;
+  }
+
+  setClient(client: DkgDaemonClient): void {
+    this.client = client;
+  }
+
+  /** Wire the memory-slot re-assert callback. Called by `DkgNodePlugin`. */
+  setPreDispatchReAssert(cb: (() => void) | null): void {
+    this.preDispatchReAssert = cb;
+  }
+
+  setChatTurnWriter(writer: ChatTurnWriter | null): void {
+    this.chatTurnWriter = writer;
   }
 
   /**
@@ -449,7 +511,7 @@ export class DkgChannelPlugin {
     // Capture the runtime and config from the plugin API.
     // These are not part of the typed API surface but are available at runtime.
     this.runtime = (api as any).runtime;
-    this.cfg = (api as any).cfg ?? (api as any).config ?? this.runtime?.cfg ?? this.runtime?.config;
+    this.cfg = resolveChannelDispatchConfig(api);
 
     // Log what we found for diagnostics
     if (this.runtime?.channel) {
@@ -530,6 +592,10 @@ export class DkgChannelPlugin {
   // ---------------------------------------------------------------------------
 
   async start(): Promise<void> {
+    if (this.serverStop) await this.serverStop;
+    this.stopping = false;
+    this.stopDrainDeadlineAt = null;
+
     if (this.server?.listening) return;
     if (this.serverStart) return this.serverStart;
 
@@ -580,43 +646,274 @@ export class DkgChannelPlugin {
     await this.serverStart;
   }
 
-  async stop(): Promise<void> {
-    this.stopping = true;
-    this.stopDrainDeadlineAt = Date.now() + STOP_DRAIN_TIMEOUT_MS;
+  async stop(options: { updateGatewayStatus?: boolean } = {}): Promise<void> {
+    const updateGatewayStatus = options.updateGatewayStatus !== false;
+    if (this.serverStop) {
+      if (updateGatewayStatus) this.serverStopShouldUpdateGatewayStatus = true;
+      return this.serverStop;
+    }
+    this.serverStopShouldUpdateGatewayStatus = updateGatewayStatus;
+    const stopWork = Promise.resolve().then(async () => {
+      this.stopping = true;
+      this.stopDrainDeadlineAt = Date.now() + STOP_DRAIN_TIMEOUT_MS;
 
-    // Reject all pending requests
-    for (const [id, pending] of this.pendingRequests) {
-      clearTimeout(pending.timer);
-      pending.reject(new Error('Channel shutting down'));
-      this.pendingRequests.delete(id);
+      // Reject all pending requests
+      for (const [id, pending] of this.pendingRequests) {
+        clearTimeout(pending.timer);
+        pending.reject(new Error('Channel shutting down'));
+        this.pendingRequests.delete(id);
+      }
+
+      for (const [id, job] of this.pendingTurnPersistence) {
+        if (job.allowDuringShutdown) continue;
+        if (!job.timer) continue;
+        clearTimeout(job.timer);
+        this.deletePendingTurnPersistence(id);
+      }
+      for (const [id, job] of this.pendingMarkerPersistence) {
+        if (job.allowDuringShutdown) continue;
+        if (!job.timer) continue;
+        clearTimeout(job.timer);
+        this.deletePendingMarkerPersistence(id);
+      }
+
+      if (this.serverStart) {
+        await this.serverStart.catch(() => {});
+      }
+
+      if (this.server) {
+        await new Promise<void>((resolve) => {
+          this.server!.close(() => resolve());
+        });
+        this.server = null;
+      }
+
+      const drained = await this.waitForStopDrain(STOP_DRAIN_TIMEOUT_MS);
+      if (!drained) {
+        this.api?.logger.warn?.(
+          `[dkg-channel] Channel stop timed out after ${STOP_DRAIN_TIMEOUT_MS}ms waiting for turn persistence to drain; continuing shutdown`,
+        );
+        await this.flushPendingPersistenceBeforeDrop();
+        this.clearPendingTurnPersistence();
+        this.clearPendingMarkerPersistence();
+      }
+      this.stopDrainDeadlineAt = null;
+      if (this.serverStopShouldUpdateGatewayStatus) {
+        this.reportGatewayLifecycleStopped(this.gatewayLifecycleStatusContext, this.gatewayLifecycleStatusOwner);
+      }
+      this.gatewayLifecycleStop?.();
+      this.gatewayLifecycleStop = null;
+    });
+
+    this.serverStop = stopWork;
+    try {
+      await stopWork;
+    } finally {
+      if (this.serverStop === stopWork) {
+        this.serverStop = null;
+        this.serverStopShouldUpdateGatewayStatus = false;
+      }
+    }
+  }
+
+  private reportGatewayLifecycleStopped(ctx: OpenClawGatewayLifecycleContext | null | undefined, lifecycleOwner?: object | null): void {
+    if (!ctx) return;
+    this.setGatewayLifecycleStatus(ctx, {
+      running: false,
+      connected: false,
+      restartPending: false,
+      lastStopAt: Date.now(),
+    });
+    if (lifecycleOwner && this.gatewayLifecycleStatusOwner === lifecycleOwner) {
+      this.gatewayLifecycleStatusContext = null;
+      this.gatewayLifecycleStatusOwner = null;
+    }
+  }
+
+  private getGatewayAccountId(ctx: any): string {
+    const accountId = typeof ctx?.accountId === 'string' ? ctx.accountId.trim() : '';
+    return accountId || DEFAULT_CHANNEL_ACCOUNT_ID;
+  }
+
+  private getGatewayLifecycleStatus(ctx: OpenClawGatewayLifecycleContext): Record<string, unknown> {
+    const status = ctx.getStatus?.();
+    return status && typeof status === 'object' ? status : {};
+  }
+
+  private setGatewayLifecycleStatus(
+    ctx: OpenClawGatewayLifecycleContext,
+    patch: Record<string, unknown>,
+  ): void {
+    ctx.setStatus?.({
+      ...this.getGatewayLifecycleStatus(ctx),
+      ...patch,
+      accountId: this.getGatewayAccountId(ctx),
+    });
+  }
+
+  private reportUnsupportedGatewayAccount(ctx: any, message: string): void {
+    ctx?.setStatus?.({
+      accountId: this.getGatewayAccountId(ctx),
+      enabled: false,
+      configured: false,
+      linked: false,
+      running: false,
+      connected: false,
+      restartPending: false,
+      lastError: message,
+      lastStopAt: Date.now(),
+    });
+  }
+
+  private ensureSupportedGatewayAccount(ctx: any): void {
+    const accountId = this.getGatewayAccountId(ctx);
+    if (accountId === DEFAULT_CHANNEL_ACCOUNT_ID) return;
+    const message = `DKG UI channel only supports the "${DEFAULT_CHANNEL_ACCOUNT_ID}" gateway account`;
+    this.reportUnsupportedGatewayAccount(ctx, message);
+    throw new Error(message);
+  }
+
+  private ignoreUnsupportedGatewayStop(ctx: any): boolean {
+    const accountId = this.getGatewayAccountId(ctx);
+    if (accountId === DEFAULT_CHANNEL_ACCOUNT_ID) return false;
+    this.reportUnsupportedGatewayAccount(ctx, `DKG UI channel does not run gateway account "${accountId}"`);
+    return true;
+  }
+
+  private cancelPendingGatewayLifecycle(ctx: any, lifecycleOwner: object): void {
+    const accountId = this.getGatewayAccountId(ctx);
+    const signal = ctx?.abortSignal as AbortSignal | undefined;
+    if (this.gatewayLifecyclePendingOwner === lifecycleOwner) {
+      this.gatewayLifecyclePendingOwner = null;
+    }
+    if (this.gatewayLifecycleOwner && this.gatewayLifecycleOwner !== lifecycleOwner) {
+      this.gatewayLifecyclePendingOwner = this.gatewayLifecycleOwner;
+    }
+    if (this.gatewayLifecyclePendingOwnersByAccount.get(accountId) === lifecycleOwner) {
+      this.gatewayLifecyclePendingOwnersByAccount.delete(accountId);
+    }
+    if (ctx && typeof ctx === 'object' && this.gatewayLifecycleOwnersByContext.get(ctx) === lifecycleOwner) {
+      this.gatewayLifecycleOwnersByContext.delete(ctx);
+    }
+    if (signal && this.gatewayLifecycleOwnersBySignal.get(signal) === lifecycleOwner) {
+      this.gatewayLifecycleOwnersBySignal.delete(signal);
+    }
+  }
+
+  private async stopAbortedGatewayLifecycle(ctx: any, lifecycleOwner?: object): Promise<void> {
+    await this.stop({ updateGatewayStatus: false });
+    this.reportGatewayLifecycleStopped(ctx, lifecycleOwner);
+  }
+
+  private async stopCurrentGatewayLifecycle(ctx: any): Promise<void> {
+    const accountId = this.getGatewayAccountId(ctx);
+    const signal = ctx?.abortSignal as AbortSignal | undefined;
+    const lifecycleOwner =
+      (ctx && typeof ctx === 'object' ? this.gatewayLifecycleOwnersByContext.get(ctx) : undefined) ??
+      (signal ? this.gatewayLifecycleOwnersBySignal.get(signal) : undefined) ??
+      this.gatewayLifecycleOwnersByAccount.get(accountId) ??
+      this.gatewayLifecyclePendingOwnersByAccount.get(accountId);
+    const activeOwner = this.gatewayLifecycleOwner;
+    const pendingOwner = this.gatewayLifecyclePendingOwner;
+    if ((activeOwner || pendingOwner) && lifecycleOwner !== activeOwner && lifecycleOwner !== pendingOwner) {
+      return;
+    }
+    if (
+      lifecycleOwner === pendingOwner &&
+      activeOwner &&
+      activeOwner !== pendingOwner &&
+      this.server?.listening === true &&
+      !this.serverStop &&
+      !this.stopping
+    ) {
+      this.cancelPendingGatewayLifecycle(ctx, lifecycleOwner);
+      return;
+    }
+    await this.stopAbortedGatewayLifecycle(ctx, lifecycleOwner);
+  }
+
+  private async runGatewayLifecycle(ctx: any): Promise<void> {
+    if (ctx?.abortSignal?.aborted) {
+      return;
     }
 
-    for (const [id, job] of this.pendingTurnPersistence) {
-      if (job.allowDuringShutdown) continue;
-      if (!job.timer) continue;
-      clearTimeout(job.timer);
-      this.deletePendingTurnPersistence(id);
+    const accountId = this.getGatewayAccountId(ctx);
+    const signal = ctx?.abortSignal as AbortSignal | undefined;
+    const lifecycleOwner = {};
+    this.gatewayLifecyclePendingOwner = lifecycleOwner;
+    this.gatewayLifecyclePendingOwnersByAccount.set(accountId, lifecycleOwner);
+    if (ctx && typeof ctx === 'object') {
+      this.gatewayLifecycleOwnersByContext.set(ctx, lifecycleOwner);
+    }
+    if (signal) {
+      this.gatewayLifecycleOwnersBySignal.set(signal, lifecycleOwner);
     }
 
-    if (this.serverStart) {
-      await this.serverStart.catch(() => {});
-    }
+    try {
+      const hadStableBridgeBeforeStart =
+        this.server?.listening === true &&
+        !this.serverStop &&
+        !this.stopping;
+      await this.start();
+      if (this.gatewayLifecyclePendingOwner !== lifecycleOwner) {
+        return;
+      }
+      if (ctx?.abortSignal?.aborted) {
+        if (!hadStableBridgeBeforeStart) {
+          await this.stopAbortedGatewayLifecycle(ctx, lifecycleOwner);
+        }
+        return;
+      }
+      if (this.serverStop || this.stopping || !this.server?.listening) {
+        if (this.serverStop) await this.serverStop;
+          return;
+      }
 
-    if (this.server) {
-      await new Promise<void>((resolve) => {
-        this.server!.close(() => resolve());
+      this.gatewayLifecycleOwner = lifecycleOwner;
+      if (this.gatewayLifecyclePendingOwnersByAccount.get(accountId) === lifecycleOwner) {
+        this.gatewayLifecyclePendingOwnersByAccount.delete(accountId);
+      }
+      this.gatewayLifecycleOwnersByAccount.set(accountId, lifecycleOwner);
+      this.gatewayLifecycleStatusContext = ctx;
+      this.gatewayLifecycleStatusOwner = lifecycleOwner;
+      this.setGatewayLifecycleStatus(ctx, {
+        enabled: this.config.enabled !== false,
+        configured: true,
+        linked: true,
+        running: true,
+        connected: true,
+        restartPending: false,
+        lastError: null,
+        lastStartAt: Date.now(),
+        mode: 'webhook',
+        port: this.bridgePort || this.port,
       });
-      this.server = null;
-    }
 
-    const drained = await this.waitForStopDrain(STOP_DRAIN_TIMEOUT_MS);
-    if (!drained) {
-      this.api?.logger.warn?.(
-        `[dkg-channel] Channel stop timed out after ${STOP_DRAIN_TIMEOUT_MS}ms waiting for turn persistence to drain; continuing shutdown`,
-      );
-      this.clearPendingTurnPersistence();
+      await this.waitForGatewayLifecycleStop(ctx?.abortSignal);
+    } finally {
+      const ownsActiveLifecycle =
+        this.gatewayLifecycleOwner === lifecycleOwner &&
+        this.gatewayLifecyclePendingOwner === lifecycleOwner;
+      if (ctx?.abortSignal?.aborted && ownsActiveLifecycle) {
+        await this.stopAbortedGatewayLifecycle(ctx, lifecycleOwner);
+      }
+      if (this.gatewayLifecycleOwnersByAccount.get(accountId) === lifecycleOwner) {
+        this.gatewayLifecycleOwnersByAccount.delete(accountId);
+      }
+      if (this.gatewayLifecyclePendingOwnersByAccount.get(accountId) === lifecycleOwner) {
+        this.gatewayLifecyclePendingOwnersByAccount.delete(accountId);
+      }
+      if (this.gatewayLifecyclePendingOwner === lifecycleOwner) {
+        this.gatewayLifecyclePendingOwner = null;
+      }
+      if (this.gatewayLifecycleOwner === lifecycleOwner) {
+        this.gatewayLifecycleOwner = null;
+      }
+      if (this.gatewayLifecycleStatusOwner === lifecycleOwner) {
+        this.gatewayLifecycleStatusContext = null;
+        this.gatewayLifecycleStatusOwner = null;
+      }
     }
-    this.stopDrainDeadlineAt = null;
   }
 
   private deletePendingTurnPersistence(correlationId: string): void {
@@ -624,6 +921,16 @@ export class DkgChannelPlugin {
     if (job?.timer) clearTimeout(job.timer);
     this.pendingTurnPersistence.delete(correlationId);
     this.notifyStopIdle();
+  }
+
+  private reservePendingTurnPersistence(correlationId: string, allowDuringShutdown: boolean): void {
+    if (this.pendingTurnPersistence.has(correlationId)) return;
+    this.pendingTurnPersistence.set(correlationId, {
+      attempt: 0,
+      timer: null,
+      allowDuringShutdown,
+      inFlight: null,
+    });
   }
 
   private clearPendingTurnPersistence(): void {
@@ -634,15 +941,143 @@ export class DkgChannelPlugin {
     this.notifyStopIdle();
   }
 
+  private deletePendingMarkerPersistence(correlationId: string): void {
+    const job = this.pendingMarkerPersistence.get(correlationId);
+    if (job?.timer) clearTimeout(job.timer);
+    this.pendingMarkerPersistence.delete(correlationId);
+    this.notifyStopIdle();
+  }
+
+  private clearPendingMarkerPersistence(): void {
+    for (const job of this.pendingMarkerPersistence.values()) {
+      if (job.timer) clearTimeout(job.timer);
+    }
+    this.pendingMarkerPersistence.clear();
+    this.notifyStopIdle();
+  }
+
+  private async flushPendingPersistenceBeforeDrop(): Promise<void> {
+    if (this.pendingTurnPersistence.size === 0 && this.pendingMarkerPersistence.size === 0) return;
+    const deadlineAt = Date.now() + FINAL_MARKER_FLUSH_TIMEOUT_MS;
+    while (Date.now() < deadlineAt) {
+      const turnsSettled = await this.waitForPendingTurnPersistenceBeforeDrop(deadlineAt);
+      await Promise.resolve();
+      await this.flushPendingMarkerPersistenceBeforeDrop(deadlineAt);
+      await Promise.resolve();
+      const hasInFlightTurn = Array.from(this.pendingTurnPersistence.values()).some((job) => job.inFlight);
+      if (!hasInFlightTurn && this.pendingMarkerPersistence.size === 0) return;
+      if (!turnsSettled && hasInFlightTurn) break;
+    }
+
+    for (const [correlationId, job] of this.pendingTurnPersistence) {
+      if (!job.inFlight) continue;
+      this.api?.logger.warn?.(
+        `[dkg-channel] Final turn persistence did not settle during shutdown for ${correlationId}; dropping turn job.`,
+      );
+    }
+  }
+
+  private async waitForPendingTurnPersistenceBeforeDrop(deadlineAt: number): Promise<boolean> {
+    const inFlightTurns = Array.from(this.pendingTurnPersistence.entries())
+      .filter(([, job]) => job.inFlight)
+      .map(([correlationId, job]) => ({ correlationId, inFlight: job.inFlight! }));
+    if (inFlightTurns.length === 0) return true;
+    const remainingMs = Math.max(0, deadlineAt - Date.now());
+    if (remainingMs === 0) return false;
+
+    for (const { inFlight } of inFlightTurns) {
+      void inFlight.catch(() => {});
+    }
+
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    try {
+      const settled = await Promise.race([
+        Promise.allSettled(inFlightTurns.map(({ inFlight }) => inFlight)).then(() => true),
+        new Promise<boolean>((resolve) => {
+          timer = setTimeout(() => resolve(false), remainingMs);
+        }),
+      ]);
+      if (!settled) {
+        for (const { correlationId } of inFlightTurns) {
+          if (!this.pendingTurnPersistence.get(correlationId)?.inFlight) continue;
+          this.api?.logger.warn?.(
+            `[dkg-channel] Final turn persistence wait timed out during shutdown for ${correlationId}; checking marker jobs before drop.`,
+          );
+        }
+      }
+      return settled;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  private async flushPendingMarkerPersistenceBeforeDrop(deadlineAt = Date.now() + FINAL_MARKER_FLUSH_TIMEOUT_MS): Promise<void> {
+    if (!this.chatTurnWriter || this.pendingMarkerPersistence.size === 0) return;
+    const jobs = Array.from(this.pendingMarkerPersistence.entries());
+    for (const [correlationId, job] of jobs) {
+      try {
+        if (job.timer) clearTimeout(job.timer);
+        const remainingMs = Math.max(0, deadlineAt - Date.now());
+        if (remainingMs === 0) {
+          this.api?.logger.warn?.(
+            `[dkg-channel] Final ChatTurnWriter marker flush timed out during shutdown for ${correlationId}; dropping marker job.`,
+          );
+          continue;
+        }
+        const markerWrite = job.inFlight ?? this.writeExternalTurnMarker(job.opts);
+        const flushed = await this.waitForExternalMarkerWrite(markerWrite, remainingMs);
+        if (!flushed) {
+          this.api?.logger.warn?.(
+            `[dkg-channel] Final ChatTurnWriter marker flush timed out during shutdown for ${correlationId}; dropping marker job.`,
+          );
+        }
+      } catch (err: any) {
+        this.api?.logger.warn?.(
+          `[dkg-channel] Final ChatTurnWriter marker flush failed during shutdown for ${correlationId}: ${err?.message ?? err}`,
+        );
+      } finally {
+        this.pendingMarkerPersistence.delete(correlationId);
+      }
+    }
+    this.notifyStopIdle();
+  }
+
+  private async waitForExternalMarkerWrite(
+    markerWrite: Promise<void>,
+    timeoutMs: number,
+  ): Promise<boolean> {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    void markerWrite.catch(() => {});
+    try {
+      return await Promise.race([
+        markerWrite.then(() => true),
+        new Promise<boolean>((resolve) => {
+          timer = setTimeout(() => resolve(false), timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
   private notifyStopIdle(): void {
-    if (!this.stopping || this.inFlight > 0 || this.pendingTurnPersistence.size > 0) return;
+    if (
+      !this.stopping
+      || this.inFlight > 0
+      || this.pendingTurnPersistence.size > 0
+      || this.pendingMarkerPersistence.size > 0
+    ) return;
     while (this.stopWaiters.length > 0) {
       this.stopWaiters.shift()?.();
     }
   }
 
   private waitForStopDrain(timeoutMs: number): Promise<boolean> {
-    if (this.inFlight === 0 && this.pendingTurnPersistence.size === 0) {
+    if (
+      this.inFlight === 0
+      && this.pendingTurnPersistence.size === 0
+      && this.pendingMarkerPersistence.size === 0
+    ) {
       return Promise.resolve(true);
     }
     return new Promise((resolve) => {
@@ -725,7 +1160,7 @@ export class DkgChannelPlugin {
     return this.sdk;
   }
 
-  private buildRegisteredChannelPlugin() {
+  private buildRegisteredChannelPlugin(): OpenClawChannelAdapter {
     return {
       id: CHANNEL_NAME,
       name: CHANNEL_NAME,
@@ -755,10 +1190,40 @@ export class DkgChannelPlugin {
         disabledReason: () => 'disabled',
         unconfiguredReason: () => 'not configured',
       },
+      gateway: {
+        startAccount: async (ctx: any) => {
+          this.ensureSupportedGatewayAccount(ctx);
+          await this.runGatewayLifecycle(ctx);
+        },
+        stopAccount: async (ctx: any) => {
+          if (this.ignoreUnsupportedGatewayStop(ctx)) return;
+          await this.stopCurrentGatewayLifecycle(ctx);
+        },
+      },
       start: () => this.start(),
       stop: () => this.stop(),
       onOutbound: (reply: ChannelOutboundReply) => this.handleOutboundReply(reply),
     };
+  }
+
+  private waitForGatewayLifecycleStop(signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) return Promise.resolve();
+    return new Promise((resolve) => {
+      this.gatewayLifecycleStop?.();
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        signal?.removeEventListener('abort', finish);
+        if (this.gatewayLifecycleStop === finish) {
+          this.gatewayLifecycleStop = null;
+        }
+        resolve();
+      };
+      this.gatewayLifecycleStop = finish;
+      signal?.addEventListener('abort', finish, { once: true });
+      if (signal?.aborted) finish();
+    });
   }
 
   private resolveRegisteredAccount(accountId?: string): Record<string, unknown> {
@@ -791,6 +1256,10 @@ export class DkgChannelPlugin {
   ): Promise<ChannelOutboundReply> {
     const api = this.api;
     if (!api) throw new Error('Channel not registered');
+    // Re-assert memory-slot ownership before this dispatch reaches the
+    // memory host. Cheap and runs in every registration mode, so the
+    // slot stays honest even when full-mode-only anchors don't fire.
+    try { this.preDispatchReAssert?.(); } catch { /* non-fatal */ }
 
     const runtime = this.runtime;
     const cfg = this.cfg;
@@ -807,19 +1276,24 @@ export class DkgChannelPlugin {
     if (opts?.contextEntries != null && contextEntries === undefined) {
       throw new Error('Invalid context entries');
     }
+    const markerUserMessage = buildAgentBody(text, {
+      attachmentRefs: contextAttachmentRefs,
+      contextEntries: sanitizedContextEntries,
+    });
 
     // Re-assert memory-slot capability before dispatch so our runtime
     // handles recall even if memory-core's dreaming sidecar overwrote it.
-    this.memoryReAssert?.();
-
     // --- Primary: dispatch via runtime channel (uses plugin-sdk when available) ---
     if (runtime?.channel && cfg) {
       api.logger.info?.(`[dkg-channel] Dispatching for: ${correlationId}`);
       try {
         const reply = await this.dispatchViaPluginSdk(text, correlationId, identity, contextAttachmentRefs, sanitizedContextEntries, uiContextGraphId);
+        const sessionKey = typeof reply.sessionKey === 'string' ? reply.sessionKey : undefined;
         // Fire-and-forget: persist turn to DKG graph for Agent Hub visualization
         this.queueTurnPersistence(text, reply.text, correlationId, identity, {
           attachmentRefs,
+          sessionKey,
+          markerUser: markerUserMessage,
         }, true);
         return reply;
       } catch (err: any) {
@@ -837,10 +1311,11 @@ export class DkgChannelPlugin {
       // UI-selected `uiContextGraphId`. The `routeInboundMessage` fallback
       // used when `runtime.channel` is unavailable must do the same, or
       // tool calls fired during this dispatch will read an empty ALS store
-      // and silently degrade recall to `agent-context` only. We don't have
-      // a resolved sessionKey on this path (routing lives in
-      // runtime.channel), so the context carries only `uiContextGraphId`
-      // and `correlationId`.
+      // and silently degrade recall to `agent-context` only. We deliberately
+      // do not guess a sessionKey here: legacy routes may resolve a different
+      // OpenClaw session, and sending a synthetic key can split transcript
+      // state from the real route. Marker persistence uses only the key
+      // returned by routeInboundMessage.
       const dispatchContext: DkgDispatchContext = {
         uiContextGraphId,
         correlationId,
@@ -852,12 +1327,27 @@ export class DkgChannelPlugin {
           senderIsOwner: true,
           text: buildAgentBody(text, { attachmentRefs: contextAttachmentRefs, contextEntries: sanitizedContextEntries }),
           correlationId,
-        } as any),
+        }),
       );
+      const replySessionKey = reply.sessionKey;
+      const replyOpenClawSessionKey = reply.SessionKey;
+      const returnedSessionKey =
+        (typeof replySessionKey === 'string' ? replySessionKey.trim() : '')
+        || (typeof replyOpenClawSessionKey === 'string' ? replyOpenClawSessionKey.trim() : '');
+      const normalizedReply = returnedSessionKey
+        ? { ...reply, sessionKey: returnedSessionKey }
+        : reply;
+      if (!returnedSessionKey && this.chatTurnWriter) {
+        api.logger.warn?.(
+          `[dkg-channel] routeInboundMessage reply for ${correlationId} did not include sessionKey; skipping ChatTurnWriter marker for this direct-channel turn.`,
+        );
+      }
       this.queueTurnPersistence(text, reply.text, correlationId, identity || 'owner', {
         attachmentRefs,
+        sessionKey: returnedSessionKey || undefined,
+        markerUser: markerUserMessage,
       }, true);
-      return reply;
+      return normalizedReply;
     }
 
     throw new Error(
@@ -933,6 +1423,8 @@ export class DkgChannelPlugin {
       CommandBody: commandBody,
       BodyForCommands: commandBody,
       ...(commandBody !== text ? { OriginalRawBody: text } : {}),
+      CorrelationId: correlationId,
+      DkgTurnId: correlationId,
       From: identity || 'Owner',
       To: route.agentId,
       SessionKey: route.sessionKey,
@@ -1027,7 +1519,7 @@ export class DkgChannelPlugin {
         clearTimeout(timer);
         const replyText = finalizeAgentReplyText(replyChunks.join('\n'));
         log.info?.(`[dkg-channel] Reply dispatched (${replyText.length} chars) for ${correlationId}`);
-        resolve({ text: replyText, correlationId });
+        resolve({ text: replyText, correlationId, sessionKey: route.sessionKey });
       }).catch((err: any) => {
         clearTimeout(timer);
         log.warn?.(`[dkg-channel] dispatchInboundReplyWithBase failed: ${err.message}`);
@@ -1076,7 +1568,7 @@ export class DkgChannelPlugin {
           clearTimeout(timer);
           const replyText = finalizeAgentReplyText(replyChunks.join('\n'));
           log.info?.(`[dkg-channel] Reply dispatched (${replyText.length} chars) for ${correlationId}`);
-          resolve({ text: replyText, correlationId });
+          resolve({ text: replyText, correlationId, sessionKey: route.sessionKey });
         })
         .catch((err: any) => {
           clearTimeout(timer);
@@ -1101,6 +1593,8 @@ export class DkgChannelPlugin {
     opts?: InboundChatOptions,
   ): AsyncGenerator<{ type: 'text_delta'; delta: string } | { type: 'final'; text: string; correlationId: string }> {
     if (!this.api) throw new Error('Channel not registered');
+    // Mode-independent slot re-assert (mirrors `processInbound`).
+    try { this.preDispatchReAssert?.(); } catch { /* non-fatal */ }
 
     const log = this.api.logger;
     const runtime = this.runtime;
@@ -1118,9 +1612,6 @@ export class DkgChannelPlugin {
     if (opts?.contextEntries != null && contextEntries === undefined) {
       throw new Error('Invalid context entries');
     }
-
-    this.memoryReAssert?.();
-
     if (!runtime?.channel || !cfg) {
       const reply = await this.processInbound(text, correlationId, identity, { attachmentRefs, contextEntries, uiContextGraphId });
       yield { type: 'final', text: reply.text, correlationId: reply.correlationId ?? correlationId };
@@ -1163,6 +1654,8 @@ export class DkgChannelPlugin {
       Body: formattedBody, BodyForAgent: agentBody, RawBody: commandBody,
       CommandBody: commandBody, BodyForCommands: commandBody,
       ...(commandBody !== text ? { OriginalRawBody: text } : {}),
+      CorrelationId: correlationId,
+      DkgTurnId: correlationId,
       From: identity || 'Owner', To: route.agentId,
       SessionKey: route.sessionKey, AccountId: 'default',
       Provider: CHANNEL_NAME, Surface: CHANNEL_NAME, ChatType: 'direct',
@@ -1272,6 +1765,8 @@ export class DkgChannelPlugin {
       if (resolvedTerminalState === 'completed' && resolvedFinalText) {
         this.queueTurnPersistence(text, resolvedFinalText, correlationId, identity, {
           attachmentRefs,
+          sessionKey: route.sessionKey,
+          markerUser: agentBody,
         }, true);
       } else if (resolvedTerminalState === 'failed') {
         this.queueTurnPersistence(
@@ -1279,7 +1774,13 @@ export class DkgChannelPlugin {
           this.buildFailedAssistantReply(resolvedFailureReason),
           correlationId,
           identity,
-          { persistenceState: 'failed', failureReason: resolvedFailureReason, attachmentRefs },
+          {
+            persistenceState: 'failed',
+            failureReason: resolvedFailureReason,
+            attachmentRefs,
+            sessionKey: route.sessionKey,
+            markerUser: agentBody,
+          },
           true,
         );
       } else {
@@ -1288,7 +1789,13 @@ export class DkgChannelPlugin {
           CANCELLED_TURN_MESSAGE,
           correlationId,
           identity,
-          { persistenceState: 'failed', failureReason: 'cancelled', attachmentRefs },
+          {
+            persistenceState: 'failed',
+            failureReason: 'cancelled',
+            attachmentRefs,
+            sessionKey: route.sessionKey,
+            markerUser: agentBody,
+          },
           true,
         );
       }
@@ -1328,6 +1835,7 @@ export class DkgChannelPlugin {
       aborted = true; // Stop dangling deliver() callbacks from queuing
 
       if (terminalState === 'cancelled' && dispatchTerminal == null) {
+        this.reservePendingTurnPersistence(correlationId, true);
         void dispatchCompletion.finally(() => {
           persistResolvedTerminalState();
         });
@@ -1475,6 +1983,7 @@ export class DkgChannelPlugin {
     correlationId: string,
     identity: string,
     opts?: PersistTurnOptions,
+    allowDuringShutdown = false,
   ): Promise<void> {
     // Non-owner identities (e.g. background workers) get their own session
     // so they don't pollute the user's DKG UI chat history.
@@ -1492,7 +2001,105 @@ export class DkgChannelPlugin {
         ...(opts?.failureReason != null ? { failureReason: opts.failureReason } : {}),
       },
     );
+    if (this.stopping && !this.pendingTurnPersistence.has(correlationId)) {
+      this.api?.logger.warn?.(
+        `[dkg-channel] Turn persistence for ${correlationId} completed after shutdown marker drain; skipping late ChatTurnWriter marker job.`,
+      );
+      return;
+    }
+    await this.markExternalTurnPersistedAfterStore({
+      sessionKey: opts?.sessionKey,
+      turnId: opts?.turnId ?? correlationId,
+      user: opts?.markerUser ?? userMessage,
+      assistant: assistantReply,
+      correlationId,
+    }, allowDuringShutdown);
     this.api?.logger.info?.(`[dkg-channel] Turn persisted to DKG graph: ${correlationId}`);
+  }
+
+  private async markExternalTurnPersistedAfterStore(
+    opts: ExternalTurnMarkerPersistOptions,
+    allowDuringShutdown: boolean,
+  ): Promise<void> {
+    if (!this.chatTurnWriter) return;
+    if (!opts.sessionKey) return;
+    const markerWrite = this.writeExternalTurnMarker(opts);
+    this.pendingMarkerPersistence.set(opts.correlationId, {
+      attempt: 1,
+      timer: null,
+      allowDuringShutdown,
+      opts,
+      inFlight: markerWrite,
+    });
+    try {
+      await markerWrite;
+      this.deletePendingMarkerPersistence(opts.correlationId);
+    } catch (err: any) {
+      this.scheduleExternalTurnMarkerRetry(opts, 1, allowDuringShutdown, err);
+    }
+  }
+
+  private async writeExternalTurnMarker(opts: ExternalTurnMarkerPersistOptions): Promise<void> {
+    await this.chatTurnWriter?.markExternalTurnPersistedDurable({
+      sessionKey: opts.sessionKey,
+      turnId: opts.turnId,
+      user: opts.user,
+      assistant: opts.assistant,
+    });
+  }
+
+  private scheduleExternalTurnMarkerRetry(
+    opts: ExternalTurnMarkerPersistOptions,
+    attempt: number,
+    allowDuringShutdown: boolean,
+    err: any,
+  ): void {
+    if (!this.chatTurnWriter || !this.canContinuePersistenceAttempt(allowDuringShutdown)) {
+      this.deletePendingMarkerPersistence(opts.correlationId);
+      return;
+    }
+    const retryDelayMs = TURN_PERSIST_RETRY_DELAYS_MS[attempt - 1];
+    if (retryDelayMs == null) {
+      this.deletePendingMarkerPersistence(opts.correlationId);
+      this.api?.logger.warn?.(
+        `[dkg-channel] ChatTurnWriter marker failed permanently after ${attempt} retry attempt(s) for ${opts.correlationId}: ${err?.message ?? err}`,
+      );
+      return;
+    }
+    this.api?.logger.warn?.(
+      `[dkg-channel] Turn persisted but ChatTurnWriter marker failed for ${opts.correlationId}; retrying marker in ${retryDelayMs}ms: ${err?.message ?? err}`,
+    );
+    const existing = this.pendingMarkerPersistence.get(opts.correlationId);
+    if (existing?.timer) clearTimeout(existing.timer);
+    const timer = setTimeout(() => {
+      if (!this.chatTurnWriter || !this.canContinuePersistenceAttempt(allowDuringShutdown)) {
+        this.deletePendingMarkerPersistence(opts.correlationId);
+        return;
+      }
+      const markerWrite = this.writeExternalTurnMarker(opts);
+      this.pendingMarkerPersistence.set(opts.correlationId, {
+        attempt: attempt + 1,
+        timer: null,
+        allowDuringShutdown,
+        opts,
+        inFlight: markerWrite,
+      });
+      void markerWrite
+        .then(() => {
+          this.deletePendingMarkerPersistence(opts.correlationId);
+        })
+        .catch((nextErr: any) => {
+          this.scheduleExternalTurnMarkerRetry(opts, attempt + 1, allowDuringShutdown, nextErr);
+        });
+    }, retryDelayMs);
+    this.pendingMarkerPersistence.set(opts.correlationId, {
+      attempt,
+      timer,
+      allowDuringShutdown,
+      opts,
+      inFlight: null,
+    });
+    this.notifyStopIdle();
   }
 
   private queueTurnPersistence(
@@ -1503,12 +2110,22 @@ export class DkgChannelPlugin {
     opts?: PersistTurnOptions,
     allowDuringShutdown = false,
   ): void {
-    if (!this.canContinuePersistenceAttempt(allowDuringShutdown) || this.pendingTurnPersistence.has(correlationId)) return;
+    const existing = this.pendingTurnPersistence.get(correlationId);
+    if (
+      !this.canContinuePersistenceAttempt(allowDuringShutdown)
+      || (existing && existing.attempt > 0)
+    ) return;
 
     const attemptPersist = (attempt: number): void => {
       if (!this.canContinuePersistenceAttempt(allowDuringShutdown)) return;
-      this.pendingTurnPersistence.set(correlationId, { attempt, timer: null, allowDuringShutdown });
-      void this.persistTurn(userMessage, assistantReply, correlationId, identity, opts)
+      const persistWrite = this.persistTurn(userMessage, assistantReply, correlationId, identity, opts, allowDuringShutdown);
+      this.pendingTurnPersistence.set(correlationId, {
+        attempt,
+        timer: null,
+        allowDuringShutdown,
+        inFlight: persistWrite,
+      });
+      void persistWrite
         .then(() => {
           this.deletePendingTurnPersistence(correlationId);
         })
@@ -1541,10 +2158,14 @@ export class DkgChannelPlugin {
             }
             const job = this.pendingTurnPersistence.get(correlationId);
             if (!job) return;
-            this.pendingTurnPersistence.set(correlationId, { attempt: attempt + 1, timer: null, allowDuringShutdown });
             attemptPersist(attempt + 1);
           }, retryDelayMs);
-          this.pendingTurnPersistence.set(correlationId, { attempt, timer, allowDuringShutdown });
+          this.pendingTurnPersistence.set(correlationId, {
+            attempt,
+            timer,
+            allowDuringShutdown,
+            inFlight: null,
+          });
         });
     };
 
@@ -1857,4 +2478,200 @@ function getErrorMessage(err: unknown): string {
     return err.message;
   }
   return String(err);
+}
+
+function resolveDirectAdapterConfigFallback(api: OpenClawPluginApi): Record<string, unknown> | undefined {
+  const anyApi = api as any;
+  const runtime = anyApi?.runtime;
+  const sources = [
+    directAdapterConfigFrom(anyApi?.cfg),
+    directAdapterConfigFrom(anyApi?.config),
+    directAdapterConfigFrom(anyApi?.pluginConfig),
+    directAdapterConfigFrom(runtime?.cfg),
+    directAdapterConfigFrom(runtime?.config),
+    directAdapterConfigFrom(runtime?.pluginConfig),
+  ].filter(isObjectRecord);
+  // T364 — Capture all partial overlays (state-metadata-only AND module
+  // partials like `{ channel: { port: 9801 } }`) in priority order so a
+  // higher-priority partial doesn't mask a lower-priority full adapter
+  // config it should layer over. Pre-fix the loop only captured
+  // state-metadata-only overlays and returned the first non-metadata
+  // source verbatim, so a partial channel overlay at api.cfg blocked
+  // the full config in runtime.config from contributing
+  // daemonUrl/memory/etc to the dispatch — breaking route resolution
+  // on gateways that emit incremental direct config updates.
+  // `isPartialAdapterConfigOverlay` is a superset of
+  // `isStateMetadataOnlyAdapterConfig`, so a single check covers both.
+  const overlays: Record<string, unknown>[] = [];
+  for (const source of sources) {
+    if (isPartialAdapterConfigOverlay(source)) {
+      overlays.push(source);
+      continue;
+    }
+    // Found a full config. Merge captured overlays over it. `overlays`
+    // is in highest-first priority order; reverse so the highest
+    // priority is applied last (and wins via mergeAdapterPluginConfigs's
+    // later-arg-wins semantic for top-level keys plus deep-merge for
+    // memory/channel modules).
+    return overlays.length > 0
+      ? mergeAdapterPluginConfigs(source, ...overlays.slice().reverse())
+      : source;
+  }
+  // T364 — When every discovered source is a partial overlay (no full
+  // config exists), merge ALL collected overlays in priority order.
+  // Pre-fix this path returned `overlays[0]` and dropped the rest, so a
+  // metadata-only api.cfg + partial pluginConfig + partial runtime.* still
+  // produced an incomplete cfg even when the missing daemon/channel/memory
+  // fields were available on lower-priority overlays. Reverse so the
+  // highest-priority overlay is applied last and wins on conflicts; module
+  // deep-merge preserves lower-priority defaults for fields the higher
+  // overlay omits.
+  return overlays.length > 0
+    ? mergeAdapterPluginConfigs(...overlays.slice().reverse())
+    : undefined;
+}
+
+function resolveChannelDispatchConfig(api: OpenClawPluginApi): Record<string, unknown> | undefined {
+  const mergedConfig = resolveOpenClawMergedConfig(api);
+  const routeConfig = resolveOpenClawRouteMetadataConfig(api);
+  const directConfig = resolveDirectAdapterConfigFallback(api);
+  if (mergedConfig) {
+    // T364 — Layer the fresher direct adapter config over the merged
+    // workspace config's nested `plugins.entries['adapter-openclaw'].config`.
+    // Pre-fix this branch returned the merged config as-is even when
+    // `api.pluginConfig` carried newer daemonUrl / channel / memory
+    // updates, so the channel dispatched against stale settings on
+    // multi-phase gateways that update direct config before the merged
+    // snapshot catches up.
+    const mergedWithDirect = directConfig
+      ? mergeDirectAdapterConfigIntoMergedConfig(mergedConfig, directConfig)
+      : mergedConfig;
+    return routeConfig
+      ? mergeRouteMetadataWithMergedConfig(mergedWithDirect, routeConfig)
+      : mergedWithDirect;
+  }
+
+  if (routeConfig && directConfig) {
+    return mergeRouteConfigWithAdapterConfig(routeConfig, directConfig);
+  }
+
+  return directConfig ?? routeConfig;
+}
+
+function mergeDirectAdapterConfigIntoMergedConfig(
+  mergedConfig: Record<string, unknown>,
+  directConfig: Record<string, unknown>,
+): Record<string, unknown> {
+  const plugins = isObjectRecord(mergedConfig.plugins)
+    ? (mergedConfig.plugins as Record<string, unknown>)
+    : {};
+  const entries = isObjectRecord(plugins.entries)
+    ? (plugins.entries as Record<string, unknown>)
+    : {};
+  const adapterEntry = isObjectRecord(entries['adapter-openclaw'])
+    ? (entries['adapter-openclaw'] as Record<string, unknown>)
+    : {};
+  const adapterEntryConfig = isObjectRecord(adapterEntry.config)
+    ? (adapterEntry.config as Record<string, unknown>)
+    : {};
+  const mergedAdapterConfig = mergeAdapterPluginConfigs(adapterEntryConfig, directConfig);
+  return {
+    ...mergedConfig,
+    plugins: {
+      ...plugins,
+      entries: {
+        ...entries,
+        'adapter-openclaw': {
+          ...adapterEntry,
+          config: mergedAdapterConfig,
+        },
+      },
+    },
+  };
+}
+
+function mergeRouteMetadataWithMergedConfig(
+  mergedConfig: Record<string, unknown>,
+  routeConfig: Record<string, unknown>,
+): Record<string, unknown> {
+  const priorAgents = isObjectRecord(mergedConfig.agents) ? mergedConfig.agents : undefined;
+  const nextAgents = isObjectRecord(routeConfig.agents) ? routeConfig.agents : undefined;
+  const priorSession = isObjectRecord(mergedConfig.session) ? mergedConfig.session : undefined;
+  const nextSession = isObjectRecord(routeConfig.session) ? routeConfig.session : undefined;
+  const result: Record<string, unknown> = {
+    ...mergedConfig,
+    ...routeConfig,
+    plugins: mergedConfig.plugins,
+  };
+  // T364 round 8 — drop stale workspace aliases that the merged
+  // snapshot inherited from older route metadata when the current
+  // routeConfig asserts a newer workspace signal. Pre-fix the
+  // `...mergedConfig, ...routeConfig` spread kept any older
+  // `workspace` / `agents.defaults.workspace` from the merged
+  // snapshot alongside the newer-only `workspaceDir`, and the
+  // documented `agents.defaults.workspace -> workspace -> workspaceDir`
+  // resolver chain would pick the stale alias. Scrubbing here
+  // keeps the dispatch-side and resolve-side merges consistent
+  // with `mergeRouteMetadataConfigs` in `openclaw-config.ts`.
+  scrubStaleWorkspaceAliases(result, routeConfig);
+  if (priorAgents || nextAgents) {
+    result.agents = { ...(priorAgents ?? {}), ...(nextAgents ?? {}) };
+    const priorDefaults = isObjectRecord(priorAgents?.defaults) ? priorAgents.defaults : undefined;
+    const nextDefaults = isObjectRecord(nextAgents?.defaults) ? nextAgents.defaults : undefined;
+    if (priorDefaults || nextDefaults) {
+      (result.agents as Record<string, unknown>).defaults = {
+        ...(priorDefaults ?? {}),
+        ...(nextDefaults ?? {}),
+      };
+    }
+    // The agents.defaults assignment above re-introduces the prior
+    // `agents.defaults.workspace` that was scrubbed by
+    // `scrubStaleWorkspaceAliases`. Re-scrub so the rule (newer
+    // workspace signal wins consistently) holds for the nested alias.
+    scrubStaleWorkspaceAliases(result, routeConfig);
+  }
+  if (priorSession || nextSession) {
+    result.session = { ...(priorSession ?? {}), ...(nextSession ?? {}) };
+  }
+  return result;
+}
+
+function directAdapterConfigFrom(candidate: unknown): Record<string, unknown> | undefined {
+  // T364 round 6 — extract just the adapter-config keys from
+  // candidates that may be mixed gateway payloads (route metadata +
+  // adapter overlay), e.g. `{ workspaceDir, channel: { port: 9801 } }`.
+  // Pre-fix `looksLikeAdapterPluginConfig` returned false for such
+  // payloads, so the legitimate channel/memory overlay was dropped on
+  // the floor and bootstrap/dispatch kept stale settings. The
+  // extraction helper splits route-metadata keys (handled separately
+  // by `resolveOpenClawRouteMetadataConfig`) from adapter-config keys.
+  return extractAdapterPluginConfigOverlay(candidate);
+}
+
+function mergeRouteConfigWithAdapterConfig(
+  routeConfig: Record<string, unknown>,
+  adapterConfig: Record<string, unknown>,
+): Record<string, unknown> {
+  const plugins = isObjectRecord(routeConfig.plugins) ? routeConfig.plugins : undefined;
+  const entries = isObjectRecord(plugins?.entries) ? plugins.entries : undefined;
+  const existingEntry = isObjectRecord(entries?.['adapter-openclaw'])
+    ? entries['adapter-openclaw'] as Record<string, unknown>
+    : undefined;
+  const existingAdapterConfig = isObjectRecord(existingEntry?.config)
+    ? existingEntry.config as Record<string, unknown>
+    : undefined;
+
+  return {
+    ...routeConfig,
+    plugins: {
+      ...(plugins ?? {}),
+      entries: {
+        ...(entries ?? {}),
+        'adapter-openclaw': {
+          ...(existingEntry ?? {}),
+          config: mergeAdapterPluginConfigs(existingAdapterConfig, adapterConfig),
+        },
+      },
+    },
+  };
 }

@@ -123,7 +123,7 @@ function uint72ToBytes(value: bigint): Uint8Array {
 /**
  * Compute the V10 publish ACK digest that each receiving core node signs.
  *
- * Layout matches `KnowledgeAssetsV10.sol:362-373` exactly:
+ * Layout matches `KnowledgeAssetsV10.sol` `_executePublishCore` exactly:
  *   keccak256(abi.encodePacked(
  *     block.chainid,            // uint256 (32)
  *     address(this),            // address (20) — the deployed KAV10 address
@@ -132,8 +132,9 @@ function uint72ToBytes(value: bigint): Uint8Array {
  *     knowledgeAssetsAmount,    // uint256 (32)
  *     uint256(byteSize),        // uint256 (32) — cast from uint88 in contract
  *     uint256(epochs),          // uint256 (32) — cast from uint40 in contract
- *     uint256(tokenAmount)      // uint256 (32) — cast from uint96 in contract
- *   ))                          // total packed width = 244 bytes
+ *     uint256(tokenAmount),     // uint256 (32) — cast from uint96 in contract
+ *     uint256(merkleLeafCount)  // uint256 (32) — cast from uint32 in contract
+ *   ))                          // total packed width = 276 bytes
  *
  * The contract wraps this with `ECDSA.toEthSignedMessageHash` (EIP-191)
  * before recovery; off-chain, `signer.signMessage(returnedBytes)` applies
@@ -152,13 +153,14 @@ export function computePublishACKDigest(
   byteSize: bigint,
   epochs: bigint,
   tokenAmount: bigint,
+  merkleLeafCount: bigint,
 ): Uint8Array {
   if (merkleRoot.length !== 32) {
     throw new Error(`merkleRoot must be 32 bytes, got ${merkleRoot.length}`);
   }
   const addrBytes = addressToBytes(kav10Address);
 
-  const packed = new Uint8Array(244);
+  const packed = new Uint8Array(276);
   let offset = 0;
   packed.set(uint256ToBytes(chainId), offset); offset += 32;
   packed.set(addrBytes, offset); offset += 20;
@@ -168,6 +170,7 @@ export function computePublishACKDigest(
   packed.set(uint256ToBytes(byteSize), offset); offset += 32;
   packed.set(uint256ToBytes(epochs), offset); offset += 32;
   packed.set(uint256ToBytes(tokenAmount), offset); offset += 32;
+  packed.set(uint256ToBytes(merkleLeafCount), offset); offset += 32;
 
   return keccak256(packed);
 }
@@ -192,7 +195,7 @@ export function computePublishACKDigest(
 /**
  * Compute the V10 update ACK digest that core nodes sign.
  *
- * Layout matches `KnowledgeAssetsV10.sol:832-846`:
+ * Layout matches `KnowledgeAssetsV10.sol` `_executeUpdateCore`:
  *   keccak256(abi.encodePacked(
  *     block.chainid,                          // uint256 (32)
  *     address(this),                          // address (20)
@@ -203,8 +206,9 @@ export function computePublishACKDigest(
  *     uint256(p.newByteSize),                 // uint256 (32)
  *     uint256(p.newTokenAmount),              // uint256 (32)
  *     p.mintKnowledgeAssetsAmount,            // uint256 (32)
- *     keccak256(abi.encodePacked(burnIds))    // bytes32 (32)
- *   ))                                        // total packed width = 308 bytes
+ *     keccak256(abi.encodePacked(burnIds)),   // bytes32 (32)
+ *     uint256(newMerkleLeafCount)             // uint256 (32) — cast from uint32
+ *   ))                                        // total packed width = 340 bytes
  */
 export function computeUpdateACKDigest(
   chainId: bigint,
@@ -217,6 +221,7 @@ export function computeUpdateACKDigest(
   newTokenAmount: bigint,
   mintAmount: bigint,
   burnTokenIds: bigint[],
+  newMerkleLeafCount: bigint,
 ): Uint8Array {
   if (newMerkleRoot.length !== 32) {
     throw new Error(`newMerkleRoot must be 32 bytes, got ${newMerkleRoot.length}`);
@@ -230,11 +235,8 @@ export function computeUpdateACKDigest(
   }
   const burnHash = keccak256(burnPacked);
 
-  // Packed width = 32 (chainId) + 20 (addr) + 32*8 (8× uint256/bytes32 fields) = 308.
-  // Earlier versions allocated 340, which silently appended 32 zero bytes and
-  // produced a digest that never matched KAV10.sol:832-846 → update ACK signed
-  // off-chain would be rejected on-chain. See test/v10-ack-digests-extra.ts [C-1].
-  const packed = new Uint8Array(308);
+  // Packed width = 32 (chainId) + 20 (addr) + 32*9 (9× uint256/bytes32 fields) = 340.
+  const packed = new Uint8Array(340);
   let offset = 0;
   packed.set(uint256ToBytes(chainId), offset); offset += 32;
   packed.set(addrBytes, offset); offset += 20;
@@ -246,6 +248,7 @@ export function computeUpdateACKDigest(
   packed.set(uint256ToBytes(newTokenAmount), offset); offset += 32;
   packed.set(uint256ToBytes(mintAmount), offset); offset += 32;
   packed.set(burnHash, offset); offset += 32;
+  packed.set(uint256ToBytes(newMerkleLeafCount), offset); offset += 32;
 
   return keccak256(packed);
 }

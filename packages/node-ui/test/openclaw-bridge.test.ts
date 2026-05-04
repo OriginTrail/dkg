@@ -473,7 +473,12 @@ describe('OpenClaw bridge behavioral tests', () => {
     expect(daemonSrc).toContain('http://127.0.0.1:9201');
     expect(daemonSrc).toContain('const gatewayBase =');
     expect(daemonSrc).toContain('explicitGatewayBase ??');
-    expect(daemonSrc).toContain("healthUrl: `${normalizedGatewayBase}/health`");
+    expect(daemonSrc).toContain('const explicitHealthUrl = openclawIntegration?.transport.healthUrl');
+    expect(daemonSrc).toContain('function classifyExplicitOpenClawHealthUrl');
+    expect(daemonSrc).toContain('const explicitHealthTarget = classifyExplicitOpenClawHealthUrl');
+    expect(daemonSrc).toContain("healthUrl: explicitHealthTarget === 'bridge'");
+    expect(daemonSrc).toContain("healthUrl: explicitHealthTarget === 'gateway'");
+    expect(daemonSrc).toContain(': `${normalizedGatewayBase}/health`,');
     expect(daemonSrc).toContain('function buildOpenClawGatewayBase');
     expect(daemonSrc).toContain('return value.endsWith("/api/dkg-channel")');
     expect(daemonSrc).toContain(': `${value}/api/dkg-channel`;');

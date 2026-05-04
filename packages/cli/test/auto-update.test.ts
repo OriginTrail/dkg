@@ -18,6 +18,11 @@ const MOCK_BUNDLER_SCRIPT = [
   "export const MARKITDOWN_UPSTREAM_VERSION = '0.1.5';",
   "export const PYINSTALLER_VERSION = '6.19.0';",
 ].join('\n');
+const RUNTIME_PACKAGES_BUILD_CMD = 'pnpm build:runtime:packages';
+const RUNTIME_BUILD_CMD = 'pnpm build:runtime';
+const RUNTIME_BUILD_COMPAT_WRAPPER = 'pnpm run build:runtime:packages && pnpm --filter @origintrail-official/dkg-node-ui run build:ui';
+const NODE_UI_BUILD_CMD = 'pnpm --filter @origintrail-official/dkg-node-ui run build:ui';
+const LEGACY_NODE_UI_BUILD_CMD = 'pnpm --filter @dkg/node-ui run build:ui';
 let mockBundledCliPackageVersion = CLI_VERSION;
 let mockInstalledPackageVersion = '9.0.0-beta.4-dev.100.abc1234';
 
@@ -63,7 +68,7 @@ let openSyncCalls: any[][] = [];
 let closeSyncCalls: any[][] = [];
 let writeFileSyncCalls: any[][] = [];
 let unlinkSyncCalls: any[][] = [];
-let execCalls: { cmd: string; cwd: string }[] = [];
+let execCalls: { cmd: string; cwd: string; timeout?: number }[] = [];
 let execFileCalls: { file: string; args: string[]; cwd: string; env: any }[] = [];
 let swapSlotCalls: string[] = [];
 let fetchCalls: any[][] = [];
@@ -161,7 +166,7 @@ function installMocks() {
   _autoUpdateIo.writeFileSync = ((...args: any[]) => { writeFileSyncCalls.push(args); }) as any;
   _autoUpdateIo.unlinkSync = ((...args: any[]) => { unlinkSyncCalls.push(args); }) as any;
   _autoUpdateIo.exec = (async (cmd: any, opts?: any) => {
-    execCalls.push({ cmd: String(cmd), cwd: normalizePathString(opts?.cwd) });
+    execCalls.push({ cmd: String(cmd), cwd: normalizePathString(opts?.cwd), timeout: opts?.timeout });
     return execImpl(String(cmd), opts);
   }) as any;
   _autoUpdateIo.execFile = (async (file: any, args: any[], opts?: any) => {
@@ -213,10 +218,42 @@ function makeFetchOk(sha: string) {
   });
 }
 
+function mockGitUpdateReadFile(
+  currentCommit = 'aaa111',
+  cliVersion = '9.0.0',
+  nodeUiPackageName = '@origintrail-official/dkg-node-ui',
+  rootScripts: Record<string, string> = {
+    'build:runtime:packages': RUNTIME_PACKAGES_BUILD_CMD,
+    'build:runtime': RUNTIME_BUILD_COMPAT_WRAPPER,
+  },
+) {
+  readFileImpl = async (path: any) => {
+    const p = normalizePathString(path);
+    if (p.endsWith('/packages/node-ui/package.json')) {
+      return JSON.stringify({
+        name: nodeUiPackageName,
+        scripts: { 'build:ui': 'vite build' },
+      });
+    }
+    if (p.endsWith('/package.json') && !p.endsWith('/packages/cli/package.json')) {
+      return JSON.stringify({
+        dkgBuild: { releaseRuntimeBuildScript: 'build:runtime:packages' },
+        scripts: rootScripts,
+      });
+    }
+    if (p.endsWith('/packages/cli/package.json')) {
+      return JSON.stringify({ version: cliVersion });
+    }
+    if (p.endsWith('.update-pending.json')) throw new Error('ENOENT');
+    return currentCommit;
+  };
+}
+
 function getExecCalls() {
   return execCalls.map(c => ({
     cmd: c.cmd,
     cwd: c.cwd,
+    timeout: c.timeout,
   }));
 }
 
@@ -344,6 +381,9 @@ describe('blue-green checkForUpdate', () => {
     expect(gitCmds.some(c => c.file === 'git' && c.args[0] === 'checkout' && c.cwd === targetDir)).toBe(true);
     expect(allCmds.some(c => c.cmd.includes('pnpm install') && c.cwd === targetDir)).toBe(true);
     expect(allCmds.some(c => c.cmd.includes('pnpm build') && c.cwd === targetDir)).toBe(true);
+    expect(existsSyncCalls.some(([p]) =>
+      normalizePathString(p).endsWith('/packages/node-ui/dist-ui/index.html')
+    )).toBe(true);
     expect(allCmds.some(c => c.cmd.includes('bundle-markitdown-binaries.mjs') && c.cwd === targetDir)).toBe(true);
     expect(allCmds.some(c => c.cmd.includes('--force') && c.cwd === targetDir)).toBe(false);
     expect(allCmds.some(c => c.cmd.includes('--best-effort') && c.cwd === targetDir)).toBe(true);
@@ -351,6 +391,87 @@ describe('blue-green checkForUpdate', () => {
 
     const activeDir = '/tmp/dkg-test/releases/a';
     expect(allCmds.every(c => c.cwd !== activeDir)).toBe(true);
+  });
+
+  it('runs the Node UI static build after the runtime package build before swapping', async () => {
+    const current = 'aaa111';
+    const latest = 'bbb224';
+    mockGitUpdateReadFile(current);
+    makeFetchOk(latest);
+    let nodeUiBuilt = false;
+    existsSyncImpl = (p: any) => {
+      const path = normalizePathString(p);
+      if (path.endsWith('/packages/node-ui/dist-ui/index.html')) return nodeUiBuilt;
+      return true;
+    };
+    execImpl = async (cmd: string) => {
+      if (cmd === NODE_UI_BUILD_CMD) nodeUiBuilt = true;
+      return { stdout: '', stderr: '' };
+    };
+
+    const result = await performUpdate(AU, () => {});
+    expect(result).toBe(true);
+
+    const targetDir = '/tmp/dkg-test/releases/b';
+    const targetCalls = getExecCalls().filter(c => c.cwd === targetDir);
+    const allCmds = targetCalls.map(c => c.cmd);
+    const runtimeIdx = allCmds.indexOf(RUNTIME_PACKAGES_BUILD_CMD);
+    const uiIdx = allCmds.indexOf(NODE_UI_BUILD_CMD);
+    expect(runtimeIdx).toBeGreaterThanOrEqual(0);
+    expect(uiIdx).toBeGreaterThan(runtimeIdx);
+    expect(targetCalls.find(c => c.cmd === RUNTIME_PACKAGES_BUILD_CMD)?.timeout).toBe(180_000);
+    expect(targetCalls.find(c => c.cmd === NODE_UI_BUILD_CMD)?.timeout).toBe(180_000);
+    expect(allCmds).not.toContain(RUNTIME_BUILD_CMD);
+    expect(swapSlotCalls).toContain('b');
+    expect(rmCalls.some(([p]) =>
+      normalizePathString(p).endsWith('/packages/node-ui/dist-ui'),
+    )).toBe(true);
+    expect(existsSyncCalls.some(([p]) =>
+      normalizePathString(p).endsWith('/packages/node-ui/dist-ui/index.html')
+    )).toBe(true);
+  });
+
+  it('falls back to build:runtime when the target lacks the runtime-only package script', async () => {
+    const current = 'aaa111';
+    const latest = 'bbb224-runtime-wrapper';
+    mockGitUpdateReadFile(current, '9.0.0', '@origintrail-official/dkg-node-ui', {
+      'build:runtime': RUNTIME_BUILD_CMD,
+    });
+    makeFetchOk(latest);
+
+    const result = await performUpdate(AU, () => {});
+    expect(result).toBe(true);
+
+    const targetDir = '/tmp/dkg-test/releases/b';
+    const allCmds = getExecCalls().filter(c => c.cwd === targetDir).map(c => c.cmd);
+    expect(allCmds).toContain(RUNTIME_BUILD_CMD);
+    expect(allCmds).not.toContain(RUNTIME_PACKAGES_BUILD_CMD);
+  });
+
+  it('uses the Node UI workspace package name from the target slot', async () => {
+    const current = 'aaa111';
+    const latest = 'bbb225';
+    mockGitUpdateReadFile(current, '9.0.0-beta.2', '@dkg/node-ui');
+    makeFetchOk(latest);
+    let nodeUiBuilt = false;
+    existsSyncImpl = (p: any) => {
+      const path = normalizePathString(p);
+      if (path.endsWith('/packages/node-ui/dist-ui/index.html')) return nodeUiBuilt;
+      return true;
+    };
+    execImpl = async (cmd: string) => {
+      if (cmd === LEGACY_NODE_UI_BUILD_CMD) nodeUiBuilt = true;
+      return { stdout: '', stderr: '' };
+    };
+
+    const result = await performUpdate(AU, () => {});
+    expect(result).toBe(true);
+
+    const targetDir = '/tmp/dkg-test/releases/b';
+    const allCmds = getExecCalls().filter(c => c.cwd === targetDir).map(c => c.cmd);
+    expect(allCmds).toContain(LEGACY_NODE_UI_BUILD_CMD);
+    expect(allCmds).not.toContain(NODE_UI_BUILD_CMD);
+    expect(swapSlotCalls).toContain('b');
   });
 
   it('continues the update when MarkItDown staging fails inside the best-effort git-update step', async () => {
@@ -507,6 +628,45 @@ describe('blue-green checkForUpdate', () => {
     expect(result).toBe(false);
     expect(swapSlotCalls.length).toBe(0);
     expect(logCalls.some(m => m.includes('build output missing'))).toBe(true);
+  });
+
+  it('aborts swap when the git Node UI static bundle is missing after build', async () => {
+    readFileImpl = async () => 'aaa111';
+    makeFetchOk('newcommit');
+
+    existsSyncImpl = (p: any) => {
+      const path = normalizePathString(p);
+      if (path.endsWith('/packages/node-ui/dist-ui/index.html')) return false;
+      return true;
+    };
+
+    const logCalls: string[] = [];
+    const log = (msg: string) => { logCalls.push(msg); };
+    const result = await performUpdate(AU, log);
+    expect(result).toBe(false);
+    expect(swapSlotCalls.length).toBe(0);
+    expect(logCalls.some(m => m.includes('Node UI static bundle missing'))).toBe(true);
+  });
+
+  it('does not swap when the Node UI static build fails', async () => {
+    readFileImpl = async () => 'aaa111';
+    makeFetchOk('newcommit');
+    existsSyncImpl = (p: any) => {
+      const path = normalizePathString(p);
+      if (path.endsWith('/packages/node-ui/dist-ui/index.html')) return false;
+      return true;
+    };
+    execImpl = async (cmd: string) => {
+      if (cmd === NODE_UI_BUILD_CMD) throw new Error('vite exploded');
+      return { stdout: '', stderr: '' };
+    };
+
+    const logCalls: string[] = [];
+    const log = (msg: string) => { logCalls.push(msg); };
+    const result = await performUpdate(AU, log);
+    expect(result).toBe(false);
+    expect(swapSlotCalls.length).toBe(0);
+    expect(logCalls.some(m => m.includes('build failed') && m.includes('vite exploded'))).toBe(true);
   });
 
   it('continues the swap when the bundled MarkItDown binary is missing after build', async () => {
@@ -978,6 +1138,55 @@ describe('performNpmUpdate', () => {
     expect(swapSlotCalls.length).toBe(0);
   });
 
+  it('returns failed when npm Node UI static bundle is missing after install', async () => {
+    existsSyncImpl = (p: any) => {
+      const path = normalizePathString(p);
+      if (path.endsWith('/dist-ui/index.html')) return false;
+      return true;
+    };
+
+    const logCalls: string[] = [];
+    const log = (msg: string) => { logCalls.push(msg); };
+    const result = await performNpmUpdate('9.0.0-beta.5', log);
+
+    expect(result).toBe('failed');
+    expect(swapSlotCalls.length).toBe(0);
+    expect(logCalls.some(m => m.includes('Node UI static bundle missing'))).toBe(true);
+    expect(existsSyncCalls.some(([path]) =>
+      normalizePathString(path).endsWith('/packages/node-ui/dist-ui/index.html'),
+    )).toBe(false);
+  });
+
+  it('does not accept a legacy npm UI bundle for a current-package npm update', async () => {
+    readFileImpl = async (path: any) => {
+      const normalized = normalizePathString(path);
+      if (normalized.endsWith('.update-pending.json')) throw new Error('ENOENT');
+      if (normalized.endsWith('/node_modules/@origintrail-official/dkg/package.json')) {
+        return JSON.stringify({
+          version: '9.0.0-beta.5',
+          dependencies: { '@origintrail-official/dkg-node-ui': '9.0.0-beta.5' },
+        });
+      }
+      if (normalized.endsWith('package.json')) return JSON.stringify({ version: '9.0.0-beta.5' });
+      throw new Error(`Unexpected readFile: ${normalized}`);
+    };
+    existsSyncImpl = (p: any) => {
+      const path = normalizePathString(p);
+      if (path.endsWith('/node_modules/@origintrail-official/dkg/dist/cli.js')) return true;
+      if (path.includes('/@dkg/node-ui/dist-ui/index.html')) return true;
+      if (path.endsWith('/dist-ui/index.html')) return false;
+      return true;
+    };
+
+    const result = await performNpmUpdate('9.0.0-beta.5', () => {});
+
+    expect(result).toBe('failed');
+    expect(swapSlotCalls.length).toBe(0);
+    expect(existsSyncCalls.some(([path]) =>
+      normalizePathString(path).includes('/@dkg/node-ui/dist-ui/index.html'),
+    )).toBe(false);
+  });
+
   it('continues when the bundled MarkItDown binary is missing after install', async () => {
     mockInstalledPackageVersion = '9.0.0-beta.5';
     existsSyncImpl = (p: any) => {
@@ -1370,7 +1579,7 @@ describe('autoupdater hardening', () => {
   });
 
   it('honours autoUpdate.buildTimeoutMs.contracts when contracts rebuild', async () => {
-    readFileImpl = async () => 'aaa111';
+    mockGitUpdateReadFile();
     makeFetchOk('bbb222');
     let contractsTimeout: number | undefined;
     execImpl = async (cmd: string, opts?: any) => {
@@ -1424,7 +1633,7 @@ describe('autoupdater hardening', () => {
     // change we run `hardhat clean` first to drop ghost outputs from
     // deleted contracts. Scoped to the same trigger as the rebuild so
     // no-change updates still benefit from the Hardhat compile cache.
-    readFileImpl = async () => 'aaa111';
+    mockGitUpdateReadFile();
     makeFetchOk('bbb222');
     const order: string[] = [];
     execImpl = async (cmd: string) => {
@@ -1443,7 +1652,7 @@ describe('autoupdater hardening', () => {
   });
 
   it('contract-diff retries via `git fetch --depth=1` for the missing parent commit before giving up', async () => {
-    readFileImpl = async () => 'aaa111';
+    mockGitUpdateReadFile();
     makeFetchOk('bbb222');
     let firstDiffSeen = false;
     let retryFetchArgs: string[] | null = null;

@@ -943,6 +943,11 @@
         "internalType": "bool",
         "name": "isImmutable",
         "type": "bool"
+      },
+      {
+        "internalType": "uint32",
+        "name": "merkleLeafCount",
+        "type": "uint32"
       }
     ],
     "name": "createKnowledgeCollection",
@@ -1161,6 +1166,11 @@
             "internalType": "bool",
             "name": "isImmutable",
             "type": "bool"
+          },
+          {
+            "internalType": "uint32",
+            "name": "merkleLeafCount",
+            "type": "uint32"
           }
         ],
         "internalType": "struct KnowledgeCollectionLib.KnowledgeCollection",
@@ -1300,6 +1310,11 @@
         "internalType": "bool",
         "name": "isImmutable",
         "type": "bool"
+      },
+      {
+        "internalType": "uint32",
+        "name": "merkleLeafCount",
+        "type": "uint32"
       }
     ],
     "stateMutability": "view",
@@ -1406,6 +1421,25 @@
         "internalType": "uint256",
         "name": "",
         "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "id",
+        "type": "uint256"
+      }
+    ],
+    "name": "getMerkleLeafCount",
+    "outputs": [
+      {
+        "internalType": "uint32",
+        "name": "",
+        "type": "uint32"
       }
     ],
     "stateMutability": "view",
@@ -1817,6 +1851,11 @@
         "internalType": "bool",
         "name": "isImmutable",
         "type": "bool"
+      },
+      {
+        "internalType": "uint32",
+        "name": "merkleLeafCount",
+        "type": "uint32"
       }
     ],
     "stateMutability": "view",
@@ -2294,6 +2333,11 @@
         "internalType": "uint96",
         "name": "tokenAmount",
         "type": "uint96"
+      },
+      {
+        "internalType": "uint32",
+        "name": "merkleLeafCount",
+        "type": "uint32"
       }
     ],
     "name": "updateKnowledgeCollection",

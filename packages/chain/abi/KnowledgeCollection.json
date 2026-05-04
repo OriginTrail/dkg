@@ -286,6 +286,11 @@
         "internalType": "bytes32[]",
         "name": "vs",
         "type": "bytes32[]"
+      },
+      {
+        "internalType": "uint32",
+        "name": "merkleLeafCount",
+        "type": "uint32"
       }
     ],
     "name": "createKnowledgeCollection",
@@ -405,45 +410,6 @@
     "outputs": [
       {
         "internalType": "contract ParametersStorage",
-        "name": "",
-        "type": "address"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "paranetKnowledgeCollectionsRegistry",
-    "outputs": [
-      {
-        "internalType": "contract ParanetKnowledgeCollectionsRegistry",
-        "name": "",
-        "type": "address"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "paranetKnowledgeMinersRegistry",
-    "outputs": [
-      {
-        "internalType": "contract ParanetKnowledgeMinersRegistry",
-        "name": "",
-        "type": "address"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "paranetsRegistry",
-    "outputs": [
-      {
-        "internalType": "contract ParanetsRegistry",
         "name": "",
         "type": "address"
       }

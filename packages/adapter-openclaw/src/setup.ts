@@ -19,16 +19,21 @@
  * Every step is idempotent — re-running is safe.
  */
 
-import { execSync, spawnSync } from 'node:child_process';
-import { accessSync, constants as fsConstants, copyFileSync, existsSync, readFileSync, realpathSync, writeFileSync, mkdirSync, rmdirSync, statSync, unlinkSync } from 'node:fs';
+import { execSync, spawnSync, type SpawnSyncOptions } from 'node:child_process';
+import { accessSync, constants as fsConstants, copyFileSync, existsSync, lstatSync, readFileSync, realpathSync, writeFileSync, mkdirSync, rmdirSync, statSync, unlinkSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join, dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
-import { requestFaucetFunding } from '@origintrail-official/dkg-core';
+import { blueGreenSlotReady, findPackageRepoDir, requestFaucetFunding, resolveDkgConfigHome } from '@origintrail-official/dkg-core';
 import type { DkgOpenClawConfig } from './types.js';
 import { resolveDkgCli } from './resolve-dkg-cli.js';
+import {
+  defaultStateDirForWorkspace,
+  legacyStateDirForWorkspace,
+  sameResolvedPath,
+} from './state-dir-path.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -122,7 +127,7 @@ function isEphemeralPath(p: string): boolean {
 }
 
 function dkgDir(): string {
-  return process.env.DKG_HOME ?? join(homedir(), '.dkg');
+  return resolveDkgConfigHome({ startDir: __dirname });
 }
 
 function openclawDir(): string {
@@ -563,6 +568,45 @@ export function writeDkgConfig(
 // Step 5: Start DKG daemon
 // ---------------------------------------------------------------------------
 
+const DKG_START_TIMEOUT_MS = 30_000;
+const DKG_START_MIGRATION_TIMEOUT_MS = 60 * 60_000;
+
+function hasLocalRepoForCli(cliPath: string): boolean {
+  let physicalCliPath = cliPath;
+  try {
+    physicalCliPath = realpathSync(cliPath);
+  } catch {
+    // `resolveDkgCli` surfaces missing CLI paths later; keep timeout detection conservative here.
+  }
+  const repo = findPackageRepoDir(dirname(physicalCliPath));
+  return Boolean(repo && existsSync(join(repo, '.git')));
+}
+
+function blueGreenMigrationMayRunDuringStart(cliPath: string): boolean {
+  if (process.env.DKG_NO_BLUE_GREEN) return false;
+  if (!hasLocalRepoForCli(cliPath)) return false;
+
+  const releasesPath = join(dkgDir(), 'releases');
+  const currentLink = join(releasesPath, 'current');
+
+  try {
+    if (!lstatSync(currentLink).isSymbolicLink()) return true;
+  } catch {
+    return true;
+  }
+
+  return !blueGreenSlotReady(join(releasesPath, 'a'))
+    || !blueGreenSlotReady(join(releasesPath, 'b'));
+}
+
+function daemonStartSpawnOptions(cliPath: string): SpawnSyncOptions {
+  const options: SpawnSyncOptions = { stdio: 'inherit' };
+  options.timeout = blueGreenMigrationMayRunDuringStart(cliPath)
+    ? DKG_START_MIGRATION_TIMEOUT_MS
+    : DKG_START_TIMEOUT_MS;
+  return options;
+}
+
 export async function startDaemon(apiPort: number): Promise<void> {
   // Check if already running
   const pidPath = join(dkgDir(), 'daemon.pid');
@@ -596,10 +640,7 @@ export async function startDaemon(apiPort: number): Promise<void> {
     // process.execPath so we don't depend on `dkg` being on PATH — which
     // `pnpm dkg openclaw setup` does not guarantee in a cloned monorepo.
     const { node, cliPath } = resolveDkgCli();
-    const result = spawnSync(node, [cliPath, 'start'], {
-      stdio: 'inherit',
-      timeout: 30_000,
-    });
+    const result = spawnSync(node, [cliPath, 'start'], daemonStartSpawnOptions(cliPath));
     if (result.error) throw result.error;
     if (result.status !== 0) {
       throw new Error(
@@ -665,14 +706,39 @@ export function readWallets(): string[] {
     warn('wallets.json is malformed or still being written — skipping');
     return [];
   }
-  // The daemon writes { wallets: [{ address, privateKey }] }.
-  // Handle this shape first, then fall back to other formats.
+  // The daemon writes { adminWallet, wallets: [{ address, privateKey }] }.
+  // Include admin first so profile/key-management transactions have gas, then
+  // fall back to the legacy operational-only array shapes.
   const walletList: any[] = Array.isArray(raw?.wallets) ? raw.wallets
     : Array.isArray(raw) ? raw
     : [];
-  const addresses: string[] = [];
+  const operationalAddresses: string[] = [];
+  const operationalSeen = new Set<string>();
   for (const w of walletList) {
-    if (w?.address) addresses.push(w.address);
+    const address = w?.address;
+    if (typeof address !== 'string' || address.length === 0) continue;
+    const key = address.toLowerCase();
+    if (operationalSeen.has(key)) continue;
+    operationalSeen.add(key);
+    operationalAddresses.push(address);
+  }
+  if (operationalAddresses.length === 0) {
+    warn('wallets.json has no operational wallets — skipping faucet funding');
+    return [];
+  }
+
+  const addresses: string[] = [];
+  const seen = new Set<string>();
+  const addAddress = (address: unknown) => {
+    if (typeof address !== 'string' || address.length === 0) return;
+    const key = address.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    addresses.push(address);
+  };
+  addAddress(raw?.adminWallet?.address);
+  for (const address of operationalAddresses) {
+    addAddress(address);
   }
 
   if (addresses.length) {
@@ -686,25 +752,26 @@ export function readWallets(): string[] {
  * only on faucet failure; the caller is expected to continue (funding is
  * best-effort / non-fatal).
  *
- * Addresses are capped at the first 3 to match `requestFaucetFunding`'s
- * server-side cap (`packages/core/src/faucet.ts`). Including more wallets
- * in the body would be rejected by the faucet. When the caller passes >3
- * addresses, the extras are listed in a follow-on note so the operator
- * knows which wallets still need funding (via a separate request or a
- * re-run after cooldown).
+ * Addresses are split into batches of 3 to match the faucet's per-request
+ * cap. Including more wallets in one body would be rejected by the faucet.
  */
 export function logManualFundingInstructions(addresses: string[], faucetUrl: string, mode: string): void {
-  const fundable = addresses.slice(0, 3);
-  const extras = addresses.slice(3);
+  const batches: string[][] = [];
+  for (let i = 0; i < addresses.length; i += 3) {
+    batches.push(addresses.slice(i, i + 3));
+  }
   console.log('\nTo fund wallets manually, run:');
-  console.log(`  curl -X POST "${faucetUrl}" \\`);
-  console.log(`    -H "Content-Type: application/json" \\`);
-  console.log(`    -H "Idempotency-Key: $(date +%s)" \\`);
-  console.log(`    --data-raw '{"mode":"${mode}","wallets":${JSON.stringify(fundable)}}'`);
-  if (extras.length > 0) {
-    console.log(`\nNote: faucet supports up to 3 wallets per call; the command above funds the first 3.`);
-    console.log(`Fund the remaining ${extras.length} wallet(s) with a separate request:`);
-    console.log(`  ${extras.join(', ')}`);
+  batches.forEach((batch, index) => {
+    if (batches.length > 1) {
+      console.log(`  # batch ${index + 1}/${batches.length}`);
+    }
+    console.log(`  curl -X POST "${faucetUrl}" \\`);
+    console.log(`    -H "Content-Type: application/json" \\`);
+    console.log(`    -H "Idempotency-Key: $(date +%s)-${index + 1}" \\`);
+    console.log(`    --data-raw '{"mode":"${mode}","wallets":${JSON.stringify(batch)}}'`);
+  });
+  if (batches.length > 1) {
+    console.log(`\nNote: faucet supports up to 3 wallets per call; run each batch above.`);
   }
   console.log('');
 }
@@ -900,7 +967,10 @@ function isAdapterLoadPath(value: string): boolean {
  * can pass any of the same sub-fields the adapter reads at load time,
  * including `channel.port` for advanced bridge-port overrides.
  */
-export type AdapterEntryConfig = Pick<DkgOpenClawConfig, 'daemonUrl' | 'memory' | 'channel'>;
+export type AdapterEntryConfig = Pick<
+  DkgOpenClawConfig,
+  'daemonUrl' | 'stateDir' | 'stateDirSource' | 'memory' | 'channel'
+>;
 
 export function mergeOpenClawConfig(
   openclawConfigPath: string,
@@ -1000,10 +1070,51 @@ export function mergeOpenClawConfig(
   const existingChannel = existingEntryConfig.channel && typeof existingEntryConfig.channel === 'object'
     ? existingEntryConfig.channel
     : {};
+  const trimmedNonEmpty = (value: unknown): string | undefined => {
+    if (typeof value !== 'string') return undefined;
+    const trimmed = value.trim();
+    return trimmed ? trimmed : undefined;
+  };
   const priorInstalledWorkspace =
-    typeof existingEntryConfig.installedWorkspace === 'string'
-      ? existingEntryConfig.installedWorkspace
-      : undefined;
+    trimmedNonEmpty(existingEntryConfig.installedWorkspace);
+
+  const existingStateDir = trimmedNonEmpty(existingEntryConfig.stateDir);
+  const incomingStateDir = trimmedNonEmpty(entryConfig.stateDir);
+  const isSetupOwnedDefaultForWorkspace = (stateDir: string, workspaceDir: string): boolean =>
+    sameResolvedPath(stateDir, defaultStateDirForWorkspace(workspaceDir)) ||
+    sameResolvedPath(stateDir, legacyStateDirForWorkspace(workspaceDir));
+  const incomingStateDirIsSetupDefault =
+    entryConfig.stateDirSource === 'setup-default' &&
+    !!incomingStateDir &&
+    sameResolvedPath(incomingStateDir, defaultStateDirForWorkspace(installedWorkspace));
+  const existingStateDirIsSetupOwned =
+    existingEntryConfig.stateDirSource === 'setup-default' &&
+    !!existingStateDir &&
+    !!priorInstalledWorkspace &&
+    isSetupOwnedDefaultForWorkspace(existingStateDir, priorInstalledWorkspace);
+  let preservedExistingStateDir = false;
+  if (typeof existingEntryConfig.stateDir === 'string' && !existingEntryConfig.stateDir.trim()) {
+    delete existingEntryConfig.stateDir;
+    delete existingEntryConfig.stateDirSource;
+  } else if (
+    existingStateDir &&
+    incomingStateDir &&
+    existingStateDirIsSetupOwned
+  ) {
+    // The existing value is the setup-owned default from the previous
+    // workspace, so a workspace migration should move it alongside
+    // installedWorkspace. Any custom value remains first-wins.
+    delete existingEntryConfig.stateDir;
+    delete existingEntryConfig.stateDirSource;
+  } else if (existingStateDir) {
+    preservedExistingStateDir = true;
+    // A preserved stateDir is user-owned unless the existing marker proves it
+    // came from setup and no replacement stateDir was supplied.
+    if (!existingStateDirIsSetupOwned || incomingStateDir) {
+      delete existingEntryConfig.stateDirSource;
+    }
+  }
+
   entryForConfig.config = {
     ...entryConfig,
     ...existingEntryConfig,
@@ -1013,6 +1124,24 @@ export function mergeOpenClawConfig(
     // for the adapter-owned pointer so a re-install updates it cleanly.
     installedWorkspace,
   };
+  const finalStateDir = trimmedNonEmpty(entryForConfig.config.stateDir);
+  const preservedSetupDefault =
+    preservedExistingStateDir &&
+    existingStateDirIsSetupOwned &&
+    !incomingStateDir &&
+    !!finalStateDir &&
+    sameResolvedPath(finalStateDir, existingStateDir);
+  if (
+    incomingStateDirIsSetupDefault &&
+    !preservedExistingStateDir &&
+    finalStateDir === incomingStateDir
+  ) {
+    entryForConfig.config.stateDirSource = 'setup-default';
+  } else if (preservedSetupDefault) {
+    entryForConfig.config.stateDirSource = 'setup-default';
+  } else {
+    delete entryForConfig.config.stateDirSource;
+  }
   if (!hadConfig) {
     log(`Populated plugins.entries.${pluginId}.config`);
   }
@@ -1829,6 +1958,14 @@ export async function runSetup(options: SetupOptions): Promise<void> {
           const result = await requestFaucetFunding(faucetUrl, faucetMode, walletAddresses, effectiveAgentName);
           if (result.success) {
             log(`Funded: ${result.funded.join(', ')}`);
+            if (result.error) {
+              warn(`Faucet partially completed: ${result.error}`);
+              logManualFundingInstructions(
+                result.failedWallets?.length ? result.failedWallets : walletAddresses,
+                faucetUrl,
+                faucetMode,
+              );
+            }
           } else {
             warn(`Faucet request did not fund any wallets${result.error ? ` (${result.error})` : ''}`);
             logManualFundingInstructions(walletAddresses, faucetUrl, faucetMode);
@@ -1862,6 +1999,8 @@ export async function runSetup(options: SetupOptions): Promise<void> {
   const portExplicit = options.port != null;
   const entryConfig: AdapterEntryConfig = {
     daemonUrl: `http://127.0.0.1:${effectivePort}`,
+    stateDir: defaultStateDirForWorkspace(workspaceDir),
+    stateDirSource: 'setup-default',
     memory: { enabled: true },
     channel: { enabled: true },
   };

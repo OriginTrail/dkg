@@ -25,7 +25,7 @@
  *
  * Per QA policy: no production code modified. Uses real Hardhat, real
  * EVMChainAdapter, real `LocalSignerPeer`-style signing — but with the
- * SPEC-correct 8-field H5-prefixed digest (`computePublishACKDigest`).
+ * SPEC-correct 9-field H5-prefixed digest (`computePublishACKDigest`).
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { ethers } from 'ethers';
@@ -54,6 +54,7 @@ const CHAIN_ID = 31337n;
 const EPOCHS_SIGNED = 1n;
 const BYTE_SIZE_SIGNED = 256n;
 const KA_COUNT_SIGNED = 1n;
+const MERKLE_LEAF_COUNT_SIGNED = 1n;
 const MERKLE_ROOT = ethers.getBytes(
   ethers.keccak256(ethers.toUtf8Bytes('p3-ack-replay-root')),
 );
@@ -87,6 +88,7 @@ async function submitWithCostMismatch(
   const ackDigest = computePublishACKDigest(
     CHAIN_ID, kav10Address, cgId, MERKLE_ROOT,
     KA_COUNT_SIGNED, BYTE_SIZE_SIGNED, EPOCHS_SIGNED, tokenAmountSigned,
+    MERKLE_LEAF_COUNT_SIGNED,
   );
   const ackSig = ethers.Signature.from(await signer.signMessage(ackDigest));
 
@@ -105,6 +107,7 @@ async function submitWithCostMismatch(
     byteSize: byteSizeSubmitted,
     epochs: Number(epochsSubmitted),
     tokenAmount: tokenAmountSubmitted,
+    merkleLeafCount: Number(MERKLE_LEAF_COUNT_SIGNED),
     isImmutable: false,
     paymaster: ethers.ZeroAddress,
     publisherNodeIdentityId: identityId,

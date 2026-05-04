@@ -41,6 +41,7 @@ import { MessageHandler, type SkillHandler, type SkillRequest, type SkillRespons
 import { ed25519ToX25519Private, ed25519ToX25519Public } from './encryption.js';
 import { AGENT_REGISTRY_CONTEXT_GRAPH, canonicalAgentDidSubject, type AgentProfileConfig } from './profile.js';
 import { SyncVerifyWorker } from './sync-verify-worker.js';
+import { bindRandomSampling, type RandomSamplingHandle, type RandomSamplingStatus } from './random-sampling-bind.js';
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
 import { waitForPeerProtocol } from './p2p/protocol-readiness.js';
 import { orderCatchupPeers } from './p2p/peer-selection.js';
@@ -161,6 +162,14 @@ const GOSSIP_DIAL_TIMEOUT_MS = 10_000;
  * (each of which fires its own connection:open).
  */
 const CATCHUP_ON_CONNECT_COOLDOWN_MS = 60_000;
+const RANDOM_SAMPLING_BIND_RETRY_MS = 30_000;
+const STORAGE_ACK_REGISTRATION_RETRY_MS = 30_000;
+
+type RandomSamplingStartResult = 'started' | 'retryable' | 'disabled';
+type ACKSignerResolution = {
+  wallet: ethers.Wallet | null;
+  retryable: boolean;
+};
 
 interface SyncRequestEnvelope {
   contextGraphId: string;
@@ -194,6 +203,8 @@ export interface ContextGraphSub {
   subscribed: boolean;
   /** Definition triples exist in the local triple store. */
   synced: boolean;
+  /** Shared-memory catch-up has completed at least once for this subscription. */
+  sharedMemorySynced?: boolean;
   /**
    * Whether the `_meta` graph (allowlist, registration status) has been
    * fetched via authenticated sync or is known from local creation.
@@ -207,6 +218,42 @@ export interface ContextGraphSub {
   participantIdentityIds?: bigint[];
   /** Participant agent addresses (V10 agent identity model). */
   participantAgents?: string[];
+}
+
+export interface ContextGraphSubscriptionRecord {
+  id: string;
+  name?: string;
+  subscribed: boolean;
+  synced: boolean;
+  sharedMemorySynced?: boolean;
+  metaSynced?: boolean;
+  onChainId?: string;
+  syncScoped: boolean;
+}
+
+export interface ContextGraphSubscriptionStore {
+  loadAll(): Promise<ContextGraphSubscriptionRecord[]>;
+  save(record: ContextGraphSubscriptionRecord): Promise<void>;
+  delete(contextGraphId: string): Promise<void>;
+}
+
+export type ContextGraphMemberPrincipalType = 'node' | 'agent' | 'identity';
+export type ContextGraphMemberStatus = 'active' | 'removed' | 'pending';
+
+export interface ContextGraphMembershipRecord {
+  contextGraphId: string;
+  principalType: ContextGraphMemberPrincipalType;
+  principalId: string;
+  role?: string;
+  status: ContextGraphMemberStatus;
+  source?: string;
+  displayName?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface ContextGraphMembershipStore {
+  upsert(record: ContextGraphMembershipRecord & { firstSeenAt?: number; updatedAt: number }): Promise<void>;
+  delete(contextGraphId: string, principalType: ContextGraphMemberPrincipalType, principalId: string): Promise<void>;
 }
 
 /** @deprecated Use ContextGraphSub */
@@ -278,12 +325,37 @@ export interface DKGAgentConfig {
   storeConfig?: TripleStoreConfig;
   /** Node deployment tier: 'core' (cloud, relay) or 'edge' (personal, behind NAT). Default: 'edge'. */
   nodeRole?: 'core' | 'edge';
+  /**
+   * Path to the V10 Random Sampling prover write-ahead log. Core
+   * nodes only; ignored on edge. When omitted, an in-memory WAL is
+   * used (loses crash-recovery context on restart). Production
+   * deployments SHOULD set this to a persistent path under `dataDir`.
+   */
+  randomSamplingWalPath?: string;
+  /**
+   * If true (default on core), run the V10 Merkle proof build on a
+   * `worker_threads` worker so a 100k-leaf KC does not block the
+   * agent's event loop. Set false to keep the build on the main
+   * thread (test ergonomics, deterministic profiling).
+   */
+  randomSamplingUseWorkerThread?: boolean;
+  /**
+   * Tick cadence for the prover loop (ms). Default 30s. The
+   * orchestrator is idempotent under double-ticks; a tighter cadence
+   * is safe but yields more chain reads.
+   */
+  randomSamplingTickIntervalMs?: number;
   /** Pre-built chain adapter (for testing). If provided, chainConfig is ignored. */
   chainAdapter?: ChainAdapter;
   /** Private key for the V10 ACK signer. When omitted, falls back to chainConfig.operationalKeys[0]. */
   ackSignerKey?: string;
   /**
    * EVM chain configuration. If omitted, publishing won't have on-chain finality.
+   * `adminPrivateKey` is the private key for the profile admin wallet used
+   * only for profile/key-management transactions. Nodes may omit it when they
+   * already have an on-chain identity and do not need profile creation/key-repair
+   * privileges; profile mutation paths will fail fast if admin authority is
+   * required but unavailable.
    * `operationalKeys` are the private keys for operational wallets.
    * The first key is the primary signer (identity, staking); all are used
    * round-robin for publish TXs to avoid nonce collisions on parallel publishes.
@@ -291,6 +363,7 @@ export interface DKGAgentConfig {
   chainConfig?: {
     rpcUrl: string;
     hubAddress: string;
+    adminPrivateKey?: string;
     operationalKeys: string[];
     chainId?: string;
   };
@@ -300,6 +373,10 @@ export interface DKGAgentConfig {
   syncContextGraphs?: string[];
   /** TTL for shared memory data in milliseconds. Expired operations are periodically cleaned up. Default: 48 hours. Set to 0 to disable. */
   sharedMemoryTtlMs?: number;
+  /** Durable local store for subscribed context-graph runtime state. */
+  contextGraphSubscriptionStore?: ContextGraphSubscriptionStore;
+  /** Durable local cache for nodes/agents known to be members of a context graph. */
+  contextGraphMembershipStore?: ContextGraphMembershipStore;
 }
 
 /**
@@ -337,6 +414,11 @@ export class DKGAgent {
   private messageHandler: MessageHandler | null = null;
   private chainPoller: ChainEventPoller | null = null;
   private swmCleanupTimer: ReturnType<typeof setInterval> | null = null;
+  private randomSamplingHandle: RandomSamplingHandle | null = null;
+  private randomSamplingBindRetryTimer: ReturnType<typeof setInterval> | null = null;
+  private randomSamplingBindRetryInFlight = false;
+  private storageACKRegistrationRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  private storageACKRegistrationRetryInFlight = false;
   private readonly config: DKGAgentConfig;
   private started = false;
   private readonly subscribedContextGraphs = new Map<string, ContextGraphSub>();
@@ -449,6 +531,7 @@ export class DKGAgent {
       log.warn(ctx, `No dataDir — triple store is in-memory (data will be lost on restart)`);
     }
 
+    const nodeRole = config.nodeRole ?? 'edge';
     let chain: ChainAdapter;
     let opKeys = config.chainConfig?.operationalKeys;
     if (config.chainAdapter) {
@@ -457,13 +540,18 @@ export class DKGAgent {
         opKeys = [(chain as any).getOperationalPrivateKey()];
       }
     } else if (config.chainConfig && opKeys?.length) {
-      chain = new EVMChainAdapter({
+      const evmConfigBase = {
         rpcUrl: config.chainConfig.rpcUrl,
         privateKey: opKeys[0],
         additionalKeys: opKeys.slice(1),
         hubAddress: config.chainConfig.hubAddress,
         chainId: config.chainConfig.chainId,
-      });
+      };
+      if (config.chainConfig.adminPrivateKey) {
+        chain = new EVMChainAdapter({ ...evmConfigBase, adminPrivateKey: config.chainConfig.adminPrivateKey });
+      } else {
+        chain = new EVMChainAdapter({ ...evmConfigBase, allowNoAdminSigner: true });
+      }
     } else {
       chain = new NoChainAdapter();
     }
@@ -476,7 +564,6 @@ export class DKGAgent {
 
     const port = config.listenPort ?? 0;
     const host = config.listenHost ?? '0.0.0.0';
-    const nodeRole = config.nodeRole ?? 'edge';
     const nodeConfig: DKGNodeConfig = {
       listenAddresses: [`/ip4/${host}/tcp/${port}`],
       announceAddresses: config.announceAddresses,
@@ -519,6 +606,79 @@ export class DKGAgent {
     );
   }
 
+  private getACKSignerCandidateWallets(ctx: OperationContext): ethers.Wallet[] {
+    const operationalKeys = this.config.chainAdapter
+      ? []
+      : (this.config.chainConfig?.operationalKeys ?? []);
+    const keys = [
+      this.config.ackSignerKey,
+      ...operationalKeys,
+      typeof this.chain.getACKSignerKey === 'function' ? this.chain.getACKSignerKey() : undefined,
+    ].filter((key): key is string => Boolean(key));
+
+    const wallets: ethers.Wallet[] = [];
+    const seen = new Set<string>();
+    for (const key of keys) {
+      try {
+        const wallet = new ethers.Wallet(key);
+        const addressKey = wallet.address.toLowerCase();
+        if (seen.has(addressKey)) continue;
+        seen.add(addressKey);
+        wallets.push(wallet);
+      } catch (err) {
+        this.log.warn(ctx, `Ignoring invalid ACK signer key: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
+    return wallets;
+  }
+
+  private async resolveConfirmedACKSigner(
+    identityId: bigint,
+    candidates: ethers.Wallet[],
+    ctx: OperationContext,
+  ): Promise<ACKSignerResolution> {
+    const isOperationalWalletRegistered = this.chain.isOperationalWalletRegistered;
+    if (typeof isOperationalWalletRegistered !== 'function') {
+      this.log.warn(
+        ctx,
+        'V10 StorageACK signer disabled: chain adapter does not implement required on-chain operational wallet confirmation',
+      );
+      return { wallet: null, retryable: false };
+    }
+
+    let sawLookupError = false;
+    for (const wallet of candidates) {
+      try {
+        if (await isOperationalWalletRegistered.call(this.chain, identityId, wallet.address)) {
+          return { wallet, retryable: false };
+        }
+      } catch (err) {
+        sawLookupError = true;
+        this.log.warn(
+          ctx,
+          `Unable to confirm ACK signer ${wallet.address} on-chain: ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+
+    if (sawLookupError) {
+      this.log.warn(
+        ctx,
+        `V10 StorageACK handler registration deferred: signer confirmation failed due lookup error(s)`,
+      );
+      return { wallet: null, retryable: true };
+    }
+
+    this.log.warn(
+      ctx,
+      `V10 StorageACK signer disabled: no candidate key is confirmed on-chain as ` +
+      `OPERATIONAL_KEY for identity ${identityId}`,
+    );
+    return { wallet: null, retryable: false };
+  }
+
   async start(): Promise<void> {
     if (this.started) return;
     const ctx = createOperationContext('connect');
@@ -544,6 +704,7 @@ export class DKGAgent {
 
     this.router = new ProtocolRouter(this.node);
     this.gossip = new GossipSubManager(this.node, this.eventBus);
+    await this.rehydrateContextGraphSubscriptions();
 
     // Register protocol handlers
     const accessHandler = new AccessHandler(this.store, this.eventBus);
@@ -571,36 +732,75 @@ export class DKGAgent {
     this.router.register(PROTOCOL_QUERY_REMOTE, queryRemoteHandler.handler);
 
     const effectiveRole = this.config.nodeRole ?? 'edge';
+    const ackSignerCandidates = this.getACKSignerCandidateWallets(ctx);
+    let onChainIdentityId = 0n;
+    const ensureACKCandidateWalletsRegistered = async (
+      attemptCtx: OperationContext,
+    ): Promise<boolean> => {
+      if (onChainIdentityId <= 0n || typeof this.chain.ensureOperationalWalletsRegistered !== 'function') {
+        return true;
+      }
+      try {
+        const registration = await this.chain.ensureOperationalWalletsRegistered({
+          identityId: onChainIdentityId,
+          additionalAddresses: ackSignerCandidates.map((wallet) => wallet.address),
+        });
+        if (registration.registered.length > 0) {
+          this.log.info(
+            attemptCtx,
+            `Registered ${registration.registered.length} operational wallet(s) on-chain for ` +
+            `identityId=${onChainIdentityId}`,
+          );
+        }
+        if (registration.taken.length > 0) {
+          this.log.warn(
+            attemptCtx,
+            `Operational wallet(s) already registered to another identity: ` +
+            registration.taken.map((w) => `${w.address}->${w.identityId}`).join(', '),
+          );
+        }
+        return true;
+      } catch (err) {
+        this.log.warn(
+          attemptCtx,
+          `Operational wallet auto-registration failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        return false;
+      }
+    };
 
     // Auto-detect or register on-chain identity.
     // Edge nodes skip profile creation — they operate with agent identity only.
     if (this.chain.chainId !== 'none') {
-      let identityId = 0n;
       try {
-        identityId = await this.chain.getIdentityId();
-        if (identityId === 0n && effectiveRole === 'core') {
+        onChainIdentityId = await this.chain.getIdentityId();
+        if (onChainIdentityId === 0n && effectiveRole === 'core') {
           this.log.info(ctx, `No on-chain identity found, creating profile and staking...`);
-          identityId = await this.chain.ensureProfile({
+          onChainIdentityId = await this.chain.ensureProfile({
             nodeName: this.config.name,
           });
-          this.log.info(ctx, `On-chain profile created, identityId=${identityId}`);
-        } else if (identityId === 0n) {
+          this.log.info(ctx, `On-chain profile created, identityId=${onChainIdentityId}`);
+        } else if (onChainIdentityId === 0n) {
           this.log.info(ctx, `Edge node — skipping on-chain profile creation (agent identity only)`);
         } else {
-          this.log.info(ctx, `On-chain identity found: identityId=${identityId}`);
+          this.log.info(ctx, `On-chain identity found: identityId=${onChainIdentityId}`);
         }
       } catch (err) {
         this.log.warn(ctx, `ensureProfile error: ${err instanceof Error ? err.message : String(err)}`);
         try {
-          identityId = await this.chain.getIdentityId();
-          if (identityId > 0n) {
-            this.log.info(ctx, `Recovered identityId=${identityId} after partial failure`);
+          onChainIdentityId = await this.chain.getIdentityId();
+          if (onChainIdentityId > 0n) {
+            this.log.info(ctx, `Recovered identityId=${onChainIdentityId} after partial failure`);
           }
         } catch { /* ignore */ }
       }
-      if (identityId > 0n) {
-        this.publisher.setIdentityId(identityId);
-        this.log.info(ctx, `Publisher using identityId=${identityId}`);
+      if (onChainIdentityId > 0n) {
+        if (effectiveRole === 'core') {
+          await ensureACKCandidateWalletsRegistered(ctx);
+        }
+
+        this.publisher.setIdentityId(onChainIdentityId);
+        this.log.info(ctx, `Publisher using identityId=${onChainIdentityId}`);
       } else if (effectiveRole === 'core') {
         this.log.warn(ctx, `No valid on-chain identity — on-chain publishes will be skipped`);
       }
@@ -611,13 +811,28 @@ export class DKGAgent {
     // sign ACKs (the handler would reject immediately) and advertising the
     // protocol confuses peer-role detection based on protocol support.
     if (effectiveRole === 'core') {
-      const ackSignerKeyStr = this.config.ackSignerKey
-        ?? (typeof this.chain.getACKSignerKey === 'function' ? this.chain.getACKSignerKey() : undefined);
-      if (ackSignerKeyStr) {
-        try {
-          const ackSignerWallet = new ethers.Wallet(ackSignerKeyStr);
-          const identityId = await this.chain.getIdentityId();
-          if (identityId > 0n) {
+      if (ackSignerCandidates.length > 0) {
+        let storageACKProtocolRegistered = false;
+        let storageACKFailoverInFlight = false;
+        const attemptStorageACKRegistration = async (
+          attemptCtx: OperationContext,
+          options: { repairWallets?: boolean } = {},
+        ): Promise<'registered' | 'retryable' | 'disabled'> => {
+          if (storageACKProtocolRegistered) return 'registered';
+          if (onChainIdentityId > 0n) {
+            const registrationSucceeded = options.repairWallets === false
+              ? true
+              : await ensureACKCandidateWalletsRegistered(attemptCtx);
+            const signerResolution = await this.resolveConfirmedACKSigner(
+              onChainIdentityId,
+              ackSignerCandidates,
+              attemptCtx,
+            );
+            const ackSignerWallet = signerResolution.wallet;
+            if (!ackSignerWallet) {
+              return (registrationSucceeded && !signerResolution.retryable) ? 'disabled' : 'retryable';
+            }
+
             // The V10 ACK digest includes a (chainid, kav10Address) H5 prefix
             // per KnowledgeAssetsV10.sol:362-373. Resolve both from the chain
             // adapter BEFORE constructing the handler so the handler can sign
@@ -632,28 +847,116 @@ export class DKGAgent {
               : undefined;
             if (chainIdForHandler === undefined || kav10AddressForHandler === undefined) {
               this.log.warn(
-                ctx,
+                attemptCtx,
                 `Skipping V10 StorageACK handler: chain adapter does not expose ` +
                 `getEvmChainId() + getKnowledgeAssetsV10Address(); handler cannot build the ` +
                 `H5-prefixed ACK digest that KnowledgeAssetsV10 verifies on-chain`,
               );
-            } else {
-              const ackHandler = new StorageACKHandler(this.store, {
-                nodeRole: effectiveRole,
-                nodeIdentityId: typeof identityId === 'bigint' ? identityId : BigInt(identityId),
-                signerWallet: ackSignerWallet,
-                contextGraphSharedMemoryUri,
-                chainId: chainIdForHandler,
-                kav10Address: kav10AddressForHandler,
-              }, this.eventBus);
-              this.router.register(PROTOCOL_STORAGE_ACK, ackHandler.handler);
-              this.log.info(ctx, `Registered V10 StorageACK handler (identity=${identityId})`);
+              return 'disabled';
             }
+
+            const ackHandler = new StorageACKHandler(this.store, {
+              nodeRole: effectiveRole,
+              nodeIdentityId: onChainIdentityId,
+              signerWallet: ackSignerWallet,
+              contextGraphSharedMemoryUri,
+              chainId: chainIdForHandler,
+              kav10Address: kav10AddressForHandler,
+              isSignerRegistered: async () => {
+                const isOperationalWalletRegistered = this.chain.isOperationalWalletRegistered;
+                if (typeof isOperationalWalletRegistered !== 'function') return false;
+                return isOperationalWalletRegistered.call(
+                  this.chain,
+                  onChainIdentityId,
+                  ackSignerWallet.address,
+                );
+              },
+              onSignerUnregistered: () => {
+                if (storageACKFailoverInFlight) return;
+                storageACKFailoverInFlight = true;
+                storageACKProtocolRegistered = false;
+                this.router.unregister(PROTOCOL_STORAGE_ACK);
+                this.log.warn(
+                  attemptCtx,
+                  `Unregistered V10 StorageACK handler: signer ${ackSignerWallet.address} ` +
+                  `is no longer confirmed on-chain for identity=${onChainIdentityId}`,
+                );
+                attemptStorageACKRegistration(
+                  createOperationContext('connect'),
+                  { repairWallets: false },
+                )
+                  .then((result) => {
+                    if (result === 'retryable') {
+                      scheduleStorageACKRegistrationRetry({ repairWallets: false });
+                    }
+                  })
+                  .catch((err: unknown) => {
+                    this.log.warn(
+                      attemptCtx,
+                      `V10 StorageACK signer failover failed: ` +
+                      `${err instanceof Error ? err.message : String(err)}`,
+                    );
+                    scheduleStorageACKRegistrationRetry({ repairWallets: false });
+                  })
+                  .finally(() => {
+                    storageACKFailoverInFlight = false;
+                  });
+              },
+              onSignerRegistrationLookupFailed: (err) => {
+                this.log.warn(
+                  attemptCtx,
+                  `V10 StorageACK signer registration lookup failed for ${ackSignerWallet.address}; ` +
+                  `keeping handler active: ${err instanceof Error ? err.message : String(err)}`,
+                );
+              },
+            }, this.eventBus);
+            this.router.register(PROTOCOL_STORAGE_ACK, ackHandler.handler);
+            storageACKProtocolRegistered = true;
+            this.clearStorageACKRegistrationRetry();
+            this.log.info(
+              attemptCtx,
+              `Registered V10 StorageACK handler (identity=${onChainIdentityId}, signer=${ackSignerWallet.address})`,
+            );
+            return 'registered';
           } else {
-            this.log.warn(ctx, `Skipping V10 StorageACK handler registration — identity not yet provisioned`);
+            this.log.warn(attemptCtx, `Skipping V10 StorageACK handler registration — identity not yet provisioned`);
+            return 'disabled';
           }
+          return 'disabled';
+        };
+
+        const scheduleStorageACKRegistrationRetry = (options: { repairWallets?: boolean } = {}) => {
+          if (this.storageACKRegistrationRetryTimer || storageACKProtocolRegistered) return;
+          this.log.warn(ctx, `V10 StorageACK handler registration will retry every ${STORAGE_ACK_REGISTRATION_RETRY_MS}ms`);
+          this.storageACKRegistrationRetryTimer = setTimeout(() => {
+            this.storageACKRegistrationRetryTimer = null;
+            if (!this.started || storageACKProtocolRegistered || this.storageACKRegistrationRetryInFlight) return;
+            this.storageACKRegistrationRetryInFlight = true;
+            attemptStorageACKRegistration(createOperationContext('connect'), options)
+              .then((result) => {
+                if (result === 'retryable') scheduleStorageACKRegistrationRetry(options);
+              })
+              .catch((err: unknown) => {
+                this.log.warn(
+                  ctx,
+                  `V10 StorageACK handler registration retry failed: ` +
+                  `${err instanceof Error ? err.message : String(err)}`,
+                );
+                scheduleStorageACKRegistrationRetry(options);
+              })
+              .finally(() => {
+                this.storageACKRegistrationRetryInFlight = false;
+              });
+          }, STORAGE_ACK_REGISTRATION_RETRY_MS);
+          if (this.storageACKRegistrationRetryTimer.unref) this.storageACKRegistrationRetryTimer.unref();
+        };
+
+        try {
+          const result = await attemptStorageACKRegistration(ctx);
+          if (result === 'retryable') scheduleStorageACKRegistrationRetry();
         } catch (err) {
           this.log.warn(ctx, `Skipping V10 StorageACK handler: ${err instanceof Error ? err.message : String(err)}`);
+          scheduleStorageACKRegistrationRetry();
         }
       } else if (typeof this.chain.signACKDigest === 'function') {
         this.log.info(ctx, `V10 StorageACK: adapter has signACKDigest but no extractable key — handler registration deferred until callback signing is supported`);
@@ -781,6 +1084,16 @@ export class DKGAgent {
             this.preferredSyncPeers.set(contextGraphId, peerId.toString());
             this.log.info(createOperationContext('system'), `Join request approved for "${contextGraphId}" — auto-subscribing`);
             this.subscribeToContextGraph(contextGraphId);
+            if (approvedAddr) {
+              this.upsertContextGraphMember({
+                contextGraphId,
+                principalType: 'agent',
+                principalId: approvedAddr,
+                role: 'participant',
+                status: 'active',
+                source: 'join-approved',
+              });
+            }
             this.syncContextGraphFromConnectedPeers(contextGraphId, { includeSharedMemory: true }).catch(() => {});
             this.eventBus.emit(DKGEvent.JOIN_APPROVED, {
               contextGraphId,
@@ -830,6 +1143,14 @@ export class DKGAgent {
             return new TextEncoder().encode(JSON.stringify({ ok: true, skipped: true }));
           }
           this.log.info(createOperationContext('system'), `Join request rejected for "${contextGraphId}"`);
+          this.upsertContextGraphMember({
+            contextGraphId,
+            principalType: 'agent',
+            principalId: rejectedAddr,
+            role: 'requester',
+            status: 'removed',
+            source: 'join-rejected',
+          });
           this.eventBus.emit(DKGEvent.JOIN_REJECTED, {
             contextGraphId,
             agentAddress: rejectedAddr,
@@ -980,6 +1301,124 @@ export class DKGAgent {
       }, SWM_CLEANUP_INTERVAL_MS);
       if (this.swmCleanupTimer.unref) this.swmCleanupTimer.unref();
     }
+
+    // Wire V10 Random Sampling prover. Edge nodes no-op. Core nodes with
+    // transient identity/RPC startup failures retry in the background so
+    // one flaky `getIdentityId()` call does not disable proving until the
+    // next process restart.
+    const rsStart = await this.tryStartRandomSamplingProver(ctx, true);
+    if (rsStart === 'retryable') {
+      this.scheduleRandomSamplingBindRetry(ctx);
+    }
+  }
+
+  private randomSamplingLogger(ctx: OperationContext) {
+    return {
+      info: (event: string, fields: Record<string, unknown>) =>
+        this.log.info(ctx, `[${event}] ${JSON.stringify(fields)}`),
+      warn: (event: string, fields: Record<string, unknown>) =>
+        this.log.warn(ctx, `[${event}] ${JSON.stringify(fields)}`),
+      error: (event: string, fields: Record<string, unknown>) =>
+        this.log.error(ctx, `[${event}] ${JSON.stringify(fields)}`),
+    };
+  }
+
+  private async tryStartRandomSamplingProver(
+    ctx: OperationContext,
+    logDisabled: boolean,
+  ): Promise<RandomSamplingStartResult> {
+    if (!this.started) return 'disabled';
+    const rsRole: 'core' | 'edge' = (this.config.nodeRole ?? 'edge') === 'core' ? 'core' : 'edge';
+    if (rsRole !== 'core' || this.chain.chainId === 'none') return 'disabled';
+
+    let rsIdentityId = 0n;
+    try {
+      rsIdentityId = await this.chain.getIdentityId();
+    } catch (err) {
+      this.log.warn(
+        ctx,
+        `V10 Random Sampling identity lookup failed; prover bind will retry: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return 'retryable';
+    }
+
+    if (rsIdentityId === 0n) {
+      if (logDisabled) {
+        this.log.info(ctx, `V10 Random Sampling prover not started (identity=0, chain=${this.chain.chainId}); will retry`);
+      }
+      return 'retryable';
+    }
+    if (!this.started) return 'disabled';
+
+    try {
+      const handle = await bindRandomSampling({
+        role: rsRole,
+        chain: this.chain,
+        store: this.store,
+        identityId: rsIdentityId,
+        walPath: this.config.randomSamplingWalPath,
+        useWorkerThread: this.config.randomSamplingUseWorkerThread ?? true,
+        tickIntervalMs: this.config.randomSamplingTickIntervalMs,
+        log: this.randomSamplingLogger(ctx),
+      });
+      if (this.randomSamplingHandle && this.randomSamplingHandle !== handle) {
+        try { await this.randomSamplingHandle.stop(); } catch { /* swallow bind replacement cleanup */ }
+      }
+      this.randomSamplingHandle = handle;
+      if (handle.enabled) {
+        if (!this.started) {
+          try { await handle.stop(); } catch { /* swallow shutdown race cleanup */ }
+          return 'disabled';
+        }
+        handle.start();
+        this.clearRandomSamplingBindRetry();
+        this.log.info(ctx, `V10 Random Sampling prover started (identityId=${rsIdentityId})`);
+        return 'started';
+      }
+      if (logDisabled) {
+        this.log.info(ctx, `V10 Random Sampling prover not started (identity=${rsIdentityId}, chain=${this.chain.chainId})`);
+      }
+      return 'disabled';
+    } catch (err) {
+      this.log.warn(ctx, `Failed to bind V10 Random Sampling prover: ${err instanceof Error ? err.message : String(err)}`);
+      return 'retryable';
+    }
+  }
+
+  private scheduleRandomSamplingBindRetry(ctx: OperationContext): void {
+    if (this.randomSamplingBindRetryTimer) return;
+    this.log.warn(ctx, `V10 Random Sampling prover bind will retry every ${RANDOM_SAMPLING_BIND_RETRY_MS}ms`);
+    this.randomSamplingBindRetryTimer = setInterval(() => {
+      if (!this.started || this.randomSamplingBindRetryInFlight || this.randomSamplingHandle?.enabled) return;
+      this.randomSamplingBindRetryInFlight = true;
+      this.tryStartRandomSamplingProver(ctx, false)
+        .then((result) => {
+          if (result === 'started' || result === 'disabled') {
+            this.clearRandomSamplingBindRetry();
+          }
+        })
+        .catch((err: unknown) => {
+          this.log.warn(ctx, `V10 Random Sampling prover retry failed: ${err instanceof Error ? err.message : String(err)}`);
+        })
+        .finally(() => {
+          this.randomSamplingBindRetryInFlight = false;
+        });
+    }, RANDOM_SAMPLING_BIND_RETRY_MS);
+    if (this.randomSamplingBindRetryTimer.unref) this.randomSamplingBindRetryTimer.unref();
+  }
+
+  private clearRandomSamplingBindRetry(): void {
+    if (!this.randomSamplingBindRetryTimer) return;
+    clearInterval(this.randomSamplingBindRetryTimer);
+    this.randomSamplingBindRetryTimer = null;
+  }
+
+  private clearStorageACKRegistrationRetry(): void {
+    if (!this.storageACKRegistrationRetryTimer) return;
+    clearTimeout(this.storageACKRegistrationRetryTimer);
+    this.storageACKRegistrationRetryTimer = null;
   }
 
   /**
@@ -1017,9 +1456,9 @@ export class DKGAgent {
    * to incoming gossip with an opportunistic dial, we restore the path long
    * before the application-layer sync protocol is invoked.
    *
-   * Best-effort only: we try peerStore-known multiaddrs first, then fall
-   * back to constructing `/p2p-circuit` multiaddrs through each configured
-   * relay. Failures are logged but never surface to the caller.
+   * Best-effort only: for each configured relay that we are already connected
+   * to, construct an explicit `/p2p-circuit` multiaddr and dial. Failures are
+   * logged but never surface to the caller.
    */
   private async maybeDialGossipSender(peerIdStr: string): Promise<void> {
     const selfPeerId = this.node.libp2p.peerId.toString();
@@ -1040,30 +1479,24 @@ export class DKGAgent {
     const shortPeer = peerIdStr.slice(-8);
 
     const { peerIdFromString } = await import('@libp2p/peer-id');
-    let peerId: ReturnType<typeof peerIdFromString>;
     try {
-      peerId = peerIdFromString(peerIdStr);
+      peerIdFromString(peerIdStr);
     } catch (err) {
       this.log.warn(ctx, `Skipping gossip redial for invalid peer id ${shortPeer}: ${err instanceof Error ? err.message : String(err)}`);
       return;
     }
 
-    // First pass: let libp2p try whatever addresses it already knows about
-    // for this peer (direct multiaddrs from identify, previous relay
-    // addresses from peerStore, etc.).
-    try {
-      await this.node.libp2p.dial(peerId, { signal: AbortSignal.timeout(GOSSIP_DIAL_TIMEOUT_MS) });
-      this.log.info(ctx, `Reconnect-on-gossip: dialed ${shortPeer} via peerStore`);
-      return;
-    } catch (err) {
-      this.log.info(ctx, `Reconnect-on-gossip: peerStore dial to ${shortPeer} failed (${err instanceof Error ? err.message : String(err)}); trying relay fallbacks`);
-    }
-
-    // Relay fallback: for each configured relay, construct an explicit
-    // circuit-relay multiaddr and dial. The first relay with a valid
-    // reservation for the sender wins.
     const relays = this.config.relayPeers ?? [];
+    const connectedPeers = new Set(this.node.libp2p.getPeers().map(p => p.toString()));
+    let skippedRelays = 0;
+
     for (const relayAddr of relays) {
+      const relayPeerId = relayAddr.match(/\/p2p\/([^/]+)/)?.[1];
+      if (relayPeerId == null || !connectedPeers.has(relayPeerId)) {
+        skippedRelays++;
+        continue;
+      }
+
       const circuitAddr = `${relayAddr}/p2p-circuit/p2p/${peerIdStr}`;
       try {
         await this.node.libp2p.dial(
@@ -1078,7 +1511,7 @@ export class DKGAgent {
       }
     }
 
-    this.log.info(ctx, `Reconnect-on-gossip: no path to ${shortPeer} via peerStore or ${relays.length} relay(s); will retry after cooldown`);
+    this.log.info(ctx, `Reconnect-on-gossip: no path to ${shortPeer} via ${relays.length - skippedRelays}/${relays.length} connected relay(s); will retry after cooldown`);
   }
 
   /**
@@ -1495,7 +1928,160 @@ export class DKGAgent {
       if (!sub || sub.metaSynced === true) continue;
       if (await this.hasConfirmedMetaState(contextGraphId)) {
         sub.metaSynced = true;
+        this.persistContextGraphSubscription(contextGraphId);
       }
+    }
+  }
+
+  private setContextGraphSubscription(
+    contextGraphId: string,
+    next: ContextGraphSub,
+    options?: { persist?: boolean },
+  ): ContextGraphSub {
+    this.subscribedContextGraphs.set(contextGraphId, next);
+    if (options?.persist !== false) {
+      this.persistContextGraphSubscription(contextGraphId);
+      if (next.subscribed) {
+        this.persistLocalNodeMembership(contextGraphId);
+      } else {
+        this.deleteContextGraphMember(contextGraphId, 'node', this.peerId);
+      }
+    }
+    return next;
+  }
+
+  markContextGraphSubscriptionState(contextGraphId: string, patch: Partial<ContextGraphSub>): void {
+    const existing = this.subscribedContextGraphs.get(contextGraphId);
+    if (!existing) return;
+    this.setContextGraphSubscription(contextGraphId, { ...existing, ...patch });
+  }
+
+  persistContextGraphSubscriptionState(contextGraphId: string): void {
+    this.persistContextGraphSubscription(contextGraphId);
+  }
+
+  private persistContextGraphSubscription(contextGraphId: string): void {
+    const store = this.config.contextGraphSubscriptionStore;
+    if (!store) return;
+    const sub = this.subscribedContextGraphs.get(contextGraphId);
+    if (!sub?.subscribed) {
+      void store.delete(contextGraphId).catch((err) => {
+        this.log.warn(
+          createOperationContext('system'),
+          `Failed to delete persisted context-graph subscription for "${contextGraphId}": ${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
+      return;
+    }
+    void store.save({
+      id: contextGraphId,
+      name: sub.name,
+      subscribed: sub.subscribed,
+      synced: sub.synced,
+      sharedMemorySynced: sub.sharedMemorySynced,
+      metaSynced: sub.metaSynced,
+      onChainId: sub.onChainId,
+      syncScoped: (this.config.syncContextGraphs ?? []).includes(contextGraphId),
+    }).catch((err) => {
+      this.log.warn(
+        createOperationContext('system'),
+        `Failed to persist context-graph subscription for "${contextGraphId}": ${err instanceof Error ? err.message : String(err)}`,
+      );
+    });
+  }
+
+  private normalizeMembershipPrincipal(
+    principalType: ContextGraphMemberPrincipalType,
+    principalId: string,
+  ): string {
+    if (principalType === 'agent' && ethers.isAddress(principalId)) {
+      return ethers.getAddress(principalId);
+    }
+    return principalId;
+  }
+
+  private upsertContextGraphMember(record: ContextGraphMembershipRecord): void {
+    const store = this.config.contextGraphMembershipStore;
+    if (!store) return;
+    const normalizedRecord = {
+      ...record,
+      principalId: this.normalizeMembershipPrincipal(record.principalType, record.principalId),
+    };
+    const updatedAt = Date.now();
+    void store.upsert({ ...normalizedRecord, updatedAt }).catch((err) => {
+      this.log.warn(
+        createOperationContext('system'),
+        `Failed to persist context-graph membership for "${normalizedRecord.contextGraphId}" (${normalizedRecord.principalType}:${normalizedRecord.principalId}): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    });
+  }
+
+  private deleteContextGraphMember(
+    contextGraphId: string,
+    principalType: ContextGraphMemberPrincipalType,
+    principalId: string,
+  ): void {
+    const store = this.config.contextGraphMembershipStore;
+    if (!store) return;
+    const normalizedPrincipalId = this.normalizeMembershipPrincipal(principalType, principalId);
+    void store.delete(contextGraphId, principalType, normalizedPrincipalId).catch((err) => {
+      this.log.warn(
+        createOperationContext('system'),
+        `Failed to delete context-graph membership for "${contextGraphId}" (${principalType}:${normalizedPrincipalId}): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    });
+  }
+
+  private persistLocalNodeMembership(contextGraphId: string, source = 'subscription'): void {
+    const sub = this.subscribedContextGraphs.get(contextGraphId);
+    this.upsertContextGraphMember({
+      contextGraphId,
+      principalType: 'node',
+      principalId: this.peerId,
+      role: 'subscriber',
+      status: 'active',
+      source,
+      displayName: this.nodeName,
+      metadata: {
+        subscribed: sub?.subscribed ?? false,
+        synced: sub?.synced ?? false,
+        sharedMemorySynced: sub?.sharedMemorySynced ?? false,
+        metaSynced: sub?.metaSynced ?? false,
+        ...(sub?.onChainId ? { onChainId: sub.onChainId } : {}),
+      },
+    });
+  }
+
+  private async rehydrateContextGraphSubscriptions(): Promise<void> {
+    const store = this.config.contextGraphSubscriptionStore;
+    if (!store) return;
+    const ctx = createOperationContext('init');
+    try {
+      const rows = await store.loadAll();
+      for (const row of rows) {
+        this.setContextGraphSubscription(row.id, {
+          name: row.name,
+          subscribed: row.subscribed,
+          synced: row.synced,
+          sharedMemorySynced: row.sharedMemorySynced,
+          metaSynced: row.metaSynced,
+          onChainId: row.onChainId,
+        }, { persist: false });
+      }
+      for (const row of rows) {
+        if (row.syncScoped) {
+          this.trackSyncContextGraph(row.id);
+        }
+        if (row.subscribed) {
+          this.subscribeToContextGraph(row.id, { trackSyncScope: false, persist: false });
+          this.persistLocalNodeMembership(row.id, 'rehydrated-subscription');
+        }
+      }
+      if (rows.length > 0) {
+        this.log.info(ctx, `Rehydrated ${rows.length} persisted context-graph subscription(s)`);
+      }
+    } catch (err) {
+      this.log.warn(ctx, `Failed to rehydrate persisted context-graph subscriptions: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
@@ -2413,6 +2999,27 @@ export class DKGAgent {
       throw new Error('createOnChainContextGraph not available on chain adapter');
     }
     const result = await this.chain.createOnChainContextGraph(params);
+    const contextGraphId = result.contextGraphId.toString();
+    for (const identityId of params.participantIdentityIds) {
+      this.upsertContextGraphMember({
+        contextGraphId,
+        principalType: 'identity',
+        principalId: identityId.toString(),
+        role: 'hosting-node',
+        status: 'active',
+        source: 'on-chain-registration',
+      });
+    }
+    for (const agentAddress of params.participantAgents ?? []) {
+      this.upsertContextGraphMember({
+        contextGraphId,
+        principalType: 'agent',
+        principalId: agentAddress,
+        role: 'participant-agent',
+        status: 'active',
+        source: 'on-chain-registration',
+      });
+    }
     this.log.info(ctx, `Created on-chain context graph ${result.contextGraphId} (M=${params.requiredSignatures}, N=${params.participantIdentityIds.length})`);
     return result;
   }
@@ -2869,7 +3476,7 @@ export class DKGAgent {
     });
   }
 
-  subscribeToContextGraph(contextGraphId: string, options?: { trackSyncScope?: boolean }): void {
+  subscribeToContextGraph(contextGraphId: string, options?: { trackSyncScope?: boolean; persist?: boolean }): void {
     if (options?.trackSyncScope !== false) {
       this.trackSyncContextGraph(contextGraphId);
     }
@@ -2878,7 +3485,11 @@ export class DKGAgent {
     if (this.gossipRegistered.has(contextGraphId)) {
       const existing = this.subscribedContextGraphs.get(contextGraphId);
       if (!existing?.subscribed) {
-        this.subscribedContextGraphs.set(contextGraphId, { ...existing, subscribed: true, synced: existing?.synced ?? false });
+        this.setContextGraphSubscription(
+          contextGraphId,
+          { ...existing, subscribed: true, synced: existing?.synced ?? false },
+          { persist: options?.persist },
+        );
       }
       return;
     }
@@ -2893,7 +3504,11 @@ export class DKGAgent {
     this.gossip.subscribe(appTopic);
 
     const existing = this.subscribedContextGraphs.get(contextGraphId);
-    this.subscribedContextGraphs.set(contextGraphId, { ...existing, subscribed: true, synced: existing?.synced ?? false });
+    this.setContextGraphSubscription(
+      contextGraphId,
+      { ...existing, subscribed: true, synced: existing?.synced ?? false },
+      { persist: options?.persist },
+    );
 
     this.gossip.onMessage(publishTopic, async (_topic, data, from) => {
       const gph = this.getOrCreateGossipPublishHandler();
@@ -2949,6 +3564,7 @@ export class DKGAgent {
           getContextGraphOwner: (id) => this.getContextGraphCreator(id),
           subscribeToContextGraph: (id, options) => this.subscribeToContextGraph(id, options),
           hasConfirmedMetaState: (id) => this.hasConfirmedMetaState(id),
+          persistContextGraphSubscription: (id) => this.persistContextGraphSubscriptionState(id),
         },
       );
     }
@@ -3216,12 +3832,81 @@ export class DKGAgent {
     await this.store.insert(quads);
     await gm.ensureParanet(opts.id);
 
-    this.subscribedContextGraphs.set(opts.id, {
+    this.setContextGraphSubscription(opts.id, {
       name: opts.name,
       subscribed: !opts.private,
       synced: true,
       metaSynced: true,
     });
+
+    if (opts.private || isCurated) {
+      this.upsertContextGraphMember({
+        contextGraphId: opts.id,
+        principalType: 'node',
+        principalId: this.peerId,
+        role: 'curator',
+        status: 'active',
+        source: 'local-create',
+        displayName: this.nodeName,
+      });
+    }
+
+    const curatorAgentAddress = opts.callerAgentAddress ?? this.defaultAgentAddress;
+    if (curatorAgentAddress) {
+      this.upsertContextGraphMember({
+        contextGraphId: opts.id,
+        principalType: 'agent',
+        principalId: curatorAgentAddress,
+        role: 'curator',
+        status: 'active',
+        source: 'local-create',
+      });
+    }
+
+    for (const peer of opts.allowedPeers ?? []) {
+      this.upsertContextGraphMember({
+        contextGraphId: opts.id,
+        principalType: 'node',
+        principalId: peer,
+        role: 'participant',
+        status: 'active',
+        source: 'allowed-peer',
+      });
+    }
+
+    for (const addr of opts.allowedAgents ?? []) {
+      this.upsertContextGraphMember({
+        contextGraphId: opts.id,
+        principalType: 'agent',
+        principalId: addr,
+        role: 'participant',
+        status: 'active',
+        source: 'allowed-agent',
+      });
+    }
+
+    for (const addr of opts.participantAgents ?? []) {
+      if (!ethers.isAddress(addr)) continue;
+      this.upsertContextGraphMember({
+        contextGraphId: opts.id,
+        principalType: 'agent',
+        principalId: ethers.getAddress(addr),
+        role: 'participant-agent',
+        status: 'active',
+        source: 'participant-agent',
+      });
+    }
+
+    for (const identityId of participantIdentityIds) {
+      this.upsertContextGraphMember({
+        contextGraphId: opts.id,
+        principalType: 'identity',
+        principalId: identityId.toString(),
+        role: 'hosting-node',
+        status: 'active',
+        source: 'participant-identity',
+      });
+    }
 
     // On-chain registration is intentionally NOT done here — per v10 spec
     // §2.2 / §2.3 Context Graphs are a local-first primitive. A CG exists
@@ -3548,6 +4233,7 @@ export class DKGAgent {
         this.subscribeToContextGraph(id, { trackSyncScope: true });
         this.log.info(ctx, `Subscribed to newly registered context graph "${id}"`);
       }
+      this.persistContextGraphSubscription(id);
     }
 
     // Registration status is in _meta — it propagates to peers via sync, not
@@ -3628,6 +4314,14 @@ export class DKGAgent {
 
     // Skip if already in the allowlist (idempotent)
     if (existingAllowlist?.includes(peerId)) {
+      this.upsertContextGraphMember({
+        contextGraphId,
+        principalType: 'node',
+        principalId: peerId,
+        role: 'participant',
+        status: 'active',
+        source: 'allowed-peer',
+      });
       this.log.info(ctx, `Peer ${peerId} already in allowlist for "${contextGraphId}" — skipping`);
       return;
     }
@@ -3640,6 +4334,26 @@ export class DKGAgent {
     });
 
     await this.store.insert(quadsToInsert);
+
+    if (existingAllowlist === null || existingAllowlist.length === 0) {
+      this.upsertContextGraphMember({
+        contextGraphId,
+        principalType: 'node',
+        principalId: this.peerId,
+        role: 'curator',
+        status: 'active',
+        source: 'allowed-peer',
+        displayName: this.nodeName,
+      });
+    }
+    this.upsertContextGraphMember({
+      contextGraphId,
+      principalType: 'node',
+      principalId: peerId,
+      role: 'participant',
+      status: 'active',
+      source: 'allowed-peer',
+    });
 
     // Allowlist updates are in _meta and propagate to peers via the
     // authenticated sync protocol, not unauthenticated gossip.
@@ -3685,6 +4399,14 @@ export class DKGAgent {
         object: `"${this.defaultAgentAddress}"`,
         graph: cgMetaGraph,
       });
+      this.upsertContextGraphMember({
+        contextGraphId,
+        principalType: 'agent',
+        principalId: this.defaultAgentAddress,
+        role: 'curator',
+        status: 'active',
+        source: 'allowed-agent',
+      });
     }
 
     quadsToInsert.push({
@@ -3695,6 +4417,14 @@ export class DKGAgent {
     });
 
     await this.store.insert(quadsToInsert);
+    this.upsertContextGraphMember({
+      contextGraphId,
+      principalType: 'agent',
+      principalId: agentAddress,
+      role: 'participant',
+      status: 'active',
+      source: 'allowed-agent',
+    });
 
     this.log.info(ctx, `Invited agent ${agentAddress} to context graph "${contextGraphId}"`);
   }
@@ -3732,6 +4462,7 @@ export class DKGAgent {
       predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
       object: `"${agentAddress}"`,
     });
+    this.deleteContextGraphMember(contextGraphId, 'agent', agentAddress);
 
     this.log.info(ctx, `Removed agent ${agentAddress} from context graph "${contextGraphId}"`);
   }
@@ -3907,6 +4638,16 @@ export class DKGAgent {
       quads.push({ subject: requestUri, predicate: SCHEMA_NAME, object: `"${agentName}"`, graph: cgMetaGraph });
     }
     await this.store.insert(quads);
+    this.upsertContextGraphMember({
+      contextGraphId,
+      principalType: 'agent',
+      principalId: agentAddress,
+      role: 'requester',
+      status: 'pending',
+      source: 'join-request',
+      ...(agentName ? { displayName: agentName } : {}),
+      metadata: { timestamp },
+    });
     const ctx = createOperationContext('system');
     this.log.info(ctx, `Stored pending join request from ${agentAddress} for "${contextGraphId}"`);
   }
@@ -4048,6 +4789,14 @@ export class DKGAgent {
       object: `"rejected"`,
       graph: cgMetaGraph,
     }]);
+    this.upsertContextGraphMember({
+      contextGraphId,
+      principalType: 'agent',
+      principalId: agentAddress,
+      role: 'requester',
+      status: 'removed',
+      source: 'join-rejected',
+    });
 
     const ctx = createOperationContext('system');
     this.log.info(ctx, `Rejected join request from ${agentAddress} for "${contextGraphId}"`);
@@ -4458,7 +5207,7 @@ export class DKGAgent {
       // `LIMIT 1` made ownership nondeterministic — any subscriber could
       // win the unordered query and look like the curator.
       this.subscribeToContextGraph(opts.id);
-      this.subscribedContextGraphs.set(opts.id, {
+      this.setContextGraphSubscription(opts.id, {
         name: opts.name,
         subscribed: true,
         synced: true,
@@ -4516,7 +5265,7 @@ export class DKGAgent {
     await gm.ensureParanet(opts.id);
 
     this.subscribeToContextGraph(opts.id);
-    this.subscribedContextGraphs.set(opts.id, {
+    this.setContextGraphSubscription(opts.id, {
       name: opts.name,
       subscribed: true,
       synced: true,
@@ -6592,23 +7341,23 @@ export class DKGAgent {
         // `refreshMetaSyncedFlags(newlyDiscovered)` call from
         // `trySyncFromPeer` (see ~#1012) will flip the flag once the
         // allowlist has been fetched via the authenticated sync path.
-        this.subscribedContextGraphs.set(id, {
+        this.setContextGraphSubscription(id, {
           name,
           subscribed: false,
           synced: true,
           metaSynced: false,
           onChainId: undefined,
-        });
+        }, { persist: false });
         this.subscribeToContextGraph(id);
         this.log.info(ctx, `Discovered invited context graph "${name}" (${id}) — auto-subscribed (private/allowlisted)`);
       } else {
-        this.subscribedContextGraphs.set(id, {
+        this.setContextGraphSubscription(id, {
           name,
           subscribed: false,
           synced: true,
           metaSynced: source === 'meta',
           onChainId: undefined,
-        });
+        }, { persist: false });
         this.log.info(ctx, `Discovered context graph "${name}" (${id}) from ${source} store — added as discoverable only`);
       }
       discovered++;
@@ -6660,7 +7409,7 @@ export class DKGAgent {
         continue;
       }
 
-      this.subscribedContextGraphs.set(p.name, {
+      this.setContextGraphSubscription(p.name, {
         name: p.name,
         subscribed: true,
         synced: false,
@@ -6691,6 +7440,23 @@ export class DKGAgent {
     return discovered;
   }
 
+  /**
+   * Snapshot of the V10 Random Sampling prover's recent activity.
+   * Returns a disabled-handle status when the prover never started
+   * (edge node, no identity, missing chain methods). Used by the
+   * daemon's `/api/random-sampling/status` route + the CLI's
+   * `random-sampling status` subcommand.
+   */
+  getRandomSamplingStatus(): RandomSamplingStatus {
+    if (this.randomSamplingHandle) return this.randomSamplingHandle.getStatus();
+    return {
+      enabled: false,
+      role: (this.config.nodeRole ?? 'edge') as 'core' | 'edge',
+      identityId: '0',
+      loop: null,
+    };
+  }
+
   async stop(): Promise<void> {
     if (!this.started) return;
     if (this.chainPoller) {
@@ -6700,6 +7466,13 @@ export class DKGAgent {
     if (this.swmCleanupTimer) {
       clearInterval(this.swmCleanupTimer);
       this.swmCleanupTimer = null;
+    }
+    this.clearRandomSamplingBindRetry();
+    this.clearStorageACKRegistrationRetry();
+    this.storageACKRegistrationRetryInFlight = false;
+    if (this.randomSamplingHandle) {
+      try { await this.randomSamplingHandle.stop(); } catch { /* swallow on shutdown */ }
+      this.randomSamplingHandle = null;
     }
     await this.node.stop();
     if (this.syncVerifyWorker) {
@@ -6805,11 +7578,12 @@ export class DKGAgent {
       kaCount: number,
       rootEntities: string[],
       publicByteSize: bigint,
-      stagingQuads?: Uint8Array,
-      epochs?: number,
-      tokenAmount?: bigint,
-      swmGraphId?: string,
-      subGraphName?: string,
+      stagingQuads: Uint8Array | undefined,
+      epochs: number | undefined,
+      tokenAmount: bigint | undefined,
+      swmGraphId: string | undefined,
+      subGraphName: string | undefined,
+      merkleLeafCount: number,
     ) => {
       // Fail loud on non-numeric or non-positive CG ids: V10 publish requires
       // a real on-chain context graph and the contract rejects `cgId == 0`
@@ -6835,6 +7609,12 @@ export class DKGAgent {
         throw new Error(
           `V10 ACK collection requires a positive on-chain context graph id; got ${cgIdBigInt}. ` +
           `Register the CG on-chain via ContextGraphs.createContextGraph first.`,
+        );
+      }
+      if (!Number.isInteger(merkleLeafCount) || merkleLeafCount < 1) {
+        throw new Error(
+          `V10 ACK collection requires a positive integer merkleLeafCount; got ${merkleLeafCount}. ` +
+          'Publishers must pass the V10 flat-KC leaf count computed by V10MerkleTree.',
         );
       }
 
@@ -6866,6 +7646,7 @@ export class DKGAgent {
         tokenAmount,
         swmGraphId,
         subGraphName,
+        merkleLeafCount,
       });
       return result.acks;
     };
@@ -7058,4 +7839,3 @@ export class DKGAgent {
   }
 
 }
-

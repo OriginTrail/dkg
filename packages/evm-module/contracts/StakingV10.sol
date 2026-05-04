@@ -9,6 +9,7 @@ import {ProfileStorage} from "./storage/ProfileStorage.sol";
 import {ShardingTableStorage} from "./storage/ShardingTableStorage.sol";
 import {StakingStorage} from "./storage/StakingStorage.sol";
 import {ConvictionStakingStorage} from "./storage/ConvictionStakingStorage.sol";
+import {IdentityStorage} from "./storage/IdentityStorage.sol";
 import {RandomSamplingStorage} from "./storage/RandomSamplingStorage.sol";
 import {EpochStorage} from "./storage/EpochStorage.sol";
 import {Chronos} from "./storage/Chronos.sol";
@@ -16,7 +17,10 @@ import {ContractStatus} from "./abstract/ContractStatus.sol";
 import {IInitializable} from "./interfaces/IInitializable.sol";
 import {INamed} from "./interfaces/INamed.sol";
 import {IVersioned} from "./interfaces/IVersioned.sol";
+import {IdentityLib} from "./libraries/IdentityLib.sol";
+import {Permissions} from "./libraries/Permissions.sol";
 import {StakingLib} from "./libraries/StakingLib.sol";
+import {TokenLib} from "./libraries/TokenLib.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 /**
@@ -24,21 +28,24 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
  * @notice V10 NFT-backed staking orchestrator. Canonical staking entry point
  *         post-migration.
  *
- * V10 architecture (post-migration):
- *   - All delegator state is NFT-keyed and lives in ConvictionStakingStorage
- *     (positions, per-node aggregates, per-epoch operator-fee / net-rewards).
- *   - StakingStorage is a read-only V8 legacy archive and the TRAC vault.
- *     V10 does NOT write to StakingStorage's nodeStake / totalStake /
- *     delegatorStakeBase mappings except during `convertToNFT`, which
- *     drains the V8 state atomically in the same transaction that creates
- *     the V10 position.
+ * V10 architecture (post-consolidation, v3.0.0 / CSS v4.0.0):
+ *   - All V10 delegator state, the TRAC vault, AND operator-fee accounting
+ *     live in `ConvictionStakingStorage` (CSS). CSS extends `Guardian`, holds
+ *     `tokenContract`, and exposes `transferStake` for outflows. Deposits
+ *     route TRAC into the CSS address; withdrawals call `cs.transferStake`.
+ *   - `StakingStorage` is dead weight in the V10 hot path. It is read ONLY
+ *     by `_convertToNFT` (V8→V10 drain at cutover). Operator-fee balances,
+ *     operator-fee withdrawal requests, and the TRAC vault role moved into
+ *     CSS in v4.0.0.
  *   - DelegatorsInfo is unregistered (D13). The two per-node-per-epoch
  *     flags it used to hold (`isOperatorFeeClaimedForEpoch`,
  *     `netNodeEpochRewards`) were absorbed into ConvictionStakingStorage.
  *   - The V8 Staking contract is unregistered. The V8-side score
  *     settlement helper (`Staking.prepareForStakeChange`) is no longer
  *     reachable from V10 (D17); the V10-native `_prepareForStakeChangeV10`
- *     handles all V10 settlement.
+ *     handles all V10 settlement. Operator-fee request/finalize/cancel
+ *     was V8-only — v3.0.0 ports it to V10 (CSS-backed) so post-consolidation
+ *     deploys can fully drain operator fees without the V8 contract.
  *
  * Rewards model (D19 — compound into raw):
  *   - `claim()` walks the unclaimed window, sums TRAC rewards, and compounds
@@ -91,7 +98,20 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     //             the public surface so admins can add tier ids above 255.
     //           * L11 — `createPosition` no longer takes `multiplier18`;
     //             CSS reads it from the tier table.
-    string private constant _VERSION = "2.3.0";
+    //   3.0.0 — Storage consolidation (CSS v4.0.0):
+    //           * `stake` deposits TRAC into `convictionStorage` (CSS) instead
+    //             of `stakingStorage` (SS). CSS extends Guardian and is the
+    //             V10 TRAC vault.
+    //           * `withdraw` outflow uses `convictionStorage.transferStake`.
+    //           * `_claim` operator-fee accrual writes to
+    //             `convictionStorage.increaseOperatorFeeBalance`.
+    //           * NEW: `requestOperatorFeeWithdrawal`,
+    //             `finalizeOperatorFeeWithdrawal`, `cancelOperatorFeeWithdrawal`
+    //             — V10-native operator-fee withdrawal API (was V8-only). Uses
+    //             `parametersStorage.stakeWithdrawalDelay` cooldown.
+    //           * `stakingStorage` is retained ONLY for `_convertToNFT`'s
+    //             V8→V10 drain at cutover.
+    string private constant _VERSION = "3.0.0";
 
     // ========================================================================
     // Constants
@@ -107,6 +127,10 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     // Hub-wired dependencies
     // ========================================================================
 
+    /// @notice V8 archive accessor — present ONLY for `_convertToNFT`'s V8→V10
+    ///         drain. The V10 hot path (stake/withdraw/claim/operator-fee
+    ///         accrual + withdrawal) reads and writes `convictionStorage`
+    ///         exclusively (v4.0.0 consolidation).
     StakingStorage public stakingStorage;
     ConvictionStakingStorage public convictionStorage;
     Chronos public chronos;
@@ -116,6 +140,9 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     Ask public ask;
     ParametersStorage public parametersStorage;
     ProfileStorage public profileStorage;
+    /// @notice IdentityStorage for `onlyAdmin(identityId)` admin-key checks
+    ///         (operator-fee withdrawal request / finalize / cancel).
+    IdentityStorage public identityStorage;
     IERC20 public token;
     EpochStorage public epochStorage;
 
@@ -192,6 +219,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         ask = Ask(hub.getContractAddress("Ask"));
         parametersStorage = ParametersStorage(hub.getContractAddress("ParametersStorage"));
         profileStorage = ProfileStorage(hub.getContractAddress("ProfileStorage"));
+        identityStorage = IdentityStorage(hub.getContractAddress("IdentityStorage"));
         token = IERC20(hub.getContractAddress("Token"));
         epochStorage = EpochStorage(hub.getContractAddress("EpochStorageV8"));
     }
@@ -211,6 +239,22 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     modifier onlyConvictionNFT() {
         if (msg.sender != hub.getContractAddress("DKGStakingConvictionNFT")) {
             revert StakingLib.OnlyConvictionNFT();
+        }
+        _;
+    }
+
+    /// @notice Operator-fee admin gate. Mirrors V8 `Staking.onlyAdmin` —
+    ///         the caller's address (hashed) must hold ADMIN_KEY purpose
+    ///         on `identityId` per `IdentityStorage`.
+    modifier onlyAdmin(uint72 identityId) {
+        if (
+            !identityStorage.keyHasPurpose(
+                identityId,
+                keccak256(abi.encodePacked(msg.sender)),
+                IdentityLib.ADMIN_KEY
+            )
+        ) {
+            revert Permissions.OnlyProfileAdminFunction(msg.sender);
         }
         _;
     }
@@ -272,10 +316,11 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
 
         _prepareForStakeChangeV10(chronos.getCurrentEpoch(), tokenId, identityId);
 
-        // TRAC flows directly into the StakingStorage vault — the vault is
-        // shared with V8 (the TRAC custodian contract of the protocol).
-        // The NFT wrapper never holds funds.
-        token.transferFrom(staker, address(stakingStorage), amount);
+        // v4.0.0 — TRAC flows into the CSS vault. CSS extends Guardian and
+        // exposes `transferStake` for the withdraw outflow side. The NFT
+        // wrapper never holds funds; the V8 StakingStorage is no longer in
+        // the deposit path.
+        token.transferFrom(staker, address(convictionStorage), amount);
 
         // L11 — multiplier18 is no longer passed in; CSS reads it from the
         //       tier table (single source of truth).
@@ -466,10 +511,8 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         // raw aggregate decrement, global total decrement, finalization.
         convictionStorage.deletePosition(tokenId);
 
-        // TRAC flows from the StakingStorage vault (protocol-wide TRAC
-        // custody) to the NFT owner. This is the only mapping on
-        // StakingStorage that the V10 path still writes to.
-        stakingStorage.transferStake(staker, amount);
+        // v4.0.0 — TRAC flows from the CSS vault to the NFT owner.
+        convictionStorage.transferStake(staker, amount);
 
         // Sharding-table maintenance: node may have dropped below minStake.
         uint256 newNodeStake = convictionStorage.getNodeStakeV10(identityId);
@@ -483,6 +526,94 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         ask.recalculateActiveSet();
 
         emit Withdrawn(tokenId, staker, amount);
+    }
+
+    // ========================================================================
+    // Operator-fee withdrawal (v4.0.0)
+    //
+    // Operators accrue fees inside `_claim` (the gross-vs-net split). The
+    // accrued balance lives on CSS (`nodeOperatorFeeBalance`); withdrawing
+    // it back to the operator's wallet is a request → cooldown → finalize
+    // dance, mirroring V8 `Staking.{request,finalize,cancel}OperatorFeeWithdrawal`
+    // exactly. The cooldown reuses `parametersStorage.stakeWithdrawalDelay`
+    // (no separate operator-fee delay parameter).
+    //
+    // Restake-fee-as-stake is handled by the existing 2-step path
+    // (`finalizeOperatorFeeWithdrawal` → `DKGStakingConvictionNFT.createConviction`)
+    // — no dedicated `restakeOperatorFee` primitive exists in V10 because
+    // V10 stake is NFT-keyed and lock-tiered; the operator picks tier on
+    // re-stake.
+    //
+    // ── Deprecated V8 lifetime statistics ─────────────────────────────────
+    // V8 `StakingStorage` tracked `operatorFeeCumulative{Earned,PaidOut}Rewards`
+    // (with paired events) so off-chain dashboards could compute lifetime
+    // operator-fee throughput per node. V10 deliberately drops these counters:
+    // the on-chain working set is `nodeOperatorFeeBalance` + queued
+    // `operatorFeeWithdrawals` only. Lifetime analytics for V10 are computed
+    // off-chain by replaying the existing `OperatorFeeBalanceUpdated`,
+    // `OperatorFeeWithdrawalRequestCreated`, and `OperatorFeeWithdrawalRequestDeleted`
+    // events (or via the per-epoch `IsOperatorFeeClaimedForEpoch` flag), and
+    // are not part of the staking-storage surface. Any consumer that needs the
+    // legacy cumulative reads must be ported to event replay; CSS will not be
+    // extended with the V8 fields. Documented here so the omission is
+    // intentional rather than an oversight in the V8→V10 consolidation.
+    // ========================================================================
+
+    /// @notice Initiate an operator-fee withdrawal. Caller must hold ADMIN_KEY
+    ///         on `identityId`. Subsequent calls before finalize/cancel
+    ///         augment the existing request (combined amount = old + new).
+    function requestOperatorFeeWithdrawal(uint72 identityId, uint96 withdrawalAmount) external onlyAdmin(identityId) {
+        if (withdrawalAmount == 0) revert TokenLib.ZeroTokenAmount();
+
+        ConvictionStakingStorage cs = convictionStorage;
+
+        uint96 existingRequestAmount = cs.getOperatorFeeWithdrawalRequestAmount(identityId);
+        uint96 currentOperatorFeeBalance = cs.getOperatorFeeBalance(identityId);
+
+        // If a request already exists, the requested funds were already
+        // moved out of the balance into the queue — restore them before we
+        // re-check the cap so the totalRequestAmount comparison is honest.
+        if (existingRequestAmount > 0) {
+            currentOperatorFeeBalance += existingRequestAmount;
+        }
+
+        uint96 totalRequestAmount = existingRequestAmount + withdrawalAmount;
+        if (totalRequestAmount > currentOperatorFeeBalance) {
+            revert StakingLib.AmountExceedsOperatorFeeBalance(currentOperatorFeeBalance, totalRequestAmount);
+        }
+
+        uint256 withdrawalReleaseTimestamp = block.timestamp + parametersStorage.stakeWithdrawalDelay();
+        cs.setOperatorFeeBalance(identityId, currentOperatorFeeBalance - totalRequestAmount);
+        cs.createOperatorFeeWithdrawalRequest(identityId, totalRequestAmount, /*indexed*/ 0, withdrawalReleaseTimestamp);
+    }
+
+    /// @notice Complete an operator-fee withdrawal after the cooldown has
+    ///         elapsed. Pays out from the CSS TRAC vault.
+    function finalizeOperatorFeeWithdrawal(uint72 identityId) external onlyAdmin(identityId) {
+        ConvictionStakingStorage cs = convictionStorage;
+
+        (uint96 operatorFeeWithdrawalAmount, , uint256 withdrawalReleaseTimestamp) = cs.getOperatorFeeWithdrawalRequest(
+            identityId
+        );
+        if (operatorFeeWithdrawalAmount == 0) revert StakingLib.WithdrawalWasntInitiated();
+        if (block.timestamp < withdrawalReleaseTimestamp) {
+            revert StakingLib.WithdrawalPeriodPending(block.timestamp, withdrawalReleaseTimestamp);
+        }
+
+        cs.deleteOperatorFeeWithdrawalRequest(identityId);
+        cs.transferStake(msg.sender, operatorFeeWithdrawalAmount);
+    }
+
+    /// @notice Cancel a pending operator-fee withdrawal and return the queued
+    ///         amount to the operator-fee balance. No cooldown applies.
+    function cancelOperatorFeeWithdrawal(uint72 identityId) external onlyAdmin(identityId) {
+        ConvictionStakingStorage cs = convictionStorage;
+
+        uint96 operatorFeeWithdrawalAmount = cs.getOperatorFeeWithdrawalRequestAmount(identityId);
+        if (operatorFeeWithdrawalAmount == 0) revert StakingLib.WithdrawalWasntInitiated();
+
+        cs.deleteOperatorFeeWithdrawalRequest(identityId);
+        cs.increaseOperatorFeeBalance(identityId, operatorFeeWithdrawalAmount);
     }
 
     /**
@@ -616,7 +747,8 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
                         netNodeRewards = grossNodeRewards - operatorFeeAmount;
                         convictionStorage.setIsOperatorFeeClaimedForEpoch(identityId, e, true);
                         convictionStorage.setNetNodeEpochRewards(identityId, e, netNodeRewards);
-                        stakingStorage.increaseOperatorFeeBalance(identityId, operatorFeeAmount);
+                        // v4.0.0 — operator-fee balance lives on CSS now.
+                        convictionStorage.increaseOperatorFeeBalance(identityId, operatorFeeAmount);
                     }
                 } else {
                     netNodeRewards = convictionStorage.getNetNodeEpochRewards(identityId, e);

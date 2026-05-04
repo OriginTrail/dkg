@@ -23,6 +23,16 @@ import type {
   PublishToContextGraphParams,
   V10PublishDirectParams,
   V10UpdateKCParams,
+  NodeChallenge,
+  ProofPeriodStatus,
+  CreateChallengeResult,
+  OperationalWalletRegistrationResult,
+} from './chain-adapter.js';
+import {
+  NoEligibleContextGraphError,
+  NoEligibleKnowledgeCollectionError,
+  MerkleRootMismatchError,
+  ChallengeNoLongerActiveError,
 } from './chain-adapter.js';
 import { ethers } from 'ethers';
 
@@ -45,7 +55,16 @@ export class MockChainAdapter implements ChainAdapter {
   private namespaceNextId = new Map<string, bigint>();
   private namespaceOwner = new Map<string, string>();
   private batches = new Map<bigint, { merkleRoot: Uint8Array; kaCount: number }>();
-  private collections = new Map<bigint, { merkleRoot: Uint8Array; kaCount: number }>();
+  private collections = new Map<bigint, {
+    merkleRoot: Uint8Array;
+    kaCount: number;
+    /** V10 flat-KC merkle leaf count (sorted + deduped). 0 for legacy V8 entries. */
+    merkleLeafCount: number;
+    /** Publisher EOA from `createKnowledgeAssetsV10`; default to mock signer for V8 paths. */
+    publisherAddress: string;
+    /** On-chain context graph id (0n when the mock V8 path didn't carry one). */
+    cgId: bigint;
+  }>();
   private contextGraphRegistry = new Map<string, Record<string, string>>();
   private events: ChainEvent[] = [];
   /** Reserved UAL ranges per publisher address for verifyPublisherOwnsRange */
@@ -64,7 +83,7 @@ export class MockChainAdapter implements ChainAdapter {
     return existing ?? 0n;
   }
 
-  async ensureProfile(_options?: { nodeName?: string; stakeAmount?: bigint }): Promise<bigint> {
+  async ensureProfile(_options?: { nodeName?: string; stakeAmount?: bigint; lockTier?: number }): Promise<bigint> {
     const existing = await this.getIdentityId();
     if (existing > 0n) return existing;
     const id = this.nextIdentityId++;
@@ -384,6 +403,9 @@ export class MockChainAdapter implements ChainAdapter {
     this.collections.set(kcId, {
       merkleRoot: params.merkleRoot,
       kaCount: params.knowledgeAssetsCount,
+      merkleLeafCount: 0,
+      publisherAddress: this.signerAddress,
+      cgId: 0n,
     });
 
     this.pushEvent('KCCreated', {
@@ -528,13 +550,43 @@ export class MockChainAdapter implements ChainAdapter {
 
   // --- Staking Conviction ---
 
-  private delegatorLocks = new Map<string, { lockEpochs: number; startEpoch: number }>();
+  private delegatorLocks = new Map<string, { lockTier: number; startEpoch: number }>();
+
+  // Mirror the V10 baseline tier ladder seeded by
+  // `ConvictionStakingStorage._seedBaselineTiers()` so the mock surfaces the same
+  // "tier must exist" error the real `DKGStakingConvictionNFT` reverts with.
+  private static readonly V10_BASELINE_LOCK_TIERS = [0, 1, 3, 6, 12] as const;
+
+  private snapToBaselineLockTier(lockEpochs: number): number {
+    let snapped = 0;
+    for (const tier of MockChainAdapter.V10_BASELINE_LOCK_TIERS) {
+      if (tier <= lockEpochs) snapped = tier;
+      else break;
+    }
+    return snapped;
+  }
+
+  private normalizeLegacyLockEpochs(lockEpochs: number): number {
+    if (!Number.isInteger(lockEpochs) || lockEpochs < 0) {
+      throw new Error(`Mock: invalid lockEpochs ${lockEpochs}`);
+    }
+    return this.snapToBaselineLockTier(lockEpochs);
+  }
 
   async stakeWithLock(identityId: bigint, amount: bigint, lockEpochs: number): Promise<TxResult> {
+    return this.stakeWithLockTier(identityId, amount, this.normalizeLegacyLockEpochs(lockEpochs));
+  }
+
+  async stakeWithLockTier(identityId: bigint, _amount: bigint, lockTier: number): Promise<TxResult> {
+    if (!Number.isInteger(lockTier) || !(MockChainAdapter.V10_BASELINE_LOCK_TIERS as readonly number[]).includes(lockTier)) {
+      throw new Error(
+        `Mock: lockTier must be one of {${MockChainAdapter.V10_BASELINE_LOCK_TIERS.join(', ')}} (V10 baseline tier ladder), got ${lockTier}`,
+      );
+    }
     const key = `${identityId}-${this.signerAddress}`;
     const existing = this.delegatorLocks.get(key);
-    if (!existing || lockEpochs > existing.lockEpochs) {
-      this.delegatorLocks.set(key, { lockEpochs, startEpoch: 0 });
+    if (!existing || lockTier > existing.lockTier) {
+      this.delegatorLocks.set(key, { lockTier, startEpoch: 0 });
     }
     return this.txResult(true);
   }
@@ -542,8 +594,8 @@ export class MockChainAdapter implements ChainAdapter {
   async getDelegatorConvictionMultiplier(identityId: bigint, delegator: string): Promise<{ multiplier: number }> {
     const key = `${identityId}-${delegator}`;
     const lock = this.delegatorLocks.get(key);
-    const lockEpochs = lock?.lockEpochs ?? 1;
-    return { multiplier: computeConvictionMultiplier(lockEpochs) };
+    const lockTier = lock?.lockTier ?? 1;
+    return { multiplier: computeConvictionMultiplier(lockTier) };
   }
 
   // --- On-Chain Context Graphs (ContextGraphs contract) ---
@@ -669,6 +721,47 @@ export class MockChainAdapter implements ChainAdapter {
     return false;
   }
 
+  async isOperationalWalletRegistered(identityId: bigint, address: string): Promise<boolean> {
+    return this.verifyACKIdentity(address, identityId);
+  }
+
+  async ensureOperationalWalletsRegistered(options?: {
+    identityId?: bigint;
+    additionalAddresses?: string[];
+  }): Promise<OperationalWalletRegistrationResult> {
+    const identityId = options?.identityId ?? (await this.getIdentityId());
+    const result: OperationalWalletRegistrationResult = {
+      identityId,
+      registered: [],
+      alreadyRegistered: [],
+      taken: [],
+    };
+    if (identityId === 0n) return result;
+
+    const candidates = [this.signerAddress, ...(options?.additionalAddresses ?? [])];
+    const seen = new Set<string>();
+    for (const candidate of candidates) {
+      const address = ethers.getAddress(candidate);
+      const key = address.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      const existing = [...this.identities.entries()].find(
+        ([addr]) => addr.toLowerCase() === key,
+      );
+      if (existing?.[1] === identityId) {
+        result.alreadyRegistered.push(address);
+      } else if (existing) {
+        result.taken.push({ address, identityId: existing[1] });
+      } else {
+        this.identities.set(address, identityId);
+        result.registered.push(address);
+      }
+    }
+
+    return result;
+  }
+
   async verifySyncIdentity(recoveredAddress: string, claimedIdentityId: bigint): Promise<boolean> {
     return this.verifyACKIdentity(recoveredAddress, claimedIdentityId);
   }
@@ -681,6 +774,10 @@ export class MockChainAdapter implements ChainAdapter {
 
   async signACKDigest(digest: Uint8Array): Promise<{ r: Uint8Array; vs: Uint8Array } | undefined> {
     if (!this.mockACKSigner) return undefined;
+    const identityId = await this.getIdentityId();
+    if (identityId === 0n || !(await this.isOperationalWalletRegistered(identityId, this.mockACKSigner.address))) {
+      return undefined;
+    }
     const { ethers: eth } = await import('ethers');
     const sig = eth.Signature.from(await this.mockACKSigner.signMessage(digest));
     return {
@@ -694,6 +791,10 @@ export class MockChainAdapter implements ChainAdapter {
   }
 
   isV10Ready(): boolean {
+    return true;
+  }
+
+  isRandomSamplingReady(): boolean {
     return true;
   }
 
@@ -820,6 +921,9 @@ export class MockChainAdapter implements ChainAdapter {
     this.collections.set(kcId, {
       merkleRoot: params.merkleRoot,
       kaCount: params.knowledgeAssetsAmount,
+      merkleLeafCount: params.merkleLeafCount,
+      publisherAddress: this.signerAddress,
+      cgId: params.contextGraphId,
     });
     // Also store in batches so verify() can find this publish
     this.batches.set(kcId, {
@@ -911,6 +1015,281 @@ export class MockChainAdapter implements ChainAdapter {
    * Set to false to group multiple transactions in the same block for testing.
    */
   autoMine = true;
+
+  // =====================================================================
+  // Random Sampling — in-memory implementation for off-chain tests.
+  //
+  // The contract is the source of truth in production; here we maintain
+  // just enough state for the proofing service unit tests to exercise
+  // every branch (rollover detection, NoEligible* skip, success path,
+  // MerkleRootMismatch non-retry, reentrancy guard).
+  //
+  // Test helpers (`__advanceProofPeriod`, `__registerKC`, `__forceNoEligible`)
+  // are NOT on the public ChainAdapter interface — they're documented
+  // double-underscore conventions so production code that compiles
+  // against the interface can't accidentally call them, while tests
+  // can reach them via concrete-typed instance access.
+  // =====================================================================
+
+  /**
+   * Mock proof period length in blocks. Single source of truth for:
+   *   - `__advanceProofPeriod()` cursor step
+   *   - `createChallenge()` `NodeChallenge.proofingPeriodDurationInBlocks`
+   *   - `getActiveProofPeriodStatus()` `proofingPeriodDurationInBlocks`
+   *
+   * Codex round 3 on PR #369 — these were three separate `100n` literals.
+   * If one drifted the mock would report a self-inconsistent
+   * (status, challenge, cursor) tuple and the prover's wall-clock
+   * staleness logic could be tested against behaviour the mock never
+   * actually simulates. Centralising removes that footgun.
+   */
+  private static readonly RS_MOCK_PERIOD_DURATION_IN_BLOCKS = 100n;
+
+  private rsPeriodCursor = 1n;            // activeProofPeriodStartBlock
+  private rsEpoch = 1n;
+  private rsPeriodIsValid = true;
+  /** kcId -> {root: bytes32 hex, leaves: leafIndex -> expected bytes32 leaf (hex), kcsAddr } */
+  private rsKCs = new Map<bigint, {
+    merkleRootHex: string;
+    chunks: Map<bigint, string>;
+    kcsContract: string;
+    cgId: bigint;
+  }>();
+  /** identityId -> NodeChallenge */
+  private rsChallenges = new Map<bigint, NodeChallenge>();
+  /** key `${identityId}|${epoch}|${periodStart}` -> score */
+  private rsScores = new Map<string, bigint>();
+  /** When set, the next createChallenge() call throws this typed error. */
+  private rsForcedRevert: 'none' | 'no-cg' | 'no-kc' = 'none';
+  /** Round-robin pointer over registered KCs for createChallenge picks. */
+  private rsKCPickIndex = 0;
+
+  /** Test helper: advance to a fresh proof period (mirrors a chain rollover). */
+  __advanceProofPeriod(): bigint {
+    this.rsPeriodCursor += MockChainAdapter.RS_MOCK_PERIOD_DURATION_IN_BLOCKS;
+    this.rsPeriodIsValid = true;
+    return this.rsPeriodCursor;
+  }
+
+  /** Test helper: switch to a new epoch (clears period state for cleanliness). */
+  __advanceEpoch(): bigint {
+    this.rsEpoch += 1n;
+    return this.rsEpoch;
+  }
+
+  /**
+   * Test helper: pre-seed a KC so createChallenge can land on it.
+   *
+   * Also mirrors the entry into `collections` so the `getLatestMerkleRoot`
+   * / `getMerkleLeafCount` / `getLatestMerkleRootPublisher` /
+   * `getKCContextGraphId` view methods stay coherent with the random
+   * sampling mock without forcing tests to publish through
+   * `createKnowledgeAssetsV10` first. `merkleLeafCount` defaults to the
+   * number of chunks supplied (one leaf per chunk), and `publisherAddress`
+   * defaults to the mock signer; both can be overridden per call.
+   */
+  __registerKC(input: {
+    kcId: bigint;
+    contextGraphId: bigint;
+    merkleRootHex: string;
+    knowledgeCollectionStorageContract?: string;
+    chunks: Array<{ chunkId: bigint; chunk: string }>;
+    merkleLeafCount?: number;
+    publisherAddress?: string;
+  }): void {
+    const chunks = new Map<bigint, string>();
+    for (const c of input.chunks) chunks.set(c.chunkId, c.chunk);
+    this.rsKCs.set(input.kcId, {
+      merkleRootHex: input.merkleRootHex,
+      chunks,
+      kcsContract: input.knowledgeCollectionStorageContract ?? '0x' + 'aa'.repeat(20),
+      cgId: input.contextGraphId,
+    });
+    this.collections.set(input.kcId, {
+      merkleRoot: fromHex(input.merkleRootHex),
+      kaCount: input.chunks.length,
+      merkleLeafCount: input.merkleLeafCount ?? input.chunks.length,
+      publisherAddress: input.publisherAddress ?? this.signerAddress,
+      cgId: input.contextGraphId,
+    });
+  }
+
+  /** Test helper: force the next createChallenge to revert with a typed retry-next-period error. */
+  __forceNoEligible(kind: 'cg' | 'kc' | 'none'): void {
+    this.rsForcedRevert = kind === 'cg' ? 'no-cg' : kind === 'kc' ? 'no-kc' : 'none';
+  }
+
+  /** Test helper: read the score the contract would return — bypasses the public adapter surface. */
+  __getScoreDirect(identityId: bigint, epoch: bigint, periodStart: bigint): bigint {
+    return this.rsScores.get(`${identityId}|${epoch}|${periodStart}`) ?? 0n;
+  }
+
+  /** Test helper: simulate the period rolling closed (between rollovers). */
+  __setPeriodIsValid(value: boolean): void {
+    this.rsPeriodIsValid = value;
+  }
+
+  async createChallenge(): Promise<CreateChallengeResult> {
+    if (this.rsForcedRevert === 'no-cg') {
+      this.rsForcedRevert = 'none';
+      throw new NoEligibleContextGraphError();
+    }
+    if (this.rsForcedRevert === 'no-kc') {
+      this.rsForcedRevert = 'none';
+      throw new NoEligibleKnowledgeCollectionError();
+    }
+    if (this.rsKCs.size === 0) {
+      throw new NoEligibleContextGraphError();
+    }
+
+    const identityId = await this.getIdentityId();
+    if (identityId === 0n) {
+      throw new Error('Mock: cannot createChallenge without an identity (call ensureProfile first)');
+    }
+
+    const existing = this.rsChallenges.get(identityId);
+    if (existing && existing.activeProofPeriodStartBlock === this.rsPeriodCursor) {
+      if (existing.solved) throw new Error('The challenge for this proof period has already been solved');
+      throw new Error('An unsolved challenge already exists for this node in the current proof period');
+    }
+
+    // Round-robin pick over registered KCs (deterministic across runs).
+    const kcEntries = Array.from(this.rsKCs.entries());
+    const [kcId, kcEntry] = kcEntries[this.rsKCPickIndex % kcEntries.length];
+    this.rsKCPickIndex++;
+
+    const chunkIds = Array.from(kcEntry.chunks.keys());
+    if (chunkIds.length === 0) {
+      throw new NoEligibleKnowledgeCollectionError();
+    }
+    const chunkId = chunkIds[0];
+
+    const challenge: NodeChallenge = {
+      knowledgeCollectionId: kcId,
+      chunkId,
+      knowledgeCollectionStorageContract: kcEntry.kcsContract,
+      epoch: this.rsEpoch,
+      activeProofPeriodStartBlock: this.rsPeriodCursor,
+      proofingPeriodDurationInBlocks: MockChainAdapter.RS_MOCK_PERIOD_DURATION_IN_BLOCKS,
+      solved: false,
+    };
+    this.rsChallenges.set(identityId, challenge);
+
+    this.pushEvent('ChallengeGenerated', {
+      identityId: identityId.toString(),
+      contextGraphId: kcEntry.cgId.toString(),
+      knowledgeCollectionId: kcId.toString(),
+      chunkId: chunkId.toString(),
+      epoch: this.rsEpoch.toString(),
+      activeProofPeriodStartBlock: this.rsPeriodCursor.toString(),
+    });
+
+    const tx = this.txResult(true);
+    return {
+      ...tx,
+      challenge,
+      contextGraphId: kcEntry.cgId,
+    };
+  }
+
+  async submitProof(leaf: Uint8Array | `0x${string}`, _merkleProof: Uint8Array[]): Promise<TxResult> {
+    const identityId = await this.getIdentityId();
+    if (identityId === 0n) {
+      throw new Error('Mock: cannot submitProof without an identity (call ensureProfile first)');
+    }
+
+    const challenge = this.rsChallenges.get(identityId);
+    if (!challenge) {
+      throw new Error('Mock: no active challenge for identity ' + identityId);
+    }
+    if (challenge.solved) {
+      throw new Error('This challenge has already been solved');
+    }
+    if (challenge.activeProofPeriodStartBlock !== this.rsPeriodCursor) {
+      throw new ChallengeNoLongerActiveError();
+    }
+
+    const kcEntry = this.rsKCs.get(challenge.knowledgeCollectionId);
+    if (!kcEntry) {
+      throw new Error(`Mock: KC ${challenge.knowledgeCollectionId} no longer registered`);
+    }
+    const expectedLeaf = kcEntry.chunks.get(challenge.chunkId);
+    if (expectedLeaf === undefined) {
+      throw new Error(`Mock: KC ${challenge.knowledgeCollectionId} has no leaf at index ${challenge.chunkId}`);
+    }
+    const leafHex = (typeof leaf === 'string' ? leaf : ethers.hexlify(leaf)).toLowerCase();
+    if (!/^0x[0-9a-f]{64}$/.test(leafHex)) {
+      throw new Error('Mock: submitProof leaf must be a 32-byte hex string (bytes32)');
+    }
+    if (expectedLeaf.toLowerCase() !== leafHex) {
+      const computed = '0x' + 'cc'.repeat(32);
+      throw new MerkleRootMismatchError(computed, kcEntry.merkleRootHex);
+    }
+
+    challenge.solved = true;
+    this.rsChallenges.set(identityId, challenge);
+    const score = 1_000_000_000_000_000_000n; // 1.0 in 18-decimals
+    this.rsScores.set(
+      `${identityId}|${challenge.epoch}|${challenge.activeProofPeriodStartBlock}`,
+      score,
+    );
+
+    this.pushEvent('ProofSubmitted', {
+      identityId: identityId.toString(),
+      epoch: challenge.epoch.toString(),
+      score: score.toString(),
+    });
+
+    return this.txResult(true);
+  }
+
+  async getActiveProofPeriodStatus(): Promise<ProofPeriodStatus> {
+    return {
+      activeProofPeriodStartBlock: this.rsPeriodCursor,
+      isValid: this.rsPeriodIsValid,
+      proofingPeriodDurationInBlocks: MockChainAdapter.RS_MOCK_PERIOD_DURATION_IN_BLOCKS,
+    };
+  }
+
+  async getNodeChallenge(identityId: bigint): Promise<NodeChallenge | null> {
+    return this.rsChallenges.get(identityId) ?? null;
+  }
+
+  async getNodeEpochProofPeriodScore(
+    identityId: bigint,
+    epoch: bigint,
+    periodStartBlock: bigint,
+  ): Promise<bigint> {
+    return this.rsScores.get(`${identityId}|${epoch}|${periodStartBlock}`) ?? 0n;
+  }
+
+  // =====================================================================
+  // KC views — read from the in-memory `collections` map populated by
+  // `createKnowledgeAssetsV10` and `__registerKC`.
+  // =====================================================================
+
+  async getLatestMerkleRoot(kcId: bigint): Promise<Uint8Array> {
+    const entry = this.collections.get(kcId);
+    if (!entry) throw new Error(`Mock: unknown kcId ${kcId}`);
+    return entry.merkleRoot;
+  }
+
+  async getMerkleLeafCount(kcId: bigint): Promise<number> {
+    const entry = this.collections.get(kcId);
+    if (!entry) throw new Error(`Mock: unknown kcId ${kcId}`);
+    return entry.merkleLeafCount;
+  }
+
+  async getLatestMerkleRootPublisher(kcId: bigint): Promise<string> {
+    const entry = this.collections.get(kcId);
+    if (!entry) throw new Error(`Mock: unknown kcId ${kcId}`);
+    return entry.publisherAddress;
+  }
+
+  async getKCContextGraphId(kcId: bigint): Promise<bigint> {
+    const entry = this.collections.get(kcId);
+    return entry?.cgId ?? 0n;
+  }
 }
 
 function toHex(bytes: Uint8Array): string {

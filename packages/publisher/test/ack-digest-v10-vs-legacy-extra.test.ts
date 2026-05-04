@@ -8,16 +8,17 @@
  *                ACK digest `keccak256(uint256 cgId || bytes32 merkleRoot)`.
  *                V10 on-chain verification (see
  *                `packages/core/src/crypto/ack.ts::computePublishACKDigest`
- *                and `KnowledgeAssetsV10.sol:362-373`) requires the
- *                H5-prefixed 8-field form
+ *                and `KnowledgeAssetsV10.sol`) requires the
+ *                H5-prefixed 9-field form
  *                `keccak256(chainid || kav10Address || cgId || root ||
- *                           kaCount || byteSize || epochs || tokenAmount)`.
+ *                           kaCount || byteSize || epochs || tokenAmount ||
+ *                           merkleLeafCount)`.
  *                A signer using the 2-field form yields an ACK the chain
  *                would silently reject.  We pin:
- *                  • the 8-field digest is the ACKCollector's expected
+ *                  • the 9-field digest is the ACKCollector's expected
  *                    digest → ecrecover yields the right address;
  *                  • a 2-field-signed ACK over the SAME `(cgId, root)` is
- *                    NOT equal to the 8-field digest → the collector MUST
+ *                    NOT equal to the 9-field digest → the collector MUST
  *                    reject it (not silently accept a mismatched address).
  *
  * Per QA policy: do NOT modify production code. If the collector ever
@@ -44,6 +45,8 @@ const KA_COUNT = 2;
 const BYTE_SIZE = 321n;
 const EPOCHS = 1;
 const TOKEN_AMOUNT = 1000n;
+/** Synthetic leaf count for these digest-only fixtures (no real KC payload). */
+const MERKLE_LEAF_COUNT = 1n;
 
 /** Legacy (pre-V10, 2-field) digest that the current `signature-collection.test.ts::LocalSignerPeer.signParticipantAck` produces. */
 function legacyTwoFieldDigest(cgId: bigint, merkleRoot: Uint8Array): Uint8Array {
@@ -73,11 +76,12 @@ function buildAckFromDigest(
     });
 }
 
-describe('P-5: V10 8-field ACK digest must differ from legacy 2-field digest', () => {
+describe('P-5: V10 9-field ACK digest must differ from legacy 2-field digest', () => {
   it('the two digests hash different packed payloads', () => {
     const v10 = computePublishACKDigest(
       CHAIN_ID, KAV10_ADDR, CG_ID, ROOT,
       BigInt(KA_COUNT), BYTE_SIZE, BigInt(EPOCHS), TOKEN_AMOUNT,
+      MERKLE_LEAF_COUNT,
     );
     const legacy = legacyTwoFieldDigest(CG_ID, ROOT);
     // If these ever collide, the H5 prefix collapsed and chain replay
@@ -89,22 +93,27 @@ describe('P-5: V10 8-field ACK digest must differ from legacy 2-field digest', (
     const base = computePublishACKDigest(
       CHAIN_ID, KAV10_ADDR, CG_ID, ROOT,
       BigInt(KA_COUNT), BYTE_SIZE, BigInt(EPOCHS), TOKEN_AMOUNT,
+      MERKLE_LEAF_COUNT,
     );
     const wrongTok = computePublishACKDigest(
       CHAIN_ID, KAV10_ADDR, CG_ID, ROOT,
       BigInt(KA_COUNT), BYTE_SIZE, BigInt(EPOCHS), TOKEN_AMOUNT + 1n,
+      MERKLE_LEAF_COUNT,
     );
     const wrongEpochs = computePublishACKDigest(
       CHAIN_ID, KAV10_ADDR, CG_ID, ROOT,
       BigInt(KA_COUNT), BYTE_SIZE, BigInt(EPOCHS + 1), TOKEN_AMOUNT,
+      MERKLE_LEAF_COUNT,
     );
     const wrongByte = computePublishACKDigest(
       CHAIN_ID, KAV10_ADDR, CG_ID, ROOT,
       BigInt(KA_COUNT), BYTE_SIZE + 1n, BigInt(EPOCHS), TOKEN_AMOUNT,
+      MERKLE_LEAF_COUNT,
     );
     const wrongCount = computePublishACKDigest(
       CHAIN_ID, KAV10_ADDR, CG_ID, ROOT,
       BigInt(KA_COUNT + 1), BYTE_SIZE, BigInt(EPOCHS), TOKEN_AMOUNT,
+      MERKLE_LEAF_COUNT,
     );
     expect(ethers.hexlify(wrongTok)).not.toBe(ethers.hexlify(base));
     expect(ethers.hexlify(wrongEpochs)).not.toBe(ethers.hexlify(base));
@@ -125,6 +134,7 @@ describe('P-5: ACKCollector rejects ACKs signed over the legacy 2-field digest',
     const v10Digest = computePublishACKDigest(
       CHAIN_ID, KAV10_ADDR, CG_ID, ROOT,
       BigInt(KA_COUNT), BYTE_SIZE, BigInt(EPOCHS), TOKEN_AMOUNT,
+      MERKLE_LEAF_COUNT,
     );
     const legacyDigest = legacyTwoFieldDigest(CG_ID, ROOT);
 
@@ -164,6 +174,7 @@ describe('P-5: ACKCollector rejects ACKs signed over the legacy 2-field digest',
       kav10Address: KAV10_ADDR,
       epochs: EPOCHS,
       tokenAmount: TOKEN_AMOUNT,
+      merkleLeafCount: Number(MERKLE_LEAF_COUNT),
     });
 
     // 3 legit ACKs must be accepted.
@@ -200,6 +211,7 @@ describe('P-5: ACKCollector rejects ACKs signed over the legacy 2-field digest',
           kav10Address: KAV10_ADDR,
           epochs: EPOCHS,
           tokenAmount: TOKEN_AMOUNT,
+          merkleLeafCount: Number(MERKLE_LEAF_COUNT),
         })
         .then(
           (r) => ({ kind: 'resolved' as const, acks: r.acks.length }),

@@ -40,6 +40,10 @@ func.dependencies = [
   'Ask',
   'ParametersStorage',
   'ProfileStorage',
+  // v4.0.0 — `StakingV10.initialize()` resolves IdentityStorage for the
+  // `onlyAdmin(identityId)` admin-key gate on the new operator-fee
+  // withdrawal request/finalize/cancel API.
+  'IdentityStorage',
   'Token',
   'EpochStorage',
 ];

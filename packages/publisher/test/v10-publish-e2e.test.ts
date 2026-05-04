@@ -1,7 +1,12 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { ACKCollector, type ACKCollectorDeps } from '../src/ack-collector.js';
 import { StorageACKHandler, type StorageACKHandlerConfig } from '../src/storage-ack-handler.js';
-import { computeFlatKCRootV10 as computeFlatKCRoot, computeFlatKCRootV10, computeTripleHashV10 } from '../src/merkle.js';
+import {
+  computeFlatKCRootV10 as computeFlatKCRoot,
+  computeFlatKCRootV10,
+  computeFlatKCMerkleLeafCountV10,
+  computeTripleHashV10,
+} from '../src/merkle.js';
 import {
   encodePublishIntent, decodePublishIntent,
   encodeStorageACK, decodeStorageACK,
@@ -30,6 +35,7 @@ describe('V10 Publish E2E', () => {
     makeQuad('urn:experiment:wsd', 'urn:exp:val_bpb', '"1.36"'),
     makeQuad('urn:experiment:wsd', 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', 'urn:exp:Experiment'),
   ];
+  const publishMerkleLeafCount = computeFlatKCMerkleLeafCountV10(publishQuads, []);
 
   const coreWallets = [
     ethers.Wallet.createRandom(),
@@ -139,6 +145,7 @@ describe('V10 Publish E2E', () => {
       rootEntities,
       chainId: TEST_CHAIN_ID,
       kav10Address: TEST_KAV10_ADDR,
+      merkleLeafCount: publishMerkleLeafCount,
     });
 
     expect(result.acks).toHaveLength(3);
@@ -152,6 +159,7 @@ describe('V10 Publish E2E', () => {
       BigInt(publishQuads.length * 100),
       1n,
       0n,
+      BigInt(publishMerkleLeafCount),
     );
     const prefixedHash = ethers.hashMessage(digest);
 
@@ -198,6 +206,7 @@ describe('V10 Publish E2E', () => {
       isPrivate: false,
       kaCount: 1,
       rootEntities: ['urn:experiment:wsd'],
+      merkleLeafCount: publishMerkleLeafCount,
     });
 
     const decoded = decodePublishIntent(intent);
@@ -219,6 +228,7 @@ describe('V10 Publish E2E', () => {
     const digest = computePublishACKDigest(
       TEST_CHAIN_ID, TEST_KAV10_ADDR, cgIdBigInt, merkleRoot,
       1n, BigInt(publishQuads.length * 100), 1n, 0n,
+      BigInt(publishMerkleLeafCount),
     );
     const sig = ethers.Signature.from(await wallet.signMessage(digest));
 
@@ -263,6 +273,7 @@ describe('V10 Publish E2E', () => {
         const digest = computePublishACKDigest(
           TEST_CHAIN_ID, realKAV10Addr, chainCgId, merkleRoot,
           BigInt(publishQuads.length), byteSize, epochs, tokenAmount,
+          BigInt(publishMerkleLeafCount),
         );
         const sig = ethers.Signature.from(await wallet.signMessage(digest));
         return {
@@ -297,6 +308,7 @@ describe('V10 Publish E2E', () => {
       epochs: Number(epochs),
       tokenAmount,
       isImmutable: false,
+      merkleLeafCount: publishMerkleLeafCount,
       paymaster: ethers.ZeroAddress,
       publisherNodeIdentityId: publisherIdentityId,
       publisherSignature: {

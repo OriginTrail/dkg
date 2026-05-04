@@ -114,6 +114,7 @@ export async function createKnowledgeCollection(
   isImmutable: boolean = false,
   paymaster: string = ethers.ZeroAddress,
   phase10Bridge?: Phase10CGBridge,
+  merkleLeafCount: number = 1,
 ) {
   const signaturesData = await getKCSignaturesData(
     publishingNode,
@@ -146,6 +147,7 @@ export async function createKnowledgeCollection(
     receivingNodesIdentityIds,
     signaturesData.receiverRs,
     signaturesData.receiverVSs,
+    merkleLeafCount,
   );
 
   const receipt = await tx.wait();

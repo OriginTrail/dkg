@@ -17,6 +17,7 @@ import { EVMChainAdapter } from '@origintrail-official/dkg-chain';
 const chain = new EVMChainAdapter({
   rpcUrl: 'https://sepolia.base.org',
   privateKey: process.env.PRIVATE_KEY,
+  adminPrivateKey: process.env.ADMIN_PRIVATE_KEY,
   hubAddress: '0x...',
 });
 

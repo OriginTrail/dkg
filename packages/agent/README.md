@@ -23,6 +23,7 @@ const agent = await DKGAgent.create({
   chainConfig: {
     rpcUrl: 'https://sepolia.base.org',
     hubAddress: '0x...',
+    adminPrivateKey: '0xadminPrivateKey',
     operationalKeys: ['0xprivateKey1'],
   },
 });

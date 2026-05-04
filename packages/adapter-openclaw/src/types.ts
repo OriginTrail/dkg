@@ -19,7 +19,19 @@ export interface OpenClawPluginApi {
   registrationMode?: 'full' | 'setup-only' | 'setup-runtime' | 'cli-metadata';
   registerTool(tool: OpenClawTool): void;
   registerHook(event: string, handler: (...args: any[]) => Promise<void>, opts?: { name: string }): void;
-  on(event: string, handler: (...args: any[]) => void): void;
+  /**
+   * Register a typed-hook handler. The OpenClaw upstream
+   * (`openclaw/src/plugins/registry.ts:registerTypedHook` →
+   * `registry.typedHooks` → `hooks.ts:runModifyingHook`) sequentially
+   * awaits handlers and reads their return value: modifying hooks like
+   * `before_prompt_build` honor `{ appendSystemContext, ... }`, and
+   * fire-and-forget hooks like `agent_end` ignore the return.
+   *
+   * The signature accepts `unknown | Promise<unknown>` to match this
+   * contract — the previous `=> void` was an under-specification that
+   * masked the dependency on return-value propagation (R16.1).
+   */
+  on(event: string, handler: (...args: any[]) => unknown | Promise<unknown>): void;
   logger: { info?(...args: any[]): void; warn?(...args: any[]): void; debug?(...args: any[]): void };
 
   /** Register a bidirectional channel plugin. */
@@ -87,6 +99,21 @@ export interface OpenClawToolResult {
 // Channel types
 // ---------------------------------------------------------------------------
 
+export interface OpenClawGatewayLifecycleContext {
+  accountId?: string;
+  account?: Record<string, unknown>;
+  cfg?: any;
+  runtime?: any;
+  abortSignal?: AbortSignal;
+  getStatus?: () => Record<string, unknown>;
+  setStatus?: (status: Record<string, unknown>) => void;
+}
+
+export interface OpenClawGatewayLifecycleAdapter {
+  startAccount(ctx: OpenClawGatewayLifecycleContext): Promise<void>;
+  stopAccount(ctx: OpenClawGatewayLifecycleContext): Promise<void>;
+}
+
 /** Inbound message from an external channel into OpenClaw. */
 export interface ChannelInboundMessage {
   /** Channel name (e.g. "dkg-ui"). */
@@ -99,6 +126,10 @@ export interface ChannelInboundMessage {
   text: string;
   /** Correlation ID for request-reply tracking. */
   correlationId?: string;
+  /** Optional transcript session key when the caller already knows the resolved route. */
+  sessionKey?: string;
+  /** OpenClaw context-style alias for `sessionKey`. */
+  SessionKey?: string;
 }
 
 /** Outbound reply from OpenClaw to an external channel. */
@@ -109,6 +140,10 @@ export interface ChannelOutboundReply {
   text: string;
   /** Session-internal turn ID. */
   turnId?: string;
+  /** OpenClaw transcript session key resolved for this channel dispatch. */
+  sessionKey?: string;
+  /** OpenClaw context-style alias for `sessionKey` returned by legacy routes. */
+  SessionKey?: string;
   /** Tool calls made during this turn. */
   toolCalls?: Array<{ name: string; args: Record<string, unknown>; result: unknown }>;
 }
@@ -143,6 +178,8 @@ export interface OpenClawChannelAdapter {
   start?(): Promise<void>;
   /** Called when the gateway stops.  Tear down transport. */
   stop?(): Promise<void>;
+  /** Per-account lifecycle hooks consumed by current OpenClaw gateway monitors. */
+  gateway?: OpenClawGatewayLifecycleAdapter;
   /**
    * Called by the gateway when the agent produces a reply for this channel.
    * The adapter should deliver it via its transport.
@@ -221,6 +258,14 @@ export interface MemorySearchOptions {
   maxResults?: number;
   minScore?: number;
   sessionKey?: string;
+  /**
+   * T74 — Observability tag. Identifies the caller in the
+   * `[dkg-memory] search fired (caller=…)` log line so operators can
+   * distinguish W3 auto-recall hook firings from explicit `memory_search`
+   * tool calls (and other future callers). Free-form short string;
+   * defaults to `'unknown'` when not supplied.
+   */
+  caller?: string;
 }
 
 /**
@@ -365,6 +410,41 @@ export interface MemoryPluginCapability {
 export interface DkgOpenClawConfig {
   /** DKG daemon HTTP URL (default: "http://127.0.0.1:9200"). */
   daemonUrl?: string;
+
+  /**
+   * Explicit DKG home directory for the daemon the adapter targets via
+   * `daemonUrl`. Used only for loading the node-level `<dkgHome>/auth.token`
+   * when the daemon runs with a custom home outside the auto-detected
+   * `~/.dkg` / `~/.dkg-dev` homes.
+   *
+   * This is not used for agent identity probing; the adapter resolves the
+   * default agent through `/api/agent/identity` with the node-level Bearer
+   * token.
+   */
+  dkgHome?: string;
+
+  /**
+   * Explicit adapter state directory for file-backed runtime state such as
+   * ChatTurnWriter watermarks. Setup writes a workspace-scoped default when
+   * it can discover the workspace. Runtime honors explicit user config after
+   * gateway/env state sources and before the current `api.workspaceDir`;
+   * setup-owned defaults are only a fallback for older gateways.
+   */
+  stateDir?: string;
+
+  /**
+   * Setup-owned provenance marker for `stateDir`. Setup writes this as
+   * `"setup-default"` only when it writes its workspace-scoped default;
+   * absent means a matching `stateDir` must be treated as user-owned.
+   */
+  stateDirSource?: 'setup-default';
+
+  /**
+   * Setup-owned metadata for the workspace that installed this adapter entry.
+   * Runtime combines it with `stateDirSource` to distinguish setup-written
+   * stateDir defaults from explicit user stateDir overrides.
+   */
+  installedWorkspace?: string;
 
   /** DKG memory integration config. */
   memory?: {

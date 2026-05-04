@@ -33,6 +33,7 @@ import {
   ContextGraphStorage,
   ContextGraphValueStorage,
   DKGPublishingConvictionNFT,
+  DKGStakingConvictionNFT,
   EpochStorage,
   Hub,
   KnowledgeAssetsV10,
@@ -41,6 +42,7 @@ import {
   ParametersStorage,
   Profile,
   Staking,
+  StakingV10,
   Token,
 } from '../../typechain';
 import {
@@ -70,6 +72,8 @@ describe('@unit v10 KnowledgeAssetsV10 audit', () => {
   let TokenContract: Token;
   let ProfileContract: Profile;
   let StakingContract: Staking;
+  let StakingV10Contract: StakingV10;
+  let StakingNFT: DKGStakingConvictionNFT;
   let ParametersStorageContract: ParametersStorage;
   let Facade: ContextGraphs;
   let CGStorageContract: ContextGraphStorage;
@@ -93,6 +97,8 @@ describe('@unit v10 KnowledgeAssetsV10 audit', () => {
     TokenContract: Token;
     ProfileContract: Profile;
     StakingContract: Staking;
+    StakingV10Contract: StakingV10;
+    StakingNFT: DKGStakingConvictionNFT;
     ParametersStorageContract: ParametersStorage;
     Facade: ContextGraphs;
     CGStorageContract: ContextGraphStorage;
@@ -118,6 +124,11 @@ describe('@unit v10 KnowledgeAssetsV10 audit', () => {
       'ContextGraphs',
       'ContextGraphValueStorage',
       'DKGPublishingConvictionNFT',
+      // v4.0.0 — KAv10 ACK gate reads `getNodeStakeV10`, which only the V10
+      // staking path can populate. Pull in the V10 staking stack so
+      // `setupNodes` can stake via `DKGStakingConvictionNFT.createConviction`.
+      'StakingV10',
+      'DKGStakingConvictionNFT',
       'KnowledgeAssetsStorage',
       'KnowledgeAssetsV10',
     ]);
@@ -152,6 +163,10 @@ describe('@unit v10 KnowledgeAssetsV10 audit', () => {
     const TokenContract = await hre.ethers.getContract<Token>('Token');
     const ProfileContract = await hre.ethers.getContract<Profile>('Profile');
     const StakingContract = await hre.ethers.getContract<Staking>('Staking');
+    const StakingV10Contract = await hre.ethers.getContract<StakingV10>('StakingV10');
+    const StakingNFT = await hre.ethers.getContract<DKGStakingConvictionNFT>(
+      'DKGStakingConvictionNFT',
+    );
     const ParametersStorageContract =
       await hre.ethers.getContract<ParametersStorage>('ParametersStorage');
     const Facade = await hre.ethers.getContract<ContextGraphs>('ContextGraphs');
@@ -178,6 +193,8 @@ describe('@unit v10 KnowledgeAssetsV10 audit', () => {
       TokenContract,
       ProfileContract,
       StakingContract,
+      StakingV10Contract,
+      StakingNFT,
       ParametersStorageContract,
       Facade,
       CGStorageContract,
@@ -200,6 +217,8 @@ describe('@unit v10 KnowledgeAssetsV10 audit', () => {
     TokenContract = f.TokenContract;
     ProfileContract = f.ProfileContract;
     StakingContract = f.StakingContract;
+    StakingV10Contract = f.StakingV10Contract;
+    StakingNFT = f.StakingNFT;
     ParametersStorageContract = f.ParametersStorageContract;
     Facade = f.Facade;
     CGStorageContract = f.CGStorageContract;
@@ -210,13 +229,21 @@ describe('@unit v10 KnowledgeAssetsV10 audit', () => {
     chainId = DEFAULT_CHAIN_ID;
   });
 
+  // v4.0.0 — KAv10's `_verifySignature` ACK gate reads
+  // `convictionStakingStorage.getNodeStakeV10(identityId) > 0`, so V8
+  // `Staking.stake` no longer makes the signer eligible. Stake via the V10
+  // NFT path (`DKGStakingConvictionNFT.createConviction`) instead.
   async function fundAndStakeNode(node: NodeAccounts, identityId: number) {
     await TokenContract.mint(node.operational.address, MIN_STAKE);
     await TokenContract.connect(node.operational).approve(
-      await StakingContract.getAddress(),
+      await StakingV10Contract.getAddress(),
       MIN_STAKE,
     );
-    await StakingContract.connect(node.operational).stake(identityId, MIN_STAKE);
+    await StakingNFT.connect(node.operational).createConviction(
+      identityId,
+      MIN_STAKE,
+      1,
+    );
   }
 
   async function setupNodes(receivingNodesCount = 3): Promise<{
@@ -298,6 +325,7 @@ describe('@unit v10 KnowledgeAssetsV10 audit', () => {
       const signedEpochs = 3;
       const signedByteSize = 1000;
       const signedKnowledgeAssetsAmount = 10;
+      const merkleLeafCount = 1;
 
       // Signatures are computed against the "signed" values.
       const publisherDigest = buildPublisherDigest(
@@ -316,6 +344,7 @@ describe('@unit v10 KnowledgeAssetsV10 audit', () => {
         signedByteSize,
         signedEpochs,
         signedTokenAmount,
+        merkleLeafCount,
       );
       const sig = await signPublishDigests(
         publishingNode,
@@ -341,6 +370,7 @@ describe('@unit v10 KnowledgeAssetsV10 audit', () => {
             ? signedTokenAmount + 1n
             : signedTokenAmount,
         isImmutable: false,
+        merkleLeafCount,
         publisherNodeIdentityId: publisherIdentityId,
         publisherNodeR: sig.publisherR,
         publisherNodeVS: sig.publisherVS,
@@ -392,6 +422,7 @@ describe('@unit v10 KnowledgeAssetsV10 audit', () => {
       const epochs = 2;
       const knowledgeAssetsAmount = 10;
       const byteSize = 1000;
+      const merkleLeafCount = 1;
 
       // Foreign KAV10 address (KAV10_ADDRESS_A in BUGS_FOUND.md). We use
       // accounts[19] — a valid checksummed address that is NOT the deployed
@@ -419,6 +450,7 @@ describe('@unit v10 KnowledgeAssetsV10 audit', () => {
         byteSize,
         epochs,
         tokenAmount,
+        merkleLeafCount,
       );
       const sig = await signPublishDigests(
         publishingNode,
@@ -436,6 +468,7 @@ describe('@unit v10 KnowledgeAssetsV10 audit', () => {
         epochs,
         tokenAmount,
         isImmutable: false,
+        merkleLeafCount,
         publisherNodeIdentityId: publisherIdentityId,
         publisherNodeR: sig.publisherR,
         publisherNodeVS: sig.publisherVS,
@@ -465,6 +498,7 @@ describe('@unit v10 KnowledgeAssetsV10 audit', () => {
       const epochs = 2;
       const knowledgeAssetsAmount = 10;
       const byteSize = 1000;
+      const merkleLeafCount = 1;
 
       const foreignKav10 = accounts[18].address;
 
@@ -488,6 +522,7 @@ describe('@unit v10 KnowledgeAssetsV10 audit', () => {
         byteSize,
         epochs,
         tokenAmount,
+        merkleLeafCount,
       );
       const sig = await signPublishDigests(
         publishingNode,
@@ -505,6 +540,7 @@ describe('@unit v10 KnowledgeAssetsV10 audit', () => {
         epochs,
         tokenAmount,
         isImmutable: false,
+        merkleLeafCount,
         publisherNodeIdentityId: publisherIdentityId,
         publisherNodeR: sig.publisherR,
         publisherNodeVS: sig.publisherVS,
@@ -592,6 +628,7 @@ describe('@unit v10 KnowledgeAssetsV10 audit', () => {
       const epochs = 2;
       const knowledgeAssetsAmount = 10;
       const byteSize = 1000;
+      const merkleLeafCount = 1;
 
       const publisherDigest = buildPublisherDigest(
         chainId,
@@ -609,6 +646,7 @@ describe('@unit v10 KnowledgeAssetsV10 audit', () => {
         byteSize,
         epochs,
         tokenAmount,
+        merkleLeafCount,
       );
 
       // 4 signing nodes: [n0, n1, n0, n1] — only 2 unique identities.
@@ -640,6 +678,7 @@ describe('@unit v10 KnowledgeAssetsV10 audit', () => {
         epochs,
         tokenAmount,
         isImmutable: false,
+        merkleLeafCount,
         publisherNodeIdentityId: publisherIdentityId,
         publisherNodeR: sig.publisherR,
         publisherNodeVS: sig.publisherVS,

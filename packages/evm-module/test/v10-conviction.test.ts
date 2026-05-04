@@ -209,18 +209,20 @@ describe('@integration V10 Phase 5 — NFT-backed staking', function () {
   // End-to-end happy path: user approves StakingV10, calls
   // NFT.createConviction, and we verify the full state write surface:
   //   - ERC-721 token minted to user
-  //   - TRAC moved user → StakingStorage (NFT wrapper holds nothing)
-  //   - StakingStorage totals + delegator base updated
+  //   - TRAC moved user → ConvictionStakingStorage (NFT wrapper holds nothing)
+  //   - ConvictionStakingStorage TRAC vault and V10 stake aggregates updated
   //   - ConvictionStakingStorage position carries the right tier
-  it('createConviction: 12-month tier mints NFT + writes storage through to SS + CSS', async () => {
+  it('createConviction: 12-month tier mints NFT + writes storage through to CSS', async () => {
     const { identityId } = await createProfile();
     const amount = hre.ethers.parseEther('10000');
     await mintAndApprove(accounts[0], amount);
 
     const ssAddr = await StakingStorageContract.getAddress();
+    const cssAddr = await ConvictionStakingStorageContract.getAddress();
     const nftAddr = await NFT.getAddress();
     const stakerBalBefore = await Token.balanceOf(accounts[0].address);
     const ssBalBefore = await Token.balanceOf(ssAddr);
+    const cssBalBefore = await Token.balanceOf(cssAddr);
 
     await expect(
       NFT.connect(accounts[0]).createConviction(identityId, amount, 12),
@@ -230,24 +232,23 @@ describe('@integration V10 Phase 5 — NFT-backed staking', function () {
       .and.to.emit(StakingV10Contract, 'Staked')
       .withArgs(1n, accounts[0].address, identityId, amount, 12);
 
-    // NFT minted (tokenId 0).
+    // NFT minted (tokenId 1).
     expect(await NFT.ownerOf(1)).to.equal(accounts[0].address);
     expect(await NFT.balanceOf(accounts[0].address)).to.equal(1n);
 
-    // TRAC moved in one hop: staker → StakingStorage (shared vault). NFT
-    // wrapper untouched. Note (D15): even though V10 accounting lives on
-    // ConvictionStakingStorage, the TRAC custody vault is still the V8
-    // StakingStorage contract — V10 does not run its own ERC-20 vault.
+    // v4.0.0 — TRAC moves in one hop: staker → CSS (V10 vault). The NFT
+    // wrapper holds nothing. The V8 StakingStorage TRAC balance is
+    // untouched on V10 deposits — the consolidation routes the entire
+    // V10 deposit/transfer surface through CSS.
     expect(await Token.balanceOf(accounts[0].address)).to.equal(
       stakerBalBefore - amount,
     );
-    expect(await Token.balanceOf(ssAddr)).to.equal(ssBalBefore + amount);
+    expect(await Token.balanceOf(ssAddr)).to.equal(ssBalBefore);
+    expect(await Token.balanceOf(cssAddr)).to.equal(cssBalBefore + amount);
     expect(await Token.balanceOf(nftAddr)).to.equal(0n);
 
-    // D15 — V10 stake lives in ConvictionStakingStorage. StakingStorage
-    // keeps track of the TRAC custody only (no delegator-base rows for V10
-    // tokenId keys). The V8 `getDelegatorStakeBase` / `getNodeStake`
-    // getters stay zero for V10 positions.
+    // V10 stake aggregates live on CSS. V8 SS getNodeStake/totalStake stay
+    // zero for V10 positions (no V8 delegator-base mirror).
     expect(
       await ConvictionStakingStorageContract.getNodeStakeV10(identityId),
     ).to.equal(amount);
@@ -317,10 +318,10 @@ describe('@integration V10 Phase 5 — NFT-backed staking', function () {
     const grossNodeRewards = (epochPool * nodeScore18) / allNodesScore18;
     const expectedReward = (delegatorScore18 * grossNodeRewards) / nodeScore18;
 
-    // Pre-fund the StakingStorage vault with the anticipated reward so the
-    // post-claim node-stake bookkeeping stays tied to on-chain TRAC.
+    // v4.0.0 — Pre-fund the CSS vault (V10 vault) with the anticipated
+    // reward so the post-claim TRAC payout has on-chain backing.
     await Token.mint(
-      await StakingStorageContract.getAddress(),
+      await ConvictionStakingStorageContract.getAddress(),
       expectedReward,
     );
 

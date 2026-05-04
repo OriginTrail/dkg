@@ -277,7 +277,7 @@ npm install -g @origintrail-official/dkg
 dkg openclaw setup
 ```
 
-`dkg openclaw setup` is non-interactive and idempotent. It writes `~/.dkg/config.json`, merges the adapter into `~/.openclaw/openclaw.json` (including `plugins.entries.adapter-openclaw.config` with `daemonUrl`, `memory.enabled`, and `channel.enabled`), syncs the canonical DKG node skill into your OpenClaw workspace, starts the DKG daemon, and verifies the install. Re-running preserves any customizations you made to the plugin entry config.
+`dkg openclaw setup` is non-interactive and idempotent. It writes `~/.dkg/config.json`, merges the adapter into `~/.openclaw/openclaw.json` (including `plugins.entries.adapter-openclaw.config` with `daemonUrl`, `stateDir`, `memory.enabled`, and `channel.enabled`), writes workspace-local adapter scratch state under `<workspace>/.dkg-adapter`, syncs the canonical DKG node skill into your OpenClaw workspace, starts the DKG daemon, and verifies the install. Re-running preserves any customizations you made to the plugin entry config. `~/.openclaw` remains the OpenClaw runtime home; use `OPENCLAW_STATE_DIR` or custom `config.stateDir` only when you intentionally want adapter state outside the workspace default.
 
 Alternatively, the DKG node UI's right-panel "Connect OpenClaw" button runs the same setup flow in-process — clicking it from a fresh install is equivalent to running `dkg openclaw setup` on the command line.
 

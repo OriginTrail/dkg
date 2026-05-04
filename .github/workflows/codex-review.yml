@@ -2,7 +2,21 @@ name: Codex PR Review
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths-ignore:
+      - 'pnpm-lock.yaml'
+      - 'LICENSE'
+      - 'knip.json'
+      - 'CHANGELOG.md'
+      - 'data/**'
+      - 'snapshots/**'
+      - '**/*.snap'
+      - '**/*.log'
+      - '**/CHANGELOG.md'
+      - '**/dist/**'
+      - '**/.turbo/**'
+      - '**/node_modules/**'
+      - '**/snapshots/**'
 
 concurrency:
   group: codex-review-${{ github.event.pull_request.number }}
@@ -17,8 +31,10 @@ jobs:
     name: Codex Review
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # Skip fork PRs - they cannot access repository secrets
-    if: github.event.pull_request.head.repo.full_name == github.repository
+    # Skip fork PRs (no access to secrets) and draft PRs (still iterating)
+    if: |
+      github.event.pull_request.head.repo.full_name == github.repository
+      && github.event.pull_request.draft == false
 
     steps:
       - name: Checkout PR merge commit
@@ -27,33 +43,107 @@ jobs:
           ref: refs/pull/${{ github.event.pull_request.number }}/merge
           fetch-depth: 0
 
-      - name: Generate PR diff
+      - name: Generate filtered PR diff
+        id: diff
         run: |
-          git diff ${{ github.event.pull_request.base.sha }}...HEAD > pr-diff.patch
+          # Filter out noise paths from the diff sent to the model.
+          git diff ${{ github.event.pull_request.base.sha }}...HEAD -- \
+            ':!pnpm-lock.yaml' \
+            ':!LICENSE' \
+            ':!knip.json' \
+            ':!CHANGELOG.md' \
+            ':!data/**' \
+            ':!snapshots/**' \
+            ':!**/*.snap' \
+            ':!**/*.log' \
+            ':!**/CHANGELOG.md' \
+            ':!**/dist/**' \
+            ':!**/.turbo/**' \
+            ':!**/node_modules/**' \
+            ':!**/snapshots/**' \
+            > pr-diff.patch
+
           DIFF_LINES=$(wc -l < pr-diff.patch)
-          echo "Diff size: ${DIFF_LINES} lines"
-          if [ "$DIFF_LINES" -eq 0 ]; then
-            echo "::warning::PR diff is empty — nothing to review"
-          fi
+          DIFF_HASH=$(sha256sum pr-diff.patch | cut -d' ' -f1)
+          echo "diff_lines=${DIFF_LINES}" >> "$GITHUB_OUTPUT"
+          echo "diff_hash=${DIFF_HASH}" >> "$GITHUB_OUTPUT"
+          echo "Filtered diff: ${DIFF_LINES} lines, hash ${DIFF_HASH}"
+
+      - name: Check if diff already handled (hash skip)
+        id: hash_check
+        if: steps.diff.outputs.diff_lines != '0'
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            const marker = `<!-- codex-review-diff-hash: ${{ steps.diff.outputs.diff_hash }} -->`;
+            const reviews = await github.paginate(
+              github.rest.pulls.listReviews,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: context.issue.number,
+                per_page: 100,
+              }
+            );
+            const matched = reviews.some(r => r.body && r.body.includes(marker));
+            if (matched) {
+              console.log('Diff hash matches a prior review or skip notice — silently skipping.');
+              core.setOutput('skipped', 'true');
+            } else {
+              core.setOutput('skipped', 'false');
+            }
+
+      - name: Skip if diff exceeds size cap
+        id: size_check
+        if: |
+          steps.diff.outputs.diff_lines != '0'
+          && steps.diff.outputs.diff_lines > 5000
+          && steps.hash_check.outputs.skipped == 'false'
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          DIFF_HASH: ${{ steps.diff.outputs.diff_hash }}
+          DIFF_LINES: ${{ steps.diff.outputs.diff_lines }}
+        with:
+          script: |
+            const hashMarker = `<!-- codex-review-diff-hash: ${process.env.DIFF_HASH} -->`;
+            const lines = process.env.DIFF_LINES;
+            await github.rest.pulls.createReview({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+              body: `${hashMarker}\nCodex review skipped: filtered diff is ${lines} lines (cap: 5,000). Please consider splitting this into smaller PRs for reviewability.`,
+              event: 'COMMENT',
+              comments: [],
+            });
 
       - name: Run Codex review
         id: codex
+        if: |
+          steps.diff.outputs.diff_lines != '0'
+          && steps.diff.outputs.diff_lines <= 5000
+          && steps.hash_check.outputs.skipped == 'false'
         uses: openai/codex-action@v1
         with:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
           model: gpt-5.4
           prompt-file: .codex/review-prompt.md
           output-schema-file: .codex/review-schema.json
-          effort: high
+          effort: medium
           sandbox: read-only
 
       - name: Post PR review with inline comments
+        if: |
+          steps.diff.outputs.diff_lines != '0'
+          && steps.diff.outputs.diff_lines <= 5000
+          && steps.hash_check.outputs.skipped == 'false'
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         env:
           REVIEW_JSON: ${{ steps.codex.outputs.final-message }}
+          DIFF_HASH: ${{ steps.diff.outputs.diff_hash }}
         with:
           script: |
             const raw = process.env.REVIEW_JSON || '';
+            const hashMarker = `<!-- codex-review-diff-hash: ${process.env.DIFF_HASH} -->`;
             console.log(`Raw Codex output (${raw.length} chars): ${raw.slice(0, 1000)}`);
 
             let review;
@@ -61,12 +151,13 @@ jobs:
               review = JSON.parse(raw);
             } catch (e) {
               console.error('Failed to parse Codex output:', e.message);
+              // Transient failure: do NOT embed the hash marker, so the next
+              // run on this same diff retries instead of silently skipping.
               await github.rest.pulls.createReview({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 pull_number: context.issue.number,
-                body: '⚠️ Codex review failed to produce valid JSON output. Check the [workflow logs](' +
-                  `${process.env.GITHUB_SERVER_URL}/${context.repo.owner}/${context.repo.repo}/actions/runs/${process.env.GITHUB_RUN_ID}) for details.`,
+                body: `Codex review failed to produce valid JSON output. Check the [workflow logs](${process.env.GITHUB_SERVER_URL}/${context.repo.owner}/${context.repo.repo}/actions/runs/${process.env.GITHUB_RUN_ID}) for details.`,
                 event: 'COMMENT',
                 comments: [],
               });
@@ -145,25 +236,34 @@ jobs:
 
             if (validComments.length === 0) {
               console.log(`No valid inline comments (${comments.length} total from Codex, ${droppedComments.length} dropped).`);
-              // Always post a review so the PR author knows the check ran
+              // "All dropped" means the model produced comments but every one
+              // targeted lines outside the right-side diff — usually a line
+              // mapping failure, not a real no-issues signal. Treat it as
+              // transient: post the warning without the hash marker so the
+              // next run on the same diff retries instead of silently skipping.
+              const isLineMappingFailure = droppedComments.length > 0;
+              const summary = isLineMappingFailure
+                ? `Codex review produced ${droppedComments.length} comment(s) but all targeted lines outside the diff and were dropped. Check the [workflow logs](${process.env.GITHUB_SERVER_URL}/${context.repo.owner}/${context.repo.repo}/actions/runs/${process.env.GITHUB_RUN_ID}) for details.`
+                : 'Codex review completed — no issues found.';
+              const body = isLineMappingFailure ? summary : `${hashMarker}\n${summary}`;
               await github.rest.pulls.createReview({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 pull_number: context.issue.number,
-                body: droppedComments.length > 0
-                  ? `Codex review produced ${droppedComments.length} comment(s) but all targeted lines outside the diff and were dropped. Check the [workflow logs](${process.env.GITHUB_SERVER_URL}/${context.repo.owner}/${context.repo.repo}/actions/runs/${process.env.GITHUB_RUN_ID}) for details.`
-                  : 'Codex review completed — no issues found.',
+                body,
                 event: 'COMMENT',
                 comments: [],
               });
               return;
             }
 
-            // Post inline comments only (no top-level summary comment)
+            // Inline comments + a small body carrying the diff-hash marker so
+            // future runs can detect "diff unchanged" and skip.
             await github.rest.pulls.createReview({
               owner: context.repo.owner,
               repo: context.repo.repo,
               pull_number: context.issue.number,
+              body: hashMarker,
               event: 'COMMENT',
               comments: validComments,
             });

@@ -227,10 +227,14 @@ describe('EVM E2E: Full on-chain publishing lifecycle', () => {
     const pubSigRaw = await coreOp.signMessage(pubDigest);
     const pubSig = ethers.Signature.from(pubSigRaw);
 
-    // ACK digest: keccak256(abi.encodePacked(chainid, address(KAV10), contextGraphId, merkleRoot, kaCount, byteSize, epochs, tokenAmount))
+    // ACK digest: keccak256(abi.encodePacked(chainid, address(KAV10), contextGraphId, merkleRoot, kaCount, byteSize, epochs, tokenAmount, merkleLeafCount))
+    // PR #357: V10 ACK now binds merkleLeafCount (uint256) so that
+    // RandomSampling can rely on the on-chain count matching what the
+    // publisher signed. Mirrors helpers/v10-kc-helpers.ts:buildPublishAckDigest.
+    const merkleLeafCount = 1;
     const ackDigest = ethers.getBytes(ethers.solidityPackedKeccak256(
-      ['uint256', 'address', 'uint256', 'bytes32', 'uint256', 'uint256', 'uint256', 'uint256'],
-      [evmChainId, kav10Address, contextGraphId, ethers.hexlify(merkleRoot), kaCount, byteSize, epochs, tokenAmount],
+      ['uint256', 'address', 'uint256', 'bytes32', 'uint256', 'uint256', 'uint256', 'uint256', 'uint256'],
+      [evmChainId, kav10Address, contextGraphId, ethers.hexlify(merkleRoot), kaCount, byteSize, epochs, tokenAmount, merkleLeafCount],
     ));
 
     // Collect ACK signatures from 3 receivers
@@ -262,6 +266,7 @@ describe('EVM E2E: Full on-chain publishing lifecycle', () => {
       epochs,
       tokenAmount,
       isImmutable: false,
+      merkleLeafCount,
       paymaster: ethers.ZeroAddress,
       convictionAccountId: 0n,
       publisherNodeIdentityId: publisherIdentityId,
@@ -270,7 +275,7 @@ describe('EVM E2E: Full on-chain publishing lifecycle', () => {
         vs: ethers.getBytes(pubSig.yParityAndS),
       },
       ackSignatures,
-    });
+    } as any);
 
     expect(result.batchId).toBeGreaterThan(0n);
     expect(result.txHash).toMatch(/^0x[0-9a-f]{64}$/);

@@ -1027,11 +1027,16 @@ describe('Tentative publish UAL uniqueness', () => {
     });
 
     let receivedStagingQuads: Uint8Array | undefined;
+    let receivedMerkleLeafCount = 0;
     const v10ACKProvider = async (
       _merkleRoot: Uint8Array, _cgId: string, _kaCount: number,
-      _rootEntities: string[], _byteSize: bigint, stagingQuads?: Uint8Array,
+      _rootEntities: string[], _byteSize: bigint, stagingQuads: Uint8Array | undefined,
+      _epochs: number | undefined, _tokenAmount: bigint | undefined,
+      _swmGraphId: string | undefined, _subGraphName: string | undefined,
+      merkleLeafCount: number,
     ) => {
       receivedStagingQuads = stagingQuads;
+      receivedMerkleLeafCount = merkleLeafCount;
       return [];
     };
 
@@ -1047,6 +1052,7 @@ describe('Tentative publish UAL uniqueness', () => {
 
     expect(receivedStagingQuads).toBeDefined();
     expect(receivedStagingQuads!.length).toBeGreaterThan(0);
+    expect(receivedMerkleLeafCount).toBeGreaterThan(0);
     const decoded = new TextDecoder().decode(receivedStagingQuads);
     expect(decoded).toContain('V10 Staging Test');
 

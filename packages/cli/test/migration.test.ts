@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, mkdir, writeFile, readlink, readFile, rm, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { existsSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { _migrationIo, migrateToBlueGreen } from '../src/migration.js';
 import { repoDir } from '../src/config.js';
 
@@ -11,21 +11,48 @@ let dkgHome: string;
 
 let execSyncCalls: { cmd: string; opts?: any }[] = [];
 let execFileSyncCalls: { binary: string; args: string[]; opts?: any }[] = [];
+const RUNTIME_PACKAGES_BUILD_CMD = 'pnpm build:runtime:packages';
+const RUNTIME_BUILD_CMD = 'pnpm build:runtime';
+const RUNTIME_BUILD_COMPAT_WRAPPER = 'pnpm run build:runtime:packages && pnpm --filter @origintrail-official/dkg-node-ui run build:ui';
+const FULL_BUILD_CMD = 'pnpm build';
+const NODE_UI_BUILD_CMD = 'pnpm --filter @origintrail-official/dkg-node-ui run build:ui';
+const LEGACY_NODE_UI_BUILD_CMD = 'pnpm --filter @dkg/node-ui run build:ui';
 
 const origIo = { ..._migrationIo };
 
 function installMocks() {
   _migrationIo.execSync = ((cmd: string, opts?: any) => {
     execSyncCalls.push({ cmd, opts });
+    const cwd = opts?.cwd ? String(opts.cwd) : '';
+    if (cwd && (cmd === RUNTIME_PACKAGES_BUILD_CMD || cmd === RUNTIME_BUILD_CMD || cmd === FULL_BUILD_CMD)) {
+      mkdirSync(join(cwd, 'packages', 'cli', 'dist'), { recursive: true });
+      writeFileSync(join(cwd, 'packages', 'cli', 'dist', 'cli.js'), '');
+    }
+    if (cwd && (cmd === NODE_UI_BUILD_CMD || cmd === LEGACY_NODE_UI_BUILD_CMD)) {
+      mkdirSync(join(cwd, 'packages', 'node-ui', 'dist-ui'), { recursive: true });
+      writeFileSync(join(cwd, 'packages', 'node-ui', 'dist-ui', 'index.html'), '');
+    }
     return 'https://github.com/test/repo.git';
   }) as any;
 
   _migrationIo.execFileSync = ((binary: string, args: string[], opts?: any) => {
     execFileSyncCalls.push({ binary, args: [...args], opts });
-    if (binary === 'git' && args[0] === 'clone') {
+    if (binary === 'git' && args.includes('clone')) {
       const target = args[args.length - 1];
       if (target && !target.startsWith('git') && !target.startsWith('http')) {
-        try { mkdirSync(target, { recursive: true }); } catch {}
+        try {
+          mkdirSync(join(target, '.git'), { recursive: true });
+          writeFileSync(
+            join(target, 'package.json'),
+            JSON.stringify({
+              dkgBuild: { releaseRuntimeBuildScript: 'build:runtime:packages' },
+              scripts: {
+                'build:runtime:packages': RUNTIME_PACKAGES_BUILD_CMD,
+                'build:runtime': RUNTIME_BUILD_COMPAT_WRAPPER,
+              },
+            }),
+          );
+        } catch {}
       }
     }
     if (binary === 'git' && args[0] === 'remote' && args[1] === 'get-url') {
@@ -64,16 +91,57 @@ function makeLog(): { fn: (msg: string) => void; calls: string[] } {
   return { fn: (msg: string) => { calls.push(msg); }, calls };
 }
 
+async function writeSlotReady(slotDir: string, includeUi = true): Promise<void> {
+  await mkdir(join(slotDir, '.git'), { recursive: true });
+  await mkdir(join(slotDir, 'packages', 'cli', 'dist'), { recursive: true });
+  await writeFile(join(slotDir, 'packages', 'cli', 'dist', 'cli.js'), '');
+  if (includeUi) {
+    await mkdir(join(slotDir, 'packages', 'node-ui', 'dist-ui'), { recursive: true });
+    await writeFile(join(slotDir, 'packages', 'node-ui', 'dist-ui', 'index.html'), '');
+  }
+}
+
+async function writeNpmSlotReady(slotDir: string, includeUi = true): Promise<void> {
+  await mkdir(join(slotDir, 'node_modules', '@origintrail-official', 'dkg', 'dist'), { recursive: true });
+  await writeFile(join(slotDir, 'package.json'), '{}');
+  await writeFile(join(slotDir, 'node_modules', '@origintrail-official', 'dkg', 'dist', 'cli.js'), '');
+  if (includeUi) {
+    await mkdir(
+      join(
+        slotDir,
+        'node_modules',
+        '@origintrail-official',
+        'dkg',
+        'node_modules',
+        '@origintrail-official',
+        'dkg-node-ui',
+        'dist-ui',
+      ),
+      { recursive: true },
+    );
+    await writeFile(
+      join(
+        slotDir,
+        'node_modules',
+        '@origintrail-official',
+        'dkg',
+        'node_modules',
+        '@origintrail-official',
+        'dkg-node-ui',
+        'dist-ui',
+        'index.html',
+      ),
+      '',
+    );
+  }
+}
+
 describe('migrateToBlueGreen', () => {
   it('skips migration when releases/current already exists', async () => {
     const rDir = join(dkgHome, 'releases');
     await mkdir(rDir, { recursive: true });
-    await mkdir(join(rDir, 'a', '.git'), { recursive: true });
-    await mkdir(join(rDir, 'b', '.git'), { recursive: true });
-    await mkdir(join(rDir, 'a', 'packages', 'cli', 'dist'), { recursive: true });
-    await mkdir(join(rDir, 'b', 'packages', 'cli', 'dist'), { recursive: true });
-    await writeFile(join(rDir, 'a', 'packages', 'cli', 'dist', 'cli.js'), '');
-    await writeFile(join(rDir, 'b', 'packages', 'cli', 'dist', 'cli.js'), '');
+    await writeSlotReady(join(rDir, 'a'));
+    await writeSlotReady(join(rDir, 'b'));
     await symlink('a', join(rDir, 'current'));
 
     const log = makeLog();
@@ -97,9 +165,7 @@ describe('migrateToBlueGreen', () => {
 
   it('restores current symlink from existing active metadata when valid', async () => {
     const rDir = join(dkgHome, 'releases');
-    await mkdir(join(rDir, 'b', '.git'), { recursive: true });
-    await mkdir(join(rDir, 'b', 'packages', 'cli', 'dist'), { recursive: true });
-    await writeFile(join(rDir, 'b', 'packages', 'cli', 'dist', 'cli.js'), '');
+    await writeSlotReady(join(rDir, 'b'), false);
     await writeFile(join(rDir, 'active'), 'b');
 
     const log = makeLog();
@@ -211,12 +277,309 @@ describe('migrateToBlueGreen', () => {
   });
 
   it('migration builds slot A after cloning (not just clone)', async () => {
+    _migrationIo.swapSlot = (async () => undefined) as any;
     const log = makeLog();
     await migrateToBlueGreen(log.fn);
 
     const allCmds = execSyncCalls.map(c => c.cmd);
     expect(allCmds.some(cmd => cmd.includes('pnpm install'))).toBe(true);
     expect(allCmds.some(cmd => cmd.includes('pnpm build'))).toBe(true);
+    expect(allCmds.some(cmd => cmd === NODE_UI_BUILD_CMD)).toBe(true);
+    const uiBuildIdx = allCmds.indexOf(NODE_UI_BUILD_CMD);
+    const runtimeBuildIdx = allCmds.indexOf(RUNTIME_PACKAGES_BUILD_CMD);
+    expect(uiBuildIdx).toBeGreaterThan(runtimeBuildIdx);
+    expect(allCmds).not.toContain(RUNTIME_BUILD_CMD);
+  });
+
+  it('falls back to build:runtime during bootstrap when the runtime-only package script is absent', async () => {
+    const rDir = join(dkgHome, 'releases');
+    _migrationIo.repoDir = () => repoDir();
+    _migrationIo.swapSlot = (async () => undefined) as any;
+    _migrationIo.execFileSync = ((binary: string, args: string[], opts?: any) => {
+      execFileSyncCalls.push({ binary, args: [...args], opts });
+      if (binary === 'git' && args.includes('clone')) {
+        const target = args[args.length - 1];
+        mkdirSync(join(target, '.git'), { recursive: true });
+        writeFileSync(
+          join(target, 'package.json'),
+          JSON.stringify({ scripts: { 'build:runtime': RUNTIME_BUILD_CMD } }),
+        );
+      }
+      if (binary === 'git' && args[0] === 'remote' && args[1] === 'get-url') {
+        return 'https://github.com/test/repo.git';
+      }
+      return '';
+    }) as any;
+
+    const log = makeLog();
+    await migrateToBlueGreen(log.fn);
+
+    const slotACmds = execSyncCalls
+      .filter(c => String(c.opts?.cwd) === join(rDir, 'a'))
+      .map(c => c.cmd);
+    expect(slotACmds).toContain(RUNTIME_BUILD_CMD);
+    expect(slotACmds).not.toContain(RUNTIME_PACKAGES_BUILD_CMD);
+  });
+
+  it('falls back to pnpm build during bootstrap when runtime build scripts are absent', async () => {
+    const rDir = join(dkgHome, 'releases');
+    _migrationIo.repoDir = () => repoDir();
+    _migrationIo.swapSlot = (async () => undefined) as any;
+    _migrationIo.execFileSync = ((binary: string, args: string[], opts?: any) => {
+      execFileSyncCalls.push({ binary, args: [...args], opts });
+      if (binary === 'git' && args.includes('clone')) {
+        const target = args[args.length - 1];
+        mkdirSync(join(target, '.git'), { recursive: true });
+        writeFileSync(
+          join(target, 'package.json'),
+          JSON.stringify({ scripts: { build: 'turbo build' } }),
+        );
+      }
+      if (binary === 'git' && args[0] === 'remote' && args[1] === 'get-url') {
+        return 'https://github.com/test/repo.git';
+      }
+      return '';
+    }) as any;
+
+    const log = makeLog();
+    await migrateToBlueGreen(log.fn);
+
+    const slotACmds = execSyncCalls
+      .filter(c => String(c.opts?.cwd) === join(rDir, 'a'))
+      .map(c => c.cmd);
+    expect(slotACmds).toContain(FULL_BUILD_CMD);
+    expect(slotACmds).not.toContain(RUNTIME_PACKAGES_BUILD_CMD);
+    expect(slotACmds).not.toContain(RUNTIME_BUILD_CMD);
+  });
+
+  it('repairs inactive ready slots that are missing the Node UI static bundle', async () => {
+    const rDir = join(dkgHome, 'releases');
+    await writeSlotReady(join(rDir, 'a'));
+    await writeSlotReady(join(rDir, 'b'), false);
+    await writeFile(join(rDir, 'active'), 'a');
+    await symlink('a', join(rDir, 'current'));
+
+    const log = makeLog();
+    await migrateToBlueGreen(log.fn);
+
+    const uiBuilds = execSyncCalls.filter(c => c.cmd === NODE_UI_BUILD_CMD);
+    expect(uiBuilds.map(c => String(c.opts?.cwd))).toEqual([join(rDir, 'b')]);
+    expect(log.calls.some(m => m.includes('Node UI static bundle missing'))).toBe(true);
+    expect(execFileSyncCalls.some(c => c.binary === 'git' && c.args[0] === 'clone')).toBe(false);
+  });
+
+  it('does not run workspace UI build for npm-layout slots missing UI', async () => {
+    const rDir = join(dkgHome, 'releases');
+    const slotB = join(rDir, 'b');
+    await writeSlotReady(join(rDir, 'a'));
+    await writeNpmSlotReady(slotB, false);
+    await writeFile(join(rDir, 'active'), 'a');
+    _migrationIo.swapSlot = (async () => undefined) as any;
+
+    const log = makeLog();
+    await migrateToBlueGreen(log.fn);
+
+    const slotBCmds = execSyncCalls
+      .filter(c => String(c.opts?.cwd) === slotB)
+      .map(c => c.cmd);
+    expect(slotBCmds).not.toContain(NODE_UI_BUILD_CMD);
+    expect(slotBCmds).not.toContain(LEGACY_NODE_UI_BUILD_CMD);
+    expect(log.calls.some(m => m.includes('repair failed') && m.includes('Trying remaining slots'))).toBe(true);
+  });
+
+  it('does not select npm-layout slots that are missing UI', async () => {
+    const rDir = join(dkgHome, 'releases');
+    await writeNpmSlotReady(join(rDir, 'a'), false);
+    await writeNpmSlotReady(join(rDir, 'b'), false);
+    await writeFile(join(rDir, 'active'), 'a');
+    const swaps: Array<'a' | 'b'> = [];
+    _migrationIo.swapSlot = (async (slot: 'a' | 'b') => {
+      swaps.push(slot);
+    }) as any;
+
+    const log = makeLog();
+    await expect(migrateToBlueGreen(log.fn)).rejects.toThrow('Node UI static bundle missing');
+
+    expect(swaps).toEqual([]);
+    expect(execSyncCalls.length).toBe(0);
+    expect(log.calls.filter(m => m.includes('Trying remaining slots')).length).toBe(2);
+  });
+
+  it('uses the Node UI workspace package name from each slot during repair', async () => {
+    const rDir = join(dkgHome, 'releases');
+    const slotB = join(rDir, 'b');
+    await writeSlotReady(join(rDir, 'a'));
+    await writeSlotReady(slotB, false);
+    await mkdir(join(slotB, 'packages', 'node-ui'), { recursive: true });
+    await writeFile(
+      join(slotB, 'packages', 'node-ui', 'package.json'),
+      JSON.stringify({ name: '@dkg/node-ui', scripts: { 'build:ui': 'vite build' } }),
+    );
+    await writeFile(join(rDir, 'active'), 'a');
+    await symlink('a', join(rDir, 'current'));
+
+    const log = makeLog();
+    await migrateToBlueGreen(log.fn);
+
+    const slotBuilds = execSyncCalls
+      .filter(c => String(c.opts?.cwd) === slotB)
+      .map(c => c.cmd);
+    expect(slotBuilds).toContain(LEGACY_NODE_UI_BUILD_CMD);
+    expect(slotBuilds).not.toContain(NODE_UI_BUILD_CMD);
+  });
+
+  it('uses releases/current before stale active metadata when deciding the live slot', async () => {
+    const rDir = join(dkgHome, 'releases');
+    await writeSlotReady(join(rDir, 'a'));
+    await writeSlotReady(join(rDir, 'b'), false);
+    await writeFile(join(rDir, 'active'), 'b');
+    await symlink('a', join(rDir, 'current'));
+
+    const log = makeLog();
+    await migrateToBlueGreen(log.fn);
+
+    const uiBuilds = execSyncCalls.filter(c => c.cmd === NODE_UI_BUILD_CMD);
+    expect(uiBuilds.map(c => String(c.opts?.cwd))).toEqual([join(rDir, 'b')]);
+  });
+
+  it('repairs a live slot missing UI in place instead of failing over', async () => {
+    const rDir = join(dkgHome, 'releases');
+    await writeSlotReady(join(rDir, 'a'), false);
+    await writeSlotReady(join(rDir, 'b'));
+    await writeFile(join(rDir, 'active'), 'a');
+    await symlink('a', join(rDir, 'current'));
+
+    const log = makeLog();
+    await migrateToBlueGreen(log.fn);
+
+    expect(await readlink(join(rDir, 'current'))).toBe('a');
+    const uiBuilds = execSyncCalls.filter(c => c.cmd === NODE_UI_BUILD_CMD);
+    expect(uiBuilds.map(c => String(c.opts?.cwd))).toEqual([join(rDir, 'a')]);
+    expect(log.calls.some(m => m.includes('active slot') && m.includes('rebuilding'))).toBe(true);
+  });
+
+  it('leaves live slot untouched when live UI repair is disabled', async () => {
+    const rDir = join(dkgHome, 'releases');
+    await writeSlotReady(join(rDir, 'a'), false);
+    await writeSlotReady(join(rDir, 'b'));
+    await writeFile(join(rDir, 'active'), 'a');
+    await symlink('a', join(rDir, 'current'));
+
+    const log = makeLog();
+    await migrateToBlueGreen(log.fn, { repairLiveNodeUi: false });
+
+    expect(await readlink(join(rDir, 'current'))).toBe('a');
+    const uiBuilds = execSyncCalls.filter(c => c.cmd === NODE_UI_BUILD_CMD);
+    expect(uiBuilds.map(c => String(c.opts?.cwd))).not.toContain(join(rDir, 'a'));
+    expect(log.calls.some(m => m.includes('active slot') && m.includes('untouched'))).toBe(true);
+  });
+
+  it('repairs live and standby UI when both ready slots are missing UI', async () => {
+    const rDir = join(dkgHome, 'releases');
+    await writeSlotReady(join(rDir, 'a'), false);
+    await writeSlotReady(join(rDir, 'b'), false);
+    await writeFile(join(rDir, 'active'), 'a');
+    await symlink('a', join(rDir, 'current'));
+
+    const log = makeLog();
+    await migrateToBlueGreen(log.fn);
+
+    expect(await readlink(join(rDir, 'current'))).toBe('a');
+    const uiBuilds = execSyncCalls.filter(c => c.cmd === NODE_UI_BUILD_CMD);
+    expect(uiBuilds.map(c => String(c.opts?.cwd))).toEqual([join(rDir, 'a'), join(rDir, 'b')]);
+  });
+
+  it('does not block migration when inactive slot UI repair fails', async () => {
+    const rDir = join(dkgHome, 'releases');
+    await writeSlotReady(join(rDir, 'a'));
+    await writeSlotReady(join(rDir, 'b'), false);
+    await writeFile(join(rDir, 'active'), 'a');
+    await symlink('a', join(rDir, 'current'));
+    _migrationIo.execSync = ((cmd: string, opts?: any) => {
+      execSyncCalls.push({ cmd, opts });
+      if (cmd === NODE_UI_BUILD_CMD || cmd === LEGACY_NODE_UI_BUILD_CMD) throw new Error('vite exploded');
+      return '';
+    }) as any;
+
+    const log = makeLog();
+    await migrateToBlueGreen(log.fn);
+
+    expect(log.calls.some(m => m.includes('repair failed') && m.includes('next update'))).toBe(true);
+  });
+
+  it('continues startup when live slot UI repair fails instead of rolling back', async () => {
+    const rDir = join(dkgHome, 'releases');
+    await writeSlotReady(join(rDir, 'a'), false);
+    await writeSlotReady(join(rDir, 'b'));
+    await writeFile(join(rDir, 'active'), 'a');
+    await symlink('a', join(rDir, 'current'));
+    _migrationIo.execSync = ((cmd: string, opts?: any) => {
+      execSyncCalls.push({ cmd, opts });
+      if (cmd === NODE_UI_BUILD_CMD || cmd === LEGACY_NODE_UI_BUILD_CMD) throw new Error('vite exploded');
+      return '';
+    }) as any;
+
+    const log = makeLog();
+    await migrateToBlueGreen(log.fn);
+
+    expect(await readlink(join(rDir, 'current'))).toBe('a');
+    expect(log.calls.some(m => m.includes('repair failed') && m.includes('fallback page'))).toBe(true);
+  });
+
+  it('restores current to a healthy UI slot when another ready slot repair fails', async () => {
+    const rDir = join(dkgHome, 'releases');
+    await writeSlotReady(join(rDir, 'a'));
+    await writeSlotReady(join(rDir, 'b'), false);
+    await writeFile(join(rDir, 'active'), 'b');
+    _migrationIo.execSync = ((cmd: string, opts?: any) => {
+      execSyncCalls.push({ cmd, opts });
+      if (cmd === NODE_UI_BUILD_CMD || cmd === LEGACY_NODE_UI_BUILD_CMD) throw new Error('vite exploded');
+      return '';
+    }) as any;
+
+    const log = makeLog();
+    await migrateToBlueGreen(log.fn);
+
+    expect(await readlink(join(rDir, 'current'))).toBe('a');
+    expect(log.calls.some(m => m.includes('repair failed') && m.includes('Trying remaining slots'))).toBe(true);
+  });
+
+  it('tries both slots before failing no-current UI repair', async () => {
+    const rDir = join(dkgHome, 'releases');
+    await writeSlotReady(join(rDir, 'a'), false);
+    await writeSlotReady(join(rDir, 'b'), false);
+    await writeFile(join(rDir, 'active'), 'a');
+    _migrationIo.execSync = ((cmd: string, opts?: any) => {
+      execSyncCalls.push({ cmd, opts });
+      const cwd = String(opts?.cwd ?? '');
+      if (cmd === NODE_UI_BUILD_CMD || cmd === LEGACY_NODE_UI_BUILD_CMD) {
+        if (cwd.endsWith(`${join('releases', 'a')}`)) throw new Error('vite exploded');
+        mkdirSync(join(cwd, 'packages', 'node-ui', 'dist-ui'), { recursive: true });
+        writeFileSync(join(cwd, 'packages', 'node-ui', 'dist-ui', 'index.html'), '');
+      }
+      return '';
+    }) as any;
+
+    const log = makeLog();
+    await migrateToBlueGreen(log.fn);
+
+    expect(await readlink(join(rDir, 'current'))).toBe('b');
+    expect(log.calls.some(m => m.includes('Trying remaining slots'))).toBe(true);
+  });
+
+  it('fails initial migration when no slot can provide the Node UI static bundle', async () => {
+    const rDir = join(dkgHome, 'releases');
+    await writeSlotReady(join(rDir, 'a'), false);
+    await writeSlotReady(join(rDir, 'b'), false);
+    _migrationIo.execSync = ((cmd: string, opts?: any) => {
+      execSyncCalls.push({ cmd, opts });
+      if (cmd === NODE_UI_BUILD_CMD || cmd === LEGACY_NODE_UI_BUILD_CMD) throw new Error('vite exploded');
+      return '';
+    }) as any;
+
+    const log = makeLog();
+    await expect(migrateToBlueGreen(log.fn)).rejects.toThrow('vite exploded');
+    expect(existsSync(join(rDir, 'current'))).toBe(false);
   });
 
   it('migration slot B clone uses --dissociate to prevent repo corruption', async () => {
@@ -263,9 +626,7 @@ describe('migrateToBlueGreen', () => {
 
   it('repairs incomplete slots even when current symlink exists', async () => {
     const rDir = join(dkgHome, 'releases');
-    await mkdir(join(rDir, 'a', '.git'), { recursive: true });
-    await mkdir(join(rDir, 'a', 'packages', 'cli', 'dist'), { recursive: true });
-    await writeFile(join(rDir, 'a', 'packages', 'cli', 'dist', 'cli.js'), '');
+    await writeSlotReady(join(rDir, 'a'));
     await mkdir(join(rDir, 'b'), { recursive: true }); // incomplete slot b
     await symlink('a', join(rDir, 'current'));
 
@@ -281,12 +642,8 @@ describe('migrateToBlueGreen', () => {
 
   it('repairs non-symlink releases/current by recreating current symlink', async () => {
     const rDir = join(dkgHome, 'releases');
-    await mkdir(join(rDir, 'a', '.git'), { recursive: true });
-    await mkdir(join(rDir, 'b', '.git'), { recursive: true });
-    await mkdir(join(rDir, 'a', 'packages', 'cli', 'dist'), { recursive: true });
-    await mkdir(join(rDir, 'b', 'packages', 'cli', 'dist'), { recursive: true });
-    await writeFile(join(rDir, 'a', 'packages', 'cli', 'dist', 'cli.js'), '');
-    await writeFile(join(rDir, 'b', 'packages', 'cli', 'dist', 'cli.js'), '');
+    await writeSlotReady(join(rDir, 'a'));
+    await writeSlotReady(join(rDir, 'b'));
     await writeFile(join(rDir, 'active'), 'b');
     await mkdir(join(rDir, 'current'), { recursive: true }); // legacy broken state: directory instead of symlink
 

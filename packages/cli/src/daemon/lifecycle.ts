@@ -242,6 +242,7 @@ import {
   performNpmUpdate,
   checkForUpdate,
 } from './auto-update.js';
+import { chainResetWipe } from './chain-reset-wipe.js';
 import {
   OPENCLAW_UI_CONNECT_TIMEOUT_MS,
   OPENCLAW_UI_CONNECT_POLL_MS,
@@ -466,8 +467,38 @@ export async function runDaemonInner(
     ]),
   ];
 
-  // Load operational wallets from ~/.dkg/wallets.json (auto-generated on first run)
+  // Auto-wipe per-node chain-state derived files (oxigraph store, publish
+  // journal, random-sampling WAL) when the maintainer bumps
+  // network/<env>.json#chainResetMarker. This makes future testnet resets
+  // zero-touch for operators: the maintainer bumps the marker in the
+  // reset commit, daemon auto-update brings it within ≤ 5 min, this hook
+  // detects the change and wipes the now-orphaned chain state.
+  // Operator's keystore + dashboard DB + uploaded files are preserved.
+  // See docs/TESTNET_RESET.md and packages/cli/src/daemon/chain-reset-wipe.ts.
+  const wipeResult = chainResetWipe({
+    dataDir: dkgDir(),
+    currentMarker: network?.chainResetMarker,
+    // Honour operator's `randomSampling.walPath` override; the prover
+    // writes its WAL there, so a fresh chain reset must wipe that file
+    // (not the default ~/.dkg/random-sampling.wal which would be empty).
+    randomSamplingWalPath: config.randomSampling?.walPath,
+    log,
+  });
+  if (wipeResult.wiped) {
+    log(
+      `Chain-state auto-wipe complete: ${wipeResult.removedFiles.length} file(s) removed ` +
+      `(prev marker: ${wipeResult.prevMarker ?? '<none>'}, now: ${network?.chainResetMarker})`,
+    );
+  }
+
+  // Load admin + operational wallets from ~/.dkg/wallets.json (auto-generated on first run)
   const opWallets = await loadOpWallets(dkgDir());
+  log(`Admin wallet:`);
+  if (opWallets.adminWallet) {
+    log(`  ${opWallets.adminWallet.address}`);
+  } else {
+    log(`  (missing from legacy wallets.json; auto-registration requires adding the profile admin key)`);
+  }
   log(`Operational wallets (${opWallets.wallets.length}):`);
   for (const w of opWallets.wallets) {
     log(`  ${w.address}`);
@@ -518,6 +549,8 @@ export async function runDaemonInner(
       })()
     : undefined;
 
+  const dashDb = new DashboardDB({ dataDir: dkgDir() });
+
   const agent = await DKGAgent.create({
     name: config.name,
     framework: "DKG",
@@ -539,10 +572,63 @@ export async function runDaemonInner(
     chainConfig: chainBase?.rpcUrl && chainBase?.hubAddress ? {
       rpcUrl: chainBase.rpcUrl,
       hubAddress: chainBase.hubAddress,
+      ...(opWallets.adminWallet
+        ? { adminPrivateKey: opWallets.adminWallet.privateKey }
+        : {}),
       operationalKeys: opWallets.wallets.map((w) => w.privateKey),
       chainId: chainBase.chainId,
     } : undefined,
     sharedMemoryTtlMs: resolveSharedMemoryTtlMs(config),
+    randomSamplingWalPath: config.randomSampling?.walPath,
+    randomSamplingTickIntervalMs: config.randomSampling?.tickIntervalMs,
+    randomSamplingUseWorkerThread: config.randomSampling?.useWorkerThread,
+    contextGraphSubscriptionStore: {
+      loadAll: async () => dashDb.listContextGraphSubscriptions().map((row) => ({
+        id: row.context_graph_id,
+        name: row.name ?? undefined,
+        subscribed: row.subscribed === 1,
+        synced: row.synced === 1,
+        sharedMemorySynced: row.shared_memory_synced == null ? undefined : row.shared_memory_synced === 1,
+        metaSynced: row.meta_synced == null ? undefined : row.meta_synced === 1,
+        onChainId: row.on_chain_id ?? undefined,
+        syncScoped: row.sync_scoped === 1,
+      })),
+      save: async (record) => {
+        dashDb.upsertContextGraphSubscription({
+          context_graph_id: record.id,
+          name: record.name ?? null,
+          subscribed: record.subscribed ? 1 : 0,
+          synced: record.synced ? 1 : 0,
+          shared_memory_synced: record.sharedMemorySynced == null ? null : record.sharedMemorySynced ? 1 : 0,
+          meta_synced: record.metaSynced == null ? null : record.metaSynced ? 1 : 0,
+          on_chain_id: record.onChainId ?? null,
+          sync_scoped: record.syncScoped ? 1 : 0,
+          updated_at: Date.now(),
+        });
+      },
+      delete: async (contextGraphId) => {
+        dashDb.deleteContextGraphSubscription(contextGraphId);
+      },
+    },
+    contextGraphMembershipStore: {
+      upsert: async (record) => {
+        dashDb.upsertContextGraphMember({
+          context_graph_id: record.contextGraphId,
+          principal_type: record.principalType,
+          principal_id: record.principalId,
+          role: record.role ?? null,
+          status: record.status,
+          source: record.source ?? null,
+          display_name: record.displayName ?? null,
+          metadata: record.metadata ? JSON.stringify(record.metadata) : null,
+          first_seen_at: record.firstSeenAt ?? record.updatedAt,
+          updated_at: record.updatedAt,
+        });
+      },
+      delete: async (contextGraphId, principalType, principalId) => {
+        dashDb.deleteContextGraphMember(contextGraphId, principalType, principalId);
+      },
+    },
   });
 
   let publisherRuntime: PublisherRuntime | null = null;
@@ -793,7 +879,6 @@ export async function runDaemonInner(
 
   // --- Dashboard DB + Metrics ---
 
-  const dashDb = new DashboardDB({ dataDir: dkgDir() });
   chatDb = dashDb;
   log("Dashboard DB initialized at " + join(dkgDir(), "node-ui.db"));
 

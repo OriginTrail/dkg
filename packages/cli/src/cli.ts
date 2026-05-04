@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { writeFile, unlink } from 'node:fs/promises';
 import { ethers } from 'ethers';
-import { requestFaucetFunding, toErrorMessage, hasErrorCode } from '@origintrail-official/dkg-core';
+import { dkgAuthTokenPath, requestFaucetFunding, toErrorMessage, hasErrorCode } from '@origintrail-official/dkg-core';
 import yaml from 'js-yaml';
 import {
   loadConfig, saveConfig, configExists, configPath,
@@ -53,6 +53,7 @@ import {
   DAEMON_EXIT_CODE_RESTART,
 } from './daemon.js';
 import { migrateToBlueGreen } from './migration.js';
+import { ensureRollbackNodeUiBundle } from './rollback-node-ui.js';
 import { registerIntegrationCommands } from './integrations/commands.js';
 
 /** Commander action callbacks receive parsed .option() values with loose types. */
@@ -385,7 +386,10 @@ program
     try {
       const { loadOpWallets } = await import('@origintrail-official/dkg-agent');
       const opWallets = await loadOpWallets(dkgDir());
-      walletAddresses = opWallets.wallets.map((w: { address: string }) => w.address);
+      walletAddresses = [
+        ...(opWallets.adminWallet ? [opWallets.adminWallet.address] : []),
+        ...opWallets.wallets.map((w: { address: string }) => w.address),
+      ];
     } catch (err: any) {
       console.warn(`\nWarning: could not generate wallets (${err?.message ?? String(err)}).`);
       console.warn('Wallets will be auto-generated on first "dkg start".');
@@ -399,7 +403,7 @@ program
     console.log(`  relay:      ${relayDisplay}`);
     console.log(`  context graphs: ${contextGraphs.length ? contextGraphs.join(', ') : '(none)'}`);
     console.log(`  apiPort:    ${config.apiPort}`);
-    console.log(`  auth:       ${enableAuth ? 'enabled (token in ~/.dkg/auth.token)' : 'disabled'}`);
+    console.log(`  auth:       ${enableAuth ? `enabled (token in ${dkgAuthTokenPath(dkgDir())})` : 'disabled'}`);
     {
       const resolved = resolveAutoUpdateConfig(config, network);
       console.log(
@@ -430,7 +434,7 @@ program
     // Auto-fund from testnet faucet if available
     if (network?.faucet?.url && walletAddresses.length > 0) {
       if (walletAddresses.length > 3) {
-        console.log(`\nNote: faucet supports up to 3 wallets; funding the first 3.`);
+        console.log(`\nNote: faucet supports up to 3 wallets per request; funding wallets in batches.`);
       }
       console.log(`\nRequesting testnet tokens from faucet...`);
       try {
@@ -439,6 +443,12 @@ program
         );
         if (result.success) {
           console.log(`  Funded: ${result.funded.join(', ')}`);
+          if (result.error) {
+            console.log(`  Faucet partially completed (${result.error}). Retry later for any remaining wallets.`);
+            if (result.failedWallets?.length) {
+              console.log(`  Remaining: ${result.failedWallets.join(', ')}`);
+            }
+          }
         } else if (result.error) {
           console.log(`  Faucet request failed (${result.error}). Fund manually or retry later.`);
         } else {
@@ -544,7 +554,10 @@ program
 
     // Keep blue-green slots initialized for both foreground and daemonized start.
     if (!process.env.DKG_NO_BLUE_GREEN) {
-      await migrateToBlueGreen((msg) => console.log(msg), { allowRemoteBootstrap: false });
+      await migrateToBlueGreen((msg) => console.log(msg), {
+        allowRemoteBootstrap: false,
+        repairLiveNodeUi: true,
+      });
     }
 
     if (opts.foreground) {
@@ -2560,7 +2573,7 @@ program
 
 program
   .command('wallet')
-  .description('Show operational wallet addresses and balances')
+  .description('Show admin and operational wallet addresses and balances')
   .action(async () => {
     try {
       const config = await loadConfig();
@@ -2598,6 +2611,22 @@ program
         }
       }
 
+      console.log(`\nAdmin wallet:\n`);
+      if (opWallets.adminWallet) {
+        console.log(`  ${opWallets.adminWallet.address}`);
+        if (provider) {
+          try {
+            const ethBal = await provider.getBalance(opWallets.adminWallet.address);
+            const tracBal = token ? await token.balanceOf(opWallets.adminWallet.address) : 0n;
+            console.log(`  ETH: ${ethers.formatEther(ethBal)}  ${tokenSymbol}: ${ethers.formatEther(tracBal)}`);
+          } catch {
+            console.log('  (unable to query balances)');
+          }
+        }
+      } else {
+        console.log('  (missing from legacy wallets.json; add the profile admin key to enable key management)');
+      }
+
       console.log(`\nOperational wallets (${opWallets.wallets.length}):\n`);
       for (let i = 0; i < opWallets.wallets.length; i++) {
         const addr = opWallets.wallets[i].address;
@@ -2618,7 +2647,11 @@ program
       if (rpcUrl) console.log(`  RPC:   ${rpcUrl}`);
       console.log(`  File:  ~/.dkg/wallets.json`);
       console.log('\nFund these addresses with ETH (gas) and TRAC (staking/publishing).');
-      console.log('The primary wallet is used for identity registration. All wallets are used for publishing.\n');
+      if (opWallets.adminWallet) {
+        console.log('The admin wallet is used for profile key management. The primary operational wallet is used for staking; all operational wallets are used for publishing.\n');
+      } else {
+        console.log('Add the real profile admin key to wallets.json to enable profile key management and operational-wallet repair.\n');
+      }
     } catch (err) {
       console.error(toErrorMessage(err));
       process.exit(1);
@@ -2924,7 +2957,10 @@ program
       return;
     }
 
-    await migrateToBlueGreen((msg) => console.log(msg), { allowRemoteBootstrap: true });
+    await migrateToBlueGreen((msg) => console.log(msg), {
+      allowRemoteBootstrap: true,
+      repairLiveNodeUi: false,
+    });
     console.log('Checking for updates and applying...');
     try {
       const updateStatus = await performUpdateWithStatus(au, (msg) => console.log(msg), {
@@ -2988,6 +3024,9 @@ program
       console.error(`Slot ${target} has no build output. Run "dkg update" first to prepare it.`);
       process.exit(1);
     }
+    if (!ensureRollbackNodeUiBundle(targetDir, target)) {
+      process.exit(1);
+    }
 
     const pid = await readPid();
     if (pid && isProcessRunning(pid)) {
@@ -3042,6 +3081,101 @@ program
     }
     console.log(`Rolled back: current → slot ${target}`);
     console.log('Daemon stopped. Run "dkg start" to start with the rolled-back version.');
+  });
+
+// ─── dkg random-sampling (alias: rs) ─────────────────────────────────
+
+const randomSamplingCmd = program
+  .command('random-sampling')
+  .alias('rs')
+  .description('V10 Random Sampling prover — operator surface');
+
+randomSamplingCmd
+  .command('status')
+  .description('Show the running prover snapshot (last tick, last submitted proof, etc.)')
+  .option('--json', 'Print the raw JSON response instead of the formatted summary')
+  .action(async (opts: ActionOpts) => {
+    try {
+      const client = await ApiClient.connect();
+      const status = await client.randomSamplingStatus();
+      if (opts.json) {
+        console.log(JSON.stringify(status, null, 2));
+        return;
+      }
+      console.log(`  Prover:    ${status.enabled ? 'enabled' : 'disabled'}`);
+      console.log(`  Role:      ${status.role}`);
+      console.log(`  Identity:  ${status.identityId}`);
+      if (!status.loop) {
+        console.log(`  Loop:      not running`);
+        if (!status.enabled) {
+          if (status.role !== 'core') {
+            console.log(`  Reason:    edge node — random sampling is core-only`);
+          } else if (status.identityId === '0') {
+            console.log(`  Reason:    no on-chain identity yet (run "dkg start" after staking)`);
+          } else {
+            console.log(`  Reason:    chain adapter missing RandomSampling methods (V10 not deployed?)`);
+          }
+        }
+        return;
+      }
+      const last = status.loop.lastOutcome as { kind?: string } | null;
+      console.log(`  Ticks:     ${status.loop.totalTicks} (in flight: ${status.loop.inflight})`);
+      console.log(`  Last tick: ${status.loop.lastTickAt ?? '—'} (${last?.kind ?? 'never run'})`);
+      console.log(`  Submitted: ${status.loop.submittedCount} proof${status.loop.submittedCount === 1 ? '' : 's'}`);
+      if (status.loop.lastSubmittedAt) {
+        console.log(`  Last tx:   ${status.loop.lastSubmittedTxHash} (${status.loop.lastSubmittedAt})`);
+      }
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
+randomSamplingCmd
+  .command('wal-tail [path]')
+  .description(
+    'Tail the prover WAL (JSONL). If no path is given, reads ~/.dkg/random-sampling.wal. ' +
+    'Local file read — does not require the daemon to be running.',
+  )
+  .option('-n, --count <count>', 'Number of trailing entries to print', '50')
+  .option('--json', 'Print raw JSONL (one entry per line)', false)
+  .action(async (path: string | undefined, opts: ActionOpts) => {
+    try {
+      const walPath = path ?? join(dkgDir(), 'random-sampling.wal');
+      if (!existsSync(walPath)) {
+        console.error(`No WAL file at ${walPath}`);
+        console.error('Hint: set `randomSamplingWalPath` in your dkg config to enable persistent WAL.');
+        process.exit(1);
+      }
+      const limit = Math.max(1, parseInt(String(opts.count ?? '50'), 10) || 50);
+      const raw = readFileSync(walPath, 'utf8');
+      const lines = raw.split('\n').filter((l) => l.trim().length > 0);
+      const tail = lines.slice(-limit);
+      if (opts.json) {
+        for (const line of tail) console.log(line);
+        return;
+      }
+      for (const line of tail) {
+        try {
+          const entry = JSON.parse(line) as Record<string, unknown>;
+          const ts = String(entry.ts ?? '—');
+          const status = String(entry.status ?? '?');
+          const epoch = String(entry.epoch ?? '?');
+          const periodStart = String(entry.periodStartBlock ?? '?');
+          const kcId = entry.kcId !== undefined ? `kc=${entry.kcId}` : '';
+          const tx = entry.txHash !== undefined ? ` tx=${String(entry.txHash).slice(0, 14)}…` : '';
+          const errCode = entry.error && typeof entry.error === 'object'
+            ? ` err=${(entry.error as { code?: string }).code ?? '?'}`
+            : '';
+          console.log(`${ts}  ep=${epoch} pb=${periodStart}  ${status.padEnd(10)} ${kcId}${tx}${errCode}`);
+        } catch {
+          console.log(line);
+        }
+      }
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
   });
 
 // ─── dkg integration ─────────────────────────────────────────────────

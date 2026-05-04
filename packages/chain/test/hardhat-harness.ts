@@ -104,6 +104,7 @@ export function makeAdapterConfig(
   hubAddress: string,
   privateKey: string,
   additionalKeys?: string[],
+  adminPrivateKey?: string,
 ): EVMAdapterConfig {
   return {
     rpcUrl,
@@ -111,7 +112,38 @@ export function makeAdapterConfig(
     hubAddress,
     chainId: `evm:${HARDHAT_CHAIN_ID}`,
     additionalKeys,
+    adminPrivateKey: adminPrivateKey ?? pickDefaultAdminKey(privateKey, additionalKeys ?? []),
   };
+}
+
+function pickDefaultAdminKey(privateKey: string, additionalKeys: string[]): string {
+  const blocked = new Set([privateKey, ...additionalKeys].map((key) => key.toLowerCase()));
+  const preferredByOperational = new Map<string, string>([
+    [HARDHAT_KEYS.CORE_OP.toLowerCase(), HARDHAT_KEYS.CORE_ADMIN],
+    [HARDHAT_KEYS.REC1_OP.toLowerCase(), HARDHAT_KEYS.REC1_ADMIN],
+    [HARDHAT_KEYS.REC2_OP.toLowerCase(), HARDHAT_KEYS.REC2_ADMIN],
+    [HARDHAT_KEYS.REC3_OP.toLowerCase(), HARDHAT_KEYS.REC3_ADMIN],
+  ]);
+  const preferred = preferredByOperational.get(privateKey.toLowerCase());
+  if (preferred && !blocked.has(preferred.toLowerCase())) {
+    return preferred;
+  }
+
+  const candidates = [
+    HARDHAT_KEYS.CORE_ADMIN,
+    HARDHAT_KEYS.REC1_ADMIN,
+    HARDHAT_KEYS.REC2_ADMIN,
+    HARDHAT_KEYS.REC3_ADMIN,
+    HARDHAT_KEYS.EXTRA3,
+    HARDHAT_KEYS.EXTRA2,
+    HARDHAT_KEYS.PUBLISHER2,
+    HARDHAT_KEYS.DEPLOYER,
+  ];
+  const adminKey = candidates.find((candidate) => !blocked.has(candidate.toLowerCase()));
+  if (!adminKey) {
+    throw new Error('No distinct Hardhat admin key available for adapter config');
+  }
+  return adminKey;
 }
 
 export async function createNodeProfile(
@@ -177,6 +209,7 @@ export async function stakeAndSetAsk(
   identityId: number,
   stakeAmount = ethers.parseEther('50000'),
   ask = ethers.parseEther('1'),
+  lockTier = 1,
 ): Promise<void> {
   const deployer = new Wallet(deployerKey, provider);
   const operational = new Wallet(operationalKey, provider);
@@ -186,8 +219,17 @@ export async function stakeAndSetAsk(
     provider,
   );
 
+  // V10 consolidation (PR #357): stake routes through
+  // DKGStakingConvictionNFT.createConviction → StakingV10 (which writes
+  // nodeStakeV10 in ConvictionStakingStorage and pulls TRAC into the V10
+  // vault). The legacy V8 Staking.stake path updates only V8 StakingStorage
+  // and leaves AskStorage.totalActiveStake at zero — getStakeWeightedAverageAsk
+  // then returns 0 and getRequiredPublishTokenAmount returns 0, making every
+  // E2E publish test fail at the first assertion. Mirrors the same fix
+  // already applied to evm-adapter.ts:ensureProfile + scripts/devnet.sh.
   const tokenAddr = await hub.getContractAddress('Token');
-  const stakingAddr = await hub.getContractAddress('Staking');
+  const nftAddr = await hub.getContractAddress('DKGStakingConvictionNFT');
+  const stakingV10Addr = await hub.getContractAddress('StakingV10');
   const profileAddr = await hub.getContractAddress('Profile');
 
   const token = new Contract(
@@ -195,9 +237,9 @@ export async function stakeAndSetAsk(
     ['function mint(address, uint256)', 'function approve(address, uint256) returns (bool)'],
     deployer,
   );
-  const staking = new Contract(
-    stakingAddr,
-    ['function stake(uint72 identityId, uint96 amount)'],
+  const stakingNFT = new Contract(
+    nftAddr,
+    ['function createConviction(uint72 identityId, uint96 amount, uint40 lockTier)'],
     operational,
   );
   const profile = new Contract(
@@ -207,8 +249,8 @@ export async function stakeAndSetAsk(
   );
 
   await (await token.mint(operational.address, stakeAmount)).wait();
-  await (await token.connect(operational).approve(stakingAddr, stakeAmount)).wait();
-  await (await staking.stake(identityId, stakeAmount)).wait();
+  await (await token.connect(operational).approve(stakingV10Addr, stakeAmount)).wait();
+  await (await stakingNFT.createConviction(identityId, stakeAmount, lockTier)).wait();
   await (await profile.updateAsk(identityId, ask)).wait();
 }
 

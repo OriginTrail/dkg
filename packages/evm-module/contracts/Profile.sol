@@ -20,7 +20,7 @@ import {Permissions} from "./libraries/Permissions.sol";
 
 contract Profile is INamed, IVersioned, ContractStatus, IInitializable {
     string private constant _NAME = "Profile";
-    string private constant _VERSION = "1.0.0";
+    string private constant _VERSION = "1.1.0";
 
     Ask public askContract;
     Identity public identityContract;
@@ -117,6 +117,91 @@ contract Profile is INamed, IVersioned, ContractStatus, IInitializable {
         id.addOperationalWallets(identityId, operationalWallets);
 
         ps.createProfile(identityId, nodeName, nodeId, initialOperatorFee);
+    }
+
+    function addOperationalWallets(
+        uint72 identityId,
+        address[] calldata operationalWallets
+    ) external onlyAdmin(identityId) {
+        if (profileStorage.getNodeId(identityId).length == 0) {
+            revert ProfileLib.ProfileDoesntExist(identityId);
+        }
+
+        address[] memory walletsToAdd = new address[](operationalWallets.length);
+        uint256 walletsToAddCount;
+        IdentityStorage ids = identityStorage;
+
+        for (uint256 i; i < operationalWallets.length; ) {
+            address operationalWallet = operationalWallets[i];
+            if (operationalWallet == address(0)) {
+                revert IdentityLib.OperationalAddressZero();
+            }
+
+            bytes32 operationalKey = keccak256(abi.encodePacked(operationalWallet));
+            if (ids.keyHasPurpose(identityId, operationalKey, IdentityLib.ADMIN_KEY)) {
+                revert IdentityLib.AdminEqualsOperational();
+            }
+            uint72 existingIdentityId = ids.identityIds(operationalKey);
+
+            if (existingIdentityId == identityId) {
+                unchecked {
+                    i++;
+                }
+                continue;
+            }
+            if (existingIdentityId != 0) {
+                revert IdentityLib.OperationalKeyTaken(operationalKey);
+            }
+
+            bool duplicate;
+            for (uint256 j; j < walletsToAddCount; ) {
+                if (walletsToAdd[j] == operationalWallet) {
+                    duplicate = true;
+                    break;
+                }
+                unchecked {
+                    j++;
+                }
+            }
+
+            if (!duplicate) {
+                walletsToAdd[walletsToAddCount] = operationalWallet;
+                unchecked {
+                    walletsToAddCount++;
+                }
+            }
+
+            unchecked {
+                i++;
+            }
+        }
+
+        if (walletsToAddCount == 0) {
+            return;
+        }
+
+        uint256 totalOperationalWallets = ids.getKeysByPurpose(identityId, IdentityLib.OPERATIONAL_KEY).length +
+            walletsToAddCount;
+        uint256 additionalOperationalWallets = totalOperationalWallets == 0 ? 0 : totalOperationalWallets - 1;
+        uint16 operationalWalletLimit = parametersStorage.opWalletsLimitOnProfileCreation();
+        if (additionalOperationalWallets > operationalWalletLimit) {
+            revert ProfileLib.TooManyOperationalWallets(
+                operationalWalletLimit,
+                additionalOperationalWallets > type(uint16).max
+                    ? type(uint16).max
+                    : uint16(additionalOperationalWallets)
+            );
+        }
+
+        address[] memory compactWalletsToAdd = new address[](walletsToAddCount);
+        for (uint256 i; i < walletsToAddCount; ) {
+            compactWalletsToAdd[i] = walletsToAdd[i];
+            unchecked {
+                i++;
+            }
+        }
+
+        identityContract.addOperationalWallets(identityId, compactWalletsToAdd);
     }
 
     function updateAsk(uint72 identityId, uint96 ask) external onlyIdentityOwner(identityId) {

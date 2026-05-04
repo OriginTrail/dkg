@@ -24,7 +24,7 @@ contract Guardian is HubDependent {
     // solhint-disable-next-line no-empty-blocks
     constructor(address hubAddress) HubDependent(hubAddress) {}
 
-    function initialize() public onlyHub {
+    function initialize() public virtual onlyHub {
         tokenContract = IERC20(hub.getContractAddress("Token"));
     }
 

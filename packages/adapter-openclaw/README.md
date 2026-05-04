@@ -29,7 +29,7 @@ npm install -g @origintrail-official/dkg
 dkg openclaw setup
 ```
 
-The setup flow is non-interactive and idempotent. It writes `~/.dkg/config.json`, merges the adapter into `~/.openclaw/openclaw.json` (including the adapter's runtime config under `plugins.entries.adapter-openclaw.config`), starts the daemon if requested, and verifies the node.
+The setup flow is non-interactive and idempotent. It writes `~/.dkg/config.json`, merges the adapter into `~/.openclaw/openclaw.json` (including the adapter's runtime config under `plugins.entries.adapter-openclaw.config`), writes the adapter's workspace scratch state under `<workspace>/.dkg-adapter`, starts the daemon if requested, and verifies the node.
 
 The node UI's right-panel "Connect OpenClaw" button runs this same setup flow in-process — clicking it from a fresh install is equivalent to running `dkg openclaw setup` on the command line (issue #198).
 
@@ -65,6 +65,7 @@ A healthy setup should satisfy all of the following:
 | --- | --- | --- |
 | `~/.dkg/config.json` | DKG node | node config: networking, chain, auth, API |
 | `~/.openclaw/openclaw.json` | OpenClaw | plugin loading config; the adapter's runtime config also lives here under `plugins.entries.adapter-openclaw.config` |
+| `<workspace>/.dkg-adapter/` | DKG adapter | workspace-local scratch state such as chat-turn watermarks |
 
 ## Adapter Config
 
@@ -73,9 +74,12 @@ These keys live under `plugins.entries.adapter-openclaw.config` in `~/.openclaw/
 | Key | Default | Purpose |
 | --- | --- | --- |
 | `daemonUrl` | `http://127.0.0.1:9200` | DKG daemon HTTP URL (env `DKG_DAEMON_URL` overrides at runtime) |
+| `stateDir` | `<workspace>/.dkg-adapter` after setup | adapter runtime state directory; setup-owned workspace defaults store chat-turn watermarks at `<workspace>/.dkg-adapter/chat-turn-watermarks.json`; custom `stateDir` values keep the legacy nested layout under `<stateDir>/dkg-adapter/` |
 | `memory.enabled` | `true` after setup | register the DKG memory-slot capability on attach (slot-backed recall via `api.registerMemoryCapability`; no adapter-side write tool — writes go through SKILL.md direct routes) |
 | `channel.enabled` | `true` after setup | enable the DKG UI to OpenClaw bridge |
 | `channel.port` | `9201` (optional) | standalone bridge port when gateway route registration is unavailable; setup does not write this key — set it manually on the entry config if you need to override the default |
+
+Environment override: `OPENCLAW_STATE_DIR` overrides the adapter state root at runtime. Manual state roots are operator-owned; unless they resolve to a known workspace default, watermarks stay nested under `<stateDir>/dkg-adapter/`. `~/.openclaw` remains the OpenClaw runtime home, not the adapter scratch directory.
 
 **Disconnect semantics.** The node UI's "Disconnect" button removes `plugins.entries.adapter-openclaw` entirely from `~/.openclaw/openclaw.json` (including any customized `config` values) AND removes `$WORKSPACE_DIR/skills/dkg-node/SKILL.md` (the canonical DKG node skill installed by setup). Other skills under `skills/` and sibling files under `skills/dkg-node/` are untouched. If you had set a non-default `daemonUrl` (for example via `dkg openclaw setup --port 9300` or a remote daemon URL), re-run `dkg openclaw setup --port <N>` after Reconnect to restore it — Reconnect also re-installs the skill document. Default-port users see no visible difference across a Disconnect/Reconnect cycle aside from the brief absence of the skill file.
 

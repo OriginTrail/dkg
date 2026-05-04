@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { TypedEventBus } from '@origintrail-official/dkg-core';
 import { ACKCollector, type ACKCollectorDeps } from '../src/ack-collector.js';
 import { StorageACKHandler, type StorageACKHandlerConfig } from '../src/storage-ack-handler.js';
-import { computeFlatKCRootV10 } from '../src/merkle.js';
+import { computeFlatKCRootV10, computeFlatKCMerkleLeafCountV10 } from '../src/merkle.js';
 import {
   encodePublishIntent,
   decodePublishIntent,
@@ -50,36 +50,6 @@ function makeQuad(s: string, p: string, o: string, g = 'urn:test:swm'): Quad {
   return { subject: s, predicate: p, object: o, graph: g };
 }
 
-function computeTargetAckDigest(merkleRoot: Uint8Array): Uint8Array {
-  return computePublishACKDigest(
-    TEST_CHAIN_ID,
-    TEST_KAV10_ADDR,
-    TARGET_CG_ID_BIGINT,
-    merkleRoot,
-    BigInt(KA_COUNT),
-    BYTE_SIZE,
-    EPOCHS,
-    TOKEN_AMOUNT,
-  );
-}
-
-async function signTargetAck(
-  wallet: ethers.Wallet,
-  merkleRoot: Uint8Array,
-  nodeIdentityId: number,
-  contextGraphIdOnWire: string = TARGET_CG_ID_STR,
-): Promise<Uint8Array> {
-  const digest = computeTargetAckDigest(merkleRoot);
-  const sig = ethers.Signature.from(await wallet.signMessage(digest));
-  return encodeStorageACK({
-    merkleRoot,
-    coreNodeSignatureR: ethers.getBytes(sig.r),
-    coreNodeSignatureVS: ethers.getBytes(sig.yParityAndS),
-    contextGraphId: contextGraphIdOnWire,
-    nodeIdentityId,
-  });
-}
-
 describe('V10 remap wire (PublishIntent.swmGraphId + subGraphName)', () => {
   const swmQuads: Quad[] = [
     makeQuad('urn:ship:1', 'urn:has', 'urn:item:a'),
@@ -87,7 +57,39 @@ describe('V10 remap wire (PublishIntent.swmGraphId + subGraphName)', () => {
     makeQuad('urn:ship:2', 'urn:has', 'urn:item:c'),
   ];
   const merkleRoot = computeFlatKCRootV10(swmQuads, []);
+  const merkleLeafCount = computeFlatKCMerkleLeafCountV10(swmQuads, []);
   const rootEntities = ['urn:ship:1', 'urn:ship:2'];
+
+  function computeTargetAckDigest(root: Uint8Array): Uint8Array {
+    return computePublishACKDigest(
+      TEST_CHAIN_ID,
+      TEST_KAV10_ADDR,
+      TARGET_CG_ID_BIGINT,
+      root,
+      BigInt(KA_COUNT),
+      BYTE_SIZE,
+      EPOCHS,
+      TOKEN_AMOUNT,
+      BigInt(merkleLeafCount),
+    );
+  }
+
+  async function signTargetAck(
+    wallet: ethers.Wallet,
+    root: Uint8Array,
+    nodeIdentityId: number,
+    contextGraphIdOnWire: string = TARGET_CG_ID_STR,
+  ): Promise<Uint8Array> {
+    const digest = computeTargetAckDigest(root);
+    const sig = ethers.Signature.from(await wallet.signMessage(digest));
+    return encodeStorageACK({
+      merkleRoot: root,
+      coreNodeSignatureR: ethers.getBytes(sig.r),
+      coreNodeSignatureVS: ethers.getBytes(sig.yParityAndS),
+      contextGraphId: contextGraphIdOnWire,
+      nodeIdentityId,
+    });
+  }
 
   // Hand-serialized N-Quads that re-hash to the same merkle root the test
   // oracle computes. The handler parses these inline (stagingQuads path)
@@ -144,6 +146,7 @@ describe('V10 remap wire (PublishIntent.swmGraphId + subGraphName)', () => {
       swmGraphId: SOURCE_SWM_GRAPH_ID,
       subGraphName: SUB_GRAPH_NAME,
       stagingQuads,
+      merkleLeafCount,
     });
 
     expect(result.acks).toHaveLength(3);
@@ -253,6 +256,7 @@ describe('V10 remap wire (PublishIntent.swmGraphId + subGraphName)', () => {
       tokenAmount: TOKEN_AMOUNT,
       swmGraphId: TARGET_CG_ID_STR,
       stagingQuads,
+      merkleLeafCount,
     });
 
     expect(dispatchedIntent).toBeDefined();
@@ -321,6 +325,7 @@ describe('V10 remap wire (PublishIntent.swmGraphId + subGraphName)', () => {
       tokenAmountStr: TOKEN_AMOUNT.toString(),
       swmGraphId: SOURCE_SWM_GRAPH_ID,
       subGraphName: SUB_GRAPH_NAME,
+      merkleLeafCount,
     });
 
     const response = await handler.handler(intent, { toString: () => 'publisher-peer-0' });

@@ -18,9 +18,9 @@ import {ERC721Enumerable} from "@openzeppelin/contracts/token/ERC721/extensions/
  *
  * V10 flow-through model:
  *   - At createAccount, `committedTRAC` is moved DIRECTLY from the publisher to
- *     `StakingStorage` (the contract NEVER holds TRAC) and the full 12-epoch
- *     allowance is distributed to the staker reward pool via
- *     `EpochStorage.addTokensToEpochRange`.
+ *     the V10 TRAC vault — `ConvictionStakingStorage` (the contract NEVER holds
+ *     TRAC) and the full 12-epoch allowance is distributed to the staker
+ *     reward pool via `EpochStorage.addTokensToEpochRange`.
  *   - The contract stores accounting only: per-account epoch spend and a
  *     persistent `topUpBalance` buffer.
  *   - Discount tier is fixed by `committedTRAC` at creation (6-tier ladder,
@@ -31,7 +31,7 @@ import {ERC721Enumerable} from "@openzeppelin/contracts/token/ERC721/extensions/
  *     `agentToAccountId`, which closes N28 (a trusted caller could otherwise
  *     pass a victim's accountId and drain their allowance). It deducts from
  *     the current epoch allowance first, then from `topUpBalance`, and does
- *     NOT move TRAC — TRAC already lives in StakingStorage.
+ *     NOT move TRAC — TRAC already lives in the CSS vault.
  *   - The legacy unspent-TRAC release function is gone: the flow-through
  *     design eliminates it.
  *   - Agents are tracked per account with a governance-configurable cap, and
@@ -54,6 +54,10 @@ contract DKGPublishingConvictionNFT is INamed, IVersioned, HubDependent, IInitia
     }
 
     IERC20 public tokenContract;
+    /// @notice v4.0.0 — V10 TRAC vault address. Resolves to
+    ///         `ConvictionStakingStorage`, the post-consolidation custodian.
+    ///         Field name retained for storage layout stability across the
+    ///         legacy `stakingStorageAddress` slot.
     address public stakingStorageAddress;
     EpochStorage public epochStorage;
     Chronos public chronos;
@@ -120,9 +124,11 @@ contract DKGPublishingConvictionNFT is INamed, IVersioned, HubDependent, IInitia
         if (token == address(0)) revert ZeroAddressDependency("Token");
         tokenContract = IERC20(token);
 
-        address ss = hub.getContractAddress("StakingStorage");
-        if (ss == address(0)) revert ZeroAddressDependency("StakingStorage");
-        stakingStorageAddress = ss;
+        // v4.0.0 — TRAC vault moved from StakingStorage to CSS. Field
+        // name kept for storage layout stability.
+        address vault = hub.getContractAddress("ConvictionStakingStorage");
+        if (vault == address(0)) revert ZeroAddressDependency("ConvictionStakingStorage");
+        stakingStorageAddress = vault;
 
         address es = hub.getContractAddress("EpochStorageV8");
         if (es == address(0)) revert ZeroAddressDependency("EpochStorageV8");
@@ -153,7 +159,7 @@ contract DKGPublishingConvictionNFT is INamed, IVersioned, HubDependent, IInitia
      * @notice Create a new publisher conviction account.
      *
      * TRAC flow (fail-closed; any sub-call revert reverts the whole tx):
-     *   1. `committedTRAC` is pulled from msg.sender directly into StakingStorage.
+     *   1. `committedTRAC` is pulled from msg.sender directly into the CSS vault.
      *   2. The full amount is distributed across the next 12 epochs of the
      *      staker reward pool via EpochStorage.addTokensToEpochRange.
      *   3. Accounting state (Account struct) is written.
@@ -178,7 +184,7 @@ contract DKGPublishingConvictionNFT is INamed, IVersioned, HubDependent, IInitia
 
         _mint(msg.sender, accountId);
 
-        // Direct publisher -> StakingStorage transfer. Contract never holds TRAC.
+        // Direct publisher -> CSS vault transfer. Contract never holds TRAC.
         if (!tokenContract.transferFrom(msg.sender, stakingStorageAddress, committedTRAC)) {
             revert TokenTransferFailed();
         }
@@ -198,7 +204,7 @@ contract DKGPublishingConvictionNFT is INamed, IVersioned, HubDependent, IInitia
     /**
      * @notice Add TRAC to an existing account's persistent top-up balance.
      *
-     * TRAC flows publisher -> StakingStorage directly, and is distributed across
+     * TRAC flows publisher -> CSS vault directly, and is distributed across
      * the REMAINING epochs of the original account lifetime (current epoch
      * through expiresAtEpoch-1). Does NOT extend expiry or change the discount
      * tier.
@@ -253,7 +259,7 @@ contract DKGPublishingConvictionNFT is INamed, IVersioned, HubDependent, IInitia
      * Spend order: current-epoch base allowance (committedTRAC / 12) first,
      * then `topUpBalance`. Reverts if the combined balance is insufficient.
      *
-     * Does NOT move TRAC — TRAC already lives in StakingStorage from
+     * Does NOT move TRAC — TRAC already lives in the CSS vault from
      * createAccount/topUp. Returns the discounted amount for KAV10's internal
      * accounting.
      */

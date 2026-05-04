@@ -1,5 +1,5 @@
 export { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
-export { loadOpWallets, generateWallets, type OpWalletsConfig } from './op-wallets.js';
+export { loadOpWallets, generateWallets, type OpWalletsConfig, type WalletEntry } from './op-wallets.js';
 export {
   generateCustodialAgent, registerSelfSovereignAgent, agentFromPrivateKey,
   generateAgentToken, hashAgentToken, type AgentKeyRecord,
@@ -55,9 +55,22 @@ export {
   DKGAgent,
   type DKGAgentConfig,
   type ContextGraphSub,
+  type ContextGraphMemberPrincipalType,
+  type ContextGraphMemberStatus,
+  type ContextGraphMembershipRecord,
+  type ContextGraphMembershipStore,
+  type ContextGraphSubscriptionRecord,
+  type ContextGraphSubscriptionStore,
   type ParanetSub,
   type PeerHealth,
 } from './dkg-agent.js';
 export type { CclPublishedEvaluationRecord, CclPublishedResultEntry } from './dkg-agent.js';
+export {
+  bindRandomSampling,
+  type RandomSamplingBindOptions,
+  type RandomSamplingHandle,
+  type RandomSamplingStatus,
+  type AgentRole,
+} from './random-sampling-bind.js';
 export { monotonicTransition, versionedWrite, type MonotonicStages } from './workspace-consistency.js';
 export { StaleWriteError, type CASCondition } from '@origintrail-official/dkg-publisher';

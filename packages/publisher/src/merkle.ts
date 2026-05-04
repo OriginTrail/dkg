@@ -80,6 +80,18 @@ export function computeFlatKCRootV10(
   return new V10MerkleTree(leaves).root;
 }
 
+/** Leaf count after V10 sort+dedupe (same tree as {@link computeFlatKCRootV10}). */
+export function computeFlatKCMerkleLeafCountV10(
+  publicQuads: Quad[],
+  privateRoots: Uint8Array[],
+): number {
+  const leaves: Uint8Array[] = publicQuads.map(computeTripleHashV10);
+  for (const root of privateRoots) {
+    leaves.push(root);
+  }
+  return new V10MerkleTree(leaves).leafCount;
+}
+
 export function computeKARootV10(
   publicRoot?: Uint8Array,
   privateRoot?: Uint8Array,

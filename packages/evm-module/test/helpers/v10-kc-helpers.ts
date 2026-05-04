@@ -19,17 +19,20 @@ import { KnowledgeAssetsV10 } from '../../typechain';
  * Publisher digest (N26 field order — publish AND update):
  *   (publisherNodeIdentityId, contextGraphId, merkleRoot_or_newMerkleRoot)
  *
- * ACK digest (publish) — PRD V10 "Publish Flow" + decision #25 Option B.
+ * ACK digest (publish) — PRD V10 "Publish Flow" + decision #25 Option B,
+ * extended with `merkleLeafCount` (uint256 on wire).
  * NOTE: the ACK digest does NOT include `publisherNodeIdentityId` — that
  * field is in the publisher digest only:
  *   contextGraphId || merkleRoot || knowledgeAssetsAmount
  *   || uint256(byteSize) || uint256(epochs) || uint256(tokenAmount)
+ *   || uint256(merkleLeafCount)
  *
  * ACK digest (update) — same separation rule:
  *   contextGraphId (from on-chain) || id || preUpdateMerkleRootCount
  *   || newMerkleRoot || uint256(newByteSize) || uint256(newTokenAmount)
  *   || mintKnowledgeAssetsAmount
  *   || keccak256(abi.encodePacked(knowledgeAssetsToBurn))
+ *   || uint256(newMerkleLeafCount)
  *
  * Both digests are wrapped in `ECDSA.toEthSignedMessageHash(...)` (EIP-191)
  * before recovery — `signMessage` in kc-helpers.ts does the EIP-191 wrap for
@@ -85,6 +88,7 @@ export function buildPublishAckDigest(
   byteSize: number | bigint,
   epochs: number | bigint,
   tokenAmount: bigint,
+  merkleLeafCount: number | bigint,
 ): string {
   return ethers.solidityPackedKeccak256(
     [
@@ -96,6 +100,7 @@ export function buildPublishAckDigest(
       'uint256', // byteSize (cast to uint256 in contract)
       'uint256', // epochs (cast to uint256 in contract)
       'uint256', // tokenAmount (cast to uint256 in contract)
+      'uint256', // merkleLeafCount (cast to uint256 in contract)
     ],
     [
       chainId,
@@ -106,6 +111,7 @@ export function buildPublishAckDigest(
       byteSize,
       epochs,
       tokenAmount,
+      merkleLeafCount,
     ],
   );
 }
@@ -132,6 +138,7 @@ export function buildUpdateAckDigest(
   newTokenAmount: bigint,
   mintKnowledgeAssetsAmount: bigint,
   knowledgeAssetsToBurn: bigint[],
+  newMerkleLeafCount: number | bigint,
 ): string {
   // Inner burn-list keccak matches `keccak256(abi.encodePacked(knowledgeAssetsToBurn))`.
   const innerBurnHash = ethers.solidityPackedKeccak256(
@@ -150,6 +157,7 @@ export function buildUpdateAckDigest(
       'uint256', // newTokenAmount
       'uint256', // mintKnowledgeAssetsAmount
       'bytes32', // keccak(burn list)
+      'uint256', // newMerkleLeafCount
     ],
     [
       chainId,
@@ -162,6 +170,7 @@ export function buildUpdateAckDigest(
       newTokenAmount,
       mintKnowledgeAssetsAmount,
       innerBurnHash,
+      newMerkleLeafCount,
     ],
   );
 }
@@ -208,8 +217,11 @@ export async function buildPublishParams(args: {
   epochs: number;
   tokenAmount: bigint;
   isImmutable: boolean;
+  /** Defaults to 1 for fixtures that only assert economics / signatures. */
+  merkleLeafCount?: number;
   publishOperationId: string;
 }): Promise<KnowledgeAssetsV10.PublishParamsStruct> {
+  const merkleLeafCount = args.merkleLeafCount ?? 1;
   const publisherDigest = buildPublisherDigest(
     args.chainId,
     args.kav10Address,
@@ -226,6 +238,7 @@ export async function buildPublishParams(args: {
     args.byteSize,
     args.epochs,
     args.tokenAmount,
+    merkleLeafCount,
   );
   const sig = await signPublishDigests(
     args.publishingNode,
@@ -242,6 +255,7 @@ export async function buildPublishParams(args: {
     epochs: args.epochs,
     tokenAmount: args.tokenAmount,
     isImmutable: args.isImmutable,
+    merkleLeafCount,
     publisherNodeIdentityId: args.publisherIdentityId,
     publisherNodeR: sig.publisherR,
     publisherNodeVS: sig.publisherVS,
@@ -274,7 +288,10 @@ export async function buildUpdateParams(args: {
   mintKnowledgeAssetsAmount: bigint;
   knowledgeAssetsToBurn: bigint[];
   updateOperationId: string;
+  /** Defaults to 1 for fixtures that only assert economics / signatures. */
+  newMerkleLeafCount?: number;
 }): Promise<KnowledgeAssetsV10.UpdateParamsStruct> {
+  const newMerkleLeafCount = args.newMerkleLeafCount ?? 1;
   const publisherDigest = buildPublisherDigest(
     args.chainId,
     args.kav10Address,
@@ -293,6 +310,7 @@ export async function buildUpdateParams(args: {
     args.newTokenAmount,
     args.mintKnowledgeAssetsAmount,
     args.knowledgeAssetsToBurn,
+    newMerkleLeafCount,
   );
   const sig = await signPublishDigests(
     args.publishingNode,
@@ -306,6 +324,7 @@ export async function buildUpdateParams(args: {
     newMerkleRoot: args.newMerkleRoot,
     newByteSize: args.newByteSize,
     newTokenAmount: args.newTokenAmount,
+    newMerkleLeafCount,
     mintKnowledgeAssetsAmount: args.mintKnowledgeAssetsAmount,
     knowledgeAssetsToBurn: args.knowledgeAssetsToBurn,
     publisherNodeIdentityId: args.publisherIdentityId,

@@ -12,6 +12,10 @@ export type {
   LogRow,
   QueryHistoryRow,
   SavedQueryRow,
+  ContextGraphSubscriptionRow,
+  ContextGraphMemberPrincipalType,
+  ContextGraphMemberStatus,
+  ContextGraphMemberRow,
 } from './db.js';
 
 export { StructuredLogger } from './structured-logger.js';

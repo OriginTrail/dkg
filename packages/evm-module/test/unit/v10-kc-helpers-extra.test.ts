@@ -131,6 +131,7 @@ describe('@unit v10-kc-helpers — digest byte-layout pins (E-15)', () => {
     const byteSize = 4096;
     const epochs = 7;
     const tokenAmount = ethers.parseEther('1');
+    const merkleLeafCount = 11;
 
     const got = buildPublishAckDigest(
       chainId,
@@ -141,9 +142,10 @@ describe('@unit v10-kc-helpers — digest byte-layout pins (E-15)', () => {
       byteSize,
       epochs,
       tokenAmount,
+      merkleLeafCount,
     );
 
-    // abi.encodePacked(uint256, address, uint256, bytes32, uint256, uint256, uint256, uint256)
+    // abi.encodePacked(uint256, address, uint256, bytes32, uint256, uint256, uint256, uint256, uint256)
     const packed = ethers.concat([
       hex(32, chainId),
       addr(kav10),
@@ -153,6 +155,7 @@ describe('@unit v10-kc-helpers — digest byte-layout pins (E-15)', () => {
       hex(32, byteSize),
       hex(32, epochs),
       hex(32, tokenAmount),
+      hex(32, merkleLeafCount),
     ]);
     const expected = ethers.keccak256(packed);
     expect(got).to.equal(expected);
@@ -162,7 +165,7 @@ describe('@unit v10-kc-helpers — digest byte-layout pins (E-15)', () => {
     // If any of these were encoded as their native widths (e.g. uint64),
     // the second-source recomputation below would mismatch. This test
     // pins the cast-to-uint256 behavior documented in the PRD.
-    const a = buildPublishAckDigest(chainId, kav10, 1n, merkleRoot, 1, 1, 1, 1n);
+    const a = buildPublishAckDigest(chainId, kav10, 1n, merkleRoot, 1, 1, 1, 1n, 1);
     const packed = ethers.concat([
       hex(32, chainId),
       addr(kav10),
@@ -172,21 +175,23 @@ describe('@unit v10-kc-helpers — digest byte-layout pins (E-15)', () => {
       hex(32, 1),
       hex(32, 1),
       hex(32, 1n),
+      hex(32, 1),
     ]);
     expect(a).to.equal(ethers.keccak256(packed));
   });
 
   it('buildPublishAckDigest is sensitive to every field (no silent coalescing)', () => {
-    const base = buildPublishAckDigest(chainId, kav10, 1n, merkleRoot, 1, 1, 1, 1n);
+    const base = buildPublishAckDigest(chainId, kav10, 1n, merkleRoot, 1, 1, 1, 1n, 1);
     const variations = [
-      buildPublishAckDigest(1n, kav10, 1n, merkleRoot, 1, 1, 1, 1n), // chainId
-      buildPublishAckDigest(chainId, '0x000000000000000000000000000000000000dEaD', 1n, merkleRoot, 1, 1, 1, 1n), // kav10
-      buildPublishAckDigest(chainId, kav10, 2n, merkleRoot, 1, 1, 1, 1n), // cgId
-      buildPublishAckDigest(chainId, kav10, 1n, ethers.keccak256('0x01'), 1, 1, 1, 1n), // mr
-      buildPublishAckDigest(chainId, kav10, 1n, merkleRoot, 2, 1, 1, 1n), // kaAmount
-      buildPublishAckDigest(chainId, kav10, 1n, merkleRoot, 1, 2, 1, 1n), // byteSize
-      buildPublishAckDigest(chainId, kav10, 1n, merkleRoot, 1, 1, 2, 1n), // epochs
-      buildPublishAckDigest(chainId, kav10, 1n, merkleRoot, 1, 1, 1, 2n), // tokenAmount
+      buildPublishAckDigest(1n, kav10, 1n, merkleRoot, 1, 1, 1, 1n, 1), // chainId
+      buildPublishAckDigest(chainId, '0x000000000000000000000000000000000000dEaD', 1n, merkleRoot, 1, 1, 1, 1n, 1), // kav10
+      buildPublishAckDigest(chainId, kav10, 2n, merkleRoot, 1, 1, 1, 1n, 1), // cgId
+      buildPublishAckDigest(chainId, kav10, 1n, ethers.keccak256('0x01'), 1, 1, 1, 1n, 1), // mr
+      buildPublishAckDigest(chainId, kav10, 1n, merkleRoot, 2, 1, 1, 1n, 1), // kaAmount
+      buildPublishAckDigest(chainId, kav10, 1n, merkleRoot, 1, 2, 1, 1n, 1), // byteSize
+      buildPublishAckDigest(chainId, kav10, 1n, merkleRoot, 1, 1, 2, 1n, 1), // epochs
+      buildPublishAckDigest(chainId, kav10, 1n, merkleRoot, 1, 1, 1, 2n, 1), // tokenAmount
+      buildPublishAckDigest(chainId, kav10, 1n, merkleRoot, 1, 1, 1, 1n, 2), // merkleLeafCount
     ];
     for (const v of variations) expect(v).to.not.equal(base);
     // And no two variations collide (paranoid):
@@ -202,6 +207,7 @@ describe('@unit v10-kc-helpers — digest byte-layout pins (E-15)', () => {
     const newTokenAmount = ethers.parseEther('0.5');
     const mintAmount = 2n;
     const burn = [1n, 2n];
+    const newMerkleLeafCount = 13n;
 
     const got = buildUpdateAckDigest(
       chainId,
@@ -214,6 +220,7 @@ describe('@unit v10-kc-helpers — digest byte-layout pins (E-15)', () => {
       newTokenAmount,
       mintAmount,
       burn,
+      newMerkleLeafCount,
     );
 
     // Inner: keccak256(abi.encodePacked(uint256[]))
@@ -231,6 +238,7 @@ describe('@unit v10-kc-helpers — digest byte-layout pins (E-15)', () => {
       hex(32, newTokenAmount),
       hex(32, mintAmount),
       innerHash,
+      hex(32, newMerkleLeafCount),
     ]);
     const expected = ethers.keccak256(outerPacked);
     expect(got).to.equal(expected);
@@ -248,6 +256,7 @@ describe('@unit v10-kc-helpers — digest byte-layout pins (E-15)', () => {
       1n,
       1n,
       [1n, 2n],
+      1n,
     );
     const reordered = buildUpdateAckDigest(
       chainId,
@@ -260,6 +269,7 @@ describe('@unit v10-kc-helpers — digest byte-layout pins (E-15)', () => {
       1n,
       1n,
       [2n, 1n], // order matters in abi.encodePacked(uint256[])
+      1n,
     );
     expect(base).to.not.equal(reordered);
 
@@ -274,6 +284,7 @@ describe('@unit v10-kc-helpers — digest byte-layout pins (E-15)', () => {
       1n,
       1n,
       [],
+      1n,
     );
     expect(empty).to.not.equal(base);
   });
@@ -283,8 +294,18 @@ describe('@unit v10-kc-helpers — digest byte-layout pins (E-15)', () => {
     // `KnowledgeCollectionStorage.getKnowledgeCollectionMetadata` during
     // update — off-by-one here means signature forgery against a
     // same-id same-root update. Critical pin.
-    const a = buildUpdateAckDigest(chainId, kav10, 1n, 1n, 1n, merkleRoot, 1n, 1n, 1n, [1n]);
-    const b = buildUpdateAckDigest(chainId, kav10, 1n, 1n, 2n, merkleRoot, 1n, 1n, 1n, [1n]);
+    const a = buildUpdateAckDigest(chainId, kav10, 1n, 1n, 1n, merkleRoot, 1n, 1n, 1n, [1n], 1n);
+    const b = buildUpdateAckDigest(chainId, kav10, 1n, 1n, 2n, merkleRoot, 1n, 1n, 1n, [1n], 1n);
+    expect(a).to.not.equal(b);
+  });
+
+  it('buildUpdateAckDigest is sensitive to newMerkleLeafCount', () => {
+    // newMerkleLeafCount was added to the digest layout to bind the
+    // attestation to the unique-leaves count the publisher claims is in
+    // the new flat-KC tree (prevents a swap to a smaller tree with the
+    // same root).
+    const a = buildUpdateAckDigest(chainId, kav10, 1n, 1n, 1n, merkleRoot, 1n, 1n, 1n, [1n], 1n);
+    const b = buildUpdateAckDigest(chainId, kav10, 1n, 1n, 1n, merkleRoot, 1n, 1n, 1n, [1n], 2n);
     expect(a).to.not.equal(b);
   });
 });

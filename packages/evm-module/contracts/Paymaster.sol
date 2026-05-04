@@ -60,7 +60,8 @@ contract Paymaster is Ownable(msg.sender) {
     }
 
     function coverCost(uint256 amount) external onlyAllowed {
-        _transferTokens(hub.getContractAddress("StakingStorage"), amount);
+        // v4.0.0 — TRAC vault moved from StakingStorage to CSS.
+        _transferTokens(hub.getContractAddress("ConvictionStakingStorage"), amount);
     }
 
     function _transferTokens(address to, uint256 amount) internal {

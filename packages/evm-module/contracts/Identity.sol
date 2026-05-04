@@ -142,6 +142,10 @@ contract Identity is INamed, IVersioned, ContractStatus, IInitializable {
         bytes32 attachedKey;
 
         for (uint256 i; i < operationalWallets.length; ) {
+            if (operationalWallets[i] == address(0)) {
+                revert IdentityLib.OperationalAddressZero();
+            }
+
             operationalKey = keccak256(abi.encodePacked(operationalWallets[i]));
 
             if (operationalKey == bytes32(0)) {

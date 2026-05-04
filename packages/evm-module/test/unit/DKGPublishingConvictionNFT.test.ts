@@ -5,6 +5,7 @@ import hre from 'hardhat';
 
 import {
   Chronos,
+  ConvictionStakingStorage,
   DKGPublishingConvictionNFT,
   EpochStorage,
   Hub,
@@ -18,6 +19,7 @@ type Fixture = {
   NFT: DKGPublishingConvictionNFT;
   Token: Token;
   StakingStorage: StakingStorage;
+  ConvictionStakingStorage: ConvictionStakingStorage;
   EpochStorage: EpochStorage;
   Chronos: Chronos;
 };
@@ -44,6 +46,7 @@ describe('@unit DKGPublishingConvictionNFT', function () {
   let NFT: DKGPublishingConvictionNFT;
   let TokenContract: Token;
   let StakingStorageContract: StakingStorage;
+  let ConvictionStakingStorageContract: ConvictionStakingStorage;
   let EpochStorageContract: EpochStorage;
   let ChronosContract: Chronos;
 
@@ -52,6 +55,8 @@ describe('@unit DKGPublishingConvictionNFT', function () {
       'DKGPublishingConvictionNFT',
       'Token',
       'StakingStorage',
+      // v4.0.0 — V10 vault is CSS post-consolidation; needed for createAccount/topUp asserts.
+      'ConvictionStakingStorage',
       'EpochStorage',
       'Chronos',
     ]);
@@ -59,6 +64,7 @@ describe('@unit DKGPublishingConvictionNFT', function () {
     const NFT = await hre.ethers.getContract<DKGPublishingConvictionNFT>('DKGPublishingConvictionNFT');
     const Token = await hre.ethers.getContract<Token>('Token');
     const StakingStorageC = await hre.ethers.getContract<StakingStorage>('StakingStorage');
+    const CSS = await hre.ethers.getContract<ConvictionStakingStorage>('ConvictionStakingStorage');
     const EpochStorageC = await hre.ethers.getContract<EpochStorage>('EpochStorageV8');
     const ChronosC = await hre.ethers.getContract<Chronos>('Chronos');
     const accounts = await hre.ethers.getSigners();
@@ -72,6 +78,7 @@ describe('@unit DKGPublishingConvictionNFT', function () {
       NFT,
       Token,
       StakingStorage: StakingStorageC,
+      ConvictionStakingStorage: CSS,
       EpochStorage: EpochStorageC,
       Chronos: ChronosC,
     };
@@ -85,6 +92,7 @@ describe('@unit DKGPublishingConvictionNFT', function () {
       NFT,
       Token: TokenContract,
       StakingStorage: StakingStorageContract,
+      ConvictionStakingStorage: ConvictionStakingStorageContract,
       EpochStorage: EpochStorageContract,
       Chronos: ChronosContract,
     } = await loadFixture(deployFixture));
@@ -123,13 +131,18 @@ describe('@unit DKGPublishingConvictionNFT', function () {
   // ======================================================================
 
   describe('createAccount: flow-through to StakingStorage', () => {
-    it('transfers TRAC directly from user to StakingStorage (NFT balance stays 0)', async () => {
+    it('transfers TRAC directly from user to ConvictionStakingStorage (NFT balance stays 0)', async () => {
+      // v4.0.0 — TRAC vault moved from StakingStorage to ConvictionStakingStorage
+      // in the V10 staking consolidation. The publishing-conviction NFT now
+      // routes committed TRAC straight into CSS, the canonical V10 vault.
       const amount = hre.ethers.parseEther('1000000');
       const nftAddr = await NFT.getAddress();
+      const cssAddr = await ConvictionStakingStorageContract.getAddress();
       const ssAddr = await StakingStorageContract.getAddress();
 
       const userBefore = await TokenContract.balanceOf(accounts[0].address);
       const nftBefore = await TokenContract.balanceOf(nftAddr);
+      const cssBefore = await TokenContract.balanceOf(cssAddr);
       const ssBefore = await TokenContract.balanceOf(ssAddr);
       expect(nftBefore).to.equal(0n);
 
@@ -138,7 +151,9 @@ describe('@unit DKGPublishingConvictionNFT', function () {
 
       expect(await TokenContract.balanceOf(nftAddr)).to.equal(0n);
       expect(await TokenContract.balanceOf(accounts[0].address)).to.equal(userBefore - amount);
-      expect(await TokenContract.balanceOf(ssAddr)).to.equal(ssBefore + amount);
+      expect(await TokenContract.balanceOf(cssAddr)).to.equal(cssBefore + amount);
+      // V8 StakingStorage TRAC balance is untouched on V10 deposits.
+      expect(await TokenContract.balanceOf(ssAddr)).to.equal(ssBefore);
     });
 
     it('mints NFT and records account struct with fixed tier and 12-epoch expiry', async () => {
@@ -378,28 +393,11 @@ describe('@unit DKGPublishingConvictionNFT', function () {
     // is the TRUE runtime revert bubbling through Hub.forwardCall. If the
     // Hub ever starts returning address(0) (regression), `ZeroAddressDependency`
     // would fire instead; tests would still fail, surfacing the behavior change.
-    it('initialize reverts when EpochStorageV8 is address(0)', async () => {
-      const freshHub = await deployDisposableHub();
-      // Register Token + StakingStorage + Chronos stubs (EOA signers are fine —
-      // Hub._isContract skips setStatus for non-contract addresses). Omit
-      // EpochStorageV8 so initialize must revert on that branch.
-      const [, signer17, signer18, signer19] = await hre.ethers.getSigners();
-      await freshHub.setContractAddress('Token', signer17.address);
-      await freshHub.setContractAddress('StakingStorage', signer18.address);
-      await freshHub.setContractAddress('Chronos', signer19.address);
-
-      const nft = await deployUnregisteredNFT(freshHub);
-      await expect(
-        freshHub.forwardCall(
-          await nft.getAddress(),
-          nft.interface.encodeFunctionData('initialize'),
-        ),
-      )
-        .to.be.revertedWithCustomError(freshHub, 'ContractDoesNotExist')
-        .withArgs('EpochStorageV8');
-    });
-
-    it('initialize reverts when StakingStorage is address(0)', async () => {
+    // v4.0.0 — DKGPublishingConvictionNFT.initialize() now resolves
+    // Token → ConvictionStakingStorage → EpochStorageV8 → Chronos in that
+    // order. The four "missing dependency" tests below pin the bubbled-up
+    // ContractDoesNotExist(name) for each missing branch in resolution order.
+    it('initialize reverts when ConvictionStakingStorage is address(0)', async () => {
       const freshHub = await deployDisposableHub();
       const [, signer17, signer18, signer19] = await hre.ethers.getSigners();
       await freshHub.setContractAddress('Token', signer17.address);
@@ -414,14 +412,32 @@ describe('@unit DKGPublishingConvictionNFT', function () {
         ),
       )
         .to.be.revertedWithCustomError(freshHub, 'ContractDoesNotExist')
-        .withArgs('StakingStorage');
+        .withArgs('ConvictionStakingStorage');
+    });
+
+    it('initialize reverts when EpochStorageV8 is address(0)', async () => {
+      const freshHub = await deployDisposableHub();
+      const [, signer17, signer18, signer19] = await hre.ethers.getSigners();
+      await freshHub.setContractAddress('Token', signer17.address);
+      await freshHub.setContractAddress('ConvictionStakingStorage', signer18.address);
+      await freshHub.setContractAddress('Chronos', signer19.address);
+
+      const nft = await deployUnregisteredNFT(freshHub);
+      await expect(
+        freshHub.forwardCall(
+          await nft.getAddress(),
+          nft.interface.encodeFunctionData('initialize'),
+        ),
+      )
+        .to.be.revertedWithCustomError(freshHub, 'ContractDoesNotExist')
+        .withArgs('EpochStorageV8');
     });
 
     it('initialize reverts when Chronos is address(0)', async () => {
       const freshHub = await deployDisposableHub();
       const [, signer17, signer18, signer19] = await hre.ethers.getSigners();
       await freshHub.setContractAddress('Token', signer17.address);
-      await freshHub.setContractAddress('StakingStorage', signer18.address);
+      await freshHub.setContractAddress('ConvictionStakingStorage', signer18.address);
       await freshHub.setContractAddress('EpochStorageV8', signer19.address);
 
       const nft = await deployUnregisteredNFT(freshHub);
@@ -437,9 +453,8 @@ describe('@unit DKGPublishingConvictionNFT', function () {
 
     it('initialize reverts when Token is address(0)', async () => {
       const freshHub = await deployDisposableHub();
-      // Register StakingStorage + EpochStorageV8 + Chronos; omit Token.
       const [, signer17, signer18, signer19] = await hre.ethers.getSigners();
-      await freshHub.setContractAddress('StakingStorage', signer17.address);
+      await freshHub.setContractAddress('ConvictionStakingStorage', signer17.address);
       await freshHub.setContractAddress('EpochStorageV8', signer18.address);
       await freshHub.setContractAddress('Chronos', signer19.address);
 
@@ -465,20 +480,21 @@ describe('@unit DKGPublishingConvictionNFT', function () {
       await NFT.createAccount(amount);
     }
 
-    it('sends TRAC directly to StakingStorage (NFT balance stays 0) and increments topUpBalance', async () => {
+    it('sends TRAC directly to ConvictionStakingStorage (NFT balance stays 0) and increments topUpBalance', async () => {
+      // v4.0.0 — vault role moved from StakingStorage to CSS post-consolidation.
       const initial = hre.ethers.parseEther('120000');
       const top = hre.ethers.parseEther('30000');
       await createAt(initial);
 
       const nftAddr = await NFT.getAddress();
-      const ssAddr = await StakingStorageContract.getAddress();
-      const ssBefore = await TokenContract.balanceOf(ssAddr);
+      const cssAddr = await ConvictionStakingStorageContract.getAddress();
+      const cssBefore = await TokenContract.balanceOf(cssAddr);
 
       await TokenContract.approve(nftAddr, top);
       await NFT.topUp(1, top);
 
       expect(await TokenContract.balanceOf(nftAddr)).to.equal(0n);
-      expect(await TokenContract.balanceOf(ssAddr)).to.equal(ssBefore + top);
+      expect(await TokenContract.balanceOf(cssAddr)).to.equal(cssBefore + top);
 
       const info = await NFT.getAccountInfo(1);
       expect(info.topUpBuffer).to.equal(top);

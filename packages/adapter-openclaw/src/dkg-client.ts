@@ -11,8 +11,19 @@ import { loadAuthTokenSync } from '@origintrail-official/dkg-core';
 export interface DkgClientOptions {
   /** Base URL of the DKG daemon (default: "http://127.0.0.1:9200"). */
   baseUrl?: string;
-  /** Bearer token for daemon API auth. If omitted, tries ~/.dkg/auth.token. */
+  /** Bearer token for daemon API auth. If omitted, tries `<dkgHome>/auth.token`. */
   apiToken?: string;
+  /**
+   * T70 — DKG home directory used to read `auth.token` when `apiToken` is
+   * not supplied. Caller (typically `DkgNodePlugin.register`) passes the
+   * runtime-resolved home (`resolveDkgHome({daemonUrl})`) so the constructor
+   * fallback reads from the right place when the active daemon is in
+   * `~/.dkg-dev` (monorepo) vs `~/.dkg` (npm). Without this, an absent
+   * `auth.token` in the resolved home would silently fall through to the
+   * default `~/.dkg/auth.token`, picking up a stale npm-side token while
+   * the live daemon is at `~/.dkg-dev` (the very bug T70 set out to fix).
+   */
+  dkgHome?: string;
   /** Request timeout in ms (default: 30 000). */
   timeoutMs?: number;
 }
@@ -77,6 +88,23 @@ export interface LocalAgentIntegrationRecord extends LocalAgentIntegrationPayloa
   updatedAt?: string;
 }
 
+/**
+ * T63 — Shape of `/api/agent/identity` response.
+ *
+ * Mirrors the daemon route handler at
+ * `packages/cli/src/daemon/routes/agent-chat.ts:391`. `agentAddress` is the
+ * canonical EIP-55 form (set from `verifyWallet.address` at agent
+ * registration). The adapter trusts this verbatim and never re-checksums.
+ */
+export interface AgentIdentity {
+  agentAddress: string;
+  agentDid: string;
+  name: string;
+  framework?: string;
+  peerId: string;
+  nodeIdentityId: string;
+}
+
 export class DkgDaemonClient {
   readonly baseUrl: string;
   private readonly timeoutMs: number;
@@ -85,11 +113,11 @@ export class DkgDaemonClient {
   constructor(opts?: DkgClientOptions) {
     this.baseUrl = stripTrailingSlashes(opts?.baseUrl ?? 'http://127.0.0.1:9200');
     this.timeoutMs = opts?.timeoutMs ?? 30_000;
-    this.apiToken = opts?.apiToken ?? DkgDaemonClient.loadTokenFromFile();
+    this.apiToken = opts?.apiToken ?? DkgDaemonClient.loadTokenFromFile(opts?.dkgHome);
   }
 
-  private static loadTokenFromFile(): string | undefined {
-    return loadAuthTokenSync();
+  private static loadTokenFromFile(dkgHome?: string): string | undefined {
+    return loadAuthTokenSync(dkgHome);
   }
 
   private authHeaders(): Record<string, string> {
@@ -109,6 +137,38 @@ export class DkgDaemonClient {
     try {
       const data = await this.get<Record<string, unknown>>('/api/status');
       return { ok: true, peerId: data.peerId as string | undefined };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  /**
+   * Probe the daemon's `/api/agent/identity` route using the client's normal
+   * constructor-loaded node-level Bearer token.
+   *
+   * The daemon resolves unknown node-level tokens to its default agent address,
+   * so the response is the canonical WM identity the adapter should cache.
+   * Failure shape mirrors `getStatus()`: `{ ok: false, error }` for transport,
+   * 401, and 5xx responses so the probe site can branch without try/catch.
+   */
+  async getAgentIdentity(): Promise<{
+    ok: boolean;
+    identity?: AgentIdentity;
+    error?: string;
+  }> {
+    try {
+      const data = await this.get<Record<string, unknown>>('/api/agent/identity');
+      return {
+        ok: true,
+        identity: {
+          agentAddress: String(data.agentAddress ?? ''),
+          agentDid: String(data.agentDid ?? ''),
+          name: String(data.name ?? ''),
+          framework: typeof data.framework === 'string' ? data.framework : undefined,
+          peerId: String(data.peerId ?? ''),
+          nodeIdentityId: String(data.nodeIdentityId ?? ''),
+        },
+      };
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
@@ -691,9 +751,10 @@ export class DkgDaemonClient {
   // ---------------------------------------------------------------------------
 
   private async get<T>(path: string): Promise<T> {
+    const headers: Record<string, string> = { 'Accept': 'application/json', ...this.authHeaders() };
     const res = await fetch(`${this.baseUrl}${path}`, {
       method: 'GET',
-      headers: { 'Accept': 'application/json', ...this.authHeaders() },
+      headers,
       signal: AbortSignal.timeout(this.timeoutMs),
     });
     if (!res.ok) {

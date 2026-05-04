@@ -1,7 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import { ACKCollector, type ACKCollectorDeps } from '../src/ack-collector.js';
 import { StorageACKHandler, type StorageACKHandlerConfig } from '../src/storage-ack-handler.js';
-import { computeFlatKCRootV10 as computeFlatKCRoot } from '../src/merkle.js';
+import {
+  computeFlatKCRootV10 as computeFlatKCRoot,
+  computeFlatKCMerkleLeafCountV10,
+} from '../src/merkle.js';
 import { encodeStorageACK, computePublishACKDigest, encodePublishIntent, decodeStorageACK } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
 import { OxigraphStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
@@ -84,6 +87,14 @@ function makeEventBus() {
   return { emit: () => {}, on: () => {}, off: () => {}, once: () => {} };
 }
 
+const testQuads: Quad[] = [
+  makeQuad('urn:a', 'urn:p', 'urn:o1'),
+  makeQuad('urn:a', 'urn:p', 'urn:o2'),
+  makeQuad('urn:b', 'urn:p', 'urn:o3'),
+];
+const merkleRoot = computeFlatKCRoot(testQuads, []);
+const testMerkleLeafCount = computeFlatKCMerkleLeafCountV10(testQuads, []);
+
 async function signACK(
   wallet: ethers.Wallet,
   contextGraphId: bigint,
@@ -92,6 +103,7 @@ async function signACK(
   byteSize: bigint = 500n,
   epochs: bigint = 1n,
   tokenAmount: bigint = 0n,
+  merkleLeafCount: number = testMerkleLeafCount,
 ) {
   const digest = computePublishACKDigest(
     TEST_CHAIN_ID,
@@ -102,17 +114,11 @@ async function signACK(
     byteSize,
     epochs,
     tokenAmount,
+    BigInt(merkleLeafCount),
   );
   const sig = ethers.Signature.from(await wallet.signMessage(digest));
   return { r: ethers.getBytes(sig.r), vs: ethers.getBytes(sig.yParityAndS) };
 }
-
-const testQuads: Quad[] = [
-  makeQuad('urn:a', 'urn:p', 'urn:o1'),
-  makeQuad('urn:a', 'urn:p', 'urn:o2'),
-  makeQuad('urn:b', 'urn:p', 'urn:o3'),
-];
-const merkleRoot = computeFlatKCRoot(testQuads, []);
 // Numeric CG id — the storage-ack-handler and ACK provider both fail-loud
 // on non-numeric / zero ids, matching the V10 contract guard.
 const testCGIdStr = '42';
@@ -132,6 +138,7 @@ function buildCollectParams(overrides: Partial<Parameters<ACKCollector['collect'
     rootEntities: ['urn:a', 'urn:b'],
     chainId: TEST_CHAIN_ID,
     kav10Address: TEST_KAV10_ADDR,
+    merkleLeafCount: testMerkleLeafCount,
     ...overrides,
   };
 }
@@ -512,6 +519,7 @@ describe('StorageACKHandler inline verification', () => {
       publicByteSize: stagingBytes.length,
       isPrivate: false,
       kaCount: 2,
+      merkleLeafCount: testMerkleLeafCount,
       rootEntities: ['urn:a', 'urn:b'],
       stagingQuads: stagingBytes,
     });
@@ -537,6 +545,7 @@ describe('StorageACKHandler inline verification', () => {
       publicByteSize: stagingBytes.length,
       isPrivate: false,
       kaCount: 2,
+      merkleLeafCount: testMerkleLeafCount,
       rootEntities: ['urn:a'],
       stagingQuads: stagingBytes,
     });
@@ -561,6 +570,7 @@ describe('StorageACKHandler inline verification', () => {
       publicByteSize: 300,
       isPrivate: false,
       kaCount: 2,
+      merkleLeafCount: testMerkleLeafCount,
       rootEntities: [],
     });
 
@@ -582,6 +592,7 @@ describe('StorageACKHandler inline verification', () => {
       publicByteSize: 300,
       isPrivate: false,
       kaCount: 1,
+      merkleLeafCount: testMerkleLeafCount,
       rootEntities: ['urn:a'],
     });
 
@@ -602,6 +613,7 @@ describe('StorageACKHandler inline verification', () => {
       publicByteSize: 300,
       isPrivate: false,
       kaCount: 1,
+      merkleLeafCount: testMerkleLeafCount,
       rootEntities: [],
     });
 
@@ -640,6 +652,7 @@ describe('StorageACKHandler security', () => {
       publicByteSize: 100,
       isPrivate: false,
       kaCount: 1,
+      merkleLeafCount: testMerkleLeafCount,
       rootEntities: [],
     });
 
@@ -660,6 +673,7 @@ describe('StorageACKHandler security', () => {
       publicByteSize: oversizedPayload.length,
       isPrivate: false,
       kaCount: 1,
+      merkleLeafCount: testMerkleLeafCount,
       rootEntities: [],
       stagingQuads: oversizedPayload,
     });
@@ -682,6 +696,7 @@ describe('StorageACKHandler security', () => {
       publicByteSize: emptyNQuads.length,
       isPrivate: false,
       kaCount: 1,
+      merkleLeafCount: testMerkleLeafCount,
       rootEntities: [],
       stagingQuads: emptyNQuads,
     });
@@ -704,6 +719,7 @@ describe('StorageACKHandler security', () => {
       publicByteSize: stagingBytes.length,
       isPrivate: false,
       kaCount: 1,
+      merkleLeafCount: testMerkleLeafCount,
       rootEntities: [],
       stagingQuads: stagingBytes,
     });
@@ -729,6 +745,7 @@ describe('StorageACKHandler security', () => {
       publicByteSize: 300,
       isPrivate: false,
       kaCount: 1,
+      merkleLeafCount: testMerkleLeafCount,
       rootEntities: [],
     });
 
@@ -766,6 +783,7 @@ describe('StorageACKHandler signature format', () => {
       publicByteSize: 300,
       isPrivate: false,
       kaCount: 2,
+      merkleLeafCount: testMerkleLeafCount,
       rootEntities: [],
     });
 
@@ -781,6 +799,7 @@ describe('StorageACKHandler signature format', () => {
       300n,
       1n,
       0n,
+      BigInt(testMerkleLeafCount),
     );
     const prefixedHash = ethers.hashMessage(expectedDigest);
 
@@ -811,6 +830,7 @@ describe('StorageACKHandler signature format', () => {
       publicByteSize: stagingBytes.length,
       isPrivate: false,
       kaCount: 2,
+      merkleLeafCount: testMerkleLeafCount,
       rootEntities: ['urn:a'],
       stagingQuads: stagingBytes,
     });
@@ -827,6 +847,7 @@ describe('StorageACKHandler signature format', () => {
       BigInt(stagingBytes.length),
       1n,
       0n,
+      BigInt(testMerkleLeafCount),
     );
     const prefixedHash = ethers.hashMessage(digest);
 
@@ -857,6 +878,7 @@ describe('StorageACKHandler signature format', () => {
       publicByteSize: 300,
       isPrivate: false,
       kaCount: 2,
+      merkleLeafCount: testMerkleLeafCount,
       rootEntities: [],
     });
 

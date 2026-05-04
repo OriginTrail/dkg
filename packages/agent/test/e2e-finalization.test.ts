@@ -156,7 +156,8 @@ describe('E2E: workspace-first publish with real blockchain', () => {
 
     const hub = new Contract(hubAddress, ['function getContractAddress(string) view returns (address)'], provider);
     const tokenAddr = await hub.getContractAddress('Token');
-    const stakingAddr = await hub.getContractAddress('Staking');
+    const stakingV10Addr = await hub.getContractAddress('StakingV10');
+    const stakingNFTAddr = await hub.getContractAddress('DKGStakingConvictionNFT');
     const profileAddr = await hub.getContractAddress('Profile');
     const parametersAddr = await hub.getContractAddress('ParametersStorage');
     const deployerWallet = new Wallet(DEPLOYER_OP_KEY, provider);
@@ -170,13 +171,17 @@ describe('E2E: workspace-first publish with real blockchain', () => {
       'function mint(address, uint256)',
       'function approve(address, uint256) returns (bool)',
     ], deployerWallet);
-    const staking = new Contract(stakingAddr, ['function stake(uint72 identityId, uint96 amount)'], deployerWallet);
+    const stakingNFT = new Contract(
+      stakingNFTAddr,
+      ['function createConviction(uint72 identityId, uint96 amount, uint40 lockTier)'],
+      deployerWallet,
+    );
     const profile = new Contract(profileAddr, ['function updateAsk(uint72 identityId, uint96 ask)'], deployerWallet);
 
     const stakeAmount = ethers.parseEther('50000');
     await (await token.mint(deployerWallet.address, stakeAmount)).wait();
-    await (await token.connect(deployerWallet).approve(stakingAddr, stakeAmount)).wait();
-    await (await staking.stake(deployerProfileId, stakeAmount)).wait();
+    await (await token.connect(deployerWallet).approve(stakingV10Addr, stakeAmount)).wait();
+    await (await stakingNFT.createConviction(deployerProfileId, stakeAmount, 1)).wait();
     await (await profile.updateAsk(deployerProfileId, ethers.parseEther('1'))).wait();
 
     // Create profiles, stake, and set ask for both node wallets
@@ -189,15 +194,17 @@ describe('E2E: workspace-first publish with real blockchain', () => {
       const nodeToken = new Contract(tokenAddr, [
         'function approve(address, uint256) returns (bool)',
       ], nodeWallet);
-      const nodeStaking = new Contract(stakingAddr, [
-        'function stake(uint72 identityId, uint96 amount)',
-      ], nodeWallet);
+      const nodeStakingNFT = new Contract(
+        stakingNFTAddr,
+        ['function createConviction(uint72 identityId, uint96 amount, uint40 lockTier)'],
+        nodeWallet,
+      );
       const nodeProfile = new Contract(profileAddr, [
         'function updateAsk(uint72 identityId, uint96 ask)',
       ], nodeWallet);
 
-      await (await nodeToken.approve(stakingAddr, ethers.parseEther('100000'))).wait();
-      await (await nodeStaking.stake(nodeProfileId, ethers.parseEther('50000'))).wait();
+      await (await nodeToken.approve(stakingV10Addr, ethers.parseEther('100000'))).wait();
+      await (await nodeStakingNFT.createConviction(nodeProfileId, ethers.parseEther('50000'), 1)).wait();
       await (await nodeProfile.updateAsk(nodeProfileId, ethers.parseEther('1'))).wait();
     }
   }, 120_000);

@@ -100,6 +100,31 @@ export function buildOpenClawGatewayBase(value: string): string {
     : `${value}/api/dkg-channel`;
 }
 
+function healthUrlMatchesBase(healthUrl: string, baseUrl: string): boolean {
+  const base = trimTrailingSlashes(baseUrl);
+  return healthUrl === base || healthUrl.startsWith(`${base}/`);
+}
+
+function classifyExplicitOpenClawHealthUrl(
+  healthUrl: string | undefined,
+  standaloneBridgeBase: string | undefined,
+  gatewayBase: string | undefined,
+): 'bridge' | 'gateway' | undefined {
+  if (!healthUrl) return undefined;
+  const bridgeMatch = standaloneBridgeBase && healthUrlMatchesBase(healthUrl, standaloneBridgeBase)
+    ? trimTrailingSlashes(standaloneBridgeBase)
+    : undefined;
+  const gatewayMatch = gatewayBase && healthUrlMatchesBase(healthUrl, gatewayBase)
+    ? trimTrailingSlashes(gatewayBase)
+    : undefined;
+  if (bridgeMatch && gatewayMatch) {
+    return gatewayMatch.length >= bridgeMatch.length ? 'gateway' : 'bridge';
+  }
+  if (gatewayMatch) return 'gateway';
+  if (bridgeMatch) return 'bridge';
+  return undefined;
+}
+
 export async function loadBridgeAuthToken(): Promise<string | undefined> {
   try {
     const raw = await readFile(join(dkgDir(), "auth.token"), "utf-8");
@@ -124,6 +149,9 @@ export function getOpenClawChannelTargets(config: DkgConfig): OpenClawChannelTar
   const explicitGatewayBase = openclawIntegration?.transport.gatewayUrl
     ? trimTrailingSlashes(openclawIntegration.transport.gatewayUrl)
     : undefined;
+  const explicitHealthUrl = openclawIntegration?.transport.healthUrl
+    ? trimTrailingSlashes(openclawIntegration.transport.healthUrl)
+    : undefined;
   const bridgeLooksLikeGateway =
     explicitBridgeBase?.endsWith("/api/dkg-channel") ?? false;
   const standaloneBridgeBase = explicitBridgeBase
@@ -136,6 +164,14 @@ export function getOpenClawChannelTargets(config: DkgConfig): OpenClawChannelTar
   const gatewayBase =
     explicitGatewayBase ??
     (bridgeLooksLikeGateway ? explicitBridgeBase : undefined);
+  const normalizedGatewayBase = gatewayBase
+    ? buildOpenClawGatewayBase(gatewayBase)
+    : undefined;
+  const explicitHealthTarget = classifyExplicitOpenClawHealthUrl(
+    explicitHealthUrl,
+    standaloneBridgeBase,
+    normalizedGatewayBase,
+  );
   const targets: OpenClawChannelTarget[] = [];
   const seenInboundUrls = new Set<string>();
 
@@ -150,16 +186,19 @@ export function getOpenClawChannelTargets(config: DkgConfig): OpenClawChannelTar
       name: "bridge",
       inboundUrl: `${standaloneBridgeBase}/inbound`,
       streamUrl: `${standaloneBridgeBase}/inbound/stream`,
-      healthUrl: `${standaloneBridgeBase}/health`,
+      healthUrl: explicitHealthTarget === 'bridge'
+        ? explicitHealthUrl!
+        : `${standaloneBridgeBase}/health`,
     });
   }
 
-  if (gatewayBase) {
-    const normalizedGatewayBase = buildOpenClawGatewayBase(gatewayBase);
+  if (normalizedGatewayBase) {
     pushTarget({
       name: "gateway",
       inboundUrl: `${normalizedGatewayBase}/inbound`,
-      healthUrl: `${normalizedGatewayBase}/health`,
+      healthUrl: explicitHealthTarget === 'gateway'
+        ? explicitHealthUrl
+        : `${normalizedGatewayBase}/health`,
     });
   }
 

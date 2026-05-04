@@ -3,6 +3,7 @@ import { ethers } from 'ethers';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import {
   computeFlatKCRootV10 as computeFlatKCRoot,
+  computeFlatKCMerkleLeafCountV10,
   computeTripleHashV10,
   computeKCRootV10,
   computePublicRootV10,
@@ -33,29 +34,6 @@ function makeQuad(s: string, p: string, o: string, g = ''): Quad {
 
 function makeEventBus() {
   return { emit: () => {}, on: () => {}, off: () => {}, once: () => {} };
-}
-
-async function signACK(
-  wallet: ethers.Wallet,
-  contextGraphId: bigint,
-  merkleRoot: Uint8Array,
-  kaCount: number = 0,
-  byteSize: bigint = 0n,
-  epochs: bigint = 1n,
-  tokenAmount: bigint = 0n,
-) {
-  const digest = computePublishACKDigest(
-    TEST_CHAIN_ID,
-    TEST_KAV10_ADDR,
-    contextGraphId,
-    merkleRoot,
-    BigInt(kaCount),
-    byteSize,
-    epochs,
-    tokenAmount,
-  );
-  const sig = ethers.Signature.from(await wallet.signMessage(digest));
-  return { r: ethers.getBytes(sig.r), vs: ethers.getBytes(sig.yParityAndS) };
 }
 
 function quadsToNTriples(quads: Quad[]): string {
@@ -97,6 +75,35 @@ const specialCharQuads: Quad[] = [
   makeQuad('urn:entity:special', 'http://schema.org/description', '"Quotes \\"inside\\""'),
   makeQuad('urn:entity:special', 'urn:prop:unicode', '"日本語テスト"'),
 ];
+
+const singleEntityLeafCount = computeFlatKCMerkleLeafCountV10(singleEntityQuads, []);
+const multiEntityLeafCount = computeFlatKCMerkleLeafCountV10(multiEntityQuads, []);
+const specialCharLeafCount = computeFlatKCMerkleLeafCountV10(specialCharQuads, []);
+
+async function signACK(
+  wallet: ethers.Wallet,
+  contextGraphId: bigint,
+  merkleRoot: Uint8Array,
+  kaCount: number = 0,
+  byteSize: bigint = 0n,
+  epochs: bigint = 1n,
+  tokenAmount: bigint = 0n,
+  merkleLeafCount: number = singleEntityLeafCount,
+) {
+  const digest = computePublishACKDigest(
+    TEST_CHAIN_ID,
+    TEST_KAV10_ADDR,
+    contextGraphId,
+    merkleRoot,
+    BigInt(kaCount),
+    byteSize,
+    epochs,
+    tokenAmount,
+    BigInt(merkleLeafCount),
+  );
+  const sig = ethers.Signature.from(await wallet.signMessage(digest));
+  return { r: ethers.getBytes(sig.r), vs: ethers.getBytes(sig.yParityAndS) };
+}
 
 // ─────────────────────────────────────────────────────────────────────────
 // §1  V10 PUBLISH Protocol (spec §9.0)
@@ -226,6 +233,7 @@ describe('V10 PUBLISH Protocol (spec §9.0)', () => {
         kaCount: 1,
         rootEntities: ['urn:entity:alpha'],
         requiredACKs: 3,
+        merkleLeafCount: singleEntityLeafCount,
       });
       // Count is necessary but not sufficient: the old `>= 3` by itself
       // would be green for three *junk* ACKs. Assert every ACK is
@@ -244,7 +252,7 @@ describe('V10 PUBLISH Protocol (spec §9.0)', () => {
       const coreAddrs = new Set(
         coreWallets.map((w) => w.address.toLowerCase()),
       );
-      // Test simulators use `signACK` above, which signs the 8-field
+      // Test simulators use `signACK` above, which signs the H5-prefixed
       // `computePublishACKDigest` — same digest the collector verifies
       // against. We MUST use the same here or recovery drifts and the
       // assertion produces a false positive.
@@ -257,6 +265,7 @@ describe('V10 PUBLISH Protocol (spec §9.0)', () => {
         500n, // publicByteSize passed to collect({ publicByteSize: 500n })
         1n, // epochs default
         0n, // tokenAmount default
+        BigInt(singleEntityLeafCount),
       );
       const prefixedHash = ethers.hashMessage(digest);
       for (const ack of result.acks) {
@@ -416,6 +425,7 @@ describe('V10 ACK Edge Cases', () => {
         kaCount: 1,
         rootEntities: [],
         requiredACKs: 5,
+        merkleLeafCount: singleEntityLeafCount,
       }),
     ).rejects.toThrow('quorum impossible');
 
@@ -455,6 +465,7 @@ describe('V10 ACK Edge Cases', () => {
         isPrivate: false,
         kaCount: 1,
         rootEntities: [],
+        merkleLeafCount: singleEntityLeafCount,
       }),
     ).rejects.toThrow('storage_ack_insufficient');
   });
@@ -493,6 +504,7 @@ describe('V10 ACK Edge Cases', () => {
         isPrivate: false,
         kaCount: 1,
         rootEntities: [],
+        merkleLeafCount: singleEntityLeafCount,
       }),
     ).rejects.toThrow('storage_ack_insufficient');
     expect(verifyIdentityCalled).toBe(true);
@@ -537,6 +549,7 @@ describe('V10 ACK Edge Cases', () => {
         isPrivate: false,
         kaCount: 1,
         rootEntities: [],
+        merkleLeafCount: singleEntityLeafCount,
       }),
     ).rejects.toThrow(/storage_ack_insufficient/);
   });
@@ -576,6 +589,7 @@ describe('V10 ACK Edge Cases', () => {
         isPrivate: false,
         kaCount: 1,
         rootEntities: [],
+        merkleLeafCount: singleEntityLeafCount,
       }),
     ).rejects.toThrow(/storage_ack_insufficient/);
   });
@@ -607,6 +621,7 @@ describe('V10 ACK Edge Cases', () => {
       kaCount: 1,
       rootEntities: ['urn:entity:alpha'],
       stagingQuads: stagingBytes,
+      merkleLeafCount: singleEntityLeafCount,
     });
 
     const decoded = decodePublishIntent(intent);
@@ -623,6 +638,7 @@ describe('V10 ACK Edge Cases', () => {
       isPrivate: false,
       kaCount: 1,
       rootEntities: ['urn:entity:alpha'],
+      merkleLeafCount: singleEntityLeafCount,
     });
 
     const decoded = decodePublishIntent(intent);
@@ -666,6 +682,7 @@ describe('V10 ACK Edge Cases', () => {
       kaCount: 1,
       rootEntities: [],
       stagingQuads: oversizedBytes,
+      merkleLeafCount: singleEntityLeafCount,
     });
 
     await expect(handler.handler(intent, { toString: () => 'peer' }))
@@ -783,6 +800,7 @@ describe('V10 StorageACKHandler round-trip', () => {
     makeQuad('urn:entity:2', 'urn:p:name', '"Entity Two"'),
   ];
   const merkleRoot = computeFlatKCRoot(testQuads, []);
+  const testMerkleLeafCount = computeFlatKCMerkleLeafCountV10(testQuads, []);
 
   // SWM URI used to seed the recording store. Must match the URI returned by
   // `createHandler`'s `contextGraphSharedMemoryUri` so the handler's
@@ -855,6 +873,7 @@ describe('V10 StorageACKHandler round-trip', () => {
       kaCount: 2,
       rootEntities: ['urn:entity:1', 'urn:entity:2'],
       stagingQuads: stagingBytes,
+      merkleLeafCount: testMerkleLeafCount,
     });
 
     const response = await handler.handler(intent, fakePeerId);
@@ -874,6 +893,7 @@ describe('V10 StorageACKHandler round-trip', () => {
       BigInt(stagingBytes.length),
       1n,
       0n,
+      BigInt(testMerkleLeafCount),
     );
     const prefixedHash = ethers.hashMessage(digest);
     const recovered = ethers.recoverAddress(prefixedHash, {
@@ -897,6 +917,7 @@ describe('V10 StorageACKHandler round-trip', () => {
       isPrivate: false,
       kaCount: 2,
       rootEntities: ['urn:entity:1', 'urn:entity:2'],
+      merkleLeafCount: testMerkleLeafCount,
     });
 
     const response = await handler.handler(intent, fakePeerId);
@@ -916,6 +937,7 @@ describe('V10 StorageACKHandler round-trip', () => {
       isPrivate: false,
       kaCount: 1,
       rootEntities: [],
+      merkleLeafCount: testMerkleLeafCount,
     });
 
     await expect(handler.handler(intent, fakePeerId))
@@ -937,6 +959,7 @@ describe('V10 StorageACKHandler round-trip', () => {
       kaCount: 1,
       rootEntities: [],
       stagingQuads: stagingBytes,
+      merkleLeafCount: 1,
     });
 
     await expect(handler.handler(intent, fakePeerId))
@@ -957,6 +980,7 @@ describe('V10 StorageACKHandler round-trip', () => {
       kaCount: 1,
       rootEntities: [],
       stagingQuads: stagingBytes,
+      merkleLeafCount: testMerkleLeafCount,
     });
 
     // Empty staging bytes have length 0, which takes the SWM fallback
@@ -984,6 +1008,7 @@ describe('V10 StorageACKHandler round-trip', () => {
       kaCount: 1,
       rootEntities: [],
       stagingQuads: oversized,
+      merkleLeafCount: testMerkleLeafCount,
     });
 
     await expect(handler.handler(intent, fakePeerId))
@@ -1006,6 +1031,7 @@ describe('V10 StorageACKHandler round-trip', () => {
       kaCount: 2,
       rootEntities: ['urn:entity:1', 'urn:entity:2'],
       stagingQuads: stagingBytes,
+      merkleLeafCount: testMerkleLeafCount,
     });
 
     await handler.handler(intent, fakePeerId);
@@ -1039,6 +1065,7 @@ describe('V10 StorageACKHandler round-trip', () => {
       isPrivate: false,
       kaCount: 2,
       rootEntities: ['urn:entity:1', 'urn:entity:2'],
+      merkleLeafCount: testMerkleLeafCount,
     });
 
     await expect(handler.handler(intent, fakePeerId))
@@ -1068,6 +1095,7 @@ describe('V10 Finalization (spec §9.0 Phase 6)', () => {
       kaCount: 3,
       rootEntities,
       stagingQuads: stagingBytes,
+      merkleLeafCount: multiEntityLeafCount,
     };
 
     const encoded = encodePublishIntent(original);

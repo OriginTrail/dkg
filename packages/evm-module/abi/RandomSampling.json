@@ -498,9 +498,9 @@
   {
     "inputs": [
       {
-        "internalType": "string",
-        "name": "chunk",
-        "type": "string"
+        "internalType": "bytes32",
+        "name": "leaf",
+        "type": "bytes32"
       },
       {
         "internalType": "bytes32[]",

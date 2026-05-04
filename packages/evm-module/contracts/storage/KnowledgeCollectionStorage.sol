@@ -96,7 +96,8 @@ contract KnowledgeCollectionStorage is
         uint40 startEpoch,
         uint40 endEpoch,
         uint96 tokenAmount,
-        bool isImmutable
+        bool isImmutable,
+        uint32 merkleLeafCount
     ) external onlyContracts returns (uint256) {
         uint256 knowledgeCollectionId = ++_knowledgeCollectionsCounter;
 
@@ -108,6 +109,7 @@ contract KnowledgeCollectionStorage is
         kc.endEpoch = endEpoch;
         kc.tokenAmount = tokenAmount;
         kc.isImmutable = isImmutable;
+        kc.merkleLeafCount = merkleLeafCount;
 
         unchecked {
             _totalTokenAmount += tokenAmount;
@@ -143,7 +145,8 @@ contract KnowledgeCollectionStorage is
         uint256 mintKnowledgeAssetsAmount,
         uint256[] calldata knowledgeAssetsToBurn,
         uint88 byteSize,
-        uint96 tokenAmount
+        uint96 tokenAmount,
+        uint32 merkleLeafCount
     ) external onlyContracts {
         KnowledgeCollectionLib.KnowledgeCollection storage kc = knowledgeCollections[id];
 
@@ -154,6 +157,7 @@ contract KnowledgeCollectionStorage is
         kc.merkleRoots.push(KnowledgeCollectionLib.MerkleRoot(publisher, merkleRoot, block.timestamp));
         kc.byteSize = byteSize;
         kc.tokenAmount = tokenAmount;
+        kc.merkleLeafCount = merkleLeafCount;
 
         // Burn with an empty list is a no-op (the inner for-loop over
         // tokenIds skips when length == 0). Mint with amount == 0 was
@@ -201,7 +205,8 @@ contract KnowledgeCollectionStorage is
             uint88 byteSize,
             uint40 endEpoch,
             uint96 tokenAmount,
-            bool isImmutable
+            bool isImmutable,
+            uint32 merkleLeafCount
         )
     {
         KnowledgeCollectionLib.KnowledgeCollection storage kc = knowledgeCollections[id];
@@ -211,8 +216,15 @@ contract KnowledgeCollectionStorage is
             kc.byteSize,
             kc.endEpoch,
             kc.tokenAmount,
-            kc.isImmutable
+            kc.isImmutable,
+            kc.merkleLeafCount
         );
+    }
+
+    /// @notice Leaf count for the V10 flat-KC Merkle tree at latest root
+    ///         (see `merkleLeafCount` on `KnowledgeCollection`).
+    function getMerkleLeafCount(uint256 id) external view returns (uint32) {
+        return knowledgeCollections[id].merkleLeafCount;
     }
 
     function getKnowledgeCollectionMetadata(

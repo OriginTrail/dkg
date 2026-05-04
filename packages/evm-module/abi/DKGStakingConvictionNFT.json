@@ -944,19 +944,6 @@
   },
   {
     "inputs": [],
-    "name": "stakingStorage",
-    "outputs": [
-      {
-        "internalType": "contract StakingStorage",
-        "name": "",
-        "type": "address"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
     "name": "stakingV10",
     "outputs": [
       {

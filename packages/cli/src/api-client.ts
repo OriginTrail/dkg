@@ -8,6 +8,29 @@ export type QueryResult =
   | { type: 'boolean'; value: boolean }
   | { type?: undefined; [key: string]: unknown };
 
+/**
+ * Response shape for `/api/random-sampling/status`. Mirrors
+ * `RandomSamplingStatus` from `@origintrail-official/dkg-agent` but
+ * lives here so the CLI doesn't take a runtime dep on the agent
+ * package (only types). The `loop.lastOutcome` is intentionally
+ * `unknown` — the CLI prints it as JSON; the structured discrimination
+ * is the prover's concern, not the CLI's.
+ */
+export interface RandomSamplingStatusResponse {
+  enabled: boolean;
+  role: 'core' | 'edge';
+  identityId: string;
+  loop: null | {
+    totalTicks: number;
+    inflight: boolean;
+    lastTickAt: string | null;
+    lastOutcome: unknown;
+    submittedCount: number;
+    lastSubmittedTxHash: string | null;
+    lastSubmittedAt: string | null;
+  };
+}
+
 export class ApiClient {
   private baseUrl: string;
   private token?: string;
@@ -54,6 +77,16 @@ export class ApiClient {
     agents: Array<{ agentUri: string; name: string; peerId: string; framework?: string; nodeRole?: string }>;
   }> {
     return this.get('/api/agents');
+  }
+
+  /**
+   * V10 Random Sampling prover snapshot. Cheap; safe to poll. Returns
+   * `enabled: false` when the bind layer no-op'd (edge node, no
+   * identity, or chain adapter missing methods); the `loop` field is
+   * `null` in that case.
+   */
+  async randomSamplingStatus(): Promise<RandomSamplingStatusResponse> {
+    return this.get('/api/random-sampling/status');
   }
 
   async peerInfo(peerId: string): Promise<{

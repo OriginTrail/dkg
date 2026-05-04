@@ -18,15 +18,32 @@ import {ParametersStorage} from "./storage/ParametersStorage.sol";
 
 contract StakingKPI is INamed, IVersioned, ContractStatus, IInitializable {
     string private constant _NAME = "StakingKPI";
-    string private constant _VERSION = "1.0.0";
+    // Version history:
+    //   1.0.0 — initial KPI surface (V8 stake-base + node aggregates).
+    //   2.0.0 — v4.0.0 storage consolidation: node-level reads
+    //           (`getNodeStats`, `getOperatorFeeStats`) switched to CSS
+    //           (`getNodeStakeV10`, `getOperatorFeeBalance`) so V10 nodes
+    //           report non-zero stake and fee balance. Per-delegator
+    //           reads (`getOperatorStats`, `getDelegatorStats`, the reward
+    //           simulator) remain V8 stake-base keyed; they are accurate for
+    //           V8 archive queries but return 0 for V10 nodes. A V10
+    //           tokenId-keyed equivalent is a separate follow-up PR.
+    string private constant _VERSION = "2.0.0";
     uint256 public constant SCALE18 = 1e18;
 
     IdentityStorage public identityStorage;
     ProfileStorage public profileStorage;
+    /// @notice V8 archive accessor. Retained ONLY for V8-stake-base-keyed
+    ///         per-delegator KPI reads (`getOperatorStats`,
+    ///         `getDelegatorStats`, `_simulatePrepareForStakeChange`).
+    ///         These are accurate for V8 archive queries but return 0 for
+    ///         V10 nodes (mandatory migration → V8 stake base unmaintained).
+    ///         A V10 tokenId-keyed per-delegator KPI is deferred to a
+    ///         follow-up PR.
     StakingStorage public stakingStorage;
-    // D3+D13 — `DelegatorsInfo` unregistered in V10. The two per-epoch flags
-    // KPI needs (`isOperatorFeeClaimedForEpoch`, `netNodeEpochRewards`) now
-    // live on `ConvictionStakingStorage`.
+    /// @notice v4.0.0 — V10 canonical aggregates (node stake, operator-fee
+    ///         balance, per-epoch reward flags). Source of truth for the
+    ///         node-level KPI surface.
     ConvictionStakingStorage public convictionStakingStorage;
     RandomSamplingStorage public randomSamplingStorage;
     EpochStorage public epochStorage;
@@ -76,9 +93,14 @@ contract StakingKPI is INamed, IVersioned, ContractStatus, IInitializable {
     }
 
     /**
-     * @dev Returns the total stake of all admin keys for a node
+     * @dev Returns the total stake of all admin keys for a node.
+     *
+     * @notice DEPRECATED in V10 (v2.0.0): reads V8 stake base which is
+     *         unmaintained for V10 nodes (mandatory migration). Returns 0
+     *         for V10-only nodes. A V10 tokenId-keyed equivalent is deferred
+     *         to a follow-up PR.
      * @param identityId Node's identity ID to get total stake for
-     * @return Total stake of all admin keys for the node
+     * @return Total stake of all admin keys for the node (V8 archive only)
      */
     function getOperatorStats(uint72 identityId) external view returns (uint96) {
         bytes32[] memory adminKeys = identityStorage.getKeysByPurpose(identityId, IdentityLib.ADMIN_KEY);
@@ -93,28 +115,40 @@ contract StakingKPI is INamed, IVersioned, ContractStatus, IInitializable {
     }
 
     /**
-     * @dev Returns the total node stake
+     * @dev Returns the total node stake (v4.0.0 — V10 canonical raw TRAC
+     *      sum from `ConvictionStakingStorage.nodeStakeV10`).
      * @param identityId Node's identity ID to get total stake for
-     * @return Total stake of the node
+     * @return Total stake of the node (V10 canonical, uint96-clamped)
      */
     function getNodeStats(uint72 identityId) external view returns (uint96) {
-        return stakingStorage.getNodeStake(identityId);
+        // Down-cast safe under protocol invariants: `StakingV10.stake`
+        // enforces `nodeStakeV10 <= maximumStake` (uint96), and the V10
+        // raw stake field cannot exceed the cap.
+        uint256 stake256 = convictionStakingStorage.getNodeStakeV10(identityId);
+        return stake256 > type(uint96).max ? type(uint96).max : uint96(stake256);
     }
 
     /**
-     * @dev Returns the total node operator fee balance
+     * @dev Returns the total node operator fee balance (v4.0.0 — read from
+     *      `ConvictionStakingStorage`; V8 SS balance is no longer written
+     *      by the V10 claim path).
      * @param identityId Node's identity ID to get total operator fee balance for
      * @return Total node operator fee balance
      */
     function getOperatorFeeStats(uint72 identityId) external view returns (uint96) {
-        return stakingStorage.getOperatorFeeBalance(identityId);
+        return convictionStakingStorage.getOperatorFeeBalance(identityId);
     }
 
     /**
-     * @dev Returns the total stake of a node's delegator
+     * @dev Returns the total stake of a node's delegator.
+     *
+     * @notice DEPRECATED in V10 (v2.0.0): V8 stake base is per-(identity,address)
+     *         keyed, unmaintained for V10 nodes. Returns 0 for V10-only
+     *         delegators. V10 stake is per-tokenId (NFT-keyed); a V10
+     *         tokenId-keyed equivalent is deferred to a follow-up PR.
      * @param identityId Node's identity ID to get total stake for
      * @param delegator Delegator's address to get stake for
-     * @return Total stake of the node's delegator
+     * @return Total stake of the node's delegator (V8 archive only)
      */
     function getDelegatorStats(uint72 identityId, address delegator) external view returns (uint96) {
         bytes32 delegatorKey = keccak256(abi.encodePacked(delegator));
@@ -122,13 +156,20 @@ contract StakingKPI is INamed, IVersioned, ContractStatus, IInitializable {
     }
 
     /**
-     * @dev Calculate the reward for a delegator in an epoch (correct only for the finalized epochs)
-     * Determines the delegator's share of the total node rewards for a specific epoch
-     * Uses the delegator's score relative to the total node score to calculate proportional rewards
+     * @dev Calculate the reward for a delegator in an epoch (correct only for the finalized epochs).
+     *
+     * @notice DEPRECATED in V10 (v2.0.0): the inner `_simulatePrepareForStakeChange`
+     *         reads V8 stake base which is unmaintained for V10 nodes
+     *         (mandatory migration). Returns 0 for V10 delegators because
+     *         `stakeBase == 0` short-circuits the reward simulator. The
+     *         V10 reward path lives on `StakingV10._claim` (compound-into-raw,
+     *         per-NFT). A V10 tokenId-keyed reward KPI is deferred to a
+     *         follow-up PR.
+     *
      * @param identityId Node's identity ID that the delegator is delegating to
      * @param epoch Epoch number to calculate rewards for (must be finalized)
      * @param delegator Delegator's address to calculate rewards for
-     * @return Reward amount for the delegator in the specified epoch
+     * @return Reward amount for the delegator in the specified epoch (V8 archive only)
      */
     function getDelegatorReward(
         uint72 identityId,

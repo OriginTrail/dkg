@@ -60,6 +60,30 @@ log() {
   echo "[devnet] $*"
 }
 
+# Check whether Docker is responsive within `timeout_s` seconds. We use
+# a background-process pattern instead of relying on `timeout(1)` since
+# macOS doesn't ship it without coreutils. A wedged Docker daemon would
+# otherwise hang the whole devnet start at `docker info` indefinitely
+# (observed on this machine — `start_blazegraph` waited >5min before we
+# noticed). 0 → Docker reachable; non-zero → not reachable / wedged.
+docker_responsive() {
+  local timeout_s=${1:-3}
+  ( docker info >/dev/null 2>&1 ) &
+  local probe_pid=$!
+  local waited=0
+  while kill -0 "$probe_pid" 2>/dev/null; do
+    if [ "$waited" -ge "$timeout_s" ]; then
+      kill -9 "$probe_pid" 2>/dev/null || true
+      wait "$probe_pid" 2>/dev/null || true
+      return 1
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  wait "$probe_pid" 2>/dev/null
+  return $?
+}
+
 fund_wallet() {
   local address=$1
   local amount="0x56BC75E2D63100000"  # 100 ETH in hex wei
@@ -177,8 +201,8 @@ deploy_contracts() {
 BLAZEGRAPH_AVAILABLE=false
 
 start_blazegraph() {
-  if ! docker info > /dev/null 2>&1; then
-    log "Docker not available — nodes 3-4 will use Oxigraph instead of Blazegraph"
+  if ! docker_responsive 3; then
+    log "Docker not responsive within 3s — nodes 3-4 will use Oxigraph instead of Blazegraph"
     return 0
   fi
 
@@ -233,8 +257,8 @@ start_oxigraph_servers() {
   if [ "$NUM_NODES" -lt 5 ]; then
     return 0
   fi
-  if ! docker info > /dev/null 2>&1; then
-    log "Docker not available — nodes 5-6 will use Oxigraph (in-process) instead of Oxigraph server"
+  if ! docker_responsive 3; then
+    log "Docker not responsive within 3s — nodes 5-6 will use Oxigraph (in-process) instead of Oxigraph server"
     return 0
   fi
   if ! docker image inspect oxigraph/oxigraph:latest > /dev/null 2>&1; then
@@ -280,6 +304,7 @@ start_oxigraph_servers() {
 }
 
 stop_oxigraph_servers() {
+  if ! docker_responsive 3; then return 0; fi
   for name in $OXIGRAPH_CONTAINER_5 $OXIGRAPH_CONTAINER_6; do
     if docker inspect "$name" > /dev/null 2>&1; then
       docker rm -f "$name" > /dev/null 2>&1 || true
@@ -289,6 +314,7 @@ stop_oxigraph_servers() {
 }
 
 stop_blazegraph() {
+  if ! docker_responsive 3; then return 0; fi
   if docker inspect "$BLAZEGRAPH_CONTAINER" > /dev/null 2>&1; then
     docker rm -f "$BLAZEGRAPH_CONTAINER" > /dev/null 2>&1 || true
     log "Stopped Blazegraph container"
@@ -343,7 +369,17 @@ create_node_config() {
     devnet_auth_block='"auth": { "enabled": false },'
   fi
 
-  # Create config
+  # Random Sampling prover (core-only). For devnet we want a
+  # persistent WAL (so `dkg rs wal-tail` / smoke tests can read the
+  # trail) and a fast tick (5s) so the e2e test sees a submitted
+  # proof within a few seconds of publishing instead of the 30s
+  # production default. Edge nodes ignore this block — bindRandomSampling
+  # short-circuits on role !== 'core' before reading any of these.
+  local rs_block=""
+  if [ "$node_role" = "core" ]; then
+    rs_block="\"randomSampling\": { \"walPath\": \"${node_dir}/random-sampling.wal\", \"tickIntervalMs\": 5000 },"
+  fi
+
   cat > "$node_dir/config.json" <<EOCONF
 {
   "name": "devnet-node-${node_num}",
@@ -354,6 +390,7 @@ create_node_config() {
   ${store_block}
   "contextGraphs": ["devnet-test", "devnet-isolation"],
   ${devnet_auth_block}
+  ${rs_block}
   "chain": {
     "type": "evm",
     "rpcUrl": "http://127.0.0.1:${HARDHAT_PORT}",
@@ -363,8 +400,14 @@ create_node_config() {
 }
 EOCONF
 
-  # Generate wallets.json: primary Hardhat key + NUM_OP_WALLETS additional
-  # operational wallets for parallel EVM transaction submission.
+  # Generate wallets.json in the post-PR-366 format:
+  #   - adminWallet: primary Hardhat key (pre-funded; used to createProfile +
+  #     register operational keys via Profile.addOperationalWallets)
+  #   - wallets[]: NUM_OP_WALLETS random operational wallets for parallel EVM
+  #     transaction submission (need explicit ETH+TRAC funding below)
+  # The admin/operational separation is enforced on-chain since PR 366 — admin
+  # key holds purpose=ADMIN_KEY, operational keys hold purpose=OPERATIONAL_KEY,
+  # and the two sets MUST be disjoint addresses.
   # Run from a package that has 'ethers' so require() resolves (pnpm workspace).
   local extra_addrs
   extra_addrs=$(cd "$REPO_ROOT/packages/evm-module" && node -e "
@@ -372,14 +415,15 @@ EOCONF
     const { ethers } = require('ethers');
     const fs = require('fs');
     const primary = new ethers.Wallet('${HARDHAT_KEYS[$key_idx]}');
-    const wallets = [{ privateKey: '${HARDHAT_KEYS[$key_idx]}', address: primary.address }];
+    const adminWallet = { privateKey: '${HARDHAT_KEYS[$key_idx]}', address: primary.address };
+    const wallets = [];
     for (let i = 0; i < ${NUM_OP_WALLETS}; i++) {
       const key = '0x' + crypto.randomBytes(32).toString('hex');
       const w = new ethers.Wallet(key);
       wallets.push({ privateKey: key, address: w.address });
     }
-    fs.writeFileSync('$node_dir/wallets.json', JSON.stringify({ wallets }, null, 2));
-    wallets.slice(1).forEach(w => console.log(w.address));
+    fs.writeFileSync('$node_dir/wallets.json', JSON.stringify({ adminWallet, wallets }, null, 2));
+    wallets.forEach(w => console.log(w.address));
   ")
 
   # Fund each additional wallet with ETH (gas) and TRAC (publish payments).
@@ -657,52 +701,261 @@ cmd_start() {
 
       const token    = new ethers.Contract(c('Token'),          ['function mint(address,uint256)', 'function approve(address,uint256)'], provider);
       const identity = new ethers.Contract(c('IdentityStorage'), ['function getIdentityId(address) view returns (uint72)'], provider);
-      const staking  = new ethers.Contract(c('Staking'),         ['function stake(uint72,uint96)'], provider);
+      // v4.0.0 — V10 staking consolidation: stake via DKGStakingConvictionNFT.createConviction,
+      // which mints a V10 NFT position, writes nodeStakeV10 in ConvictionStakingStorage, and
+      // routes TRAC to the V10 vault (CSS). The legacy V8 Staking.stake path updates only
+      // StakingStorage and leaves nodeStakeV10 = 0, so RandomSampling.calculateNodeScore
+      // (which reads getNodeStakeV10) would compute zero and node scores would never grow.
+      const stakingNFT = new ethers.Contract(
+        c('DKGStakingConvictionNFT'),
+        // lockTier is uint40 in V10 (L3 — widened from uint8 to support tier ids > 255).
+        ['function createConviction(uint72,uint96,uint40)'],
+        provider
+      );
+      // Identity-scoped read used by the duplicate-stake guard below.
+      // ERC-721 balanceOf(opWallet) would also signal that the op wallet
+      // owns at least one position, but that is not what the guard needs
+      // to know - an op wallet can hold positions for OTHER identities,
+      // which would skip a needed createConviction for THIS identity.
+      // getNodeStakeV10(idId) reads the per-identity stake total
+      // directly. Codex round 7 on PR #368.
+      const css = new ethers.Contract(
+        c('ConvictionStakingStorage'),
+        ['function getNodeStakeV10(uint72) view returns (uint256)'],
+        provider
+      );
+      const stakingV10Addr = c('StakingV10');
       const profile  = new ethers.Contract(c('Profile'),         ['function updateAsk(uint72,uint96)'], provider);
 
-      const stakingAddr = c('Staking');
-      const signers = await provider.listAccounts();
-      const n = Math.min(signers.length, $NUM_NODES);
+      // Post-PR-366: each node's wallets.json has \`adminWallet\` (the Hardhat key,
+      // which holds purpose=ADMIN_KEY only) and \`wallets[]\` (random op keys
+      // holding purpose=OPERATIONAL_KEY only). The reverse-lookup map
+      // \`IdentityStorage.identityIds\` is operational-only by design (see
+      // IdentityStorage.sol:108-110), so we MUST query identity by op wallet
+      // address, not by admin/Hardhat-key address. createConviction + updateAsk
+      // also need to be signed by the op wallet (the address that owns the
+      // identity in the eyes of the staking + profile contracts).
+      const n = $NUM_NODES;
+      const opSigners = new Array(n).fill(null);
+      const nodeRoles = new Array(n).fill('edge');
+      // Codex round 4 on PR #368: read config.json FIRST and INDEPENDENTLY
+      // of wallets.json. The previous loop did wallets first and `continue`d
+      // on parse failure BEFORE reading config, so an intended core whose
+      // wallets.json was malformed silently kept the 'edge' default,
+      // dropped out of coreIdxs, and the lostCores guard never fired.
+      // Reading config first decouples the two failures: now lostCores
+      // correctly catches the case where a node was supposed to be a
+      // core but its wallets are broken.
+      const configErrors = [];
+      for (let i = 1; i <= n; i++) {
+        const cPath = '$DEVNET_DIR/node' + i + '/config.json';
+        try {
+          const cfg = JSON.parse(fs.readFileSync(cPath, 'utf8'));
+          // Trust the explicit role; fall back to 'edge' (NOT 'core') if
+          // the field is missing — defaulting unknowns to 'core' would
+          // auto-provision an on-chain identity for a node whose role we
+          // cannot confirm.
+          nodeRoles[i - 1] = cfg.nodeRole || 'edge';
+        } catch (e) {
+          configErrors.push(i);
+          console.log('Node ' + i + ': failed to parse config.json (treating as edge): ' + (e && e.message || e));
+        }
+      }
+      // Codex round 2 on PR #368: parse each node's wallets.json
+      // independently. A malformed file (truncated mid-write, missing
+      // wallets[0], unparseable JSON) MUST NOT throw and abort staking
+      // for every node — log + skip the bad one and let the rest boot.
+      // Downstream loops gate on \`opSigners[i] != null\` so skipped
+      // entries never reach createConviction/updateAsk.
+      for (let i = 1; i <= n; i++) {
+        const wPath = '$DEVNET_DIR/node' + i + '/wallets.json';
+        try {
+          const w = JSON.parse(fs.readFileSync(wPath, 'utf8'));
+          if (!w || !Array.isArray(w.wallets) || w.wallets.length === 0
+              || !w.wallets[0] || !w.wallets[0].privateKey) {
+            console.log('Node ' + i + ': wallets.json missing wallets[0].privateKey, skipping (' + wPath + ')');
+            continue;
+          }
+          opSigners[i - 1] = new ethers.Wallet(w.wallets[0].privateKey, provider);
+        } catch (e) {
+          console.log('Node ' + i + ': failed to parse wallets.json: ' + (e && e.message || e));
+        }
+      }
 
-      // Wait up to 60s for ALL nodes to have identities, not just the first
+      // Codex round 3 on PR #368: fail-fast if a node we INTEND to be
+      // a core (its config.json said so) lost its wallets.json. The
+      // earlier silent-skip here would let cmd_start succeed with a
+      // half-staked devnet, then publish/ACK smoke tests would fail
+      // later with much less obvious symptoms. We treat any node that
+      // BOTH (a) has nodeRole=core AND (b) failed wallet parse as a
+      // hard failure — print diagnostics and exit non-zero so the
+      // operator fixes the wallet file before retrying.
+      const lostCores = [];
+      for (let i = 0; i < n; i++) {
+        if (nodeRoles[i] === 'core' && opSigners[i] === null) lostCores.push(i + 1);
+      }
+      if (lostCores.length > 0) {
+        console.error('FATAL: ' + lostCores.length + ' core node(s) have invalid wallets.json: '
+          + lostCores.map(String).join(', '));
+        console.error('Refusing to bootstrap a partially-provisioned devnet. Fix the wallet files and re-run.');
+        process.exit(1);
+      }
+      // Codex round 4 on PR #368: a node whose config.json was unreadable
+      // is now treated as 'edge' and silently skipped from staking. This
+      // is the correct safe default IF the operator intended that node to
+      // be edge — but if they intended it to be core, the lostCores
+      // guard above won't catch it because nodeRoles[i] !== 'core'.
+      // Surface the ambiguity loudly so the operator can confirm intent.
+      if (configErrors.length > 0) {
+        console.error('WARNING: ' + configErrors.length + ' node(s) have unreadable config.json: '
+          + configErrors.map(String).join(', '));
+        console.error('These nodes are being treated as edge (no on-chain stake). Fix config.json if any were intended to be core.');
+      }
+
+      // Wait up to 60s for all CORE nodes to have identities. Edge nodes
+      // never create on-chain profiles by design (dkg-agent.ts skips
+      // ensureProfile for effectiveRole='edge'), so we don't wait on them.
+      // The daemon creates identities eagerly in agent.connect() (dkg-agent.ts
+      // ensureProfile path), typically within ~5s of node start.
+      // Skip nodes whose wallets.json failed to parse (opSigners[i] === null).
+      const coreIdxs = nodeRoles
+        .map((r, i) => r === 'core' && opSigners[i] !== null ? i : -1)
+        .filter(i => i >= 0);
       const nodeIds = new Array(n).fill(0n);
       for (let attempt = 0; attempt < 30; attempt++) {
         let allReady = true;
-        for (let i = 0; i < n; i++) {
+        for (const i of coreIdxs) {
           if (nodeIds[i] === 0n) {
-            nodeIds[i] = await identity.getIdentityId(signers[i].address);
+            nodeIds[i] = await identity.getIdentityId(opSigners[i].address);
           }
           if (nodeIds[i] === 0n) allReady = false;
         }
         if (allReady) break;
-        const ready = nodeIds.filter(id => id > 0n).length;
-        if (attempt % 5 === 4) console.log('Waiting for identities: ' + ready + '/' + n + ' ready...');
+        const ready = coreIdxs.filter(i => nodeIds[i] > 0n).length;
+        if (attempt % 5 === 4) console.log('Waiting for core identities: ' + ready + '/' + coreIdxs.length + ' ready...');
         await new Promise(r => setTimeout(r, 2000));
       }
 
       let staked = 0, asked = 0;
+      const coreCount = coreIdxs.length;
       for (let i = 0; i < n; i++) {
-        const signer = signers[i];
-        const idId = nodeIds[i] || await identity.getIdentityId(signer.address);
-        if (idId === 0n) { console.log('Node ' + (i+1) + ': no identity after 60s, skipping'); continue; }
+        if (nodeRoles[i] !== 'core') continue;
+        const opSigner = opSigners[i];
+        if (!opSigner) { console.log('Node ' + (i+1) + ' (core): wallets.json invalid, skipping'); continue; }
+        const idId = nodeIds[i] || await identity.getIdentityId(opSigner.address);
+        if (idId === 0n) { console.log('Node ' + (i+1) + ' (core): no identity after 60s, skipping'); continue; }
 
         const stakeAmount = ethers.parseEther('50000');
         const askAmount = ethers.parseEther('1');
-        try {
-          const deployer = await provider.getSigner(0);
-          await (await token.connect(deployer).mint(signer.address, stakeAmount)).wait();
-          await (await token.connect(signer).approve(stakingAddr, stakeAmount)).wait();
-          await (await staking.connect(signer).stake(idId, stakeAmount)).wait();
-          staked++;
-        } catch (e) { console.log('Stake failed for node ' + (i+1) + ': ' + e.message); }
+        // Lock tier 1 (1-month). Cheapest tier with non-zero multiplier; sufficient
+        // for devnet random-sampling soak tests where we need nodeStakeV10 > 0.
+        const lockTier = 1;
 
-        // Set ask price
+        // The daemon's publisher shares this op wallet (registered as the
+        // StorageACK signer + first op wallet). It may have submitted txs
+        // already (addKey, addOperationalWallets) by the time we reach here,
+        // so we MUST query the nonce explicitly and pass it to each tx —
+        // relying on ethers' default nonce manager would race the daemon
+        // and yield 'nonce has already been used'.
+        //
+        // Codex round 1 on PR #368: use 'pending' (NOT 'latest') so the
+        // count includes daemon-submitted txs already in the mempool but
+        // not yet mined. 'latest' would still collide with an in-flight
+        // addKey/addOperationalWallets and produce the very nonce error
+        // this code path exists to prevent.
+        //
+        // Codex round 2 on PR #368: re-read 'pending' before EVERY tx
+        // (not once per node loop). The previous code did `nonce++` at
+        // call site so a failed approve advanced the local counter even
+        // though the chain nonce did not, leaving createConviction +
+        // updateAsk to send with an inflated nonce that would either
+        // queue forever or skip a slot. Re-reading 'pending' between
+        // awaits costs one extra eth_call per tx, which is negligible
+        // for a 6-node devnet bootstrap.
+        const sendWithFreshNonce = async (txFactory) => {
+          const freshNonce = await provider.getTransactionCount(opSigner.address, 'pending');
+          const tx = await txFactory(freshNonce);
+          return tx.wait();
+        };
+        // Codex round 4 on PR #368: skip createConviction if the daemon
+        // already opened a position. PR 366 wired `EVMChainAdapter.ensureProfile()`
+        // to open a default 50k V10 conviction during agent startup, so by
+        // the time this script reaches the staking loop the daemon has
+        // (usually) already staked. Running createConviction again would
+        // open a SECOND 50k position per core node and silently double the
+        // devnet stake. We detect this by reading the per-identity V10
+        // stake total — if the daemon's stake succeeded it's >0 and we skip.
+        //
+        // Codex round 5 on PR #368: do NOT fall through to a not-staked
+        // on probe failure (transient RPC, decode error). That would
+        // re-introduce the double-stake bug this guard exists to prevent.
+        // Retry once with backoff; if the probe still fails, refuse to
+        // run createConviction so the operator sees the symptom and
+        // decides — rather than silently doubling the stake.
+        // updateAsk is INDEPENDENT of stake state, so we still attempt
+        // it below regardless of the probe outcome.
+        //
+        // Codex round 7 on PR #368: probe `getNodeStakeV10(idId)` instead
+        // of NFT `balanceOf(opSigner.address)`. The op wallet could hold
+        // positions for OTHER identities (not in our devnet today, but
+        // a wallet-scoped probe is the wrong semantic check); we want
+        // to know whether THIS identity is staked.
+        let probeOk = false;
+        let shouldStake = false;
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            const nodeStake = await css.getNodeStakeV10(idId);
+            probeOk = true;
+            if (nodeStake > 0n) {
+              staked++;
+              console.log('Node ' + (i+1) + ' (core): daemon already staked (nodeStakeV10=' + nodeStake + '), skipping createConviction');
+            } else {
+              shouldStake = true;
+            }
+            break;
+          } catch (e) {
+            console.log('Node ' + (i+1) + ' (core): nodeStakeV10 probe failed (attempt ' + (attempt + 1) + '/2): ' + e.message);
+            if (attempt === 0) await new Promise(r => setTimeout(r, 1500));
+          }
+        }
+        if (!probeOk) {
+          console.log('Node ' + (i+1) + ' (core): cannot verify existing conviction after retry; skipping bootstrap stake to avoid double-stake');
+        } else if (shouldStake) {
+          try {
+            const deployer = await provider.getSigner(0);
+            await (await token.connect(deployer).mint(opSigner.address, stakeAmount)).wait();
+            // StakingV10.stake pulls TRAC via transferFrom(staker, address(CSS), amount)
+            // gated by allowance to StakingV10. Approve StakingV10 here, NOT the NFT —
+            // the NFT is only the entry point and never custodies TRAC.
+            await sendWithFreshNonce((freshNonce) =>
+              token.connect(opSigner).approve(stakingV10Addr, stakeAmount, { nonce: freshNonce }));
+            await sendWithFreshNonce((freshNonce) =>
+              stakingNFT.connect(opSigner).createConviction(idId, stakeAmount, lockTier, { nonce: freshNonce }));
+            staked++;
+          } catch (e) { console.log('Stake failed for node ' + (i+1) + ': ' + e.message); }
+        }
+
+        // Set ask price (independent try block — a failed stake must not
+        // skip ask setup; sendWithFreshNonce re-reads 'pending' so it
+        // tolerates the chain nonce having advanced or not).
         try {
-          await (await profile.connect(signer).updateAsk(idId, askAmount)).wait();
+          await sendWithFreshNonce((freshNonce) =>
+            profile.connect(opSigner).updateAsk(idId, askAmount, { nonce: freshNonce }));
           asked++;
         } catch (e) { console.log('Ask failed for node ' + (i+1) + ': ' + e.message); }
       }
-      console.log('Staked 50k TRAC for ' + staked + '/' + n + ' node(s), ask set for ' + asked + '/' + n);
+      console.log('Staked 50k TRAC for ' + staked + '/' + coreCount + ' core node(s), ask set for ' + asked + '/' + coreCount);
+      // Defense-in-depth: a partial-stake bootstrap (probe failure +
+      // skip, or createConviction revert + skip) currently logs
+      // 'staked X/Y' and continues. Operators may miss the count
+      // mismatch and only notice when downstream publish/ACK smoke
+      // tests fail with much less obvious symptoms. Refuse to
+      // declare bootstrap successful unless every core node is
+      // staked. Codex follow-up to PR #368.
+      if (staked < coreCount) {
+        console.error('FATAL: only ' + staked + '/' + coreCount + ' core node(s) staked — refusing to declare devnet ready');
+        process.exit(1);
+      }
     })();
   " 2>&1 | while read -r line; do log "$line"; done
 

@@ -286,6 +286,11 @@
         "internalType": "bytes32[]",
         "name": "vs",
         "type": "bytes32[]"
+      },
+      {
+        "internalType": "uint32",
+        "name": "merkleLeafCount",
+        "type": "uint32"
       }
     ],
     "name": "createKnowledgeCollection",

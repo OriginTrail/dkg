@@ -1,6 +1,6 @@
 {
   "name": "@origintrail-official/dkg-agent",
-  "version": "10.0.0-rc.1",
+  "version": "10.0.0-rc.2",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -13,7 +13,7 @@
     "clean": "rm -rf dist tsconfig.tsbuildinfo"
   },
   "dependencies": {
-    "@libp2p/peer-id": "^6.0.4",
+    "@libp2p/peer-id": "^6.0.8",
     "@multiformats/multiaddr": "*",
     "@noble/ciphers": "^2.1.1",
     "@noble/curves": "^2",
@@ -22,6 +22,7 @@
     "@origintrail-official/dkg-core": "workspace:*",
     "@origintrail-official/dkg-publisher": "workspace:*",
     "@origintrail-official/dkg-query": "workspace:*",
+    "@origintrail-official/dkg-random-sampling": "workspace:*",
     "@origintrail-official/dkg-storage": "workspace:*",
     "ethers": "^6",
     "js-yaml": "^4.1.1",

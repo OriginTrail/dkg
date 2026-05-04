@@ -265,10 +265,16 @@ describe('@unit DKGStakingConvictionNFT', () => {
       const amount = minStake; // exercise the sharding-table insertion path too
       await mintAndApprove(accounts[0], amount);
 
+      // v4.0.0 — TRAC vault role moved from StakingStorage to
+      // ConvictionStakingStorage in the V10 consolidation. Assert the
+      // post-consolidation invariant: V10 deposits flow staker → CSS,
+      // and the V8 StakingStorage TRAC balance is untouched.
       const stakingStorageAddr = await StakingStorage.getAddress();
+      const cssAddr = await ConvictionStakingStorageContract.getAddress();
       const nftAddr = await NFT.getAddress();
       const stakerBalBefore = await Token.balanceOf(accounts[0].address);
       const ssBalBefore = await Token.balanceOf(stakingStorageAddr);
+      const cssBalBefore = await Token.balanceOf(cssAddr);
       const totalStakeBefore = await ConvictionStakingStorageContract.totalStakeV10();
 
       // Next NFT mint is tokenId 0 (fresh ERC721Enumerable, no sentinel reservation).
@@ -286,9 +292,12 @@ describe('@unit DKGStakingConvictionNFT', () => {
       expect(await NFT.ownerOf(1)).to.equal(accounts[0].address);
       expect(await NFT.balanceOf(accounts[0].address)).to.equal(1n);
 
-      // Token flow: staker → StakingStorage, nothing in NFT wrapper or StakingV10.
+      // Token flow: staker → ConvictionStakingStorage (V10 vault); StakingStorage
+      // is untouched on V10 deposits, and neither the NFT wrapper nor StakingV10
+      // hold TRAC.
       expect(await Token.balanceOf(accounts[0].address)).to.equal(stakerBalBefore - amount);
-      expect(await Token.balanceOf(stakingStorageAddr)).to.equal(ssBalBefore + amount);
+      expect(await Token.balanceOf(cssAddr)).to.equal(cssBalBefore + amount);
+      expect(await Token.balanceOf(stakingStorageAddr)).to.equal(ssBalBefore);
       expect(await Token.balanceOf(nftAddr)).to.equal(0n);
       expect(await Token.balanceOf(await StakingV10Contract.getAddress())).to.equal(0n);
 
@@ -1222,12 +1231,14 @@ describe('@unit DKGStakingConvictionNFT', () => {
       }
     };
 
-    // Helper — pre-fund the StakingStorage vault with `amount` TRAC so the
-    // post-claim node-stake bookkeeping matches the on-chain vault balance.
-    // On mainnet this TRAC flows in from Phase 11's reward distribution path.
+    // Helper — pre-fund the ConvictionStakingStorage vault with `amount` TRAC
+    // so the post-claim node-stake bookkeeping matches the on-chain vault
+    // balance. v4.0.0 — vault role moved from StakingStorage to CSS in the
+    // V10 staking consolidation. On mainnet this TRAC flows in from Phase 11's
+    // reward distribution path.
     const fundVault = async (amount: bigint) => {
-      const stakingStorageAddr = await StakingStorage.getAddress();
-      await Token.mint(stakingStorageAddr, amount);
+      const cssAddr = await ConvictionStakingStorageContract.getAddress();
+      await Token.mint(cssAddr, amount);
     };
 
     // Helper — compute expected TRAC reward for a single epoch using the
@@ -1255,9 +1266,10 @@ describe('@unit DKGStakingConvictionNFT', () => {
     };
 
     // Helper — assert the vault balance invariant after every claim.
+    // v4.0.0 — vault role moved from StakingStorage to CSS post-consolidation.
     const assertVaultInvariant = async () => {
-      const stakingStorageAddr = await StakingStorage.getAddress();
-      const vaultBalance = await Token.balanceOf(stakingStorageAddr);
+      const cssAddr = await ConvictionStakingStorageContract.getAddress();
+      const vaultBalance = await Token.balanceOf(cssAddr);
       const totalStake = await ConvictionStakingStorageContract.totalStakeV10();
       expect(vaultBalance).to.be.gte(totalStake);
     };

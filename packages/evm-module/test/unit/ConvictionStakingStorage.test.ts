@@ -76,8 +76,10 @@ describe('@unit ConvictionStakingStorage', () => {
 
   it('Should have correct name and version', async () => {
     expect(await ConvictionStakingStorage.name()).to.equal('ConvictionStakingStorage');
-    // D26 code-review follow-ups bumped storage to 3.1.0 (M2/M3/L5/L9/L11).
-    expect(await ConvictionStakingStorage.version()).to.equal('3.1.0');
+    // v4.0.0 — storage consolidation: CSS absorbs the TRAC vault role and
+    // operator-fee accounting from V8 StakingStorage; base contract switched
+    // from HubDependent → Guardian.
+    expect(await ConvictionStakingStorage.version()).to.equal('4.0.0');
   });
 
   // ------------------------------------------------------------

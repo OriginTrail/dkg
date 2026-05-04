@@ -14,6 +14,16 @@ export { MerkleTree, compareBytes } from './merkle.js';
 
 export { V10MerkleTree } from './v10-merkle.js';
 
+export {
+  buildV10ProofMaterial,
+  verifyV10ProofMaterial,
+  V10ProofRootMismatchError,
+  V10ProofLeafCountMismatchError,
+  V10ProofChunkOutOfRangeError,
+  type V10ProofMaterial,
+  type V10MerkleCommitment,
+} from './proof-material.js';
+
 export { canonicalize, hashTriple, hashTripleV10 } from './canonicalize.js';
 
 export { hexToBytes } from './oracle-verify.js';

@@ -42,7 +42,10 @@ import {
   StorageACKHandler,
   type StorageACKHandlerConfig,
 } from '../src/index.js';
-import { computeFlatKCRootV10 } from '../src/merkle.js';
+import {
+  computeFlatKCRootV10,
+  computeFlatKCMerkleLeafCountV10,
+} from '../src/merkle.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // P-8  VerifyCollector M-of-N semantics
@@ -234,6 +237,7 @@ function makeIntent(params: {
   tokenAmount: bigint;
   rootEntities: string[];
   stagingQuads: Uint8Array;
+  merkleLeafCount: number;
 }): Uint8Array {
   return encodePublishIntent({
     merkleRoot: params.merkleRoot,
@@ -246,6 +250,7 @@ function makeIntent(params: {
     stagingQuads: params.stagingQuads,
     epochs: params.epochs,
     tokenAmountStr: params.tokenAmount.toString(),
+    merkleLeafCount: params.merkleLeafCount,
   });
 }
 
@@ -281,6 +286,7 @@ describe('P-9: StorageACKHandler nodeRole guard (edge nodes cannot issue ACKs)',
       tokenAmount: 0n,
       rootEntities: [],
       stagingQuads: new Uint8Array(),
+      merkleLeafCount: 1,
     });
 
     await expect(handler.handler(intent, { toString: () => 'peer-1' })).rejects.toThrow(
@@ -329,6 +335,7 @@ describe('P-9: StorageACKHandler roster gap — core-flagged node signs with ANY
         { subject: 'urn:roster-test:a', predicate: 'urn:p', object: 'urn:v', graph: 'urn:test:swm' },
       ];
       const merkleRoot = computeFlatKCRootV10(quads, []);
+      const rosterTestLeafCount = computeFlatKCMerkleLeafCountV10(quads, []);
       const stagingQuads = new TextEncoder().encode(
         quads
           .map((q) => `<${q.subject}> <${q.predicate}> <${q.object}> <${q.graph}> .`)
@@ -343,6 +350,7 @@ describe('P-9: StorageACKHandler roster gap — core-flagged node signs with ANY
         tokenAmount: 0n,
         rootEntities: ['urn:roster-test:a'],
         stagingQuads,
+        merkleLeafCount: rosterTestLeafCount,
       });
 
       const responseBytes = await handler.handler(intent, { toString: () => 'rogue' });
@@ -358,6 +366,7 @@ describe('P-9: StorageACKHandler roster gap — core-flagged node signs with ANY
         101n,
         merkleRoot,
         1n, 64n, 1n, 0n,
+        BigInt(rosterTestLeafCount),
       );
       const prefixedHash = ethers.hashMessage(digest);
       const recovered = ethers.recoverAddress(prefixedHash, {

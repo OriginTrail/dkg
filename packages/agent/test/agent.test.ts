@@ -15,7 +15,7 @@ import {
   parseCclPolicy,
 } from '../src/index.js';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import { getGenesisQuads, computeNetworkId, PROTOCOL_SYNC, SYSTEM_PARANETS, DKG_ONTOLOGY, paranetDataGraphUri, paranetWorkspaceGraphUri, contextGraphMetaUri, sparqlString } from '@origintrail-official/dkg-core';
+import { getGenesisQuads, computeNetworkId, PROTOCOL_SYNC, PROTOCOL_STORAGE_ACK, SYSTEM_PARANETS, DKG_ONTOLOGY, paranetDataGraphUri, paranetWorkspaceGraphUri, contextGraphMetaUri, sparqlString } from '@origintrail-official/dkg-core';
 import { DKGQueryEngine } from '@origintrail-official/dkg-query';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { EVMChainAdapter, MockChainAdapter, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult } from '@origintrail-official/dkg-chain';
@@ -42,6 +42,39 @@ class CapturingContextGraphChainAdapter extends MockChainAdapter {
       participantAgents: params.participantAgents ? [...params.participantAgents] : undefined,
     });
     return super.createOnChainContextGraph(params);
+  }
+}
+
+class NonRegisteringACKChainAdapter extends MockChainAdapter {
+  async ensureOperationalWalletsRegistered(options?: {
+    identityId?: bigint;
+    additionalAddresses?: string[];
+  }) {
+    return {
+      identityId: options?.identityId ?? (await this.getIdentityId()),
+      registered: [],
+      alreadyRegistered: [],
+      taken: [],
+    };
+  }
+
+  async isOperationalWalletRegistered(): Promise<boolean> {
+    return false;
+  }
+}
+
+class FlakyRegistrationACKChainAdapter extends MockChainAdapter {
+  ensureCalls = 0;
+
+  async ensureOperationalWalletsRegistered(options?: {
+    identityId?: bigint;
+    additionalAddresses?: string[];
+  }) {
+    this.ensureCalls += 1;
+    if (this.ensureCalls === 1) {
+      throw new Error('temporary registration failure');
+    }
+    return super.ensureOperationalWalletsRegistered(options);
   }
 }
 
@@ -759,6 +792,156 @@ describe('PeerId key extraction', () => {
 
     await agent.stop();
   }, 10000);
+});
+
+describe('DKGAgent ACK signer gating', () => {
+  it('allows core chainConfig without a profile admin key for existing no-admin identities', async () => {
+    const operational = ethers.Wallet.createRandom();
+
+    const agent = await DKGAgent.create({
+      name: 'CoreMissingAdminKey',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      chainConfig: {
+        rpcUrl: 'http://127.0.0.1:0',
+        hubAddress: ethers.ZeroAddress,
+        operationalKeys: [operational.privateKey],
+      },
+      nodeRole: 'core',
+    });
+
+    expect(agent).toBeInstanceOf(DKGAgent);
+  });
+
+  it('auto-registers an ACK signer before registering the StorageACK handler', async () => {
+    const primary = ethers.Wallet.createRandom();
+    const ackSigner = ethers.Wallet.createRandom();
+    const chain = new MockChainAdapter('mock:31337', primary.address);
+    chain.seedIdentity(primary.address, 42n);
+
+    const agent = await DKGAgent.create({
+      name: 'AckSignerAutoRegister',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      chainAdapter: chain,
+      nodeRole: 'core',
+      ackSignerKey: ackSigner.privateKey,
+    });
+
+    try {
+      await agent.start();
+
+      expect(await chain.isOperationalWalletRegistered(42n, ackSigner.address)).toBe(true);
+      expect(agent.node.libp2p.getProtocols()).toContain(PROTOCOL_STORAGE_ACK);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('retries operational-wallet registration during StorageACK setup', async () => {
+    const primary = ethers.Wallet.createRandom();
+    const ackSigner = ethers.Wallet.createRandom();
+    const chain = new FlakyRegistrationACKChainAdapter('mock:31337', primary.address);
+    chain.seedIdentity(primary.address, 45n);
+
+    const agent = await DKGAgent.create({
+      name: 'AckSignerRegistrationRetry',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      chainAdapter: chain,
+      nodeRole: 'core',
+      ackSignerKey: ackSigner.privateKey,
+    });
+
+    try {
+      await agent.start();
+
+      expect(chain.ensureCalls).toBeGreaterThanOrEqual(2);
+      expect(await chain.isOperationalWalletRegistered(45n, ackSigner.address)).toBe(true);
+      expect(agent.node.libp2p.getProtocols()).toContain(PROTOCOL_STORAGE_ACK);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('does not auto-register ACK signer candidates for edge nodes', async () => {
+    const primary = ethers.Wallet.createRandom();
+    const ackSigner = ethers.Wallet.createRandom();
+    const chain = new MockChainAdapter('mock:31337', primary.address);
+    chain.seedIdentity(primary.address, 46n);
+
+    const agent = await DKGAgent.create({
+      name: 'EdgeAckSignerNoAutoRegister',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      chainAdapter: chain,
+      nodeRole: 'edge',
+      ackSignerKey: ackSigner.privateKey,
+    });
+
+    try {
+      await agent.start();
+
+      expect(await chain.isOperationalWalletRegistered(46n, ackSigner.address)).toBe(false);
+      expect(agent.node.libp2p.getProtocols()).not.toContain(PROTOCOL_STORAGE_ACK);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('does not register StorageACK when no ACK key is confirmed on-chain', async () => {
+    const primary = ethers.Wallet.createRandom();
+    const ackSigner = ethers.Wallet.createRandom();
+    const chain = new NonRegisteringACKChainAdapter('mock:31337', primary.address);
+    chain.seedIdentity(primary.address, 43n);
+
+    const agent = await DKGAgent.create({
+      name: 'AckSignerUnconfirmed',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      chainAdapter: chain,
+      nodeRole: 'core',
+      ackSignerKey: ackSigner.privateKey,
+    });
+
+    try {
+      await agent.start();
+
+      expect(agent.node.libp2p.getProtocols()).not.toContain(PROTOCOL_STORAGE_ACK);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('does not source ACK signer candidates from chainConfig when a chainAdapter is supplied', async () => {
+    const primary = ethers.Wallet.createRandom();
+    const staleChainConfigSigner = ethers.Wallet.createRandom();
+    const chain = new MockChainAdapter('mock:31337', primary.address);
+    chain.seedIdentity(primary.address, 44n);
+
+    const agent = await DKGAgent.create({
+      name: 'AckSignerChainAdapterIgnoresChainConfig',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      chainAdapter: chain,
+      chainConfig: {
+        rpcUrl: 'http://127.0.0.1:0',
+        hubAddress: ethers.ZeroAddress,
+        adminPrivateKey: ethers.Wallet.createRandom().privateKey,
+        operationalKeys: [staleChainConfigSigner.privateKey],
+      },
+      nodeRole: 'core',
+    });
+
+    try {
+      await agent.start();
+
+      expect(await chain.isOperationalWalletRegistered(44n, staleChainConfigSigner.address)).toBe(false);
+      expect(agent.node.libp2p.getProtocols()).not.toContain(PROTOCOL_STORAGE_ACK);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
 });
 
 describe('DKGAgent (integration)', () => {
@@ -1750,6 +1933,190 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       agent.subscribeToContextGraph('discovered-paranet', { trackSyncScope: false });
 
       expect((agent as any).config.syncContextGraphs ?? []).not.toContain('discovered-paranet');
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('persists runtime subscriptions and rehydrates them on restart', async () => {
+    const persisted = new Map<string, any>();
+    const persistedMembers = new Map<string, any>();
+    const subscriptionStore = {
+      loadAll: async () => [...persisted.values()],
+      save: async (record: any) => {
+        persisted.set(record.id, { ...record });
+      },
+      delete: async (contextGraphId: string) => {
+        persisted.delete(contextGraphId);
+      },
+    };
+    const membershipStore = {
+      upsert: async (record: any) => {
+        persistedMembers.set(`${record.contextGraphId}|${record.principalType}|${record.principalId}`, { ...record });
+      },
+      delete: async (contextGraphId: string, principalType: string, principalId: string) => {
+        persistedMembers.delete(`${contextGraphId}|${principalType}|${principalId}`);
+      },
+    };
+
+    const agentA = await DKGAgent.create({
+      name: 'PersistedSubscriptionsA',
+      listenHost: '127.0.0.1',
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      contextGraphSubscriptionStore: subscriptionStore,
+      contextGraphMembershipStore: membershipStore,
+    });
+
+    let agentAPeerId = '';
+    try {
+      await agentA.start();
+      agentAPeerId = agentA.peerId;
+      agentA.subscribeToContextGraph('persisted-cg');
+      agentA.markContextGraphSubscriptionState('persisted-cg', {
+        synced: true,
+        sharedMemorySynced: true,
+        metaSynced: true,
+        onChainId: '0x1234',
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    } finally {
+      await agentA.stop().catch(() => {});
+    }
+
+    expect(persisted.get('persisted-cg')).toMatchObject({
+      id: 'persisted-cg',
+      subscribed: true,
+      synced: true,
+      sharedMemorySynced: true,
+      metaSynced: true,
+      onChainId: '0x1234',
+      syncScoped: true,
+    });
+    expect(persistedMembers.get(`persisted-cg|node|${agentAPeerId}`)).toMatchObject({
+      contextGraphId: 'persisted-cg',
+      principalType: 'node',
+      principalId: agentAPeerId,
+      role: 'subscriber',
+      status: 'active',
+      source: 'subscription',
+    });
+
+    const agentB = await DKGAgent.create({
+      name: 'PersistedSubscriptionsB',
+      listenHost: '127.0.0.1',
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      contextGraphSubscriptionStore: subscriptionStore,
+      contextGraphMembershipStore: membershipStore,
+    });
+
+    try {
+      await agentB.start();
+      expect(agentB.getSubscribedContextGraphs().get('persisted-cg')).toMatchObject({
+        subscribed: true,
+        synced: true,
+        sharedMemorySynced: true,
+        metaSynced: true,
+        onChainId: '0x1234',
+      });
+      expect((agentB as any).config.syncContextGraphs ?? []).toContain('persisted-cg');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(persistedMembers.get(`persisted-cg|node|${agentB.peerId}`)).toMatchObject({
+        contextGraphId: 'persisted-cg',
+        principalType: 'node',
+        principalId: agentB.peerId,
+        status: 'active',
+        source: 'rehydrated-subscription',
+      });
+    } finally {
+      await agentB.stop().catch(() => {});
+    }
+  });
+
+  it('rehydrates persisted subscriptions without forcing sync scope', async () => {
+    const subscriptionStore = {
+      loadAll: async () => [{
+        id: 'discovered-cg',
+        name: 'Discovered CG',
+        subscribed: true,
+        synced: false,
+        sharedMemorySynced: false,
+        metaSynced: false,
+        onChainId: '0xabcd',
+        syncScoped: false,
+      }],
+      save: async () => {},
+      delete: async () => {},
+    };
+
+    const agent = await DKGAgent.create({
+      name: 'PersistedSubscriptionsNoScope',
+      listenHost: '127.0.0.1',
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      contextGraphSubscriptionStore: subscriptionStore,
+    });
+
+    try {
+      await agent.start();
+      expect(agent.getSubscribedContextGraphs().get('discovered-cg')).toMatchObject({
+        subscribed: true,
+        synced: false,
+        sharedMemorySynced: false,
+        metaSynced: false,
+        onChainId: '0xabcd',
+      });
+      expect((agent as any).config.syncContextGraphs ?? []).not.toContain('discovered-cg');
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('canonicalizes Ethereum agent membership principals before persistence', async () => {
+    const persistedMembers = new Map<string, any>();
+    const deletedMembers: string[] = [];
+    const membershipStore = {
+      upsert: async (record: any) => {
+        persistedMembers.set(`${record.contextGraphId}|${record.principalType}|${record.principalId}`, { ...record });
+      },
+      delete: async (contextGraphId: string, principalType: string, principalId: string) => {
+        const key = `${contextGraphId}|${principalType}|${principalId}`;
+        deletedMembers.push(key);
+        persistedMembers.delete(key);
+      },
+    };
+    const lowercaseAddress = '0x86b8521581b87e21ebd730cbba110e1480454d6d';
+    const checksumAddress = ethers.getAddress(lowercaseAddress);
+
+    const agent = await DKGAgent.create({
+      name: 'MembershipPrincipalCanonical',
+      listenHost: '127.0.0.1',
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      contextGraphMembershipStore: membershipStore,
+    });
+
+    try {
+      await agent.start();
+      await agent.createContextGraph({
+        id: 'membership-canonical-cg',
+        name: 'Membership Canonical',
+        accessPolicy: 1,
+        allowedAgents: [lowercaseAddress],
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(persistedMembers.get(`membership-canonical-cg|agent|${checksumAddress}`)).toMatchObject({
+        contextGraphId: 'membership-canonical-cg',
+        principalType: 'agent',
+        principalId: checksumAddress,
+        role: 'participant',
+        status: 'active',
+        source: 'allowed-agent',
+      });
+      expect(persistedMembers.has(`membership-canonical-cg|agent|${lowercaseAddress}`)).toBe(false);
+
+      await agent.removeAgentFromContextGraph('membership-canonical-cg', lowercaseAddress);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(deletedMembers).toContain(`membership-canonical-cg|agent|${checksumAddress}`);
     } finally {
       await agent.stop().catch(() => {});
     }

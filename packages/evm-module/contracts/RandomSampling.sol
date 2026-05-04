@@ -26,7 +26,7 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
     string private constant _NAME = "RandomSampling";
-    string private constant _VERSION = "1.0.0";
+    string private constant _VERSION = "1.1.0";
     uint256 public constant SCALE18 = 1e18;
 
     /// @notice Maximum number of in-CG resamples when the picker hits an
@@ -209,16 +209,12 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
 
     /**
      * @dev Submits proof for an active challenge to earn score used for later reward calculation
-     * Validates the submitted chunk and merkle proof against the expected Merkle root
-     * On successful proof: marks challenge as solved, increments valid proofs count,
-     * calculates and adds node score, and updates epoch scoring data
-     * @param chunk The data chunk being proven (must match challenge requirements)
-     * @param merkleProof Array of hashes for Merkle proof verification
+     * Verifies a V10 flat-KC Merkle inclusion proof (dkg-core V10MerkleTree / spec §9.0.2):
+     * `leaf` is a `hashTripleV10` public leaf or a private sub-root leaf; `challenge.chunkId`
+     * stores the challenged **leaf index** in the sorted+deduped bottom layer; `merkleProof`
+     * is the sibling path produced by `V10MerkleTree.proof(leafIndex)`.
      */
-    function submitProof(
-        string memory chunk,
-        bytes32[] calldata merkleProof
-    )
+    function submitProof(bytes32 leaf, bytes32[] calldata merkleProof)
         external
         profileExists(identityStorage.getIdentityId(msg.sender))
         nodeExistsInShardingTable(identityStorage.getIdentityId(msg.sender))
@@ -240,16 +236,16 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
             revert("This challenge is no longer active");
         }
 
-        // Construct the merkle root from chunk and merkleProof
-        bytes32 computedMerkleRoot = _computeMerkleRootFromProof(chunk, challenge.chunkId, merkleProof);
-
         // Get the expected merkle root for this challenge
         bytes32 expectedMerkleRoot = knowledgeCollectionStorage.getLatestMerkleRoot(challenge.knowledgeCollectionId);
 
-        // L12 — early-revert style: bail out on mismatch first so the
-        //       happy path isn't nested inside an `if`.
-        if (computedMerkleRoot != expectedMerkleRoot) {
-            revert MerkleRootMismatchError(computedMerkleRoot, expectedMerkleRoot);
+        uint32 leafCount = knowledgeCollectionStorage.getMerkleLeafCount(challenge.knowledgeCollectionId);
+        if (leafCount == 0 || challenge.chunkId >= uint256(leafCount)) {
+            revert MerkleRootMismatchError(bytes32(0), expectedMerkleRoot);
+        }
+
+        if (!_verifyV10MerkleProof(expectedMerkleRoot, leaf, challenge.chunkId, merkleProof)) {
+            revert MerkleRootMismatchError(bytes32(0), expectedMerkleRoot);
         }
 
         // Mark as correct submission and add points to the node.
@@ -258,7 +254,16 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
 
         uint256 epoch = chronos.getCurrentEpoch();
         randomSamplingStorage.incrementEpochNodeValidProofsCount(epoch, identityId);
-        uint256 score18 = calculateNodeScore(identityId);
+
+        // D4+D15+D26 — post-migration the only source of staked TRAC is
+        // the V10 conviction layer. The node score and score-per-stake
+        // denominator must use the same timestamp-accurate effective stake
+        // snapshot: raw TRAC multiplied by active conviction boosts, with
+        // expired boosts drained at this proof's block timestamp.
+        uint40 tsNow = uint40(block.timestamp);
+        convictionStakingStorage.settleNodeTo(identityId, tsNow);
+        uint256 effectiveNodeStake = convictionStakingStorage.getNodeRunningEffectiveStake(identityId);
+        uint256 score18 = _calculateNodeScore(identityId, effectiveNodeStake);
         randomSamplingStorage.addToNodeEpochProofPeriodScore(
             epoch,
             activeProofPeriodStartBlock,
@@ -268,16 +273,6 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
         randomSamplingStorage.addToNodeEpochScore(epoch, identityId, score18);
         randomSamplingStorage.addToAllNodesEpochScore(epoch, score18);
 
-        // D4+D15+D26 — post-migration the only source of staked TRAC is
-        // the V10 conviction layer. The denominator is the V10 effective
-        // stake at *this instant*. Under D26 timestamp-accurate accounting
-        // we first settle the node forward to `block.timestamp` (draining
-        // any boost-expiry drops that fell inside the interval since the
-        // last proof) and then read the post-settle running effective
-        // stake.
-        uint40 tsNow = uint40(block.timestamp);
-        convictionStakingStorage.settleNodeTo(identityId, tsNow);
-        uint256 effectiveNodeStake = convictionStakingStorage.getNodeRunningEffectiveStake(identityId);
         if (effectiveNodeStake > 0) {
             uint256 deltaScorePerStake36 = (score18 * SCALE18) / effectiveNodeStake;
             uint256 newLast = randomSamplingStorage.getEpochLastScorePerStake(identityId, epoch) +
@@ -291,35 +286,30 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
     }
 
     /**
-     * @dev Internal function to compute Merkle root from a chunk and its proof
-     * Reconstructs the Merkle tree root by hashing the chunk with its ID and
-     * traversing up the tree using the provided proof hashes
-     * Uses standard Merkle tree construction where smaller hash goes left
-     * @param chunk The data chunk to verify
-     * @param chunkId Unique identifier for the chunk position
-     * @param merkleProof Array of sibling hashes for tree traversal
-     * @return computedRoot The computed Merkle root hash
+     * @dev V10 Merkle verify — matches `V10MerkleTree.verify` in TypeScript (pair order
+     *      by tree position: even index → `keccak256(abi.encodePacked(hash, sibling))`).
      */
-    function _computeMerkleRootFromProof(
-        string memory chunk,
-        uint256 chunkId,
-        bytes32[] calldata merkleProof
-    ) internal pure returns (bytes32) {
-        bytes32 computedHash = keccak256(abi.encodePacked(chunk, chunkId));
-
-        for (uint256 i = 0; i < merkleProof.length; ) {
-            if (computedHash < merkleProof[i]) {
-                computedHash = keccak256(abi.encodePacked(computedHash, merkleProof[i]));
+    function _verifyV10MerkleProof(
+        bytes32 root,
+        bytes32 leaf,
+        uint256 leafIndex,
+        bytes32[] calldata proof
+    ) internal pure returns (bool) {
+        bytes32 h = leaf;
+        uint256 idx = leafIndex;
+        for (uint256 i = 0; i < proof.length; ) {
+            bytes32 sib = proof[i];
+            if (idx % 2 == 0) {
+                h = keccak256(abi.encodePacked(h, sib));
             } else {
-                computedHash = keccak256(abi.encodePacked(merkleProof[i], computedHash));
+                h = keccak256(abi.encodePacked(sib, h));
             }
-
             unchecked {
-                i++;
+                idx = idx / 2;
+                ++i;
             }
         }
-
-        return computedHash;
+        return h == root;
     }
 
     /**
@@ -415,7 +405,8 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
      *                   for the live picker semantics.
      * @return cgId      Selected Context Graph id.
      * @return kcId      Selected Knowledge Collection id within that CG.
-     * @return chunkId   Selected chunk index within the KC.
+     * @return chunkId   Selected **V10 Merkle leaf index** within the KC (same field
+     *                   name as V8 byte-chunk index for struct compatibility).
      */
     function previewChallengeForSeed(
         bytes32 seed,
@@ -444,8 +435,9 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
      *      has expired (`endEpoch < currentEpoch`). Uses a fresh seed each
      *      attempt via `keccak256(seed, attempt)`.
      *
-     *      Step 3 — Compute the chunk index as in V8: `seed % (byteSize /
-     *      chunkByteSize)`, or 0 if the KC is smaller than one chunk.
+     *      Step 3 — Pick a V10 Merkle leaf index: `uint256(kcSeed) % merkleLeafCount`
+     *      (see `KnowledgeCollectionStorage.getMerkleLeafCount`). Reverts
+     *      `NoEligibleKnowledgeCollection` if the KC has zero leaves recorded.
      *
      *      Reverts:
      *      - {NoEligibleContextGraph}        adjustedTotal == 0 (no public,
@@ -515,19 +507,12 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
         }
         kcId = pickedKcId;
 
-        // ---- Step 3: compute the chunk index identically to V8. ----
-        uint88 kcByteSize = knowledgeCollectionStorage.getByteSize(kcId);
-        if (kcByteSize == 0) {
-            // V8 used a verbose string here; surfacing as a custom error
-            // would change the ABI; keep the string for parity.
-            revert("Knowledge collection byte size is 0");
+        // ---- Step 3: V10 flat-KC Merkle leaf index (stored in `Challenge.chunkId`). ----
+        uint32 leafCount = knowledgeCollectionStorage.getMerkleLeafCount(kcId);
+        if (leafCount == 0) {
+            revert NoEligibleKnowledgeCollection();
         }
-        uint256 chunkByteSize = randomSamplingStorage.CHUNK_BYTE_SIZE();
-        if (kcByteSize > chunkByteSize) {
-            // Use the rotated kcSeed so chunk picks within a CG don't degenerate
-            // when many KCs share the same byte size.
-            chunkId = uint256(kcSeed) % (uint256(kcByteSize) / chunkByteSize);
-        }
+        chunkId = uint256(kcSeed) % uint256(leafCount);
     }
 
     /**
@@ -554,7 +539,7 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
      * Formula: nodeScore(t) = S(t) * (c + 0.86 * P(t) + 0.60 * A(t) * P(t))
      *
      * Where:
-     * - S(t) = sqrt(nodeStake / STAKE_CAP) - sublinear stake scaling
+     * - S(t) = sqrt(nodeEffectiveStake / STAKE_CAP) - sublinear conviction stake scaling
      * - P(t) = K_n / K_total - publishing share over 4 epochs (t-3, t-2, t-1, t)
      * - A(t) = 1 - |nodeAsk - networkPrice| / networkPrice - ask alignment factor
      * - c = 0.002 (STAKE_BASELINE_COEFFICIENT) - small baseline for staked non-publishers
@@ -569,22 +554,23 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
      * @return score18 The calculated node score scaled by 18-decimal for precision
      */
     function calculateNodeScore(uint72 identityId) public view returns (uint256) {
+        return _calculateNodeScore(identityId, convictionStakingStorage.getNodeEffectiveStake(identityId));
+    }
+
+    function _calculateNodeScore(uint72 identityId, uint256 nodeEffectiveStake) internal view returns (uint256) {
         uint256 currentEpoch = chronos.getCurrentEpoch();
 
-        // 1. Stake factor S(t) = sqrt(nodeStake / stakeCap)
+        // 1. Stake factor S(t) = sqrt(nodeEffectiveStake / stakeCap)
         // Using sublinear scaling to reduce stake dominance (RFC-26 Section 4.1)
         //
-        // D15 — post-migration the node's canonical raw TRAC stake is
-        // `ConvictionStakingStorage.nodeStakeV10`. StakingStorage.nodes[id].stake
-        // is V8 legacy and not maintained after V10 cutover; reading it here
-        // would zero-out the stake factor for any V10 node and lock it out
-        // of scoring. Migration is mandatory (user directive) — there are
-        // no V8-only nodes — so the V10 aggregate IS the node stake.
+        // D15/D26 — post-migration the node's scoring stake is V10 effective
+        // stake: raw TRAC multiplied by active conviction multipliers and
+        // timestamp-adjusted for expired boosts. Migration is mandatory (user
+        // directive), so V8 `StakingStorage.nodes[id].stake` is legacy-only.
         uint256 stakeCap = uint256(parametersStorage.maximumStake());
-        uint256 nodeStake = convictionStakingStorage.getNodeStakeV10(identityId);
-        nodeStake = nodeStake > stakeCap ? stakeCap : nodeStake;
-        // S18 = sqrt((nodeStake / stakeCap) * SCALE18) * sqrt(SCALE18)
-        uint256 stakeRatio18 = (nodeStake * SCALE18) / stakeCap;
+        nodeEffectiveStake = nodeEffectiveStake > stakeCap ? stakeCap : nodeEffectiveStake;
+        // S18 = sqrt((nodeEffectiveStake / stakeCap) * SCALE18) * sqrt(SCALE18)
+        uint256 stakeRatio18 = (nodeEffectiveStake * SCALE18) / stakeCap;
         uint256 stakeFactor18 = Math.sqrt(stakeRatio18 * SCALE18);
 
         // 2. Publishing factor P(t) = K_n / K_total over 4 epochs (RFC-26 Section 4.2)

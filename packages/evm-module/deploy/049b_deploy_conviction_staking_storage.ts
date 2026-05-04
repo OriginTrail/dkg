@@ -9,4 +9,7 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
 
 export default func;
 func.tags = ['ConvictionStakingStorage', 'v10'];
-func.dependencies = ['Hub', 'Chronos'];
+// v4.0.0 — CSS now extends Guardian, so its initialize() pulls the Token
+// address from Hub. Token must therefore be Hub-registered before CSS
+// initialize() runs (mirrors V8 StakingStorage's deploy dependencies).
+func.dependencies = ['Hub', 'Token', 'Chronos'];

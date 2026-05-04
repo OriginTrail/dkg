@@ -93,6 +93,11 @@ async function waitForBridgePort(plugin: DkgChannelPlugin): Promise<number> {
   throw new Error('Bridge server did not bind to a port');
 }
 
+async function flushAsyncContinuations(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
 describe('DkgChannelPlugin', () => {
   let client: DkgDaemonClient;
   let plugin: DkgChannelPlugin;
@@ -111,6 +116,617 @@ describe('DkgChannelPlugin', () => {
 
   it('should have channel name "dkg-ui"', () => {
     expect(CHANNEL_NAME).toBe('dkg-ui');
+  });
+
+  it('layers direct adapter config from api.config into merged runtime config', () => {
+    // T364 — Pre-fix this test asserted `(plugin as any).cfg).toBe(fullConfig)`
+    // (object identity), encoding the buggy behavior where the merged
+    // runtime config was returned verbatim and the fresher direct adapter
+    // config from `api.config` was dropped. Post-fix the direct adapter
+    // config is layered into the merged config's nested
+    // `plugins.entries['adapter-openclaw'].config`, so dispatch sees the
+    // updated daemonUrl / channel / memory while still inheriting
+    // `agents.defaults.workspace` from the merged runtime config.
+    const { runtime } = makeMockRuntime();
+    const fullConfig = {
+      plugins: {
+        entries: {
+          'adapter-openclaw': {
+            config: { channel: { enabled: true, port: 0 } },
+          },
+        },
+      },
+      agents: {
+        defaults: {
+          workspace: '/runtime-workspace',
+        },
+      },
+    };
+    const api = makeApi({
+      config: {
+        daemonUrl: 'http://localhost:9200',
+        channel: { enabled: true, port: 0 },
+      } as any,
+      runtime: {
+        ...runtime,
+        config: fullConfig,
+      },
+      registerChannel: trackFn(),
+      registerHttpRoute: trackFn(),
+    } as any);
+
+    plugin.register(api);
+
+    // Workspace metadata from the merged runtime config is preserved.
+    expect((plugin as any).cfg).toMatchObject({
+      agents: { defaults: { workspace: '/runtime-workspace' } },
+    });
+    // Direct adapter config from api.config is layered into the nested
+    // adapter-openclaw entry, with channel deep-merged over the entry's
+    // baseline (entry had `channel: { enabled: true, port: 0 }`, direct
+    // had `channel: { enabled: true, port: 0 }` — same shape, merge-clean).
+    expect((plugin as any).cfg.plugins.entries['adapter-openclaw'].config).toMatchObject({
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: true, port: 0 },
+    });
+  });
+
+  it('overlays current route metadata onto fallback merged runtime config', async () => {
+    const { runtime } = makeMockRuntime({
+      dispatchImpl: async (params) => {
+        await params.dispatcherOptions.deliver({ text: 'Merged route reply' });
+      },
+    });
+    const staleRuntimeConfig = {
+      agents: { defaults: { workspace: '/stale-runtime-workspace', model: 'gpt-5.5' } },
+      session: { projectContextGraphId: 'stale-cg', ttlMs: 10_000 },
+      plugins: {
+        entries: {
+          'adapter-openclaw': {
+            config: { channel: { enabled: true, port: 0 } },
+          },
+        },
+      },
+    };
+    const currentRouteMetadata = {
+      agents: { defaults: { workspace: '/live-cfg-workspace' } },
+      session: { projectContextGraphId: 'live-cg' },
+      workspace: '/live-cfg-workspace',
+    };
+    const api = makeApi({
+      cfg: currentRouteMetadata,
+      runtime: {
+        ...runtime,
+        config: staleRuntimeConfig,
+      },
+    } as any);
+    vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+
+    plugin.register(api);
+    const reply = await plugin.processInbound('Hello', 'corr-merged-route', 'owner');
+
+    expect(reply.text).toBe('Merged route reply');
+    const dispatchCfg = (runtime as any).channel.routing.resolveAgentRoute.calls[0][0].cfg;
+    expect(dispatchCfg).toMatchObject({
+      agents: { defaults: { workspace: '/live-cfg-workspace', model: 'gpt-5.5' } },
+      session: { projectContextGraphId: 'live-cg', ttlMs: 10_000 },
+      workspace: '/live-cfg-workspace',
+      plugins: staleRuntimeConfig.plugins,
+    });
+  });
+
+  it('uses direct plugin config as dispatch cfg fallback when no merged config exists', async () => {
+    const { runtime } = makeMockRuntime({
+      dispatchImpl: async (params) => {
+        await params.dispatcherOptions.deliver({ text: 'Direct config reply' });
+      },
+    });
+    const directConfig = {
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: true, port: 0 },
+    };
+    const fallbackRoute = trackAsyncFn(async () => ({
+      text: 'fallback',
+      correlationId: 'corr-direct-config',
+    }));
+    const api = makeApi({
+      config: directConfig,
+      runtime,
+      routeInboundMessage: fallbackRoute,
+    } as any);
+    vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+
+    plugin.register(api);
+    const reply = await plugin.processInbound('Hello', 'corr-direct-config', 'owner');
+
+    expect(reply.text).toBe('Direct config reply');
+    expect(fallbackRoute.calls).toHaveLength(0);
+    expect((runtime as any).channel.routing.resolveAgentRoute.calls[0][0].cfg).toBe(directConfig);
+  });
+
+  it('T364 round 6 — extracts adapter overlay from mixed { workspaceDir, channel } gateway payload', async () => {
+    // Pre-fix `directAdapterConfigFrom` rejected any object carrying
+    // route-metadata keys (workspaceDir, agents, session, workspace),
+    // so a gateway payload like `{ workspaceDir, channel: { port: 9801 } }`
+    // dropped its channel override on the floor and the dispatch
+    // resolver kept stale daemon/channel settings from lower-priority
+    // sources. Post-fix the helper splits the route-metadata portion
+    // (handled separately by `resolveOpenClawRouteMetadataConfig`) from
+    // the adapter-config portion and returns just the latter, so the
+    // overlay layers correctly over the lower-priority full config.
+    const { runtime } = makeMockRuntime({
+      dispatchImpl: async (params) => {
+        await params.dispatcherOptions.deliver({ text: 'Mixed payload reply' });
+      },
+    });
+    const mixedConfig = {
+      workspaceDir: '/legacy-workspace',
+      channel: { port: 9801 },
+    };
+    const fullPluginConfig = {
+      daemonUrl: 'http://localhost:9350',
+      memory: { enabled: true },
+      channel: { enabled: true, port: 0 },
+    };
+    const api = makeApi({
+      config: mixedConfig,
+      pluginConfig: fullPluginConfig,
+      runtime,
+    } as any);
+    vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+
+    plugin.register(api);
+    const reply = await plugin.processInbound('Hello', 'corr-mixed-payload', 'owner');
+
+    expect(reply.text).toBe('Mixed payload reply');
+    const dispatchCfg = (runtime as any).channel.routing.resolveAgentRoute.calls[0][0].cfg;
+    // Adapter overlay (channel.port: 9801) MUST be preserved on top of
+    // the lower-priority full plugin config; route metadata (workspaceDir)
+    // is recognized by the route-metadata path separately. Adapter
+    // fields land nested under `plugins.entries['adapter-openclaw'].config`
+    // because mergeRouteConfigWithAdapterConfig groups them there when
+    // a route-metadata layer is present (matches the no-merged-config
+    // route+direct path used elsewhere in this file).
+    expect(dispatchCfg.workspaceDir).toBe('/legacy-workspace');
+    // Route layer must NOT leak the adapter `channel` key (T364 round 6
+    // route-metadata-extraction fix).
+    expect(dispatchCfg).not.toHaveProperty('channel');
+    expect(dispatchCfg.plugins.entries['adapter-openclaw'].config).toMatchObject({
+      daemonUrl: 'http://localhost:9350',
+      memory: { enabled: true },
+      channel: { enabled: true, port: 9801 },
+    });
+  });
+
+  it('T364 round 8 — dispatch merge scrubs stale agents.defaults.workspace when newer route asserts workspaceDir only', async () => {
+    // Pre-fix `mergeRouteMetadataWithMergedConfig` (DkgChannelPlugin.ts)
+    // kept any older `workspace` / `agents.defaults.workspace` from the
+    // merged snapshot when the routeConfig only carried a newer
+    // `workspaceDir`. The setup-side resolver's fallback chain
+    // (`agents.defaults.workspace -> workspace -> workspaceDir`) then
+    // returned the stale alias and the channel dispatched against the
+    // wrong workspace. Post-fix `scrubStaleWorkspaceAliases` is shared
+    // with `openclaw-config.ts` and runs on the dispatch-side merge
+    // too, so the newest workspace signal wins consistently.
+    const { runtime } = makeMockRuntime({
+      dispatchImpl: async (params) => {
+        await params.dispatcherOptions.deliver({ text: 'New workspace reply' });
+      },
+    });
+    // mergedConfig (older snapshot) carries plugins + a stale
+    // agents.defaults.workspace.
+    const staleMergedConfig = {
+      agents: { defaults: { workspace: '/stale-workspace', model: 'gpt-4' } },
+      plugins: {
+        slots: { memory: 'adapter-openclaw' },
+        entries: {
+          'adapter-openclaw': {
+            config: {
+              daemonUrl: 'http://localhost:9350',
+              memory: { enabled: true },
+              channel: { enabled: true, port: 0 },
+            },
+          },
+        },
+      },
+    };
+    // Newer route metadata asserts workspaceDir but no agents.defaults.workspace.
+    const freshRouteConfig = {
+      workspaceDir: '/fresh-workspace',
+    };
+    const api = makeApi({
+      cfg: freshRouteConfig,
+      runtime: {
+        ...runtime,
+        config: staleMergedConfig,
+      },
+    } as any);
+    vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+
+    plugin.register(api);
+    const reply = await plugin.processInbound('Hello', 'corr-route-scrub', 'owner');
+
+    expect(reply.text).toBe('New workspace reply');
+    const dispatchCfg = (runtime as any).channel.routing.resolveAgentRoute.calls[0][0].cfg;
+    // Newer workspaceDir wins.
+    expect(dispatchCfg.workspaceDir).toBe('/fresh-workspace');
+    // Stale `agents.defaults.workspace` MUST be scrubbed so the resolver
+    // chain doesn't pick the old value.
+    expect(dispatchCfg.agents?.defaults?.workspace).toBeUndefined();
+    // Other agents.defaults fields preserved.
+    expect(dispatchCfg.agents?.defaults?.model).toBe('gpt-4');
+  });
+
+  it('T364 round 8 — dispatch merge does NOT mutate caller-owned mergedConfig.agents.defaults', async () => {
+    // QA-flagged side-effect concern: pre-fix `mergeRouteMetadataWithMergedConfig`
+    // created `result` via `{...mergedConfig, ...routeConfig}` (shallow
+    // spread), so when routeConfig has no `agents` key, `result.agents`
+    // and `result.agents.defaults` are still pointers into the caller's
+    // runtime config. The scrub then mutated `mergedConfig.agents.defaults.workspace`
+    // — visible to subsequent dispatches/observers as a delete-on-input
+    // side-effect. Post-fix `scrubStaleAgentsDefaultsWorkspace` clones
+    // the agents/defaults path before deleting, so caller-owned input
+    // is preserved verbatim.
+    const { runtime } = makeMockRuntime({
+      dispatchImpl: async (params) => {
+        await params.dispatcherOptions.deliver({ text: 'No-mutation reply' });
+      },
+    });
+    const liveMergedConfig = {
+      agents: { defaults: { workspace: '/should-not-be-mutated', model: 'gpt-4' } },
+      plugins: {
+        slots: { memory: 'adapter-openclaw' },
+        entries: {
+          'adapter-openclaw': {
+            config: {
+              daemonUrl: 'http://localhost:9350',
+              memory: { enabled: true },
+              channel: { enabled: true, port: 0 },
+            },
+          },
+        },
+      },
+    };
+    const before = JSON.stringify(liveMergedConfig);
+    const freshRouteConfig = { workspaceDir: '/fresh-from-route' };
+    const api = makeApi({
+      cfg: freshRouteConfig,
+      runtime: {
+        ...runtime,
+        config: liveMergedConfig,
+      },
+    } as any);
+    vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+
+    plugin.register(api);
+    await plugin.processInbound('Hello', 'corr-no-mutation', 'owner');
+
+    // Caller-owned mergedConfig MUST be unchanged after dispatch.
+    expect(JSON.stringify(liveMergedConfig)).toBe(before);
+    expect(liveMergedConfig.agents.defaults.workspace).toBe('/should-not-be-mutated');
+    // Returned dispatch cfg DOES carry the scrubbed view (newer
+    // workspaceDir wins, stale agents.defaults.workspace removed).
+    const dispatchCfg = (runtime as any).channel.routing.resolveAgentRoute.calls[0][0].cfg;
+    expect(dispatchCfg.workspaceDir).toBe('/fresh-from-route');
+    expect((dispatchCfg.agents as any)?.defaults?.workspace).toBeUndefined();
+    expect((dispatchCfg.agents as any)?.defaults?.model).toBe('gpt-4');
+  });
+
+  it('keeps direct api.cfg ahead of stale api.pluginConfig for dispatch cfg fallback', async () => {
+    const { runtime } = makeMockRuntime({
+      dispatchImpl: async (params) => {
+        await params.dispatcherOptions.deliver({ text: 'Direct cfg reply' });
+      },
+    });
+    const liveConfig = {
+      daemonUrl: 'http://localhost:9300',
+      channel: { enabled: true, port: 0 },
+    };
+    const stalePluginConfig = {
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+    };
+    const api = makeApi({
+      cfg: liveConfig,
+      pluginConfig: stalePluginConfig,
+      runtime,
+    } as any);
+    vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+
+    plugin.register(api);
+    const reply = await plugin.processInbound('Hello', 'corr-direct-cfg', 'owner');
+
+    expect(reply.text).toBe('Direct cfg reply');
+    expect((runtime as any).channel.routing.resolveAgentRoute.calls[0][0].cfg).toEqual(liveConfig);
+  });
+
+  it.each(['cfg', 'config'] as const)('merges metadata-only api.%s with current api.pluginConfig for dispatch cfg fallback', async (sourceKey) => {
+    const { runtime } = makeMockRuntime({
+      dispatchImpl: async (params) => {
+        await params.dispatcherOptions.deliver({ text: 'Merged metadata reply' });
+      },
+    });
+    const metadataOnlyConfig = {
+      stateDir: '/workspace/.dkg-adapter',
+      stateDirSource: 'setup-default',
+      installedWorkspace: '/workspace',
+    };
+    const currentPluginConfig = {
+      daemonUrl: 'http://localhost:9350',
+      channel: { enabled: true, port: 0 },
+    };
+    const api = makeApi({
+      [sourceKey]: metadataOnlyConfig,
+      pluginConfig: currentPluginConfig,
+      runtime,
+    } as any);
+    vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+
+    plugin.register(api);
+    const reply = await plugin.processInbound('Hello', 'corr-metadata-plugin-config', 'owner');
+
+    expect(reply.text).toBe('Merged metadata reply');
+    const dispatchCfg = (runtime as any).channel.routing.resolveAgentRoute.calls[0][0].cfg;
+    expect(dispatchCfg).not.toBe(metadataOnlyConfig);
+    expect(dispatchCfg).toMatchObject({
+      ...metadataOnlyConfig,
+      daemonUrl: 'http://localhost:9350',
+      channel: { enabled: true, port: 0 },
+    });
+  });
+
+  it.each(['cfg', 'config'] as const)('T364 — merges partial-channel api.%s overlay with current api.pluginConfig instead of masking it', async (sourceKey) => {
+    // T364 regression for the Codex bug flagged on the merge of main into PR
+    // #364: pre-fix `resolveDirectAdapterConfigFallback` only captured
+    // state-metadata-only overlays and returned the first non-metadata
+    // source verbatim. A higher-priority partial overlay like
+    // `{ channel: { port: 9801 } }` (no `enabled` field) would mask the
+    // lower-priority full adapter config in `api.pluginConfig` /
+    // `runtime.*` — the channel ended up dispatching with an incomplete
+    // `cfg` (no `daemonUrl`, no `memory.enabled`, etc.) which broke route
+    // resolution on gateways that emit incremental direct config updates.
+    //
+    // Post-fix `isPartialAdapterConfigOverlay` is checked alongside the
+    // state-metadata-only check; partial overlays are captured in
+    // priority order and merged over the next full direct config.
+    const { runtime } = makeMockRuntime({
+      dispatchImpl: async (params) => {
+        await params.dispatcherOptions.deliver({ text: 'Partial overlay reply' });
+      },
+    });
+    // Higher-priority partial overlay: just a partial channel block, no
+    // `enabled` key (so isPartialAdapterConfigOverlay matches it).
+    const partialChannelOverlay = {
+      channel: { port: 9801 },
+    };
+    // Lower-priority full adapter config carrying the daemonUrl, memory,
+    // and a baseline channel configuration that the overlay should layer
+    // over rather than mask.
+    const currentPluginConfig = {
+      daemonUrl: 'http://localhost:9350',
+      memory: { enabled: true },
+      channel: { enabled: true, port: 9200 },
+    };
+    const api = makeApi({
+      [sourceKey]: partialChannelOverlay,
+      pluginConfig: currentPluginConfig,
+      runtime,
+    } as any);
+    vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+
+    plugin.register(api);
+    const reply = await plugin.processInbound('Hello', 'corr-partial-overlay', 'owner');
+
+    expect(reply.text).toBe('Partial overlay reply');
+    const dispatchCfg = (runtime as any).channel.routing.resolveAgentRoute.calls[0][0].cfg;
+    // The dispatch cfg must carry the FULL config's daemonUrl + memory,
+    // and the overlay's channel.port must win over the full config's
+    // channel.port (deep-merge with later-wins semantic on module keys).
+    expect(dispatchCfg).toMatchObject({
+      daemonUrl: 'http://localhost:9350',
+      memory: { enabled: true },
+      channel: { enabled: true, port: 9801 },
+    });
+  });
+
+  it('T364 — merges all overlays in priority order when no full direct config exists', async () => {
+    // T364 follow-up regression: when EVERY discovered direct-config
+    // source is a partial overlay (no full adapter config anywhere on
+    // api.cfg/config/pluginConfig or runtime.*), the function previously
+    // returned `overlays[0]` and dropped the rest — losing daemonUrl /
+    // memory / channel fields that were available on lower-priority
+    // overlays. Post-fix, all overlays are merged in priority order so
+    // the highest priority wins on conflicts and lower priorities fill
+    // in fields the higher overlays omit.
+    const { runtime } = makeMockRuntime({
+      dispatchImpl: async (params) => {
+        await params.dispatcherOptions.deliver({ text: 'All-overlays merge reply' });
+      },
+    });
+    // Highest-priority overlay: state metadata only (no daemonUrl/channel).
+    const metadataOnlyOverlay = {
+      stateDir: '/workspace/.dkg-adapter',
+      stateDirSource: 'setup-default',
+      installedWorkspace: '/workspace',
+    };
+    // Mid-priority overlay: partial channel (overrides channel.port).
+    const partialChannelOverlay = {
+      channel: { port: 9802 },
+    };
+    // Lowest-priority overlay: partial config carrying daemonUrl + a
+    // baseline channel.host (no `enabled` so it's still partial).
+    const partialDaemonOverlay = {
+      daemonUrl: 'http://localhost:9555',
+      channel: { host: '127.0.0.1' },
+    };
+    const api = makeApi({
+      cfg: metadataOnlyOverlay,
+      pluginConfig: partialChannelOverlay,
+      runtime: {
+        ...runtime,
+        pluginConfig: partialDaemonOverlay,
+      },
+    } as any);
+    vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+
+    plugin.register(api);
+    const reply = await plugin.processInbound('Hello', 'corr-all-overlays', 'owner');
+
+    expect(reply.text).toBe('All-overlays merge reply');
+    const dispatchCfg = (runtime as any).channel.routing.resolveAgentRoute.calls[0][0].cfg;
+    // Top-level keys: highest-priority metadataOnly (stateDir/Source/installedWorkspace)
+    // wins, daemonUrl from runtime.pluginConfig fills the gap.
+    expect(dispatchCfg).toMatchObject({
+      stateDir: '/workspace/.dkg-adapter',
+      stateDirSource: 'setup-default',
+      installedWorkspace: '/workspace',
+      daemonUrl: 'http://localhost:9555',
+      // channel deep-merge: port from pluginConfig (mid-priority) overrides
+      // host from runtime.pluginConfig (lowest); both fields are present
+      // because module deep-merge preserves lower-priority defaults.
+      channel: { port: 9802, host: '127.0.0.1' },
+    });
+  });
+
+  it('keeps current api.pluginConfig ahead of runtime direct config fallback', async () => {
+    const { runtime } = makeMockRuntime({
+      dispatchImpl: async (params) => {
+        await params.dispatcherOptions.deliver({ text: 'Plugin config reply' });
+      },
+    });
+    const currentPluginConfig = {
+      daemonUrl: 'http://localhost:9400',
+      channel: { enabled: true, port: 0 },
+    };
+    const staleRuntimeConfig = {
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+    };
+    const api = makeApi({
+      pluginConfig: currentPluginConfig,
+      runtime: {
+        ...runtime,
+        config: staleRuntimeConfig,
+      },
+    } as any);
+    vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+
+    plugin.register(api);
+    const reply = await plugin.processInbound('Hello', 'corr-plugin-config', 'owner');
+
+    expect(reply.text).toBe('Plugin config reply');
+    expect((runtime as any).channel.routing.resolveAgentRoute.calls[0][0].cfg).toEqual(currentPluginConfig);
+  });
+
+  it('keeps route metadata while overlaying api.pluginConfig when api.cfg is not merged config', async () => {
+    const { runtime } = makeMockRuntime({
+      dispatchImpl: async (params) => {
+        await params.dispatcherOptions.deliver({ text: 'Route metadata fallback reply' });
+      },
+    });
+    const currentPluginConfig = {
+      daemonUrl: 'http://localhost:9500',
+      channel: { enabled: true, port: 0 },
+    };
+    const staleRuntimeConfig = {
+      daemonUrl: 'http://localhost:9200',
+      channel: { enabled: false },
+    };
+    const routeMetadata = {
+      agents: { defaults: { workspace: '/route-workspace' } },
+      session: { ttlMs: 30_000 },
+      workspace: '/route-workspace',
+    };
+    const api = makeApi({
+      cfg: routeMetadata,
+      pluginConfig: currentPluginConfig,
+      runtime: {
+        ...runtime,
+        config: staleRuntimeConfig,
+      },
+    } as any);
+    vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+
+    plugin.register(api);
+    const reply = await plugin.processInbound('Hello', 'corr-route-metadata', 'owner');
+
+    expect(reply.text).toBe('Route metadata fallback reply');
+    const dispatchCfg = (runtime as any).channel.routing.resolveAgentRoute.calls[0][0].cfg;
+    expect(dispatchCfg).not.toBe(routeMetadata);
+    expect(dispatchCfg).toMatchObject({
+      agents: routeMetadata.agents,
+      session: routeMetadata.session,
+      workspace: routeMetadata.workspace,
+      plugins: {
+        entries: {
+          'adapter-openclaw': {
+            config: currentPluginConfig,
+          },
+        },
+      },
+    });
+    expect((routeMetadata as any).plugins).toBeUndefined();
+  });
+
+  it('keeps session-only route metadata while overlaying direct plugin config', async () => {
+    const { runtime } = makeMockRuntime({
+      dispatchImpl: async (params) => {
+        await params.dispatcherOptions.deliver({ text: 'Session metadata fallback reply' });
+      },
+    });
+    const currentPluginConfig = {
+      daemonUrl: 'http://localhost:9510',
+      channel: { enabled: true, port: 0 },
+    };
+    const routeMetadata = {
+      session: { dmScope: 'main', ttlMs: 30_000 },
+    };
+    const api = makeApi({
+      cfg: routeMetadata,
+      pluginConfig: currentPluginConfig,
+      runtime,
+    } as any);
+    vi.spyOn(client, 'storeChatTurn').mockResolvedValue(undefined);
+
+    plugin.register(api);
+    const reply = await plugin.processInbound('Hello', 'corr-session-route-metadata', 'owner');
+
+    expect(reply.text).toBe('Session metadata fallback reply');
+    const dispatchCfg = (runtime as any).channel.routing.resolveAgentRoute.calls[0][0].cfg;
+    expect(dispatchCfg).toMatchObject({
+      session: routeMetadata.session,
+      plugins: {
+        entries: {
+          'adapter-openclaw': {
+            config: currentPluginConfig,
+          },
+        },
+      },
+    });
+  });
+
+  it('calls the pre-dispatch memory-slot reassert callback before processInbound runs (R9.1/R9.7)', async () => {
+    const reassertSpy = vi.fn();
+    plugin.setPreDispatchReAssert(reassertSpy);
+
+    // Stub api so processInbound has the bare-minimum surface it needs;
+    // we don't care about the dispatch result, only that reassert fired
+    // before any further work.
+    const mockApi = {
+      logger: { info: vi.fn(), debug: vi.fn(), warn: vi.fn() },
+      runtime: undefined,
+      cfg: undefined,
+      routeInboundMessage: undefined,
+    } as any;
+    (plugin as any).api = mockApi;
+
+    // processInbound throws once it can't find a dispatch route, but the
+    // reassert is the FIRST thing it does — confirm spy fires exactly
+    // once before the throw.
+    await expect(
+      plugin.processInbound('hello', 'corr-1', 'owner', {}),
+    ).rejects.toThrow();
+    expect(reassertSpy).toHaveBeenCalledTimes(1);
   });
 
   describe('formatInboundTurnDiagnostic (live-validation follow-up)', () => {
@@ -246,6 +862,956 @@ describe('DkgChannelPlugin', () => {
       configured: true,
       linked: true,
     });
+    expect(registeredPlugin.gateway.startAccount).toBeTypeOf('function');
+    expect(registeredPlugin.gateway.stopAccount).toBeTypeOf('function');
+  });
+
+  it('rejects non-default gateway accounts without preempting the default lifecycle', async () => {
+    const registerChannel = trackFn();
+    const api = makeApi({ registerChannel });
+    plugin.register(api);
+
+    const registeredPlugin = (registerChannel.calls[0][0] as any).plugin;
+    const defaultController = new AbortController();
+    const defaultStatus = vi.fn();
+    const defaultLifecycle = registeredPlugin.gateway.startAccount({
+      accountId: 'default',
+      account: { accountId: 'default' },
+      cfg: {},
+      runtime: {},
+      abortSignal: defaultController.signal,
+      getStatus: () => ({ accountId: 'default' }),
+      setStatus: defaultStatus,
+    });
+    await vi.waitFor(() => {
+      expect(defaultStatus).toHaveBeenCalledWith(expect.objectContaining({
+        running: true,
+        connected: true,
+      }));
+    });
+
+    const otherStatus = vi.fn();
+    await expect(registeredPlugin.gateway.startAccount({
+      accountId: 'other',
+      account: { accountId: 'other' },
+      cfg: {},
+      runtime: {},
+      abortSignal: new AbortController().signal,
+      getStatus: () => ({ accountId: 'other' }),
+      setStatus: otherStatus,
+    })).rejects.toThrow(/only supports the "default" gateway account/);
+
+    expect(plugin.isListening).toBe(true);
+    expect(otherStatus).toHaveBeenCalledWith(expect.objectContaining({
+      accountId: 'other',
+      running: false,
+      connected: false,
+      linked: false,
+    }));
+
+    await registeredPlugin.gateway.stopAccount({
+      accountId: 'other',
+      account: { accountId: 'other' },
+      cfg: {},
+      runtime: {},
+      getStatus: () => ({ accountId: 'other' }),
+      setStatus: otherStatus,
+    });
+    expect(plugin.isListening).toBe(true);
+
+    defaultController.abort();
+    await defaultLifecycle;
+    expect(plugin.isListening).toBe(false);
+  });
+
+  it('keeps the registered gateway lifecycle running until OpenClaw aborts it', async () => {
+    const registerChannel = trackFn();
+    const api = makeApi({ registerChannel });
+    plugin.register(api);
+
+    const registeredPlugin = (registerChannel.calls[0][0] as any).plugin;
+    const controller = new AbortController();
+    const setStatus = vi.fn();
+    let settled = false;
+    const lifecycle = registeredPlugin.gateway.startAccount({
+      accountId: 'default',
+      account: { accountId: 'default' },
+      cfg: {},
+      runtime: {},
+      abortSignal: controller.signal,
+      getStatus: () => ({ accountId: 'default' }),
+      setStatus,
+    }).then(() => {
+      settled = true;
+    });
+
+    await vi.waitFor(() => {
+      expect(setStatus).toHaveBeenCalledWith(expect.objectContaining({
+        accountId: 'default',
+        running: true,
+        connected: true,
+        restartPending: false,
+        mode: 'webhook',
+      }));
+    });
+    expect(settled).toBe(false);
+
+    controller.abort();
+    await lifecycle;
+    expect(settled).toBe(true);
+    expect(plugin.isListening).toBe(false);
+  });
+
+  it('does not tear down an active bridge for an already-aborted gateway lifecycle start', async () => {
+    const registerChannel = trackFn();
+    const api = makeApi({ registerChannel });
+    plugin.register(api);
+    await waitForBridgePort(plugin);
+
+    const registeredPlugin = (registerChannel.calls[0][0] as any).plugin;
+    const controller = new AbortController();
+    controller.abort();
+    const setStatus = vi.fn();
+
+    await registeredPlugin.gateway.startAccount({
+      accountId: 'default',
+      account: { accountId: 'default' },
+      cfg: {},
+      runtime: {},
+      abortSignal: controller.signal,
+      getStatus: () => ({ accountId: 'default' }),
+      setStatus,
+    });
+
+    expect(plugin.isListening).toBe(true);
+    expect(setStatus).not.toHaveBeenCalled();
+  });
+
+  it('keeps the registered gateway lifecycle pending until stopAccount even without an abort signal', async () => {
+    const registerChannel = trackFn();
+    const api = makeApi({ registerChannel });
+    plugin.register(api);
+
+    const registeredPlugin = (registerChannel.calls[0][0] as any).plugin;
+    const setStatus = vi.fn();
+    let settled = false;
+    const lifecycleCtx = {
+      accountId: 'default',
+      account: { accountId: 'default' },
+      cfg: {},
+      runtime: {},
+      getStatus: () => ({ accountId: 'default' }),
+      setStatus,
+    };
+    const lifecycle = registeredPlugin.gateway.startAccount(lifecycleCtx).then(() => {
+      settled = true;
+    });
+
+    await vi.waitFor(() => {
+      expect(setStatus).toHaveBeenCalledWith(expect.objectContaining({
+        running: true,
+        connected: true,
+      }));
+    });
+    expect(settled).toBe(false);
+
+    await registeredPlugin.gateway.stopAccount(lifecycleCtx);
+    await lifecycle;
+    expect(settled).toBe(true);
+  });
+
+  it('stops the current no-signal lifecycle from a fresh stopAccount context for the same account', async () => {
+    const registerChannel = trackFn();
+    const api = makeApi({ registerChannel });
+    plugin.register(api);
+
+    const registeredPlugin = (registerChannel.calls[0][0] as any).plugin;
+    const setStatus = vi.fn();
+    const lifecycle = registeredPlugin.gateway.startAccount({
+      accountId: 'default',
+      account: { accountId: 'default' },
+      cfg: {},
+      runtime: {},
+      getStatus: () => ({ accountId: 'default' }),
+      setStatus,
+    });
+    await vi.waitFor(() => {
+      expect(setStatus).toHaveBeenCalledWith(expect.objectContaining({
+        running: true,
+        connected: true,
+      }));
+    });
+
+    await registeredPlugin.gateway.stopAccount({
+      accountId: 'default',
+      account: { accountId: 'default' },
+      cfg: {},
+      runtime: {},
+      getStatus: () => ({ accountId: 'default' }),
+      setStatus: vi.fn(),
+    });
+
+    await lifecycle;
+    expect(plugin.isListening).toBe(false);
+  });
+
+  it('cancels a pending replacement lifecycle without stopping the active bridge', async () => {
+    const registerChannel = trackFn();
+    const api = makeApi({ registerChannel });
+    plugin.register(api);
+
+    const registeredPlugin = (registerChannel.calls[0][0] as any).plugin;
+    const firstController = new AbortController();
+    const firstCtx = {
+      accountId: 'default',
+      account: { accountId: 'default' },
+      cfg: {},
+      runtime: {},
+      abortSignal: firstController.signal,
+      getStatus: () => ({ accountId: 'default' }),
+      setStatus: vi.fn(),
+    };
+    const firstLifecycle = registeredPlugin.gateway.startAccount(firstCtx);
+    await vi.waitFor(() => {
+      expect(firstCtx.setStatus).toHaveBeenCalledWith(expect.objectContaining({
+        running: true,
+        connected: true,
+      }));
+    });
+
+    const replacementCtx = {
+      accountId: 'default',
+      account: { accountId: 'default' },
+      cfg: {},
+      runtime: {},
+      getStatus: () => ({ accountId: 'default' }),
+      setStatus: vi.fn(),
+    };
+    const replacementLifecycle = registeredPlugin.gateway.startAccount(replacementCtx);
+    await registeredPlugin.gateway.stopAccount(replacementCtx);
+
+    await replacementLifecycle;
+    expect(plugin.isListening).toBe(true);
+    expect(replacementCtx.setStatus.mock.calls.some(([status]) => status.running === true)).toBe(false);
+    expect(firstCtx.setStatus.mock.calls.some(([status]) => status.running === false)).toBe(false);
+
+    firstController.abort();
+    await firstLifecycle;
+    expect(plugin.isListening).toBe(false);
+  });
+
+  it('stops the active lifecycle for a fresh same-account stop during a replacement window', async () => {
+    const registerChannel = trackFn();
+    const api = makeApi({ registerChannel });
+    plugin.register(api);
+
+    const registeredPlugin = (registerChannel.calls[0][0] as any).plugin;
+    const firstCtx = {
+      accountId: 'default',
+      account: { accountId: 'default' },
+      cfg: {},
+      runtime: {},
+      getStatus: () => ({ accountId: 'default' }),
+      setStatus: vi.fn(),
+    };
+    const firstLifecycle = registeredPlugin.gateway.startAccount(firstCtx);
+    await vi.waitFor(() => {
+      expect(firstCtx.setStatus).toHaveBeenCalledWith(expect.objectContaining({
+        running: true,
+        connected: true,
+      }));
+    });
+
+    const replacementCtx = {
+      accountId: 'default',
+      account: { accountId: 'default' },
+      cfg: {},
+      runtime: {},
+      getStatus: () => ({ accountId: 'default' }),
+      setStatus: vi.fn(),
+    };
+    const stopStatus = vi.fn();
+    const replacementLifecycle = registeredPlugin.gateway.startAccount(replacementCtx);
+    await registeredPlugin.gateway.stopAccount({
+      accountId: 'default',
+      account: { accountId: 'default' },
+      cfg: {},
+      runtime: {},
+      getStatus: () => ({ accountId: 'default' }),
+      setStatus: stopStatus,
+    });
+
+    await replacementLifecycle;
+    await firstLifecycle;
+    expect(plugin.isListening).toBe(false);
+    expect(replacementCtx.setStatus.mock.calls.some(([status]) => status.running === true)).toBe(false);
+    expect(stopStatus).toHaveBeenCalledWith(expect.objectContaining({
+      running: false,
+      connected: false,
+      restartPending: false,
+    }));
+  });
+
+  it('stops the registered gateway lifecycle bridge when OpenClaw stops the channel', async () => {
+    const registerChannel = trackFn();
+    const api = makeApi({ registerChannel });
+    plugin.register(api);
+
+    const registeredPlugin = (registerChannel.calls[0][0] as any).plugin;
+    await plugin.start();
+    expect(plugin.isListening).toBe(true);
+
+    const setStatus = vi.fn();
+    await registeredPlugin.gateway.stopAccount({
+      accountId: 'default',
+      account: { accountId: 'default' },
+      cfg: {},
+      runtime: {},
+      abortSignal: new AbortController().signal,
+      getStatus: () => ({ accountId: 'default' }),
+      setStatus,
+    });
+
+    expect(plugin.isListening).toBe(false);
+    expect(setStatus).toHaveBeenCalledWith(expect.objectContaining({
+      accountId: 'default',
+      running: false,
+      connected: false,
+      restartPending: false,
+    }));
+  });
+
+  it('normalizes gateway status account ids and preserves fields when reporting stopped', async () => {
+    const registerChannel = trackFn();
+    const api = makeApi({ registerChannel });
+    plugin.register(api);
+
+    const registeredPlugin = (registerChannel.calls[0][0] as any).plugin;
+    let currentStatus: Record<string, unknown> = {
+      accountId: '   ',
+      enabled: true,
+      configured: true,
+      linked: true,
+      mode: 'webhook',
+      port: 9201,
+      displayName: 'DKG UI',
+    };
+    const setStatus = vi.fn((status: Record<string, unknown>) => {
+      currentStatus = status;
+    });
+    const lifecycleCtx = {
+      accountId: '   ',
+      account: { accountId: '   ' },
+      cfg: {},
+      runtime: {},
+      getStatus: () => currentStatus,
+      setStatus,
+    };
+    const lifecycle = registeredPlugin.gateway.startAccount(lifecycleCtx);
+
+    await vi.waitFor(() => {
+      expect(setStatus).toHaveBeenCalledWith(expect.objectContaining({
+        accountId: 'default',
+        enabled: true,
+        configured: true,
+        linked: true,
+        running: true,
+        connected: true,
+        displayName: 'DKG UI',
+      }));
+    });
+
+    await registeredPlugin.gateway.stopAccount(lifecycleCtx);
+    await lifecycle;
+
+    expect(setStatus).toHaveBeenCalledWith(expect.objectContaining({
+      accountId: 'default',
+      enabled: true,
+      configured: true,
+      linked: true,
+      running: false,
+      connected: false,
+      restartPending: false,
+      mode: 'webhook',
+      port: expect.any(Number),
+      displayName: 'DKG UI',
+    }));
+  });
+
+  it('settles plugin-level gateway lifecycle only after bridge shutdown completes', async () => {
+    const registerChannel = trackFn();
+    const api = makeApi({ registerChannel });
+    plugin.register(api);
+
+    const registeredPlugin = (registerChannel.calls[0][0] as any).plugin;
+    const setStatus = vi.fn();
+    let settled = false;
+    const lifecycle = registeredPlugin.gateway.startAccount({
+      accountId: 'default',
+      account: { accountId: 'default' },
+      cfg: {},
+      runtime: {},
+      getStatus: () => ({ accountId: 'default' }),
+      setStatus,
+    }).then(() => {
+      settled = true;
+    });
+    await vi.waitFor(() => {
+      expect(setStatus).toHaveBeenCalledWith(expect.objectContaining({
+        running: true,
+        connected: true,
+      }));
+    });
+
+    const server = (plugin as any).server;
+    const originalClose = server.close.bind(server);
+    let closeNow: (() => void) | undefined;
+    const closeSpy = vi.spyOn(server, 'close').mockImplementation((callback?: () => void) => {
+      closeNow = () => originalClose(callback);
+      return server;
+    });
+
+    try {
+      const stopPromise = plugin.stop();
+      await vi.waitFor(() => {
+        expect(closeNow).toBeTypeOf('function');
+      });
+      await flushAsyncContinuations();
+
+      expect(settled).toBe(false);
+      expect(setStatus).not.toHaveBeenCalledWith(expect.objectContaining({
+        running: false,
+      }));
+
+      closeNow?.();
+      await stopPromise;
+      await lifecycle;
+
+      expect(settled).toBe(true);
+      expect(setStatus).toHaveBeenCalledWith(expect.objectContaining({
+        running: false,
+        connected: false,
+        restartPending: false,
+      }));
+    } finally {
+      closeSpy.mockRestore();
+    }
+  });
+
+  it('preserves replacement lifecycle status when OpenClaw reuses the same context object', async () => {
+    const registerChannel = trackFn();
+    const api = makeApi({ registerChannel });
+    plugin.register(api);
+
+    const registeredPlugin = (registerChannel.calls[0][0] as any).plugin;
+    const setStatus = vi.fn();
+    const lifecycleCtx = {
+      accountId: 'default',
+      account: { accountId: 'default' },
+      cfg: {},
+      runtime: {},
+      getStatus: () => ({ accountId: 'default' }),
+      setStatus,
+    };
+    const firstLifecycle = registeredPlugin.gateway.startAccount(lifecycleCtx);
+    await vi.waitFor(() => {
+      expect(setStatus.mock.calls.filter(([status]) => status.running === true)).toHaveLength(1);
+    });
+
+    const replacementLifecycle = registeredPlugin.gateway.startAccount(lifecycleCtx);
+    await vi.waitFor(() => {
+      expect(setStatus.mock.calls.filter(([status]) => status.running === true)).toHaveLength(2);
+    });
+    await firstLifecycle;
+
+    await plugin.stop();
+    await replacementLifecycle;
+
+    expect(setStatus).toHaveBeenCalledWith(expect.objectContaining({
+      running: false,
+      connected: false,
+      restartPending: false,
+    }));
+  });
+
+  it('clears shutdown state when OpenClaw restarts the registered gateway lifecycle', async () => {
+    const registerChannel = trackFn();
+    const api = makeApi({ registerChannel });
+    plugin.register(api);
+
+    const registeredPlugin = (registerChannel.calls[0][0] as any).plugin;
+    await plugin.start();
+
+    await registeredPlugin.gateway.stopAccount({
+      accountId: 'default',
+      account: { accountId: 'default' },
+      cfg: {},
+      runtime: {},
+      abortSignal: new AbortController().signal,
+      getStatus: () => ({ accountId: 'default' }),
+      setStatus: vi.fn(),
+    });
+    const internal = plugin as unknown as { stopping: boolean };
+    expect(internal.stopping).toBe(true);
+
+    const controller = new AbortController();
+    const lifecycle = registeredPlugin.gateway.startAccount({
+      accountId: 'default',
+      account: { accountId: 'default' },
+      cfg: {},
+      runtime: {},
+      abortSignal: controller.signal,
+      getStatus: () => ({ accountId: 'default' }),
+      setStatus: vi.fn(),
+    });
+    await waitForBridgePort(plugin);
+
+    expect(internal.stopping).toBe(false);
+
+    controller.abort();
+    await lifecycle;
+  });
+
+  it('waits for an in-flight stop before restarting the registered gateway lifecycle', async () => {
+    const registerChannel = trackFn();
+    const api = makeApi({ registerChannel });
+    plugin.register(api);
+
+    const registeredPlugin = (registerChannel.calls[0][0] as any).plugin;
+    await plugin.start();
+    const server = (plugin as any).server;
+    const originalClose = server.close.bind(server);
+    let closeNow: (() => void) | undefined;
+    const closeSpy = vi.spyOn(server, 'close').mockImplementation((callback?: () => void) => {
+      closeNow = () => originalClose(callback);
+      return server;
+    });
+
+    try {
+      const stopPromise = plugin.stop();
+      await vi.waitFor(() => {
+        expect(closeNow).toBeTypeOf('function');
+      });
+
+      const controller = new AbortController();
+      const setStatus = vi.fn();
+      const lifecycle = registeredPlugin.gateway.startAccount({
+        accountId: 'default',
+        account: { accountId: 'default' },
+        cfg: {},
+        runtime: {},
+        abortSignal: controller.signal,
+        getStatus: () => ({ accountId: 'default' }),
+        setStatus,
+      });
+
+      await flushAsyncContinuations();
+      expect(setStatus).not.toHaveBeenCalledWith(expect.objectContaining({
+        running: true,
+      }));
+
+      closeNow?.();
+      await stopPromise;
+      await waitForBridgePort(plugin);
+      expect(setStatus).toHaveBeenCalledWith(expect.objectContaining({
+        running: true,
+        connected: true,
+      }));
+
+      controller.abort();
+      await lifecycle;
+    } finally {
+      closeSpy.mockRestore();
+    }
+  });
+
+  it('ignores different-account stopAccount while a lifecycle is waiting to claim ownership', async () => {
+    const registerChannel = trackFn();
+    const api = makeApi({ registerChannel });
+    plugin.register(api);
+
+    const registeredPlugin = (registerChannel.calls[0][0] as any).plugin;
+    await plugin.start();
+    const server = (plugin as any).server;
+    const originalClose = server.close.bind(server);
+    let closeNow: (() => void) | undefined;
+    const closeSpy = vi.spyOn(server, 'close').mockImplementation((callback?: () => void) => {
+      closeNow = () => originalClose(callback);
+      return server;
+    });
+
+    try {
+      const stopPromise = plugin.stop();
+      await vi.waitFor(() => {
+        expect(closeNow).toBeTypeOf('function');
+      });
+
+      const controller = new AbortController();
+      const setStatus = vi.fn();
+      const lifecycle = registeredPlugin.gateway.startAccount({
+        accountId: 'default',
+        account: { accountId: 'default' },
+        cfg: {},
+        runtime: {},
+        abortSignal: controller.signal,
+        getStatus: () => ({ accountId: 'default' }),
+        setStatus,
+      });
+      await flushAsyncContinuations();
+
+      const unrelatedStopStatus = vi.fn();
+      await registeredPlugin.gateway.stopAccount({
+        accountId: 'other',
+        account: { accountId: 'other' },
+        cfg: {},
+        runtime: {},
+        getStatus: () => ({ accountId: 'other' }),
+        setStatus: unrelatedStopStatus,
+      });
+      expect(unrelatedStopStatus).toHaveBeenCalledWith(expect.objectContaining({
+        accountId: 'other',
+        running: false,
+        connected: false,
+      }));
+
+      closeNow?.();
+      await stopPromise;
+      await waitForBridgePort(plugin);
+      expect(setStatus).toHaveBeenCalledWith(expect.objectContaining({
+        running: true,
+        connected: true,
+      }));
+
+      controller.abort();
+      await lifecycle;
+    } finally {
+      closeSpy.mockRestore();
+    }
+  });
+
+  it('waits for an abort-triggered lifecycle stop before starting the replacement lifecycle', async () => {
+    const registerChannel = trackFn();
+    const api = makeApi({ registerChannel });
+    plugin.register(api);
+
+    const registeredPlugin = (registerChannel.calls[0][0] as any).plugin;
+    const firstController = new AbortController();
+    const firstLifecycle = registeredPlugin.gateway.startAccount({
+      accountId: 'default',
+      account: { accountId: 'default' },
+      cfg: {},
+      runtime: {},
+      abortSignal: firstController.signal,
+      getStatus: () => ({ accountId: 'default' }),
+      setStatus: vi.fn(),
+    });
+    await waitForBridgePort(plugin);
+
+    const server = (plugin as any).server;
+    const originalClose = server.close.bind(server);
+    let closeNow: (() => void) | undefined;
+    const closeSpy = vi.spyOn(server, 'close').mockImplementation((callback?: () => void) => {
+      closeNow = () => originalClose(callback);
+      return server;
+    });
+
+    try {
+      firstController.abort();
+      await vi.waitFor(() => {
+        expect(closeNow).toBeTypeOf('function');
+      });
+
+      const replacementController = new AbortController();
+      const replacementStatus = vi.fn();
+      const replacementLifecycle = registeredPlugin.gateway.startAccount({
+        accountId: 'default',
+        account: { accountId: 'default' },
+        cfg: {},
+        runtime: {},
+        abortSignal: replacementController.signal,
+        getStatus: () => ({ accountId: 'default' }),
+        setStatus: replacementStatus,
+      });
+
+      await flushAsyncContinuations();
+      expect(replacementStatus).not.toHaveBeenCalledWith(expect.objectContaining({
+        running: true,
+      }));
+
+      closeNow?.();
+      await firstLifecycle;
+      await waitForBridgePort(plugin);
+      expect(replacementStatus).toHaveBeenCalledWith(expect.objectContaining({
+        running: true,
+        connected: true,
+      }));
+
+      replacementController.abort();
+      await replacementLifecycle;
+    } finally {
+      closeSpy.mockRestore();
+    }
+  });
+
+  it('does not let a stale aborted lifecycle stop a replacement bridge', async () => {
+    const registerChannel = trackFn();
+    const api = makeApi({ registerChannel });
+    plugin.register(api);
+
+    const registeredPlugin = (registerChannel.calls[0][0] as any).plugin;
+    const firstController = new AbortController();
+    const firstStatus = vi.fn();
+    const firstLifecycle = registeredPlugin.gateway.startAccount({
+      accountId: 'default',
+      account: { accountId: 'default' },
+      cfg: {},
+      runtime: {},
+      abortSignal: firstController.signal,
+      getStatus: () => ({ accountId: 'default' }),
+      setStatus: firstStatus,
+    });
+    await vi.waitFor(() => {
+      expect(firstStatus).toHaveBeenCalledWith(expect.objectContaining({
+        running: true,
+        connected: true,
+      }));
+    });
+
+    const replacementController = new AbortController();
+    const replacementStatus = vi.fn();
+    firstController.abort();
+    const replacementLifecycle = registeredPlugin.gateway.startAccount({
+      accountId: 'default',
+      account: { accountId: 'default' },
+      cfg: {},
+      runtime: {},
+      abortSignal: replacementController.signal,
+      getStatus: () => ({ accountId: 'default' }),
+      setStatus: replacementStatus,
+    });
+
+    await vi.waitFor(() => {
+      expect(replacementStatus).toHaveBeenCalledWith(expect.objectContaining({
+        running: true,
+        connected: true,
+      }));
+    });
+    await firstLifecycle;
+    expect(plugin.isListening).toBe(true);
+
+    replacementController.abort();
+    await replacementLifecycle;
+    expect(plugin.isListening).toBe(false);
+  });
+
+  it('ignores a stale stopAccount request for a replaced lifecycle', async () => {
+    const registerChannel = trackFn();
+    const api = makeApi({ registerChannel });
+    plugin.register(api);
+
+    const registeredPlugin = (registerChannel.calls[0][0] as any).plugin;
+    const firstController = new AbortController();
+    const firstStatus = vi.fn();
+    const firstLifecycle = registeredPlugin.gateway.startAccount({
+      accountId: 'default',
+      account: { accountId: 'default' },
+      cfg: {},
+      runtime: {},
+      abortSignal: firstController.signal,
+      getStatus: () => ({ accountId: 'default' }),
+      setStatus: firstStatus,
+    });
+    await vi.waitFor(() => {
+      expect(firstStatus).toHaveBeenCalledWith(expect.objectContaining({
+        running: true,
+        connected: true,
+      }));
+    });
+
+    const replacementController = new AbortController();
+    const replacementStatus = vi.fn();
+    firstController.abort();
+    const replacementLifecycle = registeredPlugin.gateway.startAccount({
+      accountId: 'default',
+      account: { accountId: 'default' },
+      cfg: {},
+      runtime: {},
+      abortSignal: replacementController.signal,
+      getStatus: () => ({ accountId: 'default' }),
+      setStatus: replacementStatus,
+    });
+    await vi.waitFor(() => {
+      expect(replacementStatus).toHaveBeenCalledWith(expect.objectContaining({
+        running: true,
+        connected: true,
+      }));
+    });
+    await firstLifecycle;
+
+    const staleStopStatus = vi.fn();
+    await registeredPlugin.gateway.stopAccount({
+      accountId: 'default',
+      account: { accountId: 'default' },
+      cfg: {},
+      runtime: {},
+      abortSignal: firstController.signal,
+      getStatus: () => ({ accountId: 'default' }),
+      setStatus: staleStopStatus,
+    });
+
+    expect(plugin.isListening).toBe(true);
+    expect(staleStopStatus).not.toHaveBeenCalledWith(expect.objectContaining({
+      running: false,
+    }));
+
+    replacementController.abort();
+    await replacementLifecycle;
+    expect(plugin.isListening).toBe(false);
+  });
+
+  it('ignores a stale no-signal stopAccount request for a replaced lifecycle', async () => {
+    const registerChannel = trackFn();
+    const api = makeApi({ registerChannel });
+    plugin.register(api);
+
+    const registeredPlugin = (registerChannel.calls[0][0] as any).plugin;
+    const firstStatus = vi.fn();
+    const firstCtx = {
+      accountId: 'default',
+      account: { accountId: 'default' },
+      cfg: {},
+      runtime: {},
+      getStatus: () => ({ accountId: 'default' }),
+      setStatus: firstStatus,
+    };
+    const firstLifecycle = registeredPlugin.gateway.startAccount(firstCtx);
+    await vi.waitFor(() => {
+      expect(firstStatus).toHaveBeenCalledWith(expect.objectContaining({
+        running: true,
+        connected: true,
+      }));
+    });
+
+    const replacementStatus = vi.fn();
+    const replacementCtx = {
+      accountId: 'default',
+      account: { accountId: 'default' },
+      cfg: {},
+      runtime: {},
+      getStatus: () => ({ accountId: 'default' }),
+      setStatus: replacementStatus,
+    };
+    const replacementLifecycle = registeredPlugin.gateway.startAccount(replacementCtx);
+    await vi.waitFor(() => {
+      expect(replacementStatus).toHaveBeenCalledWith(expect.objectContaining({
+        running: true,
+        connected: true,
+      }));
+    });
+    await firstLifecycle;
+
+    await registeredPlugin.gateway.stopAccount(firstCtx);
+    expect(plugin.isListening).toBe(true);
+    expect(firstStatus).not.toHaveBeenCalledWith(expect.objectContaining({
+      running: false,
+    }));
+
+    await registeredPlugin.gateway.stopAccount(replacementCtx);
+    await replacementLifecycle;
+    expect(plugin.isListening).toBe(false);
+  });
+
+  it('does not stop an active bridge when a lifecycle aborts before claiming post-start ownership', async () => {
+    const registerChannel = trackFn();
+    const api = makeApi({ registerChannel });
+    plugin.register(api);
+    await plugin.start();
+
+    const registeredPlugin = (registerChannel.calls[0][0] as any).plugin;
+    let abortedReads = 0;
+    const signal: any = {
+      get aborted() {
+        abortedReads += 1;
+        return abortedReads > 1;
+      },
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    };
+    const setStatus = vi.fn();
+
+    await registeredPlugin.gateway.startAccount({
+      accountId: 'default',
+      account: { accountId: 'default' },
+      cfg: {},
+      runtime: {},
+      abortSignal: signal,
+      getStatus: () => ({ accountId: 'default' }),
+      setStatus,
+    });
+
+    expect(plugin.isListening).toBe(true);
+    expect(setStatus).not.toHaveBeenCalled();
+  });
+
+  it('does not report running when a replacement lifecycle is aborted while waiting for stop to finish', async () => {
+    const registerChannel = trackFn();
+    const api = makeApi({ registerChannel });
+    plugin.register(api);
+
+    const registeredPlugin = (registerChannel.calls[0][0] as any).plugin;
+    await plugin.start();
+
+    const server = (plugin as any).server;
+    const originalClose = server.close.bind(server);
+    let closeNow: (() => void) | undefined;
+    const closeSpy = vi.spyOn(server, 'close').mockImplementation((callback?: () => void) => {
+      closeNow = () => originalClose(callback);
+      return server;
+    });
+
+    try {
+      const stopPromise = plugin.stop();
+      await vi.waitFor(() => {
+        expect(closeNow).toBeTypeOf('function');
+      });
+
+      const controller = new AbortController();
+      const setStatus = vi.fn();
+      const lifecycle = registeredPlugin.gateway.startAccount({
+        accountId: 'default',
+        account: { accountId: 'default' },
+        cfg: {},
+        runtime: {},
+        abortSignal: controller.signal,
+        getStatus: () => ({ accountId: 'default' }),
+        setStatus,
+      });
+      controller.abort();
+
+      closeNow?.();
+      await stopPromise;
+      await lifecycle;
+
+      expect(plugin.isListening).toBe(false);
+      expect(setStatus.mock.calls.some(([status]) => status.running === true)).toBe(false);
+    } finally {
+      closeSpy.mockRestore();
+    }
+  });
+
+  it('settles the gateway lifecycle wait if abort flips during listener registration', async () => {
+    const signal: any = {
+      aborted: false,
+      removeEventListener: vi.fn(),
+    };
+    signal.addEventListener = vi.fn(() => {
+      signal.aborted = true;
+    });
+
+    await (plugin as any).waitForGatewayLifecycleStop(signal);
+
+    expect(signal.addEventListener).toHaveBeenCalledWith('abort', expect.any(Function), { once: true });
+    expect(signal.removeEventListener).toHaveBeenCalledWith('abort', expect.any(Function));
   });
 
   it('should call registerHttpRoute if available', () => {
@@ -402,15 +1968,20 @@ describe('DkgChannelPlugin', () => {
     api.cfg = mockCfg;
     const storeCalls: unknown[][] = [];
     client.storeChatTurn = async (...args: unknown[]) => { storeCalls.push(args); return undefined as any; };
+    const markExternalTurnPersistedDurable = vi.fn().mockResolvedValue(undefined);
+    plugin.setChatTurnWriter({ markExternalTurnPersistedDurable } as any);
     plugin.register(api);
 
     const reply = await plugin.processInbound('Hello', 'corr-1', 'owner');
 
     expect(reply.text).toBe('Hello from agent');
     expect(reply.correlationId).toBe('corr-1');
+    expect(reply.sessionKey).toBe('session-1');
     expect(dispatched).toMatchObject({
       ctx: expect.objectContaining({
         BodyForAgent: 'Hello',
+        DkgTurnId: 'corr-1',
+        CorrelationId: 'corr-1',
         SessionKey: 'session-1',
       }),
       cfg: mockCfg,
@@ -425,6 +1996,8 @@ describe('DkgChannelPlugin', () => {
       sessionKey: 'session-1',
       ctx: expect.objectContaining({
         BodyForAgent: 'Hello',
+        DkgTurnId: 'corr-1',
+        CorrelationId: 'corr-1',
         From: 'owner',
       }),
     }));
@@ -485,7 +2058,7 @@ describe('DkgChannelPlugin', () => {
     expect(reply.text).toBe('Hello from legacy runtime');
     expect(dispatchCalls).toHaveLength(1);
     expect(dispatchCalls[0][0]).toMatchObject({ BodyForAgent: 'Hello', SessionKey: 'session-1' });
-    expect(dispatchCalls[0][1]).toBe(mockCfg);
+    expect(dispatchCalls[0][1]).toEqual(mockCfg);
     expect(dispatchCalls[0][2]).toMatchObject({
       deliver: expect.any(Function),
       onError: expect.any(Function),
@@ -514,6 +2087,8 @@ describe('DkgChannelPlugin', () => {
     api.cfg = mockCfg;
     const storeCalls: unknown[][] = [];
     client.storeChatTurn = async (...args: unknown[]) => { storeCalls.push(args); return undefined as any; };
+    const markExternalTurnPersistedDurable = vi.fn().mockResolvedValue(undefined);
+    plugin.setChatTurnWriter({ markExternalTurnPersistedDurable } as any);
     plugin.register(api);
 
     await plugin.processInbound('User message', 'corr-persist', 'owner');
@@ -526,6 +2101,37 @@ describe('DkgChannelPlugin', () => {
       'Agent reply',
       { turnId: 'corr-persist' },
     ]);
+    expect(markExternalTurnPersistedDurable).toHaveBeenCalledWith({
+      sessionKey: 'session-1',
+      turnId: 'corr-persist',
+      user: 'User message',
+      assistant: 'Agent reply',
+    });
+  });
+
+  it('processInbound should persist without throwing when ChatTurnWriter is not wired', async () => {
+    const { runtime } = makeMockRuntime({
+      dispatchImpl: async (params) => {
+        await params.dispatcherOptions.deliver({ text: 'Agent reply' });
+      },
+    });
+    const mockCfg = { session: { dmScope: 'main' }, agents: {} };
+
+    const api = makeApi() as any;
+    api.runtime = runtime;
+    api.cfg = mockCfg;
+    const storeCalls: unknown[][] = [];
+    client.storeChatTurn = async (...args: unknown[]) => { storeCalls.push(args); return undefined as any; };
+    plugin.register(api);
+
+    await expect(plugin.processInbound('User message', 'corr-no-writer', 'owner')).resolves.toMatchObject({
+      text: 'Agent reply',
+      correlationId: 'corr-no-writer',
+    });
+    await new Promise(r => setTimeout(r, 10));
+
+    expect(storeCalls).toHaveLength(1);
+    expect((plugin as any).pendingMarkerPersistence.size).toBe(0);
   });
 
   it('processInbound should carry attachment refs into the runtime prompt and persist them with the turn', async () => {
@@ -695,6 +2301,382 @@ describe('DkgChannelPlugin', () => {
     }
   });
 
+  it('processInbound should retry only the ChatTurnWriter marker after daemon write succeeds', async () => {
+    vi.useFakeTimers();
+    try {
+      const { runtime } = makeMockRuntime({
+        dispatchImpl: async (params) => {
+          await params.dispatcherOptions.deliver({ text: 'Persisted reply' });
+        },
+      });
+      const mockCfg = { session: { dmScope: 'main' }, agents: {} };
+
+      const api = makeApi({
+        logger: { info: trackFn(), warn: trackFn(), debug: trackFn() },
+      } as any) as any;
+      api.runtime = runtime;
+      api.cfg = mockCfg;
+      const storeCalls: unknown[][] = [];
+      client.storeChatTurn = async (...args: unknown[]) => { storeCalls.push(args); return undefined as any; };
+      const markExternalTurnPersistedDurable = vi.fn()
+        .mockRejectedValueOnce(new Error('marker disk outage'))
+        .mockRejectedValueOnce(new Error('marker disk outage again'))
+        .mockResolvedValueOnce(undefined);
+      plugin.setChatTurnWriter({ markExternalTurnPersistedDurable } as any);
+      plugin.register(api);
+
+      await plugin.processInbound('Already stored', 'corr-marker-fail', 'owner');
+      await vi.advanceTimersByTimeAsync(10);
+      expect(storeCalls).toHaveLength(1);
+      expect(markExternalTurnPersistedDurable).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(250);
+      expect(storeCalls).toHaveLength(1);
+      expect(markExternalTurnPersistedDurable).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(storeCalls).toHaveLength(1);
+      expect(markExternalTurnPersistedDurable).toHaveBeenCalledTimes(3);
+      expect(api.logger.warn.calls.some((call: unknown[]) =>
+        String(call[0]).includes('retrying marker'),
+      )).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('processInbound caps ChatTurnWriter marker-only retries after daemon write succeeds', async () => {
+    vi.useFakeTimers();
+    try {
+      const { runtime } = makeMockRuntime({
+        dispatchImpl: async (params) => {
+          await params.dispatcherOptions.deliver({ text: 'Persisted reply' });
+        },
+      });
+      const mockCfg = { session: { dmScope: 'main' }, agents: {} };
+
+      const api = makeApi({
+        logger: { info: trackFn(), warn: trackFn(), debug: trackFn() },
+      } as any) as any;
+      api.runtime = runtime;
+      api.cfg = mockCfg;
+      const storeCalls: unknown[][] = [];
+      client.storeChatTurn = async (...args: unknown[]) => { storeCalls.push(args); return undefined as any; };
+      const markExternalTurnPersistedDurable = vi.fn()
+        .mockRejectedValue(new Error('marker disk outage'));
+      plugin.setChatTurnWriter({ markExternalTurnPersistedDurable } as any);
+      plugin.register(api);
+
+      await plugin.processInbound('Already stored', 'corr-marker-permanent-fail', 'owner');
+      await vi.advanceTimersByTimeAsync(10);
+      expect(storeCalls).toHaveLength(1);
+      expect(markExternalTurnPersistedDurable).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(250);
+      expect(markExternalTurnPersistedDurable).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(markExternalTurnPersistedDurable).toHaveBeenCalledTimes(3);
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(storeCalls).toHaveLength(1);
+      expect(markExternalTurnPersistedDurable).toHaveBeenCalledTimes(3);
+      expect((plugin as any).pendingMarkerPersistence.size).toBe(0);
+      expect(api.logger.warn.calls.some((call: unknown[]) =>
+        String(call[0]).includes('failed permanently'),
+      )).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('stop should drain an in-flight initial ChatTurnWriter marker write', async () => {
+    vi.useFakeTimers();
+    try {
+      let resolveInitialMarker!: () => void;
+      const { runtime } = makeMockRuntime({
+        dispatchImpl: async (params) => {
+          await params.dispatcherOptions.deliver({ text: 'Persisted reply' });
+        },
+      });
+      const mockCfg = { session: { dmScope: 'main' }, agents: {} };
+
+      const api = makeApi({
+        logger: { info: trackFn(), warn: trackFn(), debug: trackFn() },
+      } as any) as any;
+      api.runtime = runtime;
+      api.cfg = mockCfg;
+      client.storeChatTurn = async () => undefined as any;
+      const markExternalTurnPersistedDurable = vi.fn()
+        .mockImplementation(() => new Promise<void>((resolve) => { resolveInitialMarker = resolve; }));
+      plugin.setChatTurnWriter({ markExternalTurnPersistedDurable } as any);
+      plugin.register(api);
+
+      await plugin.processInbound('Already stored', 'corr-marker-initial-hang', 'owner');
+      await vi.advanceTimersByTimeAsync(10);
+      expect(markExternalTurnPersistedDurable).toHaveBeenCalledTimes(1);
+      const markerJob = (plugin as any).pendingMarkerPersistence.get('corr-marker-initial-hang');
+      expect(markerJob).toMatchObject({
+        attempt: 1,
+        timer: null,
+        allowDuringShutdown: true,
+      });
+      expect(typeof markerJob.inFlight.then).toBe('function');
+
+      const stopPromise = plugin.stop();
+      let stopSettled = false;
+      void stopPromise.then(() => { stopSettled = true; });
+      await Promise.resolve();
+      expect(stopSettled).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(1_500);
+      await Promise.resolve();
+      expect(stopSettled).toBe(false);
+      expect(markExternalTurnPersistedDurable).toHaveBeenCalledTimes(1);
+
+      resolveInitialMarker();
+      await stopPromise;
+
+      expect(stopSettled).toBe(true);
+      expect(markExternalTurnPersistedDurable).toHaveBeenCalledTimes(1);
+      expect(markExternalTurnPersistedDurable).toHaveBeenLastCalledWith({
+        sessionKey: 'session-1',
+        turnId: 'corr-marker-initial-hang',
+        user: 'Already stored',
+        assistant: 'Persisted reply',
+      });
+      expect((plugin as any).pendingMarkerPersistence.size).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('stop should account for a marker created after storeChatTurn settles during final shutdown drain', async () => {
+    vi.useFakeTimers();
+    try {
+      let resolveStore!: () => void;
+      const storePromise = new Promise<void>((resolve) => { resolveStore = resolve; });
+      const { runtime } = makeMockRuntime({
+        dispatchImpl: async (params) => {
+          await params.dispatcherOptions.deliver({ text: 'Persisted reply' });
+        },
+      });
+      const mockCfg = { session: { dmScope: 'main' }, agents: {} };
+
+      const api = makeApi({
+        logger: { info: trackFn(), warn: trackFn(), debug: trackFn() },
+      } as any) as any;
+      api.runtime = runtime;
+      api.cfg = mockCfg;
+      const storeCalls: unknown[][] = [];
+      client.storeChatTurn = ((...args: unknown[]) => {
+        storeCalls.push(args);
+        return storePromise;
+      }) as any;
+      const markExternalTurnPersistedDurable = vi.fn().mockResolvedValue(undefined);
+      plugin.setChatTurnWriter({ markExternalTurnPersistedDurable } as any);
+      plugin.register(api);
+
+      await plugin.processInbound('Late store', 'corr-late-marker-after-store', 'owner');
+      await vi.advanceTimersByTimeAsync(10);
+      expect(storeCalls).toHaveLength(1);
+      expect((plugin as any).pendingTurnPersistence.size).toBe(1);
+      expect(markExternalTurnPersistedDurable).not.toHaveBeenCalled();
+
+      const stopPromise = plugin.stop();
+      let stopSettled = false;
+      void stopPromise.then(() => { stopSettled = true; });
+      await Promise.resolve();
+
+      await vi.advanceTimersByTimeAsync(1_500);
+      await Promise.resolve();
+      expect(stopSettled).toBe(false);
+      expect(markExternalTurnPersistedDurable).not.toHaveBeenCalled();
+
+      resolveStore();
+      await stopPromise;
+
+      expect(stopSettled).toBe(true);
+      expect(storeCalls).toHaveLength(1);
+      expect(markExternalTurnPersistedDurable).toHaveBeenCalledTimes(1);
+      expect(markExternalTurnPersistedDurable).toHaveBeenCalledWith({
+        sessionKey: 'session-1',
+        turnId: 'corr-late-marker-after-store',
+        user: 'Late store',
+        assistant: 'Persisted reply',
+      });
+      expect((plugin as any).pendingTurnPersistence.size).toBe(0);
+      expect((plugin as any).pendingMarkerPersistence.size).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('stop should not create a hidden marker job when storeChatTurn settles after the final shutdown window', async () => {
+    vi.useFakeTimers();
+    try {
+      let resolveStore!: () => void;
+      const storePromise = new Promise<void>((resolve) => { resolveStore = resolve; });
+      const { runtime } = makeMockRuntime({
+        dispatchImpl: async (params) => {
+          await params.dispatcherOptions.deliver({ text: 'Persisted reply' });
+        },
+      });
+      const mockCfg = { session: { dmScope: 'main' }, agents: {} };
+
+      const api = makeApi({
+        logger: { info: trackFn(), warn: trackFn(), debug: trackFn() },
+      } as any) as any;
+      api.runtime = runtime;
+      api.cfg = mockCfg;
+      const storeCalls: unknown[][] = [];
+      client.storeChatTurn = ((...args: unknown[]) => {
+        storeCalls.push(args);
+        return storePromise;
+      }) as any;
+      const markExternalTurnPersistedDurable = vi.fn().mockResolvedValue(undefined);
+      plugin.setChatTurnWriter({ markExternalTurnPersistedDurable } as any);
+      plugin.register(api);
+
+      await plugin.processInbound('Late timeout', 'corr-late-marker-after-timeout', 'owner');
+      await vi.advanceTimersByTimeAsync(10);
+      expect(storeCalls).toHaveLength(1);
+
+      const stopPromise = plugin.stop();
+      await vi.advanceTimersByTimeAsync(1_750);
+      await stopPromise;
+
+      expect((plugin as any).pendingTurnPersistence.size).toBe(0);
+      expect((plugin as any).pendingMarkerPersistence.size).toBe(0);
+      expect(markExternalTurnPersistedDurable).not.toHaveBeenCalled();
+
+      resolveStore();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(storeCalls).toHaveLength(1);
+      expect(markExternalTurnPersistedDurable).not.toHaveBeenCalled();
+      expect((plugin as any).pendingMarkerPersistence.size).toBe(0);
+      expect(api.logger.warn.calls.some((call: unknown[]) =>
+        String(call[0]).includes('completed after shutdown marker drain'),
+      )).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('stop should force one final ChatTurnWriter marker flush before dropping timed-out marker jobs', async () => {
+    vi.useFakeTimers();
+    try {
+      let resolveSecondMarker!: () => void;
+      const { runtime } = makeMockRuntime({
+        dispatchImpl: async (params) => {
+          await params.dispatcherOptions.deliver({ text: 'Persisted reply' });
+        },
+      });
+      const mockCfg = { session: { dmScope: 'main' }, agents: {} };
+
+      const api = makeApi({
+        logger: { info: trackFn(), warn: trackFn(), debug: trackFn() },
+      } as any) as any;
+      api.runtime = runtime;
+      api.cfg = mockCfg;
+      client.storeChatTurn = async () => undefined as any;
+      const markExternalTurnPersistedDurable = vi.fn()
+        .mockRejectedValueOnce(new Error('marker disk outage'))
+        .mockImplementationOnce(() => new Promise<void>((resolve) => { resolveSecondMarker = resolve; }));
+      plugin.setChatTurnWriter({ markExternalTurnPersistedDurable } as any);
+      plugin.register(api);
+
+      await plugin.processInbound('Already stored', 'corr-marker-stop-timeout', 'owner');
+      await vi.advanceTimersByTimeAsync(10);
+      expect(markExternalTurnPersistedDurable).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(250);
+      expect(markExternalTurnPersistedDurable).toHaveBeenCalledTimes(2);
+      expect((plugin as any).pendingMarkerPersistence.size).toBe(1);
+
+      const stopPromise = plugin.stop();
+      let stopSettled = false;
+      void stopPromise.then(() => { stopSettled = true; });
+      await Promise.resolve();
+      expect(stopSettled).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(1_500);
+      await Promise.resolve();
+      expect(stopSettled).toBe(false);
+      expect(markExternalTurnPersistedDurable).toHaveBeenCalledTimes(2);
+
+      resolveSecondMarker();
+      await stopPromise;
+
+      expect(stopSettled).toBe(true);
+      expect(markExternalTurnPersistedDurable).toHaveBeenCalledTimes(2);
+      expect(markExternalTurnPersistedDurable).toHaveBeenLastCalledWith({
+        sessionKey: 'session-1',
+        turnId: 'corr-marker-stop-timeout',
+        user: 'Already stored',
+        assistant: 'Persisted reply',
+      });
+      expect((plugin as any).pendingMarkerPersistence.size).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('stop should keep the final ChatTurnWriter marker flush bounded when the final write hangs', async () => {
+    vi.useFakeTimers();
+    try {
+      const { runtime } = makeMockRuntime({
+        dispatchImpl: async (params) => {
+          await params.dispatcherOptions.deliver({ text: 'Persisted reply' });
+        },
+      });
+      const mockCfg = { session: { dmScope: 'main' }, agents: {} };
+
+      const api = makeApi({
+        logger: { info: trackFn(), warn: trackFn(), debug: trackFn() },
+      } as any) as any;
+      api.runtime = runtime;
+      api.cfg = mockCfg;
+      client.storeChatTurn = async () => undefined as any;
+      const markExternalTurnPersistedDurable = vi.fn()
+        .mockRejectedValueOnce(new Error('marker disk outage'))
+        .mockImplementation(() => new Promise(() => {}));
+      plugin.setChatTurnWriter({ markExternalTurnPersistedDurable } as any);
+      plugin.register(api);
+
+      await plugin.processInbound('Already stored', 'corr-marker-stop-timeout-hang', 'owner');
+      await vi.advanceTimersByTimeAsync(10);
+      await vi.advanceTimersByTimeAsync(250);
+      expect(markExternalTurnPersistedDurable).toHaveBeenCalledTimes(2);
+
+      const stopPromise = plugin.stop();
+      let stopSettled = false;
+      void stopPromise.then(() => { stopSettled = true; });
+      await Promise.resolve();
+      expect(stopSettled).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(1_500);
+      await Promise.resolve();
+      expect(markExternalTurnPersistedDurable).toHaveBeenCalledTimes(2);
+      expect(stopSettled).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(249);
+      await Promise.resolve();
+      expect(stopSettled).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(1);
+      await stopPromise;
+
+      expect(stopSettled).toBe(true);
+      expect((plugin as any).pendingMarkerPersistence.size).toBe(0);
+      expect(api.logger.warn.calls.some((call: unknown[]) =>
+        String(call[0]).includes('Final ChatTurnWriter marker flush timed out'),
+      )).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('persistTurn should use separate sessionId for non-owner identities', async () => {
     const { runtime } = makeMockRuntime({
       resolveAgentRouteImpl: () => ({ agentId: 'agent-1', sessionKey: 'session-1' }),
@@ -710,6 +2692,8 @@ describe('DkgChannelPlugin', () => {
     api.cfg = mockCfg;
     const storeCalls: unknown[][] = [];
     client.storeChatTurn = async (...args: unknown[]) => { storeCalls.push(args); return undefined as any; };
+    const markExternalTurnPersistedDurable = vi.fn().mockResolvedValue(undefined);
+    plugin.setChatTurnWriter({ markExternalTurnPersistedDurable } as any);
     plugin.register(api);
 
     await plugin.processInbound('decide', 'corr-game', 'background-worker');
@@ -835,6 +2819,187 @@ describe('DkgChannelPlugin', () => {
     ]);
   });
 
+  it('processInbound routeInboundMessage fallback marks direct-channel persists with the returned session key', async () => {
+    const routeInboundMessage = trackAsyncFn(async () => ({
+      correlationId: 'corr-route-marker',
+      text: 'Reply!',
+      sessionKey: 'agent:main:main',
+    }));
+    const storeCalls: unknown[][] = [];
+    client.storeChatTurn = async (...args: unknown[]) => { storeCalls.push(args); return undefined as any; };
+    const markExternalTurnPersistedDurable = vi.fn().mockResolvedValue(undefined);
+    plugin.setChatTurnWriter({ markExternalTurnPersistedDurable } as any);
+    const api = makeApi({ routeInboundMessage });
+    plugin.register(api);
+
+    const reply = await plugin.processInbound('Hello', 'corr-route-marker', 'owner');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(reply.sessionKey).toBe('agent:main:main');
+    expect(routeInboundMessage.calls[0][0]).not.toHaveProperty('sessionKey');
+    expect(routeInboundMessage.calls[0][0]).not.toHaveProperty('SessionKey');
+    expect(storeCalls[0]).toEqual([
+      'openclaw:dkg-ui',
+      'Hello',
+      'Reply!',
+      { turnId: 'corr-route-marker' },
+    ]);
+    expect(markExternalTurnPersistedDurable).toHaveBeenCalledWith({
+      sessionKey: 'agent:main:main',
+      turnId: 'corr-route-marker',
+      user: 'Hello',
+      assistant: 'Reply!',
+    });
+  });
+
+  it('processInbound routeInboundMessage fallback hashes the routed agent body for direct-channel markers', async () => {
+    const routeInboundMessage = trackAsyncFn(async () => ({
+      correlationId: 'corr-route-context-marker',
+      text: 'Reply!',
+      sessionKey: 'agent:main:main',
+    }));
+    const storeCalls: unknown[][] = [];
+    client.storeChatTurn = async (...args: unknown[]) => { storeCalls.push(args); return undefined as any; };
+    const markExternalTurnPersistedDurable = vi.fn().mockResolvedValue(undefined);
+    plugin.setChatTurnWriter({ markExternalTurnPersistedDurable } as any);
+    const api = makeApi({ routeInboundMessage });
+    plugin.register(api);
+
+    await plugin.processInbound('Hello', 'corr-route-context-marker', 'owner', {
+      contextEntries: [{ key: 'target_context_graph', label: 'Target context graph', value: 'dkg-code-project' }],
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(routeInboundMessage.calls[0][0].text).toContain('Context for this chat turn:');
+    expect(storeCalls[0][1]).toBe('Hello');
+    expect(markExternalTurnPersistedDurable).toHaveBeenCalledWith({
+      sessionKey: 'agent:main:main',
+      turnId: 'corr-route-context-marker',
+      user: expect.stringContaining('Context for this chat turn:'),
+      assistant: 'Reply!',
+    });
+  });
+
+  it('processInbound routeInboundMessage fallback does not collapse owner-like identities into the owner marker bucket', async () => {
+    const routeInboundMessage = trackAsyncFn(async () => ({
+      correlationId: 'corr-route-ownerish',
+      text: 'Reply!',
+      sessionKey: 'agent:main:owner',
+    }));
+    client.storeChatTurn = async () => undefined as any;
+    const markExternalTurnPersistedDurable = vi.fn().mockResolvedValue(undefined);
+    plugin.setChatTurnWriter({ markExternalTurnPersistedDurable } as any);
+    const api = makeApi({ routeInboundMessage });
+    plugin.register(api);
+
+    await plugin.processInbound('Hello', 'corr-route-ownerish', 'owner!');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(routeInboundMessage.calls[0][0]).toEqual(expect.objectContaining({
+      senderId: 'owner!',
+    }));
+    expect(routeInboundMessage.calls[0][0]).not.toHaveProperty('sessionKey');
+    expect(routeInboundMessage.calls[0][0]).not.toHaveProperty('SessionKey');
+    expect(markExternalTurnPersistedDurable).toHaveBeenCalledWith({
+      sessionKey: 'agent:main:owner',
+      turnId: 'corr-route-ownerish',
+      user: 'Hello',
+      assistant: 'Reply!',
+    });
+  });
+
+  it('processInbound routeInboundMessage fallback marks non-owner direct-channel persists with the non-owner session key', async () => {
+    const routeInboundMessage = trackAsyncFn(async () => ({
+      correlationId: 'corr-route-worker',
+      text: 'Worker reply',
+      sessionKey: 'agent:main:background-worker',
+    }));
+    const storeCalls: unknown[][] = [];
+    client.storeChatTurn = async (...args: unknown[]) => { storeCalls.push(args); return undefined as any; };
+    const markExternalTurnPersistedDurable = vi.fn().mockResolvedValue(undefined);
+    plugin.setChatTurnWriter({ markExternalTurnPersistedDurable } as any);
+    const api = makeApi({ routeInboundMessage });
+    plugin.register(api);
+
+    await plugin.processInbound('Work item', 'corr-route-worker', 'background-worker');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(routeInboundMessage.calls[0][0]).toEqual(expect.objectContaining({
+      senderId: 'background-worker',
+    }));
+    expect(routeInboundMessage.calls[0][0]).not.toHaveProperty('sessionKey');
+    expect(routeInboundMessage.calls[0][0]).not.toHaveProperty('SessionKey');
+    expect(storeCalls[0]).toEqual([
+      'openclaw:dkg-ui:background-worker',
+      'Work item',
+      'Worker reply',
+      { turnId: 'corr-route-worker' },
+    ]);
+    expect(markExternalTurnPersistedDurable).toHaveBeenCalledWith({
+      sessionKey: 'agent:main:background-worker',
+      turnId: 'corr-route-worker',
+      user: 'Work item',
+      assistant: 'Worker reply',
+    });
+  });
+
+  it('processInbound routeInboundMessage fallback accepts uppercase reply SessionKey for marker persistence', async () => {
+    const routeInboundMessage = trackAsyncFn(async () => ({
+      correlationId: 'corr-route-uppercase-session',
+      text: 'Reply!',
+      SessionKey: 'agent:legacy:actual',
+    }));
+    client.storeChatTurn = async () => undefined as any;
+    const markExternalTurnPersistedDurable = vi.fn().mockResolvedValue(undefined);
+    plugin.setChatTurnWriter({ markExternalTurnPersistedDurable } as any);
+    const api = makeApi({ routeInboundMessage });
+    plugin.register(api);
+
+    const reply = await plugin.processInbound('Hello', 'corr-route-uppercase-session', 'owner');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect((reply as any).SessionKey).toBe('agent:legacy:actual');
+    expect(reply.sessionKey).toBe('agent:legacy:actual');
+    expect(markExternalTurnPersistedDurable).toHaveBeenCalledWith({
+      sessionKey: 'agent:legacy:actual',
+      turnId: 'corr-route-uppercase-session',
+      user: 'Hello',
+      assistant: 'Reply!',
+    });
+  });
+
+  it('processInbound routeInboundMessage fallback skips marker persistence when the route does not return its resolved session key', async () => {
+    const routeInboundMessage = trackAsyncFn(async () => ({
+      correlationId: 'corr-route-no-session',
+      text: 'Reply!',
+    }));
+    const storeCalls: unknown[][] = [];
+    client.storeChatTurn = async (...args: unknown[]) => { storeCalls.push(args); return undefined as any; };
+    const markExternalTurnPersistedDurable = vi.fn().mockResolvedValue(undefined);
+    plugin.setChatTurnWriter({ markExternalTurnPersistedDurable } as any);
+    const api = makeApi({
+      routeInboundMessage,
+      logger: { info: trackFn(), warn: trackFn(), debug: trackFn() },
+    });
+    plugin.register(api);
+
+    await plugin.processInbound('Hello', 'corr-route-no-session', 'owner');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(routeInboundMessage.calls[0][0]).not.toHaveProperty('sessionKey');
+    expect(routeInboundMessage.calls[0][0]).not.toHaveProperty('SessionKey');
+    expect(storeCalls[0]).toEqual([
+      'openclaw:dkg-ui',
+      'Hello',
+      'Reply!',
+      { turnId: 'corr-route-no-session' },
+    ]);
+    expect(markExternalTurnPersistedDurable).not.toHaveBeenCalled();
+    expect(api.logger.warn.calls.some((call: unknown[]) =>
+      String(call[0]).includes('did not include sessionKey'),
+    )).toBe(true);
+  });
+
   it('processInbound wraps the routeInboundMessage fallback in an ALS dispatch scope so slot-backed recall sees the UI-selected CG (Codex B13)', async () => {
     // B13 regression guard. When the gateway has no `runtime.channel` and
     // the adapter falls back to `api.routeInboundMessage`, the fallback
@@ -846,9 +3011,17 @@ describe('DkgChannelPlugin', () => {
     // `plugin.getSessionProjectContextGraphId(undefined)` from inside the
     // callback (i.e. while the ALS scope is active) and asserts the
     // captured value matches the stamped `uiContextGraphId`.
-    const capture: { inScope?: string | undefined } = {};
-    const routeInboundMessage = vi.fn().mockImplementation(async () => {
+    const capture: {
+      inScope?: string | undefined;
+      sessionScope?: string | undefined;
+      alternateSessionScope?: string | undefined;
+    } = {};
+    const routeInboundMessage = vi.fn().mockImplementation(async (message: any) => {
+      expect(message).not.toHaveProperty('sessionKey');
+      expect(message).not.toHaveProperty('SessionKey');
       capture.inScope = plugin.getSessionProjectContextGraphId(undefined);
+      capture.sessionScope = plugin.getSessionProjectContextGraphId('agent:main:main');
+      capture.alternateSessionScope = plugin.getSessionProjectContextGraphId('agent:other:owner');
       return { correlationId: 'corr-b13', text: 'Reply from route' };
     });
     const api = makeApi({ routeInboundMessage });
@@ -863,6 +3036,8 @@ describe('DkgChannelPlugin', () => {
 
     // While the fallback was running, the ALS scope was populated.
     expect(capture.inScope).toBe('research-b13');
+    expect(capture.sessionScope).toBe('research-b13');
+    expect(capture.alternateSessionScope).toBe('research-b13');
     // After the dispatch resolves, the ALS is torn down.
     expect(plugin.getSessionProjectContextGraphId(undefined)).toBeUndefined();
   });
@@ -951,6 +3126,8 @@ describe('DkgChannelPlugin', () => {
     api.cfg = mockCfg;
     const storeCalls: unknown[][] = [];
     client.storeChatTurn = async (...args: unknown[]) => { storeCalls.push(args); return undefined as any; };
+    const markExternalTurnPersistedDurable = vi.fn().mockResolvedValue(undefined);
+    plugin.setChatTurnWriter({ markExternalTurnPersistedDurable } as any);
     plugin.register(api);
 
     const events: Array<{ type: string; delta?: string; text?: string; correlationId?: string }> = [];
@@ -965,6 +3142,8 @@ describe('DkgChannelPlugin', () => {
         CommandBody: 'Hello',
         BodyForCommands: 'Hello',
         AttachmentRefs: attachmentRefs,
+        DkgTurnId: 'corr-stream-runtime',
+        CorrelationId: 'corr-stream-runtime',
         SessionKey: 'session-1',
       }),
       cfg: mockCfg,
@@ -985,6 +3164,12 @@ describe('DkgChannelPlugin', () => {
       'Streamed reply',
       { turnId: 'corr-stream-runtime', attachmentRefs },
     ]);
+    expect(markExternalTurnPersistedDurable).toHaveBeenCalledWith({
+      sessionKey: 'session-1',
+      turnId: 'corr-stream-runtime',
+      user: expect.stringContaining('Attached Working Memory items:'),
+      assistant: 'Streamed reply',
+    });
   });
 
   it('processInboundStream should wait for a still-running dispatch to settle before persisting a closed stream', async () => {
@@ -1023,6 +3208,53 @@ describe('DkgChannelPlugin', () => {
       'Hello',
       'Partial reply',
       { turnId: 'corr-stream-cancel' },
+    ]);
+  });
+
+  it('stop should drain a disconnected stream whose dispatch has not settled yet', async () => {
+    let resumeDispatch!: () => void;
+    const { runtime } = makeMockRuntime({
+      dispatchImpl: async (params) => {
+        await params.dispatcherOptions.deliver({ text: 'Partial ' });
+        await new Promise<void>((resolve) => { resumeDispatch = resolve; });
+        await params.dispatcherOptions.deliver({ text: 'reply' });
+      },
+    });
+    const mockCfg = { session: { dmScope: 'main' }, agents: {} };
+
+    const api = makeApi() as any;
+    api.runtime = runtime;
+    api.cfg = mockCfg;
+    const storeCalls: unknown[][] = [];
+    client.storeChatTurn = async (...args: unknown[]) => { storeCalls.push(args); return undefined as any; };
+    const markExternalTurnPersistedDurable = vi.fn().mockResolvedValue(undefined);
+    plugin.setChatTurnWriter({ markExternalTurnPersistedDurable } as any);
+    plugin.register(api);
+
+    const stream = plugin.processInboundStream('Hello', 'corr-stream-cancel-stop', 'owner');
+    await expect(stream.next()).resolves.toEqual({
+      done: false,
+      value: { type: 'text_delta', delta: 'Partial ' },
+    });
+    await expect(stream.return(undefined)).resolves.toEqual({
+      done: true,
+      value: undefined,
+    });
+
+    const stopPromise = plugin.stop();
+    let stopSettled = false;
+    void stopPromise.then(() => { stopSettled = true; });
+    await Promise.resolve();
+    expect(stopSettled).toBe(false);
+
+    resumeDispatch();
+    await stopPromise;
+
+    expect(storeCalls[0]).toEqual([
+      'openclaw:dkg-ui',
+      'Hello',
+      'Partial reply',
+      { turnId: 'corr-stream-cancel-stop' },
     ]);
   });
 
@@ -1369,6 +3601,7 @@ describe('DkgChannelPlugin', () => {
     await expect(replyPromise).resolves.toEqual({
       text: 'Reply before shutdown',
       correlationId: 'corr-stop-nonstream',
+      sessionKey: 'session-1',
     });
 
     let stopSettled = false;
@@ -1430,6 +3663,10 @@ describe('DkgChannelPlugin', () => {
       expect(stopSettled).toBe(false);
 
       await vi.advanceTimersByTimeAsync(1_500);
+      await Promise.resolve();
+      expect(stopSettled).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(250);
       await stopPromise;
       expect(stopSettled).toBe(true);
       expect((plugin as any).pendingTurnPersistence.size).toBe(0);

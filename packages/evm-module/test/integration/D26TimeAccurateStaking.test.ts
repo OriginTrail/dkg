@@ -29,6 +29,8 @@
 
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 import { loadFixture, time } from '@nomicfoundation/hardhat-network-helpers';
+// @ts-expect-error: No type definitions available for assertion-tools
+import { kcTools } from 'assertion-tools';
 import { expect } from 'chai';
 import hre from 'hardhat';
 
@@ -36,8 +38,15 @@ import {
   Chronos,
   ConvictionStakingStorage,
   Hub,
+  KnowledgeCollectionStorage,
+  ParametersStorage,
+  Profile,
+  RandomSampling,
   RandomSamplingStorage,
+  ShardingTableStorage,
 } from '../../typechain';
+import { sqrt } from '../helpers/math-helpers';
+import { createProfile } from '../helpers/profile-helpers';
 
 const ALICE_ID = 42n;
 
@@ -48,6 +57,10 @@ const THREE_AND_HALF_X = (35n * SCALE18) / 10n;
 const SIX_X = 6n * SCALE18;
 const DAY = 24n * 60n * 60n;
 
+const PROOF_QUADS = [
+  '<urn:s> <urn:p> "o" .',
+];
+
 async function tsNow(): Promise<bigint> {
   return BigInt(await time.latest());
 }
@@ -57,7 +70,12 @@ describe('@integration D26 — time-accurate staking accounting', () => {
   let Hub: Hub;
   let CSS: ConvictionStakingStorage;
   let RSS: RandomSamplingStorage;
+  let RandomSampling: RandomSampling;
+  let ParametersStorage: ParametersStorage;
   let Chronos: Chronos;
+  let KnowledgeCollectionStorage: KnowledgeCollectionStorage;
+  let Profile: Profile;
+  let ShardingTableStorage: ShardingTableStorage;
 
   async function deployFixture() {
     // Mirror the @unit RandomSamplingStorage fixture — it pulls in the full
@@ -77,20 +95,198 @@ describe('@integration D26 — time-accurate staking accounting', () => {
     Hub = await hre.ethers.getContract<Hub>('Hub');
     CSS = await hre.ethers.getContract<ConvictionStakingStorage>('ConvictionStakingStorage');
     RSS = await hre.ethers.getContract<RandomSamplingStorage>('RandomSamplingStorage');
+    RandomSampling = await hre.ethers.getContract<RandomSampling>('RandomSampling');
+    ParametersStorage = await hre.ethers.getContract<ParametersStorage>('ParametersStorage');
     Chronos = await hre.ethers.getContract<Chronos>('Chronos');
-    return { accounts, Hub, CSS, RSS, Chronos };
+    KnowledgeCollectionStorage = await hre.ethers.getContract<KnowledgeCollectionStorage>(
+      'KnowledgeCollectionStorage',
+    );
+    Profile = await hre.ethers.getContract<Profile>('Profile');
+    ShardingTableStorage = await hre.ethers.getContract<ShardingTableStorage>(
+      'ShardingTableStorage',
+    );
+    return {
+      accounts,
+      Hub,
+      CSS,
+      RSS,
+      RandomSampling,
+      ParametersStorage,
+      Chronos,
+      KnowledgeCollectionStorage,
+      Profile,
+      ShardingTableStorage,
+    };
   }
 
   beforeEach(async () => {
     hre.helpers.resetDeploymentsJson();
-    ({ accounts, Hub, CSS, RSS, Chronos } = await loadFixture(deployFixture));
+    ({
+      accounts,
+      Hub,
+      CSS,
+      RSS,
+      RandomSampling,
+      ParametersStorage,
+      Chronos,
+      KnowledgeCollectionStorage,
+      Profile,
+      ShardingTableStorage,
+    } = await loadFixture(deployFixture));
   });
+
+  async function expectedBaselineScore(effectiveStake: bigint): Promise<bigint> {
+    const stakeCap = await ParametersStorage.maximumStake();
+    const cappedStake = effectiveStake > stakeCap ? stakeCap : effectiveStake;
+    const stakeRatio18 = (cappedStake * SCALE18) / stakeCap;
+    const stakeFactor18 = sqrt(stakeRatio18 * SCALE18);
+    const baselineComponent18 = (2n * SCALE18) / 1000n;
+    return (stakeFactor18 * baselineComponent18) / SCALE18;
+  }
+
+  async function createProofableKnowledgeCollection(): Promise<bigint> {
+    const chunks = kcTools.splitIntoChunks(PROOF_QUADS, 32);
+    const merkleRoot = kcTools.calculateMerkleRoot(PROOF_QUADS, 32);
+    const currentEpoch = await Chronos.getCurrentEpoch();
+    const args = [
+      accounts[0].address,
+      'd26-submit-proof-regression',
+      merkleRoot,
+      1,
+      32 * chunks.length,
+      currentEpoch,
+      currentEpoch + 1n,
+      0,
+      false,
+      chunks.length,
+    ] as const;
+
+    const knowledgeCollectionId =
+      await KnowledgeCollectionStorage.createKnowledgeCollection.staticCall(...args);
+    await KnowledgeCollectionStorage.createKnowledgeCollection(...args);
+    return knowledgeCollectionId;
+  }
+
+  async function createProofableNode(): Promise<{
+    identityId: bigint;
+    operational: SignerWithAddress;
+  }> {
+    const node = { admin: accounts[1], operational: accounts[2] };
+    const { identityId, nodeId } = await createProfile(Profile, node);
+    const identityId72 = BigInt(identityId);
+
+    await ShardingTableStorage.createNodeObject(1, nodeId, identityId72, 0);
+    await ShardingTableStorage.setIdentityId(0, identityId72);
+    await ShardingTableStorage.incrementNodesCount();
+
+    return { identityId: identityId72, operational: node.operational };
+  }
 
   // --------------------------------------------------------------------
   // 1. Mid-epoch expiry denominator
   // --------------------------------------------------------------------
 
   describe('mid-epoch expiry denominator', () => {
+    it('RandomSampling.calculateNodeScore uses active conviction multipliers', async () => {
+      const raw = (await ParametersStorage.maximumStake()) / 10n;
+      const boostedEffectiveStake = (raw * SIX_X) / SCALE18;
+
+      await CSS.createPosition(1, ALICE_ID, raw, 12, 0);
+
+      expect(await CSS.getNodeStakeV10(ALICE_ID)).to.equal(raw);
+      expect(await CSS.getNodeEffectiveStake(ALICE_ID)).to.equal(boostedEffectiveStake);
+
+      const score = await RandomSampling.calculateNodeScore(ALICE_ID);
+
+      expect(score).to.equal(await expectedBaselineScore(boostedEffectiveStake));
+      expect(score).to.not.equal(await expectedBaselineScore(raw));
+    });
+
+    it('RandomSampling.calculateNodeScore caps boosted effective stake after applying the multiplier', async () => {
+      const maximumStake = await ParametersStorage.maximumStake();
+      const raw = maximumStake / 2n;
+      const boostedEffectiveStake = (raw * SIX_X) / SCALE18;
+
+      await CSS.createPosition(1, ALICE_ID, raw, 12, 0);
+
+      expect(raw).to.be.lessThan(maximumStake);
+      expect(boostedEffectiveStake).to.be.greaterThan(maximumStake);
+      expect(await CSS.getNodeEffectiveStake(ALICE_ID)).to.equal(boostedEffectiveStake);
+
+      const score = await RandomSampling.calculateNodeScore(ALICE_ID);
+
+      expect(score).to.equal(await expectedBaselineScore(boostedEffectiveStake));
+      expect(score).to.equal(await expectedBaselineScore(maximumStake));
+      expect(score).to.not.equal(await expectedBaselineScore(raw));
+    });
+
+    it('RandomSampling.calculateNodeScore simulates expired multiplier drops', async () => {
+      const raw = (await ParametersStorage.maximumStake()) / 10n;
+
+      await CSS.createPosition(1, ALICE_ID, raw, 12, 0);
+      const position = await CSS.getPosition(1);
+      const boostedEffectiveStake = (raw * SIX_X) / SCALE18;
+
+      expect(await CSS.getNodeRunningEffectiveStake(ALICE_ID)).to.equal(boostedEffectiveStake);
+
+      await time.increaseTo(Number(position.expiryTimestamp + 1n));
+
+      expect(await RandomSampling.calculateNodeScore(ALICE_ID)).to.equal(
+        await expectedBaselineScore(raw),
+      );
+      expect(await CSS.getNodeRunningEffectiveStake(ALICE_ID)).to.equal(boostedEffectiveStake);
+    });
+
+    it('RandomSampling.submitProof settles expired multipliers before scoring and checkpointing', async () => {
+      const { identityId, operational } = await createProofableNode();
+      const raw = (await ParametersStorage.maximumStake()) / 10n;
+      const boostedEffectiveStake = (raw * SIX_X) / SCALE18;
+
+      await CSS.createPosition(1, identityId, raw, 12, 0);
+      const position = await CSS.getPosition(1);
+      expect(await CSS.getNodeRunningEffectiveStake(identityId)).to.equal(boostedEffectiveStake);
+
+      await time.increaseTo(Number(position.expiryTimestamp + 1n));
+
+      const knowledgeCollectionId = await createProofableKnowledgeCollection();
+      const chunkId = 0;
+      const { leaf, proof } = kcTools.calculateMerkleProof(PROOF_QUADS, 32, chunkId);
+      const epoch = await Chronos.getCurrentEpoch();
+      await RandomSampling.updateAndGetActiveProofPeriodStartBlock();
+      const { activeProofPeriodStartBlock } = await RandomSampling.getActiveProofPeriodStatus();
+      const proofingPeriodDurationInBlocks =
+        await RandomSampling.getActiveProofingPeriodDurationInBlocks();
+
+      await RSS.setNodeChallenge(identityId, {
+        knowledgeCollectionId,
+        chunkId,
+        knowledgeCollectionStorageContract: await KnowledgeCollectionStorage.getAddress(),
+        epoch,
+        activeProofPeriodStartBlock,
+        proofingPeriodDurationInBlocks,
+        solved: false,
+      });
+
+      const expectedScore = await expectedBaselineScore(raw);
+
+      await RandomSampling.connect(operational).submitProof(leaf, proof);
+
+      expect(await CSS.getNodeRunningEffectiveStake(identityId)).to.equal(raw);
+      expect(await RSS.getEpochNodeValidProofsCount(epoch, identityId)).to.equal(1n);
+      expect(await RSS.getNodeEpochScore(epoch, identityId)).to.equal(expectedScore);
+      expect(await RSS.getAllNodesEpochScore(epoch)).to.equal(expectedScore);
+      expect(await RSS.getNodeEpochProofPeriodScore(identityId, epoch, activeProofPeriodStartBlock)).to.equal(
+        expectedScore,
+      );
+      expect(await RSS.getEpochLastScorePerStake(identityId, epoch)).to.equal(
+        (expectedScore * SCALE18) / raw,
+      );
+      expect(await RSS.findScorePerStakeAt(identityId, epoch, await tsNow())).to.equal(
+        (expectedScore * SCALE18) / raw,
+      );
+      expect((await RSS.getNodeChallenge(identityId)).solved).to.equal(true);
+    });
+
     it('Node effective stake transitions from boosted to raw at exact expiryTimestamp', async () => {
       // Alice opens a 30-day tier-1 position (boost 1.5x on 2000 raw).
       // Effective now: 3000. At +30d it collapses to 2000 (raw tail).

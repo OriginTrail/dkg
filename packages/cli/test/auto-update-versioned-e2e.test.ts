@@ -37,7 +37,7 @@ describe.sequential('auto-update versioned e2e', { timeout: 30_000 }, () => {
           version,
           scripts: {
             build:
-              'node -e "require(\'node:fs\').mkdirSync(\'packages/cli/dist\', { recursive: true }); require(\'node:fs\').writeFileSync(\'packages/cli/dist/cli.js\', \'#!/usr/bin/env node\\\\nconsole.log(\\\"fixture\\\")\\\\n\');"',
+              'node -e "const fs=require(\'node:fs\'); fs.mkdirSync(\'packages/cli/dist\', { recursive: true }); fs.writeFileSync(\'packages/cli/dist/cli.js\', \'#!/usr/bin/env node\\\\nconsole.log(\\\"fixture\\\")\\\\n\'); fs.mkdirSync(\'packages/node-ui/dist-ui\', { recursive: true }); fs.writeFileSync(\'packages/node-ui/dist-ui/index.html\', \'<!doctype html><title>fixture</title>\');"',
           },
         },
         null,

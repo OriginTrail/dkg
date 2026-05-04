@@ -253,7 +253,7 @@ describe('@unit RandomSampling', () => {
 
   describe('version()', () => {
     it('Should return correct version', async () => {
-      expect(await RandomSampling.version()).to.equal('1.0.0');
+      expect(await RandomSampling.version()).to.equal('1.1.0');
     });
   });
 
@@ -357,7 +357,7 @@ describe('@unit RandomSampling', () => {
 
     it('Should revert submitProof if profile does not exist', async () => {
       await expect(
-        RandomSampling.connect(accounts[5]).submitProof('chunk', []),
+        RandomSampling.connect(accounts[5]).submitProof(ethers.ZeroHash, []),
       ).to.be.revertedWithCustomError(RandomSampling, 'ProfileDoesntExist');
     });
   });
@@ -891,6 +891,7 @@ describe('@unit RandomSampling', () => {
         endEpoch,
         0, // tokenAmount
         false, // isImmutable
+        1, // merkleLeafCount (v10 — pin-the-leaf-count guard, not exercised by Phase 10)
       );
       const receipt = await createTx.wait();
       // Parse kc id from the KnowledgeCollectionCreated event.

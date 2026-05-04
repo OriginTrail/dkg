@@ -368,6 +368,19 @@
   },
   {
     "inputs": [],
+    "name": "convictionStakingStorage",
+    "outputs": [
+      {
+        "internalType": "contract ConvictionStakingStorage",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
     "name": "epochStorage",
     "outputs": [
       {
@@ -537,6 +550,11 @@
             "type": "bool"
           },
           {
+            "internalType": "uint32",
+            "name": "merkleLeafCount",
+            "type": "uint32"
+          },
+          {
             "internalType": "uint72",
             "name": "publisherNodeIdentityId",
             "type": "uint72"
@@ -628,6 +646,11 @@
             "type": "bool"
           },
           {
+            "internalType": "uint32",
+            "name": "merkleLeafCount",
+            "type": "uint32"
+          },
+          {
             "internalType": "uint72",
             "name": "publisherNodeIdentityId",
             "type": "uint72"
@@ -707,19 +730,6 @@
   },
   {
     "inputs": [],
-    "name": "stakingStorage",
-    "outputs": [
-      {
-        "internalType": "contract StakingStorage",
-        "name": "",
-        "type": "address"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
     "name": "status",
     "outputs": [
       {
@@ -772,6 +782,11 @@
             "internalType": "uint96",
             "name": "newTokenAmount",
             "type": "uint96"
+          },
+          {
+            "internalType": "uint32",
+            "name": "newMerkleLeafCount",
+            "type": "uint32"
           },
           {
             "internalType": "uint256",
@@ -852,6 +867,11 @@
             "internalType": "uint96",
             "name": "newTokenAmount",
             "type": "uint96"
+          },
+          {
+            "internalType": "uint32",
+            "name": "newMerkleLeafCount",
+            "type": "uint32"
           },
           {
             "internalType": "uint256",

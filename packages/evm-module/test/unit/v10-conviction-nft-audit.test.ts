@@ -121,8 +121,13 @@ describe('@unit v10 conviction NFT audit', () => {
   // ========================================================================
   // E-16: live StakingStorage wiring sanity check
   // ========================================================================
-
-  describe('E-16 — DKGStakingConvictionNFT uses real StakingStorage reference', () => {
+  //
+  // v4.0.0 — Skipped: `DKGStakingConvictionNFT.stakingStorageAddress` was
+  // removed in Phase 2 of the V10 staking consolidation. The NFT now
+  // routes TRAC through `convictionStorage` (the V10 vault). The live-
+  // wiring sanity check is covered for CSS in
+  // `test/unit/ConvictionStakingStorage.test.ts`.
+  describe.skip('E-16 — DKGStakingConvictionNFT uses real StakingStorage reference', () => {
     it('stakingStorageAddress resolves to the live StakingStorage deployment', async () => {
       const liveSSAddr = await StakingStorageContract.getAddress();
       expect(await StakingNFT.stakingStorageAddress()).to.equal(liveSSAddr);
@@ -135,8 +140,14 @@ describe('@unit v10 conviction NFT audit', () => {
   // ========================================================================
   // E-2: DKGStakingConvictionNFT.unstake full coverage
   // ========================================================================
-
-  describe('E-2 — DKGStakingConvictionNFT.unstake full coverage', () => {
+  //
+  // v4.0.0 — Skipped: `DKGStakingConvictionNFT.{stake,unstake}` were
+  // removed in Phase 2 of the V10 staking consolidation. The V10 entry
+  // points are `createConviction` and `withdraw`. The withdraw path is
+  // exercised end-to-end in `test/v10-conviction.test.ts` ("atomic
+  // withdrawal" / "claim" / "createConviction"). Followup PR will rewrite
+  // these audit cases against the new API.
+  describe.skip('E-2 — DKGStakingConvictionNFT.unstake full coverage', () => {
     async function stake(
       signer: SignerWithAddress,
       amount: bigint,
@@ -273,8 +284,14 @@ describe('@unit v10 conviction NFT audit', () => {
   // ========================================================================
   // E-14: DKGStakingConvictionNFT lock-tier sanity (Flow 1 / Flow 2 strengthening)
   // ========================================================================
-
-  describe('E-14 — staking NFT lock-tier multiplier ladder', () => {
+  //
+  // v4.0.0 — Skipped: drives the lock-tier ladder via the deprecated
+  // `DKGStakingConvictionNFT.stake(...)` API removed in Phase 2 of the
+  // V10 staking consolidation. The multiplier ladder still lives on the
+  // NFT (`getMultiplier`) but the entry point is now `createConviction`.
+  // Followup PR will reframe these boundary checks; same tracking as
+  // E-2 / E-16 above.
+  describe.skip('E-14 — staking NFT lock-tier multiplier ladder', () => {
     const SCALE18 = 10n ** 18n;
     // (lockTier, expected multiplier as fractional-x-SCALE18)
     const tiers: Array<[number, bigint]> = [

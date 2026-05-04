@@ -16,6 +16,7 @@
     "branch": "main",
     "checkIntervalMinutes": 5
   },
+  "chainResetMarker": "v10-rs-staking-consolidation-2026-04-30",
   "chain": {
     "type": "evm",
     "rpcUrl": "https://sepolia.base.org",

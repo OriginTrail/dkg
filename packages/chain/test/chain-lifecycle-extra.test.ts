@@ -98,9 +98,12 @@ async function publishOneKCV10(opts: {
   const pubRaw = ethers.Signature.from(await coreOp.signMessage(pubDigest));
   const publisherSignature = { r: ethers.getBytes(pubRaw.r), vs: ethers.getBytes(pubRaw.yParityAndS) };
 
+  // PR #357: V10 ACK now binds merkleLeafCount (uint256). Mirrors
+  // helpers/v10-kc-helpers.ts:buildPublishAckDigest.
+  const merkleLeafCount = 1;
   const ackDigest = ethers.getBytes(ethers.solidityPackedKeccak256(
-    ['uint256', 'address', 'uint256', 'bytes32', 'uint256', 'uint256', 'uint256', 'uint256'],
-    [evmChainId, kav10Address, contextGraphId, ethers.hexlify(merkleRoot), kaCount, byteSize, epochs, tokenAmount],
+    ['uint256', 'address', 'uint256', 'bytes32', 'uint256', 'uint256', 'uint256', 'uint256', 'uint256'],
+    [evmChainId, kav10Address, contextGraphId, ethers.hexlify(merkleRoot), kaCount, byteSize, epochs, tokenAmount, merkleLeafCount],
   ));
   const ackRaw = ethers.Signature.from(await coreOp.signMessage(ackDigest));
 
@@ -113,6 +116,7 @@ async function publishOneKCV10(opts: {
     epochs,
     tokenAmount,
     isImmutable: false,
+    merkleLeafCount,
     paymaster: ethers.ZeroAddress,
     publisherNodeIdentityId: publisherIdentityId,
     publisherSignature,
@@ -229,6 +233,7 @@ describe('chain-lifecycle-extra — V10 lifecycle + adapter invariants', () => {
         newMerkleRoot,
         newByteSize: 256n,
         newTokenAmount: publishTokenAmount,
+        newMerkleLeafCount: 1,
       } as any);
 
       expect(updateResult.success).toBe(true);

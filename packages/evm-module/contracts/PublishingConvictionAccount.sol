@@ -158,7 +158,8 @@ contract PublishingConvictionAccount is INamed, IVersioned, ContractStatus, IIni
 
         acct.balance -= discountedCost;
 
-        if (!tokenContract.transfer(hub.getContractAddress("StakingStorage"), discountedCost)) {
+        // v4.0.0 — TRAC vault moved from StakingStorage to CSS.
+        if (!tokenContract.transfer(hub.getContractAddress("ConvictionStakingStorage"), discountedCost)) {
             revert InvalidAmount();
         }
 

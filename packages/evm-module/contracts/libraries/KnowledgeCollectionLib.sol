@@ -18,6 +18,11 @@ library KnowledgeCollectionLib {
         uint40 endEpoch;
         uint96 tokenAmount;
         bool isImmutable;
+        /// @notice Number of leaves in the V10 flat-KC Merkle tree (sorted +
+        ///         deduped `hashTripleV10` public leaves plus private roots),
+        ///         matching `V10MerkleTree` in `@origintrail-official/dkg-core`.
+        ///         `RandomSampling` uses this for `leafIndex = seed % count`.
+        uint32 merkleLeafCount;
     }
 
     error ExceededKnowledgeCollectionMaxSize(uint256 id, uint256 minted, uint256 requested, uint256 maxSize);

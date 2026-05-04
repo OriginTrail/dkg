@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import { join } from 'node:path';
 
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 9;
 const DEFAULT_RETENTION_DAYS = 90;
 
 export interface DashboardDBOptions {
@@ -216,6 +216,57 @@ export class DashboardDB {
       `);
     }
 
+    if (version < 7) {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS context_graph_subscriptions (
+          context_graph_id TEXT PRIMARY KEY,
+          name TEXT,
+          subscribed INTEGER NOT NULL,
+          synced INTEGER NOT NULL,
+          meta_synced INTEGER,
+          on_chain_id TEXT,
+          sync_scoped INTEGER NOT NULL DEFAULT 1,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_cg_subs_sync_scoped
+          ON context_graph_subscriptions(sync_scoped);
+      `);
+    }
+
+    if (version < 8) {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS context_graph_memberships (
+          context_graph_id TEXT NOT NULL,
+          principal_type TEXT NOT NULL,
+          principal_id TEXT NOT NULL,
+          role TEXT,
+          status TEXT NOT NULL,
+          source TEXT,
+          display_name TEXT,
+          metadata TEXT,
+          first_seen_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          PRIMARY KEY (context_graph_id, principal_type, principal_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_cg_members_context
+          ON context_graph_memberships(context_graph_id);
+        CREATE INDEX IF NOT EXISTS idx_cg_members_principal
+          ON context_graph_memberships(principal_type, principal_id);
+        CREATE INDEX IF NOT EXISTS idx_cg_members_status
+          ON context_graph_memberships(status);
+      `);
+    }
+
+    if (version < 9) {
+      const columns = this.db.prepare('PRAGMA table_info(context_graph_subscriptions)').all() as Array<{ name: string }>;
+      if (!columns.some((column) => column.name === 'shared_memory_synced')) {
+        this.db.exec(`
+          ALTER TABLE context_graph_subscriptions
+            ADD COLUMN shared_memory_synced INTEGER;
+        `);
+      }
+    }
+
     this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
 
     const savedRetention = this.db.prepare("SELECT value FROM settings WHERE key = 'retentionDays'").get() as { value: string } | undefined;
@@ -272,6 +323,125 @@ export class DashboardDB {
     return this.db.prepare(
       'SELECT * FROM metric_snapshots ORDER BY ts DESC LIMIT 1',
     ).get() as MetricSnapshotRow | undefined;
+  }
+
+  upsertContextGraphSubscription(record: {
+    context_graph_id: string;
+    name?: string | null;
+    subscribed: number;
+    synced: number;
+    shared_memory_synced?: number | null;
+    meta_synced?: number | null;
+    on_chain_id?: string | null;
+    sync_scoped: number;
+    updated_at: number;
+  }): void {
+    this.stmt('upsertContextGraphSubscription', `
+      INSERT INTO context_graph_subscriptions (
+        context_graph_id, name, subscribed, synced, shared_memory_synced, meta_synced,
+        on_chain_id, sync_scoped, updated_at
+      ) VALUES (
+        @context_graph_id, @name, @subscribed, @synced, @shared_memory_synced, @meta_synced,
+        @on_chain_id, @sync_scoped, @updated_at
+      )
+      ON CONFLICT(context_graph_id) DO UPDATE SET
+        name = excluded.name,
+        subscribed = excluded.subscribed,
+        synced = excluded.synced,
+        shared_memory_synced = excluded.shared_memory_synced,
+        meta_synced = excluded.meta_synced,
+        on_chain_id = excluded.on_chain_id,
+        sync_scoped = excluded.sync_scoped,
+        updated_at = excluded.updated_at
+    `).run({
+      context_graph_id: record.context_graph_id,
+      name: record.name ?? null,
+      subscribed: record.subscribed,
+      synced: record.synced,
+      shared_memory_synced: record.shared_memory_synced ?? null,
+      meta_synced: record.meta_synced ?? null,
+      on_chain_id: record.on_chain_id ?? null,
+      sync_scoped: record.sync_scoped,
+      updated_at: record.updated_at,
+    });
+  }
+
+  listContextGraphSubscriptions(): ContextGraphSubscriptionRow[] {
+    return this.db.prepare(
+      'SELECT * FROM context_graph_subscriptions ORDER BY context_graph_id ASC',
+    ).all() as ContextGraphSubscriptionRow[];
+  }
+
+  deleteContextGraphSubscription(contextGraphId: string): void {
+    this.stmt('deleteContextGraphSubscription', 'DELETE FROM context_graph_subscriptions WHERE context_graph_id = ?').run(contextGraphId);
+  }
+
+  upsertContextGraphMember(record: {
+    context_graph_id: string;
+    principal_type: ContextGraphMemberPrincipalType;
+    principal_id: string;
+    role?: string | null;
+    status: ContextGraphMemberStatus;
+    source?: string | null;
+    display_name?: string | null;
+    metadata?: string | null;
+    first_seen_at?: number | null;
+    updated_at: number;
+  }): void {
+    const firstSeenAt = record.first_seen_at ?? record.updated_at;
+    this.stmt('upsertContextGraphMember', `
+      INSERT INTO context_graph_memberships (
+        context_graph_id, principal_type, principal_id, role, status, source,
+        display_name, metadata, first_seen_at, updated_at
+      ) VALUES (
+        @context_graph_id, @principal_type, @principal_id, @role, @status, @source,
+        @display_name, @metadata, @first_seen_at, @updated_at
+      )
+      ON CONFLICT(context_graph_id, principal_type, principal_id) DO UPDATE SET
+        role = excluded.role,
+        status = excluded.status,
+        source = excluded.source,
+        display_name = excluded.display_name,
+        metadata = excluded.metadata,
+        first_seen_at = context_graph_memberships.first_seen_at,
+        updated_at = excluded.updated_at
+    `).run({
+      context_graph_id: record.context_graph_id,
+      principal_type: record.principal_type,
+      principal_id: record.principal_id,
+      role: record.role ?? null,
+      status: record.status,
+      source: record.source ?? null,
+      display_name: record.display_name ?? null,
+      metadata: record.metadata ?? null,
+      first_seen_at: firstSeenAt,
+      updated_at: record.updated_at,
+    });
+  }
+
+  listContextGraphMembers(contextGraphId?: string): ContextGraphMemberRow[] {
+    if (contextGraphId) {
+      return this.db.prepare(`
+        SELECT * FROM context_graph_memberships
+        WHERE context_graph_id = ?
+        ORDER BY principal_type ASC, principal_id ASC
+      `).all(contextGraphId) as ContextGraphMemberRow[];
+    }
+    return this.db.prepare(`
+      SELECT * FROM context_graph_memberships
+      ORDER BY context_graph_id ASC, principal_type ASC, principal_id ASC
+    `).all() as ContextGraphMemberRow[];
+  }
+
+  deleteContextGraphMember(
+    contextGraphId: string,
+    principalType: ContextGraphMemberPrincipalType,
+    principalId: string,
+  ): void {
+    this.stmt(
+      'deleteContextGraphMember',
+      'DELETE FROM context_graph_memberships WHERE context_graph_id = ? AND principal_type = ? AND principal_id = ?',
+    ).run(contextGraphId, principalType, principalId);
   }
 
   getSnapshotHistory(from: number, to: number, maxPoints = 500): MetricSnapshotRow[] {
@@ -1263,6 +1433,34 @@ export interface ChatPersistenceHealthRow {
   failed_count: number;
   overdue_pending_count: number;
   oldest_pending_queued_at: number | null;
+}
+
+export interface ContextGraphSubscriptionRow {
+  context_graph_id: string;
+  name: string | null;
+  subscribed: number;
+  synced: number;
+  shared_memory_synced: number | null;
+  meta_synced: number | null;
+  on_chain_id: string | null;
+  sync_scoped: number;
+  updated_at: number;
+}
+
+export type ContextGraphMemberPrincipalType = 'node' | 'agent' | 'identity';
+export type ContextGraphMemberStatus = 'active' | 'removed' | 'pending';
+
+export interface ContextGraphMemberRow {
+  context_graph_id: string;
+  principal_type: ContextGraphMemberPrincipalType;
+  principal_id: string;
+  role: string | null;
+  status: ContextGraphMemberStatus;
+  source: string | null;
+  display_name: string | null;
+  metadata: string | null;
+  first_seen_at: number;
+  updated_at: number;
 }
 
 export interface SpendingPeriod {

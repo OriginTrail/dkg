@@ -97,6 +97,19 @@
   },
   {
     "inputs": [],
+    "name": "convictionStakingStorage",
+    "outputs": [
+      {
+        "internalType": "contract ConvictionStakingStorage",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
     "name": "getShardingTable",
     "outputs": [
       {
@@ -298,19 +311,6 @@
     "outputs": [
       {
         "internalType": "contract ShardingTableStorage",
-        "name": "",
-        "type": "address"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "stakingStorage",
-    "outputs": [
-      {
-        "internalType": "contract StakingStorage",
         "name": "",
         "type": "address"
       }

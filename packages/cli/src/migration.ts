@@ -1,8 +1,68 @@
-import { existsSync, lstatSync } from 'node:fs';
-import { mkdir, rm, readFile } from 'node:fs/promises';
+import { existsSync, lstatSync, readFileSync } from 'node:fs';
+import { mkdir, rm, readFile, readlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { execSync, execFileSync } from 'node:child_process';
-import { releasesDir, repoDir, swapSlot, loadConfig, loadNetworkConfig, loadProjectConfig, gitCommandEnv, gitCommandArgs, slotEntryPoint } from './config.js';
+import { releasesDir, repoDir, swapSlot, loadConfig, loadNetworkConfig, loadProjectConfig, gitCommandEnv, gitCommandArgs, slotReady } from './config.js';
+import {
+  FULL_BUILD_COMMAND,
+  isNodeUiGitLayoutSlot,
+  NODE_UI_PACKAGE_NAME_FALLBACKS,
+  nodeUiPackageJsonPath,
+  nodeUiPackageNamesFromCliPackageJson,
+  nodeUiPackageNameFromPackageJson,
+  nodeUiNpmStaticIndexPaths,
+  nodeUiStaticBuildCommand,
+  nodeUiStaticIndexPath,
+  runtimeBuildCommandFromPackageJson,
+} from './node-ui-static.js';
+
+function npmCliPackageJsonPath(slotDir: string): string {
+  return join(
+    slotDir,
+    'node_modules',
+    '@origintrail-official',
+    'dkg',
+    'package.json',
+  );
+}
+
+function nodeUiPackageNamesForNpmSlot(slotDir: string): string[] {
+  try {
+    return nodeUiPackageNamesFromCliPackageJson(
+      readFileSync(npmCliPackageJsonPath(slotDir), 'utf-8'),
+    );
+  } catch {
+    return NODE_UI_PACKAGE_NAME_FALLBACKS;
+  }
+}
+
+function npmNodeUiStaticIndexPaths(slotDir: string): string[] {
+  return nodeUiNpmStaticIndexPaths(slotDir, nodeUiPackageNamesForNpmSlot(slotDir));
+}
+
+function hasNpmNodeUiStaticBundle(slotDir: string): boolean {
+  return npmNodeUiStaticIndexPaths(slotDir).some((indexFile) => existsSync(indexFile));
+}
+
+function hasRequiredNodeUiStaticBundle(slotDir: string): boolean {
+  if (isNodeUiGitLayoutSlot(slotDir)) {
+    return existsSync(nodeUiStaticIndexPath(slotDir));
+  }
+  return hasNpmNodeUiStaticBundle(slotDir);
+}
+
+function assertNodeUiStaticBundle(slotDir: string): void {
+  const indexFile = nodeUiStaticIndexPath(slotDir);
+  if (!existsSync(indexFile)) {
+    throw new Error(`Node UI static bundle missing (${indexFile})`);
+  }
+}
+
+function assertNpmNodeUiStaticBundle(slotDir: string): void {
+  if (!hasNpmNodeUiStaticBundle(slotDir)) {
+    throw new Error(`Node UI static bundle missing (${npmNodeUiStaticIndexPaths(slotDir).join(', ')})`);
+  }
+}
 
 export const _migrationIo = {
   execSync: execSync as (...args: any[]) => any,
@@ -10,6 +70,7 @@ export const _migrationIo = {
   repoDir: repoDir as () => string | null,
   loadConfig: loadConfig as () => Promise<any>,
   loadNetworkConfig: loadNetworkConfig as () => Promise<any>,
+  swapSlot: swapSlot as (slot: 'a' | 'b') => Promise<void>,
 };
 
 /**
@@ -18,9 +79,10 @@ export const _migrationIo = {
  */
 export async function migrateToBlueGreen(
   log: (msg: string) => void = console.log,
-  opts: { allowRemoteBootstrap?: boolean } = {},
+  opts: { allowRemoteBootstrap?: boolean; repairLiveNodeUi?: boolean } = {},
 ): Promise<void> {
-  const { execSync, execFileSync, repoDir, loadConfig, loadNetworkConfig } = _migrationIo;
+  const { execSync, execFileSync, repoDir, loadConfig, loadNetworkConfig, swapSlot: swapActiveSlot } = _migrationIo;
+  const repairLiveNodeUi = opts.repairLiveNodeUi ?? true;
   const INSTALL_TIMEOUT_MS = 10 * 60_000;
   const BUILD_TIMEOUT_MS = 15 * 60_000;
   const rDir = releasesDir();
@@ -79,14 +141,147 @@ export async function migrateToBlueGreen(
 
   const slotA = join(rDir, 'a');
   const slotB = join(rDir, 'b');
-  const slotReady = (slotDir: string) => {
-    const entry = slotEntryPoint(slotDir);
-    if (!entry) return false;
-    return existsSync(join(slotDir, '.git')) || existsSync(join(slotDir, 'package.json'));
-  };
-  if (hadCurrentLink && slotReady(slotA) && slotReady(slotB)) return;
+  if (
+    hadCurrentLink &&
+    slotReady(slotA) &&
+    slotReady(slotB) &&
+    hasRequiredNodeUiStaticBundle(slotA) &&
+    hasRequiredNodeUiStaticBundle(slotB)
+  ) {
+    return;
+  }
 
   log('Migrating to blue-green release slots...');
+
+  const runSlotCommand = (cmd: string, cwd: string, timeout: number): void => {
+    execSync(cmd, {
+      cwd,
+      encoding: 'utf-8',
+      stdio: 'pipe',
+      timeout,
+    });
+  };
+
+  const resolveNodeUiPackageNames = (slotDir: string): string[] => {
+    try {
+      return [nodeUiPackageNameFromPackageJson(
+        readFileSync(nodeUiPackageJsonPath(slotDir), 'utf-8'),
+      )];
+    } catch {
+      return NODE_UI_PACKAGE_NAME_FALLBACKS;
+    }
+  };
+
+  const runNodeUiStaticBuild = (slotDir: string): void => {
+    let lastError: unknown;
+    for (const packageName of resolveNodeUiPackageNames(slotDir)) {
+      try {
+        runSlotCommand(
+          nodeUiStaticBuildCommand(packageName),
+          slotDir,
+          BUILD_TIMEOUT_MS,
+        );
+        return;
+      } catch (err) {
+        lastError = err;
+      }
+    }
+    throw lastError;
+  };
+
+  const runtimeBuildCommand = (slotDir: string): string => {
+    try {
+      return runtimeBuildCommandFromPackageJson(
+        readFileSync(join(slotDir, 'package.json'), 'utf-8'),
+      );
+    } catch {
+      return FULL_BUILD_COMMAND;
+    }
+  };
+
+  const buildRuntimeAndNodeUi = (slotDir: string): void => {
+    runSlotCommand(runtimeBuildCommand(slotDir), slotDir, BUILD_TIMEOUT_MS);
+    if (!existsSync(nodeUiStaticIndexPath(slotDir))) {
+      runNodeUiStaticBuild(slotDir);
+    }
+    assertNodeUiStaticBundle(slotDir);
+  };
+
+  const repairNodeUiStaticBundle = (slotDir: string): void => {
+    if (isNodeUiGitLayoutSlot(slotDir)) {
+      runNodeUiStaticBuild(slotDir);
+      assertNodeUiStaticBundle(slotDir);
+      return;
+    }
+
+    assertNpmNodeUiStaticBundle(slotDir);
+  };
+
+  const activeSlotFromCurrent = async (): Promise<'a' | 'b' | null> => {
+    try {
+      const target = (await readlink(currentLink)).trim().split(/[\\/]/).pop();
+      if (target === 'a' || target === 'b') return target;
+    } catch {
+      // Fall back to active metadata below.
+    }
+    try {
+      const activeRaw = (await readFile(join(rDir, 'active'), 'utf-8')).trim();
+      if (activeRaw === 'a' || activeRaw === 'b') return activeRaw;
+    } catch {
+      return null;
+    }
+    return null;
+  };
+
+  const slotReadyWithNodeUi = (label: 'a' | 'b'): boolean => {
+    const slotDir = label === 'a' ? slotA : slotB;
+    return slotReady(slotDir) && hasRequiredNodeUiStaticBundle(slotDir);
+  };
+
+  const hasRestorableSlot = (): boolean =>
+    slotReadyWithNodeUi('a') || slotReadyWithNodeUi('b');
+  let noCurrentRepairError: unknown;
+
+  const ensureNodeUiBundle = (
+    slotDir: string,
+    label: 'a' | 'b',
+    liveSlot: 'a' | 'b' | null,
+  ): void => {
+    if (!slotReady(slotDir) || hasRequiredNodeUiStaticBundle(slotDir)) return;
+    if (liveSlot === label) {
+      if (!repairLiveNodeUi) {
+        log(`  Slot ${label}: Node UI static bundle missing in active slot; leaving live slot untouched.`);
+        return;
+      }
+      log(`  Slot ${label}: Node UI static bundle missing in active slot; rebuilding UI assets in place.`);
+    } else {
+      log(`  Slot ${label}: Node UI static bundle missing; building UI assets.`);
+    }
+    try {
+      repairNodeUiStaticBundle(slotDir);
+      log(`  Slot ${label}: Node UI static bundle built`);
+    } catch (err: any) {
+      if (liveSlot === label) {
+        log(
+          `  Slot ${label}: Node UI static bundle repair failed (${err?.message ?? String(err)}). ` +
+            'Continuing startup with the existing Node UI fallback page.',
+        );
+        return;
+      }
+      if (!liveSlot) {
+        noCurrentRepairError ??= err;
+        log(
+          `  Slot ${label}: Node UI static bundle repair failed (${err?.message ?? String(err)}). ` +
+            'Trying remaining slots before selecting an initial slot.',
+        );
+        return;
+      }
+      log(
+        `  Slot ${label}: Node UI static bundle repair failed (${err?.message ?? String(err)}). ` +
+          'Leaving inactive slot for the next update to rebuild.',
+      );
+    }
+  };
 
   const git = (args: string[], cwd?: string, repoUrl?: string): string =>
     String(execFileSync('git', [...gitCommandArgs(repoUrl, config?.autoUpdate ?? network?.autoUpdate), ...args], {
@@ -104,18 +299,8 @@ export async function migrateToBlueGreen(
     } else {
       git(['clone', '--branch', sourceBranch, sourceRepo, slotA], undefined, sourceRepo);
     }
-    execSync('pnpm install --frozen-lockfile', {
-      cwd: slotA,
-      encoding: 'utf-8',
-      stdio: 'pipe',
-      timeout: INSTALL_TIMEOUT_MS,
-    });
-    execSync('pnpm build:runtime', {
-      cwd: slotA,
-      encoding: 'utf-8',
-      stdio: 'pipe',
-      timeout: BUILD_TIMEOUT_MS,
-    });
+    runSlotCommand('pnpm install --frozen-lockfile', slotA, INSTALL_TIMEOUT_MS);
+    buildRuntimeAndNodeUi(slotA);
     log(`  Slot a: cloned and built from ${hasLocalRepo ? localRepo : sourceRepo}`);
   }
 
@@ -132,18 +317,8 @@ export async function migrateToBlueGreen(
       if (!hasLocalRepo) {
         git(['checkout', sourceBranch], slotB);
       }
-      execSync('pnpm install --frozen-lockfile', {
-        cwd: slotB,
-        encoding: 'utf-8',
-        stdio: 'pipe',
-        timeout: INSTALL_TIMEOUT_MS,
-      });
-      execSync('pnpm build:runtime', {
-        cwd: slotB,
-        encoding: 'utf-8',
-        stdio: 'pipe',
-        timeout: BUILD_TIMEOUT_MS,
-      });
+      runSlotCommand('pnpm install --frozen-lockfile', slotB, INSTALL_TIMEOUT_MS);
+      buildRuntimeAndNodeUi(slotB);
       log(`  Slot b: cloned and built`);
     } catch (err: any) {
       log(`  Slot b: clone/build failed (${err.message}). Retrying clone only.`);
@@ -162,17 +337,39 @@ export async function migrateToBlueGreen(
     }
   }
 
+  const liveSlot = hadCurrentLink ? await activeSlotFromCurrent() : null;
+  ensureNodeUiBundle(slotA, 'a', liveSlot);
+  ensureNodeUiBundle(slotB, 'b', liveSlot);
+
+  if (hadCurrentLink && liveSlot && !slotReadyWithNodeUi(liveSlot)) {
+    if (!repairLiveNodeUi) {
+      log(`Migration complete: active slot ${liveSlot} is missing Node UI static bundle; live slot left untouched.`);
+      return;
+    }
+    log(
+      `Migration complete: active slot ${liveSlot} is missing Node UI static bundle; ` +
+        'startup will continue with the existing Node UI fallback page.',
+    );
+    return;
+  }
+
   if (!hadCurrentLink) {
-    let initialSlot: 'a' | 'b' = 'a';
+    let initialSlot: 'a' | 'b' | null = null;
     try {
       const activeRaw = (await readFile(join(rDir, 'active'), 'utf-8')).trim();
-      if ((activeRaw === 'a' || activeRaw === 'b') && slotReady(join(rDir, activeRaw))) {
+      if ((activeRaw === 'a' || activeRaw === 'b') && slotReadyWithNodeUi(activeRaw)) {
         initialSlot = activeRaw;
       }
     } catch {
       // No prior active metadata; default to a.
     }
-    await swapSlot(initialSlot);
+    initialSlot ??= slotReadyWithNodeUi('a') ? 'a' : null;
+    initialSlot ??= slotReadyWithNodeUi('b') ? 'b' : null;
+    if (!initialSlot) {
+      if (noCurrentRepairError) throw noCurrentRepairError;
+      throw new Error('No blue-green slot has the required Node UI static bundle');
+    }
+    await swapActiveSlot(initialSlot);
     log(`Migration complete: releases/current → ${initialSlot}`);
     return;
   }

@@ -4,7 +4,7 @@ pragma solidity ^0.8.20;
 
 import {ProfileStorage} from "./storage/ProfileStorage.sol";
 import {ShardingTableStorage} from "./storage/ShardingTableStorage.sol";
-import {StakingStorage} from "./storage/StakingStorage.sol";
+import {ConvictionStakingStorage} from "./storage/ConvictionStakingStorage.sol";
 import {ContractStatus} from "./abstract/ContractStatus.sol";
 import {IInitializable} from "./interfaces/IInitializable.sol";
 import {INamed} from "./interfaces/INamed.sol";
@@ -17,7 +17,10 @@ contract ShardingTable is INamed, IVersioned, ContractStatus, IInitializable {
 
     ProfileStorage public profileStorage;
     ShardingTableStorage public shardingTableStorage;
-    StakingStorage public stakingStorage;
+    /// @notice v4.0.0 — V10 canonical node stake source. Replaces the prior
+    ///         `stakingStorage` reference; the V8 archive is unmaintained
+    ///         post-migration so its `getNodeStake` is not a faithful read.
+    ConvictionStakingStorage public convictionStakingStorage;
 
     uint256 public migrationPeriodEnd;
 
@@ -29,7 +32,7 @@ contract ShardingTable is INamed, IVersioned, ContractStatus, IInitializable {
     function initialize() public onlyHub {
         profileStorage = ProfileStorage(hub.getContractAddress("ProfileStorage"));
         shardingTableStorage = ShardingTableStorage(hub.getContractAddress("ShardingTableStorage"));
-        stakingStorage = StakingStorage(hub.getContractAddress("StakingStorage"));
+        convictionStakingStorage = ConvictionStakingStorage(hub.getContractAddress("ConvictionStakingStorage"));
     }
 
     function name() external pure virtual override returns (string memory) {
@@ -196,16 +199,22 @@ contract ShardingTable is INamed, IVersioned, ContractStatus, IInitializable {
         nodesPage = new ShardingTableLib.NodeInfo[](nodesNumber);
 
         ProfileStorage ps = profileStorage;
-        StakingStorage ss = stakingStorage;
+        ConvictionStakingStorage cs = convictionStakingStorage;
 
         uint72 nextIdentityId = startingIdentityId;
         uint72 index;
         while ((index < nodesNumber) && (nextIdentityId != ShardingTableLib.NULL)) {
+            // v4.0.0 — V10 canonical node stake. Down-cast to uint96 is safe
+            // under protocol invariants: `StakingV10.stake` enforces
+            // `nodeStakeV10 <= parametersStorage.maximumStake()` (uint96), and
+            // the V10 raw stake field cannot exceed the cap.
+            uint256 stake256 = cs.getNodeStakeV10(nextIdentityId);
+            uint96 stakeView = stake256 > type(uint96).max ? type(uint96).max : uint96(stake256);
             nodesPage[index] = ShardingTableLib.NodeInfo({
                 nodeId: ps.getNodeId(nextIdentityId),
                 identityId: nextIdentityId,
                 ask: ps.getAsk(nextIdentityId),
-                stake: ss.getNodeStake(nextIdentityId)
+                stake: stakeView
             });
 
             unchecked {

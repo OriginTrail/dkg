@@ -8,7 +8,12 @@ import type { Publisher, PublishOptions, PublishResult, KAManifestEntry, PhaseCa
 import { autoPartition } from './auto-partition.js';
 import { RESERVED_SUBJECT_PREFIXES, findReservedSubjectPrefix, isReservedSubject } from './reserved-subjects.js';
 import { skolemize } from './skolemize.js';
-import { computeTripleHashV10 as computeTripleHash, computePrivateRootV10 as computePrivateRoot, computeFlatKCRootV10 as computeFlatKCRoot } from './merkle.js';
+import {
+  computeTripleHashV10 as computeTripleHash,
+  computePrivateRootV10 as computePrivateRoot,
+  computeFlatKCRootV10 as computeFlatKCRoot,
+  computeFlatKCMerkleLeafCountV10,
+} from './merkle.js';
 import { validatePublishRequest } from './validation.js';
 import {
   generateTentativeMetadata,
@@ -1042,7 +1047,11 @@ export class DKGPublisher implements Publisher {
       .map(m => m.privateMerkleRoot)
       .filter((r): r is Uint8Array => r != null);
     const kcMerkleRoot = computeFlatKCRoot(allSkolemizedQuads, privateRoots);
-    this.log.info(ctx, `Computed kcMerkleRoot (flat) over ${allSkolemizedQuads.length} triple hashes + ${privateRoots.length} private root(s)`);
+    const kcMerkleLeafCount = computeFlatKCMerkleLeafCountV10(allSkolemizedQuads, privateRoots);
+    if (kcMerkleLeafCount > 0xffffffff) {
+      throw new Error(`V10 merkleLeafCount exceeds uint32: ${kcMerkleLeafCount}`);
+    }
+    this.log.info(ctx, `Computed kcMerkleRoot (flat) over ${allSkolemizedQuads.length} triple hashes + ${privateRoots.length} private root(s), leafCount=${kcMerkleLeafCount}`);
     const kaCount = manifestEntries.length;
     onPhase?.('prepare:merkle', 'end');
 
@@ -1092,10 +1101,9 @@ export class DKGPublisher implements Publisher {
       : new TextEncoder().encode(nquadsStr);
 
     // Pre-compute tokenAmount and epochs so they can be included in the
-    // H5-prefixed 8-field publish ACK digest (chainid, kav10Address, cgId,
-    // merkleRoot, kaCount, byteSize, epochs, tokenAmount) — matches
+    // H5-prefixed publish ACK digest (incl. merkleLeafCount) — matches
     // `packages/core/src/crypto/ack.ts:computePublishACKDigest` and
-    // `KnowledgeAssetsV10.sol:362-373`.
+    // `KnowledgeAssetsV10._executePublishCore`.
     const publishEpochs = 1;
     let precomputedTokenAmount = 0n;
     if (this.publisherWallet && typeof this.chain.getRequiredPublishTokenAmount === 'function') {
@@ -1165,6 +1173,7 @@ export class DKGPublisher implements Publisher {
           kcMerkleRoot, v10CgDomain, kaCount, rootEntities, publicByteSize, stagingQuads,
           publishEpochs, precomputedTokenAmount,
           swmGraphId, options.subGraphName,
+          kcMerkleLeafCount,
         );
         this.log.info(ctx, `V10: Collected ${v10ACKs.length} core node ACKs`);
       } catch (err) {
@@ -1235,6 +1244,7 @@ export class DKGPublisher implements Publisher {
         publicByteSize,
         BigInt(publishEpochs),
         precomputedTokenAmount,
+        BigInt(kcMerkleLeafCount),
       );
       const ackSig = ethers.Signature.from(
         await this.publisherWallet.signMessage(ackDigest),
@@ -1367,6 +1377,7 @@ export class DKGPublisher implements Publisher {
             byteSize: publicByteSize,
             epochs: 1,
             tokenAmount,
+            merkleLeafCount: kcMerkleLeafCount,
             isImmutable: false,
             paymaster: ethers.ZeroAddress,
             publisherNodeIdentityId: identityId,
@@ -1577,6 +1588,10 @@ export class DKGPublisher implements Publisher {
       .map(m => m.privateMerkleRoot)
       .filter((r): r is Uint8Array => r != null);
     const kcMerkleRoot = computeFlatKCRoot(allSkolemizedQuads, updatePrivateRoots);
+    const kcMerkleLeafCount = computeFlatKCMerkleLeafCountV10(allSkolemizedQuads, updatePrivateRoots);
+    if (kcMerkleLeafCount > 0xffffffff) {
+      throw new Error(`V10 merkleLeafCount exceeds uint32: ${kcMerkleLeafCount}`);
+    }
     onPhase?.('prepare:merkle', 'end');
     onPhase?.('prepare', 'end');
 
@@ -1629,6 +1644,7 @@ export class DKGPublisher implements Publisher {
             kcId,
             newMerkleRoot: kcMerkleRoot,
             newByteSize: updateByteSize,
+            newMerkleLeafCount: kcMerkleLeafCount,
             mintAmount: 0,
             publisherAddress: this.publisherAddress,
             v10Origin: true,

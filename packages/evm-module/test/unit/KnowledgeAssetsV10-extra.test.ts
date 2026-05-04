@@ -37,6 +37,7 @@ import {
   Chronos,
   ContextGraphStorage,
   ContextGraphs,
+  DKGStakingConvictionNFT,
   EpochStorage,
   Hub,
   KnowledgeAssetsV10,
@@ -44,6 +45,7 @@ import {
   ParametersStorage,
   Profile,
   Staking,
+  StakingV10,
   Token,
 } from '../../typechain';
 import {
@@ -69,6 +71,8 @@ describe('@unit KnowledgeAssetsV10 — extra audit coverage (E-4, E-5, E-8, E-9)
   let TokenContract: Token;
   let ProfileContract: Profile;
   let StakingContract: Staking;
+  let StakingV10Contract: StakingV10;
+  let StakingNFT: DKGStakingConvictionNFT;
   let ParametersStorageContract: ParametersStorage;
   let Facade: ContextGraphs;
   let CGStorageContract: ContextGraphStorage;
@@ -95,6 +99,9 @@ describe('@unit KnowledgeAssetsV10 — extra audit coverage (E-4, E-5, E-8, E-9)
       'ContextGraphs',
       'ContextGraphValueStorage',
       'DKGPublishingConvictionNFT',
+      // v4.0.0 — KAv10 ACK gate reads getNodeStakeV10; pull V10 staking stack.
+      'StakingV10',
+      'DKGStakingConvictionNFT',
       'KnowledgeAssetsV10',
     ]);
     const signers = await hre.ethers.getSigners();
@@ -110,6 +117,10 @@ describe('@unit KnowledgeAssetsV10 — extra audit coverage (E-4, E-5, E-8, E-9)
       Token: await hre.ethers.getContract<Token>('Token'),
       Profile: await hre.ethers.getContract<Profile>('Profile'),
       Staking: await hre.ethers.getContract<Staking>('Staking'),
+      StakingV10: await hre.ethers.getContract<StakingV10>('StakingV10'),
+      StakingNFT: await hre.ethers.getContract<DKGStakingConvictionNFT>(
+        'DKGStakingConvictionNFT',
+      ),
       ParametersStorage: await hre.ethers.getContract<ParametersStorage>(
         'ParametersStorage',
       ),
@@ -133,19 +144,26 @@ describe('@unit KnowledgeAssetsV10 — extra audit coverage (E-4, E-5, E-8, E-9)
     TokenContract = f.Token;
     ProfileContract = f.Profile;
     StakingContract = f.Staking;
+    StakingV10Contract = f.StakingV10;
+    StakingNFT = f.StakingNFT;
     ParametersStorageContract = f.ParametersStorage;
     Facade = f.Facade;
     CGStorageContract = f.CGStorage;
     kav10Address = await KAV10.getAddress();
   });
 
+  // v4.0.0 — KAv10 ACK gate reads getNodeStakeV10; route through V10 NFT path.
   async function fundAndStakeNode(node: NodeAccounts, identityId: number) {
     await TokenContract.mint(node.operational.address, MIN_STAKE);
     await TokenContract.connect(node.operational).approve(
-      await StakingContract.getAddress(),
+      await StakingV10Contract.getAddress(),
       MIN_STAKE,
     );
-    await StakingContract.connect(node.operational).stake(identityId, MIN_STAKE);
+    await StakingNFT.connect(node.operational).createConviction(
+      identityId,
+      MIN_STAKE,
+      1,
+    );
   }
 
   async function setupNodes(receivingNodesCount = 3) {
@@ -227,6 +245,7 @@ describe('@unit KnowledgeAssetsV10 — extra audit coverage (E-4, E-5, E-8, E-9)
         cgId,
         merkleRoot,
       );
+      const merkleLeafCount = 1;
       const ackDigest = buildPublishAckDigest(
         chainId,
         kav10Address,
@@ -236,6 +255,7 @@ describe('@unit KnowledgeAssetsV10 — extra audit coverage (E-4, E-5, E-8, E-9)
         signedAck.byteSize,
         signedAck.epochs,
         signedAck.tokenAmount,
+        merkleLeafCount,
       );
       const sig = await signPublishDigests(
         publishingNode,
@@ -254,6 +274,7 @@ describe('@unit KnowledgeAssetsV10 — extra audit coverage (E-4, E-5, E-8, E-9)
         epochs: submittedOverride.epochs ?? baseEpochs,
         tokenAmount: submittedOverride.tokenAmount ?? baseTokenAmount,
         isImmutable: false,
+        merkleLeafCount,
         publisherNodeIdentityId: publisherIdentityId,
         publisherNodeR: sig.publisherR,
         publisherNodeVS: sig.publisherVS,
@@ -360,6 +381,7 @@ describe('@unit KnowledgeAssetsV10 — extra audit coverage (E-4, E-5, E-8, E-9)
         byteSize,
         epochs,
         tokenAmount,
+        1,
       );
       const sig = await signPublishDigests(
         publishingNode,
@@ -377,6 +399,7 @@ describe('@unit KnowledgeAssetsV10 — extra audit coverage (E-4, E-5, E-8, E-9)
         epochs,
         tokenAmount,
         isImmutable: false,
+        merkleLeafCount: 1,
         publisherNodeIdentityId: publisherIdentityId,
         publisherNodeR: sig.publisherR,
         publisherNodeVS: sig.publisherVS,
@@ -476,6 +499,7 @@ describe('@unit KnowledgeAssetsV10 — extra audit coverage (E-4, E-5, E-8, E-9)
         byteSize,
         epochs,
         tokenAmount,
+        1,
       );
       const sig = await signPublishDigests(
         publishingNode,
@@ -493,6 +517,7 @@ describe('@unit KnowledgeAssetsV10 — extra audit coverage (E-4, E-5, E-8, E-9)
         epochs,
         tokenAmount,
         isImmutable: false,
+        merkleLeafCount: 1,
         publisherNodeIdentityId: publisherIdentityId,
         publisherNodeR: sig.publisherR,
         publisherNodeVS: sig.publisherVS,

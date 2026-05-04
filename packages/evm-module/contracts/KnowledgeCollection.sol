@@ -73,7 +73,8 @@ contract KnowledgeCollection is INamed, IVersioned, ContractStatus, IInitializab
         bytes32 publisherNodeVS,
         uint72[] calldata identityIds,
         bytes32[] calldata r,
-        bytes32[] calldata vs
+        bytes32[] calldata vs,
+        uint32 merkleLeafCount
     ) external returns (uint256) {
         _verifySignature(
             publisherNodeIdentityId,
@@ -96,7 +97,8 @@ contract KnowledgeCollection is INamed, IVersioned, ContractStatus, IInitializab
             currentEpoch,
             currentEpoch + epochs,
             tokenAmount,
-            isImmutable
+            isImmutable,
+            merkleLeafCount
         );
 
         // Validate that the provided token amount is sufficient
@@ -288,7 +290,14 @@ contract KnowledgeCollection is INamed, IVersioned, ContractStatus, IInitializab
                 revert TokenLib.TooLowBalance(address(token), token.balanceOf(msg.sender), tokenAmount);
             }
 
-            if (!token.transferFrom(msg.sender, address(hub.getContractAddress("StakingStorage")), tokenAmount)) {
+            if (
+                !token.transferFrom(
+                    msg.sender,
+                    // v4.0.0 — TRAC vault moved from StakingStorage to CSS.
+                    address(hub.getContractAddress("ConvictionStakingStorage")),
+                    tokenAmount
+                )
+            ) {
                 revert TokenLib.TransferFailed();
             }
         }

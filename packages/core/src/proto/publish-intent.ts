@@ -42,7 +42,9 @@ export const PublishIntentSchema = new Type('PublishIntent')
   // id 42. Handlers resolve SWM via `swmGraphId ?? contextGraphId` + the
   // optional `subGraphName` suffix.
   .add(new Field('swmGraphId', 11, 'string'))
-  .add(new Field('subGraphName', 12, 'string'));
+  .add(new Field('subGraphName', 12, 'string'))
+  /** V10 flat-KC Merkle leaf count (sorted + deduped); must match ACK digest + on-chain KC. */
+  .add(new Field('merkleLeafCount', 13, 'uint32'));
 
 type Long = { low: number; high: number; unsigned: boolean };
 
@@ -73,6 +75,8 @@ export interface PublishIntentMsg {
    * writes into a sub-graph partition.
    */
   subGraphName?: string;
+  /** V10 flat-KC Merkle leaf count after sort+dedupe (see `V10MerkleTree.leafCount`). */
+  merkleLeafCount?: number;
 }
 
 export function encodePublishIntent(msg: PublishIntentMsg): Uint8Array {

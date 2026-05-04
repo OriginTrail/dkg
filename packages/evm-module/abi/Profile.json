@@ -11,6 +11,11 @@
     "type": "constructor"
   },
   {
+    "inputs": [],
+    "name": "AdminEqualsOperational",
+    "type": "error"
+  },
+  {
     "inputs": [
       {
         "internalType": "uint72",
@@ -113,6 +118,22 @@
     "type": "error"
   },
   {
+    "inputs": [],
+    "name": "OperationalAddressZero",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "key",
+        "type": "bytes32"
+      }
+    ],
+    "name": "OperationalKeyTaken",
+    "type": "error"
+  },
+  {
     "inputs": [
       {
         "internalType": "uint16",
@@ -121,6 +142,17 @@
       }
     ],
     "name": "OperatorFeeOutOfRange",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      }
+    ],
+    "name": "ProfileDoesntExist",
     "type": "error"
   },
   {
@@ -159,6 +191,24 @@
     "inputs": [],
     "name": "ZeroAsk",
     "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      },
+      {
+        "internalType": "address[]",
+        "name": "operationalWallets",
+        "type": "address[]"
+      }
+    ],
+    "name": "addOperationalWallets",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
   },
   {
     "inputs": [],

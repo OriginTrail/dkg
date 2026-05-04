@@ -58,6 +58,59 @@ describe('DkgDaemonClient', () => {
     });
   });
 
+  it('getAgentIdentity uses constructor auth headers', async () => {
+    const authedClient = new DkgDaemonClient({
+      baseUrl: 'http://localhost:9200',
+      apiToken: 'node-token',
+    });
+
+    fetchResponses.push(
+      new Response(JSON.stringify({
+        agentAddress: '0x1234567890123456789012345678901234567890',
+        agentDid: 'did:dkg:agent:0x1234567890123456789012345678901234567890',
+        name: 'default-agent',
+        peerId: '12D3KooWPeer',
+        nodeIdentityId: '7',
+      }), { status: 200 }),
+    );
+
+    const result = await authedClient.getAgentIdentity();
+
+    expect(result.ok).toBe(true);
+    expect(result.identity?.agentAddress).toBe('0x1234567890123456789012345678901234567890');
+    expect(fetchCalls[0]?.[0]).toBe('http://localhost:9200/api/agent/identity');
+    expect(fetchCalls[0]?.[1]?.method).toBe('GET');
+    expect(fetchCalls[0]?.[1]?.headers).toMatchObject({
+      Accept: 'application/json',
+      Authorization: 'Bearer node-token',
+    });
+  });
+
+  it('getAgentIdentity works without Authorization when daemon auth is disabled', async () => {
+    const noAuthClient = new DkgDaemonClient({
+      baseUrl: 'http://localhost:9200',
+      apiToken: '',
+    });
+
+    fetchResponses.push(
+      new Response(JSON.stringify({
+        agentAddress: '12D3KooWPeerFallback',
+        agentDid: 'did:dkg:agent:12D3KooWPeerFallback',
+        name: 'default-agent',
+        peerId: '12D3KooWPeerFallback',
+        nodeIdentityId: '0',
+      }), { status: 200 }),
+    );
+
+    const result = await noAuthClient.getAgentIdentity();
+
+    expect(result.ok).toBe(true);
+    expect(result.identity?.agentAddress).toBe('12D3KooWPeerFallback');
+    expect(fetchCalls[0]?.[0]).toBe('http://localhost:9200/api/agent/identity');
+    expect(fetchCalls[0]?.[1]?.headers).toMatchObject({ Accept: 'application/json' });
+    expect(fetchCalls[0]?.[1]?.headers).not.toHaveProperty('Authorization');
+  });
+
   // ---------------------------------------------------------------------------
   // Health
   // ---------------------------------------------------------------------------

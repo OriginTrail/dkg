@@ -10,8 +10,13 @@
 #   1. Reads ContextGraphs / ContextGraphStorage / IdentityStorage /
 #      KnowledgeCollectionStorage addresses from
 #      packages/evm-module/deployments/localhost_contracts.json.
-#   2. Discovers hosting-node identity ids by looping over the first 6 devnet
-#      signers and querying IdentityStorage.getIdentityId(signer.address).
+#   2. Discovers hosting-node identity ids by reading each devnet node's
+#      .devnet/nodeN/wallets.json, deriving the operational wallet[0]
+#      address, and querying IdentityStorage.getIdentityId(opAddress).
+#      Pre-PR #366 the operational + admin keys were the same Hardhat
+#      signer, so iterating provider.listAccounts() worked. Post-PR #366
+#      identities are registered against random operational wallets only,
+#      so Hardhat signers no longer resolve to any identity.
 #   3. Creates a fresh open-policy V10 context graph on-chain via
 #      ContextGraphs.createContextGraph(hostingNodes, [], 1, 0, 1, ZeroAddress, 0).
 #      Uses staticCall to preview the returned numeric cgId, then sends the
@@ -40,6 +45,9 @@ NODE_NUM="${DEVNET_TEST_NODE:-1}"
 API_PORT_BASE=9201
 API_PORT=$((API_PORT_BASE + NODE_NUM - 1))
 CONFIRM_TIMEOUT="${CONFIRM_TIMEOUT:-60}"
+# Match scripts/devnet.sh's default node count when probing for hosting-node
+# identities. Override if you start devnet with a different size.
+HOSTING_NODE_COUNT="${HOSTING_NODE_COUNT:-6}"
 
 CONTRACTS_JSON="$REPO_ROOT/packages/evm-module/deployments/localhost_contracts.json"
 EVM_ABI_DIR="$REPO_ROOT/packages/evm-module/abi"
@@ -88,6 +96,8 @@ CG_ID=$(
   RPC_URL="http://127.0.0.1:${HARDHAT_PORT}" \
   CONTRACTS_JSON="$CONTRACTS_JSON" \
   ABI_DIR="$EVM_ABI_DIR" \
+  DEVNET_DIR="$DEVNET_DIR" \
+  HOSTING_NODE_COUNT="$HOSTING_NODE_COUNT" \
   node -e '
 const { ethers } = require("ethers");
 const fs = require("fs");
@@ -114,15 +124,53 @@ const path = require("path");
   const cgAbi        = loadAbi("ContextGraphs");
   const cgStorageAbi = loadAbi("ContextGraphStorage");
 
-  // Discover hosting-node identity ids from the first 6 devnet signers.
+  // Discover hosting-node identity ids by reading each devnet nodes
+  // wallets.json file and querying IdentityStorage against the operational
+  // wallet[0] address. PR #366 separated admin and operational keys: the
+  // identity is registered against the operational key, not the Hardhat
+  // signer that funded the node. NOTE: avoid an apostrophe in this comment;
+  // the entire JS body lives inside bashs `node -e ...` single-quoted arg,
+  // so any apostrophe here would close the bash quoting prematurely.
   const identity = new ethers.Contract(identityAddr, identityAbi, provider);
-  const signers = await provider.listAccounts();
-  const max = Math.min(signers.length, 6);
+  const devnetDir = process.env.DEVNET_DIR;
+  const hostingCount = Number(process.env.HOSTING_NODE_COUNT || "6");
+  if (!devnetDir) throw new Error("DEVNET_DIR not set");
+  // Distinguish FILE-level failures (missing/malformed wallets.json —
+  // unexpected post-bootstrap, treat as fatal) from NO-IDENTITY (edge
+  // nodes have valid wallets.json but no on-chain identity by design,
+  // so this is silently expected). Without this split, a corrupt
+  // wallets.json on one core node would silently shrink the roster
+  // and let the smoke test pass against fewer hosting nodes than
+  // intended. Codex follow-up to PR #368.
   const ids = [];
-  for (let i = 0; i < max; i++) {
-    const addr = typeof signers[i] === "string" ? signers[i] : signers[i].address;
-    const id = await identity.getIdentityId(addr);
+  const failures = [];
+  for (let i = 1; i <= hostingCount; i++) {
+    const walletsPath = path.join(devnetDir, "node" + i, "wallets.json");
+    if (!fs.existsSync(walletsPath)) {
+      failures.push("node " + i + ": missing " + walletsPath);
+      continue;
+    }
+    let opAddr;
+    try {
+      const w = JSON.parse(fs.readFileSync(walletsPath, "utf8"));
+      const op0 = Array.isArray(w.wallets) ? w.wallets[0] : null;
+      if (!op0 || !op0.privateKey) {
+        failures.push("node " + i + ": wallets.json has no wallets[0].privateKey");
+        continue;
+      }
+      opAddr = new ethers.Wallet(op0.privateKey).address;
+    } catch (e) {
+      failures.push("node " + i + ": failed to parse wallets.json: " + (e?.message || e));
+      continue;
+    }
+    const id = await identity.getIdentityId(opAddr);
     if (id > 0n) ids.push(id);
+    // No identity → edge node, by design (dkg-agent.ts skips
+    // ensureProfile for effectiveRole==='edge'). Silent skip is
+    // intentional here.
+  }
+  if (failures.length > 0) {
+    throw new Error("hosting-node discovery failures (refusing partial roster):\n  " + failures.join("\n  "));
   }
   if (ids.length === 0) {
     throw new Error("no hosting-node identities found — devnet identity registration may still be pending");

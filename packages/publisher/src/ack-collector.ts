@@ -76,6 +76,8 @@ export class ACKCollector {
     swmGraphId?: string;
     /** Optional sub-graph name suffix appended to the SWM URI. */
     subGraphName?: string;
+    /** V10 flat-KC Merkle leaf count (sorted + deduped); binds StorageACK to on-chain RandomSampling. */
+    merkleLeafCount: number;
   }): Promise<ACKCollectionResult> {
     const {
       merkleRoot, contextGraphId, contextGraphIdStr,
@@ -85,6 +87,11 @@ export class ACKCollector {
     const REQUIRED_ACKS = params.requiredACKs ?? DEFAULT_REQUIRED_ACKS;
 
     const log = this.deps.log ?? (() => {});
+    if (!Number.isInteger(params.merkleLeafCount) || params.merkleLeafCount < 1) {
+      throw new Error(
+        `ACK collection failed: merkleLeafCount must be a positive integer, got ${params.merkleLeafCount}`,
+      );
+    }
 
     // P2P intent includes staging quads so core nodes can verify inline.
     // `contextGraphId` on the wire is the TARGET numeric id peers will sign
@@ -106,6 +113,7 @@ export class ACKCollector {
         ? params.swmGraphId
         : undefined,
       subGraphName: params.subGraphName,
+      merkleLeafCount: params.merkleLeafCount,
     };
     const intentBytes = encodePublishIntent(p2pMsg);
 
@@ -134,6 +142,7 @@ export class ACKCollector {
       publicByteSize,
       BigInt(params.epochs ?? 1),
       params.tokenAmount ?? 0n,
+      BigInt(params.merkleLeafCount),
     );
 
     const collected: CollectedACK[] = [];

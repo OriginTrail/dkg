@@ -56,6 +56,11 @@ describe('NoChainAdapter — every write method throws with stable message [CH-9
     ['registerIdentity', () => adapter.registerIdentity({ publicKey: zeroBytes, signature: zeroBytes })],
     ['ensureProfile', () => adapter.ensureProfile()],
     ['ensureProfile(with options)', () => adapter.ensureProfile({ nodeName: 'x', stakeAmount: 0n })],
+    // V10 staking consolidation: ensureProfile accepts an optional lockTier
+    // (passed through to DKGStakingConvictionNFT.createConviction by the
+    // EVM adapter). Asserting it stays in the no-chain rejection surface
+    // catches accidental signature regressions from either side.
+    ['ensureProfile(with lockTier)', () => adapter.ensureProfile({ stakeAmount: 1n, lockTier: 1 })],
     ['reserveUALRange', () => adapter.reserveUALRange(1)],
     ['batchMintKnowledgeAssets', () =>
       adapter.batchMintKnowledgeAssets({
@@ -109,6 +114,7 @@ describe('NoChainAdapter — every write method throws with stable message [CH-9
         epochs: 1,
         tokenAmount: 0n,
         isImmutable: false,
+        merkleLeafCount: 1,
         paymaster: '0x0000000000000000000000000000000000000000',
         publisherNodeIdentityId: 0n,
         publisherSignature: zeroSig,

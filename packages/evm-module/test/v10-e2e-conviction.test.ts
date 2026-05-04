@@ -11,6 +11,9 @@ import {
   Profile,
   Staking,
   StakingStorage,
+  ConvictionStakingStorage,
+  StakingV10,
+  DKGStakingConvictionNFT,
   ParametersStorage,
   DelegatorsInfo,
   PublishingConvictionAccount,
@@ -41,6 +44,9 @@ type E2EFixture = {
   Profile: Profile;
   Staking: Staking;
   StakingStorage: StakingStorage;
+  ConvictionStakingStorage: ConvictionStakingStorage;
+  StakingV10: StakingV10;
+  StakingNFT: DKGStakingConvictionNFT;
   ParametersStorage: ParametersStorage;
   DelegatorsInfo: DelegatorsInfo;
   PCA: PublishingConvictionAccount;
@@ -73,6 +79,11 @@ async function deployE2EFixture(): Promise<E2EFixture> {
     'ContextGraphs',
     'ContextGraphValueStorage',
     'DKGPublishingConvictionNFT',
+    // v4.0.0 — Flow 3 needs nodeStakeV10 > 0 for the ACK signer gate (KAv10
+    // reads V10 stake post-consolidation). Pull in the V10 staking stack so
+    // the test can stake nodes via `DKGStakingConvictionNFT.createConviction`.
+    'DKGStakingConvictionNFT',
+    'StakingV10',
   ]);
 
   const accounts = await hre.ethers.getSigners();
@@ -88,6 +99,13 @@ async function deployE2EFixture(): Promise<E2EFixture> {
     Profile: await hre.ethers.getContract<Profile>('Profile'),
     Staking: await hre.ethers.getContract<Staking>('Staking'),
     StakingStorage: await hre.ethers.getContract<StakingStorage>('StakingStorage'),
+    ConvictionStakingStorage: await hre.ethers.getContract<ConvictionStakingStorage>(
+      'ConvictionStakingStorage',
+    ),
+    StakingV10: await hre.ethers.getContract<StakingV10>('StakingV10'),
+    StakingNFT: await hre.ethers.getContract<DKGStakingConvictionNFT>(
+      'DKGStakingConvictionNFT',
+    ),
     ParametersStorage: await hre.ethers.getContract<ParametersStorage>('ParametersStorage'),
     DelegatorsInfo: await hre.ethers.getContract<DelegatorsInfo>('DelegatorsInfo'),
     PCA: await hre.ethers.getContract<PublishingConvictionAccount>('PublishingConvictionAccount'),
@@ -300,6 +318,8 @@ describe('V10 E2E Conviction System', function () {
     let EpochStorageContract: EpochStorage;
 
     let kav10Address: string;
+    let StakingV10Contract: StakingV10;
+    let StakingNFT: DKGStakingConvictionNFT;
 
     beforeEach(async () => {
       hre.helpers.resetDeploymentsJson();
@@ -314,6 +334,8 @@ describe('V10 E2E Conviction System', function () {
       ProfileContract = fixture.Profile;
       Staking = fixture.Staking;
       StakingStorage = fixture.StakingStorage;
+      StakingV10Contract = fixture.StakingV10;
+      StakingNFT = fixture.StakingNFT;
       KAV10 = fixture.KnowledgeAssetsV10;
       NFT = fixture.PublishingConvictionNFT;
       CGFacade = fixture.ContextGraphs;
@@ -322,6 +344,22 @@ describe('V10 E2E Conviction System', function () {
       EpochStorageContract = fixture.EpochStorage;
       kav10Address = await KAV10.getAddress();
     });
+
+    // v4.0.0 — Bring `nodeStakeV10` > 0 for the ACK signer gate via the V10
+    // path. KAv10 reads `convictionStakingStorage.getNodeStakeV10`, so V8
+    // `Staking.stake` no longer makes the ACK signer eligible.
+    const stakeV10 = async (
+      staker: SignerWithAddress,
+      identityId: number,
+      amount: bigint,
+    ) => {
+      await Token.mint(staker.address, amount);
+      await Token.connect(staker).approve(
+        await StakingV10Contract.getAddress(),
+        amount,
+      );
+      await StakingNFT.connect(staker).createConviction(identityId, amount, 1);
+    };
 
     it('end-to-end: createAccount → createContextGraph → publish → atomic bind → CG value written → double-count-free', async () => {
       // ---- Step 0: Set up publishing + receiving nodes (profiles + stake) ----
@@ -335,19 +373,12 @@ describe('V10 E2E Conviction System', function () {
       const receiverIdentityIds = receiverProfiles.map((p) => p.identityId);
 
       // Stake all nodes so `_verifySignature`'s stake gate passes.
-      await Token.mint(publishingNode.operational.address, MIN_STAKE);
-      await Token.connect(publishingNode.operational).approve(
-        await Staking.getAddress(),
-        MIN_STAKE,
-      );
-      await Staking.connect(publishingNode.operational).stake(publisherIdentityId, MIN_STAKE);
+      // v4.0.0 — KAv10 reads V10 stake (`getNodeStakeV10`) for the ACK
+      // signer gate, so we route through the V10 NFT path.
+      await stakeV10(publishingNode.operational, publisherIdentityId, MIN_STAKE);
       for (let i = 0; i < receivingNodes.length; i++) {
-        await Token.mint(receivingNodes[i].operational.address, MIN_STAKE);
-        await Token.connect(receivingNodes[i].operational).approve(
-          await Staking.getAddress(),
-          MIN_STAKE,
-        );
-        await Staking.connect(receivingNodes[i].operational).stake(
+        await stakeV10(
+          receivingNodes[i].operational,
           receiverProfiles[i].identityId,
           MIN_STAKE,
         );
@@ -355,26 +386,30 @@ describe('V10 E2E Conviction System', function () {
 
       // ---- Step 1: Conviction NFT account creation ----
       //
-      // The NFT's `createAccount` pulls `committedTRAC` from msg.sender into
-      // StakingStorage directly (fail-closed transferFrom) and writes the
-      // full amount across the 12-epoch lock window via
+      // v4.0.0 — The NFT's `createAccount` pulls `committedTRAC` from
+      // msg.sender into the CSS vault directly (fail-closed transferFrom)
+      // and writes the full amount across the 12-epoch lock window via
       // `EpochStorage.addTokensToEpochRange`. The contract NEVER holds TRAC.
       const creator = getDefaultKCCreator(accounts);
       await Token.connect(accounts[0]).transfer(creator.address, COMMITTED_TRAC);
       await Token.connect(creator).approve(await NFT.getAddress(), COMMITTED_TRAC);
 
-      const stakingStorageBalanceBefore = await Token.balanceOf(
-        await StakingStorage.getAddress(),
+      const ConvictionStakingStorage =
+        await hre.ethers.getContract<import('../typechain').ConvictionStakingStorage>(
+          'ConvictionStakingStorage',
+        );
+      const cssBalanceBefore = await Token.balanceOf(
+        await ConvictionStakingStorage.getAddress(),
       );
       await NFT.connect(creator).createAccount(COMMITTED_TRAC);
       const accountId = await NFT.totalSupply();
       expect(accountId).to.equal(1n);
 
-      // createAccount side-effects:
-      // - TRAC moved publisher → StakingStorage
-      expect(await Token.balanceOf(await StakingStorage.getAddress())).to.equal(
-        stakingStorageBalanceBefore + COMMITTED_TRAC,
-      );
+      // createAccount side-effects (v4.0.0):
+      // - TRAC moved publisher → CSS vault
+      expect(
+        await Token.balanceOf(await ConvictionStakingStorage.getAddress()),
+      ).to.equal(cssBalanceBefore + COMMITTED_TRAC);
       // - NFT minted to creator
       expect(await NFT.ownerOf(accountId)).to.equal(creator.address);
 

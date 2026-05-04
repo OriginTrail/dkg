@@ -292,6 +292,7 @@ describe('@unit KnowledgeCollection', () => {
         receiversIdentityIds,
         signaturesData.receiverRs,
         signaturesData.receiverVSs,
+        1,
       ),
     ).to.be.revertedWithCustomError(
       KnowledgeCollection,
@@ -343,6 +344,7 @@ describe('@unit KnowledgeCollection', () => {
         dupReceiverIds,
         dupReceiverRs,
         dupReceiverVSs,
+        1,
       ),
     ).to.be.revertedWith('Insufficient unique receiver identities');
   });
@@ -407,6 +409,7 @@ describe('@unit KnowledgeCollection', () => {
       mixedReceiverIds,
       mixedReceiverRs,
       mixedReceiverVSs,
+      1,
     );
     await expect(tx).to.emit(
       KnowledgeCollectionStorage,
@@ -586,6 +589,7 @@ describe('@unit KnowledgeCollection', () => {
         receiverIds,
         sig.receiverRs,
         sig.receiverVSs,
+        1,
       ),
     ).to.be.revertedWithCustomError(KnowledgeCollection, 'InvalidTokenAmount');
   });
@@ -661,6 +665,7 @@ describe('@unit KnowledgeCollection', () => {
       receiverIds,
       sig.receiverRs,
       sig.receiverVSs,
+      1,
     );
 
     const receipt = await tx.wait();

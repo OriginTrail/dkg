@@ -152,6 +152,15 @@ export interface VerifyParams {
 export interface PublishToContextGraphParams extends PublishParams {
   contextGraphId: bigint;
   participantSignatures: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
+  /**
+   * V10 Merkle leaf count of the published flat-KC payload. Required: the
+   * adapter mirrors this V9 publish to V10 (`createKnowledgeAssetsV10`)
+   * and `RandomSampling` reads `merkleLeafCount` from on-chain storage to
+   * pick / verify `chunkId`. Hard-coding it would corrupt every bridged
+   * KC whose tree has more than one leaf. Callers must supply the value
+   * from `V10MerkleTree.leafCount`.
+   */
+  merkleLeafCount: number;
 }
 
 // ----- Permanent Publishing types -----
@@ -189,6 +198,8 @@ export interface V10PublishDirectParams {
   epochs: number;
   tokenAmount: bigint;
   isImmutable: boolean;
+  /** V10 flat-KC Merkle leaf count (sorted + deduped); stored on-chain for RandomSampling. */
+  merkleLeafCount: number;
   /**
    * Paymaster address. `ethers.ZeroAddress` means the caller pays TRAC
    * directly. Non-zero means the paymaster covers the cost. The adapter
@@ -240,6 +251,8 @@ export interface V10UpdateKCParams {
   kcId: bigint;
   newMerkleRoot: Uint8Array;
   newByteSize: bigint;
+  /** V10 flat-KC Merkle leaf count after update (sorted + deduped). */
+  newMerkleLeafCount: number;
   newTokenAmount?: bigint;
   mintAmount?: number;
   burnTokenIds?: bigint[];
@@ -259,6 +272,125 @@ export interface V10UpdateKCParams {
   onBroadcast?: (info: { txHash: string }) => Promise<void> | void;
 }
 
+// ----- Random Sampling (V10 RandomSampling.sol) -----
+
+/**
+ * Mirrors the on-chain `RandomSamplingLib.Challenge` struct verbatim.
+ * Returned by `getNodeChallenge` and `createChallenge`. Note that
+ * `contextGraphId` is intentionally NOT part of this struct on-chain
+ * (V8 signature compat) — it travels via the `ChallengeGenerated` event
+ * topic, which `createChallenge` decodes from its tx receipt and
+ * surfaces alongside the challenge.
+ */
+export interface NodeChallenge {
+  knowledgeCollectionId: bigint;
+  chunkId: bigint;
+  knowledgeCollectionStorageContract: string;
+  epoch: bigint;
+  activeProofPeriodStartBlock: bigint;
+  proofingPeriodDurationInBlocks: bigint;
+  solved: boolean;
+}
+
+/** Result of `getActiveProofPeriodStatus()` (V10 RandomSampling.sol). */
+export interface ProofPeriodStatus {
+  activeProofPeriodStartBlock: bigint;
+  /**
+   * True when `block.number < activeProofPeriodStartBlock + duration`.
+   * False between periods (briefly, since the contract auto-advances on
+   * `updateAndGetActiveProofPeriodStartBlock`). Off-chain pollers should
+   * treat `false` as "skip this tick, retry on the next block".
+   */
+  isValid: boolean;
+  /**
+   * Currently-active proofing period duration in blocks, as the contract
+   * computes it for the current epoch (read via
+   * `RandomSampling.getActiveProofingPeriodDurationInBlocks()` →
+   * `RandomSamplingStorage.getEpochProofingPeriodDurationInBlocks(currentEpoch)`).
+   *
+   * The chain's `updateAndGetActiveProofPeriodStartBlock()` rolls the
+   * cursor forward using THIS value, not the duration baked into a
+   * cached `NodeChallenge`. Off-chain wall-clock staleness checks must
+   * therefore consult this live value (Codex round 2 on PR #369): if a
+   * governance action changes the proofing duration mid-flight, the
+   * cached `existing.proofingPeriodDurationInBlocks` no longer reflects
+   * the on-chain expiry boundary, and rotating off `existing.duration`
+   * alone would re-introduce the same `kc-not-synced` deadlock that
+   * the unsolved-stale check exists to prevent.
+   *
+   * Optional only because legacy adapters that pre-date this field may
+   * not populate it; consumers MUST treat `undefined` as "skip the
+   * live-duration staleness path and fall back to the cached duration".
+   */
+  proofingPeriodDurationInBlocks?: bigint;
+}
+
+/**
+ * Result of `createChallenge`. Carries the freshly-decoded challenge + cgId.
+ *
+ * `Omit<TxResult, 'contextGraphId'>` because the V9 `TxResult.contextGraphId`
+ * is a `string` (legacy ContextGraphNameRegistry hex) — V10 random sampling
+ * uses `bigint` ContextGraphs ids, so the field is rebound here. Same
+ * pattern as `CreateOnChainContextGraphResult`.
+ */
+export interface CreateChallengeResult extends Omit<TxResult, 'contextGraphId'> {
+  /** Decoded from `RandomSamplingStorage.getNodeChallenge` after the tx. */
+  challenge: NodeChallenge;
+  /** Decoded from the indexed `ChallengeGenerated(contextGraphId)` event topic. */
+  contextGraphId: bigint;
+}
+
+/**
+ * Thrown by `createChallenge` when `_pickWeightedChallenge` finds no
+ * public, active CG holds non-zero per-epoch value at the current epoch.
+ * Off-chain prover MUST treat this as "skip this period silently, retry
+ * on the next" — it is not a malfunction, it is the documented
+ * retry-next-period contract.
+ */
+export class NoEligibleContextGraphError extends Error {
+  readonly name = 'NoEligibleContextGraphError';
+  constructor() { super('NoEligibleContextGraph: no public CG holds non-zero per-epoch value'); }
+}
+
+/**
+ * Thrown by `createChallenge` when the chosen CG's KC list is empty or
+ * every resampled KC was expired after `MAX_KC_RETRIES = 10`. Same
+ * retry-next-period contract as {@link NoEligibleContextGraphError}.
+ */
+export class NoEligibleKnowledgeCollectionError extends Error {
+  readonly name = 'NoEligibleKnowledgeCollectionError';
+  constructor() { super('NoEligibleKnowledgeCollection: KC list empty or all sampled KCs expired'); }
+}
+
+/**
+ * Thrown by `submitProof` when the recomputed merkle root from the
+ * supplied chunk + proof does not equal the on-chain expected root.
+ * Indicates either (a) data corruption in the local triple store, or
+ * (b) the proof builder used the wrong merkle scheme. Non-retryable;
+ * the prover SHOULD log loudly and drop the period — retrying with the
+ * same data will keep failing.
+ */
+export class MerkleRootMismatchError extends Error {
+  readonly name = 'MerkleRootMismatchError';
+  constructor(
+    readonly computedMerkleRoot: string,
+    readonly expectedMerkleRoot: string,
+  ) {
+    super(`MerkleRootMismatchError: computed=${computedMerkleRoot} expected=${expectedMerkleRoot}`);
+  }
+}
+
+/**
+ * Thrown by `submitProof` when `block.number` has rolled past the
+ * challenge's proof period before the tx confirmed. Non-retryable for
+ * this period; the prover MUST drop and rebuild on the next period
+ * (the contract message is "This challenge is no longer active").
+ */
+export class ChallengeNoLongerActiveError extends Error {
+  readonly name = 'ChallengeNoLongerActiveError';
+  constructor() { super('ChallengeNoLongerActive: proof period rolled over before submission'); }
+}
+
 // ----- V8 backward-compat types (used by mock adapter and legacy code) -----
 
 export interface CreateKCParams {
@@ -271,6 +403,13 @@ export interface UpdateKCParams {
   kcId: bigint;
   newMerkleRoot: Uint8Array;
   signatures: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
+}
+
+export interface OperationalWalletRegistrationResult {
+  identityId: bigint;
+  registered: string[];
+  alreadyRegistered: string[];
+  taken: Array<{ address: string; identityId: bigint }>;
 }
 
 /**
@@ -286,7 +425,7 @@ export interface ChainAdapter {
   // Identity
   registerIdentity(proof: IdentityProof): Promise<bigint>;
   getIdentityId(): Promise<bigint>;
-  ensureProfile(options?: { nodeName?: string; stakeAmount?: bigint }): Promise<bigint>;
+  ensureProfile(options?: { nodeName?: string; stakeAmount?: bigint; lockTier?: number }): Promise<bigint>;
 
   // V9 UAL reservation (publisher address is derived from signer)
   reserveUALRange(count: number): Promise<ReservedRange>;
@@ -357,7 +496,31 @@ export interface ChainAdapter {
   publishKnowledgeAssetsPermanent?(params: PermanentPublishParams): Promise<OnChainPublishResult>;
 
   // Staking Conviction
+  /**
+   * Legacy staking helper that accepts a lock duration-style number.
+   *
+   * V10 stakes are NFT-backed positions keyed by `lockTier`; adapters
+   * snap-down this legacy `lockEpochs` value to the largest baseline V10
+   * tier ≤ `lockEpochs` (baseline ladder = `{0, 1, 3, 6, 12}`). Conservative —
+   * never lock the user up for longer than the legacy parameter requested.
+   * Examples: `lockEpochs=2 → 1`, `lockEpochs=5 → 3`, `lockEpochs=30 → 12`.
+   *
+   * @deprecated Prefer `stakeWithLockTier` for new V10 callers.
+   */
   stakeWithLock?(identityId: bigint, amount: bigint, lockEpochs: number): Promise<TxResult>;
+  /**
+   * Mint a V10 NFT-backed conviction stake position on `identityId` with
+   * `amount` TRAC at an explicit V10 `lockTier`. Each call mints a new
+   * position; there is no per-delegator-address position to "extend" under
+   * V10. Use the V10 tokenId-keyed `getPosition` for per-position
+   * multipliers.
+   *
+   * `lockTier` MUST be a member of the V10 baseline tier ladder
+   * (`{0, 1, 3, 6, 12}`) seeded by `ConvictionStakingStorage._seedBaselineTiers`;
+   * any other value reverts on-chain with `InvalidLockTier()`. Adapters
+   * validate off-chain and throw a clearer error before broadcasting.
+   */
+  stakeWithLockTier?(identityId: bigint, amount: bigint, lockTier: number): Promise<TxResult>;
   getDelegatorConvictionMultiplier?(identityId: bigint, delegator: string): Promise<{ multiplier: number }>;
 
   /**
@@ -387,6 +550,20 @@ export interface ChainAdapter {
 
   /** Verify that a recovered signer address is a registered operational key for the given identity. */
   verifyACKIdentity?(recoveredAddress: string, claimedIdentityId: bigint): Promise<boolean>;
+
+  /** Idempotently register local operational wallets for an existing identity. */
+  ensureOperationalWalletsRegistered?(options?: {
+    identityId?: bigint;
+    additionalAddresses?: string[];
+  }): Promise<OperationalWalletRegistrationResult>;
+
+  /**
+   * Confirm that an address is registered as an OPERATIONAL_KEY for an identity.
+   * V10 ACK signing refuses to proceed when this capability is missing, but the
+   * method stays optional to preserve the public ChainAdapter interface for
+   * adapters that never advertise StorageACK support.
+   */
+  isOperationalWalletRegistered?(identityId: bigint, address: string): Promise<boolean>;
 
   /**
    * Verify that a recovered signer address owns the claimed identity without
@@ -420,6 +597,13 @@ export interface ChainAdapter {
    * breaking the defensive runtime optional-call style.
    */
   isV10Ready(): boolean;
+  /**
+   * Whether the adapter has resolved the V10 RandomSampling contracts
+   * needed by the off-chain prover. Optional for non-prover adapters;
+   * when present, bind layers should use it as the deployment-capability
+   * check rather than only testing method presence.
+   */
+  isRandomSamplingReady?(): boolean;
 
   /**
    * Returns the deployed address of `KnowledgeAssetsV10` on this chain.
@@ -441,6 +625,106 @@ export interface ChainAdapter {
   // V8 backward compatibility (used by mock adapter, will be removed)
   createKnowledgeCollection?(params: CreateKCParams): Promise<TxResult>;
   updateKnowledgeCollection?(params: UpdateKCParams): Promise<TxResult>;
+
+  // ----- Random Sampling (V10 RandomSampling.sol) -----
+
+  /**
+   * Generate a fresh challenge for the calling node in the current proof
+   * period. Decodes the indexed `contextGraphId` from the
+   * `ChallengeGenerated` event (V10 only — V8 didn't index the cgId on
+   * the event) so the caller can route the proof builder to the right
+   * CG-scoped subgraph in one round trip.
+   *
+   * Throws {@link NoEligibleContextGraphError} or
+   * {@link NoEligibleKnowledgeCollectionError} when the on-chain picker
+   * has nothing to land on. Both are documented retry-next-period
+   * conditions — callers SHOULD swallow them silently.
+   *
+   * Optional so non-validator adapters (NoChainAdapter, no-on-chain
+   * agents) don't have to stub the prover surface.
+   */
+  createChallenge?(): Promise<CreateChallengeResult>;
+
+  /**
+   * Submit a chunk + merkle proof for the active challenge. Throws
+   * {@link MerkleRootMismatchError} on root mismatch (data corruption /
+   * wrong merkle scheme — non-retryable for this period) and
+   * {@link ChallengeNoLongerActiveError} when the proof window has
+   * already closed (also non-retryable; rebuild on next period).
+   */
+  /** @param leaf 32-byte leaf (`hashTripleV10` or private sub-root), hex string or raw bytes */
+  submitProof?(leaf: Uint8Array | `0x${string}`, merkleProof: Uint8Array[]): Promise<TxResult>;
+
+  /**
+   * Read the active proof-period state without writing. Cheap; safe to
+   * poll every block. Off-chain prover uses the start block to detect
+   * rollover and `isValid` to know whether a period is currently open.
+   */
+  getActiveProofPeriodStatus?(): Promise<ProofPeriodStatus>;
+
+  /**
+   * Read the current challenge for an identity from
+   * `RandomSamplingStorage`. Returns `null` when the storage entry is
+   * empty (typed instead of `Challenge` with all-zeros so callers don't
+   * have to special-case it).
+   */
+  getNodeChallenge?(identityId: bigint): Promise<NodeChallenge | null>;
+
+  /**
+   * Read the per-period score for `(epoch, periodStartBlock, identityId)`.
+   * Used by smoke tests + observability — the prover itself doesn't need
+   * to read this back, the on-chain state IS the source of truth.
+   */
+  getNodeEpochProofPeriodScore?(
+    identityId: bigint,
+    epoch: bigint,
+    periodStartBlock: bigint,
+  ): Promise<bigint>;
+
+  // ----- KC views (V10 KnowledgeCollectionStorage + ContextGraphStorage) -----
+  // Used by the off-chain Random Sampling prover to bind a challenged
+  // `kcId` to the canonical merkle root + leaf count + cgId before
+  // building a V10 Merkle proof from the local triple store. All four
+  // are pure reads; cheap to call per challenge.
+
+  /**
+   * Latest on-chain merkle root for the given knowledge collection.
+   * Returns 32 raw bytes (use `ethers.hexlify` to render). Throws when
+   * `kcId` is unknown to the chain or the V10 storage contract is not
+   * deployed on this Hub. Optional so non-V10 / no-chain adapters can
+   * stub the prover surface.
+   */
+  getLatestMerkleRoot?(kcId: bigint): Promise<Uint8Array>;
+
+  /**
+   * V10 flat-KC merkle leaf count (sorted + deduped) recorded on-chain
+   * for `kcId`. Used by the prover to (a) validate the local extraction
+   * matches the published shape before building a proof, and (b) sanity
+   * check the on-chain `chunkId = leafIndex` falls within the tree.
+   */
+  getMerkleLeafCount?(kcId: bigint): Promise<number>;
+
+  /**
+   * Address that signed the latest merkle root for `kcId` (the EOA that
+   * called `KnowledgeAssetsV10.publishDirect` / update). Mostly observability
+   * — the prover does not gate on this — but useful for trace logs and for
+   * future sharding / authorship-based reward heuristics.
+   */
+  getLatestMerkleRootPublisher?(kcId: bigint): Promise<string>;
+
+  /**
+   * Context graph id that hosts `kcId`, sourced from
+   * `ContextGraphStorage.kcToContextGraph[kcId]`. The on-chain
+   * `Challenge` struct intentionally omits cgId (V8 wire compat — see
+   * `_generateChallenge` NatSpec); the off-chain prover needs cgId to
+   * route the local-extraction queries to the correct CG-scoped data /
+   * meta graph URIs. One chain read per challenge.
+   *
+   * Returns `0n` when `kcId` is unregistered (matches the Solidity
+   * default-zero mapping). Callers MUST treat zero as "not found" and
+   * skip the period rather than blindly querying CG `_meta:0`.
+   */
+  getKCContextGraphId?(kcId: bigint): Promise<bigint>;
 }
 
 // ----- Backward-compat deprecated aliases -----

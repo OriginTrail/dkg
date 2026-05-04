@@ -7,7 +7,7 @@ import {
 
 // Golden reference vectors computed via ethers.solidityPackedKeccak256 against
 // the exact abi.encodePacked shapes in KnowledgeAssetsV10.sol:
-//   - ACK digest            → contract lines 362-373
+//   - ACK digest            → `_executePublishCore` (incl. merkleLeafCount)
 //   - Publisher digest      → contract lines 327-335
 //
 // The contract prefixes both with (block.chainid, address(this)) for H5 replay
@@ -22,13 +22,14 @@ const KA_COUNT = 3n;
 const BYTE_SIZE = 777n;
 const EPOCHS = 2n;
 const TOKEN_AMOUNT = 1000n;
+const MERKLE_LEAF_COUNT = 7n;
 const IDENTITY_ID = 5n;
 
 // Golden hex reference — precomputed offline with ethers.solidityPackedKeccak256.
 // If either of these diverges from the contract, on-chain _verifySignatures and
 // _verifySignature revert on every publish; keep these vectors pinned.
 const ACK_DIGEST_GOLDEN =
-  '0xd00e49a83ec62438bbd23818a35d1dd1572adaf72e1b660a2e7573bb15d22bcc';
+  '0xe950463d621d6b63c55eaa2dd52e95281826f5bd6611205b80bf9597c56ac82a';
 const PUBLISHER_DIGEST_GOLDEN =
   '0x511ca6d1022288492fb07cd51c6285513790e6ac1e99745ad1a369bb5b53d991';
 // The same fields in the WRONG order (cgId before identityId) — must NOT match.
@@ -46,6 +47,7 @@ describe('computePublishACKDigest', () => {
       BYTE_SIZE,
       EPOCHS,
       TOKEN_AMOUNT,
+      MERKLE_LEAF_COUNT,
     );
     expect(keccak256Hex(new Uint8Array(0))).toMatch(/^0x/); // sanity on helper import
     expect('0x' + Buffer.from(digest).toString('hex')).toBe(ACK_DIGEST_GOLDEN);
@@ -53,30 +55,30 @@ describe('computePublishACKDigest', () => {
 
   it('is deterministic for identical inputs', () => {
     const a = computePublishACKDigest(
-      CHAIN_ID, KAV10_ADDRESS, CG_ID, MERKLE_ROOT, KA_COUNT, BYTE_SIZE, EPOCHS, TOKEN_AMOUNT,
+      CHAIN_ID, KAV10_ADDRESS, CG_ID, MERKLE_ROOT, KA_COUNT, BYTE_SIZE, EPOCHS, TOKEN_AMOUNT, MERKLE_LEAF_COUNT,
     );
     const b = computePublishACKDigest(
-      CHAIN_ID, KAV10_ADDRESS, CG_ID, MERKLE_ROOT, KA_COUNT, BYTE_SIZE, EPOCHS, TOKEN_AMOUNT,
+      CHAIN_ID, KAV10_ADDRESS, CG_ID, MERKLE_ROOT, KA_COUNT, BYTE_SIZE, EPOCHS, TOKEN_AMOUNT, MERKLE_LEAF_COUNT,
     );
     expect(a).toEqual(b);
   });
 
   it('different chainId produces a different digest (H5 chain-pin)', () => {
     const a = computePublishACKDigest(
-      CHAIN_ID, KAV10_ADDRESS, CG_ID, MERKLE_ROOT, KA_COUNT, BYTE_SIZE, EPOCHS, TOKEN_AMOUNT,
+      CHAIN_ID, KAV10_ADDRESS, CG_ID, MERKLE_ROOT, KA_COUNT, BYTE_SIZE, EPOCHS, TOKEN_AMOUNT, MERKLE_LEAF_COUNT,
     );
     const b = computePublishACKDigest(
-      CHAIN_ID + 1n, KAV10_ADDRESS, CG_ID, MERKLE_ROOT, KA_COUNT, BYTE_SIZE, EPOCHS, TOKEN_AMOUNT,
+      CHAIN_ID + 1n, KAV10_ADDRESS, CG_ID, MERKLE_ROOT, KA_COUNT, BYTE_SIZE, EPOCHS, TOKEN_AMOUNT, MERKLE_LEAF_COUNT,
     );
     expect(a).not.toEqual(b);
   });
 
   it('different kav10Address produces a different digest (H5 contract-pin)', () => {
     const a = computePublishACKDigest(
-      CHAIN_ID, KAV10_ADDRESS, CG_ID, MERKLE_ROOT, KA_COUNT, BYTE_SIZE, EPOCHS, TOKEN_AMOUNT,
+      CHAIN_ID, KAV10_ADDRESS, CG_ID, MERKLE_ROOT, KA_COUNT, BYTE_SIZE, EPOCHS, TOKEN_AMOUNT, MERKLE_LEAF_COUNT,
     );
     const b = computePublishACKDigest(
-      CHAIN_ID, '0x0000000000000000000000000000000000000043', CG_ID, MERKLE_ROOT, KA_COUNT, BYTE_SIZE, EPOCHS, TOKEN_AMOUNT,
+      CHAIN_ID, '0x0000000000000000000000000000000000000043', CG_ID, MERKLE_ROOT, KA_COUNT, BYTE_SIZE, EPOCHS, TOKEN_AMOUNT, MERKLE_LEAF_COUNT,
     );
     expect(a).not.toEqual(b);
   });
@@ -84,7 +86,7 @@ describe('computePublishACKDigest', () => {
   it('rejects merkleRoot with wrong length', () => {
     expect(() =>
       computePublishACKDigest(
-        CHAIN_ID, KAV10_ADDRESS, CG_ID, new Uint8Array(16), KA_COUNT, BYTE_SIZE, EPOCHS, TOKEN_AMOUNT,
+        CHAIN_ID, KAV10_ADDRESS, CG_ID, new Uint8Array(16), KA_COUNT, BYTE_SIZE, EPOCHS, TOKEN_AMOUNT, MERKLE_LEAF_COUNT,
       ),
     ).toThrow(/merkleRoot/);
   });
@@ -92,7 +94,7 @@ describe('computePublishACKDigest', () => {
   it('rejects malformed kav10Address', () => {
     expect(() =>
       computePublishACKDigest(
-        CHAIN_ID, '0xnope', CG_ID, MERKLE_ROOT, KA_COUNT, BYTE_SIZE, EPOCHS, TOKEN_AMOUNT,
+        CHAIN_ID, '0xnope', CG_ID, MERKLE_ROOT, KA_COUNT, BYTE_SIZE, EPOCHS, TOKEN_AMOUNT, MERKLE_LEAF_COUNT,
       ),
     ).toThrow(/kav10Address/);
   });

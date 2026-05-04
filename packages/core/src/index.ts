@@ -19,6 +19,11 @@ export {
   type GenesisQuad,
 } from './genesis.js';
 export { withRetry, type RetryOptions } from './retry.js';
+export {
+  findPackageRepoDir,
+  blueGreenSlotEntryPoint,
+  blueGreenSlotReady,
+} from './blue-green.js';
 export { requestFaucetFunding, type FaucetResult } from './faucet.js';
 export {
   assertSafeIri,
@@ -39,11 +44,17 @@ export {
 } from './errors.js';
 export {
   dkgHomeDir,
+  resolveDkgConfigHome,
+  dkgAuthTokenPath,
+  isDkgMonorepoRoot,
+  findDkgMonorepoRoot,
+  resolveDkgHome,
   readDaemonPid,
   isProcessAlive,
   readDkgApiPort,
   loadAuthTokenSync,
   loadAuthToken,
+  toEip55Checksum,
 } from './dkg-home.js';
 export {
   type Quad as ExtractionQuad,

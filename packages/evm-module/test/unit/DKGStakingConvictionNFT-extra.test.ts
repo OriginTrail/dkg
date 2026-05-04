@@ -29,7 +29,20 @@ type Fixture = {
   StakingStorage: StakingStorage;
 };
 
-describe('@unit DKGStakingConvictionNFT — extra audit coverage (E-2, E-16)', () => {
+// v4.0.0 — Skipped: this entire suite drives the deprecated
+// `DKGStakingConvictionNFT.{stake,unstake}` API and reads the removed
+// `stakingStorageAddress` field. Both surfaces were removed in Phase 2
+// of the V10 staking consolidation. The V10 entry points are
+// `createConviction` (mint) and `withdraw` (unstake), with TRAC routed
+// through `convictionStorage` (CSS, the V10 vault). The withdraw and
+// createConviction paths are covered end-to-end in
+// `test/v10-conviction.test.ts` and `test/unit/DKGStakingConvictionNFT.test.ts`
+// (real-fixture happy path + tier ladder + claim matrix). Followup PR
+// (`tests/v10-staking-extra-rewrite`) will reframe these E-2 / E-16
+// boundary checks against the new API; same tracking as the skipped
+// blocks in `test/unit/v10-conviction-extra.test.ts` and
+// `test/unit/v10-conviction-nft-audit.test.ts`.
+describe.skip('@unit DKGStakingConvictionNFT — extra audit coverage (E-2, E-16)', () => {
   let accounts: SignerWithAddress[];
   let HubContract: Hub;
   let NFT: DKGStakingConvictionNFT;

@@ -26,9 +26,13 @@ function freshPeerIdString(): string {
   return id;
 }
 
+function relayAddrFor(peerId: string): string {
+  return `/ip4/127.0.0.1/tcp/4001/p2p/${peerId}`;
+}
+
 describe('p2p resilience hooks', () => {
   describe('reconnect-on-gossip', () => {
-    it('dials the sender of a gossip message when not already connected', async () => {
+    it('dials the sender of a gossip message via a connected relay circuit', async () => {
       const agent = await DKGAgent.create({
         name: 'ReconnectOnGossipBasic',
         listenHost: '127.0.0.1',
@@ -38,7 +42,15 @@ describe('p2p resilience hooks', () => {
         await agent.start();
 
         const dialSpy = vi.spyOn(agent.node.libp2p, 'dial').mockResolvedValue({} as any);
+        const relayPeer = freshPeerIdString();
+        const relayAddr = relayAddrFor(relayPeer);
         const remotePeer = freshPeerIdString();
+        (agent as any).config.relayPeers = [relayAddr];
+
+        const origGetPeers = agent.node.libp2p.getPeers.bind(agent.node.libp2p);
+        vi.spyOn(agent.node.libp2p, 'getPeers').mockImplementation(
+          () => [...origGetPeers(), peerIdFromString(relayPeer)],
+        );
 
         agent.eventBus.emit(DKGEvent.GOSSIP_MESSAGE, {
           topic: 'dkg/context-graph/test/pub',
@@ -51,7 +63,35 @@ describe('p2p resilience hooks', () => {
           await new Promise(r => setTimeout(r, 20));
         }
 
-        expect(dialSpy).toHaveBeenCalled();
+        expect(dialSpy).toHaveBeenCalledTimes(1);
+        expect(dialSpy.mock.calls[0]?.[0].toString()).toBe(`${relayAddr}/p2p-circuit/p2p/${remotePeer}`);
+      } finally {
+        await agent.stop().catch(() => {});
+      }
+    });
+
+    it('does not dial when configured relays are not connected', async () => {
+      const agent = await DKGAgent.create({
+        name: 'ReconnectOnGossipSkipsDisconnectedRelay',
+        listenHost: '127.0.0.1',
+        chainAdapter: new MockChainAdapter(),
+      });
+      try {
+        await agent.start();
+
+        const dialSpy = vi.spyOn(agent.node.libp2p, 'dial').mockResolvedValue({} as any);
+        const relayPeer = freshPeerIdString();
+        const remotePeer = freshPeerIdString();
+        (agent as any).config.relayPeers = [relayAddrFor(relayPeer)];
+
+        agent.eventBus.emit(DKGEvent.GOSSIP_MESSAGE, {
+          topic: 'dkg/context-graph/test/pub',
+          data: new Uint8Array(),
+          from: remotePeer,
+        });
+
+        await new Promise(r => setTimeout(r, 150));
+        expect(dialSpy).not.toHaveBeenCalled();
       } finally {
         await agent.stop().catch(() => {});
       }
@@ -126,7 +166,15 @@ describe('p2p resilience hooks', () => {
         // Mocked dial always rejects so no real path is created; we only
         // care about how many times maybeDialGossipSender *attempted* it.
         const dialSpy = vi.spyOn(agent.node.libp2p, 'dial').mockRejectedValue(new Error('no route'));
+        const relayPeer = freshPeerIdString();
+        const relayAddr = relayAddrFor(relayPeer);
         const remotePeer = freshPeerIdString();
+        (agent as any).config.relayPeers = [relayAddr];
+
+        const origGetPeers = agent.node.libp2p.getPeers.bind(agent.node.libp2p);
+        vi.spyOn(agent.node.libp2p, 'getPeers').mockImplementation(
+          () => [...origGetPeers(), peerIdFromString(relayPeer)],
+        );
 
         for (let i = 0; i < 5; i++) {
           agent.eventBus.emit(DKGEvent.GOSSIP_MESSAGE, {
@@ -136,14 +184,12 @@ describe('p2p resilience hooks', () => {
           });
         }
 
-        // Let the async dial attempts settle. With no relayPeers configured
-        // the method returns after the single peerStore dial, so ~200ms is
-        // plenty.
+        // Let the async dial attempt settle.
         await new Promise(r => setTimeout(r, 250));
 
-        // All 5 bursts should collapse to exactly 1 dial attempt via the
-        // peerStore path (no relayPeers configured → no relay fallbacks).
+        // All 5 bursts should collapse to exactly 1 explicit relay circuit dial.
         expect(dialSpy).toHaveBeenCalledTimes(1);
+        expect(dialSpy.mock.calls[0]?.[0].toString()).toBe(`${relayAddr}/p2p-circuit/p2p/${remotePeer}`);
       } finally {
         await agent.stop().catch(() => {});
       }

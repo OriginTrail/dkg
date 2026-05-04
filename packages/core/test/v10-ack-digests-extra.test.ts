@@ -124,31 +124,9 @@ describe('computeACKDigest (6-field) — H5 cost-parameter binding [C-2]', () =>
   });
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// !!! CRITICAL FINDING DURING TEST AUTHORING !!!
-//
-// `computeUpdateACKDigest` in src/crypto/ack.ts allocates a 340-byte packed
-// buffer but only writes 308 bytes (10 fields totalling 32+20+32+32+32+32+32+32
-// +32+32 = 308). The trailing 32 zero bytes ARE included in keccak256, so the
-// off-chain digest does NOT match the on-chain digest computed by KAV10.sol
-// lines 832-846. Every V10 UPDATE signed off-chain will fail _verifySignatures
-// on chain.
-//
-// The docstring in ack.ts even says "total packed width = 340 bytes" — that is
-// also wrong. Contract source of truth: 308 bytes (verified by reading the
-// abi.encodePacked() call in KnowledgeAssetsV10.sol).
-//
-// Golden vectors below are the CORRECT contract-layout vectors (308 bytes,
-// computed via ethers.solidityPackedKeccak256 with the exact field order from
-// the contract). The "matches the contract-layout golden vector" test SHOULD
-// pass; while it fails, that failure IS the bug signal — see BUGS_FOUND.md
-// finding C-1 (upgraded to PROD-BUG).
-//
-// QA policy (per user instruction "trust the code more"): do NOT modify
-// production code from a test PR. Leave the test red so the implementation
-// owner sees the contract-mismatch and fixes the buffer width.
-// ─────────────────────────────────────────────────────────────────────────────
-describe('computeUpdateACKDigest — KAV10.sol:832-846 layout [C-1]', () => {
+// Golden vectors: ethers.solidityPackedKeccak256 with the exact field order
+// from `KnowledgeAssetsV10._executeUpdateCore` (incl. trailing newMerkleLeafCount).
+describe('computeUpdateACKDigest — KAV10 update ACK layout [C-1]', () => {
   const newMerkleRoot = new Uint8Array(32).fill(0xbb);
   const kcId = 7n;
   const preUpdateMerkleRootCount = 2n;
@@ -156,24 +134,21 @@ describe('computeUpdateACKDigest — KAV10.sol:832-846 layout [C-1]', () => {
   const newTokenAmount = 2500n;
   const mintAmount = 4n;
   const burnTokenIds = [10n, 11n, 12n];
+  const newMerkleLeafCount = 11n;
 
-  // ethers.solidityPackedKeccak256(
-  //   ['uint256','address','uint256','uint256','uint256','bytes32',
-  //    'uint256','uint256','uint256','bytes32'],
-  //   [31337n, '0x...42', 1337n, 7n, 2n, '0xbb..bb', 5000n, 2500n, 4n, burnHash]
-  // )
   const GOLDEN =
-    '0xc74b73501b2342bc4441c08920a7b52e31d3af8da77da4b87d18bf9d572350b3';
+    '0xf96a6ec017e13243ed2261a0693962ee24c4dbe5c9221558d31aaef4eec5d674';
   const GOLDEN_WRONG_TOKEN =
-    '0x2a9df3e935b9c7f5bfaf1631fd203c09a2191e01630f24ef89ad32aca5e5d39c';
+    '0x47360fcf82083938cf87cf9fbd2497de970c6011041ed205ab36b1d90a5a3be0';
   const GOLDEN_EMPTY_BURN =
-    '0xdcadd5ba58e520a97505ce8f2dec61c483c58caf0d9a925ebf0b6758ae24d8e3';
+    '0x9ca167e7fd7c387dd75f58a7b758186f9686e4dcdcc66822aac7f05bbf7b570a';
 
   it('matches the contract-layout golden vector', () => {
     const digest = computeUpdateACKDigest(
       CHAIN_ID, KAV10_ADDRESS, CG_ID, kcId,
       preUpdateMerkleRootCount, newMerkleRoot,
       newByteSize, newTokenAmount, mintAmount, burnTokenIds,
+      newMerkleLeafCount,
     );
     expect('0x' + Buffer.from(digest).toString('hex')).toBe(GOLDEN);
   });
@@ -183,11 +158,13 @@ describe('computeUpdateACKDigest — KAV10.sol:832-846 layout [C-1]', () => {
       CHAIN_ID, KAV10_ADDRESS, CG_ID, kcId,
       preUpdateMerkleRootCount, newMerkleRoot,
       newByteSize, newTokenAmount, mintAmount, burnTokenIds,
+      newMerkleLeafCount,
     );
     const b = computeUpdateACKDigest(
       CHAIN_ID + 1n, KAV10_ADDRESS, CG_ID, kcId,
       preUpdateMerkleRootCount, newMerkleRoot,
       newByteSize, newTokenAmount, mintAmount, burnTokenIds,
+      newMerkleLeafCount,
     );
     expect(a).not.toEqual(b);
   });
@@ -197,11 +174,13 @@ describe('computeUpdateACKDigest — KAV10.sol:832-846 layout [C-1]', () => {
       CHAIN_ID, KAV10_ADDRESS, CG_ID, kcId,
       preUpdateMerkleRootCount, newMerkleRoot,
       newByteSize, newTokenAmount, mintAmount, burnTokenIds,
+      newMerkleLeafCount,
     );
     const b = computeUpdateACKDigest(
       CHAIN_ID, '0x0000000000000000000000000000000000000043', CG_ID, kcId,
       preUpdateMerkleRootCount, newMerkleRoot,
       newByteSize, newTokenAmount, mintAmount, burnTokenIds,
+      newMerkleLeafCount,
     );
     expect(a).not.toEqual(b);
   });
@@ -211,6 +190,7 @@ describe('computeUpdateACKDigest — KAV10.sol:832-846 layout [C-1]', () => {
       CHAIN_ID, KAV10_ADDRESS, CG_ID, kcId,
       preUpdateMerkleRootCount, newMerkleRoot,
       newByteSize, 9999n, mintAmount, burnTokenIds,
+      newMerkleLeafCount,
     );
     expect('0x' + Buffer.from(digest).toString('hex')).toBe(GOLDEN_WRONG_TOKEN);
     expect('0x' + Buffer.from(digest).toString('hex')).not.toBe(GOLDEN);
@@ -221,11 +201,13 @@ describe('computeUpdateACKDigest — KAV10.sol:832-846 layout [C-1]', () => {
       CHAIN_ID, KAV10_ADDRESS, CG_ID, kcId,
       preUpdateMerkleRootCount, newMerkleRoot,
       newByteSize, newTokenAmount, mintAmount, burnTokenIds,
+      newMerkleLeafCount,
     );
     const b = computeUpdateACKDigest(
       CHAIN_ID, KAV10_ADDRESS, CG_ID, kcId,
       preUpdateMerkleRootCount, newMerkleRoot,
       newByteSize + 1n, newTokenAmount, mintAmount, burnTokenIds,
+      newMerkleLeafCount,
     );
     expect(a).not.toEqual(b);
   });
@@ -235,11 +217,13 @@ describe('computeUpdateACKDigest — KAV10.sol:832-846 layout [C-1]', () => {
       CHAIN_ID, KAV10_ADDRESS, CG_ID, kcId,
       preUpdateMerkleRootCount, newMerkleRoot,
       newByteSize, newTokenAmount, mintAmount, burnTokenIds,
+      newMerkleLeafCount,
     );
     const b = computeUpdateACKDigest(
       CHAIN_ID, KAV10_ADDRESS, CG_ID, kcId + 1n,
       preUpdateMerkleRootCount, newMerkleRoot,
       newByteSize, newTokenAmount, mintAmount, burnTokenIds,
+      newMerkleLeafCount,
     );
     expect(a).not.toEqual(b);
   });
@@ -249,11 +233,13 @@ describe('computeUpdateACKDigest — KAV10.sol:832-846 layout [C-1]', () => {
       CHAIN_ID, KAV10_ADDRESS, CG_ID, kcId,
       preUpdateMerkleRootCount, newMerkleRoot,
       newByteSize, newTokenAmount, mintAmount, burnTokenIds,
+      newMerkleLeafCount,
     );
     const b = computeUpdateACKDigest(
       CHAIN_ID, KAV10_ADDRESS, CG_ID, kcId,
       preUpdateMerkleRootCount + 1n, newMerkleRoot,
       newByteSize, newTokenAmount, mintAmount, burnTokenIds,
+      newMerkleLeafCount,
     );
     expect(a).not.toEqual(b);
   });
@@ -263,11 +249,13 @@ describe('computeUpdateACKDigest — KAV10.sol:832-846 layout [C-1]', () => {
       CHAIN_ID, KAV10_ADDRESS, CG_ID, kcId,
       preUpdateMerkleRootCount, newMerkleRoot,
       newByteSize, newTokenAmount, mintAmount, burnTokenIds,
+      newMerkleLeafCount,
     );
     const b = computeUpdateACKDigest(
       CHAIN_ID, KAV10_ADDRESS, CG_ID, kcId,
       preUpdateMerkleRootCount, newMerkleRoot,
       newByteSize, newTokenAmount, mintAmount, [10n, 11n, 13n],
+      newMerkleLeafCount,
     );
     expect(a).not.toEqual(b);
   });
@@ -277,11 +265,13 @@ describe('computeUpdateACKDigest — KAV10.sol:832-846 layout [C-1]', () => {
       CHAIN_ID, KAV10_ADDRESS, CG_ID, kcId,
       preUpdateMerkleRootCount, newMerkleRoot,
       newByteSize, newTokenAmount, mintAmount, [10n, 11n, 12n],
+      newMerkleLeafCount,
     );
     const b = computeUpdateACKDigest(
       CHAIN_ID, KAV10_ADDRESS, CG_ID, kcId,
       preUpdateMerkleRootCount, newMerkleRoot,
       newByteSize, newTokenAmount, mintAmount, [12n, 11n, 10n],
+      newMerkleLeafCount,
     );
     expect(a).not.toEqual(b);
   });
@@ -291,6 +281,7 @@ describe('computeUpdateACKDigest — KAV10.sol:832-846 layout [C-1]', () => {
       CHAIN_ID, KAV10_ADDRESS, CG_ID, kcId,
       preUpdateMerkleRootCount, newMerkleRoot,
       newByteSize, newTokenAmount, mintAmount, [],
+      newMerkleLeafCount,
     );
     expect('0x' + Buffer.from(digest).toString('hex')).toBe(GOLDEN_EMPTY_BURN);
   });
@@ -300,6 +291,7 @@ describe('computeUpdateACKDigest — KAV10.sol:832-846 layout [C-1]', () => {
       CHAIN_ID, KAV10_ADDRESS, CG_ID, kcId,
       preUpdateMerkleRootCount, new Uint8Array(31),
       newByteSize, newTokenAmount, mintAmount, burnTokenIds,
+      newMerkleLeafCount,
     )).toThrow(/newMerkleRoot/);
   });
 
@@ -308,6 +300,7 @@ describe('computeUpdateACKDigest — KAV10.sol:832-846 layout [C-1]', () => {
       CHAIN_ID, '0xnotanaddress', CG_ID, kcId,
       preUpdateMerkleRootCount, newMerkleRoot,
       newByteSize, newTokenAmount, mintAmount, burnTokenIds,
+      newMerkleLeafCount,
     )).toThrow(/kav10Address/);
   });
 
@@ -316,11 +309,13 @@ describe('computeUpdateACKDigest — KAV10.sol:832-846 layout [C-1]', () => {
       CHAIN_ID, KAV10_ADDRESS, CG_ID, kcId,
       preUpdateMerkleRootCount, newMerkleRoot,
       newByteSize, newTokenAmount, mintAmount, burnTokenIds,
+      newMerkleLeafCount,
     );
     const b = computeUpdateACKDigest(
       CHAIN_ID, KAV10_ADDRESS, CG_ID, kcId,
       preUpdateMerkleRootCount, newMerkleRoot,
       newByteSize, newTokenAmount, mintAmount, burnTokenIds,
+      newMerkleLeafCount,
     );
     expect(a).toEqual(b);
   });
@@ -332,6 +327,7 @@ describe('computeUpdateACKDigest — KAV10.sol:832-846 layout [C-1]', () => {
       CHAIN_ID, KAV10_ADDRESS, CG_ID, kcId,
       preUpdateMerkleRootCount, newMerkleRoot,
       newByteSize, newTokenAmount, mintAmount, burnTokenIds,
+      newMerkleLeafCount,
     );
     const ack6 = computeACKDigest(CG_ID, newMerkleRoot, Number(mintAmount), newByteSize, 1, newTokenAmount);
     expect(updateDigest).not.toEqual(ack6);

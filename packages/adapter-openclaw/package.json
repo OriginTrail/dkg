@@ -1,6 +1,6 @@
 {
   "name": "@origintrail-official/dkg-adapter-openclaw",
-  "version": "10.0.0-rc.1",
+  "version": "10.0.0-rc.2",
   "description": "OpenClaw plugin adapter for connecting a DKG V10 node and chat bridge to an OpenClaw agent",
   "type": "module",
   "main": "dist/index.js",

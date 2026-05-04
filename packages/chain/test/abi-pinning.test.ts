@@ -93,9 +93,17 @@ function canonicalAbiDigest(contractName: string): string {
 // update this table intentionally after reviewing the ABI diff.
 const PINNED_DIGESTS: Record<string, string> = {
   // Critical V10 lifecycle contracts — drift here breaks publish/update.
-  KnowledgeAssetsV10:           '610d0fc24d0b4a0651ea54ece222aacc5699131347b33334d1de89e8ca365a9e',
-  KnowledgeCollectionStorage:   '734edc3a9a106aefe429d6a50daf9c821ccdfe6a6e051cc520a7f6e61b258dfb',
-  KnowledgeCollection:          'c919254895cea1dc922f1e62db1ff2fbaba4a61d249023e584e2f8c10f42dbab',
+  // Updated PR #357: V10 publish/update flows now carry merkleLeafCount
+  // (uint256) in addition to merkleRoot, propagating through:
+  //   - KnowledgeCollection.publish/update fn signatures (root cause)
+  //   - KnowledgeAssetsV10 publish + ACK digest input set
+  //   - KnowledgeCollectionStorage event payload (KnowledgeCollectionCreated /
+  //     KnowledgeCollectionUpdated still carry the same ABI shape today;
+  //     the digest changed because the function inputs they originate from
+  //     changed). Sanity tests below pin the actual event field shapes.
+  KnowledgeAssetsV10:           '8cd026c514ae7390760b3f5c10982af71bba624c8438a8a0f4ba16c4da006fab',
+  KnowledgeCollectionStorage:   '99dd188d290c191a9f7ab5e8bef78db123f9400da0e8fa2c20811db0df15c5da',
+  KnowledgeCollection:          'c906207c38ffded8944d7255498f7fc9f2c864098a3f8f3670df19006dbcd395',
   ContextGraphs:                '25a5e18897044b88c129e7e0fc68eec8fd99e64ded658f29f69df85f95cd25fc',
   ContextGraphStorage:          '7df78d2a870cd14236a2fa30461ea9bcae4a338e5ba20b466149a00ace5ee2be',
   // Identity / staking — consulted on every publish.

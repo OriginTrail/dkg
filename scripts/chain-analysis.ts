@@ -5,8 +5,16 @@
  * Cross-chain analysis: compares on-chain staking totals against
  * publisher TRAC snapshots and staker/delegator stakes.
  *
+ * v4.0.0 — TRAC vault moved from V8 `StakingStorage` to V10
+ * `ConvictionStakingStorage` (CSS). The audit reads BOTH addresses:
+ *   - SS TRAC balance + V8 stake/operator-fee aggregates (legacy archive)
+ *   - CSS TRAC balance + V10 nodeStakeV10 + operator-fee aggregates
+ * and sums them so the per-chain accounting is faithful through the
+ * migration window. Post-cutover, V8 columns drop to 0 and CSS holds
+ * the entire stake.
+ *
  * Per chain reports:
- *   - Total staked TRAC (from StakingStorage.getTotalStake)
+ *   - Total staked TRAC (sum: StakingStorage + ConvictionStakingStorage)
  *   - Total publisher TRAC (from our epoch16 snapshots)
  *   - Number of publishers and stakers
  *   - Any remaining/unaccounted TRAC
@@ -80,6 +88,13 @@ const STAKING_STORAGE_ABI = [
   'function delegatorWithdrawalRequestExists(uint72, bytes32) view returns (bool)',
 ];
 
+const CONVICTION_STAKING_STORAGE_ABI = [
+  'function getNodeStakeV10(uint72) view returns (uint256)',
+  'function totalStakeV10() view returns (uint256)',
+  'function getOperatorFeeBalance(uint72) view returns (uint96)',
+  'function getOperatorFeeWithdrawalRequestAmount(uint72) view returns (uint96)',
+];
+
 const IDENTITY_STORAGE_ABI = [
   'function lastIdentityId() view returns (uint72)',
 ];
@@ -141,9 +156,19 @@ async function analyzeChain(chain: ChainDef) {
 
   const hub = new Contract(chain.hubAddress, HUB_ABI, provider);
 
-  const [stakingStorageAddr, identityStorageAddr, chronosAddr, delegatorsInfoAddr, epochStorageAddr, tokenAddr, knowledgeCollectionAddr] =
-    await Promise.all([
+  const [
+    stakingStorageAddr,
+    convictionStakingStorageAddr,
+    identityStorageAddr,
+    chronosAddr,
+    delegatorsInfoAddr,
+    epochStorageAddr,
+    tokenAddr,
+    knowledgeCollectionAddr,
+  ] = await Promise.all([
       hub.getContractAddress('StakingStorage', { blockTag: blockNumber }),
+      hub.getContractAddress('ConvictionStakingStorage', { blockTag: blockNumber })
+        .catch(() => ethers.ZeroAddress),
       hub.getContractAddress('IdentityStorage', { blockTag: blockNumber }),
       hub.getContractAddress('Chronos', { blockTag: blockNumber }),
       hub.getContractAddress('DelegatorsInfo', { blockTag: blockNumber }),
@@ -153,6 +178,10 @@ async function analyzeChain(chain: ChainDef) {
     ]);
 
   const stakingStorage = new Contract(stakingStorageAddr, STAKING_STORAGE_ABI, provider);
+  const cssEnabled = convictionStakingStorageAddr !== ethers.ZeroAddress;
+  const convictionStakingStorage = cssEnabled
+    ? new Contract(convictionStakingStorageAddr, CONVICTION_STAKING_STORAGE_ABI, provider)
+    : null;
   const identityStorage = new Contract(identityStorageAddr, IDENTITY_STORAGE_ABI, provider);
   const chronos = new Contract(chronosAddr, CHRONOS_ABI, provider);
   const delegatorsInfo = new Contract(delegatorsInfoAddr, DELEGATORS_INFO_ABI, provider);
@@ -162,15 +191,28 @@ async function analyzeChain(chain: ChainDef) {
   const currentEpoch = Number(await chronos.getCurrentEpoch({ blockTag: blockNumber }));
   const lastIdentityId = Number(await identityStorage.lastIdentityId({ blockTag: blockNumber }));
 
-  // Actual TRAC balances on contracts
+  // Actual TRAC balances on contracts. Sum SS + CSS for the V10 vault audit
+  // (CSS is the v4.0.0 vault; SS holds residual TRAC from the V8 era and any
+  // mid-migration drains).
   const stakingStorageBalance: bigint = await token.balanceOf(stakingStorageAddr, { blockTag: blockNumber });
+  const convictionStakingStorageBalance: bigint = cssEnabled
+    ? await token.balanceOf(convictionStakingStorageAddr, { blockTag: blockNumber })
+    : 0n;
+  const stakingVaultBalance = stakingStorageBalance + convictionStakingStorageBalance;
   const kcBalance: bigint = await token.balanceOf(knowledgeCollectionAddr, { blockTag: blockNumber });
 
   console.log(`  Block: ${blockNumber}`);
   console.log(`  Current epoch: ${currentEpoch}`);
   console.log(`  TRAC Token: ${tokenAddr}`);
   console.log(`  StakingStorage (${stakingStorageAddr}):`);
-  console.log(`    TRAC balance: ${ethers.formatEther(stakingStorageBalance)} TRAC`);
+  console.log(`    TRAC balance (V8 archive):     ${ethers.formatEther(stakingStorageBalance)} TRAC`);
+  if (cssEnabled) {
+    console.log(`  ConvictionStakingStorage (${convictionStakingStorageAddr}):`);
+    console.log(`    TRAC balance (V10 vault):      ${ethers.formatEther(convictionStakingStorageBalance)} TRAC`);
+  } else {
+    console.log(`  ConvictionStakingStorage: not registered (pre-V10 chain).`);
+  }
+  console.log(`  Combined staking-vault balance:  ${ethers.formatEther(stakingVaultBalance)} TRAC`);
   console.log(`  KnowledgeCollection (${knowledgeCollectionAddr}):`);
   console.log(`    TRAC balance: ${ethers.formatEther(kcBalance)} TRAC`);
   console.log(`  Last identity ID: ${lastIdentityId}`);
@@ -190,11 +232,26 @@ async function analyzeChain(chain: ChainDef) {
   let delegatorsWithWithdrawal = 0;
 
   await batchProcess(identityIds, BATCH_SIZE, async (id) => {
-    const [nodeStake, opFeeBalance, opFeeWithdrawal] = await Promise.all([
+    const [v8NodeStake, v8OpFeeBalance, v8OpFeeWithdrawal] = await Promise.all([
       retry(() => stakingStorage.getNodeStake(id, { blockTag: blockNumber })) as Promise<bigint>,
       retry(() => stakingStorage.getOperatorFeeBalance(id, { blockTag: blockNumber })) as Promise<bigint>,
       retry(() => stakingStorage.getOperatorFeeWithdrawalRequestAmount(id, { blockTag: blockNumber })) as Promise<bigint>,
     ]);
+
+    let v10NodeStake = 0n;
+    let v10OpFeeBalance = 0n;
+    let v10OpFeeWithdrawal = 0n;
+    if (convictionStakingStorage) {
+      [v10NodeStake, v10OpFeeBalance, v10OpFeeWithdrawal] = await Promise.all([
+        (retry(() => convictionStakingStorage.getNodeStakeV10(id, { blockTag: blockNumber })) as Promise<bigint>).then(BigInt),
+        retry(() => convictionStakingStorage.getOperatorFeeBalance(id, { blockTag: blockNumber })) as Promise<bigint>,
+        retry(() => convictionStakingStorage.getOperatorFeeWithdrawalRequestAmount(id, { blockTag: blockNumber })) as Promise<bigint>,
+      ]);
+    }
+
+    const nodeStake = v8NodeStake + v10NodeStake;
+    const opFeeBalance = v8OpFeeBalance + v10OpFeeBalance;
+    const opFeeWithdrawal = v8OpFeeWithdrawal + v10OpFeeWithdrawal;
 
     if (nodeStake > 0n) {
       totalNodeStakeWei += nodeStake;
@@ -256,7 +313,12 @@ async function analyzeChain(chain: ChainDef) {
   }
 
   // ── Report ────────────────────────────────────────────────────────────
-  const stakingBalanceTRAC = parseFloat(ethers.formatEther(stakingStorageBalance));
+  // v4.0.0 — `stakingBalanceTRAC` reports the COMBINED vault balance (SS + CSS)
+  // so the unaccounted-TRAC reconciliation is honest through the migration
+  // window. The per-store breakdown is in the header lines above.
+  const stakingBalanceTRAC = parseFloat(ethers.formatEther(stakingVaultBalance));
+  const v8StakingBalanceTRAC = parseFloat(ethers.formatEther(stakingStorageBalance));
+  const cssBalanceTRAC = parseFloat(ethers.formatEther(convictionStakingStorageBalance));
   const kcBalanceTRAC = parseFloat(ethers.formatEther(kcBalance));
   const totalNodeStakeTRAC = parseFloat(ethers.formatEther(totalNodeStakeWei));
   const opFeeBalanceTRAC = parseFloat(ethers.formatEther(totalOperatorFeeBalanceWei));
@@ -267,20 +329,24 @@ async function analyzeChain(chain: ChainDef) {
   const unaccountedTRAC = stakingBalanceTRAC - accountedTRAC;
 
   console.log(`\n  ── Results ──`);
-  console.log(`  StakingStorage TRAC balance:              ${fmt(stakingBalanceTRAC)} TRAC`);
+  console.log(`  Combined staking-vault balance (SS+CSS):  ${fmt(stakingBalanceTRAC)} TRAC`);
+  console.log(`    StakingStorage  (V8 archive):           ${fmt(v8StakingBalanceTRAC)} TRAC`);
+  console.log(`    ConvictionStakingStorage (V10 vault):   ${fmt(cssBalanceTRAC)} TRAC`);
   console.log(`  KnowledgeCollection TRAC balance:         ${fmt(kcBalanceTRAC)} TRAC`);
   console.log(``);
-  console.log(`  1. Node stakes (getNodeStake):            ${fmt(totalNodeStakeTRAC)} TRAC`);
+  console.log(`  1. Node stakes (V8 + V10 raw sum):        ${fmt(totalNodeStakeTRAC)} TRAC`);
   console.log(`     Staked nodes: ${stakedNodeCount}, Delegator entries: ${totalDelegatorCount}`);
   console.log(`  2. Publisher epoch pools (${epochNums[0]}→${epochNums[epochNums.length - 1]}):         ${fmt(totalEpochPoolTRAC)} TRAC`);
   console.log(`     Unique publishers: ${publisherSet.size}`);
-  console.log(`  3. Operator fee balances:                 ${fmt(opFeeBalanceTRAC)} TRAC  (${nodesWithOpFee} nodes)`);
-  console.log(`  4. Operator fee withdrawal requests:      ${fmt(opFeeWithdrawalTRAC)} TRAC  (${nodesWithOpFeeWithdrawal} nodes)`);
-  console.log(`  5. Delegator withdrawal requests:         ${fmt(delegatorWithdrawalTRAC)} TRAC  (${delegatorsWithWithdrawal} delegators)`);
+  console.log(`  3. Operator fee balances (V8 + V10):      ${fmt(opFeeBalanceTRAC)} TRAC  (${nodesWithOpFee} nodes)`);
+  console.log(`  4. Operator fee withdrawal req. (V8+V10): ${fmt(opFeeWithdrawalTRAC)} TRAC  (${nodesWithOpFeeWithdrawal} nodes)`);
+  console.log(`  5. Delegator withdrawal requests (V8):    ${fmt(delegatorWithdrawalTRAC)} TRAC  (${delegatorsWithWithdrawal} delegators)`);
   console.log(``);
   console.log(`  Total accounted (1+2+3+4+5):              ${fmt(accountedTRAC)} TRAC`);
   console.log(`  Unaccounted (balance - accounted):         ${fmt(unaccountedTRAC)} TRAC`);
-  console.log(`  Unaccounted %:                             ${((unaccountedTRAC / stakingBalanceTRAC) * 100).toFixed(4)}%`);
+  if (stakingBalanceTRAC > 0) {
+    console.log(`  Unaccounted %:                             ${((unaccountedTRAC / stakingBalanceTRAC) * 100).toFixed(4)}%`);
+  }
 
   return {
     chain: chain.name,
@@ -288,6 +354,8 @@ async function analyzeChain(chain: ChainDef) {
     blockNumber,
     currentEpoch,
     stakingBalanceTRAC,
+    v8StakingBalanceTRAC,
+    cssBalanceTRAC,
     kcBalanceTRAC,
     totalNodeStakeTRAC,
     stakedNodeCount,
@@ -337,8 +405,10 @@ async function main() {
 
     for (const r of results) {
       console.log(`\n  ${r.chain} (${r.blockchainId}):`);
-      console.log(`    StakingStorage balance:      ${fmt(r.stakingBalanceTRAC)}`);
-      console.log(`    1. Node stakes:              ${fmt(r.totalNodeStakeTRAC)} (${r.stakedNodeCount} nodes, ${r.totalDelegatorCount} delegators)`);
+      console.log(`    Combined vault (SS+CSS):     ${fmt(r.stakingBalanceTRAC)}`);
+      console.log(`      V8 SS:                     ${fmt(r.v8StakingBalanceTRAC)}`);
+      console.log(`      V10 CSS:                   ${fmt(r.cssBalanceTRAC)}`);
+      console.log(`    1. Node stakes (V8+V10):     ${fmt(r.totalNodeStakeTRAC)} (${r.stakedNodeCount} nodes, ${r.totalDelegatorCount} delegators)`);
       console.log(`    2. Publisher epoch pools:     ${fmt(r.totalEpochPoolTRAC)} (${r.uniquePublishers} publishers, epochs ${r.epochRange})`);
       console.log(`    3. Operator fee balances:     ${fmt(r.opFeeBalanceTRAC)}`);
       console.log(`    4. Operator fee withdrawals:  ${fmt(r.opFeeWithdrawalTRAC)}`);
@@ -361,14 +431,16 @@ async function main() {
     }
 
     console.log(`\n  ── Totals across all chains ──`);
-    console.log(`  StakingStorage TRAC balance:     ${fmt(grandBalance)} TRAC`);
-    console.log(`  1. Node stakes:                  ${fmt(grandNodeStake)} TRAC`);
+    console.log(`  Combined staking vault (SS+CSS): ${fmt(grandBalance)} TRAC`);
+    console.log(`  1. Node stakes (V8+V10):         ${fmt(grandNodeStake)} TRAC`);
     console.log(`  2. Publisher epoch pools:         ${fmt(grandEpochPool)} TRAC`);
-    console.log(`  3. Operator fee balances:         ${fmt(grandOpFee)} TRAC`);
+    console.log(`  3. Operator fee balances (V8+V10):${fmt(grandOpFee)} TRAC`);
     console.log(`  4. Operator fee withdrawals:      ${fmt(grandOpFeeWithdrawal)} TRAC`);
-    console.log(`  5. Delegator withdrawals:         ${fmt(grandDelegatorWithdrawal)} TRAC`);
+    console.log(`  5. Delegator withdrawals (V8):    ${fmt(grandDelegatorWithdrawal)} TRAC`);
     console.log(`  Accounted (1+2+3+4+5):            ${fmt(grandAccounted)} TRAC`);
-    console.log(`  Unaccounted:                      ${fmt(grandUnaccounted)} TRAC  (${((grandUnaccounted / grandBalance) * 100).toFixed(4)}%)`);
+    if (grandBalance > 0) {
+      console.log(`  Unaccounted:                      ${fmt(grandUnaccounted)} TRAC  (${((grandUnaccounted / grandBalance) * 100).toFixed(4)}%)`);
+    }
     console.log(`  Nodes: ${grandNodes}, Delegators: ${grandDelegators}, Publishers: ${grandPubs}`);
   }
 }

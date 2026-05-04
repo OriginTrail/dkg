@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { ACKCollector, type ACKCollectorDeps } from '../src/ack-collector.js';
 import { encodeStorageACK, computePublishACKDigest } from '@origintrail-official/dkg-core';
-import { computeFlatKCRootV10 } from '../src/merkle.js';
+import { computeFlatKCRootV10, computeFlatKCMerkleLeafCountV10 } from '../src/merkle.js';
 import { ethers } from 'ethers';
 
 // Test H5 prefix inputs — must match what the collector passes into
@@ -13,29 +13,6 @@ function makeQuad(s: string, p: string, o: string, g = 'urn:test') {
   return { subject: s, predicate: p, object: o, graph: g };
 }
 
-async function signACK(
-  wallet: ethers.Wallet,
-  contextGraphId: bigint,
-  merkleRoot: Uint8Array,
-  kaCount: number,
-  byteSize: bigint,
-  epochs: bigint = 1n,
-  tokenAmount: bigint = 0n,
-) {
-  const digest = computePublishACKDigest(
-    TEST_CHAIN_ID,
-    TEST_KAV10_ADDR,
-    contextGraphId,
-    merkleRoot,
-    BigInt(kaCount),
-    byteSize,
-    epochs,
-    tokenAmount,
-  );
-  const sig = ethers.Signature.from(await wallet.signMessage(digest));
-  return { r: ethers.getBytes(sig.r), vs: ethers.getBytes(sig.yParityAndS) };
-}
-
 describe('ACKCollector', () => {
   const testCGId = 42n;
   const testCGIdStr = 'test-cg';
@@ -44,6 +21,32 @@ describe('ACKCollector', () => {
     makeQuad('urn:a', 'urn:p', 'urn:o2'),
   ];
   const merkleRoot = computeFlatKCRootV10(testQuads, []);
+  const merkleLeafCount = computeFlatKCMerkleLeafCountV10(testQuads, []);
+
+  async function signACK(
+    wallet: ethers.Wallet,
+    contextGraphId: bigint,
+    root: Uint8Array,
+    kaCount: number,
+    byteSize: bigint,
+    epochs: bigint = 1n,
+    tokenAmount: bigint = 0n,
+    leafCount: number = merkleLeafCount,
+  ) {
+    const digest = computePublishACKDigest(
+      TEST_CHAIN_ID,
+      TEST_KAV10_ADDR,
+      contextGraphId,
+      root,
+      BigInt(kaCount),
+      byteSize,
+      epochs,
+      tokenAmount,
+      BigInt(leafCount),
+    );
+    const sig = ethers.Signature.from(await wallet.signMessage(digest));
+    return { r: ethers.getBytes(sig.r), vs: ethers.getBytes(sig.yParityAndS) };
+  }
 
   const coreWallets = [
     ethers.Wallet.createRandom(),
@@ -85,6 +88,7 @@ describe('ACKCollector', () => {
       rootEntities: ['urn:a'],
       chainId: TEST_CHAIN_ID,
       kav10Address: TEST_KAV10_ADDR,
+      merkleLeafCount,
     });
 
     expect(result.acks).toHaveLength(3);
@@ -137,6 +141,7 @@ describe('ACKCollector', () => {
       rootEntities: ['urn:a'],
       chainId: TEST_CHAIN_ID,
       kav10Address: TEST_KAV10_ADDR,
+      merkleLeafCount,
     });
 
     expect(result.acks).toHaveLength(3);
@@ -165,6 +170,7 @@ describe('ACKCollector', () => {
       rootEntities: ['urn:a'],
       chainId: TEST_CHAIN_ID,
       kav10Address: TEST_KAV10_ADDR,
+      merkleLeafCount,
     })).rejects.toThrow('no connected core peers');
   });
 
@@ -200,6 +206,7 @@ describe('ACKCollector', () => {
       rootEntities: ['urn:a'],
       chainId: TEST_CHAIN_ID,
       kav10Address: TEST_KAV10_ADDR,
+      merkleLeafCount,
     })).rejects.toThrow('storage_ack_insufficient');
   });
 
@@ -234,6 +241,7 @@ describe('ACKCollector', () => {
       rootEntities: ['urn:a'],
       chainId: TEST_CHAIN_ID,
       kav10Address: TEST_KAV10_ADDR,
+      merkleLeafCount,
     })).rejects.toThrow('storage_ack_insufficient');
   });
 });

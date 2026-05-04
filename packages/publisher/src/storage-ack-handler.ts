@@ -6,7 +6,10 @@ import {
   computePublishACKDigest,
   assertSafeIri,
 } from '@origintrail-official/dkg-core';
-import { computeFlatKCRootV10 as computeFlatKCRoot } from './merkle.js';
+import {
+  computeFlatKCRootV10 as computeFlatKCRoot,
+  computeFlatKCMerkleLeafCountV10,
+} from './merkle.js';
 import { parseSimpleNQuads } from './publish-handler.js';
 import { ethers } from 'ethers';
 
@@ -34,6 +37,23 @@ export interface StorageACKHandlerConfig {
    * of the H5 prefix on the V10 ACK digest.
    */
   kav10Address: string;
+  /**
+   * Optional live confirmation hook. When provided, the handler calls it
+   * immediately before signing so removed/unregistered operational keys stop
+   * producing ACKs without needing a process restart.
+   */
+  isSignerRegistered?: () => Promise<boolean>;
+  /**
+   * Called when the live confirmation hook reports the signer is no longer
+   * registered. Agents can use this to stop advertising StorageACK support.
+   */
+  onSignerUnregistered?: () => void | Promise<void>;
+  /**
+   * Called when the live confirmation hook itself fails. Lookup errors are
+   * signing blockers because ACKs must only be produced by keys confirmed
+   * registered on-chain at signing time.
+   */
+  onSignerRegistrationLookupFailed?: (err: unknown) => void | Promise<void>;
 }
 
 /**
@@ -44,8 +64,8 @@ export interface StorageACKHandlerConfig {
  * 2. Verify the data exists in SWM
  * 3. Recompute the merkle root from SWM triples
  * 4. Sign ACK = EIP-191(computePublishACKDigest(chainId, kav10Address, cgId,
- *    merkleRoot, kaCount, byteSize, epochs, tokenAmount)) — the H5-prefixed
- *    8-field digest. Matches KnowledgeAssetsV10.sol:362-373 byte-for-byte.
+ *    merkleRoot, kaCount, byteSize, epochs, tokenAmount, merkleLeafCount)) —
+ *    the H5-prefixed digest. Matches `KnowledgeAssetsV10._executePublishCore`.
  * 5. Return StorageACK via the P2P stream response
  */
 export class StorageACKHandler {
@@ -211,9 +231,23 @@ export class StorageACKHandler {
     const intentTokenAmount = intent.tokenAmountStr
       ? BigInt(intent.tokenAmountStr)
       : 0n;
-    // H5-prefixed ACK digest matching KnowledgeAssetsV10.sol:362-373. `chainId`
-    // and `kav10Address` are threaded in via StorageACKHandlerConfig at
-    // construction time from the node's chain adapter.
+
+    const verifiedLeafCount = computeFlatKCMerkleLeafCountV10(swmQuads, []);
+    if (verifiedLeafCount === 0) {
+      throw new Error(
+        'StorageACK: empty knowledge collection (zero V10 Merkle leaves after sort+dedupe) — refusing ACK',
+      );
+    }
+    const claimedLeafCount = intent.merkleLeafCount == null ? 0 : Number(intent.merkleLeafCount);
+    if (claimedLeafCount !== verifiedLeafCount) {
+      throw new Error(
+        `StorageACK: merkleLeafCount mismatch (intent=${claimedLeafCount}, computed=${verifiedLeafCount}). ` +
+        'Publishers must set PublishIntent.merkleLeafCount to the V10 flat-KC leaf count.',
+      );
+    }
+
+    // H5-prefixed ACK digest matching `KnowledgeAssetsV10._executePublishCore`.
+    // `chainId` and `kav10Address` are threaded in via StorageACKHandlerConfig.
     const digest = computePublishACKDigest(
       this.config.chainId,
       this.config.kav10Address,
@@ -223,7 +257,30 @@ export class StorageACKHandler {
       verifiedByteSize,
       BigInt(intentEpochs),
       intentTokenAmount,
+      BigInt(verifiedLeafCount),
     );
+    if (this.config.isSignerRegistered) {
+      let signerRegistered: boolean | undefined;
+      try {
+        signerRegistered = await this.config.isSignerRegistered();
+      } catch (err) {
+        try {
+          await this.config.onSignerRegistrationLookupFailed?.(err);
+        } catch {
+          // Keep ACK availability independent from logging/callback failures.
+        }
+        throw new Error('StorageACK signer registration lookup failed; refusing to sign');
+      }
+      if (signerRegistered === false) {
+        try {
+          await this.config.onSignerUnregistered?.();
+        } catch {
+          // Keep the signing refusal deterministic even if protocol cleanup fails.
+        }
+        throw new Error('StorageACK signer is not confirmed on-chain as an operational wallet');
+      }
+    }
+
     const signature = ethers.Signature.from(
       await this.config.signerWallet.signMessage(digest),
     );

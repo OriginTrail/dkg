@@ -9,7 +9,7 @@ import {Chronos} from "./storage/Chronos.sol";
 import {KnowledgeCollectionStorage} from "./storage/KnowledgeCollectionStorage.sol";
 import {IdentityStorage} from "./storage/IdentityStorage.sol";
 import {ParametersStorage} from "./storage/ParametersStorage.sol";
-import {StakingStorage} from "./storage/StakingStorage.sol";
+import {ConvictionStakingStorage} from "./storage/ConvictionStakingStorage.sol";
 import {ContextGraphs} from "./ContextGraphs.sol";
 import {ContextGraphStorage} from "./storage/ContextGraphStorage.sol";
 import {ContextGraphValueStorage} from "./storage/ContextGraphValueStorage.sol";
@@ -102,6 +102,9 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
         uint40 epochs;
         uint96 tokenAmount;
         bool isImmutable;
+        /// @notice V10 flat-KC Merkle leaf count (sorted + deduped), must match
+        ///         off-chain `V10MerkleTree` built from the same publish payload.
+        uint32 merkleLeafCount;
         uint72 publisherNodeIdentityId;
         bytes32 publisherNodeR;
         bytes32 publisherNodeVS;
@@ -125,6 +128,7 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
         bytes32 newMerkleRoot;
         uint88 newByteSize;
         uint96 newTokenAmount;
+        uint32 newMerkleLeafCount;
         uint256 mintKnowledgeAssetsAmount;
         uint256[] knowledgeAssetsToBurn;
         uint72 publisherNodeIdentityId;
@@ -145,7 +149,9 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
     IERC20 public tokenContract;
     ParametersStorage public parametersStorage;
     IdentityStorage public identityStorage;
-    StakingStorage public stakingStorage;
+    /// @notice v4.0.0 — TRAC vault + V10 stake reads. Replaces the prior
+    ///         `stakingStorage` field; CSS is the V10 source of truth.
+    ConvictionStakingStorage public convictionStakingStorage;
     ContextGraphs public contextGraphs;
     ContextGraphStorage public contextGraphStorage;
     ContextGraphValueStorage public contextGraphValueStorage;
@@ -192,7 +198,7 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
         tokenContract = IERC20(hub.getContractAddress("Token"));
         parametersStorage = ParametersStorage(hub.getContractAddress("ParametersStorage"));
         identityStorage = IdentityStorage(hub.getContractAddress("IdentityStorage"));
-        stakingStorage = StakingStorage(hub.getContractAddress("StakingStorage"));
+        convictionStakingStorage = ConvictionStakingStorage(hub.getContractAddress("ConvictionStakingStorage"));
 
         // V10 new dependencies — fail-fast. Each MUST be Hub-registered at
         // KAV10 initialize() time. The Phase 7 transitional try/catch tolerance
@@ -338,9 +344,10 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
 
         // ACK digest. H5 chain/contract prefix mirrors the publisher digest.
         // Field set per PRD (V10 protocol core §9 "Publish Flow — Contract
-        // Verification") and decision #25 Option B:
+        // Verification") and decision #25 Option B, extended with V10 flat-KC
+        // Merkle metadata:
         //   (chainid, address(this), contextGraphId, merkleRoot,
-        //    knowledgeAssetsAmount, byteSize, epochs, tokenAmount)
+        //    knowledgeAssetsAmount, byteSize, epochs, tokenAmount, merkleLeafCount)
         // The publisher node identity is NOT part of the ACK digest — it lives
         // only in the publisher digest above. ACK signers attest to the
         // publication's economic + content shape; the publishing node is a
@@ -355,7 +362,8 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
                 p.knowledgeAssetsAmount,
                 uint256(p.byteSize),
                 uint256(p.epochs),
-                uint256(p.tokenAmount)
+                uint256(p.tokenAmount),
+                uint256(p.merkleLeafCount)
             )
         );
         _verifySignatures(p.identityIds, ECDSA.toEthSignedMessageHash(ackDigest), p.r, p.vs);
@@ -407,7 +415,8 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
             currentEpoch,
             currentEpoch + p.epochs,
             p.tokenAmount,
-            p.isImmutable
+            p.isImmutable,
+            p.merkleLeafCount
         );
 
         // --- 4. N20: atomic CG↔KC binding + CG value diff ---
@@ -543,8 +552,11 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
             revert KnowledgeCollectionLib.SignerIsNotNodeOperator(identityId, signer);
         }
 
-        // Core nodes must be staked (spec §9.0)
-        require(stakingStorage.getNodeStake(identityId) > 0, "ACK signer has no stake");
+        // Core nodes must be staked (spec §9.0). v4.0.0 — read V10 canonical
+        // stake (`nodeStakeV10`) instead of the V8 archive aggregate; under
+        // mandatory migration `getNodeStake` is unmaintained for V10 nodes
+        // and would zero-gate every legitimate V10 ACK signer.
+        require(convictionStakingStorage.getNodeStakeV10(identityId) > 0, "ACK signer has no stake");
     }
 
     // ========================================================================
@@ -598,7 +610,7 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
                 revert TokenLib.TooLowBalance(address(token), token.balanceOf(msg.sender), tokenAmount);
             }
 
-            if (!token.transferFrom(msg.sender, address(stakingStorage), tokenAmount)) {
+            if (!token.transferFrom(msg.sender, address(convictionStakingStorage), tokenAmount)) {
                 revert TokenLib.TransferFailed();
             }
         }
@@ -718,7 +730,8 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
             uint88 currentByteSize,
             uint40 endEpoch,
             uint96 currentTokenAmount,
-            bool isImmutable
+            bool isImmutable,
+            uint32 ignoredPreUpdateMerkleLeafCount
         ) = kcs.getKnowledgeCollectionUpdateContext(p.id);
 
         if (isImmutable) {
@@ -813,7 +826,8 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
                 uint256(p.newByteSize),
                 uint256(p.newTokenAmount),
                 p.mintKnowledgeAssetsAmount,
-                keccak256(abi.encodePacked(p.knowledgeAssetsToBurn))
+                keccak256(abi.encodePacked(p.knowledgeAssetsToBurn)),
+                uint256(p.newMerkleLeafCount)
             )
         );
         _verifySignatures(p.identityIds, ECDSA.toEthSignedMessageHash(ackDigest), p.r, p.vs);
@@ -924,7 +938,8 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
             p.mintKnowledgeAssetsAmount,
             p.knowledgeAssetsToBurn,
             p.newByteSize,
-            p.newTokenAmount
+            p.newTokenAmount,
+            p.newMerkleLeafCount
         );
 
         // --- 7. CG value delta + per-node produced-value bookkeeping ---

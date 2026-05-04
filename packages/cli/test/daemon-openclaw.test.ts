@@ -108,6 +108,189 @@ describe('OpenClaw channel routing helpers', () => {
     ]);
   });
 
+  it('uses an explicit bridge health URL without rewriting the gateway health target', () => {
+    expect(getOpenClawChannelTargets(makeConfig({
+      localAgentIntegrations: {
+        openclaw: {
+          enabled: true,
+          transport: {
+            kind: 'openclaw-channel',
+            bridgeUrl: 'http://127.0.0.1:9301',
+            gatewayUrl: 'http://gateway.local:3030',
+            healthUrl: 'http://127.0.0.1:9301/custom-health',
+          },
+        },
+      },
+    }))).toEqual([
+      {
+        name: 'bridge',
+        inboundUrl: 'http://127.0.0.1:9301/inbound',
+        streamUrl: 'http://127.0.0.1:9301/inbound/stream',
+        healthUrl: 'http://127.0.0.1:9301/custom-health',
+      },
+      {
+        name: 'gateway',
+        inboundUrl: 'http://gateway.local:3030/api/dkg-channel/inbound',
+        healthUrl: 'http://gateway.local:3030/api/dkg-channel/health',
+      },
+    ]);
+  });
+
+  it('leaves an ambiguous explicit health URL unclassified when both bridge and gateway exist', () => {
+    expect(getOpenClawChannelTargets(makeConfig({
+      localAgentIntegrations: {
+        openclaw: {
+          enabled: true,
+          transport: {
+            kind: 'openclaw-channel',
+            bridgeUrl: 'http://bridge.local:9301',
+            gatewayUrl: 'http://gateway.local:3030',
+            healthUrl: 'http://bridge-health.local/custom-health',
+          },
+        },
+      },
+    }))).toEqual([
+      {
+        name: 'bridge',
+        inboundUrl: 'http://bridge.local:9301/inbound',
+        streamUrl: 'http://bridge.local:9301/inbound/stream',
+        healthUrl: 'http://bridge.local:9301/health',
+      },
+      {
+        name: 'gateway',
+        inboundUrl: 'http://gateway.local:3030/api/dkg-channel/inbound',
+        healthUrl: 'http://gateway.local:3030/api/dkg-channel/health',
+      },
+    ]);
+  });
+
+  it('uses an explicit gateway health URL without rewriting the bridge health target', () => {
+    expect(getOpenClawChannelTargets(makeConfig({
+      localAgentIntegrations: {
+        openclaw: {
+          enabled: true,
+          transport: {
+            kind: 'openclaw-channel',
+            bridgeUrl: 'http://127.0.0.1:9301',
+            gatewayUrl: 'http://gateway.local:3030',
+            healthUrl: 'http://gateway.local:3030/api/dkg-channel/health/probe',
+          },
+        },
+      },
+    }))).toEqual([
+      {
+        name: 'bridge',
+        inboundUrl: 'http://127.0.0.1:9301/inbound',
+        streamUrl: 'http://127.0.0.1:9301/inbound/stream',
+        healthUrl: 'http://127.0.0.1:9301/health',
+      },
+      {
+        name: 'gateway',
+        inboundUrl: 'http://gateway.local:3030/api/dkg-channel/inbound',
+        healthUrl: 'http://gateway.local:3030/api/dkg-channel/health/probe',
+      },
+    ]);
+  });
+
+  it('uses explicit gateway health by port when bridge and gateway share a host', () => {
+    expect(getOpenClawChannelTargets(makeConfig({
+      localAgentIntegrations: {
+        openclaw: {
+          enabled: true,
+          transport: {
+            kind: 'openclaw-channel',
+            bridgeUrl: 'http://localhost:9301',
+            gatewayUrl: 'http://localhost:3030',
+            healthUrl: 'http://localhost:3030/api/dkg-channel/health/probe',
+          },
+        },
+      },
+    }))).toEqual([
+      {
+        name: 'bridge',
+        inboundUrl: 'http://localhost:9301/inbound',
+        streamUrl: 'http://localhost:9301/inbound/stream',
+        healthUrl: 'http://localhost:9301/health',
+      },
+      {
+        name: 'gateway',
+        inboundUrl: 'http://localhost:3030/api/dkg-channel/inbound',
+        healthUrl: 'http://localhost:3030/api/dkg-channel/health/probe',
+      },
+    ]);
+  });
+
+  it('prefers a nested gateway health URL over a broader bridge base', () => {
+    expect(getOpenClawChannelTargets(makeConfig({
+      localAgentIntegrations: {
+        openclaw: {
+          enabled: true,
+          transport: {
+            kind: 'openclaw-channel',
+            bridgeUrl: 'http://localhost:9301',
+            gatewayUrl: 'http://localhost:9301/api/dkg-channel',
+            healthUrl: 'http://localhost:9301/api/dkg-channel/health',
+          },
+        },
+      },
+    }))).toEqual([
+      {
+        name: 'bridge',
+        inboundUrl: 'http://localhost:9301/inbound',
+        streamUrl: 'http://localhost:9301/inbound/stream',
+        healthUrl: 'http://localhost:9301/health',
+      },
+      {
+        name: 'gateway',
+        inboundUrl: 'http://localhost:9301/api/dkg-channel/inbound',
+        healthUrl: 'http://localhost:9301/api/dkg-channel/health',
+      },
+    ]);
+  });
+
+  it('uses an explicit gateway health URL when only gateway transport is configured', () => {
+    expect(getOpenClawChannelTargets(makeConfig({
+      localAgentIntegrations: {
+        openclaw: {
+          enabled: true,
+          transport: {
+            kind: 'openclaw-channel',
+            gatewayUrl: 'http://gateway.local:3030',
+            healthUrl: 'http://gateway.local:3030/api/dkg-channel/health/probe',
+          },
+        },
+      },
+    }))).toEqual([
+      {
+        name: 'gateway',
+        inboundUrl: 'http://gateway.local:3030/api/dkg-channel/inbound',
+        healthUrl: 'http://gateway.local:3030/api/dkg-channel/health/probe',
+      },
+    ]);
+  });
+
+  it('ignores an explicit bridge health URL outside the bridge base', () => {
+    expect(getOpenClawChannelTargets(makeConfig({
+      localAgentIntegrations: {
+        openclaw: {
+          enabled: true,
+          transport: {
+            kind: 'openclaw-channel',
+            bridgeUrl: 'http://127.0.0.1:9301',
+            healthUrl: 'http://bridge-health.local/custom-health',
+          },
+        },
+      },
+    }))).toEqual([
+      {
+        name: 'bridge',
+        inboundUrl: 'http://127.0.0.1:9301/inbound',
+        streamUrl: 'http://127.0.0.1:9301/inbound/stream',
+        healthUrl: 'http://127.0.0.1:9301/health',
+      },
+    ]);
+  });
+
   it('prefers the generic local agent integration transport when OpenClaw is connected through the registry', () => {
     expect(getOpenClawChannelTargets(makeConfig({
       localAgentIntegrations: {
@@ -168,6 +351,171 @@ describe('OpenClaw channel routing helpers', () => {
       { 'Content-Type': 'application/json' },
     );
     expect(gatewayHeaders).toEqual({ 'Content-Type': 'application/json' });
+  });
+
+  it('probes an explicit bridge health URL with bridge authentication', async () => {
+    const origFetch = globalThis.fetch;
+    let requestedUrl = '';
+    let requestedHeaders: HeadersInit | undefined;
+    globalThis.fetch = (async (input, init) => {
+      requestedUrl = String(input);
+      requestedHeaders = init?.headers;
+      return new Response(
+        JSON.stringify({ ok: true, channel: 'dkg-ui' }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    }) as typeof fetch;
+
+    try {
+      const result = await probeOpenClawChannelHealth(makeConfig({
+        localAgentIntegrations: {
+          openclaw: {
+            enabled: true,
+            transport: {
+              kind: 'openclaw-channel',
+              bridgeUrl: 'http://127.0.0.1:9301',
+              gatewayUrl: 'http://gateway.local:3030',
+              healthUrl: 'http://127.0.0.1:9301/custom-health',
+            },
+          },
+        },
+      }), 'bridge-token', { ignoreBridgeCache: true });
+
+      expect(result.ok).toBe(true);
+      expect(requestedUrl).toBe('http://127.0.0.1:9301/custom-health');
+      expect(requestedHeaders).toMatchObject({
+        'x-dkg-bridge-token': 'bridge-token',
+      });
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it('does not probe an ambiguous explicit health URL as bridge health', async () => {
+    const origFetch = globalThis.fetch;
+    const requested: Array<{ url: string; headers: HeadersInit | undefined }> = [];
+    globalThis.fetch = (async (input, init) => {
+      const url = String(input);
+      requested.push({ url, headers: init?.headers });
+      if (url.includes('bridge.local')) {
+        return new Response('bridge unavailable', { status: 503 });
+      }
+      return new Response(
+        JSON.stringify({ ok: true, channel: 'dkg-ui' }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    }) as typeof fetch;
+
+    try {
+      const result = await probeOpenClawChannelHealth(makeConfig({
+        localAgentIntegrations: {
+          openclaw: {
+            enabled: true,
+            transport: {
+              kind: 'openclaw-channel',
+              bridgeUrl: 'http://bridge.local:9301',
+              gatewayUrl: 'http://gateway.local:3030',
+              healthUrl: 'http://bridge-health.local/custom-health',
+            },
+          },
+        },
+      }), 'bridge-token', { ignoreBridgeCache: true });
+
+      expect(result).toMatchObject({ ok: true, target: 'gateway' });
+      expect(requested.map((entry) => entry.url)).toEqual([
+        'http://bridge.local:9301/health',
+        'http://gateway.local:3030/api/dkg-channel/health',
+      ]);
+      expect(requested[0].headers).toMatchObject({
+        'x-dkg-bridge-token': 'bridge-token',
+      });
+      expect(requested[1].headers ?? {}).not.toMatchObject({
+        'x-dkg-bridge-token': 'bridge-token',
+      });
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it('does not send the bridge token to an unmatched bridge-only explicit health URL', async () => {
+    const origFetch = globalThis.fetch;
+    const requested: Array<{ url: string; headers: HeadersInit | undefined }> = [];
+    globalThis.fetch = (async (input, init) => {
+      const url = String(input);
+      requested.push({ url, headers: init?.headers });
+      if (url === 'http://bridge-health.local/custom-health') {
+        return new Response('unexpected custom health probe', { status: 500 });
+      }
+      return new Response(
+        JSON.stringify({ ok: true, channel: 'dkg-ui' }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    }) as typeof fetch;
+
+    try {
+      const result = await probeOpenClawChannelHealth(makeConfig({
+        localAgentIntegrations: {
+          openclaw: {
+            enabled: true,
+            transport: {
+              kind: 'openclaw-channel',
+              bridgeUrl: 'http://127.0.0.1:9301',
+              healthUrl: 'http://bridge-health.local/custom-health',
+            },
+          },
+        },
+      }), 'bridge-token', { ignoreBridgeCache: true });
+
+      expect(result).toMatchObject({ ok: true, target: 'bridge' });
+      expect(requested).toHaveLength(1);
+      expect(requested[0]).toMatchObject({
+        url: 'http://127.0.0.1:9301/health',
+      });
+      expect(requested[0].headers).toMatchObject({
+        'x-dkg-bridge-token': 'bridge-token',
+      });
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it('does not probe gateway health when the bridge target is healthy', async () => {
+    const origFetch = globalThis.fetch;
+    const requestedUrls: string[] = [];
+    globalThis.fetch = (async (input) => {
+      const url = String(input);
+      requestedUrls.push(url);
+      if (url.includes('gateway.local')) {
+        return new Response(
+          JSON.stringify({ ok: false, error: 'gateway auth required' }),
+          { status: 401, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      return new Response(
+        JSON.stringify({ ok: true, channel: 'dkg-ui' }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    }) as typeof fetch;
+
+    try {
+      const result = await probeOpenClawChannelHealth(makeConfig({
+        localAgentIntegrations: {
+          openclaw: {
+            enabled: true,
+            transport: {
+              kind: 'openclaw-channel',
+              bridgeUrl: 'http://127.0.0.1:9301',
+              gatewayUrl: 'http://gateway.local:3030',
+            },
+          },
+        },
+      }), 'bridge-token', { ignoreBridgeCache: true });
+
+      expect(result).toMatchObject({ ok: true, target: 'bridge' });
+      expect(requestedUrls).toEqual(['http://127.0.0.1:9301/health']);
+    } finally {
+      globalThis.fetch = origFetch;
+    }
   });
 
   it('does not cancel the upstream stream on request close events after the body is consumed', async () => {

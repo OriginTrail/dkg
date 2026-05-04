@@ -13,6 +13,11 @@ describe('@unit Paymaster', () => {
   let Paymaster: Paymaster;
   let owner: SignerWithAddress;
   let user: SignerWithAddress;
+  // v4.0.0 — variable name preserved (`stakingStorageAddress`) for test diff
+  // minimalism; the underlying Hub registration moved to
+  // ConvictionStakingStorage in the V10 staking consolidation. Paymaster.coverCost
+  // now resolves "ConvictionStakingStorage", so the mock is registered under
+  // that key and the destination address is the same on the assertion side.
   let stakingStorageAddress: string;
 
   async function deployPaymasterFixture() {
@@ -28,10 +33,13 @@ describe('@unit Paymaster', () => {
     const PaymasterFactory = await hre.ethers.getContractFactory('Paymaster');
     Paymaster = await PaymasterFactory.deploy(Hub.getAddress());
 
-    // Set mock StakingStorage address in Hub — V10 publishing fees flow
-    // to stakers via StakingStorage, so coverCost() must route TRAC there.
+    // V10 publishing fees flow to stakers via ConvictionStakingStorage (the
+    // V10 vault post-consolidation), so coverCost() must route TRAC there.
     stakingStorageAddress = accounts[3].address;
-    await Hub.setContractAddress('StakingStorage', stakingStorageAddress);
+    await Hub.setContractAddress(
+      'ConvictionStakingStorage',
+      stakingStorageAddress,
+    );
 
     // Reset user's balance to zero first
     const initialBalance = await Token.balanceOf(user.address);
@@ -187,11 +195,12 @@ describe('@unit Paymaster', () => {
         );
     });
 
-    it('Should send TRAC to StakingStorage, not KnowledgeCollection (H1 regression)', async () => {
+    it('Should send TRAC to ConvictionStakingStorage, not KnowledgeCollection (H1 regression)', async () => {
       // Register a DIFFERENT mock address under "KnowledgeCollection" so we
-      // can prove the Transfer destination is StakingStorage and explicitly
-      // NOT KnowledgeCollection. If a future change ever flips the Hub
-      // lookup string back to "KnowledgeCollection", this test fires.
+      // can prove the Transfer destination is the V10 vault (CSS post-
+      // consolidation) and explicitly NOT KnowledgeCollection. If a future
+      // change ever flips the Hub lookup string back to "KnowledgeCollection",
+      // this test fires.
       const knowledgeCollectionMock = accounts[5].address;
       await Hub.setContractAddress(
         'KnowledgeCollection',
