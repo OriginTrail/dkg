@@ -2993,11 +2993,83 @@ export class DKGAgent {
   /**
    * Register a new M/N signature-gated context graph on-chain.
    */
+  /**
+   * Refuse on-chain context-graph registration when the proposed
+   * configuration cannot satisfy the global
+   * `ParametersStorage.minimumRequiredSignatures` floor that
+   * `KnowledgeAssetsV10.publishDirect` enforces at publish time.
+   *
+   * Fail-closed semantics: if the adapter exposes
+   * `getMinimumRequiredSignatures` but the RPC call fails, we throw rather
+   * than continue. Silently skipping on a transient RPC failure would let
+   * an operator mint a CG that is never publishable — exactly the bug this
+   * pre-flight exists to prevent. The previous `try { ... } catch {
+   * warn-and-continue }` shape reintroduced that footgun.
+   *
+   * Skip silently only when the adapter does not implement the getter at
+   * all — i.e. legacy / pre-V10 adapters or test fixtures that don't
+   * model the floor. The chain's own validation still applies in that
+   * case (and the `createOnChainContextGraph` call may still revert on
+   * its own internal invariants).
+   */
+  private async assertGlobalQuorumOrThrow(
+    hostingNodeCount: number,
+    requiredSignatures: number,
+    contextLabel: string,
+  ): Promise<void> {
+    if (typeof this.chain.getMinimumRequiredSignatures !== 'function') return;
+
+    let globalMin: number;
+    try {
+      globalMin = await this.chain.getMinimumRequiredSignatures();
+    } catch (err) {
+      throw new Error(
+        `${contextLabel} cannot be registered on-chain: failed to read ` +
+        `minimumRequiredSignatures floor from ParametersStorage ` +
+        `(${(err as Error).message}). Refusing to proceed (fail-closed) — ` +
+        `creating the CG without verifying the global quorum could leave it ` +
+        `permanently unpublishable. Retry once chain RPC is healthy.`,
+      );
+    }
+
+    if (globalMin <= 0) return;
+
+    if (hostingNodeCount < globalMin) {
+      throw new Error(
+        `${contextLabel} cannot be registered on-chain: it has ` +
+        `${hostingNodeCount} hosting node${hostingNodeCount === 1 ? '' : 's'} ` +
+        `but the global minimum quorum (ParametersStorage.minimumRequiredSignatures) ` +
+        `is ${globalMin}. Recreate the CG with at least ${globalMin} hosting nodes — ` +
+        `otherwise every publish would revert with MinSignaturesRequirementNotMet(` +
+        `${globalMin}, ${hostingNodeCount}).`,
+      );
+    }
+    if (requiredSignatures < globalMin) {
+      throw new Error(
+        `${contextLabel} cannot be registered on-chain: requiredSignatures=` +
+        `${requiredSignatures} is below the global minimum quorum of ${globalMin}. ` +
+        `Recreate the CG with --required-signatures ${globalMin} (or higher) before registering — ` +
+        `otherwise every publish would revert with MinSignaturesRequirementNotMet(` +
+        `${globalMin}, ${requiredSignatures}).`,
+      );
+    }
+  }
+
   async registerContextGraphOnChain(params: CreateOnChainContextGraphParams): Promise<CreateOnChainContextGraphResult> {
     const ctx = createOperationContext('system');
     if (typeof this.chain.createOnChainContextGraph !== 'function') {
       throw new Error('createOnChainContextGraph not available on chain adapter');
     }
+    // Defense-in-depth: also gate this lower-level entry point so the
+    // daemon's HTTP/API path (`/api/context-graph` → `registerContextGraphOnChain`)
+    // can't bypass the high-level pre-flight by submitting bad params
+    // directly. The high-level `registerContextGraph` runs the same check
+    // earlier in its own flow (with the local `id` for nicer error context).
+    await this.assertGlobalQuorumOrThrow(
+      params.participantIdentityIds.length,
+      params.requiredSignatures,
+      'Context graph (on-chain registration)',
+    );
     const result = await this.chain.createOnChainContextGraph(params);
     const contextGraphId = result.contextGraphId.toString();
     for (const identityId of params.participantIdentityIds) {
@@ -4192,47 +4264,15 @@ export class DKGAgent {
     // and requiredSignatures=1, after which every publish reverts with
     // `MinSignaturesRequirementNotMet(globalMin, hostingNodes.length)`.
     //
-    // Refuse here when the chain adapter exposes the floor and the proposed
-    // CG configuration cannot satisfy it. Skip when the adapter does not
-    // implement `getMinimumRequiredSignatures` (mock/legacy adapters): the
-    // existing on-chain create call is still subject to its own constraints,
-    // and we don't want to regress test fixtures that use a permissive mock.
-    if (typeof this.chain.getMinimumRequiredSignatures === 'function') {
-      let globalMin: number;
-      try {
-        globalMin = await this.chain.getMinimumRequiredSignatures();
-      } catch (err) {
-        this.log.warn(
-          ctx,
-          `Could not read minimumRequiredSignatures from ParametersStorage while ` +
-          `validating registration of "${id}": ${(err as Error).message}. ` +
-          `Proceeding without global-quorum pre-flight.`,
-        );
-        globalMin = 0;
-      }
-      if (globalMin > 0) {
-        if (effectiveParticipantIdentityIds.length < globalMin) {
-          throw new Error(
-            `Context graph "${id}" cannot be registered on-chain: it has ` +
-            `${effectiveParticipantIdentityIds.length} hosting node` +
-            `${effectiveParticipantIdentityIds.length === 1 ? '' : 's'} ` +
-            `but the global minimum quorum (ParametersStorage.minimumRequiredSignatures) ` +
-            `is ${globalMin}. Recreate the CG with at least ${globalMin} hosting nodes — ` +
-            `otherwise every publish would revert with MinSignaturesRequirementNotMet(` +
-            `${globalMin}, ${effectiveParticipantIdentityIds.length}).`,
-          );
-        }
-        if (effectiveRequiredSignatures < globalMin) {
-          throw new Error(
-            `Context graph "${id}" cannot be registered on-chain: requiredSignatures=` +
-            `${effectiveRequiredSignatures} is below the global minimum quorum of ${globalMin}. ` +
-            `Recreate the CG with --required-signatures ${globalMin} (or higher) before registering — ` +
-            `otherwise every publish would revert with MinSignaturesRequirementNotMet(` +
-            `${globalMin}, ${effectiveRequiredSignatures}).`,
-          );
-        }
-      }
-    }
+    // Validate here AND inside `registerContextGraphOnChain`: this call gives
+    // operators an early failure with the local `id` for context, the lower
+    // call closes the bypass for any caller that hits it directly (e.g. the
+    // daemon's `/api/context-graph` route).
+    await this.assertGlobalQuorumOrThrow(
+      effectiveParticipantIdentityIds.length,
+      effectiveRequiredSignatures,
+      `Context graph "${id}"`,
+    );
 
     const participantAgents = await this.getContextGraphParticipantAgentAddresses(id);
     if (participantAgents.length > MAX_CONTEXT_GRAPH_PARTICIPANT_AGENTS) {

@@ -164,3 +164,153 @@ describe('DKGAgent.registerContextGraph — global quorum pre-flight', () => {
     expect(chain.createOnChainContextGraphCalls).toHaveLength(1);
   });
 });
+
+/**
+ * Covers the codex-flagged bypass on PR #374:
+ *
+ *   The daemon's `/api/context-graph` route calls `registerContextGraphOnChain`
+ *   directly (see `packages/cli/src/daemon/routes/context-graph.ts`). Before
+ *   this fix the pre-flight only fired in `registerContextGraph`, so an HTTP
+ *   client could still mint a permanently-broken CG by hitting the lower
+ *   entry point with bad params.
+ *
+ * The two tests below assert the validation is enforced at the lower layer
+ * too, so the bypass is closed at the only chokepoint that all callers must
+ * pass through.
+ */
+describe('DKGAgent.registerContextGraphOnChain — direct-call quorum gate', () => {
+  const agents: DKGAgent[] = [];
+  afterEach(async () => {
+    while (agents.length) {
+      const a = agents.pop()!;
+      await a.stop().catch(() => {});
+    }
+  });
+
+  it('refuses direct calls with hostingNodes < globalMin (closes the daemon HTTP bypass)', async () => {
+    const { agent, chain } = await makeAgent({ globalMin: 3 });
+    agents.push(agent);
+
+    await expect(
+      agent.registerContextGraphOnChain({
+        participantIdentityIds: [1n, 2n],
+        requiredSignatures: 2,
+      }),
+    ).rejects.toThrow(/2 hosting nodes but the global minimum quorum.*is 3/s);
+
+    expect(chain.createOnChainContextGraphCalls).toEqual([]);
+  });
+
+  it('refuses direct calls with requiredSignatures < globalMin', async () => {
+    const { agent, chain } = await makeAgent({ globalMin: 3 });
+    agents.push(agent);
+
+    await expect(
+      agent.registerContextGraphOnChain({
+        participantIdentityIds: [1n, 2n, 3n, 4n],
+        requiredSignatures: 1,
+      }),
+    ).rejects.toThrow(/requiredSignatures=1 is below the global minimum quorum of 3/);
+
+    expect(chain.createOnChainContextGraphCalls).toEqual([]);
+  });
+
+  it('accepts direct calls when both hostingNodes and requiredSignatures meet globalMin', async () => {
+    const { agent, chain } = await makeAgent({ globalMin: 3 });
+    agents.push(agent);
+
+    const result = await agent.registerContextGraphOnChain({
+      participantIdentityIds: [1n, 2n, 3n],
+      requiredSignatures: 3,
+    });
+    expect(result.contextGraphId).toBeDefined();
+
+    expect(chain.createOnChainContextGraphCalls).toHaveLength(1);
+  });
+});
+
+/**
+ * Covers the codex-flagged "swallowed RPC error" footgun on PR #374:
+ *
+ *   The previous `try { getMinimumRequiredSignatures() } catch { warn-and-continue }`
+ *   shape meant that a single transient `eth_call` failure would silently
+ *   skip the global-quorum pre-flight, after which the chain's own
+ *   `createContextGraph` would happily mint the CG (it doesn't check the
+ *   global floor) and every subsequent publish would revert. That's
+ *   exactly the bug the pre-flight was supposed to prevent.
+ *
+ * After the fix, RPC failures throw — fail-closed — so the operator gets
+ * an actionable error and no on-chain mint happens. They can retry once
+ * RPC is healthy.
+ */
+describe('DKGAgent — RPC failure when reading minimumRequiredSignatures (fail-closed)', () => {
+  const agents: DKGAgent[] = [];
+  afterEach(async () => {
+    while (agents.length) {
+      const a = agents.pop()!;
+      await a.stop().catch(() => {});
+    }
+  });
+
+  /**
+   * Wraps the mock chain to make `getMinimumRequiredSignatures` reject
+   * with a synthetic RPC error.
+   */
+  function makeRpcFailingChain(): CapturingMockChainAdapter {
+    const chain = new CapturingMockChainAdapter();
+    chain.getMinimumRequiredSignatures = async () => {
+      throw new Error('synthetic RPC failure: eth_call timed out');
+    };
+    return chain;
+  }
+
+  it('throws (fail-closed) instead of silently proceeding when getMinimumRequiredSignatures rejects', async () => {
+    const chain = makeRpcFailingChain();
+    const agent = await DKGAgent.create({
+      name: 'FailClosedBot',
+      store: new OxigraphStore(),
+      chainAdapter: chain,
+      nodeRole: 'core',
+    });
+    await agent.start();
+    agents.push(agent);
+
+    await expect(
+      agent.registerContextGraphOnChain({
+        participantIdentityIds: [1n, 2n, 3n],
+        requiredSignatures: 3,
+      }),
+    ).rejects.toThrow(
+      /failed to read minimumRequiredSignatures floor.*synthetic RPC failure.*Refusing to proceed \(fail-closed\)/s,
+    );
+
+    expect(chain.createOnChainContextGraphCalls).toEqual([]);
+  });
+
+  it('also fails closed in the high-level registerContextGraph path', async () => {
+    const chain = makeRpcFailingChain();
+    const agent = await DKGAgent.create({
+      name: 'FailClosedBotHL',
+      store: new OxigraphStore(),
+      chainAdapter: chain,
+      nodeRole: 'core',
+    });
+    await agent.start();
+    agents.push(agent);
+    const ownerAgent = ethers.getAddress(chain.signerAddress);
+
+    await agent.createContextGraph({
+      id: 'fail-closed-hl',
+      name: 'Fail Closed HL',
+      participantIdentityIds: [1n, 2n, 3n],
+      requiredSignatures: 3,
+      callerAgentAddress: ownerAgent,
+    });
+
+    await expect(
+      agent.registerContextGraph('fail-closed-hl', { callerAgentAddress: ownerAgent }),
+    ).rejects.toThrow(/failed to read minimumRequiredSignatures floor.*Refusing to proceed \(fail-closed\)/s);
+
+    expect(chain.createOnChainContextGraphCalls).toEqual([]);
+  });
+});
