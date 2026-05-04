@@ -160,19 +160,16 @@ export const kosavaEpcisCoverage: CoverageThresholds = {
 };
 
 export const kosavaKafkaCoverage: CoverageThresholds = {
-  // Slice 04 (kafka-probe) widened the surface to cover four auth modes,
-  // PEM filesystem fallbacks, and timeout/error classification. The
-  // remaining uncovered lines are the disconnect-failure branch (line 88
-  // in `endpoint.ts`) and the disconnect best-effort handler in
-  // `kafka-probe.ts` (lines 203–204) — both `catch {}` paths that fire
-  // only when the broker connection drops *during* shutdown. Driving them
-  // synthetically would require a kafkajs mock that throws on disconnect,
-  // which the slice already exercises in unit tests; the v8 coverage tool
-  // doesn't credit the synthetic case here.
-  lines: 95,
+  // Slice 04 ratchet, scoped to `src/**` (excluding the `src/index.ts` re-export
+  // barrel). The remaining uncovered branches are the `??` fallback for
+  // `issuedAt` in `endpoint.ts` (callers always supply it today) and the
+  // exhaustive `never` `default` arm in `kafka-probe.ts`'s
+  // `buildKafkaConfig` switch — defensive code that the type system already
+  // proves unreachable.
+  lines: 97,
   functions: 100,
-  branches: 85,
-  statements: 95,
+  branches: 88,
+  statements: 94,
 };
 
 /**
