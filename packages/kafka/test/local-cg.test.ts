@@ -87,4 +87,34 @@ describe('ensureKafkaLocalCg', () => {
   it('reserves the literal id "kafka-local"', () => {
     expect(KAFKA_LOCAL_CG_ID).toBe('kafka-local');
   });
+
+  // Defence-in-depth path: the in-flight gate already serializes concurrent
+  // callers in-process, but if an external creator (another route, a CLI in
+  // another shell, a peer sync) wins the race between our exists-check and
+  // our create-call, the underlying store will throw "already exists".
+  // ensureKafkaLocalCg must swallow that specific error and return the id
+  // anyway, while non-"already exists" errors must still bubble up.
+  it('treats a concurrent "already exists" create error as success', async () => {
+    const cg = {
+      contextGraphExists: async (_id: string): Promise<boolean> => false,
+      createContextGraph: async (_opts: { id: string; name: string }): Promise<void> => {
+        throw new Error('Context graph "kafka-local" already exists');
+      },
+    };
+
+    const id = await ensureKafkaLocalCg(cg);
+
+    expect(id).toBe(KAFKA_LOCAL_CG_ID);
+  });
+
+  it('rethrows non-"already exists" create errors', async () => {
+    const cg = {
+      contextGraphExists: async (_id: string): Promise<boolean> => false,
+      createContextGraph: async (_opts: { id: string; name: string }): Promise<void> => {
+        throw new Error('storage offline');
+      },
+    };
+
+    await expect(ensureKafkaLocalCg(cg)).rejects.toThrow(/storage offline/);
+  });
 });
