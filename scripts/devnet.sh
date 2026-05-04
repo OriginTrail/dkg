@@ -739,7 +739,7 @@ cmd_start() {
       const opSigners = new Array(n).fill(null);
       const nodeRoles = new Array(n).fill('edge');
       // Codex round 4 on PR #368: read config.json FIRST and INDEPENDENTLY
-      // of wallets.json. The previous loop did wallets first and `continue`d
+      // of wallets.json. The previous loop did wallets first and \`continue\`d
       // on parse failure BEFORE reading config, so an intended core whose
       // wallets.json was malformed silently kept the 'edge' default,
       // dropped out of coreIdxs, and the lostCores guard never fired.
@@ -865,7 +865,7 @@ cmd_start() {
         // this code path exists to prevent.
         //
         // Codex round 2 on PR #368: re-read 'pending' before EVERY tx
-        // (not once per node loop). The previous code did `nonce++` at
+        // (not once per node loop). The previous code did \`nonce++\` at
         // call site so a failed approve advanced the local counter even
         // though the chain nonce did not, leaving createConviction +
         // updateAsk to send with an inflated nonce that would either
@@ -878,7 +878,7 @@ cmd_start() {
           return tx.wait();
         };
         // Codex round 4 on PR #368: skip createConviction if the daemon
-        // already opened a position. PR 366 wired `EVMChainAdapter.ensureProfile()`
+        // already opened a position. PR 366 wired \`EVMChainAdapter.ensureProfile()\`
         // to open a default 50k V10 conviction during agent startup, so by
         // the time this script reaches the staking loop the daemon has
         // (usually) already staked. Running createConviction again would
@@ -895,8 +895,8 @@ cmd_start() {
         // updateAsk is INDEPENDENT of stake state, so we still attempt
         // it below regardless of the probe outcome.
         //
-        // Codex round 7 on PR #368: probe `getNodeStakeV10(idId)` instead
-        // of NFT `balanceOf(opSigner.address)`. The op wallet could hold
+        // Codex round 7 on PR #368: probe \`getNodeStakeV10(idId)\` instead
+        // of NFT \`balanceOf(opSigner.address)\`. The op wallet could hold
         // positions for OTHER identities (not in our devnet today, but
         // a wallet-scoped probe is the wrong semantic check); we want
         // to know whether THIS identity is staked.
