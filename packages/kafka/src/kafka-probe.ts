@@ -26,7 +26,6 @@ import {
   type SASLOptions,
 } from 'kafkajs';
 
-/** Supported Kafka broker security/auth modes. */
 export type SecurityProtocol =
   | 'PLAINTEXT'
   | 'SASL_PLAINTEXT'
@@ -57,7 +56,6 @@ export interface KafkaSslMaterial {
   rejectUnauthorized?: boolean;
 }
 
-/** SASL credentials for authenticated broker connections. */
 export interface KafkaSaslCredentials {
   /** SASL mechanism. kafkajs accepts lowercase identifiers. */
   mechanism: 'plain' | 'scram-sha-256' | 'scram-sha-512';
@@ -81,7 +79,6 @@ export interface KafkaProbeOptions {
   timeoutMs?: number;
 }
 
-/** Discriminator for the probe outcome. See {@link ProbeResult}. */
 export type ProbeStatus = 'verified' | 'failed' | 'unreachable';
 
 /**
