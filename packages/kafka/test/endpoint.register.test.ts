@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   KafkaEndpointProbeFailedError,
   registerKafkaEndpoint,
+  toKafkaEndpointProbeOutcome,
 } from '../src/endpoint.js';
 
 interface CapturedPublish {
@@ -269,5 +270,44 @@ describe('registerKafkaEndpoint — opportunistic verification (ADR 0002)', () =
     expect(blob).not.toMatch(/password/i);
     expect(blob).not.toMatch(/username/i);
     expect(blob).not.toMatch(/BEGIN [A-Z ]+/);
+  });
+});
+
+describe('toKafkaEndpointProbeOutcome', () => {
+  it('passes through status and probedAt on a verified result (no error)', () => {
+    expect(
+      toKafkaEndpointProbeOutcome({
+        status: 'verified',
+        securityProtocol: 'SASL_SSL',
+        probedAt: '2026-05-04T12:40:00.000Z',
+      }),
+    ).toEqual({
+      status: 'verified',
+      probedAt: '2026-05-04T12:40:00.000Z',
+    });
+  });
+
+  it('includes the error field when the probe carries one', () => {
+    expect(
+      toKafkaEndpointProbeOutcome({
+        status: 'failed',
+        securityProtocol: 'PLAINTEXT',
+        probedAt: '2026-05-04T12:41:00.000Z',
+        error: 'KafkaJSProtocolError',
+      }),
+    ).toEqual({
+      status: 'failed',
+      probedAt: '2026-05-04T12:41:00.000Z',
+      error: 'KafkaJSProtocolError',
+    });
+  });
+
+  it('omits the error field when the probe result has no error string', () => {
+    const out = toKafkaEndpointProbeOutcome({
+      status: 'verified',
+      securityProtocol: 'PLAINTEXT',
+      probedAt: '2026-05-04T12:42:00.000Z',
+    });
+    expect('error' in out).toBe(false);
   });
 });

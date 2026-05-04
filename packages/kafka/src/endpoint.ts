@@ -2,6 +2,7 @@ import {
   buildKafkaEndpointKnowledgeAsset,
   type KafkaEndpointVerificationStatus,
 } from './ka-builder.js';
+import type { ProbeResult } from './kafka-probe.js';
 import { buildKafkaEndpointUri } from './uri.js';
 
 /**
@@ -137,5 +138,18 @@ export async function registerKafkaEndpoint(
     contextGraphId: input.contextGraphId,
     verificationStatus,
     ...(verifiedAt ? { verifiedAt } : {}),
+  };
+}
+
+/**
+ * Convert a kafka-probe result into the endpoint registration probe-outcome shape.
+ * The endpoint contract intentionally exposes a narrower view than the probe (no
+ * credential-adjacent fields, no broker connection details).
+ */
+export function toKafkaEndpointProbeOutcome(result: ProbeResult): KafkaEndpointProbeOutcome {
+  return {
+    status: result.status,
+    probedAt: result.probedAt,
+    ...(result.error ? { error: result.error } : {}),
   };
 }

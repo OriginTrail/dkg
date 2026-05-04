@@ -12,6 +12,7 @@ import {
   KafkaEndpointProbeFailedError,
   probe as kafkaProbe,
   registerKafkaEndpoint,
+  toKafkaEndpointProbeOutcome,
   type KafkaEndpointPublisher,
   type KafkaProbeOptions,
   type ProbeResult,
@@ -120,15 +121,7 @@ export async function handleKafkaRoutes(ctx: RequestContext): Promise<void> {
         messageFormat,
         publisher,
         ...(reqBody.securityProtocol ? { securityProtocol: reqBody.securityProtocol } : {}),
-        ...(probeResult
-          ? {
-              probe: {
-                status: probeResult.status,
-                probedAt: probeResult.probedAt,
-                ...(probeResult.error ? { error: probeResult.error } : {}),
-              },
-            }
-          : {}),
+        ...(probeResult ? { probe: toKafkaEndpointProbeOutcome(probeResult) } : {}),
         force,
       });
 
