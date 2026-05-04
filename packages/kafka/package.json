@@ -10,8 +10,14 @@
     "test:coverage": "vitest run --coverage",
     "clean": "rm -rf dist tsconfig.tsbuildinfo"
   },
+  "dependencies": {
+    "kafkajs": "2.2.4"
+  },
   "devDependencies": {
+    "@origintrail-official/dkg-core": "workspace:*",
+    "@testcontainers/kafka": "11.14.0",
     "@vitest/coverage-v8": "^4.0.18",
+    "testcontainers": "11.14.0",
     "vitest": "^4.0.18"
   },
   "publishConfig": {
