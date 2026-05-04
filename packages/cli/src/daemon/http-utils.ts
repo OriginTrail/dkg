@@ -260,6 +260,16 @@ export function validateOptionalSubGraphName(
   return true;
 }
 
+/**
+ * Generic guard: narrows `unknown` to a non-empty trimmed string. Useful in
+ * route handlers that need to validate string fields without coupling each
+ * one to a domain-specific validator. Does NOT write a response — caller
+ * decides the error semantics.
+ */
+export function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
 export function validateRequiredContextGraphId(
   contextGraphId: unknown,
   res: ServerResponse,

@@ -1,13 +1,14 @@
-import { jsonResponse, readBody, validateRequiredContextGraphId } from '../http-utils.js';
+import {
+  isNonEmptyString,
+  jsonResponse,
+  readBody,
+  validateRequiredContextGraphId,
+} from '../http-utils.js';
 import type { RequestContext } from './context.js';
 import {
   registerKafkaEndpoint,
   type KafkaEndpointPublisher,
 } from '@origintrail-official/dkg-kafka';
-
-function isNonEmptyString(value: unknown): value is string {
-  return typeof value === 'string' && value.trim().length > 0;
-}
 
 export async function handleKafkaRoutes(ctx: RequestContext): Promise<void> {
   const {
