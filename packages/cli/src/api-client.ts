@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { basename } from 'node:path';
+import type { SecurityProtocol } from '@origintrail-official/dkg-kafka';
 import { readApiPort, readPid, isProcessRunning } from './config.js';
 import { loadTokens } from './auth.js';
 
@@ -559,7 +560,7 @@ export class ApiClient {
     // Opportunistic verification fields (slice 04). All optional; when omitted
     // the daemon skips the probe and the KA records `verificationStatus:
     // "unattempted"`.
-    securityProtocol?: 'PLAINTEXT' | 'SASL_PLAINTEXT' | 'SASL_SSL' | 'SSL';
+    securityProtocol?: SecurityProtocol;
     sasl?: {
       mechanism?: 'plain' | 'scram-sha-256' | 'scram-sha-512';
       username: string;

@@ -32,7 +32,7 @@ export type SecurityProtocol =
   | 'SASL_SSL'
   | 'SSL';
 
-export interface KafkaProbeSslMaterial {
+export interface KafkaSslMaterial {
   /** PEM string (CA bundle). Preferred. */
   caPem?: string;
   /** PEM string (mTLS client cert). Required for SSL mTLS. */
@@ -52,7 +52,7 @@ export interface KafkaProbeSslMaterial {
   rejectUnauthorized?: boolean;
 }
 
-export interface KafkaProbeSaslCredentials {
+export interface KafkaSaslCredentials {
   /** SASL mechanism. kafkajs accepts lowercase identifiers. */
   mechanism: 'plain' | 'scram-sha-256' | 'scram-sha-512';
   username: string;
@@ -63,8 +63,8 @@ export interface KafkaProbeOptions {
   brokers: string[];
   topic: string;
   securityProtocol: SecurityProtocol;
-  sasl?: KafkaProbeSaslCredentials;
-  ssl?: KafkaProbeSslMaterial;
+  sasl?: KafkaSaslCredentials;
+  ssl?: KafkaSslMaterial;
   /** kafkajs client identifier (logged on the broker side). */
   clientId?: string;
   /** Hard timeout for the entire probe call. Defaults to 5_000 ms. */
@@ -239,7 +239,7 @@ interface SslConnectionOptions {
 }
 
 async function buildSsl(
-  ssl: KafkaProbeSslMaterial | undefined,
+  ssl: KafkaSslMaterial | undefined,
   requireMtls: boolean,
 ): Promise<SslConnectionOptions> {
   const material = ssl ?? {};

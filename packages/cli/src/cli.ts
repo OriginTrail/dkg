@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { readFile, writeFile, unlink } from 'node:fs/promises';
 import { ethers } from 'ethers';
+import type { SecurityProtocol } from '@origintrail-official/dkg-kafka';
 import { dkgAuthTokenPath, requestFaucetFunding, toErrorMessage, hasErrorCode } from '@origintrail-official/dkg-core';
 import yaml from 'js-yaml';
 import {
@@ -1757,8 +1758,7 @@ kafkaEndpointCmd
 
       const client = await ApiClient.connect();
       const securityProtocol = opts.securityProtocol
-        ? (String(opts.securityProtocol).toUpperCase() as
-            'PLAINTEXT' | 'SASL_PLAINTEXT' | 'SASL_SSL' | 'SSL')
+        ? (String(opts.securityProtocol).toUpperCase() as SecurityProtocol)
         : undefined;
       const result = await client.registerKafkaEndpoint({
         contextGraphId: opts.cg,

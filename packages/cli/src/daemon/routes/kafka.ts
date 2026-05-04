@@ -6,8 +6,8 @@ import {
   registerKafkaEndpoint,
   type KafkaEndpointPublisher,
   type KafkaProbeOptions,
-  type KafkaProbeSaslCredentials,
-  type KafkaProbeSslMaterial,
+  type KafkaSaslCredentials,
+  type KafkaSslMaterial,
   type ProbeResult,
   type SecurityProtocol,
 } from '@origintrail-official/dkg-kafka';
@@ -23,7 +23,7 @@ const VALID_PROTOCOLS: ReadonlySet<SecurityProtocol> = new Set([
   'SSL',
 ]);
 
-const VALID_SASL_MECHANISMS: ReadonlySet<KafkaProbeSaslCredentials['mechanism']> = new Set([
+const VALID_SASL_MECHANISMS: ReadonlySet<KafkaSaslCredentials['mechanism']> = new Set([
   'plain',
   'scram-sha-256',
   'scram-sha-512',
@@ -35,8 +35,8 @@ export interface KafkaEndpointRequestBody {
   topic: string;
   messageFormat: string;
   securityProtocol?: SecurityProtocol;
-  sasl?: KafkaProbeSaslCredentials;
-  ssl?: KafkaProbeSslMaterial;
+  sasl?: KafkaSaslCredentials;
+  ssl?: KafkaSslMaterial;
 }
 
 /**
@@ -84,7 +84,7 @@ export function parseSecurityProtocol(value: unknown): SecurityProtocol | undefi
     : undefined;
 }
 
-export function parseSasl(value: unknown): KafkaProbeSaslCredentials | undefined {
+export function parseSasl(value: unknown): KafkaSaslCredentials | undefined {
   if (!value || typeof value !== 'object') return undefined;
   const v = value as Record<string, unknown>;
   // Empty-string username/password must collapse to "no creds present" so the
@@ -93,24 +93,24 @@ export function parseSasl(value: unknown): KafkaProbeSaslCredentials | undefined
   // would result in a confusing kafkajs auth failure downstream.
   if (!isNonEmptyString(v.username) || !isNonEmptyString(v.password)) return undefined;
   const mechanism = typeof v.mechanism === 'string' ? v.mechanism.toLowerCase() : 'plain';
-  if (!VALID_SASL_MECHANISMS.has(mechanism as KafkaProbeSaslCredentials['mechanism'])) {
+  if (!VALID_SASL_MECHANISMS.has(mechanism as KafkaSaslCredentials['mechanism'])) {
     return undefined;
   }
   return {
-    mechanism: mechanism as KafkaProbeSaslCredentials['mechanism'],
+    mechanism: mechanism as KafkaSaslCredentials['mechanism'],
     username: v.username,
     password: v.password,
   };
 }
 
-export function parseSsl(value: unknown): KafkaProbeSslMaterial | undefined {
+export function parseSsl(value: unknown): KafkaSslMaterial | undefined {
   if (!value || typeof value !== 'object') return undefined;
   const v = value as Record<string, unknown>;
   // Empty-string PEMs / paths collapse to "absent". An empty inline PEM would
   // make kafkajs reject the connection; an empty path would make `readFile`
   // throw ENOENT. Either case is more useful as a skipped probe than a
   // confusing failure mode.
-  const out: KafkaProbeSslMaterial = {};
+  const out: KafkaSslMaterial = {};
   if (isNonEmptyString(v.ca)) out.caPem = v.ca;
   if (isNonEmptyString(v.cert)) out.certPem = v.cert;
   if (isNonEmptyString(v.key)) out.keyPem = v.key;
