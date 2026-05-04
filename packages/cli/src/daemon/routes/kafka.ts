@@ -42,6 +42,9 @@ interface KafkaEndpointRequestBody {
 /**
  * `dependsOnProbe` — opportunistic verification per ADR 0002.
  *
+ * TL;DR: PLAINTEXT with `securityProtocol` set is the explicit opt-in to
+ * verification; absence of `securityProtocol` means no probe.
+ *
  * The probe runs IFF the caller supplied credentials (SASL_PLAINTEXT/SASL_SSL
  * with sasl.username/password, or SSL with cert+key, or PLAINTEXT/SASL_SSL
  * with explicit `securityProtocol`). When the request carries no creds and no

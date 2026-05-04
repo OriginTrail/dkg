@@ -125,6 +125,36 @@ describe('registerKafkaEndpoint — opportunistic verification (ADR 0002)', () =
     expect(ka['dkg:securityProtocol']).toBe('SASL_SSL');
   });
 
+  it('creds present + probe verified + force=true → identical to force=false on success (force ignored)', async () => {
+    // ADR 0002: `force` is only consulted when the probe did NOT verify. On a
+    // successful probe, the flag is irrelevant — the resulting KA must be
+    // bit-identical to the force=false verified case. Guards against a future
+    // change that lets `force=true` mutate the recorded `verificationStatus`
+    // when there's nothing to override.
+    const { publisher, calls } = makePublisher();
+
+    const result = await registerKafkaEndpoint({
+      ...BASE_INPUT,
+      publisher,
+      securityProtocol: 'SASL_SSL',
+      probe: { status: 'verified', probedAt: '2026-05-04T12:35:00.000Z' },
+      force: true,
+    });
+
+    expect(result).toMatchObject({
+      verificationStatus: 'verified',
+      verifiedAt: '2026-05-04T12:35:00.000Z',
+    });
+
+    const ka = calls[0].content;
+    expect(ka['dkg:verificationStatus']).toBe('verified');
+    expect(ka['dkg:verifiedAt']).toEqual({
+      '@value': '2026-05-04T12:35:00.000Z',
+      '@type': 'xsd:dateTime',
+    });
+    expect(ka['dkg:securityProtocol']).toBe('SASL_SSL');
+  });
+
   it('creds present + probe failed (no force) → throws KafkaEndpointProbeFailedError; no KA published', async () => {
     const { publisher, calls } = makePublisher();
 

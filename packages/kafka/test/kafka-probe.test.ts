@@ -371,6 +371,79 @@ describe('probe — credential discarding', () => {
   });
 });
 
+describe('probe — logging primitives never see credentials (regression guard)', () => {
+  // The probe production code today does NOT log anything itself — it relies
+  // on structured `ProbeResult` returns and never imports `Logger` or calls
+  // `console.*`. This test is defence-in-depth: if a future contributor adds
+  // `Logger.info(opts)` or `console.log(opts)` to the probe and accidentally
+  // hands raw credentials to a logging primitive, this assertion fails. The
+  // intent is "no credential leak through any logging primitive."
+  it('no credential substring appears in any captured Logger/console call', async () => {
+    const { Logger } = await import('@origintrail-official/dkg-core');
+
+    // Intercept at the prototype level so any Logger instance the probe might
+    // construct in the future is captured here.
+    const loggerSpies = [
+      vi.spyOn(Logger.prototype, 'info').mockImplementation(() => {}),
+      vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => {}),
+      vi.spyOn(Logger.prototype, 'error').mockImplementation(() => {}),
+      vi.spyOn(Logger.prototype, 'debug').mockImplementation(() => {}),
+    ];
+    const consoleSpies = [
+      vi.spyOn(console, 'log').mockImplementation(() => {}),
+      vi.spyOn(console, 'warn').mockImplementation(() => {}),
+      vi.spyOn(console, 'error').mockImplementation(() => {}),
+      vi.spyOn(console, 'debug').mockImplementation(() => {}),
+    ];
+
+    const SECRETS = [
+      'CRED-USER-LOG-MARKER',
+      'CRED-PASS-LOG-MARKER',
+      'CA-PEM-LOG-MARKER',
+      'CERT-PEM-LOG-MARKER',
+      'KEY-PEM-LOG-MARKER',
+    ] as const;
+
+    const { probe } = await importProbe();
+    await probe({
+      brokers: ['localhost:9092'],
+      topic: 'orders',
+      securityProtocol: 'SASL_SSL',
+      sasl: {
+        mechanism: 'plain',
+        username: 'CRED-USER-LOG-MARKER',
+        password: 'CRED-PASS-LOG-MARKER',
+      },
+      ssl: {
+        caPem: '-----BEGIN CERTIFICATE-----\nCA-PEM-LOG-MARKER\n-----END CERTIFICATE-----',
+      },
+    });
+
+    // Also exercise the SSL/mTLS branch so cert+key PEMs flow through too.
+    await probe({
+      brokers: ['localhost:9092'],
+      topic: 'orders',
+      securityProtocol: 'SSL',
+      ssl: {
+        caPem: '-----BEGIN CERTIFICATE-----\nCA-PEM-LOG-MARKER\n-----END CERTIFICATE-----',
+        certPem: '-----BEGIN CERTIFICATE-----\nCERT-PEM-LOG-MARKER\n-----END CERTIFICATE-----',
+        keyPem: '-----BEGIN PRIVATE KEY-----\nKEY-PEM-LOG-MARKER\n-----END PRIVATE KEY-----',
+      },
+    });
+
+    // Stringify every captured argument across every spy and assert no secret
+    // ever made it into a logging primitive. The probe is supposed to log
+    // nothing today, so the typical case is "no calls at all" — but the
+    // assertion stays satisfied even if some non-credential debug log appears
+    // in the future.
+    const allCalls = [...loggerSpies, ...consoleSpies].flatMap((spy) => spy.mock.calls);
+    const blob = JSON.stringify(allCalls);
+    for (const secret of SECRETS) {
+      expect(blob).not.toContain(secret);
+    }
+  });
+});
+
 describe('probe — timeout', () => {
   it('returns failed when probeAdmin exceeds timeoutMs', async () => {
     nextAdminBehavior = {
