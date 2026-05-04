@@ -52,7 +52,10 @@ async function resolveSelection(
     return { contextGraphId: selection.contextGraphId, cgScope: 'shared' };
   }
   if (!ensureLocalCg) {
-    throw new Error('"ensureLocalCg" is required when selection.kind is "local".');
+    throw new Error(
+      '"ensureLocalCg" is required when selection.kind is "local". ' +
+      'The caller must bind a thunk that lazy-creates the kafka-local free CG.',
+    );
   }
   return { contextGraphId: await ensureLocalCg(), cgScope: 'local' };
 }

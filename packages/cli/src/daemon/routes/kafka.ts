@@ -71,6 +71,8 @@ export async function handleKafkaRoutes(ctx: RequestContext): Promise<void> {
       topic,
       messageFormat,
       publisher: kafkaPublisherFromAgent(agent),
+      // Fresh ensurer per request; hoisting per-agent is a deferred optimization
+      // (the agent's "already exists" guard plus the exists-check make repeats cheap).
       ensureLocalCg: createKafkaLocalCgEnsurer(
         kafkaLocalCgFromAgent(agent, requestAgentAddress),
       ),
