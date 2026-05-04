@@ -1,5 +1,5 @@
 import { defineConfig } from 'vitest/config';
-import { criticalityTargets } from '../../vitest.coverage.js';
+import { kosavaKafkaCoverage } from '../../vitest.coverage';
 
 export default defineConfig({
   test: {
@@ -8,7 +8,7 @@ export default defineConfig({
       provider: 'v8',
       reporter: ['text', 'html', 'lcov', 'json-summary'],
       reportsDirectory: './coverage',
-      thresholds: criticalityTargets.kosava,
+      thresholds: kosavaKafkaCoverage,
     },
   },
 });

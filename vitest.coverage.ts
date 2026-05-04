@@ -159,6 +159,13 @@ export const kosavaEpcisCoverage: CoverageThresholds = {
   statements: 97,
 };
 
+export const kosavaKafkaCoverage: CoverageThresholds = {
+  lines: 100,
+  functions: 100,
+  branches: 50,
+  statements: 100,
+};
+
 /**
  * @deprecated Import a tier-specific export (e.g. `kosavaNodeUiCoverage`).
  * Kept for any external tooling that still references the old name.
