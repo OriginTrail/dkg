@@ -94,6 +94,12 @@ export type PublishHook = (cgId: string, envelope: unknown) => Promise<unknown>;
  *
  * The returned `publishCalls` array is shared mutable state — assert on it
  * after invoking the route handler.
+ *
+ * When `overrides.onPublish` is supplied, calls are still captured into
+ * `publishCalls` (capture is unconditional); `onPublish` only controls what
+ * `agent.publish()` returns to the route handler. This lets tests both
+ * assert on the call shape AND drive custom return values (e.g., to
+ * simulate a publish failure) without losing visibility into what was sent.
  */
 export function makeRequestContext(
   req: IncomingMessage,
