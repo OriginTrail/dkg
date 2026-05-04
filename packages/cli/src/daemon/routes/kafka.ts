@@ -32,6 +32,7 @@ export async function handleKafkaRoutes(ctx: RequestContext): Promise<void> {
       broker,
       topic,
       messageFormat,
+      private: privateField,
     } = parsed as Record<string, unknown>;
 
     if (!validateRequiredContextGraphId(contextGraphId, res)) {
@@ -48,12 +49,17 @@ export async function handleKafkaRoutes(ctx: RequestContext): Promise<void> {
       return jsonResponse(res, 400, { error: '"messageFormat" must be a non-empty string' });
     }
 
+    // Default to private: true. Callers opt into a public KA by sending
+    // `private: false` in the request body. The envelope choice lives here
+    // in the adapter — the kafka package's publisher receives the bare KA.
+    const isPrivate = privateField !== false;
+
     const publisher: KafkaEndpointPublisher = {
       async publish(cgId, content) {
-        await agent.publish(
-          cgId,
-          { public: content } as Record<string, unknown>,
-        );
+        const envelope = isPrivate
+          ? { private: content }
+          : { public: content };
+        await agent.publish(cgId, envelope as Record<string, unknown>);
       },
     };
 
@@ -66,6 +72,6 @@ export async function handleKafkaRoutes(ctx: RequestContext): Promise<void> {
       publisher,
     });
 
-    return jsonResponse(res, 200, result);
+    return jsonResponse(res, 200, { ...result, private: isPrivate });
   }
 }
