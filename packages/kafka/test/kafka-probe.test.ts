@@ -669,3 +669,84 @@ describe('probe — SSL material defaults', () => {
     expect(ssl.key).toBeUndefined();
   });
 });
+
+describe('probe — SSL client cert/key XOR validation', () => {
+  // Half of an mTLS pair (cert without key, or key without cert) is a LOCAL
+  // input error: the caller intended mTLS but only supplied one half. The
+  // probe must throw so the route translates it to HTTP 400 (input
+  // validation), not let kafkajs fail later with a vague handshake error
+  // that gets mapped to 422 (probe failure).
+
+  it('cert-only (no key) → throws an input error', async () => {
+    const { probe } = await importProbe();
+    await expect(
+      probe({
+        brokers: ['localhost:9092'],
+        topic: 'orders',
+        securityProtocol: 'SSL',
+        ssl: {
+          certPem: '-----BEGIN CERTIFICATE-----\nCERT\n-----END CERTIFICATE-----',
+        },
+      }),
+    ).rejects.toThrow(
+      /SSL configuration requires both client cert and key together/,
+    );
+  });
+
+  it('key-only (no cert) → throws an input error', async () => {
+    const { probe } = await importProbe();
+    await expect(
+      probe({
+        brokers: ['localhost:9092'],
+        topic: 'orders',
+        securityProtocol: 'SSL',
+        ssl: {
+          keyPem: '-----BEGIN PRIVATE KEY-----\nKEY\n-----END PRIVATE KEY-----',
+        },
+      }),
+    ).rejects.toThrow(
+      /SSL configuration requires both client cert and key together/,
+    );
+  });
+
+  it('CA-only (no client cert/key) → no throw (one-way TLS)', async () => {
+    const { probe } = await importProbe();
+    const result = await probe({
+      brokers: ['localhost:9092'],
+      topic: 'orders',
+      securityProtocol: 'SSL',
+      ssl: {
+        caPem: '-----BEGIN CERTIFICATE-----\nCA\n-----END CERTIFICATE-----',
+      },
+    });
+    expect(result.status).toBe('verified');
+  });
+
+  it('cert + key together → no throw (mTLS)', async () => {
+    const { probe } = await importProbe();
+    const result = await probe({
+      brokers: ['localhost:9092'],
+      topic: 'orders',
+      securityProtocol: 'SSL',
+      ssl: {
+        certPem: '-----BEGIN CERTIFICATE-----\nCERT\n-----END CERTIFICATE-----',
+        keyPem: '-----BEGIN PRIVATE KEY-----\nKEY\n-----END PRIVATE KEY-----',
+      },
+    });
+    expect(result.status).toBe('verified');
+  });
+
+  it('no ssl block at all → no throw (default trust store)', async () => {
+    // Already covered by the "SSL material defaults" describe above — this
+    // duplicate guard pins the contract here too: the cert/key XOR check
+    // must not trip on `ssl ?? {}` (both inputs absent is the legitimate
+    // one-way-TLS shape).
+    const { probe } = await importProbe();
+    const result = await probe({
+      brokers: ['localhost:9092'],
+      topic: 'orders',
+      securityProtocol: 'SSL',
+    });
+    expect(result.status).toBe('verified');
+  });
+});

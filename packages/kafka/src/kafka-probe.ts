@@ -41,6 +41,12 @@ export type SecurityProtocol =
  * are supported. SASL_SSL behaves the same way: TLS to the broker is
  * server-side only by default, and a client cert/key may be supplied if the
  * broker also requires mutual auth.
+ *
+ * Client `cert` and `key` must be supplied together (mTLS), or neither
+ * (one-way TLS). Supplying only one is rejected as invalid input — half of
+ * an mTLS pair is a local misconfiguration, not a broker reachability
+ * problem, and would otherwise surface as a confusing kafkajs handshake
+ * error.
  */
 export interface KafkaSslMaterial {
   /** PEM string (CA bundle). Preferred. */
@@ -292,6 +298,11 @@ interface SslConnectionOptions {
 // produces an mTLS config. Brokers that demand mTLS will reject the handshake
 // without the cert/key — that failure surfaces as a structured probe outcome,
 // not a thrown exception, so callers can react uniformly.
+//
+// However, supplying half of an mTLS pair (cert without key, or key without
+// cert) is a LOCAL input error, not a broker reachability problem. Reject it
+// up front so the route translates it to HTTP 400 (input validation) rather
+// than letting kafkajs fail later with a vague handshake error mapped to 422.
 async function buildSsl(
   ssl: KafkaSslMaterial | undefined,
 ): Promise<SslConnectionOptions> {
@@ -299,6 +310,12 @@ async function buildSsl(
   const ca = await loadOptionalPem(material.caPem, material.caPath);
   const cert = await loadOptionalPem(material.certPem, material.certPath);
   const key = await loadOptionalPem(material.keyPem, material.keyPath);
+
+  if ((cert && !key) || (!cert && key)) {
+    throw new Error(
+      'SSL configuration requires both client cert and key together (or neither)',
+    );
+  }
 
   const tlsOpts: SslConnectionOptions = {
     rejectUnauthorized: material.rejectUnauthorized ?? true,
