@@ -16,7 +16,7 @@ import {
 } from '../../lib/contextGraphSidebar.js';
 
 function toSidebarIdentity(a: AgentIdentity): AgentSidebarIdentity {
-  return { agentDid: a.agentDid };
+  return { agentDid: a.agentDid, peerId: a.peerId };
 }
 
 const CHEVRON_ICON = '▸';

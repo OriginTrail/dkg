@@ -7,22 +7,42 @@ import type { ContextGraph } from '../stores/projects.js';
 
 export interface AgentSidebarIdentity {
   agentDid: string;
+  /** Node libp2p peer id — daemon stores `DKG_CREATOR` as `did:dkg:agent:${peerId}`. */
+  peerId?: string;
 }
 
-/** Canonical form for DID comparison (`did:dkg:agent:0x...` lowercased). */
+/**
+ * Canonical `did:dkg:agent:…` for comparison.
+ * Ethereum addresses normalise to lowercase; peer-id suffix is case-preserving (Base58/CID).
+ */
 export function canonicalAgentDid(did: string): string {
   let t = did.trim().replace(/^["']|["']$/g, '');
   if (t.startsWith('<') && t.endsWith('>')) t = t.slice(1, -1);
-  const m = /^did:dkg:agent:(0x[a-fA-F0-9]{40})$/i.exec(t);
-  if (m) return `did:dkg:agent:${m[1].toLowerCase()}`;
+  const PREFIX = 'did:dkg:agent:';
+  if (t.length >= PREFIX.length && t.slice(0, PREFIX.length).toLowerCase() === PREFIX.toLowerCase()) {
+    const rest = t.slice(PREFIX.length);
+    const evm = /^(0x[a-fA-F0-9]{40})$/i.exec(rest);
+    if (evm) return `${PREFIX}${evm[1].toLowerCase()}`;
+    return `${PREFIX}${rest}`;
+  }
   return t.toLowerCase();
 }
 
-/** Creator field from list payload is normally an agent DID. */
+/** True when list `creator` is from another node/agent than the sidebar identity (same machine can share one peer DID on all locally created CGs). */
 export function creatorIsAnotherAgent(cg: ContextGraph, identity: AgentSidebarIdentity): boolean {
   const cr = cg.creator?.trim();
   if (!cr) return false;
-  return canonicalAgentDid(cr) !== canonicalAgentDid(identity.agentDid);
+  const cNorm = canonicalAgentDid(cr);
+
+  const walletNorm = canonicalAgentDid(identity.agentDid);
+  if (cNorm === walletNorm) return false;
+
+  if (identity.peerId) {
+    const peerNorm = canonicalAgentDid(`did:dkg:agent:${identity.peerId}`);
+    if (cNorm === peerNorm) return false;
+  }
+
+  return true;
 }
 
 /**
