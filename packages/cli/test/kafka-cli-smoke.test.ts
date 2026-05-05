@@ -1,6 +1,6 @@
 import { beforeAll, afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { createServer } from 'node:http';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
@@ -11,6 +11,32 @@ import { tmpdir } from 'node:os';
 const execFileAsync = promisify(execFile);
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CLI_ENTRY = join(__dirname, '..', 'dist', 'cli.js');
+
+/**
+ * Run the CLI with a piped stdin payload. Returns the same shape as the
+ * `execFileAsync` resolved value, plus an `exitCode`. When `expectFailure`
+ * is true the helper resolves on non-zero exit instead of throwing — used
+ * for negative tests where we want to inspect stderr.
+ */
+function runCliWithStdin(
+  args: string[],
+  stdinPayload: string,
+  env: NodeJS.ProcessEnv,
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn('node', [CLI_ENTRY, ...args], { env });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (d) => { stdout += String(d); });
+    child.stderr.on('data', (d) => { stderr += String(d); });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      resolve({ stdout, stderr, exitCode: code ?? 0 });
+    });
+    child.stdin.write(stdinPayload);
+    child.stdin.end();
+  });
+}
 
 interface CapturedRequest {
   url: string;
@@ -255,5 +281,142 @@ describe.sequential('kafka CLI smoke', () => {
     expect(stderr).toContain('plain');
     expect(stderr).toContain('scram-sha-256');
     expect(stderr).toContain('scram-sha-512');
+  }, 15000);
+
+  // --- Fix 3: non-argv password input ----------------------------------
+  // `--password <pass>` exposes the credential to shell history and `ps -ef`.
+  // The CLI also accepts `--password-stdin` (recommended) and the
+  // `DKG_KAFKA_PASSWORD` environment variable as alternatives.
+
+  it('reads password from stdin via --password-stdin and ships it in the SASL block', async () => {
+    const env = { ...process.env, DKG_HOME: dkgHome, DKG_API_PORT: smokeApiPort };
+
+    const { exitCode, stderr } = await runCliWithStdin(
+      [
+        'kafka',
+        'endpoint',
+        'register',
+        '--cg',
+        'devnet-test',
+        '--broker',
+        'kafka.example.com:9092',
+        '--topic',
+        'orders.created',
+        '--security-protocol',
+        'SASL_PLAINTEXT',
+        '--username',
+        'alice',
+        '--password-stdin',
+      ],
+      // Trailing newline mirrors how shells like `printf '%s\n' ... | dkg`
+      // would feed the password; the CLI must strip it without dropping the
+      // password itself.
+      'stdin-secret-XYZ\n',
+      env,
+    );
+
+    expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: '' });
+    const body = JSON.parse(last.body);
+    expect(body.securityProtocol).toBe('SASL_PLAINTEXT');
+    expect(body.sasl).toEqual({
+      mechanism: 'plain',
+      username: 'alice',
+      password: 'stdin-secret-XYZ',
+    });
+  }, 15000);
+
+  it('reads password from DKG_KAFKA_PASSWORD when --password is not supplied', async () => {
+    const env = {
+      ...process.env,
+      DKG_HOME: dkgHome,
+      DKG_API_PORT: smokeApiPort,
+      DKG_KAFKA_PASSWORD: 'env-secret-XYZ',
+    };
+
+    await execFileAsync('node', [
+      CLI_ENTRY,
+      'kafka',
+      'endpoint',
+      'register',
+      '--cg',
+      'devnet-test',
+      '--broker',
+      'kafka.example.com:9092',
+      '--topic',
+      'orders.created',
+      '--security-protocol',
+      'SASL_PLAINTEXT',
+      '--username',
+      'alice',
+    ], { env });
+
+    const body = JSON.parse(last.body);
+    expect(body.sasl).toEqual({
+      mechanism: 'plain',
+      username: 'alice',
+      password: 'env-secret-XYZ',
+    });
+  }, 15000);
+
+  it('--password takes precedence over DKG_KAFKA_PASSWORD', async () => {
+    const env = {
+      ...process.env,
+      DKG_HOME: dkgHome,
+      DKG_API_PORT: smokeApiPort,
+      DKG_KAFKA_PASSWORD: 'env-loses-XYZ',
+    };
+
+    await execFileAsync('node', [
+      CLI_ENTRY,
+      'kafka',
+      'endpoint',
+      'register',
+      '--cg',
+      'devnet-test',
+      '--broker',
+      'kafka.example.com:9092',
+      '--topic',
+      'orders.created',
+      '--security-protocol',
+      'SASL_PLAINTEXT',
+      '--username',
+      'alice',
+      '--password',
+      'flag-wins-XYZ',
+    ], { env });
+
+    const body = JSON.parse(last.body);
+    expect(body.sasl?.password).toBe('flag-wins-XYZ');
+  }, 15000);
+
+  it('rejects --password and --password-stdin together with a non-zero exit', async () => {
+    const env = { ...process.env, DKG_HOME: dkgHome, DKG_API_PORT: smokeApiPort };
+
+    const { exitCode, stderr } = await runCliWithStdin(
+      [
+        'kafka',
+        'endpoint',
+        'register',
+        '--cg',
+        'devnet-test',
+        '--broker',
+        'kafka.example.com:9092',
+        '--topic',
+        'orders.created',
+        '--security-protocol',
+        'SASL_PLAINTEXT',
+        '--username',
+        'alice',
+        '--password',
+        'argv-pw',
+        '--password-stdin',
+      ],
+      'stdin-pw\n',
+      env,
+    );
+
+    expect(exitCode).not.toBe(0);
+    expect(stderr).toContain('--password');
+    expect(stderr).toContain('--password-stdin');
   }, 15000);
 });

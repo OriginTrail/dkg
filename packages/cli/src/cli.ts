@@ -1718,6 +1718,62 @@ assertionCmd
 
 // ─── dkg kafka ──────────────────────────────────────────────────────
 
+/**
+ * Resolve the SASL password for `dkg kafka endpoint register`, in priority
+ * order:
+ *   1. `--password-stdin` (read from stdin; conflicts with `--password`)
+ *   2. `--password <pass>`
+ *   3. `DKG_KAFKA_PASSWORD` environment variable
+ *   4. `undefined` (no password supplied)
+ *
+ * `--password <pass>` exposes the secret to shell history and `ps -ef`. The
+ * stdin / env var paths exist so CI and humans can avoid that. We only ever
+ * read the FIRST line of stdin and trim trailing newlines — anything beyond
+ * that is not a password.
+ *
+ * Stdin handling: when `--password-stdin` is set, we require a non-TTY stdin
+ * (a piped value). A TTY-attached stdin would need an interactive prompt with
+ * suppressed echo, which is intentionally out of scope for this commit; if a
+ * TTY is detected we fail with a clear pointer to the alternatives.
+ */
+async function resolveKafkaPassword(opts: {
+  password?: string;
+  passwordStdin?: boolean;
+}): Promise<string | undefined> {
+  if (opts.passwordStdin && opts.password) {
+    throw new Error(
+      '--password and --password-stdin are mutually exclusive (pick one)',
+    );
+  }
+  if (opts.passwordStdin) {
+    if (process.stdin.isTTY) {
+      // Interactive masked prompt is a separate piece of work; pipe the
+      // password instead, e.g. `printf %s "$PW" | dkg ... --password-stdin`.
+      throw new Error(
+        '--password-stdin requires piped stdin; pipe the password (or use DKG_KAFKA_PASSWORD)',
+      );
+    }
+    const chunks: Buffer[] = [];
+    for await (const chunk of process.stdin) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    }
+    const raw = Buffer.concat(chunks).toString('utf8');
+    // Take the first line only, trim trailing CR/LF — keeps secrets that
+    // legitimately contain whitespace intact while rejecting the trailing
+    // newline that `printf '%s\n' "$PW" | ...` and most shells will append.
+    const firstLine = raw.split(/\r?\n/, 1)[0] ?? '';
+    return firstLine.length > 0 ? firstLine : undefined;
+  }
+  if (typeof opts.password === 'string' && opts.password.length > 0) {
+    return opts.password;
+  }
+  const envPw = process.env.DKG_KAFKA_PASSWORD;
+  if (typeof envPw === 'string' && envPw.length > 0) {
+    return envPw;
+  }
+  return undefined;
+}
+
 const kafkaCmd = program
   .command('kafka')
   .description('Kafka metadata registration commands');
@@ -1740,7 +1796,14 @@ kafkaEndpointCmd
   // `--force` is passed.
   .option('--security-protocol <proto>', 'PLAINTEXT | SASL_PLAINTEXT | SASL_SSL | SSL')
   .option('--username <user>', 'SASL username (SASL_PLAINTEXT or SASL_SSL)')
-  .option('--password <pass>', 'SASL password (SASL_PLAINTEXT or SASL_SSL)')
+  .option(
+    '--password <pass>',
+    'SASL password (NOT recommended — exposes secret in shell history; prefer --password-stdin or DKG_KAFKA_PASSWORD)',
+  )
+  .option(
+    '--password-stdin',
+    'Read SASL password from stdin (recommended; prevents shell-history exposure)',
+  )
   .option(
     '--sasl-mechanism <mechanism>',
     'SASL mechanism: plain (default), scram-sha-256, scram-sha-512',
@@ -1774,6 +1837,14 @@ kafkaEndpointCmd
       if (opts.certPemPath) ssl.cert = await readFile(String(opts.certPemPath), 'utf8');
       if (opts.keyPemPath) ssl.key = await readFile(String(opts.keyPemPath), 'utf8');
 
+      // Resolve the SASL password from --password / --password-stdin /
+      // DKG_KAFKA_PASSWORD before composing the request body so that all
+      // downstream SASL-credential logic reads from a single resolved value.
+      const resolvedPassword = await resolveKafkaPassword({
+        password: typeof opts.password === 'string' ? opts.password : undefined,
+        passwordStdin: Boolean(opts.passwordStdin),
+      });
+
       const client = await ApiClient.connect();
       const securityProtocol = opts.securityProtocol
         ? (String(opts.securityProtocol).toUpperCase() as SecurityProtocol)
@@ -1784,12 +1855,12 @@ kafkaEndpointCmd
         topic: opts.topic,
         messageFormat: opts.format,
         ...(securityProtocol ? { securityProtocol } : {}),
-        ...(opts.username && opts.password
+        ...(opts.username && resolvedPassword
           ? {
               sasl: {
                 mechanism: saslMechanism as SaslMechanism,
                 username: String(opts.username),
-                password: String(opts.password),
+                password: resolvedPassword,
               },
             }
           : {}),
