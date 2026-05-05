@@ -15,8 +15,9 @@
  * and is out of scope here; see the worker for the parallel implementation.
  */
 
-import type { Quad } from '@origintrail-official/dkg-storage';
+import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import type { Logger, OperationContext } from '@origintrail-official/dkg-core';
+import { assertSafeIri, contextGraphMetaUri, validateContextGraphId } from '@origintrail-official/dkg-core';
 import {
   computeFlatKCRootV10 as computeFlatKCRoot,
   autoPartition,
@@ -394,4 +395,85 @@ export function verifySyncedData(
   });
 
   return { data: verifiedData, meta: verifiedMeta, rejected };
+}
+
+/**
+ * Resolve a Knowledge Collection's V10 `kcId` (a.k.a. on-chain `batchId`)
+ * for a given root-entity URI in a context graph's `_meta` graph.
+ *
+ * Each KA published into a CG records in the meta graph:
+ *   - `<kaUri> dkg:rootEntity <rootEntityUri>`
+ *   - `<kaUri> dkg:partOf    <kcUal>`
+ *   - `<kcUal> dkg:batchId   "<integer>"^^xsd:integer`
+ *
+ * Returns `null` when no such KA / KC exists for the URI in the requested
+ * CG. The shape `bigint | null` is the natural caller contract for the V10
+ * publisher's `update` flow, which keys updates on a `bigint` kcId.
+ *
+ * Validates inputs before SPARQL interpolation:
+ *   - `contextGraphId` must pass `validateContextGraphId` (rejects `<`, `>`,
+ *     `}`, whitespace — same gate as every public CG-id consumer).
+ *   - `rootEntityUri` must pass `assertSafeIri` (the generic SPARQL-IRI
+ *     character-class check from `@origintrail-official/dkg-core`).
+ * Both throw on bad input rather than silently returning `null` — a
+ * malformed call is a programming error, not a "not found" signal.
+ *
+ * Pure helper: takes a `TripleStore` so it can be unit-tested with a tiny
+ * mock. The thin `agent.update(uri, cgId, content)` overload composes this
+ * with the existing kcId-keyed update path.
+ */
+export async function resolveKcIdByRootEntity(
+  store: TripleStore,
+  contextGraphId: string,
+  rootEntityUri: string,
+): Promise<bigint | null> {
+  const cgValidation = validateContextGraphId(contextGraphId);
+  if (!cgValidation.valid) {
+    throw new Error(
+      `resolveKcIdByRootEntity: invalid contextGraphId — ${cgValidation.reason}`,
+    );
+  }
+  // `assertSafeIri` rejects every char that breaks a SPARQL `<…>` IRI position
+  // (no `<`, `>`, `"`, `\`, `{`, `}`, `|`, `^`, backtick, whitespace, control
+  // chars). Defence-in-depth alongside any package-specific validators (e.g.
+  // the kafka package's `assertValidKafkaEndpointUri`) — this helper is meant
+  // to be reusable across packages, so it cannot rely on a domain-specific
+  // shape check.
+  assertSafeIri(rootEntityUri);
+
+  const metaGraph = contextGraphMetaUri(contextGraphId);
+  // `metaGraph` is derived from the validated `contextGraphId` via a pure
+  // string concat (`did:dkg:context-graph:${id}/_meta`); the validator's
+  // character class precludes IRI-breaking content downstream.
+  const sparql =
+    `SELECT ?batchId WHERE {\n` +
+    `  GRAPH <${metaGraph}> {\n` +
+    `    ?ka <${DKG_NS}rootEntity> <${rootEntityUri}> ;\n` +
+    `        <${DKG_NS}partOf> ?kc .\n` +
+    `    ?kc <${DKG_NS}batchId> ?batchId .\n` +
+    `  }\n` +
+    `} LIMIT 1`;
+  const result = await store.query(sparql);
+  if (result.type !== 'bindings' || result.bindings.length === 0) return null;
+
+  // The store binding can come back as a typed-literal string
+  // (`"<int>"^^<xsd:integer>`) or as a SPARQL-JSON object
+  // (`{ value, type, datatype }`) depending on the adapter. Normalise both
+  // shapes through the existing `stripLiteral` helper above.
+  const raw = result.bindings[0]['batchId'] as
+    | string
+    | { value?: string }
+    | undefined;
+  if (raw === undefined) return null;
+  const valueStr = typeof raw === 'string' ? stripLiteral(raw) : raw.value;
+  if (!valueStr) return null;
+  try {
+    return BigInt(valueStr);
+  } catch {
+    // The triple store should never have a non-integer in the batchId
+    // position (the publisher writes it as `intLit` in
+    // `generateConfirmedMetadata`). Treat any malformed value as "not
+    // resolvable" rather than throwing — the caller can branch on `null`.
+    return null;
+  }
 }

@@ -66,7 +66,7 @@ import { CclEvaluator, parseCclPolicy, validateCclPolicy, type CclEvaluationResu
 import { buildCclEvaluationQuads } from './ccl-evaluation-publish.js';
 import { buildManualCclFacts, resolveFactsFromSnapshot, type CclFactResolutionMode } from './ccl-fact-resolution.js';
 import {
-  strip, stripLiteral, jsonLdToQuads,
+  strip, stripLiteral, jsonLdToQuads, resolveKcIdByRootEntity,
   type JsonLdContent,
 } from './dkg-agent-utils.js';
 
@@ -2803,7 +2803,64 @@ export class DKGAgent {
     return result;
   }
 
+  // Overload: kcId-keyed update with raw quads (the original V10 signature).
   async update(
+    kcId: bigint, contextGraphId: string, quads: Quad[], privateQuads?: Quad[],
+    opts?: { onPhase?: PhaseCallback; operationCtx?: OperationContext },
+  ): Promise<PublishResult>;
+  /**
+   * Overload: URI-keyed update with JSON-LD content. Resolves the KA's
+   * `kcId` from the CG's `_meta` graph using the supplied root-entity URI,
+   * converts the JSON-LD KA to quads, and dispatches into the original
+   * `update` flow.
+   *
+   * Use this when the caller knows the rootEntity URI but not the V10
+   * `kcId` (which is an implementation-internal opaque batchId). Mirrors
+   * the existing JSON-LD overload on `publish()`.
+   *
+   * Throws when no KA is registered for the URI in the requested CG —
+   * "publish first, then update". The kcId-keyed overload above can still
+   * be used by callers that already hold the kcId.
+   */
+  async update(
+    rootEntityUri: string, contextGraphId: string, content: JsonLdContent,
+    opts?: { onPhase?: PhaseCallback; operationCtx?: OperationContext },
+  ): Promise<PublishResult>;
+  async update(
+    keyOrUri: bigint | string,
+    contextGraphId: string,
+    third: Quad[] | JsonLdContent,
+    fourth?: Quad[] | { onPhase?: PhaseCallback; operationCtx?: OperationContext },
+    fifth?: { onPhase?: PhaseCallback; operationCtx?: OperationContext },
+  ): Promise<PublishResult> {
+    // Discriminate on the first arg: bigint → kcId-keyed (original path);
+    // string → URI-keyed JSON-LD overload.
+    if (typeof keyOrUri === 'string') {
+      const opts = fourth as { onPhase?: PhaseCallback; operationCtx?: OperationContext } | undefined;
+      const ctx = opts?.operationCtx ?? createOperationContext('update');
+      const kcId = await resolveKcIdByRootEntity(this.store, contextGraphId, keyOrUri);
+      if (kcId === null) {
+        throw new Error(
+          `No Knowledge Collection found for rootEntity "${keyOrUri}" in context graph "${contextGraphId}". ` +
+            `Publish the KA before calling update().`,
+        );
+      }
+      const { publicQuads, privateQuads } = await jsonLdToQuads(third as JsonLdContent);
+      return this._update(kcId, contextGraphId, publicQuads, privateQuads, { ...opts, operationCtx: ctx });
+    }
+
+    // kcId-keyed (original signature). The third arg is `Quad[]`, the
+    // fourth is either `Quad[]` (privateQuads) or the opts object, the
+    // fifth is opts when fourth is privateQuads.
+    const quads = third as Quad[];
+    const privateQuads = Array.isArray(fourth) ? (fourth as Quad[]) : undefined;
+    const opts = (Array.isArray(fourth) ? fifth : fourth) as
+      | { onPhase?: PhaseCallback; operationCtx?: OperationContext }
+      | undefined;
+    return this._update(keyOrUri, contextGraphId, quads, privateQuads, opts);
+  }
+
+  private async _update(
     kcId: bigint, contextGraphId: string, quads: Quad[], privateQuads?: Quad[],
     opts?: { onPhase?: PhaseCallback; operationCtx?: OperationContext },
   ): Promise<PublishResult> {
