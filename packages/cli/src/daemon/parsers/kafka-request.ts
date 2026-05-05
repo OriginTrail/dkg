@@ -281,9 +281,18 @@ export function hasAnyKafkaCredentials(body: KafkaEndpointVerifyRequestBody): bo
       return true;
     }
   }
-  // PLAINTEXT is the one explicit-protocol-without-creds case the probe
-  // accepts (mirrors `shouldProbe`). Verify with PLAINTEXT and no creds is
-  // meaningful — it asks "is the broker reachable at all".
-  if (body.securityProtocol === 'PLAINTEXT') return true;
+  // PLAINTEXT and SSL are the two explicit-protocol-without-creds cases the
+  // probe accepts (mirrors `shouldProbe`). Verify with PLAINTEXT asks "is
+  // the broker reachable at all". Verify with bare SSL asks "is the broker
+  // reachable AND serving a valid TLS cert against the system CA". Both
+  // are meaningful diagnostics; rejecting bare SSL while accepting bare
+  // PLAINTEXT was Codex Bug B3 — register accepted bare SSL via
+  // `shouldProbe`, so re-verify of the same endpoint with no inline creds
+  // would 400 even though the original registration succeeded.
+  //
+  // SASL_PLAINTEXT/SASL_SSL are intentionally NOT in this branch — they
+  // require an explicit sasl block (mechanism + credentials), so a
+  // no-creds verify on those protocols is correctly meaningless.
+  if (body.securityProtocol === 'PLAINTEXT' || body.securityProtocol === 'SSL') return true;
   return false;
 }

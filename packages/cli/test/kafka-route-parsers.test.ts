@@ -472,11 +472,38 @@ describe('hasAnyKafkaCredentials — verify-route precondition gate', () => {
     ).toBe(true);
   });
 
-  it('false when only an empty securityProtocol of SSL is set without cert/key', () => {
+  it('true when securityProtocol is "SSL" alone — defaults to system trust store, probes "reachable + valid TLS cert" (Codex Bug B3)', () => {
+    // Bug B3 regression guard: bare SSL is meaningful to verify — the
+    // probe runs a TLS connect against the broker's system-CA-validated
+    // certificate. `shouldProbe` already accepts bare SSL (no inline
+    // ca/cert/key required); the gate here was incorrectly rejecting it.
+    // Operators who registered an SSL endpoint via the default trust store
+    // were getting 400 on re-verify with no inline creds.
     expect(
       hasAnyKafkaCredentials({
         ...baseBody,
         securityProtocol: 'SSL',
+      }),
+    ).toBe(true);
+  });
+
+  it('false when securityProtocol is "SASL_PLAINTEXT" alone — SASL requires an explicit creds block (no widening past SSL/PLAINTEXT)', () => {
+    // Negative-side guard so Bug B3's fix doesn't accidentally drop SASL's
+    // creds-required gate. SASL_PLAINTEXT/SASL_SSL must still 400 on
+    // bare-protocol re-verify.
+    expect(
+      hasAnyKafkaCredentials({
+        ...baseBody,
+        securityProtocol: 'SASL_PLAINTEXT',
+      }),
+    ).toBe(false);
+  });
+
+  it('false when securityProtocol is "SASL_SSL" alone (same negative as SASL_PLAINTEXT)', () => {
+    expect(
+      hasAnyKafkaCredentials({
+        ...baseBody,
+        securityProtocol: 'SASL_SSL',
       }),
     ).toBe(false);
   });

@@ -256,4 +256,46 @@ describe('handleVerify — Bug 1: validation must run after the existing KA is l
     expect(captured.status).toBe(404);
     expect(updateCalls).toHaveLength(0);
   }, 30_000);
+
+  it('Codex Bug B3: verify reaches agent.update for a stored bare-SSL endpoint with no body creds', async () => {
+    // Bug B3: an operator who registered an SSL endpoint via the system
+    // trust store (no inline ca/cert/key, just `--security-protocol SSL`)
+    // could register fine — `shouldProbe` accepts bare SSL — but
+    // re-verify of the same endpoint with no body creds 400'd as
+    // "Re-verify requires credentials". `hasAnyKafkaCredentials` accepted
+    // bare PLAINTEXT but NOT bare SSL.
+    //
+    // Fix: SSL is now treated the same as PLAINTEXT in the precondition
+    // gate. Verify must reach the probe → reach `agent.update` → 200,
+    // mirroring the PLAINTEXT no-creds test above. The probe itself
+    // resolves to `unreachable`/`failed` against the synthetic broker
+    // hostname (kafkajs returns KafkaJSNumberOfRetriesExceeded quickly
+    // because the hostname doesn't resolve); the load-bearing assertion is
+    // that the route DIDN'T 400 — agent.update was called and the response
+    // is 200 with the failure recorded on the KA.
+    const sslBindings = {
+      ...STORED_KA_BINDINGS,
+      securityProtocol: '"SSL"',
+    };
+    const { agent, updateCalls } = buildMockAgent({
+      getEndpointBindings: [sslBindings],
+    });
+    const req = buildMockReq('POST', '/api/kafka/endpoint/verify', {
+      contextGraphId: 'devnet-test',
+      uri: VALID_URI,
+      // NO securityProtocol, NO sasl, NO ssl — bare-SSL re-verify defaults
+      // securityProtocol from the stored KA.
+    });
+    const { res, captured } = buildMockRes();
+
+    await handleKafkaRoutes(buildCtx(req, res, agent));
+
+    expect(captured.status).toBe(200);
+    expect(updateCalls).toHaveLength(1);
+    expect(updateCalls[0].uri).toBe(VALID_URI);
+    expect(updateCalls[0].cgId).toBe('devnet-test');
+    const body = captured.body as { verificationStatus?: string; probe?: { status?: string } };
+    expect(body.verificationStatus).toBe('failed');
+    expect(body.probe?.status).toMatch(/^(failed|unreachable)$/);
+  }, 30_000);
 });
