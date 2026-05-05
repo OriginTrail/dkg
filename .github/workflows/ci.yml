@@ -96,6 +96,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Validate npm metadata points to v10
+        run: pnpm check:npm-metadata
+
       - name: Restore Turbo cache
         uses: actions/cache@v4
         with:

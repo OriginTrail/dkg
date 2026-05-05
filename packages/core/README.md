@@ -1,6 +1,6 @@
 # @origintrail-official/dkg-core
 
-Foundation package for DKG V9. Provides P2P networking, protocol messaging, cryptographic primitives, and shared utilities used by every other package in the stack.
+Foundation package for DKG V10. Provides P2P networking, protocol messaging, cryptographic primitives, and shared utilities used by every other package in the stack.
 
 ## Features
 

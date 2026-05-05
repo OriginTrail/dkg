@@ -1,6 +1,6 @@
 # @origintrail-official/dkg-agent
 
-Agent runtime for DKG V9. Provides the `DKGAgent` class — the primary entry point for building agents that participate in the decentralized knowledge network.
+Agent runtime for DKG V10. Provides the `DKGAgent` class — the primary entry point for building agents that participate in the decentralized knowledge network.
 
 ## Features
 

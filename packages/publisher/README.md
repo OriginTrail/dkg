@@ -1,6 +1,6 @@
 # @origintrail-official/dkg-publisher
 
-Publishing protocol for DKG V9. Handles the complete lifecycle of getting Knowledge Assets from a node into the network — from RDF processing through Merkle tree construction to on-chain finalization.
+Publishing protocol for DKG V10. Handles the complete lifecycle of getting Knowledge Assets from a node into the network — from RDF processing through Merkle tree construction to on-chain finalization.
 
 ## Features
 

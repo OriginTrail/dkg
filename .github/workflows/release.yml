@@ -88,6 +88,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Validate npm metadata points to v10
+        run: pnpm check:npm-metadata
+
       - name: Build
         run: pnpm build
 
@@ -271,7 +274,7 @@ jobs:
             sed -n "/^## \[$V\]/,/^## \[/p" CHANGELOG.md | sed '/^## \[/d' | sed '1d' > release_notes.md
           fi
           if [ ! -s release_notes.md ]; then
-            echo "## DKG V9 Node $V" > release_notes.md
+            echo "## DKG V10 Node $V" > release_notes.md
             echo "" >> release_notes.md
             echo "See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/v$V/CHANGELOG.md) for details." >> release_notes.md
           fi

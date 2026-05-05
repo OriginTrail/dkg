@@ -1,6 +1,6 @@
 # @origintrail-official/dkg-storage
 
-Triple store abstraction layer for DKG V9. Provides a unified API over multiple RDF storage backends with named graph management and private content storage.
+Triple store abstraction layer for DKG V10. Provides a unified API over multiple RDF storage backends with named graph management and private content storage.
 
 ## Features
 

@@ -1,6 +1,6 @@
 # @origintrail-official/dkg-chain
 
-Blockchain abstraction layer for DKG V9. Provides a `ChainAdapter` interface with implementations for EVM chains and testing.
+Blockchain abstraction layer for DKG V10. Provides a `ChainAdapter` interface with implementations for EVM chains and testing.
 
 ## Features
 
