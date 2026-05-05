@@ -20,7 +20,15 @@ export default defineConfig({
   // /api/paranet/list refresh" in their beforeEach to escape the daemon
   // bootstrap window. 30s was the old mock-mode budget and is too tight.
   timeout: 60_000,
-  reporter: CI ? [['github'], ['html', { open: 'never' }]] : 'list',
+  // JUnit + HTML are always on so `pnpm test:ui:notify` (which reads
+  // results.xml) works locally as well as in CI. List reporter prints the
+  // per-test stream; the GitHub annotations reporter only fires on CI.
+  reporter: [
+    ['list'],
+    ['html', { open: 'never' }],
+    ['junit', { outputFile: 'results.xml' }],
+    ...(CI ? [['github'] as const] : []),
+  ],
 
   use: {
     baseURL: `http://localhost:${PORT}/ui/`,

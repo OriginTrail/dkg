@@ -85,9 +85,20 @@ test.describe('Operations View', () => {
     expect(someVisible).toBe(true);
   });
 
-  test('switching to Performance sub-tab shows chart placeholder', async ({ page }) => {
+  test('switching to Performance sub-tab renders charts or the empty placeholder', async ({ page }) => {
+    // Performance tab has two valid render paths:
+    //   - empty (no ops yet) → "Not enough data for charts"
+    //   - populated → at least one chart heading (e.g. "OPERATIONS OVER TIME")
+    // The daemon almost always has activity, so populated is the common case;
+    // we accept either branch but require one of them to land.
     await page.locator('.tab-item').filter({ hasText: 'Performance' }).click();
-    await expect(page.getByText('Not enough data for charts')).toBeVisible();
+    const empty = page.getByText('Not enough data for charts');
+    const chartHeading = page.getByText(/OPERATIONS OVER TIME|AVG DURATION BY|SUCCESS RATE BY/i);
+    const someVisible = await Promise.race([
+      empty.first().waitFor({ state: 'visible', timeout: 8_000 }).then(() => true).catch(() => false),
+      chartHeading.first().waitFor({ state: 'visible', timeout: 8_000 }).then(() => true).catch(() => false),
+    ]);
+    expect(someVisible).toBe(true);
   });
 
   test('switching to Logs sub-tab shows log viewer controls', async ({ page }) => {
@@ -150,11 +161,15 @@ test.describe('Operations View', () => {
 
   test('Performance sub-tab is selectable and re-selectable', async ({ page }) => {
     const perfBtn = page.locator('.tab-item').filter({ hasText: 'Performance' });
+    // Anchor to a stable element that's present in both empty and populated
+    // states — the period selector at the top of the tab.
+    const periodSelect = page.locator('select.input, .v10-ops-tab + * select').first();
+
     await perfBtn.click();
-    await expect(page.getByText('Not enough data for charts')).toBeVisible();
+    await expect(periodSelect).toBeVisible();
     await page.locator('.tab-item').filter({ hasText: 'All Operations' }).click();
     await perfBtn.click();
-    await expect(page.getByText('Not enough data for charts')).toBeVisible();
+    await expect(periodSelect).toBeVisible();
   });
 
   test('Logs level filter has an All levels default and at least one other option', async ({ page }) => {

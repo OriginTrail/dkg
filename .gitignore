@@ -23,6 +23,9 @@ packages/evm-module/typechain/
 # contains a live bearer token. Never commit it.
 packages/node-ui/e2e/setup/.daemon-state.json
 
+# JUnit output written by Playwright on CI, consumed by report-config.js.
+packages/node-ui/results.xml
+
 packages/evm-module/deployments/hardhat_contracts.json
 packages/evm-module/deployments/localhost_contracts.json
 snapshots/_cache_phase1_neuroweb_epoch16.json
