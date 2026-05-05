@@ -423,6 +423,69 @@ export function verifySyncedData(
  * with the existing kcId-keyed update path.
  */
 /**
+ * Thrown by `assertJsonLdRootMatches` when the quads produced by
+ * `jsonLdToQuads` from an `agent.update(uri, ...)` payload don't all anchor
+ * to the expected `uri`.
+ *
+ * Codex Bug A: the URI-keyed update overload resolves `uri → kcId` and then
+ * writes whatever quads the JSON-LD content carries — without verifying that
+ * those quads are about `uri`. A typo, a stale builder, or a private-only
+ * payload (which `jsonLdToQuads` anchors to a synthetic `urn:dkg:private:`
+ * URN) would silently land triples with a DIFFERENT subject inside the kcId
+ * resolved from `uri`. Original subject's triples become stale; new subject's
+ * triples coexist confusingly. Failing closed eliminates the hole.
+ *
+ * Route adapters can `instanceof`-discriminate to map to HTTP 422.
+ */
+export class RootEntityMismatchError extends Error {
+  constructor(
+    public readonly expected: string,
+    public readonly actual: string[],
+  ) {
+    const actualPart =
+      actual.length === 0
+        ? '(no concrete subject in the supplied JSON-LD content)'
+        : actual.join(', ');
+    super(
+      `update content root mismatch: expected the only subject to be "${expected}", ` +
+        `got ${actualPart}. Refusing to write triples carrying a different subject ` +
+        `into the kcId resolved from "${expected}".`,
+    );
+    this.name = 'RootEntityMismatchError';
+  }
+}
+
+/**
+ * Pure helper: assert that the (publicQuads, privateQuads) produced by
+ * `jsonLdToQuads` from a JSON-LD `update` payload all share a single subject
+ * IRI equal to `expectedUri`. Used by the URI-keyed overload of
+ * `agent.update` BEFORE dispatching into `_update`.
+ *
+ * Decision: be strict. A mixed-subject payload — even one where the
+ * expected URI IS one of the subjects — is suspicious; if a real use case
+ * for "child triples under different subjects but anchored to the same
+ * rootEntity" emerges, the call site can ask for the rule to be widened.
+ *
+ * The kcId-keyed overload (`update(kcId: bigint, ...)`) does NOT use this
+ * gate — kcId callers manage their own subject discipline and the agent
+ * doesn't second-guess them.
+ */
+export function assertJsonLdRootMatches(
+  expectedUri: string,
+  publicQuads: Quad[],
+  privateQuads: Quad[],
+): void {
+  const subjects = new Set<string>();
+  for (const q of publicQuads) subjects.add(q.subject);
+  for (const q of privateQuads) subjects.add(q.subject);
+
+  if (subjects.size === 1 && subjects.has(expectedUri)) return;
+
+  const sortedActual = Array.from(subjects).sort();
+  throw new RootEntityMismatchError(expectedUri, sortedActual);
+}
+
+/**
  * Thrown when `resolveKcIdByRootEntity` finds 2+ Knowledge Collections
  * sharing a `rootEntity` URI in the same context graph's `_meta` graph.
  *

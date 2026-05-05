@@ -66,7 +66,7 @@ import { CclEvaluator, parseCclPolicy, validateCclPolicy, type CclEvaluationResu
 import { buildCclEvaluationQuads } from './ccl-evaluation-publish.js';
 import { buildManualCclFacts, resolveFactsFromSnapshot, type CclFactResolutionMode } from './ccl-fact-resolution.js';
 import {
-  strip, stripLiteral, jsonLdToQuads, resolveKcIdByRootEntity,
+  strip, stripLiteral, jsonLdToQuads, resolveKcIdByRootEntity, assertJsonLdRootMatches,
   type JsonLdContent,
 } from './dkg-agent-utils.js';
 
@@ -2846,6 +2846,13 @@ export class DKGAgent {
         );
       }
       const { publicQuads, privateQuads } = await jsonLdToQuads(third as JsonLdContent);
+      // Codex Bug A: ensure the supplied JSON-LD actually describes
+      // `keyOrUri` (and only `keyOrUri`) before we let it land in the
+      // resolved kcId. Without this, a typo / stale builder / private-only
+      // payload silently writes triples carrying a different subject under
+      // the resolved kcId. The kcId-keyed overload below intentionally
+      // skips this check — kcId callers manage their own subject discipline.
+      assertJsonLdRootMatches(keyOrUri, publicQuads, privateQuads);
       return this._update(kcId, contextGraphId, publicQuads, privateQuads, { ...opts, operationCtx: ctx });
     }
 
