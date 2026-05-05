@@ -331,6 +331,7 @@ import { handleQueryRoutes } from './routes/query.js';
 import { handleLocalAgentsRoutes } from './routes/local-agents.js';
 import { handleEpcisRoutes } from './routes/epcis.js';
 import { handleKafkaRoutes } from './routes/kafka.js';
+import { handleAuthRoutes } from './routes/auth.js';
 
 
 export async function handleRequest(
@@ -440,6 +441,9 @@ export async function handleRequest(
   if (res.writableEnded) return;
 
   await handleKafkaRoutes(ctx);
+  if (res.writableEnded) return;
+
+  await handleAuthRoutes(ctx);
   if (res.writableEnded) return;
 
   jsonResponse(res, 404, { error: 'Not found' });
