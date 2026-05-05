@@ -310,6 +310,15 @@ export interface VerifyKafkaEndpointInput {
    * "creds present" precondition before invoking this function.
    */
   probe: KafkaEndpointProbeOutcome;
+  /**
+   * Pre-fetched existing KA snapshot. When supplied, this function skips
+   * its own `getKafkaEndpoint` read — useful for routes that already need
+   * the existing KA to compute effective probe inputs (broker / topic /
+   * securityProtocol defaulting), so they don't pay for a second SPARQL
+   * round-trip. When omitted, the function fetches the KA itself, same as
+   * before.
+   */
+  existing?: KafkaEndpointSummary;
 }
 
 export interface VerifyKafkaEndpointResult {
@@ -430,11 +439,20 @@ export async function revokeKafkaEndpoint(
 export async function verifyKafkaEndpoint(
   input: VerifyKafkaEndpointInput,
 ): Promise<VerifyKafkaEndpointResult> {
-  const existing = await getKafkaEndpoint({
-    contextGraphId: input.contextGraphId,
-    uri: input.uri,
-    queryEngine: input.queryEngine,
-  });
+  // Reuse the caller's pre-fetched KA snapshot when available — every
+  // production caller (the verify route) already needs `existing` to
+  // compute the effective probe inputs (broker / topic / securityProtocol
+  // defaulting from the recorded values), so re-fetching here would be a
+  // wasted round-trip. When `existing` is omitted we fall back to the
+  // self-fetching path so direct unit-test callers don't have to thread
+  // the snapshot through.
+  const existing =
+    input.existing ??
+    (await getKafkaEndpoint({
+      contextGraphId: input.contextGraphId,
+      uri: input.uri,
+      queryEngine: input.queryEngine,
+    }));
   if (!existing) {
     throw new Error(
       `Kafka endpoint ${input.uri} not found in context graph "${input.contextGraphId}"`,

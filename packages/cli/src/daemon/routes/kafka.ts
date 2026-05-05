@@ -384,11 +384,15 @@ async function handleVerify(ctx: RequestContext): Promise<void> {
     return jsonResponse(res, 400, { error: '"topic" must be a non-empty string when provided' });
   }
 
-  // Slice 04: `parseSasl` / `parseSsl` throw `KafkaRequestParseError` on
-  // present-but-malformed payloads, and `validateKafkaAuthConsistency`
-  // rejects protocol/credential mismatch (e.g. sasl block with no
-  // securityProtocol, sasl block paired with SSL, ...). Mirror the
-  // register flow so verify gets the same fail-fast input contract.
+  // Parse-only step: `parseSasl` / `parseSsl` throw `KafkaRequestParseError`
+  // on present-but-malformed payloads (wrong type, unknown mechanism,
+  // non-string PEM, …). Shape-consistency and "any creds at all" gates run
+  // LATER, after we've loaded the existing KA — the verify route is documented
+  // to default `broker`, `topic`, and `securityProtocol` from the recorded
+  // values, and the gates need to see those effective inputs (Bug 1
+  // regression: running them on the bare body 400'd legitimate
+  // "URI + sasl" requests because `securityProtocol` was undefined before
+  // defaulting, and 400'd URI-only re-verifies of stored PLAINTEXT KAs).
   let verifyBody: KafkaEndpointVerifyRequestBody;
   try {
     const sasl = parseSasl(raw.sasl);
@@ -401,20 +405,6 @@ async function handleVerify(ctx: RequestContext): Promise<void> {
       sasl,
       ssl,
     };
-    // The shape-consistency check only reads `securityProtocol` / `sasl` /
-    // `ssl` — the broker/topic/messageFormat fields it nominally expects are
-    // unread. Pass a minimal projection that satisfies the required-field
-    // contract; broker/topic stay as defaults the verify route uses
-    // separately.
-    validateKafkaAuthConsistency({
-      contextGraphId: contextGraphId as string,
-      broker: verifyBody.broker ?? '',
-      topic: verifyBody.topic ?? '',
-      messageFormat: '',
-      securityProtocol: verifyBody.securityProtocol,
-      sasl: verifyBody.sasl,
-      ssl: verifyBody.ssl,
-    });
   } catch (err) {
     if (err instanceof KafkaRequestParseError) {
       return jsonResponse(res, 400, { error: err.publicMessage });
@@ -424,19 +414,6 @@ async function handleVerify(ctx: RequestContext): Promise<void> {
 
   const queryEngine = buildKafkaEndpointQueryEngine(ctx);
   const publisher = buildKafkaEndpointPublisher(ctx);
-
-  // The verify verb requires creds. ADR 0002 distinguishes register
-  // (unattempted is acceptable when no creds) from verify (whose contract is
-  // "tell me what the broker says, write it down"). Without any creds at all
-  // — neither SASL/SSL material nor an explicit PLAINTEXT advertisement —
-  // there is no probe to run; reject as 400.
-  if (!hasAnyKafkaCredentials(verifyBody)) {
-    return jsonResponse(res, 400, {
-      error:
-        'Re-verify requires credentials: pass sasl (username/password), ssl (cert/key), ' +
-        'or securityProtocol="PLAINTEXT". To register without verifying, use POST /api/kafka/endpoint.',
-    });
-  }
 
   // Fetch the existing KA so we can default broker/topic/securityProtocol
   // from its recorded values when the caller didn't override. ADR-recommended
@@ -458,6 +435,50 @@ async function handleVerify(ctx: RequestContext): Promise<void> {
     (verifyBody.securityProtocol ?? existing.securityProtocol) as
       | KafkaProbeOptions['securityProtocol']
       | undefined;
+
+  // Now that defaulting is done, run the shape-consistency check and the
+  // creds-required gate against the EFFECTIVE values the probe will see.
+  // `validateKafkaAuthConsistency` catches sasl-without-protocol etc. once
+  // the protocol has fallen back from `existing.securityProtocol`;
+  // `hasAnyKafkaCredentials` accepts a stored PLAINTEXT advertisement as
+  // sufficient (per ADR 0002).
+  const effectiveBody: KafkaEndpointVerifyRequestBody = {
+    ...verifyBody,
+    broker: probeBroker,
+    topic: probeTopic,
+    securityProtocol: probeSecurityProtocol,
+  };
+  try {
+    validateKafkaAuthConsistency({
+      contextGraphId: contextGraphId as string,
+      broker: probeBroker,
+      topic: probeTopic,
+      messageFormat: existing.messageFormat,
+      securityProtocol: probeSecurityProtocol,
+      sasl: verifyBody.sasl,
+      ssl: verifyBody.ssl,
+    });
+  } catch (err) {
+    if (err instanceof KafkaRequestParseError) {
+      return jsonResponse(res, 400, { error: err.publicMessage });
+    }
+    throw err;
+  }
+
+  // The verify verb requires creds. ADR 0002 distinguishes register
+  // (unattempted is acceptable when no creds) from verify (whose contract is
+  // "tell me what the broker says, write it down"). Without any creds at all
+  // — neither SASL/SSL material nor an explicit (or recorded) PLAINTEXT
+  // advertisement — there is no probe to run; reject as 400.
+  if (!hasAnyKafkaCredentials(effectiveBody)) {
+    return jsonResponse(res, 400, {
+      error:
+        'Re-verify requires credentials: pass sasl (username/password), ssl (cert/key), ' +
+        'or securityProtocol="PLAINTEXT" (or re-verify a stored PLAINTEXT endpoint). ' +
+        'To register without verifying, use POST /api/kafka/endpoint.',
+    });
+  }
+
   if (!probeSecurityProtocol) {
     return jsonResponse(res, 400, {
       error:
@@ -492,6 +513,9 @@ async function handleVerify(ctx: RequestContext): Promise<void> {
       queryEngine,
       publisher,
       probe: toKafkaEndpointProbeOutcome(probeResult),
+      // I6 consequential: pass the already-fetched KA so the package layer
+      // skips its own re-read.
+      existing,
     });
     return jsonResponse(res, 200, {
       ...result,

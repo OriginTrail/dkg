@@ -193,4 +193,54 @@ describe('verifyKafkaEndpoint', () => {
     expect(updateCalls[0].ka['dkg:verificationStatus']).toBe('verified');
     expect(updateCalls[0].ka['dkg:verifiedAt']['@value']).toBe('2026-05-05T10:00:00.000Z');
   });
+
+  it('uses the caller-supplied `existing` snapshot and skips the queryEngine read (Bug 1 / I6)', async () => {
+    // The verify route already loads the existing KA to compute effective
+    // probe inputs (broker / topic / securityProtocol defaulting). Passing
+    // `existing` through avoids a second SPARQL round-trip. The package must
+    // honour it: zero queryEngine.query calls, the supplied snapshot is the
+    // sole basis for the composed update.
+    const { publisher, updateCalls } = makePublisher();
+    let queryCount = 0;
+    const queryEngine = {
+      async query() {
+        queryCount += 1;
+        // Return something distinct from `existing` so a regression that
+        // re-fetches anyway would either fail this test (queryCount > 0) or
+        // surface a wrong-broker mutation in the assertions below.
+        return { bindings: [] };
+      },
+    };
+
+    const existing = {
+      uri: URI,
+      contextGraphId: 'devnet-test',
+      broker: 'caller.supplied:9092',
+      topic: 'caller-supplied-topic',
+      messageFormat: 'application/cloudevents+json',
+      publisher: 'urn:dkg:agent:0xowner',
+      endpointUrl: 'kafka://caller.supplied:9092/caller-supplied-topic',
+      issued: '2026-05-04T12:34:56.000Z',
+      verificationStatus: 'verified',
+      verifiedAt: '2026-05-04T12:35:00.000Z',
+    };
+
+    await verifyKafkaEndpoint({
+      contextGraphId: 'devnet-test',
+      uri: URI,
+      queryEngine,
+      publisher,
+      probe: VERIFIED_PROBE,
+      existing,
+    });
+
+    expect(queryCount).toBe(0);
+    expect(updateCalls).toHaveLength(1);
+    // The composed update used the caller-supplied broker/topic/messageFormat,
+    // proving the function did not re-fetch (which would have returned an
+    // empty bindings array and surfaced as a "not found" throw).
+    expect(updateCalls[0].ka['dkg:broker']).toBe('caller.supplied:9092');
+    expect(updateCalls[0].ka['dkg:topic']).toBe('caller-supplied-topic');
+    expect(updateCalls[0].ka['dkg:messageFormat']).toBe('application/cloudevents+json');
+  });
 });
