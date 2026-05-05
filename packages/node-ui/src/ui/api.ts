@@ -1516,6 +1516,34 @@ async function mapLocalAgentIntegrationRecord(record: LocalAgentIntegrationRecor
   } satisfies LocalAgentIntegration;
 }
 
+export type RegistryTrustTier = 'community' | 'verified' | 'featured';
+export type RegistryMemoryLayer = 'WM' | 'SWM' | 'VM';
+export type RegistryInstallKind = 'cli' | 'mcp' | 'service' | 'agent-plugin' | 'manual';
+
+export interface RegistryIntegrationSummary {
+  slug: string;
+  name: string;
+  description: string;
+  trustTier: RegistryTrustTier;
+  memoryLayers: RegistryMemoryLayer[];
+  installKind: RegistryInstallKind;
+  repo: string;
+  maintainer: string;
+  targetAgents: string[];
+}
+
+export interface RegistryListResult {
+  entries: RegistryIntegrationSummary[];
+  failures: Array<{ slug: string; error: string }>;
+  fetchedAt: number;
+  tier: RegistryTrustTier;
+}
+
+export async function fetchRegistryIntegrations(opts: { tier?: RegistryTrustTier } = {}): Promise<RegistryListResult> {
+  const search = opts.tier ? `?tier=${encodeURIComponent(opts.tier)}` : '';
+  return get<RegistryListResult>(`/api/integrations/registry${search}`);
+}
+
 export async function fetchLocalAgentIntegrations(): Promise<{ integrations: LocalAgentIntegration[] }> {
   const response = await get<{ integrations?: LocalAgentIntegrationRecord[] }>('/api/local-agent-integrations');
   const integrations = await Promise.all((response.integrations ?? []).map(mapLocalAgentIntegrationRecord));

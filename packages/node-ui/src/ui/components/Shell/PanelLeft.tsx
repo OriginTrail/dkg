@@ -6,9 +6,14 @@ import { useJourneyStore } from '../../stores/journey.js';
 import { api } from '../../api-wrapper.js';
 import { CreateProjectModal } from '../Modals/CreateProjectModal.js';
 import { JoinProjectModal } from '../Modals/JoinProjectModal.js';
-import { ImportFilesModal } from '../Modals/ImportFilesModal.js';
 import { useNodeEvents } from '../../hooks/useNodeEvents.js';
-import { fetchCurrentAgent, type AgentIdentity } from '../../api.js';
+import {
+  fetchCurrentAgent,
+  fetchLocalAgentIntegrations,
+  type AgentIdentity,
+  type LocalAgentIntegration,
+  type LocalAgentIntegrationStatus,
+} from '../../api.js';
 import {
   belongsInContextOracleSidebar,
   belongsInMyProjectsSidebar,
@@ -21,6 +26,10 @@ function toSidebarIdentity(a: AgentIdentity): AgentSidebarIdentity {
 
 const CHEVRON_ICON = '▸';
 const COLLAPSE_ICON = '◂';
+
+// Project tree row: a flat, clickable header that opens the project tab.
+// Memory-layer expansion was removed by request — layers are surfaced inside
+// the project view rather than as nested sidebar items.
 
 type TreeMode = 'explorer' | 'oracle';
 
@@ -74,7 +83,6 @@ interface ProjectTreeItemProps {
   cg: ContextGraph;
   isActive: boolean;
   onSelect: () => void;
-  onImport: () => void;
   onHide: () => void;
 }
 
@@ -82,20 +90,16 @@ function ProjectTreeItem({
   cg,
   isActive,
   onSelect,
-  onImport,
   onHide,
 }: ProjectTreeItemProps) {
-  const [open, setOpen] = useState(false);
-  const { openTab } = useTabsStore();
   const assetCount = cg.assetCount ?? cg.assets ?? 0;
 
   return (
     <div className="v10-tree-section">
       <div
         className={`v10-tree-section-header ${isActive ? 'active' : ''}`}
-        onClick={() => { setOpen((v) => !v); onSelect(); }}
+        onClick={onSelect}
       >
-        <span className={`v10-tree-chevron ${open ? 'open' : ''}`}>{CHEVRON_ICON}</span>
         <span className="v10-tree-project-dot" />
         <span className="v10-tree-section-label">{cg.name || cg.id.slice(0, 16)}</span>
         <span className="v10-tree-section-badge">{assetCount}</span>
@@ -108,50 +112,49 @@ function ProjectTreeItem({
           ×
         </button>
       </div>
-      {open && (
-        <div className="v10-tree-items">
-          <div className="v10-tree-layer-header">Working Memory</div>
-          <div
-            className="v10-tree-item"
-            onClick={() => openTab({ id: `wm:${cg.id}`, label: `WM · ${cg.name || cg.id.slice(0,12)}`, closable: true })}
-          >
-            <span className="v10-tree-item-icon" style={{ color: 'var(--layer-working)' }}>◇</span>
-            <span className="v10-tree-item-label">agent drafts</span>
-          </div>
-          <div
-            className="v10-tree-item"
-            onClick={(e) => { e.stopPropagation(); onImport(); }}
-            style={{ paddingLeft: 32 }}
-          >
-            <span className="v10-tree-item-icon" style={{ fontSize: 11 }}>↑</span>
-            <span className="v10-tree-item-label" style={{ color: 'var(--text-tertiary)' }}>Import files…</span>
-          </div>
-
-          <div className="v10-tree-layer-header" style={{ marginTop: 6 }}>Shared Memory</div>
-          <div
-            className="v10-tree-item"
-            onClick={() => openTab({ id: `swm:${cg.id}`, label: `SWM · ${cg.name || cg.id.slice(0,12)}`, closable: true })}
-          >
-            <span className="v10-tree-item-icon" style={{ color: 'var(--layer-shared)' }}>◈</span>
-            <span className="v10-tree-item-label">team workspace</span>
-          </div>
-
-          <div className="v10-tree-layer-header" style={{ marginTop: 6 }}>Verified Memory</div>
-          <div
-            className="v10-tree-item"
-            onClick={() => openTab({ id: `vm:${cg.id}`, label: `VM · ${cg.name || cg.id.slice(0,12)}`, closable: true })}
-          >
-            <span className="v10-tree-item-icon" style={{ color: 'var(--layer-verified)' }}>◉</span>
-            <span className="v10-tree-item-label">verified assets</span>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
 
+// Maps local-agent integration status → status-dot color. Kept inline (vs new
+// CSS classes) because the four states map 1:1 to existing semantic palette
+// vars and there's no shared status-dot component to extend.
+function localAgentDotColor(status: LocalAgentIntegrationStatus): string {
+  switch (status) {
+    case 'chat_ready':
+      return 'var(--accent-green, #22c55e)';
+    case 'connecting':
+      return 'var(--accent-yellow, #eab308)';
+    case 'degraded':
+    case 'bridge_offline':
+      return 'var(--accent-orange, #f97316)';
+    case 'available':
+    case 'coming_soon':
+    default:
+      return 'var(--text-tertiary, #6b7280)';
+  }
+}
+
 function IntegrationsSection() {
   const [open, setOpen] = useState(false);
+  const [localAgents, setLocalAgents] = useState<LocalAgentIntegration[]>([]);
+  const [localAgentsError, setLocalAgentsError] = useState<string | null>(null);
+
+  // Lazy-load on first open and refresh every 30s while open.
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+
+    const loadLocal = () => {
+      fetchLocalAgentIntegrations()
+        .then((r) => { if (!cancelled) { setLocalAgents(r.integrations); setLocalAgentsError(null); } })
+        .catch((e: Error) => { if (!cancelled) setLocalAgentsError(e.message); });
+    };
+
+    loadLocal();
+    const iv = setInterval(loadLocal, 30_000);
+    return () => { cancelled = true; clearInterval(iv); };
+  }, [open]);
 
   return (
     <div className="v10-tree-section">
@@ -162,10 +165,42 @@ function IntegrationsSection() {
       </div>
       {open && (
         <div className="v10-tree-items" style={{ display: 'block' }}>
-          <div className="v10-tree-item">
-            <span className="v10-tree-item-icon">⬡</span>
-            <span className="v10-tree-item-label">Obsidian</span>
+          <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: 0.5, padding: '6px 12px 2px 38px' }}>
+            Agents
           </div>
+          {localAgentsError && (
+            <div style={{ fontSize: 11, color: 'var(--accent-orange, #f97316)', padding: '4px 12px 4px 38px' }}>
+              {localAgentsError}
+            </div>
+          )}
+          {!localAgentsError && localAgents.length === 0 && (
+            <div style={{ fontSize: 11, color: 'var(--text-tertiary)', padding: '4px 12px 4px 38px', fontStyle: 'italic' }}>
+              No agents detected.
+            </div>
+          )}
+          {localAgents.map((a) => (
+            <div
+              key={a.id}
+              className="v10-tree-item"
+              title={a.detail}
+              style={{ cursor: 'default' }}
+            >
+              <span
+                aria-label={a.statusLabel}
+                style={{
+                  width: 7,
+                  height: 7,
+                  borderRadius: '50%',
+                  background: localAgentDotColor(a.status),
+                  flexShrink: 0,
+                }}
+              />
+              <span className="v10-tree-item-label">{a.name}</span>
+              <span style={{ fontSize: 10, color: 'var(--text-tertiary)', marginLeft: 4 }}>
+                {a.statusLabel}
+              </span>
+            </div>
+          ))}
         </div>
       )}
     </div>
@@ -191,7 +226,6 @@ export function PanelLeft() {
 
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showJoinModal, setShowJoinModal] = useState(false);
-  const [importTarget, setImportTarget] = useState<ContextGraph | null>(null);
 
   const loadCGs = useCallback(() => {
     setLoading(true);
@@ -216,6 +250,11 @@ export function PanelLeft() {
 
   return (
     <div className="v10-panel-left">
+      <div style={{ display: 'flex', gap: 4, padding: '8px 8px 4px' }}>
+        <button className="v10-new-project-btn" onClick={() => setShowCreateModal(true)}>+ New Project</button>
+        <button className="v10-new-project-btn" onClick={() => setShowJoinModal(true)}>↗ Join Project</button>
+      </div>
+
       <div className="v10-tree-header">
         <button
           className={`v10-tree-mode-btn ${treeMode === 'explorer' ? 'active' : ''}`}
@@ -242,22 +281,6 @@ export function PanelLeft() {
           >
             <span>▦</span> Dashboard
           </div>
-
-          {contextGraphs.length > 0 && (
-            <div
-              className={`v10-tree-dashboard ${activeTabId === 'memory-stack' ? 'active' : ''}`}
-              onClick={() => openTab({ id: 'memory-stack', label: 'Memory Stack', closable: true })}
-            >
-              <span>▤</span> Memory Stack
-            </div>
-          )}
-
-          {contextGraphs.length > 0 && (
-            <div style={{ display: 'flex', gap: 4 }}>
-              <button className="v10-new-project-btn" onClick={() => setShowCreateModal(true)}>+ New Project</button>
-              <button className="v10-new-project-btn" onClick={() => setShowJoinModal(true)}>↗ Join Project</button>
-            </div>
-          )}
 
           {contextGraphs.length === 0 && stage <= 1 && (
             <div className="v10-journey-empty-card">
@@ -287,7 +310,6 @@ export function PanelLeft() {
                     setActiveProject(cg.id);
                     openTab({ id: `project:${cg.id}`, label: cg.name || cg.id.slice(0, 16), closable: true });
                   }}
-                  onImport={() => setImportTarget(cg)}
                   onHide={() => {
                     hideProject(cg.id);
                     if (activeProjectId === cg.id) setActiveProject(null);
@@ -326,7 +348,6 @@ export function PanelLeft() {
                     setActiveProject(cg.id);
                     openTab({ id: `project:${cg.id}`, label: cg.name || cg.id.slice(0, 16), closable: true });
                   }}
-                  onImport={() => setImportTarget(cg)}
                   onHide={() => {
                     hideProject(cg.id);
                     if (activeProjectId === cg.id) setActiveProject(null);
@@ -355,14 +376,6 @@ export function PanelLeft() {
 
       <CreateProjectModal open={showCreateModal} onClose={() => setShowCreateModal(false)} />
       <JoinProjectModal open={showJoinModal} onClose={() => setShowJoinModal(false)} />
-      {importTarget && (
-        <ImportFilesModal
-          open
-          onClose={() => setImportTarget(null)}
-          contextGraphId={importTarget.id}
-          contextGraphName={importTarget.name}
-        />
-      )}
     </div>
   );
 }

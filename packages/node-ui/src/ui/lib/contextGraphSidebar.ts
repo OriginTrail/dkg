@@ -1,8 +1,8 @@
 /**
  * Sidebar bucketing for context graphs using daemon list fields:
- * `subscribed`, `curator` (wallet DID), `accessPolicy`, and `creator` (peer DID fallback).
+ * `callerInvolved` (agent-scoped curator/participant), `accessPolicy`, and legacy fallbacks.
  *
- * No localStorage — identity and published policy only.
+ * Node-level `subscribed` is not "my project" — subscription is sync plumbing, not membership.
  */
 
 import type { ContextGraph } from '../stores/projects.js';
@@ -38,28 +38,24 @@ export function canonicalAgentDid(did: string): string {
   return t.toLowerCase();
 }
 
-/** This node/agent is materially involved as participant (sync subscription) or curator (wallet DID). */
+/** Bearer agent is curator or explicitly allowlisted participant (`callerInvolved` from daemon). */
 export function belongsInMyProjectsSidebar(cg: ContextGraph, identity: AgentSidebarIdentity | null): boolean {
-  if (cg.subscribed === true) return true;
+  if (cg.callerInvolved === true) return true;
+  if (cg.callerInvolved === false) return false;
+  // Older daemons without `callerInvolved`: curator match only (no subscribed / creator heuristic).
   if (!identity?.agentDid?.trim()) return false;
-  if (cg.curator?.trim()) {
-    if (canonicalAgentDid(cg.curator) === canonicalAgentDid(identity.agentDid)) return true;
-  }
-  const cr = cg.creator?.trim();
-  if (cr && identity.peerId) {
-    const peerCreator = canonicalAgentDid(`did:dkg:agent:${identity.peerId}`);
-    if (canonicalAgentDid(cr) === peerCreator) return true;
+  if (cg.curator?.trim() && canonicalAgentDid(cg.curator) === canonicalAgentDid(identity.agentDid)) {
+    return true;
   }
   return false;
 }
 
 /**
- * Browse/join catalogue: explicitly non-private discovery entries this node does not actively sync,
- * excluding projects already classified under "mine".
+ * Browse/join catalogue. Strict invariant: ONLY graphs with `accessPolicy === 'public'`.
+ * Curated/private graphs and graphs with unknown policy never enter the Oracle, regardless
+ * of how they ended up in the local list (chain auto-subscribe, manual subscribe, dev script).
  */
 export function belongsInContextOracleSidebar(cg: ContextGraph, identity: AgentSidebarIdentity | null): boolean {
   if (belongsInMyProjectsSidebar(cg, identity)) return false;
-  const ap = normalizeAccessPolicy(cg.accessPolicy);
-  if (ap === 'private') return false;
-  return true;
+  return normalizeAccessPolicy(cg.accessPolicy) === 'public';
 }

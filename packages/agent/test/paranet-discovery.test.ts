@@ -119,6 +119,7 @@ describe('ensureContextGraphLocal', () => {
     const paranets = await agent.listContextGraphs();
     const entry = paranets.find(p => p.id === 'special-chars');
     expect(entry?.description).toBe('Default paranet: special-chars (test)');
+    expect(entry?.callerInvolved).toBeUndefined();
   }, 15000);
 
   it('treats storage-backed shared-memory-only graphs as existing', async () => {
@@ -213,6 +214,7 @@ describe('listContextGraphs merge', () => {
     expect(entry!.subscribed).toBe(true);
     expect(entry!.synced).toBe(true);
     expect(entry!.name).toBe('Synced');
+    expect(entry!.callerInvolved).toBeUndefined();
   }, 15000);
 
   it('includes subscribed-but-not-synced paranets from registry', async () => {
@@ -234,6 +236,7 @@ describe('listContextGraphs merge', () => {
     expect(entry!.subscribed).toBe(true);
     expect(entry!.synced).toBe(false);
     expect(entry!.name).toBe('Chain Only');
+    expect(entry!.callerInvolved).toBeUndefined();
   }, 15000);
 
   it('marks SPARQL-only paranets (not in registry) as subscribed=false', async () => {
@@ -254,6 +257,7 @@ describe('listContextGraphs merge', () => {
     expect(entry).toBeDefined();
     expect(entry!.subscribed).toBe(false);
     expect(entry!.synced).toBe(true);
+    expect(entry!.callerInvolved).toBeUndefined();
   }, 15000);
 
   it('includes storage-only context graphs when shared memory graphs exist', async () => {
@@ -277,6 +281,50 @@ describe('listContextGraphs merge', () => {
     expect(entry!.name).toBe('workspace-only');
     expect(entry!.subscribed).toBe(false);
     expect(entry!.synced).toBe(false);
+    expect(entry!.callerInvolved).toBeUndefined();
+  }, 15000);
+
+  it('listContextGraphs sets callerInvolved from curator wallet match', async () => {
+    const result = await createTestAgent();
+    agent = result.agent;
+    await agent.start();
+    await agent.createContextGraph({ id: 'owned-cg', name: 'Owned' });
+    const wallet = agent.getDefaultAgentAddress();
+    expect(wallet).toBeDefined();
+
+    const noCaller = await agent.listContextGraphs();
+    expect(noCaller.find(p => p.id === 'owned-cg')?.callerInvolved).toBeUndefined();
+
+    const mine = await agent.listContextGraphs({ callerAgentAddress: wallet });
+    expect(mine.find(p => p.id === 'owned-cg')?.callerInvolved).toBe(true);
+
+    const otherWallet = ethers.Wallet.createRandom().address;
+    const notMine = await agent.listContextGraphs({ callerAgentAddress: otherWallet });
+    expect(notMine.find(p => p.id === 'owned-cg')?.callerInvolved).toBe(false);
+  }, 15000);
+
+  it('listContextGraphs hides curated CGs from non-members', async () => {
+    const result = await createTestAgent();
+    agent = result.agent;
+    await agent.start();
+
+    const myWallet = agent.getDefaultAgentAddress()!;
+    await agent.createContextGraph({
+      id: 'my-curated',
+      name: 'My Curated',
+      accessPolicy: 1,
+      allowedAgents: [myWallet],
+    });
+
+    const otherWallet = ethers.Wallet.createRandom().address;
+    const fromStranger = await agent.listContextGraphs({ callerAgentAddress: otherWallet });
+    expect(fromStranger.find(p => p.id === 'my-curated')).toBeUndefined();
+
+    const fromCurator = await agent.listContextGraphs({ callerAgentAddress: myWallet });
+    expect(fromCurator.find(p => p.id === 'my-curated')).toBeDefined();
+
+    const unauthenticated = await agent.listContextGraphs();
+    expect(unauthenticated.find(p => p.id === 'my-curated')).toBeUndefined();
   }, 15000);
 });
 
@@ -313,6 +361,30 @@ describe('discoverContextGraphsFromChain', () => {
     expect(entry!.subscribed).toBe(true);
     expect(entry!.synced).toBe(false);
     expect(entry!.onChainId).toBe('0xdeadbeef00000000000000000000000000000000000000000000000000000001');
+  }, 15000);
+
+  it('skips auto-subscribe to revealed curated chain entries when not curator', async () => {
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    (chain as any).listContextGraphsFromChain = async () => ([
+      {
+        contextGraphId: '0xcafebabe00000000000000000000000000000000000000000000000000000003',
+        name: 'leaked-curated',
+        creator: '0x000000000000000000000000000000000000dEaD',
+        accessPolicy: 1,
+        blockNumber: 100,
+        metadataRevealed: true,
+      },
+    ] satisfies ContextGraphOnChain[]);
+
+    const result = await createTestAgent({ chainAdapter: chain });
+    agent = result.agent;
+    await agent.start();
+
+    const discovered = await agent.discoverContextGraphsFromChain();
+    expect(discovered).toBe(0);
+
+    const subs = agent.getSubscribedContextGraphs();
+    expect(subs.get('leaked-curated')).toBeUndefined();
   }, 15000);
 
   it('skips hash-only on-chain paranets without metadata', async () => {
@@ -493,6 +565,7 @@ describe('hash-vs-name duplication regression', () => {
     expect(matches[0].id).toBe(localName);
     expect(matches[0].subscribed).toBe(true);
     expect(matches[0].synced).toBe(true);
+    expect(matches[0].callerInvolved).toBeUndefined();
 
     const ghosts = paranets.filter(p => p.id.startsWith('0x'));
     expect(ghosts.length).toBe(0);
