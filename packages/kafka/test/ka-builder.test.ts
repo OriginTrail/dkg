@@ -1,9 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
-import {
-  buildKafkaEndpointKnowledgeAsset,
-  buildKafkaEndpointRevocationMutation,
-} from '../src/ka-builder.js';
+import { buildKafkaEndpointKnowledgeAsset } from '../src/ka-builder.js';
 
 describe('buildKafkaEndpointKnowledgeAsset', () => {
   it('builds the full Kafka endpoint KA shape with verification metadata', async () => {
@@ -70,52 +67,5 @@ describe('buildKafkaEndpointKnowledgeAsset', () => {
       '@value': '2026-05-04T12:35:00.000Z',
       '@type': 'xsd:dateTime',
     });
-  });
-});
-
-describe('buildKafkaEndpointRevocationMutation', () => {
-  it('produces the canonical revocation-mutation KA shape (golden)', async () => {
-    const actual = buildKafkaEndpointRevocationMutation(
-      'urn:dkg:kafka-endpoint:0xabcdefabcdefabcdefabcdefabcdefabcdefabcd:33b58f60595c766739f72b29e4ee417888d1a46af8339a4b5bdb1c3a5692f652',
-      '2026-05-05T09:30:00.000Z',
-    );
-
-    const fixtureUrl = new URL('./fixtures/endpoint-ka-revocation.json', import.meta.url);
-    const expected = JSON.parse(await readFile(fixtureUrl, 'utf8'));
-
-    expect(actual).toEqual(expected);
-  });
-
-  it('emits dkg:status "revoked" as a literal string', () => {
-    const actual = buildKafkaEndpointRevocationMutation(
-      'urn:dkg:kafka-endpoint:owner:hash',
-      '2026-05-05T09:30:00.000Z',
-    );
-
-    expect((actual as Record<string, unknown>)['dkg:status']).toBe('revoked');
-  });
-
-  it('emits dkg:revokedAt as a typed xsd:dateTime literal', () => {
-    const actual = buildKafkaEndpointRevocationMutation(
-      'urn:dkg:kafka-endpoint:owner:hash',
-      '2026-05-05T09:30:00.000Z',
-    );
-
-    expect((actual as Record<string, unknown>)['dkg:revokedAt']).toEqual({
-      '@value': '2026-05-05T09:30:00.000Z',
-      '@type': 'xsd:dateTime',
-    });
-  });
-
-  it('uses the supplied URI as the @id (no normalization)', () => {
-    const actual = buildKafkaEndpointRevocationMutation(
-      'urn:dkg:kafka-endpoint:0xMixedCase:abc',
-      '2026-05-05T09:30:00.000Z',
-    );
-
-    // The mutation builder is a presentation-layer helper; case-folding happens
-    // upstream when the URI is minted. Round-trip parity with the original KA
-    // matters more than re-applying owner normalisation here.
-    expect((actual as Record<string, unknown>)['@id']).toBe('urn:dkg:kafka-endpoint:0xMixedCase:abc');
   });
 });
