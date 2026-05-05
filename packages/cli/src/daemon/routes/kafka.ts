@@ -51,8 +51,15 @@ const VALID_LIST_STATUSES: ReadonlySet<KafkaEndpointListStatus> = new Set([
  * No `WWW-Authenticate` header — that header is reserved for 401
  * responses by RFC 7235; sending it on a 403 confuses clients about
  * whether to re-prompt for credentials.
+ *
+ * When `auth.enabled = false` the guard short-circuits to true (Codex
+ * bug 1). `httpAuthGuard` already bypasses auth in that mode, so a
+ * scope check that ignored the flag would 403 requests that used to
+ * succeed unauthenticated — a regression for every operator running
+ * with auth disabled (typical dev/test setup).
  */
 function requireScope(ctx: RequestContext, scope: Scope): boolean {
+  if (!ctx.authEnabled) return true;
   if (verifyTokenScope(ctx.requestToken, scope, ctx.tokenStore)) return true;
   jsonResponse(ctx.res, 403, {
     error: `Token lacks required scope: ${scope}`,

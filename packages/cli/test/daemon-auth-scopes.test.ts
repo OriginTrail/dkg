@@ -22,6 +22,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { handleKafkaRoutes } from '../src/daemon/routes/kafka.js';
+import { handleAuthRoutes } from '../src/daemon/routes/auth.js';
 import {
   loadTokenStore,
   verifyTokenScope,
@@ -111,6 +112,7 @@ function buildCtx(
   agent: any,
   store: TokenStore,
   token: string | undefined,
+  opts: { authEnabled?: boolean } = {},
 ): RequestContext {
   const url = new URL(`http://localhost${req.url}`);
   return {
@@ -123,6 +125,11 @@ function buildCtx(
     requestToken: token,
     validTokens: new Set([...store.values()].map((r) => r.fullToken)),
     tokenStore: store,
+    // Default `authEnabled: true` — Codex bug 1's fix short-circuits the
+    // scope/root check when this is false; tests that exercise the gates
+    // need it enabled. The auth-disabled bypass has its own dedicated
+    // test below.
+    authEnabled: opts.authEnabled ?? true,
   } as unknown as RequestContext;
 }
 
@@ -410,5 +417,190 @@ describe('slice 06 — per-route scope enforcement', () => {
       await handleKafkaRoutes(buildCtx(req, res, agent, store, writeToken));
       expect(captured.status).not.toBe(403);
     }
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// Codex bug 1 — auth-disabled bypasses scope gates
+// ───────────────────────────────────────────────────────────────────────────
+
+describe('slice 06 — Codex bug 1: auth.enabled=false bypasses scope gates', () => {
+  let dkgHome: string;
+
+  beforeEach(async () => {
+    dkgHome = await mkdtemp(join(tmpdir(), 'dkg-auth-disabled-'));
+    process.env.DKG_HOME = dkgHome;
+    // Pre-populate so the loader doesn't auto-generate. Even with auth
+    // disabled, the store will exist; the gate just doesn't consult it.
+    await writeFile(join(dkgHome, 'auth.token'), `auth-disabled-root-tk\n`);
+  });
+
+  afterEach(async () => {
+    delete process.env.DKG_HOME;
+    await rm(dkgHome, { recursive: true, force: true });
+  });
+
+  it('with auth.enabled=false, every kafka route accepts requests with NO bearer token (200/non-403)', async () => {
+    const store = await loadTokenStore();
+    const agent = buildAgent();
+
+    // POST register — no Authorization header at all. Pre-Codex-bug-1
+    // fix this would 403 because verifyTokenScope(undefined, ...) fails.
+    {
+      const req = buildMockReq(
+        'POST',
+        `/api/kafka/endpoint`,
+        {
+          contextGraphId: 'cg1',
+          broker: 'k.example:9092',
+          topic: 'orders',
+          messageFormat: 'application/json',
+        },
+        undefined, // NO bearer header
+      );
+      const { res, captured } = buildMockRes();
+      await handleKafkaRoutes(
+        buildCtx(req, res, agent, store, undefined, { authEnabled: false }),
+      );
+      expect(captured.status).not.toBe(401);
+      expect(captured.status).not.toBe(403);
+    }
+
+    // GET list — same, no token.
+    {
+      const req = buildMockReq(
+        'GET',
+        `/api/kafka/endpoint?contextGraphId=cg1`,
+        undefined,
+        undefined,
+      );
+      const { res, captured } = buildMockRes();
+      await handleKafkaRoutes(
+        buildCtx(req, res, agent, store, undefined, { authEnabled: false }),
+      );
+      expect(captured.status).not.toBe(401);
+      expect(captured.status).not.toBe(403);
+    }
+
+    // DELETE revoke — same.
+    {
+      const req = buildMockReq(
+        'DELETE',
+        `/api/kafka/endpoint/${encodeURIComponent(VALID_URI)}?contextGraphId=cg1`,
+        undefined,
+        undefined,
+      );
+      const { res, captured } = buildMockRes();
+      await handleKafkaRoutes(
+        buildCtx(req, res, agent, store, undefined, { authEnabled: false }),
+      );
+      expect(captured.status).not.toBe(401);
+      expect(captured.status).not.toBe(403);
+    }
+  });
+
+  it('with auth.enabled=false, mint/list/revoke /api/auth/tokens accept requests with NO bearer token', async () => {
+    const store = await loadTokenStore();
+    const validTokens = new Set([...store.values()].map((r) => r.fullToken));
+
+    // POST mint — no Authorization header.
+    {
+      const req = buildMockReq(
+        'POST',
+        `/api/auth/tokens`,
+        { scope: 'kafka:endpoint:read' },
+        undefined,
+      );
+      const { res, captured } = buildMockRes();
+      await handleAuthRoutes({
+        req,
+        res,
+        path: '/api/auth/tokens',
+        url: new URL('http://localhost/api/auth/tokens'),
+        requestToken: undefined,
+        tokenStore: store,
+        validTokens,
+        authEnabled: false,
+      } as unknown as RequestContext);
+      // 201 (mint succeeded) — NOT 403 (pre-Codex-bug-1 fix would have 403'd
+      // because lookupTokenRecord(undefined) returns undefined and
+      // requireRoot rejected).
+      expect(captured.status).toBe(201);
+    }
+
+    // GET list — no header.
+    {
+      const req = buildMockReq(
+        'GET',
+        `/api/auth/tokens`,
+        undefined,
+        undefined,
+      );
+      const { res, captured } = buildMockRes();
+      await handleAuthRoutes({
+        req,
+        res,
+        path: '/api/auth/tokens',
+        url: new URL('http://localhost/api/auth/tokens'),
+        requestToken: undefined,
+        tokenStore: store,
+        validTokens,
+        authEnabled: false,
+      } as unknown as RequestContext);
+      expect(captured.status).toBe(200);
+    }
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// Codex bug 3 — runtime agent token works on scope-gated routes
+// ───────────────────────────────────────────────────────────────────────────
+
+describe('slice 06 — Codex bug 3: runtime token added to BOTH structures works on scope-gated routes', () => {
+  let dkgHome: string;
+
+  beforeEach(async () => {
+    dkgHome = await mkdtemp(join(tmpdir(), 'dkg-runtime-add-'));
+    process.env.DKG_HOME = dkgHome;
+    await writeFile(join(dkgHome, 'auth.token'), `bug3-root-token-aaaaaaaaa\n`);
+  });
+
+  afterEach(async () => {
+    delete process.env.DKG_HOME;
+    await rm(dkgHome, { recursive: true, force: true });
+  });
+
+  it('addTokenToStore-issued runtime token passes the kafka scope gate immediately (no restart)', async () => {
+    const { addTokenToStore } = await import('../src/auth.js');
+    const store = await loadTokenStore();
+    const validTokens = new Set([...store.values()].map((r) => r.fullToken));
+    const agent = buildAgent();
+
+    // Simulate /api/agent/register issuing a fresh runtime token. The
+    // helper must mutate BOTH structures so the daemon's scope gates
+    // accept it on the very next request.
+    const NEW_AGENT_TOKEN = 'runtime-agent-token-bbbbbbbbbbbbbbbbb';
+    addTokenToStore(store, validTokens, {
+      prefix: NEW_AGENT_TOKEN.slice(0, 8),
+      fullToken: NEW_AGENT_TOKEN,
+      scopes: '*', // agent tokens carry full access on non-admin routes
+      source: 'agent',
+    });
+
+    // GET list with the brand-new token — pre-Codex-bug-3 fix this
+    // would 403 (Set had it, store didn't, scope gate consults store).
+    const req = buildMockReq(
+      'GET',
+      `/api/kafka/endpoint?contextGraphId=cg1`,
+      undefined,
+      `Bearer ${NEW_AGENT_TOKEN}`,
+    );
+    const { res, captured } = buildMockRes();
+    await handleKafkaRoutes(buildCtx(req, res, agent, store, NEW_AGENT_TOKEN));
+    expect(captured.status).not.toBe(401);
+    expect(captured.status).not.toBe(403);
+    // Both structures stayed in sync.
+    expect(validTokens.has(NEW_AGENT_TOKEN)).toBe(true);
+    expect(store.has(NEW_AGENT_TOKEN.slice(0, 8))).toBe(true);
   });
 });

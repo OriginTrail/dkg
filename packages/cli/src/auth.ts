@@ -34,13 +34,15 @@ import {
 // Re-export the deep-module types + helpers so call sites only import from
 // `auth.ts`. Keeps the seam between the deep parser/serializer module and
 // the I/O-bearing auth surface visible in one place.
-export type { TokenStore, TokenRecord, Scope } from './token-store.js';
+export type { TokenStore, TokenRecord, Scope, TokenSource } from './token-store.js';
 export {
   lookupTokenRecord,
   toPublicRecord,
   tokenPrefix,
   setTokenRecord,
   deleteTokenRecord,
+  addTokenToStore,
+  removeTokenFromStore,
   serializeTokenStore,
   parseTokenFile,
   type PublicTokenRecord,
@@ -105,7 +107,10 @@ export async function loadTokenStore(authConfig?: AuthConfig): Promise<TokenStor
 
   // Insert config tokens AFTER file tokens so a config token can't
   // accidentally clobber a file-only one (the parser already de-dupes
-  // file lines by prefix).
+  // file lines by prefix). Stamped `source: 'config'` so the operator
+  // sees them flagged as such in `dkg auth list-tokens` and DELETE
+  // doesn't fool them into thinking the token is gone (it'd still be
+  // re-loaded from config on the next restart).
   if (authConfig?.tokens) {
     for (const t of authConfig.tokens) {
       if (t.length === 0) continue;
@@ -115,19 +120,23 @@ export async function loadTokenStore(authConfig?: AuthConfig): Promise<TokenStor
         prefix: tokenPrefix(t),
         fullToken: t,
         scopes: '*',
+        source: 'config',
       };
       setTokenRecord(parsed.store, record);
     }
   }
 
   // Auto-generate on first run. Legacy single-line format so a
-  // downgrade to a pre-slice-06 daemon still reads it correctly.
+  // downgrade to a pre-slice-06 daemon still reads it correctly. The
+  // record IS `source: 'file'` because we're about to write it to disk
+  // — this is the canonical operator-managed root token.
   if (parsed.store.size === 0) {
     const token = generateToken();
     const record: TokenRecord = {
       prefix: tokenPrefix(token),
       fullToken: token,
       scopes: '*',
+      source: 'file',
     };
     setTokenRecord(parsed.store, record);
     parsed.preserved.push({

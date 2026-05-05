@@ -84,6 +84,7 @@ function buildCtx(
     requestToken: token,
     tokenStore: store,
     validTokens,
+    authEnabled: true,
   } as unknown as RequestContext;
 }
 

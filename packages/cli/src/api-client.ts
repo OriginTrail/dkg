@@ -740,6 +740,12 @@ export class ApiClient {
       scopes: string[] | '*';
       name?: string;
       createdAt?: string;
+      // Codex bug 4: surfaces which rows are revocable via DELETE.
+      // Only `'file'` rows can be revoked through this API; `'config'`
+      // requires editing dkg.config.yaml; `'agent'` is auto-issued by
+      // /api/agent/register and cleared on daemon restart. Optional
+      // for forward-compat with older daemons that omit the field.
+      source?: 'file' | 'config' | 'agent';
     }>;
   }> {
     return this.get('/api/auth/tokens');

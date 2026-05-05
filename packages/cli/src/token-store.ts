@@ -27,6 +27,20 @@
 export type Scope = string;
 
 /**
+ * Where a token came from. In-memory only — the parser never reads it
+ * (everything from disk is implicitly `'file'`) and the serializer
+ * never writes it. Drives:
+ *   - `requireRoot` (Codex bug 2): only `'file'` and `'config'` tokens
+ *     can pass — `'agent'` tokens have always been auto-issued by
+ *     `/api/agent/register` and treating them as root admin would be
+ *     a privilege-escalation path.
+ *   - `dkg auth list-tokens` rendering (Codex bug 4): operator sees
+ *     at a glance which rows are revocable via DELETE (only `'file'`)
+ *     vs. which require config edits / agent restarts.
+ */
+export type TokenSource = 'file' | 'config' | 'agent';
+
+/**
  * Records survive a round-trip: parsing then serializing the same input
  * yields the same bytes for any input that already carries full records
  * (token + scopes + name + createdAt). For inputs missing optional fields
@@ -44,6 +58,13 @@ export interface TokenRecord {
   name?: string;
   /** ISO-8601 timestamp the token was minted. */
   createdAt?: string;
+  /**
+   * Where the token came from. In-memory only; never serialized. The
+   * parser stamps every line as `'file'`; consumer code (lifecycle,
+   * agent register, mint route) is responsible for tagging non-file
+   * sources before inserting into the store.
+   */
+  source: TokenSource;
 }
 
 /**
@@ -207,7 +228,10 @@ export function parseTokenFile(
       continue;
     }
 
-    const record: TokenRecord = { prefix, fullToken: token, scopes };
+    // Every line read off disk is by definition `source: 'file'`. The
+    // `'config'` and `'agent'` sources are stamped by lifecycle wiring,
+    // never appear in the file format, and never round-trip to disk.
+    const record: TokenRecord = { prefix, fullToken: token, scopes, source: 'file' };
     if (name !== undefined) record.name = name;
     if (createdAt !== undefined) record.createdAt = createdAt;
     store.set(prefix, record);
@@ -348,6 +372,46 @@ export function lookupTokenRecord(
 }
 
 /**
+ * Add a record to BOTH the structured store AND the legacy
+ * `validTokens` Set in lockstep (Codex bug 3). Anything that issues a
+ * new token at runtime — startup loader, mint route, runtime agent
+ * register at `/api/agent/register` — MUST go through this single
+ * helper so the two structures never drift.
+ *
+ * Without this, the historical `validTokens.add(...)` pattern at the
+ * agent-register site bypassed the structured store, so freshly
+ * registered agents passed `httpAuthGuard` (Set-based) but got 403
+ * from every scope-checked route until daemon restart.
+ *
+ * Returns the record so callers can chain.
+ */
+export function addTokenToStore(
+  store: TokenStore,
+  validTokens: Set<string>,
+  record: TokenRecord,
+): TokenRecord {
+  setTokenRecord(store, record);
+  validTokens.add(record.fullToken);
+  return record;
+}
+
+/**
+ * Remove a record from BOTH structures in lockstep — the dual of
+ * `addTokenToStore`. Returns true when an entry was removed.
+ */
+export function removeTokenFromStore(
+  store: TokenStore,
+  validTokens: Set<string>,
+  prefix: string,
+): boolean {
+  const target = store.get(prefix);
+  if (!target) return false;
+  deleteTokenRecord(store, prefix);
+  validTokens.delete(target.fullToken);
+  return true;
+}
+
+/**
  * Add a record. Returns the same store (mutated). If a prefix collision
  * occurs (vanishingly unlikely with random 43-char tokens, but possible
  * in tests / for short fixtures), the new record replaces the old one
@@ -368,16 +432,23 @@ export function deleteTokenRecord(store: TokenStore, prefix: string): boolean {
 /**
  * Sanitized public view of a record — drops `fullToken`. List/get APIs
  * MUST go through this to avoid leaking secrets in subsequent responses.
+ *
+ * `source` IS included (Codex bug 4): operators need to know which rows
+ * are revocable via `DELETE /api/auth/tokens/<prefix>` (only `'file'`
+ * — `'config'` requires editing dkg.config.yaml; `'agent'` is auto-
+ * issued by `/api/agent/register` and lives in the running daemon's
+ * memory only).
  */
 export interface PublicTokenRecord {
   prefix: string;
   scopes: Scope[] | '*';
   name?: string;
   createdAt?: string;
+  source: TokenSource;
 }
 
 export function toPublicRecord(r: TokenRecord): PublicTokenRecord {
-  const out: PublicTokenRecord = { prefix: r.prefix, scopes: r.scopes };
+  const out: PublicTokenRecord = { prefix: r.prefix, scopes: r.scopes, source: r.source };
   if (r.name !== undefined) out.name = r.name;
   if (r.createdAt !== undefined) out.createdAt = r.createdAt;
   return out;

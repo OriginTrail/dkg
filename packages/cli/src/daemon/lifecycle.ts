@@ -103,7 +103,7 @@ import {
 } from '../config.js';
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../catchup-runner.js';
-import { loadTokens, loadTokenStore, httpAuthGuard, setTokenRecord, tokenPrefix, type TokenRecord } from '../auth.js';
+import { loadTokens, loadTokenStore, httpAuthGuard, addTokenToStore, tokenPrefix, type TokenRecord } from '../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../extraction/index.js';
 import {
@@ -1365,21 +1365,30 @@ export async function runDaemonInner(
 
   const authEnabled = config.auth?.enabled !== false;
   // Slice 06 — load the structured store first; the Set view is derived
-  // from it. Per-agent tokens are added to BOTH so the existing
-  // httpAuthGuard (Set-based) continues to accept them, and the new
-  // scope-aware routes see them as full-access (`scopes: '*'`).
+  // from it. Per-agent tokens are added via the lockstep
+  // `addTokenToStore` helper (Codex bug 3) so the structured map and
+  // the Set view never drift — same helper the runtime
+  // `/api/agent/register` route uses, and the same helper the mint
+  // route uses on persistence success.
   const tokenStore = await loadTokenStore(config.auth);
+  // Build the Set view BEFORE seeding per-agent tokens so
+  // `addTokenToStore` keeps the two structures in sync from the start.
+  const validTokens = new Set([...tokenStore.values()].map((r) => r.fullToken));
   for (const a of agent.listLocalAgents()) {
     const record: TokenRecord = {
       prefix: tokenPrefix(a.authToken),
       fullToken: a.authToken,
       // Per-agent tokens are not user-mintable and have always granted
-      // unscoped access. Treat them as `'*'` for slice 06's scope check.
+      // unscoped access on the existing API surface. Slice 06 keeps
+      // them at `scopes: '*'` so kafka and other gated routes accept
+      // them, but stamps `source: 'agent'` so `requireRoot` rejects
+      // them from the new admin routes (Codex bug 2 — privilege-
+      // escalation guard).
       scopes: '*',
+      source: 'agent',
     };
-    setTokenRecord(tokenStore, record);
+    addTokenToStore(tokenStore, validTokens, record);
   }
-  const validTokens = new Set([...tokenStore.values()].map((r) => r.fullToken));
   const bridgeAuthToken =
     (await loadBridgeAuthToken()) ??
     (validTokens.size > 0

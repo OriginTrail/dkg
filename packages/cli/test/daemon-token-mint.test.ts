@@ -82,6 +82,7 @@ function buildCtx(
   store: TokenStore,
   validTokens: Set<string>,
   token?: string,
+  opts: { authEnabled?: boolean } = {},
 ): RequestContext {
   const url = new URL(`http://localhost${req.url}`);
   return {
@@ -92,6 +93,9 @@ function buildCtx(
     requestToken: token,
     tokenStore: store,
     validTokens,
+    // Default true so `requireRoot` actually enforces — the auth-disabled
+    // bypass has its own dedicated test (Codex bug 1).
+    authEnabled: opts.authEnabled ?? true,
   } as unknown as RequestContext;
 }
 
@@ -220,6 +224,70 @@ describe('POST /api/auth/tokens — mint', () => {
     await handleAuthRoutes(buildCtx(req, res, store, validTokens, SCOPED));
     expect(captured.status).toBe(403);
     expect((captured.body as any).error).toContain('Root');
+  });
+
+  it('rejects an agent-source token even when it has wildcard scope (Codex bug 2 — privilege-escalation guard)', async () => {
+    // Per-agent tokens carry `scopes: '*'` for backward-compat on every
+    // other API surface, but MUST NOT pass `requireRoot` — otherwise
+    // any registered agent could mint/list/revoke node auth tokens.
+    const { addTokenToStore } = await import('../src/auth.js');
+    const { store, validTokens } = await loadStoreAndSet();
+    const AGENT_TOKEN = 'agent-issued-token-cccccccccccccccc';
+    addTokenToStore(store, validTokens, {
+      prefix: AGENT_TOKEN.slice(0, 8),
+      fullToken: AGENT_TOKEN,
+      scopes: '*',
+      source: 'agent',
+    });
+
+    // POST mint — must 403 because source is 'agent', not 'file'/'config'.
+    {
+      const req = buildMockReq('POST', '/api/auth/tokens',
+        { scope: 'kafka:endpoint:read' }, `Bearer ${AGENT_TOKEN}`);
+      const { res, captured } = buildMockRes();
+      await handleAuthRoutes(buildCtx(req, res, store, validTokens, AGENT_TOKEN));
+      expect(captured.status).toBe(403);
+      expect((captured.body as any).error).toContain('Root');
+    }
+
+    // GET list — same.
+    {
+      const req = buildMockReq('GET', '/api/auth/tokens',
+        undefined as unknown as string, `Bearer ${AGENT_TOKEN}`);
+      const { res, captured } = buildMockRes();
+      await handleAuthRoutes(buildCtx(req, res, store, validTokens, AGENT_TOKEN));
+      expect(captured.status).toBe(403);
+    }
+
+    // DELETE revoke — same.
+    {
+      const req = buildMockReq('DELETE',
+        `/api/auth/tokens/${ROOT_TOKEN.slice(0, 8)}`,
+        undefined as unknown as string, `Bearer ${AGENT_TOKEN}`);
+      const { res, captured } = buildMockRes();
+      await handleAuthRoutes(buildCtx(req, res, store, validTokens, AGENT_TOKEN));
+      expect(captured.status).toBe(403);
+    }
+  });
+
+  it('accepts a config-source token as root (operator put it in dkg.config.yaml)', async () => {
+    // Config tokens are operator-controlled — putting one in
+    // dkg.config.yaml IS an operator action, so it qualifies as root
+    // for admin routes (documented choice in `requireRoot` JSDoc).
+    const CONFIG_TOKEN = 'config-tk-dddddddddddddddddddddddd';
+    const { store, validTokens } = await (async () => {
+      // Re-load with the config token wired through `loadTokenStore`
+      // (which stamps `source: 'config'`).
+      const s = await loadTokenStore({ tokens: [CONFIG_TOKEN] });
+      return { store: s, validTokens: new Set([...s.values()].map((r) => r.fullToken)) };
+    })();
+
+    const req = buildMockReq('POST', '/api/auth/tokens',
+      { scope: 'kafka:endpoint:read', name: 'config-mint' },
+      `Bearer ${CONFIG_TOKEN}`);
+    const { res, captured } = buildMockRes();
+    await handleAuthRoutes(buildCtx(req, res, store, validTokens, CONFIG_TOKEN));
+    expect(captured.status).toBe(201);
   });
 });
 

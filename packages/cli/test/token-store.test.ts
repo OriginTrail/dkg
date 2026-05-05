@@ -19,6 +19,8 @@ import {
   tokenPrefix,
   setTokenRecord,
   deleteTokenRecord,
+  addTokenToStore,
+  removeTokenFromStore,
   type TokenRecord,
 } from '../src/token-store.js';
 
@@ -27,7 +29,7 @@ import {
 // ───────────────────────────────────────────────────────────────────────────
 
 describe('parseTokenFile — legacy-only', () => {
-  it('parses a single legacy token line as scopes="*"', () => {
+  it('parses a single legacy token line as scopes="*" with source="file"', () => {
     const { store } = parseTokenFile('legacy-token-aaaaaaaaaaaaa\n');
     expect(store.size).toBe(1);
     const r = [...store.values()][0]!;
@@ -36,6 +38,10 @@ describe('parseTokenFile — legacy-only', () => {
     expect(r.name).toBeUndefined();
     expect(r.createdAt).toBeUndefined();
     expect(r.prefix).toBe('legacy-t');
+    // Codex bug 2: every line read off disk is by definition `source:
+    // 'file'`. The parser MUST stamp this so `requireRoot` distinguishes
+    // operator-managed tokens from agent-issued ones.
+    expect(r.source).toBe('file');
   });
 
   it('parses multiple legacy lines, preserves comments + blank lines', () => {
@@ -216,6 +222,7 @@ tok-bbbbbbbbbbbbbbbbbbbbb\t*\troot\t2026-05-04T12:01:00.000Z
           prefix: 'legacy-x',
           fullToken: 'legacy-xxxx',
           scopes: '*' as const,
+          source: 'file' as const,
         }],
       ]),
       preserved: [],
@@ -234,6 +241,7 @@ tok-bbbbbbbbbbbbbbbbbbbbb\t*\troot\t2026-05-04T12:01:00.000Z
           fullToken: 'scope-on-token',
           scopes: ['kafka:endpoint:read'],
           createdAt: '2026-05-04T12:00:00.000Z',
+          source: 'file' as const,
         }],
       ]),
       preserved: [],
@@ -269,23 +277,24 @@ describe('lookupTokenRecord', () => {
     // would warn-and-skip the second; the lookup helper must still find a
     // legitimate insertion (e.g. via setTokenRecord overriding).
     const store = new Map<string, TokenRecord>();
-    store.set('prefix01', { prefix: 'prefix01', fullToken: 'prefix01-XXXX', scopes: '*' });
+    store.set('prefix01', { prefix: 'prefix01', fullToken: 'prefix01-XXXX', scopes: '*', source: 'file' });
     // Intentional second-record-with-same-prefix in a wrong key (wouldn't
     // happen via parser but represents the collision condition).
-    store.set('prefix02', { prefix: 'prefix01', fullToken: 'prefix01-YYYY', scopes: ['kafka:endpoint:read'] });
+    store.set('prefix02', { prefix: 'prefix01', fullToken: 'prefix01-YYYY', scopes: ['kafka:endpoint:read'], source: 'file' });
     const r = lookupTokenRecord('prefix01-YYYY', store);
     expect(r?.scopes).toEqual(['kafka:endpoint:read']);
   });
 });
 
 describe('toPublicRecord', () => {
-  it('drops the fullToken', () => {
+  it('drops the fullToken; preserves source', () => {
     const r: TokenRecord = {
       prefix: 'pr',
       fullToken: 'long-secret-stuff',
       scopes: ['kafka:endpoint:read'],
       name: 'bot',
       createdAt: '2026-05-04T12:00:00.000Z',
+      source: 'file',
     };
     const pub = toPublicRecord(r);
     expect((pub as any).fullToken).toBeUndefined();
@@ -293,30 +302,55 @@ describe('toPublicRecord', () => {
     expect(pub.scopes).toEqual(['kafka:endpoint:read']);
     expect(pub.name).toBe('bot');
     expect(pub.createdAt).toBe('2026-05-04T12:00:00.000Z');
+    expect(pub.source).toBe('file');
   });
 
-  it('elides undefined name/createdAt instead of emitting them', () => {
-    const r: TokenRecord = { prefix: 'pr', fullToken: 'x', scopes: '*' };
+  it('elides undefined name/createdAt but keeps required fields (prefix, scopes, source)', () => {
+    const r: TokenRecord = { prefix: 'pr', fullToken: 'x', scopes: '*', source: 'agent' };
     const pub = toPublicRecord(r);
-    expect(Object.keys(pub).sort()).toEqual(['prefix', 'scopes']);
+    expect(Object.keys(pub).sort()).toEqual(['prefix', 'scopes', 'source']);
+    expect(pub.source).toBe('agent');
   });
 });
 
 describe('store mutation helpers', () => {
   it('setTokenRecord adds and replaces by prefix', () => {
     const store = new Map<string, TokenRecord>();
-    setTokenRecord(store, { prefix: 'aa', fullToken: 'aaa-1', scopes: '*' });
+    setTokenRecord(store, { prefix: 'aa', fullToken: 'aaa-1', scopes: '*', source: 'file' });
     expect(store.size).toBe(1);
-    setTokenRecord(store, { prefix: 'aa', fullToken: 'aaa-2', scopes: ['x:y'] });
+    setTokenRecord(store, { prefix: 'aa', fullToken: 'aaa-2', scopes: ['x:y'], source: 'file' });
     expect(store.size).toBe(1);
     expect(store.get('aa')!.fullToken).toBe('aaa-2');
   });
 
   it('deleteTokenRecord removes by prefix and reports presence', () => {
     const store = new Map<string, TokenRecord>();
-    setTokenRecord(store, { prefix: 'aa', fullToken: 'aaa', scopes: '*' });
+    setTokenRecord(store, { prefix: 'aa', fullToken: 'aaa', scopes: '*', source: 'file' });
     expect(deleteTokenRecord(store, 'aa')).toBe(true);
     expect(deleteTokenRecord(store, 'aa')).toBe(false);
+  });
+
+  it('addTokenToStore mutates BOTH the structured map and the validTokens Set in lockstep (Codex bug 3)', () => {
+    const store = new Map<string, TokenRecord>();
+    const validTokens = new Set<string>();
+    addTokenToStore(store, validTokens, {
+      prefix: 'mm', fullToken: 'mmAGENT-token', scopes: '*', source: 'agent',
+    });
+    expect(store.has('mm')).toBe(true);
+    expect(validTokens.has('mmAGENT-token')).toBe(true);
+    expect(store.get('mm')!.source).toBe('agent');
+  });
+
+  it('removeTokenFromStore deletes from BOTH structures and reports presence', () => {
+    const store = new Map<string, TokenRecord>();
+    const validTokens = new Set<string>();
+    addTokenToStore(store, validTokens, {
+      prefix: 'mm', fullToken: 'mmAGENT-token', scopes: '*', source: 'agent',
+    });
+    expect(removeTokenFromStore(store, validTokens, 'mm')).toBe(true);
+    expect(store.has('mm')).toBe(false);
+    expect(validTokens.has('mmAGENT-token')).toBe(false);
+    expect(removeTokenFromStore(store, validTokens, 'mm')).toBe(false);
   });
 });
 

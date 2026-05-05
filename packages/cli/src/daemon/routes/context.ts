@@ -52,8 +52,20 @@ export interface RequestContext {
    * `verifyTokenScope`. Legacy tokens carry scope `'*'` and pass every
    * scope check, preserving backward compat for the routes that have
    * not yet been gated.
+   *
+   * Mutation MUST go through `addTokenToStore` / `removeTokenFromStore`
+   * so the structured map and the `validTokens` Set never drift (Codex
+   * bug 3 — runtime agent register).
    */
   tokenStore: TokenStore;
+  /**
+   * Master auth-enabled flag (mirrors `config.auth?.enabled !== false`).
+   * Per-route scope gates (`requireScope`, `requireRoot`) MUST honor
+   * this — when auth is disabled, `httpAuthGuard` short-circuits to
+   * allow all requests, and a downstream scope gate that ignored the
+   * flag would 403 the same requests (Codex bug 1 regression).
+   */
+  authEnabled: boolean;
   // API socket identity — trusted server-side state for manifestSelfClient
   // SSRF defence.
   apiHost: string;

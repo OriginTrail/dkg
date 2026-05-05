@@ -172,17 +172,23 @@ describe.sequential('auth CLI smoke', () => {
     expect(stderr).toMatch(/required option.*--scope/i);
   }, 30_000);
 
-  it('dkg auth list-tokens prints prefix-only rows', async () => {
+  it('dkg auth list-tokens prints prefix-only rows + per-row source (Codex bug 4)', async () => {
     listResponse = {
       status: 200,
       body: {
         tokens: [
-          { prefix: 'rootabcd', scopes: '*' },
+          { prefix: 'rootabcd', scopes: '*', source: 'file' },
           {
             prefix: 'reader01',
             scopes: ['kafka:endpoint:read'],
             name: 'catchup',
             createdAt: '2026-05-04T13:00:00.000Z',
+            source: 'file',
+          },
+          {
+            prefix: 'agentXyz',
+            scopes: '*',
+            source: 'agent',
           },
         ],
       },
@@ -192,10 +198,15 @@ describe.sequential('auth CLI smoke', () => {
     expect(last.method).toBe('GET');
     expect(last.url).toBe('/api/auth/tokens');
     expect(result.stdout).toContain('PREFIX');
+    expect(result.stdout).toContain('SOURCE');
     expect(result.stdout).toContain('rootabcd');
     expect(result.stdout).toContain('reader01');
     expect(result.stdout).toContain('kafka:endpoint:read');
     expect(result.stdout).toContain('catchup');
+    // The agent-sourced row IS visible — operator needs to see it
+    // exists, but it's flagged so they know it's not revocable here.
+    expect(result.stdout).toContain('agentXyz');
+    expect(result.stdout).toContain('agent');
   }, 30_000);
 
   it('dkg auth list-tokens shows "No tokens" on empty list', async () => {

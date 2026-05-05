@@ -568,17 +568,25 @@ authCmd
         console.log('No tokens configured.');
         return;
       }
-      // Two-column table — prefix + scopes/name. We print prefix first
-      // because that's the identifier the operator uses to revoke.
-      const colName = 'PREFIX'.padEnd(10);
+      // 4-column table — PREFIX | SOURCE | SCOPES | NAME / CREATED.
+      // SOURCE was added per Codex bug 4: only `'file'` rows are
+      // revocable via `dkg auth revoke-token`; `'config'` requires
+      // editing dkg.config.yaml; `'agent'` is auto-issued by
+      // `/api/agent/register` and lives in daemon memory only.
+      const colPrefix = 'PREFIX'.padEnd(10);
+      const colSource = 'SOURCE'.padEnd(8);
       const colScopes = 'SCOPES'.padEnd(40);
-      console.log(`${colName}${colScopes}NAME / CREATED`);
-      console.log('─'.repeat(80));
+      console.log(`${colPrefix}${colSource}${colScopes}NAME / CREATED`);
+      console.log('─'.repeat(85));
       for (const t of tokens) {
         const scopes = Array.isArray(t.scopes) ? t.scopes.join(',') : t.scopes;
         const meta = [t.name, t.createdAt].filter(Boolean).join('  ');
+        // `t.source` is required on the wire shape; defaulting to
+        // 'file' on the off chance an older daemon omits it keeps the
+        // CLI forward-compatible.
+        const source = (t.source ?? 'file').padEnd(8);
         console.log(
-          `${t.prefix.padEnd(10)}${scopes.slice(0, 38).padEnd(40)}${meta}`,
+          `${t.prefix.padEnd(10)}${source}${scopes.slice(0, 38).padEnd(40)}${meta}`,
         );
       }
     } catch (err) {

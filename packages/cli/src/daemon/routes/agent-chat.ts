@@ -106,7 +106,7 @@ import {
 } from '../../config.js';
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
-import { loadTokens, httpAuthGuard, extractBearerToken } from '../../auth.js';
+import { loadTokens, httpAuthGuard, extractBearerToken, addTokenToStore, tokenPrefix, type TokenRecord } from '../../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../../extraction/index.js';
 import {
@@ -354,6 +354,7 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
     vectorStore,
     embeddingProvider,
     validTokens,
+    tokenStore,
     apiHost,
     apiPortRef,
     url,
@@ -373,7 +374,21 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
     }
     try {
       const record = await agent.registerAgent(name, { publicKey, framework });
-      validTokens.add(record.authToken);
+      // Slice 06 (Codex bug 3): runtime-issued agent tokens MUST land
+      // in BOTH `validTokens` (for httpAuthGuard) AND `tokenStore`
+      // (for verifyTokenScope). Without this, the daemon accepted the
+      // new token at the auth guard but 403'd it at every kafka /
+      // scope-gated route until restart. Stamped `source: 'agent'` so
+      // the new admin routes (`requireRoot`) reject it — agent
+      // registration must NEVER produce a token that can mint other
+      // tokens (privilege-escalation guard, Codex bug 2).
+      const tokenRecord: TokenRecord = {
+        prefix: tokenPrefix(record.authToken),
+        fullToken: record.authToken,
+        scopes: '*',
+        source: 'agent',
+      };
+      addTokenToStore(tokenStore, validTokens, tokenRecord);
       const response: Record<string, unknown> = {
         agentAddress: record.agentAddress,
         authToken: record.authToken,

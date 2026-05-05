@@ -118,6 +118,7 @@ function buildCtx(req: any, res: any, agent: any): RequestContext {
       prefix: ROOT_TOKEN.slice(0, 8),
       fullToken: ROOT_TOKEN,
       scopes: '*' as const,
+      source: 'file' as const,
     }],
   ]);
   // Mutate req headers so extractBearerToken finds the root token. The
@@ -135,6 +136,7 @@ function buildCtx(req: any, res: any, agent: any): RequestContext {
     requestToken: ROOT_TOKEN,
     tokenStore,
     validTokens: new Set([ROOT_TOKEN]),
+    authEnabled: true,
   } as unknown as RequestContext;
 }
 

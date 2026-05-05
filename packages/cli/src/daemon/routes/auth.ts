@@ -34,7 +34,8 @@ import {
   parseTokenFile,
   serializeTokenStore,
   setTokenRecord,
-  deleteTokenRecord,
+  addTokenToStore,
+  removeTokenFromStore,
   toPublicRecord,
   tokenFilePath,
   tokenPrefix,
@@ -81,15 +82,35 @@ function generateSecret(): string {
 }
 
 /**
- * Verify the caller is "root" (scope set is exactly `'*'`). Sends a 403
- * + returns false if not. We accept ONLY the wildcard — an explicit list
- * that happens to include every known scope is NOT root, because new
- * scopes will be added over time and we don't want to grandfather old
- * lists into administering them.
+ * Verify the caller is "root" (scope set is exactly `'*'`) AND the
+ * caller's token came from an OPERATOR-managed source — `'file'` (the
+ * on-disk auth.token) or `'config'` (dkg.config.yaml). Sends 403 +
+ * returns false otherwise.
+ *
+ * Why source matters (Codex bug 2): per-agent tokens issued by
+ * `/api/agent/register` carry `scopes: '*'` for backward-compat on every
+ * other API surface — pre-slice-06 they had unscoped access to
+ * everything. Slice 06 added the admin routes; without a source check,
+ * any registered agent could mint/list/revoke node auth tokens — a
+ * privilege-escalation path. The source field walls off auth admin
+ * to operator-controlled tokens.
+ *
+ * `'config'` IS accepted as root: putting a token in `dkg.config.yaml`
+ * is itself an operator action, and the test/dev workflow relies on it.
+ *
+ * We accept ONLY the wildcard scope — an explicit list that happens
+ * to include every known scope is NOT root, because new scopes will be
+ * added over time and we don't want to grandfather old lists into
+ * administering them.
+ *
+ * When `auth.enabled = false` the guard short-circuits to true (Codex
+ * bug 1), matching `httpAuthGuard`'s bypass semantics.
  */
 function requireRoot(ctx: RequestContext): boolean {
+  if (!ctx.authEnabled) return true;
   const record = lookupTokenRecord(ctx.requestToken, ctx.tokenStore);
-  if (!record || record.scopes !== '*') {
+  const isOperatorSource = record?.source === 'file' || record?.source === 'config';
+  if (!record || record.scopes !== '*' || !isOperatorSource) {
     jsonResponse(ctx.res, 403, {
       error: 'Root token required for token administration',
     });
@@ -241,6 +262,8 @@ async function handleMint(ctx: RequestContext): Promise<void> {
     fullToken: newToken,
     scopes: fields.scopes,
     createdAt: new Date().toISOString(),
+    // Mint always writes to disk, so the canonical source is `'file'`.
+    source: 'file',
   };
   if (fields.name !== undefined) record.name = fields.name;
 
@@ -274,9 +297,11 @@ async function handleMint(ctx: RequestContext): Promise<void> {
       await writeFileAtomic(filePath, serializeTokenStore(existing), { mode: 0o600 });
 
       // Disk-write succeeded — now safe to publish the change to the
-      // running daemon's token set.
-      setTokenRecord(ctx.tokenStore, record);
-      ctx.validTokens.add(newToken);
+      // running daemon's token set. Goes through `addTokenToStore` so
+      // the structured store and the legacy `validTokens` Set never
+      // drift (Codex bug 3 — same helper the runtime agent register
+      // path uses).
+      addTokenToStore(ctx.tokenStore, ctx.validTokens, record);
     });
   } catch (err) {
     return jsonResponse(res, 500, {
@@ -354,11 +379,11 @@ async function handleRevoke(ctx: RequestContext): Promise<void> {
       // consistent with what's on disk. Without this, a failed disk
       // revoke would leave the daemon rejecting a token that is still
       // in the file — a restart would resurrect it.
-      deleteTokenRecord(existing.store, prefix);
+      existing.store.delete(prefix);
       await writeFileAtomic(filePath, serializeTokenStore(existing), { mode: 0o600 });
 
-      deleteTokenRecord(ctx.tokenStore, prefix);
-      ctx.validTokens.delete(target.fullToken);
+      // Lockstep removal from BOTH structures (Codex bug 3).
+      removeTokenFromStore(ctx.tokenStore, ctx.validTokens, prefix);
       return { found: true };
     });
   } catch (err) {

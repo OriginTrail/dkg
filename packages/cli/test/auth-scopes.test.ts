@@ -9,9 +9,13 @@ import { describe, expect, it } from 'vitest';
 import { verifyTokenScope, type TokenStore } from '../src/auth.js';
 import type { TokenRecord } from '../src/token-store.js';
 
-function buildStore(records: TokenRecord[]): TokenStore {
+// Tests for `verifyTokenScope` don't care about the `source` field
+// (Codex bug 2 added it; only `requireRoot` consults it). Default to
+// `'file'` here so each fixture stays focused on the scope semantics
+// under test.
+function buildStore(records: Array<Omit<TokenRecord, 'source'> & { source?: TokenRecord['source'] }>): TokenStore {
   const store = new Map<string, TokenRecord>();
-  for (const r of records) store.set(r.prefix, r);
+  for (const r of records) store.set(r.prefix, { ...r, source: r.source ?? 'file' });
   return store;
 }
 

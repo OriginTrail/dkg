@@ -402,6 +402,12 @@ export async function handleRequest(
     embeddingProvider,
     validTokens,
     tokenStore,
+    // Master auth-enabled flag — single source of truth derived from
+    // config so per-route scope gates can match the `httpAuthGuard`
+    // bypass. `config.auth?.enabled !== false` (defaults to true) is
+    // the same predicate the lifecycle uses to set the guard's
+    // behavior.
+    authEnabled: config.auth?.enabled !== false,
     apiHost,
     apiPortRef,
     url,
