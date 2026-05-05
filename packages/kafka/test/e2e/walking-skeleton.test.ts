@@ -415,6 +415,95 @@ describe('kafka walking skeleton e2e', () => {
       240_000,
     );
   });
+
+  describe('auth scopes (slice 06)', () => {
+    it(
+      'mints a write-only scoped token via CLI; register works with it; list-with-same-token → 403',
+      async () => {
+        // 1. Mint a write-scoped token via the CLI (which hits the daemon's
+        //    `/api/auth/tokens` mint endpoint with the root token already
+        //    on disk in DEVNET_NODE1_HOME). The full token comes back on
+        //    stdout exactly once — we capture it for the next two steps.
+        const mintResult = await execFileAsync(
+          'node',
+          [
+            CLI_ENTRY,
+            'auth',
+            'mint-token',
+            '--scope',
+            'kafka:endpoint:write',
+            '--name',
+            'e2e-write-only',
+          ],
+          {
+            cwd: REPO_ROOT,
+            env: {
+              ...process.env,
+              DKG_HOME: DEVNET_NODE1_HOME,
+              DKG_API_PORT: String(port),
+            },
+          },
+        );
+
+        // The mint command prints the full token on its own line as a
+        // 2-space-indented run — match that to extract.
+        const mintedToken = (() => {
+          for (const rawLine of mintResult.stdout.split('\n')) {
+            const line = rawLine.trim();
+            // base64url tokens are URL-safe (no padding, length 43 for
+            // 32 random bytes). Match conservatively to avoid mistaking
+            // labels like "Prefix:" for the token.
+            if (/^[A-Za-z0-9_-]{40,}$/.test(line)) return line;
+          }
+          throw new Error(`could not extract minted token from CLI stdout:\n${mintResult.stdout}`);
+        })();
+        expect(mintedToken.length).toBeGreaterThan(20);
+
+        // 2. With the write-scoped token, registering an endpoint via the
+        //    HTTP API must succeed.
+        const writeClient = new ApiClient(port, mintedToken);
+        const broker = `kafka.scopes.${Date.now()}.local:9092`;
+        const topic = `auth-scopes.${Date.now()}`;
+        const messageFormat = 'application/cloudevents+json';
+        const expectedUri = buildKafkaEndpointUri({ owner, broker, topic });
+
+        const registerResult = await writeClient.registerKafkaEndpoint({
+          contextGraphId: CONTEXT_GRAPH_ID,
+          broker,
+          topic,
+          messageFormat,
+        });
+        expect(registerResult.uri).toBe(expectedUri);
+
+        // 3. With the same write-only token, listing endpoints must 403 —
+        //    the read scope is missing.
+        let listError: { httpStatus?: number } | undefined;
+        try {
+          await writeClient.listKafkaEndpoints({ contextGraphId: CONTEXT_GRAPH_ID });
+        } catch (err) {
+          listError = err as { httpStatus?: number };
+        }
+        expect(listError).toBeDefined();
+        expect(listError?.httpStatus).toBe(403);
+
+        // Cleanup: revoke the e2e token so it doesn't pile up in the
+        // devnet token file across runs.
+        await execFileAsync(
+          'node',
+          [CLI_ENTRY, 'auth', 'revoke-token', mintedToken.slice(0, 8)],
+          {
+            cwd: REPO_ROOT,
+            env: {
+              ...process.env,
+              DKG_HOME: DEVNET_NODE1_HOME,
+              DKG_API_PORT: String(port),
+            },
+          },
+        );
+      },
+      240_000,
+    );
+  });
 });
 
 async function waitForRevokedRow(
