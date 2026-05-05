@@ -3,7 +3,7 @@ import {
   type KafkaEndpointVerificationStatus,
 } from './ka-builder.js';
 import type { ProbeResult } from './kafka-probe.js';
-import { buildKafkaEndpointUri } from './uri.js';
+import { assertValidKafkaEndpointUri, buildKafkaEndpointUri } from './uri.js';
 
 /**
  * The JSON-LD shape produced by `buildKafkaEndpointKnowledgeAsset` and handed
@@ -354,7 +354,11 @@ export async function listKafkaEndpoints(
 export async function getKafkaEndpoint(
   input: GetKafkaEndpointInput,
 ): Promise<GetKafkaEndpointResult | null> {
-  const { uri } = input;
+  // Defence-in-depth: validate the URI before it lands in a SPARQL IRI
+  // position, even though the route adapter already validates. The package
+  // does not trust its callers — anyone wiring up a custom adapter (tests,
+  // future agents) gets the same protection.
+  const uri = assertValidKafkaEndpointUri(input.uri);
   const sparql = `
     ${KAFKA_ENDPOINT_PREFIXES}
     SELECT ?broker ?topic ?messageFormat ?publisher ?endpointUrl ?issued

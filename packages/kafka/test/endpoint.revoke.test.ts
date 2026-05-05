@@ -151,11 +151,26 @@ describe('revokeKafkaEndpoint', () => {
     await expect(
       revokeKafkaEndpoint({
         contextGraphId: 'devnet-test',
-        uri: 'urn:dkg:kafka-endpoint:0xowner:nonexistent',
+        uri: `urn:dkg:kafka-endpoint:0xowner:${'c'.repeat(64)}`,
         queryEngine,
         publisher,
       }),
     ).rejects.toThrow(/not found/i);
+    expect(updateCalls).toHaveLength(0);
+  });
+
+  it('rejects malformed URIs before issuing any SPARQL or publisher.update', async () => {
+    const { publisher, updateCalls } = makePublisher();
+    const { queryEngine } = makeQueryEngine([]);
+
+    await expect(
+      revokeKafkaEndpoint({
+        contextGraphId: 'devnet-test',
+        uri: 'urn:dkg:kafka-endpoint:foo:bar> } UNION { ?ka <p> ?o BIND(<x',
+        queryEngine,
+        publisher,
+      }),
+    ).rejects.toThrow(/invalid kafka endpoint uri/i);
     expect(updateCalls).toHaveLength(0);
   });
 

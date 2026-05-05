@@ -8,7 +8,10 @@ interface CapturedUpdate {
   ka: any;
 }
 
-const URI = 'urn:dkg:kafka-endpoint:0xowner:abc123';
+// Canonical-shape URI: matches the strict `assertValidKafkaEndpointUri`
+// regex (`urn:dkg:kafka-endpoint:<owner>:<sha256-hex-64>`).
+const URI = `urn:dkg:kafka-endpoint:0xowner:${'a'.repeat(64)}`;
+const MISSING_URI = `urn:dkg:kafka-endpoint:owner:${'b'.repeat(64)}`;
 
 const ACTIVE_BINDINGS = {
   broker: '"kafka.example.com:9092"',
@@ -137,12 +140,28 @@ describe('verifyKafkaEndpoint', () => {
     await expect(
       verifyKafkaEndpoint({
         contextGraphId: 'devnet-test',
-        uri: 'urn:dkg:kafka-endpoint:owner:missing',
+        uri: MISSING_URI,
         queryEngine,
         publisher,
         probe: VERIFIED_PROBE,
       }),
     ).rejects.toThrow(/not found/i);
+    expect(updateCalls).toHaveLength(0);
+  });
+
+  it('rejects malformed URIs before issuing any SPARQL or publisher.update', async () => {
+    const { publisher, updateCalls } = makePublisher();
+    const { queryEngine } = makeQueryEngine([]);
+
+    await expect(
+      verifyKafkaEndpoint({
+        contextGraphId: 'devnet-test',
+        uri: 'urn:dkg:kafka-endpoint:foo:bar> } UNION { ?ka <p> ?o BIND(<x',
+        queryEngine,
+        publisher,
+        probe: VERIFIED_PROBE,
+      }),
+    ).rejects.toThrow(/invalid kafka endpoint uri/i);
     expect(updateCalls).toHaveLength(0);
   });
 

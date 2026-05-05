@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { getKafkaEndpoint } from '../src/endpoint.js';
 
-const URI = 'urn:dkg:kafka-endpoint:0xowner:abc123';
+// Canonical-shape URIs: matches the strict `assertValidKafkaEndpointUri`
+// regex (`urn:dkg:kafka-endpoint:<owner>:<sha256-hex-64>`). Real producers
+// always emit this shape; the validator is the package's defence against
+// SPARQL injection at every URI interpolation site.
+const URI = `urn:dkg:kafka-endpoint:0xowner:${'a'.repeat(64)}`;
+const MISSING_URI = `urn:dkg:kafka-endpoint:owner:${'b'.repeat(64)}`;
 
 const ACTIVE_BINDINGS = {
   broker: '"kafka.example.com:9092"',
@@ -77,10 +82,26 @@ describe('getKafkaEndpoint', () => {
     const { queryEngine } = makeQueryEngine([]);
     const result = await getKafkaEndpoint({
       contextGraphId: 'devnet-test',
-      uri: 'urn:dkg:kafka-endpoint:owner:missing',
+      uri: MISSING_URI,
       queryEngine,
     });
     expect(result).toBeNull();
+  });
+
+  it('rejects malformed URIs before issuing any SPARQL', async () => {
+    // Defence-in-depth: even if an upstream caller skips validation, the
+    // package itself must never let a non-canonical URI hit a SPARQL IRI
+    // position. Verifies the validator throws before `queryEngine.query`
+    // would have run.
+    const { queryEngine, calls } = makeQueryEngine([]);
+    await expect(
+      getKafkaEndpoint({
+        contextGraphId: 'devnet-test',
+        uri: 'urn:dkg:kafka-endpoint:foo:bar> } UNION { ?ka <p> ?o BIND(<x',
+        queryEngine,
+      }),
+    ).rejects.toThrow(/invalid kafka endpoint uri/i);
+    expect(calls).toHaveLength(0);
   });
 
   it('uses GRAPH ?g and binds the URI literal into the SPARQL', async () => {

@@ -16,6 +16,7 @@ import {
 import type { RequestContext } from './context.js';
 import {
   getKafkaEndpoint,
+  isValidKafkaEndpointUri,
   KafkaEndpointProbeFailedError,
   listKafkaEndpoints,
   probe as kafkaProbe,
@@ -426,6 +427,15 @@ async function handleVerify(ctx: RequestContext): Promise<void> {
   if (!isNonEmptyString(uri)) {
     return jsonResponse(res, 400, { error: '"uri" must be a non-empty string' });
   }
+  // Same strict validation as the path-based verbs (`extractEndpointUri`).
+  // Without this, the URI lands in a SPARQL IRI position via
+  // `getKafkaEndpoint` / `agent.update` — see review C2.
+  if (!isValidKafkaEndpointUri(uri)) {
+    return jsonResponse(res, 400, {
+      error:
+        '"uri" must match urn:dkg:kafka-endpoint:<owner>:<sha256-hex-64>',
+    });
+  }
 
   const securityProtocol = parseSecurityProtocol(raw.securityProtocol);
   if (raw.securityProtocol !== undefined && !securityProtocol) {
@@ -577,8 +587,13 @@ async function handleVerify(ctx: RequestContext): Promise<void> {
  * `decodeURIComponent` cleanly.
  *
  * Sub-paths beyond `/<uri>` (e.g. `/<uri>/something`) are rejected as 404 —
- * a URN never contains an unencoded `/`, so an extra segment means the
- * caller hit a route that does not exist.
+ * a URN never contains an unencoded `/`, so an extra path segment means the
+ * route is undefined.
+ *
+ * Validation goes through `isValidKafkaEndpointUri` (the kafka package's
+ * strict regex on `urn:dkg:kafka-endpoint:<owner>:<sha256-hex-64>`). A loose
+ * `startsWith` check would have left every URI interpolation site downstream
+ * exposed to SPARQL injection — see review C1.
  */
 function extractEndpointUri(ctx: RequestContext): string | null {
   const { res, path } = ctx;
@@ -596,9 +611,10 @@ function extractEndpointUri(ctx: RequestContext): string | null {
   }
   const decoded = safeDecodeURIComponent(encoded, res);
   if (decoded === null) return null; // safeDecodeURIComponent already sent 400
-  if (!decoded.startsWith('urn:dkg:kafka-endpoint:')) {
+  if (!isValidKafkaEndpointUri(decoded)) {
     jsonResponse(res, 400, {
-      error: '"uri" must be a urn:dkg:kafka-endpoint: URI',
+      error:
+        '"uri" must match urn:dkg:kafka-endpoint:<owner>:<sha256-hex-64>',
     });
     return null;
   }
