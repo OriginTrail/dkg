@@ -2,116 +2,252 @@
  * Bug A regression tests for `agent.update`'s URI-keyed JSON-LD overload.
  *
  * The overload converts JSON-LD content to quads and dispatches into the
- * existing kcId-keyed `_update` flow. Codex correctly noticed there was no
- * check that the quads' root subject(s) actually match `keyOrUri` — so a
- * caller that supplied JSON-LD with a different `@id` (typo, stale builder,
- * or a private-only payload that synthesises a blank-node anchor) would have
- * its triples written into the kcId resolved from `keyOrUri`, but carrying a
- * DIFFERENT subject. The original subject's triples become stale; the new
- * subject's triples coexist confusingly inside the same kcId.
+ * existing kcId-keyed `_update` flow. Codex Round 2 noticed the overload
+ * didn't verify the supplied JSON-LD actually described `keyOrUri` — so a
+ * caller that passed JSON-LD with a different `@id` (typo, stale builder)
+ * would have its triples written into the kcId resolved from `keyOrUri` but
+ * carrying a DIFFERENT subject. Original subject's triples become stale;
+ * new subject's triples coexist confusingly.
  *
- * The validation lives in a pure helper (`assertJsonLdRootMatches`) so we can
- * test it without the rest of the agent surface. The full overload is
- * exercised separately at the route level (slice 05's lifecycle e2e + the
- * smoke tests).
+ * Codex Round 3 noticed Round 2's fix was over-strict — the original
+ * helper inspected POST-conversion quads and required every subject to
+ * equal `keyOrUri`. That rejected two legitimate JSON-LD shapes that
+ * `publish()` already accepts:
+ *   1. Private-only payloads (`{ private: { ... } }`) — `jsonLdToQuads`
+ *      mints a `urn:dkg:private:<uuid>` anchor on the public side that
+ *      definitionally can't match.
+ *   2. Nested entities — a top-level KA with `{ "@id": expectedUri,
+ *      "dkg:hasMeta": { "@id": "urn:meta:1", ... } }` legitimately emits
+ *      two distinct subjects.
+ *
+ * The current rule (Round 3 fix) inspects the user's JsonLdContent
+ * structure BEFORE conversion and only checks the DECLARED top-level
+ * `@id` (when present). Nested children's `@id`s are free; missing
+ * `@id` is allowed (caller relies on synthetic anchor); explicit
+ * `urn:dkg:private:` synthetic-shaped `@id` is allowed.
+ *
+ * The validator runs against the JsonLdContent shape, not the converted
+ * quads, so the test fixtures are JSON-LD docs (not Quad arrays).
  */
 import { describe, expect, it } from 'vitest';
-import type { Quad } from '@origintrail-official/dkg-storage';
 import {
-  assertJsonLdRootMatches,
+  assertJsonLdContentRootMatches,
   RootEntityMismatchError,
 } from '../src/dkg-agent-utils.js';
 
 const URI = 'urn:dkg:kafka-endpoint:0xowner:hash';
 const OTHER = 'urn:dkg:kafka-endpoint:0xowner:other-hash';
 
-function quad(subject: string, predicate = 'http://example.org/p', object = '"v"'): Quad {
-  return { subject, predicate, object, graph: '' };
-}
-
-describe('assertJsonLdRootMatches', () => {
-  it('proceeds silently when the only public subject equals the expected URI', () => {
+describe('assertJsonLdContentRootMatches — happy paths', () => {
+  it('proceeds when content.public has matching top-level @id', () => {
     expect(() =>
-      assertJsonLdRootMatches(URI, [quad(URI)], []),
+      assertJsonLdContentRootMatches(URI, {
+        public: { '@id': URI, 'dkg:broker': 'kafka.example:9092' },
+      }),
     ).not.toThrow();
   });
 
-  it('proceeds silently when the only private subject equals the expected URI (public-only-anchor case)', () => {
-    // jsonLdToQuads synthesises an anchor on the public side when the input
-    // is private-only. We accept either side carrying the rootEntity, as
-    // long as no subject diverges from it.
+  it('proceeds when content.private has matching top-level @id', () => {
     expect(() =>
-      assertJsonLdRootMatches(URI, [], [quad(URI)]),
+      assertJsonLdContentRootMatches(URI, {
+        private: { '@id': URI, 'dkg:secret': 'S' },
+      }),
     ).not.toThrow();
   });
 
-  it('proceeds when both public and private quads share the same single subject (slice 05 compose path)', () => {
+  it('proceeds when both public and private sides carry the matching @id (slice 05 compose path)', () => {
     expect(() =>
-      assertJsonLdRootMatches(URI, [quad(URI), quad(URI, 'http://example.org/p2')], [quad(URI)]),
+      assertJsonLdContentRootMatches(URI, {
+        public: { '@id': URI, 'dkg:broker': 'b' },
+        private: { '@id': URI, 'dkg:secret': 'S' },
+      }),
     ).not.toThrow();
   });
 
-  it('throws RootEntityMismatchError when the only subject differs from the expected URI', () => {
+  it('proceeds when nested entities under the matching root carry their own @id (Round 3 relaxation)', () => {
+    // The legitimate JSON-LD pattern Round 2 over-rejected: the top-level
+    // KA roots at `URI`, but its `dkg:hasMeta` value is a nested resource
+    // with its own `@id`. Two distinct subjects in the resulting quads,
+    // both correct. Validator must allow.
     expect(() =>
-      assertJsonLdRootMatches(URI, [quad(OTHER)], []),
+      assertJsonLdContentRootMatches(URI, {
+        public: {
+          '@id': URI,
+          'dkg:broker': 'kafka.example:9092',
+          'dkg:hasMeta': { '@id': 'urn:meta:1', 'x:label': 'L' },
+        },
+      }),
+    ).not.toThrow();
+  });
+
+  it('proceeds when content.public is a single object missing @id (caller relies on synthetic anchor)', () => {
+    // `jsonLdToQuads` synthesises a public anchor when the document has no
+    // `@id`. We allow this — `publish()` already accepts the same shape.
+    expect(() =>
+      assertJsonLdContentRootMatches(URI, {
+        public: { 'dkg:broker': 'kafka.example:9092' },
+      }),
+    ).not.toThrow();
+  });
+
+  it('proceeds when content.private is a single object missing @id (private-only synthetic-anchor case)', () => {
+    // The bug-2-from-the-brief case: `update("urn:x:foo", cgId, { private:
+    // { "x:secret": "S" } })`. `jsonLdToQuads` synthesises an anchor;
+    // the validator must NOT 422 the legitimate shape.
+    expect(() =>
+      assertJsonLdContentRootMatches(URI, {
+        private: { 'x:secret': 'S' },
+      }),
+    ).not.toThrow();
+  });
+
+  it('proceeds on a bare JsonLdDocument (treated as private by jsonLdToQuads) with matching @id', () => {
+    // The non-envelope path: a bare object is the private side per
+    // `jsonLdToQuads`'s discrimination.
+    expect(() =>
+      assertJsonLdContentRootMatches(URI, {
+        '@id': URI,
+        'dkg:secret': 'S',
+      }),
+    ).not.toThrow();
+  });
+
+  it('proceeds on a bare JsonLdDocument with no @id', () => {
+    // Bare doc, no @id → private-side, jsonLdToQuads will synthesise an
+    // anchor. Allow.
+    expect(() =>
+      assertJsonLdContentRootMatches(URI, { 'dkg:secret': 'S' }),
+    ).not.toThrow();
+  });
+
+  it('proceeds when @id is a synthetic urn:dkg:private:* shape (defensive — never user-supplied in practice)', () => {
+    // Defence-in-depth: a paranoid caller might supply that shape
+    // themselves. Allow — the synthetic-anchor convention is opaque, not
+    // forbidden as input.
+    expect(() =>
+      assertJsonLdContentRootMatches(URI, {
+        public: { '@id': 'urn:dkg:private:abc123', 'x:label': 'L' },
+      }),
+    ).not.toThrow();
+  });
+
+  it('proceeds on an empty envelope ({}) — no top-level @id to validate', () => {
+    expect(() =>
+      assertJsonLdContentRootMatches(URI, {}),
+    ).not.toThrow();
+  });
+});
+
+describe('assertJsonLdContentRootMatches — array forms', () => {
+  it('proceeds when content.public is an array of objects all matching the expected @id', () => {
+    expect(() =>
+      assertJsonLdContentRootMatches(URI, {
+        public: [
+          { '@id': URI, 'dkg:broker': 'b1' },
+          { '@id': URI, 'dkg:topic': 't1' },
+        ],
+      }),
+    ).not.toThrow();
+  });
+
+  it('proceeds when an array contains objects with no @id (synthetic-anchor mix)', () => {
+    expect(() =>
+      assertJsonLdContentRootMatches(URI, {
+        public: [
+          { '@id': URI, 'dkg:broker': 'b1' },
+          { 'dkg:topic': 't1' },
+        ],
+      }),
+    ).not.toThrow();
+  });
+
+  it('throws when ANY array element has a mismatched top-level @id (the wrong sibling is the issue)', () => {
+    // From the brief: even if one sibling matches, the other's mismatch is
+    // the issue.
+    expect(() =>
+      assertJsonLdContentRootMatches(URI, {
+        public: [
+          { '@id': URI, 'dkg:broker': 'b1' },
+          { '@id': OTHER, 'dkg:topic': 't1' },
+        ],
+      }),
     ).toThrow(RootEntityMismatchError);
   });
 
-  it('throws when there are zero subjects (no concrete content)', () => {
+  it('proceeds on a bare JsonLdDocument array with all matching (or @id-less) entries', () => {
     expect(() =>
-      assertJsonLdRootMatches(URI, [], []),
+      assertJsonLdContentRootMatches(URI, [
+        { '@id': URI, 'x:a': '1' },
+        { 'x:b': '2' },
+      ]),
+    ).not.toThrow();
+  });
+});
+
+describe('assertJsonLdContentRootMatches — mismatch paths', () => {
+  it('throws when content.public has a mismatched top-level @id', () => {
+    expect(() =>
+      assertJsonLdContentRootMatches(URI, {
+        public: { '@id': OTHER, 'dkg:broker': 'b' },
+      }),
     ).toThrow(RootEntityMismatchError);
   });
 
-  it('throws when multiple subjects appear and not all match the expected URI', () => {
-    // Mixed-subject content under a single rootEntity update is suspicious
-    // even if the expected URI IS one of the subjects. Be strict.
+  it('throws when content.private has a mismatched top-level @id', () => {
     expect(() =>
-      assertJsonLdRootMatches(URI, [quad(URI), quad(OTHER)], []),
+      assertJsonLdContentRootMatches(URI, {
+        private: { '@id': OTHER, 'x:secret': 'S' },
+      }),
     ).toThrow(RootEntityMismatchError);
   });
 
-  it('throws on a synthetic anchor (urn:dkg:private:...) — the synthesised anchor never matches a real rootEntity', () => {
-    // jsonLdToQuads emits a `urn:dkg:private:<uuid>` anchor on private-only
-    // input. That URN is generated per-call and definitionally cannot equal
-    // an externally-supplied rootEntity URI.
+  it('throws when bare JsonLdDocument has a mismatched @id', () => {
     expect(() =>
-      assertJsonLdRootMatches(URI, [quad('urn:dkg:private:abc123')], []),
+      assertJsonLdContentRootMatches(URI, {
+        '@id': OTHER,
+        'x:secret': 'S',
+      }),
     ).toThrow(RootEntityMismatchError);
   });
 
-  it('the error message names both the expected URI and the actual subject(s)', () => {
+  it('typed-error fields name expected and actual top-level @id(s)', () => {
     try {
-      assertJsonLdRootMatches(URI, [quad(OTHER), quad('urn:dkg:third')], []);
+      assertJsonLdContentRootMatches(URI, {
+        public: { '@id': OTHER, 'x:a': '1' },
+        private: { '@id': 'urn:third', 'x:b': '2' },
+      });
       throw new Error('expected throw');
     } catch (err) {
       expect(err).toBeInstanceOf(RootEntityMismatchError);
       const e = err as RootEntityMismatchError;
       expect(e.message).toContain(URI);
       expect(e.message).toContain(OTHER);
-      expect(e.message).toContain('urn:dkg:third');
+      expect(e.message).toContain('urn:third');
       expect(e.expected).toBe(URI);
-      expect(e.actual).toEqual([OTHER, 'urn:dkg:third'].sort());
+      expect(e.actual).toEqual([OTHER, 'urn:third'].sort());
     }
   });
 
-  it('error message lists actual subjects sorted + deduplicated', () => {
-    // Stable output for log/diagnostic comparison: sort and dedupe.
+  it('actual list is sorted + deduplicated when the same wrong @id appears on both sides', () => {
     try {
-      assertJsonLdRootMatches(URI, [quad(OTHER), quad(OTHER), quad('urn:dkg:third')], []);
+      assertJsonLdContentRootMatches(URI, {
+        public: { '@id': OTHER, 'x:a': '1' },
+        private: { '@id': OTHER, 'x:b': '2' },
+      });
       throw new Error('expected throw');
     } catch (err) {
       const e = err as RootEntityMismatchError;
-      // Two distinct actual subjects, sorted.
-      expect(e.actual).toEqual([OTHER, 'urn:dkg:third'].sort());
+      expect(e.actual).toEqual([OTHER]);
     }
   });
 
-  it('throws on a blank node anchor (`_:b1`) — blank nodes are non-IRIs and never match a real rootEntity URI', () => {
-    // Sanity check: even if jsonLdToQuads ever leaks a blank node into the
-    // quads (shouldn't, but defence-in-depth), it must not silently match.
+  it('throws when @id is a non-string (defensive — should never happen via normal callers)', () => {
+    // jsonLdToQuads / jsonld would also reject this, but the validator
+    // shouldn't crash on it — emit a clean RootEntityMismatchError.
     expect(() =>
-      assertJsonLdRootMatches(URI, [quad('_:b1')], []),
+      assertJsonLdContentRootMatches(URI, {
+        public: { '@id': 42, 'x:a': '1' } as unknown as Record<string, unknown>,
+      }),
     ).toThrow(RootEntityMismatchError);
   });
 });

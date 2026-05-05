@@ -66,7 +66,7 @@ import { CclEvaluator, parseCclPolicy, validateCclPolicy, type CclEvaluationResu
 import { buildCclEvaluationQuads } from './ccl-evaluation-publish.js';
 import { buildManualCclFacts, resolveFactsFromSnapshot, type CclFactResolutionMode } from './ccl-fact-resolution.js';
 import {
-  strip, stripLiteral, jsonLdToQuads, resolveKcIdByRootEntity, assertJsonLdRootMatches,
+  strip, stripLiteral, jsonLdToQuads, resolveKcIdByRootEntity, assertJsonLdContentRootMatches,
   type JsonLdContent,
 } from './dkg-agent-utils.js';
 
@@ -2838,6 +2838,16 @@ export class DKGAgent {
     if (typeof keyOrUri === 'string') {
       const opts = fourth as { onPhase?: PhaseCallback; operationCtx?: OperationContext } | undefined;
       const ctx = opts?.operationCtx ?? createOperationContext('update');
+      // Codex Bug A: ensure the supplied JSON-LD's DECLARED top-level @id
+      // actually describes `keyOrUri` before we let it land in the resolved
+      // kcId. Round 3 narrowing: inspect the JsonLdContent shape (not the
+      // post-conversion quads) so legitimate nested-entity / synthetic-
+      // anchor / private-only shapes pass through. Runs BEFORE jsonLdToQuads
+      // so a malformed @id 422s without paying the conversion cost. The
+      // kcId-keyed overload below intentionally skips this check — kcId
+      // callers manage their own subject discipline.
+      const content = third as JsonLdContent;
+      assertJsonLdContentRootMatches(keyOrUri, content);
       const kcId = await resolveKcIdByRootEntity(this.store, contextGraphId, keyOrUri);
       if (kcId === null) {
         throw new Error(
@@ -2845,14 +2855,7 @@ export class DKGAgent {
             `Publish the KA before calling update().`,
         );
       }
-      const { publicQuads, privateQuads } = await jsonLdToQuads(third as JsonLdContent);
-      // Codex Bug A: ensure the supplied JSON-LD actually describes
-      // `keyOrUri` (and only `keyOrUri`) before we let it land in the
-      // resolved kcId. Without this, a typo / stale builder / private-only
-      // payload silently writes triples carrying a different subject under
-      // the resolved kcId. The kcId-keyed overload below intentionally
-      // skips this check — kcId callers manage their own subject discipline.
-      assertJsonLdRootMatches(keyOrUri, publicQuads, privateQuads);
+      const { publicQuads, privateQuads } = await jsonLdToQuads(content);
       return this._update(kcId, contextGraphId, publicQuads, privateQuads, { ...opts, operationCtx: ctx });
     }
 

@@ -423,17 +423,24 @@ export function verifySyncedData(
  * with the existing kcId-keyed update path.
  */
 /**
- * Thrown by `assertJsonLdRootMatches` when the quads produced by
- * `jsonLdToQuads` from an `agent.update(uri, ...)` payload don't all anchor
- * to the expected `uri`.
+ * Thrown by `assertJsonLdContentRootMatches` when an `agent.update(uri, ...)`
+ * payload declares a top-level `@id` that does NOT equal the supplied `uri`.
  *
- * Codex Bug A: the URI-keyed update overload resolves `uri → kcId` and then
- * writes whatever quads the JSON-LD content carries — without verifying that
- * those quads are about `uri`. A typo, a stale builder, or a private-only
- * payload (which `jsonLdToQuads` anchors to a synthetic `urn:dkg:private:`
- * URN) would silently land triples with a DIFFERENT subject inside the kcId
- * resolved from `uri`. Original subject's triples become stale; new subject's
- * triples coexist confusingly. Failing closed eliminates the hole.
+ * Codex Bug A (Round 2): the URI-keyed update overload resolves `uri → kcId`
+ * and then writes whatever quads the JSON-LD content carries — without
+ * verifying that those quads are about `uri`. A typo or stale builder
+ * supplying a different `@id` would silently land triples with a DIFFERENT
+ * subject inside the kcId resolved from `uri`.
+ *
+ * Codex Bug A (Round 3): the original Round-2 fix inspected POST-conversion
+ * quads and required EVERY subject to equal `uri`, which over-rejected two
+ * legitimate JSON-LD patterns (private-only payloads with synthetic anchors,
+ * and nested entities with their own `@id`). The current rule is narrower:
+ * inspect the user's JsonLdContent BEFORE conversion and only check the
+ * DECLARED top-level `@id` (when present). Nested children's `@id`s are
+ * unrestricted; missing `@id` is allowed (jsonLdToQuads will synthesise an
+ * anchor); explicit `urn:dkg:private:*`-shaped `@id` is allowed (the
+ * synthetic-anchor convention is opaque, not forbidden as input).
  *
  * Route adapters can `instanceof`-discriminate to map to HTTP 422.
  */
@@ -444,44 +451,100 @@ export class RootEntityMismatchError extends Error {
   ) {
     const actualPart =
       actual.length === 0
-        ? '(no concrete subject in the supplied JSON-LD content)'
+        ? '(no concrete @id in the supplied JSON-LD content)'
         : actual.join(', ');
     super(
-      `update content root mismatch: expected the only subject to be "${expected}", ` +
-        `got ${actualPart}. Refusing to write triples carrying a different subject ` +
-        `into the kcId resolved from "${expected}".`,
+      `update content root mismatch: expected top-level @id to be "${expected}", ` +
+        `got ${actualPart}. Refusing to write triples whose declared subject ` +
+        `differs from the URI passed to update().`,
     );
     this.name = 'RootEntityMismatchError';
   }
 }
 
+const SYNTHETIC_PRIVATE_ANCHOR_RE = /^urn:dkg:private:/;
+
 /**
- * Pure helper: assert that the (publicQuads, privateQuads) produced by
- * `jsonLdToQuads` from a JSON-LD `update` payload all share a single subject
- * IRI equal to `expectedUri`. Used by the URI-keyed overload of
- * `agent.update` BEFORE dispatching into `_update`.
+ * Internal helper: walk a JsonLdDocument (or array of documents) and collect
+ * every top-level `@id` that conflicts with `expectedUri`. "Top-level" means
+ * the `@id` directly on the document or the array element — children of a
+ * top-level object are intentionally NOT inspected (Round 3 relaxation:
+ * nested entities with their own `@id` are legitimate JSON-LD).
  *
- * Decision: be strict. A mixed-subject payload — even one where the
- * expected URI IS one of the subjects — is suspicious; if a real use case
- * for "child triples under different subjects but anchored to the same
- * rootEntity" emerges, the call site can ask for the rule to be widened.
+ * Skips:
+ *   - elements without `@id` (jsonLdToQuads will synthesise an anchor),
+ *   - elements whose `@id` matches `^urn:dkg:private:` (the synthetic-anchor
+ *     convention is opaque, not forbidden as input).
+ */
+function collectMismatchedTopLevelIds(
+  expectedUri: string,
+  doc: unknown,
+  out: string[],
+): void {
+  if (Array.isArray(doc)) {
+    for (const elem of doc) collectMismatchedTopLevelIds(expectedUri, elem, out);
+    return;
+  }
+  if (!doc || typeof doc !== 'object') return;
+  const id = (doc as Record<string, unknown>)['@id'];
+  if (id === undefined) return;
+  if (typeof id !== 'string') {
+    // Non-string `@id` (number, object, …) is malformed JSON-LD; jsonLdToQuads
+    // would also fail downstream, but surface a typed mismatch error here so
+    // the caller gets a clean 422 instead of an opaque jsonld throw.
+    out.push(String(id));
+    return;
+  }
+  if (SYNTHETIC_PRIVATE_ANCHOR_RE.test(id)) return;
+  if (id !== expectedUri) out.push(id);
+}
+
+/**
+ * Pure helper: assert that an `agent.update(uri, contextGraphId, content)`
+ * payload's DECLARED top-level `@id` (on either side of the envelope, or on
+ * the bare document) equals `expectedUri`. Used by the URI-keyed overload of
+ * `agent.update` BEFORE the `jsonLdToQuads` conversion runs.
+ *
+ * Inspects the JsonLdContent structure directly, not the converted quads.
+ * That's the key Round-3 narrowing: a legitimate nested-entity payload
+ * (`{ "@id": uri, "dkg:hasMeta": { "@id": "urn:meta:1", ... } }`) emits two
+ * distinct subjects after conversion, but only the top-level `@id` is the
+ * KA's root — the nested one is a child resource. Old quad-level rule
+ * rejected this; the new declaration-level rule allows it.
  *
  * The kcId-keyed overload (`update(kcId: bigint, ...)`) does NOT use this
  * gate — kcId callers manage their own subject discipline and the agent
  * doesn't second-guess them.
  */
-export function assertJsonLdRootMatches(
+export function assertJsonLdContentRootMatches(
   expectedUri: string,
-  publicQuads: Quad[],
-  privateQuads: Quad[],
+  content: JsonLdContent,
 ): void {
-  const subjects = new Set<string>();
-  for (const q of publicQuads) subjects.add(q.subject);
-  for (const q of privateQuads) subjects.add(q.subject);
+  const mismatched: string[] = [];
 
-  if (subjects.size === 1 && subjects.has(expectedUri)) return;
+  // Mirror jsonLdToQuads's discrimination: an envelope is a non-array object
+  // carrying `public` and/or `private`. Anything else is a bare document
+  // treated as the private side. Validation looks at the same shape boundaries
+  // so callers can't sneak around the gate by routing the same content
+  // through a different envelope key.
+  const obj = content as Record<string, unknown>;
+  const isEnvelope =
+    !Array.isArray(content) &&
+    content !== null &&
+    typeof content === 'object' &&
+    ('public' in obj || 'private' in obj);
 
-  const sortedActual = Array.from(subjects).sort();
+  if (isEnvelope) {
+    if ('public' in obj) collectMismatchedTopLevelIds(expectedUri, obj.public, mismatched);
+    if ('private' in obj) collectMismatchedTopLevelIds(expectedUri, obj.private, mismatched);
+  } else {
+    collectMismatchedTopLevelIds(expectedUri, content, mismatched);
+  }
+
+  if (mismatched.length === 0) return;
+
+  // Sorted + deduplicated for stable diagnostics.
+  const sortedActual = Array.from(new Set(mismatched)).sort();
   throw new RootEntityMismatchError(expectedUri, sortedActual);
 }
 
