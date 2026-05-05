@@ -711,6 +711,43 @@ export class ApiClient {
     return this.post('/api/kafka/endpoint/verify', request);
   }
 
+  // ─── Token administration (slice 06 — root-only) ──────────────────────────
+  //
+  // Wrappers around `/api/auth/tokens`. The mint endpoint returns the full
+  // secret EXACTLY ONCE; the CLI is responsible for surfacing it to the
+  // operator with a clear "save this — it won't be shown again" notice.
+  // List + revoke responses never carry full secrets.
+
+  async mintAuthToken(request: {
+    scope: string | string[];
+    name?: string;
+  }): Promise<{
+    token: string;
+    prefix: string;
+    scopes: string[] | '*';
+    name?: string;
+    createdAt: string;
+  }> {
+    const body: Record<string, unknown> = { scope: request.scope };
+    if (request.name !== undefined) body.name = request.name;
+    return this.post('/api/auth/tokens', body);
+  }
+
+  async listAuthTokens(): Promise<{
+    tokens: Array<{
+      prefix: string;
+      scopes: string[] | '*';
+      name?: string;
+      createdAt?: string;
+    }>;
+  }> {
+    return this.get('/api/auth/tokens');
+  }
+
+  async revokeAuthToken(prefix: string): Promise<Record<string, never>> {
+    return this.delete(`/api/auth/tokens/${encodeURIComponent(prefix)}`);
+  }
+
   async signJoinRequest(contextGraphId: string): Promise<{
     ok: boolean;
     status?: string;
@@ -1054,6 +1091,9 @@ export class ApiClient {
       const data = await res.json().catch(() => ({ error: res.statusText }));
       throw ApiClient.httpError(res.status, ApiClient.errorMessageFromBody(data, res.statusText), data);
     }
+    // 204 No Content has an empty body — `res.json()` would throw. Return
+    // an empty object so callers don't need to special-case the type.
+    if (res.status === 204) return {} as T;
     return res.json() as Promise<T>;
   }
 

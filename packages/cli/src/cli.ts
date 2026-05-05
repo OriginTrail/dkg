@@ -514,6 +514,102 @@ authCmd
     }
   });
 
+// ── Slice 06 ── token-admin subcommands (root-only). Hit the daemon's
+// `/api/auth/tokens` so the running token set is updated atomically and
+// the file write goes through the daemon's serialization mutex. We
+// deliberately do NOT mutate the file directly from the CLI — that would
+// race with daemon-side mints and lose records.
+
+authCmd
+  .command('mint-token')
+  .description('Mint a new scoped API token (daemon must be running, root token required)')
+  .requiredOption('--scope <list>', 'Comma-separated scope list (e.g. "kafka:endpoint:read,kafka:endpoint:write")')
+  .option('--name <label>', 'Optional human-readable label for the token')
+  .action(async (opts: ActionOpts) => {
+    const client = await ApiClient.connect();
+    try {
+      const result = await client.mintAuthToken({
+        scope: String(opts.scope),
+        ...(opts.name ? { name: String(opts.name) } : {}),
+      });
+      console.log('New token minted:');
+      console.log('');
+      console.log(`  ${result.token}`);
+      console.log('');
+      console.log('  Prefix:    ' + result.prefix);
+      console.log('  Scopes:    ' + (Array.isArray(result.scopes) ? result.scopes.join(', ') : result.scopes));
+      if (result.name) console.log('  Name:      ' + result.name);
+      console.log('  Created:   ' + result.createdAt);
+      console.log('');
+      console.log('Save this token now — it will NOT be shown again. Subsequent');
+      console.log('`dkg auth list-tokens` calls will only show its prefix.');
+    } catch (err) {
+      const status = (err as { httpStatus?: number }).httpStatus;
+      if (status === 403) {
+        console.error('Forbidden: token administration requires a root token (one with scope "*").');
+        console.error('Use the legacy auto-generated token in ~/.dkg/auth.token.');
+        process.exit(1);
+      }
+      throw err;
+    }
+  });
+
+authCmd
+  .command('list-tokens')
+  .description('List all API tokens (prefixes only — full tokens are never returned)')
+  .action(async () => {
+    const client = await ApiClient.connect();
+    try {
+      const { tokens } = await client.listAuthTokens();
+      if (tokens.length === 0) {
+        console.log('No tokens configured.');
+        return;
+      }
+      // Two-column table — prefix + scopes/name. We print prefix first
+      // because that's the identifier the operator uses to revoke.
+      const colName = 'PREFIX'.padEnd(10);
+      const colScopes = 'SCOPES'.padEnd(40);
+      console.log(`${colName}${colScopes}NAME / CREATED`);
+      console.log('─'.repeat(80));
+      for (const t of tokens) {
+        const scopes = Array.isArray(t.scopes) ? t.scopes.join(',') : t.scopes;
+        const meta = [t.name, t.createdAt].filter(Boolean).join('  ');
+        console.log(
+          `${t.prefix.padEnd(10)}${scopes.slice(0, 38).padEnd(40)}${meta}`,
+        );
+      }
+    } catch (err) {
+      const status = (err as { httpStatus?: number }).httpStatus;
+      if (status === 403) {
+        console.error('Forbidden: listing tokens requires a root token (one with scope "*").');
+        process.exit(1);
+      }
+      throw err;
+    }
+  });
+
+authCmd
+  .command('revoke-token <prefix>')
+  .description('Revoke a token by its 8-char prefix')
+  .action(async (prefix: string) => {
+    const client = await ApiClient.connect();
+    try {
+      await client.revokeAuthToken(prefix);
+      console.log(`Token ${prefix} revoked.`);
+    } catch (err) {
+      const status = (err as { httpStatus?: number }).httpStatus;
+      if (status === 403) {
+        console.error('Forbidden: revoking tokens requires a root token (one with scope "*").');
+        process.exit(1);
+      }
+      if (status === 404) {
+        console.error(`No token with prefix "${prefix}".`);
+        process.exit(1);
+      }
+      throw err;
+    }
+  });
+
 // ─── dkg start ───────────────────────────────────────────────────────
 
 program
