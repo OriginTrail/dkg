@@ -155,13 +155,20 @@ export async function handleKafkaRoutes(ctx: RequestContext): Promise<void> {
         // The probe error string is part of the typed outcome — already
         // classified to a kafkajs class name, never carries credential
         // substrings.
+        //
+        // `probeStatus` and `probeError` are emitted at the top level so a
+        // CLI client can render them without having to drill into the
+        // `probe` sub-object. The nested `probe` block is retained for
+        // backwards compatibility with any caller that already reads
+        // `probe.status` / `probe.probedAt`.
         return jsonResponse(res, 422, {
           error: err.message,
+          probeStatus: err.outcome.status,
+          probeError: err.outcome.error,
           probe: {
             status: err.outcome.status,
             probedAt: err.outcome.probedAt,
           },
-          probeError: err.outcome.error,
         });
       }
       throw err;

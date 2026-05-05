@@ -44,11 +44,20 @@ interface CapturedRequest {
   authHeader: string;
 }
 
+interface NextResponse {
+  status: number;
+  body: unknown;
+}
+
 describe.sequential('kafka CLI smoke', () => {
   let dkgHome: string;
   let server: ReturnType<typeof createServer>;
   let smokeApiPort: string;
   let last: CapturedRequest = { url: '', body: '', authHeader: '' };
+  // Optional per-test override of the mock response. Tests that exercise
+  // error paths (e.g. 422 probe failure) set this in a beforeEach. When
+  // unset, the handler falls back to the success response below.
+  let nextResponse: NextResponse | null = null;
 
   beforeAll(async () => {
     dkgHome = await mkdtemp(join(tmpdir(), 'dkg-kafka-cli-'));
@@ -70,6 +79,13 @@ describe.sequential('kafka CLI smoke', () => {
         }
         const body = Buffer.concat(chunks).toString('utf8');
         last = { url: req.url ?? '', body, authHeader };
+        if (nextResponse) {
+          const { status, body: respBody } = nextResponse;
+          nextResponse = null;
+          res.writeHead(status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(respBody));
+          return;
+        }
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
           uri: 'urn:dkg:kafka-endpoint:0xabc:hash',
@@ -95,6 +111,7 @@ describe.sequential('kafka CLI smoke', () => {
 
   beforeEach(() => {
     last = { url: '', body: '', authHeader: '' };
+    nextResponse = null;
   });
 
   afterAll(async () => {
@@ -586,5 +603,60 @@ describe.sequential('kafka CLI smoke', () => {
     expect(stderr).toContain('--username');
     expect(stderr).toContain('--password');
     expect(stderr).toContain('--password-stdin');
+  }, 15000);
+
+  it('renders probeStatus and probeError on a 422 probe-failure response', async () => {
+    // The route's 422 carries `probeStatus` (e.g. "failed", "unreachable")
+    // and `probeError` (kafkajs error class) at the top level. Without
+    // surfacing them the user sees only the generic "pass force=true"
+    // message and has no idea whether they're debugging credentials,
+    // network, or a missing topic. The CLI must print both lines on stderr.
+    nextResponse = {
+      status: 422,
+      body: {
+        error:
+          'Kafka endpoint probe failed at 2026-05-04T00:00:00.000Z; pass force=true to register anyway',
+        probeStatus: 'failed',
+        probeError: 'KafkaJSSASLAuthenticationError',
+        probe: { status: 'failed', probedAt: '2026-05-04T00:00:00.000Z' },
+      },
+    };
+    const env = { ...process.env, DKG_HOME: dkgHome, DKG_API_PORT: smokeApiPort };
+    let exited = false;
+    let stderr = '';
+    let exitCode = 0;
+    try {
+      await execFileAsync('node', [
+        CLI_ENTRY,
+        'kafka',
+        'endpoint',
+        'register',
+        '--cg',
+        'devnet-test',
+        '--broker',
+        'kafka.example.com:9092',
+        '--topic',
+        'orders.created',
+        '--security-protocol',
+        'SASL_PLAINTEXT',
+        '--username',
+        'alice',
+        '--password',
+        'pw',
+      ], { env });
+    } catch (err) {
+      exited = true;
+      stderr = String((err as { stderr?: string }).stderr ?? '');
+      exitCode = Number((err as { code?: number }).code ?? 0);
+    }
+
+    expect(exited).toBe(true);
+    expect(exitCode).toBe(1);
+    // Top-level error message from `toErrorMessage(err)`.
+    expect(stderr).toContain('pass force=true');
+    // Probe details rendered from responseBody.
+    expect(stderr).toContain('Probe status: failed');
+    expect(stderr).toContain('Probe error:');
+    expect(stderr).toContain('KafkaJSSASLAuthenticationError');
   }, 15000);
 });

@@ -1909,6 +1909,21 @@ kafkaEndpointCmd
       }
     } catch (err) {
       console.error(toErrorMessage(err));
+      // The route's 422 response carries `probeStatus` (e.g. "failed",
+      // "unreachable") and `probeError` (kafkajs error class name) as
+      // top-level fields on the response body. Render them here so users
+      // debugging an auth or topic failure see the actual cause instead of
+      // just the generic "pass force=true" message.
+      const body = (err as { responseBody?: unknown }).responseBody;
+      if (body && typeof body === 'object') {
+        const r = body as Record<string, unknown>;
+        if (typeof r.probeStatus === 'string') {
+          console.error(`  Probe status: ${r.probeStatus}`);
+        }
+        if (typeof r.probeError === 'string') {
+          console.error(`  Probe error:  ${r.probeError}`);
+        }
+      }
       process.exit(1);
     }
   });
