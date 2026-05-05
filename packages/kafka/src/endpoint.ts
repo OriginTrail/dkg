@@ -137,6 +137,35 @@ export class KafkaEndpointProbeFailedError extends Error {
 }
 
 /**
+ * Thrown when an existing KA's `dct:publisher` URN doesn't match the two
+ * shapes the package can extract an owner address from
+ * (`urn:dkg:agent:<addr>` or `did:dkg:agent:<addr>`).
+ *
+ * The earlier "defensive fallback" silently handed the raw string through to
+ * `buildKafkaEndpointKnowledgeAsset`, which lower-cased it and baked it into
+ * `urn:dkg:kafka-endpoint:<wrong-owner>:<hash>`. The result was a rebuilt KA
+ * whose `@id` differed from `existing.uri`. `agent.update(existing.uri, ...)`
+ * still resolved to the original kcId and wrote the new triples there, but
+ * those triples carried a DIFFERENT subject URI — original subject's triples
+ * orphaned, new subject's triples coexisting confusingly inside the original
+ * kcId. Failing closed eliminates the silent-mutation hole entirely.
+ *
+ * The publisher URN is non-secret operational metadata (it's a public agent
+ * address), so the throw message echoes it for operator debugging.
+ */
+export class KafkaEndpointPublisherFormatError extends Error {
+  constructor(public readonly publisher: string) {
+    super(
+      `Unrecognised Kafka endpoint publisher URN "${publisher}": expected ` +
+        `urn:dkg:agent:<address> or did:dkg:agent:<address>. ` +
+        `Refusing to mutate the KA — rebuilding the @id from a non-canonical ` +
+        `publisher would silently orphan the existing subject's triples.`,
+    );
+    this.name = 'KafkaEndpointPublisherFormatError';
+  }
+}
+
+/**
  * Build and publish a Kafka topic endpoint KA into the named context graph.
  * Consumes the route's probe decision (if any) per ADR 0002, applies the
  * `force` override, and throws `KafkaEndpointProbeFailedError` when a
@@ -553,16 +582,16 @@ function ownerFromPublisherUri(publisher: string): string {
   // Owner URIs have the shape `urn:dkg:agent:<address>` (canonical) or, for
   // legacy / cross-network callers, `did:dkg:agent:<address>`. The builder
   // re-lower-cases the address; we just need to extract it.
+  //
+  // Anything else throws — see `KafkaEndpointPublisherFormatError` for the
+  // silent-mutation hole that tolerated the unknown shape.
   if (publisher.startsWith('urn:dkg:agent:')) {
     return publisher.slice('urn:dkg:agent:'.length);
   }
   if (publisher.startsWith('did:dkg:agent:')) {
     return publisher.slice('did:dkg:agent:'.length);
   }
-  // Defensive fallback: hand the raw string through. The builder lower-cases
-  // it, which is the safe default for any URN-shaped publisher we haven't
-  // explicitly handled yet.
-  return publisher;
+  throw new KafkaEndpointPublisherFormatError(publisher);
 }
 
 function parseEndpointRow(

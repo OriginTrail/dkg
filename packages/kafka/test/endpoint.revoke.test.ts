@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { revokeKafkaEndpoint } from '../src/endpoint.js';
+import { KafkaEndpointPublisherFormatError, revokeKafkaEndpoint } from '../src/endpoint.js';
 
 interface CapturedUpdate {
   contextGraphId: string;
@@ -199,7 +199,17 @@ describe('revokeKafkaEndpoint', () => {
     });
   });
 
-  it('hands an unrecognised publisher URI shape through verbatim (defensive fallback)', async () => {
+  it('Bug 3: throws KafkaEndpointPublisherFormatError on an unrecognised publisher URN (silent-mutation hole)', async () => {
+    // The earlier "defensive fallback" behaviour silently mangled the rebuilt
+    // KA's `@id`: a publisher URN that didn't match `urn:dkg:agent:` or
+    // `did:dkg:agent:` was handed through verbatim, then `buildKafkaEndpoint
+    // KnowledgeAsset` produced `urn:dkg:kafka-endpoint:<wrong-owner>:<hash>`
+    // — different from `existing.uri`. `agent.update(existing.uri, ...)`
+    // would still resolve to the original kcId and write the new triples
+    // there, but the triples carried a DIFFERENT subject URI. Original
+    // subject's triples got orphaned; new subject's triples coexisted
+    // confusingly inside the original kcId. Failing closed eliminates the
+    // hole entirely.
     const { publisher, updateCalls } = makePublisher();
     const oddBindings = {
       ...ACTIVE_BINDINGS,
@@ -207,19 +217,45 @@ describe('revokeKafkaEndpoint', () => {
     };
     const { queryEngine } = makeQueryEngine([oddBindings]);
 
-    await revokeKafkaEndpoint({
-      contextGraphId: 'devnet-test',
-      uri: ENDPOINT_URI,
-      queryEngine,
-      publisher,
-      revokedAt: '2026-05-05T09:30:00.000Z',
-    });
+    await expect(
+      revokeKafkaEndpoint({
+        contextGraphId: 'devnet-test',
+        uri: ENDPOINT_URI,
+        queryEngine,
+        publisher,
+        revokedAt: '2026-05-05T09:30:00.000Z',
+      }),
+    ).rejects.toBeInstanceOf(KafkaEndpointPublisherFormatError);
+    // No publisher.update call — we throw before composing the new KA.
+    expect(updateCalls).toHaveLength(0);
+  });
 
-    // The KA-builder lower-cases the owner string; the package leans on that
-    // single normalisation point and never tries to re-shape unknown URIs.
-    expect(updateCalls[0].ka['dct:publisher']).toEqual({
-      '@id': 'urn:dkg:agent:urn:other:scheme:owner',
-    });
+  it('Bug 3: KafkaEndpointPublisherFormatError message names the offending publisher value', async () => {
+    // The publisher URN is non-secret, so the throw message can echo it for
+    // operator debugging. (Compare credentials, which the package never
+    // logs — see the slice 04 secret-substring tests.)
+    const { publisher } = makePublisher();
+    const oddBindings = {
+      ...ACTIVE_BINDINGS,
+      publisher: '<urn:other:scheme:owner>',
+    };
+    const { queryEngine } = makeQueryEngine([oddBindings]);
+
+    try {
+      await revokeKafkaEndpoint({
+        contextGraphId: 'devnet-test',
+        uri: ENDPOINT_URI,
+        queryEngine,
+        publisher,
+        revokedAt: '2026-05-05T09:30:00.000Z',
+      });
+      throw new Error('expected throw');
+    } catch (err) {
+      expect(err).toBeInstanceOf(KafkaEndpointPublisherFormatError);
+      const e = err as KafkaEndpointPublisherFormatError;
+      expect(e.message).toContain('urn:other:scheme:owner');
+      expect(e.publisher).toBe('urn:other:scheme:owner');
+    }
   });
 
   it('is idempotent: revoking an already-revoked KA succeeds and re-stamps revokedAt', async () => {
