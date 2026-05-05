@@ -128,7 +128,7 @@ rejects writers outside the allowed or participant agent set.
 sequenceDiagram
 actor Writer as Local agent process
 participant Agent as DKGAgent
-participant Keys as LocalAgentKeys
+participant Keys as AgentKeyStore
 participant Meta as ContextGraphMeta
 participant Gossip as GossipSub
 participant Handler as SharedMemoryHandler

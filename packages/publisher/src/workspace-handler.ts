@@ -1,7 +1,7 @@
 import type { TripleStore, Quad } from '@origintrail-official/dkg-storage';
 import { GraphManager } from '@origintrail-official/dkg-storage';
 import type { EventBus } from '@origintrail-official/dkg-core';
-import { Logger, createOperationContext, contextGraphDataUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
+import { Logger, createOperationContext, contextGraphDataUri, contextGraphMetaUri, DKG_ONTOLOGY } from '@origintrail-official/dkg-core';
 import type { PhaseCallback } from './publisher.js';
 import {
   decodeGossipEnvelope,
@@ -160,9 +160,9 @@ export class SharedMemoryHandler {
         return;
       }
 
-      const allowedAgents = await this.getContextGraphAllowedAgents(contextGraphId);
-      if (allowedAgents !== null) {
-        const verified = await this.verifyAgentEnvelope(envelope, payload, contextGraphId, allowedAgents, ctx);
+      const agentGateAddresses = await this.getContextGraphAgentGateAddresses(contextGraphId);
+      if (agentGateAddresses !== null) {
+        const verified = await this.verifyAgentEnvelope(envelope, payload, contextGraphId, agentGateAddresses, ctx);
         if (!verified) return;
       }
 
@@ -373,7 +373,7 @@ export class SharedMemoryHandler {
     envelope: GossipEnvelopeMsg | undefined,
     payload: Uint8Array,
     contextGraphId: string,
-    allowedAgents: string[],
+    agentGateAddresses: string[],
     ctx: import('@origintrail-official/dkg-core').OperationContext,
   ): Promise<boolean> {
     if (!envelope) {
@@ -421,15 +421,15 @@ export class SharedMemoryHandler {
       return false;
     }
 
-    const allowedSet = new Set(allowedAgents.map((agent) => agent.toLowerCase()));
-    if (!allowedSet.has(recovered.toLowerCase())) {
+    const agentGateSet = new Set(agentGateAddresses.map((agent) => agent.toLowerCase()));
+    if (!agentGateSet.has(recovered.toLowerCase())) {
       this.log.warn(ctx, `SWM write rejected: agent ${recovered} is not allowed for context graph "${contextGraphId}"`);
       return false;
     }
 
     if (this.localAgentAddresses) {
       const localAgents = await this.localAgentAddresses();
-      const localAllowed = localAgents.some((agent) => allowedSet.has(agent.toLowerCase()));
+      const localAllowed = localAgents.some((agent) => agentGateSet.has(agent.toLowerCase()));
       if (!localAllowed) {
         this.log.warn(ctx, `SWM write rejected: local node has no allowed agent for context graph "${contextGraphId}"`);
         return false;
@@ -460,20 +460,18 @@ export class SharedMemoryHandler {
   }
 
   /**
-   * Returns the agent-address allowlist for a context graph, or null if the
-   * graph is not agent-gated. Includes local allowedAgent entries and
-   * on-chain participantAgent metadata.
+   * Returns the accepted SWM writer agent addresses for a context graph, or
+   * null if the graph is not agent-gated. Includes DKG_ALLOWED_AGENT and
+   * DKG_PARTICIPANT_AGENT metadata.
    */
-  private async getContextGraphAllowedAgents(contextGraphId: string): Promise<string[] | null> {
-    const DKG_ALLOWED_AGENT = 'https://dkg.network/ontology#allowedAgent';
-    const DKG_PARTICIPANT_AGENT = 'https://dkg.network/ontology#participantAgent';
+  private async getContextGraphAgentGateAddresses(contextGraphId: string): Promise<string[] | null> {
     const cgMeta = contextGraphMetaUri(contextGraphId);
     const cgData = contextGraphDataUri(contextGraphId);
     const result = await this.store.query(
       `SELECT ?agent WHERE { GRAPH <${cgMeta}> {
-        { <${cgData}> <${DKG_ALLOWED_AGENT}> ?agent }
+        { <${cgData}> <${DKG_ONTOLOGY.DKG_ALLOWED_AGENT}> ?agent }
         UNION
-        { <${cgData}> <${DKG_PARTICIPANT_AGENT}> ?agent }
+        { <${cgData}> <${DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT}> ?agent }
       } }`,
     );
     if (result.type !== 'bindings' || result.bindings.length === 0) {

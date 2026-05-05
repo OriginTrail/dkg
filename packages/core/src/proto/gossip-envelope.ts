@@ -15,13 +15,17 @@ import protobuf from 'protobufjs';
 const { Type, Field } = protobuf;
 
 /**
- * V10 GossipSub message envelope.
+ * V10 GossipSub authentication envelope.
  *
- * All GossipSub messages are wrapped in this envelope which provides:
+ * GossipSub protocols that can authenticate an agent writer wrap the payload
+ * in this envelope, which provides:
  * - Protocol version ("10.0.0")
  * - Message type discrimination
  * - Context graph binding
  * - Agent identity and signature for authentication
+ *
+ * Legacy raw SWM payloads remain valid only for non-agent-gated context graphs
+ * when no local signing key is available.
  */
 
 export const GossipEnvelopeSchema = new Type('GossipEnvelope')

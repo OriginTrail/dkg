@@ -1,12 +1,12 @@
 # @origintrail-official/dkg-publisher
 
-Publishing protocol for DKG V9. Handles the complete lifecycle of getting Knowledge Assets from a node into the network — from RDF processing through Merkle tree construction to on-chain finalization.
+Publishing protocol for DKG V10. Handles the complete lifecycle of getting Knowledge Assets from a node into the network — from RDF processing through Merkle tree construction to on-chain finalization.
 
 ## Features
 
 - **DKGPublisher** — high-level publishing API: submit RDF, get back a finalized Knowledge Collection UAL
 - **PublishHandler** — P2P protocol handler that processes incoming publish requests from other nodes, validates data, stores triples, and returns signed ACKs
-- **WorkspaceHandler** — feeless "workspace mode" publishing for local-only or staging workflows
+- **WorkspaceHandler** — feeless Shared Working Memory handling for local-only or staging workflows, including signed gossip envelope verification for agent-gated context graphs
 - **Context Graphs** — `createContextGraph` and `publishToContextGraph` for M/N signature-gated subgraphs within paranets
 - **Context Oracle** — `ContextOracle` class providing verifiable read operations on Context Graphs: `queryWithProofs` (SPARQL with Merkle inclusion proofs), `entityWithProofs` (entity lookup with proofs), and `proveTriple` (single triple existence proof). Provenance triples are scoped to subjects discovered in the query results for efficiency.
 - **Merkle trees** — per-KA triple hashing, public/private sub-roots, and collection-level Merkle root computation
