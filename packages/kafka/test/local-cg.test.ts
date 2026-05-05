@@ -11,12 +11,18 @@ const EXPECTED_ID = `${KAFKA_LOCAL_CG_ID_PREFIX}${TEST_PEER_ID}`;
 
 interface FakeCgStore {
   exists: Set<string>;
+  // Tracks privacy per-id. Default-true on create unless the test seeds a
+  // non-private id explicitly. `isPrivateContextGraph` reads from this set.
+  privateIds: Set<string>;
   createCalls: Array<{ id: string; name: string }>;
 }
 
-function makeFakeCg(initial: { withId?: string } = {}) {
+function makeFakeCg(initial: { withId?: string; nonPrivate?: boolean } = {}) {
   const store: FakeCgStore = {
     exists: new Set(initial.withId ? [initial.withId] : []),
+    privateIds: new Set(
+      initial.withId && !initial.nonPrivate ? [initial.withId] : [],
+    ),
     createCalls: [],
   };
 
@@ -31,6 +37,10 @@ function makeFakeCg(initial: { withId?: string } = {}) {
       await Promise.resolve();
       return store.exists.has(id);
     },
+    isPrivateContextGraph: async (id: string): Promise<boolean> => {
+      await Promise.resolve();
+      return store.privateIds.has(id);
+    },
     createPrivateContextGraph: async (opts: { id: string; name: string }): Promise<void> => {
       // microtask hop, then atomic check-and-set so a real backing store
       // cannot double-create. Mirrors `agent.createContextGraph`'s own
@@ -40,6 +50,9 @@ function makeFakeCg(initial: { withId?: string } = {}) {
         throw new Error(`Context graph "${opts.id}" already exists`);
       }
       store.exists.add(opts.id);
+      // The real adapter hardcodes `private: true`, so any successful create
+      // through this primitive yields a private CG.
+      store.privateIds.add(opts.id);
       store.createCalls.push({ id: opts.id, name: opts.name });
     },
   };
@@ -115,6 +128,7 @@ describe('createKafkaLocalCgEnsurer', () => {
     let createPrivateCalls = 0;
     const cg = {
       contextGraphExists: async (_id: string): Promise<boolean> => false,
+      isPrivateContextGraph: async (_id: string): Promise<boolean> => true,
       createPrivateContextGraph: async (_opts: {
         id: string;
         name: string;
@@ -138,6 +152,9 @@ describe('createKafkaLocalCgEnsurer', () => {
   it('treats a concurrent "already exists" create error as success', async () => {
     const cg = {
       contextGraphExists: async (_id: string): Promise<boolean> => false,
+      // The parallel creator was OUR adapter (private: true), so the
+      // resulting CG is private and the post-race verification passes.
+      isPrivateContextGraph: async (_id: string): Promise<boolean> => true,
       createPrivateContextGraph: async (_opts: { id: string; name: string }): Promise<void> => {
         throw new Error(`Context graph "${EXPECTED_ID}" already exists`);
       },
@@ -152,6 +169,7 @@ describe('createKafkaLocalCgEnsurer', () => {
   it('rethrows non-"already exists" create errors', async () => {
     const cg = {
       contextGraphExists: async (_id: string): Promise<boolean> => false,
+      isPrivateContextGraph: async (_id: string): Promise<boolean> => true,
       createPrivateContextGraph: async (_opts: { id: string; name: string }): Promise<void> => {
         throw new Error('storage offline');
       },
@@ -159,6 +177,39 @@ describe('createKafkaLocalCgEnsurer', () => {
     const ensure = createKafkaLocalCgEnsurer(cg, TEST_PEER_ID);
 
     await expect(ensure()).rejects.toThrow(/storage offline/);
+  });
+
+  // Defence-in-depth: `contextGraphExists` only proves an id is in the local
+  // store, not that it's the private kafka-local CG we expect. A pre-existing
+  // non-private CG with a colliding id (created via /api/context-graph/create
+  // directly, or stale data from before this fix) must be REJECTED — not
+  // silently reused, which would publish into a non-local graph while the API
+  // still reports `cgScope: 'local'`.
+  it('throws when a CG with the reserved id exists locally but is not private', async () => {
+    const { cg } = makeFakeCg({ withId: EXPECTED_ID, nonPrivate: true });
+    const ensure = createKafkaLocalCgEnsurer(cg, TEST_PEER_ID);
+
+    await expect(ensure()).rejects.toThrow(
+      new RegExp(`${EXPECTED_ID}.*not private`, 'i'),
+    );
+  });
+
+  // Race-tolerance must not silently accept a non-private CG. If a parallel
+  // creator beat us with `private: false`, the post-race re-verification has
+  // to fail loudly with a distinct error that points at the race.
+  it('throws when a parallel "already exists" create yields a non-private CG', async () => {
+    const cg = {
+      contextGraphExists: async (_id: string): Promise<boolean> => false,
+      isPrivateContextGraph: async (_id: string): Promise<boolean> => false,
+      createPrivateContextGraph: async (_opts: { id: string; name: string }): Promise<void> => {
+        throw new Error(`Context graph "${EXPECTED_ID}" already exists`);
+      },
+    };
+    const ensure = createKafkaLocalCgEnsurer(cg, TEST_PEER_ID);
+
+    await expect(ensure()).rejects.toThrow(
+      /created concurrently but is not private/i,
+    );
   });
 
   // Hidden-coupling regression test: two ensurers built from two different

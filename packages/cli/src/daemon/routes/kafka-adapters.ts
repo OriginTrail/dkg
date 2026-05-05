@@ -43,6 +43,7 @@ export function kafkaLocalCgFromAgent(
 ): LocalCgPrimitive {
   return {
     contextGraphExists: (id) => agent.contextGraphExists(id),
+    isPrivateContextGraph: (id) => agent.isPrivateContextGraph(id),
     createPrivateContextGraph: (opts) =>
       agent.createContextGraph({
         ...opts,

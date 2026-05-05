@@ -40,9 +40,15 @@ export function kafkaLocalCgIdFor(peerId: string): string {
  * `createPrivateContextGraph` name is deliberate — the privacy guarantee is
  * encoded in the method name rather than a boolean flag, so a future caller
  * cannot accidentally drop `private: true` at the boundary.
+ *
+ * `isPrivateContextGraph` is required (not optional) so the ensurer can verify
+ * defence-in-depth that a pre-existing CG with our reserved id is actually
+ * private — protects against a non-private CG having been created out-of-band
+ * via `/api/context-graph/create` directly with a colliding id.
  */
 export interface LocalCgPrimitive {
   contextGraphExists(id: string): Promise<boolean>;
+  isPrivateContextGraph(id: string): Promise<boolean>;
   createPrivateContextGraph(opts: { id: string; name: string }): Promise<void>;
 }
 
@@ -68,9 +74,21 @@ export function createKafkaLocalCgEnsurer(
       return inFlight;
     }
     inFlight = (async () => {
-      const exists = await cg.contextGraphExists(id);
-      if (exists) {
-        return id;
+      // Defence-in-depth: `contextGraphExists` only proves an id is in the
+      // local store, not that it's the private kafka-local CG we expect. A
+      // pre-existing non-private CG with a colliding id (created via
+      // `/api/context-graph/create` directly, or stale data from before this
+      // fix) would otherwise be reused — publishing into a non-local graph
+      // while the API still reports `cgScope: 'local'`. Verify privacy.
+      if (await cg.contextGraphExists(id)) {
+        if (await cg.isPrivateContextGraph(id)) {
+          return id;
+        }
+        throw new Error(
+          `Context graph "${id}" exists locally but is not private. ` +
+            `The "${KAFKA_LOCAL_CG_BARE_ID}" prefix is reserved for private node-local CGs. ` +
+            `Either rename or delete the conflicting CG, or report a bug if you did not create it.`,
+        );
       }
       try {
         await cg.createPrivateContextGraph({ id, name: displayName });
@@ -81,6 +99,15 @@ export function createKafkaLocalCgEnsurer(
         const msg = err instanceof Error ? err.message : String(err);
         if (!/already exists/i.test(msg)) {
           throw err;
+        }
+        // Re-verify privacy: a parallel creator may have used the reserved
+        // id for a NON-private CG. Same threat model as the exists-branch
+        // check above — fail loudly rather than silently leak.
+        if (!(await cg.isPrivateContextGraph(id))) {
+          throw new Error(
+            `Context graph "${id}" was created concurrently but is not private. ` +
+              `Reserved id was used for a non-private CG — investigate.`,
+          );
         }
       }
       return id;

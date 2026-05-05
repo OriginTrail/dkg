@@ -6251,7 +6251,13 @@ export class DKGAgent {
     });
   }
 
-  private async isPrivateContextGraph(contextGraphId: string): Promise<boolean> {
+  /**
+   * Returns true when the CG carries a `"private"` access-policy triple in
+   * the ontology or `_meta` graph, OR when its `_meta` graph contains any
+   * allowlist predicate (`DKG_ALLOWED_PEER`, `DKG_ALLOWED_AGENT`, or
+   * `DKG_PARTICIPANT_AGENT`). System paranets always return false.
+   */
+  async isPrivateContextGraph(contextGraphId: string): Promise<boolean> {
     if ((Object.values(SYSTEM_PARANETS) as string[]).includes(contextGraphId)) {
       return false;
     }
