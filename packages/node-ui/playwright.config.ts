@@ -33,7 +33,7 @@ export default defineConfig({
   use: {
     baseURL: `http://localhost:${PORT}/ui/`,
     // Run headed locally so you can see the browser; CI keeps it headless.
-    headless: false,
+    headless: true,
     screenshot: 'only-on-failure',
     trace: 'on-first-retry',
     actionTimeout: CI ? 15_000 : 10_000,
