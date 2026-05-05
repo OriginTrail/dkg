@@ -145,25 +145,30 @@ describe('handleVerify — Bug 1: validation must run after the existing KA is l
     // The stored KA records PLAINTEXT, so the verify route must default to
     // it AND treat that as the cred-equivalent (PLAINTEXT-with-no-creds is
     // a meaningful "is the broker reachable" probe per `hasAnyKafkaCredentials`).
-    // The probe will fail (no real broker) but the route must REACH the
-    // probe — not 400 before it.
+    // The probe will fail (no real broker `kafka.example.com:9092`) but the
+    // route must REACH the probe and then call `verifyKafkaEndpoint`, which
+    // records the failure on the KA via `agent.update` and returns 200.
     //
-    // The exact terminal status depends on how the route handles probe
-    // failure: `verifyKafkaEndpoint` records `verificationStatus="failed"`
-    // and the route returns 200 with the failure recorded on the KA. What
-    // we MUST NOT see is the early 400.
-    expect(captured.status).not.toBe(400);
-
-    // Either way, the agent.update path was reached because the route got
-    // past the validation/fetch/probe sequence.
-    expect(updateCalls.length).toBeGreaterThanOrEqual(0);
+    // Codex Issue B2: the previous `expect(updateCalls.length).toBeGreaterThanOrEqual(0)`
+    // was tautological (length is always ≥ 0). Pin the concrete shape: the
+    // route reached the URI-keyed `agent.update` and the response is 200.
+    expect(captured.status).toBe(200);
+    expect(updateCalls).toHaveLength(1);
+    expect(updateCalls[0].uri).toBe(VALID_URI);
+    expect(updateCalls[0].cgId).toBe('devnet-test');
+    // Pin the wire-shape too — a regression that 422'd or returned the
+    // bare result without the probe block would slip through a status-only
+    // check. The probe outcome lands on the response body.
+    const body = captured.body as { verificationStatus?: string; probe?: { status?: string } };
+    expect(body.verificationStatus).toBe('failed');
+    expect(body.probe?.status).toMatch(/^(failed|unreachable)$/);
   }, 30_000);
 
   it('verify with no securityProtocol AND no creds on body, against a stored PLAINTEXT KA → succeeds (PLAINTEXT defaulting alone)', async () => {
     // The minimum-input case the brief calls out: URI + cg only, with the
-    // stored KA carrying PLAINTEXT. Should NOT 400 — the stored protocol
-    // covers `hasAnyKafkaCredentials`'s PLAINTEXT branch.
-    const { agent } = buildMockAgent({
+    // stored KA carrying PLAINTEXT. Must reach `agent.update` (creds-
+    // required gate is satisfied by the stored PLAINTEXT after defaulting).
+    const { agent, updateCalls } = buildMockAgent({
       getEndpointBindings: [STORED_KA_BINDINGS],
     });
     const req = buildMockReq('POST', '/api/kafka/endpoint/verify', {
@@ -174,7 +179,11 @@ describe('handleVerify — Bug 1: validation must run after the existing KA is l
 
     await handleKafkaRoutes(buildCtx(req, res, agent));
 
-    expect(captured.status).not.toBe(400);
+    // Codex Issue B2: tighten beyond `not.toBe(400)`. A regression that
+    // returned 500 or skipped the update would have passed that check.
+    expect(captured.status).toBe(200);
+    expect(updateCalls).toHaveLength(1);
+    expect(updateCalls[0].uri).toBe(VALID_URI);
   }, 30_000);
 
   it('verify with no creds on body AND no recorded protocol → 400 (creds-required gate still fires)', async () => {
@@ -183,7 +192,7 @@ describe('handleVerify — Bug 1: validation must run after the existing KA is l
     // not the creds-required semantic.
     const noProtocolBindings = { ...STORED_KA_BINDINGS };
     delete (noProtocolBindings as Partial<typeof STORED_KA_BINDINGS>).securityProtocol;
-    const { agent } = buildMockAgent({
+    const { agent, updateCalls } = buildMockAgent({
       getEndpointBindings: [noProtocolBindings],
     });
     const req = buildMockReq('POST', '/api/kafka/endpoint/verify', {
@@ -200,6 +209,10 @@ describe('handleVerify — Bug 1: validation must run after the existing KA is l
     // protocol gate fires once defaulting completes — both are 400 and both
     // mention something the caller can act on.
     expect(typeof body.error).toBe('string');
+    // Defence in depth: a 400 must never have written through to the update
+    // path. Pin the negative side too so a regression can't 400-then-also-
+    // mutate.
+    expect(updateCalls).toHaveLength(0);
   }, 30_000);
 
   it('verify with sasl on body but no securityProtocol on body or stored KA → 400 (effective consistency check fires)', async () => {
@@ -209,7 +222,7 @@ describe('handleVerify — Bug 1: validation must run after the existing KA is l
     // even though it ran AFTER the KA load.
     const noProtocolBindings = { ...STORED_KA_BINDINGS };
     delete (noProtocolBindings as Partial<typeof STORED_KA_BINDINGS>).securityProtocol;
-    const { agent } = buildMockAgent({
+    const { agent, updateCalls } = buildMockAgent({
       getEndpointBindings: [noProtocolBindings],
     });
     const req = buildMockReq('POST', '/api/kafka/endpoint/verify', {
@@ -222,12 +235,13 @@ describe('handleVerify — Bug 1: validation must run after the existing KA is l
     await handleKafkaRoutes(buildCtx(req, res, agent));
 
     expect(captured.status).toBe(400);
+    expect(updateCalls).toHaveLength(0);
   }, 30_000);
 
   it('verify against a non-existent stored KA returns 404 (not 400) — the URI shape is fine, the KA just isn\'t there', async () => {
     // Regression guard: the no-KA path must surface as 404, not as a 400
     // from a too-eager validator running on the bare body.
-    const { agent } = buildMockAgent({
+    const { agent, updateCalls } = buildMockAgent({
       getEndpointBindings: [], // no rows → KA not found
     });
     const req = buildMockReq('POST', '/api/kafka/endpoint/verify', {
@@ -240,5 +254,6 @@ describe('handleVerify — Bug 1: validation must run after the existing KA is l
     await handleKafkaRoutes(buildCtx(req, res, agent));
 
     expect(captured.status).toBe(404);
+    expect(updateCalls).toHaveLength(0);
   }, 30_000);
 });
