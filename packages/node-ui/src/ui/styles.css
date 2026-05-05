@@ -184,7 +184,30 @@ button:focus:not(:focus-visible) { outline: none; }
   color: var(--text-primary);
   user-select: none;
 }
-.v10-header-logo svg { stroke: var(--text-secondary); }
+.v10-header-logo-ot {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: 10px;
+  padding-left: 10px;
+  border-left: 1px solid var(--border-default);
+}
+.v10-header-logo-ot-by {
+  font-size: 9px;
+  color: var(--text-tertiary);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+.v10-header-ot-wordmark {
+  display: block;
+  color: var(--text-secondary);
+  opacity: 0.9;
+}
+.v10-header-ot-wordmark svg {
+  display: block;
+  stroke: none;
+  fill: currentColor;
+}
 .v10-header-logo-text {
   font-family: var(--font-mono);
   font-weight: 600;

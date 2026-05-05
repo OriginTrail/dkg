@@ -3,6 +3,8 @@ import { create } from 'zustand';
 export interface ContextGraph {
   id: string;
   name: string;
+  /** Agent DID (`did:dkg:agent:…`) — from daemon list; drives My vs Context Oracle when set. */
+  creator?: string;
   description?: string;
   assetCount?: number;
   assets?: number;

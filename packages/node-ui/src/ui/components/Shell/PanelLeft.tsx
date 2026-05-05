@@ -8,6 +8,16 @@ import { CreateProjectModal } from '../Modals/CreateProjectModal.js';
 import { JoinProjectModal } from '../Modals/JoinProjectModal.js';
 import { ImportFilesModal } from '../Modals/ImportFilesModal.js';
 import { useNodeEvents } from '../../hooks/useNodeEvents.js';
+import { fetchCurrentAgent, type AgentIdentity } from '../../api.js';
+import {
+  belongsInContextOracle,
+  creatorIsAnotherAgent,
+  type AgentSidebarIdentity,
+} from '../../lib/contextGraphSidebar.js';
+
+function toSidebarIdentity(a: AgentIdentity): AgentSidebarIdentity {
+  return { agentDid: a.agentDid };
+}
 
 const CHEVRON_ICON = '▸';
 const COLLAPSE_ICON = '◂';
@@ -15,19 +25,18 @@ const COLLAPSE_ICON = '◂';
 type TreeMode = 'explorer' | 'oracle';
 
 // ─── Local per-project organisation ─────────────────────────────
-// Two concerns, both backed by localStorage because the daemon doesn't
-// currently expose per-project metadata we'd need to drive them:
-//
-//   1. Hidden — dismiss leftover test/demo projects.
-//   2. Participating — manually mark a project as "joined someone
-//      else's" rather than "mine". When the daemon starts returning
-//      a `createdBy` / `owner` field on /api/paranet/list we'll switch
-//      the detection automatic and this local override stays as a
-//      user preference that wins over the heuristic.
+//   1. Hidden — dismiss leftover test/demo projects (localStorage).
+//   2. My vs Context Oracle — primarily from daemon `creator` DID vs
+//      GET /api/agent/identity (`belongsInContextOracle`); plus
+//      `participatingProjectIds` manual move-to-oracle, and
+//      `forceMyProjectIds` to pin guest projects under My Projects.
 const HIDDEN_KEY = 'v10:hiddenProjectIds';
 const HIDDEN_CHANGE_EVENT = 'v10:hidden-projects-change';
-const PARTICIPATING_KEY = 'v10:participatingProjectIds';
-const PARTICIPATING_CHANGE_EVENT = 'v10:participating-projects-change';
+const MANUAL_ORACLE_KEY = 'v10:participatingProjectIds';
+const MANUAL_ORACLE_CHANGE_EVENT = 'v10:participating-projects-change';
+
+const FORCE_MY_KEY = 'v10:forceMyProjectIds';
+const FORCE_MY_CHANGE_EVENT = 'v10:force-my-projects-change';
 
 function loadHiddenIds(): Set<string> {
   try {
@@ -69,44 +78,96 @@ function useHiddenProjectIds(): {
   return { hidden, hide, unhideAll };
 }
 
-// ─── "Participating in" tagging ─────────────────────────────────
-function loadParticipatingIds(): Set<string> {
+function loadManualOracleIds(): Set<string> {
   try {
-    const raw = localStorage.getItem(PARTICIPATING_KEY);
+    const raw = localStorage.getItem(MANUAL_ORACLE_KEY);
     if (!raw) return new Set();
     const arr = JSON.parse(raw);
     return new Set(Array.isArray(arr) ? arr : []);
   } catch { return new Set(); }
 }
 
-function saveParticipatingIds(ids: Set<string>): void {
+function saveManualOracleIds(ids: Set<string>): void {
   try {
-    localStorage.setItem(PARTICIPATING_KEY, JSON.stringify([...ids]));
-    window.dispatchEvent(new Event(PARTICIPATING_CHANGE_EVENT));
+    localStorage.setItem(MANUAL_ORACLE_KEY, JSON.stringify([...ids]));
+    window.dispatchEvent(new Event(MANUAL_ORACLE_CHANGE_EVENT));
   } catch { /* non-critical */ }
 }
 
-function useParticipatingIds(): {
-  participating: Set<string>;
-  toggle: (id: string) => void;
+function useManualOracleIds(): {
+  manualOracleIds: Set<string>;
+  addManualOracle: (id: string) => void;
+  removeManualOracle: (id: string) => void;
 } {
-  const [participating, setParticipating] = useState<Set<string>>(() => loadParticipatingIds());
+  const [manualOracleIds, setManualOracleIds] = useState<Set<string>>(() => loadManualOracleIds());
   useEffect(() => {
-    const sync = () => setParticipating(loadParticipatingIds());
-    window.addEventListener(PARTICIPATING_CHANGE_EVENT, sync);
+    const sync = () => setManualOracleIds(loadManualOracleIds());
+    window.addEventListener(MANUAL_ORACLE_CHANGE_EVENT, sync);
     window.addEventListener('storage', sync);
     return () => {
-      window.removeEventListener(PARTICIPATING_CHANGE_EVENT, sync);
+      window.removeEventListener(MANUAL_ORACLE_CHANGE_EVENT, sync);
       window.removeEventListener('storage', sync);
     };
   }, []);
-  const toggle = useCallback((id: string) => {
-    const next = new Set(loadParticipatingIds());
-    if (next.has(id)) next.delete(id);
-    else next.add(id);
-    saveParticipatingIds(next);
+  const addManualOracle = useCallback((id: string) => {
+    const next = new Set(loadManualOracleIds());
+    next.add(id);
+    saveManualOracleIds(next);
+    setManualOracleIds(next);
   }, []);
-  return { participating, toggle };
+  const removeManualOracle = useCallback((id: string) => {
+    const next = new Set(loadManualOracleIds());
+    next.delete(id);
+    saveManualOracleIds(next);
+    setManualOracleIds(next);
+  }, []);
+  return { manualOracleIds, addManualOracle, removeManualOracle };
+}
+
+function loadForceMyIds(): Set<string> {
+  try {
+    const raw = localStorage.getItem(FORCE_MY_KEY);
+    if (!raw) return new Set();
+    const arr = JSON.parse(raw);
+    return new Set(Array.isArray(arr) ? arr : []);
+  } catch { return new Set(); }
+}
+
+function saveForceMyIds(ids: Set<string>): void {
+  try {
+    localStorage.setItem(FORCE_MY_KEY, JSON.stringify([...ids]));
+    window.dispatchEvent(new Event(FORCE_MY_CHANGE_EVENT));
+  } catch { /* non-critical */ }
+}
+
+function useForceMyIds(): {
+  forceMyIds: Set<string>;
+  addForceMy: (id: string) => void;
+  removeForceMy: (id: string) => void;
+} {
+  const [forceMyIds, setForceMyIds] = useState<Set<string>>(() => loadForceMyIds());
+  useEffect(() => {
+    const sync = () => setForceMyIds(loadForceMyIds());
+    window.addEventListener(FORCE_MY_CHANGE_EVENT, sync);
+    window.addEventListener('storage', sync);
+    return () => {
+      window.removeEventListener(FORCE_MY_CHANGE_EVENT, sync);
+      window.removeEventListener('storage', sync);
+    };
+  }, []);
+  const addForceMy = useCallback((id: string) => {
+    const next = new Set(loadForceMyIds());
+    next.add(id);
+    saveForceMyIds(next);
+    setForceMyIds(next);
+  }, []);
+  const removeForceMy = useCallback((id: string) => {
+    const next = new Set(loadForceMyIds());
+    next.delete(id);
+    saveForceMyIds(next);
+    setForceMyIds(next);
+  }, []);
+  return { forceMyIds, addForceMy, removeForceMy };
 }
 
 interface ProjectTreeItemProps {
@@ -146,8 +207,8 @@ function ProjectTreeItem({
           type="button"
           className="v10-tree-move-btn"
           title={isParticipating
-            ? 'Move to "My Projects"'
-            : 'Mark as participating (move to "Participating")'}
+            ? 'Move to My Projects'
+            : 'Move to Context Oracle (not your primary project)'}
           onClick={(e) => { e.stopPropagation(); onToggleParticipating(); }}
         >
           ⤑
@@ -233,10 +294,38 @@ export function PanelLeft() {
   const [treeMode, setTreeMode] = useState<TreeMode>('explorer');
 
   const { hidden: hiddenIds, hide: hideProject, unhideAll } = useHiddenProjectIds();
-  const { participating: participatingIds, toggle: toggleParticipating } = useParticipatingIds();
+  const { manualOracleIds, addManualOracle, removeManualOracle } = useManualOracleIds();
+  const { forceMyIds, addForceMy, removeForceMy } = useForceMyIds();
+  const [agentIdentity, setAgentIdentity] = useState<AgentSidebarIdentity | null>(null);
+
   const visibleContextGraphs = contextGraphs.filter((cg) => !hiddenIds.has(cg.id));
-  const myProjects = visibleContextGraphs.filter((cg) => !participatingIds.has(cg.id));
-  const participatingProjects = visibleContextGraphs.filter((cg) => participatingIds.has(cg.id));
+  const myProjects = visibleContextGraphs.filter((cg) =>
+    !belongsInContextOracle(cg, agentIdentity, manualOracleIds, forceMyIds));
+  const contextOracleProjects = visibleContextGraphs.filter((cg) =>
+    belongsInContextOracle(cg, agentIdentity, manualOracleIds, forceMyIds));
+
+  const handleSidebarMove = useCallback((cg: ContextGraph) => {
+    const inOracle = belongsInContextOracle(cg, agentIdentity, manualOracleIds, forceMyIds);
+    if (inOracle) {
+      removeManualOracle(cg.id);
+      if (agentIdentity != null && creatorIsAnotherAgent(cg, agentIdentity)) {
+        addForceMy(cg.id);
+      } else {
+        removeForceMy(cg.id);
+      }
+    } else {
+      addManualOracle(cg.id);
+      removeForceMy(cg.id);
+    }
+  }, [
+    agentIdentity,
+    manualOracleIds,
+    forceMyIds,
+    addManualOracle,
+    removeManualOracle,
+    addForceMy,
+    removeForceMy,
+  ]);
   const hiddenCount = contextGraphs.length - visibleContextGraphs.length;
 
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -245,6 +334,7 @@ export function PanelLeft() {
 
   const loadCGs = useCallback(() => {
     setLoading(true);
+    fetchCurrentAgent().then((a: AgentIdentity) => setAgentIdentity(toSidebarIdentity(a))).catch(() => {});
     api.fetchContextGraphs()
       .then(({ contextGraphs: cgs }: any) => setContextGraphs(cgs ?? []))
       .catch(() => {})
@@ -324,13 +414,8 @@ export function PanelLeft() {
             </div>
           )}
 
-          {/* Projects split into two groups. Default everything lives
-              under "My Projects"; the user can mark individual projects
-              as "participating" via the ⤑ button on the row, which
-              moves them to the Participating group. This is a
-              client-local tag (localStorage) — once the daemon exposes
-              real creator/owner metadata we'll auto-populate from that
-              and keep the manual override as a user preference. */}
+          {/* My Projects only here; non-mine / guest projects live under
+              the Context Oracle tab (same localStorage tag as before). */}
           {myProjects.length > 0 && (
             <>
               <div className="v10-tree-group-label">My Projects</div>
@@ -349,31 +434,7 @@ export function PanelLeft() {
                     hideProject(cg.id);
                     if (activeProjectId === cg.id) setActiveProject(null);
                   }}
-                  onToggleParticipating={() => toggleParticipating(cg.id)}
-                />
-              ))}
-            </>
-          )}
-
-          {participatingProjects.length > 0 && (
-            <>
-              <div className="v10-tree-group-label">Participating Projects</div>
-              {participatingProjects.map((cg) => (
-                <ProjectTreeItem
-                  key={cg.id}
-                  cg={cg}
-                  isActive={activeProjectId === cg.id}
-                  isParticipating={true}
-                  onSelect={() => {
-                    setActiveProject(cg.id);
-                    openTab({ id: `project:${cg.id}`, label: cg.name || cg.id.slice(0, 16), closable: true });
-                  }}
-                  onImport={() => setImportTarget(cg)}
-                  onHide={() => {
-                    hideProject(cg.id);
-                    if (activeProjectId === cg.id) setActiveProject(null);
-                  }}
-                  onToggleParticipating={() => toggleParticipating(cg.id)}
+                  onToggleParticipating={() => handleSidebarMove(cg)}
                 />
               ))}
             </>
@@ -396,11 +457,44 @@ export function PanelLeft() {
 
       {treeMode === 'oracle' && (
         <div className="v10-tree-content">
-          <div className="v10-oracle-placeholder">
-            <p style={{ fontSize: 12, color: 'var(--text-tertiary)', padding: 24, textAlign: 'center' }}>
-              Context Oracle browser coming soon.
+          {contextOracleProjects.length > 0 && (
+            <>
+              <div className="v10-tree-group-label">Context Oracle</div>
+              {contextOracleProjects.map((cg) => (
+                <ProjectTreeItem
+                  key={cg.id}
+                  cg={cg}
+                  isActive={activeProjectId === cg.id}
+                  isParticipating={true}
+                  onSelect={() => {
+                    setActiveProject(cg.id);
+                    openTab({ id: `project:${cg.id}`, label: cg.name || cg.id.slice(0, 16), closable: true });
+                  }}
+                  onImport={() => setImportTarget(cg)}
+                  onHide={() => {
+                    hideProject(cg.id);
+                    if (activeProjectId === cg.id) setActiveProject(null);
+                  }}
+                  onToggleParticipating={() => handleSidebarMove(cg)}
+                />
+              ))}
+            </>
+          )}
+          {contextOracleProjects.length === 0 && (
+            <p style={{ fontSize: 12, color: 'var(--text-tertiary)', padding: '20px 12px', textAlign: 'center', lineHeight: 1.5 }}>
+              No Context Oracle projects. Guest or joined projects (another agent is creator) appear here automatically. You can move your own projects here with ⤑, or move any project back under <strong>Projects</strong> with ⤑.
             </p>
-          </div>
+          )}
+          {hiddenCount > 0 && (
+            <button
+              type="button"
+              className="v10-tree-show-hidden"
+              onClick={unhideAll}
+              title="Restore all projects dismissed from the sidebar"
+            >
+              ↺ Show {hiddenCount} hidden project{hiddenCount !== 1 ? 's' : ''}
+            </button>
+          )}
         </div>
       )}
 
