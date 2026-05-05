@@ -94,9 +94,10 @@ describe('validateContextGraphSelection', () => {
     ).toEqual({ kind: 'shared', contextGraphId: 'devnet-test' });
   });
 
-  // Bug 2 regression: `kafka-local` is reserved at the package level for the
-  // node-local free CG (see local-cg.ts). Passing it as a shared id would
-  // double-write into the reserved id and bypass the lazy-create path.
+  // Bug 2 regression: the `kafka-local` namespace is reserved at the package
+  // level for node-local free CGs (see local-cg.ts). The reservation covers
+  // both the bare id and any `kafka-local-{peerId}` prefix form — the prefix
+  // space is owned by the local-CG ensurer.
   it('rejects contextGraphId: "kafka-local" with a hint to use useLocalCg: true', () => {
     expect(() =>
       validateContextGraphSelection({ contextGraphId: 'kafka-local' }),
@@ -107,5 +108,22 @@ describe('validateContextGraphSelection', () => {
     expect(() =>
       validateContextGraphSelection({ contextGraphId: '  kafka-local  ' }),
     ).toThrow(/kafka-local/);
+  });
+
+  it('rejects the per-node prefixed form "kafka-local-{peerId}" with the same hint', () => {
+    expect(() =>
+      validateContextGraphSelection({
+        contextGraphId: 'kafka-local-12D3KooWAbcDEFghiJKLmnoPQRstuVWxyZ',
+      }),
+    ).toThrow(/"useLocalCg":\s*true/);
+  });
+
+  // Boundary: only the literal `kafka-local-` prefix is reserved. Ids that
+  // happen to start with the substring `kafkalocal` (no dash) are perfectly
+  // valid shared ids and must NOT be swept up by the prefix check.
+  it('accepts a shared id that merely contains "kafkalocal" without the reserved prefix', () => {
+    expect(
+      validateContextGraphSelection({ contextGraphId: 'kafkalocal' }),
+    ).toEqual({ kind: 'shared', contextGraphId: 'kafkalocal' });
   });
 });

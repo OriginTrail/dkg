@@ -188,7 +188,7 @@ describe('kafka walking skeleton e2e', () => {
     expect(Number.isNaN(Date.parse(stripQuotedLiteral(row.issued ?? '')))).toBe(false);
   }, 90_000);
 
-  it('registers a Kafka endpoint into kafka-local with --local and discovers it via SPARQL', async () => {
+  it('registers a Kafka endpoint into kafka-local-{peerId} with --local and discovers it via SPARQL', async () => {
     const broker = 'kafka.e2e.local:9092';
     const topic = `walking-skeleton-local.${Date.now()}`;
     const messageFormat = 'application/cloudevents+json';
@@ -224,7 +224,15 @@ describe('kafka walking skeleton e2e', () => {
     expect(result.stdout).toContain('kafka-local');
     expect(result.stdout).toContain('CG scope:       local');
 
-    const row = await waitForEndpointRow(client, 'kafka-local', expectedUri);
+    // The daemon scopes the kafka-local CG id per-node as
+    // `kafka-local-{peerId}`. Parse the resolved id from the CLI output and
+    // SPARQL-query against THAT id so the test stays correct on any node.
+    const cgLineMatch = result.stdout.match(/Context graph:\s+(\S+)/);
+    expect(cgLineMatch?.[1]).toBeDefined();
+    const resolvedCgId = cgLineMatch![1]!;
+    expect(resolvedCgId.startsWith('kafka-local-')).toBe(true);
+
+    const row = await waitForEndpointRow(client, resolvedCgId, expectedUri);
 
     expect(stripQuotedLiteral(row.broker ?? '')).toBe(broker);
     expect(stripQuotedLiteral(row.topic ?? '')).toBe(topic);

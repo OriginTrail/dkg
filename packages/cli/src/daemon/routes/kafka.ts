@@ -73,8 +73,11 @@ export async function handleKafkaRoutes(ctx: RequestContext): Promise<void> {
       publisher: kafkaPublisherFromAgent(agent),
       // Fresh ensurer per request; hoisting per-agent is a deferred optimization
       // (the agent's "already exists" guard plus the exists-check make repeats cheap).
+      // The peer-id scopes the kafka-local CG id per node — `kafka-local-{peerId}` —
+      // so two nodes cannot collide on the literal "kafka-local" id.
       ensureLocalCg: createKafkaLocalCgEnsurer(
         kafkaLocalCgFromAgent(agent, requestAgentAddress),
+        agent.peerId,
       ),
     });
 

@@ -28,8 +28,14 @@ export function kafkaPublisherFromAgent(agent: DKGAgent): KafkaEndpointPublisher
 
 /**
  * Adapts the agent's free-CG surface to the `LocalCgPrimitive` shape the
- * `kafka-local` ensurer consumes. `callerAgentAddress` is threaded into
+ * kafka-local ensurer consumes. `callerAgentAddress` is threaded into
  * `createContextGraph` so the create runs under the requesting agent.
+ *
+ * The `private: true` flag is hardcoded HERE — the kafka package never sees
+ * the boolean, so a future refactor cannot accidentally drop it. Without
+ * `private: true`, the agent auto-subscribes to the CG's gossip topic and
+ * broadcasts the CG definition (`dkg-agent.ts:3837`); the slice-02 spec
+ * requires kafka-local to be truly node-local, which means no gossip.
  */
 export function kafkaLocalCgFromAgent(
   agent: DKGAgent,
@@ -37,7 +43,11 @@ export function kafkaLocalCgFromAgent(
 ): LocalCgPrimitive {
   return {
     contextGraphExists: (id) => agent.contextGraphExists(id),
-    createContextGraph: (opts) =>
-      agent.createContextGraph({ ...opts, callerAgentAddress }),
+    createPrivateContextGraph: (opts) =>
+      agent.createContextGraph({
+        ...opts,
+        private: true,
+        callerAgentAddress,
+      }),
   };
 }

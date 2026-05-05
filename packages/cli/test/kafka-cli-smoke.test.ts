@@ -106,11 +106,16 @@ describe.sequential('kafka CLI smoke', () => {
   }, 15000);
 
   it('registers a Kafka endpoint through the CLI with --local', async () => {
+    // The daemon scopes the kafka-local CG id per-node as
+    // `kafka-local-{peerId}`. The smoke test mocks the daemon, so we choose
+    // a realistic prefixed value here and assert the CLI prints it back.
+    const stubPeerId = '12D3KooWStubPeerIdForSmokeTest';
+    const stubLocalId = `kafka-local-${stubPeerId}`;
     nextResponse = {
       status: 200,
       body: {
         uri: 'urn:dkg:kafka-endpoint:0xabc:hash',
-        contextGraphId: 'kafka-local',
+        contextGraphId: stubLocalId,
         cgScope: 'local',
       },
     };
@@ -130,7 +135,7 @@ describe.sequential('kafka CLI smoke', () => {
 
     expect(result.stdout).toContain('Kafka endpoint registered:');
     expect(result.stdout).toContain('urn:dkg:kafka-endpoint:0xabc:hash');
-    expect(result.stdout).toContain('kafka-local');
+    expect(result.stdout).toContain(stubLocalId);
     expect(result.stdout).toContain('CG scope:       local');
     expect(JSON.parse(lastBody)).toEqual({
       useLocalCg: true,
