@@ -1845,21 +1845,52 @@ kafkaEndpointCmd
         passwordStdin: Boolean(opts.passwordStdin),
       });
 
-      const client = await ApiClient.connect();
+      // ── SASL credential validation ────────────────────────────────────
+      // The previous shape silently dropped a half-supplied SASL block when
+      // exactly one of --username / --password was present. That left the
+      // caller with `verificationStatus: "unattempted"` even though they
+      // clearly intended to authenticate — a confusing footgun. Fail fast
+      // instead, with messages that name every input that could have set
+      // the credential (including --password-stdin / DKG_KAFKA_PASSWORD).
+      const username = typeof opts.username === 'string' && opts.username.length > 0
+        ? opts.username
+        : undefined;
       const securityProtocol = opts.securityProtocol
         ? (String(opts.securityProtocol).toUpperCase() as SecurityProtocol)
         : undefined;
+      const isSaslProtocol =
+        securityProtocol === 'SASL_PLAINTEXT' || securityProtocol === 'SASL_SSL';
+      const isNonSaslProtocol =
+        securityProtocol === 'PLAINTEXT' || securityProtocol === 'SSL';
+
+      if ((username && !resolvedPassword) || (!username && resolvedPassword)) {
+        throw new Error(
+          '--username and --password (or --password-stdin / DKG_KAFKA_PASSWORD) must be supplied together',
+        );
+      }
+      if (isSaslProtocol && (!username || !resolvedPassword)) {
+        throw new Error(
+          'SASL_PLAINTEXT/SASL_SSL requires --username and --password (or --password-stdin / DKG_KAFKA_PASSWORD)',
+        );
+      }
+      if (isNonSaslProtocol && (username || resolvedPassword)) {
+        throw new Error(
+          '--username/--password is only valid with SASL_PLAINTEXT or SASL_SSL',
+        );
+      }
+
+      const client = await ApiClient.connect();
       const result = await client.registerKafkaEndpoint({
         contextGraphId: opts.cg,
         broker: opts.broker,
         topic: opts.topic,
         messageFormat: opts.format,
         ...(securityProtocol ? { securityProtocol } : {}),
-        ...(opts.username && resolvedPassword
+        ...(username && resolvedPassword
           ? {
               sasl: {
                 mechanism: saslMechanism as SaslMechanism,
-                username: String(opts.username),
+                username,
                 password: resolvedPassword,
               },
             }

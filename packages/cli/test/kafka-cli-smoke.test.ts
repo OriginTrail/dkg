@@ -419,4 +419,172 @@ describe.sequential('kafka CLI smoke', () => {
     expect(stderr).toContain('--password');
     expect(stderr).toContain('--password-stdin');
   }, 15000);
+
+  // --- Fix 2: fail fast on partial / misplaced SASL credentials -------
+  // The previous shape silently dropped a half-supplied SASL block
+  // (`opts.username && opts.password ? sasl : {}`) which left the resulting
+  // KA in a confusing `verificationStatus: "unattempted"` state. The CLI
+  // now refuses these inputs up front.
+
+  it('fails fast when only --username is supplied (no password)', async () => {
+    const env = { ...process.env, DKG_HOME: dkgHome, DKG_API_PORT: smokeApiPort };
+
+    let exited = false;
+    let stderr = '';
+    try {
+      await execFileAsync('node', [
+        CLI_ENTRY,
+        'kafka',
+        'endpoint',
+        'register',
+        '--cg',
+        'devnet-test',
+        '--broker',
+        'kafka.example.com:9092',
+        '--topic',
+        'orders.created',
+        '--security-protocol',
+        'SASL_PLAINTEXT',
+        '--username',
+        'alice',
+      ], { env });
+    } catch (err) {
+      exited = true;
+      stderr = String((err as { stderr?: string }).stderr ?? '');
+    }
+
+    expect(exited).toBe(true);
+    expect(stderr).toContain('--username');
+    expect(stderr).toContain('--password');
+  }, 15000);
+
+  it('fails fast when only --password is supplied (no username)', async () => {
+    const env = { ...process.env, DKG_HOME: dkgHome, DKG_API_PORT: smokeApiPort };
+
+    let exited = false;
+    let stderr = '';
+    try {
+      await execFileAsync('node', [
+        CLI_ENTRY,
+        'kafka',
+        'endpoint',
+        'register',
+        '--cg',
+        'devnet-test',
+        '--broker',
+        'kafka.example.com:9092',
+        '--topic',
+        'orders.created',
+        '--security-protocol',
+        'SASL_PLAINTEXT',
+        '--password',
+        'pw',
+      ], { env });
+    } catch (err) {
+      exited = true;
+      stderr = String((err as { stderr?: string }).stderr ?? '');
+    }
+
+    expect(exited).toBe(true);
+    expect(stderr).toContain('--username');
+    expect(stderr).toContain('--password');
+  }, 15000);
+
+  it('fails fast when --security-protocol SASL_PLAINTEXT is set without credentials', async () => {
+    const env = { ...process.env, DKG_HOME: dkgHome, DKG_API_PORT: smokeApiPort };
+
+    let exited = false;
+    let stderr = '';
+    try {
+      await execFileAsync('node', [
+        CLI_ENTRY,
+        'kafka',
+        'endpoint',
+        'register',
+        '--cg',
+        'devnet-test',
+        '--broker',
+        'kafka.example.com:9092',
+        '--topic',
+        'orders.created',
+        '--security-protocol',
+        'SASL_PLAINTEXT',
+      ], { env });
+    } catch (err) {
+      exited = true;
+      stderr = String((err as { stderr?: string }).stderr ?? '');
+    }
+
+    expect(exited).toBe(true);
+    expect(stderr).toContain('SASL_PLAINTEXT');
+    expect(stderr).toContain('SASL_SSL');
+    expect(stderr).toContain('--username');
+    expect(stderr).toContain('--password');
+  }, 15000);
+
+  it('fails fast when SASL credentials are passed with PLAINTEXT', async () => {
+    const env = { ...process.env, DKG_HOME: dkgHome, DKG_API_PORT: smokeApiPort };
+
+    let exited = false;
+    let stderr = '';
+    try {
+      await execFileAsync('node', [
+        CLI_ENTRY,
+        'kafka',
+        'endpoint',
+        'register',
+        '--cg',
+        'devnet-test',
+        '--broker',
+        'kafka.example.com:9092',
+        '--topic',
+        'orders.created',
+        '--security-protocol',
+        'PLAINTEXT',
+        '--username',
+        'alice',
+        '--password',
+        'pw',
+      ], { env });
+    } catch (err) {
+      exited = true;
+      stderr = String((err as { stderr?: string }).stderr ?? '');
+    }
+
+    expect(exited).toBe(true);
+    expect(stderr).toContain('SASL_PLAINTEXT');
+    expect(stderr).toContain('SASL_SSL');
+  }, 15000);
+
+  it('fails fast when --password-stdin sees an empty stream (treated as no password)', async () => {
+    const env = { ...process.env, DKG_HOME: dkgHome, DKG_API_PORT: smokeApiPort };
+
+    const { exitCode, stderr } = await runCliWithStdin(
+      [
+        'kafka',
+        'endpoint',
+        'register',
+        '--cg',
+        'devnet-test',
+        '--broker',
+        'kafka.example.com:9092',
+        '--topic',
+        'orders.created',
+        '--security-protocol',
+        'SASL_PLAINTEXT',
+        '--username',
+        'alice',
+        '--password-stdin',
+      ],
+      // Empty stdin → resolveKafkaPassword returns undefined → Fix 2's
+      // partial-credential check fires (username present, password absent).
+      '',
+      env,
+    );
+
+    expect(exitCode).not.toBe(0);
+    expect(stderr).toContain('--username');
+    expect(stderr).toContain('--password');
+    expect(stderr).toContain('--password-stdin');
+  }, 15000);
 });
