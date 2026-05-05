@@ -268,10 +268,11 @@ describe('probe — outcomes', () => {
     expect(result.error).toBe('KafkaJSConnectionError');
   });
 
-  it('failed: SASL auth error during connect → unreachable; auth error during describe → failed', async () => {
-    // kafkajs surfaces SASL auth as a connect-time rejection, so we exercise
-    // both code paths: at connect (unreachable) and at fetchTopicMetadata
-    // (failed).
+  it('failed: KafkaJSSASLAuthenticationError thrown from connect → failed (NOT unreachable)', async () => {
+    // kafkajs surfaces SASL auth failures as a connect-time rejection. The
+    // probe must classify these as `failed` (auth/credential problem) — not
+    // `unreachable` (network/transport problem) — so operators are steered
+    // towards credential debugging, not network debugging.
     nextAdminBehavior = {
       connect: async () => {
         const err = new Error('SASL Authentication failed for user');
@@ -286,12 +287,79 @@ describe('probe — outcomes', () => {
       securityProtocol: 'SASL_PLAINTEXT',
       sasl: { mechanism: 'plain', username: 'alice', password: 'wrong-secret-zzz' },
     });
-    expect(result.status).toBe('unreachable');
+    expect(result.status).toBe('failed');
     expect(result.error).toBe('KafkaJSSASLAuthenticationError');
     // No credentials in the structured result.
     const serialized = JSON.stringify(result);
     expect(serialized).not.toContain('alice');
     expect(serialized).not.toContain('wrong-secret-zzz');
+  });
+
+  it('failed: KafkaJSAuthenticationError (parent class) thrown from connect → failed', async () => {
+    // The parent kafkajs auth-error class. Anything inheriting from it is
+    // by definition an auth failure, even if the SASL-specific subclass is
+    // not what we got.
+    nextAdminBehavior = {
+      connect: async () => {
+        const err = new Error('Authentication failed');
+        (err as any).name = 'KafkaJSAuthenticationError';
+        throw err;
+      },
+    };
+    const { probe } = await importProbe();
+    const result = await probe({
+      brokers: ['localhost:9092'],
+      topic: 'orders',
+      securityProtocol: 'SASL_PLAINTEXT',
+      sasl: { mechanism: 'plain', username: 'u', password: 'p' },
+    });
+    expect(result.status).toBe('failed');
+    expect(result.error).toBe('KafkaJSAuthenticationError');
+  });
+
+  it('unreachable: KafkaJSConnectionError thrown from connect stays unreachable', async () => {
+    // Network-class errors must not be reclassified as auth failures. The
+    // existing "unreachable: connect throws (network error)" test covers the
+    // KafkaJSConnectionError path generally; this guard is here so a future
+    // contributor cannot widen `isAuthErrorClass` and silently regress the
+    // network-failure mapping.
+    nextAdminBehavior = {
+      connect: async () => {
+        const err = new Error('connect ECONNREFUSED 127.0.0.1:9092');
+        (err as any).name = 'KafkaJSConnectionError';
+        throw err;
+      },
+    };
+    const { probe } = await importProbe();
+    const result = await probe({
+      brokers: ['localhost:9092'],
+      topic: 'orders',
+      securityProtocol: 'PLAINTEXT',
+    });
+    expect(result.status).toBe('unreachable');
+    expect(result.error).toBe('KafkaJSConnectionError');
+  });
+
+  it('unreachable: arbitrary connect-time errors (e.g. EAI_AGAIN) default to unreachable', async () => {
+    // Anything we cannot positively identify as auth must default to
+    // `unreachable`. EAI_AGAIN is a libc DNS-resolver retry signal that
+    // bubbles up as a non-kafkajs name; the probe should not pretend to know
+    // it's an auth failure.
+    nextAdminBehavior = {
+      connect: async () => {
+        const err = new Error('getaddrinfo EAI_AGAIN kafka.example.com');
+        (err as any).name = 'EAI_AGAIN';
+        throw err;
+      },
+    };
+    const { probe } = await importProbe();
+    const result = await probe({
+      brokers: ['kafka.example.com:9092'],
+      topic: 'orders',
+      securityProtocol: 'PLAINTEXT',
+    });
+    expect(result.status).toBe('unreachable');
+    expect(result.error).toBe('EAI_AGAIN');
   });
 
   it('failed: fetchTopicMetadata throws an Error → classified', async () => {

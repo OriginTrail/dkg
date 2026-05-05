@@ -172,7 +172,17 @@ async function probeAdmin(admin: Admin, topic: string): Promise<{ status: ProbeS
   try {
     await admin.connect();
   } catch (err) {
-    return { status: 'unreachable', error: classifyError(err) };
+    // kafkajs throws `KafkaJSSASLAuthenticationError` (and its parent
+    // `KafkaJSAuthenticationError`) from `connect()` when credentials are
+    // wrong — that is an auth failure, NOT broker unreachability. Lumping it
+    // under `unreachable` lies about the failure mode and steers operators
+    // towards network debugging instead of credential debugging. Anything we
+    // cannot positively identify as auth stays `unreachable` (the safe
+    // default for connect-time errors: the broker isn't reachable in a
+    // useful way).
+    const errorClass = classifyError(err);
+    const status: ProbeStatus = isAuthErrorClass(errorClass) ? 'failed' : 'unreachable';
+    return { status, error: errorClass };
   }
 
   try {
@@ -185,6 +195,18 @@ async function probeAdmin(admin: Admin, topic: string): Promise<{ status: ProbeS
   } catch (err) {
     return { status: 'failed', error: classifyError(err) };
   }
+}
+
+// Names of kafkajs error classes that indicate authentication failure.
+// `KafkaJSSASLAuthenticationError` is the SASL-specific class; the parent
+// `KafkaJSAuthenticationError` covers any future auth-class addition that
+// inherits from it. Both must map to `failed` (auth failure), not
+// `unreachable` (network failure).
+function isAuthErrorClass(name: string): boolean {
+  return (
+    name === 'KafkaJSSASLAuthenticationError' ||
+    name === 'KafkaJSAuthenticationError'
+  );
 }
 
 /**
