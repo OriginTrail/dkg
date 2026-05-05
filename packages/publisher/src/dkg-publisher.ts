@@ -4,7 +4,7 @@ import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, OperationContext } from '@origintrail-official/dkg-core';
 import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, contextGraphDataUri, contextGraphMetaUri, contextGraphAssertionUri, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, type Ed25519Keypair, computePublishACKDigest, computePublishPublisherDigest } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
-import type { Publisher, PublishOptions, PublishResult, KAManifestEntry, PhaseCallback } from './publisher.js';
+import type { Publisher, PublishOptions, PublishResult, KAManifestEntry, PhaseCallback, PublishGatewaySignature } from './publisher.js';
 import { autoPartition } from './auto-partition.js';
 import { RESERVED_SUBJECT_PREFIXES, findReservedSubjectPrefix, isReservedSubject } from './reserved-subjects.js';
 import { skolemize } from './skolemize.js';
@@ -584,6 +584,8 @@ export class DKGPublisher implements Publisher {
       onChainContextGraphId?: string;
       contextGraphSignatures?: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
       v10ACKProvider?: PublishOptions['v10ACKProvider'];
+      publishGateway?: PublishOptions['publishGateway'];
+      publishGatewayProvider?: PublishOptions['publishGatewayProvider'];
       subGraphName?: string;
     },
   ): Promise<PublishResult> {
@@ -695,6 +697,8 @@ export class DKGPublisher implements Publisher {
       operationCtx: ctx,
       onPhase: options?.onPhase,
       v10ACKProvider: options?.v10ACKProvider,
+      publishGateway: options?.publishGateway,
+      publishGatewayProvider: options?.publishGatewayProvider,
       publishContextGraphId: chainCgId ?? undefined,
       fromSharedMemory: true,
       subGraphName: options?.subGraphName,
@@ -1275,13 +1279,92 @@ export class DKGPublisher implements Publisher {
     const tentativeSeq = ++this.tentativeCounter;
     let ual = `did:dkg:${this.chain.chainId}/${this.publisherAddress}/t${this.sessionId}-${tentativeSeq}`;
 
-    const identityId = this.publisherNodeIdentityId;
+    let identityId = this.publisherNodeIdentityId;
+    let gatewaySignature: PublishGatewaySignature | undefined;
+    let paymaster = ethers.ZeroAddress;
+    let publisherConvictionAccountId: bigint | undefined;
+    if (options.publishGateway) {
+      if (!options.publishGatewayProvider) {
+        throw new Error(
+          `Publish gateway ${options.publishGateway.peerId} requested but no gateway transport is configured`,
+        );
+      }
+      if (v10ChainId === undefined || v10KavAddress === undefined) {
+        throw new Error(
+          'Publish gateway requested but V10 chain id / KnowledgeAssetsV10 address could not be resolved',
+        );
+      }
+      onPhase?.('chain:gateway', 'start');
+      try {
+        gatewaySignature = await options.publishGatewayProvider({
+          chainId: v10ChainId,
+          kav10Address: v10KavAddress,
+          contextGraphId: v10CgId,
+          merkleRoot: kcMerkleRoot,
+          gateway: options.publishGateway,
+        });
+        if (gatewaySignature.nodeIdentityId !== options.publishGateway.nodeIdentityId) {
+          throw new Error(
+            `Publish gateway returned identity ${gatewaySignature.nodeIdentityId}, ` +
+            `expected ${options.publishGateway.nodeIdentityId}`,
+          );
+        }
+        if (options.publishGateway.pcaAccountId !== undefined) {
+          if (gatewaySignature.pcaAccountId === undefined) {
+            throw new Error(
+              `Publish gateway did not return requested PCA account ${options.publishGateway.pcaAccountId}`,
+            );
+          }
+          if (gatewaySignature.pcaAccountId !== options.publishGateway.pcaAccountId) {
+            throw new Error(
+              `Publish gateway did not confirm requested PCA account ${options.publishGateway.pcaAccountId}`,
+            );
+          }
+          publisherConvictionAccountId = gatewaySignature.pcaAccountId;
+        } else if (gatewaySignature.pcaAccountId !== undefined) {
+          throw new Error(
+            `Publish gateway returned unsolicited pcaAccountId=${gatewaySignature.pcaAccountId}; ` +
+            'omit it from the response or request it via publishGateway.pcaAccountId',
+          );
+        }
+        if (options.publishGateway.paymaster) {
+          const expectedPaymaster = ethers.getAddress(options.publishGateway.paymaster);
+          const returnedPaymaster = gatewaySignature.paymaster
+            ? ethers.getAddress(gatewaySignature.paymaster)
+            : undefined;
+          if (returnedPaymaster !== expectedPaymaster) {
+            throw new Error(
+              `Publish gateway did not confirm requested paymaster ${expectedPaymaster}`,
+            );
+          }
+          paymaster = expectedPaymaster;
+        } else if (gatewaySignature.paymaster) {
+          throw new Error(
+            `Publish gateway returned unsolicited paymaster=${gatewaySignature.paymaster}; ` +
+            'omit it from the response or request it via publishGateway.paymaster',
+          );
+        }
+        if (publisherConvictionAccountId !== undefined && paymaster !== ethers.ZeroAddress) {
+          throw new Error(
+            'Publish gateway cannot use both a publisher conviction account and a paymaster in one V10 publish',
+          );
+        }
+        identityId = gatewaySignature.nodeIdentityId;
+        this.log.info(
+          ctx,
+          `Using publish gateway ${gatewaySignature.peerId} ` +
+          `(identityId=${identityId}, signer=${gatewaySignature.signer})`,
+        );
+      } finally {
+        onPhase?.('chain:gateway', 'end');
+      }
+    }
     let usedV10Path = false;
 
     if (!this.publisherWallet) {
       this.log.warn(ctx, `No EVM wallet configured — skipping on-chain publish`);
     } else if (identityId === 0n) {
-      this.log.warn(ctx, `Identity not set (0) — skipping on-chain publish`);
+      this.log.warn(ctx, `Publisher node identity not set (0) — skipping on-chain publish`);
     } else {
       onPhase?.('chain:sign', 'start');
       this.log.info(ctx, `Signing on-chain publish (identityId=${identityId}, signer=${this.publisherWallet.address})`);
@@ -1321,9 +1404,21 @@ export class DKGPublisher implements Publisher {
           v10CgId,
           kcMerkleRoot,
         );
-        const pubSig = ethers.Signature.from(
-          await this.publisherWallet.signMessage(pubMsgHash),
-        );
+        let publisherSignature: { r: Uint8Array; vs: Uint8Array };
+        if (gatewaySignature) {
+          publisherSignature = {
+            r: gatewaySignature.signatureR,
+            vs: gatewaySignature.signatureVS,
+          };
+        } else {
+          const pubSig = ethers.Signature.from(
+            await this.publisherWallet.signMessage(pubMsgHash),
+          );
+          publisherSignature = {
+            r: ethers.getBytes(pubSig.r),
+            vs: ethers.getBytes(pubSig.yParityAndS),
+          };
+        }
         // P-1 review (iter-2): `chain:writeahead:start` now fires
         // *from inside* the adapter via the `onBroadcast` callback,
         // which the adapter invokes immediately before the real
@@ -1390,12 +1485,10 @@ export class DKGPublisher implements Publisher {
             tokenAmount,
             merkleLeafCount: kcMerkleLeafCount,
             isImmutable: false,
-            paymaster: ethers.ZeroAddress,
+            paymaster,
+            publisherConvictionAccountId,
             publisherNodeIdentityId: identityId,
-            publisherSignature: {
-              r: ethers.getBytes(pubSig.r),
-              vs: ethers.getBytes(pubSig.yParityAndS),
-            },
+            publisherSignature,
             ackSignatures: v10ACKs.map(ack => ({
               identityId: ack.nodeIdentityId,
               r: ack.signatureR,

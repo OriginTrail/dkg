@@ -75,9 +75,9 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable {
 
     /**
      * @notice Create a new context graph. Mints an ERC-721 to msg.sender.
-     * @param hostingNodes              Sorted ascending node identity IDs (storage attestation set)
+     * @param hostingNodes              Legacy seed list. May be empty.
      * @param participantAgents         EOA allow-list (no zeros, no dups)
-     * @param requiredSignatures        M-of-N quorum (≤ hostingNodes.length)
+     * @param requiredSignatures        Legacy metadata. VM ACK quorum is global/dynamic.
      * @param metadataBatchId           Batch ID describing the CG metadata (0 if none)
      * @param publishPolicy             0 = curated, 1 = open
      * @param publishAuthority          Curator address (required when curated; ignored when open)

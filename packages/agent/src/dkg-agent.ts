@@ -1,6 +1,6 @@
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
-  PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_QUERY_REMOTE, PROTOCOL_STORAGE_ACK, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST,
+  PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_QUERY_REMOTE, PROTOCOL_STORAGE_ACK, PROTOCOL_PUBLISH_GATEWAY, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST,
   paranetPublishTopic, paranetWorkspaceTopic, paranetAppTopic, paranetUpdateTopic, paranetFinalizationTopic,
   paranetDataGraphUri, paranetMetaGraphUri, paranetWorkspaceGraphUri, paranetWorkspaceMetaGraphUri,
   contextGraphSharedMemoryUri,
@@ -8,6 +8,7 @@ import {
   contextGraphDataUri, contextGraphMetaUri, assertionLifecycleUri, contextGraphAssertionUri,
   MemoryLayer,
   computeACKDigest,
+  computePublishPublisherDigest,
   encodePublishRequest,
   encodeKAUpdateRequest,
   encodeFinalizationMessage, type FinalizationMessageMsg,
@@ -21,12 +22,13 @@ import { EVMChainAdapter, NoChainAdapter, enrichEvmError, type EVMAdapterConfig,
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
-  ACKCollector, StorageACKHandler,
+  ACKCollector, StorageACKHandler, PublishGatewayHandler,
   VerifyCollector, VerifyProposalHandler, buildVerificationMetadata,
   computeTripleHashV10 as computeTripleHash, computeFlatKCRootV10 as computeFlatKCRoot, autoPartition,
   TripleStoreAsyncLiftPublisher,
   type PublishResult, type PhaseCallback, type KAMetadata, type CASCondition,
   type CollectedACK, type LiftAuthorityProof, type LiftTransitionType,
+  type PublishGatewayConfig, type PublishGatewayResponseWire,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import {
@@ -245,6 +247,54 @@ class SyncAccessDeniedError extends Error {
     this.contextGraphId = contextGraphId;
   }
 }
+
+function parsePublishGatewayResponse(data: Uint8Array): PublishGatewayResponseWire {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder().decode(data));
+  } catch {
+    throw new Error('Invalid publish gateway response: expected JSON');
+  }
+  if (!parsed || typeof parsed !== 'object') {
+    throw new Error('Invalid publish gateway response: expected object');
+  }
+  const response = parsed as Record<string, unknown>;
+  if (typeof response.error === 'string' && response.error.length > 0) {
+    throw new Error(response.error);
+  }
+  for (const field of ['nodeIdentityId', 'signer', 'signatureR', 'signatureVS']) {
+    if (typeof response[field] !== 'string') {
+      throw new Error(`Invalid publish gateway response: missing string ${field}`);
+    }
+  }
+  for (const field of ['pcaAccountId', 'paymaster']) {
+    if (response[field] !== undefined && typeof response[field] !== 'string') {
+      throw new Error(`Invalid publish gateway response: ${field} must be a string`);
+    }
+  }
+  return response as unknown as PublishGatewayResponseWire;
+}
+
+function parsePositiveBigIntLiteral(value: string, field: string): bigint {
+  let parsed: bigint;
+  try {
+    parsed = BigInt(value);
+  } catch {
+    throw new Error(`Invalid publish gateway response: ${field} must be an integer string`);
+  }
+  if (parsed <= 0n) {
+    throw new Error(`Invalid publish gateway response: ${field} must be positive`);
+  }
+  return parsed;
+}
+
+function parseBytes32Literal(value: string, field: string): Uint8Array {
+  if (!/^0x[0-9a-fA-F]{64}$/.test(value)) {
+    throw new Error(`Invalid publish gateway response: ${field} must be a 32-byte hex string`);
+  }
+  return ethers.getBytes(value);
+}
+
 const META_REFRESH_COOLDOWN_MS = 30_000;
 const SYNC_MIN_GRAPH_BUDGET_MS = 10_000;
 const DEBUG_SYNC_PROGRESS = process.env.DKG_DEBUG_SYNC_PROGRESS === '1';
@@ -453,6 +503,26 @@ export interface DKGAgentConfig {
   /** Private key for the V10 ACK signer. When omitted, falls back to chainConfig.operationalKeys[0]. */
   ackSignerKey?: string;
   /**
+   * OUTBOUND preference: preferred core-node publish gateway THIS node
+   * routes V10 publisher-digest signing requests to. Edge nodes use this
+   * core for the V10 publisher-node signature while keeping the local
+   * operational wallet as the transaction sender / publisher of record.
+   */
+  publishGateway?: PublishGatewayConfig;
+  /**
+   * LOCAL ADVERTISEMENT: parameters this node's PublishGatewayHandler
+   * accepts when acting as a gateway for OTHER nodes. Distinct from
+   * `publishGateway` (outbound preference) so a core that points at an
+   * upstream gateway does not accidentally re-advertise the upstream's
+   * pcaAccountId/paymaster on its own handler. `allowedPeers` (optional)
+   * gates incoming requests to a libp2p peer-id allowlist.
+   */
+  localPublishGateway?: {
+    pcaAccountId?: bigint;
+    paymaster?: string;
+    allowedPeers?: string[];
+  };
+  /**
    * EVM chain configuration. If omitted, publishing won't have on-chain finality.
    * `adminPrivateKey` is the private key for the profile admin wallet used
    * only for profile/key-management transactions. Nodes may omit it when they
@@ -522,6 +592,13 @@ export class DKGAgent {
   private randomSamplingBindRetryInFlight = false;
   private storageACKRegistrationRetryTimer: ReturnType<typeof setTimeout> | null = null;
   private storageACKRegistrationRetryInFlight = false;
+  // Tracks the live state of the V10 publish-gateway protocol handler.
+  // Set true when the handler is registered on the libp2p router, set
+  // false when it is unregistered (signer evicted from chain, etc.).
+  // `publishProfile` reads this so the broadcast profile only advertises
+  // a working gateway — peers that discover a gateway from a stale
+  // profile would otherwise hit a missing-protocol or timeout.
+  private publishGatewayHandlerActive = false;
   private readonly config: DKGAgentConfig;
   private started = false;
   private readonly subscribedContextGraphs = new Map<string, ContextGraphSub>();
@@ -916,6 +993,7 @@ export class DKGAgent {
     if (effectiveRole === 'core') {
       if (ackSignerCandidates.length > 0) {
         let storageACKProtocolRegistered = false;
+        let publishGatewayProtocolRegistered = false;
         let storageACKFailoverInFlight = false;
         const attemptStorageACKRegistration = async (
           attemptCtx: OperationContext,
@@ -958,6 +1036,15 @@ export class DKGAgent {
               return 'disabled';
             }
 
+            const isGatewayActiveCore = async () => {
+              const verifyACKIdentity = this.chain.verifyACKIdentity;
+              if (typeof verifyACKIdentity !== 'function') return false;
+              return verifyACKIdentity.call(
+                this.chain,
+                ackSignerWallet.address,
+                onChainIdentityId,
+              );
+            };
             const ackHandler = new StorageACKHandler(this.store, {
               nodeRole: effectiveRole,
               nodeIdentityId: onChainIdentityId,
@@ -974,14 +1061,20 @@ export class DKGAgent {
                   ackSignerWallet.address,
                 );
               },
+              isActiveCore: typeof this.chain.verifyACKIdentity === 'function'
+                ? isGatewayActiveCore
+                : undefined,
               onSignerUnregistered: () => {
                 if (storageACKFailoverInFlight) return;
                 storageACKFailoverInFlight = true;
                 storageACKProtocolRegistered = false;
+                publishGatewayProtocolRegistered = false;
+                this.publishGatewayHandlerActive = false;
                 this.router.unregister(PROTOCOL_STORAGE_ACK);
+                this.router.unregister(PROTOCOL_PUBLISH_GATEWAY);
                 this.log.warn(
                   attemptCtx,
-                  `Unregistered V10 StorageACK handler: signer ${ackSignerWallet.address} ` +
+                  `Unregistered V10 StorageACK/publish-gateway handlers: signer ${ackSignerWallet.address} ` +
                   `is no longer confirmed on-chain for identity=${onChainIdentityId}`,
                 );
                 attemptStorageACKRegistration(
@@ -1013,12 +1106,41 @@ export class DKGAgent {
                 );
               },
             }, this.eventBus);
+            // Local handler advertisement comes from `localPublishGateway`,
+            // NOT `publishGateway` (which is the OUTBOUND preference). Reusing
+            // one config field for both broke isolation: a core that pointed
+            // at an upstream gateway would re-advertise the upstream's
+            // pcaAccountId/paymaster on its own PublishGatewayHandler.
+            const localGw = this.config.localPublishGateway;
+            const gatewayHandler = new PublishGatewayHandler({
+              nodeRole: effectiveRole,
+              nodeIdentityId: onChainIdentityId,
+              signerWallet: ackSignerWallet,
+              chainId: chainIdForHandler,
+              kav10Address: kav10AddressForHandler,
+              pcaAccountId: localGw?.pcaAccountId,
+              paymaster: localGw?.paymaster,
+              allowedPeers: localGw?.allowedPeers && localGw.allowedPeers.length > 0
+                ? new Set(localGw.allowedPeers)
+                : undefined,
+              isActiveCore: isGatewayActiveCore,
+              isPaymasterValid: typeof this.chain.isPaymasterValid === 'function'
+                ? (paymaster: string) => this.chain.isPaymasterValid!(paymaster)
+                : undefined,
+              getConvictionAccountInfo: typeof this.chain.getConvictionAccountInfo === 'function'
+                ? (accountId: bigint) => this.chain.getConvictionAccountInfo!(accountId)
+                : undefined,
+            });
             this.router.register(PROTOCOL_STORAGE_ACK, ackHandler.handler);
+            this.router.register(PROTOCOL_PUBLISH_GATEWAY, gatewayHandler.handler);
             storageACKProtocolRegistered = true;
+            publishGatewayProtocolRegistered = true;
+            this.publishGatewayHandlerActive = true;
             this.clearStorageACKRegistrationRetry();
             this.log.info(
               attemptCtx,
-              `Registered V10 StorageACK handler (identity=${onChainIdentityId}, signer=${ackSignerWallet.address})`,
+              `Registered V10 StorageACK and publish-gateway handlers ` +
+              `(identity=${onChainIdentityId}, signer=${ackSignerWallet.address})`,
             );
             return 'registered';
           } else {
@@ -2381,13 +2503,34 @@ export class DKGAgent {
   async publishProfile(): Promise<PublishResult> {
     const pubKeyBase64 = Buffer.from(this.wallet.keypair.publicKey).toString('base64');
     const relayAddrs = this.config.relayPeers;
+    const role = this.config.nodeRole ?? 'edge';
+    const nodeIdentityId = this.publisher.getIdentityId();
 
     const profileConfig: AgentProfileConfig = {
       peerId: this.node.peerId,
       name: this.config.name,
       description: this.config.description,
       framework: this.config.framework,
-      nodeRole: this.config.nodeRole ?? 'edge',
+      nodeRole: role,
+      nodeIdentityId: nodeIdentityId > 0n ? nodeIdentityId : undefined,
+      // Only advertise the publish gateway when the local handler is
+      // actually registered on the libp2p router. Tying advertisement
+      // to `role && nodeIdentityId > 0` would publish a gateway flag for
+      // nodes whose handler-registration loop is still retrying or has
+      // been torn down because the ACK signer is no longer confirmed
+      // on-chain — peers would discover a gateway and then hit a
+      // missing-protocol / timeout.
+      publishGateway: role === 'core' && nodeIdentityId > 0n && this.publishGatewayHandlerActive
+        ? {
+            enabled: true,
+            // Profile advertises THIS node's local gateway terms — sourced
+            // from `localPublishGateway`, NOT `publishGateway` (the latter
+            // is the outbound preference and must not leak into what we
+            // advertise to peers).
+            pcaAccountId: this.config.localPublishGateway?.pcaAccountId,
+            paymaster: this.config.localPublishGateway?.paymaster,
+          }
+        : undefined,
       publicKey: pubKeyBase64,
       relayAddress: relayAddrs?.[0],
       agentAddress: this.defaultAgentAddress,
@@ -3120,6 +3263,7 @@ export class DKGAgent {
       contextGraphId?: string | bigint;
       subContextGraphId?: string | bigint;
       contextGraphSignatures?: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
+      publishGateway?: PublishGatewayConfig;
       /** Target sub-graph within the context graph (e.g. "code", "decisions"). */
       subGraphName?: string;
     },
@@ -3131,6 +3275,8 @@ export class DKGAgent {
     const onChainId = ctxGraphIdStr ?? (await this.getContextGraphOnChainId(contextGraphId)) ?? undefined;
 
     const v10ACKProvider = this.createV10ACKProvider(contextGraphId);
+    const publishGateway = options?.publishGateway ?? this.config.publishGateway;
+    const publishGatewayProvider = this.createPublishGatewayProvider(publishGateway);
     const result = await this.publisher.publishFromSharedMemory(contextGraphId, selection, {
       operationCtx: ctx,
       clearSharedMemoryAfter: options?.clearSharedMemoryAfter,
@@ -3139,6 +3285,8 @@ export class DKGAgent {
       onChainContextGraphId: onChainId,
       contextGraphSignatures: options?.contextGraphSignatures,
       v10ACKProvider,
+      publishGateway,
+      publishGatewayProvider,
       subGraphName: options?.subGraphName,
     });
 
@@ -3988,12 +4136,6 @@ export class DKGAgent {
     }
     if (participantIdentityIds.size > 0 && typeof opts.requiredSignatures === 'number' && opts.requiredSignatures > 0) {
       const reqSig = Math.floor(opts.requiredSignatures);
-      if (reqSig < 1) {
-        throw new Error(`requiredSignatures must be >= 1, got ${opts.requiredSignatures}`);
-      }
-      if (reqSig > participantIdentityIds.size) {
-        throw new Error(`requiredSignatures (${reqSig}) exceeds participant count (${participantIdentityIds.size})`);
-      }
       quads.push({
         subject: paranetUri,
         predicate: `${DKG_ONTOLOGY.DKG_PARANET}RequiredSignatures`,
@@ -4353,19 +4495,14 @@ export class DKGAgent {
       return { onChainId: existingOnChainId, txHash: undefined };
     }
 
-    let effectiveParticipantIdentityIds = participantIdentityIds;
-    if (effectiveParticipantIdentityIds.length === 0) {
-      const selfIdentityId = await this.ensureIdentity();
-      if (selfIdentityId === 0n) {
-        throw new Error(
-          `Context graph "${id}" cannot be registered on-chain without an on-chain identity. ` +
-          'Create/ensure the curator identity first.',
-        );
-      }
-      effectiveParticipantIdentityIds = [selfIdentityId];
-    }
-
-    const effectiveRequiredSignatures = Number.isInteger(storedRequiredSignatures) && storedRequiredSignatures > 0
+    // V10 VM publish ACK quorum is dynamic: KnowledgeAssetsV10 accepts any
+    // globally configured number of active sharding-table core signatures.
+    // Do not force an edge-owned CG to mint or reuse a node identity just to
+    // satisfy legacy ContextGraphStorage.hostingNodes metadata. Keep the
+    // per-CG legacy quorum metadata positive so existing verify flows that
+    // still read ContextGraphStorage do not mint unusable zero-quorum CGs.
+    const effectiveParticipantIdentityIds = participantIdentityIds;
+    const effectiveRequiredSignatures = Number.isInteger(storedRequiredSignatures) && storedRequiredSignatures >= 1
       ? storedRequiredSignatures
       : 1;
     const participantAgents = await this.getContextGraphParticipantAgentAddresses(id);
@@ -5566,10 +5703,15 @@ export class DKGAgent {
         const cgConfig = await (this.chain as any).getContextGraphConfig(contextGraphIdOnChain);
         const raw = cgConfig?.requiredSignatures;
         const parsed = raw != null ? Number(raw) : 0;
-        if (!Number.isInteger(parsed) || parsed < 1) {
-          throw new Error(`getContextGraphConfig returned invalid requiredSignatures: ${raw} (must be a positive integer)`);
+        // On-chain legacy quorum may be 0 for edge-owned CGs; VM ACK quorum
+        // is global. Treat 0 as "unspecified" and fall through to the
+        // floor below instead of throwing.
+        if (!Number.isInteger(parsed) || parsed < 0 || parsed > 255) {
+          throw new Error(`getContextGraphConfig returned invalid requiredSignatures: ${raw} (must be an integer 0..255)`);
         }
-        requiredSignatures = parsed;
+        if (parsed >= 1) {
+          requiredSignatures = parsed;
+        }
       } catch (err: any) {
         throw new Error(
           `Cannot determine requiredSignatures for context graph ${contextGraphIdOnChain}: ${err?.message ?? err}. ` +
@@ -7630,11 +7772,11 @@ export class DKGAgent {
 
       // Two kinds of discovered CG, two different opt-in semantics:
       //
-      // - Open / public CG (no curated _meta graph locally): Viktor's
-      //   v10-rc hardening (commit b9a73e7e "better sync") says do
-      //   NOT auto-subscribe — a node shouldn't auto-ingest every
-      //   public CG a peer happens to know about. Explicit subscribe
-      //   (UI "Join" / `subscribeToContextGraph`) is the opt-in.
+      // - Open / public CG (no curated _meta graph locally): core nodes
+      //   auto-subscribe because public VM data is the core replication
+      //   surface and RandomSampling assumes active cores can host public
+      //   KCs. Edge nodes still add these as discoverable only; explicit
+      //   subscribe remains the opt-in for personal storage.
       //
       // - Curated / private CG (access policy "private" or has an
       //   allowlist): auto-subscribe so `trySyncFromPeer`'s
@@ -7680,6 +7822,16 @@ export class DKGAgent {
         }, { persist: false });
         this.subscribeToContextGraph(id);
         this.log.info(ctx, `Discovered invited context graph "${name}" (${id}) — auto-subscribed (private/allowlisted)`);
+      } else if ((this.config.nodeRole ?? 'edge') === 'core') {
+        this.setContextGraphSubscription(id, {
+          name,
+          subscribed: false,
+          synced: true,
+          metaSynced: source === 'meta',
+          onChainId: undefined,
+        }, { persist: false });
+        this.subscribeToContextGraph(id);
+        this.log.info(ctx, `Discovered public context graph "${name}" (${id}) — core auto-subscribed`);
       } else {
         this.setContextGraphSubscription(id, {
           name,
@@ -7739,12 +7891,17 @@ export class DKGAgent {
         continue;
       }
 
+      const accessPolicy = Number(p.accessPolicy);
+      const isCuratedOnChain = accessPolicy === LOCAL_ACCESS_CURATED;
+      let shouldSubscribe = accessPolicy === LOCAL_ACCESS_OPEN && (this.config.nodeRole ?? 'edge') === 'core';
+      let subscribeReason = 'core auto-subscribed';
+
       // Curated CGs (accessPolicy=1) must not silently land in non-participants' lists.
       // We can't query the V10 ContextGraphs participant set from a NameRegistry event alone,
       // so apply the strict default: only auto-subscribe when this node's wallet matches
       // `creator` (the address that called claimName). Real participants will have the CG
       // surfaced through manual subscribe / catch-up triggered by their curator.
-      if (Number(p.accessPolicy) === 1) {
+      if (accessPolicy === LOCAL_ACCESS_CURATED) {
         const isCurator = !!this.defaultAgentAddress
           && typeof p.creator === 'string'
           && p.creator.toLowerCase() === this.defaultAgentAddress.toLowerCase();
@@ -7753,16 +7910,20 @@ export class DKGAgent {
           knownOnChainIds.add(p.contextGraphId);
           continue;
         }
+        shouldSubscribe = true;
+        subscribeReason = 'curator auto-subscribed';
       }
 
       this.setContextGraphSubscription(p.name, {
         name: p.name,
-        subscribed: true,
+        subscribed: shouldSubscribe,
         synced: false,
         metaSynced: false,
         onChainId: p.contextGraphId,
       });
-      this.subscribeToContextGraph(p.name, { trackSyncScope: false });
+      if (shouldSubscribe) {
+        this.subscribeToContextGraph(p.name, { trackSyncScope: false });
+      }
 
       // Persist the on-chain ID to the ontology graph so the publisher's
       // VM registration guard can find it via RDF (it has no access to
@@ -7776,7 +7937,13 @@ export class DKGAgent {
         graph: ontoGraph,
       }]);
 
-      this.log.info(ctx, `Discovered on-chain context graph "${p.name}" (${p.contextGraphId.slice(0, 16)}…) — auto-subscribed (synced=false)`);
+      this.log.info(
+        ctx,
+        shouldSubscribe
+          ? `Discovered ${isCuratedOnChain ? 'curated' : 'public'} on-chain context graph "${p.name}" ` +
+            `(${p.contextGraphId.slice(0, 16)}…) — ${subscribeReason} (synced=false)`
+          : `Discovered on-chain context graph "${p.name}" (${p.contextGraphId.slice(0, 16)}…) — added as discoverable only`,
+      );
       discovered++;
     }
 
@@ -7995,6 +8162,115 @@ export class DKGAgent {
         merkleLeafCount,
       });
       return result.acks;
+    };
+  }
+
+  private createPublishGatewayProvider(gateway: PublishGatewayConfig | undefined) {
+    if (!gateway) return undefined;
+    if (!this.router) {
+      throw new Error('Publish gateway requested but P2P router is not started');
+    }
+
+    return async (request: {
+      chainId: bigint;
+      kav10Address: string;
+      contextGraphId: bigint;
+      merkleRoot: Uint8Array;
+      gateway: PublishGatewayConfig;
+    }) => {
+      const configured = request.gateway;
+      const payload = {
+        chainId: request.chainId.toString(),
+        kav10Address: request.kav10Address,
+        contextGraphId: request.contextGraphId.toString(),
+        merkleRoot: ethers.hexlify(request.merkleRoot),
+        nodeIdentityId: configured.nodeIdentityId.toString(),
+        ...(configured.pcaAccountId !== undefined ? { pcaAccountId: configured.pcaAccountId.toString() } : {}),
+        ...(configured.paymaster ? { paymaster: configured.paymaster } : {}),
+      };
+
+      const responseBytes = await this.router.send(
+        configured.peerId,
+        PROTOCOL_PUBLISH_GATEWAY,
+        new TextEncoder().encode(JSON.stringify(payload)),
+        120_000,
+      );
+      const response = parsePublishGatewayResponse(responseBytes);
+      const nodeIdentityId = parsePositiveBigIntLiteral(response.nodeIdentityId!, 'nodeIdentityId');
+      if (nodeIdentityId !== configured.nodeIdentityId) {
+        throw new Error(
+          `Publish gateway ${configured.peerId} returned identity ${nodeIdentityId}, ` +
+          `expected ${configured.nodeIdentityId}`,
+        );
+      }
+      const pcaAccountId = response.pcaAccountId
+        ? parsePositiveBigIntLiteral(response.pcaAccountId, 'pcaAccountId')
+        : undefined;
+      const signatureR = parseBytes32Literal(response.signatureR!, 'signatureR');
+      const signatureVS = parseBytes32Literal(response.signatureVS!, 'signatureVS');
+      const paymaster = response.paymaster ? ethers.getAddress(response.paymaster) : undefined;
+      if (!ethers.isAddress(response.signer!)) {
+        throw new Error(`Publish gateway ${configured.peerId} returned invalid signer address`);
+      }
+      const signer = ethers.getAddress(response.signer!);
+      const digest = computePublishPublisherDigest(
+        request.chainId,
+        request.kav10Address,
+        nodeIdentityId,
+        request.contextGraphId,
+        request.merkleRoot,
+      );
+      let recovered: string;
+      try {
+        recovered = ethers.getAddress(ethers.verifyMessage(
+          digest,
+          ethers.Signature.from({
+            r: ethers.hexlify(signatureR),
+            yParityAndS: ethers.hexlify(signatureVS),
+          }),
+        ));
+      } catch {
+        throw new Error(`Publish gateway ${configured.peerId} returned an invalid publisher signature`);
+      }
+      if (recovered !== signer) {
+        throw new Error(
+          `Publish gateway ${configured.peerId} signature recovered ${recovered}, ` +
+          `expected signer ${signer}`,
+        );
+      }
+
+      const isOperationalWalletRegistered = this.chain.isOperationalWalletRegistered;
+      if (typeof isOperationalWalletRegistered === 'function') {
+        let registered: boolean;
+        try {
+          registered = await isOperationalWalletRegistered.call(this.chain, nodeIdentityId, signer);
+        } catch (err) {
+          throw new Error(
+            `Publish gateway ${configured.peerId} signer registration lookup failed: ` +
+            `${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+        if (!registered) {
+          throw new Error(
+            `Publish gateway ${configured.peerId} signer ${signer} is not registered ` +
+            `as an operational wallet for identity ${nodeIdentityId}`,
+          );
+        }
+      }
+
+      // Never forward PCA / paymaster fields the publisher did not ask for.
+      // A compromised gateway could otherwise steer the edge onto a conviction
+      // or paymaster path the caller never opted into — DKGPublisher also
+      // rejects unsolicited values; stripping here is defense-in-depth.
+      return {
+        peerId: configured.peerId,
+        signer,
+        nodeIdentityId,
+        signatureR,
+        signatureVS,
+        ...(configured.pcaAccountId !== undefined && pcaAccountId !== undefined ? { pcaAccountId } : {}),
+        ...(configured.paymaster && paymaster ? { paymaster } : {}),
+      };
     };
   }
 

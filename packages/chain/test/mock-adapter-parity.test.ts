@@ -115,6 +115,11 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   // getKCContextGraphId) ARE mirrored on MockChainAdapter.
   'requireKCStorage',
   'requireContextGraphStorage',
+  // V10 publisher-conviction NFT (PR #405) — TS-private helper that
+  // lazily resolves the DKGPublishingConvictionNFT contract from the
+  // Hub. The mock keeps a `convictionAccounts` Map directly and has no
+  // need for a Contract resolver.
+  'resolvePublishingConvictionNFT',
 ]);
 
 const NO_CHAIN_EXEMPT_FROM_EVM = new Set<string>([

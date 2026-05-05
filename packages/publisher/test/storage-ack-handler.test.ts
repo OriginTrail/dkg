@@ -161,6 +161,58 @@ describe('StorageACKHandler', () => {
     expect(unregistered).not.toHaveBeenCalled();
   });
 
+  it('refuses to sign when isActiveCore reports false', async () => {
+    const unregistered = vi.fn();
+    const handler = await createHandler(swmQuads, {
+      isSignerRegistered: async () => true,
+      isActiveCore: async () => false,
+      onSignerUnregistered: unregistered,
+    });
+    const intent = encodePublishIntent({
+      merkleRoot,
+      contextGraphId,
+      publisherPeerId: 'publisher-0',
+      publicByteSize: 300,
+      isPrivate: false,
+      kaCount: 2,
+      rootEntities: ['urn:entity:1', 'urn:entity:2'],
+      epochs: 1,
+      tokenAmountStr: '1000',
+      merkleLeafCount: swmMerkleLeafCount,
+    });
+
+    await expect(handler.handler(intent, fakePeerId)).rejects.toThrow(
+      'StorageACK signer is not an active sharding-table core node',
+    );
+    expect(unregistered).toHaveBeenCalledOnce();
+  });
+
+  it('refuses to sign when isActiveCore lookup throws', async () => {
+    const lookupFailed = vi.fn();
+    const handler = await createHandler(swmQuads, {
+      isSignerRegistered: async () => true,
+      isActiveCore: async () => { throw new Error('rpc unavailable'); },
+      onSignerRegistrationLookupFailed: lookupFailed,
+    });
+    const intent = encodePublishIntent({
+      merkleRoot,
+      contextGraphId,
+      publisherPeerId: 'publisher-0',
+      publicByteSize: 300,
+      isPrivate: false,
+      kaCount: 2,
+      rootEntities: ['urn:entity:1', 'urn:entity:2'],
+      epochs: 1,
+      tokenAmountStr: '1000',
+      merkleLeafCount: swmMerkleLeafCount,
+    });
+
+    await expect(handler.handler(intent, fakePeerId)).rejects.toThrow(
+      'StorageACK active-core lookup failed; refusing to sign',
+    );
+    expect(lookupFailed).toHaveBeenCalledOnce();
+  });
+
   it('rejects when SWM has no data', async () => {
     const handler = await createHandler([]);
     const intent = encodePublishIntent({

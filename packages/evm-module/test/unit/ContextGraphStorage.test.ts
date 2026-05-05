@@ -129,12 +129,12 @@ describe('@unit ContextGraphStorage', () => {
       ).to.be.revertedWithCustomError(StorageContract, 'InvalidContextGraphConfig');
     });
 
-    it('reverts on empty hosting nodes', async () => {
-      await expect(
-        StorageContract.connect(opSigner).createContextGraph(
-          accounts[1].address, [], baseAgents(), 1, 0, 1, ethers.ZeroAddress, 0,
-        ),
-      ).to.be.revertedWithCustomError(StorageContract, 'InvalidContextGraphConfig');
+    it('allows empty hosting nodes for edge-owned CGs', async () => {
+      await StorageContract.connect(opSigner).createContextGraph(
+        accounts[1].address, [], baseAgents(), 3, 0, 1, ethers.ZeroAddress, 0,
+      );
+      expect(await StorageContract.getHostingNodes(1)).to.deep.equal([]);
+      expect(await StorageContract.getContextGraphRequiredSignatures(1)).to.equal(3);
     });
 
     it('reverts on unsorted hosting nodes', async () => {
@@ -183,20 +183,18 @@ describe('@unit ContextGraphStorage', () => {
       ).to.be.revertedWithCustomError(StorageContract, 'AgentParticipantAlreadyExists');
     });
 
-    it('reverts when requiredSignatures > hosting nodes length', async () => {
-      await expect(
-        StorageContract.connect(opSigner).createContextGraph(
-          accounts[1].address, [10n, 20n], baseAgents(), 3, 0, 1, ethers.ZeroAddress, 0,
-        ),
-      ).to.be.revertedWithCustomError(StorageContract, 'InvalidContextGraphConfig');
+    it('allows requiredSignatures greater than hosting nodes length', async () => {
+      await StorageContract.connect(opSigner).createContextGraph(
+        accounts[1].address, [10n, 20n], baseAgents(), 3, 0, 1, ethers.ZeroAddress, 0,
+      );
+      expect(await StorageContract.getContextGraphRequiredSignatures(1)).to.equal(3);
     });
 
-    it('reverts when requiredSignatures == 0', async () => {
-      await expect(
-        StorageContract.connect(opSigner).createContextGraph(
-          accounts[1].address, baseHostingNodes(), baseAgents(), 0, 0, 1, ethers.ZeroAddress, 0,
-        ),
-      ).to.be.revertedWithCustomError(StorageContract, 'InvalidContextGraphConfig');
+    it('allows requiredSignatures == 0 as legacy metadata', async () => {
+      await StorageContract.connect(opSigner).createContextGraph(
+        accounts[1].address, baseHostingNodes(), baseAgents(), 0, 0, 1, ethers.ZeroAddress, 0,
+      );
+      expect(await StorageContract.getContextGraphRequiredSignatures(1)).to.equal(0);
     });
 
     it('reverts on invalid publishPolicy (>1)', async () => {
@@ -267,10 +265,9 @@ describe('@unit ContextGraphStorage', () => {
       ).to.be.revertedWithCustomError(HubContract, 'UnauthorizedAccess');
     });
 
-    it('reverts on empty list', async () => {
-      await expect(
-        StorageContract.connect(opSigner).setHostingNodes(1, []),
-      ).to.be.revertedWithCustomError(StorageContract, 'InvalidContextGraphConfig');
+    it('allows clearing hosting nodes', async () => {
+      await StorageContract.connect(opSigner).setHostingNodes(1, []);
+      expect(await StorageContract.getHostingNodes(1)).to.deep.equal([]);
     });
 
     it('reverts on unsorted list', async () => {
@@ -291,11 +288,9 @@ describe('@unit ContextGraphStorage', () => {
       ).to.be.revertedWithCustomError(StorageContract, 'InvalidContextGraphConfig');
     });
 
-    it('reverts when new size would break quorum', async () => {
-      // CG has requiredSignatures=2, replacing with 1 node breaks the quorum
-      await expect(
-        StorageContract.connect(opSigner).setHostingNodes(1, [42n]),
-      ).to.be.revertedWithCustomError(StorageContract, 'InvalidContextGraphConfig');
+    it('allows hosting node list to shrink below legacy quorum', async () => {
+      await StorageContract.connect(opSigner).setHostingNodes(1, [42n]);
+      expect(await StorageContract.getHostingNodes(1)).to.deep.equal([42n]);
     });
 
     it('reverts for nonexistent CG', async () => {
@@ -621,30 +616,23 @@ describe('@unit ContextGraphStorage', () => {
   });
 
   // -------------------------------------------------------------------------
-  // updateQuorum: still hosting-node based
+  // updateQuorum: legacy metadata only; VM ACK quorum is global/dynamic
   // -------------------------------------------------------------------------
-  describe('updateQuorum (now bound to hosting nodes)', () => {
+  describe('updateQuorum (legacy metadata)', () => {
     beforeEach(async () => {
       await StorageContract.connect(opSigner).createContextGraph(
         accounts[0].address, [10n, 20n, 30n], [], 1, 0, 1, ethers.ZeroAddress, 0,
       );
     });
 
-    it('updates threshold within hosting node count', async () => {
-      await StorageContract.connect(opSigner).updateQuorum(1, 3);
-      expect(await StorageContract.getContextGraphRequiredSignatures(1)).to.equal(3);
+    it('updates threshold independently from hosting node count', async () => {
+      await StorageContract.connect(opSigner).updateQuorum(1, 4);
+      expect(await StorageContract.getContextGraphRequiredSignatures(1)).to.equal(4);
     });
 
-    it('reverts when threshold > hosting nodes length', async () => {
-      await expect(
-        StorageContract.connect(opSigner).updateQuorum(1, 4),
-      ).to.be.revertedWithCustomError(StorageContract, 'InvalidContextGraphConfig');
-    });
-
-    it('reverts on zero threshold', async () => {
-      await expect(
-        StorageContract.connect(opSigner).updateQuorum(1, 0),
-      ).to.be.revertedWithCustomError(StorageContract, 'InvalidContextGraphConfig');
+    it('allows threshold == 0', async () => {
+      await StorageContract.connect(opSigner).updateQuorum(1, 0);
+      expect(await StorageContract.getContextGraphRequiredSignatures(1)).to.equal(0);
     });
   });
 

@@ -384,44 +384,50 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
           error: "requiredSignatures must be a positive integer (>= 1)",
         });
       }
-      if (requiredSignatures > participantIdentityIds.length) {
-        return jsonResponse(res, 400, {
-          error: `requiredSignatures (${requiredSignatures}) cannot exceed participantIdentityIds count (${participantIdentityIds.length})`,
-        });
-      }
-      for (let i = 0; i < participantIdentityIds.length; i++) {
-        const id = participantIdentityIds[i];
-        if (typeof id === "number") {
-          if (
-            !Number.isInteger(id) ||
-            id <= 0 ||
-            id > Number.MAX_SAFE_INTEGER
-          ) {
-            return jsonResponse(res, 400, {
-              error: `participantIdentityIds[${i}] must be a positive safe integer`,
-            });
-          }
-        } else if (typeof id === "string") {
-          if (!/^\d+$/.test(id) || id === "0") {
-            return jsonResponse(res, 400, {
-              error: `participantIdentityIds[${i}] must be a positive decimal integer string`,
-            });
-          }
-        } else {
+      // Legacy quorum metadata is independent of `participantIdentityIds`
+      // length for edge-owned / empty-hosting CGs (on-chain hosting list may
+      // be empty while `requiredSignatures` still records metadata). Only
+      // enforce M<=N when there is a non-empty participant list.
+      if (participantIdentityIds.length > 0) {
+        if (requiredSignatures > participantIdentityIds.length) {
           return jsonResponse(res, 400, {
-            error: `participantIdentityIds[${i}] must be a number or string`,
+            error: `requiredSignatures (${requiredSignatures}) cannot exceed participantIdentityIds count (${participantIdentityIds.length})`,
           });
+        }
+        for (let i = 0; i < participantIdentityIds.length; i++) {
+          const id = participantIdentityIds[i];
+          if (typeof id === "number") {
+            if (
+              !Number.isInteger(id) ||
+              id <= 0 ||
+              id > Number.MAX_SAFE_INTEGER
+            ) {
+              return jsonResponse(res, 400, {
+                error: `participantIdentityIds[${i}] must be a positive safe integer`,
+              });
+            }
+          } else if (typeof id === "string") {
+            if (!/^\d+$/.test(id) || id === "0") {
+              return jsonResponse(res, 400, {
+                error: `participantIdentityIds[${i}] must be a positive decimal integer string`,
+              });
+            }
+          } else {
+            return jsonResponse(res, 400, {
+              error: `participantIdentityIds[${i}] must be a number or string`,
+            });
+          }
         }
       }
       try {
-        const mappedIds = participantIdentityIds.map((id: number | string) =>
-          BigInt(id),
-        );
-        const uniqueIds: bigint[] = Array.from(new Set(mappedIds));
-        const sortedUniqueIds = uniqueIds.sort((a, b) =>
-          a < b ? -1 : a > b ? 1 : 0,
-        );
-        if (requiredSignatures > sortedUniqueIds.length) {
+        const sortedUniqueIds = participantIdentityIds.length === 0
+          ? []
+          : Array.from(
+            new Set(
+              (participantIdentityIds as (number | string)[]).map((id) => BigInt(id)),
+            ),
+          ).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+        if (sortedUniqueIds.length > 0 && requiredSignatures > sortedUniqueIds.length) {
           return jsonResponse(res, 400, {
             error: `requiredSignatures (${requiredSignatures}) exceeds unique participant count (${sortedUniqueIds.length}) after deduplication`,
           });

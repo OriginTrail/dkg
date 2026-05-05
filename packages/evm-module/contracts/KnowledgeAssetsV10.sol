@@ -10,6 +10,7 @@ import {KnowledgeCollectionStorage} from "./storage/KnowledgeCollectionStorage.s
 import {IdentityStorage} from "./storage/IdentityStorage.sol";
 import {ParametersStorage} from "./storage/ParametersStorage.sol";
 import {ConvictionStakingStorage} from "./storage/ConvictionStakingStorage.sol";
+import {ShardingTableStorage} from "./storage/ShardingTableStorage.sol";
 import {ContextGraphs} from "./ContextGraphs.sol";
 import {ContextGraphStorage} from "./storage/ContextGraphStorage.sol";
 import {ContextGraphValueStorage} from "./storage/ContextGraphValueStorage.sol";
@@ -152,6 +153,7 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
     /// @notice v4.0.0 — TRAC vault + V10 stake reads. Replaces the prior
     ///         `stakingStorage` field; CSS is the V10 source of truth.
     ConvictionStakingStorage public convictionStakingStorage;
+    ShardingTableStorage public shardingTableStorage;
     ContextGraphs public contextGraphs;
     ContextGraphStorage public contextGraphStorage;
     ContextGraphValueStorage public contextGraphValueStorage;
@@ -199,6 +201,7 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
         parametersStorage = ParametersStorage(hub.getContractAddress("ParametersStorage"));
         identityStorage = IdentityStorage(hub.getContractAddress("IdentityStorage"));
         convictionStakingStorage = ConvictionStakingStorage(hub.getContractAddress("ConvictionStakingStorage"));
+        shardingTableStorage = ShardingTableStorage(hub.getContractAddress("ShardingTableStorage"));
 
         // V10 new dependencies — fail-fast. Each MUST be Hub-registered at
         // KAV10 initialize() time. The Phase 7 transitional try/catch tolerance
@@ -552,11 +555,10 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
             revert KnowledgeCollectionLib.SignerIsNotNodeOperator(identityId, signer);
         }
 
-        // Core nodes must be staked (spec §9.0). v4.0.0 — read V10 canonical
-        // stake (`nodeStakeV10`) instead of the V8 archive aggregate; under
-        // mandatory migration `getNodeStake` is unmaintained for V10 nodes
-        // and would zero-gate every legitimate V10 ACK signer.
-        require(convictionStakingStorage.getNodeStakeV10(identityId) > 0, "ACK signer has no stake");
+        // VM ACKs may come from any active core node, not from a fixed per-CG
+        // host list. Active sharding-table membership is the on-chain source
+        // of truth for "core node currently eligible to host and be challenged".
+        require(shardingTableStorage.nodeExists(identityId), "ACK signer is not an active core node");
     }
 
     // ========================================================================

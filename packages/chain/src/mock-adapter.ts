@@ -52,6 +52,7 @@ export class MockChainAdapter implements ChainAdapter {
   private nextBlock = 1;
   private txIndexInBlock = 0;
   private identities = new Map<string, bigint>();
+  private activeCoreIdentities = new Set<bigint>();
   private namespaceNextId = new Map<string, bigint>();
   private namespaceOwner = new Map<string, string>();
   private batches = new Map<bigint, { merkleRoot: Uint8Array; kaCount: number }>();
@@ -88,6 +89,7 @@ export class MockChainAdapter implements ChainAdapter {
     if (existing > 0n) return existing;
     const id = this.nextIdentityId++;
     this.identities.set(this.signerAddress, id);
+    this.activeCoreIdentities.add(id);
     return id;
   }
 
@@ -98,6 +100,7 @@ export class MockChainAdapter implements ChainAdapter {
 
     const id = this.nextIdentityId++;
     this.identities.set(key, id);
+    this.activeCoreIdentities.add(id);
     this.pushEvent('IdentityRegistered', { identityId: id.toString() });
     return id;
   }
@@ -106,11 +109,21 @@ export class MockChainAdapter implements ChainAdapter {
    * Test helper: seed a deterministic identity for an address in this in-memory adapter.
    * Used by black-box daemon tests that need stable participant IDs across processes.
    */
-  seedIdentity(address: string, identityId: bigint): void {
+  seedIdentity(address: string, identityId: bigint, options?: { activeCore?: boolean }): void {
     this.identities.set(address, identityId);
+    if (options?.activeCore === false) {
+      this.activeCoreIdentities.delete(identityId);
+    } else {
+      this.activeCoreIdentities.add(identityId);
+    }
     if (identityId >= this.nextIdentityId) {
       this.nextIdentityId = identityId + 1n;
     }
+  }
+
+  setActiveCoreIdentity(identityId: bigint, active: boolean): void {
+    if (active) this.activeCoreIdentities.add(identityId);
+    else this.activeCoreIdentities.delete(identityId);
   }
 
   // --- V9 UAL-based methods ---
@@ -615,11 +628,8 @@ export class MockChainAdapter implements ChainAdapter {
   private nextContextGraphId = 1n;
 
   async createOnChainContextGraph(params: CreateOnChainContextGraphParams): Promise<CreateOnChainContextGraphResult> {
-    if (params.requiredSignatures < 1) {
-      throw new Error('Mock: requiredSignatures must be >= 1');
-    }
-    if (params.requiredSignatures > params.participantIdentityIds.length) {
-      throw new Error(`Mock: requiredSignatures (${params.requiredSignatures}) exceeds participant count (${params.participantIdentityIds.length})`);
+    if (!Number.isInteger(params.requiredSignatures) || params.requiredSignatures < 0 || params.requiredSignatures > 255) {
+      throw new Error('Mock: requiredSignatures must fit uint8');
     }
     for (let i = 1; i < params.participantIdentityIds.length; i++) {
       if (params.participantIdentityIds[i] <= params.participantIdentityIds[i - 1]) {
@@ -715,14 +725,24 @@ export class MockChainAdapter implements ChainAdapter {
     const normalizedAddress = recoveredAddress.toLowerCase();
     for (const [addr, id] of this.identities) {
       if (id === claimedIdentityId && addr.toLowerCase() === normalizedAddress) {
-        return true;
+        return this.activeCoreIdentities.has(claimedIdentityId);
       }
     }
     return false;
   }
 
   async isOperationalWalletRegistered(identityId: bigint, address: string): Promise<boolean> {
-    return this.verifyACKIdentity(address, identityId);
+    const normalizedAddress = address.toLowerCase();
+    for (const [addr, id] of this.identities) {
+      if (id === identityId && addr.toLowerCase() === normalizedAddress) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  async isPaymasterValid(paymaster: string): Promise<boolean> {
+    return ethers.isAddress(paymaster) && ethers.getAddress(paymaster) !== ethers.ZeroAddress;
   }
 
   async ensureOperationalWalletsRegistered(options?: {
@@ -889,6 +909,49 @@ export class MockChainAdapter implements ChainAdapter {
     if (params.ackSignatures.length < this.minimumRequiredSignatures) {
       throw new Error('MinSignaturesRequirementNotMet');
     }
+    if (
+      params.publisherConvictionAccountId !== undefined &&
+      params.paymaster !== '0x0000000000000000000000000000000000000000'
+    ) {
+      throw new Error(
+        'V10 conviction publish cannot also use a paymaster; choose one gateway payment path',
+      );
+    }
+    if (params.publisherConvictionAccountId !== undefined) {
+      const convictionAccount = this.convictionAccounts.get(params.publisherConvictionAccountId);
+      if (!convictionAccount) {
+        throw new Error(`Publishing conviction account ${params.publisherConvictionAccountId} unavailable`);
+      }
+      // Mirror DKGPublishingConvictionNFT.agentToAccountId semantics: an
+      // agent address is bound to AT MOST ONE account, and `publish()`
+      // resolves the paying account through that 1:1 reverse map. The
+      // EVM adapter's preflight at evm-adapter.ts:1648-1665 enforces
+      // `agentToAccountId(signer) === publisherConvictionAccountId`, so
+      // the mock has to fail under the same conditions or mock-backed
+      // tests will pass for a publish that reverts on a real chain.
+      const signerAddress = ethers.getAddress(this.signerAddress);
+      let registeredAccountId: bigint | undefined;
+      for (const [id, acct] of this.convictionAccounts) {
+        if (acct.authorizedKeys.has(signerAddress)) {
+          registeredAccountId = id;
+          break;
+        }
+      }
+      if (registeredAccountId === undefined) {
+        throw new Error(
+          `Publisher wallet ${this.signerAddress} is not registered under requested ` +
+          `publisher conviction account ${params.publisherConvictionAccountId}; ` +
+          `registered account: none`,
+        );
+      }
+      if (registeredAccountId !== params.publisherConvictionAccountId) {
+        throw new Error(
+          `Publisher wallet ${this.signerAddress} is not registered under requested ` +
+          `publisher conviction account ${params.publisherConvictionAccountId}; ` +
+          `registered account: ${registeredAccountId}`,
+        );
+      }
+    }
 
     // P-1 review (follow-up): mirror the EVM adapter's write-ahead
     // hook so mock-backed publisher tests observe the same phase
@@ -947,6 +1010,7 @@ export class MockChainAdapter implements ChainAdapter {
       isImmutable: params.isImmutable,
       contextGraphId: params.contextGraphId.toString(),
       paymaster: params.paymaster,
+      publisherConvictionAccountId: params.publisherConvictionAccountId?.toString(),
     });
 
     const result = this.txResult(true);

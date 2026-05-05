@@ -84,6 +84,7 @@ import {
   TELEMETRY_ENDPOINTS,
   type DkgConfig,
   type AutoUpdateConfig,
+  type PublisherGatewayConfig,
   type LocalAgentIntegrationCapabilities,
   type LocalAgentIntegrationConfig,
   type LocalAgentIntegrationManifest,
@@ -119,6 +120,77 @@ import {
   hasVerifiedBundledBinary as hasVerifiedBundledMarkItDownBinary,
   metadataPathFor as markItDownMetadataPath,
 } from '../../../scripts/markitdown-bundle-validation.mjs';
+
+function normalizePublishGatewayFromBody(input: unknown): PublisherGatewayConfig | undefined {
+  if (input === undefined || input === null) return undefined;
+  if (typeof input !== 'object') {
+    throw new Error('"publishGateway" must be an object');
+  }
+  const gateway = input as Record<string, unknown>;
+  if (typeof gateway.peerId !== 'string' || gateway.peerId.trim().length === 0) {
+    throw new Error('"publishGateway.peerId" is required');
+  }
+  if (gateway.nodeIdentityId === undefined || gateway.nodeIdentityId === null) {
+    throw new Error('"publishGateway.nodeIdentityId" is required');
+  }
+  const nodeIdentityId = parsePositiveIntegerForGateway(gateway.nodeIdentityId, 'publishGateway.nodeIdentityId');
+  const pcaAccountId = gateway.pcaAccountId === undefined
+    ? undefined
+    : parsePositiveIntegerForGateway(gateway.pcaAccountId, 'publishGateway.pcaAccountId');
+  const paymaster = gateway.paymaster === undefined
+    ? undefined
+    : ethers.getAddress(String(gateway.paymaster));
+  if (pcaAccountId && paymaster) {
+    // The V10 publish path rejects PCA + paymaster on the same call
+    // (EVMChainAdapter.publishToContextGraph), so refuse the impossible
+    // combination here instead of persisting/serializing it for a
+    // network round-trip that will fail.
+    throw new Error(
+      '"publishGateway" cannot set both pcaAccountId and paymaster; choose one payment path',
+    );
+  }
+  return {
+    peerId: gateway.peerId.trim(),
+    nodeIdentityId,
+    ...(pcaAccountId ? { pcaAccountId } : {}),
+    ...(paymaster ? { paymaster } : {}),
+  };
+}
+
+/**
+ * Parse a positive integer ID from a JSON-decoded body field. Strings
+ * and bigints are accepted as-is; numbers are accepted ONLY when they
+ * fit in `Number.MAX_SAFE_INTEGER` because JSON.parse rounds anything
+ * larger to the nearest IEEE-754 double before we ever see it. An
+ * `nodeIdentityId` like 9007199254740993 (= 2^53 + 1) submitted as a
+ * raw JSON number arrives as 9007199254740992 — the request would then
+ * pass validation against the rounded ID, never the one the caller
+ * meant. Force callers to use strings (or safe-range numbers) so the
+ * value the daemon validates is the value that actually appeared on
+ * the wire.
+ */
+function parsePositiveIntegerForGateway(value: unknown, field: string): string {
+  if (typeof value === 'number') {
+    if (!Number.isInteger(value) || !Number.isSafeInteger(value)) {
+      throw new Error(
+        `"${field}" exceeds Number.MAX_SAFE_INTEGER; pass it as a string`,
+      );
+    }
+    if (value <= 0) throw new Error(`"${field}" must be a positive integer`);
+    return String(value);
+  }
+  if (typeof value !== 'string' && typeof value !== 'bigint') {
+    throw new Error(`"${field}" must be a positive integer`);
+  }
+  let parsed: bigint;
+  try {
+    parsed = BigInt(value);
+  } catch {
+    throw new Error(`"${field}" must be a positive integer`);
+  }
+  if (parsed <= 0n) throw new Error(`"${field}" must be a positive integer`);
+  return parsed.toString();
+}
 import { type ExtractionStatusRecord, getExtractionStatusRecord, setExtractionStatusRecord } from '../../extraction-status.js';
 import { FileStore } from '../../file-store.js';
 import { VectorStore, OpenAIEmbeddingProvider, type EmbeddingProvider } from '../../vector-store.js';
@@ -549,6 +621,14 @@ WHERE {
     if (!parsed) return;
     const { selection, clearAfter, publishContextGraphId, subGraphName } =
       parsed;
+    let publishGateway: PublisherGatewayConfig | undefined;
+    try {
+      publishGateway = normalizePublishGatewayFromBody(parsed.publishGateway);
+    } catch (err) {
+      return jsonResponse(res, 400, {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
     const paranetId = parsed.contextGraphId ?? parsed.paranetId;
     if (!paranetId)
       return jsonResponse(res, 400, {
@@ -584,6 +664,14 @@ WHERE {
           clearSharedMemoryAfter: clearAfter ?? true,
           operationCtx: ctx,
           subGraphName,
+          publishGateway: publishGateway
+            ? {
+                peerId: publishGateway.peerId,
+                nodeIdentityId: BigInt(publishGateway.nodeIdentityId),
+                ...(publishGateway.pcaAccountId ? { pcaAccountId: BigInt(publishGateway.pcaAccountId) } : {}),
+                ...(publishGateway.paymaster ? { paymaster: publishGateway.paymaster } : {}),
+              }
+            : undefined,
           ...(resolvedPublishContextGraphId != null
             ? { contextGraphId: resolvedPublishContextGraphId }
             : {}),

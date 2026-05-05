@@ -55,6 +55,12 @@ export interface AgentProfileConfig {
   /** @deprecated Use contextGraphsServed */
   paranetsServed?: string[];
   nodeRole?: 'core' | 'edge';
+  nodeIdentityId?: string | bigint;
+  publishGateway?: {
+    enabled?: boolean;
+    pcaAccountId?: string | bigint;
+    paymaster?: string;
+  };
   publicKey?: string;
   relayAddress?: string;
   agentAddress?: string;
@@ -104,6 +110,19 @@ export function buildAgentProfile(config: AgentProfileConfig): {
   // DKG P2P properties
   q(entity, `${DKG}peerId`, `"${config.peerId}"`);
   q(entity, `${DKG}nodeRole`, `"${role}"`);
+  if (config.nodeIdentityId !== undefined) {
+    q(entity, `${DKG}nodeIdentityId`, `"${String(config.nodeIdentityId)}"`);
+  }
+  if (config.publishGateway?.enabled) {
+    q(entity, `${DKG}publishGateway`, `${DKG}PublishGateway`);
+    q(entity, `${DKG}publishGatewayEnabled`, `"true"`);
+    if (config.publishGateway.pcaAccountId !== undefined) {
+      q(entity, `${DKG}publisherConvictionAccountId`, `"${String(config.publishGateway.pcaAccountId)}"`);
+    }
+    if (config.publishGateway.paymaster) {
+      q(entity, `${DKG}publishPaymaster`, `"${config.publishGateway.paymaster}"`);
+    }
+  }
 
   if (config.publicKey) {
     q(entity, `${DKG}publicKey`, `"${config.publicKey}"`);

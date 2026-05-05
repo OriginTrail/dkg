@@ -44,6 +44,14 @@ export interface StorageACKHandlerConfig {
    */
   isSignerRegistered?: () => Promise<boolean>;
   /**
+   * Optional: confirms this node's ACK-signer identity is currently an
+   * active sharding-table core (same probe as `PublishGatewayHandler`).
+   * When set, runs after `isSignerRegistered` succeeds so evicted cores stop
+   * emitting ACKs that would revert on-chain with
+   * `ACK signer is not an active core node`.
+   */
+  isActiveCore?: () => Promise<boolean>;
+  /**
    * Called when the live confirmation hook reports the signer is no longer
    * registered. Agents can use this to stop advertising StorageACK support.
    */
@@ -278,6 +286,28 @@ export class StorageACKHandler {
           // Keep the signing refusal deterministic even if protocol cleanup fails.
         }
         throw new Error('StorageACK signer is not confirmed on-chain as an operational wallet');
+      }
+    }
+
+    if (this.config.isActiveCore) {
+      let active: boolean;
+      try {
+        active = await this.config.isActiveCore();
+      } catch (err) {
+        try {
+          await this.config.onSignerRegistrationLookupFailed?.(err);
+        } catch {
+          // Keep ACK availability independent from logging/callback failures.
+        }
+        throw new Error('StorageACK active-core lookup failed; refusing to sign');
+      }
+      if (!active) {
+        try {
+          await this.config.onSignerUnregistered?.();
+        } catch {
+          // Keep the signing refusal deterministic even if protocol cleanup fails.
+        }
+        throw new Error('StorageACK signer is not an active sharding-table core node');
       }
     }
 

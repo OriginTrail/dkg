@@ -18,7 +18,7 @@ import {
   releasesDir, activeSlot, swapSlot,
   slotEntryPoint, isStandaloneInstall,
   resolveContextGraphs, resolveNetworkDefaultContextGraphs,
-  type AutoUpdateConfig,
+  type AutoUpdateConfig, type PublisherGatewayConfig, type LocalPublisherGatewayConfig,
 } from './config.js';
 import { ApiClient } from './api-client.js';
 import { parsePositiveIntegerOption, parsePositiveMsOption } from './publisher-runner.js';
@@ -59,6 +59,123 @@ import { registerIntegrationCommands } from './integrations/commands.js';
 
 /** Commander action callbacks receive parsed .option() values with loose types. */
 type ActionOpts = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
+
+function parsePositiveIntegerString(value: string, flag: string): string {
+  let parsed: bigint;
+  try {
+    parsed = BigInt(value);
+  } catch {
+    throw new Error(`${flag} must be a positive integer`);
+  }
+  if (parsed <= 0n) throw new Error(`${flag} must be a positive integer`);
+  return parsed.toString();
+}
+
+function buildPublisherGatewayConfig(args: {
+  peerId: string;
+  identity: string;
+  pcaAccount?: string;
+  paymaster?: string;
+}): PublisherGatewayConfig {
+  // The V10 publish path rejects PCA + paymaster on the same call (see
+  // EVMChainAdapter.publishToContextGraph and DKGPublisher's gateway
+  // request builder), so reject the combination at config-build time.
+  // Otherwise the CLI would happily persist or serialize an impossible
+  // config and the user would only find out after a network round-trip.
+  if (args.pcaAccount && args.paymaster) {
+    throw new Error(
+      'Publish gateway cannot use both --pca-account and --paymaster; choose one payment path',
+    );
+  }
+  return {
+    peerId: args.peerId,
+    nodeIdentityId: parsePositiveIntegerString(args.identity, '--identity'),
+    ...(args.pcaAccount ? { pcaAccountId: parsePositiveIntegerString(args.pcaAccount, '--pca-account') } : {}),
+    ...(args.paymaster ? { paymaster: ethers.getAddress(args.paymaster) } : {}),
+  };
+}
+
+function mergeLocalPublisherGatewayCliOpts(
+  opts: ActionOpts,
+  prev?: LocalPublisherGatewayConfig,
+): { pcaAccount?: string; paymaster?: string; allowedPeers?: string } {
+  const pcaAccount =
+    opts.pcaAccount !== undefined
+      ? (String(opts.pcaAccount).trim() || undefined)
+      : prev?.pcaAccountId;
+  const paymaster =
+    opts.paymaster !== undefined
+      ? (String(opts.paymaster).trim() || undefined)
+      : prev?.paymaster;
+  const allowedPeers =
+    opts.allowedPeers !== undefined
+      ? String(opts.allowedPeers)
+      : prev?.allowedPeers?.join(',');
+  return { pcaAccount, paymaster, allowedPeers };
+}
+
+function buildLocalPublisherGatewayConfig(args: {
+  pcaAccount?: string;
+  paymaster?: string;
+  allowedPeers?: string;
+}): LocalPublisherGatewayConfig {
+  if (args.pcaAccount && args.paymaster) {
+    throw new Error(
+      'publisher.localGateway cannot combine --pca-account and --paymaster; choose one',
+    );
+  }
+  const allowedPeers =
+    typeof args.allowedPeers === 'string' && args.allowedPeers.trim().length > 0
+      ? args.allowedPeers.split(',').map((p) => p.trim()).filter((p) => p.length > 0)
+      : undefined;
+  const paymasterAddr = args.paymaster ? ethers.getAddress(String(args.paymaster)) : undefined;
+  if (paymasterAddr && paymasterAddr !== ethers.ZeroAddress && (!allowedPeers || allowedPeers.length === 0)) {
+    throw new Error(
+      'publisher.localGateway: when setting a paymaster, --allowed-peers must list at least one libp2p peer id',
+    );
+  }
+  const pca =
+    args.pcaAccount && String(args.pcaAccount).trim().length > 0
+      ? parsePositiveIntegerString(String(args.pcaAccount), '--pca-account')
+      : undefined;
+  if (!pca && !paymasterAddr && (!allowedPeers || allowedPeers.length === 0)) {
+    throw new Error(
+      'publisher.localGateway would be empty (need --pca-account, --paymaster, and/or --allowed-peers)',
+    );
+  }
+  return {
+    ...(pca ? { pcaAccountId: pca } : {}),
+    ...(paymasterAddr ? { paymaster: paymasterAddr } : {}),
+    ...(allowedPeers && allowedPeers.length > 0 ? { allowedPeers } : {}),
+  };
+}
+
+function resolvePublishGatewayForCommand(opts: ActionOpts, stored?: PublisherGatewayConfig): PublisherGatewayConfig | undefined {
+  const hasCommandOverride = !!(
+    opts.publishGatewayPeer ||
+    opts.publishGatewayIdentity ||
+    opts.pcaAccount ||
+    opts.paymaster
+  );
+  if (!hasCommandOverride) return stored;
+  const peerId = String(opts.publishGatewayPeer ?? stored?.peerId ?? '');
+  if (!peerId) {
+    throw new Error('--publish-gateway-peer is required when gateway override options are supplied');
+  }
+  const identity = String(opts.publishGatewayIdentity ?? (stored?.peerId === peerId ? stored.nodeIdentityId : '') ?? '');
+  if (!identity) {
+    throw new Error(
+      `No identity configured for publish gateway ${peerId}. ` +
+      'Run `dkg publisher gateway set` first or pass --publish-gateway-identity.',
+    );
+  }
+  return buildPublisherGatewayConfig({
+    peerId,
+    identity,
+    pcaAccount: opts.pcaAccount ?? (stored?.peerId === peerId ? stored.pcaAccountId : undefined),
+    paymaster: opts.paymaster ?? (stored?.peerId === peerId ? stored.paymaster : undefined),
+  });
+}
 
 const STARTUP_BANNER = `
 \x1b[36m██████╗ ██╗  ██╗ ██████╗     ██╗   ██╗ █████╗ 
@@ -2254,15 +2371,22 @@ sharedMemoryCmd
   .option('--keep', 'Keep shared memory triples after publishing')
   .option('--root <entity...>', 'Publish only specific root entities')
   .option('--sub-graph-name <name>', 'Publish from a specific shared-memory sub-graph')
+  .option('--publish-gateway-peer <peer-id>', 'Preferred core peer to sign the V10 publisher digest')
+  .option('--publish-gateway-identity <id>', 'Gateway core node identity ID (uses saved gateway config when omitted)')
+  .option('--pca-account <id>', 'Publisher conviction account ID requested from the gateway')
+  .option('--paymaster <address>', 'Paymaster address requested from the gateway')
   .action(async (contextGraph: string | undefined, opts: ActionOpts) => {
     try {
       const targetContextGraph = contextGraph ?? 'dev-coordination';
       const client = await ApiClient.connect();
+      const config = await loadConfig();
+      const publishGateway = resolvePublishGatewayForCommand(opts, config.publisher?.gateway);
       const selection = opts.root?.length
         ? { rootEntities: opts.root as string[] }
         : 'all';
       const result = await client.publishFromSharedMemory(targetContextGraph, selection, !opts.keep, {
         subGraphName: opts.subGraphName,
+        publishGateway,
       });
       console.log(`Published from shared memory to "${targetContextGraph}":`);
       console.log(`  Status: ${result.status}`);
@@ -2270,6 +2394,9 @@ sharedMemoryCmd
       console.log(`  KAs:    ${result.kas.length}`);
       if (opts.subGraphName) {
         console.log(`  Sub-graph: ${opts.subGraphName}`);
+      }
+      if (publishGateway) {
+        console.log(`  Gateway: ${publishGateway.peerId} (identity ${publishGateway.nodeIdentityId})`);
       }
       if (result.txHash) {
         console.log(`  TX:     ${result.txHash}`);
@@ -2364,6 +2491,144 @@ publisherWalletCmd
     }
   });
 
+const publisherGatewayCmd = publisherCmd
+  .command('gateway')
+  .description('Manage preferred publish gateway core node');
+
+publisherGatewayCmd
+  .command('set <peer-id>')
+  .description('Set preferred publish gateway core node')
+  .requiredOption('--identity <id>', 'Gateway core node identity ID')
+  .option('--pca-account <id>', 'Publisher conviction account ID exposed by the gateway')
+  .option('--paymaster <address>', 'Paymaster address exposed by the gateway')
+  .action(async (peerId: string, opts: ActionOpts) => {
+    try {
+      const config = await loadConfig();
+      const gateway = buildPublisherGatewayConfig({
+        peerId,
+        identity: String(opts.identity),
+        pcaAccount: opts.pcaAccount,
+        paymaster: opts.paymaster,
+      });
+      config.publisher = { ...(config.publisher ?? {}), gateway };
+      await saveConfig(config);
+      console.log('Publish gateway configured.');
+      console.log(`  Peer:     ${gateway.peerId}`);
+      console.log(`  Identity: ${gateway.nodeIdentityId}`);
+      if (gateway.pcaAccountId) console.log(`  PCA:      ${gateway.pcaAccountId}`);
+      if (gateway.paymaster) console.log(`  Paymaster: ${gateway.paymaster}`);
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
+publisherGatewayCmd
+  .command('status')
+  .description('Show preferred publish gateway core node')
+  .action(async () => {
+    try {
+      const config = await loadConfig();
+      const gateway = config.publisher?.gateway;
+      if (!gateway) {
+        console.log('No publish gateway configured.');
+        return;
+      }
+      console.log('Publish gateway:');
+      console.log(`  Peer:     ${gateway.peerId}`);
+      console.log(`  Identity: ${gateway.nodeIdentityId}`);
+      if (gateway.pcaAccountId) console.log(`  PCA:      ${gateway.pcaAccountId}`);
+      if (gateway.paymaster) console.log(`  Paymaster: ${gateway.paymaster}`);
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
+const publisherLocalGatewayCmd = publisherCmd
+  .command('local-gateway')
+  .description('Configure what THIS core advertises on PublishGatewayHandler (PCA/paymaster/allowlist)');
+
+publisherLocalGatewayCmd
+  .command('set')
+  .description('Set or update publisher.localGateway (omit a flag to keep its previous value)')
+  .option('--pca-account <id>', 'Publisher conviction account ID to advertise')
+  .option('--paymaster <address>', 'Paymaster address to advertise')
+  .option('--allowed-peers <csv>', 'Comma-separated libp2p peer IDs (required when advertising a paymaster)')
+  .action(async (opts: ActionOpts) => {
+    try {
+      const config = await loadConfig();
+      const hasExplicit =
+        opts.pcaAccount !== undefined ||
+        opts.paymaster !== undefined ||
+        opts.allowedPeers !== undefined;
+      if (!hasExplicit && !config.publisher?.localGateway) {
+        throw new Error(
+          'Pass at least one of --pca-account, --paymaster, or --allowed-peers (nothing to merge yet)',
+        );
+      }
+      const merged = mergeLocalPublisherGatewayCliOpts(opts, config.publisher?.localGateway);
+      const local = buildLocalPublisherGatewayConfig(merged);
+      config.publisher = { ...(config.publisher ?? {}), localGateway: local };
+      await saveConfig(config);
+      console.log('Local publish gateway (handler advertisement) configured.');
+      if (local.pcaAccountId) console.log(`  PCA:             ${local.pcaAccountId}`);
+      if (local.paymaster) console.log(`  Paymaster:       ${local.paymaster}`);
+      if (local.allowedPeers?.length) {
+        console.log(`  Allowed peers:   ${local.allowedPeers.join(', ')}`);
+      }
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
+publisherLocalGatewayCmd
+  .command('clear')
+  .description('Remove publisher.localGateway advertisement block')
+  .action(async () => {
+    try {
+      const config = await loadConfig();
+      if (!config.publisher?.localGateway) {
+        console.log('No local publish gateway configuration to clear.');
+        return;
+      }
+      config.publisher = { ...config.publisher };
+      delete config.publisher.localGateway;
+      await saveConfig(config);
+      console.log('Local publish gateway configuration cleared.');
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
+publisherLocalGatewayCmd
+  .command('status')
+  .description('Show publisher.localGateway advertisement')
+  .action(async () => {
+    try {
+      const config = await loadConfig();
+      const lg = config.publisher?.localGateway;
+      if (!lg) {
+        console.log('No local publish gateway configured.');
+        return;
+      }
+      console.log('Local publish gateway (handler advertisement):');
+      if (lg.pcaAccountId) console.log(`  PCA:             ${lg.pcaAccountId}`);
+      if (lg.paymaster) console.log(`  Paymaster:       ${lg.paymaster}`);
+      if (lg.allowedPeers?.length) {
+        console.log(`  Allowed peers:   ${lg.allowedPeers.join(', ')}`);
+      }
+      if (!lg.pcaAccountId && !lg.paymaster && !lg.allowedPeers?.length) {
+        console.log('  (empty block — use `dkg publisher local-gateway clear` to remove)');
+      }
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
 publisherCmd
   .command('enable')
   .description('Enable async publisher runtime')
@@ -2374,6 +2639,7 @@ publisherCmd
     try {
       const config = await loadConfig();
       config.publisher = {
+        ...(config.publisher ?? {}),
         enabled: true,
         pollIntervalMs: parsePositiveMsOption(String(opts.pollInterval ?? '12000'), '--poll-interval'),
         errorBackoffMs: parsePositiveMsOption(String(opts.errorBackoff ?? '5000'), '--error-backoff'),

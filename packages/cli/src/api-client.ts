@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { basename } from 'node:path';
 import { readApiPort, readPid, isProcessRunning } from './config.js';
+import type { PublisherGatewayConfig } from './config.js';
 import { loadTokens } from './auth.js';
 
 export type QueryResult =
@@ -190,7 +191,7 @@ export class ApiClient {
     contextGraphId: string,
     selection: 'all' | { rootEntities: string[] } = 'all',
     clearAfter = true,
-    options?: { subGraphName?: string },
+    options?: { subGraphName?: string; publishGateway?: PublisherGatewayConfig },
   ): Promise<{
     kcId: string;
     status: 'tentative' | 'confirmed';
@@ -203,6 +204,7 @@ export class ApiClient {
       selection,
       clearAfter,
       ...(options?.subGraphName ? { subGraphName: options.subGraphName } : {}),
+      ...(options?.publishGateway ? { publishGateway: options.publishGateway } : {}),
     });
   }
 
@@ -211,7 +213,7 @@ export class ApiClient {
     contextGraphId: string,
     selection: 'all' | { rootEntities: string[] } = 'all',
     clearAfter = true,
-    options?: { subGraphName?: string },
+    options?: { subGraphName?: string; publishGateway?: PublisherGatewayConfig },
   ): Promise<{
     kcId: string;
     status: 'tentative' | 'confirmed';

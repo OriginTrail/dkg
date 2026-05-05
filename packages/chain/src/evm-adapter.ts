@@ -109,7 +109,8 @@ const ERROR_ABI_CONTRACTS = [
   'ConvictionStakingStorage',
   'DKGStakingConvictionNFT', 'DKGPublishingConvictionNFT',
   'Hub', 'Token', 'Ask', 'AskStorage',
-  'Paymaster', 'ShardingTable', 'ParametersStorage',
+  'Paymaster', 'PaymasterManager', 'ShardingTable', 'ParametersStorage',
+  'ShardingTableStorage',
   'PublishingConvictionAccount',
   'RandomSampling', 'RandomSamplingStorage',
 ];
@@ -233,6 +234,7 @@ interface ContractCache {
   contextGraphStorage?: Contract;
   knowledgeAssetsV10?: Contract;
   publishingConvictionAccount?: Contract;
+  publishingConvictionNFT?: Contract;
   randomSampling?: Contract;
   randomSamplingStorage?: Contract;
 }
@@ -597,6 +599,12 @@ export class EVMChainAdapter implements ChainAdapter {
       this.contracts.publishingConvictionAccount = await this.resolveContract('PublishingConvictionAccount');
     } catch {
       // PublishingConvictionAccount not deployed — conviction account operations unavailable
+    }
+
+    try {
+      this.contracts.publishingConvictionNFT = await this.resolveContract('DKGPublishingConvictionNFT');
+    } catch {
+      // DKGPublishingConvictionNFT not deployed — V10 publisher conviction path unavailable
     }
 
     try {
@@ -1629,11 +1637,41 @@ export class EVMChainAdapter implements ChainAdapter {
       );
     }
 
+    const usePublisherConviction = params.publisherConvictionAccountId !== undefined;
+    if (usePublisherConviction && ethers.getAddress(params.paymaster) !== ethers.ZeroAddress) {
+      throw new Error(
+        'V10 conviction publish cannot also use a paymaster; choose one gateway payment path',
+      );
+    }
+
     const txSigner = await this.nextAuthorizedSigner(params.contextGraphId);
     const ka = this.contracts.knowledgeAssetsV10.connect(txSigner) as Contract;
     const kaAddress = await ka.getAddress();
 
-    // Approval policy: always approve TRAC from the operational signer.
+    if (usePublisherConviction) {
+      const publishingConvictionNFT = await this.resolvePublishingConvictionNFT();
+      if (!publishingConvictionNFT) {
+        throw new Error(
+          `Publishing conviction account ${params.publisherConvictionAccountId} requested but ` +
+          'DKGPublishingConvictionNFT contract is not deployed.',
+        );
+      }
+      const registeredAccountId = BigInt(
+        await publishingConvictionNFT.agentToAccountId(txSigner.address),
+      );
+      if (registeredAccountId !== params.publisherConvictionAccountId) {
+        const registeredLabel = registeredAccountId === 0n ? 'none' : registeredAccountId.toString();
+        throw new Error(
+          `Publisher wallet ${txSigner.address} is not registered under requested ` +
+          `publisher conviction account ${params.publisherConvictionAccountId}; ` +
+          `registered account: ${registeredLabel}`,
+        );
+      }
+    }
+
+    // Approval policy: always approve TRAC from the operational signer for
+    // market-rate publishDirect. The conviction path spends the account's
+    // pre-funded allowance inside DKGPublishingConvictionNFT instead.
     //
     // `KnowledgeAssetsV10._publishDirect` (KnowledgeAssetsV10.sol:613-628)
     // only routes payment to `IPaymaster(paymaster).coverCost(...)` when
@@ -1646,7 +1684,7 @@ export class EVMChainAdapter implements ChainAdapter {
     // zero allowance → publish reverts. A redundant allowance is cheap
     // and idle when the paymaster does cover the cost, so we always
     // approve and drop the probe entirely.
-    if (this.contracts.token) {
+    if (!usePublisherConviction && this.contracts.token) {
       const tokenWithSigner = this.contracts.token.connect(txSigner) as Contract;
       const currentAllowance = await tokenWithSigner.allowance(txSigner.address, kaAddress);
       if (currentAllowance < params.tokenAmount) {
@@ -1694,10 +1732,12 @@ export class EVMChainAdapter implements ChainAdapter {
     // This also gives the WAL the pre-broadcast tx hash (ethers v6
     // exposes it on the returned TransactionResponse), so recovery can
     // reconcile an in-flight tx after a daemon crash.
-    const populated = await (ka as any).publishDirect.populateTransaction(
-      publishParamsStruct,
-      params.paymaster,
-    );
+    const populated = usePublisherConviction
+      ? await (ka as any).publish.populateTransaction(publishParamsStruct)
+      : await (ka as any).publishDirect.populateTransaction(
+          publishParamsStruct,
+          params.paymaster,
+        );
     const filled = await txSigner.populateTransaction(populated);
     const signedTx = await txSigner.signTransaction(filled);
     // Derive the pre-broadcast tx hash from the signed raw hex so WAL
@@ -1716,8 +1756,9 @@ export class EVMChainAdapter implements ChainAdapter {
       // Fail closed: the signed tx is still in this function's local
       // scope — it has not been sent. Surface the hook error to the
       // caller so they know WAL persistence failed BEFORE broadcast.
+      const method = usePublisherConviction ? 'publish' : 'publishDirect';
       throw new Error(
-        `chain:writeahead hook failed before publishDirect broadcast: ` +
+        `chain:writeahead hook failed before ${method} broadcast: ` +
         `${hookErr instanceof Error ? hookErr.message : String(hookErr)}`,
       );
     }
@@ -1950,6 +1991,13 @@ export class EVMChainAdapter implements ChainAdapter {
     }
     const baseTokenAmount = params.newTokenAmount ?? currentTokenAmount;
     const newTokenAmount = baseTokenAmount > requiredForNewSize ? baseTokenAmount : requiredForNewSize;
+    if (!Number.isInteger(params.newMerkleLeafCount) || params.newMerkleLeafCount < 1) {
+      throw new Error(
+        'V10 update requires a positive newMerkleLeafCount so RandomSampling ' +
+        'can address the updated flat-KC Merkle tree correctly.',
+      );
+    }
+    const newMerkleLeafCount = BigInt(params.newMerkleLeafCount);
 
     // Look up the contextGraphId for this KC
     const contextGraphStorage = this.contracts.contextGraphStorage;
@@ -1990,7 +2038,6 @@ export class EVMChainAdapter implements ChainAdapter {
           ? ethers.solidityPacked(burnIds.map(() => 'uint256'), burnIds)
           : new Uint8Array(0),
       );
-      const newMerkleLeafCount = BigInt(params.newMerkleLeafCount ?? 0);
       const ackDigest = ethers.getBytes(ethers.solidityPackedKeccak256(
         ['uint256', 'address', 'uint256', 'uint256', 'uint256', 'bytes32', 'uint256', 'uint256', 'uint256', 'bytes32', 'uint256'],
         [evmChainId, kav10Address, contextGraphId, params.kcId, preUpdateMerkleRootCount,
@@ -2007,7 +2054,7 @@ export class EVMChainAdapter implements ChainAdapter {
       newMerkleRoot: ethers.hexlify(params.newMerkleRoot),
       newByteSize: params.newByteSize,
       newTokenAmount,
-      newMerkleLeafCount: params.newMerkleLeafCount,
+      newMerkleLeafCount,
       mintKnowledgeAssetsAmount: params.mintAmount ?? 0,
       knowledgeAssetsToBurn: burnIds,
       publisherNodeIdentityId: identityId,
@@ -2245,6 +2292,47 @@ export class EVMChainAdapter implements ChainAdapter {
 
   async getConvictionAccountInfo(accountId: bigint): Promise<ConvictionAccountInfo | null> {
     await this.init();
+    // Two on-chain conviction-account stores can coexist on a single
+    // deployment: the legacy `PublishingConvictionAccount` (PCA) and the
+    // V10 `DKGPublishingConvictionNFT` (NFT). Existing CLI flows still
+    // create accounts via PCA, so when the NFT lookup misses we fall
+    // through to the PCA path instead of immediately reporting null —
+    // returning null prematurely silently hides accounts that exist in
+    // the legacy store and breaks every test that creates via PCA then
+    // queries via this method.
+    const publishingConvictionNFT = await this.resolvePublishingConvictionNFT();
+    if (publishingConvictionNFT) {
+      try {
+        const [
+          owner,
+          committedTRAC,
+          baseEpochAllowance,
+          createdAtEpoch,
+          expiresAtEpoch,
+          discountBps,
+          topUpBuffer,
+        ] = await publishingConvictionNFT.getAccountInfo(accountId);
+
+        if (owner !== ethers.ZeroAddress) {
+          return {
+            accountId,
+            admin: owner,
+            balance: BigInt(committedTRAC) + BigInt(topUpBuffer),
+            initialDeposit: BigInt(committedTRAC),
+            lockEpochs: Number(BigInt(expiresAtEpoch) - BigInt(createdAtEpoch)),
+            conviction: BigInt(baseEpochAllowance),
+            discountBps: Number(discountBps),
+          };
+        }
+        // owner == zero means the NFT does not own this accountId;
+        // fall through to the PCA store below.
+      } catch (err: any) {
+        // NFT reverts (CALL_EXCEPTION) on a non-existent accountId —
+        // fall through to the PCA store; surface anything else.
+        if (err?.code !== 'CALL_EXCEPTION') throw err;
+      }
+    }
+
     if (!this.contracts.publishingConvictionAccount) return null;
 
     try {
@@ -2290,9 +2378,28 @@ export class EVMChainAdapter implements ChainAdapter {
     }
   }
 
+  async isPaymasterValid(paymaster: string): Promise<boolean> {
+    await this.init();
+    if (!ethers.isAddress(paymaster) || ethers.getAddress(paymaster) === ethers.ZeroAddress) {
+      return false;
+    }
+    const paymasterManager = await this.resolveContract('PaymasterManager');
+    return paymasterManager.validPaymasters(ethers.getAddress(paymaster));
+  }
+
   // =====================================================================
   // Utilities
   // =====================================================================
+
+  private async resolvePublishingConvictionNFT(): Promise<Contract | null> {
+    if (this.contracts.publishingConvictionNFT) return this.contracts.publishingConvictionNFT;
+    try {
+      this.contracts.publishingConvictionNFT = await this.resolveContract('DKGPublishingConvictionNFT');
+      return this.contracts.publishingConvictionNFT;
+    } catch {
+      return null;
+    }
+  }
 
   getSignerAddress(): string {
     return this.signer.address;
@@ -2318,36 +2425,17 @@ export class EVMChainAdapter implements ChainAdapter {
     );
     if (!hasPurpose) return false;
 
-    // Verify the identity is a staked core node (spec §9.0: "Core nodes MUST be staked").
-    // v4.0.0 — read V10 canonical stake (`ConvictionStakingStorage.getNodeStakeV10`)
-    // instead of the V8 `StakingStorage.getNodeStake` archive: under mandatory
-    // migration the V8 `nodeStake` field is unmaintained for V10 nodes and
-    // would zero-gate every legitimate V10 ACK signer (this exactly mirrors
-    // the on-chain `KnowledgeAssetsV10` ACK-signer gate, also rewired in
-    // v4.0.0). Falls back to V8 if CSS is not registered (older deploys).
-    let cs: Contract | null = null;
+    // ACK eligibility is dynamic: any active core node in the sharding table
+    // can ACK any public VM publish. Stake alone is stale as an eligibility
+    // source because a staked identity may not currently be an active core.
+    let shardingTableStorage: Contract | null = null;
     try {
-      cs = await this.resolveContract('ConvictionStakingStorage');
+      shardingTableStorage = await this.resolveContract('ShardingTableStorage');
     } catch {
-      cs = null;
+      shardingTableStorage = null;
     }
-    if (cs) {
-      const stake: bigint = await cs.getNodeStakeV10(claimedIdentityId);
-      if (stake === 0n) return false;
-      return true;
-    }
-
-    let ss: Contract | null = null;
-    try {
-      ss = await this.resolveContract('StakingStorage');
-    } catch {
-      ss = null;
-    }
-    if (!ss) return false;
-    const v8Stake: bigint = await ss.getNodeStake(claimedIdentityId);
-    if (v8Stake === 0n) return false;
-
-    return true;
+    if (!shardingTableStorage) return false;
+    return shardingTableStorage.nodeExists(claimedIdentityId);
   }
 
   async verifySyncIdentity(recoveredAddress: string, claimedIdentityId: bigint): Promise<boolean> {

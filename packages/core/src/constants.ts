@@ -13,6 +13,7 @@ export const PROTOCOL_JOIN_REQUEST = '/dkg/10.0.0/join-request';
 export const PROTOCOL_VERIFY_PROPOSAL = '/dkg/10.0.0/verify-proposal';
 export const PROTOCOL_VERIFY_APPROVAL = '/dkg/10.0.0/verify-approval';
 export const PROTOCOL_STORAGE_ACK = '/dkg/10.0.0/storage-ack';
+export const PROTOCOL_PUBLISH_GATEWAY = '/dkg/10.0.0/publish-gateway';
 
 export const DHT_PROTOCOL = '/dkg/kad/1.0.0';
 

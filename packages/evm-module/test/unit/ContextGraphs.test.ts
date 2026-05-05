@@ -238,12 +238,12 @@ describe('@unit ContextGraphs (facade)', () => {
     });
 
     // --- Validation (storage-level reverts bubble through the facade) ---
-    it('reverts on empty hosting nodes', async () => {
-      await expect(
-        Facade.connect(accounts[0]).createContextGraph(
-          [], noAgents(), 1, 0, 1, ethers.ZeroAddress, 0,
-        ),
-      ).to.be.revertedWithCustomError(Storage, 'InvalidContextGraphConfig');
+    it('allows empty hosting nodes for edge-owned CGs', async () => {
+      await Facade.connect(accounts[0]).createContextGraph(
+        [], noAgents(), 3, 0, 1, ethers.ZeroAddress, 0,
+      );
+      expect(await Storage.getHostingNodes(1)).to.deep.equal([]);
+      expect(await Storage.getContextGraphRequiredSignatures(1)).to.equal(3);
     });
 
     it('reverts on zero hosting node id', async () => {
@@ -319,20 +319,18 @@ describe('@unit ContextGraphs (facade)', () => {
       ).to.be.revertedWithCustomError(Storage, 'InvalidContextGraphConfig');
     });
 
-    it('reverts when requiredSignatures > hostingNodes.length', async () => {
-      await expect(
-        Facade.connect(accounts[0]).createContextGraph(
-          [10n, 20n], noAgents(), 3, 0, 1, ethers.ZeroAddress, 0,
-        ),
-      ).to.be.revertedWithCustomError(Storage, 'InvalidContextGraphConfig');
+    it('allows requiredSignatures greater than hostingNodes.length', async () => {
+      await Facade.connect(accounts[0]).createContextGraph(
+        [10n, 20n], noAgents(), 3, 0, 1, ethers.ZeroAddress, 0,
+      );
+      expect(await Storage.getContextGraphRequiredSignatures(1)).to.equal(3);
     });
 
-    it('reverts when requiredSignatures == 0', async () => {
-      await expect(
-        Facade.connect(accounts[0]).createContextGraph(
-          hosts(), noAgents(), 0, 0, 1, ethers.ZeroAddress, 0,
-        ),
-      ).to.be.revertedWithCustomError(Storage, 'InvalidContextGraphConfig');
+    it('allows requiredSignatures == 0 as legacy metadata', async () => {
+      await Facade.connect(accounts[0]).createContextGraph(
+        hosts(), noAgents(), 0, 0, 1, ethers.ZeroAddress, 0,
+      );
+      expect(await Storage.getContextGraphRequiredSignatures(1)).to.equal(0);
     });
 
     it('reverts on invalid publishPolicy (>1)', async () => {
@@ -1140,12 +1138,9 @@ describe('@unit ContextGraphs (facade)', () => {
       ).to.be.revertedWithCustomError(Storage, 'InvalidContextGraphConfig');
     });
 
-    it('reverts when new size would break quorum (requiredSignatures=2)', async () => {
-      // CG was created with requiredSignatures = 2, so shrinking to 1 node
-      // is invalid.
-      await expect(
-        Facade.connect(accounts[0]).setHostingNodes(1, [42n]),
-      ).to.be.revertedWithCustomError(Storage, 'InvalidContextGraphConfig');
+    it('allows hosting node list to shrink below legacy quorum', async () => {
+      await Facade.connect(accounts[0]).setHostingNodes(1, [42n]);
+      expect(await Storage.getHostingNodes(1)).to.deep.equal([42n]);
     });
   });
 
@@ -1244,11 +1239,11 @@ describe('@unit ContextGraphs (facade)', () => {
       );
     });
 
-    it('owner can raise quorum within hosting nodes count', async () => {
+    it('owner can raise legacy quorum independently from hosting nodes count', async () => {
       await expect(
-        Facade.connect(accounts[0]).updateQuorum(1, 3),
-      ).to.emit(Storage, 'QuorumUpdated').withArgs(1, 3);
-      expect(await Storage.getContextGraphRequiredSignatures(1)).to.equal(3);
+        Facade.connect(accounts[0]).updateQuorum(1, 4),
+      ).to.emit(Storage, 'QuorumUpdated').withArgs(1, 4);
+      expect(await Storage.getContextGraphRequiredSignatures(1)).to.equal(4);
     });
 
     it('owner can lower quorum', async () => {
@@ -1262,16 +1257,14 @@ describe('@unit ContextGraphs (facade)', () => {
       ).to.be.revertedWithCustomError(Facade, 'NotContextGraphOwner');
     });
 
-    it('reverts when quorum > hostingNodes.length', async () => {
-      await expect(
-        Facade.connect(accounts[0]).updateQuorum(1, 4),
-      ).to.be.revertedWithCustomError(Storage, 'InvalidContextGraphConfig');
+    it('allows quorum > hostingNodes.length as legacy metadata', async () => {
+      await Facade.connect(accounts[0]).updateQuorum(1, 4);
+      expect(await Storage.getContextGraphRequiredSignatures(1)).to.equal(4);
     });
 
-    it('reverts when quorum == 0', async () => {
-      await expect(
-        Facade.connect(accounts[0]).updateQuorum(1, 0),
-      ).to.be.revertedWithCustomError(Storage, 'InvalidContextGraphConfig');
+    it('allows quorum == 0 as legacy metadata', async () => {
+      await Facade.connect(accounts[0]).updateQuorum(1, 0);
+      expect(await Storage.getContextGraphRequiredSignatures(1)).to.equal(0);
     });
   });
 

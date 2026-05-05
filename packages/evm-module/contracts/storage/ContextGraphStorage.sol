@@ -23,8 +23,9 @@ import {ERC721Enumerable} from "@openzeppelin/contracts/token/ERC721/extensions/
  *     are tracked as two SEPARATE lists. Decision #21 — nodes and agents are
  *     different principals; the old conflated `participantIdentityIds` field
  *     is gone.
- *   - Quorum (`requiredSignatures`) is bound to hosting nodes only — ACK
- *     signatures attest storage and come from hosting nodes.
+ *   - `hostingNodes` is legacy registration metadata. VM publish ACK quorum is
+ *     dynamic and enforced by KnowledgeAssetsV10 against active sharding-table
+ *     core nodes, not against this per-CG list.
  *   - 3 curator types are supported via (publishAuthority, publishAuthorityAccountId):
  *       EOA      -> publishAuthority = wallet, accountId = 0
  *       Safe     -> publishAuthority = multisig contract, accountId = 0
@@ -162,9 +163,9 @@ contract ContextGraphStorage is INamed, IVersioned, Guardian, ERC721Enumerable {
     /**
      * @notice Create a new context graph and mint its governance NFT.
      * @param owner_                       Recipient of the ERC-721 (token holder == manager).
-     * @param hostingNodes                 Sorted ascending, no zeros, no duplicates.
+     * @param hostingNodes                 Legacy seed list. May be empty.
      * @param participantAgents            EOA allow-list (no zeros, no duplicates).
-     * @param requiredSignatures           ACK quorum, must be in (0, hostingNodes.length].
+     * @param requiredSignatures           Legacy metadata. VM ACK quorum is global.
      * @param metadataBatchId              Batch ID describing the CG metadata (0 if none).
      * @param publishPolicy                0 = curated, 1 = open.
      * @param publishAuthority             Curator address. Required when curated; ignored
@@ -185,17 +186,11 @@ contract ContextGraphStorage is INamed, IVersioned, Guardian, ERC721Enumerable {
         if (owner_ == address(0)) {
             revert KnowledgeAssetsLib.InvalidContextGraphConfig("zero address owner");
         }
-        if (hostingNodes.length == 0) {
-            revert KnowledgeAssetsLib.InvalidContextGraphConfig("empty hosting nodes");
-        }
         if (hostingNodes.length > MAX_HOSTING_NODES) {
             revert KnowledgeAssetsLib.InvalidContextGraphConfig("hosting nodes cap");
         }
         if (participantAgents.length > MAX_PARTICIPANT_AGENTS) {
             revert KnowledgeAssetsLib.InvalidContextGraphConfig("agents cap");
-        }
-        if (requiredSignatures == 0 || requiredSignatures > hostingNodes.length) {
-            revert KnowledgeAssetsLib.InvalidContextGraphConfig("invalid M/N threshold");
         }
         if (publishPolicy > 1) {
             revert KnowledgeAssetsLib.InvalidContextGraphConfig("invalid publishPolicy");
@@ -448,23 +443,16 @@ contract ContextGraphStorage is INamed, IVersioned, Guardian, ERC721Enumerable {
     // -----------------------------------------------------------------------
 
     /**
-     * @notice Replace the hosting node list entirely. New list is validated
-     *         (sorted, no zeros, no duplicates) and the existing quorum must
-     *         still fit in the new size.
+     * @notice Replace the legacy hosting node list entirely. New list may be
+     *         empty; VM ACK eligibility is dynamic and enforced at publish time.
      */
     function setHostingNodes(
         uint256 contextGraphId,
         uint72[] calldata nodes
     ) external onlyContracts {
         _requireExists(contextGraphId);
-        if (nodes.length == 0) {
-            revert KnowledgeAssetsLib.InvalidContextGraphConfig("empty hosting nodes");
-        }
         if (nodes.length > MAX_HOSTING_NODES) {
             revert KnowledgeAssetsLib.InvalidContextGraphConfig("hosting nodes cap");
-        }
-        if (_contextGraphs[contextGraphId].requiredSignatures > nodes.length) {
-            revert KnowledgeAssetsLib.InvalidContextGraphConfig("setHostingNodes would break quorum");
         }
         _validateHostingNodes(nodes);
 
@@ -539,10 +527,6 @@ contract ContextGraphStorage is INamed, IVersioned, Guardian, ERC721Enumerable {
         uint8 requiredSignatures
     ) external onlyContracts {
         _requireExists(contextGraphId);
-        uint256 hostCount = _hostingNodes[contextGraphId].length;
-        if (requiredSignatures == 0 || requiredSignatures > hostCount) {
-            revert KnowledgeAssetsLib.InvalidContextGraphConfig("invalid M/N threshold");
-        }
         _contextGraphs[contextGraphId].requiredSignatures = requiredSignatures;
         emit QuorumUpdated(contextGraphId, requiredSignatures);
     }

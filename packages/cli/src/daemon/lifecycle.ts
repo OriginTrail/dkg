@@ -81,6 +81,7 @@ import {
   TELEMETRY_ENDPOINTS,
   type DkgConfig,
   type AutoUpdateConfig,
+  type PublisherGatewayConfig,
   type LocalAgentIntegrationCapabilities,
   type LocalAgentIntegrationConfig,
   type LocalAgentIntegrationManifest,
@@ -121,6 +122,46 @@ import { FileStore } from '../file-store.js';
 import { VectorStore, OpenAIEmbeddingProvider, type EmbeddingProvider } from '../vector-store.js';
 import { parseBoundary, parseMultipart, MultipartParseError } from '../http/multipart.js';
 import { handleCapture, EpcisValidationError, handleEventsQuery, EpcisQueryError, type Publisher as EpcisPublisher } from '@origintrail-official/dkg-epcis';
+
+function normalizePublisherGatewayConfig(gateway?: PublisherGatewayConfig) {
+  if (!gateway) return undefined;
+  return {
+    peerId: gateway.peerId,
+    nodeIdentityId: BigInt(gateway.nodeIdentityId),
+    ...(gateway.pcaAccountId ? { pcaAccountId: BigInt(gateway.pcaAccountId) } : {}),
+    ...(gateway.paymaster ? { paymaster: ethers.getAddress(gateway.paymaster) } : {}),
+  };
+}
+
+function normalizeLocalPublisherGatewayConfig(local?: { pcaAccountId?: string; paymaster?: string; allowedPeers?: string[] }) {
+  if (!local) return undefined;
+  if (local.pcaAccountId === undefined && local.paymaster === undefined && (!local.allowedPeers || local.allowedPeers.length === 0)) {
+    return undefined;
+  }
+  const allowedPeers = local.allowedPeers
+    ? local.allowedPeers.map((p) => p.trim()).filter((p) => p.length > 0)
+    : [];
+  // Fail-closed at config-load time so operators get an immediate clear
+  // error instead of the gateway handler's retry-loop warning. A
+  // configured paymaster without a non-empty allowlist would let any
+  // connected peer get sponsored publishes.
+  if (
+    local.paymaster
+    && ethers.getAddress(local.paymaster) !== ethers.ZeroAddress
+    && allowedPeers.length === 0
+  ) {
+    throw new Error(
+      'publisher.localGateway.paymaster is configured but allowedPeers is empty; ' +
+      'set allowedPeers (libp2p peer-ids) before advertising a paymaster',
+    );
+  }
+  return {
+    ...(local.pcaAccountId ? { pcaAccountId: BigInt(local.pcaAccountId) } : {}),
+    ...(local.paymaster ? { paymaster: ethers.getAddress(local.paymaster) } : {}),
+    ...(allowedPeers.length > 0 ? { allowedPeers } : {}),
+  };
+}
+
 // Phase 8 — project-manifest publish + install (UI-driven onboarding flow).
 // Daemon constructs a self-pointing DkgClient (localhost:listenPort) and
 // reuses the same publish/fetch/plan/write helpers the CLI uses, so wire
@@ -582,6 +623,8 @@ export async function runDaemonInner(
     randomSamplingWalPath: config.randomSampling?.walPath,
     randomSamplingTickIntervalMs: config.randomSampling?.tickIntervalMs,
     randomSamplingUseWorkerThread: config.randomSampling?.useWorkerThread,
+    publishGateway: normalizePublisherGatewayConfig(config.publisher?.gateway),
+    localPublishGateway: normalizeLocalPublisherGatewayConfig(config.publisher?.localGateway),
     contextGraphSubscriptionStore: {
       loadAll: async () => dashDb.listContextGraphSubscriptions().map((row) => ({
         id: row.context_graph_id,

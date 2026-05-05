@@ -129,6 +129,36 @@ export interface ChainConfig {
   mockIdentityId?: string;
 }
 
+export interface PublisherGatewayConfig {
+  peerId: string;
+  nodeIdentityId: string;
+  pcaAccountId?: string;
+  paymaster?: string;
+}
+
+/**
+ * Local advertisement for THIS node's PublishGatewayHandler — the
+ * pcaAccountId / paymaster a core node is willing to sign requests
+ * against. Distinct from `publisher.gateway`, which is the OUTBOUND
+ * preference (which remote core to publish through). Reusing one
+ * config object for both broke isolation: a core that pointed at an
+ * upstream gateway would also start advertising the upstream's
+ * pcaAccountId / paymaster on its own PublishGatewayHandler.
+ */
+export interface LocalPublisherGatewayConfig {
+  pcaAccountId?: string;
+  paymaster?: string;
+  /**
+   * Optional libp2p peer-id allowlist. When present (and non-empty),
+   * the local PublishGatewayHandler refuses to sign requests from any
+   * peer not in this set. Defaults to "open" (no allowlist) for back-
+   * compat with the existing devnet setup; production cores that
+   * advertise a paymaster MUST set this to avoid accidental sponsoring
+   * of arbitrary peers.
+   */
+  allowedPeers?: string[];
+}
+
 /** Optional LLM config for the Node UI chatbot (OpenAI-compatible API). */
 export interface LlmConfig {
   /** API key (e.g. OpenAI, Anthropic, or compatible provider). */
@@ -249,6 +279,21 @@ export interface DkgConfig {
     pollIntervalMs?: number;
     errorBackoffMs?: number;
     maxRetries?: number;
+    /**
+     * Outbound preference: where THIS node's edge-side publisher
+     * routes V10 publisher-digest signing requests. Set via
+     * `dkg publisher gateway set <peer-id> --identity <id>`.
+     */
+    gateway?: PublisherGatewayConfig;
+    /**
+     * Local advertisement for THIS node's PublishGatewayHandler when
+     * acting as a gateway for OTHER nodes. Set via
+     * `dkg publisher local-gateway set|clear|status`. Distinct from `gateway`
+     * above so a core that points at an upstream gateway does not
+     * accidentally re-advertise the upstream's PCA/paymaster on its
+     * own handler.
+     */
+    localGateway?: LocalPublisherGatewayConfig;
   };
   /** Allowed CORS origins. Defaults to '*' when apiHost is '127.0.0.1', otherwise restrictive. */
   corsOrigins?: string | string[];

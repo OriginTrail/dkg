@@ -35,6 +35,12 @@ export {
 } from './ack-collector.js';
 export { StorageACKHandler, type StorageACKHandlerConfig } from './storage-ack-handler.js';
 export {
+  PublishGatewayHandler,
+  type PublishGatewayHandlerConfig,
+  type PublishGatewayRequestWire,
+  type PublishGatewayResponseWire,
+} from './publish-gateway-handler.js';
+export {
   VerifyCollector,
   type VerifyCollectorDeps,
   type CollectedApproval,

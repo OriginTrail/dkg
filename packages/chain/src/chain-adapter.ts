@@ -207,6 +207,13 @@ export interface V10PublishDirectParams {
    * argument to `KnowledgeAssetsV10.publishDirect(PublishParams, paymaster)`.
    */
   paymaster: string;
+  /**
+   * Publisher conviction account requested for the discounted V10 publish
+   * path. The on-chain contract resolves the actual paying account from
+   * `msg.sender`; the adapter uses this value for preflight/observability and
+   * calls `KnowledgeAssetsV10.publish(PublishParams)` when it is set.
+   */
+  publisherConvictionAccountId?: bigint;
   publisherNodeIdentityId: bigint;
   publisherSignature: { r: Uint8Array; vs: Uint8Array };
   ackSignatures: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
@@ -491,6 +498,8 @@ export interface ChainAdapter {
   extendConvictionLock?(accountId: bigint, additionalEpochs: number): Promise<TxResult>;
   getConvictionDiscount?(accountId: bigint): Promise<{ discountBps: number; conviction: bigint }>;
   getConvictionAccountInfo?(accountId: bigint): Promise<ConvictionAccountInfo | null>;
+  /** Return true when a paymaster address is currently accepted by PaymasterManager. */
+  isPaymasterValid?(paymaster: string): Promise<boolean>;
 
   // Permanent Publishing
   publishKnowledgeAssetsPermanent?(params: PermanentPublishParams): Promise<OnChainPublishResult>;

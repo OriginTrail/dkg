@@ -13,6 +13,13 @@ export type PhaseCallback = (phase: string, status: 'start' | 'end') => void;
 
 export type ReceiverSignature = { identityId: bigint; r: Uint8Array; vs: Uint8Array };
 
+export interface PublishGatewayConfig {
+  peerId: string;
+  nodeIdentityId: bigint;
+  pcaAccountId?: bigint;
+  paymaster?: string;
+}
+
 /**
  * Callback that collects receiver signatures from peers.
  * Called AFTER data preparation, BEFORE on-chain tx.
@@ -62,6 +69,28 @@ export type V10ACKProvider = (
   merkleLeafCount: number,
 ) => Promise<V10CoreNodeACK[]>;
 
+export interface PublishGatewaySignatureRequest {
+  chainId: bigint;
+  kav10Address: string;
+  contextGraphId: bigint;
+  merkleRoot: Uint8Array;
+  gateway: PublishGatewayConfig;
+}
+
+export interface PublishGatewaySignature {
+  peerId: string;
+  signer: string;
+  nodeIdentityId: bigint;
+  signatureR: Uint8Array;
+  signatureVS: Uint8Array;
+  pcaAccountId?: bigint;
+  paymaster?: string;
+}
+
+export type PublishGatewayProvider = (
+  request: PublishGatewaySignatureRequest,
+) => Promise<PublishGatewaySignature>;
+
 /**
  * Callback that collects participant signatures for context graph governance.
  */
@@ -109,6 +138,14 @@ export interface PublishOptions {
    * When provided, ACKs are collected and stored in the result.
    */
   v10ACKProvider?: V10ACKProvider;
+  /**
+   * Optional preferred core-node publish gateway. The gateway signs the V10
+   * publisher digest so produced-value attribution lands on its
+   * `publisherNodeIdentityId`; the local publisher wallet still submits the
+   * tx and remains `msg.sender` / publisher of record.
+   */
+  publishGateway?: PublishGatewayConfig;
+  publishGatewayProvider?: PublishGatewayProvider;
   /**
    * When publishing into a specific context graph (publishFromSharedMemory),
    * this overrides contextGraphId as the ACK domain and on-chain contextGraphId.
