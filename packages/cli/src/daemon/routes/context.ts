@@ -21,6 +21,7 @@ import type { ExtractionStatusRecord } from '../../extraction-status.js';
 import type { FileStore } from '../../file-store.js';
 import type { VectorStore, EmbeddingProvider } from '../../vector-store.js';
 import type { CatchupTracker } from '../types.js';
+import type { TokenStore } from '../../auth.js';
 
 export interface RequestContext {
   req: IncomingMessage;
@@ -45,6 +46,14 @@ export interface RequestContext {
   vectorStore: VectorStore;
   embeddingProvider: EmbeddingProvider | null;
   validTokens: Set<string>;
+  /**
+   * Slice 06 — structured token store backing `validTokens`. Routes that
+   * need scope checks (e.g. kafka, auth admin) read from here via
+   * `verifyTokenScope`. Legacy tokens carry scope `'*'` and pass every
+   * scope check, preserving backward compat for the routes that have
+   * not yet been gated.
+   */
+  tokenStore: TokenStore;
   // API socket identity — trusted server-side state for manifestSelfClient
   // SSRF defence.
   apiHost: string;

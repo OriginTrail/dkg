@@ -11,6 +11,7 @@ import {
   type KafkaEndpointRequestBody,
   type KafkaEndpointVerifyRequestBody,
 } from '../parsers/kafka-request.js';
+import { verifyTokenScope, type Scope } from '../../auth.js';
 import type { RequestContext } from './context.js';
 import {
   getKafkaEndpoint,
@@ -37,31 +38,58 @@ const VALID_LIST_STATUSES: ReadonlySet<KafkaEndpointListStatus> = new Set([
   'all',
 ]);
 
+/**
+ * Per-route scope guard. Returns true when the caller's bearer token
+ * carries `scope` (or wildcard `*`); when false, a 403 (NOT 401) has
+ * already been written to the response — caller must early-return.
+ *
+ * 403 distinguishes "valid token, wrong permission" from 401's "no /
+ * invalid token". The httpAuthGuard at the top of the request pipeline
+ * already enforces 401; by the time a kafka handler runs we know the
+ * token is valid, so any rejection here is a scope mismatch.
+ *
+ * No `WWW-Authenticate` header — that header is reserved for 401
+ * responses by RFC 7235; sending it on a 403 confuses clients about
+ * whether to re-prompt for credentials.
+ */
+function requireScope(ctx: RequestContext, scope: Scope): boolean {
+  if (verifyTokenScope(ctx.requestToken, scope, ctx.tokenStore)) return true;
+  jsonResponse(ctx.res, 403, {
+    error: `Token lacks required scope: ${scope}`,
+  });
+  return false;
+}
+
 export async function handleKafkaRoutes(ctx: RequestContext): Promise<void> {
   const { req, path } = ctx;
 
-  // POST /api/kafka/endpoint — register
+  // POST /api/kafka/endpoint — register (write)
   if (req.method === 'POST' && path === ENDPOINT_BASE_PATH) {
+    if (!requireScope(ctx, 'kafka:endpoint:write')) return;
     return handleRegister(ctx);
   }
 
-  // POST /api/kafka/endpoint/verify — re-verify
+  // POST /api/kafka/endpoint/verify — re-verify (write — mutates the KA)
   if (req.method === 'POST' && path === `${ENDPOINT_BASE_PATH}/verify`) {
+    if (!requireScope(ctx, 'kafka:endpoint:write')) return;
     return handleVerify(ctx);
   }
 
-  // GET /api/kafka/endpoint?contextGraphId=X[&status=...] — list
+  // GET /api/kafka/endpoint?contextGraphId=X[&status=...] — list (read)
   if (req.method === 'GET' && path === ENDPOINT_BASE_PATH) {
+    if (!requireScope(ctx, 'kafka:endpoint:read')) return;
     return handleList(ctx);
   }
 
-  // GET /api/kafka/endpoint/<urlencoded-uri> — single fetch
+  // GET /api/kafka/endpoint/<urlencoded-uri> — single fetch (read)
   if (req.method === 'GET' && path.startsWith(`${ENDPOINT_BASE_PATH}/`)) {
+    if (!requireScope(ctx, 'kafka:endpoint:read')) return;
     return handleGetByUri(ctx);
   }
 
-  // DELETE /api/kafka/endpoint/<urlencoded-uri> — soft-revoke
+  // DELETE /api/kafka/endpoint/<urlencoded-uri> — soft-revoke (write)
   if (req.method === 'DELETE' && path.startsWith(`${ENDPOINT_BASE_PATH}/`)) {
+    if (!requireScope(ctx, 'kafka:endpoint:write')) return;
     return handleRevoke(ctx);
   }
 }

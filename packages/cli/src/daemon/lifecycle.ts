@@ -103,7 +103,7 @@ import {
 } from '../config.js';
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../catchup-runner.js';
-import { loadTokens, httpAuthGuard } from '../auth.js';
+import { loadTokens, loadTokenStore, httpAuthGuard, setTokenRecord, type TokenRecord } from '../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../extraction/index.js';
 import {
@@ -1364,16 +1364,27 @@ export async function runDaemonInner(
   // --- Authentication ---
 
   const authEnabled = config.auth?.enabled !== false;
-  const validTokens = await loadTokens(config.auth);
+  // Slice 06 — load the structured store first; the Set view is derived
+  // from it. Per-agent tokens are added to BOTH so the existing
+  // httpAuthGuard (Set-based) continues to accept them, and the new
+  // scope-aware routes see them as full-access (`scopes: '*'`).
+  const tokenStore = await loadTokenStore(config.auth);
+  for (const a of agent.listLocalAgents()) {
+    const record: TokenRecord = {
+      prefix: a.authToken.length >= 8 ? a.authToken.slice(0, 8) : a.authToken,
+      fullToken: a.authToken,
+      // Per-agent tokens are not user-mintable and have always granted
+      // unscoped access. Treat them as `'*'` for slice 06's scope check.
+      scopes: '*',
+    };
+    setTokenRecord(tokenStore, record);
+  }
+  const validTokens = new Set([...tokenStore.values()].map((r) => r.fullToken));
   const bridgeAuthToken =
     (await loadBridgeAuthToken()) ??
     (validTokens.size > 0
       ? (validTokens.values().next().value as string)
       : undefined);
-  // Register per-agent Bearer tokens so the auth guard accepts them
-  for (const a of agent.listLocalAgents()) {
-    validTokens.add(a.authToken);
-  }
 
   if (authEnabled) {
     log(
@@ -1625,6 +1636,7 @@ export async function runDaemonInner(
         vectorStore,
         embeddingProvider,
         validTokens,
+        tokenStore,
         apiHost,
         apiPortRef,
       );

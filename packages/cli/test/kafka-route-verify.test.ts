@@ -106,9 +106,25 @@ function buildMockAgent(opts: MockAgentOptions = {}): any {
 function buildCtx(req: any, res: any, agent: any): RequestContext {
   // Many RequestContext fields are unused by handleKafkaRoutes; cast to any
   // so we don't need a full DKGAgent / DkgConfig / OperationTracker. The
-  // route reads only `req`, `res`, `agent`, `path`, `url`, and
-  // `requestAgentAddress` — all populated below.
+  // route reads only `req`, `res`, `agent`, `path`, `url`,
+  // `requestAgentAddress`, plus slice 06's `requestToken` + `tokenStore`
+  // for the scope guard — all populated below. The store maps the test
+  // bearer token to scope `'*'` so verify-route assertions are unaffected
+  // by the scope check (covered separately in `daemon-auth-scopes.test.ts`).
   const url = new URL(`http://localhost${req.url}`);
+  const ROOT_TOKEN = 'ROOTROOT-verify-test-token';
+  const tokenStore = new Map([
+    [ROOT_TOKEN.slice(0, 8), {
+      prefix: ROOT_TOKEN.slice(0, 8),
+      fullToken: ROOT_TOKEN,
+      scopes: '*' as const,
+    }],
+  ]);
+  // Mutate req headers so extractBearerToken finds the root token. The
+  // route reads `ctx.requestToken` directly when set, but the daemon
+  // pipeline derives it from req.headers.authorization — populating both
+  // keeps the mock honest if either path is exercised.
+  if (req.headers) req.headers.authorization = `Bearer ${ROOT_TOKEN}`;
   return {
     req,
     res,
@@ -116,6 +132,9 @@ function buildCtx(req: any, res: any, agent: any): RequestContext {
     path: url.pathname,
     url,
     requestAgentAddress: '0xabcdefabcdefabcdefabcdefabcdefabcdefabcd',
+    requestToken: ROOT_TOKEN,
+    tokenStore,
+    validTokens: new Set([ROOT_TOKEN]),
   } as unknown as RequestContext;
 }
 

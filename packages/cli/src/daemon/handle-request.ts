@@ -101,7 +101,7 @@ import {
 } from '../config.js';
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../catchup-runner.js';
-import { loadTokens, httpAuthGuard, extractBearerToken } from '../auth.js';
+import { loadTokens, httpAuthGuard, extractBearerToken, type TokenStore } from '../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../extraction/index.js';
 import {
@@ -356,6 +356,12 @@ export async function handleRequest(
   vectorStore: VectorStore,
   embeddingProvider: EmbeddingProvider | null,
   validTokens: Set<string>,
+  // Slice 06 — structured token store; the kafka routes (and the
+  // upcoming auth-admin routes) read scopes off this. `validTokens`
+  // is kept in the signature unchanged because the rest of the
+  // codebase uses the Set-shape; the store is the supplementary
+  // surface the scope-aware routes consume.
+  tokenStore: TokenStore,
   // API socket identity — passed in from the outer daemon closure so
   // `manifestSelfClient()` can build a self-pointing URL from trusted
   // server state instead of request headers (SSRF defence).
@@ -394,6 +400,7 @@ export async function handleRequest(
     vectorStore,
     embeddingProvider,
     validTokens,
+    tokenStore,
     apiHost,
     apiPortRef,
     url,
