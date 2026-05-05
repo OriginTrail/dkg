@@ -106,7 +106,22 @@ export function parseSecurityProtocol(value: unknown): SecurityProtocol | undefi
  */
 export function validateKafkaAuthConsistency(body: KafkaEndpointRequestBody): void {
   const sp = body.securityProtocol;
-  if (!sp) return; // No protocol declared → no enforcement (slice-01 wire compat).
+  if (!sp) {
+    // No protocol declared — slice-01 wire compat allows this for plain,
+    // unauthenticated requests. But auth/TLS blocks require a protocol
+    // declaration; sending them without one is ambiguous misconfig.
+    if (body.sasl !== undefined) {
+      throw new KafkaRequestParseError(
+        `"sasl" must not be set without "securityProtocol"`,
+      );
+    }
+    if (body.ssl !== undefined) {
+      throw new KafkaRequestParseError(
+        `"ssl" must not be set without "securityProtocol"`,
+      );
+    }
+    return;
+  }
   const requiresSasl = sp === 'SASL_PLAINTEXT' || sp === 'SASL_SSL';
   const hasSasl = body.sasl !== undefined;
   if (requiresSasl && !hasSasl) {

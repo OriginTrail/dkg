@@ -373,4 +373,37 @@ describe('validateKafkaAuthConsistency', () => {
     const body: KafkaEndpointRequestBody = { ...baseBody };
     expect(() => validateKafkaAuthConsistency(body)).not.toThrow();
   });
+
+  it('No securityProtocol but sasl block present → throws, naming both fields', () => {
+    // Without `securityProtocol`, `shouldProbe` returns false and the route
+    // would silently drop the supplied auth payload into an `unattempted` KA.
+    // Reject this ambiguous misconfig at the gate so the caller sees a 400.
+    const body: KafkaEndpointRequestBody = {
+      ...baseBody,
+      sasl: validSasl,
+    };
+    expect(() => validateKafkaAuthConsistency(body)).toThrow(KafkaRequestParseError);
+    expect(() => validateKafkaAuthConsistency(body)).toThrow(/"sasl"/);
+    expect(() => validateKafkaAuthConsistency(body)).toThrow(/"securityProtocol"/);
+  });
+
+  it('No securityProtocol but ssl block present → throws, naming both fields', () => {
+    // Same silent-downgrade pattern as the sasl case: without a protocol the
+    // route would skip the probe and drop the SSL material into an unverified
+    // KA. Reject so the caller is forced to declare intent.
+    const body: KafkaEndpointRequestBody = {
+      ...baseBody,
+      ssl: { caPem: '-----BEGIN CERTIFICATE-----\nCA\n-----END CERTIFICATE-----' },
+    };
+    expect(() => validateKafkaAuthConsistency(body)).toThrow(KafkaRequestParseError);
+    expect(() => validateKafkaAuthConsistency(body)).toThrow(/"ssl"/);
+    expect(() => validateKafkaAuthConsistency(body)).toThrow(/"securityProtocol"/);
+  });
+
+  it('No securityProtocol and no sasl/ssl blocks → no throw (slice-01 wire compat preserved)', () => {
+    // Regression guard: tightening the no-protocol branch must still permit
+    // genuine slice-01 wire-compat requests that send neither auth nor TLS.
+    const body: KafkaEndpointRequestBody = { ...baseBody };
+    expect(() => validateKafkaAuthConsistency(body)).not.toThrow();
+  });
 });
