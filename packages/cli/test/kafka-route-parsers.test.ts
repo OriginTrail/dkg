@@ -211,7 +211,10 @@ describe('shouldProbe — valid inputs and explicit absences', () => {
     expect(shouldProbe(body)).toBe(false);
   });
 
-  it('SSL with no ssl field at all → no probe', () => {
+  it('SSL with no ssl field → probe (default trust store)', () => {
+    // `buildSsl` (in @origintrail-official/dkg-kafka) accepts SSL with no
+    // SSL block at all — the kafkajs client falls back to the platform's
+    // default trust store. The gate must not be stricter than buildSsl.
     const ssl = parseSsl(undefined);
     expect(ssl).toBeUndefined();
     const body: KafkaEndpointRequestBody = {
@@ -222,7 +225,39 @@ describe('shouldProbe — valid inputs and explicit absences', () => {
       securityProtocol: 'SSL',
       ...(ssl ? { ssl } : {}),
     };
-    expect(shouldProbe(body)).toBe(false);
+    expect(shouldProbe(body)).toBe(true);
+  });
+
+  it('SSL with only caPem → probe (CA-only one-way TLS)', () => {
+    const ssl = parseSsl({
+      ca: '-----BEGIN CERTIFICATE-----\nCA\n-----END CERTIFICATE-----',
+    });
+    const body: KafkaEndpointRequestBody = {
+      contextGraphId: 'cg',
+      broker: 'b',
+      topic: 't',
+      messageFormat: 'application/json',
+      securityProtocol: 'SSL',
+      ...(ssl ? { ssl } : {}),
+    };
+    expect(shouldProbe(body)).toBe(true);
+  });
+
+  it('SSL with full mTLS material (cert+key) → probe', () => {
+    const ssl = parseSsl({
+      ca: '-----BEGIN CERTIFICATE-----\nCA\n-----END CERTIFICATE-----',
+      cert: '-----BEGIN CERTIFICATE-----\nCERT\n-----END CERTIFICATE-----',
+      key: '-----BEGIN PRIVATE KEY-----\nKEY\n-----END PRIVATE KEY-----',
+    });
+    const body: KafkaEndpointRequestBody = {
+      contextGraphId: 'cg',
+      broker: 'b',
+      topic: 't',
+      messageFormat: 'application/json',
+      securityProtocol: 'SSL',
+      ...(ssl ? { ssl } : {}),
+    };
+    expect(shouldProbe(body)).toBe(true);
   });
 
   it('PLAINTEXT with explicit protocol → probe (no creds needed)', () => {

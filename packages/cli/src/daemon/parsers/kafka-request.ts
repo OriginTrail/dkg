@@ -51,19 +51,22 @@ export interface KafkaEndpointRequestBody {
 /**
  * `dependsOnProbe` — opportunistic verification per ADR 0002.
  *
- * TL;DR: PLAINTEXT with `securityProtocol` set is the explicit opt-in to
- * verification; absence of `securityProtocol` means no probe.
+ * TL;DR: setting `securityProtocol` is the explicit opt-in to verification;
+ * its absence means no probe.
  *
- * The probe runs IFF the caller supplied credentials (SASL_PLAINTEXT/SASL_SSL
- * with sasl.username/password, or SSL with cert+key, or PLAINTEXT/SASL_SSL
- * with explicit `securityProtocol`). When the request carries no creds and no
- * explicit protocol, the route skips the probe entirely and the resulting
- * KA records `verificationStatus: "unattempted"`.
+ * The probe runs whenever `securityProtocol` is set AND the caller supplied
+ * the inputs that protocol logically needs:
  *
- * The exception is `securityProtocol: "PLAINTEXT"`: a caller might explicitly
- * advertise PLAINTEXT and ask for verification. In that case we still probe,
- * because reachability against PLAINTEXT is the most permissive case the
- * probe can answer.
+ *  - `PLAINTEXT`: always probe (reachability is the most permissive answer).
+ *  - `SSL`: always probe — `buildSsl` accepts mTLS material, a CA-only
+ *    bundle, or no SSL block at all (default trust store), so the probe
+ *    runs in all three shapes. Forcing cert+key here would be inconsistent
+ *    with the kafka-package contract.
+ *  - `SASL_PLAINTEXT` / `SASL_SSL`: probe only when both `sasl.username` and
+ *    `sasl.password` are present — they are the credentials being verified.
+ *
+ * When no `securityProtocol` is set the route skips the probe entirely and
+ * the resulting KA records `verificationStatus: "unattempted"`.
  *
  * Exported so unit tests can pin the gate's behaviour without standing up
  * the full daemon HTTP surface.
@@ -72,14 +75,11 @@ export function shouldProbe(body: KafkaEndpointRequestBody): boolean {
   if (!body.securityProtocol) return false;
   switch (body.securityProtocol) {
     case 'PLAINTEXT':
+    case 'SSL':
       return true;
     case 'SASL_PLAINTEXT':
     case 'SASL_SSL':
       return Boolean(body.sasl?.username && body.sasl?.password);
-    case 'SSL':
-      return Boolean(
-        (body.ssl?.certPem || body.ssl?.certPath) && (body.ssl?.keyPem || body.ssl?.keyPath),
-      );
     default:
       return false;
   }
