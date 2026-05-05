@@ -10,6 +10,10 @@ import {
   computeACKDigest,
   encodePublishRequest,
   encodeKAUpdateRequest,
+  encodeGossipEnvelope,
+  computeGossipSigningPayload,
+  GOSSIP_ENVELOPE_VERSION,
+  GOSSIP_TYPE_WORKSPACE_PUBLISH,
   encodeFinalizationMessage, type FinalizationMessageMsg,
   getGenesisQuads, computeNetworkId, SYSTEM_PARANETS, DKG_ONTOLOGY,
   Logger, createOperationContext, sparqlString, escapeSparqlLiteral,
@@ -2861,6 +2865,118 @@ export class DKGAgent {
     return this._publish(contextGraphId, input as Quad[], undefined, thirdArg ?? fourthArg);
   }
 
+  private getDefaultWorkspaceGossipSigningAgent(): (AgentKeyRecord & { privateKey: string }) | null {
+    if (!this.defaultAgentAddress) return null;
+    const defaultAddress = this.defaultAgentAddress.toLowerCase();
+    for (const record of this.localAgents.values()) {
+      if (record.agentAddress.toLowerCase() === defaultAddress && record.privateKey) {
+        return { ...record, privateKey: record.privateKey };
+      }
+    }
+    return null;
+  }
+
+  private async getContextGraphAgentGateAddresses(contextGraphId: string): Promise<string[] | null> {
+    const seen = new Set<string>();
+    const agents: string[] = [];
+    let sawAgentGate = false;
+    const add = (value: string | undefined) => {
+      if (!value || !ethers.isAddress(value)) return;
+      const checksum = ethers.getAddress(value);
+      const key = checksum.toLowerCase();
+      if (seen.has(key)) return;
+      seen.add(key);
+      agents.push(checksum);
+    };
+
+    const subscriptionAgents = this.subscribedContextGraphs.get(contextGraphId)?.participantAgents ?? [];
+    if (subscriptionAgents.length > 0) sawAgentGate = true;
+    for (const agentAddress of subscriptionAgents) {
+      add(agentAddress);
+    }
+
+    const contextGraphUri = paranetDataGraphUri(contextGraphId);
+    const cgMetaGraph = paranetMetaGraphUri(contextGraphId);
+    const result = await this.store.query(
+      `SELECT ?agent WHERE {
+        GRAPH <${cgMetaGraph}> {
+          { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_ALLOWED_AGENT}> ?agent }
+          UNION
+          { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT}> ?agent }
+        }
+      }`,
+    );
+    if (result.type === 'bindings') {
+      if (result.bindings.length > 0) sawAgentGate = true;
+      for (const row of result.bindings) {
+        const raw = row['agent'];
+        if (typeof raw === 'string') {
+          add(raw.replace(/^"/, '').replace(/"(@[a-zA-Z-]+|\^\^<[^>]+>)?$/, ''));
+        }
+      }
+    }
+
+    return sawAgentGate ? agents : null;
+  }
+
+  private async resolveWorkspaceGossipSigningAgent(
+    contextGraphId: string,
+  ): Promise<(AgentKeyRecord & { privateKey: string }) | null> {
+    const allowedAgents = await this.getContextGraphAgentGateAddresses(contextGraphId);
+    if (!allowedAgents) {
+      return this.getDefaultWorkspaceGossipSigningAgent();
+    }
+
+    const allowedSet = new Set(allowedAgents.map((agent) => agent.toLowerCase()));
+    for (const record of this.localAgents.values()) {
+      if (record.privateKey && allowedSet.has(record.agentAddress.toLowerCase())) {
+        return { ...record, privateKey: record.privateKey };
+      }
+    }
+
+    throw new Error(`Cannot gossip SWM write for agent-gated context graph "${contextGraphId}": no local allowed signing agent key`);
+  }
+
+  private async encodeWorkspaceGossipMessage(contextGraphId: string, message: Uint8Array): Promise<Uint8Array> {
+    const signer = await this.resolveWorkspaceGossipSigningAgent(contextGraphId);
+    if (!signer) {
+      return message;
+    }
+
+    const timestamp = new Date().toISOString();
+    const payload = new Uint8Array(message);
+    const signingPayload = computeGossipSigningPayload(
+      GOSSIP_TYPE_WORKSPACE_PUBLISH,
+      contextGraphId,
+      timestamp,
+      payload,
+    );
+    const signature = await new ethers.Wallet(signer.privateKey).signMessage(signingPayload);
+    return encodeGossipEnvelope({
+      version: GOSSIP_ENVELOPE_VERSION,
+      type: GOSSIP_TYPE_WORKSPACE_PUBLISH,
+      contextGraphId,
+      agentAddress: signer.agentAddress,
+      timestamp,
+      signature: ethers.getBytes(signature),
+      payload,
+    });
+  }
+
+  private async publishWorkspaceGossip(
+    contextGraphId: string,
+    message: Uint8Array,
+    ctx: OperationContext,
+  ): Promise<void> {
+    const topic = paranetWorkspaceTopic(contextGraphId);
+    const wireMessage = await this.encodeWorkspaceGossipMessage(contextGraphId, message);
+    try {
+      await this.gossip.publish(topic, wireMessage);
+    } catch {
+      this.log.warn(ctx, `No peers subscribed to ${topic} yet`);
+    }
+  }
+
   async publishAsync(
     contextGraphIdOrUal: string,
     content: PublishAsyncContent,
@@ -2938,12 +3054,7 @@ export class DKGAgent {
     });
 
     if (!opts?.localOnly) {
-      const topic = paranetWorkspaceTopic(contextGraphId);
-      try {
-        await this.gossip.publish(topic, message);
-      } catch {
-        this.log.warn(ctx, `No peers subscribed to ${topic} yet`);
-      }
+      await this.publishWorkspaceGossip(contextGraphId, message, ctx);
     }
 
     return { captureID };
@@ -3063,12 +3174,7 @@ export class DKGAgent {
       subGraphName: opts?.subGraphName,
     });
     if (!opts?.localOnly) {
-      const topic = paranetWorkspaceTopic(contextGraphId);
-      try {
-        await this.gossip.publish(topic, message);
-      } catch {
-        this.log.warn(ctx, `No peers subscribed to ${topic} yet`);
-      }
+      await this.publishWorkspaceGossip(contextGraphId, message, ctx);
     }
     return { shareOperationId };
   }
@@ -3094,12 +3200,7 @@ export class DKGAgent {
       subGraphName: opts?.subGraphName,
     });
     if (!opts?.localOnly) {
-      const topic = paranetWorkspaceTopic(contextGraphId);
-      try {
-        await this.gossip.publish(topic, message);
-      } catch {
-        this.log.warn(ctx, `No peers subscribed to ${topic} yet`);
-      }
+      await this.publishWorkspaceGossip(contextGraphId, message, ctx);
     }
     return { shareOperationId };
   }
@@ -3767,6 +3868,7 @@ export class DKGAgent {
       this.sharedMemoryHandler = new SharedMemoryHandler(this.store, this.eventBus, {
         sharedMemoryOwnedEntities: this.workspaceOwnedEntities,
         writeLocks: this.writeLocks,
+        localAgentAddresses: () => [...this.localAgents.keys()],
       });
     }
     return this.sharedMemoryHandler;
@@ -7929,9 +8031,8 @@ export class DKGAgent {
           { ...opts, publisherPeerId: agent.node.peerId.toString() },
         );
         if (gossipMessage) {
-          const topic = paranetWorkspaceTopic(contextGraphId);
           try {
-            await agent.gossip.publish(topic, gossipMessage);
+            await agent.publishWorkspaceGossip(contextGraphId, gossipMessage, createOperationContext('share'));
           } catch (err: any) {
             agent.log.warn(createOperationContext('share'), `Promote gossip failed (local SWM committed): ${err?.message ?? err}`);
           }

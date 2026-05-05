@@ -55,6 +55,9 @@ import {
   decodeWorkspacePublishRequest,
   encodeFinalizationMessage,
   decodeGossipEnvelope,
+  computeGossipSigningPayload,
+  GOSSIP_ENVELOPE_VERSION,
+  GOSSIP_TYPE_WORKSPACE_PUBLISH,
 } from '@origintrail-official/dkg-core';
 import {
   SharedMemoryHandler,
@@ -467,7 +470,7 @@ describe('[A-12] DID format drift in agent.endorse', () => {
 });
 
 describe('[A-15] Publisher signs every gossip message (SWM share)', () => {
-  it('PROD-BUG: DKGAgent.share emits raw WorkspacePublishRequest bytes — NOT wrapped in a signed GossipEnvelope', async () => {
+  it('DKGAgent.share emits a signed GossipEnvelope that carries the WorkspacePublishRequest', async () => {
     const agent = await makeAgent('A15-Share');
 
     // Intercept libp2p pubsub publish to capture the raw wire bytes without
@@ -490,30 +493,23 @@ describe('[A-15] Publisher signs every gossip message (SWM share)', () => {
     const shareMsg = captured.find(c => c.topic.includes('shared-memory'));
     expect(shareMsg, `expected a shared-memory gossip publish; saw: ${captured.map(c => c.topic).join(', ')}`).toBeTruthy();
 
-    // ① The bytes successfully decode as WorkspacePublishRequest (raw payload).
-    const decoded = decodeWorkspacePublishRequest(shareMsg!.data);
+    const envelope = decodeGossipEnvelope(shareMsg!.data);
+    expect(envelope.version).toBe(GOSSIP_ENVELOPE_VERSION);
+    expect(envelope.type).toBe(GOSSIP_TYPE_WORKSPACE_PUBLISH);
+    expect(envelope.contextGraphId).toBe(CG);
+    expect(envelope.signature.length).toBeGreaterThan(0);
+
+    const signingPayload = computeGossipSigningPayload(
+      envelope.type,
+      envelope.contextGraphId,
+      envelope.timestamp,
+      envelope.payload,
+    );
+    const recovered = ethers.verifyMessage(signingPayload, ethers.hexlify(envelope.signature));
+    expect(recovered.toLowerCase()).toBe(envelope.agentAddress.toLowerCase());
+
+    const decoded = decodeWorkspacePublishRequest(envelope.payload);
     expect(decoded.paranetId).toBe(CG);
     expect(decoded.publisherPeerId).toBe(agent.peerId);
-
-    // ② When decoded as a GossipEnvelope (spec — §GossipEnvelopeSchema),
-    //    the signature field is EMPTY. Protobuf decode will not throw
-    //    because the wire types happen to align, but `signature.length`
-    //    is zero, proving nothing was signed.
-    let envelopeView: any = undefined;
-    try {
-      envelopeView = decodeGossipEnvelope(shareMsg!.data);
-    } catch {
-      // Some permutations of wire layout will throw — that is ALSO a pass
-      // for this assertion: if it doesn't even parse as a GossipEnvelope,
-      // then it certainly isn't a signed GossipEnvelope.
-    }
-    if (envelopeView) {
-      const sig: Uint8Array | undefined = envelopeView.signature;
-      const sigLen = sig ? sig.length : 0;
-      // PROD-BUG (audit A-15): V10 requires every gossip message to ride
-      // inside a signed envelope. The WM share path bypasses the envelope
-      // entirely, so there is no signature to verify.
-      expect(sigLen).toBe(0);
-    }
   }, 20_000);
 });

@@ -86,6 +86,9 @@ export {
 
 export {
   type GossipEnvelopeMsg,
+  GOSSIP_ENVELOPE_VERSION,
+  GOSSIP_TYPE_WORKSPACE_PUBLISH,
+  GOSSIP_ENVELOPE_FRESHNESS_MS,
   encodeGossipEnvelope,
   decodeGossipEnvelope,
   computeGossipSigningPayload,

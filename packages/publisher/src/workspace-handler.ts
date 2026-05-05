@@ -3,13 +3,31 @@ import { GraphManager } from '@origintrail-official/dkg-storage';
 import type { EventBus } from '@origintrail-official/dkg-core';
 import { Logger, createOperationContext, contextGraphDataUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import type { PhaseCallback } from './publisher.js';
-import { decodeWorkspacePublishRequest, assertSafeIri, assertSafeRdfTerm, validateSubGraphName, contextGraphSubGraphUri } from '@origintrail-official/dkg-core';
-import type { WorkspaceCASConditionMsg } from '@origintrail-official/dkg-core';
+import {
+  decodeGossipEnvelope,
+  decodeWorkspacePublishRequest,
+  computeGossipSigningPayload,
+  assertSafeIri,
+  assertSafeRdfTerm,
+  validateSubGraphName,
+  contextGraphSubGraphUri,
+  GOSSIP_ENVELOPE_FRESHNESS_MS,
+  GOSSIP_ENVELOPE_VERSION,
+  GOSSIP_TYPE_WORKSPACE_PUBLISH,
+} from '@origintrail-official/dkg-core';
+import type { GossipEnvelopeMsg, WorkspaceCASConditionMsg, WorkspacePublishRequestMsg } from '@origintrail-official/dkg-core';
+import { ethers } from 'ethers';
 import { validatePublishRequest } from './validation.js';
 import { generateShareMetadata, generateOwnershipQuads, generateSubGraphRegistration } from './metadata.js';
 import { parseSimpleNQuads } from './publish-handler.js';
 import { storeWorkspaceOperationPublicQuads } from './workspace-resolution.js';
 import type { KAManifestEntry } from './publisher.js';
+
+interface WorkspaceGossipDecodeResult {
+  request: WorkspacePublishRequestMsg;
+  envelope?: GossipEnvelopeMsg;
+  payload: Uint8Array;
+}
 
 /**
  * Handles incoming shared memory topic messages (GossipSub).
@@ -23,6 +41,8 @@ export class SharedMemoryHandler {
   /** Per-context-graph map of rootEntity → creatorPeerId. Shared with publisher when used by agent. */
   private readonly sharedMemoryOwnedEntities: Map<string, Map<string, string>> = new Map();
   private readonly writeLocks: Map<string, Promise<void>>;
+  private readonly localAgentAddresses?: () => readonly string[] | Promise<readonly string[]>;
+  private readonly now: () => number;
   private readonly log = new Logger('SharedMemoryHandler');
 
   constructor(
@@ -31,6 +51,8 @@ export class SharedMemoryHandler {
     options?: {
       sharedMemoryOwnedEntities?: Map<string, Map<string, string>>;
       writeLocks?: Map<string, Promise<void>>;
+      localAgentAddresses?: () => readonly string[] | Promise<readonly string[]>;
+      now?: () => number;
     },
   ) {
     this.store = store;
@@ -40,6 +62,8 @@ export class SharedMemoryHandler {
       this.sharedMemoryOwnedEntities = options.sharedMemoryOwnedEntities;
     }
     this.writeLocks = options?.writeLocks ?? new Map();
+    this.localAgentAddresses = options?.localAgentAddresses;
+    this.now = options?.now ?? (() => Date.now());
   }
 
   private async withWriteLocks<T>(keys: string[], fn: () => Promise<T>): Promise<T> {
@@ -121,7 +145,8 @@ export class SharedMemoryHandler {
     let ctx = createOperationContext('share');
     try {
       onPhase?.('decode', 'start');
-      const request = decodeWorkspacePublishRequest(data);
+      const decoded = this.decodeWorkspaceGossipMessage(data);
+      const { request, envelope, payload } = decoded;
       if (request.operationId) {
         ctx = createOperationContext('share', request.operationId);
       }
@@ -133,6 +158,12 @@ export class SharedMemoryHandler {
       if (publisherPeerId !== fromPeerId) {
         this.log.warn(ctx, `SWM write rejected: payload publisherPeerId "${publisherPeerId}" does not match sender "${fromPeerId}"`);
         return;
+      }
+
+      const allowedAgents = await this.getContextGraphAllowedAgents(contextGraphId);
+      if (allowedAgents !== null) {
+        const verified = await this.verifyAgentEnvelope(envelope, payload, contextGraphId, allowedAgents, ctx);
+        if (!verified) return;
       }
 
       // Enforce peer allowlist for curated CGs
@@ -314,6 +345,100 @@ export class SharedMemoryHandler {
     }
   }
 
+  private decodeWorkspaceGossipMessage(data: Uint8Array): WorkspaceGossipDecodeResult {
+    try {
+      const envelope = decodeGossipEnvelope(data);
+      if (
+        envelope.version === GOSSIP_ENVELOPE_VERSION &&
+        envelope.type === GOSSIP_TYPE_WORKSPACE_PUBLISH &&
+        envelope.payload &&
+        envelope.payload.length > 0
+      ) {
+        return {
+          request: decodeWorkspacePublishRequest(envelope.payload),
+          envelope,
+          payload: new Uint8Array(envelope.payload),
+        };
+      }
+    } catch {
+      // Legacy raw workspace messages are still valid for non-agent-gated CGs.
+    }
+    return {
+      request: decodeWorkspacePublishRequest(data),
+      payload: data,
+    };
+  }
+
+  private async verifyAgentEnvelope(
+    envelope: GossipEnvelopeMsg | undefined,
+    payload: Uint8Array,
+    contextGraphId: string,
+    allowedAgents: string[],
+    ctx: import('@origintrail-official/dkg-core').OperationContext,
+  ): Promise<boolean> {
+    if (!envelope) {
+      this.log.warn(ctx, `SWM write rejected: unsigned workspace gossip for agent-gated context graph "${contextGraphId}"`);
+      return false;
+    }
+
+    if (envelope.version !== GOSSIP_ENVELOPE_VERSION || envelope.type !== GOSSIP_TYPE_WORKSPACE_PUBLISH) {
+      this.log.warn(ctx, `SWM write rejected: invalid gossip envelope type/version for context graph "${contextGraphId}"`);
+      return false;
+    }
+    if (envelope.contextGraphId !== contextGraphId) {
+      this.log.warn(ctx, `SWM write rejected: envelope contextGraphId "${envelope.contextGraphId}" does not match payload "${contextGraphId}"`);
+      return false;
+    }
+    if (!envelope.signature || envelope.signature.length === 0) {
+      this.log.warn(ctx, `SWM write rejected: missing agent signature for context graph "${contextGraphId}"`);
+      return false;
+    }
+
+    const timestampMs = Date.parse(envelope.timestamp);
+    if (!Number.isFinite(timestampMs) || Math.abs(this.now() - timestampMs) > GOSSIP_ENVELOPE_FRESHNESS_MS) {
+      this.log.warn(ctx, `SWM write rejected: stale or invalid gossip timestamp "${envelope.timestamp}"`);
+      return false;
+    }
+
+    let claimedAgent: string;
+    let recovered: string;
+    try {
+      claimedAgent = ethers.getAddress(envelope.agentAddress);
+      const signingPayload = computeGossipSigningPayload(
+        envelope.type,
+        envelope.contextGraphId,
+        envelope.timestamp,
+        payload,
+      );
+      recovered = ethers.verifyMessage(signingPayload, ethers.hexlify(envelope.signature));
+    } catch (err) {
+      this.log.warn(ctx, `SWM write rejected: invalid agent signature (${err instanceof Error ? err.message : String(err)})`);
+      return false;
+    }
+
+    if (recovered.toLowerCase() !== claimedAgent.toLowerCase()) {
+      this.log.warn(ctx, `SWM write rejected: recovered signer ${recovered} does not match envelope agent ${claimedAgent}`);
+      return false;
+    }
+
+    const allowedSet = new Set(allowedAgents.map((agent) => agent.toLowerCase()));
+    if (!allowedSet.has(recovered.toLowerCase())) {
+      this.log.warn(ctx, `SWM write rejected: agent ${recovered} is not allowed for context graph "${contextGraphId}"`);
+      return false;
+    }
+
+    if (this.localAgentAddresses) {
+      const localAgents = await this.localAgentAddresses();
+      const localAllowed = localAgents.some((agent) => allowedSet.has(agent.toLowerCase()));
+      if (!localAllowed) {
+        this.log.warn(ctx, `SWM write rejected: local node has no allowed agent for context graph "${contextGraphId}"`);
+        return false;
+      }
+    }
+
+    return true;
+  }
+
   /**
    * Returns the peer allowlist for a context graph, or null if no allowlist
    * is set (open CG — all peers allowed).
@@ -331,7 +456,36 @@ export class SharedMemoryHandler {
     return result.bindings
       .map(row => row['peer'])
       .filter((v): v is string => typeof v === 'string')
-      .map(v => v.replace(/^"|"$/g, ''));
+      .map(stripRdfLiteral);
+  }
+
+  /**
+   * Returns the agent-address allowlist for a context graph, or null if the
+   * graph is not agent-gated. Includes local allowedAgent entries and
+   * on-chain participantAgent metadata.
+   */
+  private async getContextGraphAllowedAgents(contextGraphId: string): Promise<string[] | null> {
+    const DKG_ALLOWED_AGENT = 'https://dkg.network/ontology#allowedAgent';
+    const DKG_PARTICIPANT_AGENT = 'https://dkg.network/ontology#participantAgent';
+    const cgMeta = contextGraphMetaUri(contextGraphId);
+    const cgData = contextGraphDataUri(contextGraphId);
+    const result = await this.store.query(
+      `SELECT ?agent WHERE { GRAPH <${cgMeta}> {
+        { <${cgData}> <${DKG_ALLOWED_AGENT}> ?agent }
+        UNION
+        { <${cgData}> <${DKG_PARTICIPANT_AGENT}> ?agent }
+      } }`,
+    );
+    if (result.type !== 'bindings' || result.bindings.length === 0) {
+      return null;
+    }
+    const agents = result.bindings
+      .map(row => row['agent'])
+      .filter((v): v is string => typeof v === 'string')
+      .map(stripRdfLiteral)
+      .filter((v) => ethers.isAddress(v))
+      .map((v) => ethers.getAddress(v));
+    return [...new Set(agents)];
   }
 
   /**
@@ -373,4 +527,10 @@ function parseCountLiteral(val: string | false | undefined): number {
   const stripped = val.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '');
   const n = Number(stripped);
   return Number.isFinite(n) ? n : NaN;
+}
+
+function stripRdfLiteral(value: string): string {
+  return value
+    .replace(/^"/, '')
+    .replace(/"(@[a-zA-Z-]+|\^\^<[^>]+>)?$/, '');
 }

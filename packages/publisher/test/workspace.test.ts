@@ -2,8 +2,15 @@ import { describe, it, expect, beforeEach, beforeAll, afterAll, afterEach } from
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { GraphManager } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter } from '@origintrail-official/dkg-chain';
-import { TypedEventBus } from '@origintrail-official/dkg-core';
-import { generateEd25519Keypair } from '@origintrail-official/dkg-core';
+import {
+  TypedEventBus,
+  generateEd25519Keypair,
+  encodeWorkspacePublishRequest,
+  encodeGossipEnvelope,
+  computeGossipSigningPayload,
+  GOSSIP_ENVELOPE_VERSION,
+  GOSSIP_TYPE_WORKSPACE_PUBLISH,
+} from '@origintrail-official/dkg-core';
 import {
   DKGPublisher,
   SharedMemoryHandler,
@@ -23,6 +30,30 @@ const ENTITY = 'urn:test:entity:1';
 
 function q(s: string, p: string, o: string, g = ''): Quad {
   return { subject: s, predicate: p, object: o, graph: g };
+}
+
+async function signWorkspaceMessage(
+  wallet: ethers.Wallet,
+  contextGraphId: string,
+  payload: Uint8Array,
+  timestamp = new Date().toISOString(),
+): Promise<Uint8Array> {
+  const signingPayload = computeGossipSigningPayload(
+    GOSSIP_TYPE_WORKSPACE_PUBLISH,
+    contextGraphId,
+    timestamp,
+    payload,
+  );
+  const signature = await wallet.signMessage(signingPayload);
+  return encodeGossipEnvelope({
+    version: GOSSIP_ENVELOPE_VERSION,
+    type: GOSSIP_TYPE_WORKSPACE_PUBLISH,
+    contextGraphId,
+    agentAddress: wallet.address,
+    timestamp,
+    signature: ethers.getBytes(signature),
+    payload,
+  });
 }
 
 beforeAll(async () => {
@@ -502,6 +533,144 @@ describe('SharedMemoryHandler', () => {
       expect(result.bindings[0]['o']).toBe('"Handler Test"');
     }
     expect(workspaceOwned.get(PARANET)?.has(ENTITY)).toBe(true);
+  });
+
+  it('rejects raw workspace gossip when the context graph is agent-gated', async () => {
+    const wallet = ethers.Wallet.createRandom();
+    await store.insert([{
+      subject: DATA_GRAPH,
+      predicate: 'https://dkg.network/ontology#allowedAgent',
+      object: `"${wallet.address}"`,
+      graph: `did:dkg:context-graph:${PARANET}/_meta`,
+    }]);
+
+    const nquads = `<${ENTITY}> <http://schema.org/name> "Unsigned" <${DATA_GRAPH}> .`;
+    const msg = encodeWorkspacePublishRequest({
+      paranetId: PARANET,
+      nquads: new TextEncoder().encode(nquads),
+      manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
+      publisherPeerId: '12D3KooWPeer',
+      workspaceOperationId: 'ws-unsigned-agent-gate',
+      timestampMs: Date.now(),
+    });
+
+    await handler.handle(msg, '12D3KooWPeer');
+
+    const gm = new GraphManager(store);
+    await gm.ensureContextGraph(PARANET);
+    const askResult = await store.query(
+      `ASK { GRAPH <${gm.workspaceGraphUri(PARANET)}> { <${ENTITY}> ?p ?o } }`,
+    );
+    expect(askResult.type).toBe('boolean');
+    if (askResult.type === 'boolean') {
+      expect(askResult.value).toBe(false);
+    }
+  });
+
+  it('treats malformed allowedAgent metadata as gated instead of open', async () => {
+    await store.insert([{
+      subject: DATA_GRAPH,
+      predicate: 'https://dkg.network/ontology#allowedAgent',
+      object: '"not-an-address"',
+      graph: `did:dkg:context-graph:${PARANET}/_meta`,
+    }]);
+
+    const nquads = `<${ENTITY}> <http://schema.org/name> "Malformed Gate" <${DATA_GRAPH}> .`;
+    const msg = encodeWorkspacePublishRequest({
+      paranetId: PARANET,
+      nquads: new TextEncoder().encode(nquads),
+      manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
+      publisherPeerId: '12D3KooWPeer',
+      workspaceOperationId: 'ws-malformed-agent-gate',
+      timestampMs: Date.now(),
+    });
+
+    await handler.handle(msg, '12D3KooWPeer');
+
+    const gm = new GraphManager(store);
+    await gm.ensureContextGraph(PARANET);
+    const askResult = await store.query(
+      `ASK { GRAPH <${gm.workspaceGraphUri(PARANET)}> { <${ENTITY}> ?p ?o } }`,
+    );
+    expect(askResult.type).toBe('boolean');
+    if (askResult.type === 'boolean') {
+      expect(askResult.value).toBe(false);
+    }
+  });
+
+  it('accepts signed workspace gossip from an allowed agent', async () => {
+    const wallet = ethers.Wallet.createRandom();
+    handler = new SharedMemoryHandler(store, new TypedEventBus(), {
+      sharedMemoryOwnedEntities: workspaceOwned,
+      localAgentAddresses: () => [wallet.address],
+    });
+    await store.insert([{
+      subject: DATA_GRAPH,
+      predicate: 'https://dkg.network/ontology#allowedAgent',
+      object: `"${wallet.address}"`,
+      graph: `did:dkg:context-graph:${PARANET}/_meta`,
+    }]);
+
+    const nquads = `<${ENTITY}> <http://schema.org/name> "Signed" <${DATA_GRAPH}> .`;
+    const raw = encodeWorkspacePublishRequest({
+      paranetId: PARANET,
+      nquads: new TextEncoder().encode(nquads),
+      manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
+      publisherPeerId: '12D3KooWPeer',
+      workspaceOperationId: 'ws-signed-agent-gate',
+      timestampMs: Date.now(),
+    });
+    const msg = await signWorkspaceMessage(wallet, PARANET, raw);
+
+    await handler.handle(msg, '12D3KooWPeer');
+
+    const gm = new GraphManager(store);
+    await gm.ensureContextGraph(PARANET);
+    const result = await store.query(
+      `SELECT ?o WHERE { GRAPH <${gm.workspaceGraphUri(PARANET)}> { <${ENTITY}> <http://schema.org/name> ?o } }`,
+    );
+    expect(result.type).toBe('bindings');
+    if (result.type === 'bindings') {
+      expect(result.bindings[0]?.['o']).toBe('"Signed"');
+    }
+  });
+
+  it('rejects signed workspace gossip from an agent outside the allowlist', async () => {
+    const allowed = ethers.Wallet.createRandom();
+    const denied = ethers.Wallet.createRandom();
+    handler = new SharedMemoryHandler(store, new TypedEventBus(), {
+      sharedMemoryOwnedEntities: workspaceOwned,
+      localAgentAddresses: () => [allowed.address],
+    });
+    await store.insert([{
+      subject: DATA_GRAPH,
+      predicate: 'https://dkg.network/ontology#allowedAgent',
+      object: `"${allowed.address}"`,
+      graph: `did:dkg:context-graph:${PARANET}/_meta`,
+    }]);
+
+    const nquads = `<${ENTITY}> <http://schema.org/name> "Denied" <${DATA_GRAPH}> .`;
+    const raw = encodeWorkspacePublishRequest({
+      paranetId: PARANET,
+      nquads: new TextEncoder().encode(nquads),
+      manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
+      publisherPeerId: '12D3KooWPeer',
+      workspaceOperationId: 'ws-denied-agent-gate',
+      timestampMs: Date.now(),
+    });
+    const msg = await signWorkspaceMessage(denied, PARANET, raw);
+
+    await handler.handle(msg, '12D3KooWPeer');
+
+    const gm = new GraphManager(store);
+    await gm.ensureContextGraph(PARANET);
+    const askResult = await store.query(
+      `ASK { GRAPH <${gm.workspaceGraphUri(PARANET)}> { <${ENTITY}> ?p ?o } }`,
+    );
+    expect(askResult.type).toBe('boolean');
+    if (askResult.type === 'boolean') {
+      expect(askResult.value).toBe(false);
+    }
   });
 
   it('rejects message when rootEntity was created by a different peer (Rule 4)', async () => {

@@ -15,9 +15,8 @@ import {
 // ─────────────────────────────────────────────────────────────────────────────
 // Audit findings covered:
 //
-// C-6  computeGossipSigningPayload concatenates type|cgId|timestamp|payload
-//      with no length prefix. ('a'+'bc') and ('ab'+'c') would produce the
-//      same prefix ('abc'). Test that length-confusion is detected.
+// C-6  computeGossipSigningPayload must length-frame type|cgId|timestamp|payload
+//      so ('a'+'bc') and ('ab'+'c') cannot produce the same signed bytes.
 //
 // C-7  Existing v10-proto.test.ts round-trips do NOT assert nodeIdentityId
 //      on StorageACK or verifiedMemoryId/batchId on VerifyProposal. A proto
@@ -44,21 +43,12 @@ function bytes(n: number, fill = 0): Uint8Array {
 }
 
 describe('computeGossipSigningPayload — length-confusion safety [C-6]', () => {
-  // The signing payload is `${type}${contextGraphId}${timestamp}` || payload.
-  // Without length prefixes between fields, an attacker who controls one
-  // field can shift bytes between fields and produce the same signed bytes.
-  // This test pins the current behaviour as a finding: a single-byte shift
-  // across the type / contextGraphId boundary collides today.
-
-  it('same concatenation byte-stream from different field splits collides (length-confusion)', () => {
+  it('same concatenation byte-stream from different field splits does not collide', () => {
     const ts = '2026-01-01T00:00:00Z';
     const payload = new Uint8Array([1, 2, 3, 4]);
     const a = computeGossipSigningPayload('a', 'bc' + 'tail', ts, payload);
     const b = computeGossipSigningPayload('ab', 'c' + 'tail', ts, payload);
-    // If this passes (a equals b), the protocol is vulnerable to type/cgId
-    // length confusion. If it fails (a !== b), the implementation has been
-    // hardened with length prefixes — update the test to reflect the fix.
-    expect(a).toEqual(b);
+    expect(a).not.toEqual(b);
   });
 
   it('different timestamps produce different payloads', () => {
@@ -73,14 +63,18 @@ describe('computeGossipSigningPayload — length-confusion safety [C-6]', () => 
     expect(a).not.toEqual(b);
   });
 
-  it('payload bytes appear AFTER the prefix (regression: prefix before payload)', () => {
+  it('payload bytes are length-framed after metadata fields', () => {
     const type = 'T';
     const cgId = 'CG';
     const ts = 'TS';
     const payload = new Uint8Array([0xAB, 0xCD]);
     const p = computeGossipSigningPayload(type, cgId, ts, payload);
-    // Expected: 'T' 'C' 'G' 'T' 'S' 0xAB 0xCD = bytes 84,67,71,84,83,171,205
-    expect(Array.from(p)).toEqual([84, 67, 71, 84, 83, 0xAB, 0xCD]);
+    expect(Array.from(p)).toEqual([
+      0, 0, 0, 1, 84,
+      0, 0, 0, 2, 67, 71,
+      0, 0, 0, 2, 84, 83,
+      0, 0, 0, 2, 0xAB, 0xCD,
+    ]);
   });
 });
 
