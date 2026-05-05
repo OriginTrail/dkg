@@ -5,7 +5,7 @@
  *
  *   POST   /api/auth/tokens               mint a scoped token
  *   GET    /api/auth/tokens               list (prefix + scopes only — never the secret)
- *   DELETE /api/auth/tokens/<prefix>      revoke by prefix (idempotent: 204 on hit, 404 on miss)
+ *   DELETE /api/auth/tokens/<prefix>      revoke by prefix (204 on first delete; 404 if already gone)
  *
  * Root-only: a "root" caller is one whose bearer token's scope set is
  * `'*'` in the loaded store. Every other caller (any explicitly-scoped
@@ -215,9 +215,7 @@ function parseMintBody(
     }
   }
 
-  const result: { scopes: Scope[] | '*'; name?: string } = { scopes: scopeList };
-  if (name !== undefined) result.name = name;
-  return result;
+  return { scopes: scopeList, ...(name !== undefined ? { name } : {}) };
 }
 
 async function handleMint(ctx: RequestContext): Promise<void> {

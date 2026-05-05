@@ -728,9 +728,10 @@ export class ApiClient {
     name?: string;
     createdAt: string;
   }> {
-    const body: Record<string, unknown> = { scope: request.scope };
-    if (request.name !== undefined) body.name = request.name;
-    return this.post('/api/auth/tokens', body);
+    return this.post('/api/auth/tokens', {
+      scope: request.scope,
+      ...(request.name !== undefined ? { name: request.name } : {}),
+    });
   }
 
   async listAuthTokens(): Promise<{
