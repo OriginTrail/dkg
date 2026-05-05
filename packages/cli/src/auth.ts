@@ -24,6 +24,7 @@ import {
   serializeTokenStore,
   lookupTokenRecord,
   setTokenRecord,
+  tokenPrefix,
   type ParsedTokenFile,
   type TokenStore,
   type TokenRecord,
@@ -111,7 +112,7 @@ export async function loadTokenStore(authConfig?: AuthConfig): Promise<TokenStor
       const existing = lookupTokenRecord(t, parsed.store);
       if (existing) continue;
       const record: TokenRecord = {
-        prefix: t.length >= 8 ? t.slice(0, 8) : t,
+        prefix: tokenPrefix(t),
         fullToken: t,
         scopes: '*',
       };
@@ -124,7 +125,7 @@ export async function loadTokenStore(authConfig?: AuthConfig): Promise<TokenStor
   if (parsed.store.size === 0) {
     const token = generateToken();
     const record: TokenRecord = {
-      prefix: token.slice(0, 8),
+      prefix: tokenPrefix(token),
       fullToken: token,
       scopes: '*',
     };
@@ -169,9 +170,14 @@ export function verifyToken(token: string | undefined, validTokens: Set<string>)
 /**
  * Verify a bearer token has the requested scope.
  *
- *   - `'*'` (root) grants any scope.
+ *   - `'*'` (root) grants any NON-EMPTY scope.
  *   - Explicit scope arrays are exact-match (no globbing).
  *   - Unknown / unrecognized tokens fail closed (false).
+ *   - Empty / undefined `requiredScope` fails closed (false). The TS
+ *     signature forbids this, but a JS caller (or a `someValue as Scope`
+ *     cast) could still slip through; without the guard, a wildcard
+ *     token would grant a "no scope" check, which is exactly the
+ *     forgotten-argument bug we want loud rather than silent.
  *
  * Pure function — every input is explicit, no global state. Callers are
  * expected to send the appropriate 403 (NOT 401: the token IS valid; the
@@ -183,6 +189,10 @@ export function verifyTokenScope(
   store: TokenStore,
 ): boolean {
   if (!token) return false;
+  // Fail-closed BEFORE the wildcard shortcut so a forgotten/empty scope
+  // argument can never accidentally grant access to a root token. See
+  // review I1: slice 07 will copy this guard verbatim.
+  if (!requiredScope) return false;
   const record = lookupTokenRecord(token, store);
   if (!record) return false;
   if (record.scopes === '*') return true;

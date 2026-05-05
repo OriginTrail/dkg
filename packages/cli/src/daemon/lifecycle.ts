@@ -103,7 +103,7 @@ import {
 } from '../config.js';
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../catchup-runner.js';
-import { loadTokens, loadTokenStore, httpAuthGuard, setTokenRecord, type TokenRecord } from '../auth.js';
+import { loadTokens, loadTokenStore, httpAuthGuard, setTokenRecord, tokenPrefix, type TokenRecord } from '../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../extraction/index.js';
 import {
@@ -1371,7 +1371,7 @@ export async function runDaemonInner(
   const tokenStore = await loadTokenStore(config.auth);
   for (const a of agent.listLocalAgents()) {
     const record: TokenRecord = {
-      prefix: a.authToken.length >= 8 ? a.authToken.slice(0, 8) : a.authToken,
+      prefix: tokenPrefix(a.authToken),
       fullToken: a.authToken,
       // Per-agent tokens are not user-mintable and have always granted
       // unscoped access. Treat them as `'*'` for slice 06's scope check.

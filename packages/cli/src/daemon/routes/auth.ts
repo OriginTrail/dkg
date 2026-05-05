@@ -21,7 +21,7 @@
  */
 
 import { randomBytes } from 'node:crypto';
-import { mkdir, chmod, readFile } from 'node:fs/promises';
+import { mkdir, readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { dirname } from 'node:path';
 import {
@@ -246,30 +246,45 @@ async function handleMint(ctx: RequestContext): Promise<void> {
   };
   if (fields.name !== undefined) record.name = fields.name;
 
-  await withMintMutex(async () => {
-    // Read-modify-write: re-read the file inside the mutex so we don't
-    // clobber records added by a concurrent CLI mint that landed
-    // BETWEEN the daemon's startup load and now. Without this, two
-    // sequential API mints would each append their record but only
-    // the second would survive on disk.
-    const filePath = tokenFilePath();
-    const existing = existsSync(filePath)
-      ? parseTokenFile(await readFile(filePath, 'utf-8'), {
-          onWarning: (msg) => console.warn(`[auth] ${msg}`),
-        })
-      : { store: new Map(), preserved: [] as Array<{ text: string; index: number }> };
+  try {
+    await withMintMutex(async () => {
+      // Read-modify-write: re-read the file inside the mutex so we don't
+      // clobber records added by a concurrent CLI mint that landed
+      // BETWEEN the daemon's startup load and now. Without this, two
+      // sequential API mints would each append their record but only
+      // the second would survive on disk.
+      const filePath = tokenFilePath();
+      const existing = existsSync(filePath)
+        ? parseTokenFile(await readFile(filePath, 'utf-8'), {
+            onWarning: (msg) => console.warn(`[auth] ${msg}`),
+          })
+        : { store: new Map(), preserved: [] as Array<{ text: string; index: number }> };
 
-    setTokenRecord(existing.store, record);
+      // Apply the mutation to the file's in-memory copy ONLY. The
+      // shared `ctx.tokenStore` and `ctx.validTokens` stay untouched
+      // until the disk write succeeds — see review I2: previously the
+      // in-memory state was mutated first, so a writeFileAtomic failure
+      // would leave the daemon accepting a token that is absent from
+      // disk; a restart would then silently revoke it.
+      setTokenRecord(existing.store, record);
 
-    // Mirror into the in-memory store so subsequent requests within
-    // this daemon process accept the new token without a restart.
-    setTokenRecord(ctx.tokenStore, record);
-    ctx.validTokens.add(newToken);
+      await mkdir(dirname(filePath), { recursive: true });
+      // `mode: 0o600` is enforced inside writeFileAtomic — the temp file
+      // is created with the right mode AND chmod'd defensively after
+      // rename, closing the umask-derived 0o644 window that review C1
+      // flagged.
+      await writeFileAtomic(filePath, serializeTokenStore(existing), { mode: 0o600 });
 
-    await mkdir(dirname(filePath), { recursive: true });
-    await writeFileAtomic(filePath, serializeTokenStore(existing));
-    await chmod(filePath, 0o600);
-  });
+      // Disk-write succeeded — now safe to publish the change to the
+      // running daemon's token set.
+      setTokenRecord(ctx.tokenStore, record);
+      ctx.validTokens.add(newToken);
+    });
+  } catch (err) {
+    return jsonResponse(res, 500, {
+      error: `Failed to persist token: ${err instanceof Error ? err.message : 'unknown error'}`,
+    });
+  }
 
   // Mint response — the ONLY surface that returns the full token.
   // Subsequent GET/DELETE responses MUST never include `token`.
@@ -323,24 +338,36 @@ async function handleRevoke(ctx: RequestContext): Promise<void> {
     });
   }
 
-  const result = await withMintMutex(async () => {
-    const filePath = tokenFilePath();
-    if (!existsSync(filePath)) return { found: false };
+  let result: { found: boolean };
+  try {
+    result = await withMintMutex(async () => {
+      const filePath = tokenFilePath();
+      if (!existsSync(filePath)) return { found: false };
 
-    const existing = parseTokenFile(await readFile(filePath, 'utf-8'), {
-      onWarning: (msg) => console.warn(`[auth] ${msg}`),
+      const existing = parseTokenFile(await readFile(filePath, 'utf-8'), {
+        onWarning: (msg) => console.warn(`[auth] ${msg}`),
+      });
+      const target = existing.store.get(prefix);
+      if (!target) return { found: false };
+
+      // Same disk-first ordering as the mint path (review I2): write
+      // the new file content BEFORE mutating the in-memory store, so a
+      // write failure leaves the daemon's accepted-token set
+      // consistent with what's on disk. Without this, a failed disk
+      // revoke would leave the daemon rejecting a token that is still
+      // in the file — a restart would resurrect it.
+      deleteTokenRecord(existing.store, prefix);
+      await writeFileAtomic(filePath, serializeTokenStore(existing), { mode: 0o600 });
+
+      deleteTokenRecord(ctx.tokenStore, prefix);
+      ctx.validTokens.delete(target.fullToken);
+      return { found: true };
     });
-    const target = existing.store.get(prefix);
-    if (!target) return { found: false };
-
-    deleteTokenRecord(existing.store, prefix);
-    deleteTokenRecord(ctx.tokenStore, prefix);
-    ctx.validTokens.delete(target.fullToken);
-
-    await writeFileAtomic(filePath, serializeTokenStore(existing));
-    await chmod(filePath, 0o600);
-    return { found: true };
-  });
+  } catch (err) {
+    return jsonResponse(res, 500, {
+      error: `Failed to persist token revocation: ${err instanceof Error ? err.message : 'unknown error'}`,
+    });
+  }
 
   if (!result.found) {
     // Documented choice: 404 on miss (NOT 204). The semantic is "the

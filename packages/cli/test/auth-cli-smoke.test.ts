@@ -146,7 +146,13 @@ describe.sequential('auth CLI smoke', () => {
       scope: 'kafka:endpoint:write',
       name: 'producer-bot',
     });
-    expect(result.stdout).toContain('minted-secret-XYZ');
+    // I4: assert EXACTLY one occurrence of the secret on stdout. A
+    // `toContain` would silently pass if a future debug/error path
+    // re-printed the token — that's the single most security-relevant
+    // regression in this slice.
+    expect(result.stdout.match(/minted-secret-XYZ/g)?.length).toBe(1);
+    // Negative-control: the secret must never appear on stderr either.
+    expect(result.stderr).not.toContain('minted-secret-XYZ');
     expect(result.stdout).toContain('Save this token now');
     expect(result.stdout).toContain('Prefix:');
     expect(result.stdout).toContain('producer-bot');

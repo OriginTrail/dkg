@@ -485,7 +485,10 @@ authCmd
 
 authCmd
   .command('rotate')
-  .description('Generate a new auth token (replaces the file-based token)')
+  .description(
+    "Replace the entire token file with a single new root token " +
+      "(WARNING: any tokens minted via 'dkg auth mint-token' will be deleted)",
+  )
   .action(async () => {
     const { randomBytes } = await import('node:crypto');
     const { writeFile, chmod, mkdir } = await import('node:fs/promises');

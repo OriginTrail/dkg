@@ -47,6 +47,30 @@ describe('verifyTokenScope', () => {
     expect(verifyTokenScope('not-in-store', 'any', store)).toBe(false);
   });
 
+  it('fails closed when requiredScope is empty/undefined, even for a wildcard token (review I1)', () => {
+    // The TS signature forbids an empty-or-undefined requiredScope, but a
+    // JS caller (or an `as Scope` cast) could slip one through. Without
+    // the fail-closed guard, the wildcard shortcut would grant access.
+    // Slice 07 will copy this guard verbatim — pin the contract here so
+    // a regression in either copy fails loudly.
+    const store = buildStore([
+      { prefix: 'rooty-tk', fullToken: 'rooty-tkABCDEF', scopes: '*' },
+    ]);
+    expect(verifyTokenScope('rooty-tkABCDEF', '', store)).toBe(false);
+    expect(verifyTokenScope('rooty-tkABCDEF', undefined as unknown as string, store)).toBe(false);
+    expect(verifyTokenScope('rooty-tkABCDEF', null as unknown as string, store)).toBe(false);
+    // The same fail-closed semantic applies to scoped records.
+    const scopedStore = buildStore([
+      {
+        prefix: 'reader-x',
+        fullToken: 'reader-xAAAAAA',
+        scopes: ['kafka:endpoint:read'],
+      },
+    ]);
+    expect(verifyTokenScope('reader-xAAAAAA', '', scopedStore)).toBe(false);
+    expect(verifyTokenScope('reader-xAAAAAA', undefined as unknown as string, scopedStore)).toBe(false);
+  });
+
   it('does not perform glob/wildcard matching on non-"*" lists', () => {
     // ADR-0003: no CG-bound scopes, no wildcards within lists. A scope
     // string is exact-match against the required scope.
