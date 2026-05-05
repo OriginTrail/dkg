@@ -94,6 +94,34 @@ export function parseSecurityProtocol(value: unknown): SecurityProtocol | undefi
 }
 
 /**
+ * Cross-field consistency check between `securityProtocol` and the auth
+ * material. Mirrors the CLI's fail-fast logic so direct HTTP callers also
+ * fail fast instead of getting silent `unattempted` registrations.
+ *
+ * Throws `KafkaRequestParseError` on mismatch; returns void on consistency.
+ *
+ * Slice-01 wire compatibility: when no `securityProtocol` is declared we do
+ * not enforce anything — the route already skips the probe and the KA records
+ * `verificationStatus: "unattempted"`.
+ */
+export function validateKafkaAuthConsistency(body: KafkaEndpointRequestBody): void {
+  const sp = body.securityProtocol;
+  if (!sp) return; // No protocol declared → no enforcement (slice-01 wire compat).
+  const requiresSasl = sp === 'SASL_PLAINTEXT' || sp === 'SASL_SSL';
+  const hasSasl = body.sasl !== undefined;
+  if (requiresSasl && !hasSasl) {
+    throw new KafkaRequestParseError(
+      `"securityProtocol" "${sp}" requires a "sasl" block with username and password`,
+    );
+  }
+  if (!requiresSasl && hasSasl) {
+    throw new KafkaRequestParseError(
+      `"sasl" must not be set when "securityProtocol" is "${sp}"`,
+    );
+  }
+}
+
+/**
  * Parse a SASL block from the request body.
  *
  * Returns `undefined` when the field is genuinely absent (`null` / `undefined`

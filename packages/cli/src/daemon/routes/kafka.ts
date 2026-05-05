@@ -6,6 +6,7 @@ import {
   parseSecurityProtocol,
   parseSsl,
   shouldProbe,
+  validateKafkaAuthConsistency,
   type KafkaEndpointRequestBody,
 } from '../parsers/kafka-request.js';
 import type { RequestContext } from './context.js';
@@ -63,32 +64,33 @@ export async function handleKafkaRoutes(ctx: RequestContext): Promise<void> {
     }
     // `parseSasl` / `parseSsl` throw `KafkaRequestParseError` on present-but-
     // malformed payloads (wrong type, unknown mechanism, non-string PEM, ...).
-    // Translate those to HTTP 400 so the caller learns about the misconfig
-    // up front, instead of getting a confusing kafkajs auth failure later or
-    // — worse — a `verificationStatus: "unattempted"` registration that
-    // silently dropped the broken auth block. The error message is sanitized
-    // by the parser; safe to forward verbatim.
-    let sasl: KafkaEndpointRequestBody['sasl'];
-    let ssl: KafkaEndpointRequestBody['ssl'];
+    // `validateKafkaAuthConsistency` throws on protocol/credential mismatch
+    // (e.g. SASL_SSL with no sasl block, PLAINTEXT with sasl present). Both
+    // translate to HTTP 400 so the caller learns about the misconfig up front,
+    // instead of getting a confusing kafkajs auth failure later or — worse —
+    // a `verificationStatus: "unattempted"` registration that silently
+    // dropped the broken auth block. Error messages are sanitized by the
+    // parser; safe to forward verbatim.
+    let reqBody: KafkaEndpointRequestBody;
     try {
-      sasl = parseSasl(raw.sasl);
-      ssl = parseSsl(raw.ssl);
+      const sasl = parseSasl(raw.sasl);
+      const ssl = parseSsl(raw.ssl);
+      reqBody = {
+        contextGraphId: targetContextGraphId,
+        broker,
+        topic,
+        messageFormat,
+        securityProtocol,
+        sasl,
+        ssl,
+      };
+      validateKafkaAuthConsistency(reqBody);
     } catch (err) {
       if (err instanceof KafkaRequestParseError) {
         return jsonResponse(res, 400, { error: err.publicMessage });
       }
       throw err;
     }
-
-    const reqBody: KafkaEndpointRequestBody = {
-      contextGraphId: targetContextGraphId,
-      broker,
-      topic,
-      messageFormat,
-      securityProtocol,
-      sasl,
-      ssl,
-    };
 
     // `?force=true` overrides a non-verified probe outcome. We honor `1`
     // and `true` (case-insensitive) as truthy; any other value is treated

@@ -5,6 +5,7 @@ import {
   parseSecurityProtocol,
   parseSsl,
   shouldProbe,
+  validateKafkaAuthConsistency,
   type KafkaEndpointRequestBody,
 } from '../src/daemon/parsers/kafka-request.js';
 
@@ -279,5 +280,97 @@ describe('shouldProbe — valid inputs and explicit absences', () => {
       messageFormat: 'application/json',
     };
     expect(shouldProbe(body)).toBe(false);
+  });
+});
+
+describe('validateKafkaAuthConsistency', () => {
+  // Cross-field consistency check between `securityProtocol` and the auth
+  // material. The route's per-field parsers validate each field in isolation;
+  // this helper closes the protocol/credential mismatch gap so direct HTTP
+  // callers cannot smuggle a SASL_SSL request without creds (or PLAINTEXT
+  // with creds) past the route and silently land on `verificationStatus:
+  // "unattempted"`.
+
+  const baseBody = {
+    contextGraphId: 'cg',
+    broker: 'b',
+    topic: 't',
+    messageFormat: 'application/json',
+  } as const;
+
+  const validSasl = { mechanism: 'plain', username: 'a', password: 'p' } as const;
+
+  it('SASL_SSL with no sasl block → throws, naming the protocol', () => {
+    const body: KafkaEndpointRequestBody = {
+      ...baseBody,
+      securityProtocol: 'SASL_SSL',
+    };
+    expect(() => validateKafkaAuthConsistency(body)).toThrow(KafkaRequestParseError);
+    expect(() => validateKafkaAuthConsistency(body)).toThrow(/SASL_SSL/);
+    expect(() => validateKafkaAuthConsistency(body)).toThrow(/"sasl"/);
+  });
+
+  it('SASL_PLAINTEXT with no sasl block → throws, naming the protocol', () => {
+    const body: KafkaEndpointRequestBody = {
+      ...baseBody,
+      securityProtocol: 'SASL_PLAINTEXT',
+    };
+    expect(() => validateKafkaAuthConsistency(body)).toThrow(KafkaRequestParseError);
+    expect(() => validateKafkaAuthConsistency(body)).toThrow(/SASL_PLAINTEXT/);
+  });
+
+  it('PLAINTEXT with sasl block present → throws, naming the protocol', () => {
+    const body: KafkaEndpointRequestBody = {
+      ...baseBody,
+      securityProtocol: 'PLAINTEXT',
+      sasl: validSasl,
+    };
+    expect(() => validateKafkaAuthConsistency(body)).toThrow(KafkaRequestParseError);
+    expect(() => validateKafkaAuthConsistency(body)).toThrow(/PLAINTEXT/);
+    expect(() => validateKafkaAuthConsistency(body)).toThrow(/"sasl"/);
+  });
+
+  it('SSL with sasl block present → throws, naming the protocol', () => {
+    const body: KafkaEndpointRequestBody = {
+      ...baseBody,
+      securityProtocol: 'SSL',
+      sasl: validSasl,
+    };
+    expect(() => validateKafkaAuthConsistency(body)).toThrow(KafkaRequestParseError);
+    expect(() => validateKafkaAuthConsistency(body)).toThrow(/SSL/);
+  });
+
+  it('SASL_SSL with valid sasl block → no throw', () => {
+    const body: KafkaEndpointRequestBody = {
+      ...baseBody,
+      securityProtocol: 'SASL_SSL',
+      sasl: validSasl,
+    };
+    expect(() => validateKafkaAuthConsistency(body)).not.toThrow();
+  });
+
+  it('PLAINTEXT with no sasl block → no throw', () => {
+    const body: KafkaEndpointRequestBody = {
+      ...baseBody,
+      securityProtocol: 'PLAINTEXT',
+    };
+    expect(() => validateKafkaAuthConsistency(body)).not.toThrow();
+  });
+
+  it('SSL with no sasl block, optional ssl block present → no throw', () => {
+    const body: KafkaEndpointRequestBody = {
+      ...baseBody,
+      securityProtocol: 'SSL',
+      ssl: { caPem: '-----BEGIN CERTIFICATE-----\nCA\n-----END CERTIFICATE-----' },
+    };
+    expect(() => validateKafkaAuthConsistency(body)).not.toThrow();
+  });
+
+  it('No securityProtocol declared → no throw (slice-01 wire compat)', () => {
+    // Slice-01 callers can omit `securityProtocol` entirely. The route already
+    // skips the probe and the KA records `verificationStatus: "unattempted"`.
+    // The consistency check must not regress that path.
+    const body: KafkaEndpointRequestBody = { ...baseBody };
+    expect(() => validateKafkaAuthConsistency(body)).not.toThrow();
   });
 });
