@@ -2865,15 +2865,18 @@ export class DKGAgent {
     return this._publish(contextGraphId, input as Quad[], undefined, thirdArg ?? fourthArg);
   }
 
-  private getDefaultWorkspaceGossipSigningAgent(): (AgentKeyRecord & { privateKey: string }) | null {
-    if (!this.defaultAgentAddress) return null;
-    const defaultAddress = this.defaultAgentAddress.toLowerCase();
+  private getWorkspaceGossipSigningAgent(): (AgentKeyRecord & { privateKey: string }) | null {
+    const defaultAddress = this.defaultAgentAddress?.toLowerCase();
+    let fallback: (AgentKeyRecord & { privateKey: string }) | null = null;
     for (const record of this.localAgents.values()) {
-      if (record.agentAddress.toLowerCase() === defaultAddress && record.privateKey) {
-        return { ...record, privateKey: record.privateKey };
+      if (!record.privateKey) continue;
+      const signingRecord = { ...record, privateKey: record.privateKey };
+      if (defaultAddress && record.agentAddress.toLowerCase() === defaultAddress) {
+        return signingRecord;
       }
+      fallback ??= signingRecord;
     }
-    return null;
+    return fallback;
   }
 
   private async getContextGraphAgentGateAddresses(contextGraphId: string): Promise<string[] | null> {
@@ -2924,7 +2927,7 @@ export class DKGAgent {
   ): Promise<(AgentKeyRecord & { privateKey: string }) | null> {
     const allowedAgents = await this.getContextGraphAgentGateAddresses(contextGraphId);
     if (!allowedAgents) {
-      return this.getDefaultWorkspaceGossipSigningAgent();
+      return this.getWorkspaceGossipSigningAgent();
     }
 
     const allowedSet = new Set(allowedAgents.map((agent) => agent.toLowerCase()));
