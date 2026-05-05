@@ -1,5 +1,3 @@
-import { jsonLdToQuads, type JsonLdContent } from '@origintrail-official/dkg-agent';
-import { contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { jsonResponse, readBody, safeDecodeURIComponent, validateRequiredContextGraphId } from '../http-utils.js';
 import {
   hasAnyKafkaCredentials,
@@ -71,11 +69,11 @@ export async function handleKafkaRoutes(ctx: RequestContext): Promise<void> {
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
 /**
- * Build a `KafkaEndpointPublisher` adapter for a route's `agent`. `publish`
- * goes through `agent.publish` with the slice 01 envelope (`{ public: ka }`);
- * `update` resolves the URI to its V10 kcId via the meta graph and calls the
- * publisher's full-replace update flow with quads converted from the JSON-LD
- * KA. The kafka package never sees kcIds.
+ * Build a `KafkaEndpointPublisher` adapter for a route's `agent`. Both
+ * `publish` and `update` delegate to the agent's URI-keyed JSON-LD overloads
+ * (`agent.publish(cgId, content)` and `agent.update(uri, cgId, content)`),
+ * which encapsulate the kcId lookup + JSON-LD → quads conversion. The kafka
+ * package — and this adapter — never see kcIds.
  */
 function buildKafkaEndpointPublisher(
   ctx: RequestContext,
@@ -89,20 +87,7 @@ function buildKafkaEndpointPublisher(
       );
     },
     async update(cgId, uri, content) {
-      const kcId = await resolveKcIdForUri(ctx, cgId, uri);
-      if (kcId === null) {
-        // The kafka-package side already verified the KA exists via the
-        // queryEngine read; missing kcId here means the meta graph and the
-        // data graph are out of sync, which should not happen on a healthy
-        // node. Fail loudly so the operator can investigate.
-        throw new Error(
-          `Kafka endpoint ${uri} is present in CG "${cgId}" data graph but ` +
-            `has no kcId in the corresponding _meta graph (cannot resolve V10 update target)`,
-        );
-      }
-      const envelope: JsonLdContent = { public: content as object };
-      const { publicQuads } = await jsonLdToQuads(envelope);
-      await agent.update(kcId, cgId, publicQuads);
+      await agent.update(uri, cgId, { public: content as object });
     },
   };
 }
@@ -128,60 +113,6 @@ function buildKafkaEndpointQueryEngine(
       return { bindings };
     },
   };
-}
-
-const DKG_ONTOLOGY = 'http://dkg.io/ontology/';
-
-/**
- * Resolve the V10 kcId (a.k.a. batchId) for an endpoint URI by querying the
- * CG's `_meta` graph. The `_meta` graph stores every published KA's
- * `dkg:rootEntity` → `dkg:partOf` → `dkg:batchId` chain (see
- * `packages/publisher/src/metadata.ts → generateConfirmedMetadata`).
- *
- * Returns `null` when no KA / KC is registered for the URI.
- */
-async function resolveKcIdForUri(
-  ctx: RequestContext,
-  contextGraphId: string,
-  uri: string,
-): Promise<bigint | null> {
-  const { agent } = ctx;
-  const metaGraph = contextGraphMetaUri(contextGraphId);
-  // We query the `_meta` graph directly (no `contextGraphId` option) because
-  // the daemon engine's auto-wrap targets the data graph; the meta graph
-  // lives at a different URI. Explicit `GRAPH <metaUri>` is the canonical
-  // pattern (see `packages/publisher/src/metadata.ts` line 377).
-  const sparql = `
-    SELECT ?batchId WHERE {
-      GRAPH <${metaGraph}> {
-        ?ka <${DKG_ONTOLOGY}rootEntity> <${uri}> ;
-            <${DKG_ONTOLOGY}partOf> ?kc .
-        ?kc <${DKG_ONTOLOGY}batchId> ?batchId .
-      }
-    }
-    LIMIT 1
-  `;
-  const result = await agent.query(sparql);
-  const bindings = (result?.bindings ?? []) as Array<Record<string, unknown>>;
-  if (bindings.length === 0) return null;
-  const raw = bindings[0]['batchId'];
-  // `agent.query` returns bindings either as plain strings (`"42"^^<...>`) or
-  // SPARQL-JSON `{value, type, datatype}` objects depending on the wire
-  // format. Handle both.
-  const valueStr = typeof raw === 'string'
-    ? stripTypedLiteral(raw)
-    : (raw as { value?: string } | undefined)?.value;
-  if (!valueStr) return null;
-  try {
-    return BigInt(valueStr);
-  } catch {
-    return null;
-  }
-}
-
-function stripTypedLiteral(value: string): string {
-  const m = value.match(/^"(.*)"(?:\^\^<.*>)?$/s);
-  return m ? m[1] : value;
 }
 
 // ─── handlers ────────────────────────────────────────────────────────────────

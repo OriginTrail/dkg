@@ -74,7 +74,3 @@ export {
 } from './random-sampling-bind.js';
 export { monotonicTransition, versionedWrite, type MonotonicStages } from './workspace-consistency.js';
 export { StaleWriteError, type CASCondition } from '@origintrail-official/dkg-publisher';
-// JSON-LD → quads conversion. Re-exported so daemon route handlers can feed
-// the V10 update flow (which only accepts `Quad[]`) from JSON-LD KAs without
-// reaching into agent internals.
-export { jsonLdToQuads, type JsonLdContent } from './dkg-agent-utils.js';
