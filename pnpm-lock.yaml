@@ -496,6 +496,12 @@ importers:
       '@origintrail-official/dkg-core':
         specifier: workspace:*
         version: link:../core
+      '@origintrail-official/dkg-query':
+        specifier: workspace:*
+        version: link:../query
+      '@origintrail-official/dkg-storage':
+        specifier: workspace:*
+        version: link:../storage
       '@testcontainers/kafka':
         specifier: 11.14.0
         version: 11.14.0
