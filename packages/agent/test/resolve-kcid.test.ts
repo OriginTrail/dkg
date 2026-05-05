@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import type { Quad, QueryResult, TripleStore } from '@origintrail-official/dkg-storage';
-import { resolveKcIdByRootEntity } from '../src/dkg-agent-utils.js';
+import {
+  AmbiguousRootEntityError,
+  resolveKcIdByRootEntity,
+} from '../src/dkg-agent-utils.js';
 
 interface CapturedQuery {
   sparql: string;
@@ -151,5 +154,69 @@ describe('resolveKcIdByRootEntity', () => {
     await expect(
       resolveKcIdByRootEntity(store, 'devnet-test', 'urn:dkg:foo bar'),
     ).rejects.toThrow();
+  });
+
+  it('Bug 2: throws AmbiguousRootEntityError when 2+ KCs match the same rootEntity URI', async () => {
+    // V10's `publish()` can create duplicate KAs at new kcIds for the same
+    // rootEntity URI. With `LIMIT 1` and no `ORDER BY` the helper used to
+    // return whichever the store happened to enumerate first — semantically
+    // nondeterministic, with `revoke`/`verify` silently mutating the wrong
+    // collection. The fix is to fail closed: 2+ matches throws so the
+    // operator must disambiguate explicitly (probably by pruning the stale
+    // KC before retrying the lifecycle verb).
+    const { store } = makeStore(() => ({
+      type: 'bindings',
+      bindings: [
+        { batchId: '"42"^^<http://www.w3.org/2001/XMLSchema#integer>' },
+        { batchId: '"99"^^<http://www.w3.org/2001/XMLSchema#integer>' },
+      ],
+    }));
+
+    await expect(
+      resolveKcIdByRootEntity(store, 'devnet-test', VALID_URI),
+    ).rejects.toBeInstanceOf(AmbiguousRootEntityError);
+  });
+
+  it('Bug 2: AmbiguousRootEntityError message names the URI, the CG, and the count', async () => {
+    // Operator-debugging contract: the error must give the human enough to
+    // act on without grepping the daemon log. URI + CG + count is the
+    // minimum.
+    const { store } = makeStore(() => ({
+      type: 'bindings',
+      bindings: [
+        { batchId: '"1"^^<http://www.w3.org/2001/XMLSchema#integer>' },
+        { batchId: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' },
+        { batchId: '"3"^^<http://www.w3.org/2001/XMLSchema#integer>' },
+      ],
+    }));
+
+    try {
+      await resolveKcIdByRootEntity(store, 'devnet-test', VALID_URI);
+      throw new Error('expected throw');
+    } catch (err) {
+      expect(err).toBeInstanceOf(AmbiguousRootEntityError);
+      const e = err as AmbiguousRootEntityError;
+      expect(e.message).toContain(VALID_URI);
+      expect(e.message).toContain('devnet-test');
+      expect(e.message).toContain('3');
+      // Typed-error fields for programmatic introspection (route adapter
+      // can map to a 409 without parsing the message).
+      expect(e.rootEntityUri).toBe(VALID_URI);
+      expect(e.contextGraphId).toBe('devnet-test');
+      expect(e.matchCount).toBe(3);
+    }
+  });
+
+  it('Bug 2: still resolves cleanly when exactly one match is present (regression guard for the single-row path)', async () => {
+    // The fix changes the SPARQL shape (drops LIMIT 1) and the result
+    // discrimination (1 → resolve, 0 → null, 2+ → throw). Pin that the
+    // common 1-match case still returns the kcId.
+    const { store } = makeStore(() => ({
+      type: 'bindings',
+      bindings: [{ batchId: '"7"^^<http://www.w3.org/2001/XMLSchema#integer>' }],
+    }));
+
+    const kcId = await resolveKcIdByRootEntity(store, 'devnet-test', VALID_URI);
+    expect(kcId).toBe(7n);
   });
 });

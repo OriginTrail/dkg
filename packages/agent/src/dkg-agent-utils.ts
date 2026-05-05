@@ -422,6 +422,35 @@ export function verifySyncedData(
  * mock. The thin `agent.update(uri, cgId, content)` overload composes this
  * with the existing kcId-keyed update path.
  */
+/**
+ * Thrown when `resolveKcIdByRootEntity` finds 2+ Knowledge Collections
+ * sharing a `rootEntity` URI in the same context graph's `_meta` graph.
+ *
+ * V10's `publish()` can in principle create duplicate KCs at new kcIds for
+ * the same rootEntity URI (republish-after-prune races, manual data import,
+ * etc.). Returning whichever the store happened to enumerate first would
+ * silently mutate the wrong collection on `agent.update(uri, ...)` —
+ * `revoke` could land on the original instead of the latest, or vice versa.
+ * Failing closed forces the operator to disambiguate explicitly (typically
+ * by pruning the stale KC, then retrying).
+ *
+ * Route adapters can map this to an HTTP 409 Conflict.
+ */
+export class AmbiguousRootEntityError extends Error {
+  constructor(
+    public readonly rootEntityUri: string,
+    public readonly contextGraphId: string,
+    public readonly matchCount: number,
+  ) {
+    super(
+      `Ambiguous rootEntity URI ${rootEntityUri}: ${matchCount} Knowledge Collections found ` +
+        `in context graph "${contextGraphId}". Disambiguate (e.g. prune the stale KC) before ` +
+        `calling update().`,
+    );
+    this.name = 'AmbiguousRootEntityError';
+  }
+}
+
 export async function resolveKcIdByRootEntity(
   store: TripleStore,
   contextGraphId: string,
@@ -445,6 +474,11 @@ export async function resolveKcIdByRootEntity(
   // `metaGraph` is derived from the validated `contextGraphId` via a pure
   // string concat (`did:dkg:context-graph:${id}/_meta`); the validator's
   // character class precludes IRI-breaking content downstream.
+  //
+  // No `LIMIT 1`: when the store has multiple KCs sharing this rootEntity URI
+  // we must observe the ambiguity and throw, not silently pick whichever the
+  // store enumerated first (Codex review Bug 2). For the common 1-match case
+  // this costs at most one extra binding row over the wire.
   const sparql =
     `SELECT ?batchId WHERE {\n` +
     `  GRAPH <${metaGraph}> {\n` +
@@ -452,10 +486,19 @@ export async function resolveKcIdByRootEntity(
     `        <${DKG_NS}partOf> ?kc .\n` +
     `    ?kc <${DKG_NS}batchId> ?batchId .\n` +
     `  }\n` +
-    `} LIMIT 1`;
+    `}`;
   const result = await store.query(sparql);
   if (result.type !== 'bindings' || result.bindings.length === 0) return null;
 
+  if (result.bindings.length > 1) {
+    throw new AmbiguousRootEntityError(
+      rootEntityUri,
+      contextGraphId,
+      result.bindings.length,
+    );
+  }
+
+  // Exactly one match — extract the batchId.
   // The store binding can come back as a typed-literal string
   // (`"<int>"^^<xsd:integer>`) or as a SPARQL-JSON object
   // (`{ value, type, datatype }`) depending on the adapter. Normalise both
