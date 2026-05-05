@@ -1,19 +1,29 @@
 /**
- * Sidebar bucketing for context graphs — uses daemon `creator` (agent DID)
- * from GET /api/paranet/list, plus optional local overrides.
+ * Sidebar bucketing for context graphs using daemon list fields:
+ * `subscribed`, `curator` (wallet DID), `accessPolicy`, and `creator` (peer DID fallback).
+ *
+ * No localStorage — identity and published policy only.
  */
 
 import type { ContextGraph } from '../stores/projects.js';
 
 export interface AgentSidebarIdentity {
   agentDid: string;
-  /** Node libp2p peer id — daemon stores `DKG_CREATOR` as `did:dkg:agent:${peerId}`. */
+  /** Node libp2p peer id — matches `DKG_CREATOR` when curator is not yet listed. */
   peerId?: string;
+}
+
+function normalizeAccessPolicy(raw?: string): 'public' | 'private' | 'unknown' {
+  if (!raw?.trim()) return 'unknown';
+  const t = raw.trim().replace(/^["']|["']$/g, '').toLowerCase();
+  if (t === 'private') return 'private';
+  if (t === 'public') return 'public';
+  return 'unknown';
 }
 
 /**
  * Canonical `did:dkg:agent:…` for comparison.
- * Ethereum addresses normalise to lowercase; peer-id suffix is case-preserving (Base58/CID).
+ * Ethereum addresses normalise to lowercase; non-EVM suffix is case-preserving.
  */
 export function canonicalAgentDid(did: string): string {
   let t = did.trim().replace(/^["']|["']$/g, '');
@@ -28,35 +38,28 @@ export function canonicalAgentDid(did: string): string {
   return t.toLowerCase();
 }
 
-/** True when list `creator` is from another node/agent than the sidebar identity (same machine can share one peer DID on all locally created CGs). */
-export function creatorIsAnotherAgent(cg: ContextGraph, identity: AgentSidebarIdentity): boolean {
-  const cr = cg.creator?.trim();
-  if (!cr) return false;
-  const cNorm = canonicalAgentDid(cr);
-
-  const walletNorm = canonicalAgentDid(identity.agentDid);
-  if (cNorm === walletNorm) return false;
-
-  if (identity.peerId) {
-    const peerNorm = canonicalAgentDid(`did:dkg:agent:${identity.peerId}`);
-    if (cNorm === peerNorm) return false;
+/** This node/agent is materially involved as participant (sync subscription) or curator (wallet DID). */
+export function belongsInMyProjectsSidebar(cg: ContextGraph, identity: AgentSidebarIdentity | null): boolean {
+  if (cg.subscribed === true) return true;
+  if (!identity?.agentDid?.trim()) return false;
+  if (cg.curator?.trim()) {
+    if (canonicalAgentDid(cg.curator) === canonicalAgentDid(identity.agentDid)) return true;
   }
-
-  return true;
+  const cr = cg.creator?.trim();
+  if (cr && identity.peerId) {
+    const peerCreator = canonicalAgentDid(`did:dkg:agent:${identity.peerId}`);
+    if (canonicalAgentDid(cr) === peerCreator) return true;
+  }
+  return false;
 }
 
 /**
- * Projects listed under Context Oracle: another agent's creator, manual
- * "sent to oracle", not undone by force-my override.
+ * Browse/join catalogue: explicitly non-private discovery entries this node does not actively sync,
+ * excluding projects already classified under "mine".
  */
-export function belongsInContextOracle(
-  cg: ContextGraph,
-  identity: AgentSidebarIdentity | null,
-  manualOracleIds: Set<string>,
-  forceMyIds: Set<string>,
-): boolean {
-  if (forceMyIds.has(cg.id)) return false;
-  if (manualOracleIds.has(cg.id)) return true;
-  if (!identity) return false;
-  return creatorIsAnotherAgent(cg, identity);
+export function belongsInContextOracleSidebar(cg: ContextGraph, identity: AgentSidebarIdentity | null): boolean {
+  if (belongsInMyProjectsSidebar(cg, identity)) return false;
+  const ap = normalizeAccessPolicy(cg.accessPolicy);
+  if (ap === 'private') return false;
+  return true;
 }

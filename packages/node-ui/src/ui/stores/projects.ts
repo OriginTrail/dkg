@@ -3,8 +3,14 @@ import { create } from 'zustand';
 export interface ContextGraph {
   id: string;
   name: string;
-  /** Agent DID (`did:dkg:agent:…`) — from daemon list; drives My vs Context Oracle when set. */
+  /** Peer DID from `DKG_CREATOR` — hosting node identifier. */
   creator?: string;
+  /** Wallet curator DID when present (from ontology / `_meta`). */
+  curator?: string;
+  /** `public` / `private` (from ontology / `_meta`). */
+  accessPolicy?: string;
+  /** This node maintains an active sync subscription for this graph. */
+  subscribed?: boolean;
   description?: string;
   assetCount?: number;
   assets?: number;

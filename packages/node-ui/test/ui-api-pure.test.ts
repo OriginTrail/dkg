@@ -101,8 +101,8 @@ function startTestServer(): Promise<void> {
           res.end(JSON.stringify({ rates: [] }));
         } else if (url.startsWith('/api/per-type-stats')) {
           res.end(JSON.stringify({ buckets: [], types: [], series: {} }));
-        } else if (url.startsWith('/api/context-graphs') || url.startsWith('/api/paranets')) {
-          res.end(JSON.stringify({ contextGraphs: [{ id: 'cg1' }], paranets: [{ id: 'p1', name: 'Test' }] }));
+        } else if (url.startsWith('/api/context-graph/list') || url.startsWith('/api/context-graphs')) {
+          res.end(JSON.stringify({ contextGraphs: [{ id: 'cg1' }] }));
         } else if (url.startsWith('/api/query')) {
           res.end(JSON.stringify({ result: { bindings: [] } }));
         } else if (url.startsWith('/api/shared-memory')) {
