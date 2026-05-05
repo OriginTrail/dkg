@@ -149,14 +149,24 @@ describe('listKafkaEndpoints', () => {
     expect(result.endpoints).toEqual([]);
   });
 
-  it('uses GRAPH ?g so the daemon engine targets named per-CG graphs', async () => {
-    // The repo convention (commit 348ffd19): SPARQL against per-CG named
-    // graphs MUST wrap the WHERE in `GRAPH ?g { ... }` — the daemon's
-    // query-engine treats unwrapped queries as default-graph, returning
-    // empty bindings. Pin the convention.
+  it('does NOT include `GRAPH` in the SPARQL — the daemon engine auto-scopes per-CG queries (Bug B)', async () => {
+    // Codex Bug B: an explicit `GRAPH ?g { ... }` (the previous slice 04
+    // convention) suppresses `DKGQueryEngine.wrapWithGraph`'s auto-scope
+    // (which bails when the SPARQL contains "graph "), turning the query
+    // into a wildcard scan across every named graph in the store. Same
+    // broker/topic registered in two CGs would collapse to the same
+    // content-addressed URI, and the package would return whichever the
+    // store enumerated first — silently returning a foreign CG's data.
+    //
+    // The fix: drop the wrapper. Let `agent.query(sparql, contextGraphId)`
+    // wrap the WHERE with `GRAPH <did:dkg:context-graph:${cgId}>`. CG
+    // isolation is then enforced by the engine, not by the package's
+    // SPARQL. Real-store coverage lives in
+    // `test/integration/cg-isolation.test.ts`.
     const { queryEngine, calls } = makeQueryEngine(() => []);
     await listKafkaEndpoints({ contextGraphId: 'devnet-test', queryEngine });
-    expect(calls[0].sparql).toMatch(/GRAPH\s+\?g\s*\{/);
+    // Case-insensitive guard mirrors the engine's check.
+    expect(calls[0].sparql.toLowerCase()).not.toContain('graph ');
   });
 
   it('returns endpoints with publisher in the legacy did:dkg:agent: shape (defensive parsing)', async () => {

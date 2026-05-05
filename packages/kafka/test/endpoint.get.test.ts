@@ -104,14 +104,20 @@ describe('getKafkaEndpoint', () => {
     expect(calls).toHaveLength(0);
   });
 
-  it('uses GRAPH ?g and binds the URI literal into the SPARQL', async () => {
+  it('binds the URI literal into the SPARQL and emits NO `GRAPH` wrapper (Bug B — engine auto-scopes per-CG)', async () => {
+    // Codex Bug B: an explicit `GRAPH ?g { ... }` suppresses
+    // `DKGQueryEngine.wrapWithGraph`'s per-CG auto-scope, turning the
+    // query into a wildcard scan that returns the wrong CG's row when
+    // the same content-addressed URI exists in two CGs. Real-store
+    // coverage is in `test/integration/cg-isolation.test.ts`.
     const { queryEngine, calls } = makeQueryEngine([]);
     await getKafkaEndpoint({
       contextGraphId: 'devnet-test',
       uri: URI,
       queryEngine,
     });
-    expect(calls[0].sparql).toMatch(/GRAPH\s+\?g\s*\{/);
+    // Case-insensitive guard mirrors the engine's check.
+    expect(calls[0].sparql.toLowerCase()).not.toContain('graph ');
     expect(calls[0].sparql).toContain(`<${URI}>`);
   });
 });

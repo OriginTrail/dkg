@@ -366,15 +366,22 @@ export async function listKafkaEndpoints(
   input: ListKafkaEndpointsInput,
 ): Promise<ListKafkaEndpointsResult> {
   const status: KafkaEndpointListStatus = input.status ?? 'active';
+  // No `GRAPH ?g { ... }` wrapper here — the daemon's `DKGQueryEngine`
+  // auto-wraps every CG-scoped query with `GRAPH <did:dkg:context-graph:${cgId}>`
+  // around the supplied WHERE block, but its `wrapWithGraph` helper bails as
+  // soon as the SPARQL contains the literal "graph " (case-insensitive). Our
+  // earlier `GRAPH ?g` suppressed the auto-wrap and made the query a wildcard
+  // scan across every named graph in the store — so the same broker/topic
+  // registered in two CGs (which collapse to the same content-addressed URI)
+  // returned whichever the store enumerated first. Drop the wrapper, let the
+  // engine scope the query for us. (Codex Bug B.)
   const sparql = `
     ${KAFKA_ENDPOINT_PREFIXES}
     SELECT ?endpoint ?broker ?topic ?messageFormat ?publisher ?endpointUrl ?issued
            ?verificationStatus ?verifiedAt ?securityProtocol ?status ?revokedAt
     WHERE {
-      GRAPH ?g {
-        ${KAFKA_ENDPOINT_BGP}
-        ${statusFilterClause(status)}
-      }
+      ${KAFKA_ENDPOINT_BGP}
+      ${statusFilterClause(status)}
     }
   `;
   const { bindings } = await input.queryEngine.query(sparql, input.contextGraphId);
@@ -397,15 +404,17 @@ export async function getKafkaEndpoint(
   // does not trust its callers — anyone wiring up a custom adapter (tests,
   // future agents) gets the same protection.
   const uri = assertValidKafkaEndpointUri(input.uri);
+  // No `GRAPH ?g { ... }` wrapper — see the explanation on `listKafkaEndpoints`
+  // above. The daemon's `DKGQueryEngine` auto-scopes this query to the
+  // per-CG named data graph; an explicit `GRAPH` would suppress that and
+  // turn the query into an all-graphs wildcard scan.
   const sparql = `
     ${KAFKA_ENDPOINT_PREFIXES}
     SELECT ?broker ?topic ?messageFormat ?publisher ?endpointUrl ?issued
            ?verificationStatus ?verifiedAt ?securityProtocol ?status ?revokedAt
     WHERE {
-      GRAPH ?g {
-        BIND(<${uri}> AS ?endpoint)
-        ${KAFKA_ENDPOINT_BGP}
-      }
+      BIND(<${uri}> AS ?endpoint)
+      ${KAFKA_ENDPOINT_BGP}
     }
     LIMIT 1
   `;
