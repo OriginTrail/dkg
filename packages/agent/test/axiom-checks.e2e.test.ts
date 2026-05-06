@@ -17,7 +17,7 @@
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { ethers } from 'ethers';
-import { TrustLevel } from '@origintrail-official/dkg-core';
+import { TrustLevel, TransitionType } from '@origintrail-official/dkg-core';
 import { DKGAgent } from '../src/index.js';
 import {
   HARDHAT_KEYS,
@@ -40,6 +40,13 @@ interface Finding {
   rule: string;
   outcome: Outcome;
   detail?: string;
+  where?: string;
+}
+
+function extractWhere(stack: string | undefined): string | undefined {
+  if (!stack) return undefined;
+  const m = /axiom-checks\.e2e\.test\.ts:(\d+):(\d+)/.exec(stack);
+  return m ? `axiom-checks.e2e.test.ts:${m[1]}` : undefined;
 }
 
 const findings: Finding[] = [];
@@ -125,6 +132,7 @@ afterEach((ctx) => {
       rule: ctx.task.name,
       outcome: classify(msg),
       detail: msg.split('\n')[0]!.slice(0, 220),
+      where: extractWhere(err?.stack),
     });
   }
 });
@@ -157,6 +165,33 @@ describe('Axiom 1 — Context Graph isolation', () => {
     const b = await rowsFor(right, 'shared-working-memory', s);
     expect(a).toEqual(['"alpha"']);
     expect(b).toEqual(['"beta"']);
+  }, 30_000);
+
+  it('1.c private CG with allowedAgents blocks non-listed callers from SWM reads', async () => {
+    const cg = freshCg('a1-priv');
+    const sub = urn('secret');
+    const own = agent.getDefaultAgentAddress()!;
+    await agent.createContextGraph({
+      id: cg,
+      name: 'priv',
+      description: '',
+      private: true,
+      allowedAgents: [own],
+    });
+    await agent.share(
+      cg,
+      [{ subject: sub, predicate: P_NAME, object: '"top-secret"', graph: '' }],
+      { localOnly: true },
+    );
+
+    const blocked = await agent.query(
+      `SELECT ?o WHERE { <${sub}> <${P_NAME}> ?o }`,
+      { contextGraphId: cg, view: 'shared-working-memory', callerAgentAddress: bAddr },
+    );
+    expect(
+      blocked.bindings,
+      'private CG with allowedAgents must not return data to a non-listed caller (Axiom 1)',
+    ).toHaveLength(0);
   }, 30_000);
 
   it('1.b broad SPARQL in CG-A does not return CG-B subjects', async () => {
@@ -289,6 +324,18 @@ describe('Axiom 3 — Typed state transitions', () => {
     expect(after).toContain('"v2"');
     expect(after).not.toContain('"v1"');
   }, 90_000);
+
+  it('3.d TransitionType enum covers all 7 types named in the spec', async () => {
+    // dkgv10-spec/02_AXIOMS.md, Axiom 3 transition table:
+    // CREATE / UPDATE / REVOKE / SHARE / PUBLISH / VERIFY / DISCARD.
+    const required = ['CREATE', 'UPDATE', 'REVOKE', 'SHARE', 'PUBLISH', 'VERIFY', 'DISCARD'];
+    const present = Object.values(TransitionType) as string[];
+    const missing = required.filter(t => !present.includes(t));
+    expect(
+      missing,
+      `TransitionType is missing the spec types: [${missing.join(', ')}]; current enum: [${present.join(', ')}]`,
+    ).toEqual([]);
+  });
 
   it('3.c DISCARD removes WM rows for the discarded assertion', async () => {
     const cg = freshCg('a3-discard');
@@ -606,8 +653,11 @@ function printReport(rs: Finding[]): void {
       const tag =
         r.outcome === 'PASS' ? 'PASS  ' : r.outcome === 'BREACH' ? 'BREACH' : 'MISSING';
       out.push(`  ${tag}  ${r.rule}`);
+      if (r.where) {
+        out.push(`         where: ${r.where}`);
+      }
       if (r.detail) {
-        out.push(`         err: ${r.detail}`);
+        out.push(`         why:   ${r.detail}`);
       }
     }
   }
