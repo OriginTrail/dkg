@@ -123,28 +123,32 @@ describe('[Q-1] DKGQueryEngine minTrust is graph-scope only — PROD-BUG', () =>
     expect(names).toEqual(['"HighTrust"']);
   });
 
-  // explicit pin that the new
-  // `> Endorsed` threshold leaves Endorsed queries reading from
-  // /_verified_memory/* sub-graphs without applying the per-triple
-  // join. Real production data lands in those sub-graphs WITHOUT a
-  // `dkg:trustLevel` literal (writer-side trust tagging is tracked
-  // upstream), so the previously-applied per-triple filter would
-  // collapse every Endorsed query to `[]`. This test exercises that
-  // exact production shape: data in /_verified_memory/{quorum}
-  // with NO trustLevel triples must still be visible at Endorsed.
-  it('Endorsed reads /_verified_memory/* WITHOUT requiring per-triple trustLevel (graph-scope is the trust gate)', async () => {
+  // At `minTrust=Endorsed` the engine unions root + /_verified_memory/*
+  // and applies per-triple `dkg:trustLevel`. Quorum sub-graph rows must
+  // carry literals ≥ Endorsed to survive; unstamped root-graph subjects
+  // are excluded by the same filter.
+  it('Endorsed reads /_verified_memory/* when subjects carry trustLevel ≥ Endorsed', async () => {
     const store = new OxigraphStore();
     const engine = new DKGQueryEngine(store);
 
-    const subGraph = contextGraphVerifiedMemoryUri(CG, 'no-trust-metadata-quorum');
+    const subGraph = contextGraphVerifiedMemoryUri(CG, 'endorsed-quorum');
     const rootGraph = contextGraphDataUri(CG);
 
-    // Production-shaped data: quads in a quorum sub-graph with NO
-    // trustLevel literals (matches today's publisher write path).
     await store.insert([
       quad('urn:prod1', 'http://schema.org/name', '"Production1"', subGraph),
+      quad(
+        'urn:prod1',
+        'http://dkg.io/ontology/trustLevel',
+        `"${TrustLevel.Endorsed}"^^<http://www.w3.org/2001/XMLSchema#integer>`,
+        subGraph,
+      ),
       quad('urn:prod2', 'http://schema.org/name', '"Production2"', subGraph),
-      // Root-graph data must NOT leak into Endorsed (P-13 graph-scope filter).
+      quad(
+        'urn:prod2',
+        'http://dkg.io/ontology/trustLevel',
+        `"${TrustLevel.Endorsed}"^^<http://www.w3.org/2001/XMLSchema#integer>`,
+        subGraph,
+      ),
       quad('urn:root', 'http://schema.org/name', '"RootDataGraph"', rootGraph),
     ]);
 
@@ -158,8 +162,6 @@ describe('[Q-1] DKGQueryEngine minTrust is graph-scope only — PROD-BUG', () =>
     );
 
     const names = result.bindings.map((b) => b['name']).sort();
-    // BOTH quorum-sub-graph quads survive (no per-triple filter at
-    // Endorsed) and the root-graph quad is excluded by P-13.
     expect(names).toEqual(['"Production1"', '"Production2"']);
   });
 

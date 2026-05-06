@@ -142,6 +142,7 @@ describe('Access Protocol', () => {
     expect(result.kaManifest[0].privateMerkleRoot).toBeDefined();
     expect(result.kaManifest[0].privateMerkleRoot).toHaveLength(32);
     expect(result.publicQuads?.map((quad) => quad.predicate).sort()).toEqual([
+      'http://dkg.io/ontology/trustLevel',
       'http://schema.org/description',
       'http://schema.org/name',
     ]);

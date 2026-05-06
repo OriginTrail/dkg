@@ -758,7 +758,7 @@ describe('DKGPublisher: no random publisher wallet without explicit key', () => 
       }
     `);
     expect(stored.type).toBe('bindings');
-    expect(stored.bindings).toHaveLength(1);
+    expect(stored.bindings).toHaveLength(2);
   });
 
   it('binds context-graph-aware adapter signer resolution to the V10 tx publisher address', async () => {

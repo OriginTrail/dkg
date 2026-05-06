@@ -86,10 +86,22 @@ describe('sub-graph query scoping', () => {
     expect(result.bindings).toHaveLength(0);
   });
 
-  it('rejects subGraphName combined with view-based routing', async () => {
+  it('rejects subGraphName with views other than shared-working-memory', async () => {
     await expect(engine.query(
       'SELECT ?s ?sig WHERE { ?s <http://ex.org/signature> ?sig }',
       { contextGraphId: CG_ID, view: 'verified-memory', subGraphName: 'code' },
-    )).rejects.toThrow('subGraphName cannot be combined with view-based routing');
+    )).rejects.toThrow(/Only shared-working-memory supports sub-graph scoping/);
+  });
+
+  it('scopes shared-working-memory to subGraphName/_shared_memory', async () => {
+    const swmCode = `did:dkg:context-graph:${CG_ID}/code/_shared_memory`;
+    await store.insert([
+      q('urn:swm:1', 'http://ex.org/note', '"in-code-swm"', swmCode),
+    ]);
+    const result = await engine.query(
+      'SELECT ?o WHERE { ?s <http://ex.org/note> ?o }',
+      { contextGraphId: CG_ID, view: 'shared-working-memory', subGraphName: 'code' },
+    );
+    expect(result.bindings.map((b) => b['o'])).toContain('"in-code-swm"');
   });
 });

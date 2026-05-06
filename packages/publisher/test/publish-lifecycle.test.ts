@@ -24,6 +24,7 @@ import { PublishHandler } from '../src/publish-handler.js';
 import { ChainEventPoller } from '../src/chain-event-poller.js';
 import { autoPartition } from '../src/auto-partition.js';
 import { computeTripleHashV10 as computeTripleHash } from '../src/merkle.js';
+import { vmPublishPublicQuads } from './vm-publish-public-quads.js';
 import { ethers } from 'ethers';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, createTestContextGraph, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
@@ -91,7 +92,7 @@ describe('Publish lifecycle (aligned with diagram)', () => {
     expect(result.merkleRoot).toHaveLength(32);
     expect(result.status).toBe('confirmed');
 
-    const hashes = triples.map(computeTripleHash);
+    const hashes = vmPublishPublicQuads(triples).map(computeTripleHash);
     const flatTree = new MerkleTree(hashes);
     expect(Buffer.from(result.merkleRoot).toString('hex'))
       .toBe(Buffer.from(flatTree.root).toString('hex'));
@@ -125,7 +126,7 @@ describe('Publish lifecycle (aligned with diagram)', () => {
 
     expect(result.merkleRoot).toHaveLength(32);
 
-    const hashes = triples.map(computeTripleHash);
+    const hashes = vmPublishPublicQuads(triples).map(computeTripleHash);
     const flatTree = new MerkleTree(hashes);
     expect(Buffer.from(result.merkleRoot).toString('hex'))
       .toBe(Buffer.from(flatTree.root).toString('hex'));
@@ -161,7 +162,7 @@ describe('Publish lifecycle (aligned with diagram)', () => {
 
     const actualHex = Buffer.from(result.merkleRoot).toString('hex');
     const goldenHex =
-      'd0d2a43d52a4925eabf280043ac3fa21043d7da90f9813fb22fecfc038d3da97';
+      '70cc7f02b2f8b298d8fa9cf1e0ca5566071edae54df05cf709e009153faf24e2';
     expect(actualHex).toBe(goldenHex);
   });
 
@@ -233,7 +234,9 @@ describe('Publish lifecycle (aligned with diagram)', () => {
     expect(result.kaManifest[0].privateMerkleRoot).toBeDefined();
     expect(result.kaManifest[0].privateMerkleRoot).toHaveLength(32);
 
-    const publicHashes = [q(ENTITY, 'http://schema.org/name', '"PrivBot"')].map(computeTripleHash);
+    const publicHashes = vmPublishPublicQuads([
+      q(ENTITY, 'http://schema.org/name', '"PrivBot"'),
+    ]).map(computeTripleHash);
     const privateRoot = result.kaManifest[0].privateMerkleRoot!;
     const expectedRoot = new MerkleTree([...publicHashes, privateRoot]).root;
     expect(Buffer.from(result.merkleRoot).toString('hex'))
@@ -417,7 +420,7 @@ describe('Tentative data and chain event confirmation', () => {
     const reqBytes = encodePublishRequest({
       ual,
       nquads: new TextEncoder().encode(ntriples),
-      contextGraphId: PARANET,
+      paranetId: PARANET,
       kas: [{ tokenId: 1, rootEntity: 'did:dkg:agent:QmTentative', privateMerkleRoot: new Uint8Array(0), privateTripleCount: 0 }],
       publisherIdentity: new Uint8Array(32),
       publisherAddress,
@@ -459,7 +462,7 @@ describe('Tentative data and chain event confirmation', () => {
     const reqBytes = encodePublishRequest({
       ual,
       nquads: new TextEncoder().encode(ntriples),
-      contextGraphId: PARANET,
+      paranetId: PARANET,
       kas: [{ tokenId: 1, rootEntity: 'did:dkg:agent:QmNoRange', privateMerkleRoot: new Uint8Array(0), privateTripleCount: 0 }],
       publisherIdentity: new Uint8Array(32),
       publisherAddress,
@@ -496,7 +499,7 @@ describe('Tentative data and chain event confirmation', () => {
     const reqBytes = encodePublishRequest({
       ual,
       nquads: new TextEncoder().encode(ntriples),
-      contextGraphId: PARANET,
+      paranetId: PARANET,
       kas: [{ tokenId: 1, rootEntity: 'did:dkg:agent:QmMisAddr', privateMerkleRoot: new Uint8Array(0), privateTripleCount: 0 }],
       publisherIdentity: new Uint8Array(32),
       publisherAddress,
@@ -535,7 +538,7 @@ describe('Tentative data and chain event confirmation', () => {
     const reqBytes = encodePublishRequest({
       ual,
       nquads: new TextEncoder().encode(ntriples),
-      contextGraphId: PARANET,
+      paranetId: PARANET,
       kas: [{ tokenId: 1, rootEntity: 'did:dkg:agent:QmMisRoot', privateMerkleRoot: new Uint8Array(0), privateTripleCount: 0 }],
       publisherIdentity: new Uint8Array(32),
       publisherAddress,
@@ -577,7 +580,7 @@ describe('Tentative data and chain event confirmation', () => {
     const reqBytes = encodePublishRequest({
       ual,
       nquads: new TextEncoder().encode(ntriples),
-      contextGraphId: PARANET,
+      paranetId: PARANET,
       kas: [{ tokenId: 1, rootEntity: 'did:dkg:agent:QmByRoot', privateMerkleRoot: new Uint8Array(0), privateTripleCount: 0 }],
       publisherIdentity: new Uint8Array(32),
       publisherAddress,
@@ -631,19 +634,23 @@ describe('Tentative data and chain event confirmation', () => {
     // Simulate a receiver getting the data via P2P: build the same merkle root
     // The handler computes its own merkle root from the autoPartition of received quads,
     // so we need to ensure the merkle root matches what the chain event carries.
-    const hashes = triples.map(computeTripleHash);
-    const expectedMerkleRoot = new MerkleTree(hashes).root;
+    const expectedMerkleRoot = publishResult.merkleRoot;
 
-    const ntriples = triples.map(t =>
-      `<${t.subject}> <${t.predicate}> ${t.object} .`,
-    ).join('\n');
+    const ntriples = publishResult.publicQuads!
+      .map((t) => {
+        const obj = t.object.startsWith('"') ? t.object : `<${t.object}>`;
+        return t.graph
+          ? `<${t.subject}> <${t.predicate}> ${obj} <${t.graph}> .`
+          : `<${t.subject}> <${t.predicate}> ${obj} .`;
+      })
+      .join('\n');
 
     const onChain = publishResult.onChainResult!;
     const ual = `did:dkg:mock:31337/${onChain.publisherAddress}/${onChain.startKAId}`;
     const reqBytes = encodePublishRequest({
       ual,
       nquads: new TextEncoder().encode(ntriples),
-      contextGraphId: PARANET,
+      paranetId: PARANET,
       kas: [{ tokenId: 1, rootEntity: 'did:dkg:agent:QmPolled', privateMerkleRoot: new Uint8Array(0), privateTripleCount: 0 }],
       publisherIdentity: new Uint8Array(32),
       publisherAddress: onChain.publisherAddress,

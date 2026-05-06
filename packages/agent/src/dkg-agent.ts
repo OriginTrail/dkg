@@ -14,6 +14,7 @@ import {
   getGenesisQuads, computeNetworkId, SYSTEM_PARANETS, DKG_ONTOLOGY,
   Logger, createOperationContext, sparqlString, escapeSparqlLiteral,
   TrustLevel,
+  DKG_ENTITY_TRUST_LEVEL_PREDICATE,
   type DKGNodeConfig, type OperationContext, type GetView, type AssertionDescriptor, type AssertionEvent, type AssertionState,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad } from '@origintrail-official/dkg-storage';
@@ -5771,6 +5772,34 @@ export class DKGAgent {
         merkleRoot: new Uint8Array(32),
         kaManifest: [],
       };
+    }
+
+    const rootsRes = await this.store.query(
+      `SELECT DISTINCT ?root WHERE { GRAPH <${metaGraph}> {
+        <${opts.knowledgeAssetUal}> <http://dkg.io/ontology/rootEntity> ?root
+      } }`,
+    );
+    const endorsedLit =
+      `"${TrustLevel.Endorsed}"^^<http://www.w3.org/2001/XMLSchema#integer>`;
+    if (rootsRes.type === 'bindings') {
+      for (const row of rootsRes.bindings) {
+        const raw = row['root'];
+        if (typeof raw !== 'string') continue;
+        const rootUri =
+          raw.startsWith('<') && raw.endsWith('>') ? raw.slice(1, -1) : raw.replace(/^"(.*)"$/, '$1');
+        if (!rootUri) continue;
+        await this.store.deleteByPattern({
+          graph: dataGraph,
+          subject: rootUri,
+          predicate: DKG_ENTITY_TRUST_LEVEL_PREDICATE,
+        });
+        await this.store.insert([{
+          subject: rootUri,
+          predicate: DKG_ENTITY_TRUST_LEVEL_PREDICATE,
+          object: endorsedLit,
+          graph: dataGraph,
+        }]);
+      }
     }
 
     const quads = buildEndorsementQuads(

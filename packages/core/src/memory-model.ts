@@ -27,6 +27,9 @@ export enum TrustLevel {
   ConsensusVerified = 3,
 }
 
+/** Per-root RDF predicate aligned with `injectMinTrustFilter` in `@origintrail-official/dkg-query`. */
+export const DKG_ENTITY_TRUST_LEVEL_PREDICATE = 'http://dkg.io/ontology/trustLevel' as const;
+
 export enum TransitionType {
   CREATE = 'CREATE',
   UPDATE = 'UPDATE',

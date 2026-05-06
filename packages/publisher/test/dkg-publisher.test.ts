@@ -75,7 +75,7 @@ describe('DKGPublisher', () => {
     expect(result.status).toBe('confirmed');
 
     const count = await store.countQuads(GRAPH);
-    expect(count).toBe(2);
+    expect(count).toBe(3);
 
     const metaGraph = `did:dkg:context-graph:${PARANET}/_meta`;
     const metaCount = await store.countQuads(metaGraph);

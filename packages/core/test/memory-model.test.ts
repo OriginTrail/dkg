@@ -40,9 +40,23 @@ describe('TrustLevel enum', () => {
 });
 
 describe('TransitionType enum', () => {
-  it('has exactly CREATE and UPDATE (no MUTATE)', () => {
-    const values = Object.values(TransitionType);
-    expect(values).toEqual(['CREATE', 'UPDATE']);
+  /** Canonical vocabulary aligned with `memory-model.ts` / axiom 3.d — update both places together. */
+  const CANONICAL = [
+    'CREATE',
+    'UPDATE',
+    'REVOKE',
+    'SHARE',
+    'PUBLISH',
+    'VERIFY',
+    'DISCARD',
+  ] as const;
+
+  it('enumerates exactly the seven canonical transition types', () => {
+    expect(Object.values(TransitionType)).toEqual([...CANONICAL]);
+  });
+
+  it('does not resurrect legacy MUTATE', () => {
+    expect(Object.values(TransitionType)).not.toContain('MUTATE');
   });
 });
 

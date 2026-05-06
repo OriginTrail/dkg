@@ -2,7 +2,28 @@ import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams } from '@origintrail-official/dkg-chain';
 import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, OperationContext } from '@origintrail-official/dkg-core';
-import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, contextGraphDataUri, contextGraphMetaUri, contextGraphAssertionUri, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, type Ed25519Keypair, computePublishACKDigest, computePublishPublisherDigest } from '@origintrail-official/dkg-core';
+import {
+  DKGEvent,
+  Logger,
+  createOperationContext,
+  sha256,
+  encodeWorkspacePublishRequest,
+  contextGraphDataUri,
+  contextGraphMetaUri,
+  contextGraphAssertionUri,
+  assertionLifecycleUri,
+  contextGraphSubGraphUri,
+  contextGraphSubGraphMetaUri,
+  validateSubGraphName,
+  isSafeIri,
+  assertSafeIri,
+  assertSafeRdfTerm,
+  type Ed25519Keypair,
+  computePublishACKDigest,
+  computePublishPublisherDigest,
+  TrustLevel,
+  DKG_ENTITY_TRUST_LEVEL_PREDICATE,
+} from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import type { Publisher, PublishOptions, PublishResult, KAManifestEntry, PhaseCallback } from './publisher.js';
 import { autoPartition } from './auto-partition.js';
@@ -35,6 +56,21 @@ import { storeWorkspaceOperationPublicQuads } from './workspace-resolution.js';
 import { ethers } from 'ethers';
 
 export { RESERVED_SUBJECT_PREFIXES, findReservedSubjectPrefix, isReservedSubject } from './reserved-subjects.js';
+
+const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
+
+/** Stamps each KA root with `trustLevel` SelfAttested (`0`) for VM minTrust filtering (Axiom 6). */
+function stampKaMapWithSelfAttestedTrust(kaMap: Map<string, Quad[]>): void {
+  const lit = `"${TrustLevel.SelfAttested}"^^<${XSD_INTEGER}>`;
+  for (const root of kaMap.keys()) {
+    kaMap.get(root)!.push({
+      subject: root,
+      predicate: DKG_ENTITY_TRUST_LEVEL_PREDICATE,
+      object: lit,
+      graph: '',
+    });
+  }
+}
 
 export interface DKGPublisherConfig {
   store: TripleStore;
@@ -295,6 +331,13 @@ export class DKGPublisher implements Publisher {
   private readonly log = new Logger('DKGPublisher');
   private readonly sessionId = Date.now().toString(36);
   private tentativeCounter = 0;
+  /**
+   * Serialize **publish** chain txs only — avoids EVM nonce collisions when two
+   * `publish()` calls race (Axiom 7.e). `update()` is intentionally not queued here:
+   * concurrent updates to the same kcId must not both confirm (Axiom 7.d), which
+   * the adapter nonce path enforces when txs are not artificially serialized.
+   */
+  private chainTxQueue = Promise.resolve();
   readonly writeLocks: Map<string, Promise<void>>;
 
   constructor(config: DKGPublisherConfig) {
@@ -346,6 +389,21 @@ export class DKGPublisher implements Publisher {
     this.sharedMemoryOwnedEntities = config.sharedMemoryOwnedEntities ?? new Map();
     this.knownBatchContextGraphs = config.knownBatchContextGraphs ?? new Map();
     this.writeLocks = config.writeLocks ?? new Map();
+  }
+
+  private async withSerializedChainTx<T>(fn: () => Promise<T>): Promise<T> {
+    let release!: () => void;
+    const next = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const prev = this.chainTxQueue;
+    this.chainTxQueue = next;
+    await prev;
+    try {
+      return await fn();
+    } finally {
+      release();
+    }
   }
 
   private async resolvePublisherAddress(
@@ -1356,6 +1414,7 @@ export class DKGPublisher implements Publisher {
 
     onPhase?.('prepare:partition', 'start');
     const kaMap = autoPartition(quads);
+    stampKaMapWithSelfAttestedTrust(kaMap);
     onPhase?.('prepare:partition', 'end');
 
     const manifestEntries: KAManifestEntry[] = [];
@@ -1654,6 +1713,11 @@ export class DKGPublisher implements Publisher {
     } else if (!chainV10Ready) {
       this.log.warn(ctx, 'Chain adapter is not V10-ready — skipping on-chain publish');
     } else {
+      const chainOut: {
+        status: 'tentative' | 'confirmed';
+        onChainResult: OnChainPublishResult | undefined;
+      } = { status: 'tentative', onChainResult: undefined };
+      await this.withSerializedChainTx(async () => {
       const tokenAmount = precomputedTokenAmount;
       usedV10Path = true;
       let signStarted = false;
@@ -1760,7 +1824,7 @@ export class DKGPublisher implements Publisher {
           onPhase?.('chain:writeahead', 'start');
         };
         try {
-          onChainResult = await this.chain.createKnowledgeAssetsV10!({
+          chainOut.onChainResult = await this.chain.createKnowledgeAssetsV10!({
             publishOperationId: `${this.sessionId}-${tentativeSeq}`,
             contextGraphId: v10CgId,
             publisherAddress: publisherSigner.address,
@@ -1788,10 +1852,11 @@ export class DKGPublisher implements Publisher {
           if (wroteAhead) onPhase?.('chain:writeahead', 'end');
         }
 
-        onChainResult.tokenAmount = tokenAmount;
+        chainOut.onChainResult!.tokenAmount = tokenAmount;
 
         // V9 UAL: did:dkg:{chainId}/{publisherAddress}/{firstKAId}
-        ual = `did:dkg:${this.chain.chainId}/${onChainResult.publisherAddress}/${onChainResult.startKAId}`;
+        const ocr = chainOut.onChainResult!;
+        ual = `did:dkg:${this.chain.chainId}/${ocr.publisherAddress}/${ocr.startKAId}`;
 
         for (const km of kaMetadata) {
           km.kcUal = ual;
@@ -1810,11 +1875,11 @@ export class DKGPublisher implements Publisher {
           },
           kaMetadata,
           {
-            txHash: onChainResult.txHash,
-            blockNumber: onChainResult.blockNumber,
-            blockTimestamp: onChainResult.blockTimestamp,
-            publisherAddress: onChainResult.publisherAddress,
-            batchId: onChainResult.batchId,
+            txHash: ocr.txHash,
+            blockNumber: ocr.blockNumber,
+            blockTimestamp: ocr.blockTimestamp,
+            publisherAddress: ocr.publisherAddress,
+            batchId: ocr.batchId,
             chainId: this.chain.chainId,
           },
         );
@@ -1851,16 +1916,19 @@ export class DKGPublisher implements Publisher {
           this.log.warn(ctx, `Failed to generate authorship proof: ${proofErr instanceof Error ? proofErr.message : String(proofErr)}`);
         }
 
-        status = 'confirmed';
+        chainOut.status = 'confirmed';
         onPhase?.('chain:submit', 'end');
         submitStarted = false;
         onPhase?.('chain:metadata', 'start');
-        this.log.info(ctx, `On-chain confirmed: UAL=${ual} batchId=${onChainResult.batchId} tx=${onChainResult.txHash}`);
+        this.log.info(ctx, `On-chain confirmed: UAL=${ual} batchId=${ocr.batchId} tx=${ocr.txHash}`);
       } catch (err) {
         if (signStarted) onPhase?.('chain:sign', 'end');
         if (submitStarted) onPhase?.('chain:submit', 'end');
         this.log.warn(ctx, `On-chain tx failed: ${err instanceof Error ? err.message : String(err)}`);
       }
+      });
+      status = chainOut.status;
+      onChainResult = chainOut.onChainResult;
     }
 
     if (status === 'tentative') {
@@ -1988,6 +2056,7 @@ export class DKGPublisher implements Publisher {
     onPhase?.('prepare', 'start');
     onPhase?.('prepare:partition', 'start');
     const kaMap = autoPartition(quads);
+    stampKaMapWithSelfAttestedTrust(kaMap);
     onPhase?.('prepare:partition', 'end');
 
     onPhase?.('prepare:manifest', 'start');

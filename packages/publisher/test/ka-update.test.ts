@@ -6,6 +6,7 @@ import { TypedEventBus, encodeKAUpdateRequest, decodeKAUpdateRequest } from '@or
 import { generateEd25519Keypair } from '@origintrail-official/dkg-core';
 import { DKGPublisher, UpdateHandler, autoPartition, computePublicRootV10 as computePublicRoot, computeKARootV10 as computeKARoot, computeKCRootV10 as computeKCRoot, computeFlatKCRootV10 as computeFlatKCRoot, toHex, resolveUalByBatchId, updateMetaMerkleRoot } from '../src/index.js';
 import { parseSimpleNQuads } from '../src/publish-handler.js';
+import { vmPublishPublicQuads } from './vm-publish-public-quads.js';
 import { ethers } from 'ethers';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, createTestContextGraph, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
@@ -43,23 +44,28 @@ function buildGossipMessage(opts: {
   contextGraphId: string;
   batchId: bigint;
   quads: Quad[];
-  manifest: { rootEntity: string; privateTripleCount: number }[];
+  manifest: { rootEntity: string; privateTripleCount: number; privateMerkleRoot?: Uint8Array }[];
   publisherPeerId: string;
   publisherAddress: string;
   txHash: string;
   blockNumber: number;
 }) {
-  const gossipRoot = computeGossipMerkleRoot(opts.quads, opts.manifest);
+  const stamped = vmPublishPublicQuads(opts.quads);
+  const privateRoots = opts.manifest
+    .map((m) => m.privateMerkleRoot)
+    .filter((r): r is Uint8Array => r != null && r.length > 0)
+    .map((r) => new Uint8Array(r));
+  const flatRoot = computeFlatKCRoot(stamped, privateRoots);
   return encodeKAUpdateRequest({
     paranetId: opts.contextGraphId,
     batchId: opts.batchId,
-    nquads: quadsToNQuads(opts.quads, `did:dkg:context-graph:${opts.contextGraphId}`),
+    nquads: quadsToNQuads(stamped, `did:dkg:context-graph:${opts.contextGraphId}`),
     manifest: opts.manifest,
     publisherPeerId: opts.publisherPeerId,
     publisherAddress: opts.publisherAddress,
     txHash: opts.txHash,
     blockNumber: BigInt(opts.blockNumber),
-    newMerkleRoot: gossipRoot,
+    newMerkleRoot: flatRoot,
     timestampMs: BigInt(Date.now()),
   });
 }
@@ -300,7 +306,7 @@ describe('UpdateHandler', () => {
     const message = encodeKAUpdateRequest({
       paranetId: PARANET,
       batchId: original.kcId,
-      nquads: quadsToNQuads(updatePublic, dataGraph),
+      nquads: quadsToNQuads(vmPublishPublicQuads(updatePublic), dataGraph),
       manifest: [{
         rootEntity: ENTITY_A,
         privateMerkleRoot: updatedPrivateRoot!,
@@ -920,7 +926,7 @@ describe('UpdateHandler', () => {
     expect(newRootResult.type).toBe('bindings');
     if (newRootResult.type === 'bindings') {
       expect(newRootResult.bindings.length).toBe(1);
-      const newRootHex = toHex(computeFlatKCRoot(updateQuads, []));
+      const newRootHex = toHex(computeFlatKCRoot(vmPublishPublicQuads(updateQuads), []));
       expect(newRootResult.bindings[0]['root']).toContain(newRootHex);
       expect(newRootResult.bindings[0]['root']).not.toContain(originalRootHex);
     }

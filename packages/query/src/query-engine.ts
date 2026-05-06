@@ -28,9 +28,10 @@ export interface QueryOptions {
   assertionName?: string;
   /**
    * Scope the query to a specific sub-graph within the context graph.
-   * When set, the query targets `did:dkg:context-graph:{id}/{subGraphName}`
-   * instead of the root data graph. Only works with legacy routing (no `view`).
-   * Combining `subGraphName` with `view` throws — deferred to V10.x.
+   * With legacy routing (no `view`), targets `did:dkg:context-graph:{id}/{subGraphName}`
+   * as the data graph and `…/{subGraphName}/_shared_memory` when unioning SWM.
+   * With `view: 'shared-working-memory'`, targets `…/{subGraphName}/_shared_memory` only.
+   * Other views reject `subGraphName` until scoped routing exists for them.
    */
   subGraphName?: string;
   /**
@@ -50,19 +51,13 @@ export interface QueryOptions {
    *     populated by the quorum's verified-memory write path; the quorum
    *     identifier itself is the trust provenance.
    *
-   * Semantics (PR #239 Codex iter-5):
-   *   - undefined or `SelfAttested`: union root + `/_verified_memory/*`.
-   *   - `Endorsed` (1): drop the root data graph, keep only
-   *     `/_verified_memory/*` sub-graphs. This prevents SelfAttested
-   *     chain data from bleeding into a quorum-verified query.
-   *   - `PartiallyVerified` (2) / `ConsensusVerified` (3): **rejected**
-   *     with a client error until Q-1 lands per-graph trust tagging.
-   *     The engine cannot currently prove that a given
-   *     `/_verified_memory/<quorum>` sub-graph satisfies these higher
-   *     tiers, and silently downgrading to `Endorsed` would leak
-   *     merely-endorsed data into a caller asking for stronger trust.
-   *     Callers must drop `minTrust` to `Endorsed` (1), or use the
-   *     exact-graph path below and accept `Endorsed` as the ceiling.
+   * Semantics:
+   *   - undefined or `SelfAttested`: union root + `/_verified_memory/*` (no per-triple filter).
+   *   - `Endorsed` (1): keep root + `/_verified_memory/*`; `injectMinTrustFilter` requires
+   *     each matched subject to carry `dkg:trustLevel` ≥ 1 (publisher stamps 0 on PUBLISH;
+   *     ENDORSE raises endorsed entities to 1).
+   *   - `PartiallyVerified` (2) / `ConsensusVerified` (3): drop the root graph and union
+   *     only `/_verified_memory/*`; per-triple filtering enforces the numeric threshold.
    *
    * View gating (iter-6): `minTrust` is **ignored** on the
    * `working-memory` and `shared-working-memory` views — those views

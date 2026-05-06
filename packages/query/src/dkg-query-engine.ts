@@ -39,13 +39,19 @@ export interface ViewResolution {
  *   data at only `TrustLevel.SelfAttested` (on-chain anchoring proves the
  *   publisher signed it, not that a quorum endorsed it). Higher-trust data
  *   lives in per-quorum sub-graphs under `/_verified_memory/{quorum}`.
- *   When `minTrust > SelfAttested`, the root data graph is excluded from
- *   the resolution so low-trust triples cannot leak into a high-trust query.
+ *   When `minTrust` is **strictly above** `Endorsed`, the root data graph is
+ *   excluded and only `/_verified_memory/*` sub-graphs are unioned — combined
+ *   with `injectMinTrustFilter` this prevents low-trust triples leaking into
+ *   PartiallyVerified / ConsensusVerified queries. At exactly `Endorsed`, the
+ *   root graph stays in scope so publisher-stamped `trustLevel` literals on
+ *   chain-confirmed entities participate in the trust gradient (Axiom 6.e).
  */
 export function resolveViewGraphs(
   view: GetView,
   contextGraphId: string,
   opts?: {
+    /** When `view` is `shared-working-memory`, scopes SWM to `{cg}/{name}/_shared_memory`. */
+    subGraphName?: string;
     agentAddress?: string;
     verifiedGraph?: string;
     assertionName?: string;
@@ -82,11 +88,18 @@ export function resolveViewGraphs(
         graphPrefixes: [`did:dkg:context-graph:${contextGraphId}/assertion/${opts.agentAddress}/`],
       };
     }
-    case 'shared-working-memory':
+    case 'shared-working-memory': {
+      if (opts?.subGraphName) {
+        const v = validateSubGraphName(opts.subGraphName);
+        if (!v.valid) {
+          throw new Error(`Invalid sub-graph name for shared-working-memory view: ${v.reason}`);
+        }
+      }
       return {
-        graphs: [contextGraphSharedMemoryUri(contextGraphId)],
+        graphs: [contextGraphSharedMemoryUri(contextGraphId, opts?.subGraphName)],
         graphPrefixes: [],
       };
+    }
     case 'verified-memory': {
       // P-13 review (iter-6): `minTrust` is a verified-memory concept
       // — it is the only view whose graph resolution is actually
@@ -117,8 +130,8 @@ export function resolveViewGraphs(
         }
       }
 
-      const requireHighTrust =
-        opts?.minTrust !== undefined && opts.minTrust > TrustLevel.SelfAttested;
+      const dropRootForStrictTrust =
+        opts?.minTrust !== undefined && opts.minTrust > TrustLevel.Endorsed;
       if (opts?.verifiedGraph) {
         // P-13 review (iter-6): every `/_verified_memory/<id>` graph
         // is populated only by quorum-verified write paths, so the
@@ -152,28 +165,18 @@ export function resolveViewGraphs(
       // finalization).  Any quorum-specific verified-memory sub-graphs live
       // under `_verified_memory/` and are unioned in as well.
       //
-      // P-13 (graph-scope) + Q-1 (per-triple) working together:
-      //   - Graph-scope (this function): when `minTrust > SelfAttested`
-      //     the root content graph is dropped (via `requireHighTrust`)
-      //     and only `/_verified_memory/<quorum>` sub-graphs survive.
-      //     That sub-graph prefix is populated only by quorum-verified
-      //     write paths, so the floor for those graphs is implicitly
-      //     `Endorsed`.
-      //   - Per-triple (DKGQueryEngine.queryWithView): when
-      //     `minTrust` is set, `injectMinTrustFilter` rewrites the user
-      //     SPARQL so every subject MUST carry an explicit
-      //     `<http://dkg.io/ontology/trustLevel> "N"` literal with
-      //     `N ≥ minTrust`. Subjects without such metadata are
-      //     silently rejected (fail-closed).
-      //
-      // Together this satisfies spec §14 for values above `Endorsed`:
-      // even though the engine cannot yet distinguish a
-      // `PartiallyVerified`-quorum sub-graph from a `ConsensusVerified`
-      // one at the graph level, a caller asking for `ConsensusVerified`
-      // data only ever sees quads whose triples carry the matching
-      // per-triple trust literal, so sub-threshold data cannot leak.
+      // P-13 (graph-scope) + per-triple trust literals:
+      //   - Graph-scope: drop the root **only** when `minTrust` is strictly
+      //     above `Endorsed`, so PartiallyVerified / ConsensusVerified queries
+      //     cannot read unstamped chain-confirmed triples from the root layer.
+      //   - At `Endorsed`, keep the root so publisher-stamped `trustLevel`
+      //     on entities can surface after ENDORSE (Axiom 6.e); self-attested
+      //     publishes stamp `0`, so `minTrust=Endorsed` still excludes them
+      //     via `injectMinTrustFilter`.
+      //   - `injectMinTrustFilter` (queryWithView) enforces `N ≥ minTrust`
+      //     on every matched subject.
       return {
-        graphs: requireHighTrust ? [] : [contextGraphDataUri(contextGraphId)],
+        graphs: dropRootForStrictTrust ? [] : [contextGraphDataUri(contextGraphId)],
         graphPrefixes: [`did:dkg:context-graph:${contextGraphId}/_verified_memory/`],
       };
     }
@@ -215,10 +218,10 @@ export class DKGQueryEngine implements QueryEngine {
           `view '${options.view}' requires a contextGraphId or paranetId to scope the query`,
         );
       }
-      if (options.subGraphName) {
+      if (options.subGraphName && options.view !== 'shared-working-memory') {
         throw new Error(
-          `subGraphName cannot be combined with view-based routing (view='${options.view}'). ` +
-          'Sub-graph scoping within views is deferred to V10.x.',
+          `subGraphName cannot be combined with view='${options.view}'. ` +
+          'Only shared-working-memory supports sub-graph scoping today.',
         );
       }
       return this.queryWithView(sparql, options.view, effectiveContextGraphId, options);
@@ -285,6 +288,7 @@ export class DKGQueryEngine implements QueryEngine {
     options: QueryOptions,
   ): Promise<QueryResult> {
     const resolution = resolveViewGraphs(view, contextGraphId, {
+      subGraphName: options.subGraphName,
       agentAddress: options.agentAddress,
       verifiedGraph: options.verifiedGraph,
       assertionName: options.assertionName,
@@ -337,24 +341,14 @@ export class DKGQueryEngine implements QueryEngine {
     // every quad that lacks a `dkg:trustLevel` literal (i.e. every
     // pre-Q-1 quad).
     //
-    // we ALSO skip the per-triple filter at `Endorsed`. The graph-
-    // scope resolution above already drops the root data graph and
-    // unions only over `<…>/_verified_memory/{quorum}` sub-graphs,
-    // and any quad that landed in `_verified_memory` is by
-    // definition at least `Endorsed` (the on-chain quorum that
-    // promoted it IS the endorsement). Until the publisher / quorum
-    // writers actually emit `dkg:trustLevel` literals (tracked
-    // upstream), the per-triple join would silently turn every
-    // legitimate `minTrust=Endorsed` query into an empty result.
-    // Levels strictly above Endorsed (`PartiallyVerified`,
-    // `ConsensusVerified`) still require the per-triple filter
-    // because graph-scope alone cannot distinguish those tiers from
-    // a basic Endorsed write — a fail-closed empty result there is
-    // the correct behaviour until writers stamp the literal.
+    // At `Endorsed` and above, attach `dkg:trustLevel` constraints so the
+    // trust gradient is observable (publisher stamps SelfAttested=`0` on
+    // PUBLISH; ENDORSE raises roots to `Endorsed`). Self-attested-only rows
+    // remain invisible at `minTrust=Endorsed` because `0 >= 1` fails.
     if (
       view === 'verified-memory' &&
       effectiveMinTrust !== undefined &&
-      effectiveMinTrust > TrustLevel.Endorsed
+      effectiveMinTrust >= TrustLevel.Endorsed
     ) {
       const rewritten = injectMinTrustFilter(sparql, effectiveMinTrust);
       if (!rewritten) {
