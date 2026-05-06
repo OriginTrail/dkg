@@ -491,6 +491,7 @@ export class ApiClient {
     participantAgents?: string[];
     participantIdentityIds?: Array<string | number | bigint>;
     requiredSignatures?: number;
+    pcaAccountId?: string | number | bigint;
   }, allowedPeers?: string[]): Promise<{
     created: string;
     uri: string;
@@ -508,6 +509,7 @@ export class ApiClient {
         ? { participantIdentityIds: options.participantIdentityIds.map((id) => id.toString()) }
         : {}),
       ...(options?.requiredSignatures != null ? { requiredSignatures: options.requiredSignatures } : {}),
+      ...(options?.pcaAccountId != null ? { pcaAccountId: options.pcaAccountId.toString() } : {}),
     });
   }
 
@@ -515,6 +517,7 @@ export class ApiClient {
     /** @deprecated V10 ContextGraphs registration ignores metadata reveal. */
     revealOnChain?: boolean;
     accessPolicy?: number;
+    pcaAccountId?: string | number | bigint;
   }): Promise<{
     registered: string;
     onChainId: string;
@@ -523,6 +526,7 @@ export class ApiClient {
     return this.post('/api/context-graph/register', {
       id,
       ...(opts?.accessPolicy != null ? { accessPolicy: opts.accessPolicy } : {}),
+      ...(opts?.pcaAccountId != null ? { pcaAccountId: opts.pcaAccountId.toString() } : {}),
     });
   }
 

@@ -69,6 +69,22 @@ class SignerListContextGraphChainAdapter extends CapturingContextGraphChainAdapt
   }
 }
 
+class PcaCuratedRegistrationChainAdapter extends AsyncSignerAddressContextGraphChainAdapter {
+  constructor(
+    private readonly accountOwners: Map<bigint, string>,
+  ) {
+    super();
+  }
+
+  async getPublishingConvictionAccountOwner(accountId: bigint): Promise<string> {
+    const owner = this.accountOwners.get(accountId);
+    if (!owner) {
+      throw new Error(`No mock PCA owner for account ${accountId}`);
+    }
+    return owner;
+  }
+}
+
 class NonRegisteringACKChainAdapter extends MockChainAdapter {
   async ensureOperationalWalletsRegistered(options?: {
     identityId?: bigint;
@@ -2314,6 +2330,120 @@ decisions: []
     await agent.registerContextGraph('register-curated-signer-list-policy', { callerAgentAddress: ownerAgent });
 
     expect(chain.createOnChainContextGraphCalls[0]?.publishAuthority).toBe(ownerAgent);
+    await agent.stop().catch(() => {});
+  });
+
+  it('registers PCA curated context graphs without requiring the chain signer to equal the local curator', async () => {
+    const pcaOwner = new ethers.Wallet(HARDHAT_KEYS.REC1_OP).address;
+    const pcaAccountId = 42n;
+    const chain = new PcaCuratedRegistrationChainAdapter(new Map([[pcaAccountId, pcaOwner]]));
+    const agent = await DKGAgent.create({
+      name: 'PcaRegistrationBot',
+      store: new OxigraphStore(),
+      chainAdapter: chain,
+      nodeRole: 'core',
+    });
+    await agent.start();
+
+    expect(pcaOwner.toLowerCase()).not.toBe(chain.signerAddress.toLowerCase());
+    await agent.createContextGraph({
+      id: 'register-pca-curated-policy',
+      name: 'PCA Curated Policy',
+      accessPolicy: 1,
+      publishAuthorityAccountId: pcaAccountId,
+      callerAgentAddress: pcaOwner,
+    });
+
+    await expect(agent.registerContextGraph('register-pca-curated-policy', { callerAgentAddress: pcaOwner }))
+      .resolves.toMatchObject({ onChainId: expect.any(String) });
+
+    expect(chain.createOnChainContextGraphCalls[0]).toMatchObject({
+      publishPolicy: 0,
+      publishAuthority: pcaOwner,
+      publishAuthorityAccountId: pcaAccountId,
+    });
+    await agent.stop().catch(() => {});
+  });
+
+  it('registers PCA curated context graphs when the PCA account id is supplied at registration time', async () => {
+    const pcaOwner = new ethers.Wallet(HARDHAT_KEYS.REC1_OP).address;
+    const pcaAccountId = 43n;
+    const chain = new PcaCuratedRegistrationChainAdapter(new Map([[pcaAccountId, pcaOwner]]));
+    const agent = await DKGAgent.create({
+      name: 'PcaRegistrationOverrideBot',
+      store: new OxigraphStore(),
+      chainAdapter: chain,
+      nodeRole: 'core',
+    });
+    await agent.start();
+
+    await agent.createContextGraph({
+      id: 'register-pca-curated-override-policy',
+      name: 'PCA Curated Override Policy',
+      accessPolicy: 1,
+      callerAgentAddress: pcaOwner,
+    });
+
+    await expect(agent.registerContextGraph('register-pca-curated-override-policy', {
+      callerAgentAddress: pcaOwner,
+      publishAuthorityAccountId: pcaAccountId,
+    })).resolves.toMatchObject({ onChainId: expect.any(String) });
+
+    expect(chain.createOnChainContextGraphCalls[0]).toMatchObject({
+      publishPolicy: 0,
+      publishAuthority: pcaOwner,
+      publishAuthorityAccountId: pcaAccountId,
+    });
+    await agent.stop().catch(() => {});
+  });
+
+  it('rejects PCA account ids on open context graphs', async () => {
+    const chain = new PcaCuratedRegistrationChainAdapter(new Map([[7n, ethers.Wallet.createRandom().address]]));
+    const agent = await DKGAgent.create({
+      name: 'PcaOpenPolicyBot',
+      store: new OxigraphStore(),
+      chainAdapter: chain,
+      nodeRole: 'core',
+    });
+    await agent.start();
+
+    await expect(agent.createContextGraph({
+      id: 'register-open-pca-policy',
+      name: 'Open PCA Policy',
+      publishAuthorityAccountId: 7n,
+      callerAgentAddress: ethers.getAddress(chain.signerAddress),
+    })).rejects.toThrow(/PCA account id.*curated/i);
+
+    await agent.stop().catch(() => {});
+  });
+
+  it('rejects PCA curated registration when local curator is not the PCA owner', async () => {
+    const pcaOwner = new ethers.Wallet(HARDHAT_KEYS.REC1_OP).address;
+    const nonOwner = new ethers.Wallet(HARDHAT_KEYS.REC2_OP).address;
+    const pcaAccountId = 99n;
+    const chain = new PcaCuratedRegistrationChainAdapter(new Map([[pcaAccountId, pcaOwner]]));
+    const agent = await DKGAgent.create({
+      name: 'PcaRejectsNonOwnerBot',
+      store: new OxigraphStore(),
+      chainAdapter: chain,
+      nodeRole: 'core',
+    });
+    await agent.start();
+
+    expect(nonOwner.toLowerCase()).not.toBe(pcaOwner.toLowerCase());
+    await agent.createContextGraph({
+      id: 'reject-pca-non-owner',
+      name: 'Reject PCA non-owner',
+      accessPolicy: 1,
+      publishAuthorityAccountId: pcaAccountId,
+      callerAgentAddress: nonOwner,
+    });
+
+    await expect(agent.registerContextGraph('reject-pca-non-owner', {
+      callerAgentAddress: nonOwner,
+    })).rejects.toThrow(/PCA account 99|only the PCA owner/i);
+
+    expect(chain.createOnChainContextGraphCalls).toHaveLength(0);
     await agent.stop().catch(() => {});
   });
 

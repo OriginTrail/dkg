@@ -592,6 +592,15 @@ export class MockChainAdapter implements ChainAdapter {
     };
   }
 
+  async getPublishingConvictionAccountOwner(accountId: bigint): Promise<string> {
+    const acct = this.convictionAccounts.get(accountId);
+    if (!acct) {
+      throw new Error(`Mock: PCA account ${accountId} does not exist`);
+    }
+    // The mock does not model PCA NFT transfers, so the account admin is its owner.
+    return ethers.getAddress(acct.admin);
+  }
+
   // --- Staking Conviction ---
 
   private delegatorLocks = new Map<string, { lockTier: number; startEpoch: number }>();
@@ -681,11 +690,14 @@ export class MockChainAdapter implements ChainAdapter {
     }
     publishAuthority = ethers.getAddress(publishAuthority);
     if (publishPolicy === 0) {
-      if (publishAuthorityAccountId !== 0n) {
-        throw new Error('Mock: PCA publishAuthorityAccountId is not supported');
-      }
       if (publishAuthority === ethers.ZeroAddress) {
         publishAuthority = ethers.getAddress(this.signerAddress);
+      }
+      if (publishAuthorityAccountId !== 0n) {
+        const pcaOwner = await this.getPublishingConvictionAccountOwner(publishAuthorityAccountId);
+        if (publishAuthority.toLowerCase() !== pcaOwner.toLowerCase()) {
+          throw new Error('Mock: PCA publishAuthority must match account owner');
+        }
       }
     } else {
       if (publishAuthority !== ethers.ZeroAddress) {

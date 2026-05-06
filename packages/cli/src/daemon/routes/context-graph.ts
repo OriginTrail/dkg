@@ -328,6 +328,23 @@ import {
 
 import type { RequestContext } from './context.js';
 
+function parseOptionalPcaAccountId(body: Record<string, unknown>): { value?: bigint; error?: string } {
+  const raw = body.pcaAccountId;
+  if (raw === undefined || raw === null || raw === '') return {};
+  if (typeof raw === 'number') {
+    if (!Number.isSafeInteger(raw) || raw <= 0) {
+      return { error: 'pcaAccountId must be a positive safe integer' };
+    }
+    return { value: BigInt(raw) };
+  }
+  if (typeof raw === 'string') {
+    if (!/^[1-9]\d*$/.test(raw)) {
+      return { error: 'pcaAccountId must be a positive decimal integer string' };
+    }
+    return { value: BigInt(raw) };
+  }
+  return { error: 'pcaAccountId must be a positive integer or decimal integer string' };
+}
 
 export async function handleContextGraphRoutes(ctx: RequestContext): Promise<void> {
   const {
@@ -444,6 +461,18 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       return jsonResponse(res, 400, { error: 'Missing "id" or "name"' });
     if (!isValidContextGraphId(id))
       return jsonResponse(res, 400, { error: "Invalid context graph id" });
+    const parsedPcaAccountId = parseOptionalPcaAccountId(parsed);
+    if (parsedPcaAccountId.error) {
+      return jsonResponse(res, 400, { error: parsedPcaAccountId.error });
+    }
+    if (parsedPcaAccountId.value !== undefined && accessPolicy === 0 && parsed.private !== true) {
+      return jsonResponse(res, 400, { error: 'pcaAccountId is only valid for curated/private context graphs' });
+    }
+    const inferredAccessPolicy = typeof accessPolicy === 'number'
+      ? accessPolicy
+      : parsedPcaAccountId.value !== undefined
+        ? 1
+        : undefined;
     try {
       await agent.createContextGraph({
         id,
@@ -452,8 +481,9 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
         allowedAgents: Array.isArray(allowedAgents) ? allowedAgents : undefined,
         allowedPeers: Array.isArray(allowedPeers) ? allowedPeers : undefined,
         participantAgents: Array.isArray(participantAgents) ? participantAgents : undefined,
-        accessPolicy: typeof accessPolicy === 'number' ? accessPolicy : undefined,
+        accessPolicy: inferredAccessPolicy,
         callerAgentAddress: requestAgentAddress,
+        publishAuthorityAccountId: parsedPcaAccountId.value,
         ...(parsed.private === true ? { private: true } : {}),
         ...(Array.isArray(parsed.participantIdentityIds)
           ? { participantIdentityIds: parsed.participantIdentityIds.map((v: string | number) => BigInt(v)) }
@@ -476,7 +506,10 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     // registered later via POST /api/context-graph/register.
     if (register === true) {
       try {
-        const regResult = await agent.registerContextGraph(id, { callerAgentAddress: requestAgentAddress });
+        const regResult = await agent.registerContextGraph(id, {
+          callerAgentAddress: requestAgentAddress,
+          publishAuthorityAccountId: parsedPcaAccountId.value,
+        });
         return jsonResponse(res, 200, {
           created: id,
           uri: `did:dkg:context-graph:${id}`,
@@ -509,8 +542,19 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     if (accessPolicy !== undefined && (accessPolicy !== 0 && accessPolicy !== 1)) {
       return jsonResponse(res, 400, { error: '"accessPolicy" must be 0 (open) or 1 (private)' });
     }
+    const parsedPcaAccountId = parseOptionalPcaAccountId(parsed);
+    if (parsedPcaAccountId.error) {
+      return jsonResponse(res, 400, { error: parsedPcaAccountId.error });
+    }
+    if (parsedPcaAccountId.value !== undefined && accessPolicy === 0) {
+      return jsonResponse(res, 400, { error: 'pcaAccountId is only valid for curated/private context graphs' });
+    }
     try {
-      const result = await agent.registerContextGraph(id, { accessPolicy, callerAgentAddress: requestAgentAddress });
+      const result = await agent.registerContextGraph(id, {
+        accessPolicy,
+        callerAgentAddress: requestAgentAddress,
+        publishAuthorityAccountId: parsedPcaAccountId.value,
+      });
       return jsonResponse(res, 200, {
         registered: id,
         onChainId: result.onChainId,
@@ -536,6 +580,9 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       }
       if (msg.includes('address-scoped curator')) {
         return jsonResponse(res, 403, { error: msg });
+      }
+      if (msg.includes('PCA account id can only be used with curated/private context graphs')) {
+        return jsonResponse(res, 400, { error: msg });
       }
       return jsonResponse(res, 500, { error: msg });
     }

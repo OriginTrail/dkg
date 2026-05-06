@@ -517,6 +517,37 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
     // "duplicate" / "conflict" substrings.
     expect(second.status).toBe(409);
   });
+
+  it('returns 400 when registering an existing open context graph with a PCA account id', async () => {
+    const d = daemon!;
+    const cgId = 'open-pca-register-' + Math.random().toString(36).slice(2, 8);
+    const create = await fetch(urlFor(d, '/api/context-graph/create'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders(d) },
+      body: JSON.stringify({ id: cgId, name: cgId }),
+    });
+    expect([200, 201]).toContain(create.status);
+
+    const register = await fetch(urlFor(d, '/api/context-graph/register'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders(d) },
+      body: JSON.stringify({ id: cgId, pcaAccountId: '1' }),
+    });
+    expect(register.status).toBe(400);
+    const body = await register.json();
+    expect(body.error).toMatch(/pcaAccountId|PCA account id/i);
+  });
+
+  it('treats pcaAccountId as curated input when creating a context graph', async () => {
+    const d = daemon!;
+    const cgId = 'pca-create-' + Math.random().toString(36).slice(2, 8);
+    const create = await fetch(urlFor(d, '/api/context-graph/create'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders(d) },
+      body: JSON.stringify({ id: cgId, name: cgId, pcaAccountId: '1' }),
+    });
+    expect([200, 201]).toContain(create.status);
+  });
 });
 
 // ---------------------------------------------------------------------------

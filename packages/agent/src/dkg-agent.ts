@@ -3989,6 +3989,8 @@ export class DKGAgent {
     requiredSignatures?: number;
     /** Participant agent addresses for on-chain context graphs. */
     participantAgents?: string[];
+    /** Publishing Conviction Account id for PCA-curated on-chain registration. */
+    publishAuthorityAccountId?: bigint;
     /** When true, skips gossip subscription and broadcast. Data stays local-only. */
     private?: boolean;
     /** Caller's agent address (resolved from token). Used for curator/creator triples. */
@@ -4020,6 +4022,15 @@ export class DKGAgent {
     const isCurated = opts.accessPolicy === LOCAL_ACCESS_CURATED
       || (opts.allowedAgents && opts.allowedAgents.length > 0)
       || (opts.allowedPeers && opts.allowedPeers.length > 0);
+    const publishAuthorityAccountId = opts.publishAuthorityAccountId;
+    if (publishAuthorityAccountId !== undefined) {
+      if (publishAuthorityAccountId <= 0n) {
+        throw new Error('PCA account id must be a positive integer.');
+      }
+      if (!isCurated && opts.private !== true) {
+        throw new Error('PCA account id can only be used with curated/private context graphs.');
+      }
+    }
 
     if (opts.private) {
       this.log.info(ctx, `Creating private context graph "${opts.id}" (local-only, no gossip)`);
@@ -4062,6 +4073,14 @@ export class DKGAgent {
       { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_REGISTRATION_STATUS, object: `"unregistered"`, graph: cgMetaGraph },
       { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CURATOR, object: curatorDid, graph: cgMetaGraph },
     );
+    if (publishAuthorityAccountId !== undefined) {
+      quads.push({
+        subject: paranetUri,
+        predicate: DKG_ONTOLOGY.DKG_PUBLISH_AUTHORITY_ACCOUNT_ID,
+        object: `"${publishAuthorityAccountId.toString()}"`,
+        graph: cgMetaGraph,
+      });
+    }
 
     // Store peer allowlist for curated CGs (with validation)
     if (opts.allowedPeers && opts.allowedPeers.length > 0) {
@@ -4355,6 +4374,7 @@ export class DKGAgent {
     revealOnChain?: boolean;
     accessPolicy?: number;
     callerAgentAddress?: string;
+    publishAuthorityAccountId?: bigint;
   }): Promise<{ onChainId: string; txHash?: string }> {
     const ctx = createOperationContext('system');
 
@@ -4490,6 +4510,22 @@ export class DKGAgent {
     const publishPolicy = resolvedLocalAccessPolicy === LOCAL_ACCESS_CURATED
       ? EVM_PUBLISH_CURATED
       : EVM_PUBLISH_OPEN;
+    const storedPublishAuthorityAccountId = await this.getContextGraphPublishAuthorityAccountId(id);
+    const requestedPublishAuthorityAccountId = opts?.publishAuthorityAccountId;
+    const publishAuthorityAccountId = requestedPublishAuthorityAccountId ?? storedPublishAuthorityAccountId;
+    if (requestedPublishAuthorityAccountId !== undefined) {
+      if (requestedPublishAuthorityAccountId <= 0n) {
+        throw new Error('PCA account id must be a positive integer.');
+      }
+    }
+    if (publishPolicy === EVM_PUBLISH_OPEN && publishAuthorityAccountId !== undefined) {
+      throw new Error('PCA account id can only be used with curated/private context graphs.');
+    }
+    if (requestedPublishAuthorityAccountId !== undefined) {
+      await this.setContextGraphPublishAuthorityAccountId(id, requestedPublishAuthorityAccountId);
+    }
+    const isPcaCurated = publishPolicy === EVM_PUBLISH_CURATED
+      && publishAuthorityAccountId !== undefined;
 
     const participantsResult = await this.store.query(
       `SELECT ?identityId WHERE { GRAPH <${cgMetaGraph}> { <${paranetUri}> <${DKG_ONTOLOGY.DKG_PARTICIPANT_IDENTITY_ID}> ?identityId } }`,
@@ -4547,30 +4583,44 @@ export class DKGAgent {
         `${MAX_CONTEXT_GRAPH_PARTICIPANT_AGENTS} addresses after merging local allowedAgents.`,
       );
     }
-    const publishAuthority = publishPolicy === EVM_PUBLISH_CURATED
-      ? await this.getChainPublishAuthorityAddress(id)
-      : undefined;
-    if (
-      publishPolicy === EVM_PUBLISH_CURATED
-      && publishAuthority
-      && ownerAddress.toLowerCase() !== publishAuthority.toLowerCase()
-    ) {
-      throw new Error(
-        `Context graph "${id}" cannot be registered as curated by local curator ${ownerAddress} ` +
-        `because the configured chain signer is ${publishAuthority}. Per-agent chain signers are not supported yet.`,
-      );
-    }
-    if (
-      publishPolicy === EVM_PUBLISH_CURATED
-      && !publishAuthority
-      && opts?.callerAgentAddress
-      && this.defaultAgentAddress
-      && opts.callerAgentAddress.toLowerCase() !== this.defaultAgentAddress.toLowerCase()
-    ) {
-      throw new Error(
-        `Context graph "${id}" cannot be registered as curated by non-default local curator ` +
-        `${opts.callerAgentAddress} without chain signer introspection. Per-agent chain signers are not supported yet.`,
-      );
+    let publishAuthority: string | undefined;
+    if (publishPolicy === EVM_PUBLISH_CURATED) {
+      if (isPcaCurated) {
+        if (typeof this.chain.getPublishingConvictionAccountOwner !== 'function') {
+          throw new Error('PCA curated context graph registration requires chain adapter PCA owner lookup support.');
+        }
+        publishAuthority = ethers.getAddress(
+          await this.chain.getPublishingConvictionAccountOwner(publishAuthorityAccountId),
+        );
+      } else {
+        publishAuthority = await this.getChainPublishAuthorityAddress(id);
+      }
+      // Uniform strict check across EOA and PCA modes:
+      //  - EOA: publishAuthority is the chain signer; local curator
+      //    must equal the chain signer.
+      //  - PCA: publishAuthority is ownerOf(pcaAccountId); local curator
+      //    must equal the PCA owner. Registered agents are publish-time
+      //    delegates only — publish-time authorization lives on chain in
+      //    `ContextGraphs.isAuthorizedPublisher`.
+      if (publishAuthority && ownerAddress.toLowerCase() !== publishAuthority.toLowerCase()) {
+        const reason = isPcaCurated
+          ? `PCA account ${publishAuthorityAccountId} is owned by ${publishAuthority}; only the PCA owner can register, registered agents may only publish.`
+          : `the configured chain signer is ${publishAuthority}. Per-agent chain signers are not supported yet.`;
+        throw new Error(
+          `Context graph "${id}" cannot be registered as curated by local curator ${ownerAddress} because ${reason}`,
+        );
+      }
+      if (
+        !publishAuthority
+        && opts?.callerAgentAddress
+        && this.defaultAgentAddress
+        && opts.callerAgentAddress.toLowerCase() !== this.defaultAgentAddress.toLowerCase()
+      ) {
+        throw new Error(
+          `Context graph "${id}" cannot be registered as curated by non-default local curator ` +
+          `${opts.callerAgentAddress} without chain signer introspection. Per-agent chain signers are not supported yet.`,
+        );
+      }
     }
 
     const result = await this.registerContextGraphOnChain({
@@ -4578,6 +4628,7 @@ export class DKGAgent {
       requiredSignatures: effectiveRequiredSignatures,
       publishPolicy,
       ...(publishAuthority ? { publishAuthority } : {}),
+      ...(isPcaCurated ? { publishAuthorityAccountId } : {}),
       participantAgents,
     });
     const onChainId = result.contextGraphId.toString();
@@ -7302,6 +7353,46 @@ export class DKGAgent {
       includeReservingPublisherProbe: false,
       includeGenericSignMessageProbe: false,
     });
+  }
+
+  private async getContextGraphPublishAuthorityAccountId(contextGraphId: string): Promise<bigint | undefined> {
+    const cgMetaGraph = contextGraphMetaUri(contextGraphId);
+    const paranetUri = `did:dkg:context-graph:${contextGraphId}`;
+    const result = await this.store.query(
+      `SELECT ?accountId WHERE {
+        GRAPH <${cgMetaGraph}> {
+          <${paranetUri}> <${DKG_ONTOLOGY.DKG_PUBLISH_AUTHORITY_ACCOUNT_ID}> ?accountId .
+        }
+      } LIMIT 1`,
+    );
+    if (result.type !== 'bindings' || result.bindings.length === 0) return undefined;
+
+    const raw = result.bindings[0]?.['accountId']?.replace(/^"|"$/g, '');
+    if (!raw) return undefined;
+    if (!/^\d+$/.test(raw)) {
+      throw new Error(`Context graph "${contextGraphId}" has invalid PCA account id "${raw}".`);
+    }
+    const accountId = BigInt(raw);
+    if (accountId <= 0n) {
+      throw new Error(`Context graph "${contextGraphId}" has invalid PCA account id "${raw}".`);
+    }
+    return accountId;
+  }
+
+  private async setContextGraphPublishAuthorityAccountId(contextGraphId: string, accountId: bigint): Promise<void> {
+    const cgMetaGraph = contextGraphMetaUri(contextGraphId);
+    const paranetUri = `did:dkg:context-graph:${contextGraphId}`;
+    await this.store.deleteByPattern({
+      graph: cgMetaGraph,
+      subject: paranetUri,
+      predicate: DKG_ONTOLOGY.DKG_PUBLISH_AUTHORITY_ACCOUNT_ID,
+    });
+    await this.store.insert([{
+      graph: cgMetaGraph,
+      subject: paranetUri,
+      predicate: DKG_ONTOLOGY.DKG_PUBLISH_AUTHORITY_ACCOUNT_ID,
+      object: `"${accountId.toString()}"`,
+    }]);
   }
 
   /**
