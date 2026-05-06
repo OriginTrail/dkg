@@ -11,6 +11,18 @@ test.describe('Header', () => {
     await expect(header.version).toHaveText('v10');
   });
 
+  test('shows the OriginTrail "powered by" wordmark next to the DKG logo', async ({ header, page }) => {
+    // The brand-mark lockup was added in v10 (see Header.tsx
+    // `ORIGINTRAIL_WORDMARK`). It carries an aria-label of
+    // "Powered by OriginTrail" and the visible "powered by" caption,
+    // and the SVG wordmark itself is rendered with the
+    // `.v10-header-ot-wordmark` class.
+    await expect(header.otBrand).toBeVisible();
+    await expect(header.otBrand).toHaveAttribute('aria-label', 'Powered by OriginTrail');
+    await expect(header.otWordmark).toBeVisible();
+    await expect(page.getByText('powered by', { exact: true })).toBeVisible();
+  });
+
   test('shows agent name', async ({ header }) => {
     await expect(header.agentName).toBeVisible();
     const name = await header.getAgentName();

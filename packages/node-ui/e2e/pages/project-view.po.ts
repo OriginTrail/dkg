@@ -51,11 +51,11 @@ export class ProjectViewPage {
     return this.root.locator('.v10-layer-switcher');
   }
 
-  layerBtn(layer: 'overview' | 'graph-overview' | 'wm' | 'swm' | 'vm') {
+  layerBtn(layer: 'overview' | 'graph-overview' | 'query' | 'wm' | 'swm' | 'vm') {
     return this.root.locator(`.v10-layer-switch-btn[data-layer="${layer}"]`);
   }
 
-  async switchLayer(layer: 'overview' | 'graph-overview' | 'wm' | 'swm' | 'vm') {
+  async switchLayer(layer: 'overview' | 'graph-overview' | 'query' | 'wm' | 'swm' | 'vm') {
     await this.layerBtn(layer).click();
   }
 
@@ -68,5 +68,14 @@ export class ProjectViewPage {
     // The Share action button lives in the layer-switcher toolbar, not the
     // layer-name buttons (e.g. "Shared Memory") below.
     await this.root.locator('.v10-layer-switcher .v10-layer-action-btn').filter({ hasText: 'Share' }).click();
+  }
+
+  /**
+   * Click the Import action in the LayerSwitcher toolbar. As of v10 (PR #326)
+   * the import entry-point moved out of the sidebar tree and into the
+   * project view's own action bar.
+   */
+  async clickImport() {
+    await this.root.locator('.v10-layer-switcher .v10-layer-action-btn').filter({ hasText: /Import/ }).click();
   }
 }

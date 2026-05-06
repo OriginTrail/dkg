@@ -6,14 +6,19 @@ export class LeftPanelPage {
   readonly root: Locator;
   readonly collapseBtn: Locator;
   readonly newProjectBtn: Locator;
-  readonly oraclePlaceholder: Locator;
+  readonly oracleEmptyState: Locator;
 
   constructor(page: Page) {
     this.page = page;
     this.root = page.locator(sel.leftPanel.root).first();
     this.collapseBtn = page.locator(sel.leftPanel.collapseBtn);
-    this.newProjectBtn = page.locator(sel.leftPanel.newProjectBtn);
-    this.oraclePlaceholder = page.locator(sel.leftPanel.oraclePlaceholder);
+    // The two header buttons share the `.v10-new-project-btn` class — use the
+    // first match (mounted first in JSX), which is the `+ New Project` button.
+    this.newProjectBtn = this.root.getByRole('button', { name: /\+ New Project/ });
+    // Context Oracle empty state is a plain `<p>` rendered inside the tree
+    // content when treeMode === 'oracle' and there are no public CGs to show.
+    // The user-facing copy is "No public catalogue entries yet."
+    this.oracleEmptyState = this.root.locator(sel.leftPanel.treeContent).getByText(/No public catalogue entries yet/);
   }
 
   async isVisible() {
@@ -37,18 +42,6 @@ export class LeftPanelPage {
 
   async clickDashboard() {
     await this.root.locator(sel.leftPanel.dashboard).filter({ hasText: 'Dashboard' }).click();
-  }
-
-  async clickMemoryStack() {
-    // Memory Stack only renders once the tree knows there's at least one
-    // CG. Wait for the row before clicking.
-    const row = this.root.locator(sel.leftPanel.dashboard).filter({ hasText: 'Memory Stack' });
-    await row.waitFor({ state: 'visible', timeout: 30_000 });
-    await row.click();
-  }
-
-  async isMemoryStackVisible() {
-    return this.root.locator(sel.leftPanel.dashboard).filter({ hasText: 'Memory Stack' }).isVisible();
   }
 
   async switchToMode(mode: 'explorer' | 'oracle') {
@@ -80,6 +73,13 @@ export class LeftPanelPage {
     return names;
   }
 
+  /**
+   * Click a project's row in the sidebar tree. In v10 the project rows are
+   * flat — clicking opens the project tab in the center panel (which then
+   * exposes the LayerSwitcher inside the project view). The legacy name
+   * `expandProject` is kept so existing call sites keep working; the row
+   * does not actually expand any nested items.
+   */
   async expandProject(name: string) {
     const header = this.root.locator(sel.leftPanel.sectionHeader).filter({ hasText: name });
     // Daemon-driven CG list can lag; wait until the project header renders
@@ -89,18 +89,9 @@ export class LeftPanelPage {
     await header.click();
   }
 
-  async clickLayer(projectName: string, layer: 'wm' | 'swm' | 'vm' | 'import') {
-    const section = this.root.locator(sel.leftPanel.section).filter({ hasText: projectName });
-    const items = section.locator(sel.leftPanel.treeItem);
-
-    const labelMap: Record<string, string> = {
-      wm: 'agent drafts',
-      import: 'Import files',
-      swm: 'team workspace',
-      vm: 'verified assets',
-    };
-
-    await items.filter({ hasText: labelMap[layer] }).click();
+  // Alias with the new, accurate name. New tests should prefer this.
+  async openProject(name: string) {
+    return this.expandProject(name);
   }
 
   async expandIntegrations() {
@@ -108,22 +99,22 @@ export class LeftPanelPage {
     await header.click();
   }
 
+  /** Read the local-agent integration rows (Hermes / OpenClaw) from the open Integrations section. */
+  async getIntegrationRows() {
+    return this.root.locator(sel.leftPanel.integrationItem);
+  }
+
   async getEmptyStateTitle() {
     return this.root.locator(sel.leftPanel.emptyTitle).textContent();
   }
 
   async clickJoinProject() {
-    await this.root.getByRole('button', { name: /Join Project/ }).click();
+    await this.root.getByRole('button', { name: /↗ Join Project/ }).click();
   }
 
   async hideProject(name: string) {
     const section = this.root.locator(sel.leftPanel.section).filter({ hasText: name });
     await section.locator(sel.leftPanel.hideBtn).click();
-  }
-
-  async toggleParticipating(name: string) {
-    const section = this.root.locator(sel.leftPanel.section).filter({ hasText: name });
-    await section.locator(sel.leftPanel.moveBtn).click();
   }
 
   async clickShowHidden() {

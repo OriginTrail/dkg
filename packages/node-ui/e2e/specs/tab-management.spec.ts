@@ -20,7 +20,7 @@ test.describe('Tab Management', () => {
   test('clicking a project opens a new closable tab', async ({ leftPanel, centerPanel, seed }) => {
     await leftPanel.waitForReady();
     const before = await centerPanel.getTabCount();
-    await leftPanel.expandProject(seed.contextGraphName);
+    await leftPanel.openProject(seed.contextGraphName);
     const after = await centerPanel.getTabCount();
     expect(after).toBeGreaterThan(before);
 
@@ -30,17 +30,24 @@ test.describe('Tab Management', () => {
     expect(await centerPanel.isTabClosable(projectTab!)).toBe(true);
   });
 
-  test('clicking a memory layer opens a WM tab', async ({ leftPanel, centerPanel, seed }) => {
+  test('switching layers inside a project does NOT open a new tab', async ({ leftPanel, projectView, centerPanel, seed }) => {
+    // In v10 the LayerSwitcher swaps the rendered layer view in-place
+    // inside the existing project tab — it no longer opens a separate
+    // tab per layer. This test guards against accidentally regressing
+    // to the v9 "tab per WM/SWM/VM" behaviour.
     await leftPanel.waitForReady();
-    await leftPanel.expandProject(seed.contextGraphName);
-    await leftPanel.clickLayer(seed.contextGraphName, 'wm');
-    const tabs = await centerPanel.getTabNames();
-    expect(tabs.some(t => t.includes('WM'))).toBe(true);
+    await leftPanel.openProject(seed.contextGraphName);
+    const before = await centerPanel.getTabCount();
+    await projectView.switchLayer('wm');
+    await projectView.switchLayer('swm');
+    await projectView.switchLayer('vm');
+    const after = await centerPanel.getTabCount();
+    expect(after).toBe(before);
   });
 
   test('closing a tab removes it from the bar', async ({ leftPanel, centerPanel, seed }) => {
     await leftPanel.waitForReady();
-    await leftPanel.expandProject(seed.contextGraphName);
+    await leftPanel.openProject(seed.contextGraphName);
     const tabs = await centerPanel.getTabNames();
     const projectTab = tabs.find(t => t.includes(seed.contextGraphName))!;
     await centerPanel.closeTab(projectTab);
@@ -48,50 +55,43 @@ test.describe('Tab Management', () => {
     expect(remaining).not.toContain(projectTab);
   });
 
-  test('closing active tab activates a neighbor', async ({ leftPanel, centerPanel, seed }) => {
+  test('closing the project tab leaves Dashboard active', async ({ leftPanel, centerPanel, seed }) => {
     await leftPanel.waitForReady();
-    await leftPanel.expandProject(seed.contextGraphName);
-    await leftPanel.clickLayer(seed.contextGraphName, 'swm');
+    await leftPanel.openProject(seed.contextGraphName);
     const tabs = await centerPanel.getTabNames();
-    const swmTab = tabs.find(t => t.includes('SWM'))!;
-    await centerPanel.closeTab(swmTab);
+    const projectTab = tabs.find(t => t.includes(seed.contextGraphName))!;
+    await centerPanel.closeTab(projectTab);
     const activeAfter = await centerPanel.getActiveTabName();
-    expect(activeAfter).toBeTruthy();
+    expect(activeAfter?.trim()).toBe('Dashboard');
   });
 
   test('clicking existing tab switches to it', async ({ leftPanel, centerPanel, seed }) => {
     await leftPanel.waitForReady();
-    await leftPanel.expandProject(seed.contextGraphName);
+    await leftPanel.openProject(seed.contextGraphName);
     await centerPanel.switchTab('Dashboard');
     const active = await centerPanel.getActiveTabName();
     expect(active?.trim()).toBe('Dashboard');
   });
 
-  test('multiple views open as separate tabs', async ({ leftPanel, centerPanel, seed }) => {
+  test('opening Settings + a project opens distinct tabs', async ({ leftPanel, centerPanel, header, seed }) => {
+    // Layer-tab tests went away with v10's flat project tree; the
+    // multi-tab story now flows through opening fundamentally different
+    // surfaces (project + Settings) rather than nested project layers.
     await leftPanel.waitForReady();
     const before = await centerPanel.getTabCount();
-    await leftPanel.expandProject(seed.contextGraphName);
-    await leftPanel.clickLayer(seed.contextGraphName, 'wm');
-    await leftPanel.clickLayer(seed.contextGraphName, 'swm');
+    await leftPanel.openProject(seed.contextGraphName);
+    await header.openSettings();
     const after = await centerPanel.getTabCount();
-    expect(after).toBeGreaterThan(before + 1);
+    expect(after).toBeGreaterThanOrEqual(before + 2);
   });
 
-  test('reopening same view does not duplicate tab', async ({ leftPanel, centerPanel, seed }) => {
+  test('reopening the same project does not duplicate the tab', async ({ leftPanel, centerPanel, seed }) => {
     await leftPanel.waitForReady();
-    await leftPanel.expandProject(seed.contextGraphName);
-    await leftPanel.clickLayer(seed.contextGraphName, 'wm');
+    await leftPanel.openProject(seed.contextGraphName);
     const countBefore = await centerPanel.getTabCount();
     await centerPanel.switchTab('Dashboard');
-    await leftPanel.clickLayer(seed.contextGraphName, 'wm');
+    await leftPanel.openProject(seed.contextGraphName);
     const countAfter = await centerPanel.getTabCount();
     expect(countAfter).toBe(countBefore);
-  });
-
-  test('Memory Stack opens as closable tab', async ({ leftPanel, centerPanel }) => {
-    await leftPanel.clickMemoryStack();
-    const tabs = await centerPanel.getTabNames();
-    expect(tabs).toContain('Memory Stack');
-    expect(await centerPanel.isTabClosable('Memory Stack')).toBe(true);
   });
 });

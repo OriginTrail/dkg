@@ -6,11 +6,14 @@ const __filename = fileURLToPath(import.meta.url);
 const __dir = dirname(__filename);
 
 test.describe('Import Files Modal', () => {
-  test.beforeEach(async ({ shell, leftPanel, importFilesModal, seed }) => {
+  test.beforeEach(async ({ shell, leftPanel, projectView, importFilesModal, page, seed }) => {
     await shell.goto();
     await leftPanel.waitForReady();
-    await leftPanel.expandProject(seed.contextGraphName);
-    await leftPanel.clickLayer(seed.contextGraphName, 'import');
+    await leftPanel.openProject(seed.contextGraphName);
+    // In v10 the Import entry-point moved out of the sidebar tree and into
+    // the LayerSwitcher action bar at the top of the project view.
+    await page.locator('.v10-layer-switcher').first().waitFor({ state: 'visible', timeout: 15_000 });
+    await projectView.clickImport();
     await expect(importFilesModal.overlay).toBeVisible();
   });
 

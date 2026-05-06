@@ -7,6 +7,9 @@ export const sel = {
     logo: '.v10-header-logo',
     logoText: '.v10-header-logo-text',
     version: '.v10-header-logo-version',
+    // OriginTrail brand mark + "powered by" lockup added in v10 (PR #326).
+    otBrand: '.v10-header-logo-ot',
+    otWordmark: '.v10-header-ot-wordmark',
     sidebarToggle: 'button[title="Toggle sidebar"]',
     agentName: '.v10-header-agent-name',
     statusDot: '.v10-header-status-dot',
@@ -45,9 +48,11 @@ export const sel = {
     treeItem: '.v10-tree-item',
     itemLabel: '.v10-tree-item-label',
     layerHeader: '.v10-tree-layer-header',
-    oraclePlaceholder: '.v10-oracle-placeholder',
     integrationDot: '.v10-tree-integration-dot',
-    moveBtn: '.v10-tree-move-btn',
+    // Each row in the (lazy-loaded) Integrations → Agents section. Includes
+    // Hermes, OpenClaw, and any other local-agent integrations the daemon
+    // surfaces via /api/local-agent-integrations.
+    integrationItem: '.v10-tree-item',
     hideBtn: '.v10-tree-hide-btn',
     showHidden: '.v10-tree-show-hidden',
   },

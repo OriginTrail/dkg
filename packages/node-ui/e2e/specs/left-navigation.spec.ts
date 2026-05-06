@@ -3,9 +3,9 @@ import { sel } from '../helpers/selectors.js';
 
 test.describe('Left Panel Navigation', () => {
   // No global waitForReady — `Dashboard row is visible`, `PROJECTS mode
-  // is active by default`, `Memory Stack row is visible`, and the
-  // `+ New Project` / `Join Project` button tests don't depend on the
-  // project tree being populated. Tree-dependent tests opt in inline.
+  // is active by default`, and the `+ New Project` / `Join Project` button
+  // tests don't depend on the project tree being populated. Tree-dependent
+  // tests opt in inline.
   test.beforeEach(async ({ shell }) => {
     await shell.goto();
   });
@@ -18,11 +18,6 @@ test.describe('Left Panel Navigation', () => {
   test('Dashboard row is visible', async ({ leftPanel }) => {
     const dashboard = leftPanel.root.locator(sel.leftPanel.dashboard).filter({ hasText: 'Dashboard' });
     await expect(dashboard).toBeVisible();
-  });
-
-  test('Memory Stack row is visible', async ({ leftPanel, page }) => {
-    await page.locator('.v10-tree-dashboard').filter({ hasText: 'Memory Stack' }).waitFor({ state: 'visible', timeout: 5_000 });
-    expect(await leftPanel.isMemoryStackVisible()).toBe(true);
   });
 
   test('seeded project is listed in the tree', async ({ leftPanel, seed }) => {
@@ -41,76 +36,29 @@ test.describe('Left Panel Navigation', () => {
     expect(parseInt(text, 10)).toBeGreaterThanOrEqual(0);
   });
 
-  test('expanding a project reveals memory layer items', async ({ leftPanel, seed }) => {
-    await leftPanel.expandProject(seed.contextGraphName);
-    const section = leftPanel.root.locator(sel.leftPanel.section).filter({ hasText: seed.contextGraphName });
-    const layerHeaders = section.locator(sel.leftPanel.layerHeader);
-    expect(await layerHeaders.count()).toBe(3);
-    await expect(section.locator(sel.leftPanel.treeItem).first()).toBeVisible();
-  });
-
-  test('expanded project shows Working, Shared, and Verified memory sections', async ({ page, leftPanel, seed }) => {
-    await leftPanel.expandProject(seed.contextGraphName);
-    const content = page.locator(sel.leftPanel.root).first();
-    await expect(content.getByText('WORKING MEMORY')).toBeVisible();
-    await expect(content.getByText('SHARED MEMORY')).toBeVisible();
-    await expect(content.getByText('VERIFIED MEMORY')).toBeVisible();
-  });
-
-  test('working memory section contains agent drafts and import link', async ({ page, leftPanel, seed }) => {
-    await leftPanel.expandProject(seed.contextGraphName);
-    const section = page.locator(sel.leftPanel.root).first();
-    await expect(section.getByText('agent drafts')).toBeVisible();
-    await expect(section.getByText('Import files…')).toBeVisible();
-  });
-
-  test('clicking agent drafts opens WM tab', async ({ leftPanel, centerPanel, seed }) => {
-    await leftPanel.expandProject(seed.contextGraphName);
-    await leftPanel.clickLayer(seed.contextGraphName, 'wm');
+  test('clicking a project row opens the project tab in the center panel', async ({ leftPanel, centerPanel, seed }) => {
+    await leftPanel.openProject(seed.contextGraphName);
     const tabs = await centerPanel.getTabNames();
-    expect(tabs.some(t => t.includes('WM'))).toBe(true);
+    expect(tabs.some(t => t.includes(seed.contextGraphName))).toBe(true);
   });
 
-  test('clicking Import files link opens import modal', async ({ leftPanel, importFilesModal, seed }) => {
-    await leftPanel.expandProject(seed.contextGraphName);
-    await leftPanel.clickLayer(seed.contextGraphName, 'import');
-    expect(await importFilesModal.isOpen()).toBe(true);
-  });
-
-  test('clicking team workspace opens SWM tab', async ({ leftPanel, centerPanel, seed }) => {
-    await leftPanel.expandProject(seed.contextGraphName);
-    await leftPanel.clickLayer(seed.contextGraphName, 'swm');
-    const tabs = await centerPanel.getTabNames();
-    expect(tabs.some(t => t.includes('SWM'))).toBe(true);
-  });
-
-  test('clicking verified assets opens VM tab', async ({ leftPanel, centerPanel, seed }) => {
-    await leftPanel.expandProject(seed.contextGraphName);
-    await leftPanel.clickLayer(seed.contextGraphName, 'vm');
-    const tabs = await centerPanel.getTabNames();
-    expect(tabs.some(t => t.includes('VM'))).toBe(true);
-  });
-
-  test('Context Oracle mode shows coming soon placeholder', async ({ leftPanel }) => {
+  test('Context Oracle mode renders either a public-CG list or its empty-state copy (NOT the v9 "coming soon" placeholder)', async ({ leftPanel, page }) => {
+    // PR #088dbc17 retired the "coming soon" placeholder. The oracle pane
+    // now either lists public-policy CGs the daemon knows about, or shows
+    // the new empty-state paragraph. Bucketing is identity-driven (see
+    // contextGraphSidebar.ts) so the seeded CG can land in either bucket
+    // depending on how fast `fetchCurrentAgent` resolves — accept either
+    // populated or empty, but assert the legacy placeholder is gone.
     await leftPanel.switchToMode('oracle');
-    await expect(leftPanel.oraclePlaceholder).toBeVisible();
-    const text = await leftPanel.oraclePlaceholder.textContent();
-    expect(text).toContain('coming soon');
-  });
-
-  test('expanding a project toggles chevron open class', async ({ page, leftPanel, seed }) => {
-    const chevron = page.locator('.v10-tree-section').filter({ hasText: seed.contextGraphName }).locator('.v10-tree-chevron');
-    expect(await chevron.evaluate((el: Element) => el.classList.contains('open'))).toBe(false);
-    await leftPanel.expandProject(seed.contextGraphName);
-    expect(await chevron.evaluate((el: Element) => el.classList.contains('open'))).toBe(true);
-  });
-
-  test('collapsing a project removes chevron open class', async ({ page, leftPanel, seed }) => {
-    await leftPanel.expandProject(seed.contextGraphName);
-    const chevron = page.locator('.v10-tree-section').filter({ hasText: seed.contextGraphName }).locator('.v10-tree-chevron');
-    expect(await chevron.evaluate((el: Element) => el.classList.contains('open'))).toBe(true);
-    await leftPanel.expandProject(seed.contextGraphName);
-    expect(await chevron.evaluate((el: Element) => el.classList.contains('open'))).toBe(false);
+    const empty = leftPanel.oracleEmptyState;
+    const oracleProjects = leftPanel.root.locator('.v10-tree-section');
+    const someVisible = await Promise.race([
+      empty.waitFor({ state: 'visible', timeout: 5_000 }).then(() => true).catch(() => false),
+      oracleProjects.first().waitFor({ state: 'visible', timeout: 5_000 }).then(() => true).catch(() => false),
+    ]);
+    expect(someVisible).toBe(true);
+    // Hard guard against the v9 "coming soon" string sneaking back.
+    await expect(page.getByText(/coming soon/i)).toHaveCount(0);
   });
 
   test('switching back to Projects mode restores the tree', async ({ leftPanel }) => {
@@ -127,27 +75,26 @@ test.describe('Left Panel Navigation', () => {
     expect(await createProjectModal.isOpen()).toBe(true);
   });
 
+  test('↗ Join Project button opens the JoinProjectModal', async ({ leftPanel, joinProjectModal }) => {
+    await leftPanel.clickJoinProject();
+    expect(await joinProjectModal.isOpen()).toBe(true);
+  });
+
+  test('+ New Project and ↗ Join Project both render in the sidebar header', async ({ leftPanel }) => {
+    await expect(leftPanel.root.getByRole('button', { name: /\+ New Project/ })).toBeVisible();
+    await expect(leftPanel.root.getByRole('button', { name: /↗ Join Project/ })).toBeVisible();
+  });
+
   test('collapse button hides left panel', async ({ leftPanel, shell }) => {
     await leftPanel.collapse();
     await expect(shell.leftPanel).toBeHidden();
   });
 
   test('clicking Dashboard row switches to dashboard view', async ({ leftPanel, centerPanel, seed }) => {
-    await leftPanel.expandProject(seed.contextGraphName);
+    await leftPanel.openProject(seed.contextGraphName);
     await leftPanel.clickDashboard();
     const active = await centerPanel.getActiveTabName();
     expect(active?.trim()).toBe('Dashboard');
-  });
-
-  test('clicking Memory Stack opens Memory Stack tab', async ({ leftPanel, centerPanel }) => {
-    await leftPanel.clickMemoryStack();
-    const tabs = await centerPanel.getTabNames();
-    expect(tabs).toContain('Memory Stack');
-  });
-
-  test('Join Project button opens the JoinProjectModal', async ({ leftPanel, joinProjectModal }) => {
-    await leftPanel.clickJoinProject();
-    expect(await joinProjectModal.isOpen()).toBe(true);
   });
 
   test('hide × on a project removes it from the tree', async ({ leftPanel, seed }) => {
@@ -167,13 +114,6 @@ test.describe('Left Panel Navigation', () => {
     await leftPanel.waitForReady();
     await leftPanel.hideProject(seed.contextGraphName);
     await leftPanel.clickShowHidden();
-    const names = await leftPanel.getProjectNames();
-    expect(names).toContain(seed.contextGraphName);
-  });
-
-  test('participating ⤑ toggle keeps the project in the tree', async ({ leftPanel, seed }) => {
-    await leftPanel.waitForReady();
-    await leftPanel.toggleParticipating(seed.contextGraphName);
     const names = await leftPanel.getProjectNames();
     expect(names).toContain(seed.contextGraphName);
   });

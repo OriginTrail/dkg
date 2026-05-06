@@ -59,10 +59,19 @@ test.describe('Project View', () => {
     await expect(page.locator('.v10-po-title').first()).toHaveText(seed.contextGraphName);
   });
 
-  test('layer switcher renders five buttons', async ({ projectView }) => {
-    for (const layer of ['overview', 'graph-overview', 'wm', 'swm', 'vm'] as const) {
+  test('layer switcher renders six buttons (overview, graph-overview, query, wm, swm, vm)', async ({ projectView }) => {
+    for (const layer of ['overview', 'graph-overview', 'query', 'wm', 'swm', 'vm'] as const) {
       await expect(projectView.layerBtn(layer)).toBeVisible();
     }
+  });
+
+  test('Query layer button is labelled "⟐ Query"', async ({ projectView }) => {
+    await expect(projectView.layerBtn('query')).toContainText('Query');
+  });
+
+  test('switching to Query layer updates the active layer', async ({ projectView }) => {
+    await projectView.switchLayer('query');
+    expect(await projectView.getActiveLayer()).toBe('query');
   });
 
   test('Overview is the default active layer', async ({ projectView }) => {
