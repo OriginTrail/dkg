@@ -362,6 +362,20 @@ function buildHermesChannelBody(
   };
 }
 
+function escapeHermesPromptAttribute(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function buildHermesOpenAiUserMessage(payload: HermesChatPayload): string {
+  if (!payload.contextGraphId) return payload.text;
+  const contextGraphId = escapeHermesPromptAttribute(payload.contextGraphId);
+  return `${payload.text}\n\n<dkg-node-ui-context context_graph_id="${contextGraphId}" source="dkg-node-ui" />`;
+}
+
 function buildHermesOpenAiChatBody(
   payload: HermesChatPayload,
   attachmentRefs: OpenClawAttachmentRef[] | undefined,
@@ -378,7 +392,7 @@ function buildHermesOpenAiChatBody(
       },
       {
         role: 'user',
-        content: payload.text,
+        content: buildHermesOpenAiUserMessage(payload),
       },
     ],
   };
@@ -392,6 +406,7 @@ function buildHermesNodeUiSystemPrompt(
   const lines = [
     'This conversation is coming from the DKG Node UI Hermes integration.',
     'Use the DKG tools normally. When a current context graph is provided, prefer it for project-scoped DKG operations unless the user asks for a different project/context graph.',
+    'If the user message contains a <dkg-node-ui-context ... /> marker, treat it as routing metadata only; do not quote it, answer about it, or store the marker itself.',
   ];
   if (payload.contextGraphId) {
     lines.push(`Current DKG context graph id: ${payload.contextGraphId}`);

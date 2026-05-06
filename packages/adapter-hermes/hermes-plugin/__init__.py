@@ -15,6 +15,7 @@ Config via $HERMES_HOME/dkg.json:
 
 from __future__ import annotations
 
+import html
 import json
 import logging
 import os
@@ -24,7 +25,7 @@ import secrets
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode
 
 from agent.memory_provider import MemoryProvider
@@ -35,6 +36,14 @@ _DEFAULT_MEMORY_CONTEXT_GRAPH = "agent-context"
 _AUTO_RECALL_SOURCE = "dkg-auto-recall"
 _RECALLED_MEMORY_OPEN_RE = re.compile(
     r"<recalled-memory\b(?=[^>]*\bdata-source\s*=\s*(?:\"dkg-auto-recall\"|'dkg-auto-recall'|dkg-auto-recall(?=[\s>/])))[^>]*>",
+    re.IGNORECASE,
+)
+_NODE_UI_CONTEXT_MARKER_RE = re.compile(
+    r"\s*<dkg-node-ui-context\b(?P<attrs>[^>]*)/?>\s*",
+    re.IGNORECASE,
+)
+_NODE_UI_CONTEXT_ATTR_RE = re.compile(
+    r"\b(?:context_graph_id|target_context_graph|contextGraphId|targetContextGraph)\s*=\s*(?P<quote>['\"])(?P<value>.*?)\1",
     re.IGNORECASE,
 )
 
@@ -997,6 +1006,10 @@ class DKGMemoryProvider(MemoryProvider):
                 DKG_JOIN_REQUEST_APPROVE_SCHEMA,
                 DKG_JOIN_REQUEST_REJECT_SCHEMA,
             ]
+        logger.debug(
+            "[dkg] dkg_memory tool schema fields=%s",
+            ",".join(DKG_MEMORY_SCHEMA.get("parameters", {}).get("properties", {}).keys()),
+        )
         return schemas
 
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
@@ -1055,21 +1068,34 @@ class DKGMemoryProvider(MemoryProvider):
 
         try:
             # Passive recall shares the same six-layer planner as memory_search.
+            search_query, node_ui_context = _extract_node_ui_context_marker(query)
             supplied_context = _first_text({
                 "context_graph_id": context_graph_id,
                 "target_context_graph": target_context_graph,
                 "contextGraphId": kwargs.get("contextGraphId"),
                 "targetContextGraph": kwargs.get("targetContextGraph"),
-            }, "context_graph_id", "target_context_graph", "contextGraphId", "targetContextGraph")
+                "nodeUiContext": node_ui_context,
+            }, "context_graph_id", "target_context_graph", "contextGraphId", "targetContextGraph", "nodeUiContext")
             search = self._search_dkg_memory(
-                query,
+                search_query,
                 limit=5,
                 project_context_graph=supplied_context,
                 fallback_to_cache=False,
+                caller="hook",
             )
             hits = search.get("hits", [])
             if not hits:
+                logger.debug(
+                    "[dkg] Passive recall scope=%s hits=0",
+                    supplied_context or "agent-context-only",
+                )
                 return ""
+            logger.debug(
+                "[dkg] Passive recall scope=%s hits=%d layers=%s",
+                supplied_context or "agent-context-only",
+                len(hits),
+                ",".join(hit.get("layer", "") for hit in hits if hit.get("layer")) or "none",
+            )
             return _format_recalled_memory_block(hits)
         except Exception as e:
             logger.debug(f"[dkg] Prefetch failed: {e}")
@@ -1080,13 +1106,14 @@ class DKGMemoryProvider(MemoryProvider):
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
         """Send turn to daemon for entity extraction + persistence."""
         effective_session_id = _scoped_session_id(session_id or self._session_id, self._config)
+        user_to_persist = _strip_node_ui_context_markers(user_content)
         assistant_to_persist = _strip_recalled_memory_blocks(assistant_content)
         turn_sequence = self._next_turn_sequence(effective_session_id)
-        turn_id = self._build_turn_id(effective_session_id, turn_sequence, user_content, assistant_to_persist)
+        turn_id = self._build_turn_id(effective_session_id, turn_sequence, user_to_persist, assistant_to_persist)
         idempotency_key = f"hermes:{turn_id}"
         if self._offline or not self._client:
             # Queue for later sync
-            self._queue_turn(effective_session_id, turn_id, idempotency_key, user_content, assistant_to_persist)
+            self._queue_turn(effective_session_id, turn_id, idempotency_key, user_to_persist, assistant_to_persist)
             return
 
         # Fire-and-forget in background thread
@@ -1095,17 +1122,17 @@ class DKGMemoryProvider(MemoryProvider):
             try:
                 result = self._client.store_turn(
                     effective_session_id,
-                    user_content[:2000],
+                    user_to_persist[:2000],
                     assistant_to_persist[:2000],
                     agent_name=agent_name,
                     turn_id=turn_id,
                     idempotency_key=idempotency_key,
                 )
                 if _client_result_failed(result):
-                    self._queue_turn(effective_session_id, turn_id, idempotency_key, user_content, assistant_to_persist)
+                    self._queue_turn(effective_session_id, turn_id, idempotency_key, user_to_persist, assistant_to_persist)
             except Exception as e:
                 logger.debug(f"[dkg] sync_turn failed: {e}")
-                self._queue_turn(effective_session_id, turn_id, idempotency_key, user_content, assistant_to_persist)
+                self._queue_turn(effective_session_id, turn_id, idempotency_key, user_to_persist, assistant_to_persist)
 
         threading.Thread(target=_sync, daemon=True).start()
 
@@ -1323,6 +1350,7 @@ class DKGMemoryProvider(MemoryProvider):
             limit=limit,
             project_context_graph=project_context_graph,
             fallback_to_cache=True,
+            caller="tool",
         ))
 
     def _search_dkg_memory(
@@ -1332,8 +1360,9 @@ class DKGMemoryProvider(MemoryProvider):
         limit: int,
         project_context_graph: str = "",
         fallback_to_cache: bool,
+        caller: str = "unknown",
     ) -> Dict[str, Any]:
-        keywords = [k for k in query.lower().split() if len(k) >= 2]
+        keywords = _memory_search_keywords(query)
         scope = (
             project_context_graph
             if project_context_graph and project_context_graph != _DEFAULT_MEMORY_CONTEXT_GRAPH
@@ -1348,6 +1377,8 @@ class DKGMemoryProvider(MemoryProvider):
 
         hits: List[Dict[str, Any]] = []
         successful_queries = 0
+        planned_layers: List[str] = []
+        layer_counts: Dict[str, int] = {}
         for cg in context_graphs:
             for view, weight in (
                 ("working-memory", 1.0),
@@ -1356,6 +1387,9 @@ class DKGMemoryProvider(MemoryProvider):
             ):
                 if view == "working-memory" and not agent_address:
                     continue
+                layer = _memory_search_layer(cg, view)
+                planned_layers.append(layer)
+                layer_counts.setdefault(layer, 0)
                 result = self._client.query(
                     sparql,
                     cg,
@@ -1372,7 +1406,6 @@ class DKGMemoryProvider(MemoryProvider):
                     if not text:
                         continue
                     score = _keyword_overlap(text, keywords)
-                    layer = _memory_search_layer(cg, view)
                     source = _memory_search_source(cg, pred)
                     content_key = _stable_scope_hash(f"{uri}\n{pred}\n{text}")
                     hits.append({
@@ -1387,6 +1420,24 @@ class DKGMemoryProvider(MemoryProvider):
                         "path": f"dkg://{cg}/{layer}/{content_key}",
                         "predicate": pred,
                     })
+                    layer_counts[layer] += 1
+
+        project_label = (
+            project_context_graph
+            if project_context_graph and project_context_graph != _DEFAULT_MEMORY_CONTEXT_GRAPH
+            else "none"
+        )
+        breakdown = ", ".join(f"{layer}:{layer_counts.get(layer, 0)}" for layer in planned_layers)
+        logger.info(
+            "[dkg-memory] search fired (caller=%s, limit=%s): project=%s, layers=%d, raw_hits=%d (%s)",
+            caller,
+            limit,
+            project_label,
+            len(planned_layers),
+            sum(layer_counts.values()),
+            breakdown or "none",
+        )
+        logger.debug("[dkg-memory] search query: %s", query[:80])
 
         if not hits and successful_queries == 0 and fallback_to_cache:
             fallback = _cache_memory_search(
@@ -2263,6 +2314,32 @@ def _escape_prompt_xml(value: Any) -> str:
     )
 
 
+def _extract_node_ui_context_marker(query: str) -> Tuple[str, str]:
+    text = query or ""
+    if "dkg-node-ui-context" not in text.lower():
+        return text, ""
+
+    context_graph_id = ""
+
+    def remove_marker(match: re.Match[str]) -> str:
+        nonlocal context_graph_id
+        attrs = match.group("attrs") or ""
+        if not context_graph_id:
+            attr = _NODE_UI_CONTEXT_ATTR_RE.search(attrs)
+            if attr:
+                context_graph_id = html.unescape(attr.group("value")).strip()
+        return " "
+
+    cleaned = _NODE_UI_CONTEXT_MARKER_RE.sub(remove_marker, text).strip()
+    return cleaned or text, context_graph_id
+
+
+def _strip_node_ui_context_markers(text: str) -> str:
+    if not text or "dkg-node-ui-context" not in text.lower():
+        return text
+    return _NODE_UI_CONTEXT_MARKER_RE.sub("", text).strip()
+
+
 def _format_recalled_memory_block(hits: List[Dict[str, Any]]) -> str:
     lines = [
         f'<recalled-memory data-source="{_AUTO_RECALL_SOURCE}">',
@@ -2446,17 +2523,68 @@ def _coerce_limit(value: Any, default: int, maximum: int) -> int:
     return max(1, min(maximum, parsed))
 
 
+_MEMORY_SEARCH_STOPWORDS = {
+    "about",
+    "answer",
+    "available",
+    "call",
+    "called",
+    "context",
+    "dkg",
+    "does",
+    "from",
+    "graph",
+    "memory",
+    "memories",
+    "passive",
+    "project",
+    "provenance",
+    "query",
+    "recall",
+    "recalled",
+    "say",
+    "says",
+    "search",
+    "tell",
+    "that",
+    "the",
+    "this",
+    "tools",
+    "what",
+    "with",
+}
+
+
+def _memory_search_keywords(query: str) -> List[str]:
+    tokens = [
+        token.strip("-_")
+        for token in re.findall(r"[a-z0-9][a-z0-9_-]*", (query or "").lower())
+    ]
+    tokens = [token for token in tokens if len(token) >= 2]
+    filtered = [token for token in tokens if token not in _MEMORY_SEARCH_STOPWORDS]
+    candidates = filtered or tokens
+    unique_tokens = list(dict.fromkeys(candidates))
+    unique_tokens.sort(key=lambda token: (
+        0 if re.search(r"[\d_-]", token) else 1,
+        -len(token),
+        candidates.index(token),
+    ))
+    return unique_tokens[:12]
+
+
 def _build_memory_search_sparql(keywords: List[str], limit: int) -> str:
-    filters = " || ".join(
-        f'CONTAINS(LCASE(STR(?text)), "{_escape_sparql(keyword)}")'
+    score_terms = " + ".join(
+        f'IF(CONTAINS(LCASE(STR(?text)), "{_escape_sparql(keyword)}"), 1, 0)'
         for keyword in keywords
     )
+    raw_limit = min(max(limit * 10, 50), 500)
     return (
         "SELECT ?uri ?pred ?text WHERE { "
         "?uri ?pred ?text . "
         "FILTER(isLiteral(?text)) "
-        f"FILTER({filters}) "
-        f"}} LIMIT {limit}"
+        f"BIND(({score_terms}) AS ?rank) "
+        "FILTER(?rank > 0) "
+        f"}} ORDER BY DESC(?rank) LIMIT {raw_limit}"
     )
 
 
@@ -2506,7 +2634,7 @@ def _cache_memory_search(
     limit: int,
     context_graphs: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
-    keywords = [k for k in query.lower().split() if len(k) >= 2]
+    keywords = _memory_search_keywords(query)
     hits: List[Dict[str, Any]] = []
     context_graphs = context_graphs or [_DEFAULT_MEMORY_CONTEXT_GRAPH]
     scoped_cache = cache.get("context_graphs", {})

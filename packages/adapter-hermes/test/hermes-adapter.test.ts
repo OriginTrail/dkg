@@ -1934,6 +1934,12 @@ assert turn["assistant"] == "before  after", turn
 assert "secret recall" not in turn["assistant"], turn
 assert "recalled-memory" not in turn["assistant"], turn
 
+provider.sync_turn('project question\n\n<dkg-node-ui-context context_graph_id="project-cg" source="dkg-node-ui" />', "answer")
+cache = module._load_cache("agent")
+project_turn = [item for item in cache["queued_writes"] if item.get("type") == "turn"][-1]
+assert project_turn["user"] == "project question", project_turn
+assert "dkg-node-ui-context" not in project_turn["user"], project_turn
+
 malformed = "keep <Recalled-Memory data-source='dkg-auto-recall'><snippet>unterminated"
 assert module._strip_recalled_memory_blocks(malformed) == "keep "
 unquoted = "keep <Recalled-Memory data-source=dkg-auto-recall><snippet>unterminated"
@@ -2211,6 +2217,20 @@ module = importlib.util.module_from_spec(spec)
 sys.modules["plugins.memory.dkg"] = module
 spec.loader.exec_module(module)
 
+class FakeLogger:
+    def __init__(self):
+        self.info_messages = []
+        self.debug_messages = []
+
+    def info(self, message, *args):
+        self.info_messages.append(message % args if args else message)
+
+    def debug(self, message, *args):
+        self.debug_messages.append(message % args if args else message)
+
+fake_logger = FakeLogger()
+module.logger = fake_logger
+
 class FakeClient:
     def __init__(self):
         self.calls = []
@@ -2270,6 +2290,51 @@ assert provider._client.calls == [
 ], provider._client.calls
 assert 'context_graph_id="agent-context"' in configured_prefetch, configured_prefetch
 assert 'context_graph_id="project-cg"' not in configured_prefetch, configured_prefetch
+
+provider._client.calls = []
+marker_prefetch = provider.prefetch('alpha beta\n\n<dkg-node-ui-context context_graph_id="project-cg" source="dkg-node-ui" />')
+assert provider._client.calls == [
+    ("agent-context", {"view": "working-memory", "agent_address": "0xAgent"}),
+    ("agent-context", {"view": "shared-working-memory", "agent_address": None}),
+    ("agent-context", {"view": "verified-memory", "agent_address": None}),
+    ("project-cg", {"view": "working-memory", "agent_address": "0xAgent"}),
+    ("project-cg", {"view": "shared-working-memory", "agent_address": None}),
+    ("project-cg", {"view": "verified-memory", "agent_address": None}),
+], provider._client.calls
+assert 'context_graph_id="project-cg"' in marker_prefetch, marker_prefetch
+assert 'layer="project-vm"' in marker_prefetch, marker_prefetch
+search_logs = [
+    message for message in fake_logger.info_messages
+    if "[dkg-memory] search fired" in message
+]
+assert any(
+    "caller=hook" in message
+    and "project=project-cg" in message
+    and "layers=6" in message
+    and "raw_hits=6" in message
+    and "agent-context-wm:1" in message
+    and "project-vm:1" in message
+    for message in search_logs
+), search_logs
+cleaned_query, marker_context = module._extract_node_ui_context_marker(
+    'alpha beta\n\n<dkg-node-ui-context context_graph_id="project-cg" source="dkg-node-ui" />'
+)
+assert cleaned_query == "alpha beta", cleaned_query
+assert marker_context == "project-cg", marker_context
+assert module._strip_node_ui_context_markers(
+    'alpha beta\n\n<dkg-node-ui-context context_graph_id="project-cg" source="dkg-node-ui" />'
+) == "alpha beta"
+
+keywords = module._memory_search_keywords(
+    "What does passive DKG memory recall say about qa664-577728 project unique memory?"
+)
+assert keywords[:2] == ["qa664-577728", "unique"], keywords
+assert "project" not in keywords, keywords
+assert "memory" not in keywords, keywords
+sparql = module._build_memory_search_sparql(keywords, 5)
+assert "qa664-577728" in sparql, sparql
+assert "ORDER BY DESC(?rank)" in sparql, sparql
+assert "LIMIT 50" in sparql, sparql
 `;
     const result = spawnSync('python', ['-B', '-c', script], {
       cwd: process.cwd(),

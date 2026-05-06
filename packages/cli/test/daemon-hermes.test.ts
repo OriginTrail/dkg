@@ -1362,7 +1362,10 @@ describe('Hermes daemon routes', () => {
           role: 'system',
           content: expect.stringContaining('Current DKG context graph id: project-1'),
         }),
-        { role: 'user', content: 'hello' },
+        expect.objectContaining({
+          role: 'user',
+          content: expect.stringContaining('<dkg-node-ui-context context_graph_id="project-1" source="dkg-node-ui" />'),
+        }),
       ],
     });
   });
@@ -1378,7 +1381,12 @@ describe('Hermes daemon routes', () => {
     });
     vi.stubGlobal('fetch', vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       expect(String(url)).toBe('http://127.0.0.1:8642/v1/chat/completions');
-      expect(JSON.parse(String(init?.body))).toMatchObject({ stream: true });
+      const forwardedBody = JSON.parse(String(init?.body));
+      expect(forwardedBody).toMatchObject({ stream: true });
+      expect(forwardedBody.messages).toContainEqual(expect.objectContaining({
+        role: 'user',
+        content: expect.stringContaining('<dkg-node-ui-context context_graph_id="project-1" source="dkg-node-ui" />'),
+      }));
       return new Response(new ReadableStream({
         start(controller) {
           controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"Hel"}}]}\r\n\r\n'));
