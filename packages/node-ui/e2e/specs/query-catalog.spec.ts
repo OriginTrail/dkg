@@ -63,20 +63,22 @@ test.describe('Query Catalog (Query layer)', () => {
     expect(after.toUpperCase()).toContain('GROUP BY');
   });
 
-  test('clicking Run executes the query and the results pane settles to a populated/empty/error state', async ({ page }) => {
+  test('clicking Run executes the query and settles to a non-loading terminal state within 10s', async ({ page }) => {
     await page.locator('.v10-cg-query-editor').getByRole('button', { name: /^Run$/ }).click();
-    // After a Run we accept any of: a results table, the "No results" empty
-    // marker, or a status banner ("Loading..." / error). What's not OK is
-    // none of them — that would mean the view crashed silently.
+    // The view must reach a TERMINAL state — rows in a table or the
+    // "No results" empty marker. An earlier version of this test also
+    // accepted any visible `.v10-mlv-status` banner, but `.v10-mlv-status`
+    // includes "Loading..." — meaning a query stuck loading forever
+    // would pass. Match only the post-load outcomes.
     const resultsTable = page.locator('.v10-mlv-table');
     const noResults = page.getByText('No results for this query.');
-    const status = page.locator('.v10-mlv-status');
-    const someVisible = await Promise.race([
+    const terminal = await Promise.race([
       resultsTable.waitFor({ state: 'visible', timeout: 10_000 }).then(() => true).catch(() => false),
       noResults.waitFor({ state: 'visible', timeout: 10_000 }).then(() => true).catch(() => false),
-      status.waitFor({ state: 'visible', timeout: 10_000 }).then(() => true).catch(() => false),
     ]);
-    expect(someVisible).toBe(true);
+    expect(terminal).toBe(true);
+    // Belt-and-braces: assert the loading banner is gone after the wait.
+    await expect(page.getByText('Loading...', { exact: true })).toHaveCount(0);
   });
 
   test('clicking Save opens the save panel with Name + Description fields', async ({ page }) => {

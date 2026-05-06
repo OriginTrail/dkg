@@ -81,9 +81,17 @@ test.describe('Dashboard', () => {
     const card = page.locator('.v10-dash-project-card').first();
     await card.waitFor({ state: 'visible', timeout: 15_000 });
     const cardName = (await card.locator('.v10-dash-project-name').textContent())?.trim() ?? '';
+    // Earlier this test took an 8-char prefix of cardName — if the card
+    // text fetch failed and returned '', `''.slice(0, 8)` is still ''
+    // and `t.includes('')` is true for every tab, masking the bug.
+    expect(cardName.length).toBeGreaterThan(0);
     await card.click();
     const tabs = await centerPanel.getTabNames();
-    expect(tabs.some(t => t.toLowerCase().includes(cardName.toLowerCase().slice(0, 8)))).toBe(true);
+    // Use the full card name. Tab labels are derived from the CG name
+    // verbatim or its 16-char prefix (see PanelLeft.tsx openTab call) —
+    // either form contains the first ~8 chars of the original name.
+    const needle = cardName.toLowerCase().slice(0, 8);
+    expect(tabs.some(t => t.toLowerCase().includes(needle))).toBe(true);
   });
 
   test('View all link opens Operations tab', async ({ dashboard, centerPanel }) => {

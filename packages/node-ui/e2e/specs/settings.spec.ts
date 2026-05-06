@@ -33,13 +33,38 @@ test.describe('Settings', () => {
     await expect(settings.baseUrlInput).toHaveValue('https://example.com/v1');
   });
 
-  test('Save button is visible and clickable', async ({ settings }) => {
-    await expect(settings.llmSaveBtn).toBeVisible();
-    await expect(settings.llmSaveBtn).toBeEnabled();
-  });
-
   test('Disconnect button is hidden when LLM is not configured', async ({ settings }) => {
     await expect(settings.llmDisconnectBtn).toBeHidden();
+  });
+
+  test('Saving an LLM config flips the daemon to "LLM Connected" and exposes Disconnect; Disconnect reverts state', async ({ settings, page }) => {
+    // The previous test only asserted the Save button was visible and
+    // enabled — it never CLICKED it. A regression that broke the click
+    // handler, the API call, the optimistic state flip, or the
+    // "configured" indicator would all ship past such a smoke test.
+    //
+    // This drives the full save→connected→disconnect cycle so the daemon
+    // ends back at "Not Configured" for downstream tests (sequencing
+    // matters: Playwright runs workers: 1 and the daemon state carries
+    // between tests). If the test fails mid-flow, the afterEach hook
+    // here ensures we still try to disconnect to keep the suite clean.
+    await settings.fillApiKey('sk-e2e-test-key');
+    await settings.fillModel('gpt-4o-mini');
+    await settings.fillBaseUrl('https://api.openai.com/v1');
+    await expect(settings.llmSaveBtn).toBeEnabled();
+    await settings.llmSaveBtn.click();
+    try {
+      await expect(page.getByText(/LLM configuration saved|LLM settings updated/)).toBeVisible({ timeout: 10_000 });
+      await expect(settings.llmStatusBadge).toContainText('LLM Connected');
+      await expect(settings.llmDisconnectBtn).toBeVisible();
+    } finally {
+      // Always revert — even if assertions above failed — so the test
+      // daemon doesn't carry sk-e2e-test-key into other specs.
+      if (await settings.llmDisconnectBtn.isVisible().catch(() => false)) {
+        await settings.llmDisconnectBtn.click();
+        await expect(settings.llmStatusBadge).toContainText('Not Configured', { timeout: 10_000 });
+      }
+    }
   });
 
   test('Telemetry card renders with the share-telemetry toggle', async ({ settings }) => {

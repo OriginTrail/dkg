@@ -37,14 +37,19 @@ test.describe('Keyboard & focus', () => {
   test.describe('Enter to submit forms', () => {
     test('Enter inside the Join Project invite textarea triggers Join', async ({ leftPanel, joinProjectModal, page }) => {
       await leftPanel.clickJoinProject();
+      // Use a multiaddr without a /p2p/ peer id so the validation path
+      // produces a *specific* "missing peer ID" error string. The earlier
+      // version of this test accepted ANY `.v10-modal-error` OR a disabled
+      // button — but the Cancel button is not disabled, the Join button
+      // is briefly disabled while submitting, and a generic error CSS
+      // class can be left over from a previous render. That made it
+      // possible for the test to pass while Enter never actually
+      // routed through to the click handler. Asserting the exact error
+      // string proves the form's submit path fired.
       await joinProjectModal.fillInvite('cg:demo\n/ip4/1.2.3.4/tcp/10001');
-      // Focus the join button via keyboard so Enter activates it.
       await joinProjectModal.joinBtn.focus();
       await page.keyboard.press('Enter');
-      // Either the validation error fires (good — Enter routed through),
-      // or the join begins. Both prove the keyboard path is wired.
-      const errorOrBusy = page.locator('.v10-modal-error, .v10-modal-btn[disabled]');
-      await expect(errorOrBusy.first()).toBeVisible({ timeout: 5_000 });
+      await expect(joinProjectModal.error).toContainText('missing peer ID', { timeout: 5_000 });
     });
   });
 

@@ -36,11 +36,13 @@ test.describe('Bottom Panel', () => {
     expect(count).toBeGreaterThan(0);
   });
 
-  // SKIPPED: production bug — Node Log panel never displays any lines
-  // even though the daemon is actively logging (you can `tail -f
-  // ~/.dkg/daemon.log` to confirm). The SSE / event-stream wiring is
-  // broken end-to-end. Unskip once that's fixed.
-  test.skip('log lines contain timestamps and a [Module] tag (daemon log format)', async ({ bottomPanel, page }) => {
+  test('log lines contain timestamps and a [Module] tag (daemon log format)', async ({ bottomPanel, page }) => {
+    // Previously skipped with the rationale "Node Log panel never displays
+    // any lines (SSE wiring broken)". The companion test
+    // "log output renders at least one line from the daemon" (below) IS
+    // now green in CI, so the SSE/polling fetch is working — the skip
+    // comment was stale. Unskipped to actually catch a regression in
+    // log line FORMAT rather than just rendering.
     await bottomPanel.toggle();
     await page.locator('.v10-log-line').first().waitFor({ state: 'visible', timeout: 15_000 });
     const lines = await bottomPanel.getLogLines();
@@ -86,12 +88,12 @@ test.describe('Bottom Panel', () => {
     expect(await bottomPanel.isCollapsed()).toBe(true);
   });
 
-  // SKIPPED: same Node Log SSE bug as above (no log lines render at all)
-  // plus the log filter input itself isn't wired to the displayed set.
-  // Unskip when both are fixed.
-  test.skip('log filter input filters log lines by text (bug guard)', async ({ bottomPanel, page }) => {
-    // Production bug guard: the log filter currently does NOT filter the
-    // visible lines — typing into it should reduce the displayed set.
+  test('log filter input narrows the visible log lines', async ({ bottomPanel, page }) => {
+    // Previously skipped on the assumption the filter wasn't wired. Source
+    // verification: PanelBottom.tsx:20 calls
+    // `api.fetchNodeLog({ q: filter || undefined })` inside a useEffect
+    // that depends on `[filter]`. Filtering IS wired. Unskipped to catch
+    // a regression where the filter param stops being passed.
     await bottomPanel.toggle();
     await page.locator('.v10-log-line').first().waitFor({ state: 'visible', timeout: 10_000 });
     const before = await bottomPanel.getLogLineCount();

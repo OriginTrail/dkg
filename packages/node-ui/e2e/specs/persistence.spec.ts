@@ -48,11 +48,17 @@ test.describe('UI state persists across page reloads', () => {
     await leftPanel.hideProject(seed.contextGraphName);
     expect(await leftPanel.isShowHiddenVisible()).toBe(true);
     await page.reload();
-    // After reload, the hide-state should still be honoured: the seeded
-    // CG should be absent from the visible list, and the Show Hidden
-    // affordance should be present.
-    await page.locator(sel.leftPanel.root).first().waitFor({ state: 'visible', timeout: 10_000 });
-    expect(await leftPanel.isShowHiddenVisible()).toBe(true);
+    // After reload, wait for the CG list to actually load (not just the
+    // panel root) — the hideCount = contextGraphs.length -
+    // visibleContextGraphs.length math is racy until the daemon list
+    // resolves. Earlier this test relied on the seed being the ONLY CG
+    // so the panel root was visible right alongside it; with extra CGs
+    // present (e.g. from the create-project-success spec running
+    // earlier), the root can paint before the full list lands.
+    await leftPanel.waitForReady();
+    // Use expect.poll so the CG list / hidden state has time to
+    // re-hydrate from localStorage and the daemon refresh.
+    await expect.poll(() => leftPanel.isShowHiddenVisible(), { timeout: 10_000 }).toBe(true);
     const names = await leftPanel.getProjectNames();
     expect(names).not.toContain(seed.contextGraphName);
   });

@@ -141,22 +141,56 @@ test.describe('Operations View', () => {
     expect(await centerPanel.isTabClosable('Operations')).toBe(true);
   });
 
-  test('changing the type filter retains its selected value', async ({ page }) => {
+  test('changing the type filter actually filters the operations table', async ({ page }) => {
+    // Old version only asserted `select.inputValue() === 'publish'` — a
+    // tautology (selectOption sets the value, then we read it back). The
+    // real contract: changing the dropdown re-queries the daemon with
+    // `?name=publish`, and every row in the resulting table has type
+    // `publish`. If the table has zero rows after the filter, accept it
+    // as a valid empty result; what's NOT acceptable is a row whose
+    // type cell shows something other than `publish`.
     const select = page.locator('select').first();
     await select.selectOption('publish');
-    expect(await select.inputValue()).toBe('publish');
+    await expect(select).toHaveValue('publish');
+    // Give the useFetch deps-change refetch ~2s to settle.
+    await page.waitForTimeout(1500);
+    const typeBadges = page.locator('table tbody tr td:nth-child(2) .badge');
+    const rowCount = await typeBadges.count();
+    for (let i = 0; i < rowCount; i++) {
+      await expect(typeBadges.nth(i)).toHaveText('publish');
+    }
   });
 
-  test('changing the status filter retains its selected value', async ({ page }) => {
+  test('changing the status filter actually filters the operations table', async ({ page }) => {
     const statusSelect = page.locator('select').nth(1);
     await statusSelect.selectOption('error');
-    expect(await statusSelect.inputValue()).toBe('error');
+    await expect(statusSelect).toHaveValue('error');
+    await page.waitForTimeout(1500);
+    // Status badge lives in column 3.
+    const statusBadges = page.locator('table tbody tr td:nth-child(3) .badge');
+    const rowCount = await statusBadges.count();
+    for (let i = 0; i < rowCount; i++) {
+      // StatusBadge renders the status string verbatim — match it
+      // case-insensitively to absorb any future capitalisation tweak.
+      await expect(statusBadges.nth(i)).toHaveText(/^error$/i);
+    }
   });
 
-  test('typing into the operation search filters input value', async ({ page }) => {
+  test('typing into the Operation ID search narrows the result set or empties it', async ({ page }) => {
     const input = page.locator('input[placeholder*="Operation ID"]');
-    await input.fill('xyz-search');
-    await expect(input).toHaveValue('xyz-search');
+    const totalBefore = page.getByText(/\d+ total/);
+    const beforeText = (await totalBefore.first().textContent()) ?? '';
+    const beforeCount = parseInt(beforeText.match(/(\d+)\s+total/)?.[1] ?? '0', 10);
+    // A nonsense operation-id substring will either narrow the result set
+    // (server-side filter via `?operationId=...`) OR produce zero rows.
+    // Both prove the input is actually wired into the request, unlike
+    // the old `expect(input).toHaveValue(...)` tautology.
+    await input.fill('definitely-not-a-real-op-id-zzzzzzzz');
+    await expect(input).toHaveValue('definitely-not-a-real-op-id-zzzzzzzz');
+    await page.waitForTimeout(1500);
+    const afterText = (await totalBefore.first().textContent()) ?? '';
+    const afterCount = parseInt(afterText.match(/(\d+)\s+total/)?.[1] ?? '0', 10);
+    expect(afterCount).toBeLessThanOrEqual(beforeCount);
   });
 
   test('Performance sub-tab is selectable and re-selectable', async ({ page }) => {

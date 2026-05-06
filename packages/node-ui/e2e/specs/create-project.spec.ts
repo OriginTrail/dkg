@@ -45,13 +45,22 @@ test.describe('Create Project Modal', () => {
 
   test('name with only special characters / punctuation keeps submit enabled', async ({ createProjectModal }) => {
     // The id is derived from the name by slugifying; pure punctuation may
-    // produce an empty slug. The form should either reject (disabled) or
-    // accept gracefully — but never crash the modal.
+    // produce an empty slug. The current production behavior is to NOT
+    // pre-validate the name — `name.trim()` is the only gate, so any
+    // non-empty string enables submit (CreateProjectModal.tsx:390).
+    // The earlier version of this test used
+    // `expect([true, false]).toContain(disabled)`, which is a tautology
+    // — it could never fail. Pin to the actual contract so a future
+    // refactor that adds a slug-empty pre-check will surface here.
+    //
+    // Fill first (the button is disabled while name is empty per
+    // `!name.trim()` gate). The disabled gate also depends on
+    // `agentAddress` and `!identityLoading`. Mirror the pattern of
+    // the surrounding test "submit enabled after entering a name"
+    // (line 36) — a single boolean check rather than a hard-wait —
+    // so this test is consistent and has the same timing budget.
     await createProjectModal.fill('!!!@@@###');
-    // Either disabled (validation caught it) or enabled (submit will hit
-    // server-side validation). Both are valid behaviours.
-    const disabled = await createProjectModal.isSubmitDisabled();
-    expect([true, false]).toContain(disabled);
+    expect(await createProjectModal.isSubmitDisabled()).toBe(false);
   });
 
   test('very long name (300+ chars) does not crash the modal', async ({ createProjectModal, page }) => {

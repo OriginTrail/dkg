@@ -5,15 +5,24 @@ test.describe('Concurrency and race conditions', () => {
     await shell.goto();
   });
 
-  test('clicking the same Quick Action twice does not open two modals', async ({ dashboard, page }) => {
+  test('clicking the same Quick Action twice never stacks two modals', async ({ dashboard, page }) => {
     await dashboard.waitForReady();
     const create = dashboard.quickActions.filter({ hasText: 'Create Project' });
-    await create.click();
-    await create.click({ force: true }).catch(() => {
-      // Second click may be blocked by the modal overlay — that's fine.
-    });
-    // At any moment there should be exactly one Create Project modal.
     const modals = page.locator('.v10-modal-box').filter({ hasText: 'Create New Project' });
+
+    // FIRST click MUST open exactly one modal. The previous version of
+    // this test asserted only `<= 1` at the end — that passed when the
+    // first click never opened anything (zero modals). Pin click-1 to
+    // a positive open signal so a regression in the dashboard-button
+    // wiring surfaces here.
+    await create.click();
+    await expect(modals).toHaveCount(1, { timeout: 5_000 });
+
+    // SECOND click: the click may be intercepted by the modal overlay
+    // (closes the modal — count goes to 0) or fully blocked (count
+    // stays at 1). What's NOT acceptable is the count going above 1
+    // — that would mean the dashboard double-opened the modal.
+    await create.click({ force: true }).catch(() => {});
     expect(await modals.count()).toBeLessThanOrEqual(1);
   });
 
