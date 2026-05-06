@@ -8668,7 +8668,17 @@ export class DKGAgent {
         await agent.store.insert([
           { subject: lifecycleUri, predicate: `${DKG_NS}revoked`, object: `"true"^^<${XSD}boolean>`, graph: metaGraph },
           { subject: lifecycleUri, predicate: `${DKG_NS}revokedAt`, object: `"${ts}"^^<${XSD}dateTime>`, graph: metaGraph },
-          { subject: lifecycleUri, predicate: `${DKG_NS}revokedReason`, object: `"${reason.replace(/"/g, '\\"')}"`, graph: metaGraph },
+          {
+            subject: lifecycleUri,
+            predicate: `${DKG_NS}revokedReason`,
+            object: `"${reason
+              .replace(/\\/g, '\\\\')
+              .replace(/"/g, '\\"')
+              .replace(/\n/g, '\\n')
+              .replace(/\r/g, '\\r')
+              .replace(/\t/g, '\\t')}"`,
+            graph: metaGraph,
+          },
           { subject: lifecycleUri, predicate: `${DKG_NS}transitionType`, object: `"REVOKE"`, graph: metaGraph },
         ]);
         return { status: 'revoked', lifecycleUri };

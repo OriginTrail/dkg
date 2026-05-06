@@ -561,6 +561,54 @@ describe('Axiom 3 — Typed state transitions', () => {
     ).toBe(true);
   }, 30_000);
 
+  it('3.g.escape revoke() reason is fully N-Triples-escaped (no injection via backslash/quote/newline)', async () => {
+    // Regression for CodeQL "Incomplete string escaping or encoding": the
+    // reason literal must escape backslash BEFORE quote, plus newline/CR/tab,
+    // otherwise an attacker-controlled reason can break out of the literal
+    // and inject extra triples into _meta.
+    const cg = freshCg('a3-revoke-esc');
+    await agent.createContextGraph({ id: cg, name: 'rev-esc', description: '' });
+    await agent.assertion.create(cg, 'cap');
+    await agent.assertion.write(cg, 'cap', [
+      { subject: urn('cap'), predicate: P_NAME, object: '"granted"', graph: '' },
+    ]);
+
+    const hostile = 'back\\slash and "quote" and\nnewline and\ttab';
+    const out = await (agent.assertion as unknown as {
+      revoke: (cg: string, name: string, opts?: { reason?: string }) => Promise<{ status: string; lifecycleUri: string }>;
+    }).revoke(cg, 'cap', { reason: hostile });
+    expect(out.status).toBe('revoked');
+
+    const meta = `did:dkg:context-graph:${cg}/_meta`;
+    const r = await agent.store.query(
+      `SELECT ?reason WHERE { GRAPH <${meta}> {
+         <${out.lifecycleUri}> <http://dkg.io/ontology/revokedReason> ?reason .
+       } } LIMIT 1`,
+    );
+    const rows = ((r as { bindings?: Record<string, string>[] }).bindings ?? []);
+    expect(rows.length).toBe(1);
+    // The store returns N-Triples-canonical form; required escapes are \\ and \"
+    // (newline/tab MAY be encoded either as escapes or as raw control chars).
+    const stripped = rows[0]['reason']?.replace(/^"|"$/g, '') ?? '';
+    expect(stripped).toContain('\\\\');
+    expect(stripped).toContain('\\"');
+    const decoded = stripped
+      .replace(/\\n/g, '\n')
+      .replace(/\\r/g, '\r')
+      .replace(/\\t/g, '\t')
+      .replace(/\\"/g, '"')
+      .replace(/\\\\/g, '\\');
+    expect(decoded, 'reason must round-trip exactly').toBe(hostile);
+
+    const all = await agent.store.query(
+      `SELECT ?o WHERE { GRAPH <${meta}> {
+         <${out.lifecycleUri}> <http://dkg.io/ontology/revokedReason> ?o .
+       } }`,
+    );
+    const allRows = ((all as { bindings?: Record<string, string>[] }).bindings ?? []);
+    expect(allRows.length, 'hostile reason must produce exactly one revokedReason triple').toBe(1);
+  }, 30_000);
+
   it('3.h SHARE writes a typed prov:Activity event in _meta', async () => {
     // Each typed transition produces a prov:Activity record so the audit
     // trail is queryable. Without it, a node could move data between layers
