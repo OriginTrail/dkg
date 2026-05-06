@@ -57,6 +57,12 @@ create assertion ──► write triples ──► promote ──► publish ─
 
 All on-chain publishing goes through SWM first — the chain transaction is a finality signal that seals data peers already hold via gossip. Assertions themselves carry a durable lifecycle record (`created → promoted → published → finalized`, or `discarded`) in the context graph's `_meta` graph, so their history is auditable independently of the data.
 
+SWM gossip is signed when the node has a local agent private key. Context graphs
+that declare `DKG_ALLOWED_AGENT` or `DKG_PARTICIPANT_AGENT` require a signed
+`GossipEnvelope` from one of those agent addresses; unsigned legacy SWM payloads
+are accepted only for context graphs without agent gates. Signatures authenticate
+the writer, but do not encrypt GossipSub payload bytes.
+
 ---
 
 ## Quick Start

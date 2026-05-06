@@ -230,6 +230,23 @@ describe('DkgDaemonClient', () => {
     expect(body.localOnly).toBe(true);
   });
 
+  it('share should forward explicit team-visible sub-graph writes', async () => {
+    fetchResponses.push(
+      new Response(JSON.stringify({ shareOperationId: 'op-2' }), { status: 200 }),
+    );
+
+    const quads = [{ subject: 'urn:a', predicate: 'urn:b', object: '"hello"' }];
+    await client.share('research-x', quads, { localOnly: false, subGraphName: 'protocols' });
+
+    const body = JSON.parse(fetchCalls[0][1]?.body as string);
+    expect(body).toEqual({
+      contextGraphId: 'research-x',
+      quads,
+      localOnly: false,
+      subGraphName: 'protocols',
+    });
+  });
+
   // ---------------------------------------------------------------------------
   // Working Memory assertion lifecycle
   // ---------------------------------------------------------------------------

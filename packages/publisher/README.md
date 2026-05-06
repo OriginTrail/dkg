@@ -6,7 +6,7 @@ Publishing protocol for DKG V10. Handles the complete lifecycle of getting Knowl
 
 - **DKGPublisher** — high-level publishing API: submit RDF, get back a finalized Knowledge Collection UAL
 - **PublishHandler** — P2P protocol handler that processes incoming publish requests from other nodes, validates data, stores triples, and returns signed ACKs
-- **WorkspaceHandler** — feeless "workspace mode" publishing for local-only or staging workflows
+- **SharedMemoryHandler** — feeless Shared Working Memory handling for local-only or staging workflows, including signed gossip envelope verification for agent-gated context graphs; signatures authenticate writers, but do not encrypt GossipSub payload bytes
 - **Context Graphs** — `createContextGraph` and `publishToContextGraph` for M/N signature-gated subgraphs within paranets
 - **Context Oracle** — `ContextOracle` class providing verifiable read operations on Context Graphs: `queryWithProofs` (SPARQL with Merkle inclusion proofs), `entityWithProofs` (entity lookup with proofs), and `proveTriple` (single triple existence proof). Provenance triples are scoped to subjects discovered in the query results for efficiency.
 - **Merkle trees** — per-KA triple hashing, public/private sub-roots, and collection-level Merkle root computation

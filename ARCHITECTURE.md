@@ -379,6 +379,33 @@ class DaemonHTTPAPI {
 class DKGAgent {
   +writeWorkingMemory()
   +promoteSharedMemory()
+  +encodeWorkspaceGossipMessage()
+  +publishWorkspaceGossip()
+}
+class AgentKeyStore {
+  +selectDefaultOrFallbackSigner()
+  +selectAllowedSigner(contextGraphId)
+}
+class ContextGraphAccessMetadata {
+  +DKG_ACCESS_POLICY
+  +DKG_ALLOWED_PEER
+  +DKG_ALLOWED_AGENT
+  +DKG_PARTICIPANT_AGENT
+}
+class GossipEnvelope {
+  +version
+  +type
+  +contextGraphId
+  +agentAddress
+  +timestamp
+  +signature
+  +payload
+}
+class SharedMemoryHandler {
+  +handle(data, from)
+  +verifyAgentEnvelope()
+  +contextGraphHasPrivateAccessPolicy()
+  +getContextGraphAllowedPeers()
 }
 class AsyncPublisher {
   +enqueue()
@@ -402,8 +429,89 @@ DaemonHTTPAPI --> DKGAgent : delegates memory writes
 DaemonHTTPAPI --> AsyncPublisher : delegates lift jobs
 DKGAgent --> WorkingMemory : owns
 DKGAgent --> SharedWorkingMemory : gossips
+DKGAgent --> AgentKeyStore : selects local signing agent
+DKGAgent --> ContextGraphAccessMetadata : reads agent gates
+DKGAgent --> GossipEnvelope : wraps signed SWM gossip
+GossipEnvelope --> SharedMemoryHandler : delivered on SWM topic
+SharedMemoryHandler --> ContextGraphAccessMetadata : reads access policy and gates
+SharedMemoryHandler --> SharedWorkingMemory : stores accepted writes
 AsyncPublisher --> SharedWorkingMemory : reads source data
 AsyncPublisher --> VerifiedMemory : publishes
+```
+
+## Shared Memory Gossip Authentication
+
+Shared Working Memory gossip is authenticated at the agent layer when a local
+agent private key is available. For non-agent-gated context graphs, the sender
+prefers the configured default agent key and falls back to another local signing
+agent; if no local signing key exists, the legacy raw SWM payload remains valid.
+
+For agent-gated context graphs, `DKG_ALLOWED_AGENT` and
+`DKG_PARTICIPANT_AGENT` metadata define the accepted writer set. Outgoing SWM
+gossip must be signed by one of those local agents, otherwise the write is not
+broadcast. Receivers accept legacy raw SWM only when the graph is not
+agent-gated. For gated graphs, `SharedMemoryHandler` requires a current signed
+`GossipEnvelope`, verifies the claimed agent address against the recovered
+signature, checks that the envelope context graph matches the payload, and
+rejects writers outside the allowed or participant agent set.
+
+Receiver-side access checks also treat explicit `DKG_ACCESS_POLICY = "private"`
+metadata in either the context graph `_meta` graph or the ontology graph as
+private context graph metadata. If such a graph has no `DKG_ALLOWED_PEER`,
+`DKG_ALLOWED_AGENT`, or `DKG_PARTICIPANT_AGENT` gate, `SharedMemoryHandler`
+fails closed and rejects received SWM gossip rather than accepting it as open.
+`DKG_ALLOWED_PEER` remains a libp2p peer-id allowlist, while the agent gates
+remain signed-envelope checks.
+
+`GossipEnvelope` signing authenticates the SWM writer and binds the payload to
+the claimed context graph, but it does not encrypt GossipSub payload bytes.
+Operators should treat SWM gossip contents as visible to subscribed peers.
+
+```mermaid
+sequenceDiagram
+actor Writer as Local agent process
+participant Agent as DKGAgent
+participant Keys as AgentKeyStore
+participant Meta as ContextGraphMeta
+participant Gossip as GossipSub
+participant Handler as SharedMemoryHandler
+participant SWM as SharedWorkingMemory
+
+Writer->>Agent: share or promote SWM write
+Agent->>Meta: read DKG_ALLOWED_AGENT and DKG_PARTICIPANT_AGENT
+alt context graph is agent-gated
+  Agent->>Keys: select local allowed signing key
+  alt no allowed private key
+    Agent-->>Writer: abort SWM gossip
+  else allowed private key exists
+    Agent->>Agent: encode signed GossipEnvelope
+    Agent->>Gossip: publish signed envelope
+  end
+else context graph is not agent-gated
+  Agent->>Keys: select default or fallback local signing key
+  alt signing key exists
+    Agent->>Agent: encode signed GossipEnvelope
+    Agent->>Gossip: publish signed envelope
+  else no signing key
+    Agent->>Gossip: publish legacy raw SWM payload
+  end
+end
+Gossip->>Handler: deliver SWM topic message
+Handler->>Meta: read DKG_ACCESS_POLICY, DKG_ALLOWED_PEER, and agent gates
+alt private access policy has no gossip allowlist
+  Handler->>Handler: reject write fail closed
+else gossip allowlist exists
+  opt agent writer gate exists
+    Handler->>Handler: require envelope and verify signature, timestamp, and writer
+  end
+  opt peer allowlist exists
+    Handler->>Handler: require sender peer id in DKG_ALLOWED_PEER
+  end
+  Handler->>SWM: store accepted write
+else receiver graph is open
+  Handler->>Handler: decode envelope or legacy raw payload
+  Handler->>SWM: store accepted write
+end
 ```
 
 ## Source Worker Workflow
@@ -484,7 +592,7 @@ participant Architecture as ARCHITECTURE.md
 participant Git as LocalGit
 
 User->>Workflow: continue from failure checkpoint
-Workflow->>Implementer: implement focused source-worker fix
+Workflow->>Implementer: implement focused code change
 Implementer-->>Workflow: code and tests changed
 Workflow->>Validation: run focused validation and code review
 Validation-->>Workflow: passed

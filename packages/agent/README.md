@@ -8,6 +8,7 @@ Agent runtime for DKG V10. Provides the `DKGAgent` class — the primary entry p
 - **Wallet management** — `DKGAgentWallet` for Ed25519 (P2P identity) and ECDSA (on-chain signing) key pairs, with persistent key storage and operational wallet support
 - **Agent profiles** — `ProfileManager` for publishing and updating agent skill profiles to the agent registry paranet
 - **Discovery** — `DiscoveryClient` for finding other agents by name, skill keywords, or semantic search over published profiles
+- **Signed shared memory gossip** — SWM writes are wrapped in a signed gossip envelope when a local agent key is available, and agent-gated context graphs require a local `DKG_ALLOWED_AGENT` or `DKG_PARTICIPANT_AGENT` signing key before broadcasting; signatures authenticate writers, but do not encrypt GossipSub payload bytes
 - **Encrypted messaging** — Ed25519-to-X25519 key conversion, ECDH shared secrets, and encrypted P2P message channels
 - **Skill invocation** — `MessageHandler` for receiving and responding to skill requests; `SkillHandler` and `ChatHandler` for registering custom capabilities
 
