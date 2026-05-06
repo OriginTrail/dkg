@@ -21,7 +21,10 @@ import {
   refreshLocalAgentIntegrationFromUi,
   reverseHermesSetupForUi,
 } from '../src/daemon/local-agents.js';
-import { handleHermesRoutes } from '../src/daemon/routes/hermes.js';
+import {
+  __resetHermesSessionContextGraphCacheForTests,
+  handleHermesRoutes,
+} from '../src/daemon/routes/hermes.js';
 import { handleLocalAgentsRoutes } from '../src/daemon/routes/local-agents.js';
 
 const disconnectHermesProfileMock = vi.hoisted(() => vi.fn());
@@ -1439,6 +1442,154 @@ describe('Hermes daemon routes', () => {
         persistenceState: 'stored',
       }),
     );
+  });
+
+  it('recovers contextGraphId from per-session cache when a follow-up turn drops it', async () => {
+    // Sub-issue B from PR #389: the Node UI sometimes drops `contextGraphId`
+    // on follow-up turns (chat-reset / activeProjectId race), causing
+    // Hermes passive recall to silently scope to agent-context only. The
+    // daemon caches the last seen value per sessionId so subsequent turns
+    // on the same session recover the project scope and the
+    // <dkg-node-ui-context> marker still gets injected.
+    __resetHermesSessionContextGraphCacheForTests();
+
+    const calls: Array<{ body: any }> = [];
+    vi.stubGlobal('fetch', vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ body: JSON.parse(String(init?.body)) });
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: 'ok' } }],
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json', 'x-hermes-session-id': 'api-session' },
+      });
+    }));
+
+    const sharedConfig = {
+      localAgentIntegrations: {
+        hermes: {
+          enabled: true,
+          transport: { kind: 'hermes-openai' as const, gatewayUrl: 'http://127.0.0.1:8642' },
+        },
+      },
+    };
+    const memoryStub = {
+      hasChatTurn: vi.fn(async () => false),
+      storeChatExchange: vi.fn(async () => {}),
+    };
+
+    const userMessageOf = (idx: number) =>
+      String(calls[idx].body.messages.find((m: any) => m.role === 'user')?.content ?? '');
+
+    // Send #1 — primes the cache for sessionId 'session-A'.
+    {
+      const { ctx, res } = makeHermesRouteContext({
+        text: 'first turn',
+        correlationId: 'c-1',
+        sessionId: 'session-A',
+        contextGraphId: 'project-X',
+        profile: 'default',
+      }, memoryStub, sharedConfig, '/api/hermes-channel/send');
+      await handleHermesRoutes(ctx);
+      expect(res.statusCode).toBe(200);
+    }
+    expect(userMessageOf(0)).toContain('<dkg-node-ui-context context_graph_id="project-X" source="dkg-node-ui" />');
+
+    // Send #2 — same session, contextGraphId omitted. Cache should restore it.
+    {
+      const { ctx, res } = makeHermesRouteContext({
+        text: 'second turn',
+        correlationId: 'c-2',
+        sessionId: 'session-A',
+        // intentionally no contextGraphId
+        profile: 'default',
+      }, memoryStub, sharedConfig, '/api/hermes-channel/send');
+      await handleHermesRoutes(ctx);
+      expect(res.statusCode).toBe(200);
+    }
+    expect(userMessageOf(1)).toContain('<dkg-node-ui-context context_graph_id="project-X" source="dkg-node-ui" />');
+
+    // Send #3 — different session, no contextGraphId. No cache entry → no marker.
+    {
+      const { ctx, res } = makeHermesRouteContext({
+        text: 'isolated',
+        correlationId: 'c-3',
+        sessionId: 'session-B',
+        profile: 'default',
+      }, memoryStub, sharedConfig, '/api/hermes-channel/send');
+      await handleHermesRoutes(ctx);
+      expect(res.statusCode).toBe(200);
+    }
+    expect(userMessageOf(2)).not.toContain('<dkg-node-ui-context');
+
+    // Send #4 — explicit contextGraphId 'project-Y' on session-A overwrites
+    // the cached 'project-X', and a subsequent unscoped turn recovers 'project-Y'.
+    {
+      const { ctx, res } = makeHermesRouteContext({
+        text: 'switch projects',
+        correlationId: 'c-4',
+        sessionId: 'session-A',
+        contextGraphId: 'project-Y',
+        profile: 'default',
+      }, memoryStub, sharedConfig, '/api/hermes-channel/send');
+      await handleHermesRoutes(ctx);
+    }
+    expect(userMessageOf(3)).toContain('<dkg-node-ui-context context_graph_id="project-Y" source="dkg-node-ui" />');
+
+    {
+      const { ctx, res } = makeHermesRouteContext({
+        text: 'recover from cache after switch',
+        correlationId: 'c-5',
+        sessionId: 'session-A',
+        profile: 'default',
+      }, memoryStub, sharedConfig, '/api/hermes-channel/send');
+      await handleHermesRoutes(ctx);
+    }
+    expect(userMessageOf(4)).toContain('<dkg-node-ui-context context_graph_id="project-Y" source="dkg-node-ui" />');
+  });
+
+  it('includes a dkg_memory.context_graph_id reminder in the system prompt when a project is scoped', async () => {
+    // Issue 1 mitigation in PR #389 unblock: the live tools array carries
+    // the new `context_graph_id` field, but stale <recalled-memory> snippets
+    // can bias the LLM toward the older 4-field shape. Inject one targeted
+    // line in the system prompt that names the field explicitly so the LLM
+    // has a fresh competing signal each turn.
+    __resetHermesSessionContextGraphCacheForTests();
+
+    const calls: Array<{ body: any }> = [];
+    vi.stubGlobal('fetch', vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ body: JSON.parse(String(init?.body)) });
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: 'ok' } }],
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }));
+
+    const { ctx, res } = makeHermesRouteContext({
+      text: 'note this',
+      correlationId: 'corr-mem',
+      sessionId: 'session-mem',
+      contextGraphId: 'project-mem',
+      profile: 'default',
+    }, {
+      hasChatTurn: vi.fn(async () => false),
+      storeChatExchange: vi.fn(async () => {}),
+    }, {
+      localAgentIntegrations: {
+        hermes: {
+          enabled: true,
+          transport: { kind: 'hermes-openai', gatewayUrl: 'http://127.0.0.1:8642' },
+        },
+      },
+    }, '/api/hermes-channel/send');
+    await handleHermesRoutes(ctx);
+
+    expect(res.statusCode).toBe(200);
+    const systemContent = String(calls[0].body.messages.find((m: any) => m.role === 'system')?.content ?? '');
+    expect(systemContent).toContain('dkg_memory');
+    expect(systemContent).toContain('context_graph_id');
+    expect(systemContent).toContain('project-mem');
   });
 
   it('falls back to the gateway when bridge send returns retryable 5xx', async () => {

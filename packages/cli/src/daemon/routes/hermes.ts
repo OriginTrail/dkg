@@ -38,6 +38,45 @@ type NormalizedHermesPersistTurnPayload = Exclude<ReturnType<typeof normalizeHer
 
 const hermesPersistTurnInflight = new Map<string, Promise<HermesPersistRouteResult>>();
 
+/**
+ * Per-session cache of the last `contextGraphId` seen on a Hermes chat
+ * turn. Recovers the project scope when the Node UI sends a follow-up
+ * turn that drops the field — which can happen on chat-reset paths or
+ * race conditions where `activeProjectId` is briefly null while the
+ * visible UI badge still indicates a selected project. Without this
+ * cache, the daemon would forward a markerless message to Hermes and
+ * passive recall would silently scope to agent-context only.
+ *
+ * Map insertion order is iteration order in JS, so we evict the oldest
+ * entry on overflow — bounded LRU with O(1) inserts.
+ */
+const HERMES_SESSION_CONTEXT_GRAPH_CACHE_LIMIT = 200;
+const hermesSessionContextGraphCache = new Map<string, string>();
+
+function applySessionContextGraphFallback(payload: HermesChatPayload): void {
+  if (!payload.sessionId) return;
+  if (payload.contextGraphId) {
+    if (hermesSessionContextGraphCache.has(payload.sessionId)) {
+      hermesSessionContextGraphCache.delete(payload.sessionId);
+    }
+    hermesSessionContextGraphCache.set(payload.sessionId, payload.contextGraphId);
+    if (hermesSessionContextGraphCache.size > HERMES_SESSION_CONTEXT_GRAPH_CACHE_LIMIT) {
+      const oldest = hermesSessionContextGraphCache.keys().next().value;
+      if (oldest !== undefined) hermesSessionContextGraphCache.delete(oldest);
+    }
+    return;
+  }
+  const cached = hermesSessionContextGraphCache.get(payload.sessionId);
+  if (cached) {
+    payload.contextGraphId = cached;
+  }
+}
+
+/** Test-only helper to clear the per-session contextGraphId cache between cases. */
+export function __resetHermesSessionContextGraphCacheForTests(): void {
+  hermesSessionContextGraphCache.clear();
+}
+
 export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
   const {
     req,
@@ -64,6 +103,7 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
 
     const payload = normalizeHermesChatPayload(parsed);
     if ('error' in payload) return jsonResponse(res, 400, { error: payload.error });
+    applySessionContextGraphFallback(payload);
 
     const attachmentRefs = await verifyHermesAttachmentRefsProvenance(
       agent,
@@ -162,6 +202,7 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
 
     const payload = normalizeHermesChatPayload(parsed);
     if ('error' in payload) return jsonResponse(res, 400, { error: payload.error });
+    applySessionContextGraphFallback(payload);
 
     const attachmentRefs = await verifyHermesAttachmentRefsProvenance(
       agent,
@@ -410,6 +451,13 @@ function buildHermesNodeUiSystemPrompt(
   ];
   if (payload.contextGraphId) {
     lines.push(`Current DKG context graph id: ${payload.contextGraphId}`);
+    // Live signal that competes with stale `<recalled-memory>` snippets that
+    // may describe the older 4-field `dkg_memory` schema. Names the new
+    // `context_graph_id` field explicitly so the LLM picks it up even if
+    // earlier turns are biasing toward the pre-PR-#389 shape.
+    lines.push(
+      `When persisting project-scoped notes for this session, call dkg_memory with context_graph_id: "${payload.contextGraphId}". Without that argument, dkg_memory writes default to your private agent-context.`,
+    );
   }
   const agentAddress = payload.currentAgentAddress ?? requestAgentAddress;
   if (agentAddress) {
