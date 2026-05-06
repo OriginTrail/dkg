@@ -226,6 +226,52 @@ describe('Axiom 1 — Context Graph isolation', () => {
     expect(subs.has(sRight)).toBe(false);
   }, 30_000);
 
+  it('1.g private CG with allowedAgents blocks non-listed callers from VM reads', async () => {
+    // Mirror of 1.c for VM. Private CGs must enforce the allowList on
+    // verified-memory queries, not only SWM — otherwise a private KA is
+    // readable by anyone with a CG handle.
+    const cg = freshCg('a1-priv-vm');
+    const sub = urn('priv-vm');
+    const own = agent.getDefaultAgentAddress()!;
+    await agent.createContextGraph({
+      id: cg, name: 'priv-vm', description: '',
+      private: true, allowedAgents: [own],
+    });
+    await agent.registerContextGraph(cg);
+    await agent.publish(cg, [
+      { subject: sub, predicate: P_NAME, object: '"top-secret"', graph: '' },
+    ]);
+
+    const blocked = await agent.query(
+      `SELECT ?o WHERE { <${sub}> <${P_NAME}> ?o }`,
+      { contextGraphId: cg, view: 'verified-memory', callerAgentAddress: bAddr },
+    );
+    expect(
+      blocked.bindings,
+      'private CG with allowedAgents must not return VM data to a non-listed caller (Axiom 1 + 6 access dimension)',
+    ).toHaveLength(0);
+  }, 90_000);
+
+  it('1.f Verified Memory in CG-A does not surface from CG-B (cross-CG VM isolation)', async () => {
+    // 1.b proves the rule for Shared Working Memory. The same isolation must
+    // hold for Verified Memory after a real PUBLISH, otherwise a chain-anchored
+    // KA in one CG could leak into a different CG's authoritative view.
+    const left = freshCg('a1-vmL');
+    const right = freshCg('a1-vmR');
+    const sLeft = urn('vm-left');
+    await agent.createContextGraph({ id: left, name: 'lvm', description: '' });
+    await agent.createContextGraph({ id: right, name: 'rvm', description: '' });
+    await agent.registerContextGraph(left);
+    await agent.registerContextGraph(right);
+
+    await agent.publish(left, [{ subject: sLeft, predicate: P_NAME, object: '"L"', graph: '' }]);
+    expect(await rowsFor(left, 'verified-memory', sLeft)).toEqual(['"L"']);
+    expect(
+      await rowsFor(right, 'verified-memory', sLeft),
+      'a published KA in CG-A must NOT surface in CG-B verified-memory (Axiom 1)',
+    ).toEqual([]);
+  }, 90_000);
+
   it('1.e sub-graphs within a CG are isolated (sg-A data does not surface in sg-B)', async () => {
     // Sub-graphs are a finer scope than CGs and the spec says every state
     // change is bounded by its scope. Bleeding between sub-graphs would let
@@ -356,6 +402,26 @@ describe('Axiom 2 — Authority domain', () => {
     }
     expect(threw, 'publish() must reject urn:dkg:file:/extraction: subjects (Axiom 2)').toBe(true);
   }, 60_000);
+
+  it('2.g raw SPARQL UPDATE through agent.query() is rejected (no untyped writes)', async () => {
+    // Axiom 3 says every state change must be a typed transition. Letting a
+    // caller bypass that with a raw INSERT/DELETE through the read endpoint
+    // is a direct authority bypass on every scope — Axiom 2 collapses if it
+    // is allowed.
+    const cg = freshCg('a2-untyped');
+    const sub = urn('untyped');
+    await agent.createContextGraph({ id: cg, name: 'untyped', description: '' });
+    let threw = false;
+    try {
+      await agent.query(
+        `INSERT DATA { GRAPH <did:dkg:context-graph:${cg}> { <${sub}> <${P_NAME}> "hijack" } }`,
+        { contextGraphId: cg, view: 'verified-memory' },
+      );
+    } catch {
+      threw = true;
+    }
+    expect(threw, 'agent.query() must refuse SPARQL UPDATE; writes go through typed transitions only (Axiom 2 + 3)').toBe(true);
+  }, 30_000);
 
   it('2.c SWM ownership: a different peer cannot overwrite an existing rootEntity', async () => {
     const cg = freshCg('a2-own');
@@ -517,6 +583,42 @@ describe('Axiom 3 — Typed state transitions', () => {
     expect(
       rows.length,
       'SHARE/PROMOTE must record at least one typed prov:Activity event in _meta (Axiom 3)',
+    ).toBeGreaterThan(0);
+  }, 30_000);
+
+  it('3.i agent.verify is exposed (the VERIFY transition entry point)', async () => {
+    // Spec lists VERIFY as one of the 7 typed transitions. There must be an
+    // entry point on the agent surface; without it, consensus-verified trust
+    // can never be reached. We only check the surface — full quorum flow
+    // requires multi-node setup beyond this audit.
+    const v = (agent as unknown as { verify?: unknown }).verify;
+    expect(typeof v, 'agent must expose a verify() method (VERIFY transition surface, Axiom 3 + 4)').toBe('function');
+  });
+
+  it('3.j DISCARD records a typed prov:Activity event in _meta (no untyped removals)', async () => {
+    // Spec says EVERY state change is typed — DISCARD included. Removing
+    // WM rows without recording the transition would be an untyped delete.
+    const cg = freshCg('a3-disc-event');
+    const sub = urn('disc-ev');
+    await agent.createContextGraph({ id: cg, name: 'de', description: '' });
+    await agent.assertion.create(cg, 'doc');
+    await agent.assertion.write(cg, 'doc', [
+      { subject: sub, predicate: P_NAME, object: '"v"', graph: '' },
+    ]);
+    await agent.assertion.discard(cg, 'doc');
+
+    const meta = `did:dkg:context-graph:${cg}/_meta`;
+    const r = await agent.store.query(
+      `SELECT ?event ?type WHERE { GRAPH <${meta}> {
+         ?event a <http://www.w3.org/ns/prov#Activity> ;
+                a ?type .
+         FILTER(REGEX(STR(?type), "[Dd]iscard"))
+       } } LIMIT 1`,
+    );
+    const rows = (r as { bindings?: unknown[] }).bindings ?? [];
+    expect(
+      rows.length,
+      'DISCARD must record a typed prov:Activity (e.g. DiscardAssertion) so the transition is auditable (Axiom 3)',
     ).toBeGreaterThan(0);
   }, 30_000);
 
@@ -713,6 +815,96 @@ describe('Axiom 4 — PUBLISH is canonical; ENDORSE/VERIFY raise trust', () => {
     ).toBe(true);
   }, 90_000);
 
+  it('4.l ENDORSE alone does NOT lift trust to consensus-verified (only VERIFY can)', async () => {
+    // Axiom 4 trust gradient: ENDORSE moves self-attested → endorsed; only
+    // VERIFY (M-of-N quorum) can move to consensus-verified. A query at
+    // minTrust=ConsensusVerified must remain empty after a single endorse,
+    // otherwise the gradient is just noise.
+    const cg = freshCg('a4-trust-cap');
+    const sub = urn('cap');
+    await agent.createContextGraph({ id: cg, name: 'cap', description: '' });
+    await agent.registerContextGraph(cg);
+    const pub = await agent.publish(cg, [
+      { subject: sub, predicate: P_NAME, object: '"c"', graph: '' },
+    ]);
+    await agent.endorse({ contextGraphId: cg, knowledgeAssetUal: pub.ual });
+
+    let returned: number;
+    try {
+      const r = await agent.query(
+        `SELECT ?o WHERE { <${sub}> <${P_NAME}> ?o }`,
+        { contextGraphId: cg, view: 'verified-memory', minTrust: TrustLevel.ConsensusVerified },
+      );
+      returned = r.bindings.length;
+    } catch {
+      returned = 0;
+    }
+    expect(
+      returned,
+      'a single ENDORSE must not push trust past Endorsed; ConsensusVerified requires VERIFY quorum (Axiom 4)',
+    ).toBe(0);
+  }, 90_000);
+
+  it('4.m KC metadata after PUBLISH records dkg:merkleRoot (evidence)', async () => {
+    // Axiom 4 corollary: every canonical publish records evidence. The merkle
+    // root is the on-chain evidence anchor — without it in _meta, the audit
+    // trail loses its chain-confirmable handle.
+    const cg = freshCg('a4-mr');
+    const sub = urn('mr');
+    await agent.createContextGraph({ id: cg, name: 'mr', description: '' });
+    await agent.registerContextGraph(cg);
+    const pub = await agent.publish(cg, [
+      { subject: sub, predicate: P_NAME, object: '"m"', graph: '' },
+    ]);
+    const meta = `did:dkg:context-graph:${cg}/_meta`;
+    const r = await agent.store.query(
+      `SELECT ?o WHERE { GRAPH <${meta}> { <${pub.ual}> <http://dkg.io/ontology/merkleRoot> ?o } } LIMIT 1`,
+    );
+    const rows = (r as { bindings?: unknown[] }).bindings ?? [];
+    expect(rows.length, 'KC meta must record dkg:merkleRoot as on-chain evidence (Axiom 4 corollary)').toBeGreaterThan(0);
+  }, 60_000);
+
+  it('4.n KC metadata after PUBLISH records the affected scope (rootEntity link)', async () => {
+    // The 6-field corollary requires "affected scope" — i.e. which entity
+    // the publish is about. Without it, queries over _meta cannot answer
+    // "which KAs touched scope X" without re-walking data.
+    const cg = freshCg('a4-scope');
+    const sub = urn('scope');
+    await agent.createContextGraph({ id: cg, name: 'scope', description: '' });
+    await agent.registerContextGraph(cg);
+    const pub = await agent.publish(cg, [
+      { subject: sub, predicate: P_NAME, object: '"s"', graph: '' },
+    ]);
+    const meta = `did:dkg:context-graph:${cg}/_meta`;
+    const r = await agent.store.query(
+      `SELECT ?root WHERE { GRAPH <${meta}> { <${pub.ual}> <http://dkg.io/ontology/rootEntity> ?root } }`,
+    );
+    const roots = ((r as { bindings?: Record<string, string>[] }).bindings ?? [])
+      .map(b => b['root']);
+    expect(
+      roots.includes(sub),
+      'KC meta must record dkg:rootEntity for the published subject(s) (Axiom 4 corollary "affected scope")',
+    ).toBe(true);
+  }, 60_000);
+
+  it('4.o KC metadata after PUBLISH records dkg:publishedAt (timestamp evidence)', async () => {
+    // Without a publishedAt timestamp, the audit trail loses temporal
+    // ordering — Axiom 4 corollary's "evidence" cannot be reconstructed.
+    const cg = freshCg('a4-pubat');
+    const sub = urn('pubat');
+    await agent.createContextGraph({ id: cg, name: 'pat', description: '' });
+    await agent.registerContextGraph(cg);
+    const pub = await agent.publish(cg, [
+      { subject: sub, predicate: P_NAME, object: '"p"', graph: '' },
+    ]);
+    const meta = `did:dkg:context-graph:${cg}/_meta`;
+    const r = await agent.store.query(
+      `SELECT ?ts WHERE { GRAPH <${meta}> { <${pub.ual}> <http://dkg.io/ontology/publishedAt> ?ts } } LIMIT 1`,
+    );
+    const rows = (r as { bindings?: unknown[] }).bindings ?? [];
+    expect(rows.length, 'KC meta must record dkg:publishedAt (Axiom 4 evidence)').toBeGreaterThan(0);
+  }, 60_000);
+
   it('4.c ENDORSE writes an endorsement triple referencing the published UAL', async () => {
     const cg = freshCg('a4-endorse');
     const sub = urn('end');
@@ -891,6 +1083,32 @@ describe('Axiom 5 — SWM is provisional staging', () => {
     ).toBeGreaterThan(0);
   }, 30_000);
 
+  it('5.i SWM record references the affected rootEntity/scope', async () => {
+    // Axiom 5 record contract: every SWM record identifies the affected
+    // scope. Without it, queries cannot tell what an operationId modifies.
+    const cg = freshCg('a5-rootref');
+    const sub = urn('rootref');
+    await agent.createContextGraph({ id: cg, name: 'rr', description: '' });
+    await agent.share(
+      cg,
+      [{ subject: sub, predicate: P_NAME, object: '"x"', graph: '' }],
+      { localOnly: true },
+    );
+    const meta = `did:dkg:context-graph:${cg}/_shared_memory_meta`;
+    const r = await agent.store.query(
+      `SELECT ?root WHERE { GRAPH <${meta}> {
+         ?op a <http://dkg.io/ontology/WorkspaceOperation> ;
+             <http://dkg.io/ontology/rootEntity> ?root .
+       } }`,
+    );
+    const roots = ((r as { bindings?: Record<string, string>[] }).bindings ?? [])
+      .map(b => b['root']);
+    expect(
+      roots.includes(sub),
+      'SWM record must reference the affected rootEntity (Axiom 5 record contract)',
+    ).toBe(true);
+  }, 30_000);
+
   it('5.c SWM is treated as provisional: a fresh VM read of unpublished data is empty', async () => {
     const cg = freshCg('a5-prov');
     const sub = urn('prov');
@@ -999,6 +1217,37 @@ describe('Axiom 6 — GET resolves a declared view', () => {
       'self-attested-only rows must not surface when caller requires Endorsed (Axiom 6)',
     ).toBe(0);
   }, 60_000);
+
+  it('6.e ENDORSE lifts a row to the Endorsed trust band (minTrust=Endorsed surfaces it)', async () => {
+    // The trust gradient must be observable through minTrust. After PUBLISH +
+    // ENDORSE, the row should remain visible under minTrust=Endorsed (i.e.
+    // ENDORSE actually moved trust from self-attested to endorsed). If it
+    // doesn't, the gradient is decorative and Axiom 4 collapses to "all
+    // VM data is self-attested".
+    const cg = freshCg('a6-endorsed');
+    const sub = urn('end-trust');
+    await agent.createContextGraph({ id: cg, name: 'et', description: '' });
+    await agent.registerContextGraph(cg);
+    const pub = await agent.publish(cg, [
+      { subject: sub, predicate: P_NAME, object: '"e"', graph: '' },
+    ]);
+    await agent.endorse({ contextGraphId: cg, knowledgeAssetUal: pub.ual });
+
+    let returned: number;
+    try {
+      const r = await agent.query(
+        `SELECT ?o WHERE { <${sub}> <${P_NAME}> ?o }`,
+        { contextGraphId: cg, view: 'verified-memory', minTrust: TrustLevel.Endorsed },
+      );
+      returned = r.bindings.length;
+    } catch {
+      returned = 0;
+    }
+    expect(
+      returned,
+      'after ENDORSE the row must surface at minTrust=Endorsed; otherwise the trust gradient is unused (Axiom 4 + 6)',
+    ).toBeGreaterThanOrEqual(1);
+  }, 90_000);
 
   it('6.b minTrust filter excludes a self-attested-only row when caller asks for consensus-verified', async () => {
     const cg = freshCg('a6-trust');

@@ -121,7 +121,13 @@ export function generateKCMetadata(
     }
   }
 
-  // KA metadata
+  // V10 Axiom 4 corollary "affected scope": the canonical transition (the KC
+  // itself) records the rootEntity for every KA it publishes. Per-KA rows
+  // remain below for fine-grained queries.
+  for (const ka of kaEntries) {
+    quads.push(mq(meta.ual, `${DKG}rootEntity`, ka.rootEntity, metaGraph));
+  }
+
   for (const ka of kaEntries) {
     const kaUri = `${ka.kcUal}/${ka.tokenId}`;
     quads.push(
