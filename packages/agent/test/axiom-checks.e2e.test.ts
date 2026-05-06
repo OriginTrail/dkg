@@ -1,7 +1,16 @@
 /**
- * One test per V10 axiom (see dkgv10-spec 02_AXIOMS.md). These are agent-level
- * checks: real DKGAgent, Hardhat snapshot, no mocks. When something regresses you
- * get a concrete query/count failure, not a generic “toThrow”.
+ * One test per V10 axiom. Real DKGAgent, Hardhat snapshot, no mocks — when
+ * something regresses you get a concrete query/count failure, not a generic
+ * "toThrow".
+ *
+ * Map (matches dkgv10-spec/02_AXIOMS.md):
+ *   1. Context Graph isolation        -> "CG isolation..."
+ *   2. Authority domain (WM)          -> "authority: spoofed callerAgentAddress..."
+ *   3. Typed state transitions        -> "typed layers..."
+ *   4. PUBLISH is canonical entry     -> "publish is what puts facts in VM..."
+ *   5. SWM is staging, not truth      -> "SWM is staging only..."
+ *   6. Get resolves a declared view   -> "each GET view returns its layer only"
+ *   7. Deterministic conflict rules   -> "two publishers same root entity..."
  */
 import { beforeAll, afterAll, describe, expect, it } from 'vitest';
 import { ethers } from 'ethers';
@@ -83,6 +92,8 @@ describe('V10 axioms (agent)', () => {
 
     const a = await q(left);
     const b = await q(right);
+    expect(a.bindings).toHaveLength(1);
+    expect(b.bindings).toHaveLength(1);
     expect(a.bindings[0]?.o).toBe('"alpha"');
     expect(b.bindings[0]?.o).toBe('"beta"');
   }, 30_000);
@@ -152,7 +163,7 @@ describe('V10 axioms (agent)', () => {
 
     const pub = await agent.publishFromSharedMemory(cg, { rootEntities: [sub] });
     expect(pub.status).toBe('confirmed');
-    expect(pub.ual).toBeDefined();
+    expect(pub.ual).toContain('did:dkg:evm:31337/');
 
     const vm = await agent.query(`SELECT ?o WHERE { <${sub}> <${P_NAME}> ?o }`, {
       contextGraphId: cg,
@@ -240,5 +251,6 @@ describe('V10 axioms (agent)', () => {
       view: 'shared-working-memory',
     });
     expect(row.bindings).toHaveLength(1);
+    expect(['"a"', '"b"']).toContain(row.bindings[0]?.o);
   }, 40_000);
 });
