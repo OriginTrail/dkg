@@ -69,7 +69,7 @@ jobs:
             hardhat-${{ runner.os }}-
 
       - name: Build packages
-        run: pnpm build
+        run: pnpm run build:packages
 
       - name: Run EVM integration tests (${{ matrix.scope }})
         run: ./scripts/test-evm-integration.sh ${{ matrix.scope }}

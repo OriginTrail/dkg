@@ -155,15 +155,31 @@ export function assignUrisToBlankNodes(quads: Quad[]): void {
  * - A bare JSON-LD document (defaults to private)
  * - An envelope: { public?: JsonLdDoc, private?: JsonLdDoc }
  */
+export interface JsonLdToQuadsOptions {
+  defaultVisibility?: 'public' | 'private';
+  syntheticPrivateAnchor?: boolean;
+}
+
 export async function jsonLdToQuads(
   content: JsonLdContent,
+  options: JsonLdToQuadsOptions = {},
 ): Promise<{ publicQuads: Quad[]; privateQuads: Quad[] }> {
   const jsonld = await getJsonld();
+  const defaultVisibility = options.defaultVisibility ?? 'private';
+  const syntheticPrivateAnchor = options.syntheticPrivateAnchor ?? true;
 
   const obj = content as Record<string, unknown>;
   const isEnvelope = !Array.isArray(content) && ('public' in obj || 'private' in obj);
-  const publicDoc = isEnvelope ? (obj.public as object | undefined) : undefined;
-  const privateDoc = isEnvelope ? (obj.private as object | undefined) : content;
+  const publicDoc = isEnvelope
+    ? (obj.public as object | undefined)
+    : defaultVisibility === 'public'
+      ? content
+      : undefined;
+  const privateDoc = isEnvelope
+    ? (obj.private as object | undefined)
+    : defaultVisibility === 'private'
+      ? content
+      : undefined;
 
   let publicQuads: Quad[] = [];
   let privateQuads: Quad[] = [];
@@ -187,7 +203,7 @@ export async function jsonLdToQuads(
 
   // When there are private quads but no public quads, generate a synthetic
   // anchor so the publisher has something to merkle-root and partition.
-  if (publicQuads.length === 0 && privateQuads.length > 0) {
+  if (syntheticPrivateAnchor && publicQuads.length === 0 && privateQuads.length > 0) {
     const anchorId = `urn:dkg:private:${crypto.randomUUID()}`;
     publicQuads = [{
       subject: anchorId,

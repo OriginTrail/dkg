@@ -23,6 +23,7 @@ export const CONTROL_TRANSITION_TYPE = 'urn:dkg:publisher:transitionType';
 export const CONTROL_SWM_ID = 'urn:dkg:publisher:swmId';
 export const CONTROL_SHARE_OPERATION_ID = 'urn:dkg:publisher:shareOperationId';
 export const CONTROL_ROOT = 'urn:dkg:publisher:root';
+export const CONTROL_SUB_GRAPH_NAME = 'urn:dkg:publisher:subGraphName';
 export const CONTROL_AUTHORITY_TYPE = 'urn:dkg:publisher:authorityType';
 export const CONTROL_AUTHORITY_PROOF_REF = 'urn:dkg:publisher:authorityProofRef';
 export const CONTROL_PRIOR_VERSION = 'urn:dkg:publisher:priorVersion';
@@ -225,6 +226,7 @@ export function serializeRequest(request: LiftRequest, subject: string, graphUri
   }
 
   pushOptional(quads, subject, CONTROL_PRIOR_VERSION, request.priorVersion, graphUri, literal);
+  pushOptional(quads, subject, CONTROL_SUB_GRAPH_NAME, request.subGraphName, graphUri, literal);
   return quads;
 }
 

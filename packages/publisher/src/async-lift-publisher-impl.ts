@@ -1,5 +1,5 @@
-import type { TripleStore } from '@origintrail-official/dkg-storage';
-import { GraphManager } from '@origintrail-official/dkg-storage';
+import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import type { PublishResult } from './publisher.js';
 import {
   LIFT_JOB_STATES,
@@ -59,6 +59,7 @@ import {
 export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
   private static readonly claimQueues = new Map<string, Promise<void>>();
   private static readonly DEFAULT_RECOVERY_LOOKUP_TIMEOUT_MS = 15 * 60 * 1000;
+  private static readonly DEFAULT_MAX_RETRIES = 10;
 
   private readonly graphUri: string;
   private readonly walletLockGraphUri: string;
@@ -80,7 +81,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
   ) {
     this.graphUri = config.graphUri ?? DEFAULT_GRAPH_URI;
     this.walletLockGraphUri = DEFAULT_WALLET_LOCK_GRAPH_URI;
-    this.maxRetries = config.maxRetries ?? 3;
+    this.maxRetries = config.maxRetries ?? TripleStoreAsyncLiftPublisher.DEFAULT_MAX_RETRIES;
     this.recoveryLookupTimeoutMs = config.recoveryLookupTimeoutMs ?? TripleStoreAsyncLiftPublisher.DEFAULT_RECOVERY_LOOKUP_TIMEOUT_MS;
     this.lockLeaseMs = 5 * 60 * 1000;
     this.now = config.now ?? (() => Date.now());
@@ -142,8 +143,13 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
 
   async update(jobId: string, status: LiftJobState, data: Partial<LiftJob> = {}): Promise<void> {
     await this.ensureGraph();
-    const next = this.refreshActiveLease(this.mergeJob(await this.getRequiredJob(jobId), status, data));
+    const current = await this.getRequiredJob(jobId);
+    await this.assertActiveClaimLock(current);
+    const next = this.refreshActiveLease(this.mergeJob(current, status, data));
     this.assertJobMatchesStatus(next);
+    if (next.status === 'finalized') {
+      await this.promoteFinalizedPrivateStaging(next);
+    }
     await this.writeJob(next);
     await this.syncWalletLockForJob(next);
   }
@@ -281,6 +287,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     if (!current.claim || !current.validation) {
       throw new Error(`LiftJob ${jobId} must be claimed and validated before recording publish results`);
     }
+    await this.assertActiveClaimLock(current);
 
     const mapped = mapPublishResultToLiftJobSuccess({
       publishResult,
@@ -323,6 +330,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
       finalization: mapped.finalization,
     });
     this.assertJobMatchesStatus(next);
+    await this.promoteFinalizedPrivateStaging(next);
     await this.writeJob(next);
     await this.syncWalletLockForJob(next);
     return next;
@@ -331,6 +339,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
   async recordPublishFailure(jobId: string, failure: AsyncLiftPublishFailureInput): Promise<LiftJob> {
     await this.ensureGraph();
     const current = await this.getRequiredJob(jobId);
+    await this.assertActiveClaimLock(current);
     const next = this.mergeJob(current, 'failed', {
       failure: mapPublishExceptionToLiftJobFailure(failure) as any,
     });
@@ -361,7 +370,9 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
         const resolved = await this.chainRecoveryResolver(job);
         if (resolved) {
           await this.releaseWalletLockForJob(job);
-          await this.writeJob(this.finalizeRecoveredJob(job, resolved.inclusion, resolved.finalization));
+          const finalized = this.finalizeRecoveredJob(job, resolved.inclusion, resolved.finalization);
+          await this.promoteFinalizedPrivateStaging(finalized);
+          await this.writeJob(finalized);
           recovered += 1;
           continue;
         }
@@ -396,7 +407,9 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
           const restoredStatus = job.failure.failedFromState === 'included' ? 'included' : 'broadcast';
           const { failure: _staleFailure, ...jobWithoutFailure } = job as unknown as Record<string, unknown>;
           const recoverable = { ...jobWithoutFailure, status: restoredStatus } as unknown as LiftJobBroadcast;
-          await this.writeJob(this.finalizeRecoveredJob(recoverable, resolved.inclusion, resolved.finalization));
+          const finalized = this.finalizeRecoveredJob(recoverable, resolved.inclusion, resolved.finalization);
+          await this.promoteFinalizedPrivateStaging(finalized);
+          await this.writeJob(finalized);
           recovered += 1;
         }
         // If still inconclusive, leave in failed state — next recover() will retry again.
@@ -593,9 +606,8 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     const currentLock = await this.readWalletLock(walletId);
 
     if (job.status === 'claimed' || job.status === 'validated' || job.status === 'broadcast' || job.status === 'included') {
-      if (currentLock && !this.lockMatchesJob(currentLock, job)) {
-        return;
-      }
+      if (!currentLock) throw this.createStaleClaimError(job, `missing active wallet lock for ${walletId}`);
+      if (!this.isUsableActiveLock(currentLock, job)) throw this.createStaleClaimError(job, `wallet lock mismatch for ${walletId}`);
       const acquiredAt = job.timestamps.claimedAt ?? this.now();
       const refreshedExpiry = job.claim?.claimLeaseExpiresAt ?? acquiredAt + this.lockLeaseMs;
       await this.writeWalletLock({
@@ -623,6 +635,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
 
   private async recordExecutionFailure(jobId: string, failedFromState: LiftJobState, error: unknown): Promise<LiftJob> {
     const current = await this.getRequiredJob(jobId);
+    await this.assertActiveClaimLock(current);
 
     if (failedFromState === 'claimed' || failedFromState === 'validated') {
       const message = error instanceof Error ? error.message : String(error);
@@ -729,10 +742,38 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     job: LiftJob,
   ): boolean {
     if (lock.jobId !== job.jobId) return false;
-    if (job.claim?.claimToken && lock.claimToken) {
-      return lock.claimToken === job.claim.claimToken;
+    if (job.claim?.claimToken) return lock.claimToken === job.claim.claimToken;
+    return !lock.claimToken;
+  }
+
+  private async assertActiveClaimLock(job: LiftJob): Promise<void> {
+    if (!this.requiresActiveClaimLock(job)) return;
+
+    const walletId = job.claim?.walletId;
+    if (!walletId) throw this.createStaleClaimError(job, 'missing claim wallet');
+
+    const currentLock = await this.readWalletLock(walletId);
+    if (!currentLock) throw this.createStaleClaimError(job, `missing active wallet lock for ${walletId}`);
+    if (!this.isUsableActiveLock(currentLock, job)) {
+      throw this.createStaleClaimError(job, `wallet lock mismatch for ${walletId}`);
     }
-    return true;
+  }
+
+  private requiresActiveClaimLock(job: LiftJob): boolean {
+    return job.status === 'claimed' || job.status === 'validated' || job.status === 'broadcast' || job.status === 'included';
+  }
+
+  private isUsableActiveLock(
+    lock: { jobId: string; claimToken?: string; status?: string; expiresAt?: number },
+    job: LiftJob,
+  ): boolean {
+    if (lock.status !== 'active') return false;
+    if (lock.expiresAt !== undefined && lock.expiresAt <= this.now()) return false;
+    return this.lockMatchesJob(lock, job);
+  }
+
+  private createStaleClaimError(job: LiftJob, reason: string): Error {
+    return new Error(`Stale LiftJob claim for ${job.jobId}: ${reason}`);
   }
 
   private async withClaimLock<T>(fn: () => Promise<T>): Promise<T> {
@@ -875,15 +916,47 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
 
   private async finalizeNoopPublish(jobId: string): Promise<LiftJob> {
     const current = await this.getRequiredJob(jobId);
+    await this.assertActiveClaimLock(current);
     const finalized = this.mergeJob(current, 'finalized', {
       finalization: {
         mode: 'noop',
       },
     });
     this.assertJobMatchesStatus(finalized);
+    await this.promoteFinalizedPrivateStaging(finalized);
     await this.writeJob(finalized);
     await this.syncWalletLockForJob(finalized);
     return finalized;
+  }
+
+  private async promoteFinalizedPrivateStaging(job: LiftJob): Promise<void> {
+    if (job.status !== 'finalized' || !job.validation) return;
+
+    const privateStore = new PrivateContentStore(this.store, this.graphManager);
+    for (const sourceRoot of job.request.roots) {
+      const staged = await privateStore.getPrivateTriplesForOperation(
+        job.request.contextGraphId,
+        job.request.shareOperationId,
+        sourceRoot,
+        job.request.subGraphName,
+      );
+      if (staged.length === 0) continue;
+
+      const canonicalRoot = job.validation.canonicalRootMap[sourceRoot] ?? sourceRoot;
+      const canonicalQuads = canonicalizePrivateStagedQuads(staged, job.validation.canonicalRootMap);
+      await privateStore.storePrivateTriples(
+        job.request.contextGraphId,
+        canonicalRoot,
+        canonicalQuads,
+        job.request.subGraphName,
+      );
+      await privateStore.deletePrivateTriplesForOperation(
+        job.request.contextGraphId,
+        job.request.shareOperationId,
+        sourceRoot,
+        job.request.subGraphName,
+      );
+    }
   }
 
   private computePublicByteSize(quads: readonly { subject: string; predicate: string; object: string; graph: string }[]): number {
@@ -924,4 +997,29 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
         throw new Error(`Unsupported LiftJob status: ${(job as LiftJob).status}`);
     }
   }
+}
+
+function canonicalizePrivateStagedQuads(
+  quads: readonly Quad[],
+  canonicalRootMap: Readonly<Record<string, string>>,
+): Quad[] {
+  return quads.map((quad) => ({
+    ...quad,
+    subject: canonicalizeTerm(quad.subject, canonicalRootMap),
+    object: quad.object.startsWith('"') ? quad.object : canonicalizeTerm(quad.object, canonicalRootMap),
+    graph: '',
+  }));
+}
+
+function canonicalizeTerm(term: string, canonicalRootMap: Readonly<Record<string, string>>): string {
+  for (const [sourceRoot, canonicalRoot] of Object.entries(canonicalRootMap)) {
+    if (term === sourceRoot) {
+      return canonicalRoot;
+    }
+    const skolemPrefix = `${sourceRoot}/.well-known/genid/`;
+    if (term.startsWith(skolemPrefix)) {
+      return `${canonicalRoot}${term.slice(sourceRoot.length)}`;
+    }
+  }
+  return term;
 }

@@ -1,11 +1,16 @@
 import { createValidator } from './validation.js';
 import { buildEpcisQuery } from './query-builder.js';
 import { parseQueryParams, hasValidDateRange, encodePageToken } from './utils.js';
-import type { Publisher, CaptureResult, CaptureOptions, QueryEngine, EPCISQueryDocumentResponse } from './types.js';
+import type { Publisher, AsyncPublisher, CaptureResult, CaptureAcceptedResult, CaptureOptions, QueryEngine, EPCISQueryDocumentResponse } from './types.js';
 
 export interface CaptureConfig {
   contextGraphId: string;
   publisher: Publisher;
+}
+
+export interface AsyncCaptureConfig {
+  contextGraphId: string;
+  publisher: AsyncPublisher;
 }
 
 export interface CaptureRequest {
@@ -182,7 +187,8 @@ export async function handleCapture(
   request: CaptureRequest,
   config: CaptureConfig,
 ): Promise<CaptureResult> {
-  const validation = validator.validate(request.epcisDocument);
+  const { document, content } = resolveCaptureContent(request.epcisDocument);
+  const validation = validator.validate(document);
 
   if (!validation.valid) {
     throw new EpcisValidationError(validation.errors!);
@@ -198,7 +204,7 @@ export async function handleCapture(
     ? { accessPolicy: request.publishOptions.accessPolicy, allowedPeers: request.publishOptions.allowedPeers }
     : undefined;
 
-  const result = await config.publisher.publish(config.contextGraphId, request.epcisDocument, opts);
+  const result = await config.publisher.publish(config.contextGraphId, content, opts);
 
   return {
     ual: result.ual,
@@ -206,5 +212,56 @@ export async function handleCapture(
     receivedAt: new Date().toISOString(),
     eventCount: validation.eventCount!,
     status: result.status,
+  };
+}
+
+export async function handleCaptureAsync(
+  request: CaptureRequest,
+  config: AsyncCaptureConfig,
+): Promise<CaptureAcceptedResult> {
+  const { document, content, isEnvelope } = resolveCaptureContent(request.epcisDocument);
+  const validation = validator.validate(document);
+
+  if (!validation.valid) {
+    throw new EpcisValidationError(validation.errors!);
+  }
+
+  const opts = request.publishOptions
+    ? { accessPolicy: request.publishOptions.accessPolicy, allowedPeers: request.publishOptions.allowedPeers }
+    : undefined;
+
+  const publishContent = isEnvelope ? content : { public: content };
+  const result = await config.publisher.publishAsync(config.contextGraphId, publishContent, opts);
+
+  return {
+    captureID: result.captureID,
+    receivedAt: new Date().toISOString(),
+    eventCount: validation.eventCount!,
+    status: 'accepted',
+  };
+}
+
+function resolveCaptureContent(epcisDocument: unknown): { document: unknown; content: unknown; isEnvelope: boolean } {
+  if (!epcisDocument || typeof epcisDocument !== 'object' || Array.isArray(epcisDocument)) {
+    return { document: epcisDocument, content: epcisDocument, isEnvelope: false };
+  }
+
+  const obj = epcisDocument as Record<string, unknown>;
+  const isEnvelope = obj.type !== 'EPCISDocument' && ('public' in obj || 'private' in obj);
+  if (!isEnvelope) {
+    return { document: epcisDocument, content: epcisDocument, isEnvelope: false };
+  }
+
+  if (!obj.public) {
+    throw new EpcisValidationError(['Privacy envelope requires a public EPCIS document']);
+  }
+
+  return {
+    document: obj.public,
+    content: {
+      public: obj.public,
+      private: obj.private,
+    },
+    isEnvelope: true,
   };
 }

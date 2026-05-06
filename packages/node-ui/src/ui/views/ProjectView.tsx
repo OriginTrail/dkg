@@ -20,6 +20,7 @@ import {
   PendingJoinRequestsBar,
   MemoryStrip,
   SubGraphOverviewGrid,
+  ContextGraphQueryView,
   LayerDetailView,
   ProvenanceBar,
 } from './project/components.js';
@@ -248,6 +249,10 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
           onNodeClick={handleNodeClick}
           onSelectSubGraph={handleSelectSubGraph}
         />
+      )}
+
+      {!activeSubGraph && activeLayer === 'query' && !selectedEntity && (
+        <ContextGraphQueryView contextGraphId={contextGraphId} />
       )}
 
       {/* Layer Detail Views */}

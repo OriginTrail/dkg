@@ -33,6 +33,9 @@ describe('LiftJob request and record types', () => {
       'transitionType',
       'authority',
       'priorVersion',
+      'subGraphName',
+      'accessPolicy',
+      'allowedPeers',
     ]);
     expect(LIFT_JOB_IMMUTABLE_FIELDS).toEqual([
       'jobId',
@@ -83,11 +86,11 @@ describe('LiftJob request and record types', () => {
       request,
       status: 'accepted',
       timestamps: { acceptedAt: 1, updatedAt: 1 },
-      retries: { retryCount: 0, maxRetries: 3 },
+      retries: { retryCount: 0, maxRetries: 10 },
     };
 
     expect(accepted.request.authority.proofRef).toBe('proof:namespace:aloha');
-    expect(accepted.retries.maxRetries).toBe(3);
+    expect(accepted.retries.maxRetries).toBe(10);
   });
 
   it('requires broadcast jobs to carry claim, validation, and tx metadata', () => {

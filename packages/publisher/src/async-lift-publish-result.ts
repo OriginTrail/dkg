@@ -33,14 +33,19 @@ export function mapPublishResultToLiftJobSuccess(params: {
   const { publishResult, walletId, publicByteSize } = params;
   const onChain = publishResult.onChainResult;
 
+  const merkleRoot = toHex(publishResult.merkleRoot) as `0x${string}`;
+
+  if (publishResult.status === 'failed') {
+    throw new Error('Async lift publish result cannot map failed canonical publish into success state');
+  }
+
   if (!onChain) {
     throw new Error(
-      `Canonical publish returned status ${publishResult.status} without onChainResult. Async lift can only map results that include chain submission/finality details. Check chain configuration, publisher wallet, and canonical publish behavior.`,
+      `Canonical publish returned ${publishResult.status} without onChainResult. Async lift cannot mark chain inclusion without a real transaction hash.`,
     );
   }
 
   const txHash = onChain.txHash as `0x${string}`;
-  const merkleRoot = toHex(publishResult.merkleRoot) as `0x${string}`;
 
   const broadcast: LiftJobBroadcastMetadata = {
     txHash,
@@ -77,8 +82,6 @@ export function mapPublishResultToLiftJobSuccess(params: {
           publisherAddress: onChain.publisherAddress as `0x${string}`,
         },
       };
-    case 'failed':
-      throw new Error('Async lift publish result cannot map failed canonical publish into success state');
     default:
       throw new Error(`Async lift publish result cannot map unsupported canonical publish status: ${publishResult.status}`);
   }

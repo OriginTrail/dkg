@@ -116,6 +116,7 @@ export function mapLiftRequestToPublishOptions(input: LiftPublishMappingInput): 
     entityProofs: input.resolved.entityProofs,
     targetGraphUri: input.resolved.targetGraphUri,
     targetMetaGraphUri: input.resolved.targetMetaGraphUri,
+    subGraphName: input.request.subGraphName,
     operationCtx: input.resolved.operationCtx,
     onPhase: input.resolved.onPhase,
     receiverSignatureProvider: input.resolved.receiverSignatureProvider,

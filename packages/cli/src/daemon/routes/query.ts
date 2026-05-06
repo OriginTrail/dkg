@@ -216,6 +216,8 @@ import {
   shortId,
   sleep,
   deriveBlockExplorerUrl,
+  classifyClientError,
+  sanitizeRevertMessage,
 } from '../http-utils.js';
 import {
   normalizeRepo,
@@ -374,6 +376,23 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       parsed.includeSharedMemory ?? parsed.includeWorkspace;
     const view = parsed.view;
     const agentAddress = parsed.agentAddress;
+    // the
+    // RFC-29 multi-agent WM isolation gate is fail-closed by default.
+    // For cross-agent `view: 'working-memory'` reads on nodes with
+    // more than one local agent, the caller MUST supply
+    // `agentAuthSignature` (a signature over a canonical challenge
+    // proving ownership of the agent's private key). Before this the
+    // daemon's `/api/query` endpoint only forwarded `agentAddress`,
+    // so any multi-agent caller got `[]` back from a strict-default
+    // node — effectively downgrading every /api/query hit to
+    // "denied". Plumb the signature through so clients that DO sign
+    // (mcp_auth / OpenClaw adapters after r22-1) can pass the gate.
+    // NOTE: `agentAuthSignature` plumbing is scoped out of this backend-tests
+    // branch because the corresponding `DKGAgent.query` sig-param and the
+    // signed-request verifier in agent/src/dkg-agent.ts are not ported here
+    // (they depend on the A-5/A-15 gossip-signing changes which explode PR
+    // scope). The HTTP-layer signed-request auth (CLI-10) is NOT affected —
+    // it lives in `auth.ts#httpAuthGuard` and is fully ported and tested.
     const verifiedGraph = parsed.verifiedGraph;
     const assertionName = parsed.assertionName;
     const subGraphName = parsed.subGraphName;
@@ -541,6 +560,15 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
         assertionName,
         subGraphName,
         callerAgentAddress,
+        // the daemon admin
+        // token is the authorisation anchor for cross-agent WM reads
+        // (adapter-openclaw and the CLI rely on this). Pass it through
+        // so DKGAgent.query knows to skip the multi-agent signed-proof
+        // gate. Per-agent tokens still go through the regular caller-
+        // matches-target invariant inside DKGAgent.query.
+        // NOTE: `adminAuthenticated` pass-through scoped out for the same
+        // reason as `agentAuthSignature` above — DKGAgent.query on this
+        // branch doesn't accept it; it's landing via the agent-side fixes.
         minTrust: minTrust as TrustLevel | undefined,
         operationCtx: ctx,
       });
@@ -816,6 +844,22 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       return jsonResponse(res, 200, response);
     } catch (err) {
       tracker.fail(ctx, err);
+      // CLI-7 (
+      // to re-throw and let the global catch emit a 500 with the raw
+      // libp2p / agent message. That conflates "I couldn't reach the
+      // peer" with "the daemon crashed", which the audit flagged as a
+      // false-positive 5xx. We now translate well-known
+      // peer-resolution / unreachable / dial-timeout errors to 404/400
+      // so callers can distinguish operator error from server bugs.
+      // Anything that doesn't match the conservative client-error
+      // vocabulary still falls through to the top-level 500 handler.
+      const msg = err instanceof Error ? err.message : String(err);
+      const classified = classifyClientError(msg);
+      if (classified) {
+        return jsonResponse(res, classified.status, {
+          error: classified.sanitized,
+        });
+      }
       throw err;
     }
   }
@@ -869,14 +913,53 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       return jsonResponse(res, 400, { error: parsedSigs.error });
     }
     const validatedRequiredSigs = parsedSigs.value || undefined;
-    const result = await agent.verify({
-      contextGraphId,
-      verifiedMemoryId,
-      batchId: BigInt(batchId),
-      timeoutMs: timeoutMs ? Number(timeoutMs) : undefined,
-      requiredSignatures: validatedRequiredSigs,
-    });
-    return jsonResponse(res, 200, { ...result, batchId: String(batchId) });
+
+    // CLI-9 (
+    // unparseable value used to throw `SyntaxError: Cannot convert ...
+    // to a BigInt` deep inside `BigInt()` and bubble up as a 500 with
+    // a stack trace. Pre-validate so the operator gets a crisp 400.
+    let parsedBatchId: bigint;
+    try {
+      parsedBatchId = BigInt(batchId);
+    } catch {
+      return jsonResponse(res, 400, {
+        error: `Invalid batchId — must be an integer string, got ${JSON.stringify(batchId)}`,
+      });
+    }
+
+    try {
+      const result = await agent.verify({
+        contextGraphId,
+        verifiedMemoryId,
+        batchId: parsedBatchId,
+        timeoutMs: timeoutMs ? Number(timeoutMs) : undefined,
+        requiredSignatures: validatedRequiredSigs,
+      });
+      return jsonResponse(res, 200, { ...result, batchId: String(batchId) });
+    } catch (err) {
+      // CLI-9 dup #158 #159: a non-existent (cgId, vmId, batchId)
+      // tuple used to bubble up a chain custom-error revert as a
+      // generic 500 with the raw `data="0x…"` payload in the body.
+      // Map "not found / does not exist" to 404 and other client-shape
+      // errors to 400. Sanitize the message either way so we never
+      // leak the raw revert hex (#159 specifically). Unknown errors
+      // still fall through to the global 500 handler (with the same
+      // sanitization applied below) so genuine internal failures
+      // remain visible.
+      const msg = err instanceof Error ? err.message : String(err);
+      const classified = classifyClientError(msg);
+      if (classified) {
+        return jsonResponse(res, classified.status, {
+          error: classified.sanitized,
+        });
+      }
+      // Re-throw as a sanitized error so the global catch's 500 body
+      // does not include the raw chain payload either.
+      const sanitized = sanitizeRevertMessage(msg);
+      throw err instanceof Error
+        ? Object.assign(new Error(sanitized), { cause: err })
+        : new Error(sanitized);
+    }
   }
 
   // POST /api/endorse

@@ -1,10 +1,10 @@
 # OriginTrail DKG V10 Node — your multi-agent memory 🦞
 <img width="1536" height="1024" alt="dkg_img" src="docs/assets/dkg-v10.png" />
 
-[![CI](https://github.com/OriginTrail/dkg-v9/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/OriginTrail/dkg-v9/actions/workflows/ci.yml)
+[![CI](https://github.com/OriginTrail/dkg/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/OriginTrail/dkg/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/@origintrail-official/dkg?label=npm)](https://www.npmjs.com/package/@origintrail-official/dkg)
-[![Releases](https://img.shields.io/badge/release-latest-2ea44f)](https://github.com/OriginTrail/dkg-v9/releases)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/OriginTrail/dkg-v9/blob/main/LICENSE)
+[![Releases](https://img.shields.io/badge/release-latest-2ea44f)](https://github.com/OriginTrail/dkg/releases)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/OriginTrail/dkg/blob/main/LICENSE)
 [![Discord](https://img.shields.io/badge/discord-join-5865F2?logo=discord&logoColor=white)](https://discord.com/invite/xCaY7hvNwD)
 
 **Give your AI agents the ultimate memory that survives the session.**
@@ -74,7 +74,14 @@ All on-chain publishing goes through SWM first — the chain transaction is a fi
 
 > **ElizaOS agents:** Use the [`@origintrail-official/dkg-adapter-elizaos`](packages/adapter-elizaos/README.md) adapter. See the [ElizaOS setup guide](docs/setup/SETUP_ELIZAOS.md).
 
-> **Hermes agents:** Use the [`@origintrail-official/dkg-adapter-hermes`](packages/adapter-hermes/README.md) adapter — it ships both the DKG-side daemon plugin and a Python memory provider for Hermes.
+> **Hermes agents:** Install the DKG CLI, start a node, and run Hermes setup - this wires the selected Hermes profile to DKG memory, tools, and Node UI chat:
+> ```bash
+> npm install -g @origintrail-official/dkg
+> dkg init
+> dkg start
+> dkg hermes setup
+> ```
+> Then start Hermes with its API server enabled. See the [adapter guide](packages/adapter-hermes/README.md) for details.
 
 > **Cursor / Claude Code / other MCP clients:** Install the [`@origintrail-official/dkg-mcp`](packages/mcp-dkg/README.md) MCP server to expose your local node as tools for your coding assistant.
 
@@ -175,6 +182,7 @@ dkg auth status                          # show whether auth is enabled
 
 # Framework adapters
 dkg openclaw setup                       # install & configure the OpenClaw adapter
+dkg hermes setup                         # install & configure the Hermes adapter
 
 # Community integrations (registry: OriginTrail/dkg-integrations)
 dkg integration list [--tier community]  # default tier filter is `verified`+
@@ -216,6 +224,7 @@ Use adapters for OpenClaw, ElizaOS, Hermes, or your own Node.js / TypeScript pro
 |---|---|
 | [Join the Testnet](docs/setup/JOIN_TESTNET.md) | You want a full node setup and first publish/query flow |
 | [OpenClaw Setup](docs/setup/SETUP_OPENCLAW.md) | You want OpenClaw to use DKG as memory/tools |
+| [Hermes Setup](docs/setup/SETUP_HERMES.md) | You want Hermes Agent to use DKG as memory/tools |
 | [ElizaOS Setup](docs/setup/SETUP_ELIZAOS.md) | You want ElizaOS integration |
 | [Custom agent Setup](docs/setup/SETUP_CUSTOM.md) | You are wiring an agent framework not covered above |
 | [Testnet Faucet](docs/setup/TESTNET_FAUCET.md) | You need Base Sepolia ETH and TRAC |
@@ -363,7 +372,7 @@ This is a pnpm + Turborepo monorepo.
 ```text
 @origintrail-official/dkg-adapter-openclaw        OpenClaw gateway bridge
 @origintrail-official/dkg-adapter-elizaos         ElizaOS plugin (embedded DKGAgent)
-@origintrail-official/dkg-adapter-hermes          Hermes Agent (Python plugin + TS daemon adapter)
+@origintrail-official/dkg-adapter-hermes          Hermes Agent (Python memory provider + TypeScript setup/client helpers)
 @origintrail-official/dkg-adapter-autoresearch    AutoResearch integration
 ```
 
@@ -409,7 +418,7 @@ Clone the repo and use pnpm (v10+) with Node.js 22+ to work across all workspace
 
 ```bash
 pnpm install                                     # install all workspace deps
-pnpm build                                       # compile every package (Turborepo)
+pnpm build                                       # compile packages and the Node UI bundle
 pnpm test                                        # run the full test suite
 pnpm test:coverage                               # tests + tier-based coverage gates (all packages)
 pnpm --filter @origintrail-official/dkg test     # run tests for a single package
@@ -423,7 +432,7 @@ Tier-based thresholds (TORNADO / BURA / KOSAVA) and Solidity lcov checks are doc
 
 We welcome contributions — bug reports, feature ideas, and pull requests.
 
-- [Open an issue](https://github.com/OriginTrail/dkg-v9/issues) for bugs or feature requests
+- [Open an issue](https://github.com/OriginTrail/dkg/issues) for bugs or feature requests
 - **Build a DKG integration** — submit to the [integrations registry](https://github.com/OriginTrail/dkg-integrations) (see [CONTRIBUTING.md](https://github.com/OriginTrail/dkg-integrations/blob/main/CONTRIBUTING.md) and the [dkg-hello-world](https://github.com/OriginTrail/dkg-hello-world) template)
 - [Join Discord](https://discord.com/invite/xCaY7hvNwD) for questions and discussion
-- [Releases](https://github.com/OriginTrail/dkg-v9/releases)
+- [Releases](https://github.com/OriginTrail/dkg/releases)

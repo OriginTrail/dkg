@@ -1,5 +1,29 @@
 export { DkgNodePlugin } from './DkgNodePlugin.js';
 export { DkgDaemonClient, type DkgClientOptions } from './dkg-client.js';
+export {
+  DkgPublisherExtension,
+  DkgPublisherExtension as DkgPublisherFacade,
+  DkgPublisherExtension as GenericDkgPublisher,
+  DkgPublisherExtension as DkgPublisherAbstraction,
+  createDkgPublisherExtension,
+  createDkgPublisherExtension as createDkgPublisher,
+  escapeDkgRdfLiteral,
+  isDkgRdfTerm,
+  normalizeDkgPublisherObject,
+  normalizeDkgPublisherQuads,
+} from '@origintrail-official/dkg-core';
+export type {
+  DkgPublisherClient,
+  DkgPublisherQuad,
+  DkgPublisherQuadInput,
+  LocalWorkspaceCreateRequest,
+  LocalWorkspaceDiscardRequest,
+  LocalWorkspacePromoteRequest,
+  LocalWorkspaceWriteRequest,
+  SharedMemoryPublishRequest,
+  SharedMemoryWriteRequest,
+  VerifiedMemoryPublishRequest,
+} from '@origintrail-official/dkg-core';
 export { DkgChannelPlugin, CHANNEL_NAME } from './DkgChannelPlugin.js';
 export {
   mergeOpenClawConfig,

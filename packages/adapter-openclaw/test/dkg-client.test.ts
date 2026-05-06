@@ -199,7 +199,12 @@ describe('DkgDaemonClient', () => {
   // Workspace write
   // ---------------------------------------------------------------------------
 
-  it('share should POST quads to /api/shared-memory/write with localOnly defaulted to true', async () => {
+  it('share should POST quads to /api/shared-memory/write with localOnly defaulted to false', async () => {
+    // SWM gossips to peers in the context graph's allowlist by default —
+    // privacy is governed by the CG's curation policy, not by suppressing
+    // gossip. Aligned with Hermes adapter's default and the daemon's own
+    // default at packages/cli/src/daemon/routes/memory.ts:490
+    // (`const localOnly = parsed.localOnly === true`).
     fetchResponses.push(
       new Response(JSON.stringify({ shareOperationId: 'op-1' }), { status: 200 }),
     );
@@ -210,6 +215,18 @@ describe('DkgDaemonClient', () => {
     const body = JSON.parse(fetchCalls[0][1]?.body as string);
     expect(body.contextGraphId).toBe('research-x');
     expect(body.quads).toHaveLength(1);
+    expect(body.localOnly).toBe(false);
+  });
+
+  it('share should pass through localOnly:true when the caller explicitly opts in', async () => {
+    fetchResponses.push(
+      new Response(JSON.stringify({ shareOperationId: 'op-2' }), { status: 200 }),
+    );
+
+    const quads = [{ subject: 'urn:a', predicate: 'urn:b', object: '"hello"' }];
+    await client.share('research-x', quads, { localOnly: true });
+
+    const body = JSON.parse(fetchCalls[0][1]?.body as string);
     expect(body.localOnly).toBe(true);
   });
 
@@ -685,6 +702,57 @@ describe('DkgDaemonClient', () => {
     expect(body.id).toBe('my-research');
     expect(body.name).toBe('My Research');
     expect(body.description).toBe('A research context graph');
+    // No accessPolicy/allowedAgents passed when caller omits opts — the
+    // tool handler decides the default privacy-mode. The client itself
+    // is parameter-passing only.
+    expect(body.accessPolicy).toBeUndefined();
+    expect(body.allowedAgents).toBeUndefined();
+  });
+
+  it('createContextGraph should pass accessPolicy when caller provides it', async () => {
+    fetchResponses.push(
+      new Response(JSON.stringify({ created: 'curated', uri: 'did:dkg:context-graph:curated' }), { status: 200 }),
+    );
+
+    await client.createContextGraph('curated', 'Curated', undefined, { accessPolicy: 1 });
+
+    const body = JSON.parse(fetchCalls[0][1]?.body as string);
+    expect(body.accessPolicy).toBe(1);
+    expect(body.allowedAgents).toBeUndefined();
+  });
+
+  it('createContextGraph should pass allowedAgents when caller provides them', async () => {
+    fetchResponses.push(
+      new Response(JSON.stringify({ created: 'team', uri: 'did:dkg:context-graph:team' }), { status: 200 }),
+    );
+
+    await client.createContextGraph('team', 'Team CG', undefined, {
+      accessPolicy: 1,
+      allowedAgents: ['0xAlice', '0xBob'],
+    });
+
+    const body = JSON.parse(fetchCalls[0][1]?.body as string);
+    expect(body.accessPolicy).toBe(1);
+    expect(body.allowedAgents).toEqual(['0xAlice', '0xBob']);
+  });
+
+  it('createContextGraph should omit allowedAgents when array is empty', async () => {
+    fetchResponses.push(
+      new Response(JSON.stringify({ created: 'solo', uri: 'did:dkg:context-graph:solo' }), { status: 200 }),
+    );
+
+    await client.createContextGraph('solo', 'Solo', undefined, {
+      accessPolicy: 1,
+      allowedAgents: [],
+    });
+
+    const body = JSON.parse(fetchCalls[0][1]?.body as string);
+    expect(body.accessPolicy).toBe(1);
+    // Empty array is dropped — daemon distinguishes "no allowlist" from
+    // "empty allowlist". Sending [] would unhelpfully pin an empty
+    // allowlist when the agent's creator-auto-include logic should
+    // populate it.
+    expect(body.allowedAgents).toBeUndefined();
   });
 
   // ---------------------------------------------------------------------------

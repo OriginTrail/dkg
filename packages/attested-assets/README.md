@@ -2,7 +2,7 @@
 
 > **Experimental** — This package implements the Attested Knowledge Assets (AKA) protocol, which is under active development. APIs may change.
 
-Session-scoped, multi-party consensus protocol for DKG V9. Enables bounded groups of nodes to run deterministic state machines with cryptographic attestation and quorum-based finality.
+Session-scoped, multi-party consensus protocol for DKG V10. Enables bounded groups of nodes to run deterministic state machines with cryptographic attestation and quorum-based finality.
 
 ## What are Attested Knowledge Assets?
 

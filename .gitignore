@@ -7,6 +7,8 @@ dist-ui/
 coverage/
 test-results/
 playwright-report/
+bench/results/
+.esbench-tmp/
 .env
 .env.*
 .dkg/

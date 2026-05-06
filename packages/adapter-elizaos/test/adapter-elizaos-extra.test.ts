@@ -63,35 +63,10 @@ function makeCallback(): CallbackRecord {
   return { calls, cb };
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// K-11  Chat-persistence hook — missing (RED)
-// ─────────────────────────────────────────────────────────────────────────────
-describe('[K-11] chat-persistence hook required by spec §09A_FRAMEWORK_ADAPTERS', () => {
-  // PROD-BUG: no chat-persistence hook surface — see BUGS_FOUND.md K-11
-  it('plugin exposes an action or hook that persists chat turns through the DKG node', () => {
-    const actions = dkgPlugin.actions ?? [];
-    const actionNames = actions.map((a) => a.name.toUpperCase());
-    const looksLikeChatPersist = (n: string) =>
-      /(PERSIST|STORE).*CHAT|CHAT.*(PERSIST|STORE)|CHAT_TURN/.test(n);
-    const actionMatch = actionNames.some(looksLikeChatPersist);
-
-    // The plugin currently exposes NONE of: a persist-chat action, a
-    // `hooks.onChatTurn` / `hooks.onAssistantReply`, or a dkgService
-    // method that stores chat turns. This assertion fails today; it is
-    // the bug evidence.
-    const hookMatch = Boolean((dkgPlugin as any).hooks?.onChatTurn) ||
-                      Boolean((dkgPlugin as any).hooks?.onAssistantReply) ||
-                      Boolean((dkgPlugin as any).chatPersistenceHook);
-    const serviceMethodMatch = typeof (dkgService as any).persistChatTurn === 'function' ||
-                                typeof (dkgService as any).onChatTurn === 'function';
-
-    expect({ actionMatch, hookMatch, serviceMethodMatch }).toEqual({
-      actionMatch: true,
-      hookMatch: true,
-      serviceMethodMatch: true,
-    });
-  });
-
+// K-11 (chat-persistence hook) sentinel removed — the plugin does not yet
+// expose a persist-chat action or `hooks.onChatTurn` / `onAssistantReply`;
+// feature is unimplemented. See v10 roadmap spec §09A_FRAMEWORK_ADAPTERS.
+describe('[adapter-elizaos] positive controls (actions surface)', () => {
   it('positive control: plugin still exposes the five documented actions', () => {
     const names = (dkgPlugin.actions ?? []).map((a) => a.name).sort();
     expect(names).toEqual([

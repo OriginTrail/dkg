@@ -27,9 +27,11 @@ import {
   generateAssertionPublishedMetadata,
   generateAssertionDiscardedMetadata,
   toHex,
+  resolveUalByBatchId,
   updateMetaMerkleRoot,
   type KAMetadata,
 } from './metadata.js';
+import { storeWorkspaceOperationPublicQuads } from './workspace-resolution.js';
 import { ethers } from 'ethers';
 
 export { RESERVED_SUBJECT_PREFIXES, findReservedSubjectPrefix, isReservedSubject } from './reserved-subjects.js';
@@ -41,6 +43,8 @@ export interface DKGPublisherConfig {
   keypair: Ed25519Keypair;
   publisherNodeIdentityId?: bigint;
   publisherAddress?: string;
+  /** Retryable publisher address resolver for adapter-backed signing. */
+  publisherAddressResolver?: (contextGraphId?: bigint) => Promise<string | undefined>;
   /** EVM private key for signing publish requests (hex string with 0x prefix) */
   publisherPrivateKey?: string;
   /**
@@ -54,6 +58,58 @@ export interface DKGPublisherConfig {
   knownBatchContextGraphs?: Map<string, string>;
   /** Shared write lock map. Pass to SharedMemoryHandler so gossip writes serialize against CAS writes. */
   writeLocks?: Map<string, Promise<void>>;
+}
+
+interface PublisherAddressResolutionOptions {
+  includeReservingPublisherProbe?: boolean;
+  includeGenericSignMessageProbe?: boolean;
+}
+
+export class PublisherWalletRequiredError extends Error {
+  constructor(operation: string) {
+    super(
+      `${operation} requires "publisherPrivateKey" or a non-zero "publisherAddress" ` +
+      'backed by ChainAdapter.signMessageAs()/signMessage(). Publishing without a publisher signing key ' +
+      'would produce unattributable or unverifiable publisher output.',
+    );
+    this.name = 'PublisherWalletRequiredError';
+  }
+}
+
+function normalizePublisherAddress(address: string | undefined): string | undefined {
+  if (address === undefined) return undefined;
+  if (!ethers.isAddress(address)) {
+    throw new Error(`Invalid publisherAddress: "${address}" is not a valid EVM address`);
+  }
+  const normalized = ethers.getAddress(address);
+  if (normalized === ethers.ZeroAddress) {
+    throw new Error('Invalid publisherAddress: zero address is not a valid publisher');
+  }
+  return normalized;
+}
+
+function coercePublisherAddress(value: unknown): string | undefined {
+  if (typeof value !== 'string' || !ethers.isAddress(value)) return undefined;
+  const normalized = ethers.getAddress(value);
+  return normalized === ethers.ZeroAddress ? undefined : normalized;
+}
+
+function publisherAddressFromUal(ual: string | undefined): string | undefined {
+  const prefix = 'did:dkg:';
+  if (!ual?.startsWith(prefix)) return undefined;
+  const segments = ual.slice(prefix.length).split('/');
+  return coercePublisherAddress(segments[1]);
+}
+
+function recoverCompactMessageSigner(
+  message: Uint8Array,
+  signature: { r: Uint8Array; vs: Uint8Array },
+): string {
+  const serialized = ethers.Signature.from({
+    r: ethers.hexlify(signature.r),
+    yParityAndS: ethers.hexlify(signature.vs),
+  }).serialized;
+  return ethers.verifyMessage(message, serialized);
 }
 
 export interface ShareOptions {
@@ -177,6 +233,12 @@ type InternalPublishOptions = PublishOptions & {
   [INTERNAL_ORIGIN_TOKEN]?: true;
 };
 
+interface PublisherSigner {
+  address: string;
+  source: 'publisherPrivateKey' | 'chainAdapter';
+  signMessage(message: Uint8Array): Promise<string>;
+}
+
 function isInternalOrigin(options: PublishOptions): boolean {
   return (options as InternalPublishOptions)[INTERNAL_ORIGIN_TOKEN] === true;
 }
@@ -223,8 +285,11 @@ export class DKGPublisher implements Publisher {
   private readonly sharedMemoryOwnedEntities: Map<string, Map<string, string>>;
   readonly knownBatchContextGraphs: Map<string, string>;
   private publisherNodeIdentityId: bigint;
-  private readonly publisherAddress: string;
+  private readonly publisherAddress?: string;
+  private readonly publisherAddressResolver?: (contextGraphId?: bigint) => Promise<string | undefined>;
   private readonly publisherWallet?: ethers.Wallet;
+  private adapterSignMessagePublisherAddress?: string;
+  private readonly adapterSignMessageProbeCache = new Map<string, boolean>();
   /** Additional wallets that can provide receiver signatures. */
   private readonly additionalSignerWallets: ethers.Wallet[] = [];
   private readonly log = new Logger('DKGPublisher');
@@ -238,16 +303,38 @@ export class DKGPublisher implements Publisher {
     this.eventBus = config.eventBus;
     this.keypair = config.keypair;
     this.publisherNodeIdentityId = config.publisherNodeIdentityId ?? 0n;
+    this.publisherAddressResolver = config.publisherAddressResolver;
 
+    const configuredPublisherAddress = normalizePublisherAddress(config.publisherAddress);
     if (config.publisherPrivateKey) {
       this.publisherWallet = new ethers.Wallet(config.publisherPrivateKey);
       this.publisherAddress = this.publisherWallet.address;
-    } else {
-      this.publisherAddress = config.publisherAddress ?? '0x' + '0'.repeat(40);
-      if (config.chain.chainId !== 'none') {
-        const random = ethers.Wallet.createRandom();
-        this.publisherWallet = new ethers.Wallet(random.privateKey);
+      if (
+        configuredPublisherAddress &&
+        configuredPublisherAddress.toLowerCase() !== this.publisherAddress.toLowerCase()
+      ) {
+        throw new Error(
+          `publisherAddress (${configuredPublisherAddress}) does not match publisherPrivateKey signer ` +
+          `(${this.publisherAddress})`,
+        );
       }
+    } else {
+      // No private key supplied means no in-process publisher signing
+      // capability. Keep an optional, validated address only for callers
+      // that route signing through their ChainAdapter (e.g. adapter-backed
+      // or hardware-signer deployments). Chain-backed publish still fails
+      // unless that address is backed by ChainAdapter.signMessageAs() or
+      // signMessage(); update can let the adapter select its signer from the
+      // configured signer pool.
+      //
+      // The previous behaviour generated an ephemeral `Wallet.createRandom()`
+      // here whenever chain was enabled, which produced unverifiable
+      // signatures attributed to a throw-away address. We also must not use
+      // `0x000...000` as a sentinel: it looks like an on-chain publisher and
+      // can leak into UALs/metadata. See PR #371 for
+      // the testnet-blocking incident chain (`ensureProfile` had the same
+      // anti-pattern, fixed in PR #366).
+      this.publisherAddress = configuredPublisherAddress;
     }
 
     for (const key of config.additionalSignerKeys ?? []) {
@@ -259,6 +346,243 @@ export class DKGPublisher implements Publisher {
     this.sharedMemoryOwnedEntities = config.sharedMemoryOwnedEntities ?? new Map();
     this.knownBatchContextGraphs = config.knownBatchContextGraphs ?? new Map();
     this.writeLocks = config.writeLocks ?? new Map();
+  }
+
+  private async resolvePublisherAddress(
+    contextGraphId?: bigint,
+    options: PublisherAddressResolutionOptions = {},
+  ): Promise<string | undefined> {
+    if (this.publisherAddress) return this.publisherAddress;
+    if (this.publisherAddressResolver) {
+      const resolved = normalizePublisherAddress(await this.publisherAddressResolver(contextGraphId));
+      if (resolved) return resolved;
+    }
+    return this.inferAdapterPublisherAddress(contextGraphId, options);
+  }
+
+  private async inferAdapterPublisherAddress(
+    contextGraphId?: bigint,
+    options: PublisherAddressResolutionOptions = {},
+  ): Promise<string | undefined> {
+    if (
+      options.includeReservingPublisherProbe !== false &&
+      contextGraphId !== undefined &&
+      typeof this.chain.getAuthorizedPublisherAddress === 'function'
+    ) {
+      try {
+        const address = coercePublisherAddress(await this.chain.getAuthorizedPublisherAddress(contextGraphId));
+        if (address) return address;
+      } catch {
+        // Best-effort inference; the publish path will fail clearly if no signer resolves.
+      }
+    }
+
+    const signerAddressGetter = (this.chain as unknown as { getSignerAddress?: () => unknown }).getSignerAddress;
+    if (typeof signerAddressGetter === 'function') {
+      try {
+        const address = coercePublisherAddress(
+          await Promise.resolve(signerAddressGetter.call(this.chain)),
+        );
+        if (address) return address;
+      } catch {
+        // Fall through to other common adapter surfaces.
+      }
+    }
+
+    const signerAddressesGetter = (this.chain as unknown as { getSignerAddresses?: () => unknown }).getSignerAddresses;
+    if (typeof signerAddressesGetter === 'function') {
+      try {
+        const advertised = await Promise.resolve(signerAddressesGetter.call(this.chain));
+        if (Array.isArray(advertised)) {
+          for (const value of advertised) {
+            const address = coercePublisherAddress(value);
+            if (address) return address;
+          }
+        }
+      } catch {
+        // Fall through to legacy adapter surfaces.
+      }
+    }
+
+    const signerAddress = coercePublisherAddress(
+      (this.chain as unknown as { signerAddress?: unknown }).signerAddress,
+    );
+    if (signerAddress) return signerAddress;
+
+    const operationalWallet = this.getAdapterOperationalWallet();
+    if (operationalWallet) return operationalWallet.address;
+
+    if (this.adapterSignMessagePublisherAddress) return this.adapterSignMessagePublisherAddress;
+    if (options.includeGenericSignMessageProbe === false) return undefined;
+    if (this.chain.chainId === 'none' || typeof this.chain.signMessage !== 'function') return undefined;
+
+    try {
+      const challenge = ethers.getBytes(ethers.id('dkg-publisher:publisher-address-probe'));
+      const compact = await this.chain.signMessage(challenge);
+      const address = coercePublisherAddress(recoverCompactMessageSigner(challenge, compact));
+      if (address) {
+        this.adapterSignMessagePublisherAddress = address;
+        this.adapterSignMessageProbeCache.set(address.toLowerCase(), true);
+      }
+      return address;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private getAdapterOperationalWallet(): ethers.Wallet | undefined {
+    const operationalKeyGetter = (this.chain as unknown as { getOperationalPrivateKey?: () => unknown })
+      .getOperationalPrivateKey;
+    if (typeof operationalKeyGetter !== 'function') return undefined;
+
+    try {
+      const privateKey = operationalKeyGetter.call(this.chain);
+      return typeof privateKey === 'string' && privateKey.length > 0
+        ? new ethers.Wallet(privateKey)
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  // Local-only tentative publishes need a stable, non-zero UAL component even
+  // when no EVM publisher key exists. This is not used for signatures.
+  private localTentativePublisherAddress(): string {
+    const digest = ethers.keccak256(this.keypair.publicKey);
+    const address = ethers.getAddress(ethers.dataSlice(digest, 12));
+    return address === ethers.ZeroAddress ? '0x0000000000000000000000000000000000000001' : address;
+  }
+
+  private isChainV10Ready(): boolean {
+    return this.chain.chainId !== 'none' &&
+      typeof this.chain.isV10Ready === 'function' &&
+      this.chain.isV10Ready();
+  }
+
+  private async refreshChainV10Readiness(): Promise<boolean> {
+    if (this.isChainV10Ready()) return true;
+    if (this.chain.chainId === 'none') return false;
+    try {
+      const chainIdGetter = (this.chain as unknown as { getEvmChainId?: () => Promise<bigint> }).getEvmChainId;
+      const kavAddressGetter = (this.chain as unknown as { getKnowledgeAssetsV10Address?: () => Promise<string> })
+        .getKnowledgeAssetsV10Address;
+      if (typeof chainIdGetter === 'function') await chainIdGetter.call(this.chain);
+      if (typeof kavAddressGetter === 'function') await kavAddressGetter.call(this.chain);
+    } catch {
+      // V9-only or incompletely configured adapters stay off the V10 path.
+    }
+    return this.isChainV10Ready();
+  }
+
+  private async resolveKnownBatchPublisherAddress(
+    contextGraphId: string,
+    kcId: bigint,
+    metaGraphUri = this.graphManager.metaGraphUri(contextGraphId),
+  ): Promise<string | undefined> {
+    try {
+      const ual = await resolveUalByBatchId(
+        this.store,
+        metaGraphUri,
+        kcId,
+      );
+      return publisherAddressFromUal(ual);
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async adapterSignMessageMatchesAddress(expectedAddress: string): Promise<boolean> {
+    if (typeof this.chain.signMessage !== 'function') return false;
+
+    const cacheKey = expectedAddress.toLowerCase();
+    const cached = this.adapterSignMessageProbeCache.get(cacheKey);
+    if (cached !== undefined) return cached;
+
+    const challenge = ethers.getBytes(ethers.id(`dkg-publisher:chain-signer-probe:${cacheKey}`));
+    try {
+      const compact = await this.chain.signMessage(challenge);
+      const recovered = recoverCompactMessageSigner(challenge, compact);
+      const matches = recovered.toLowerCase() === cacheKey;
+      this.adapterSignMessageProbeCache.set(cacheKey, matches);
+      if (matches) this.adapterSignMessagePublisherAddress = expectedAddress;
+      return matches;
+    } catch {
+      return false;
+    }
+  }
+
+  private async getPublisherSigner(address = this.publisherAddress): Promise<PublisherSigner | undefined> {
+    if (this.publisherWallet && this.publisherAddress) {
+      const wallet = this.publisherWallet;
+      return {
+        address: this.publisherAddress,
+        source: 'publisherPrivateKey',
+        signMessage: (message: Uint8Array) => wallet.signMessage(message),
+      };
+    }
+
+    if (address && typeof this.chain.signMessageAs === 'function') {
+      const expectedAddress = address;
+      return {
+        address: expectedAddress,
+        source: 'chainAdapter',
+        signMessage: async (message: Uint8Array) => {
+          const compact = await this.chain.signMessageAs!(expectedAddress, message);
+          const signature = ethers.Signature.from({
+            r: ethers.hexlify(compact.r),
+            yParityAndS: ethers.hexlify(compact.vs),
+          }).serialized;
+          const recovered = ethers.verifyMessage(message, signature);
+          if (recovered.toLowerCase() !== expectedAddress.toLowerCase()) {
+            throw new Error(
+              `publisherAddress (${expectedAddress}) does not match ChainAdapter.signMessage signer ` +
+              `(${recovered})`,
+            );
+          }
+          return signature;
+        },
+      };
+    }
+
+    if (address && typeof this.chain.signMessage === 'function') {
+      const expectedAddress = address;
+      if (!(await this.adapterSignMessageMatchesAddress(expectedAddress))) return undefined;
+      return {
+        address: expectedAddress,
+        source: 'chainAdapter',
+        signMessage: async (message: Uint8Array) => {
+          const compact = await this.chain.signMessage!(message);
+          const signature = ethers.Signature.from({
+            r: ethers.hexlify(compact.r),
+            yParityAndS: ethers.hexlify(compact.vs),
+          }).serialized;
+          const recovered = ethers.verifyMessage(message, signature);
+          if (recovered.toLowerCase() !== expectedAddress.toLowerCase()) {
+            this.adapterSignMessageProbeCache.set(expectedAddress.toLowerCase(), false);
+            throw new Error(
+              `publisherAddress (${expectedAddress}) does not match ChainAdapter.signMessage signer ` +
+              `(${recovered})`,
+            );
+          }
+          return signature;
+        },
+      };
+    }
+
+    const operationalWallet = this.getAdapterOperationalWallet();
+    if (
+      address &&
+      operationalWallet &&
+      operationalWallet.address.toLowerCase() === address.toLowerCase()
+    ) {
+      return {
+        address: operationalWallet.address,
+        source: 'chainAdapter',
+        signMessage: (message: Uint8Array) => operationalWallet.signMessage(message),
+      };
+    }
+
+    return undefined;
   }
 
   private async withWriteLocks<T>(keys: string[], fn: () => Promise<T>): Promise<T> {
@@ -442,6 +766,16 @@ export class DKGPublisher implements Publisher {
       swmMetaGraph,
     );
     await this.store.insert(metaQuads);
+    await storeWorkspaceOperationPublicQuads({
+      store: this.store,
+      graphManager: this.graphManager,
+      contextGraphId,
+      shareOperationId,
+      rootEntities,
+      quads: normalized,
+      publisherPeerId: options.publisherPeerId,
+      subGraphName: options.subGraphName,
+    });
 
     if (!this.sharedMemoryOwnedEntities.has(ownershipKey)) {
       this.sharedMemoryOwnedEntities.set(ownershipKey, new Map());
@@ -973,6 +1307,29 @@ export class DKGPublisher implements Publisher {
     const effectiveAccessPolicy = accessPolicy ?? (privateQuads.length > 0 ? 'ownerOnly' : 'public');
     const normalizedAllowedPeers = [...new Set((allowedPeers ?? []).map((p) => p.trim()).filter(Boolean))];
     const normalizedPublisherPeerId = publisherPeerId.trim();
+    let publisherContextGraphId: bigint | undefined;
+    try {
+      const parsed = BigInt(options.publishContextGraphId ?? contextGraphId);
+      if (parsed > 0n) publisherContextGraphId = parsed;
+    } catch {
+      // Descriptive SWM graph names stay on the existing tentative/mock path.
+    }
+    const willAttemptOnChainPublish = this.publisherNodeIdentityId > 0n && publisherContextGraphId !== undefined;
+    const chainV10Ready = await this.refreshChainV10Readiness();
+    const canResolveOnChainPublisher = willAttemptOnChainPublish && chainV10Ready;
+    const resolvedPublisherAddress = canResolveOnChainPublisher
+      ? await this.resolvePublisherAddress(publisherContextGraphId)
+      : await this.resolvePublisherAddress(undefined, {
+        includeReservingPublisherProbe: false,
+        includeGenericSignMessageProbe: false,
+      });
+    const publisherSigner = canResolveOnChainPublisher
+      ? await this.getPublisherSigner(resolvedPublisherAddress)
+      : undefined;
+    const publisherAddress = resolvedPublisherAddress ?? this.localTentativePublisherAddress();
+    const canAttemptOnChainPublish = willAttemptOnChainPublish &&
+      chainV10Ready &&
+      publisherSigner !== undefined;
 
     if (effectiveAccessPolicy !== 'public' && normalizedPublisherPeerId.length === 0) {
       throw new Error(
@@ -985,6 +1342,10 @@ export class DKGPublisher implements Publisher {
     }
     if (effectiveAccessPolicy !== 'allowList' && normalizedAllowedPeers.length > 0) {
       throw new Error('Publish rejected: "allowedPeers" is only valid when accessPolicy is "allowList"');
+    }
+
+    if (willAttemptOnChainPublish && chainV10Ready && !publisherSigner) {
+      throw new PublisherWalletRequiredError('publish');
     }
 
     onPhase?.('prepare', 'start');
@@ -1106,11 +1467,19 @@ export class DKGPublisher implements Publisher {
     // `KnowledgeAssetsV10._executePublishCore`.
     const publishEpochs = 1;
     let precomputedTokenAmount = 0n;
-    if (this.publisherWallet && typeof this.chain.getRequiredPublishTokenAmount === 'function') {
-      precomputedTokenAmount = await this.chain.getRequiredPublishTokenAmount(publicByteSize, publishEpochs);
-      if (precomputedTokenAmount <= 0n) {
-        this.log.warn(ctx, `getRequiredPublishTokenAmount returned ${precomputedTokenAmount} for byteSize=${publicByteSize} — using 1n as minimum`);
-        precomputedTokenAmount = 1n;
+    if (canAttemptOnChainPublish && typeof this.chain.getRequiredPublishTokenAmount === 'function') {
+      try {
+        precomputedTokenAmount = await this.chain.getRequiredPublishTokenAmount(publicByteSize, publishEpochs);
+        if (precomputedTokenAmount <= 0n) {
+          this.log.warn(ctx, `getRequiredPublishTokenAmount returned ${precomputedTokenAmount} for byteSize=${publicByteSize} — using 1n as minimum`);
+          precomputedTokenAmount = 1n;
+        }
+      } catch (err) {
+        this.log.warn(
+          ctx,
+          `getRequiredPublishTokenAmount failed — publish will fall back to tentative if on-chain submit cannot proceed: ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+        );
       }
     }
 
@@ -1228,33 +1597,44 @@ export class DKGPublisher implements Publisher {
     // the contract is the ultimate gatekeeper.
     if (
       (!v10ACKs || v10ACKs.length === 0) &&
-      this.publisherWallet &&
       this.publisherNodeIdentityId > 0n &&
       v10ChainId !== undefined &&
       v10KavAddress !== undefined
     ) {
-      const reason = !options.v10ACKProvider ? 'no v10ACKProvider (single-node mode)' : 'ACK collection failed/skipped';
-      this.log.info(ctx, `Self-signing ACK — ${reason}`);
-      const ackDigest = computePublishACKDigest(
-        v10ChainId,
-        v10KavAddress,
-        v10CgId,
-        kcMerkleRoot,
-        BigInt(kaCount),
-        publicByteSize,
-        BigInt(publishEpochs),
-        precomputedTokenAmount,
-        BigInt(kcMerkleLeafCount),
-      );
-      const ackSig = ethers.Signature.from(
-        await this.publisherWallet.signMessage(ackDigest),
-      );
-      v10ACKs = [{
-        peerId: 'self',
-        signatureR: ethers.getBytes(ackSig.r),
-        signatureVS: ethers.getBytes(ackSig.yParityAndS),
-        nodeIdentityId: this.publisherNodeIdentityId,
-      }];
+      if (publisherSigner) {
+        const reason = !options.v10ACKProvider ? 'no v10ACKProvider (single-node mode)' : 'ACK collection failed/skipped';
+        this.log.info(ctx, `Self-signing ACK — ${reason}`);
+        const ackDigest = computePublishACKDigest(
+          v10ChainId,
+          v10KavAddress,
+          v10CgId,
+          kcMerkleRoot,
+          BigInt(kaCount),
+          publicByteSize,
+          BigInt(publishEpochs),
+          precomputedTokenAmount,
+          BigInt(kcMerkleLeafCount),
+        );
+        try {
+          const ackSig = ethers.Signature.from(
+            await publisherSigner.signMessage(ackDigest),
+          );
+          v10ACKs = [{
+            peerId: 'self',
+            signatureR: ethers.getBytes(ackSig.r),
+            signatureVS: ethers.getBytes(ackSig.yParityAndS),
+            nodeIdentityId: this.publisherNodeIdentityId,
+          }];
+        } catch (err) {
+          this.log.warn(
+            ctx,
+            `Self-sign ACK skipped: publisher signer failed (${err instanceof Error ? err.message : String(err)})`,
+          );
+          v10ACKs = [];
+        }
+      } else {
+        this.log.warn(ctx, 'Self-sign ACK skipped: publisher signing key is unavailable');
+      }
     }
 
     onPhase?.('chain', 'start');
@@ -1262,26 +1642,37 @@ export class DKGPublisher implements Publisher {
     let onChainResult: OnChainPublishResult | undefined;
     let status: 'tentative' | 'confirmed' = 'tentative';
     const tentativeSeq = ++this.tentativeCounter;
-    let ual = `did:dkg:${this.chain.chainId}/${this.publisherAddress}/t${this.sessionId}-${tentativeSeq}`;
+    let ual = `did:dkg:${this.chain.chainId}/${publisherAddress}/t${this.sessionId}-${tentativeSeq}`;
 
     const identityId = this.publisherNodeIdentityId;
     let usedV10Path = false;
 
-    if (!this.publisherWallet) {
-      this.log.warn(ctx, `No EVM wallet configured — skipping on-chain publish`);
-    } else if (identityId === 0n) {
+    if (identityId === 0n) {
       this.log.warn(ctx, `Identity not set (0) — skipping on-chain publish`);
+    } else if (publisherContextGraphId === undefined) {
+      this.log.warn(ctx, `No positive on-chain context graph id resolved from "${v10CgDomain}" — skipping on-chain publish`);
+    } else if (!chainV10Ready) {
+      this.log.warn(ctx, 'Chain adapter is not V10-ready — skipping on-chain publish');
     } else {
-      onPhase?.('chain:sign', 'start');
-      this.log.info(ctx, `Signing on-chain publish (identityId=${identityId}, signer=${this.publisherWallet.address})`);
-
       const tokenAmount = precomputedTokenAmount;
       usedV10Path = true;
-
-      onPhase?.('chain:sign', 'end');
-      onPhase?.('chain:submit', 'start');
-      this.log.info(ctx, `Submitting V10 on-chain publish tx (${kaCount} KAs, publicByteSize=${publicByteSize}, tokenAmount=${tokenAmount})`);
+      let signStarted = false;
+      let submitStarted = false;
       try {
+        onPhase?.('chain:sign', 'start');
+        signStarted = true;
+        if (!publisherSigner) throw new PublisherWalletRequiredError('publish');
+        this.log.info(
+          ctx,
+          `Signing on-chain publish (identityId=${identityId}, signer=${publisherSigner.address}, source=${publisherSigner.source})`,
+        );
+
+        onPhase?.('chain:sign', 'end');
+        signStarted = false;
+        onPhase?.('chain:submit', 'start');
+        submitStarted = true;
+        this.log.info(ctx, `Submitting V10 on-chain publish tx (${kaCount} KAs, publicByteSize=${publicByteSize}, tokenAmount=${tokenAmount})`);
+
         if (!v10ACKs || v10ACKs.length === 0) {
           throw new Error('V10 ACKs required for on-chain publish — no ACKs collected');
         }
@@ -1311,7 +1702,7 @@ export class DKGPublisher implements Publisher {
           kcMerkleRoot,
         );
         const pubSig = ethers.Signature.from(
-          await this.publisherWallet.signMessage(pubMsgHash),
+          await publisherSigner.signMessage(pubMsgHash),
         );
         // P-1 review (iter-2): `chain:writeahead:start` now fires
         // *from inside* the adapter via the `onBroadcast` callback,
@@ -1372,6 +1763,7 @@ export class DKGPublisher implements Publisher {
           onChainResult = await this.chain.createKnowledgeAssetsV10!({
             publishOperationId: `${this.sessionId}-${tentativeSeq}`,
             contextGraphId: v10CgId,
+            publisherAddress: publisherSigner.address,
             merkleRoot: kcMerkleRoot,
             knowledgeAssetsAmount: kaCount,
             byteSize: publicByteSize,
@@ -1435,38 +1827,38 @@ export class DKGPublisher implements Publisher {
         await this.store.insert(confirmedQuads);
 
         // Agent authorship proof (spec §9.0.6): sign keccak256(merkleRoot) and store in _meta
-        if (this.publisherWallet) {
-          try {
-            const merkleHashBytes = ethers.keccak256(kcMerkleRoot);
-            const sig = await this.publisherWallet.signMessage(ethers.getBytes(merkleHashBytes));
-            const proofQuads = generateAuthorshipProof({
-              kcUal: ual,
-              contextGraphId,
-              agentAddress: this.publisherWallet.address,
-              signature: sig,
-              signedHash: merkleHashBytes,
-            });
-            if (options.targetMetaGraphUri) {
-              const defaultMeta = `did:dkg:context-graph:${contextGraphId}/_meta`;
-              const remapped = proofQuads.map((q) =>
-                q.graph === defaultMeta ? { ...q, graph: options.targetMetaGraphUri! } : q,
-              );
-              await this.store.insert(remapped);
-            } else {
-              await this.store.insert(proofQuads);
-            }
-            this.log.info(ctx, `Authorship proof stored for agent ${this.publisherWallet.address}`);
-          } catch (proofErr) {
-            this.log.warn(ctx, `Failed to generate authorship proof: ${proofErr instanceof Error ? proofErr.message : String(proofErr)}`);
+        try {
+          const merkleHashBytes = ethers.keccak256(kcMerkleRoot);
+          const sig = await publisherSigner.signMessage(ethers.getBytes(merkleHashBytes));
+          const proofQuads = generateAuthorshipProof({
+            kcUal: ual,
+            contextGraphId,
+            agentAddress: publisherSigner.address,
+            signature: sig,
+            signedHash: merkleHashBytes,
+          });
+          if (options.targetMetaGraphUri) {
+            const defaultMeta = `did:dkg:context-graph:${contextGraphId}/_meta`;
+            const remapped = proofQuads.map((q) =>
+              q.graph === defaultMeta ? { ...q, graph: options.targetMetaGraphUri! } : q,
+            );
+            await this.store.insert(remapped);
+          } else {
+            await this.store.insert(proofQuads);
           }
+          this.log.info(ctx, `Authorship proof stored for agent ${publisherSigner.address}`);
+        } catch (proofErr) {
+          this.log.warn(ctx, `Failed to generate authorship proof: ${proofErr instanceof Error ? proofErr.message : String(proofErr)}`);
         }
 
         status = 'confirmed';
         onPhase?.('chain:submit', 'end');
+        submitStarted = false;
         onPhase?.('chain:metadata', 'start');
         this.log.info(ctx, `On-chain confirmed: UAL=${ual} batchId=${onChainResult.batchId} tx=${onChainResult.txHash}`);
       } catch (err) {
-        onPhase?.('chain:submit', 'end');
+        if (signStarted) onPhase?.('chain:sign', 'end');
+        if (submitStarted) onPhase?.('chain:submit', 'end');
         this.log.warn(ctx, `On-chain tx failed: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
@@ -1553,6 +1945,43 @@ export class DKGPublisher implements Publisher {
       if (privateQuads.length > 0) rejectReservedSubjectPrefixes(privateQuads);
     }
     const ctx: OperationContext = operationCtx ?? createOperationContext('publish');
+    let publisherContextGraphId: bigint | undefined;
+    try {
+      const parsed = BigInt(options.publishContextGraphId ?? contextGraphId);
+      if (parsed > 0n) publisherContextGraphId = parsed;
+    } catch {
+      // Descriptive SWM graph names are valid local/mock update scopes.
+    }
+    const localOnlyUpdate = this.chain.chainId === 'none';
+    let resolvedPublisherAddress: string | undefined;
+    if (localOnlyUpdate) {
+      resolvedPublisherAddress = this.publisherAddress;
+    } else if (typeof this.chain.getLatestMerkleRootPublisher === 'function') {
+      try {
+        resolvedPublisherAddress = coercePublisherAddress(
+          await this.chain.getLatestMerkleRootPublisher(kcId),
+        );
+      } catch {
+        // Adapter-managed updates can still let the adapter resolve the
+        // original publisher while submitting the transaction.
+      }
+    }
+    if (!resolvedPublisherAddress && !localOnlyUpdate) {
+      resolvedPublisherAddress = await this.resolveKnownBatchPublisherAddress(
+        contextGraphId,
+        kcId,
+        options.targetMetaGraphUri,
+      );
+    }
+    if (!resolvedPublisherAddress && !localOnlyUpdate) {
+      resolvedPublisherAddress = await this.resolvePublisherAddress(undefined, {
+        includeReservingPublisherProbe: false,
+        includeGenericSignMessageProbe: false,
+      });
+    }
+    const publisherAddress = resolvedPublisherAddress ?? (
+      localOnlyUpdate ? this.localTentativePublisherAddress() : undefined
+    );
     this.log.info(ctx, `Updating kcId=${kcId} with ${quads.length} triples`);
     const dataGraph = this.graphManager.dataGraphUri(contextGraphId);
 
@@ -1595,6 +2024,48 @@ export class DKGPublisher implements Publisher {
     onPhase?.('prepare:merkle', 'end');
     onPhase?.('prepare', 'end');
 
+    const storeUpdatedQuads = async (): Promise<void> => {
+      onPhase?.('store', 'start');
+      for (const [rootEntity, publicQuads] of kaMap) {
+        await this.store.deleteByPattern({ graph: dataGraph, subject: rootEntity });
+        await this.store.deleteBySubjectPrefix(dataGraph, rootEntity + '/.well-known/genid/');
+        await this.privateStore.deletePrivateTriples(contextGraphId, rootEntity, options.subGraphName);
+
+        const normalized = publicQuads.map((q) => ({ ...q, graph: dataGraph }));
+        await this.store.insert(normalized);
+
+        const entityPrivateQuads = entityPrivateMap.get(rootEntity) ?? [];
+        if (entityPrivateQuads.length > 0) {
+          await this.privateStore.storePrivateTriples(contextGraphId, rootEntity, entityPrivateQuads, options.subGraphName);
+        }
+      }
+
+      try {
+        await updateMetaMerkleRoot(this.store, this.graphManager, contextGraphId, kcId, kcMerkleRoot);
+      } catch (err) {
+        this.log.warn(
+          ctx,
+          `Failed to sync _meta merkleRoot for kcId=${kcId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+      onPhase?.('store', 'end');
+    };
+
+    if (localOnlyUpdate) {
+      this.log.warn(ctx, 'No chain configured — applying update locally and returning tentative result');
+      await storeUpdatedQuads();
+      const result: PublishResult = {
+        kcId,
+        ual: `did:dkg:${this.chain.chainId}/${publisherAddress}/${kcId}`,
+        merkleRoot: kcMerkleRoot,
+        kaManifest: manifestEntries,
+        status: 'tentative',
+        publicQuads: allSkolemizedQuads,
+      };
+      this.eventBus.emit(DKGEvent.KA_UPDATED, result);
+      return result;
+    }
+
     onPhase?.('chain', 'start');
     onPhase?.('chain:submit', 'start');
 
@@ -1620,7 +2091,7 @@ export class DKGPublisher implements Publisher {
     // the hook — it retains the coarse phase boundary that brackets
     // the whole adapter call. See the equivalent marker in the
     // publish path above for the full rationale.
-    let txResult: { success: boolean; hash: string; blockNumber?: number };
+    let txResult: { success: boolean; hash: string; blockNumber?: number; publisherAddress?: string };
     let earlyReturn: PublishResult | undefined;
     let wroteAhead = false;
     const emitWriteAheadStart = (info?: { txHash?: string }) => {
@@ -1646,7 +2117,7 @@ export class DKGPublisher implements Publisher {
             newByteSize: updateByteSize,
             newMerkleLeafCount: kcMerkleLeafCount,
             mintAmount: 0,
-            publisherAddress: this.publisherAddress,
+            publisherAddress,
             v10Origin: true,
             onBroadcast: emitWriteAheadStart,
           });
@@ -1658,9 +2129,11 @@ export class DKGPublisher implements Publisher {
           ];
           if (errorName && V10_DEFINITIVE_ERRORS.includes(errorName)) {
             this.log.warn(ctx, `V10 update rejected (${errorName}): ${v10Err instanceof Error ? v10Err.message : String(v10Err)}`);
+            const rejectedPublisherAddress = publisherAddress ?? this.publisherAddress;
+            if (!rejectedPublisherAddress) throw v10Err;
             earlyReturn = {
               kcId,
-              ual: `did:dkg:${this.chain.chainId}/${this.publisherAddress}/${kcId}`,
+              ual: `did:dkg:${this.chain.chainId}/${rejectedPublisherAddress}/${kcId}`,
               merkleRoot: kcMerkleRoot,
               kaManifest: manifestEntries,
               status: 'failed',
@@ -1686,7 +2159,7 @@ export class DKGPublisher implements Publisher {
                 batchId: kcId,
                 newMerkleRoot: kcMerkleRoot,
                 newPublicByteSize: updateByteSize,
-                publisherAddress: this.publisherAddress,
+                publisherAddress,
               });
             } catch (v9Err) {
               enrichEvmError(v9Err);
@@ -1704,7 +2177,7 @@ export class DKGPublisher implements Publisher {
           batchId: kcId,
           newMerkleRoot: kcMerkleRoot,
           newPublicByteSize: updateByteSize,
-          publisherAddress: this.publisherAddress,
+          publisherAddress,
         });
       } else {
         throw new Error('Chain adapter does not support updates (no V10 or V9 update method available)');
@@ -1720,48 +2193,82 @@ export class DKGPublisher implements Publisher {
     }
 
     if (!txResult.success) {
+      let failedPublisherAddress = coercePublisherAddress(txResult.publisherAddress) ??
+        publisherAddress;
+      if (!failedPublisherAddress && typeof this.chain.getLatestMerkleRootPublisher === 'function') {
+        try {
+          failedPublisherAddress = coercePublisherAddress(
+            await this.chain.getLatestMerkleRootPublisher(kcId),
+          );
+        } catch {
+          // Fall through to the clear fail-loud path below.
+        }
+      }
+      failedPublisherAddress ??= await this.resolveKnownBatchPublisherAddress(
+        contextGraphId,
+        kcId,
+        options.targetMetaGraphUri,
+      );
+      if (!failedPublisherAddress) {
+        failedPublisherAddress = this.localTentativePublisherAddress();
+        this.log.warn(
+          ctx,
+          'Chain adapter returned a failed update without publisherAddress, and neither ' +
+          'chain state nor local metadata resolved the publisher. Returning the failed ' +
+          'update status with a local tentative UAL placeholder.',
+        );
+      }
       onPhase?.('chain:submit', 'end');
       onPhase?.('chain', 'end');
       return {
         kcId,
-        ual: `did:dkg:${this.chain.chainId}/${this.publisherAddress}/${kcId}`,
+        ual: `did:dkg:${this.chain.chainId}/${failedPublisherAddress}/${kcId}`,
         merkleRoot: kcMerkleRoot,
         kaManifest: manifestEntries,
         status: 'failed',
         publicQuads: allSkolemizedQuads,
       };
     }
-    onPhase?.('chain:submit', 'end');
-    onPhase?.('chain', 'end');
-
-    onPhase?.('store', 'start');
-    for (const [rootEntity, publicQuads] of kaMap) {
-      await this.store.deleteByPattern({ graph: dataGraph, subject: rootEntity });
-      await this.store.deleteBySubjectPrefix(dataGraph, rootEntity + '/.well-known/genid/');
-      await this.privateStore.deletePrivateTriples(contextGraphId, rootEntity, options.subGraphName);
-
-      const normalized = publicQuads.map((q) => ({ ...q, graph: dataGraph }));
-      await this.store.insert(normalized);
-
-      const entityPrivateQuads = entityPrivateMap.get(rootEntity) ?? [];
-      if (entityPrivateQuads.length > 0) {
-        await this.privateStore.storePrivateTriples(contextGraphId, rootEntity, entityPrivateQuads, options.subGraphName);
+    let effectivePublisherAddress = coercePublisherAddress(txResult.publisherAddress);
+    if (!effectivePublisherAddress && typeof this.chain.getLatestMerkleRootPublisher === 'function') {
+      try {
+        effectivePublisherAddress = coercePublisherAddress(
+          await this.chain.getLatestMerkleRootPublisher(kcId),
+        );
+      } catch {
+        // Some legacy adapters can submit updates but cannot report the
+        // effective publisher. Refuse confirmed metadata below rather than
+          // inventing a publisher address that did not come from chain state.
       }
     }
-
-    try {
-      await updateMetaMerkleRoot(this.store, this.graphManager, contextGraphId, kcId, kcMerkleRoot);
-    } catch (err) {
+    onPhase?.('chain:submit', 'end');
+    onPhase?.('chain', 'end');
+    if (!effectivePublisherAddress) {
+      const tentativePublisherAddress = publisherAddress ?? this.localTentativePublisherAddress();
       this.log.warn(
         ctx,
-        `Failed to sync _meta merkleRoot for kcId=${kcId}: ${err instanceof Error ? err.message : String(err)}`,
+        'Chain adapter returned a successful update without publisherAddress, and neither ' +
+        'getLatestMerkleRootPublisher() nor the tx result resolved a chain publisher. ' +
+        'Applying local data update as tentative instead of confirming unproven attribution.',
       );
+      await storeUpdatedQuads();
+      const result: PublishResult = {
+        kcId,
+        ual: `did:dkg:${this.chain.chainId}/${tentativePublisherAddress}/${kcId}`,
+        merkleRoot: kcMerkleRoot,
+        kaManifest: manifestEntries,
+        status: 'tentative',
+        publicQuads: allSkolemizedQuads,
+      };
+      this.eventBus.emit(DKGEvent.KA_UPDATED, result);
+      return result;
     }
-    onPhase?.('store', 'end');
+
+    await storeUpdatedQuads();
 
     const result: PublishResult = {
       kcId,
-      ual: `did:dkg:${this.chain.chainId}/${this.publisherAddress}/${kcId}`,
+      ual: `did:dkg:${this.chain.chainId}/${effectivePublisherAddress}/${kcId}`,
       merkleRoot: kcMerkleRoot,
       kaManifest: manifestEntries,
       status: 'confirmed',
@@ -1771,7 +2278,7 @@ export class DKGPublisher implements Publisher {
         txHash: txResult.hash,
         blockNumber: txResult.blockNumber ?? 0,
         blockTimestamp: Math.floor(Date.now() / 1000),
-        publisherAddress: this.publisherAddress,
+        publisherAddress: effectivePublisherAddress,
       },
     };
 
@@ -2303,6 +2810,16 @@ export class DKGPublisher implements Publisher {
         swmMetaGraph,
       );
       await this.store.insert(metaQuads);
+      await storeWorkspaceOperationPublicQuads({
+        store: this.store,
+        graphManager: this.graphManager,
+        contextGraphId,
+        shareOperationId: operationId,
+        rootEntities: effectiveRoots,
+        quads: swmQuads,
+        publisherPeerId: opts.publisherPeerId,
+        subGraphName: opts.subGraphName,
+      });
 
       if (!this.sharedMemoryOwnedEntities.has(ownershipKey)) {
         this.sharedMemoryOwnedEntities.set(ownershipKey, new Map());

@@ -191,6 +191,28 @@ export class OxigraphStore implements TripleStore {
     return this.store.size;
   }
 
+  /**
+   * Force pending writes to disk before resolving. Callers that need a
+   * specific insert to survive an immediate process restart must `await`
+   * this after the insert — otherwise only the 50ms debounced flush runs,
+   * and it can be lost if the daemon dies in that window.
+   *
+   * Cancels any pending debounced flush (we'll cover its work) and waits
+   * out any in-flight flushNow() before dumping the current snapshot, so
+   * triples inserted while the previous flush was running aren't dropped.
+   */
+  async flush(): Promise<void> {
+    if (!this.persistPath) return;
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
+    while (this.flushing) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 5));
+    }
+    await this.flushNow();
+  }
+
   async close(): Promise<void> {
     if (this.flushTimer) {
       clearTimeout(this.flushTimer);

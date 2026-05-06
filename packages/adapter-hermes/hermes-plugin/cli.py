@@ -23,12 +23,15 @@ def register_cli(cli_group):
     @dkg.command("status")
     def dkg_status():
         """Show DKG node connection, context graphs, and assertion stats."""
-        from plugins.memory.dkg.client import DKGClient
-        from plugins.memory.dkg import _load_config, _load_cache
+        from .client import DKGClient
+        from . import _load_config, _load_cache
 
         config = _load_config()
         agent_name = config.get("agent_name", "")
-        client = DKGClient(base_url=config.get("daemon_url", "http://127.0.0.1:9200"))
+        client = DKGClient(
+            base_url=config.get("daemon_url", "http://127.0.0.1:9200"),
+            dkg_home=config.get("dkg_home") or None,
+        )
 
         if not client.health_check():
             cache = _load_cache(agent_name)
@@ -45,7 +48,7 @@ def register_cli(cli_group):
         click.echo("DKG Status: CONNECTED")
         click.echo(f"  Daemon URL: {config.get('daemon_url')}")
         click.echo(f"  Peer ID: {status.get('peerId', 'unknown')}")
-        click.echo(f"  Context Graph: {config.get('context_graph', 'hermes-memory')}")
+        click.echo(f"  Context Graph: {config.get('context_graph', 'agent-context')}")
         if isinstance(cg_list, list):
             click.echo(f"  Subscribed CGs: {len(cg_list)}")
             for cg in cg_list[:5]:
@@ -57,11 +60,14 @@ def register_cli(cli_group):
     @click.argument("sparql")
     def dkg_query(sparql):
         """Run a SPARQL query against the DKG node."""
-        from plugins.memory.dkg.client import DKGClient
-        from plugins.memory.dkg import _load_config
+        from .client import DKGClient
+        from . import _load_config
 
         config = _load_config()
-        client = DKGClient(base_url=config.get("daemon_url", "http://127.0.0.1:9200"))
+        client = DKGClient(
+            base_url=config.get("daemon_url", "http://127.0.0.1:9200"),
+            dkg_home=config.get("dkg_home") or None,
+        )
 
         if not client.health_check():
             click.echo("Error: DKG daemon is not reachable.", err=True)
@@ -80,12 +86,15 @@ def register_cli(cli_group):
         once per affected target.  This preserves semantics — removes
         actually delete facts, and replaces overwrite them.
         """
-        from plugins.memory.dkg.client import DKGClient
-        from plugins.memory.dkg import _load_config, _load_cache, _save_cache
+        from .client import DKGClient
+        from . import _load_config, _load_cache, _save_cache
 
         config = _load_config()
         agent_name = config.get("agent_name", "")
-        client = DKGClient(base_url=config.get("daemon_url", "http://127.0.0.1:9200"))
+        client = DKGClient(
+            base_url=config.get("daemon_url", "http://127.0.0.1:9200"),
+            dkg_home=config.get("dkg_home") or None,
+        )
 
         if not client.health_check():
             click.echo("Error: DKG daemon is not reachable.", err=True)
@@ -99,8 +108,9 @@ def register_cli(cli_group):
             return
 
         click.echo(f"Syncing {len(queued)} queued writes...")
-        context_graph = config.get("context_graph", "hermes-memory")
-        assertion_name = agent_name or "hermes"
+        context_graph = config.get("context_graph", "agent-context")
+        assertion_name = config.get("memory_assertion") or "memory"
+        subject_agent = agent_name or "hermes"
         synced = 0
         failed = []
         dirty_targets: set = set()
@@ -112,6 +122,9 @@ def register_cli(cli_group):
                         item["session_id"],
                         item.get("user", ""),
                         item.get("assistant", ""),
+                        agent_name=agent_name,
+                        turn_id=item.get("turn_id", ""),
+                        idempotency_key=item.get("idempotency_key", ""),
                     )
                     if result.get("success") is False:
                         click.echo(f"  Turn sync failed: {result.get('error', 'unknown')}")
@@ -136,7 +149,7 @@ def register_cli(cli_group):
                 failed_targets.add(target)
                 continue
             quads = [{
-                "subject": f"urn:hermes:{assertion_name}:{target}",
+                "subject": f"urn:hermes:{subject_agent}:{target}",
                 "predicate": "urn:hermes:content",
                 "object": f"[{e.get('target', target)}]\n{e['content']}",
             } for e in entries]

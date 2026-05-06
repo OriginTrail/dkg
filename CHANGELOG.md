@@ -4,6 +4,12 @@ All notable changes to the DKG V9 node are documented here. The format is based 
 
 ## [Unreleased]
 
+### Fixed
+- **Publisher no longer auto-mints an ephemeral signing wallet** (`packages/publisher/src/dkg-publisher.ts`): `DKGPublisher` constructed without `publisherPrivateKey` previously generated `ethers.Wallet.createRandom()` whenever chain was enabled and used it to sign on-chain publish digests, ACK self-signatures, and authorship proofs. Signatures were unverifiable (signed by a throw-away key the caller never saw, attributed via `publisherAddress` to a different address). The constructor now leaves `publisherWallet` undefined, rejects zero/mismatched `publisherAddress` values, and publish/update fail before emitting publisher-attributed output unless a real signing key exists.
+
+### Added
+- **`scripts/audit-create-random.mjs`** + CI gate: bans new `Wallet.createRandom()` use in `packages/*/src/**` outside three explicitly justified call sites (`op-wallets.ts` first-run wallet bootstrap, `agent-keystore.ts` custodial chat-agent registration, `evm-module/utils/helpers.ts` deploy script). Same anti-pattern destroyed nine testnet admin keys in May 2026 via the pre-PR-#366 `ensureProfile` random-and-discard path; audit runs in <300 ms on every CI build.
+
 ---
 
 ## [10.0.0-rc.4] - 2026-05-04

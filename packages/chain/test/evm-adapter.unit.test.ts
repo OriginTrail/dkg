@@ -153,6 +153,26 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     expect(sig.vs).toHaveLength(32);
   });
 
+  it('reserves distinct authorized publisher signers across concurrent address probes', async () => {
+    const a = new EVMChainAdapter(minimalConfig({ additionalKeys: [OTHER_PK] }));
+    const [firstAddress, secondAddress] = a.getSignerAddresses();
+    (a as any).init = async () => undefined;
+    (a as any).contracts.contextGraphs = {
+      isAuthorizedPublisher: vi.fn(async () => {
+        await Promise.resolve();
+        return true;
+      }),
+    };
+
+    const [firstReserved, secondReserved] = await Promise.all([
+      a.getAuthorizedPublisherAddress(1n),
+      a.getAuthorizedPublisherAddress(1n),
+    ]);
+
+    expect(firstReserved).toBe(firstAddress);
+    expect(secondReserved).toBe(secondAddress);
+  });
+
   it('accepts randomSamplingHubRefreshMs override without RPC contact', () => {
     const a = new EVMChainAdapter(minimalConfig({ randomSamplingHubRefreshMs: 60_000 }));
     expect(a.chainType).toBe('evm');

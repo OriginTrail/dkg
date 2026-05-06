@@ -88,6 +88,75 @@ dkg query my-project -q "SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 10"
 
 Run `dkg <command> --help` for per-command options.
 
+## Source Workers
+
+`dkg source-worker run --config <path>` runs a generic polling worker from a
+JSON config file. Treat that config as sensitive operator material, equivalent
+to the daemon's `auth.token`: it contains `daemonToken` and names a
+`handlerModule` that the CLI dynamically imports and executes in the worker
+process. Store it with the same access controls as `auth.token`, and do not
+commit it to a repository.
+
+Handler modules export `createSourceWorkerDeps(context)`, returning
+`getFingerprint` and `processSource`. `getFingerprint(source)` is the content
+identity contract for the worker: source content changes that affect emitted
+triples/assets must produce a different fingerprint, while unchanged source
+content must keep the same fingerprint across runs. Do not include wall-clock
+time, random values, transient job status, or other polling noise in the
+fingerprint.
+
+Minimal config shape:
+
+```json
+{
+  "pollIntervalMs": 60000,
+  "stateFile": "./state/source-worker.json",
+  "daemonUrl": "http://127.0.0.1:9200",
+  "daemonToken": "<contents of auth.token>",
+  "handlerModule": "./handlers/source-worker.mjs",
+  "handlerExport": "sourceWorker",
+  "sources": [{ "id": "source-1" }]
+}
+```
+
+The handler module is loaded from the config file's directory:
+
+```js
+export const sourceWorker = {
+  createSourceWorkerDeps({ sharedMemory, asyncLift }) {
+    return {
+      async getFingerprint(source) {
+        return source.contentHash;
+      },
+      async processSource(source, fingerprint) {
+        const share = await sharedMemory.share(source.contextGraphId, source.quads);
+        const jobId = await asyncLift.lift({
+          ...source.liftRequest,
+          shareOperationId: share.shareOperationId
+        });
+        return {
+          sourceId: source.id,
+          skipped: false,
+          jobIds: [jobId],
+          jobStatuses: { [jobId]: "queued" },
+          status: "queued",
+          nextState: {
+            fingerprint,
+            lastStatus: "queued",
+            lastJobIds: [jobId],
+            lastJobStatuses: { [jobId]: "queued" }
+          }
+        };
+      },
+    };
+  },
+};
+```
+
+The worker state file is updated with a same-directory temp-file write, file
+fsync, atomic rename, and parent-directory fsync where supported so a crash does
+not truncate the previous state file.
+
 ## HTTP API
 
 When the daemon is running, it exposes a local HTTP API (default: `http://localhost:9200`). Key endpoint groups:
@@ -110,6 +179,62 @@ When the daemon is running, it exposes a local HTTP API (default: `http://localh
 All endpoints (except public paths like `/api/status`, `/api/chain/rpc-health`, and `/.well-known/skill.md`) require an API token via `Authorization: Bearer <token>` header.
 
 The full API surface — including request bodies, response shapes, and error codes — is documented in [`skills/dkg-node/SKILL.md`](./skills/dkg-node/SKILL.md).
+
+## Local Benchmarks
+
+The live publish/get benchmark measures four operation timings against a running
+DKG daemon: synchronous publish end-to-end latency, async publisher enqueue
+latency, async job completion/finalization latency, and SPARQL get latency for
+the published benchmark content.
+
+Prerequisites:
+
+- Start a node with `dkg start`.
+- Use a context graph that is safe for benchmark writes and publish costs.
+- Ensure the async publisher is enabled when measuring async completion:
+  `dkg publisher enable`.
+- For local daemon targets, use normal discovery or `DKG_API_PORT`; the command
+  loads the local auth token from `DKG_HOME`. For non-loopback `--api-url`
+  targets, pass `--auth-token` or `DKG_AUTH_TOKEN` explicitly.
+
+Run from the repository after building the CLI package:
+
+```bash
+pnpm --filter @origintrail-official/dkg build
+```
+
+```bash
+pnpm --filter @origintrail-official/dkg benchmark:publish-async-get -- \
+  --context-graph-id my-project \
+  --repeat 30 \
+  --warmups 3 \
+  --payload-size 1024 \
+  --output-format json
+```
+
+Useful environment variables mirror the flags: `DKG_BENCH_CONTEXT_GRAPH_ID`,
+`DKG_BENCH_REPEAT`, `DKG_BENCH_WARMUPS`, `DKG_BENCH_TIMEOUT_MS`,
+`DKG_BENCH_PAYLOAD_SIZE`, `DKG_BENCH_FIXTURE`, `DKG_BENCH_OUTPUT_FORMAT`,
+`DKG_BENCH_POLL_INTERVAL_MS`, `DKG_API_PORT`, `DKG_API_URL`, and
+`DKG_AUTH_TOKEN`.
+
+The output includes per-operation timing records and summary rows for
+`syncPublish`, `asyncEnqueue`, `asyncCompletion`, and `get`. Each summary reports
+count, success count, failure count, min, max, mean, median/p50, and p95. Failure
+records include operation, iteration, error message, root entity, marker, context
+graph, and a reproduction command. Warmups are excluded from summaries.
+
+The repository-level ESBench workflow for this same benchmark feature is
+documented in `BENCHMARKING.md`. It uses a deterministic layered DKG client, not
+a live daemon, so the generated reports avoid auth tokens and local node paths.
+`pnpm bench:html` writes the combined ESBench report plus one focused HTML page
+for each benchmark flow:
+
+- get/read retrieval
+- synchronous publish with finalization
+- asynchronous publish enqueue and finalization
+- upload payload to local working memory
+- lift local working memory to shared working memory
 
 ## Extending the Node
 

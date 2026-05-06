@@ -21,7 +21,8 @@ import {
   type AutoUpdateConfig,
 } from './config.js';
 import { ApiClient } from './api-client.js';
-import { parsePositiveMsOption } from './publisher-runner.js';
+import { parsePositiveIntegerOption, parsePositiveMsOption } from './publisher-runner.js';
+import { runConfiguredSourceWorker } from './source-worker-runner.js';
 
 function isDaemonUnreachable(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
@@ -1758,6 +1759,119 @@ openclawCmd
 
 // ─── dkg ccl ────────────────────────────────────────────────────────
 
+type HermesAdapterModule = Record<string, unknown>;
+type HermesAdapterAction = (opts: any) => Promise<void>;
+
+async function importHermesAdapterModule(): Promise<HermesAdapterModule> {
+  const dynamicImport = new Function('specifier', 'return import(specifier)') as (
+    specifier: string,
+  ) => Promise<HermesAdapterModule>;
+  return dynamicImport('@origintrail-official/dkg-adapter-hermes');
+}
+
+function resolveHermesAdapterAction(
+  adapter: HermesAdapterModule,
+  commandName: string,
+  candidates: readonly string[],
+): HermesAdapterAction {
+  for (const candidate of candidates) {
+    const value = adapter[candidate];
+    if (typeof value === 'function') return value as HermesAdapterAction;
+  }
+  throw new Error(`@origintrail-official/dkg-adapter-hermes does not export a ${commandName} helper yet`);
+}
+
+async function loadHermesAdapterAction(
+  commandName: string,
+  candidates: readonly string[],
+): Promise<HermesAdapterAction> {
+  let adapter: HermesAdapterModule;
+  try {
+    adapter = await importHermesAdapterModule();
+  } catch (err: any) {
+    console.error(`\n[dkg hermes ${commandName}] Hermes adapter is not available.`);
+    console.error(`  Reason: ${err?.message ?? err}`);
+    console.error('  In a monorepo dev checkout: run `pnpm install` and build the Hermes adapter workspace.');
+    console.error('  With a global install: reinstall with Hermes adapter support included.\n');
+    process.exit(1);
+  }
+
+  try {
+    return resolveHermesAdapterAction(adapter, commandName, candidates);
+  } catch (err: any) {
+    console.error(`\n[dkg hermes ${commandName}] ${err?.message ?? err}\n`);
+    process.exit(1);
+  }
+}
+
+const hermesCmd = program
+  .command('hermes')
+  .description('Hermes adapter management');
+
+hermesCmd
+  .command('setup')
+  .description('Set up DKG node + Hermes adapter (non-interactive, idempotent)')
+  .option('--profile <name>', 'Hermes profile name')
+  .option('--daemon-url <url>', 'DKG daemon URL')
+  .option('--bridge-url <url>', 'Hermes loopback bridge URL for local same-host chat')
+  .option('--gateway-url <url>', 'Hermes gateway URL for WSL2 or remote chat')
+  .option('--bridge-health-url <url>', 'Hermes bridge health URL override')
+  .option('--port <port>', 'Override daemon API port (default: 9200)')
+  .option('--memory-mode <mode>', 'Memory mode: primary or tools-only')
+  .option('--dry-run', 'Preview changes without writing anything')
+  .option('--no-verify', 'Skip post-setup verification')
+  .option('--no-start', 'Skip daemon start (configure only)')
+  .action(async (opts, command) => {
+    const runSetup = await loadHermesAdapterAction('setup', ['runSetup', 'setup']);
+    const { hermesSetupAction } = await import('./hermes-setup.js');
+    try {
+      await hermesSetupAction(opts, command, { runSetup });
+    } catch (err: any) {
+      console.error(`\n[hermes setup] ERROR: ${err?.message ?? err}\n`);
+      process.exit(1);
+    }
+  });
+
+for (const [commandName, candidates, description] of [
+  ['status', ['runStatus', 'status'], 'Show Hermes adapter status'],
+  ['verify', ['runVerify', 'verify'], 'Verify Hermes adapter configuration'],
+  ['doctor', ['runDoctor', 'doctor'], 'Diagnose Hermes adapter issues'],
+  ['disconnect', ['runDisconnect', 'disconnect'], 'Disconnect this node from a Hermes profile'],
+  ['reconnect', ['runReconnect', 'reconnect'], 'Reconnect this node to a Hermes profile'],
+  ['uninstall', ['runUninstall', 'uninstall'], 'Uninstall the Hermes adapter wiring'],
+] as const) {
+  const command = hermesCmd
+    .command(commandName)
+    .description(description)
+    .option('--profile <name>', 'Hermes profile name')
+    .option('--dry-run', 'Preview changes without writing anything');
+  if (commandName === 'reconnect') {
+    command
+      .option('--daemon-url <url>', 'DKG daemon URL')
+      .option('--bridge-url <url>', 'Hermes loopback bridge URL for local same-host chat')
+      .option('--gateway-url <url>', 'Hermes gateway URL for WSL2 or remote chat')
+      .option('--bridge-health-url <url>', 'Hermes bridge health URL override')
+      .option('--port <port>', 'Override daemon API port (default: 9200)')
+      .option('--memory-mode <mode>', 'Memory mode: primary or tools-only')
+      .option('--no-verify', 'Skip post-reconnect verification')
+      .option('--no-start', 'Skip daemon start (configure only)');
+  }
+  command.action(async (opts) => {
+    const action = await loadHermesAdapterAction(commandName, candidates);
+    try {
+      if (commandName === 'reconnect') {
+        const { loadBundledDkgNodeSkill } = await import('./hermes-setup.js');
+        await action({ ...opts, nodeSkillContent: loadBundledDkgNodeSkill() });
+        return;
+      }
+      await action(opts);
+    } catch (err: any) {
+      console.error(`\n[hermes ${commandName}] ERROR: ${err?.message ?? err}\n`);
+      process.exit(1);
+    }
+  });
+}
+
 const cclCmd = program
   .command('ccl')
   .description('Manage paranet-scoped CCL policies');
@@ -2166,6 +2280,26 @@ sharedMemoryCmd
     }
   });
 
+// ─── dkg source-worker ────────────────────────────────────────────────
+
+const sourceWorkerCmd = program
+  .command('source-worker')
+  .description('Run generic source workers against the DKG daemon');
+
+sourceWorkerCmd
+  .command('run')
+  .description('Run a source worker from a JSON config file')
+  .requiredOption('--config <path>', 'Sensitive worker config JSON file')
+  .option('--once', 'Run a single iteration and exit')
+  .action(async (opts: ActionOpts) => {
+    try {
+      await runConfiguredSourceWorker(String(opts.config), { once: opts.once === true });
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
 // ─── dkg publisher ────────────────────────────────────────────────────
 
 const publisherCmd = program
@@ -2235,6 +2369,7 @@ publisherCmd
   .description('Enable async publisher runtime')
   .option('--poll-interval <ms>', 'Poll interval in milliseconds', '12000')
   .option('--error-backoff <ms>', 'Error backoff in milliseconds', '5000')
+  .option('--max-retries <count>', 'Maximum async Lift retries per job', '10')
   .action(async (opts: ActionOpts) => {
     try {
       const config = await loadConfig();
@@ -2242,6 +2377,7 @@ publisherCmd
         enabled: true,
         pollIntervalMs: parsePositiveMsOption(String(opts.pollInterval ?? '12000'), '--poll-interval'),
         errorBackoffMs: parsePositiveMsOption(String(opts.errorBackoff ?? '5000'), '--error-backoff'),
+        maxRetries: parsePositiveIntegerOption(String(opts.maxRetries ?? '10'), '--max-retries'),
       };
       await saveConfig(config);
       console.log('Async publisher enabled');
@@ -2589,6 +2725,7 @@ program
       const chainResolved = resolveChainConfig(config, network);
       const rpcUrl = chainResolved?.rpcUrl;
       const hubAddress = chainResolved?.hubAddress;
+      const tokenAddress = chainResolved?.tokenAddress;
       const chainId = chainResolved?.chainId ?? '(unknown)';
 
       let provider: ethers.JsonRpcProvider | null = null;
@@ -2598,7 +2735,10 @@ program
       if (rpcUrl) {
         try {
           provider = new ethers.JsonRpcProvider(rpcUrl);
-          if (hubAddress) {
+          if (tokenAddress && tokenAddress !== ethers.ZeroAddress) {
+            token = new ethers.Contract(tokenAddress, ['function balanceOf(address) view returns (uint256)', 'function symbol() view returns (string)'], provider);
+            tokenSymbol = await token.symbol().catch(() => 'TRAC');
+          } else if (hubAddress) {
             const hub = new ethers.Contract(hubAddress, ['function getContractAddress(string) view returns (address)'], provider);
             const tokenAddr = await hub.getContractAddress('Token');
             if (tokenAddr !== ethers.ZeroAddress) {
@@ -2831,14 +2971,66 @@ function formatPublisherJobValue(value: unknown, key?: string): unknown {
 }
 
 function stripQuotes(s: string): string {
-  if (s.startsWith('"') && s.endsWith('"')) return s.slice(1, -1);
-  const match = s.match(/^"(.*)"(\^\^.*|@.*)?$/);
-  if (match) return match[1];
+  const decodeLiteral = (literal: string): string => {
+    try {
+      return JSON.parse(literal);
+    } catch {
+      return literal.slice(1, -1);
+    }
+  };
+  if (s.startsWith('"') && s.endsWith('"')) return decodeLiteral(s);
+  const match = s.match(/^(".*")(\^\^.*|@.*)?$/);
+  if (match) return decodeLiteral(match[1]);
   return s;
 }
 
 function formatQuadObject(object: string): string {
   return /^(?:[a-zA-Z][a-zA-Z0-9+.-]*:)/.test(object) ? `<${object}>` : object;
+}
+
+type QueryCatalogItem = {
+  slug: string;
+  name: string;
+  description?: string;
+  sparql: string;
+  rank: number;
+  catalogSlug: string;
+  catalogName: string;
+  catalogDescription?: string;
+  catalogRank: number;
+  subGraph: string;
+};
+
+async function loadSavedQueriesForCatalog(contextGraphId: string): Promise<QueryCatalogItem[]> {
+  const client = await ApiClient.connect();
+  const result = await client.readQueryCatalog(contextGraphId);
+  const bindings = result.result.type === 'bindings' ? result.result.bindings : [];
+  return bindings
+    .map((row) => {
+      const qIri = stripQuotes(String(row.q ?? ''));
+      const catalogIri = stripQuotes(String(row.catalog ?? ''));
+      const slug = qIri.split(':query:').pop() ?? qIri;
+      const catalogSlug = catalogIri ? (catalogIri.split(':catalog:').pop() ?? catalogIri) : 'ui-saved-queries';
+      return {
+        slug,
+        name: stripQuotes(String(row.name ?? slug)),
+        description: row.description ? stripQuotes(String(row.description)) : undefined,
+        sparql: stripQuotes(String(row.sparql ?? '')),
+        rank: Number.parseInt(stripQuotes(String(row.rank ?? '99')), 10) || 99,
+        catalogSlug,
+        catalogName: stripQuotes(String(row.catalogName ?? 'Queries')),
+        catalogDescription: row.catalogDescription ? stripQuotes(String(row.catalogDescription)) : undefined,
+        catalogRank: Number.parseInt(stripQuotes(String(row.catalogRank ?? '999')), 10) || 999,
+        subGraph: stripQuotes(String(row.subGraph ?? '')),
+      };
+    })
+    .filter((item) => item.sparql.length > 0)
+    .sort((a, b) => a.subGraph.localeCompare(b.subGraph) || a.catalogRank - b.catalogRank || a.rank - b.rank || a.name.localeCompare(b.name));
+}
+
+function findSavedQuery(items: QueryCatalogItem[], selector: string): QueryCatalogItem | undefined {
+  return items.find((item) => item.slug === selector)
+    ?? items.find((item) => item.name === selector);
 }
 
 function sleep(ms: number): Promise<void> {
@@ -2862,6 +3054,59 @@ async function stopDaemonIfRunning(): Promise<boolean> {
 }
 
 // ─── dkg update ──────────────────────────────────────────────────────
+
+// ─── dkg query-catalog ───────────────────────────────────────────────
+
+const queryCatalogCmd = program
+  .command('query-catalog')
+  .description('List and run saved SPARQL queries from the profile catalog');
+
+queryCatalogCmd
+  .command('list <context-graph>')
+  .description('List saved queries in the profile query catalog')
+  .action(async (contextGraphId: string) => {
+    try {
+      const items = await loadSavedQueriesForCatalog(contextGraphId);
+      if (items.length === 0) {
+        console.log(`No saved queries found for ${contextGraphId}.`);
+        return;
+      }
+      console.log(`Saved queries for ${contextGraphId}:\n`);
+      for (const item of items) {
+        console.log(`${item.slug}`);
+        console.log(`  Name:        ${item.name}`);
+        console.log(`  Catalog:     ${item.catalogName} (${item.catalogSlug})`);
+        console.log(`  Sub-graph:   ${item.subGraph}`);
+        if (item.description) console.log(`  Description: ${item.description}`);
+        console.log('');
+      }
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
+queryCatalogCmd
+  .command('run <context-graph> <query>')
+  .description('Run a saved query by slug or exact name')
+  .action(async (contextGraphId: string, selector: string) => {
+    try {
+      const items = await loadSavedQueriesForCatalog(contextGraphId);
+      const match = findSavedQuery(items, selector);
+      if (!match) {
+        console.error(`Saved query not found: ${selector}`);
+        process.exit(1);
+      }
+      const client = await ApiClient.connect();
+      const result = await client.query(match.sparql, contextGraphId);
+      console.log(`Running saved query: ${match.name}`);
+      console.log(`Slug: ${match.slug}\n`);
+      console.log(JSON.stringify(result.result, null, 2));
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
 
 program
   .command('update [versionOrRef]')

@@ -139,6 +139,12 @@ describe('Access Protocol', () => {
 
     expect(result.status).toBe('confirmed');
     expect(result.kaManifest[0].privateTripleCount).toBe(2);
+    expect(result.kaManifest[0].privateMerkleRoot).toBeDefined();
+    expect(result.kaManifest[0].privateMerkleRoot).toHaveLength(32);
+    expect(result.publicQuads?.map((quad) => quad.predicate).sort()).toEqual([
+      'http://schema.org/description',
+      'http://schema.org/name',
+    ]);
 
     const publicResult = await storeA.query(`
       SELECT ?s ?p ?o WHERE {
@@ -154,11 +160,16 @@ describe('Access Protocol', () => {
     const kcUal = result.ual;
     const kaUal = `${result.ual}/1`;
     const metaGraph = `did:dkg:context-graph:${PARANET}/_meta`;
+    const privateRootHex = Array.from(result.kaManifest[0].privateMerkleRoot!)
+      .map((byte) => byte.toString(16).padStart(2, '0'))
+      .join('');
     const metaResult = await storeA.query(`
-      SELECT ?policy ?publisher WHERE {
+      SELECT ?policy ?publisher ?privateCount ?privateRoot WHERE {
         GRAPH <${metaGraph}> {
           OPTIONAL { <${kcUal}> <http://dkg.io/ontology/accessPolicy> ?policy }
           OPTIONAL { <${kcUal}> <http://dkg.io/ontology/publisherPeerId> ?publisher }
+          OPTIONAL { <${kaUal}> <http://dkg.io/ontology/privateTripleCount> ?privateCount }
+          OPTIONAL { <${kaUal}> <http://dkg.io/ontology/privateMerkleRoot> ?privateRoot }
         }
       }
     `);
@@ -167,6 +178,8 @@ describe('Access Protocol', () => {
       {
         policy: '"ownerOnly"',
         publisher: `"${nodeB.peerId}"`,
+        privateCount: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>',
+        privateRoot: `"${privateRootHex}"`,
       },
     ]);
 
@@ -320,6 +333,31 @@ describe('Access Protocol', () => {
     expect(accessResult.granted).toBe(false);
     expect(accessResult.rejectionReason).toContain('owner identity missing');
   }, 20000);
+
+  it('stores normalized allowList metadata for private publishing', async () => {
+    const storeA = new OxigraphStore();
+    const { result } = await publishWithPrivate(storeA, {
+      publisherPeerId: 'publisher-peer',
+      accessPolicy: 'allowList',
+      allowedPeers: [' peer-a ', 'peer-b', 'peer-a'],
+    });
+
+    const metaGraph = `did:dkg:context-graph:${PARANET}/_meta`;
+    const metaResult = await storeA.query(`
+      SELECT ?policy ?allowedPeer WHERE {
+        GRAPH <${metaGraph}> {
+          <${result.ual}> <http://dkg.io/ontology/accessPolicy> ?policy .
+          <${result.ual}> <http://dkg.io/ontology/allowedPeer> ?allowedPeer .
+        }
+      }
+    `);
+
+    expect(metaResult.type).toBe('bindings');
+    const bindings = metaResult.type === 'bindings' ? metaResult.bindings : [];
+    expect(bindings).toHaveLength(2);
+    expect(bindings.every((binding) => binding['policy'] === '"allowList"')).toBe(true);
+    expect(bindings.map((binding) => binding['allowedPeer']).sort()).toEqual(['"peer-a"', '"peer-b"']);
+  });
 
   it('rejects publish when allowList policy is set without allowed peers', async () => {
     const store = new OxigraphStore();

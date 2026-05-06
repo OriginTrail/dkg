@@ -124,6 +124,9 @@ export interface SessionGraphDeltaResult {
   triples: Array<{ subject: string; predicate: string; object: string }>;
 }
 
+export type ChatTurnPersistenceState = 'stored' | 'failed' | 'pending';
+type ChatTurnPersistenceDisplayState = 'pending' | 'in_progress' | 'stored' | 'failed' | 'skipped';
+
 const IMPORT_SOURCES = ['claude', 'chatgpt', 'gemini', 'other'] as const;
 export type ImportSource = (typeof IMPORT_SOURCES)[number];
 
@@ -173,6 +176,15 @@ const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const XSD_DATETIME = 'http://www.w3.org/2001/XMLSchema#dateTime';
 const OPENCLAW_LOCAL_SESSION_URI = `${CHAT_NS}session:${OPENCLAW_LOCAL_SESSION_ID}`;
 const CHAT_ATTACHMENT_REFS_PREDICATE = `${DKG_ONT}attachmentRefs`;
+const CHAT_TURN_PERSISTENCE_TRANSITION_TYPE = `${DKG_ONT}ChatTurnPersistenceTransition`;
+const CHAT_TURN_PERSISTENCE_TRANSITION_PREDICATE = `${DKG_ONT}updatesTurn`;
+const PERSISTENCE_STATUS_RANK: Record<ChatTurnPersistenceDisplayState, number> = {
+  skipped: 1,
+  pending: 2,
+  in_progress: 3,
+  failed: 4,
+  stored: 5,
+};
 
 interface ChatAttachmentRef {
   id?: string;
@@ -187,11 +199,34 @@ interface ChatAttachmentRef {
   rootEntity?: string;
 }
 
+interface ChatToolCall {
+  name: string;
+  args: Record<string, unknown>;
+  result: unknown;
+}
+
 function stripRdfLiteral(value: string): string {
   if (!value) return '';
   const typed = value.match(/^"([\s\S]*)"(?:\^\^<[^>]+>)?(?:@[a-z-]+)?$/);
   if (typed) return typed[1];
   return value;
+}
+
+function normalizePersistenceStatus(value: string): ChatTurnPersistenceDisplayState | undefined {
+  const status = stripRdfLiteral(value).trim();
+  if (status === 'pending' || status === 'in_progress' || status === 'stored' || status === 'failed' || status === 'skipped') {
+    return status;
+  }
+  return undefined;
+}
+
+function choosePersistenceStatus(
+  current: ChatTurnPersistenceDisplayState | undefined,
+  candidate: ChatTurnPersistenceDisplayState | undefined,
+): ChatTurnPersistenceDisplayState | undefined {
+  if (!candidate) return current;
+  if (!current) return candidate;
+  return PERSISTENCE_STATUS_RANK[candidate] > PERSISTENCE_STATUS_RANK[current] ? candidate : current;
 }
 
 function normalizeChatAttachmentRef(raw: unknown): ChatAttachmentRef | null {
@@ -232,6 +267,27 @@ function normalizeChatAttachmentRefs(raw: unknown): ChatAttachmentRef[] | undefi
   return refs.length > 0 ? refs : undefined;
 }
 
+function normalizeChatToolCall(raw: unknown): ChatToolCall | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const record = raw as Record<string, unknown>;
+  const name = typeof record.name === 'string' && record.name.trim() ? record.name.trim() : 'unknown';
+  return {
+    name,
+    args: record.args && typeof record.args === 'object' && !Array.isArray(record.args)
+      ? record.args as Record<string, unknown>
+      : {},
+    result: record.result,
+  };
+}
+
+function normalizeChatToolCalls(raw: unknown): ChatToolCall[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const calls = raw
+    .map((entry) => normalizeChatToolCall(entry))
+    .filter((entry): entry is ChatToolCall => entry != null);
+  return calls.length > 0 ? calls : undefined;
+}
+
 function parseNestedJsonLiteral(value: string): unknown {
   let current: unknown = value;
   for (let depth = 0; depth < 4; depth += 1) {
@@ -255,6 +311,19 @@ function parseAttachmentRefsLiteral(value: string): ChatAttachmentRef[] | undefi
   for (const candidate of candidates) {
     const parsed = parseNestedJsonLiteral(candidate) ?? parseNestedJsonLiteral(JSON.stringify(candidate));
     const normalized = normalizeChatAttachmentRefs(parsed);
+    if (normalized?.length) return normalized;
+  }
+  return undefined;
+}
+
+function parseToolCallsLiteral(value: string): ChatToolCall[] | undefined {
+  const candidates = [value, stripRdfLiteral(value)]
+    .map((candidate) => candidate.trim())
+    .filter((candidate, index, all) => candidate.length > 0 && all.indexOf(candidate) === index);
+
+  for (const candidate of candidates) {
+    const parsed = parseNestedJsonLiteral(candidate) ?? parseNestedJsonLiteral(JSON.stringify(candidate));
+    const normalized = normalizeChatToolCalls(parsed);
     if (normalized?.length) return normalized;
   }
   return undefined;
@@ -493,10 +562,10 @@ export class ChatMemoryManager {
     sessionId: string,
     userMessage: string,
     assistantReply: string,
-    toolCalls?: Array<{ name: string; args: Record<string, unknown>; result: unknown }>,
+    toolCalls?: ChatToolCall[],
     opts?: {
       turnId?: string;
-      persistenceState?: 'stored' | 'failed' | 'pending';
+      persistenceState?: ChatTurnPersistenceState;
       failureReason?: string | null;
       attachmentRefs?: ChatAttachmentRef[];
     },
@@ -590,6 +659,116 @@ export class ChatMemoryManager {
       this.extractAndWriteMentions(userMsgUri, userMessage, assistantMsgUri, assistantReply)
         .catch(() => {/* best-effort */});
     }
+  }
+
+  async hasChatTurn(sessionId: string, turnId: string): Promise<boolean> {
+    await this.ensureInitialized();
+    const trimmedTurnId = turnId.trim();
+    if (!trimmedTurnId) return false;
+    const sessionUri = `${CHAT_NS}session:${sessionId}`;
+    const result = await this.tools.query(
+      `SELECT ?turn WHERE {
+        ?turn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
+        ?turn <${SCHEMA}isPartOf> <${sessionUri}> .
+        ?turn <${DKG_ONT}turnId> ${JSON.stringify(trimmedTurnId)} .
+      } LIMIT 1`,
+      this.wmReadOpts(),
+    );
+    return (result.bindings ?? []).length > 0;
+  }
+
+  async getChatTurnPersistenceState(sessionId: string, turnId: string): Promise<ChatTurnPersistenceState | null> {
+    await this.ensureInitialized();
+    const trimmedTurnId = turnId.trim();
+    if (!trimmedTurnId) return null;
+    const sessionUri = `${CHAT_NS}session:${sessionId}`;
+    const result = await this.tools.query(
+      `SELECT ?persistenceState ?transitionState WHERE {
+        ?turn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
+        ?turn <${SCHEMA}isPartOf> <${sessionUri}> .
+        ?turn <${DKG_ONT}turnId> ${JSON.stringify(trimmedTurnId)} .
+        OPTIONAL { ?turn <${DKG_ONT}persistenceState> ?persistenceState }
+        OPTIONAL {
+          ?transition <${RDF_TYPE}> <${CHAT_TURN_PERSISTENCE_TRANSITION_TYPE}> .
+          ?transition <${CHAT_TURN_PERSISTENCE_TRANSITION_PREDICATE}> ?turn .
+          ?transition <${DKG_ONT}persistenceState> ?transitionState .
+        }
+      }`,
+      this.wmReadOpts(),
+    );
+    const states = (result.bindings ?? [])
+      .flatMap((binding: Record<string, string>) => [
+        stripRdfLiteral(binding.transitionState ?? '').trim(),
+        stripRdfLiteral(binding.persistenceState ?? '').trim(),
+      ]);
+    if (states.includes('stored')) return 'stored';
+    if (states.includes('failed')) return 'failed';
+    if (states.includes('pending')) return 'pending';
+    return null;
+  }
+
+  async recordChatTurnPersistenceTransition(
+    sessionId: string,
+    turnId: string,
+    persistenceState: ChatTurnPersistenceState,
+    opts?: {
+      failureReason?: string | null;
+      assistantReply?: string;
+      toolCalls?: ChatToolCall[];
+      attachmentRefs?: ChatAttachmentRef[];
+    },
+  ): Promise<void> {
+    await this.ensureInitialized();
+    const trimmedTurnId = turnId.trim();
+    if (!trimmedTurnId) return;
+    const transitionId = crypto.randomUUID().slice(0, 8);
+    const turnUri = `${CHAT_NS}turn:${trimmedTurnId}`;
+    const transitionUri = `${CHAT_NS}turn-transition:${transitionId}`;
+    const now = new Date().toISOString();
+    const failureReason = typeof opts?.failureReason === 'string'
+      ? opts.failureReason.trim()
+      : (opts?.failureReason === null ? null : undefined);
+    const quads: Array<{ subject: string; predicate: string; object: string; graph: string }> = [
+      { subject: transitionUri, predicate: RDF_TYPE, object: CHAT_TURN_PERSISTENCE_TRANSITION_TYPE, graph: '' },
+      { subject: transitionUri, predicate: CHAT_TURN_PERSISTENCE_TRANSITION_PREDICATE, object: turnUri, graph: '' },
+      { subject: transitionUri, predicate: `${DKG_ONT}turnId`, object: JSON.stringify(trimmedTurnId), graph: '' },
+      { subject: transitionUri, predicate: `${DKG_ONT}persistenceState`, object: JSON.stringify(persistenceState), graph: '' },
+      { subject: transitionUri, predicate: `${SCHEMA}dateCreated`, object: `"${now}"^^<${XSD_DATETIME}>`, graph: '' },
+    ];
+    if (persistenceState === 'failed' && failureReason) {
+      quads.push({
+        subject: transitionUri,
+        predicate: `${DKG_ONT}failureReason`,
+        object: JSON.stringify(failureReason),
+        graph: '',
+      });
+    }
+    if (typeof opts?.assistantReply === 'string') {
+      quads.push({
+        subject: transitionUri,
+        predicate: `${DKG_ONT}assistantReply`,
+        object: JSON.stringify(opts.assistantReply),
+        graph: '',
+      });
+    }
+    const normalizedAttachmentRefs = normalizeChatAttachmentRefs(opts?.attachmentRefs ?? []);
+    if (normalizedAttachmentRefs?.length) {
+      quads.push({
+        subject: transitionUri,
+        predicate: CHAT_ATTACHMENT_REFS_PREDICATE,
+        object: JSON.stringify(JSON.stringify(normalizedAttachmentRefs)),
+        graph: '',
+      });
+    }
+    if (opts?.toolCalls?.length) {
+      quads.push({
+        subject: transitionUri,
+        predicate: `${DKG_ONT}toolCalls`,
+        object: JSON.stringify(JSON.stringify(opts.toolCalls)),
+        graph: '',
+      });
+    }
+    await this.tools.writeAssertion(this.agentContextGraph, this.chatTurnsAssertion, quads);
   }
 
   private async extractAndWriteMentions(
@@ -846,6 +1025,7 @@ export class ChatMemoryManager {
       persistStatus?: 'pending' | 'in_progress' | 'stored' | 'failed' | 'skipped';
       failureReason?: string | null;
       attachmentRefs?: ChatAttachmentRef[];
+      toolCalls?: ChatToolCall[];
     }>;
   } | null> {
     await this.ensureInitialized();
@@ -859,7 +1039,13 @@ export class ChatMemoryManager {
       const order = opts.order === 'desc' ? 'DESC' : 'ASC';
       const sessionUri = `${CHAT_NS}session:${sessionId}`;
       const msgsResult = await this.tools.query(
-        `SELECT ?m ?author ?text ?ts ?turnId ?persistenceState ?attachmentRefs ?failureReason WHERE {
+        `SELECT ?m ?author ?text ?ts ?turnId ?persistenceState ?transitionState ?attachmentRefs ?failureReason ?transitionFailureReason ?transitionAssistantReply ?transitionAttachmentRefs ?transitionToolCalls WHERE {
+          {
+            SELECT ?m ?ts WHERE {
+              ?m <${SCHEMA}isPartOf> <${sessionUri}> .
+              ?m <${SCHEMA}dateCreated> ?ts
+            } ORDER BY ${order}(?ts) LIMIT ${limit}
+          }
           ?m <${SCHEMA}isPartOf> <${sessionUri}> .
           ?m <${SCHEMA}author> ?author .
           ?m <${SCHEMA}text> ?text .
@@ -870,35 +1056,74 @@ export class ChatMemoryManager {
             ?turn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
             ?turn <${SCHEMA}isPartOf> <${sessionUri}> .
             ?turn <${DKG_ONT}turnId> ?turnId .
-            ?turn <${DKG_ONT}persistenceState> ?persistenceState .
+            OPTIONAL { ?turn <${DKG_ONT}persistenceState> ?persistenceState }
             OPTIONAL { ?turn <${DKG_ONT}failureReason> ?failureReason }
+            OPTIONAL {
+              ?transition <${RDF_TYPE}> <${CHAT_TURN_PERSISTENCE_TRANSITION_TYPE}> .
+              ?transition <${CHAT_TURN_PERSISTENCE_TRANSITION_PREDICATE}> ?turn .
+              ?transition <${DKG_ONT}persistenceState> ?transitionState .
+              OPTIONAL { ?transition <${DKG_ONT}failureReason> ?transitionFailureReason }
+              OPTIONAL { ?transition <${DKG_ONT}assistantReply> ?transitionAssistantReply }
+              OPTIONAL { ?transition <${CHAT_ATTACHMENT_REFS_PREDICATE}> ?transitionAttachmentRefs }
+              OPTIONAL { ?transition <${DKG_ONT}toolCalls> ?transitionToolCalls }
+            }
           }
-        } ORDER BY ${order}(?ts) LIMIT ${limit}`,
+        } ORDER BY ${order}(?ts)`,
         this.wmReadOpts(),
       );
       const bindings = msgsResult.bindings ?? [];
       if (bindings.length === 0) return null;
+      const messagesByUri = new Map<string, {
+        uri: string;
+        author: string;
+        text: string;
+        ts: string;
+        turnId?: string;
+        persistStatus?: ChatTurnPersistenceDisplayState;
+        failureReason?: string | null;
+        attachmentRefs?: ChatAttachmentRef[];
+        toolCalls?: ChatToolCall[];
+      }>();
+      for (const mb of bindings) {
+        const uri = String(mb.m ?? '').replace(/[<>]/g, '');
+        const key = uri || `${String(mb.author ?? '')}:${String(mb.ts ?? '')}:${String(mb.text ?? '')}`;
+        let message = messagesByUri.get(key);
+        if (!message) {
+          message = {
+            uri,
+            author: mb.author?.includes('user') ? 'user' : 'agent',
+            text: stripRdfLiteral(mb.text ?? ''),
+            ts: stripRdfLiteral(mb.ts ?? ''),
+            turnId: stripRdfLiteral(mb.turnId ?? '') || undefined,
+            attachmentRefs: parseAttachmentRefsLiteral(String(mb.attachmentRefs ?? '')),
+          };
+          messagesByUri.set(key, message);
+        }
+        const candidateStatus = normalizePersistenceStatus(mb.transitionState ?? mb.persistenceState ?? '');
+        const transitionAssistantReply = String(mb.transitionAssistantReply ?? '');
+        if (message.author === 'agent' && candidateStatus === 'stored' && transitionAssistantReply) {
+          message.text = stripRdfLiteral(transitionAssistantReply);
+        }
+        const transitionAttachmentRefs = parseAttachmentRefsLiteral(String(mb.transitionAttachmentRefs ?? ''));
+        if (message.author === 'user' && candidateStatus === 'stored' && transitionAttachmentRefs?.length) {
+          message.attachmentRefs = transitionAttachmentRefs;
+        }
+        const transitionToolCalls = parseToolCallsLiteral(String(mb.transitionToolCalls ?? ''));
+        if (message.author === 'agent' && candidateStatus === 'stored' && transitionToolCalls?.length) {
+          message.toolCalls = transitionToolCalls;
+        }
+        message.persistStatus = choosePersistenceStatus(message.persistStatus, candidateStatus);
+        const candidateReason = stripRdfLiteral(mb.transitionFailureReason ?? mb.failureReason ?? '').trim();
+        if (candidateStatus === 'failed' && candidateReason) {
+          message.failureReason = candidateReason;
+        }
+        if (message.persistStatus && message.persistStatus !== 'failed') {
+          message.failureReason = undefined;
+        }
+      }
       return {
         session: sessionId,
-        messages: bindings.map((mb: any) => ({
-          uri: String(mb.m ?? '').replace(/[<>]/g, ''),
-          author: mb.author?.includes('user') ? 'user' : 'agent',
-          text: stripRdfLiteral(mb.text ?? ''),
-          ts: stripRdfLiteral(mb.ts ?? ''),
-          turnId: stripRdfLiteral(mb.turnId ?? '') || undefined,
-          attachmentRefs: parseAttachmentRefsLiteral(String(mb.attachmentRefs ?? '')),
-          persistStatus: (() => {
-            const status = stripRdfLiteral(mb.persistenceState ?? '').trim();
-            if (status === 'pending' || status === 'in_progress' || status === 'stored' || status === 'failed' || status === 'skipped') {
-              return status;
-            }
-            return undefined;
-          })(),
-          failureReason: (() => {
-            const reason = stripRdfLiteral(mb.failureReason ?? '').trim();
-            return reason.length > 0 ? reason : undefined;
-          })(),
-        })),
+        messages: [...messagesByUri.values()],
       };
     } catch {
       return null;
@@ -1320,8 +1545,8 @@ export class ChatMemoryManager {
 
   // importMemories / parseMemoriesWithLlm / parseMemoriesHeuristic /
   // extractKnowledgeFromImport are retired as part of the openclaw-dkg-primary-memory
-  // work. /api/memory/import is a V9 relic that required LLM API keys on the
-  // node and wrote dkg:ImportedMemory / dkg:MemoryImport ad-hoc types into a
+  // work. /api/memory/import required LLM API keys on the node and wrote
+  // dkg:ImportedMemory / dkg:MemoryImport ad-hoc types into a
   // throwaway sidecar graph. v1 replaces it with the assertion-route write
   // path inside the adapter (DkgMemoryPlugin.dkg_memory_import), which
   // targets the 'memory' WM assertion of a resolved project context graph.

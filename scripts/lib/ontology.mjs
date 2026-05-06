@@ -353,6 +353,7 @@ export const Profile = {
     SubGraphBinding: NS.profile + 'SubGraphBinding',
     EntityTypeBinding: NS.profile + 'EntityTypeBinding',
     ViewConfig: NS.profile + 'ViewConfig',
+    QueryCatalog: NS.profile + 'QueryCatalog',
     // A FilterChip declares an interactive filter for an entity type in a
     // sub-graph page (e.g. status chips for decisions, priority chips for
     // tasks). The UI reads these and renders a chip row above the entity
@@ -392,6 +393,7 @@ export const Profile = {
     // predicate and renders a time-sorted ribbon of the sub-graph's entities.
     timelinePredicate: NS.profile + 'timelinePredicate', // SubGraphBinding -> predicate IRI (a date/dateTime)
     // ── Saved SPARQL queries (ViewConfig extension) ──────────────
+    inCatalog: NS.profile + 'inCatalog',         // SavedQuery -> QueryCatalog
     // A SavedQuery ViewConfig renders as a pill above the entity list. On
     // click the UI runs the query against the project's SPARQL endpoint
     // and displays the result set as the filtered entity list.
@@ -438,6 +440,8 @@ export const Profile = {
       `urn:dkg:profile:${encodeURIComponent(projectId)}:view:${encodeURIComponent(slug)}`,
     chip: (projectId, slug) =>
       `urn:dkg:profile:${encodeURIComponent(projectId)}:chip:${encodeURIComponent(slug)}`,
+    catalog: (projectId, slug) =>
+      `urn:dkg:profile:${encodeURIComponent(projectId)}:catalog:${encodeURIComponent(slug)}`,
     query: (projectId, slug) =>
       `urn:dkg:profile:${encodeURIComponent(projectId)}:query:${encodeURIComponent(slug)}`,
   },

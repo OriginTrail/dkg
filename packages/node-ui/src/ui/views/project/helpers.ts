@@ -10,7 +10,7 @@ import {
   VIZ_PRED_ANCHORED_IN, VIZ_PRED_SIGNED_BY, VIZ_PRED_CONSENSUS,
 } from '../../hooks/useVerifiedMemoryAnchors.js';
 
-export type LayerView = 'overview' | 'graph-overview' | 'wm' | 'swm' | 'vm';
+export type LayerView = 'overview' | 'graph-overview' | 'query' | 'wm' | 'swm' | 'vm';
 export type LayerContentTab = 'items' | 'assertions' | 'graph' | 'docs';
 export const TRUST_COLORS: Record<TrustLevel, string> = {
   verified: '#22c55e',
@@ -369,7 +369,8 @@ export function formatTimelineBucket(ym: string): string {
 // Graph / (optional) Timeline / Documents tabs as the layer views. The
 // layer axis becomes a secondary filter in the header via the mini
 // pyramid chips; `profile:FilterChip` rows filter by predicate value;
-// `profile:SavedQuery` pills run SPARQL and narrow the entity list.
+// `profile:QueryCatalog` + `profile:SavedQuery` render grouped SPARQL
+// pills that narrow the entity list.
 export type SubGraphTab = 'items' | 'graph' | 'timeline' | 'docs';
 
 export type SubGraphEntitySort = 'created-desc' | 'created-asc' | 'triples' | 'label';

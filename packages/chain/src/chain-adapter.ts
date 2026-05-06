@@ -55,6 +55,7 @@ export interface UpdateKAParams {
   batchId: bigint;
   newMerkleRoot: Uint8Array;
   newPublicByteSize: bigint;
+  /** Optional signer hint; adapters may resolve the original publisher on-chain instead. */
   publisherAddress?: string;
 }
 
@@ -68,6 +69,16 @@ export interface TxResult {
   hash: string;
   blockNumber: number;
   success: boolean;
+  /**
+   * Effective publisher/signing address used by update-style txs.
+   *
+   * Required for successful update results that callers will persist as
+   * confirmed metadata, unless the adapter also exposes
+   * `getLatestMerkleRootPublisher(kcId)` so callers can query the same
+   * chain-truth address after the receipt. Publish-style result shapes
+   * use `OnChainPublishResult.publisherAddress` instead.
+   */
+  publisherAddress?: string;
   /** Set by createContextGraph when V9 registry is used (on-chain contextGraphId as hex). */
   contextGraphId?: string;
 }
@@ -192,6 +203,14 @@ export interface ConvictionAccountInfo {
 export interface V10PublishDirectParams {
   publishOperationId: string;
   contextGraphId: bigint;
+  /**
+   * Optional signer hint selected by the caller for the publish. Adapters
+   * with signer pools MUST use this address for the concrete tx when present
+   * (or throw clearly if unavailable/unauthorized), so the off-chain
+   * publisher/ACK/authorship signatures and on-chain attribution stay bound
+   * to the same key.
+   */
+  publisherAddress?: string;
   merkleRoot: Uint8Array;
   knowledgeAssetsAmount: number;
   byteSize: bigint;
@@ -448,7 +467,11 @@ export interface ChainAdapter {
    */
   getRequiredPublishTokenAmount?(publicByteSize: bigint, epochs: number): Promise<bigint>;
 
-  // V9 knowledge updates
+  /**
+   * V9 knowledge updates. Successful update txs must either return
+   * `TxResult.publisherAddress` or support `getLatestMerkleRootPublisher`
+   * so callers can avoid inventing confirmed publisher attribution.
+   */
   updateKnowledgeAssets(params: UpdateKAParams): Promise<TxResult>;
 
   /**
@@ -529,6 +552,23 @@ export interface ChainAdapter {
    */
   signMessage?(messageHash: Uint8Array): Promise<{ r: Uint8Array; vs: Uint8Array }>;
 
+  /**
+   * Reserve the adapter signer that should be used for a publish to the given
+   * context graph and return its address. Signer-pool implementations should
+   * advance their cursor atomically here so concurrent publishers do not bind
+   * multiple off-chain signatures to the same tx signer by accident. Used by
+   * publishers that need the off-chain signature address to match the eventual
+   * tx signer.
+   */
+  getAuthorizedPublisherAddress?(contextGraphId: bigint): Promise<string>;
+
+  /**
+   * Sign with a specific adapter-held address. Adapters with signer pools
+   * should implement this so callers can bind a context-graph-selected
+   * publisher address to the digest signatures generated before tx submit.
+   */
+  signMessageAs?(address: string, messageHash: Uint8Array): Promise<{ r: Uint8Array; vs: Uint8Array }>;
+
   // On-Chain Context Graphs (ContextGraphs contract)
   createOnChainContextGraph?(params: CreateOnChainContextGraphParams): Promise<CreateOnChainContextGraphResult>;
   getContextGraphParticipants?(contextGraphId: bigint): Promise<bigint[] | null>;
@@ -582,7 +622,12 @@ export interface ChainAdapter {
   /** @deprecated Use signACKDigest instead. Will be removed in V10.1. */
   getACKSignerKey?(): string | undefined;
 
-  /** V10 update (works with KnowledgeCollectionStorage). */
+  /**
+   * V10 update (works with KnowledgeCollectionStorage). Successful update txs
+   * must either return `TxResult.publisherAddress` or support
+   * `getLatestMerkleRootPublisher` so callers can persist confirmed metadata
+   * with real chain attribution.
+   */
   updateKnowledgeCollectionV10?(params: V10UpdateKCParams): Promise<TxResult>;
 
   /**
@@ -708,7 +753,9 @@ export interface ChainAdapter {
    * Address that signed the latest merkle root for `kcId` (the EOA that
    * called `KnowledgeAssetsV10.publishDirect` / update). Mostly observability
    * — the prover does not gate on this — but useful for trace logs and for
-   * future sharding / authorship-based reward heuristics.
+   * future sharding / authorship-based reward heuristics. Publishers also use
+   * this as the compatibility path for update adapters whose successful
+   * `TxResult` cannot directly include `publisherAddress`.
    */
   getLatestMerkleRootPublisher?(kcId: bigint): Promise<string>;
 

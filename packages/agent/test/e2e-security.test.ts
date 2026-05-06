@@ -132,82 +132,19 @@ describe('Private triple confidentiality via GossipSub', () => {
     expect(weightsResult.bindings).toHaveLength(0);
   }, 25000);
 
-  it('publisher A retains private triples locally while B only sees public', async () => {
-    const agentA = await DKGAgent.create({
-      name: 'RetentionPublisher',
-      listenPort: 0,
-      skills: [],
-      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
-    });
-    const agentB = await DKGAgent.create({
-      name: 'RetentionReceiver',
-      listenPort: 0,
-      skills: [],
-      chainAdapter: createEVMAdapter(HARDHAT_KEYS.REC1_OP),
-    });
-    agents.push(agentA, agentB);
-    await agentA.start();
-    await agentB.start();
-    await agentB.connectTo(agentA.multiaddrs[0]);
-    await sleep(1000);
-
-    const PARANET = 'retention-test';
-    await agentA.createContextGraph({ id: PARANET, name: 'Retention', description: '' });
-    agentA.subscribeToContextGraph(PARANET);
-    agentB.subscribeToContextGraph(PARANET);
-    await sleep(500);
-
-    await agentA.publish(
-      PARANET,
-      [{ subject: 'did:dkg:test:Doc', predicate: 'http://schema.org/name', object: '"PublicDoc"', graph: '' }],
-      [{ subject: 'did:dkg:test:Doc', predicate: 'http://ex.org/secret', object: '"top-secret-value"', graph: '' }],
-    );
-
-    await sleep(3000);
-
-    // Private triples are stored in a dedicated private graph, NOT the data
-    // graph. Standard SPARQL queries (scoped to the data graph) should NOT
-    // return them — even on the publisher node. They are only accessible
-    // through the access protocol or direct store queries on the private graph.
-    const aPublicQuery = await agentA.query(
-      'SELECT ?val WHERE { ?s <http://ex.org/secret> ?val }',
-      PARANET,
-    );
-    expect(aPublicQuery.bindings).toHaveLength(0);
-
-    // But the underlying store DOES have them in the private graph
-    const privateGraph = `did:dkg:context-graph:${PARANET}/_private`;
-    const directResult = await agentA.store.query(
-      `SELECT ?val WHERE { GRAPH <${privateGraph}> { ?s <http://ex.org/secret> ?val } }`,
-    );
-    expect(directResult.type).toBe('bindings');
-    if (directResult.type === 'bindings') {
-      expect(directResult.bindings).toHaveLength(1);
-      expect(directResult.bindings[0]['val']).toBe('"top-secret-value"');
-    }
-
-    // Receiver B should have public but NOT private
-    const bSecrets = await agentB.query(
-      'SELECT ?val WHERE { ?s <http://ex.org/secret> ?val }',
-      PARANET,
-    );
-    expect(bSecrets.bindings).toHaveLength(0);
-
-    // B should also not have them in the private graph
-    const bPrivResult = await agentB.store.query(
-      `SELECT ?val WHERE { GRAPH <${privateGraph}> { ?s <http://ex.org/secret> ?val } }`,
-    );
-    expect(bPrivResult.type).toBe('bindings');
-    if (bPrivResult.type === 'bindings') {
-      expect(bPrivResult.bindings).toHaveLength(0);
-    }
-
-    const bPublic = await agentB.query(
-      'SELECT ?name WHERE { ?s <http://schema.org/name> ?name }',
-      PARANET,
-    );
-    expect(bPublic.bindings.length).toBeGreaterThanOrEqual(1);
-  }, 25000);
+  // "publisher A retains private triples locally while B only sees public"
+  // removed: the test ran a RAW
+  // `agentA.store.query(SELECT ?val WHERE { GRAPH <…/_private> { … } })`
+  // and asserted `bindings[0].val === '"top-secret-value"'` — it expected
+  // the on-disk private graph to contain plaintext. After the ST-2 fix
+  // (AES-GCM-SIV at rest) the private graph holds ciphertext
+  // (`"enc:gcm:v1:…"`) by design; authorised access is via the access
+  // protocol, not raw store reads. Coverage for the intended behaviour
+  // (cross-agent privacy + protocol-mediated access) is retained by
+  // sibling tests "private triples published on A are NOT received by B
+  // through GossipSub", "cross-agent SPARQL query does not return
+  // private triples", and "publisher grants access and returns correct
+  // private triples".
 });
 
 // ---------------------------------------------------------------------------

@@ -8,6 +8,7 @@ import type { WorkspaceCASConditionMsg } from '@origintrail-official/dkg-core';
 import { validatePublishRequest } from './validation.js';
 import { generateShareMetadata, generateOwnershipQuads, generateSubGraphRegistration } from './metadata.js';
 import { parseSimpleNQuads } from './publish-handler.js';
+import { storeWorkspaceOperationPublicQuads } from './workspace-resolution.js';
 import type { KAManifestEntry } from './publisher.js';
 
 /**
@@ -266,6 +267,16 @@ export class SharedMemoryHandler {
         }
 
         await this.store.insert(metaQuads);
+        await storeWorkspaceOperationPublicQuads({
+          store: this.store,
+          graphManager: this.graphManager,
+          contextGraphId,
+          shareOperationId,
+          rootEntities,
+          quads: normalized,
+          publisherPeerId,
+          subGraphName,
+        });
 
         if (!this.sharedMemoryOwnedEntities.has(swmOwnershipKey)) {
           this.sharedMemoryOwnedEntities.set(swmOwnershipKey, new Map());

@@ -110,6 +110,48 @@ describe('ChatMemoryManager', () => {
     expect(failureReasonQuad.object).toBe('"timeout"');
   });
 
+  it('checks a chat turn directly by turnId without scanning session history', async () => {
+    mockQuery.returns.push({ bindings: [] }, { bindings: [{ turn: 'urn:dkg:chat:turn:turn-1' }] });
+
+    await expect(manager.hasChatTurn('session-1', 'turn-1')).resolves.toBe(true);
+
+    const turnQuery = mockQuery.calls.at(-1)?.[0] as string;
+    expect(turnQuery).toContain('turnId> "turn-1"');
+    expect(turnQuery).toContain('LIMIT 1');
+  });
+
+  it('records chat turn persistence transitions without appending messages', async () => {
+    mockQuery.returns.push({ bindings: [] });
+
+    await manager.recordChatTurnPersistenceTransition('session-1', 'turn-1', 'stored', {
+      assistantReply: 'Final reply',
+      toolCalls: [{ name: 'lookup', args: { query: 'hello' }, result: { ok: true } }],
+      attachmentRefs: [{
+        id: 'att-1',
+        fileName: 'notes.md',
+        contextGraphId: 'project-1',
+        assertionUri: 'did:dkg:context-graph:project-1/assertion/notes',
+        fileHash: 'keccak256:abc123',
+        extractionStatus: 'completed',
+        tripleCount: 12,
+      }],
+    });
+
+    const quads = mockWriteAssertion.calls[0][2] as any[];
+    expect(quads.find((q: any) => q.object === 'http://dkg.io/ontology/ChatTurnPersistenceTransition')).toBeDefined();
+    expect(quads.find((q: any) => q.predicate === 'http://dkg.io/ontology/updatesTurn')?.object)
+      .toBe('urn:dkg:chat:turn:turn-1');
+    expect(quads.find((q: any) => q.predicate === 'http://dkg.io/ontology/persistenceState')?.object)
+      .toBe('"stored"');
+    expect(quads.find((q: any) => q.predicate === 'http://dkg.io/ontology/assistantReply')?.object)
+      .toBe('"Final reply"');
+    expect(quads.find((q: any) => q.predicate === 'http://dkg.io/ontology/toolCalls')).toBeDefined();
+    expect(quads.find((q: any) => q.predicate === 'http://dkg.io/ontology/attachmentRefs')).toBeDefined();
+    expect(quads.some((q: any) => q.object === 'http://schema.org/Message')).toBe(false);
+    expect(quads.some((q: any) => q.predicate === 'http://dkg.io/ontology/hasUserMessage')).toBe(false);
+    expect(quads.some((q: any) => q.predicate === 'http://dkg.io/ontology/hasAssistantMessage')).toBe(false);
+  });
+
   it('stores attachment refs inline on the user message when provided', async () => {
     mockQuery.returns.push({ bindings: [] });
     await manager.storeChatExchange(
@@ -353,8 +395,10 @@ describe('ChatMemoryManager', () => {
       'urn:dkg:chat:msg:user-1',
     ]);
     const queryText = String(mockQuery.calls[1][0]);
-    expect(queryText).toContain('SELECT ?m ?author ?text ?ts ?turnId ?persistenceState ?attachmentRefs ?failureReason');
+    expect(queryText).toContain('SELECT ?m ?author ?text ?ts ?turnId ?persistenceState ?transitionState ?attachmentRefs ?failureReason ?transitionFailureReason ?transitionAssistantReply ?transitionAttachmentRefs ?transitionToolCalls');
+    expect(queryText).toContain('SELECT ?m ?ts WHERE');
     expect(queryText).toContain('ORDER BY DESC(?ts) LIMIT 3');
+    expect(queryText.match(/LIMIT 3/g)).toHaveLength(1);
   });
 
   it('getSession returns null when session has no messages', async () => {
@@ -412,6 +456,93 @@ describe('ChatMemoryManager', () => {
     expect(session).not.toBeNull();
     expect(session!.messages[0].persistStatus).toBe('failed');
     expect(session!.messages[0].failureReason).toBe('timeout');
+  });
+
+  it('getSession collapses persistence transition rows into one message', async () => {
+    mockQuery.returns.push(
+      { bindings: [] },
+      {
+        bindings: [
+          {
+            m: 'urn:dkg:chat:msg:agent-1',
+            author: 'urn:dkg:chat:actor:agent',
+            text: '"Answer"',
+            ts: '"2026-01-01T12:00:01Z"',
+            turnId: '"turn-1"',
+            persistenceState: '"pending"',
+            transitionState: '"failed"',
+            transitionFailureReason: '"temporary"',
+          },
+          {
+            m: 'urn:dkg:chat:msg:agent-1',
+            author: 'urn:dkg:chat:actor:agent',
+            text: '"Answer"',
+            ts: '"2026-01-01T12:00:01Z"',
+            turnId: '"turn-1"',
+            persistenceState: '"pending"',
+            transitionState: '"stored"',
+          },
+        ],
+      },
+    );
+
+    const session = await manager.getSession('test-session-transition-rows');
+    expect(session).not.toBeNull();
+    expect(session!.messages).toHaveLength(1);
+    expect(session!.messages[0].persistStatus).toBe('stored');
+    expect(session!.messages[0].failureReason).toBeUndefined();
+  });
+
+  it('getSession applies stored transition payload updates to provisional turns', async () => {
+    const transitionAttachmentRefs = JSON.stringify(JSON.stringify([{
+      id: 'att-1',
+      fileName: 'notes.md',
+      contextGraphId: 'project-1',
+      assertionUri: 'did:dkg:context-graph:project-1/assertion/notes',
+      fileHash: 'keccak256:abc123',
+      extractionStatus: 'completed',
+      tripleCount: 12,
+    }]));
+    const transitionToolCalls = JSON.stringify(JSON.stringify([
+      { name: 'lookup', args: { query: 'hello' }, result: { ok: true } },
+    ]));
+    mockQuery.returns.push(
+      { bindings: [] },
+      {
+        bindings: [
+          {
+            m: 'urn:dkg:chat:msg:user-1',
+            author: 'urn:dkg:chat:actor:user',
+            text: '"Draft user"',
+            ts: '"2026-01-01T12:00:00Z"',
+            turnId: '"turn-1"',
+            persistenceState: '"pending"',
+            transitionState: '"stored"',
+            transitionAttachmentRefs,
+          },
+          {
+            m: 'urn:dkg:chat:msg:agent-1',
+            author: 'urn:dkg:chat:actor:agent',
+            text: '"Draft reply"',
+            ts: '"2026-01-01T12:00:01Z"',
+            turnId: '"turn-1"',
+            persistenceState: '"pending"',
+            transitionState: '"stored"',
+            transitionAssistantReply: '"Final reply"',
+            transitionToolCalls,
+          },
+        ],
+      },
+    );
+
+    const session = await manager.getSession('test-session-transition-payload');
+
+    expect(session).not.toBeNull();
+    expect(session!.messages).toHaveLength(2);
+    expect(session!.messages[0].attachmentRefs?.[0]).toEqual(expect.objectContaining({ id: 'att-1' }));
+    expect(session!.messages[1].text).toBe('Final reply');
+    expect(session!.messages[1].toolCalls?.[0]).toEqual(expect.objectContaining({ name: 'lookup' }));
+    expect(session!.messages[1].persistStatus).toBe('stored');
   });
 
   it('getStats returns session and triple counts', async () => {
@@ -500,7 +631,7 @@ describe('ChatMemoryManager', () => {
 
   // The 'getSessionRootEntities widens the openclaw local session to
   // imported memory roots' test was removed with the retirement of the
-  // /api/memory/import V9 relic and the ImportedMemory / MemoryImport
+  // /api/memory/import endpoint and the ImportedMemory / MemoryImport
   // special-case branch inside buildSessionRootPattern.
 
   it('getSessionRootEntities keeps regular chat sessions scoped to their own graph roots', async () => {

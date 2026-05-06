@@ -20,6 +20,10 @@
 #   HARDHAT_PORT  Hardhat node port (default: 8545)
 #   UI_PORT       node-ui Vite port (default: 5173)
 #   UI_NODE_ID    Which devnet node the UI talks to (default: 1)
+#   DEVNET_ENABLE_PUBLISHER=1
+#                 Enable the async publisher runtime on each node
+#   DEVNET_EPCIS_CONTEXT_GRAPH
+#                 Context graph used by /api/epcis/capture when publisher is enabled
 #
 set -euo pipefail
 
@@ -28,7 +32,7 @@ DEVNET_DIR="${DEVNET_DIR:-$REPO_ROOT/.devnet}"
 HARDHAT_PORT="${HARDHAT_PORT:-8545}"
 NUM_NODES="${2:-6}"
 API_PORT_BASE="${API_PORT_BASE:-9201}"
-LIBP2P_PORT_BASE=10001
+LIBP2P_PORT_BASE="${LIBP2P_PORT_BASE:-10001}"
 UI_PORT="${UI_PORT:-5173}"
 UI_NODE_ID="${UI_NODE_ID:-1}"
 UI_PIDFILE="$DEVNET_DIR/node-ui.pid"
@@ -368,6 +372,12 @@ create_node_config() {
   if [ "${DEVNET_NO_AUTH:-}" = "1" ]; then
     devnet_auth_block='"auth": { "enabled": false },'
   fi
+  local publisher_block=""
+  local epcis_block=""
+  if [ "${DEVNET_ENABLE_PUBLISHER:-}" = "1" ]; then
+    publisher_block='"publisher": { "enabled": true, "pollIntervalMs": 500, "errorBackoffMs": 500, "maxRetries": 10 },'
+    epcis_block="\"epcis\": { \"contextGraphId\": \"${DEVNET_EPCIS_CONTEXT_GRAPH:-devnet-test}\" },"
+  fi
 
   # Random Sampling prover (core-only). For devnet we want a
   # persistent WAL (so `dkg rs wal-tail` / smoke tests can read the
@@ -389,8 +399,15 @@ create_node_config() {
   ${relay_value}
   ${store_block}
   "contextGraphs": ["devnet-test", "devnet-isolation"],
+  "publisher": {
+    "enabled": true,
+    "pollIntervalMs": 12000,
+    "errorBackoffMs": 5000
+  },
   ${devnet_auth_block}
   ${rs_block}
+  ${publisher_block}
+  ${epcis_block}
   "chain": {
     "type": "evm",
     "rpcUrl": "http://127.0.0.1:${HARDHAT_PORT}",
@@ -423,6 +440,9 @@ EOCONF
       wallets.push({ privateKey: key, address: w.address });
     }
     fs.writeFileSync('$node_dir/wallets.json', JSON.stringify({ adminWallet, wallets }, null, 2));
+    if (process.env.DEVNET_ENABLE_PUBLISHER === '1') {
+      fs.writeFileSync('$node_dir/publisher-wallets.json', JSON.stringify({ wallets: wallets.slice(0, 1) }, null, 2));
+    }
     wallets.forEach(w => console.log(w.address));
   ")
 
@@ -739,7 +759,7 @@ cmd_start() {
       const opSigners = new Array(n).fill(null);
       const nodeRoles = new Array(n).fill('edge');
       // Codex round 4 on PR #368: read config.json FIRST and INDEPENDENTLY
-      // of wallets.json. The previous loop did wallets first and `continue`d
+      // of wallets.json. The previous loop did continue first
       // on parse failure BEFORE reading config, so an intended core whose
       // wallets.json was malformed silently kept the 'edge' default,
       // dropped out of coreIdxs, and the lostCores guard never fired.
@@ -865,7 +885,7 @@ cmd_start() {
         // this code path exists to prevent.
         //
         // Codex round 2 on PR #368: re-read 'pending' before EVERY tx
-        // (not once per node loop). The previous code did `nonce++` at
+        // (not once per node loop). The previous code incremented a nonce at
         // call site so a failed approve advanced the local counter even
         // though the chain nonce did not, leaving createConviction +
         // updateAsk to send with an inflated nonce that would either
@@ -878,7 +898,7 @@ cmd_start() {
           return tx.wait();
         };
         // Codex round 4 on PR #368: skip createConviction if the daemon
-        // already opened a position. PR 366 wired `EVMChainAdapter.ensureProfile()`
+        // already opened a position. PR 366 wired EVMChainAdapter.ensureProfile()
         // to open a default 50k V10 conviction during agent startup, so by
         // the time this script reaches the staking loop the daemon has
         // (usually) already staked. Running createConviction again would
@@ -895,8 +915,8 @@ cmd_start() {
         // updateAsk is INDEPENDENT of stake state, so we still attempt
         // it below regardless of the probe outcome.
         //
-        // Codex round 7 on PR #368: probe `getNodeStakeV10(idId)` instead
-        // of NFT `balanceOf(opSigner.address)`. The op wallet could hold
+        // Codex round 7 on PR #368: probe getNodeStakeV10(idId) instead
+        // of NFT balanceOf(opSigner.address). The op wallet could hold
         // positions for OTHER identities (not in our devnet today, but
         // a wallet-scoped probe is the wrong semantic check); we want
         // to know whether THIS identity is staked.
@@ -996,7 +1016,7 @@ cmd_start() {
       reg_resp=$(curl -sS --max-time 30 -X POST \
         -H "$register_auth_header" \
         -H "Content-Type: application/json" \
-        -d "{\"id\":\"$cg\"}" \
+        -d "{\"id\":\"$cg\",\"accessPolicy\":0}" \
         "$register_endpoint" 2>&1 || true)
       if echo "$reg_resp" | grep -q '"onChainId"'; then
         on_chain_id=$(echo "$reg_resp" | python3 -c "import sys,json;print(json.load(sys.stdin).get('onChainId',''))" 2>/dev/null || echo '')

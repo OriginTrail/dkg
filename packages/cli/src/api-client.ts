@@ -35,8 +35,10 @@ export class ApiClient {
   private baseUrl: string;
   private token?: string;
 
-  constructor(port: number, token?: string) {
-    this.baseUrl = `http://127.0.0.1:${port}`;
+  constructor(portOrBaseUrl: number | string, token?: string) {
+    this.baseUrl = typeof portOrBaseUrl === 'number'
+      ? `http://127.0.0.1:${portOrBaseUrl}`
+      : portOrBaseUrl.replace(/\/+$/, '');
     this.token = token;
   }
 
@@ -303,6 +305,10 @@ export class ApiClient {
       verifiedGraph: opts?.verifiedGraph,
       minTrust: opts?.minTrust,
     });
+  }
+
+  async readQueryCatalog(contextGraphId: string): Promise<{ result: QueryResult }> {
+    return this.post('/api/profile/query-catalog/read', { contextGraphId });
   }
 
   async queryRemote(peerId: string, request: {
@@ -622,6 +628,11 @@ export class ApiClient {
       creator?: string;
       createdAt?: string;
       isSystem: boolean;
+      subscribed?: boolean;
+      synced?: boolean;
+      curator?: string;
+      accessPolicy?: string;
+      callerInvolved?: boolean;
     }>;
   }> {
     return this.get('/api/context-graph/list');

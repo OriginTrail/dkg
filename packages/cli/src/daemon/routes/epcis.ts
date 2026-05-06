@@ -122,7 +122,7 @@ import { type ExtractionStatusRecord, getExtractionStatusRecord, setExtractionSt
 import { FileStore } from '../../file-store.js';
 import { VectorStore, OpenAIEmbeddingProvider, type EmbeddingProvider } from '../../vector-store.js';
 import { parseBoundary, parseMultipart, MultipartParseError } from '../../http/multipart.js';
-import { handleCapture, EpcisValidationError, handleEventsQuery, EpcisQueryError, type Publisher as EpcisPublisher } from '@origintrail-official/dkg-epcis';
+import { handleCaptureAsync, EpcisValidationError, handleEventsQuery, EpcisQueryError, type AsyncPublisher as EpcisAsyncPublisher } from '@origintrail-official/dkg-epcis';
 // Phase 8 — project-manifest publish + install (UI-driven onboarding flow).
 // Daemon constructs a self-pointing DkgClient (localhost:listenPort) and
 // reuses the same publish/fetch/plan/write helpers the CLI uses, so wire
@@ -335,6 +335,7 @@ export async function handleEpcisRoutes(ctx: RequestContext): Promise<void> {
     res,
     agent,
     publisherControl,
+    publisherRuntime,
     config,
     startedAt,
     dashDb,
@@ -396,7 +397,30 @@ export async function handleEpcisRoutes(ctx: RequestContext): Promise<void> {
     }
   }
 
-  // POST /api/epcis/capture  { epcisDocument: {...}, publishOptions?: { accessPolicy? } }
+  // GET /api/epcis/capture/:captureID
+  if (req.method === "GET" && path.startsWith("/api/epcis/capture/")) {
+    const captureID = decodeURIComponent(path.slice("/api/epcis/capture/".length));
+    if (!captureID) {
+      return jsonResponse(res, 404, { error: "CaptureNotFound" });
+    }
+    const job = await publisherControl.getStatus(captureID);
+    if (!job) {
+      return jsonResponse(res, 404, { error: "CaptureNotFound" });
+    }
+    return jsonResponse(res, 200, {
+      captureID,
+      state: job.status,
+      receivedAt: new Date(job.timestamps.acceptedAt).toISOString(),
+      finalizedAt: job.timestamps.finalizedAt
+        ? new Date(job.timestamps.finalizedAt).toISOString()
+        : null,
+      error: job.status === "failed"
+        ? job.failure?.message ?? "Async capture failed"
+        : null,
+    });
+  }
+
+  // POST /api/epcis/capture  { epcisDocument: {...} | { public, private }, publishOptions?: { accessPolicy? } }
   if (req.method === "POST" && path === "/api/epcis/capture") {
     const captureContextGraphId =
       config.epcis?.contextGraphId ?? config.epcis?.paranetId;
@@ -406,50 +430,75 @@ export async function handleEpcisRoutes(ctx: RequestContext): Promise<void> {
           "EPCIS plugin is not configured (missing epcis.contextGraphId in config)",
       });
     }
+    if (!config.publisher?.enabled) {
+      return jsonResponse(res, 503, {
+        error: "PublisherDisabled",
+        message: "Async EPCIS capture requires publisher.enabled=true",
+      });
+    }
+    if (!publisherRuntime || publisherRuntime.walletIds.length === 0) {
+      return jsonResponse(res, 503, {
+        error: "PublisherUnavailable",
+        message: "Async EPCIS capture requires the publisher runtime to be running with at least one configured publisher wallet",
+      });
+    }
     const body = await readBody(req);
     let parsed;
     try {
       parsed = JSON.parse(body);
     } catch {
-      return jsonResponse(res, 400, { error: "Invalid JSON in request body" });
+      return jsonResponse(res, 400, {
+        error: "InvalidContent",
+        message: "Invalid JSON in request body",
+      });
     }
     const { epcisDocument, publishOptions } = parsed;
     if (!epcisDocument) {
       return jsonResponse(res, 400, {
-        error: 'Missing "epcisDocument" in request body',
+        error: "InvalidContent",
+        message: 'Missing "epcisDocument" in request body',
       });
     }
-    const epcisPublisher: EpcisPublisher = {
-      async publish(contextGraphId, content, opts) {
-        const result = await agent.publish(
+    const epcisPublisher: EpcisAsyncPublisher = {
+      async publishAsync(contextGraphId, content, opts) {
+        return agent.publishAsync(
           contextGraphId,
-          { public: content } as Record<string, unknown>,
+          content as Record<string, unknown>,
           opts,
         );
-        return {
-          ual: result.ual,
-          kcId: String(result.kcId),
-          status: result.status,
-        };
       },
     };
     try {
-      const result = await handleCapture(
+      const result = await handleCaptureAsync(
         { epcisDocument, publishOptions },
         { contextGraphId: captureContextGraphId, publisher: epcisPublisher },
       );
-      // TODO: EPCIS 2.0 §12.6.1 requires 202 Accepted + captureID for async job tracking.
-      // Current sync model returns 200 with the full result. Switch to 202 + captureID +
-      // GET /capture/{captureID} polling endpoint when async capture is implemented (Phase 2).
-      return jsonResponse(res, 200, result);
+      return jsonResponse(res, 202, result);
     } catch (err) {
       if (err instanceof EpcisValidationError) {
         return jsonResponse(res, 400, {
-          error: err.message,
+          error: "InvalidContent",
+          message: err.message,
           details: err.errors,
         });
       }
-      throw err;
+      const code = (err as { code?: string; name?: string })?.code ?? (err as { name?: string })?.name;
+      if (code === "ContextGraphNotFound") {
+        return jsonResponse(res, 404, {
+          error: "ContextGraphNotFound",
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+      if (code === "InvalidContent") {
+        return jsonResponse(res, 400, {
+          error: "InvalidContent",
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+      return jsonResponse(res, 503, {
+        error: "EnqueueFailed",
+        message: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 }

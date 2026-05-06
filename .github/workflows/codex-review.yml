@@ -30,7 +30,12 @@ jobs:
   review:
     name: Codex Review
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 30 min ceiling: gpt-5.4 / effort: medium can take ~25 min on a
+    # large diff, so 15 min was hitting the cap mid-stream. The
+    # concurrency group above already cancel-in-progress, so a new push
+    # will kill any still-running review — no downside to a generous
+    # ceiling.
+    timeout-minutes: 30
     # Skip fork PRs (no access to secrets) and draft PRs (still iterating)
     if: |
       github.event.pull_request.head.repo.full_name == github.repository

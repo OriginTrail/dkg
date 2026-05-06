@@ -1,5 +1,5 @@
 {
-  "name": "dkg-v9",
+  "name": "dkg-v10",
   "version": "10.0.0-rc.4",
   "private": true,
   "packageManager": "pnpm@10.28.1",
@@ -7,11 +7,17 @@
     "releaseRuntimeBuildScript": "build:runtime:packages"
   },
   "scripts": {
-    "build": "turbo build",
-    "build:runtime:packages": "pnpm -r --filter @origintrail-official/dkg-core --filter @origintrail-official/dkg-storage --filter @origintrail-official/dkg-query --filter @origintrail-official/dkg-publisher --filter @origintrail-official/dkg-chain --filter @origintrail-official/dkg-epcis --filter @origintrail-official/dkg-random-sampling --filter @origintrail-official/dkg-agent --filter @origintrail-official/dkg-graph-viz --filter @origintrail-official/dkg-node-ui --filter @origintrail-official/dkg-adapter-openclaw --filter @origintrail-official/dkg run build",
+    "build": "node scripts/build.mjs",
+    "build:packages": "turbo build",
+    "build:runtime:packages": "pnpm -r --filter @origintrail-official/dkg-core --filter @origintrail-official/dkg-storage --filter @origintrail-official/dkg-query --filter @origintrail-official/dkg-publisher --filter @origintrail-official/dkg-chain --filter @origintrail-official/dkg-epcis --filter @origintrail-official/dkg-random-sampling --filter @origintrail-official/dkg-agent --filter @origintrail-official/dkg-graph-viz --filter @origintrail-official/dkg-node-ui --filter @origintrail-official/dkg-adapter-openclaw --filter @origintrail-official/dkg-adapter-hermes --filter @origintrail-official/dkg run build",
     "build:runtime": "pnpm run build:runtime:packages && pnpm --filter @origintrail-official/dkg-node-ui run build:ui",
     "test": "turbo test",
+    "test:watch": "vitest --config vitest.config.ts",
     "test:coverage": "turbo test:coverage",
+    "bench": "esbench --config esbench.config.mjs",
+    "bench:html": "ESBENCH_HTML=1 ESBENCH_PUBLISH_ASYNC_GET_HTML=1 esbench --config esbench.config.mjs",
+    "bench:baseline": "ESBENCH_RESULT=bench/results/baseline.json ESBENCH_HTML=1 ESBENCH_HTML_FILE=bench/results/baseline.html esbench --config esbench.config.mjs",
+    "bench:compare": "ESBENCH_DIFF=bench/results/baseline.json ESBENCH_RESULT=bench/results/compare.json ESBENCH_HTML=1 ESBENCH_HTML_FILE=bench/results/compare.html esbench --config esbench.config.mjs",
     "lint": "turbo lint",
     "clean": "turbo clean",
     "dev": "turbo dev",
@@ -25,6 +31,7 @@
     "sim:testnet": "SIM_TARGET=testnet pnpm --filter @origintrail-official/dkg-network-sim dev",
     "sim:build": "pnpm --filter @origintrail-official/dkg-network-sim build",
     "mcp": "node packages/mcp-server/dist/index.js",
+    "check:npm-metadata": "node scripts/check-npm-metadata.mjs",
     "index": "node packages/cli/dist/cli.js index",
     "test:evm-integration": "./scripts/test-evm-integration.sh",
     "test:evm": "./scripts/test-evm-integration.sh all",
@@ -36,6 +43,7 @@
   "devDependencies": {
     "@types/node": "^22",
     "@vitest/coverage-v8": "^4.0.18",
+    "esbench": "^0.8.1",
     "knip": "^6.6.1",
     "tsx": "^4.21.0",
     "turbo": "^2",
@@ -65,6 +73,5 @@
     "patchedDependencies": {
       "hardhat@2.28.6": "patches/hardhat@2.28.6.patch"
     }
-  },
-  "dependencies": {}
+  }
 }

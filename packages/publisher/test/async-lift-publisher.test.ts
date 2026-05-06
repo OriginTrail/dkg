@@ -1,5 +1,5 @@
 import { beforeAll, beforeEach, afterAll, describe, expect, it } from 'vitest';
-import { GraphManager, OxigraphStore } from '@origintrail-official/dkg-storage';
+import { GraphManager, OxigraphStore, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter } from '@origintrail-official/dkg-chain';
 import { TypedEventBus, generateEd25519Keypair, sha256 } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
@@ -22,6 +22,7 @@ import {
   CONTROL_LOCKED_JOB,
   CONTROL_LOCK_EXPIRES_AT,
   CONTROL_LOCK_STATUS,
+  CONTROL_MAX_RETRIES,
   CONTROL_WALLET_ID,
   CONTROL_CONTEXT_GRAPH_ID,
   CONTROL_PAYLOAD,
@@ -29,6 +30,7 @@ import {
   CONTROL_ROOT,
   CONTROL_SCOPE,
   CONTROL_SHARE_OPERATION_ID,
+  CONTROL_SUB_GRAPH_NAME,
   CONTROL_STATUS,
   CONTROL_SWM_ID,
   DEFAULT_CONTROL_GRAPH_URI,
@@ -133,6 +135,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(job?.request.contextGraphId).toBe('music-social');
     expect(job?.request.swmId).toBe('swm-1');
     expect(job?.request.shareOperationId).toBe('op-1');
+    expect(job?.retries.maxRetries).toBe(10);
   });
 
   it('exposes the renamed shared-memory publisher contract', async () => {
@@ -154,7 +157,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
   it('stores explicit LiftJob and LiftRequest control-plane triples', async () => {
     const publisher = createPublisher();
-    const jobId = await publisher.lift(request());
+    const jobId = await publisher.lift({ ...request(), subGraphName: 'research' });
 
     const result = await store.query(`SELECT ?p ?o WHERE {
       GRAPH <${DEFAULT_CONTROL_GRAPH_URI}> {
@@ -170,6 +173,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(triples.get(CONTROL_JOB_SLUG)).toBe('"music-social/person-profile/create/op-1/rihana"');
     expect(triples.get(CONTROL_HAS_REQUEST)).toBe(requestSubject(jobId));
     expect(triples.get(CONTROL_ACCEPTED_AT)).toBe('"1001"^^<http://www.w3.org/2001/XMLSchema#integer>');
+    expect(triples.get(CONTROL_MAX_RETRIES)).toBe('"10"^^<http://www.w3.org/2001/XMLSchema#integer>');
     expect(triples.get(CONTROL_PAYLOAD)).toBeDefined();
 
     const requestResult = await store.query(`SELECT ?p ?o WHERE {
@@ -190,6 +194,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(requestTriples).toContainEqual([CONTROL_SWM_ID, '"swm-1"']);
     expect(requestTriples).toContainEqual([CONTROL_SHARE_OPERATION_ID, '"op-1"']);
     expect(requestTriples).toContainEqual([CONTROL_SCOPE, '"person-profile"']);
+    expect(requestTriples).toContainEqual([CONTROL_SUB_GRAPH_NAME, '"research"']);
     expect(requestTriples).toContainEqual([CONTROL_AUTHORITY_PROOF_REF, '"proof:owner:1"']);
     expect(requestTriples).toContainEqual([CONTROL_ROOT, '"urn:local:/rihana"']);
   });
@@ -336,7 +341,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(released.bindings).toHaveLength(0);
   });
 
-  it('does not delete a newer wallet lock when an older job releases late', async () => {
+  it('rejects a stale release without deleting a newer wallet lock', async () => {
     const publisher = createPublisher();
     const jobA = await publisher.lift(request());
     const jobB = await publisher.lift({ ...request(), shareOperationId: 'op-2' });
@@ -370,14 +375,16 @@ describe('TripleStoreAsyncLiftPublisher', () => {
       ),
     );
 
-    await publisher.update(jobA, 'failed', {
-      failure: createLiftJobFailureMetadata({
-        failedFromState: 'validated',
-        code: 'authority_unavailable',
-        message: 'late failure',
-        errorPayloadRef: 'urn:error:late-failure',
-      }) as any,
-    });
+    await expect(
+      publisher.update(jobA, 'failed', {
+        failure: createLiftJobFailureMetadata({
+          failedFromState: 'validated',
+          code: 'authority_unavailable',
+          message: 'late failure',
+          errorPayloadRef: 'urn:error:late-failure',
+        }) as any,
+      }),
+    ).rejects.toThrow(/stale|lock|claim/i);
 
     const lock = await store.query(`SELECT ?job WHERE {
       GRAPH <${DEFAULT_WALLET_LOCK_GRAPH_URI}> {
@@ -572,6 +579,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
           expect(walletId).toBe('wallet-1');
           expect(publishOptions.contextGraphId).toBe('music-social');
           expect(publishOptions.quads[0]?.subject).toContain('dkg:music-social:aloha:person-profile/rihana-');
+          expect(publishOptions.privateQuads?.[0]?.subject).toContain('dkg:music-social:aloha:person-profile/rihana-');
           return {
             kcId: 1n,
             ual: 'did:dkg:mock:31337/0xabc/1',
@@ -591,6 +599,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
         },
       },
     });
+    const privateStore = new PrivateContentStore(store, new GraphManager(store));
 
     const dkgPublisher = new DKGPublisher({
       store,
@@ -603,6 +612,10 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     const write = await dkgPublisher.share('music-social', [
       { subject: 'urn:local:/rihana', predicate: 'http://schema.org/name', object: '"Rihana"', graph: '' },
     ], { publisherPeerId: 'peer-1' });
+    await privateStore.storePrivateTriplesForOperation('music-social', write.shareOperationId, 'urn:local:/rihana', [
+      { subject: 'urn:local:/rihana', predicate: 'http://schema.org/secret', object: '"stage-secret"', graph: '' },
+    ]);
+    expect(await privateStore.getPrivateTriples('music-social', 'urn:local:/rihana')).toEqual([]);
 
     const jobId = await publisher.lift({
       ...request(),
@@ -615,6 +628,10 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(processed?.status).toBe('finalized');
     expect(processed?.validation?.authorityProofRef).toBe('proof:owner:1');
     expect(processed?.finalization?.ual).toBe('did:dkg:mock:31337/0xabc/1');
+    const canonicalRoot = processed?.validation?.canonicalRootMap['urn:local:/rihana'];
+    expect(canonicalRoot).toBeDefined();
+    expect((await privateStore.getPrivateTriples('music-social', canonicalRoot!)).map((quad) => quad.object)).toEqual(['"stage-secret"']);
+    expect(await privateStore.getPrivateTriplesForOperation('music-social', write.shareOperationId, 'urn:local:/rihana')).toEqual([]);
   });
 
   it('records validation/publish execution failures during processNext', async () => {
@@ -647,6 +664,48 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
     expect(processed?.status).toBe('failed');
     expect(processed?.failure?.code).toBe('tx_submit_timeout');
+  });
+
+  it('does not invent chain metadata for tentative publish results without on-chain details', async () => {
+    const publisher = createPublisher({
+      config: {
+        publishExecutor: async () => ({
+          kcId: 0n,
+          ual: 'did:dkg:mock:31337/0xabc/tentative',
+          merkleRoot: new Uint8Array([0xab, 0xcd]),
+          kaManifest: [],
+          status: 'tentative',
+        }),
+      },
+    });
+
+    const dkgPublisher = new DKGPublisher({
+      store,
+      chain: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      eventBus: new TypedEventBus(),
+      keypair: await generateEd25519Keypair(),
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
+    });
+    const write = await dkgPublisher.share('music-social', [
+      { subject: 'urn:local:/rihana', predicate: 'http://schema.org/name', object: '"Rihana"', graph: '' },
+    ], { publisherPeerId: 'peer-1' });
+
+    await publisher.lift({
+      ...request(),
+      shareOperationId: write.shareOperationId,
+    });
+
+    const processed = await publisher.processNext('wallet-1');
+
+    expect(processed?.status).toBe('failed');
+    expect(processed?.broadcast).toBeUndefined();
+    expect(processed?.inclusion).toBeUndefined();
+    expect(processed?.failure?.failedFromState).toBe('broadcast');
+    expect(processed?.failure?.code).toBe('rpc_unavailable');
+    expect(processed?.failure?.retryable).toBe(true);
+    expect(processed?.failure?.resolution).toBe('reset_to_accepted');
+    expect(processed?.failure?.message).toContain('without onChainResult');
   });
 
   it('persists unknown included-phase failures as terminal failed jobs', async () => {
@@ -955,6 +1014,10 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
     const claimedId = await publisher.lift(request());
     const broadcastId = await publisher.lift({ ...request(), shareOperationId: 'op-2' });
+    const privateStore = new PrivateContentStore(store, new GraphManager(store));
+    await privateStore.storePrivateTriplesForOperation('music-social', 'op-2', 'urn:local:/rihana', [
+      { subject: 'urn:local:/rihana', predicate: 'http://schema.org/secret', object: '"recover-secret"', graph: '' },
+    ]);
 
     await publisher.claimNext('wallet-1');
     await publisher.claimNext('wallet-2');
@@ -980,6 +1043,8 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(claimed?.status).toBe('accepted');
     expect(broadcast?.status).toBe('finalized');
     expect(broadcast?.recovery?.action).toBe('finalized_from_chain');
+    expect((await privateStore.getPrivateTriples('music-social', 'dkg:music-social:aloha:person/rihana')).map((quad) => quad.object)).toEqual(['"recover-secret"']);
+    expect(await privateStore.getPrivateTriplesForOperation('music-social', 'op-2', 'urn:local:/rihana')).toEqual([]);
   });
 
   it('keeps broadcast jobs in place while inconclusive recovery is still within the timeout window', async () => {

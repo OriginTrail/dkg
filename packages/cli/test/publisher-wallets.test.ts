@@ -10,7 +10,7 @@ import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, rever
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import { DKGPublisher } from '@origintrail-official/dkg-publisher';
 import { addPublisherWallet, loadPublisherWallets, publisherWalletsPath, removePublisherWallet } from '../src/publisher-wallets.js';
-import { createPublisherInspector, createPublisherInspectorFromStore, createPublisherRuntime, createPublisherRuntimeFromAgent, startPublisherRuntimeIfEnabled, parsePositiveMsOption } from '../src/publisher-runner.js';
+import { createPublisherInspector, createPublisherInspectorFromStore, createPublisherRuntime, createPublisherRuntimeFromAgent, startPublisherRuntimeIfEnabled, parsePositiveIntegerOption, parsePositiveMsOption } from '../src/publisher-runner.js';
 
 let _fileSnapshot: string;
 beforeAll(async () => {
@@ -190,13 +190,14 @@ describe('publisher wallets', () => {
       chainBase: undefined,
       pollIntervalMs: 10,
       errorBackoffMs: 10,
+      maxRetries: 10,
       v10ACKProviderFactory: () => {
         v10ACKProviderWasPassed = true;
         return async () => [];
       },
     });
 
-    await runtime.publisher.lift({
+    const jobId = await runtime.publisher.lift({
       swmId: 'swm-main',
       shareOperationId: write.shareOperationId,
       roots: ['urn:local:/rihana'],
@@ -206,6 +207,7 @@ describe('publisher wallets', () => {
       transitionType: 'CREATE',
       authority: { type: 'owner', proofRef: 'proof:owner:1' },
     });
+    expect((await runtime.publisher.getStatus(jobId))?.retries.maxRetries).toBe(10);
 
     const processed = await runtime.publisher.processNext(wallet.address);
 
@@ -274,6 +276,13 @@ describe('publisher wallets', () => {
     );
     expect(() => parsePositiveMsOption('nan', '--error-backoff')).toThrow(
       '--error-backoff must be a positive integer in milliseconds',
+    );
+  });
+
+  it('validates positive integer CLI options', () => {
+    expect(parsePositiveIntegerOption('10', '--max-retries')).toBe(10);
+    expect(() => parsePositiveIntegerOption('0', '--max-retries')).toThrow(
+      '--max-retries must be a positive integer',
     );
   });
 

@@ -267,6 +267,21 @@ describe('resolveChainConfig (field-level merge)', () => {
     expect(merged?.chainId).toBe(fullNetworkChain.chainId);
   });
 
+  it('merges tokenAddress with operator override precedence', () => {
+    const networkTokenAddress = '0xNETWORKTOKEN000000000000000000000000000';
+    const operatorTokenAddress = '0xOPERATORTOKEN00000000000000000000000000';
+
+    expect(resolveChainConfig(
+      {},
+      { chain: { ...fullNetworkChain, tokenAddress: networkTokenAddress } },
+    )?.tokenAddress).toBe(networkTokenAddress);
+
+    expect(resolveChainConfig(
+      { chain: { tokenAddress: operatorTokenAddress } },
+      { chain: { ...fullNetworkChain, tokenAddress: networkTokenAddress } },
+    )?.tokenAddress).toBe(operatorTokenAddress);
+  });
+
   it('returns a partial block when only config supplies fields (no network)', () => {
     const merged = resolveChainConfig(
       { chain: { rpcUrl: 'https://standalone.example/rpc' } },

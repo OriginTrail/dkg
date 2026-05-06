@@ -505,6 +505,27 @@ describe('PrivateContentStore', () => {
     expect(ps.hasPrivateTriples('cg-1', entity)).toBe(false);
   });
 
+  it('keeps operation-staged private triples out of the canonical private graph', async () => {
+    const entity = 'did:dkg:agent:AsyncPrivate';
+    const quads: Quad[] = [
+      { subject: entity, predicate: 'http://ex.org/secret', object: '"pending"', graph: '' },
+    ];
+
+    await ps.storePrivateTriplesForOperation('cg-stage', 'op-1', entity, quads);
+
+    expect(ps.hasPrivateTriples('cg-stage', entity)).toBe(false);
+    expect(await ps.getPrivateTriples('cg-stage', entity)).toEqual([]);
+    expect(await ps.hasPrivateTriplesInStore('cg-stage', entity)).toBe(false);
+    expect(await ps.getPrivateTriplesForOperation('cg-stage', 'op-1', entity)).toEqual(quads);
+
+    await ps.storePrivateTriples('cg-stage', entity, await ps.getPrivateTriplesForOperation('cg-stage', 'op-1', entity));
+    await ps.deletePrivateTriplesForOperation('cg-stage', 'op-1', entity);
+
+    expect(ps.hasPrivateTriples('cg-stage', entity)).toBe(true);
+    expect(await ps.getPrivateTriplesForOperation('cg-stage', 'op-1', entity)).toEqual([]);
+    expect((await ps.getPrivateTriples('cg-stage', entity)).map((quad) => quad.object)).toEqual(['"pending"']);
+  });
+
   it('hasPrivateTriples returns false before any data is stored', () => {
     expect(ps.hasPrivateTriples('unknown-cg', 'urn:x')).toBe(false);
   });

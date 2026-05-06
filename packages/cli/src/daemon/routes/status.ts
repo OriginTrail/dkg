@@ -105,6 +105,8 @@ import {
   CLI_NPM_PACKAGE,
 } from '../../config.js';
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../../publisher-runner.js';
+import { fetchAllEntries, resolveRegistryConfig } from '../../integrations/registry-client.js';
+import type { IntegrationEntry, TrustTier } from '../../integrations/schema.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
 import { loadTokens, httpAuthGuard, extractBearerToken } from '../../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
@@ -329,6 +331,54 @@ import {
 
 import type { RequestContext } from './context.js';
 
+// In-process cache for the dkg-integrations registry. Sidebar polls
+// open/close and 60s refresh would otherwise hit GitHub on every tick;
+// the registry doesn't change minute-to-minute, so a 5-minute TTL is fine.
+const REGISTRY_CACHE_TTL_MS = 5 * 60_000;
+
+interface RegistryCacheSnapshot {
+  entries: IntegrationEntry[];
+  failures: Array<{ slug: string; error: string }>;
+  fetchedAt: number;
+}
+
+let registryCache: RegistryCacheSnapshot | null = null;
+let registryCacheInflight: Promise<RegistryCacheSnapshot> | null = null;
+
+async function getRegistryCacheSnapshot(): Promise<RegistryCacheSnapshot> {
+  const now = Date.now();
+  if (registryCache && now - registryCache.fetchedAt < REGISTRY_CACHE_TTL_MS) {
+    return registryCache;
+  }
+  if (registryCacheInflight) return registryCacheInflight;
+  registryCacheInflight = (async () => {
+    const cfg = resolveRegistryConfig();
+    const { entries, failures } = await fetchAllEntries(cfg);
+    const snap: RegistryCacheSnapshot = { entries, failures, fetchedAt: Date.now() };
+    registryCache = snap;
+    return snap;
+  })().finally(() => {
+    registryCacheInflight = null;
+  });
+  return registryCacheInflight;
+}
+
+// Trims a registry entry down to the fields the sidebar/browse UI consumes.
+// Full entries (security blocks, install specs, etc.) stay on the daemon
+// until the eventual /integrations browse page asks for them.
+function summarizeRegistryEntry(e: IntegrationEntry) {
+  return {
+    slug: e.slug,
+    name: e.name,
+    description: e.description,
+    trustTier: e.trustTier,
+    memoryLayers: e.memoryLayers,
+    installKind: e.install.kind,
+    repo: e.repo,
+    maintainer: e.maintainer.github,
+    targetAgents: e.targetAgents ?? [],
+  };
+}
 
 export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
   const {
@@ -563,25 +613,58 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
     return jsonResponse(res, 200, { adapters, localAgentIntegrations, skills, paranets });
   }
 
+  // GET /api/integrations/registry — proxies the public dkg-integrations
+  // registry to the UI so the sidebar can list community integrations
+  // without spending the user's GitHub rate-limit. Cached in-process for
+  // REGISTRY_CACHE_TTL_MS to keep the sidebar responsive on poll/toggle.
+  if (req.method === 'GET' && path === '/api/integrations/registry') {
+    const tierParam = (url.searchParams.get('tier') ?? '').trim().toLowerCase();
+    const minTier: TrustTier = tierParam === 'community' || tierParam === 'verified' || tierParam === 'featured'
+      ? tierParam
+      : 'community';
+    try {
+      const { entries, failures, fetchedAt } = await getRegistryCacheSnapshot();
+      const TIER_RANK: Record<TrustTier, number> = { community: 0, verified: 1, featured: 2 };
+      const filtered = entries.filter((e) => TIER_RANK[e.trustTier] >= TIER_RANK[minTier]);
+      const summarized = filtered.map(summarizeRegistryEntry);
+      return jsonResponse(res, 200, {
+        entries: summarized,
+        failures,
+        fetchedAt,
+        tier: minTier,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return jsonResponse(res, 502, { error: `registry fetch failed: ${msg}` });
+    }
+  }
+
   // POST /api/register-adapter — legacy OpenClaw alias for /api/local-agent-integrations/connect
   if (req.method === 'POST' && path === '/api/register-adapter') {
     const body = await readBody(req, SMALL_BODY_BYTES);
     let parsed: Record<string, unknown>;
     try { parsed = JSON.parse(body); } catch { return jsonResponse(res, 400, { error: 'Invalid JSON body' }); }
-    if (parsed.id !== undefined && parsed.id !== 'openclaw') {
-      return jsonResponse(res, 400, { error: `Unknown adapter id: ${String(parsed.id)}` });
+    const adapterId = typeof parsed.id === 'string' && parsed.id.trim()
+      ? normalizeIntegrationId(parsed.id)
+      : 'openclaw';
+    const definition = LOCAL_AGENT_INTEGRATION_DEFINITIONS[adapterId];
+    if (!definition || adapterId !== 'openclaw') {
+      return jsonResponse(res, 400, { error: `Unknown adapter id: ${String(parsed.id ?? adapterId)}` });
     }
     try {
       const integration = connectLocalAgentIntegration(config, {
         ...parsed,
-        id: parsed.id ?? 'openclaw',
+        id: adapterId,
+        transport: {
+          kind: definition.transportKind,
+          ...(isPlainRecord(parsed.transport) ? parsed.transport : {}),
+        },
+        manifest: {
+          ...(definition.manifest ?? {}),
+          ...(isPlainRecord(parsed.manifest) ? parsed.manifest : {}),
+        },
         capabilities: {
-          localChat: true,
-          connectFromUi: true,
-          installNode: true,
-          dkgPrimaryMemory: true,
-          wmImportPipeline: true,
-          nodeServedSkill: true,
+          ...definition.capabilities,
           ...(isPlainRecord(parsed.capabilities) ? parsed.capabilities : {}),
         },
       });
@@ -620,12 +703,12 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
     }
     try {
       const provider = new ethers.JsonRpcProvider(rpcUrl);
-      const hub = new ethers.Contract(
-        hubAddress,
-        ["function getContractAddress(string) view returns (address)"],
-        provider,
-      );
-      const tokenAddr = await hub.getContractAddress("Token").catch(() => null);
+      const tokenAddr = chain?.tokenAddress
+        ?? (await new ethers.Contract(
+          hubAddress,
+          ["function getContractAddress(string) view returns (address)"],
+          provider,
+        ).getContractAddress("Token").catch(() => null));
       let token: ethers.Contract | null = null;
       let tokenSymbol = "TRAC";
       if (tokenAddr && tokenAddr !== ethers.ZeroAddress) {

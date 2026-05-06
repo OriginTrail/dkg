@@ -102,9 +102,9 @@ Never guess — `GET /api/agent/identity` is free and definitive. Call it first.
 
 ## 4a. Tool vs. HTTP — when to use each
 
-On an **OpenClaw runtime**, prefer the 21 `dkg_*` tools below over raw HTTP — the adapter handles token discovery, parameter aliasing, and error shaping. The 21-tool surface documented here is OpenClaw-specific. Other runtimes may expose different tool surfaces — Cursor / Claude Code / MCP clients should install [`@origintrail-official/dkg-mcp`](../../../mcp-dkg/README.md) for its own (different) tool set. When no tool layer applies (raw CLI, custom HTTP client, or an operation not covered by the tools below), use the HTTP API — the rest of this doc is the reference.
+On an **OpenClaw runtime** or **Hermes provider runtime**, prefer the `dkg_*` tools below over raw HTTP — the adapter handles token discovery, parameter aliasing, and error shaping. Other runtimes may expose different tool surfaces — Cursor / Claude Code / MCP clients should install [`@origintrail-official/dkg-mcp`](../../../mcp-dkg/README.md) for its own (different) tool set. When no tool layer applies (raw CLI, custom HTTP client, or an operation not covered by the tools below), use the HTTP API — the rest of this doc is the reference.
 
-Drop to HTTP when the operation isn't in the table — participant admin (§6), conditional writes (§5), publisher jobs (§8), file retrieval (§7), endorse / verify / update (§5), SSE events (§8). Each tool's full schema lives in `DkgNodePlugin.ts`; this table exists to help you find the right name, not re-document it.
+Drop to HTTP when the operation isn't in the table — participant self-service join/sign routes (§6), conditional writes (§5), publisher jobs (§8), file retrieval (§7), endorse / verify / update (§5), SSE events (§8). Each tool's full schema lives in `DkgNodePlugin.ts`; this table exists to help you find the right name, not re-document it.
 
 | Tool | Wraps | Short description |
 |---|---|---|
@@ -113,6 +113,13 @@ Drop to HTTP when the operation isn't in the table — participant admin (§6), 
 | `dkg_list_context_graphs` | `GET /api/context-graph/list` | List all context graphs the node knows about — each entry carries `subscribed` and `synced` flags (discovered-but-not-subscribed entries are present too) |
 | `dkg_context_graph_create` | `POST /api/context-graph/create` | Create a simple context graph (tool schema accepts only `name` / `description` / `id` — no multi-sig inputs). On chain-enabled nodes the daemon may auto-register on-chain as a best-effort side-effect — see §6 for the register semantics. Multi-sig CGs are HTTP-only |
 | `dkg_subscribe` | `POST /api/context-graph/subscribe` | Subscribe + catch up an existing CG |
+| `dkg_context_graph_invite` | `POST /api/context-graph/invite` | Create a ready-to-share invite for another peer to join a context graph |
+| `dkg_participant_add` | `POST /api/context-graph/{id}/add-participant` | Add an agent address to a curated/private context graph allowlist |
+| `dkg_participant_remove` | `POST /api/context-graph/{id}/remove-participant` | Remove an agent address from a curated/private context graph allowlist |
+| `dkg_participant_list` | `GET /api/context-graph/{id}/participants` | List current context graph participants / allowed agents |
+| `dkg_join_request_list` | `GET /api/context-graph/{id}/join-requests` | List pending join requests for a context graph |
+| `dkg_join_request_approve` | `POST /api/context-graph/{id}/approve-join` | Approve a pending join request by agent address |
+| `dkg_join_request_reject` | `POST /api/context-graph/{id}/reject-join` | Reject a pending join request by agent address |
 | `dkg_assertion_create` | `POST /api/assertion/create` | Start a WM assertion |
 | `dkg_assertion_write` | `POST /api/assertion/{name}/write` | Append triples to a WM assertion |
 | `dkg_assertion_promote` | `POST /api/assertion/{name}/promote` | Move a WM assertion's triples to SWM |
@@ -122,21 +129,25 @@ Drop to HTTP when the operation isn't in the table — participant admin (§6), 
 | `dkg_assertion_history` | `GET /api/assertion/{name}/history` | Read an assertion's lifecycle descriptor |
 | `dkg_publish` | `POST /api/shared-memory/write` + `POST /api/shared-memory/publish` | **Two-call helper**: first writes supplied quads to SWM via `/write`, then publishes all SWM → VM (TRAC). Calling only the `/publish` route skips the write — if dropping to raw HTTP, use both calls in order |
 | `dkg_shared_memory_publish` | `POST /api/shared-memory/publish` | **Canonical finalizer** after `dkg_assertion_promote`: publish SWM → VM, no fresh quads |
+| `dkg_share` | `POST /api/shared-memory/write` | Directly write concise team-visible knowledge to SWM without staging a WM assertion. Prefer the WM assertion → promote flow for durable/canonical work. Both Hermes and OpenClaw expose the same tool schema (required `content` and `context_graph_id`, optional `sub_graph_name`), so MCP-discovered call signatures are portable. The OpenClaw implementation additionally validates content as non-whitespace, mints a unique subject per share (returned in the response), and N-Triples-quotes content; Hermes is currently looser on those points — the parallel hardening is tracked in OriginTrail/dkg#414. |
 | `dkg_sub_graph_create` | `POST /api/sub-graph/create` | Register a sub-graph inside a CG |
 | `dkg_sub_graph_list` | `GET /api/sub-graph/list` | List sub-graphs in a CG |
 | `dkg_query` | `POST /api/query` | Read-only SPARQL across assertions in a CG. Pass `view` (`working-memory` / `shared-working-memory` / `verified-memory`) to pick the layer — when `view` is set, `context_graph_id` is required; for WM reads, optional `agent_address` targets another agent's WM (defaults to this node). Omit `view` for a legacy cross-graph data-path query. |
+| `dkg_query_catalog_list` | `POST /api/profile/query-catalog/read` | List saved SPARQL queries declared in the project profile query catalog |
+| `dkg_query_catalog_run` | `POST /api/profile/query-catalog/read` + `POST /api/query` | Run a saved catalog query by slug or exact display name |
 | `dkg_find_agents` | `GET /api/agents` | Discover other agents (best-effort P2P) |
 | `dkg_send_message` | `POST /api/chat` | Send a direct message (best-effort P2P) |
 | `dkg_read_messages` | `GET /api/messages` | Read inbound messages |
 | `dkg_invoke_skill` | `POST /api/invoke-skill` | Call another agent's skill (best-effort P2P) |
 
-P2P tools fail gracefully when the peer is offline. `dkg_publish` (fresh quads + write + publish, two HTTP calls) and `dkg_shared_memory_publish` (publish existing SWM, one HTTP call) differ in intent: use the two-call helper for "I have quads, publish now"; use the canonical finalizer as step 4 of the stepwise write → promote → publish flow.
+P2P tools fail gracefully when the peer is offline. `dkg_publish` (fresh quads + write + publish, two HTTP calls) and `dkg_shared_memory_publish` (publish existing SWM, one HTTP call) differ in intent: use the two-call helper for "I have quads, publish now"; use the canonical finalizer as step 4 of the stepwise write → promote → publish flow. `dkg_share` is a direct SWM convenience helper for quick team-visible notes, not a replacement for assertion lifecycle tracking.
 
 ### HTTP-only operations (no tool wrapper)
 
-- **Participants and join flow** — see §6.
+- **Participant self-service join/sign flow** — see §6.
 - **Conditional writes** (`POST /api/shared-memory/conditional-write`) — see §5 SWM.
 - **Async publisher job queue** (`/api/publisher/*`) — see §8.
+- **Query catalog writes** (`POST /api/profile/query-catalog/write`) — see §5 "Saved Query Catalog".
 - **Raw file retrieval** (`GET /api/file/{fileHash}`) — see §7.
 - **Endorse / verify / update** (`POST /api/endorse`, `/verify`, `/update`) — see §5 VM.
 - **SSE event stream** (`GET /api/events`) — see §8.
@@ -176,6 +187,12 @@ before promoting it to SWM (team) or through to VM (chain-anchored).
 ### Shared Working Memory (SWM) — Team-visible
 
 SWM is for knowledge you've promoted from WM and want peers to see. Data arrives here via `POST /api/assertion/{name}/promote` (from WM) or via direct SWM writes (escape hatch for team-visible data that doesn't need a WM staging step).
+
+> **Visibility.** SWM gossips to peers in the context graph's allowlist.
+> For a **curated** CG (the default — see §6), only listed agents/peers
+> receive the gossip. For an **explicitly public** CG (`public: true` at
+> creation), every peer subscribed to the CG receives the gossip.
+> Working Memory is per-agent regardless of CG visibility.
 
 - `POST /api/shared-memory/write` — write triples directly to SWM (gossip-replicated). Body: `{ contextGraphId, quads, subGraphName? }`. Use the WM → promote path for most workflows; direct SWM writes are for bulk team data that skips the private draft stage.
 - `POST /api/shared-memory/conditional-write` — compare-and-swap write. Body: `{ contextGraphId, quads, conditions: [...], subGraphName? }`. Each condition is `{ subject: IRI, predicate: IRI, expectedValue: string | null }`; `null` means "must not exist", a string must match the current object after N-Triples serialization. Any mismatch throws `StaleWriteError` and leaves SWM unchanged. `conditions` must be non-empty — use `/api/shared-memory/write` for unconditional writes.
@@ -220,6 +237,101 @@ The `memory_search` tool is the recommended entry point for free-text memory rec
   - `verifiedGraph` — target a specific VM (on-chain) named graph
 - `POST /api/query-remote` — query a remote peer via P2P. Body: `{ peerId, lookupType, contextGraphId, ual?, entityUri?, rdfType?, sparql?, limit?, timeout? }`. `lookupType` picks the strategy (e.g. `sparql`, `entity`, `rdf-type`). Remote peer ACL is enforced.
 
+### Saved Query Catalog
+
+The query catalog is project profile metadata: saved SPARQL queries attached to
+a context graph and grouped by sub-graph/catalog. In the Node UI it appears in
+the Project view as **Query catalog** above the context-graph query surface and
+inside sub-graph detail views; it is not the Graph Overview.
+
+Use this decision order:
+
+1. When a turn has a clear selected project/context graph
+   (`target_context_graph` or an explicit user-provided context graph) and the
+   user asks a substantive question about that project's data, call
+   `dkg_query_catalog_list` before inventing ad-hoc SPARQL or using broad
+   free-text recall. Skip this first-check only for operational/admin requests
+   such as daemon status, publishing, setup, connectivity, permissions, or
+   explicit writes.
+2. Inspect the returned saved-query candidates (`slug`, `name`, `description`,
+   `catalogName`, and `subGraph`) and choose the query that best matches the
+   user's wording. If exactly one candidate clearly matches, run it with
+   `dkg_query_catalog_run` and answer from the result. Mention the saved query
+   used in one short phrase when useful.
+3. If several candidates plausibly match and the answer depends on which one
+   is used, list the candidate names/slugs and ask the user to choose. If one
+   is clearly the best default, run it and note that other catalog options
+   exist only if the result is incomplete.
+4. If the catalog is empty or no saved query matches the request, continue with
+   the normal lookup path (`memory_search` for broad recall or `dkg_query` for
+   precise SPARQL). Do not pretend a catalog query was used.
+5. If the user asks which saved queries exist, call `dkg_query_catalog_list`
+   with the selected `context_graph_id` and present the useful candidates.
+6. If the user explicitly asks to run a saved query, call
+   `dkg_query_catalog_run` with the selected `context_graph_id` and the saved
+   query slug or exact display name. If the name is ambiguous, list first and
+   ask/choose by slug.
+7. If no query catalog tool is available, use `dkg_query` against the profile
+   graph (`did:dkg:context-graph:<id>/meta/query-catalog`) to read saved
+   queries, then run the selected `prof:sparqlQuery` with `dkg_query`.
+8. Only write or change query catalog entries when the user explicitly asks to
+   save/update catalog queries.
+
+OpenClaw tool path:
+
+- `dkg_query_catalog_list` input: `{ "context_graph_id": "<contextGraphId>" }`
+- `dkg_query_catalog_run` input:
+  `{ "context_graph_id": "<contextGraphId>", "query": "<slug-or-exact-name>" }`
+
+CLI fallback:
+
+```bash
+dkg query-catalog list <context-graph>
+dkg query-catalog run <context-graph> <query-slug-or-exact-name>
+```
+
+HTTP fallback:
+
+- `POST /api/profile/query-catalog/read`
+  Body: `{ "contextGraphId": "<contextGraphId>" }`
+  Returns bindings with `q`, `subGraph`, `catalog`, `name`, `description`,
+  `sparql`, `rank`, `catalogName`, `catalogDescription`, and `catalogRank`.
+- `POST /api/profile/query-catalog/write`
+  Body: `{ "contextGraphId": "<contextGraphId>", "quads": [...] }`
+  The daemon stores these triples in
+  `did:dkg:context-graph:<contextGraphId>/meta/query-catalog` regardless of
+  the incoming quad `graph` field. This route appends profile triples; prefer
+  a new saved-query URI for new saved queries and avoid overwriting unrelated
+  catalog/profile metadata.
+
+Profile RDF shape for writes:
+
+```turtle
+@prefix prof: <http://dkg.io/ontology/profile/> .
+@prefix schema: <http://schema.org/> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+<urn:dkg:profile:PROJECT:catalog:CATALOG> rdf:type prof:QueryCatalog ;
+  prof:forSubGraph "SUBGRAPH" ;
+  prof:displayName "Catalog name" ;
+  schema:description "Catalog description" ;
+  prof:rank "50"^^xsd:integer .
+
+<urn:dkg:profile:PROJECT:query:QUERY> rdf:type prof:SavedQuery ;
+  prof:forSubGraph "SUBGRAPH" ;
+  prof:inCatalog <urn:dkg:profile:PROJECT:catalog:CATALOG> ;
+  prof:displayName "Saved query name" ;
+  schema:description "What this query returns" ;
+  prof:sparqlQuery "SELECT ?uri WHERE { ?uri ?p ?o } LIMIT 50" ;
+  prof:resultColumn "uri" ;
+  prof:rank "100"^^xsd:integer .
+```
+
+When composing saved SPARQL, keep it read-only (`SELECT`, `ASK`, `CONSTRUCT`,
+or `DESCRIBE`). Prefer returning a stable `?uri` column when the result should
+feed entity-list UI surfaces.
+
 ### Operational constraints
 
 Respect these when producing writes — they're enforced at the node and produce errors rather than silent truncation.
@@ -246,6 +358,19 @@ The `<recalled-memory>` block is stripped from outgoing assistant text before tu
 ## 6. Context Graphs
 
 Context Graphs are scoped knowledge domains with configurable access and governance. In the node UI, context graphs are called **projects** — when a user says "my project" or selects a project in the right-panel dropdown, they mean a context graph.
+
+> **Default privacy model.** Context graphs created via the
+> `dkg_context_graph_create` tool are **curated/private by default** —
+> only agents in the allowlist can read SWM gossip or subscribe to
+> the CG. The creator is auto-included in the allowlist on creation,
+> so they can immediately read and write without an explicit
+> self-invite. Pass `public: true` to create an open/discoverable
+> context graph instead. Pass `allowed_agents: ["0x..."]` to invite
+> collaborators atomically with creation, or use
+> `dkg_participant_add` to invite them later. Working Memory is
+> per-agent regardless of CG visibility. Verified Memory anchors
+> are public on-chain — but the underlying private quads stay local
+> on the publishing node and are gated to allowed peers.
 
 ### Routing: Turn Context Override
 
@@ -307,8 +432,16 @@ Implications:
   - **Mock chain adapter** (`chainId` starts with `mock`): the create-time auto-register path is deliberately skipped to avoid polluting test runs. The CG stays local on create; explicit `register: true` or `/api/context-graph/register` may succeed depending on what the mock implements.
   - **Real chain adapter WITH on-chain identity**: `createContextGraph()` auto-registers on-chain as a best-effort side-effect. Failures are logged as warnings (not surfaced on the create response) and the CG remains local. Passing `register: true` in this regime usually duplicates the auto-register work and returns `200` with `registered: false` + `registerError` + `hint` because the CG is already registered — looks like a failure but isn't one. Use `register: true` here only as an explicit retry hook when the auto-register path failed.
   - **Real chain adapter WITHOUT on-chain identity**: no auto-register on create; CG stays local until `/api/context-graph/register` or `register: true` promotes it.
-  - **Simple CG** (default): pass `{ id, name }`. Creator alone publishes to VM. Add `accessPolicy: 1` + `allowedAgents` for a curated CG.
+  - **Curated CG** (default for the `dkg_context_graph_create` tool): the tool sends `accessPolicy: 1` automatically. The creator is auto-included in `DKG_ALLOWED_AGENT` so they can immediately read/write. Add collaborators with `dkg_participant_add` (or pass `allowed_agents: ["0x..."]` at creation to do it atomically).
+  - **Public CG**: pass `public: true` on the tool (or `accessPolicy: 0` / omit on the raw HTTP route). Anyone can subscribe and read SWM gossip.
   - **Multi-sig CG**: pass `participantIdentityIds: [...]` + `requiredSignatures: M`. Use `register: true` so the participant set and threshold are anchored on-chain. `requiredSignatures` is optional when `private: true`.
+
+  > **Direct HTTP vs tool.** When you call the `dkg_context_graph_create`
+  > tool, it defaults to curated/private (sends `accessPolicy: 1`). When
+  > you call `POST /api/context-graph/create` directly without
+  > `accessPolicy`, the daemon resolves to public/discoverable. The tool
+  > is the recommended surface for agent workflows; raw HTTP is for
+  > programmatic clients that want explicit control.
 - `POST /api/context-graph/register` — register a previously-created local CG on-chain (two-phase creation). Body: `{ id, accessPolicy? }`. Use this to promote a free CG to an on-chain identity before publishing to Verified Memory. `revealOnChain` is deprecated and ignored on the V10 ContextGraphs path.
 - `POST /api/context-graph/rename` — rename a CG (human-readable name only; the ID is immutable). Body: `{ contextGraphId, name }`.
 - `POST /api/context-graph/subscribe` — subscribe to a context graph
@@ -430,6 +563,21 @@ Use the job queue for bulk or long-running publishes, publishes that must surviv
 3. Write triples to Working Memory (`POST /api/assertion/{name}/write`)
 4. When ready to share with peers: promote to SWM (`POST /api/assertion/{name}/promote`)
 5. When ready to publish permanently: publish to VM (`POST /api/shared-memory/publish`)
+
+**Private project for me alone (the default):**
+
+1. `dkg_context_graph_create({ name: "My Notes" })` — curated by default; creator is the only allowed agent.
+2. Write WM and promote to SWM — gossip is gated to the creator's allowlist (just yourself).
+
+**Shared project with a teammate:**
+
+1. `dkg_context_graph_create({ name: "Team X", allowed_agents: ["0xAlice"] })` — curated CG with Alice (and the creator) on the allowlist atomically with creation.
+2. Or, if Alice's address comes later: `dkg_context_graph_create({ name: "Team X" })` followed by `dkg_participant_add({ context_graph_id: "team-x", agent_address: "0xAlice" })`.
+3. Write and promote — SWM gossip is delivered only to the listed peers.
+
+**Open/discoverable project:**
+
+1. `dkg_context_graph_create({ name: "Public Research", public: true })` — explicitly opts out of curation; anyone subscribed receives SWM gossip.
 
 **Import a file into a project:**
 

@@ -52,7 +52,8 @@ export async function startPublisherRuntimeIfEnabled(args: {
       chainBase: args.chainBase,
       pollIntervalMs: args.config.publisher.pollIntervalMs,
       errorBackoffMs: args.config.publisher.errorBackoffMs,
-        ackTransportFactory: args.ackTransportFactory,
+      maxRetries: args.config.publisher.maxRetries,
+      ackTransportFactory: args.ackTransportFactory,
     });
     await runtime.runner.start();
     args.log(`Async publisher runner started (${runtime.walletIds.length} wallet${runtime.walletIds.length === 1 ? '' : 's'})`);
@@ -79,6 +80,7 @@ interface PublisherRuntimeBaseArgs {
   };
   pollIntervalMs?: number;
   errorBackoffMs?: number;
+  maxRetries?: number;
   ackTransportFactory?: () => ACKTransportFactory;
   v10ACKProviderFactory?: () => PublishOptions['v10ACKProvider'];
   closeStoreOnStop: boolean;
@@ -89,6 +91,7 @@ export async function createPublisherRuntime(args: {
   config: DkgConfig;
   pollIntervalMs?: number;
   errorBackoffMs?: number;
+  maxRetries?: number;
 }): Promise<PublisherRuntime> {
   const publisherWallets = await loadPublisherWallets(args.dataDir);
   if (publisherWallets.wallets.length === 0) {
@@ -114,6 +117,7 @@ export async function createPublisherRuntime(args: {
     chainBase,
     pollIntervalMs: args.pollIntervalMs,
     errorBackoffMs: args.errorBackoffMs,
+    maxRetries: args.maxRetries ?? args.config.publisher?.maxRetries,
     closeStoreOnStop: true,
   });
 }
@@ -152,6 +156,7 @@ export async function createPublisherRuntimeFromAgent(args: {
   };
   pollIntervalMs?: number;
   errorBackoffMs?: number;
+  maxRetries?: number;
   ackTransportFactory?: () => ACKTransportFactory;
   v10ACKProviderFactory?: () => PublishOptions['v10ACKProvider'];
 }): Promise<PublisherRuntime> {
@@ -162,6 +167,7 @@ export async function createPublisherRuntimeFromAgent(args: {
     chainBase: args.chainBase,
     pollIntervalMs: args.pollIntervalMs,
     errorBackoffMs: args.errorBackoffMs,
+    maxRetries: args.maxRetries,
     ackTransportFactory: args.ackTransportFactory,
     v10ACKProviderFactory: args.v10ACKProviderFactory,
     closeStoreOnStop: false,
@@ -228,6 +234,7 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
 
   const asyncPublisher = new TripleStoreAsyncLiftPublisher(args.store, {
     chainRecoveryResolver: hasChainRecovery ? createChainRecoveryResolver(publishers) : undefined,
+    maxRetries: args.maxRetries,
     publishExecutor: async ({ walletId, publishOptions }: AsyncLiftPublishExecutionInput) => {
       const publisher = publishers.get(walletId);
       if (!publisher) {
@@ -423,6 +430,14 @@ export function parsePositiveMsOption(value: string, optionName: '--poll-interva
   const parsed = Number.parseInt(value, 10);
   if (!Number.isFinite(parsed) || parsed < 1) {
     throw new Error(`${optionName} must be a positive integer in milliseconds`);
+  }
+  return parsed;
+}
+
+export function parsePositiveIntegerOption(value: string, optionName: string): number {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    throw new Error(`${optionName} must be a positive integer`);
   }
   return parsed;
 }

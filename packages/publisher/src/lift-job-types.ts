@@ -16,6 +16,8 @@ export interface LiftAuthorityProof {
   readonly proofRef: string;
 }
 
+export type LiftAccessPolicy = 'public' | 'ownerOnly' | 'allowList';
+
 export interface LiftRequest {
   readonly swmId: string;
   readonly shareOperationId: string;
@@ -26,6 +28,9 @@ export interface LiftRequest {
   readonly transitionType: LiftTransitionType;
   readonly authority: LiftAuthorityProof;
   readonly priorVersion?: string;
+  readonly subGraphName?: string;
+  readonly accessPolicy?: LiftAccessPolicy;
+  readonly allowedPeers?: readonly string[];
 }
 
 export const LIFT_REQUEST_IMMUTABLE_FIELDS = [
@@ -38,6 +43,9 @@ export const LIFT_REQUEST_IMMUTABLE_FIELDS = [
   'transitionType',
   'authority',
   'priorVersion',
+  'subGraphName',
+  'accessPolicy',
+  'allowedPeers',
 ] as const;
 
 export interface LiftJobTimestamps {

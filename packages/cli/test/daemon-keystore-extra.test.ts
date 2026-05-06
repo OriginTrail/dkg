@@ -1,7 +1,7 @@
 /**
  * Extra keystore hardening tests.
  *
- * Covers audit findings from `.test-audit/BUGS_FOUND.md` → `packages/cli (BURA)`:
+ * Covers audit findings from `.test-audit/
  *   - CLI-1  (CRITICAL, dup #11) — scrypt KDF parameter floor is not enforced.
  *     A keystore file with dangerously weak N/r/p parameters loads successfully,
  *     defeating the whole point of scrypt memory-hardness.
@@ -14,7 +14,7 @@
  * verbatim and derives the key with whatever values the (untrusted) keystore
  * file provides. There is no minimum-cost gate. Until a floor check lands in
  * `src/keystore.ts`, the "refuse weak" assertions stay RED — see
- * `.test-audit/BUGS_FOUND.md` CLI-1 (dup of open issue #11).
+ * `.test-audit/.
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
@@ -91,10 +91,18 @@ describe('CLI-1 — scrypt KDF parameter floor (PROD-BUG: not enforced)', () => 
     // encrypted with.
     expect(weakKs.crypto.kdfparams.n).toBe(WEAK_N);
 
-    // Sanity: the "strong" keystore is rejected if we lie about its N
-    // (tampered kdfparams → wrong key → GCM auth failure).
+    // Sanity: `decryptKeystore` actually reads `kdfparams.n` when deriving
+    // (regression guard against the historical bug where the loader
+    // ignored the file's advertised cost factor and always used the
+    // module-global `SCRYPT_N`). To prove the param is honoured without
+    // tripping the brand-new "weak keystore" gate, tamper with a value
+    // that's STILL above the production floor (2^15) but different from
+    // what the keystore was actually encrypted with — different N →
+    // different derived key → GCM auth failure → "Decryption failed".
+    const STRONG_BUT_DIFFERENT_N = 2 ** 16;
+    expect(STRONG_BUT_DIFFERENT_N).toBeGreaterThan(SAFE_N);
     await expect(
-      decryptKeystore(withKdfParams(ks, { n: WEAK_N }), PASSPHRASE),
+      decryptKeystore(withKdfParams(ks, { n: STRONG_BUT_DIFFERENT_N }), PASSPHRASE),
     ).rejects.toThrow(/Decryption failed/);
 
     // PROD-BUG: the below call SHOULD throw "KDF parameters below minimum"

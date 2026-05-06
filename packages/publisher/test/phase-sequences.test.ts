@@ -129,9 +129,9 @@ describe('Phase-sequence contracts', () => {
     ]);
   });
 
-  // -- Publish (no wallet — tentative path) -----------------------------
+  // -- Publish (adapter-backed signer, no identity — tentative) -----------
 
-  it('publish: tentative path omits sign/submit sub-phases', async () => {
+  it('publish: adapter-backed signer without node identity returns tentative after local phases', async () => {
     const store = new OxigraphStore();
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const keypair = await generateEd25519Keypair();
@@ -141,15 +141,19 @@ describe('Phase-sequence contracts', () => {
       chain,
       eventBus: new TypedEventBus(),
       keypair,
-      // No publisherPrivateKey → tentative only
+      // EVM adapter but no publisherPrivateKey / adapter-backed signer.
     });
 
     const quads = [q(ENTITY, 'http://schema.org/name', '"Tentative"')];
     const { calls, fn } = recorder();
-    await publisher.publish({ contextGraphId: PARANET, quads, onPhase: fn });
+    const result = await publisher.publish({ contextGraphId: PARANET, quads, onPhase: fn });
+    const adapterAddress = new ethers.Wallet(HARDHAT_KEYS.CORE_OP).address;
 
-    const phases = calls.map(([p, s]) => `${p}:${s}`);
+    expect(result.status).toBe('tentative');
+    expect(result.ual).toContain(`/${adapterAddress}/`);
+    expect(result.ual).not.toContain(`/${ethers.ZeroAddress}/`);
 
+    const phases = stripTxSigned(calls).map(([p, s]) => `${p}:${s}`);
     expect(phases).toEqual([
       'prepare:start',
       'prepare:ensureContextGraph:start',

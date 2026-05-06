@@ -45,6 +45,7 @@ import { describe, it, expect } from 'vitest';
 import { EVMChainAdapter } from '../src/evm-adapter.js';
 import { MockChainAdapter } from '../src/mock-adapter.js';
 import { NoChainAdapter } from '../src/no-chain-adapter.js';
+import { ethers } from 'ethers';
 
 /** Collect all own method names across the whole prototype chain, minus `constructor`. */
 function collectMethodNames(ctor: Function): Set<string> {
@@ -77,6 +78,8 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'getProvider',            // returns a JsonRpcProvider; mock has none
   'getSignerAddress',       // mock exposes `signerAddress` as a field
   'getSignerAddresses',     // pool not applicable to mock
+  'getAuthorizedPublisherAddress', // pool-specific signer selection; mock has one signerAddress
+  'signMessageAs',          // pool-specific wallet-key signing; mock has no adapter-held private keys
   'getOperationalPrivateKey', // mock has no wallet keys
   'getRequiredPublishTokenAmount', // TODO: missing on mock, cross-check below
   // TypeScript `private` is erased at runtime; these are adapter-internal
@@ -84,6 +87,7 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   // ChainAdapter contract. They must remain EVM-only.
   'nextSigner',
   'nextAuthorizedSigner',
+  'findSignerByAddress',
   'walletKeyHash',
   'hasAdminPurpose',
   'hasOperationalPurpose',
@@ -280,6 +284,103 @@ describe('MockChainAdapter API parity with EVMChainAdapter [CH-8]', () => {
       ...base,
       publishPolicy: 0,
     })).resolves.toMatchObject({ contextGraphId: 1n });
+  });
+
+  it('requires explicit mock support for address-specific V10 publishing', async () => {
+    const mock = new MockChainAdapter('mock:31337', '0x1111111111111111111111111111111111111111');
+    mock.minimumRequiredSignatures = 0;
+    const otherPublisher = '0x2222222222222222222222222222222222222222';
+    const params = {
+      publishOperationId: 'mock-v10-publisher-address',
+      contextGraphId: 1n,
+      publisherAddress: otherPublisher,
+      merkleRoot: new Uint8Array(32),
+      knowledgeAssetsAmount: 1,
+      byteSize: 1n,
+      epochs: 1,
+      tokenAmount: 1n,
+      isImmutable: false,
+      merkleLeafCount: 1,
+      paymaster: '0x0000000000000000000000000000000000000000',
+      publisherNodeIdentityId: 1n,
+      publisherSignature: { r: new Uint8Array(32), vs: new Uint8Array(32) },
+      ackSignatures: [],
+    };
+
+    await expect(mock.createKnowledgeAssetsV10(params)).rejects.toThrow(/not allowed/);
+
+    mock.allowPublisherAddress(otherPublisher);
+    await expect(mock.createKnowledgeAssetsV10(params)).resolves.toMatchObject({
+      publisherAddress: otherPublisher,
+    });
+  });
+
+  it('preserves delegated V10 publisher attribution across mock updates', async () => {
+    const mock = new MockChainAdapter('mock:31337', '0x1111111111111111111111111111111111111111');
+    mock.minimumRequiredSignatures = 0;
+    const delegatedPublisher = '0x2222222222222222222222222222222222222222';
+    mock.allowPublisherAddress(delegatedPublisher);
+
+    const created = await mock.createKnowledgeAssetsV10({
+      publishOperationId: 'mock-v10-delegated-update',
+      contextGraphId: 1n,
+      publisherAddress: delegatedPublisher,
+      merkleRoot: new Uint8Array(32),
+      knowledgeAssetsAmount: 1,
+      byteSize: 1n,
+      epochs: 1,
+      tokenAmount: 1n,
+      isImmutable: false,
+      merkleLeafCount: 1,
+      paymaster: ethers.ZeroAddress,
+      publisherNodeIdentityId: 1n,
+      publisherSignature: { r: new Uint8Array(32), vs: new Uint8Array(32) },
+      ackSignatures: [],
+    });
+
+    const newMerkleRoot = ethers.getBytes(ethers.keccak256(ethers.toUtf8Bytes('mock-v10-update')));
+    const update = await mock.updateKnowledgeCollectionV10({
+      kcId: created.batchId,
+      newMerkleRoot,
+      newByteSize: 2n,
+      newMerkleLeafCount: 1,
+    });
+
+    expect(update.publisherAddress?.toLowerCase()).toBe(delegatedPublisher.toLowerCase());
+    await expect(mock.getLatestMerkleRootPublisher(created.batchId)).resolves.toBe(delegatedPublisher);
+    await expect(mock.getLatestMerkleRoot(created.batchId)).resolves.toEqual(newMerkleRoot);
+  });
+
+  it('uses stored publisher attribution on the V9 mock update path', async () => {
+    const mock = new MockChainAdapter('mock:31337', '0x1111111111111111111111111111111111111111');
+    const delegatedPublisher = '0x2222222222222222222222222222222222222222';
+    mock.minimumRequiredSignatures = 0;
+    mock.allowPublisherAddress(delegatedPublisher);
+
+    const created = await mock.createKnowledgeAssetsV10({
+      publishOperationId: 'mock-v9-fallback-delegated-update',
+      contextGraphId: 1n,
+      publisherAddress: delegatedPublisher,
+      merkleRoot: new Uint8Array(32),
+      knowledgeAssetsAmount: 1,
+      byteSize: 1n,
+      epochs: 1,
+      tokenAmount: 1n,
+      isImmutable: false,
+      merkleLeafCount: 1,
+      paymaster: ethers.ZeroAddress,
+      publisherNodeIdentityId: 1n,
+      publisherSignature: { r: new Uint8Array(32), vs: new Uint8Array(32) },
+      ackSignatures: [],
+    });
+
+    const update = await mock.updateKnowledgeAssets({
+      batchId: created.batchId,
+      newMerkleRoot: ethers.getBytes(ethers.keccak256(ethers.toUtf8Bytes('mock-v9-update'))),
+      newPublicByteSize: 2n,
+    });
+
+    expect(update.publisherAddress?.toLowerCase()).toBe(delegatedPublisher.toLowerCase());
   });
 });
 

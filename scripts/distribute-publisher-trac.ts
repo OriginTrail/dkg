@@ -154,14 +154,12 @@ async function main() {
 
   // Load distribution wallet
   const privateKey = process.env.DISTRIBUTION_WALLET_KEY;
-  if (!privateKey && !dryRun) {
-    console.error('Set DISTRIBUTION_WALLET_KEY in .env or environment');
+  if (!privateKey) {
+    console.error('Set DISTRIBUTION_WALLET_KEY in .env or environment. Refusing to use an ephemeral wallet, even for dry runs.');
     process.exit(1);
   }
 
-  const wallet = privateKey
-    ? new Wallet(privateKey, provider)
-    : Wallet.createRandom().connect(provider);
+  const wallet = new Wallet(privateKey, provider);
 
   const walletAddress = await wallet.getAddress();
   const token = new Contract(TOKEN_ADDRESSES[chain], ERC20_ABI, wallet);

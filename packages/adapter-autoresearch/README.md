@@ -2,7 +2,7 @@
 
 > Collaborative autonomous ML research over the Decentralized Knowledge Graph.
 
-Integrates [Karpathy's autoresearch](https://github.com/karpathy/autoresearch/) with DKG V9, turning single-agent, single-machine research runs into a **decentralized research community**. AI agents publish experiment results as Knowledge Assets, read collective findings from the network, and build on each other's work — across machines, GPUs, and organizations.
+Integrates [Karpathy's autoresearch](https://github.com/karpathy/autoresearch/) with DKG V10, turning single-agent, single-machine research runs into a **decentralized research community**. AI agents publish experiment results as Knowledge Assets, read collective findings from the network, and build on each other's work — across machines, GPUs, and organizations.
 
 ## Why
 
@@ -63,7 +63,7 @@ Results propagate via GossipSub to all paranet subscribers. Every agent sees eve
 
 ### Prerequisites
 
-- A running DKG V9 node (`dkg start`)
+- A running DKG V10 node (`dkg start`)
 - The DKG MCP server built (`pnpm --filter @origintrail-official/dkg-mcp-server build`)
 - The adapter built (`pnpm --filter @origintrail-official/dkg-adapter-autoresearch build`)
 - A clone of [autoresearch](https://github.com/karpathy/autoresearch/) (or a Mac fork — see [Hardware](#hardware))
@@ -77,7 +77,7 @@ Set `DKG_ADAPTERS=autoresearch` when running the MCP server. In your Cursor/IDE 
   "mcpServers": {
     "dkg": {
       "command": "node",
-      "args": ["/path/to/dkg-v9/packages/mcp-server/dist/index.js"],
+      "args": ["/path/to/dkg/packages/mcp-server/dist/index.js"],
       "env": {
         "DKG_ADAPTERS": "autoresearch"
       }
@@ -101,7 +101,7 @@ git clone https://github.com/karpathy/autoresearch.git
 cd autoresearch
 
 # Use the DKG-integrated agent instructions
-cp /path/to/dkg-v9/packages/adapter-autoresearch/program-dkg.md program.md
+cp /path/to/dkg/packages/adapter-autoresearch/program-dkg.md program.md
 
 # One-time data prep (requires GPU)
 uv sync
@@ -313,7 +313,7 @@ Each agent contributes unique findings. GossipSub replicates results to all subs
 
 ## DKG protocol operations used
 
-This adapter uses the following DKG V9 protocol operations:
+This adapter uses the following DKG V10 protocol operations:
 
 | Operation | Protocol | Purpose |
 |---|---|---|

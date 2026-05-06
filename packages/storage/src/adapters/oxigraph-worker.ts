@@ -80,6 +80,7 @@ export class OxigraphWorkerStore implements TripleStore {
   async listGraphs(): Promise<string[]> { return this.call('listGraphs'); }
   async deleteBySubjectPrefix(graphUri: string, prefix: string): Promise<number> { return this.call('deleteBySubjectPrefix', graphUri, prefix); }
   async countQuads(graphUri?: string): Promise<number> { return this.call('countQuads', graphUri); }
+  async flush(): Promise<void> { return this.call('flush'); }
 
   async close(): Promise<void> {
     await this.call('close');

@@ -1,6 +1,6 @@
 # @origintrail-official/dkg-query
 
-SPARQL query engine for DKG V9. Provides paranet-scoped querying, Knowledge Asset resolution by UAL, and read-only query validation.
+SPARQL query engine for DKG V10. Provides paranet-scoped querying, Knowledge Asset resolution by UAL, and read-only query validation.
 
 ## Features
 

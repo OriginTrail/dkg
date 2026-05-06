@@ -631,13 +631,16 @@ describe('DkgNodePlugin', () => {
     expect(toolNames).toContain('dkg_sub_graph_create');
     expect(toolNames).toContain('dkg_sub_graph_list');
     expect(toolNames).toContain('dkg_shared_memory_publish');
+    // dkg_share — direct SWM convenience helper, parity with Hermes (#382, #408).
+    expect(toolNames).toContain('dkg_share');
     // Legacy V9 paranet aliases are removed as of v10-rc.
     expect(toolNames).not.toContain('dkg_list_paranets');
     expect(toolNames).not.toContain('dkg_paranet_create');
     // memory_search added by this feature branch (W2 — agent-callable recall button).
     expect(toolNames).toContain('memory_search');
-    // 28 from main (originals + assertion/subgraph/SWM/CG-registration tools) + 1 memory_search = 29
-    expect(registeredTools.length).toBe(29);
+    // Keep this resilient as main adds new exported tools; this test already
+    // asserts presence of the critical tool set above.
+    expect(registeredTools.length).toBeGreaterThanOrEqual(29);
   });
 
   it('new dkg_assertion_* and dkg_sub_graph_* tools have the expected schema shape', () => {
@@ -753,7 +756,10 @@ describe('DkgNodePlugin', () => {
   // ---------------------------------------------------------------------------
 
   describe('handler-level drift guards: snake_case args → camelCase daemon body', () => {
-    const setupPluginWithFetch = (response: unknown = {}) => {
+    const setupPluginWithFetch = (
+      response: unknown = {},
+      opts: { skipNodeIdInjection?: boolean } = {},
+    ) => {
       const fetchMock = vi.fn(async () =>
         new Response(JSON.stringify(response), {
           status: 200,
@@ -771,6 +777,13 @@ describe('DkgNodePlugin', () => {
         on: () => {},
         logger: {},
       });
+      // Most handler tests assume the node identity has resolved (e.g. dkg_share
+      // builds canned-quad subjects from it). Inject a placeholder address so
+      // tests don't have to mock the daemon /api/status probe end-to-end. Pass
+      // `skipNodeIdInjection: true` to exercise the unresolved-identity branch.
+      if (!opts.skipNodeIdInjection) {
+        (plugin as any).nodePeerId = '12D3KooTestPeerId';
+      }
       const byName = new Map(tools.map((t) => [t.name, t] as const));
       return { fetchMock, plugin, byName };
     };
@@ -1258,6 +1271,261 @@ describe('DkgNodePlugin', () => {
       expect(fetchMock).not.toHaveBeenCalled();
       expect(bad.content[0].text).toContain('root_entities');
       expect(bad.content[0].text).toContain('non-empty array');
+    });
+
+    it('dkg_share is registered with required content and context_graph_id', () => {
+      const { byName } = setupPluginWithFetch({});
+      const tool = byName.get('dkg_share');
+      expect(tool).toBeDefined();
+      expect(tool!.parameters.required).toEqual(['content', 'context_graph_id']);
+      const props = tool!.parameters.properties;
+      expect(props.content?.type).toBe('string');
+      expect(props.context_graph_id?.type).toBe('string');
+      expect(props.sub_graph_name?.type).toBe('string');
+    });
+
+    it('dkg_share rejects non-string content/context_graph_id/sub_graph_name without coercing', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ shareOperationId: 'op-types' });
+      // Without explicit type checks, `String(args.content ?? '')` would coerce
+      // {} → "[object Object]" and false → "false" — silently polluting SWM
+      // with garbage. Validate at the runtime boundary instead.
+      const objContent = await byName.get('dkg_share')!.execute('tc', { content: {}, context_graph_id: 'ctx' });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(objContent.content[0].text).toContain('content');
+
+      const boolContent = await byName.get('dkg_share')!.execute('tc', { content: false, context_graph_id: 'ctx' });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(boolContent.content[0].text).toContain('content');
+
+      const objCg = await byName.get('dkg_share')!.execute('tc', { content: 'x', context_graph_id: { id: 'ctx' } });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(objCg.content[0].text).toContain('context_graph_id');
+
+      const numSub = await byName.get('dkg_share')!.execute('tc', {
+        content: 'x', context_graph_id: 'ctx', sub_graph_name: 42,
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(numSub.content[0].text).toContain('sub_graph_name');
+    });
+
+    it('dkg_share rejects missing/empty content without making a daemon call', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ shareOperationId: 'op-1' });
+      const result = await byName.get('dkg_share')!.execute('tc', { context_graph_id: 'ctx' });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(result.content[0].text).toContain('content');
+
+      const blank = await byName.get('dkg_share')!.execute('tc', { content: '   ', context_graph_id: 'ctx' });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(blank.content[0].text).toContain('content');
+    });
+
+    it('dkg_share rejects missing/empty context_graph_id without making a daemon call', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ shareOperationId: 'op-2' });
+      const result = await byName.get('dkg_share')!.execute('tc', { content: 'fact' });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(result.content[0].text).toContain('context_graph_id');
+    });
+
+    it('dkg_share forwards content as a canned quad to /api/shared-memory/write with localOnly=false', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ shareOperationId: 'op-3' });
+      await byName.get('dkg_share')!.execute('tc', {
+        content: 'hello',
+        context_graph_id: 'ctx',
+      });
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('http://localhost:9200/api/shared-memory/write');
+      expect(init.method).toBe('POST');
+      const body = JSON.parse(init.body as string);
+      expect(body.contextGraphId).toBe('ctx');
+      expect(body.localOnly).toBe(false);
+      expect(body.subGraphName).toBeUndefined();
+      expect(body.quads).toHaveLength(1);
+      const [quad] = body.quads;
+      // Subject ends with a unique shareId suffix so the publisher's
+      // delete-then-insert upsert doesn't replace prior shares.
+      expect(quad.subject).toMatch(/^urn:openclaw:.+:shared:\d+-[a-z0-9]+$/);
+      expect(quad.predicate).toBe('urn:openclaw:sharedContent');
+      // Object is N-Triples-quoted so the storage formatTerm doesn't
+      // IRI-encode the unquoted text.
+      expect(quad.object).toBe('"hello"');
+    });
+
+    it('dkg_share returns the minted subject and snake_case root_entities in the tool response', async () => {
+      // Field name is snake_case to match the consuming tool's argument
+      // shape — agents chaining dkg_share → dkg_shared_memory_publish
+      // ({ root_entities: ... }) can pass the value through unchanged.
+      const { byName } = setupPluginWithFetch({ shareOperationId: 'op-resp' });
+      const result = await byName.get('dkg_share')!.execute('tc', {
+        content: 'targetable',
+        context_graph_id: 'ctx',
+      });
+      const body = JSON.parse(result.content[0].text);
+      expect(body.shareOperationId).toBe('op-resp');
+      expect(body.subject).toMatch(/^urn:openclaw:.+:shared:\d+-[a-z0-9]+$/);
+      expect(body.root_entities).toEqual([body.subject]);
+      expect(body.rootEntities).toBeUndefined();
+    });
+
+    it('dkg_share mints a unique subject per call so successive shares do not upsert', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ shareOperationId: 'op-multi' });
+      await byName.get('dkg_share')!.execute('tc', { content: 'one', context_graph_id: 'ctx' });
+      await byName.get('dkg_share')!.execute('tc', { content: 'two', context_graph_id: 'ctx' });
+      const subjA = JSON.parse(fetchMock.mock.calls[0][1]?.body as string).quads[0].subject;
+      const subjB = JSON.parse(fetchMock.mock.calls[1][1]?.body as string).quads[0].subject;
+      expect(subjA).not.toBe(subjB);
+      expect(subjA).toMatch(/^urn:openclaw:.+:shared:\d+-[a-z0-9]+$/);
+      expect(subjB).toMatch(/^urn:openclaw:.+:shared:\d+-[a-z0-9]+$/);
+    });
+
+    it('dkg_share escapes the full N-Triples control-char set when building the literal', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ shareOperationId: 'op-escape' });
+      // Cover \\, ", \n, \r, \t, \f, \b — the canonical escaper from
+      // @origintrail-official/dkg-core handles all seven.
+      await byName.get('dkg_share')!.execute('tc', {
+        content: 'a\nb\rc\td\fe\bf "q" \\ end',
+        context_graph_id: 'ctx',
+      });
+      const body = JSON.parse(fetchMock.mock.calls[0][1]?.body as string);
+      expect(body.quads[0].object).toBe('"a\\nb\\rc\\td\\fe\\bf \\"q\\" \\\\ end"');
+    });
+
+    it('dkg_share preserves leading/trailing whitespace in content (no silent trim)', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ shareOperationId: 'op-ws' });
+      // Agents sharing code snippets or exact transcripts must get byte-for-byte
+      // round-tripping. Trimming for serialization would silently drop terminal
+      // newlines and indentation. Validation still rejects whitespace-only.
+      await byName.get('dkg_share')!.execute('tc', {
+        content: '  function f() {\n  return 1;\n}\n',
+        context_graph_id: 'ctx',
+      });
+      const body = JSON.parse(fetchMock.mock.calls[0][1]?.body as string);
+      // Quoted, with the leading two spaces, embedded newlines, and trailing newline preserved.
+      expect(body.quads[0].object).toBe('"  function f() {\\n  return 1;\\n}\\n"');
+
+      const blank = await byName.get('dkg_share')!.execute('tc', {
+        content: '   \n   ',
+        context_graph_id: 'ctx',
+      });
+      expect(blank.content[0].text).toContain('content');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('dkg_share falls back to direct /api/agent/identity probe when the memory resolver is disabled', async () => {
+      // With `memory.enabled: false` the memory resolver API never registers,
+      // so ensureNodeAgentAddress/ensureNodePeerId both no-op (memoryResolverApi
+      // stays null). dkg_share writes to /api/shared-memory/write directly and
+      // must not go dark in that config — fall through to a direct daemon
+      // /api/agent/identity probe.
+      const fetchMock = vi.fn(async (url: string) => {
+        if (url === 'http://localhost:9200/api/agent/identity') {
+          return new Response(JSON.stringify({
+            agentAddress: '0xprobed',
+            peerId: '12D3KooProbed',
+            agentDid: 'did:dkg:agent:probed',
+            name: 'probed',
+          }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+        }
+        return new Response(JSON.stringify({ shareOperationId: 'op-mem-off' }), {
+          status: 200, headers: { 'Content-Type': 'application/json' },
+        });
+      });
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+      const plugin = new DkgNodePlugin({ daemonUrl: 'http://localhost:9200' });
+      const tools: OpenClawTool[] = [];
+      plugin.register({
+        config: {},
+        registerTool: (t) => tools.push(t),
+        registerHook: () => {},
+        on: () => {},
+        logger: {},
+      });
+      // Deliberately do NOT inject nodePeerId — memory module disabled scenario.
+      const byName = new Map(tools.map((t) => [t.name, t] as const));
+      const result = await byName.get('dkg_share')!.execute('tc', {
+        content: 'works without memory module',
+        context_graph_id: 'ctx',
+      });
+      const body = JSON.parse(result.content[0].text);
+      expect(body.shareOperationId).toBe('op-mem-off');
+      // Subject should incorporate the address surfaced by the direct probe.
+      expect(body.subject).toMatch(/^urn:openclaw:0xprobed:shared:\d+-[a-z0-9]+$/);
+      const identityCalls = fetchMock.mock.calls.filter(c => c[0] === 'http://localhost:9200/api/agent/identity');
+      expect(identityCalls.length).toBe(1);
+    });
+
+    it('dkg_share falls back to an anonymous unique subject when node identity is unresolved', async () => {
+      // Without an injected nodePeerId, ensureNodeAgentAddress/ensureNodePeerId
+      // both no-op (no memoryResolverApi). The direct /api/agent/identity
+      // probe returns the default mock payload which lacks agentAddress and
+      // peerId. The handler must NOT refuse the share — /api/shared-memory/write
+      // doesn't require identity preflight. Mint a unique-per-call anonymous
+      // subject so the upsert problem is still avoided and authorship just
+      // degrades to anon attribution.
+      const { fetchMock, byName } = setupPluginWithFetch(
+        { shareOperationId: 'op-noid' },
+        { skipNodeIdInjection: true },
+      );
+      const result = await byName.get('dkg_share')!.execute('tc', {
+        content: 'hello',
+        context_graph_id: 'ctx',
+      });
+      const body = JSON.parse(result.content[0].text);
+      expect(body.shareOperationId).toBe('op-noid');
+      expect(body.subject).toMatch(/^urn:openclaw:anon:shared:\d+-[a-z0-9]+$/);
+      expect(body.root_entities).toEqual([body.subject]);
+      // The actual share write must have happened.
+      const shareCalls = fetchMock.mock.calls.filter(c => String(c[0]).includes('/api/shared-memory/write'));
+      expect(shareCalls.length).toBe(1);
+    });
+
+    it('dkg_share UCHAR-encodes non-ECHAR control bytes (NUL, VT, DEL) the canonical escaper leaves raw', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ shareOperationId: 'op-uchar' });
+      // escapeDkgRdfLiteral covers \b, \t, \n, \f, \r — but leaves NUL (0x00),
+      // VT (0x0B), DEL (0x7F), etc. untouched. Those would produce invalid
+      // N-Triples at the storage layer. Defensive post-pass UCHAR-encodes them.
+      const NUL = String.fromCharCode(0x00);
+      const VT = String.fromCharCode(0x0B);
+      const DEL = String.fromCharCode(0x7F);
+      await byName.get('dkg_share')!.execute('tc', {
+        content: `a${NUL}b${VT}c${DEL}d`,
+        context_graph_id: 'ctx',
+      });
+      const body = JSON.parse(fetchMock.mock.calls[0][1]?.body as string);
+      expect(body.quads[0].object).toBe('"a\\u0000b\\u000Bc\\u007Fd"');
+    });
+
+    it('dkg_share plumbs sub_graph_name through to subGraphName for sub-graph-scoped writes', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ shareOperationId: 'op-4' });
+      await byName.get('dkg_share')!.execute('tc', {
+        content: 'hello',
+        context_graph_id: 'ctx',
+        sub_graph_name: 'protocols',
+      });
+      const body = JSON.parse(fetchMock.mock.calls[0][1]?.body as string);
+      expect(body.subGraphName).toBe('protocols');
+    });
+
+    it('dkg_share surfaces daemon-offline failures via the standard daemonError helper', async () => {
+      const fetchMock = vi.fn(async () => { throw new Error('fetch failed: ECONNREFUSED'); });
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+      const plugin = new DkgNodePlugin({ daemonUrl: 'http://localhost:9200' });
+      const tools: OpenClawTool[] = [];
+      plugin.register({
+        config: {},
+        registerTool: (t) => tools.push(t),
+        registerHook: () => {},
+        on: () => {},
+        logger: {},
+      });
+      // Mirror setupPluginWithFetch's identity injection so the handler
+      // gets past the unresolved-identity guard and reaches the fetch.
+      (plugin as any).nodePeerId = '12D3KooTestPeerId';
+      const byName = new Map(tools.map((t) => [t.name, t] as const));
+      const result = await byName.get('dkg_share')!.execute('tc', {
+        content: 'hello',
+        context_graph_id: 'ctx',
+      });
+      expect(result.content[0].text).toContain('DKG daemon is not reachable');
     });
 
     it('dkg_query explicitly rejects the v9 paranet_id field with a clear error', async () => {

@@ -1,0 +1,15 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "allowImportingTsExtensions": true,
+    "declaration": false,
+    "declarationMap": false,
+    "noEmit": true,
+    "rootDir": ".."
+  },
+  "include": [
+    "./**/*.ts",
+    "../packages/cli/src/benchmark/**/*.ts",
+    "../packages/cli/src/api-client.ts"
+  ]
+}

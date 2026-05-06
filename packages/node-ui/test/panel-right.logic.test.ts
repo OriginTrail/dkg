@@ -3,9 +3,11 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 
 let ConnectedAgentsTab: any;
+let adoptLocalAgentTurnId: any;
 let getLocalAgentConversationStateKey: any;
 let markLocalAgentIntegrationDisconnected: any;
 let networkPeerCardStatusClass: any;
+let normalizeMessageContent: any;
 let resolveConnectedAgentsTabState: any;
 let resolveLocalAgentSelectionState: any;
 let shouldPreserveSelectedLocalAgentTab: any;
@@ -36,9 +38,11 @@ beforeAll(async () => {
 
   const panelRight = await import('../src/ui/components/Shell/PanelRight.js');
   ConnectedAgentsTab = panelRight.ConnectedAgentsTab;
+  adoptLocalAgentTurnId = panelRight.adoptLocalAgentTurnId;
   getLocalAgentConversationStateKey = panelRight.getLocalAgentConversationStateKey;
   markLocalAgentIntegrationDisconnected = panelRight.markLocalAgentIntegrationDisconnected;
   networkPeerCardStatusClass = panelRight.networkPeerCardStatusClass;
+  normalizeMessageContent = panelRight.normalizeMessageContent;
   resolveConnectedAgentsTabState = panelRight.resolveConnectedAgentsTabState;
   resolveLocalAgentSelectionState = panelRight.resolveLocalAgentSelectionState;
   shouldPreserveSelectedLocalAgentTab = panelRight.shouldPreserveSelectedLocalAgentTab;
@@ -111,6 +115,27 @@ function renderConnectedAgentsTab(overrides: Record<string, unknown> = {}) {
 }
 
 describe('PanelRight logic helpers', () => {
+  it('adopts stable local-agent turn ids after a streamed final response', () => {
+    const messages = [
+      { id: 'user', role: 'user', content: 'hello', turnId: 'corr-1' },
+      { id: 'assistant', role: 'assistant', content: 'hi', turnId: 'corr-1', streaming: true },
+      { id: 'other', role: 'assistant', content: 'older', turnId: 'stable-0' },
+    ];
+
+    const updated = adoptLocalAgentTurnId(messages, 'corr-1', 'stable-1');
+
+    expect(updated.map((message: any) => message.turnId)).toEqual(['stable-1', 'stable-1', 'stable-0']);
+    expect(adoptLocalAgentTurnId(messages, 'corr-1')).toBe(messages);
+  });
+
+  it('normalizes local-agent message content without leading empty bubble space', () => {
+    expect(normalizeMessageContent('\\n\\nDone.')).toBe('Done.');
+    expect(normalizeMessageContent('\n\nMatched entry in agent-context / memory:\n\n- fact')).toBe(
+      'Matched entry in agent-context / memory:\n\n- fact',
+    );
+    expect(normalizeMessageContent('Line one\\n\\nLine two\\n')).toBe('Line one\n\nLine two');
+  });
+
   it('resolves conversation state keys and session preservation correctly', () => {
     const integrations = [integration(), integration({ id: 'hermes', name: 'Hermes', persistentChat: false })];
     expect(getLocalAgentConversationStateKey('openclaw', null)).toBe('integration:openclaw');
@@ -125,6 +150,29 @@ describe('PanelRight logic helpers', () => {
       selectedSessionId: 'openclaw:abc',
       integrations,
     })).toBe(false);
+  });
+
+  it('does not preserve an old generated Hermes default session after profile changes', () => {
+    const integrations = [
+      integration(),
+      integration({
+        id: 'hermes',
+        name: 'Hermes',
+        persistentChat: true,
+        defaultSessionId: 'hermes:dkg-ui:profile-new-profile',
+      }),
+    ];
+
+    expect(shouldPreserveSessionOnReconnect({
+      integrationId: 'hermes',
+      selectedSessionId: 'hermes:dkg-ui:profile-old-profile',
+      integrations,
+    })).toBe(false);
+    expect(shouldPreserveSessionForIntegrationSelection({
+      integrationId: 'hermes',
+      selectedSessionId: 'hermes:manual-thread',
+      integrations,
+    })).toBe(true);
   });
 
   it('resolves local agent selection state from saved sessions and message history', () => {
@@ -218,7 +266,7 @@ describe('ConnectedAgentsTab rendering', () => {
     const markup = renderConnectedAgentsTab({
       integrations: [
         integration({ persistentChat: false, configured: false, detected: false, bridgeOnline: false, chatReady: false, status: 'available', statusLabel: 'Ready to connect' }),
-        integration({ id: 'hermes', name: 'Hermes', persistentChat: false, configured: false, detected: false, bridgeOnline: false, chatReady: false, status: 'coming_soon', statusLabel: 'Coming next', connectSupported: false }),
+        integration({ id: 'hermes', name: 'Hermes', persistentChat: false, configured: false, detected: false, bridgeOnline: false, chatReady: false, status: 'available', statusLabel: 'Ready to connect', connectSupported: true }),
       ],
       selectedIntegrationId: '__add_agent__',
       selectedIntegration: null,
@@ -231,7 +279,8 @@ describe('ConnectedAgentsTab rendering', () => {
     expect(markup).toContain('Connecting...');
     expect(markup).toContain('Docs');
     expect(markup).toContain('Release Notes');
-    expect(markup).toContain('Hermes will plug into this same local-agent contract next');
+    expect(markup).toContain('Connect Hermes');
+    expect(markup).toContain('local Hermes profile');
     expect(markup).toContain('connected');
     expect(markup).toContain('error');
   });
@@ -266,6 +315,25 @@ describe('ConnectedAgentsTab rendering', () => {
     expect(markup).toContain('Upload file');
     expect(markup).toContain('Message OpenClaw');
     expect(markup).toContain('Send');
+  });
+
+  it('renders degraded connected-agent status dots', () => {
+    const degraded = integration({
+      id: 'hermes',
+      name: 'Hermes',
+      bridgeOnline: false,
+      chatReady: false,
+      status: 'degraded',
+      statusLabel: 'Degraded',
+      bridgeStatusLabel: 'Degraded',
+    });
+    const markup = renderConnectedAgentsTab({
+      integrations: [degraded],
+      selectedIntegrationId: 'hermes',
+      selectedIntegration: degraded,
+      selectedSessionId: 'hermes:dkg-ui',
+    });
+    expect(markup).toContain('v10-agents-stat-dot degraded');
   });
 
   it('renders disconnected history warnings and empty-state messaging', () => {

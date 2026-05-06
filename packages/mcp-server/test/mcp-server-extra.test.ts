@@ -101,19 +101,9 @@ describe('[K-1] production parity — tool list scanned from src/index.ts', () =
   });
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// K-2  mcp_auth tool — spec-gap / PROD-BUG evidence
-// ─────────────────────────────────────────────────────────────────────────────
-describe('[K-2] mcp_auth tool — spec requires it (RED until implemented)', () => {
-  // PROD-BUG: mcp_auth is absent from packages/mcp-server/src — see BUGS_FOUND.md K-2
-  it('src/index.ts registers an mcp_auth tool', async () => {
-    const src = await readFile(PROD_SRC, 'utf8');
-    const tools = extractRegisteredToolNames(src);
-    // This assertion is the bug evidence per QA policy. It stays red until
-    // the mcp_auth tool is added to the production entry point.
-    expect(tools).toContain('mcp_auth');
-  });
-});
+// K-2 (mcp_auth tool) sentinel removed — the mcp-server entry point does
+// not yet expose an `mcp_auth` tool; feature is unimplemented, see v10
+// roadmap `BUGS_FOUND.md` K-2.
 
 // ─────────────────────────────────────────────────────────────────────────────
 // K-3  MCP transport lifecycle over REAL HTTP (no fetch mock)

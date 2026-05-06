@@ -53,6 +53,12 @@ import {
   loadBridgeAuthToken,
   localOpenclawConfigPath,
 } from './openclaw.js';
+import {
+  DEFAULT_HERMES_API_SERVER_URL,
+  type HermesChannelHealthReport,
+  probeHermesChannelHealth,
+  transportPatchFromHermesTarget,
+} from './hermes.js';
 
 const daemonRequire = createRequire(import.meta.url);
 
@@ -100,12 +106,19 @@ export const LOCAL_AGENT_INTEGRATION_DEFINITIONS: Record<string, LocalAgentInteg
     id: 'hermes',
     name: 'Hermes',
     description: 'Connect a local Hermes agent through the DKG node.',
+    transportKind: 'hermes-openai',
     capabilities: {
+      localChat: true,
+      chatAttachments: true,
       connectFromUi: true,
       installNode: true,
       dkgPrimaryMemory: true,
       wmImportPipeline: true,
       nodeServedSkill: true,
+    },
+    manifest: {
+      packageName: '@origintrail-official/dkg-adapter-hermes',
+      setupEntry: './setup-entry.mjs',
     },
   },
 };
@@ -125,7 +138,11 @@ export function normalizeLocalAgentTransport(input: unknown): LocalAgentIntegrat
   if (typeof input.kind === 'string' && input.kind.trim()) transport.kind = input.kind.trim();
   if (typeof input.bridgeUrl === 'string' && input.bridgeUrl.trim()) transport.bridgeUrl = trimTrailingSlashes(input.bridgeUrl.trim());
   if (typeof input.gatewayUrl === 'string' && input.gatewayUrl.trim()) transport.gatewayUrl = trimTrailingSlashes(input.gatewayUrl.trim());
-  if (typeof input.healthUrl === 'string' && input.healthUrl.trim()) transport.healthUrl = trimTrailingSlashes(input.healthUrl.trim());
+  if (Object.prototype.hasOwnProperty.call(input, 'healthUrl')) {
+    transport.healthUrl = typeof input.healthUrl === 'string' && input.healthUrl.trim()
+      ? trimTrailingSlashes(input.healthUrl.trim())
+      : undefined;
+  }
   return Object.keys(transport).length > 0 ? transport : undefined;
 }
 
@@ -204,11 +221,15 @@ export function normalizeExplicitLocalAgentDisconnectBody(body: Record<string, u
 export function mergeLocalAgentIntegrationConfig(
   base: LocalAgentIntegrationConfig | undefined,
   patch: LocalAgentIntegrationConfig,
+  options: { mergeTransport?: boolean } = {},
 ): LocalAgentIntegrationConfig {
   return {
     ...(base ?? {}),
     ...patch,
-    transport: patch.transport !== undefined ? patch.transport : (base?.transport ?? undefined),
+    transport: patch.transport !== undefined && options.mergeTransport ? {
+      ...(base?.transport ?? {}),
+      ...patch.transport,
+    } : (patch.transport !== undefined ? patch.transport : (base?.transport ?? undefined)),
     capabilities: {
       ...(base?.capabilities ?? {}),
       ...(patch.capabilities ?? {}),
@@ -334,7 +355,11 @@ export function connectLocalAgentIntegration(
     updatedAt: now.toISOString(),
     runtime: patch.runtime ?? { status: patch.enabled === false ? 'disconnected' : 'configured', updatedAt: now.toISOString() },
   };
-  const next = mergeLocalAgentIntegrationConfig(mergeLocalAgentIntegrationConfig(existing, base), patch);
+  const next = mergeLocalAgentIntegrationConfig(
+    mergeLocalAgentIntegrationConfig(existing, base),
+    patch,
+    { mergeTransport: id === 'hermes' },
+  );
   if (next.enabled === true && isLocalAgentExplicitlyUserDisabled(next)) {
     next.metadata = { ...(next.metadata ?? {}), userDisabled: false };
   }
@@ -354,7 +379,7 @@ export function updateLocalAgentIntegration(
   if (!normalizedId) throw new Error('Missing integration id');
   const existing = getStoredLocalAgentIntegrations(config)[normalizedId] ?? { id: normalizedId };
   const patch = extractLocalAgentIntegrationPatch(body);
-  const next = mergeLocalAgentIntegrationConfig(existing, patch);
+  const next = mergeLocalAgentIntegrationConfig(existing, patch, { mergeTransport: normalizedId === 'hermes' });
   if (isExplicitLocalAgentDisconnectPatch(patch)) {
     next.enabled = false;
     next.runtime = { ...(next.runtime ?? {}), status: 'disconnected', ready: false, lastError: null };
@@ -389,6 +414,68 @@ export function hasStoredLocalAgentTransportConfig(
   );
 }
 
+export type LocalAgentUiAttachDeps = OpenClawUiAttachDeps & {
+  probeHermesHealth?: (
+    config: DkgConfig,
+    bridgeAuthToken: string | undefined,
+    opts?: { timeoutMs?: number },
+  ) => Promise<HermesChannelHealthReport>;
+  resolveHermesProfile?: (options?: { profileName?: string; hermesHome?: string }) => {
+    profileName?: string;
+    hermesHome: string;
+    memoryMode?: string;
+  };
+};
+
+async function addHermesProfileMetadataForUiConnect(
+  config: DkgConfig,
+  body: Record<string, unknown>,
+  deps: LocalAgentUiAttachDeps,
+): Promise<Record<string, unknown>> {
+  const metadata = isPlainRecord(body.metadata) ? { ...body.metadata } : {};
+  const topLevelProfileName = typeof body.profileName === 'string' && body.profileName.trim()
+    ? body.profileName.trim()
+    : undefined;
+  const topLevelHermesHome = typeof body.hermesHome === 'string' && body.hermesHome.trim()
+    ? body.hermesHome.trim()
+    : undefined;
+  const existing = getStoredLocalAgentIntegrations(config).hermes;
+  const existingMetadata = isPlainRecord(existing?.metadata) ? existing.metadata : {};
+  const profileName =
+    topLevelProfileName
+    ?? stringMetadataValue(metadata, 'profileName')
+    ?? stringMetadataValue(existingMetadata, 'profileName');
+  const hermesHome =
+    topLevelHermesHome
+    ?? stringMetadataValue(metadata, 'hermesHome')
+    ?? stringMetadataValue(existingMetadata, 'hermesHome');
+
+  if (profileName || hermesHome) {
+    return {
+      ...body,
+      metadata: {
+        ...metadata,
+        ...(profileName ? { profileName } : {}),
+        ...(hermesHome ? { hermesHome } : {}),
+      },
+    };
+  }
+
+  const adapter = deps.resolveHermesProfile
+    ? { resolveHermesProfile: deps.resolveHermesProfile }
+    : await import('@origintrail-official/dkg-adapter-hermes');
+  const profile = adapter.resolveHermesProfile({});
+  return {
+    ...body,
+    metadata: {
+      ...metadata,
+      ...(profile.profileName ? { profileName: profile.profileName } : {}),
+      hermesHome: profile.hermesHome,
+      ...(profile.memoryMode ? { memoryMode: profile.memoryMode } : {}),
+    },
+  };
+}
+
 /**
  * CONTRACT (issue #198): This handler MUST leave ~/.openclaw/openclaw.json in a state
  * where the OpenClaw gateway, on next restart, will load the adapter from the
@@ -399,19 +486,57 @@ export async function connectLocalAgentIntegrationFromUi(
   config: DkgConfig,
   body: Record<string, unknown>,
   bridgeAuthToken: string | undefined,
-  deps: OpenClawUiAttachDeps = {},
+  deps: LocalAgentUiAttachDeps = {},
 ): Promise<{ integration: LocalAgentIntegrationRecord; notice?: string }> {
   const requestedId = typeof body.id === 'string' ? normalizeIntegrationId(body.id) : '';
   const existingBeforeConnect = requestedId ? getLocalAgentIntegration(config, requestedId) : null;
   const hadStoredTransportBeforeConnect = hasStoredLocalAgentTransportConfig(existingBeforeConnect);
+  const connectBody = requestedId === 'hermes'
+    ? await addHermesProfileMetadataForUiConnect(config, body, deps)
+    : body;
   const requested = connectLocalAgentIntegration(config, {
-    ...body,
+    ...connectBody,
     runtime: {
       status: 'connecting',
       ready: false,
       lastError: null,
     },
   });
+  if (requested.id === 'hermes') {
+    const probeHermesHealth = deps.probeHermesHealth ?? probeHermesChannelHealth;
+    const health = await probeHermesHealth(config, bridgeAuthToken, { timeoutMs: 3_000 });
+    if (health.ok) {
+      const transport = transportPatchFromHermesTarget(config, health.target)
+        ?? (health.target === 'gateway'
+          ? { kind: 'hermes-openai', gatewayUrl: DEFAULT_HERMES_API_SERVER_URL }
+          : undefined);
+      const integration = updateLocalAgentIntegration(config, requested.id, {
+        transport,
+        runtime: {
+          status: 'ready',
+          ready: true,
+          lastError: null,
+        },
+      });
+      return {
+        integration,
+        notice: `${integration.name} is connected and chat-ready.`,
+      };
+    }
+
+    const integration = updateLocalAgentIntegration(config, requested.id, {
+      runtime: {
+        status: 'degraded',
+        ready: false,
+        lastError: health.error ?? 'Hermes bridge offline',
+      },
+    });
+    return {
+      integration,
+      notice: 'Hermes was registered, but its local chat bridge is not responding yet. Run `dkg hermes setup` or refresh after Hermes starts.',
+    };
+  }
+
   if (requested.id !== 'openclaw') {
     return {
       integration: requested,
@@ -556,6 +681,34 @@ export type ReverseLocalAgentSetupDeps = {
   verifySkillRemoved?: (installedWorkspace: string) => string | null;
 };
 
+export type ReverseHermesSetupDeps = {
+  disconnectHermesProfile?: (options: { profileName?: string; hermesHome?: string }) => unknown;
+};
+
+function stringMetadataValue(metadata: Record<string, unknown>, key: string): string | undefined {
+  const value = metadata[key];
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+export async function reverseHermesSetupForUi(
+  config: DkgConfig,
+  deps: ReverseHermesSetupDeps = {},
+): Promise<void> {
+  const stored = getStoredLocalAgentIntegrations(config).hermes;
+  const metadata = isPlainRecord(stored?.metadata) ? stored.metadata : {};
+  const options = {
+    profileName: stringMetadataValue(metadata, 'profileName'),
+    hermesHome: stringMetadataValue(metadata, 'hermesHome'),
+  };
+  if (!options.profileName && !options.hermesHome) {
+    throw new Error('Hermes profile metadata is missing; run dkg hermes disconnect for the target profile.');
+  }
+  const adapter = deps.disconnectHermesProfile
+    ? { disconnectHermesProfile: deps.disconnectHermesProfile }
+    : await import('@origintrail-official/dkg-adapter-hermes');
+  await adapter.disconnectHermesProfile(options);
+}
+
 export async function reverseLocalAgentSetupForUi(
   _config: DkgConfig,
   openclawConfigPath?: string,
@@ -657,6 +810,35 @@ export async function refreshLocalAgentIntegrationFromUi(
     throw new Error(`Unknown integration: ${id}`);
   }
   if (normalizedId !== 'openclaw') {
+    if (normalizedId === 'hermes') {
+      const health = await probeHermesChannelHealth(config, bridgeAuthToken, {
+        timeoutMs: 3_000,
+      });
+
+      if (health.ok) {
+        const transport = transportPatchFromHermesTarget(config, health.target)
+          ?? (health.target === 'gateway'
+            ? { kind: 'hermes-openai', gatewayUrl: DEFAULT_HERMES_API_SERVER_URL }
+            : undefined);
+        return updateLocalAgentIntegration(config, normalizedId, {
+          transport,
+          runtime: {
+            status: 'ready',
+            ready: true,
+            lastError: null,
+          },
+        });
+      }
+
+      return updateLocalAgentIntegration(config, normalizedId, {
+        runtime: {
+          status: 'degraded',
+          ready: false,
+          lastError: health.error ?? 'Hermes bridge offline',
+        },
+      });
+    }
+
     return existing;
   }
 

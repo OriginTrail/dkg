@@ -122,8 +122,8 @@ describe('httpAuthGuard', () => {
   let baseUrl: string;
 
   beforeEach(async () => {
-    server = createServer((req: IncomingMessage, res: ServerResponse) => {
-      if (!httpAuthGuard(req, res, true, validTokens)) return;
+    server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+      if (!(await httpAuthGuard(req, res, true, validTokens))) return;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true }));
     });
@@ -156,6 +156,13 @@ describe('httpAuthGuard', () => {
 
   it('rejects protected endpoint without token', async () => {
     const res = await fetch(`${baseUrl}/api/shared-memory/publish`, { method: 'POST' });
+    expect(res.status).toBe(401);
+    const body = await res.json();
+    expect(body.error).toContain('Unauthorized');
+  });
+
+  it('rejects Hermes provider persistence without token', async () => {
+    const res = await fetch(`${baseUrl}/api/hermes-channel/persist-turn`, { method: 'POST' });
     expect(res.status).toBe(401);
     const body = await res.json();
     expect(body.error).toContain('Unauthorized');
@@ -197,8 +204,8 @@ describe('httpAuthGuard (auth disabled)', () => {
   let baseUrl: string;
 
   beforeEach(async () => {
-    server = createServer((req: IncomingMessage, res: ServerResponse) => {
-      if (!httpAuthGuard(req, res, false, new Set())) return;
+    server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+      if (!(await httpAuthGuard(req, res, false, new Set()))) return;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true }));
     });

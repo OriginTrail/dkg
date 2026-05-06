@@ -1,6 +1,6 @@
 # @origintrail-official/dkg-adapter-elizaos
 
-[ElizaOS](https://elizaos.ai) plugin adapter for DKG V9. Turns any ElizaOS agent into a DKG node with knowledge publishing, querying, agent discovery, and skill invocation capabilities.
+[ElizaOS](https://elizaos.ai) plugin adapter for DKG V10. Turns any ElizaOS agent into a DKG node with knowledge publishing, querying, agent discovery, and skill invocation capabilities.
 
 ## Features
 

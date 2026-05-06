@@ -43,6 +43,17 @@ export interface TripleStore {
 
   countQuads(graphUri?: string): Promise<number>;
 
+  /**
+   * Force any pending writes to durable storage and resolve only once the
+   * persistence step is complete (or no-op for non-persistent backends).
+   * Callers that need at-least-once durability for a specific write — e.g.
+   * context-graph creation, where the SQLite cache survives crashes but the
+   * triple store's debounced flush does not — should `await store.flush?.()`
+   * after the relevant `insert(...)` call. Optional so HTTP-backed and
+   * memory-only adapters can omit it without breaking the interface.
+   */
+  flush?(): Promise<void>;
+
   close(): Promise<void>;
 }
 

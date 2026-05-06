@@ -288,7 +288,51 @@ for (const c of chips) {
   for (const v of c.values) emit(uri(id), uri(Profile.P.chipValue), lit(v));
 }
 
-// ── Saved SPARQL queries ──────────────────────────────────────
+// ── Query catalogs + saved SPARQL queries ─────────────────────
+// Query catalogs let any project group generic DKG-native queries into
+// named sets without hardcoding domain logic into the UI. Each catalog is
+// declared in the profile data, scoped to a sub-graph, and contains one or
+// more SavedQuery entries. The UI renders catalogs as grouped query pills.
+const queryCatalogs = [
+  {
+    slug: 'decision-review',
+    sg: 'decisions',
+    name: 'Decision review',
+    description: 'Queries that help reviewers inspect architectural choices and their downstream impact.',
+    rank: 1,
+  },
+  {
+    slug: 'task-triage',
+    sg: 'tasks',
+    name: 'Task triage',
+    description: 'Queries for finding urgent, blocked, or dependency-heavy work items.',
+    rank: 1,
+  },
+  {
+    slug: 'change-impact',
+    sg: 'github',
+    name: 'Change impact',
+    description: 'Queries for spotting high-signal pull requests and code hotspots.',
+    rank: 1,
+  },
+  {
+    slug: 'collaboration',
+    sg: 'chat',
+    name: 'Collaboration',
+    description: 'Queries for surfacing shared working context from people and agents.',
+    rank: 1,
+  },
+];
+for (const c of queryCatalogs) {
+  const id = Profile.uri.catalog(PROJECT_ID, c.slug);
+  emit(uri(id), uri(Common.type), uri(Profile.T.QueryCatalog));
+  emit(uri(id), uri(Profile.P.ofProfile), uri(profileId));
+  emit(uri(id), uri(Profile.P.forSubGraph), lit(c.sg));
+  emit(uri(id), uri(Profile.P.displayName), lit(c.name));
+  emit(uri(id), uri(Common.description), lit(c.description));
+  emit(uri(id), uri(Profile.P.rank), lit(c.rank, XSD.int));
+}
+
 // Rendered as pills above the entity list. Clicking a pill runs the query
 // against /api/sparql/query and displays the result set as the filtered
 // entity list. `resultColumn` tells the UI which SELECT var holds the
@@ -296,9 +340,11 @@ for (const c of chips) {
 const savedQueries = [
   {
     slug: 'decisions-touching-node-ui',
+    catalog: 'decision-review',
     sg: 'decisions',
     name: 'Decisions affecting node-ui',
     description: 'Every decision whose `affects` reaches a file in packages/node-ui.',
+    rank: 1,
     resultColumn: 'decision',
     sparql: `
 SELECT DISTINCT ?decision WHERE {
@@ -309,9 +355,11 @@ SELECT DISTINCT ?decision WHERE {
   },
   {
     slug: 'p0-p1-tasks-in-flight',
+    catalog: 'task-triage',
     sg: 'tasks',
     name: 'P0 / P1 tasks in flight',
     description: 'High-priority tasks currently `in_progress` or `blocked`.',
+    rank: 1,
     resultColumn: 'task',
     sparql: `
 SELECT DISTINCT ?task WHERE {
@@ -326,9 +374,11 @@ SELECT DISTINCT ?task WHERE {
   },
   {
     slug: 'prs-that-affected-vm-packages',
+    catalog: 'change-impact',
     sg: 'github',
     name: 'PRs that touched flagship packages',
     description: 'Closed PRs that changed node-ui or graph-viz — likely VM candidates.',
+    rank: 1,
     resultColumn: 'pr',
     sparql: `
 SELECT DISTINCT ?pr WHERE {
@@ -340,9 +390,11 @@ SELECT DISTINCT ?pr WHERE {
   },
   {
     slug: 'chat-shared-with-me',
+    catalog: 'collaboration',
     sg: 'chat',
     name: 'Chat shared with me',
     description: 'Recent SWM-visible chat sessions from other participants — what are your teammates\' assistants working on?',
+    rank: 1,
     resultColumn: 'session',
     sparql: `
 SELECT DISTINCT ?session WHERE {
@@ -355,9 +407,11 @@ SELECT DISTINCT ?session WHERE {
   },
   {
     slug: 'decisions-with-open-tasks',
+    catalog: 'decision-review',
     sg: 'decisions',
     name: 'Decisions with open tasks',
     description: 'Decisions still tracked by at least one non-done task.',
+    rank: 2,
     resultColumn: 'decision',
     sparql: `
 SELECT DISTINCT ?decision WHERE {
@@ -377,6 +431,8 @@ for (const q of savedQueries) {
   emit(uri(id), uri(Profile.P.forSubGraph), lit(q.sg));
   emit(uri(id), uri(Profile.P.displayName), lit(q.name));
   emit(uri(id), uri(Common.description), lit(q.description));
+  if (q.catalog) emit(uri(id), uri(Profile.P.inCatalog), uri(Profile.uri.catalog(PROJECT_ID, q.catalog)));
+  if (q.rank !== undefined) emit(uri(id), uri(Profile.P.rank), lit(q.rank, XSD.int));
   emit(uri(id), uri(Profile.P.sparqlQuery), lit(q.sparql));
   emit(uri(id), uri(Profile.P.resultColumn), lit(q.resultColumn));
 }

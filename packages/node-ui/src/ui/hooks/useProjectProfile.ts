@@ -93,10 +93,24 @@ export interface FilterChip {
 export interface SavedQuery {
   slug: string;
   subGraph: string;
+  catalogSlug: string;
+  catalogName: string;
+  catalogDescription?: string;
+  catalogRank: number;
   name: string;
   description?: string;
   sparql: string;
   resultColumn: string;
+  rank: number;
+}
+
+export interface QueryCatalog {
+  slug: string;
+  subGraph: string;
+  name: string;
+  description?: string;
+  rank: number;
+  queries: SavedQuery[];
 }
 
 export interface ProjectProfile {
@@ -109,6 +123,7 @@ export interface ProjectProfile {
   typeBindings: EntityTypeBinding[];
   views: ViewConfig[];
   filterChips: FilterChip[];
+  queryCatalogs: QueryCatalog[];
   savedQueries: SavedQuery[];
   loading: boolean;
   error?: string;
@@ -116,6 +131,7 @@ export interface ProjectProfile {
   forType: (typeIri: string) => EntityTypeBinding | undefined;
   view: (slug: string) => ViewConfig | undefined;
   chipsFor: (subGraphSlug: string) => FilterChip[];
+  savedQueryCatalogsFor: (subGraphSlug: string) => QueryCatalog[];
   savedQueriesFor: (subGraphSlug: string) => SavedQuery[];
 }
 
@@ -235,21 +251,147 @@ WHERE {
 GROUP BY ?chip ?subGraph ?type ?predicate ?label`;
 }
 
+function buildQueryCatalogsQuery(contextGraphId: string): string {
+  return `PREFIX prof: <${PROFILE_NS}>
+PREFIX schema: <http://schema.org/>
+SELECT ?catalog ?subGraph ?name ?description ?rank
+WHERE {
+  GRAPH ?g {
+    ?catalog a prof:QueryCatalog ;
+             prof:forSubGraph ?subGraph .
+    OPTIONAL { ?catalog prof:displayName ?name }
+    OPTIONAL { ?catalog schema:description ?description }
+    OPTIONAL { ?catalog prof:rank ?rank }
+  }
+  ${metaGraphFilter(contextGraphId)}
+}`;
+}
+
 function buildSavedQueriesQuery(contextGraphId: string): string {
   return `PREFIX prof: <${PROFILE_NS}>
 PREFIX schema: <http://schema.org/>
-SELECT ?q ?subGraph ?name ?description ?sparql ?column
+SELECT ?q ?subGraph ?catalog ?name ?description ?sparql ?column ?rank
 WHERE {
   GRAPH ?g {
     ?q a prof:SavedQuery ;
        prof:forSubGraph ?subGraph ;
        prof:sparqlQuery ?sparql .
+    OPTIONAL { ?q prof:inCatalog ?catalog }
     OPTIONAL { ?q prof:displayName ?name }
     OPTIONAL { ?q schema:description ?description }
     OPTIONAL { ?q prof:resultColumn ?column }
+    OPTIONAL { ?q prof:rank ?rank }
   }
   ${metaGraphFilter(contextGraphId)}
 }`;
+}
+
+interface QueryCatalogRowShape extends Record<string, unknown> {}
+interface SavedQueryRowShape extends Record<string, unknown> {}
+
+export function buildQueryCatalogState(
+  catalogRows: readonly QueryCatalogRowShape[],
+  queryRows: readonly SavedQueryRowShape[],
+): {
+  queryCatalogs: QueryCatalog[];
+  savedQueries: SavedQuery[];
+  catalogsBySubGraph: Map<string, QueryCatalog[]>;
+  queriesBySubGraph: Map<string, SavedQuery[]>;
+} {
+  const catalogsByUri = new Map<string, QueryCatalog>();
+
+  for (const row of catalogRows) {
+    const catalogIri = stripIri(row.catalog);
+    if (!catalogIri) continue;
+    const slug = catalogIri.split(':catalog:').pop() ?? catalogIri;
+    catalogsByUri.set(catalogIri, {
+      slug,
+      subGraph: stripLiteral(row.subGraph),
+      name: stripLiteral(row.name) || slug,
+      description: stripLiteral(row.description) || undefined,
+      rank: parseInt10(row.rank) || 99,
+      queries: [],
+    });
+  }
+
+  const queries: SavedQuery[] = queryRows
+    .map(row => {
+      const qIri = stripIri(row.q);
+      const slug = qIri.split(':query:').pop() ?? qIri;
+      const subGraph = stripLiteral(row.subGraph);
+      const catalogIri = stripIri(row.catalog);
+      const catalog = catalogIri ? catalogsByUri.get(catalogIri) : undefined;
+      const implicitCatalogSlug = `default:${subGraph}`;
+      return {
+        slug,
+        subGraph,
+        catalogSlug: catalog?.slug ?? implicitCatalogSlug,
+        catalogName: catalog?.name ?? 'Queries',
+        catalogDescription: catalog?.description,
+        catalogRank: catalog?.rank ?? 999,
+        name: stripLiteral(row.name) || slug,
+        description: stripLiteral(row.description) || undefined,
+        sparql: stripLiteral(row.sparql),
+        resultColumn: stripLiteral(row.column) || '',
+        rank: parseInt10(row.rank) || 99,
+      };
+    })
+    .filter(q => q.subGraph && q.sparql)
+    .sort((a, b) =>
+      a.subGraph.localeCompare(b.subGraph)
+      || a.catalogRank - b.catalogRank
+      || a.catalogName.localeCompare(b.catalogName)
+      || a.rank - b.rank
+      || a.name.localeCompare(b.name),
+    );
+
+  const catalogsByComposite = new Map<string, QueryCatalog>();
+  for (const catalog of catalogsByUri.values()) {
+    catalogsByComposite.set(`${catalog.subGraph}|${catalog.slug}`, { ...catalog, queries: [] });
+  }
+
+  for (const query of queries) {
+    const key = `${query.subGraph}|${query.catalogSlug}`;
+    const existing = catalogsByComposite.get(key);
+    if (existing) {
+      existing.queries.push(query);
+      continue;
+    }
+    catalogsByComposite.set(key, {
+      slug: query.catalogSlug,
+      subGraph: query.subGraph,
+      name: query.catalogName,
+      description: query.catalogDescription,
+      rank: query.catalogRank,
+      queries: [query],
+    });
+  }
+
+  const queryCatalogs = Array.from(catalogsByComposite.values())
+    .filter(catalog => catalog.queries.length > 0)
+    .map(catalog => ({
+      ...catalog,
+      queries: [...catalog.queries].sort((a, b) => a.rank - b.rank || a.name.localeCompare(b.name)),
+    }))
+    .sort((a, b) =>
+      a.subGraph.localeCompare(b.subGraph)
+      || a.rank - b.rank
+      || a.name.localeCompare(b.name),
+    );
+
+  const catalogsBySubGraph = new Map<string, QueryCatalog[]>();
+  const queriesBySubGraph = new Map<string, SavedQuery[]>();
+  for (const catalog of queryCatalogs) {
+    const nextCatalogs = catalogsBySubGraph.get(catalog.subGraph) ?? [];
+    nextCatalogs.push(catalog);
+    catalogsBySubGraph.set(catalog.subGraph, nextCatalogs);
+
+    const nextQueries = queriesBySubGraph.get(catalog.subGraph) ?? [];
+    nextQueries.push(...catalog.queries);
+    queriesBySubGraph.set(catalog.subGraph, nextQueries);
+  }
+
+  return { queryCatalogs, savedQueries: queries, catalogsBySubGraph, queriesBySubGraph };
 }
 
 function buildTypeBindingsQuery(contextGraphId: string): string {
@@ -312,11 +454,13 @@ export function useProjectProfile(contextGraphId: string | undefined): ProjectPr
   const [typeBindings, setTypeBindings] = useState<EntityTypeBinding[]>([]);
   const [views, setViews] = useState<ViewConfig[]>([]);
   const [filterChips, setFilterChips] = useState<FilterChip[]>([]);
+  const [queryCatalogs, setQueryCatalogs] = useState<QueryCatalog[]>([]);
   const [savedQueries, setSavedQueries] = useState<SavedQuery[]>([]);
   const typeIndexRef = useRef<Map<string, EntityTypeBinding>>(new Map());
   const subIndexRef = useRef<Map<string, SubGraphBinding>>(new Map());
   const viewIndexRef = useRef<Map<string, ViewConfig>>(new Map());
   const chipsBySgRef = useRef<Map<string, FilterChip[]>>(new Map());
+  const queryCatalogsBySgRef = useRef<Map<string, QueryCatalog[]>>(new Map());
   const queriesBySgRef = useRef<Map<string, SavedQuery[]>>(new Map());
 
   useEffect(() => {
@@ -330,12 +474,13 @@ export function useProjectProfile(contextGraphId: string | undefined): ProjectPr
       setLoading(true);
       setError(undefined);
       try {
-        const [rootRows, sgRows, typeRows, viewRows, chipRows, queryRows] = await Promise.all([
+        const [rootRows, sgRows, typeRows, viewRows, chipRows, catalogRows, queryRows] = await Promise.all([
           runProjectQuery(buildProfileRootQuery(contextGraphId), contextGraphId).catch(() => []),
           runProjectQuery(buildSubGraphBindingsQuery(contextGraphId), contextGraphId).catch(() => []),
           runProjectQuery(buildTypeBindingsQuery(contextGraphId), contextGraphId).catch(() => []),
           runProjectQuery(buildViewConfigsQuery(contextGraphId), contextGraphId).catch(() => []),
           runProjectQuery(buildFilterChipsQuery(contextGraphId), contextGraphId).catch(() => []),
+          runProjectQuery(buildQueryCatalogsQuery(contextGraphId), contextGraphId).catch(() => []),
           runProjectQuery(buildSavedQueriesQuery(contextGraphId), contextGraphId).catch(() => []),
         ]);
         if (cancelled) return;
@@ -432,28 +577,11 @@ export function useProjectProfile(contextGraphId: string | undefined): ProjectPr
         }
         chipsBySgRef.current = chipsBySg;
 
-        const queries: SavedQuery[] = queryRows
-          .map(row => {
-            const qIri = stripIri(row.q);
-            const slug = qIri.split(':query:').pop() ?? qIri;
-            return {
-              slug,
-              subGraph: stripLiteral(row.subGraph),
-              name: stripLiteral(row.name) || slug,
-              description: stripLiteral(row.description) || undefined,
-              sparql: stripLiteral(row.sparql),
-              resultColumn: stripLiteral(row.column) || '',
-            };
-          })
-          .filter(q => q.subGraph && q.sparql);
-        setSavedQueries(queries);
-        const queriesBySg = new Map<string, SavedQuery[]>();
-        for (const q of queries) {
-          const list = queriesBySg.get(q.subGraph) ?? [];
-          list.push(q);
-          queriesBySg.set(q.subGraph, list);
-        }
-        queriesBySgRef.current = queriesBySg;
+        const queryCatalogState = buildQueryCatalogState(catalogRows, queryRows);
+        setQueryCatalogs(queryCatalogState.queryCatalogs);
+        setSavedQueries(queryCatalogState.savedQueries);
+        queryCatalogsBySgRef.current = queryCatalogState.catalogsBySubGraph;
+        queriesBySgRef.current = queryCatalogState.queriesBySubGraph;
       } catch (err: any) {
         if (!cancelled) setError(err?.message ?? String(err));
       } finally {
@@ -480,6 +608,10 @@ export function useProjectProfile(contextGraphId: string | undefined): ProjectPr
     (slug: string) => chipsBySgRef.current.get(slug) ?? [],
     [],
   );
+  const savedQueryCatalogsFor = useCallback(
+    (slug: string) => queryCatalogsBySgRef.current.get(slug) ?? [],
+    [],
+  );
   const savedQueriesFor = useCallback(
     (slug: string) => queriesBySgRef.current.get(slug) ?? [],
     [],
@@ -495,6 +627,7 @@ export function useProjectProfile(contextGraphId: string | undefined): ProjectPr
     typeBindings,
     views,
     filterChips,
+    queryCatalogs,
     savedQueries,
     loading,
     error,
@@ -502,6 +635,7 @@ export function useProjectProfile(contextGraphId: string | undefined): ProjectPr
     forType,
     view,
     chipsFor,
+    savedQueryCatalogsFor,
     savedQueriesFor,
   };
 }
@@ -512,4 +646,3 @@ export const ProjectProfileContext = React.createContext<ProjectProfile | null>(
 export function useProjectProfileContext(): ProjectProfile | null {
   return useContext(ProjectProfileContext);
 }
-

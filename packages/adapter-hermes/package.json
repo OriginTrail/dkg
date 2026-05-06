@@ -9,12 +9,13 @@
     ".": {
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
-    }
+    },
+    "./package.json": "./package.json"
   },
   "files": [
     "dist",
     "hermes-plugin",
-    "install.sh",
+    "setup-entry.mjs",
     "README.md",
     "LICENSE"
   ],
@@ -22,7 +23,10 @@
     "build": "tsc",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
-    "clean": "rm -rf dist tsconfig.tsbuildinfo"
+    "clean": "node -e \"const fs=require('fs'); for (const p of ['dist','tsconfig.tsbuildinfo']) fs.rmSync(p,{recursive:true,force:true});\""
+  },
+  "dependencies": {
+    "@origintrail-official/dkg-core": "workspace:*"
   },
   "devDependencies": {
     "@vitest/coverage-v8": "^4.0.18",
@@ -34,7 +38,7 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/OriginTrail/dkg-v9.git",
+    "url": "https://github.com/OriginTrail/dkg.git",
     "directory": "packages/adapter-hermes"
   }
 }

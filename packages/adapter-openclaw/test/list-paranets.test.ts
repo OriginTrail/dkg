@@ -459,6 +459,239 @@ describe('dkg_context_graph_create tool', () => {
 
     expect(parsed.error).toContain('daemon is not reachable');
   });
+
+  it('defaults to curated/private (accessPolicy: 1) when public is not specified', async () => {
+    // Privacy-by-default: omitting `public` produces a curated CG.
+    // The agent's createContextGraph flow auto-includes the creator
+    // in DKG_ALLOWED_AGENT (see packages/agent/src/dkg-agent.ts:3962),
+    // so the creator can immediately read/write without a self-invite.
+    ft.addResponses(
+      new Response(JSON.stringify({ created: 'private', uri: 'did:dkg:context-graph:private' }), { status: 200 }),
+    );
+
+    const tool = findTool('dkg_context_graph_create');
+    await tool.execute('call-default-private', { id: 'private', name: 'Private CG' });
+
+    const body = JSON.parse(ft.calls[0][1]?.body as string);
+    expect(body.accessPolicy).toBe(1);
+    expect(body.allowedAgents).toBeUndefined();
+  });
+
+  it('creates an open/discoverable CG when public:true is passed', async () => {
+    ft.addResponses(
+      new Response(JSON.stringify({ created: 'open', uri: 'did:dkg:context-graph:open' }), { status: 200 }),
+    );
+
+    const tool = findTool('dkg_context_graph_create');
+    await tool.execute('call-public', { id: 'open', name: 'Open CG', public: true });
+
+    const body = JSON.parse(ft.calls[0][1]?.body as string);
+    // public:true → no accessPolicy sent → daemon's "open" default takes over.
+    expect(body.accessPolicy).toBeUndefined();
+    expect(body.allowedAgents).toBeUndefined();
+  });
+
+  it('passes allowed_agents to the daemon when provided alongside curated default', async () => {
+    ft.addResponses(
+      new Response(JSON.stringify({ created: 'team', uri: 'did:dkg:context-graph:team' }), { status: 200 }),
+    );
+
+    const validAddr1 = '0x' + 'a'.repeat(40);
+    const validAddr2 = '0x' + 'B'.repeat(40);
+    const tool = findTool('dkg_context_graph_create');
+    await tool.execute('call-allowed', {
+      id: 'team',
+      name: 'Team CG',
+      allowed_agents: [validAddr1, validAddr2],
+    });
+
+    const body = JSON.parse(ft.calls[0][1]?.body as string);
+    expect(body.accessPolicy).toBe(1);
+    expect(body.allowedAgents).toEqual([validAddr1, validAddr2]);
+  });
+
+  it('ignores allowed_agents when public:true is passed', async () => {
+    // Curation parameters are meaningless on a public CG; the handler
+    // drops them rather than sending a contradictory mix to the daemon.
+    ft.addResponses(
+      new Response(JSON.stringify({ created: 'open-2', uri: 'did:dkg:context-graph:open-2' }), { status: 200 }),
+    );
+
+    const validAddr = '0x' + 'a'.repeat(40);
+    const tool = findTool('dkg_context_graph_create');
+    await tool.execute('call-public-with-allowed', {
+      id: 'open-2',
+      name: 'Open',
+      public: true,
+      allowed_agents: [validAddr],
+    });
+
+    const body = JSON.parse(ft.calls[0][1]?.body as string);
+    expect(body.accessPolicy).toBeUndefined();
+    expect(body.allowedAgents).toBeUndefined();
+  });
+
+  it('trims whitespace-padded valid allowed_agents entries', async () => {
+    // Whitespace padding around an otherwise valid address is trimmed
+    // before validation. Empty, whitespace-only, and non-string entries
+    // are NOT silently dropped — they fail validation (see fail-fast
+    // tests below). LLM-generated bad args should produce a clear tool
+    // error so the agent can correct, not silently lose collaborators.
+    ft.addResponses(
+      new Response(JSON.stringify({ created: 'trimmed', uri: 'did:dkg:context-graph:trimmed' }), { status: 200 }),
+    );
+
+    const validAddr1 = '0x' + 'a'.repeat(40);
+    const validAddr2 = '0x' + 'B'.repeat(40);
+    const tool = findTool('dkg_context_graph_create');
+    await tool.execute('call-trim', {
+      id: 'trimmed',
+      name: 'Trim',
+      allowed_agents: [`  ${validAddr1}  `, validAddr2],
+    });
+
+    const body = JSON.parse(ft.calls[0][1]?.body as string);
+    expect(body.allowedAgents).toEqual([validAddr1, validAddr2]);
+  });
+
+  it('returns a tool error when allowed_agents contains a malformed address', async () => {
+    // Validation is at the tool layer so a malformed input surfaces as a
+    // user-correctable tool error rather than bubbling up as a daemon 500.
+    // Mirrors the agent-layer regex at `packages/agent/src/dkg-agent.ts:3918`.
+    const tool = findTool('dkg_context_graph_create');
+    const result = await tool.execute('call-bad-addr', {
+      id: 'bad-addr',
+      name: 'Bad',
+      allowed_agents: ['0x' + 'a'.repeat(40), 'not-an-address'],
+    });
+    const parsed = JSON.parse(result.content[0].text);
+
+    expect(parsed.error).toContain('Invalid Ethereum address');
+    expect(parsed.error).toContain('allowed_agents[1]');
+    expect(parsed.error).toContain('not-an-address');
+    expect(ft.calls).toHaveLength(0);
+  });
+
+  it('returns a tool error when allowed_agents has a too-short hex value', async () => {
+    const tool = findTool('dkg_context_graph_create');
+    const result = await tool.execute('call-short-addr', {
+      id: 'short-addr',
+      name: 'Short',
+      allowed_agents: ['0xabc'],
+    });
+    const parsed = JSON.parse(result.content[0].text);
+
+    expect(parsed.error).toContain('Invalid Ethereum address');
+    expect(ft.calls).toHaveLength(0);
+  });
+
+  it('round 2: fails fast when allowed_agents contains a non-string entry', async () => {
+    // LLMs sometimes emit numbers / nulls / dicts in tool args; if we
+    // silently drop them, the agent thinks the participant was added
+    // when it wasn't. Fail with a precise index-scoped error.
+    const tool = findTool('dkg_context_graph_create');
+    const result = await tool.execute('call-non-string', {
+      id: 'non-string',
+      name: 'NonString',
+      allowed_agents: ['0x' + 'a'.repeat(40), 42 as unknown as string, '0x' + 'b'.repeat(40)],
+    });
+    const parsed = JSON.parse(result.content[0].text);
+
+    expect(parsed.error).toContain('allowed_agents[1]');
+    expect(parsed.error).toContain('must be a string');
+    expect(ft.calls).toHaveLength(0);
+  });
+
+  it('round 2: fails fast when allowed_agents contains an empty / whitespace-only entry', async () => {
+    const tool = findTool('dkg_context_graph_create');
+    const result = await tool.execute('call-empty-entry', {
+      id: 'empty-entry',
+      name: 'EmptyEntry',
+      allowed_agents: ['0x' + 'a'.repeat(40), '   '],
+    });
+    const parsed = JSON.parse(result.content[0].text);
+
+    expect(parsed.error).toContain('allowed_agents[1]');
+    expect(parsed.error).toMatch(/empty|whitespace/i);
+    expect(ft.calls).toHaveLength(0);
+  });
+
+  it('round 2: fails fast when allowed_agents contains null', async () => {
+    const tool = findTool('dkg_context_graph_create');
+    const result = await tool.execute('call-null', {
+      id: 'null-entry',
+      name: 'Null',
+      allowed_agents: ['0x' + 'a'.repeat(40), null as unknown as string],
+    });
+    const parsed = JSON.parse(result.content[0].text);
+
+    expect(parsed.error).toContain('allowed_agents[1]');
+    expect(ft.calls).toHaveLength(0);
+  });
+
+  it('round 2: fails fast when allowed_agents is not an array', async () => {
+    const tool = findTool('dkg_context_graph_create');
+    const result = await tool.execute('call-not-array', {
+      id: 'not-array',
+      name: 'NotArray',
+      allowed_agents: '0x1234' as unknown as string[],
+    });
+    const parsed = JSON.parse(result.content[0].text);
+
+    expect(parsed.error).toContain('"allowed_agents"');
+    expect(parsed.error).toContain('array');
+    expect(ft.calls).toHaveLength(0);
+  });
+
+  it('round 2: fails fast when public is a non-boolean value', async () => {
+    // An LLM emitting `public: "yes"` or `public: 1` should NOT
+    // silently produce a curated CG (which is the opposite of intent).
+    const tool = findTool('dkg_context_graph_create');
+    const result = await tool.execute('call-public-string', {
+      id: 'public-string',
+      name: 'PublicString',
+      public: 'yes' as unknown as boolean,
+    });
+    const parsed = JSON.parse(result.content[0].text);
+
+    expect(parsed.error).toContain('"public"');
+    expect(parsed.error).toContain('boolean');
+    expect(ft.calls).toHaveLength(0);
+  });
+
+  it('round 2: fails fast when public is a number', async () => {
+    const tool = findTool('dkg_context_graph_create');
+    const result = await tool.execute('call-public-number', {
+      id: 'public-number',
+      name: 'PublicNumber',
+      public: 1 as unknown as boolean,
+    });
+    const parsed = JSON.parse(result.content[0].text);
+
+    expect(parsed.error).toContain('"public"');
+    expect(ft.calls).toHaveLength(0);
+  });
+
+  it('skips allowed_agents validation entirely when public:true is passed', async () => {
+    // Curation parameters are dropped on public CGs, so even malformed
+    // entries do not produce an error — they're simply ignored.
+    ft.addResponses(
+      new Response(JSON.stringify({ created: 'open-skip', uri: 'did:dkg:context-graph:open-skip' }), { status: 200 }),
+    );
+
+    const tool = findTool('dkg_context_graph_create');
+    const result = await tool.execute('call-public-malformed', {
+      id: 'open-skip',
+      name: 'Open Skip',
+      public: true,
+      allowed_agents: ['not-an-address'],
+    });
+    const parsed = JSON.parse(result.content[0].text);
+
+    expect(parsed.error).toBeUndefined();
+    const body = JSON.parse(ft.calls[0][1]?.body as string);
+    expect(body.allowedAgents).toBeUndefined();
+  });
 });
 
 describe('dkg_subscribe tool', () => {

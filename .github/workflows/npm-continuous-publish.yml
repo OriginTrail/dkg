@@ -43,15 +43,11 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build all packages
-        run: pnpm build
+      - name: Validate npm metadata points to v10
+        run: pnpm check:npm-metadata
 
-      - name: Build Vite UI bundles (node-ui)
-        # `build` was split from full (tsc + vite) into tsc-only in CI for a
-        # ~2 min wall-clock reduction (see ci.yml). Dev pre-releases still
-        # need the Vite-produced `dist-ui/` bundles shipped to npm, so
-        # rebuild them here before publishing.
-        run: pnpm turbo run build:ui
+      - name: Build all packages and Node UI bundle
+        run: pnpm build
 
       # NOTE: tests are intentionally NOT re-run here. The main `ci.yml`
       # workflow runs the full TORNADO / BURA / KOSAVA matrix in parallel on

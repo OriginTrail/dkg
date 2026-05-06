@@ -16,7 +16,7 @@ import {
   TrustLevel,
   type DKGNodeConfig, type OperationContext, type GetView, type AssertionDescriptor, type AssertionEvent, type AssertionState,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -24,8 +24,9 @@ import {
   ACKCollector, StorageACKHandler,
   VerifyCollector, VerifyProposalHandler, buildVerificationMetadata,
   computeTripleHashV10 as computeTripleHash, computeFlatKCRootV10 as computeFlatKCRoot, autoPartition,
+  TripleStoreAsyncLiftPublisher,
   type PublishResult, type PhaseCallback, type KAMetadata, type CASCondition,
-  type CollectedACK,
+  type CollectedACK, type LiftAuthorityProof, type LiftTransitionType,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import {
@@ -92,13 +93,115 @@ export interface CclPublishedEvaluationRecord {
   results: CclPublishedResultEntry[];
 }
 
-interface PublishOpts {
+export interface PublishOpts {
   onPhase?: PhaseCallback;
   operationCtx?: OperationContext;
   accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
   allowedPeers?: string[];
   /** Target sub-graph within the context graph (e.g. "code", "decisions"). */
   subGraphName?: string;
+}
+
+export interface PublishAsyncOpts extends PublishOpts {
+  namespace?: string;
+  scope?: string;
+  transitionType?: LiftTransitionType;
+  authority?: LiftAuthorityProof;
+  localOnly?: boolean;
+}
+
+export interface PublishAsyncQuadEnvelope {
+  publicQuads?: Quad[];
+  privateQuads?: Quad[];
+}
+
+export type PublishAsyncContent = JsonLdContent | PublishAsyncQuadEnvelope;
+
+export class ContextGraphNotFoundError extends Error {
+  readonly code = 'ContextGraphNotFound';
+
+  constructor(contextGraphId: string) {
+    super(`Context graph "${contextGraphId}" does not exist or is not subscribed locally`);
+    this.name = 'ContextGraphNotFound';
+  }
+}
+
+export class InvalidContentError extends Error {
+  readonly code = 'InvalidContent';
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'InvalidContent';
+  }
+}
+
+const PRIVATE_DATA_ANCHOR = 'http://dkg.io/ontology/privateDataAnchor';
+
+function normalizePublishContextGraphId(input: string): string {
+  const value = String(input).trim().replace(/^<(.+)>$/, '$1');
+  const prefix = 'did:dkg:context-graph:';
+  if (!value.startsWith(prefix)) return value;
+  const rest = value.slice(prefix.length);
+  const slash = rest.indexOf('/');
+  return slash >= 0 ? rest.slice(0, slash) : rest;
+}
+
+function isPublishAsyncQuadEnvelope(input: unknown): input is PublishAsyncQuadEnvelope {
+  return !!input
+    && typeof input === 'object'
+    && !Array.isArray(input)
+    && ('publicQuads' in input || 'privateQuads' in input);
+}
+
+function assertQuadArray(value: unknown, fieldName: string): Quad[] {
+  if (value == null) return [];
+  if (!Array.isArray(value)) {
+    throw new InvalidContentError(`${fieldName} must be an array of RDF quads`);
+  }
+  for (const quad of value) {
+    if (
+      !quad
+      || typeof quad.subject !== 'string'
+      || typeof quad.predicate !== 'string'
+      || typeof quad.object !== 'string'
+    ) {
+      throw new InvalidContentError(`${fieldName} must contain RDF quads with subject, predicate, and object strings`);
+    }
+  }
+  return value.map((quad) => ({ ...quad, graph: quad.graph ?? '' })) as Quad[];
+}
+
+function partitionPublishAsyncQuads(publicQuads: Quad[], privateQuads: Quad[]): {
+  publicQuads: Quad[];
+  privateQuadsByRoot: Map<string, Quad[]>;
+  roots: string[];
+} {
+  const privateByRoot = autoPartition(privateQuads);
+  let stagedPublicQuads = [...publicQuads];
+  let publicByRoot = autoPartition(stagedPublicQuads);
+
+  for (const rootEntity of privateByRoot.keys()) {
+    if (!publicByRoot.has(rootEntity)) {
+      stagedPublicQuads.push({
+        subject: rootEntity,
+        predicate: PRIVATE_DATA_ANCHOR,
+        object: '"true"',
+        graph: '',
+      });
+    }
+  }
+
+  publicByRoot = autoPartition(stagedPublicQuads);
+  const roots = [...publicByRoot.keys()];
+  if (roots.length === 0) {
+    throw new InvalidContentError('Content produced no publishable root entities');
+  }
+
+  return {
+    publicQuads: stagedPublicQuads,
+    privateQuadsByRoot: privateByRoot,
+    roots,
+  };
 }
 
 const SYNC_PAGE_SIZE = 500;
@@ -350,6 +453,11 @@ export interface DKGAgentConfig {
   /** Private key for the V10 ACK signer. When omitted, falls back to chainConfig.operationalKeys[0]. */
   ackSignerKey?: string;
   /**
+   * Publisher EVM address used when publish signing is delegated to the
+   * ChainAdapter instead of an in-process publisherPrivateKey.
+   */
+  publisherAddress?: string;
+  /**
    * EVM chain configuration. If omitted, publishing won't have on-chain finality.
    * `adminPrivateKey` is the private key for the profile admin wallet used
    * only for profile/key-management transactions. Nodes may omit it when they
@@ -377,6 +485,154 @@ export interface DKGAgentConfig {
   contextGraphSubscriptionStore?: ContextGraphSubscriptionStore;
   /** Durable local cache for nodes/agents known to be members of a context graph. */
   contextGraphMembershipStore?: ContextGraphMembershipStore;
+}
+
+function normalizeAdapterPublisherAddress(value: unknown): string | undefined {
+  if (typeof value !== 'string' || !ethers.isAddress(value)) return undefined;
+  const address = ethers.getAddress(value);
+  return address === ethers.ZeroAddress ? undefined : address;
+}
+
+function recoverCompactSigner(message: Uint8Array, compact: { r: Uint8Array; vs: Uint8Array }): string {
+  const signature = ethers.Signature.from({
+    r: ethers.hexlify(compact.r),
+    yParityAndS: ethers.hexlify(compact.vs),
+  }).serialized;
+  return ethers.verifyMessage(message, signature);
+}
+
+function adapterOperationalPrivateKeyAddress(chain: ChainAdapter): string | undefined {
+  const operationalKeyGetter = (chain as unknown as { getOperationalPrivateKey?: () => unknown })
+    .getOperationalPrivateKey;
+  if (typeof operationalKeyGetter !== 'function') return undefined;
+  try {
+    const privateKey = operationalKeyGetter.call(chain);
+    return typeof privateKey === 'string' && privateKey.length > 0
+      ? privateKeyAddress(privateKey)
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function adapterHasOperationalPrivateKey(chain: ChainAdapter): boolean {
+  return adapterOperationalPrivateKeyAddress(chain) !== undefined;
+}
+
+async function adapterGenericSignMessageMatchesAddress(
+  chain: ChainAdapter,
+  expectedAddress: string,
+): Promise<boolean> {
+  if (chain.chainId === 'none' || typeof chain.signMessage !== 'function') return false;
+  const normalized = normalizeAdapterPublisherAddress(expectedAddress);
+  if (!normalized) return false;
+
+  try {
+    const challenge = ethers.getBytes(ethers.id(`dkg-agent:chain-signer-probe:${normalized.toLowerCase()}`));
+    const compact = await chain.signMessage(challenge);
+    const recovered = normalizeAdapterPublisherAddress(recoverCompactSigner(challenge, compact));
+    return recovered?.toLowerCase() === normalized.toLowerCase();
+  } catch {
+    return false;
+  }
+}
+
+async function adapterAdvertisesPublisherSigner(chain: ChainAdapter): Promise<boolean> {
+  const hasReservingOrMultiAddressProbe = typeof chain.getAuthorizedPublisherAddress === 'function' ||
+    typeof (chain as unknown as { getSignerAddresses?: unknown }).getSignerAddresses === 'function';
+  const hasSingleAddressProbe = typeof (chain as unknown as { getSignerAddress?: unknown }).getSignerAddress === 'function' ||
+    Boolean(normalizeAdapterPublisherAddress((chain as unknown as { signerAddress?: unknown }).signerAddress));
+  const hasAnyAddressProbe = hasReservingOrMultiAddressProbe || hasSingleAddressProbe;
+
+  if (typeof chain.signMessageAs === 'function') return hasAnyAddressProbe;
+  if (adapterHasOperationalPrivateKey(chain)) return true;
+  if (typeof chain.signMessage !== 'function') return false;
+
+  const advertisedAddress = await inferAdapterPublisherAddress(chain, undefined, {
+    includeReservingPublisherProbe: false,
+    includeGenericSignMessageProbe: false,
+  });
+  if (!advertisedAddress) return false;
+  return adapterGenericSignMessageMatchesAddress(chain, advertisedAddress);
+}
+
+function privateKeyAddress(privateKey: string | undefined): string | undefined {
+  if (!privateKey) return undefined;
+  try {
+    return normalizeAdapterPublisherAddress(new ethers.Wallet(privateKey).address);
+  } catch {
+    return undefined;
+  }
+}
+
+async function inferAdapterPublisherAddress(
+  chain: ChainAdapter,
+  contextGraphId?: bigint,
+  options?: {
+    includeReservingPublisherProbe?: boolean;
+    includeGenericSignMessageProbe?: boolean;
+  },
+): Promise<string | undefined> {
+  if (
+    options?.includeReservingPublisherProbe !== false &&
+    contextGraphId !== undefined &&
+    typeof chain.getAuthorizedPublisherAddress === 'function'
+  ) {
+    try {
+      const address = normalizeAdapterPublisherAddress(
+        await chain.getAuthorizedPublisherAddress(contextGraphId),
+      );
+      if (address) return address;
+    } catch {
+      // Best-effort probe; the publisher resolver retries on later publish/update attempts.
+    }
+  }
+
+  const signerAddressGetter = (chain as unknown as { getSignerAddress?: () => unknown }).getSignerAddress;
+  if (typeof signerAddressGetter === 'function') {
+    try {
+      const address = normalizeAdapterPublisherAddress(
+        await Promise.resolve(signerAddressGetter.call(chain)),
+      );
+      if (address) return address;
+    } catch {
+      // Best-effort probe; fall through to broader adapter surfaces.
+    }
+  }
+
+  const signerAddresses = (chain as unknown as { getSignerAddresses?: () => unknown }).getSignerAddresses;
+  if (typeof signerAddresses === 'function') {
+    try {
+      const advertised = await Promise.resolve(signerAddresses.call(chain));
+      if (Array.isArray(advertised)) {
+        for (const value of advertised) {
+          const address = normalizeAdapterPublisherAddress(value);
+          if (address) return address;
+        }
+      }
+    } catch {
+      // Best-effort probe; the publisher resolver retries on later publish/update attempts.
+    }
+  }
+
+  const signerAddress = normalizeAdapterPublisherAddress(
+    (chain as unknown as { signerAddress?: unknown }).signerAddress,
+  );
+  if (signerAddress) return signerAddress;
+
+  const adapterOperationalAddress = adapterOperationalPrivateKeyAddress(chain);
+  if (adapterOperationalAddress) return adapterOperationalAddress;
+
+  if (options?.includeGenericSignMessageProbe === false) return undefined;
+  if (chain.chainId === 'none' || typeof chain.signMessage !== 'function') return undefined;
+
+  try {
+    const challenge = ethers.getBytes(ethers.id('dkg-agent:publisher-address-probe'));
+    const compact = await chain.signMessage(challenge);
+    return normalizeAdapterPublisherAddress(recoverCompactSigner(challenge, compact));
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -577,12 +833,31 @@ export class DKGAgent {
     const node = new DKGNode(nodeConfig);
     const workspaceOwnedEntities = new Map<string, Map<string, string>>();
     const writeLocks = new Map<string, Promise<void>>();
+    const legacyAdapterOperationalKey = opKeys?.[0];
+    const legacyAdapterOperationalAddress = privateKeyAddress(legacyAdapterOperationalKey);
+    const configuredPublisherAddress = normalizeAdapterPublisherAddress(config.publisherAddress);
+    const publisherAddressMatchesLegacyKey = Boolean(
+      configuredPublisherAddress &&
+      legacyAdapterOperationalAddress &&
+      configuredPublisherAddress.toLowerCase() === legacyAdapterOperationalAddress.toLowerCase(),
+    );
+    const adapterCanPublishFromAdvertisedSigner = await adapterAdvertisesPublisherSigner(chain);
+    const useLegacyAdapterOperationalKeyFallback = Boolean(
+      config.chainAdapter &&
+      legacyAdapterOperationalKey &&
+      !adapterCanPublishFromAdvertisedSigner &&
+      (!configuredPublisherAddress || publisherAddressMatchesLegacyKey),
+    );
     const publisher = new DKGPublisher({
       store,
       chain,
       eventBus,
       keypair,
-      publisherPrivateKey: opKeys?.[0],
+      publisherPrivateKey: useLegacyAdapterOperationalKeyFallback ? legacyAdapterOperationalKey : undefined,
+      publisherAddress: config.publisherAddress,
+      publisherAddressResolver: config.publisherAddress || useLegacyAdapterOperationalKeyFallback
+        ? undefined
+        : (contextGraphId?: bigint) => inferAdapterPublisherAddress(chain, contextGraphId),
       sharedMemoryOwnedEntities: workspaceOwnedEntities,
       writeLocks,
     });
@@ -2758,6 +3033,94 @@ export class DKGAgent {
     return this._publish(contextGraphId, input as Quad[], undefined, thirdArg ?? fourthArg);
   }
 
+  async publishAsync(
+    contextGraphIdOrUal: string,
+    content: PublishAsyncContent,
+    opts?: PublishAsyncOpts,
+  ): Promise<{ captureID: string }> {
+    const contextGraphId = normalizePublishContextGraphId(contextGraphIdOrUal);
+    const ctx = opts?.operationCtx ?? createOperationContext('publish');
+
+    const exists = await this.contextGraphExists(contextGraphId);
+    if (!exists) {
+      throw new ContextGraphNotFoundError(contextGraphId);
+    }
+
+    let publicQuads: Quad[];
+    let privateQuads: Quad[];
+    try {
+      if (isPublishAsyncQuadEnvelope(content)) {
+        publicQuads = assertQuadArray(content.publicQuads, 'publicQuads');
+        privateQuads = assertQuadArray(content.privateQuads, 'privateQuads');
+      } else {
+        const parsed = await jsonLdToQuads(content as JsonLdContent, {
+          defaultVisibility: 'private',
+          syntheticPrivateAnchor: false,
+        });
+        publicQuads = parsed.publicQuads;
+        privateQuads = parsed.privateQuads;
+      }
+    } catch (err) {
+      if (err instanceof InvalidContentError) throw err;
+      const message = err instanceof Error ? err.message : String(err);
+      throw new InvalidContentError(`Invalid JSON-LD content: ${message}`);
+    }
+
+    if (publicQuads.length === 0 && privateQuads.length === 0) {
+      throw new InvalidContentError('Content must include at least one public or private payload');
+    }
+
+    const partitioned = partitionPublishAsyncQuads(publicQuads, privateQuads);
+    const { shareOperationId, message } = await this.publisher.writeToWorkspace(
+      contextGraphId,
+      partitioned.publicQuads,
+      {
+        publisherPeerId: this.peerId,
+        operationCtx: ctx,
+        subGraphName: opts?.subGraphName,
+      },
+    );
+
+    if (partitioned.privateQuadsByRoot.size > 0) {
+      const privateStore = new PrivateContentStore(this.store, new GraphManager(this.store));
+      for (const [rootEntity, rootPrivateQuads] of partitioned.privateQuadsByRoot) {
+        await privateStore.storePrivateTriplesForOperation(
+          contextGraphId,
+          shareOperationId,
+          rootEntity,
+          rootPrivateQuads,
+          opts?.subGraphName,
+        );
+      }
+    }
+
+    const asyncPublisher = new TripleStoreAsyncLiftPublisher(this.store);
+    const captureID = await asyncPublisher.lift({
+      swmId: shareOperationId,
+      shareOperationId,
+      roots: partitioned.roots,
+      contextGraphId,
+      namespace: opts?.namespace ?? 'async-publish',
+      scope: opts?.scope ?? 'context-graph',
+      transitionType: opts?.transitionType ?? 'CREATE',
+      authority: opts?.authority ?? { type: 'owner', proofRef: `urn:dkg:publish-async:${shareOperationId}` },
+      subGraphName: opts?.subGraphName,
+      accessPolicy: opts?.accessPolicy,
+      allowedPeers: opts?.allowedPeers,
+    });
+
+    if (!opts?.localOnly) {
+      const topic = paranetWorkspaceTopic(contextGraphId);
+      try {
+        await this.gossip.publish(topic, message);
+      } catch {
+        this.log.warn(ctx, `No peers subscribed to ${topic} yet`);
+      }
+    }
+
+    return { captureID };
+  }
+
   private async _publish(
     contextGraphId: string,
     quads: Quad[],
@@ -3832,6 +4195,14 @@ export class DKGAgent {
     await this.store.insert(quads);
     await gm.ensureParanet(opts.id);
 
+    // Force the triple-store flush BEFORE the SQLite caches are written.
+    // Without this, a daemon crash within 50ms of the insert would lose the
+    // declaration triples (best-effort debounced flush) while SQLite's WAL
+    // would survive — leaving ghost CGs that show up in the dashboard but
+    // don't exist in the graph. Awaiting flush here makes the create durable
+    // before the caller is told it succeeded.
+    await this.store.flush?.();
+
     this.setContextGraphSubscription(opts.id, {
       name: opts.name,
       subscribed: !opts.private,
@@ -4177,7 +4548,7 @@ export class DKGAgent {
       );
     }
     const publishAuthority = publishPolicy === EVM_PUBLISH_CURATED
-      ? this.getChainPublishAuthorityAddress()
+      ? await this.getChainPublishAuthorityAddress(id)
       : undefined;
     if (
       publishPolicy === EVM_PUBLISH_CURATED
@@ -6528,29 +6899,47 @@ export class DKGAgent {
    * List all known context graphs by merging the subscription registry with
    * SPARQL-discovered definition triples. Returns enriched entries with
    * `subscribed` and `synced` flags.
+   *
+   * Rows are backfilled from `_meta` with `DKG_CURATOR` when missing — open CGs only publish
+   * curator triples locally in `_meta` while definitions sync on ONTOLOGY.
+   *
+   * With a valid `callerAgentAddress` option, each row includes `callerInvolved`.
+   * With no usable caller wallet, omit that field entirely so callers can infer membership from `curator`.
    */
-  async listContextGraphs(): Promise<Array<{
+  async listContextGraphs(opts?: { callerAgentAddress?: string | null }): Promise<Array<{
     id: string;
     uri: string;
     name: string;
     description?: string;
     creator?: string;
+    /** Wallet-scoped curator DID (from _meta / ontology), if present. */
+    curator?: string;
+    /** Declared access policy literal, e.g. public / private. */
+    accessPolicy?: string;
     createdAt?: string;
     isSystem: boolean;
     subscribed: boolean;
     synced: boolean;
     onChainId?: string;
+    /**
+     * When `callerAgentAddress` is omitted or invalid: property is omitted —
+     * clients fall back to comparing `curator` to identity (listing was not scoped to a caller).
+     * When a valid caller is provided: explicit true/false.
+     */
+    callerInvolved?: boolean;
   }>> {
     const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
     const agentsGraph = paranetDataGraphUri(SYSTEM_PARANETS.AGENTS);
     const result = await this.store.query(`
-      SELECT ?ctxGraph ?name ?desc ?creator ?created ?isSystem WHERE {
+      SELECT ?ctxGraph ?name ?desc ?creator ?created ?curator ?access ?isSystem WHERE {
         {
           GRAPH <${ontologyGraph}> {
             ?ctxGraph <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_PARANET}> .
             OPTIONAL { ?ctxGraph <${DKG_ONTOLOGY.SCHEMA_NAME}> ?name }
             OPTIONAL { ?ctxGraph <${DKG_ONTOLOGY.SCHEMA_DESCRIPTION}> ?desc }
             OPTIONAL { ?ctxGraph <${DKG_ONTOLOGY.DKG_CREATOR}> ?creator }
+            OPTIONAL { ?ctxGraph <${DKG_ONTOLOGY.DKG_CURATOR}> ?curator }
+            OPTIONAL { ?ctxGraph <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?access }
             OPTIONAL { ?ctxGraph <${DKG_ONTOLOGY.DKG_CREATED_AT}> ?created }
             OPTIONAL { ?ctxGraph <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_SYSTEM_PARANET}> . BIND(true AS ?isSystem) }
           }
@@ -6560,6 +6949,8 @@ export class DKGAgent {
             OPTIONAL { ?ctxGraph <${DKG_ONTOLOGY.SCHEMA_NAME}> ?name }
             OPTIONAL { ?ctxGraph <${DKG_ONTOLOGY.SCHEMA_DESCRIPTION}> ?desc }
             OPTIONAL { ?ctxGraph <${DKG_ONTOLOGY.DKG_CREATOR}> ?creator }
+            OPTIONAL { ?ctxGraph <${DKG_ONTOLOGY.DKG_CURATOR}> ?curator }
+            OPTIONAL { ?ctxGraph <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?access }
             OPTIONAL { ?ctxGraph <${DKG_ONTOLOGY.DKG_CREATED_AT}> ?created }
             OPTIONAL { ?ctxGraph <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_SYSTEM_PARANET}> . BIND(true AS ?isSystem) }
           }
@@ -6570,14 +6961,21 @@ export class DKGAgent {
     const prefix = 'did:dkg:context-graph:';
     const seen = new Map<string, {
       id: string; uri: string; name: string; description?: string;
-      creator?: string; createdAt?: string; isSystem: boolean;
+      creator?: string; curator?: string; accessPolicy?: string; createdAt?: string; isSystem: boolean;
       subscribed: boolean; synced: boolean; onChainId?: string;
     }>();
 
     if (result.type === 'bindings') {
+      const byUri = new Map<string, Record<string, string>>();
       for (const row of result.bindings as Record<string, string>[]) {
         const uri = row['ctxGraph'] ?? '';
-        if (seen.has(uri)) continue;
+        if (!uri || byUri.has(uri)) continue;
+        byUri.set(uri, row);
+      }
+      // Parallel lookups — sequential await per ontology row multiplied list latency noticeably.
+      await Promise.all([...byUri.values()].map(async (row) => {
+        const uri = row['ctxGraph'] ?? '';
+        if (seen.has(uri)) return;
         const id = uri.startsWith(prefix) ? uri.slice(prefix.length) : uri;
         const sub = this.subscribedContextGraphs.get(id);
         const onChainId = sub?.onChainId ?? (await this.getContextGraphOnChainId(id)) ?? undefined;
@@ -6587,13 +6985,15 @@ export class DKGAgent {
           name: stripLiteral(row['name'] ?? id),
           description: row['desc'] ? stripLiteral(row['desc']) : undefined,
           creator: row['creator'],
+          ...(row['curator'] ? { curator: row['curator'] } : {}),
+          ...(row['access'] ? { accessPolicy: stripLiteral(row['access']) } : {}),
           createdAt: row['created'] ? stripLiteral(row['created']) : undefined,
           isSystem: !!row['isSystem'],
           subscribed: sub?.subscribed ?? false,
           synced: true,
           ...(onChainId ? { onChainId } : {}),
         });
-      }
+      }));
     }
 
     // Curated CGs store their definition in their own _meta graph, not in
@@ -6606,12 +7006,14 @@ export class DKGAgent {
       const metaGraph = paranetMetaGraphUri(id);
       const pUri = paranetDataGraphUri(id);
       const metaResult = await this.store.query(`
-        SELECT ?name ?desc ?creator ?created WHERE {
+        SELECT ?name ?desc ?creator ?created ?curator ?access WHERE {
           GRAPH <${metaGraph}> {
             <${pUri}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_PARANET}> .
             OPTIONAL { <${pUri}> <${DKG_ONTOLOGY.SCHEMA_NAME}> ?name }
             OPTIONAL { <${pUri}> <${DKG_ONTOLOGY.SCHEMA_DESCRIPTION}> ?desc }
             OPTIONAL { <${pUri}> <${DKG_ONTOLOGY.DKG_CREATOR}> ?creator }
+            OPTIONAL { <${pUri}> <${DKG_ONTOLOGY.DKG_CURATOR}> ?curator }
+            OPTIONAL { <${pUri}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?access }
             OPTIONAL { <${pUri}> <${DKG_ONTOLOGY.DKG_CREATED_AT}> ?created }
           }
         } LIMIT 1
@@ -6626,6 +7028,8 @@ export class DKGAgent {
           name: stripLiteral(row['name'] ?? sub.name ?? id),
           description: row['desc'] ? stripLiteral(row['desc']) : undefined,
           creator: row['creator'],
+          ...(row['curator'] ? { curator: row['curator'] } : {}),
+          ...(row['access'] ? { accessPolicy: stripLiteral(row['access']) } : {}),
           createdAt: row['created'] ? stripLiteral(row['created']) : undefined,
           isSystem: false,
           subscribed: sub.subscribed,
@@ -6694,7 +7098,54 @@ export class DKGAgent {
       });
     }
 
-    return Array.from(seen.values());
+    let rows = Array.from(seen.values());
+
+    /**
+     * Open CGs replicate `DKG_CREATOR`/name/policy on ONTOLOGY but keep `DKG_CURATOR` in `_meta` only,
+     * so list rows lack `curator` and the sidebar cannot classify "mine" without a Bearer-scoped pass.
+     * Backfill once (parallelised) — also removes duplicate SPARQL in the involvement pass below.
+     */
+    rows = await Promise.all(rows.map(async (r) => {
+      if (r.curator?.trim()) return r;
+      const c = await this.getContextGraphCurator(r.id);
+      return c ? { ...r, curator: c } : r;
+    }));
+
+    let checksum: string | null = null;
+    const rawCaller = opts?.callerAgentAddress?.trim();
+    if (rawCaller && ethers.isAddress(rawCaller)) {
+      try {
+        checksum = ethers.getAddress(rawCaller);
+      } catch {
+        checksum = null;
+      }
+    }
+
+    // Privacy filter: curated/private CGs must never leak past the daemon to a non-member
+    // caller. With no caller wallet (Bearer absent), drop all private rows; with a caller,
+    // keep private rows only when they are curator or allowlisted participant.
+    const isPrivateRow = (ap?: string): boolean => {
+      if (!ap?.trim()) return false;
+      const t = ap.trim().replace(/^["']|["']$/g, '').toLowerCase();
+      return t === 'private';
+    };
+
+    if (!checksum) {
+      // Without a caller wallet we still leave `callerInvolved` unset so the UI can use the
+      // curator-vs-identity fallback for OPEN graphs.
+      return rows.filter((r) => !isPrivateRow(r.accessPolicy));
+    }
+
+    const annotated = await Promise.all(rows.map(async (r) => {
+      const curatorMatch = this.curatorDidMatchesChecksumAgent(r.curator, checksum);
+      const allowlisted = await this.callerIsAllowlistedAgentParticipant(r.id, checksum);
+      // `callerInvolved` must reflect ONLY the provided caller wallet.
+      // Using local node identity (`creatorIsSelf`) leaks curated rows to unrelated callers.
+      const involved = curatorMatch || allowlisted;
+      return { ...r, callerInvolved: involved };
+    }));
+
+    return annotated.filter((r) => !isPrivateRow(r.accessPolicy) || r.callerInvolved === true);
   }
 
   async networkId(): Promise<string> {
@@ -6824,16 +7275,33 @@ export class DKGAgent {
       && ownerAddress.toLowerCase() === this.defaultAgentAddress.toLowerCase();
   }
 
-  private getChainPublishAuthorityAddress(): string | undefined {
-    const chainWithSigner = this.chain as unknown as {
-      getSignerAddress?: () => string;
-      signerAddress?: string;
-    };
-    const rawAddress = chainWithSigner.getSignerAddress?.() ?? chainWithSigner.signerAddress;
-    if (rawAddress && ethers.isAddress(rawAddress)) {
-      return ethers.getAddress(rawAddress);
+  private async getChainPublishAuthorityAddress(contextGraphId?: string): Promise<string | undefined> {
+    const configuredPublisherAddress = normalizeAdapterPublisherAddress(this.config.publisherAddress);
+    if (configuredPublisherAddress) return configuredPublisherAddress;
+
+    const legacyAdapterOperationalKey = this.config.chainConfig?.operationalKeys?.[0];
+    const legacyAdapterOperationalAddress = privateKeyAddress(legacyAdapterOperationalKey);
+    if (
+      this.config.chainAdapter &&
+      legacyAdapterOperationalAddress &&
+      !(await adapterAdvertisesPublisherSigner(this.chain))
+    ) {
+      return legacyAdapterOperationalAddress;
     }
-    return undefined;
+
+    let publisherContextGraphId: bigint | undefined;
+    try {
+      const parsed = BigInt(contextGraphId ?? '');
+      if (parsed > 0n) publisherContextGraphId = parsed;
+    } catch {
+      // Local descriptive CG ids cannot be used as adapter context hints.
+    }
+    // This mirrors the publisher resolver, including the adapter-only
+    // `getOperationalPrivateKey()` fallback used by custom ChainAdapters.
+    return inferAdapterPublisherAddress(this.chain, publisherContextGraphId, {
+      includeReservingPublisherProbe: false,
+      includeGenericSignMessageProbe: false,
+    });
   }
 
   /**
@@ -6913,6 +7381,57 @@ export class DKGAgent {
       if (owner) return owner;
     }
     return null;
+  }
+
+  /**
+   * Curator DID (`did:dkg:agent:0x…`) matches the caller's checksummed wallet address.
+   */
+  private curatorDidMatchesChecksumAgent(curatorRaw: string | undefined, checksumAddress: string): boolean {
+    if (!curatorRaw?.trim()) return false;
+    let t = curatorRaw.trim().replace(/^["']|["']$/g, '');
+    if (t.startsWith('<') && t.endsWith('>')) t = t.slice(1, -1);
+    const expected = `did:dkg:agent:${checksumAddress.toLowerCase()}`;
+    return t.toLowerCase() === expected;
+  }
+
+  /**
+   * Creator DID (`did:dkg:agent:<peerId>`) matches THIS node's libp2p peer id.
+   * Membership signal for CGs created via this node before wallet-based curator metadata
+   * was the convention — without this, a node admin (bearer-authed) loses sight of CGs
+   * their own node created. Peer ids are case-sensitive base58, so we match exactly after
+   * stripping IRI/quote framing.
+   */
+  private creatorDidMatchesSelfPeer(creatorRaw: string | undefined): boolean {
+    if (!creatorRaw?.trim()) return false;
+    let t = creatorRaw.trim().replace(/^["']|["']$/g, '');
+    if (t.startsWith('<') && t.endsWith('>')) t = t.slice(1, -1);
+    const expected = `did:dkg:agent:${this.node.peerId}`;
+    return t === expected;
+  }
+
+  /**
+   * Whether the wallet is on the CG allowlist (participant / allowed-agent) or tied to a
+   * listed on-chain identity ID. Does not consult curator — compose with curator checks separately.
+   */
+  private async callerIsAllowlistedAgentParticipant(contextGraphId: string, checksumAddress: string): Promise<boolean> {
+    const participants = await this.getPrivateContextGraphParticipants(contextGraphId);
+    if (!participants?.length) return false;
+
+    for (const raw of participants) {
+      const p = String(raw).replace(/^["']|["']$/g, '');
+      if (ethers.isAddress(p)) {
+        if (ethers.getAddress(p).toLowerCase() === checksumAddress.toLowerCase()) return true;
+        continue;
+      }
+      if (/^\d+$/.test(p) && this.chain.isOperationalWalletRegistered) {
+        try {
+          if (await this.chain.isOperationalWalletRegistered(BigInt(p), checksumAddress)) return true;
+        } catch {
+          // ignore chain read errors — treat as non-participant
+        }
+      }
+    }
+    return false;
   }
 
   private async getContextGraphParticipantAgentAddresses(contextGraphId: string): Promise<string[]> {
@@ -7407,6 +7926,22 @@ export class DKGAgent {
         this.log.info(ctx, `Noted unresolved on-chain context graph ${p.contextGraphId.slice(0, 16)}… (no metadata)`);
         knownOnChainIds.add(p.contextGraphId);
         continue;
+      }
+
+      // Curated CGs (accessPolicy=1) must not silently land in non-participants' lists.
+      // We can't query the V10 ContextGraphs participant set from a NameRegistry event alone,
+      // so apply the strict default: only auto-subscribe when this node's wallet matches
+      // `creator` (the address that called claimName). Real participants will have the CG
+      // surfaced through manual subscribe / catch-up triggered by their curator.
+      if (Number(p.accessPolicy) === 1) {
+        const isCurator = !!this.defaultAgentAddress
+          && typeof p.creator === 'string'
+          && p.creator.toLowerCase() === this.defaultAgentAddress.toLowerCase();
+        if (!isCurator) {
+          this.log.info(ctx, `Skipping auto-subscribe to curated chain entry "${p.name}" (${p.contextGraphId.slice(0, 16)}…) — not curator`);
+          knownOnChainIds.add(p.contextGraphId);
+          continue;
+        }
       }
 
       this.setContextGraphSubscription(p.name, {

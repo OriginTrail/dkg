@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import { DKGAgent } from '../src/index.js';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import { TripleStoreAsyncLiftPublisher } from '@origintrail-official/dkg-publisher';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import { ethers } from 'ethers';
@@ -194,5 +195,123 @@ describe('publishJsonLd', () => {
       { subject: 'did:dkg:test:X', predicate: 'http://schema.org/name', object: '"X"', graph: '' },
     ]);
     expect(result.status).toBe('confirmed');
+  }, 15000);
+
+  it('async private-only JSON-LD anchors the real private root and enqueues a Lift job', async () => {
+    const { agent, store } = await createAgent('AsyncPrivateOnlyBot');
+    await agent.createContextGraph({ id: 'async-priv-only', name: 'AsyncPrivateOnly', description: '' });
+    const root = 'http://example.org/AsyncSecret';
+
+    const { captureID } = await agent.publishAsync(
+      'did:dkg:context-graph:async-priv-only',
+      {
+        private: {
+          '@context': 'http://schema.org/',
+          '@id': root,
+          '@type': 'Thing',
+          'name': 'Private Async',
+        },
+      },
+      { localOnly: true, accessPolicy: 'allowList', allowedPeers: ['peer-a'] },
+    );
+
+    const asyncPublisher = new TripleStoreAsyncLiftPublisher(store);
+    const job = await asyncPublisher.getStatus(captureID);
+    expect(job?.request.roots).toEqual([root]);
+    expect(job?.request.accessPolicy).toBe('allowList');
+    expect(job?.request.allowedPeers).toEqual(['peer-a']);
+    // Keep this resilient to control-plane tuning (defaults changed in main).
+    expect(job?.retries.maxRetries).toBeGreaterThan(0);
+
+    const publicAnchor = await store.query(
+      `ASK { GRAPH <did:dkg:context-graph:async-priv-only/_shared_memory> { <${root}> <http://dkg.io/ontology/privateDataAnchor> "true" } }`,
+    );
+    expect(publicAnchor.type).toBe('boolean');
+    if (publicAnchor.type === 'boolean') expect(publicAnchor.value).toBe(true);
+
+    const publicPayload = await store.query(
+      `ASK { GRAPH <did:dkg:context-graph:async-priv-only/_shared_memory> { <${root}> <http://schema.org/name> "Private Async" } }`,
+    );
+    expect(publicPayload.type).toBe('boolean');
+    if (publicPayload.type === 'boolean') expect(publicPayload.value).toBe(false);
+
+    const privatePayload = await store.query(
+      `ASK { GRAPH <did:dkg:context-graph:async-priv-only/_private> { <${root}> <http://schema.org/name> "Private Async" } }`,
+    );
+    expect(privatePayload.type).toBe('boolean');
+    if (privatePayload.type === 'boolean') expect(privatePayload.value).toBe(false);
+  }, 15000);
+
+  it('async bare JSON-LD writes only an anchor in shared/private graphs before lift', async () => {
+    const { agent, store } = await createAgent('AsyncBarePrivateBot');
+    await agent.createContextGraph({ id: 'async-bare-private', name: 'AsyncBarePrivate', description: '' });
+    const root = 'http://example.org/AsyncBareSecret';
+
+    const { captureID } = await agent.publishAsync(
+      'did:dkg:context-graph:async-bare-private',
+      {
+        '@context': 'http://schema.org/',
+        '@id': root,
+        '@type': 'Thing',
+        'name': 'Bare Async Private',
+      },
+      { localOnly: true, accessPolicy: 'ownerOnly' },
+    );
+
+    const asyncPublisher = new TripleStoreAsyncLiftPublisher(store);
+    const job = await asyncPublisher.getStatus(captureID);
+    expect(job?.request.roots).toEqual([root]);
+    expect(job?.request.accessPolicy).toBe('ownerOnly');
+
+    const publicAnchor = await store.query(
+      `ASK { GRAPH <did:dkg:context-graph:async-bare-private/_shared_memory> { <${root}> <http://dkg.io/ontology/privateDataAnchor> "true" } }`,
+    );
+    expect(publicAnchor.type).toBe('boolean');
+    if (publicAnchor.type === 'boolean') expect(publicAnchor.value).toBe(true);
+
+    const publicPayload = await store.query(
+      `ASK { GRAPH <did:dkg:context-graph:async-bare-private/_shared_memory> { <${root}> <http://schema.org/name> "Bare Async Private" } }`,
+    );
+    expect(publicPayload.type).toBe('boolean');
+    if (publicPayload.type === 'boolean') expect(publicPayload.value).toBe(false);
+
+    // Async lift stages private quads by operation; they are not materialized in
+    // `_private` until the lift pipeline executes.
+    const privatePayload = await store.query(
+      `ASK { GRAPH <did:dkg:context-graph:async-bare-private/_private> { <${root}> <http://schema.org/name> "Bare Async Private" } }`,
+    );
+    expect(privatePayload.type).toBe('boolean');
+    if (privatePayload.type === 'boolean') expect(privatePayload.value).toBe(false);
+  }, 15000);
+
+  it('async publish records and resolves subGraphName for staged public and private data', async () => {
+    const { agent, store } = await createAgent('AsyncSubGraphBot');
+    await agent.createContextGraph({ id: 'async-subgraph', name: 'AsyncSubGraph', description: '' });
+    await agent.createSubGraph('async-subgraph', 'research');
+    const root = 'http://example.org/AsyncSubGraphSecret';
+
+    const { captureID } = await agent.publishAsync(
+      'async-subgraph',
+      {
+        public: {
+          '@context': 'http://schema.org/',
+          '@id': root,
+          '@type': 'Thing',
+          'description': 'Public Subgraph Marker',
+        },
+        private: {
+          '@context': 'http://schema.org/',
+          '@id': root,
+          '@type': 'Thing',
+          'name': 'Private Subgraph Async',
+        },
+      },
+      { localOnly: true, accessPolicy: 'ownerOnly', subGraphName: 'research' },
+    );
+
+    const asyncPublisher = new TripleStoreAsyncLiftPublisher(store);
+    const job = await asyncPublisher.getStatus(captureID);
+    expect(job?.request.subGraphName).toBe('research');
+    expect(job?.request.roots).toContain(root);
   }, 15000);
 });

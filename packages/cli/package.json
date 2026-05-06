@@ -7,18 +7,21 @@
     "dkg": "./dist/cli.js"
   },
   "scripts": {
-    "prebuild": "pnpm --filter @origintrail-official/dkg-adapter-openclaw run build && pnpm --filter @origintrail-official/dkg-mcp run build",
+    "prebuild": "pnpm --filter @origintrail-official/dkg-adapter-openclaw run build && pnpm --filter @origintrail-official/dkg-adapter-hermes run build && pnpm --filter @origintrail-official/dkg-mcp run build",
     "build": "tsc && node -e \"const fs=require('fs');const p=require('path');fs.mkdirSync('network',{recursive:true});for(const f of fs.readdirSync('../../network')){if(f.endsWith('.json'))fs.copyFileSync(p.join('../../network',f),p.join('network',f))};fs.copyFileSync('../../project.json','project.json')\"",
     "benchmark:catchup-runner": "node scripts/catchup-runner-benchmark.cjs",
     "benchmark:daemon-responsiveness": "node scripts/daemon-responsiveness-benchmark.cjs",
+    "benchmark:publish-async-get": "node scripts/publish-async-get-benchmark.cjs",
     "postinstall": "node ./scripts/bundle-markitdown-binaries.mjs --quiet --current-platform --best-effort",
     "markitdown:build": "node ./scripts/bundle-markitdown-binaries.mjs --build-current-platform",
     "test": "vitest run",
+    "test:benchmark:publish-async-get": "vitest run --config vitest.benchmark.config.ts",
     "test:coverage": "vitest run --coverage",
     "clean": "node -e \"const fs=require('fs');for(const d of['dist','network']){fs.rmSync(d,{recursive:true,force:true})};fs.rmSync('tsconfig.tsbuildinfo',{force:true})\""
   },
   "dependencies": {
     "@origintrail-official/dkg-adapter-openclaw": "workspace:*",
+    "@origintrail-official/dkg-adapter-hermes": "workspace:*",
     "@origintrail-official/dkg-agent": "workspace:*",
     "@origintrail-official/dkg-chain": "workspace:*",
     "@origintrail-official/dkg-core": "workspace:*",
@@ -58,7 +61,7 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/OriginTrail/dkg-v9.git",
+    "url": "https://github.com/OriginTrail/dkg.git",
     "directory": "packages/cli"
   }
 }

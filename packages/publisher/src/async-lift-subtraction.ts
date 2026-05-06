@@ -1,6 +1,6 @@
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import { assertSafeRdfTerm } from '@origintrail-official/dkg-core';
-import { GraphManager } from '@origintrail-official/dkg-storage';
+import { GraphManager, decryptPrivateLiteral } from '@origintrail-official/dkg-storage';
 import type { LiftResolvedPublishSlice } from './async-lift-publish-options.js';
 import type { LiftJobValidationMetadata, LiftRequest } from './lift-job.js';
 
@@ -18,6 +18,21 @@ export async function subtractFinalizedExactQuads(params: {
   request: LiftRequest;
   validation: LiftJobValidationMetadata;
   resolved: LiftResolvedPublishSlice;
+  /**
+   * Explicit encryption key used when sealing private literals (same
+   * value the caller's `PrivateContentStore` was constructed with).
+   *
+   * without
+   * this, the subtraction called `decryptPrivateLiteral` with no
+   * override and resolved ONLY the env/default key. A deployment that
+   * uses a non-default key therefore never matched any plaintext input
+   * against the on-disk envelope — every private quad reappeared as
+   * "unseen" and got republished. Callers (DKGPublisher) thread the
+   * same key they passed to `PrivateContentStore` here. `undefined`
+   * keeps the legacy env/default resolution so tests with no explicit
+   * key keep working.
+   */
+  privateStoreEncryptionKey?: Uint8Array | string;
 }): Promise<ExactQuadSubtractionResult> {
   if (params.request.transitionType !== 'CREATE') {
     return {
@@ -27,16 +42,29 @@ export async function subtractFinalizedExactQuads(params: {
     };
   }
 
-  const confirmedRoots = await loadConfirmedRoots(params.store, params.graphManager, params.request.contextGraphId, params.validation.canonicalRoots);
+  const confirmedRoots = await loadConfirmedRoots(
+    params.store,
+    params.graphManager,
+    params.request.contextGraphId,
+    params.validation.canonicalRoots,
+    params.request.subGraphName,
+  );
   const authoritativePublic = await loadAuthoritativeQuadKeys(
     params.store,
-    params.graphManager.dataGraphUri(params.request.contextGraphId),
+    publicGraphUri(params.graphManager, params.request.contextGraphId, params.request.subGraphName),
     confirmedRoots,
   );
+  // Private quads land on disk as AES-GCM-SIV ciphertext (
+  // ST-2). The deterministic IV guarantees identical plaintexts produce
+  // identical ciphertexts, but the authoritative-key set still has to
+  // be in plaintext form so callers can match against the
+  // user-supplied (plaintext) input quads. Decrypt as we read.
   const authoritativePrivate = await loadAuthoritativeQuadKeys(
     params.store,
-    params.graphManager.privateGraphUri(params.request.contextGraphId),
+    privateGraphUri(params.graphManager, params.request.contextGraphId, params.request.subGraphName),
     confirmedRoots,
+    /* decryptObjects */ true,
+    params.privateStoreEncryptionKey,
   );
 
   const publicResult = subtractGraphExactMatches(params.resolved.quads, confirmedRoots, authoritativePublic);
@@ -58,16 +86,21 @@ async function loadConfirmedRoots(
   graphManager: GraphManager,
   contextGraphId: string,
   roots: readonly string[],
+  subGraphName?: string,
 ): Promise<Set<string>> {
   if (roots.length === 0) return new Set();
   const metaGraph = graphManager.metaGraphUri(contextGraphId);
   const values = roots.map((root) => safeStringLiteral(root)).join(' ');
+  const subGraphConstraint = subGraphName
+    ? `?kc <${DKG}subGraphName> ${safeStringLiteral(subGraphName)} .`
+    : `FILTER NOT EXISTS { ?kc <${DKG}subGraphName> ?subGraphName }`;
   const result = await store.query(
     `SELECT DISTINCT ?root WHERE {
       GRAPH <${metaGraph}> {
         VALUES ?rootValue { ${values} }
         ?ka <${DKG}rootEntity> ?root ; <${DKG}partOf> ?kc .
         ?kc <${DKG}status> "confirmed" .
+        ${subGraphConstraint}
         FILTER(STR(?root) = ?rootValue)
       }
     }`,
@@ -78,6 +111,18 @@ async function loadConfirmedRoots(
   }
 
   return new Set(result.bindings.map((row) => stripTerm(row['root'])).filter(isPresent));
+}
+
+function publicGraphUri(graphManager: GraphManager, contextGraphId: string, subGraphName?: string): string {
+  return subGraphName
+    ? graphManager.subGraphUri(contextGraphId, subGraphName)
+    : graphManager.dataGraphUri(contextGraphId);
+}
+
+function privateGraphUri(graphManager: GraphManager, contextGraphId: string, subGraphName?: string): string {
+  return subGraphName
+    ? graphManager.subGraphPrivateUri(contextGraphId, subGraphName)
+    : graphManager.privateGraphUri(contextGraphId);
 }
 
 function subtractGraphExactMatches(
@@ -106,7 +151,13 @@ function subtractGraphExactMatches(
   return { remaining, removedCount };
 }
 
-async function loadAuthoritativeQuadKeys(store: TripleStore, graph: string, confirmedRoots: Set<string>): Promise<Set<string>> {
+async function loadAuthoritativeQuadKeys(
+  store: TripleStore,
+  graph: string,
+  confirmedRoots: Set<string>,
+  decryptObjects = false,
+  encryptionKey?: Uint8Array | string,
+): Promise<Set<string>> {
   if (confirmedRoots.size === 0) {
     return new Set();
   }
@@ -131,7 +182,21 @@ async function loadAuthoritativeQuadKeys(store: TripleStore, graph: string, conf
     return new Set();
   }
 
-  return new Set(result.quads.map((quad) => toQuadKey({ ...quad, graph: '' })));
+  return new Set(
+    result.quads.map((quad) => {
+      // forward the store's explicit `encryptionKey` (when the caller
+      // supplied one) so the decrypt here uses the SAME key the
+      // backing `PrivateContentStore` sealed under. Without this,
+      // `decryptPrivateLiteral` silently falls back to env/default
+      // and never round-trips a non-default-key seal — causing
+      // subtraction to miss every authoritative private quad on a
+      // retry and republish duplicates.
+      const object = decryptObjects
+        ? decryptPrivateLiteral(quad.object, { encryptionKey })
+        : quad.object;
+      return toQuadKey({ ...quad, object, graph: '' });
+    }),
+  );
 }
 
 function rootForSubject(subject: string, confirmedRoots: Set<string>): string | null {

@@ -38,6 +38,12 @@ import { ethers } from 'ethers';
 
 export const MOCK_DEFAULT_SIGNER = '0x' + '1'.repeat(40);
 
+interface MockBatch {
+  merkleRoot: Uint8Array;
+  kaCount: number;
+  publisherAddress: string;
+}
+
 /**
  * In-memory mock chain adapter for off-chain development.
  * Implements both V9 (UAL-based) and V8 (legacy KC) interfaces.
@@ -54,7 +60,7 @@ export class MockChainAdapter implements ChainAdapter {
   private identities = new Map<string, bigint>();
   private namespaceNextId = new Map<string, bigint>();
   private namespaceOwner = new Map<string, string>();
-  private batches = new Map<bigint, { merkleRoot: Uint8Array; kaCount: number }>();
+  private batches = new Map<bigint, MockBatch>();
   private collections = new Map<bigint, {
     merkleRoot: Uint8Array;
     kaCount: number;
@@ -69,6 +75,8 @@ export class MockChainAdapter implements ChainAdapter {
   private events: ChainEvent[] = [];
   /** Reserved UAL ranges per publisher address for verifyPublisherOwnsRange */
   private reservedRangesByPublisher = new Map<string, Array<{ startId: bigint; endId: bigint }>>();
+  /** Publisher addresses this mock is explicitly allowed to attribute V10 publishes to. */
+  private allowedPublisherAddresses: Set<string>;
 
   /** Configurable minimum receiver signatures. When > 0, publishKnowledgeAssets will check the count. Default: 1. */
   minimumRequiredSignatures = 1;
@@ -76,6 +84,7 @@ export class MockChainAdapter implements ChainAdapter {
   constructor(chainId = 'mock:31337', signerAddress = MOCK_DEFAULT_SIGNER) {
     this.chainId = chainId;
     this.signerAddress = signerAddress;
+    this.allowedPublisherAddresses = new Set([ethers.getAddress(signerAddress).toLowerCase()]);
   }
 
   async getIdentityId(): Promise<bigint> {
@@ -108,9 +117,20 @@ export class MockChainAdapter implements ChainAdapter {
    */
   seedIdentity(address: string, identityId: bigint): void {
     this.identities.set(address, identityId);
+    if (ethers.isAddress(address)) {
+      this.allowPublisherAddress(address);
+    }
     if (identityId >= this.nextIdentityId) {
       this.nextIdentityId = identityId + 1n;
     }
+  }
+
+  /**
+   * Test helper: allow delegated V10 publishes to be attributed to an address
+   * without also pretending that address owns a node identity.
+   */
+  allowPublisherAddress(address: string): void {
+    this.allowedPublisherAddresses.add(ethers.getAddress(address).toLowerCase());
   }
 
   // --- V9 UAL-based methods ---
@@ -146,6 +166,7 @@ export class MockChainAdapter implements ChainAdapter {
     this.batches.set(batchId, {
       merkleRoot: params.merkleRoot,
       kaCount,
+      publisherAddress: this.signerAddress,
     });
 
     this.pushEvent('KnowledgeBatchCreated', {
@@ -175,6 +196,7 @@ export class MockChainAdapter implements ChainAdapter {
     this.batches.set(batchId, {
       merkleRoot: params.merkleRoot,
       kaCount: params.kaCount,
+      publisherAddress: this.signerAddress,
     });
 
     const txHash = this.peekTxHash();
@@ -242,6 +264,7 @@ export class MockChainAdapter implements ChainAdapter {
     this.batches.set(batchId, {
       merkleRoot: params.merkleRoot,
       kaCount: params.kaCount,
+      publisherAddress: this.signerAddress,
     });
 
     const txHash = this.peekTxHash();
@@ -308,18 +331,25 @@ export class MockChainAdapter implements ChainAdapter {
     }
 
     existing.merkleRoot = params.newMerkleRoot;
+    const hintedPublisherAddress = params.publisherAddress
+      ? ethers.getAddress(params.publisherAddress)
+      : undefined;
+    const publisherAddress = existing.publisherAddress ?? hintedPublisherAddress;
     const txIndex = this.txIndexInBlock;
     const blockNumber = this.nextBlock;
     const txHash = `0x${blockNumber.toString(16).padStart(64, '0')}${txIndex.toString(16).padStart(4, '0')}`;
     this.pushEvent('KnowledgeBatchUpdated', {
       batchId: params.batchId.toString(),
       newMerkleRoot: toHex(params.newMerkleRoot),
-      publisherAddress: this.signerAddress,
+      publisherAddress,
       txHash,
       txIndex,
     });
 
-    return this.txResult(true);
+    return {
+      ...this.txResult(true),
+      publisherAddress,
+    };
   }
 
   async updateKnowledgeCollectionV10(params: V10UpdateKCParams): Promise<TxResult> {
@@ -351,18 +381,32 @@ export class MockChainAdapter implements ChainAdapter {
     }
 
     existing.merkleRoot = params.newMerkleRoot;
+    const collection = this.collections.get(params.kcId);
+    if (collection) {
+      collection.merkleRoot = params.newMerkleRoot;
+      collection.merkleLeafCount = params.newMerkleLeafCount;
+    }
+    const hintedPublisherAddress = params.publisherAddress
+      ? ethers.getAddress(params.publisherAddress)
+      : undefined;
+    const publisherAddress = collection?.publisherAddress ?? existing.publisherAddress ?? hintedPublisherAddress;
+    if (collection) collection.publisherAddress = publisherAddress;
+    existing.publisherAddress = publisherAddress;
     const txIndex = this.txIndexInBlock;
     const blockNumber = this.nextBlock;
     const txHash = `0x${blockNumber.toString(16).padStart(64, '0')}${txIndex.toString(16).padStart(4, '0')}`;
     this.pushEvent('KnowledgeBatchUpdated', {
       batchId: params.kcId.toString(),
       newMerkleRoot: toHex(params.newMerkleRoot),
-      publisherAddress: this.signerAddress,
+      publisherAddress,
       txHash,
       txIndex,
     });
 
-    return this.txResult(true);
+    return {
+      ...this.txResult(true),
+      publisherAddress,
+    };
   }
 
   async verifyKAUpdate(txHash: string, batchId: bigint, publisherAddress: string): Promise<KAUpdateVerification> {
@@ -917,18 +961,28 @@ export class MockChainAdapter implements ChainAdapter {
       );
     }
 
+    const publisherAddress = params.publisherAddress
+      ? ethers.getAddress(params.publisherAddress)
+      : ethers.getAddress(this.signerAddress);
+    if (!this.allowedPublisherAddresses.has(publisherAddress.toLowerCase())) {
+      throw new Error(
+        `Mock publisherAddress ${publisherAddress} is not allowed with this adapter. ` +
+        'Allow the address first to model explicit mock support for address-specific publishing.',
+      );
+    }
     const kcId = this.nextBatchId++;
     this.collections.set(kcId, {
       merkleRoot: params.merkleRoot,
       kaCount: params.knowledgeAssetsAmount,
       merkleLeafCount: params.merkleLeafCount,
-      publisherAddress: this.signerAddress,
+      publisherAddress,
       cgId: params.contextGraphId,
     });
     // Also store in batches so verify() can find this publish
     this.batches.set(kcId, {
       merkleRoot: params.merkleRoot,
       kaCount: params.knowledgeAssetsAmount,
+      publisherAddress,
     });
 
     const txHash = this.peekTxHash();
@@ -941,7 +995,7 @@ export class MockChainAdapter implements ChainAdapter {
       merkleRoot: toHex(params.merkleRoot),
       byteSize: params.byteSize.toString(),
       txHash,
-      publisherAddress: this.signerAddress,
+      publisherAddress,
       startKAId: startKAId.toString(),
       endKAId: endKAId.toString(),
       isImmutable: params.isImmutable,
@@ -957,7 +1011,7 @@ export class MockChainAdapter implements ChainAdapter {
       txHash: result.hash,
       blockNumber: result.blockNumber,
       blockTimestamp: Math.floor(Date.now() / 1000),
-      publisherAddress: this.signerAddress,
+      publisherAddress,
       tokenAmount: params.tokenAmount,
     };
   }

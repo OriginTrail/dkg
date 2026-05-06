@@ -105,7 +105,7 @@ import {
 } from '../../config.js';
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
-import { loadTokens, httpAuthGuard, extractBearerToken } from '../../auth.js';
+import { loadTokens, httpAuthGuard, extractBearerToken, SignedRequestRejectedError } from '../../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../../extraction/index.js';
 import {
@@ -667,6 +667,7 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
       body = await readBodyBuffer(req, MAX_UPLOAD_BYTES);
     } catch (err: any) {
       if (err instanceof PayloadTooLargeError) throw err;
+      if (err instanceof SignedRequestRejectedError) throw err;
       return jsonResponse(res, 400, {
         error: `Failed to read request body: ${err.message}`,
       });

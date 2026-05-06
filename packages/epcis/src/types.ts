@@ -41,6 +41,13 @@ export interface CaptureResult {
   status: string;
 }
 
+export interface CaptureAcceptedResult {
+  captureID: string;
+  receivedAt: string;
+  eventCount: number;
+  status: 'accepted';
+}
+
 export interface CaptureOptions {
   accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
   allowedPeers?: string[];
@@ -53,6 +60,14 @@ export interface Publisher {
     content: unknown,
     opts?: CaptureOptions,
   ): Promise<{ ual: string; kcId: string; status: string }>;
+}
+
+export interface AsyncPublisher {
+  publishAsync(
+    contextGraphId: string,
+    content: unknown,
+    opts?: CaptureOptions,
+  ): Promise<{ captureID: string }>;
 }
 
 // --- Events query types ---

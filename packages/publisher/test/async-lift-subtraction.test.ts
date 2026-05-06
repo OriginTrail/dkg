@@ -4,7 +4,7 @@ import { GraphManager } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter } from '@origintrail-official/dkg-chain';
 import { TypedEventBus, generateEd25519Keypair } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
-import { DKGPublisher } from '../src/index.js';
+import { DKGPublisher, generateSubGraphRegistration } from '../src/index.js';
 import { validateLiftPublishPayload } from '../src/async-lift-validation.js';
 import { subtractFinalizedExactQuads } from '../src/async-lift-subtraction.js';
 import type { LiftValidationInput } from '../src/async-lift-validation.js';
@@ -97,6 +97,45 @@ describe('subtractFinalizedExactQuads', () => {
 
     expect(result.alreadyPublishedPublicCount).toBe(1);
     expect(result.alreadyPublishedPrivateCount).toBe(0);
+    expect(result.resolved.quads).toEqual([genreQuad]);
+  });
+
+  it('subtracts finalized quads from the requested sub-graph only', async () => {
+    const subGraphName = 'research';
+    await graphManager.ensureSubGraph(PARANET, subGraphName);
+    await store.insert(generateSubGraphRegistration({
+      contextGraphId: PARANET,
+      subGraphName,
+      createdBy: 'peer-1',
+      timestamp: new Date('2026-01-01T00:00:00.000Z'),
+    }));
+
+    const input: LiftValidationInput = {
+      ...baseInput(),
+      request: {
+        ...baseInput().request,
+        subGraphName,
+      },
+    };
+    const validated = validateLiftPublishPayload(input);
+    const [publishedNameQuad, genreQuad] = validated.resolved.quads;
+
+    await publisher.publish({
+      contextGraphId: PARANET,
+      quads: [publishedNameQuad!],
+      publisherPeerId: 'peer-1',
+      subGraphName,
+    });
+
+    const result = await subtractFinalizedExactQuads({
+      store,
+      graphManager,
+      request: input.request,
+      validation: validated.validation,
+      resolved: validated.resolved,
+    });
+
+    expect(result.alreadyPublishedPublicCount).toBe(1);
     expect(result.resolved.quads).toEqual([genreQuad]);
   });
 

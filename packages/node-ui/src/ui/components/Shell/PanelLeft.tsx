@@ -6,28 +6,38 @@ import { useJourneyStore } from '../../stores/journey.js';
 import { api } from '../../api-wrapper.js';
 import { CreateProjectModal } from '../Modals/CreateProjectModal.js';
 import { JoinProjectModal } from '../Modals/JoinProjectModal.js';
-import { ImportFilesModal } from '../Modals/ImportFilesModal.js';
 import { useNodeEvents } from '../../hooks/useNodeEvents.js';
+import {
+  fetchCurrentAgent,
+  fetchLocalAgentIntegrations,
+  type AgentIdentity,
+  type LocalAgentIntegration,
+  type LocalAgentIntegrationStatus,
+} from '../../api.js';
+import {
+  belongsInContextOracleSidebar,
+  belongsInMyProjectsSidebar,
+  type AgentSidebarIdentity,
+} from '../../lib/contextGraphSidebar.js';
+
+function toSidebarIdentity(a: AgentIdentity): AgentSidebarIdentity {
+  return { agentDid: a.agentDid, peerId: a.peerId };
+}
 
 const CHEVRON_ICON = '▸';
 const COLLAPSE_ICON = '◂';
 
+// Project tree row: a flat, clickable header that opens the project tab.
+// Memory-layer expansion was removed by request — layers are surfaced inside
+// the project view rather than as nested sidebar items.
+
 type TreeMode = 'explorer' | 'oracle';
 
-// ─── Local per-project organisation ─────────────────────────────
-// Two concerns, both backed by localStorage because the daemon doesn't
-// currently expose per-project metadata we'd need to drive them:
-//
-//   1. Hidden — dismiss leftover test/demo projects.
-//   2. Participating — manually mark a project as "joined someone
-//      else's" rather than "mine". When the daemon starts returning
-//      a `createdBy` / `owner` field on /api/paranet/list we'll switch
-//      the detection automatic and this local override stays as a
-//      user preference that wins over the heuristic.
+// ─── Hidden projects (local dismiss) — ─────────────────────────────
+// My Projects vs Context Oracle: daemon subscription + curator + policy
+// (GET /api/context-graph/list); no manual overrides (see sidebar helper).
 const HIDDEN_KEY = 'v10:hiddenProjectIds';
 const HIDDEN_CHANGE_EVENT = 'v10:hidden-projects-change';
-const PARTICIPATING_KEY = 'v10:participatingProjectIds';
-const PARTICIPATING_CHANGE_EVENT = 'v10:participating-projects-change';
 
 function loadHiddenIds(): Set<string> {
   try {
@@ -69,89 +79,30 @@ function useHiddenProjectIds(): {
   return { hidden, hide, unhideAll };
 }
 
-// ─── "Participating in" tagging ─────────────────────────────────
-function loadParticipatingIds(): Set<string> {
-  try {
-    const raw = localStorage.getItem(PARTICIPATING_KEY);
-    if (!raw) return new Set();
-    const arr = JSON.parse(raw);
-    return new Set(Array.isArray(arr) ? arr : []);
-  } catch { return new Set(); }
-}
-
-function saveParticipatingIds(ids: Set<string>): void {
-  try {
-    localStorage.setItem(PARTICIPATING_KEY, JSON.stringify([...ids]));
-    window.dispatchEvent(new Event(PARTICIPATING_CHANGE_EVENT));
-  } catch { /* non-critical */ }
-}
-
-function useParticipatingIds(): {
-  participating: Set<string>;
-  toggle: (id: string) => void;
-} {
-  const [participating, setParticipating] = useState<Set<string>>(() => loadParticipatingIds());
-  useEffect(() => {
-    const sync = () => setParticipating(loadParticipatingIds());
-    window.addEventListener(PARTICIPATING_CHANGE_EVENT, sync);
-    window.addEventListener('storage', sync);
-    return () => {
-      window.removeEventListener(PARTICIPATING_CHANGE_EVENT, sync);
-      window.removeEventListener('storage', sync);
-    };
-  }, []);
-  const toggle = useCallback((id: string) => {
-    const next = new Set(loadParticipatingIds());
-    if (next.has(id)) next.delete(id);
-    else next.add(id);
-    saveParticipatingIds(next);
-  }, []);
-  return { participating, toggle };
-}
-
 interface ProjectTreeItemProps {
   cg: ContextGraph;
   isActive: boolean;
-  isParticipating: boolean;
   onSelect: () => void;
-  onImport: () => void;
   onHide: () => void;
-  onToggleParticipating: () => void;
 }
 
 function ProjectTreeItem({
   cg,
   isActive,
-  isParticipating,
   onSelect,
-  onImport,
   onHide,
-  onToggleParticipating,
 }: ProjectTreeItemProps) {
-  const [open, setOpen] = useState(false);
-  const { openTab } = useTabsStore();
   const assetCount = cg.assetCount ?? cg.assets ?? 0;
 
   return (
     <div className="v10-tree-section">
       <div
         className={`v10-tree-section-header ${isActive ? 'active' : ''}`}
-        onClick={() => { setOpen((v) => !v); onSelect(); }}
+        onClick={onSelect}
       >
-        <span className={`v10-tree-chevron ${open ? 'open' : ''}`}>{CHEVRON_ICON}</span>
         <span className="v10-tree-project-dot" />
         <span className="v10-tree-section-label">{cg.name || cg.id.slice(0, 16)}</span>
         <span className="v10-tree-section-badge">{assetCount}</span>
-        <button
-          type="button"
-          className="v10-tree-move-btn"
-          title={isParticipating
-            ? 'Move to "My Projects"'
-            : 'Mark as participating (move to "Participating")'}
-          onClick={(e) => { e.stopPropagation(); onToggleParticipating(); }}
-        >
-          ⤑
-        </button>
         <button
           type="button"
           className="v10-tree-hide-btn"
@@ -161,50 +112,49 @@ function ProjectTreeItem({
           ×
         </button>
       </div>
-      {open && (
-        <div className="v10-tree-items">
-          <div className="v10-tree-layer-header">Working Memory</div>
-          <div
-            className="v10-tree-item"
-            onClick={() => openTab({ id: `wm:${cg.id}`, label: `WM · ${cg.name || cg.id.slice(0,12)}`, closable: true })}
-          >
-            <span className="v10-tree-item-icon" style={{ color: 'var(--layer-working)' }}>◇</span>
-            <span className="v10-tree-item-label">agent drafts</span>
-          </div>
-          <div
-            className="v10-tree-item"
-            onClick={(e) => { e.stopPropagation(); onImport(); }}
-            style={{ paddingLeft: 32 }}
-          >
-            <span className="v10-tree-item-icon" style={{ fontSize: 11 }}>↑</span>
-            <span className="v10-tree-item-label" style={{ color: 'var(--text-tertiary)' }}>Import files…</span>
-          </div>
-
-          <div className="v10-tree-layer-header" style={{ marginTop: 6 }}>Shared Memory</div>
-          <div
-            className="v10-tree-item"
-            onClick={() => openTab({ id: `swm:${cg.id}`, label: `SWM · ${cg.name || cg.id.slice(0,12)}`, closable: true })}
-          >
-            <span className="v10-tree-item-icon" style={{ color: 'var(--layer-shared)' }}>◈</span>
-            <span className="v10-tree-item-label">team workspace</span>
-          </div>
-
-          <div className="v10-tree-layer-header" style={{ marginTop: 6 }}>Verified Memory</div>
-          <div
-            className="v10-tree-item"
-            onClick={() => openTab({ id: `vm:${cg.id}`, label: `VM · ${cg.name || cg.id.slice(0,12)}`, closable: true })}
-          >
-            <span className="v10-tree-item-icon" style={{ color: 'var(--layer-verified)' }}>◉</span>
-            <span className="v10-tree-item-label">verified assets</span>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
 
+// Maps local-agent integration status → status-dot color. Kept inline (vs new
+// CSS classes) because the four states map 1:1 to existing semantic palette
+// vars and there's no shared status-dot component to extend.
+function localAgentDotColor(status: LocalAgentIntegrationStatus): string {
+  switch (status) {
+    case 'chat_ready':
+      return 'var(--accent-green, #22c55e)';
+    case 'connecting':
+      return 'var(--accent-yellow, #eab308)';
+    case 'degraded':
+    case 'bridge_offline':
+      return 'var(--accent-orange, #f97316)';
+    case 'available':
+    case 'coming_soon':
+    default:
+      return 'var(--text-tertiary, #6b7280)';
+  }
+}
+
 function IntegrationsSection() {
   const [open, setOpen] = useState(false);
+  const [localAgents, setLocalAgents] = useState<LocalAgentIntegration[]>([]);
+  const [localAgentsError, setLocalAgentsError] = useState<string | null>(null);
+
+  // Lazy-load on first open and refresh every 30s while open.
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+
+    const loadLocal = () => {
+      fetchLocalAgentIntegrations()
+        .then((r) => { if (!cancelled) { setLocalAgents(r.integrations); setLocalAgentsError(null); } })
+        .catch((e: Error) => { if (!cancelled) setLocalAgentsError(e.message); });
+    };
+
+    loadLocal();
+    const iv = setInterval(loadLocal, 30_000);
+    return () => { cancelled = true; clearInterval(iv); };
+  }, [open]);
 
   return (
     <div className="v10-tree-section">
@@ -215,10 +165,42 @@ function IntegrationsSection() {
       </div>
       {open && (
         <div className="v10-tree-items" style={{ display: 'block' }}>
-          <div className="v10-tree-item">
-            <span className="v10-tree-item-icon">⬡</span>
-            <span className="v10-tree-item-label">Obsidian</span>
+          <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: 0.5, padding: '6px 12px 2px 38px' }}>
+            Agents
           </div>
+          {localAgentsError && (
+            <div style={{ fontSize: 11, color: 'var(--accent-orange, #f97316)', padding: '4px 12px 4px 38px' }}>
+              {localAgentsError}
+            </div>
+          )}
+          {!localAgentsError && localAgents.length === 0 && (
+            <div style={{ fontSize: 11, color: 'var(--text-tertiary)', padding: '4px 12px 4px 38px', fontStyle: 'italic' }}>
+              No agents detected.
+            </div>
+          )}
+          {localAgents.map((a) => (
+            <div
+              key={a.id}
+              className="v10-tree-item"
+              title={a.detail}
+              style={{ cursor: 'default' }}
+            >
+              <span
+                aria-label={a.statusLabel}
+                style={{
+                  width: 7,
+                  height: 7,
+                  borderRadius: '50%',
+                  background: localAgentDotColor(a.status),
+                  flexShrink: 0,
+                }}
+              />
+              <span className="v10-tree-item-label">{a.name}</span>
+              <span style={{ fontSize: 10, color: 'var(--text-tertiary)', marginLeft: 4 }}>
+                {a.statusLabel}
+              </span>
+            </div>
+          ))}
         </div>
       )}
     </div>
@@ -233,18 +215,21 @@ export function PanelLeft() {
   const [treeMode, setTreeMode] = useState<TreeMode>('explorer');
 
   const { hidden: hiddenIds, hide: hideProject, unhideAll } = useHiddenProjectIds();
-  const { participating: participatingIds, toggle: toggleParticipating } = useParticipatingIds();
+  const [agentIdentity, setAgentIdentity] = useState<AgentSidebarIdentity | null>(null);
+
   const visibleContextGraphs = contextGraphs.filter((cg) => !hiddenIds.has(cg.id));
-  const myProjects = visibleContextGraphs.filter((cg) => !participatingIds.has(cg.id));
-  const participatingProjects = visibleContextGraphs.filter((cg) => participatingIds.has(cg.id));
+  const myProjects = visibleContextGraphs.filter((cg) =>
+    belongsInMyProjectsSidebar(cg, agentIdentity));
+  const contextOracleProjects = visibleContextGraphs.filter((cg) =>
+    belongsInContextOracleSidebar(cg, agentIdentity));
   const hiddenCount = contextGraphs.length - visibleContextGraphs.length;
 
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showJoinModal, setShowJoinModal] = useState(false);
-  const [importTarget, setImportTarget] = useState<ContextGraph | null>(null);
 
   const loadCGs = useCallback(() => {
     setLoading(true);
+    fetchCurrentAgent().then((a: AgentIdentity) => setAgentIdentity(toSidebarIdentity(a))).catch(() => {});
     api.fetchContextGraphs()
       .then(({ contextGraphs: cgs }: any) => setContextGraphs(cgs ?? []))
       .catch(() => {})
@@ -265,6 +250,11 @@ export function PanelLeft() {
 
   return (
     <div className="v10-panel-left">
+      <div style={{ display: 'flex', gap: 4, padding: '8px 8px 4px' }}>
+        <button className="v10-new-project-btn" onClick={() => setShowCreateModal(true)}>+ New Project</button>
+        <button className="v10-new-project-btn" onClick={() => setShowJoinModal(true)}>↗ Join Project</button>
+      </div>
+
       <div className="v10-tree-header">
         <button
           className={`v10-tree-mode-btn ${treeMode === 'explorer' ? 'active' : ''}`}
@@ -292,22 +282,6 @@ export function PanelLeft() {
             <span>▦</span> Dashboard
           </div>
 
-          {contextGraphs.length > 0 && (
-            <div
-              className={`v10-tree-dashboard ${activeTabId === 'memory-stack' ? 'active' : ''}`}
-              onClick={() => openTab({ id: 'memory-stack', label: 'Memory Stack', closable: true })}
-            >
-              <span>▤</span> Memory Stack
-            </div>
-          )}
-
-          {contextGraphs.length > 0 && (
-            <div style={{ display: 'flex', gap: 4 }}>
-              <button className="v10-new-project-btn" onClick={() => setShowCreateModal(true)}>+ New Project</button>
-              <button className="v10-new-project-btn" onClick={() => setShowJoinModal(true)}>↗ Join Project</button>
-            </div>
-          )}
-
           {contextGraphs.length === 0 && stage <= 1 && (
             <div className="v10-journey-empty-card">
               <div className="v10-jec-title">No projects yet</div>
@@ -324,13 +298,6 @@ export function PanelLeft() {
             </div>
           )}
 
-          {/* Projects split into two groups. Default everything lives
-              under "My Projects"; the user can mark individual projects
-              as "participating" via the ⤑ button on the row, which
-              moves them to the Participating group. This is a
-              client-local tag (localStorage) — once the daemon exposes
-              real creator/owner metadata we'll auto-populate from that
-              and keep the manual override as a user preference. */}
           {myProjects.length > 0 && (
             <>
               <div className="v10-tree-group-label">My Projects</div>
@@ -339,41 +306,14 @@ export function PanelLeft() {
                   key={cg.id}
                   cg={cg}
                   isActive={activeProjectId === cg.id}
-                  isParticipating={false}
                   onSelect={() => {
                     setActiveProject(cg.id);
                     openTab({ id: `project:${cg.id}`, label: cg.name || cg.id.slice(0, 16), closable: true });
                   }}
-                  onImport={() => setImportTarget(cg)}
                   onHide={() => {
                     hideProject(cg.id);
                     if (activeProjectId === cg.id) setActiveProject(null);
                   }}
-                  onToggleParticipating={() => toggleParticipating(cg.id)}
-                />
-              ))}
-            </>
-          )}
-
-          {participatingProjects.length > 0 && (
-            <>
-              <div className="v10-tree-group-label">Participating Projects</div>
-              {participatingProjects.map((cg) => (
-                <ProjectTreeItem
-                  key={cg.id}
-                  cg={cg}
-                  isActive={activeProjectId === cg.id}
-                  isParticipating={true}
-                  onSelect={() => {
-                    setActiveProject(cg.id);
-                    openTab({ id: `project:${cg.id}`, label: cg.name || cg.id.slice(0, 16), closable: true });
-                  }}
-                  onImport={() => setImportTarget(cg)}
-                  onHide={() => {
-                    hideProject(cg.id);
-                    if (activeProjectId === cg.id) setActiveProject(null);
-                  }}
-                  onToggleParticipating={() => toggleParticipating(cg.id)}
                 />
               ))}
             </>
@@ -396,24 +336,46 @@ export function PanelLeft() {
 
       {treeMode === 'oracle' && (
         <div className="v10-tree-content">
-          <div className="v10-oracle-placeholder">
-            <p style={{ fontSize: 12, color: 'var(--text-tertiary)', padding: 24, textAlign: 'center' }}>
-              Context Oracle browser coming soon.
+          {contextOracleProjects.length > 0 && (
+            <>
+              <div className="v10-tree-group-label">Context Oracle</div>
+              {contextOracleProjects.map((cg) => (
+                <ProjectTreeItem
+                  key={cg.id}
+                  cg={cg}
+                  isActive={activeProjectId === cg.id}
+                  onSelect={() => {
+                    setActiveProject(cg.id);
+                    openTab({ id: `project:${cg.id}`, label: cg.name || cg.id.slice(0, 16), closable: true });
+                  }}
+                  onHide={() => {
+                    hideProject(cg.id);
+                    if (activeProjectId === cg.id) setActiveProject(null);
+                  }}
+                />
+              ))}
+            </>
+          )}
+          {contextOracleProjects.length === 0 && (
+            <p style={{ fontSize: 12, color: 'var(--text-tertiary)', padding: '20px 12px', textAlign: 'center', lineHeight: 1.5 }}>
+              No public catalogue entries yet. Projects you sync or curate appear under <strong>Projects</strong>; non-private graphs you discover but haven&apos;t joined list here — use <strong>Join Project</strong> to subscribe.
             </p>
-          </div>
+          )}
+          {hiddenCount > 0 && (
+            <button
+              type="button"
+              className="v10-tree-show-hidden"
+              onClick={unhideAll}
+              title="Restore all projects dismissed from the sidebar"
+            >
+              ↺ Show {hiddenCount} hidden project{hiddenCount !== 1 ? 's' : ''}
+            </button>
+          )}
         </div>
       )}
 
       <CreateProjectModal open={showCreateModal} onClose={() => setShowCreateModal(false)} />
       <JoinProjectModal open={showJoinModal} onClose={() => setShowJoinModal(false)} />
-      {importTarget && (
-        <ImportFilesModal
-          open
-          onClose={() => setImportTarget(null)}
-          contextGraphId={importTarget.id}
-          contextGraphName={importTarget.name}
-        />
-      )}
     </div>
   );
 }

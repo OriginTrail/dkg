@@ -57,7 +57,7 @@ const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
+import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, assertSafeRdfTerm, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
 import {
   DashboardDB,
@@ -362,6 +362,121 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
     requestAgentAddress,
   } = ctx;
 
+
+  // POST /api/profile/query-catalog/write
+  //
+  // UI profile metadata intentionally lives in unregistered `.../meta/...`
+  // graphs. Do not route this through shared-memory sub-graph writes: that
+  // path correctly enforces registered sub-graphs, which is wrong for this
+  // local profile/catalog namespace.
+  if (req.method === "POST" && path === "/api/profile/query-catalog/write") {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const parsed = safeParseJson(body, res);
+    if (!parsed) return;
+
+    const contextGraphId = parsed.contextGraphId ?? parsed.paranetId;
+    if (!validateRequiredContextGraphId(contextGraphId, res)) return;
+
+    const { quads } = parsed;
+    if (!Array.isArray(quads) || quads.length === 0) {
+      return jsonResponse(res, 400, {
+        error: 'Missing or invalid "quads" (must be a non-empty array)',
+      });
+    }
+
+    const graph = `did:dkg:context-graph:${contextGraphId}/meta/query-catalog`;
+    try {
+      assertSafeIri(graph);
+      const normalized = quads.map((quad: unknown, index: number) => {
+        if (!quad || typeof quad !== "object" || Array.isArray(quad)) {
+          throw new Error(`quads[${index}] must be an object`);
+        }
+        const q = quad as Record<string, unknown>;
+        if (typeof q.subject !== "string" || q.subject.length === 0) {
+          throw new Error(`quads[${index}].subject must be a non-empty string`);
+        }
+        if (typeof q.predicate !== "string" || q.predicate.length === 0) {
+          throw new Error(`quads[${index}].predicate must be a non-empty string`);
+        }
+        if (typeof q.object !== "string" || q.object.length === 0) {
+          throw new Error(`quads[${index}].object must be a non-empty string`);
+        }
+
+        assertSafeIri(q.subject);
+        assertSafeIri(q.predicate);
+        if (q.object.startsWith('"')) {
+          assertSafeRdfTerm(q.object);
+        } else {
+          assertSafeIri(q.object);
+        }
+
+        return {
+          subject: q.subject,
+          predicate: q.predicate,
+          object: q.object,
+          graph,
+        };
+      });
+
+      await agent.store.insert(normalized);
+      return jsonResponse(res, 200, {
+        ok: true,
+        contextGraphId,
+        graph,
+        triplesWritten: normalized.length,
+      });
+    } catch (err: any) {
+      return jsonResponse(res, 400, {
+        error: err?.message ?? "Invalid query catalog write",
+      });
+    }
+  }
+
+  // POST /api/profile/query-catalog/read { contextGraphId }
+  if (req.method === "POST" && path === "/api/profile/query-catalog/read") {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const parsed = safeParseJson(body, res);
+    if (!parsed) return;
+
+    const contextGraphId = parsed.contextGraphId ?? parsed.paranetId;
+    if (!validateRequiredContextGraphId(contextGraphId, res)) return;
+
+    const graph = `did:dkg:context-graph:${contextGraphId}/meta/query-catalog`;
+    const query = `PREFIX prof: <http://dkg.io/ontology/profile/>
+PREFIX schema: <http://schema.org/>
+SELECT ?q ?subGraph ?catalog ?name ?description ?sparql ?rank ?catalogName ?catalogDescription ?catalogRank
+WHERE {
+  GRAPH <${graph}> {
+    ?q a prof:SavedQuery ;
+       prof:forSubGraph ?subGraph ;
+       prof:sparqlQuery ?sparql .
+    OPTIONAL { ?q prof:inCatalog ?catalog }
+    OPTIONAL { ?q prof:displayName ?name }
+    OPTIONAL { ?q schema:description ?description }
+    OPTIONAL { ?q prof:rank ?rank }
+    OPTIONAL { ?catalog prof:displayName ?catalogName }
+    OPTIONAL { ?catalog schema:description ?catalogDescription }
+    OPTIONAL { ?catalog prof:rank ?catalogRank }
+  }
+}`;
+
+    try {
+      const result = await agent.store.query(query);
+      const bindings = result.type === "bindings" ? result.bindings : [];
+      return jsonResponse(res, 200, {
+        contextGraphId,
+        graph,
+        result: {
+          type: "bindings",
+          bindings,
+        },
+      });
+    } catch (err: any) {
+      return jsonResponse(res, 400, {
+        error: err?.message ?? "Query catalog read failed",
+      });
+    }
+  }
 
   // POST /api/shared-memory/write (V10) or /api/workspace/write (legacy)
   if (
