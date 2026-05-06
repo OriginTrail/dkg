@@ -29,9 +29,17 @@ vi.mock('@origintrail-official/dkg-core', async () => {
   );
   return {
     ...actual,
-    requestFaucetFunding: vi.fn(async () => ({ success: true, funded: ['0.01 ETH', '1000 TRAC'] })),
+    requestFaucetFunding: requestFaucetFundingSpy,
   };
 });
+// In-package mock target. `faucet-orchestration.ts` inside dkg-core does
+// `import { requestFaucetFunding } from './faucet.js'`, which Node resolves
+// to dkg-core's `dist/faucet.js` at runtime — outside of the public barrel.
+// Without this second mock the spy stays untouched and the production path
+// hits the real network call.
+vi.mock('@origintrail-official/dkg-core/dist/faucet.js', () => ({
+  requestFaucetFunding: requestFaucetFundingSpy,
+}));
 import { requestFaucetFunding } from '@origintrail-official/dkg-core';
 
 import {
