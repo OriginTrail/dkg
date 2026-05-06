@@ -17,7 +17,7 @@
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { ethers } from 'ethers';
-import { TrustLevel, TransitionType } from '@origintrail-official/dkg-core';
+import { TrustLevel, TransitionType, ASSERTION_STATES } from '@origintrail-official/dkg-core';
 import { DKGAgent } from '../src/index.js';
 import {
   HARDHAT_KEYS,
@@ -194,6 +194,19 @@ describe('Axiom 1 — Context Graph isolation', () => {
     ).toHaveLength(0);
   }, 30_000);
 
+  it('1.d publish into a non-existent CG is rejected (every publish targets a CG)', async () => {
+    const sub = urn('orphan');
+    let threw = false;
+    try {
+      await agent.publish('cg-does-not-exist-' + ethers.hexlify(ethers.randomBytes(2)).slice(2), [
+        { subject: sub, predicate: P_NAME, object: '"x"', graph: '' },
+      ]);
+    } catch {
+      threw = true;
+    }
+    expect(threw, 'agent.publish to a non-existent context graph must reject (Axiom 1)').toBe(true);
+  }, 30_000);
+
   it('1.b broad SPARQL in CG-A does not return CG-B subjects', async () => {
     const left = freshCg('a1-broadL');
     const right = freshCg('a1-broadR');
@@ -252,6 +265,27 @@ describe('Axiom 2 — Authority domain', () => {
       { contextGraphId: cg, view: 'working-memory', agentAddress: own, callerAgentAddress: bAddr },
     );
     expect(blocked.bindings).toHaveLength(0);
+  }, 30_000);
+
+  it('2.d UPDATE on a non-existent kcId is rejected (publisher-wallet authority on VM updates)', async () => {
+    const cg = freshCg('a2-update-auth');
+    const sub = urn('upd-auth');
+    await agent.createContextGraph({ id: cg, name: 'upd', description: '' });
+    await agent.registerContextGraph(cg);
+    // We never published any KC with this kcId; updating it must be rejected
+    // because there is no authority basis for the caller on this scope.
+    let threw = false;
+    try {
+      await agent.update(999_999_999n, cg, [
+        { subject: sub, predicate: P_NAME, object: '"hijack"', graph: '' },
+      ]);
+    } catch {
+      threw = true;
+    }
+    expect(
+      threw,
+      'agent.update for a kcId we did not publish must be rejected (no authority basis)',
+    ).toBe(true);
   }, 30_000);
 
   it('2.c SWM ownership: a different peer cannot overwrite an existing rootEntity', async () => {
@@ -337,6 +371,28 @@ describe('Axiom 3 — Typed state transitions', () => {
     ).toEqual([]);
   });
 
+  it('3.e REVOKE transition is supported by the agent surface', async () => {
+    // Spec lists REVOKE in the 7 transition types. There must be a way to
+    // invalidate a previously-granted permission/capability. Mark MISSING
+    // if no entry point exists. (Discard != Revoke per spec.)
+    const a = agent as unknown as { revoke?: unknown };
+    const ap = agent.assertion as unknown as { revoke?: unknown };
+    const hasRevoke = typeof a.revoke === 'function' || typeof ap.revoke === 'function';
+    expect(
+      hasRevoke,
+      'no REVOKE entry point on agent or agent.assertion (spec requires REVOKE as a typed transition)',
+    ).toBe(true);
+  });
+
+  it('3.f Assertion lifecycle states match the 5 spec states', async () => {
+    // Per Axiom 3 narrative + ASSERTION_STATES contract:
+    //   created -> promoted -> published -> finalized; created -> discarded.
+    const required = ['created', 'promoted', 'published', 'finalized', 'discarded'];
+    const present = ASSERTION_STATES as readonly string[];
+    const missing = required.filter(s => !present.includes(s));
+    expect(missing, `assertion lifecycle missing: [${missing.join(', ')}]`).toEqual([]);
+  });
+
   it('3.c DISCARD removes WM rows for the discarded assertion', async () => {
     const cg = freshCg('a3-discard');
     const sub = urn('drop');
@@ -391,6 +447,89 @@ describe('Axiom 4 — PUBLISH is canonical; ENDORSE/VERIFY raise trust', () => {
     expect(out.status).toBe('confirmed');
     expect(out.ual).toMatch(/^did:dkg:evm:\d+\/0x[0-9a-fA-F]{40}\/\d+$/);
     expect(out.kcId).toBeDefined();
+  }, 60_000);
+
+  it('4.d ENDORSE refuses to endorse an unpublished/non-existent UAL', async () => {
+    // Spec (Axiom 4): "ENDORSE / VERIFY operate on data already in Verified
+    // Memory (data must be published first)". A node accepting an endorsement
+    // that points at a UAL no one has published is silently letting trust
+    // upgrade ride on imaginary data — direct breach.
+    const cg = freshCg('a4-endorse-ghost');
+    await agent.createContextGraph({ id: cg, name: 'ghost', description: '' });
+    await agent.registerContextGraph(cg);
+    let threw = false;
+    try {
+      await agent.endorse({
+        contextGraphId: cg,
+        knowledgeAssetUal: 'did:dkg:evm:31337/0xDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF/999999/1',
+      });
+    } catch {
+      threw = true;
+    }
+    expect(
+      threw,
+      'agent.endorse must reject UALs that have not been published (Axiom 4)',
+    ).toBe(true);
+  }, 30_000);
+
+  it('4.e KC metadata after PUBLISH records transitionType (Axiom 4 corollary)', async () => {
+    const cg = freshCg('a4-meta-tt');
+    const sub = urn('meta-tt');
+    await agent.createContextGraph({ id: cg, name: 'meta', description: '' });
+    await agent.registerContextGraph(cg);
+    const pub = await agent.publish(cg, [
+      { subject: sub, predicate: P_NAME, object: '"m"', graph: '' },
+    ]);
+    expect(pub.status).toBe('confirmed');
+    const meta = `did:dkg:context-graph:${cg}/_meta`;
+    const r = await agent.store.query(
+      `SELECT ?o WHERE { GRAPH <${meta}> { <${pub.ual}> <http://dkg.io/ontology/transitionType> ?o } }`,
+    );
+    const rows = (r as { bindings?: unknown[] }).bindings ?? [];
+    expect(
+      rows.length,
+      'KC meta must record dkg:transitionType per Axiom 4 corollary (CG, scope, transitionType, authority, evidence, trustLevel)',
+    ).toBeGreaterThan(0);
+  }, 60_000);
+
+  it('4.f KC metadata after PUBLISH records authorityBasis (Axiom 4 corollary)', async () => {
+    const cg = freshCg('a4-meta-auth');
+    const sub = urn('meta-auth');
+    await agent.createContextGraph({ id: cg, name: 'meta-auth', description: '' });
+    await agent.registerContextGraph(cg);
+    const pub = await agent.publish(cg, [
+      { subject: sub, predicate: P_NAME, object: '"m"', graph: '' },
+    ]);
+    expect(pub.status).toBe('confirmed');
+    const meta = `did:dkg:context-graph:${cg}/_meta`;
+    const r = await agent.store.query(
+      `SELECT ?o WHERE { GRAPH <${meta}> { <${pub.ual}> <http://dkg.io/ontology/authorityBasis> ?o } }`,
+    );
+    const rows = (r as { bindings?: unknown[] }).bindings ?? [];
+    expect(
+      rows.length,
+      'KC meta must record dkg:authorityBasis per Axiom 4 corollary',
+    ).toBeGreaterThan(0);
+  }, 60_000);
+
+  it('4.g KC metadata after PUBLISH records trustLevel (Axiom 4 corollary)', async () => {
+    const cg = freshCg('a4-meta-tl');
+    const sub = urn('meta-tl');
+    await agent.createContextGraph({ id: cg, name: 'meta-tl', description: '' });
+    await agent.registerContextGraph(cg);
+    const pub = await agent.publish(cg, [
+      { subject: sub, predicate: P_NAME, object: '"m"', graph: '' },
+    ]);
+    expect(pub.status).toBe('confirmed');
+    const meta = `did:dkg:context-graph:${cg}/_meta`;
+    const r = await agent.store.query(
+      `SELECT ?o WHERE { GRAPH <${meta}> { <${pub.ual}> <http://dkg.io/ontology/trustLevel> ?o } }`,
+    );
+    const rows = (r as { bindings?: unknown[] }).bindings ?? [];
+    expect(
+      rows.length,
+      'KC meta must record dkg:trustLevel (self-attested at minimum) per Axiom 4 corollary',
+    ).toBeGreaterThan(0);
   }, 60_000);
 
   it('4.c ENDORSE writes an endorsement triple referencing the published UAL', async () => {
@@ -452,6 +591,76 @@ describe('Axiom 5 — SWM is provisional staging', () => {
     expect(await rowsFor(cg, 'shared-working-memory', sub)).toEqual([]);
     expect(await rowsFor(cg, 'verified-memory', sub)).toEqual(['"x"']);
   }, 60_000);
+
+  it('5.d SWM record after share is attributed to a producer (prov:wasAttributedTo)', async () => {
+    const cg = freshCg('a5-prov-attr');
+    const sub = urn('attr');
+    await agent.createContextGraph({ id: cg, name: 'attr', description: '' });
+    await agent.share(
+      cg,
+      [{ subject: sub, predicate: P_NAME, object: '"x"', graph: '' }],
+      { localOnly: true },
+    );
+    const meta = `did:dkg:context-graph:${cg}/_shared_memory_meta`;
+    const r = await agent.store.query(
+      `SELECT ?op ?p WHERE { GRAPH <${meta}> {
+         ?op a <http://dkg.io/ontology/WorkspaceOperation> .
+         ?op <http://www.w3.org/ns/prov#wasAttributedTo> ?p .
+       } }`,
+    );
+    const rows = (r as { bindings?: unknown[] }).bindings ?? [];
+    expect(
+      rows.length,
+      'SWM record must record producer via prov:wasAttributedTo (Axiom 5)',
+    ).toBeGreaterThan(0);
+  }, 30_000);
+
+  it('5.e SWM record after share carries finality marker = "provisional" (Axiom 5)', async () => {
+    const cg = freshCg('a5-final');
+    const sub = urn('final');
+    await agent.createContextGraph({ id: cg, name: 'final', description: '' });
+    await agent.share(
+      cg,
+      [{ subject: sub, predicate: P_NAME, object: '"x"', graph: '' }],
+      { localOnly: true },
+    );
+    const meta = `did:dkg:context-graph:${cg}/_shared_memory_meta`;
+    const r = await agent.store.query(
+      `SELECT ?f WHERE { GRAPH <${meta}> {
+         ?op a <http://dkg.io/ontology/WorkspaceOperation> .
+         ?op <http://dkg.io/ontology/finality> ?f .
+       } }`,
+    );
+    const rows = ((r as { bindings?: Record<string, string>[] }).bindings ?? []);
+    const literals = rows.map(b => b['f']);
+    expect(
+      literals.some(v => /provisional/i.test(v ?? '')),
+      'SWM record must carry an explicit finality marker = "provisional" (Axiom 5 record contract)',
+    ).toBe(true);
+  }, 30_000);
+
+  it('5.f SWM record carries transition type (Axiom 5 record contract)', async () => {
+    const cg = freshCg('a5-tt');
+    const sub = urn('tt');
+    await agent.createContextGraph({ id: cg, name: 'tt', description: '' });
+    await agent.share(
+      cg,
+      [{ subject: sub, predicate: P_NAME, object: '"x"', graph: '' }],
+      { localOnly: true },
+    );
+    const meta = `did:dkg:context-graph:${cg}/_shared_memory_meta`;
+    const r = await agent.store.query(
+      `SELECT ?t WHERE { GRAPH <${meta}> {
+         ?op a <http://dkg.io/ontology/WorkspaceOperation> .
+         ?op <http://dkg.io/ontology/transitionType> ?t .
+       } }`,
+    );
+    const rows = (r as { bindings?: unknown[] }).bindings ?? [];
+    expect(
+      rows.length,
+      'SWM record must record dkg:transitionType (Axiom 5 record contract)',
+    ).toBeGreaterThan(0);
+  }, 30_000);
 
   it('5.c SWM is treated as provisional: a fresh VM read of unpublished data is empty', async () => {
     const cg = freshCg('a5-prov');
@@ -588,6 +797,32 @@ describe('Axiom 7 — Deterministic conflict resolution', () => {
     const v = await rowsFor(cg, 'shared-working-memory', sub);
     expect(v).toContain('"v2"');
   }, 30_000);
+
+  it('7.d competing UPDATEs for the same kcId resolve deterministically (no double-confirm)', async () => {
+    const cg = freshCg('a7-update-race');
+    const sub = urn('upd-race');
+    await agent.createContextGraph({ id: cg, name: 'upd-race', description: '' });
+    await agent.registerContextGraph(cg);
+    const first = await agent.publish(cg, [
+      { subject: sub, predicate: P_NAME, object: '"v0"', graph: '' },
+    ]);
+    expect(first.status).toBe('confirmed');
+
+    const updateA = agent.update(first.kcId, cg, [
+      { subject: sub, predicate: P_NAME, object: '"vA"', graph: '' },
+    ]);
+    const updateB = agent.update(first.kcId, cg, [
+      { subject: sub, predicate: P_NAME, object: '"vB"', graph: '' },
+    ]);
+    const out = await Promise.allSettled([updateA, updateB]);
+    const confirmed = out.filter(
+      x => x.status === 'fulfilled' && (x as PromiseFulfilledResult<{ status: string }>).value.status === 'confirmed',
+    );
+    expect(
+      confirmed.length,
+      'two concurrent updates for the same kcId must not both confirm — deterministic conflict resolution required (Axiom 7)',
+    ).toBeLessThanOrEqual(1);
+  }, 90_000);
 
   it('7.c different rootEntities on the same CG: no false-positive lock', async () => {
     const cg = freshCg('a7-indep');
