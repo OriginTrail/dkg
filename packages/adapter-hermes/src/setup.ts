@@ -1,15 +1,25 @@
-import { cpSync, existsSync, readFileSync, rmSync, writeFileSync, mkdirSync, statSync, rmdirSync } from 'node:fs';
+import { cpSync, existsSync, readFileSync, renameSync, rmSync, writeFileSync, mkdirSync, statSync, rmdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { isIP } from 'node:net';
-import { resolveDkgConfigHome, resolveDkgHome } from '@origintrail-official/dkg-core';
+import {
+  fundWalletsBestEffort,
+  resolveDkgConfigHome,
+  resolveDkgHome,
+  startDaemon,
+  type FundWalletsNetworkConfig,
+} from '@origintrail-official/dkg-core';
 import {
   type HermesMemoryMode,
   type HermesProfileMetadata,
   type HermesPublishGuardPolicy,
+  type HermesRestoreRequest,
+  type HermesRestoreResult,
   type HermesRuntimeStatus,
+  type HermesSetupRequest,
+  type HermesSetupResult,
   type HermesSetupState,
 } from './types.js';
 import { HermesDkgClient, redact } from './dkg-client.js';
@@ -37,6 +47,14 @@ export interface HermesSetupOptions {
   agentName?: string;
   memoryMode?: HermesMemoryMode;
   dryRun?: boolean;
+  /**
+   * Refuse to replace an existing non-DKG `memory.provider` in the
+   * Hermes profile config. Defaults to `false` (replace-by-default per
+   * setup-entrypoint-contract.md §2). `true` restores the pre-#386
+   * throw-on-conflict behavior. Threaded from `HermesCliOptions.preserveProvider`
+   * via `toSetupOptions`.
+   */
+  preserveProvider?: boolean;
   publishGuard?: Partial<HermesPublishGuardPolicy>;
   nodeSkillContent?: string;
 }
@@ -53,6 +71,35 @@ export interface HermesCliOptions {
   dryRun?: boolean;
   verify?: boolean;
   start?: boolean;
+  /**
+   * Fund the first node wallets via the testnet faucet on first setup.
+   * Defaults to `true`; `--no-fund` flips to `false`. Mirrors OpenClaw
+   * `OpenClawSetupCliOptions.fund` (issue #386 acceptance).
+   */
+  fund?: boolean;
+  /**
+   * Refuse to replace an existing non-DKG `memory.provider` in the Hermes
+   * profile. Defaults to `false` (replace-by-default per
+   * setup-entrypoint-contract.md §2). `--preserve-provider` flips to true.
+   * S4 implements the actual replace-by-default + restore logic; S2 wires
+   * the flag through so the orchestrator sees it.
+   */
+  preserveProvider?: boolean;
+  /**
+   * Restore the prior `memory.provider` after a disconnect (CLI only).
+   * Defaults to `false` — `dkg hermes disconnect` is disconnect-only by
+   * default, matching today's behavior. `--restore-provider` flips to
+   * `true` and invokes `restoreHermesProfile` after
+   * `disconnectHermesProfile`. UI Disconnect always restores via the
+   * daemon route (per setup-entrypoint-contract.md §6) and ignores
+   * this field. `dkg hermes uninstall` always restores, also ignoring
+   * this field (per H-AC-39).
+   */
+  restoreProvider?: boolean;
+  /** UI-driven cancel; CLI handlers ignore. Mirrors `runOpenClawUiSetup`. */
+  signal?: AbortSignal;
+  /** Optional log/telemetry hint; non-functional. */
+  invokedBy?: 'cli' | 'ui';
   nodeSkillContent?: string;
 }
 
@@ -94,7 +141,14 @@ export function resolveHermesProfile(options: Pick<HermesSetupOptions, 'profileN
 
 export function planHermesSetup(options: HermesSetupOptions = {}): HermesSetupPlan {
   const profile = resolveHermesProfile(options);
-  const warnings = detectProviderConflict(profile, options.memoryMode ?? 'provider');
+  // S4 step 2 (issue #386): provider conflict is now handled inside
+  // `ensureManagedProviderBlock` per `preserveProvider`. Default
+  // behavior replaces with backup; `preserveProvider: true` throws the
+  // canonical "Refusing to replace existing Hermes memory.provider"
+  // message from `ensureManagedProviderBlock`. The plan-level throw at
+  // `setupHermesProfile:185` is bypassed (we no longer pre-emit warnings
+  // for non-DKG providers — that decision lives downstream now).
+  const warnings: string[] = [];
   const daemonUrl = stripTrailingSlashes(options.daemonUrl ?? 'http://127.0.0.1:9200');
   const dkgHome = resolveDkgHome({ daemonUrl });
   const bridge = normalizeBridgeConfig(options);
@@ -178,8 +232,51 @@ export function setupHermesProfile(options: HermesSetupOptions = {}): HermesSetu
 
   installHermesProviderPlugin(plan.profile);
 
+  // S4 vector-6 fix (adversarial-findings.md §6): peek the
+  // provider-swap intent BEFORE the destructive `config.yaml` rewrite,
+  // and persist `setup-state.json` with `priorMemoryProvider` set to
+  // the intent FIRST. A SIGINT between this state-write and the
+  // rewrite leaves recoverable state on disk: a re-run sees
+  // `existingState.priorMemoryProvider` populated, takes the
+  // first-wins branch below, and `restoreHermesProfile` finds the
+  // orphan backup at the recorded `configBackupPath`.
+  const intendedSwap = plan.profile.memoryMode === 'provider'
+    ? peekProviderSwapIntent(plan.profile.configPath, {
+        preserveProvider: options.preserveProvider === true,
+      }).swap
+    : null;
+
+  const existingState = readSetupState(plan.profile);
+  // First-wins on `priorMemoryProvider`: if a prior install already
+  // captured a snapshot (or a previous interrupted install captured
+  // an intent), the current install's intent is ignored. Matches
+  // the OpenClaw `previousMemorySlotOwner` first-wins semantics
+  // (parity-matrix.md Layer 4 row "Idempotency on re-run").
+  const priorMemoryProvider = existingState?.priorMemoryProvider
+    ?? (intendedSwap ? intendedSwap : undefined);
+
+  const stateBeforeRewrite = {
+    ...plan.state,
+    installedAt: existingState?.installedAt ?? plan.state.installedAt,
+    updatedAt: new Date().toISOString(),
+    ...(priorMemoryProvider ? { priorMemoryProvider } : {}),
+  };
+  writeOwnedJson(join(plan.profile.stateDir, 'setup-state.json'), stateBeforeRewrite);
+
+  let providerSwap: EnsureManagedProviderBlockResult['swap'] = null;
   if (plan.profile.memoryMode === 'provider') {
-    ensureManagedProviderBlock(plan.profile.configPath);
+    // Pass the pre-computed `intendedSwap` so the backup file lands
+    // at the path already recorded in setup-state.json. Honors
+    // first-wins: if a prior interrupted install already captured a
+    // snapshot, we still pre-write the intent then `ensureManagedProviderBlock`
+    // writes the backup file at the new `intendedSwap.configBackupPath`
+    // (the first-wins state record above keeps pointing at the
+    // original captured backup, not this re-run's).
+    const result = ensureManagedProviderBlock(plan.profile.configPath, {
+      preserveProvider: options.preserveProvider === true,
+      ...(intendedSwap ? { intendedSwap } : {}),
+    });
+    providerSwap = result.swap;
   } else {
     removeManagedProviderBlock(plan.profile.configPath);
   }
@@ -189,14 +286,23 @@ export function setupHermesProfile(options: HermesSetupOptions = {}): HermesSetu
     writeOwnedText(skillPath, options.nodeSkillContent);
   }
 
-  const existingState = readSetupState(plan.profile);
+  // Re-write setup-state.json post-rewrite with the freshest
+  // `updatedAt`. The `priorMemoryProvider` slot is still first-wins
+  // and unchanged from the pre-rewrite write — we only refresh the
+  // timestamp. If `peekProviderSwapIntent` somehow disagreed with
+  // `ensureManagedProviderBlock` (defensive: shouldn't happen, both
+  // call `findConfiguredMemoryProvider` on the same input), the
+  // pre-write snapshot is what restore consumes; the post-write is
+  // cosmetic.
   const state = {
-    ...plan.state,
-    installedAt: existingState?.installedAt ?? plan.state.installedAt,
+    ...stateBeforeRewrite,
     updatedAt: new Date().toISOString(),
   };
   writeOwnedJson(join(plan.profile.stateDir, 'setup-state.json'), state);
   plan.state = state;
+  // `providerSwap` is currently logged for parity with the pre-fix
+  // return shape; downstream consumers read `state.priorMemoryProvider`.
+  void providerSwap;
   return plan;
 }
 
@@ -310,9 +416,362 @@ export function uninstallHermesProfile(options: HermesSetupOptions = {}): Hermes
   return plan;
 }
 
+/**
+ * `restoreHermesProfile` — S4 step 3 of execution-plan.md §3.S4
+ * (issue #386). Reads `state.priorMemoryProvider` (captured by S4.2's
+ * replace-by-default branch) and attempts to put
+ * `<hermesHome>/config.yaml` back to its pre-replacement state.
+ *
+ * Behavior per setup-entrypoint-contract.md §6 + QA addendum §10C #1:
+ *
+ *   1. Absent `priorMemoryProvider` → `path: 'noop'`, `ok: true`.
+ *      Nothing to restore (fresh install or already-DKG before setup).
+ *   2. Surgical first: remove the managed block, then rewrite the
+ *      remaining active `provider:` line (or the `memory.provider:`
+ *      inline form) to the captured provider name. Preserves any user
+ *      edits made to `config.yaml` after setup. Verify post-restore
+ *      via `findConfiguredMemoryProvider(post) === captured.provider`
+ *      before reporting success — mismatch falls through to backup-file.
+ *   3. Backup-file fallback: atomic rename of `state.priorMemoryProvider.configBackupPath`
+ *      over `config.yaml`. Loses any post-setup user edits but is the
+ *      whole-file safety net. Same post-restore verification.
+ *   4. If both surgical AND backup-file fail (or both produce a
+ *      verification mismatch), `path: 'failed'`, `ok: false`,
+ *      populated `restoreError`.
+ *
+ * Restore is independent of `disconnectHermesProfile`: the daemon's
+ * `reverseHermesSetupForUi` (S3) calls disconnect first, then restore;
+ * a restore failure does NOT roll back the disconnect (per contract §6
+ * — the integration stays disconnected and the restore failure
+ * surfaces as a `runtime.lastError` warning, not an error status).
+ *
+ * Idempotent: safe to call when there's nothing to restore (returns
+ * `path: 'noop'`).
+ */
+export function restoreHermesProfile(req: HermesRestoreRequest = {}): HermesRestoreResult {
+  if (req.signal?.aborted) {
+    return { ok: false, path: 'failed', restoreError: 'restore cancelled before start' };
+  }
+  const profile = resolveHermesProfile({
+    profileName: req.profile,
+    hermesHome: req.hermesHome,
+  });
+  const state = readSetupState(profile);
+  const captured = state?.priorMemoryProvider;
+  if (!captured) {
+    return { ok: true, path: 'noop' };
+  }
+
+  // Path 1: surgical line-rewrite. Remove the managed block first so
+  // we don't accidentally rewrite the DKG provider line; then look
+  // for a remaining active provider line and rewrite it to the
+  // captured value. If no remaining line is found (e.g. user manually
+  // deleted the memory: block since setup), surgical fails and we
+  // fall through to backup-file.
+  let surgicalError: string | undefined;
+  if (existsSync(profile.configPath)) {
+    try {
+      const original = readFileSync(profile.configPath, 'utf-8');
+      const cleaned = removeManagedBlock(original);
+      const rewritten = rewriteActiveProviderLine(cleaned, captured.provider);
+      if (rewritten === null) {
+        surgicalError = 'no active memory.provider line found after removing managed block';
+      } else {
+        writeFileSync(profile.configPath, rewritten);
+        const post = findConfiguredMemoryProvider(rewritten);
+        if (post === captured.provider) {
+          return {
+            ok: true,
+            path: 'surgical',
+            restoredProvider: captured.provider,
+          };
+        }
+        surgicalError = `surgical post-restore verification mismatch (got ${post ?? 'null'}, expected ${captured.provider})`;
+      }
+    } catch (err: any) {
+      surgicalError = `surgical write failed: ${err?.message ?? String(err)}`;
+    }
+  } else {
+    surgicalError = 'config.yaml does not exist; cannot rewrite in place';
+  }
+
+  // Path 2: backup-file fallback. Atomic rename of the captured
+  // backup over config.yaml. Fails when the backup file is missing
+  // (deleted by user) or unreadable.
+  let backupError: string | undefined;
+  if (existsSync(captured.configBackupPath)) {
+    try {
+      renameSync(captured.configBackupPath, profile.configPath);
+      const post = findConfiguredMemoryProvider(
+        readFileSync(profile.configPath, 'utf-8'),
+      );
+      if (post === captured.provider) {
+        return {
+          ok: true,
+          path: 'backup-file',
+          restoredFrom: captured.configBackupPath,
+        };
+      }
+      backupError = `backup-file post-restore verification mismatch (got ${post ?? 'null'}, expected ${captured.provider})`;
+    } catch (err: any) {
+      backupError = `backup-file rename failed: ${err?.message ?? String(err)}`;
+    }
+  } else {
+    backupError = `backup file missing at ${captured.configBackupPath}`;
+  }
+
+  return {
+    ok: false,
+    path: 'failed',
+    restoreError: `restore failed via both paths. surgical: ${surgicalError ?? 'n/a'}. backup-file: ${backupError ?? 'n/a'}.`,
+  };
+}
+
+/**
+ * Internal helper for `restoreHermesProfile` surgical path. Walks the
+ * config.yaml lines (already cleaned of the managed block) and either:
+ *
+ *   1. Rewrites the first active provider line found (top-level
+ *      `memory:` block + indented `provider: <x>` line, OR inline
+ *      `memory.provider: <x>`), OR
+ *   2. If a top-level `memory:` block exists but has no `provider:`
+ *      line inside it (typical post-replacement state, since
+ *      `insertManagedProviderIntoMemoryBlock` consumed the original
+ *      provider line), INSERTS a `provider: <captured>` line as the
+ *      first child of the `memory:` block.
+ *
+ * Returns the rewritten string, or `null` when no `memory:` block
+ * exists at all (caller falls through to the backup-file path).
+ */
+function rewriteActiveProviderLine(raw: string, newProvider: string): string | null {
+  const lines = raw.split(/\r?\n/);
+  let inMemory = false;
+  let memoryHeaderIndex = -1;
+  let memoryHeaderIndent = '';
+  let rewroteAny = false;
+  const next: string[] = [];
+  for (const line of lines) {
+    if (TOP_LEVEL_MEMORY_BLOCK_RE.test(line)) {
+      inMemory = true;
+      memoryHeaderIndex = next.length;
+      memoryHeaderIndent = line.match(/^(\s*)/)?.[1] ?? '';
+      next.push(line);
+      continue;
+    }
+    if (inMemory && /^\S/.test(line)) {
+      inMemory = false;
+    }
+    if (!rewroteAny) {
+      const inline = line.match(TOP_LEVEL_MEMORY_PROVIDER_RE);
+      if (inline) {
+        next.push(`memory.provider: ${newProvider}`);
+        rewroteAny = true;
+        continue;
+      }
+      if (inMemory) {
+        const indented = readIndentedProviderLine(line);
+        if (indented) {
+          next.push(`${indented.indent}provider: ${newProvider}`);
+          rewroteAny = true;
+          continue;
+        }
+      }
+    }
+    next.push(line);
+  }
+  if (rewroteAny) return next.join('\n');
+  // Insertion fallback: a `memory:` block existed but had no
+  // `provider:` child (typical post-replace state). Insert a
+  // `provider: <captured>` line as the first child of the block.
+  if (memoryHeaderIndex >= 0) {
+    next.splice(memoryHeaderIndex + 1, 0, `${memoryHeaderIndent}  provider: ${newProvider}`);
+    return next.join('\n');
+  }
+  return null;
+}
+
+/**
+ * `runHermesSetup` — the canonical entrypoint for Hermes setup that
+ * both `dkg hermes setup` (CLI) and the daemon-side UI Connect handler
+ * (S3) call. Returns a `HermesSetupResult` rather than throwing on
+ * non-fatal conditions; the daemon route maps `result.status` into
+ * `LocalAgentIntegrationRecord.runtime.status` per
+ * `setup-entrypoint-contract.md` §3.
+ *
+ * Behavior, in order:
+ *   1. Resolve profile via `resolveHermesProfile` (mirrors `toSetupOptions`).
+ *   2. Bootstrap `~/.dkg/config.json` via `ensureDkgNodeConfig` (S1.4)
+ *      when the file is missing AND we're not in dry-run. (S2 step 3
+ *      MVP: ensure the node config exists. Currently the bootstrap
+ *      reads `network/<env>.json` via the small `loadNetworkConfig`
+ *      probe below; full network discovery parity with OpenClaw lands
+ *      alongside the rest of the issue #386 fresh-user flow.)
+ *   3. Start the DKG daemon via `startDaemon` (S1.2) when
+ *      `start !== false` AND `dryRun !== true`.
+ *   4. Best-effort fund wallets via `fundWalletsBestEffort` (S1.3) when
+ *      `fund !== false` AND `dryRun !== true`. Faucet failures are
+ *      non-fatal — they surface as warnings, not errors.
+ *   5. Run the existing `setupHermesProfile` body (preserves the
+ *      dryRun short-circuit). For dryRun, this returns the plan
+ *      without touching the filesystem (S2 step 4 / contract §5
+ *      hardens the no-write guarantee).
+ *   6. Best-effort daemon registration via `connectDaemonBestEffort`
+ *      when not dry-run AND `start !== false`. Daemon registration
+ *      probe is gated on `start !== false` to keep it decoupled from
+ *      the new daemon-start step (issue #386 acceptance: `--no-start`
+ *      truly skips both daemon start AND registration probe).
+ *   7. Verify via `verifyHermesProfile` when `verify !== false`.
+ *   8. Compute `HermesSetupResult` with full `transport` always
+ *      populated (per contract §3).
+ *
+ * `providerSwap` is intentionally not populated here — that's S4's
+ * replace-by-default work. The `HermesSetupResult.providerSwap` field
+ * is defined in the result shape so the daemon route consumer
+ * (`setup-entrypoint-contract.md` §9 sketch) doesn't change between
+ * S2 → S3 → S4.
+ */
+export async function runHermesSetup(req: HermesSetupRequest): Promise<HermesSetupResult> {
+  const cliOptions = setupRequestToCliOptions(req);
+  const setupOptions = toSetupOptions(cliOptions);
+  const profile = resolveHermesProfile(setupOptions);
+  const dryRun = req.dryRun === true;
+  const shouldStart = req.start !== false && !dryRun;
+  const shouldFund = req.fund !== false && !dryRun;
+  const shouldVerify = req.verify !== false;
+  const warnings: string[] = [];
+  const errors: string[] = [];
+  let daemonStarted = false;
+  let fundedWallets: string[] = [];
+  let plan: HermesSetupPlan | undefined;
+
+  // Step 1 (port-conflict warn): lifted out of `runHermesSetup` body
+  // for clarity. Fires when both `--port` and `--daemon-url` are passed
+  // and disagree on host:port. First-wins on `daemonUrl`. Per
+  // setup-entrypoint-contract.md §2 Open Question 1 + H-AC-58.
+  warnPortConflict(req, warnings);
+
+  // Step 2: bootstrap `~/.dkg/config.json` when missing.
+  if (!dryRun && !existsSync(join(resolveDkgConfigHome({ startDir: __dirname }), 'config.json'))) {
+    try {
+      await bootstrapDkgNodeConfig(profile, setupOptions, warnings);
+    } catch (err: any) {
+      // Non-fatal — operator can run `dkg init` and re-run setup. We
+      // surface a warning so the result.status flips to 'degraded'.
+      warnings.push(`Could not bootstrap ~/.dkg/config.json: ${err?.message ?? String(err)}`);
+    }
+  } else if (dryRun) {
+    console.log('[hermes-setup] [dry-run] Would bootstrap ~/.dkg/config.json if missing');
+  }
+
+  // Step 3: start daemon.
+  if (shouldStart) {
+    try {
+      const apiPort = setupOptions.daemonUrl
+        ? new URL(setupOptions.daemonUrl).port
+          ? Number(new URL(setupOptions.daemonUrl).port)
+          : 9200
+        : 9200;
+      await startDaemon(apiPort);
+      daemonStarted = true;
+    } catch (err: any) {
+      errors.push(`Failed to start DKG daemon: ${err?.message ?? String(err)}`);
+    }
+  } else if (dryRun) {
+    console.log('[hermes-setup] [dry-run] Would start DKG daemon');
+  } else {
+    console.log('[hermes-setup] Skipping daemon start (--no-start)');
+  }
+
+  // Step 4: fund wallets best-effort. Only meaningful when we have a
+  // network config to read `faucet.url` / `faucet.mode` from. Mirrors
+  // OpenClaw's "skip when no faucet configured" path.
+  if (shouldFund) {
+    const network = loadHermesNetworkConfig(warnings);
+    if (network) {
+      try {
+        await fundWalletsBestEffort({
+          network,
+          callerId: setupOptions.agentName ?? profile.profileName ?? 'hermes-setup',
+          didStartDaemon: shouldStart,
+        });
+        // fundWalletsBestEffort never throws and never returns funded list;
+        // we report `[]` (parity with OpenClaw — funded addresses are
+        // logged but not surfaced through the orchestrator return value).
+        fundedWallets = [];
+      } catch (err: any) {
+        // Defensive — fundWalletsBestEffort is documented as non-throwing,
+        // but log any future regression as a warning rather than an error.
+        warnings.push(`Faucet orchestrator threw unexpectedly: ${err?.message ?? String(err)}`);
+      }
+    }
+  } else if (dryRun) {
+    console.log('[hermes-setup] [dry-run] Would read wallets and fund via faucet');
+  } else if (req.fund === false) {
+    console.log('[hermes-setup] Skipping wallet funding (--no-fund)');
+  }
+
+  // Step 5: existing Hermes profile setup (writes dkg.json, plugin dir,
+  // managed provider block, skill, setup-state.json). Honors dryRun.
+  try {
+    plan = setupHermesProfile(setupOptions);
+    printPlan('Hermes setup', plan);
+  } catch (err: any) {
+    errors.push(err?.message ?? String(err));
+  }
+
+  // Step 6: daemon registration probe. Decoupled from `--no-start` per
+  // issue #386 brief ("decouple registration from shouldStart" — applies
+  // symmetrically with the same fix that landed for mcp-setup). Even
+  // with `--no-start` the operator presumably has a daemon already
+  // running and wants Hermes registered against it; the probe is
+  // best-effort and fail-quiet via `connectDaemonBestEffort`.
+  if (!dryRun && plan) {
+    await connectDaemonBestEffort(plan, setupOptions.daemonUrl);
+  }
+  let verifyState: HermesSetupState | undefined = plan?.state;
+  if (!dryRun && shouldVerify) {
+    const verifyResult = verifyHermesProfile(setupOptions);
+    printVerify('Hermes verify', verifyResult);
+    verifyState = verifyResult.state ?? verifyState;
+    if (!verifyResult.ok) {
+      errors.push(...verifyResult.errors);
+    }
+    warnings.push(...verifyResult.warnings);
+  }
+
+  // Step 8: compute result shape. `transport` always populated (contract §3).
+  const transport = computeTransportFromState(verifyState ?? plan?.state, profile);
+  const status: HermesSetupResult['status'] = errors.length
+    ? 'error'
+    : warnings.length
+      ? 'degraded'
+      : 'configured';
+
+  return {
+    ok: errors.length === 0,
+    status,
+    profile,
+    daemonStarted,
+    fundedWallets,
+    transport,
+    warnings,
+    errors,
+    state: verifyState ?? plan?.state,
+  };
+}
+
+/**
+ * Backwards-compat wrapper preserving the pre-S2 throw-on-error
+ * contract. Existing callers (CLI `dkg hermes setup` action handler,
+ * setup-entry.mjs lazy export) keep their `await runSetup(opts)` shape
+ * unchanged; on `result.ok === false` we throw so existing tests that
+ * `await expect(runSetup(...)).rejects.toThrow(...)` still pass.
+ */
 export async function runSetup(options: HermesCliOptions = {}): Promise<void> {
-  const setupOptions = toSetupOptions(options);
-  await executeSetup(options, setupOptions);
+  const result = await runHermesSetup(cliOptionsToSetupRequest(options));
+  if (!result.ok) {
+    throw new Error(result.errors.join('\n'));
+  }
 }
 
 async function executeSetup(
@@ -364,6 +823,20 @@ export async function runDisconnect(options: HermesCliOptions = {}): Promise<voi
   if (!plan.dryRun && plan.actions.some((action) => action.type !== 'skip')) {
     await disconnectDaemonBestEffort(setupOptions.daemonUrl, plan.state);
   }
+  if (options.restoreProvider) {
+    if (plan.dryRun) {
+      console.log('[dry-run] Would restore prior memory.provider via restoreHermesProfile');
+      return;
+    }
+    const result = restoreHermesProfile({
+      profile: setupOptions.profileName,
+      hermesHome: setupOptions.hermesHome,
+    });
+    printRestore('Hermes restore', result);
+    if (!result.ok) {
+      console.warn(`[hermes disconnect] restore-provider failed: ${result.restoreError ?? 'unknown error'}`);
+    }
+  }
 }
 
 export async function runReconnect(options: HermesCliOptions = {}): Promise<void> {
@@ -373,6 +846,24 @@ export async function runReconnect(options: HermesCliOptions = {}): Promise<void
 export async function runUninstall(options: HermesCliOptions = {}): Promise<void> {
   const setupOptions = toSetupOptions(options);
   const uninstallState = readSetupState(resolveHermesProfile(setupOptions));
+  // Restore prior memory.provider BEFORE uninstall removes setup-state.json
+  // (which holds the priorMemoryProvider snapshot). Per H-AC-39: uninstall
+  // always restores. Dry-run prints what would happen and skips the actual
+  // restore.
+  if (uninstallState?.priorMemoryProvider) {
+    if (options.dryRun) {
+      console.log('[dry-run] Would restore prior memory.provider via restoreHermesProfile');
+    } else {
+      const result = restoreHermesProfile({
+        profile: setupOptions.profileName,
+        hermesHome: setupOptions.hermesHome,
+      });
+      printRestore('Hermes uninstall: restore', result);
+      if (!result.ok) {
+        console.warn(`[hermes uninstall] restore-provider failed: ${result.restoreError ?? 'unknown error'}`);
+      }
+    }
+  }
   const plan = uninstallHermesProfile(setupOptions);
   printPlan('Hermes uninstall', plan);
   if (!plan.dryRun && uninstallState) {
@@ -416,6 +907,7 @@ function toSetupOptions(options: HermesCliOptions): HermesSetupOptions {
     publishGuard: existingState?.publishGuard,
     nodeSkillContent: options.nodeSkillContent,
     memoryMode,
+    preserveProvider: options.preserveProvider === true,
     dryRun: options.dryRun === true,
   };
 }
@@ -633,6 +1125,19 @@ function printVerify(label: string, result: HermesVerifyResult): void {
   }
 }
 
+function printRestore(label: string, result: HermesRestoreResult): void {
+  console.log(`${label}: path=${result.path}`);
+  if (result.path === 'surgical' && result.restoredProvider) {
+    console.log(`  restored memory.provider: ${result.restoredProvider}`);
+  }
+  if (result.path === 'backup-file' && result.restoredFrom) {
+    console.log(`  restored from backup: ${result.restoredFrom}`);
+  }
+  if (result.restoreError) {
+    console.warn(`  restore error: ${result.restoreError}`);
+  }
+}
+
 function detectProviderConflict(profile: HermesProfileMetadata, memoryMode: HermesMemoryMode): string[] {
   if (memoryMode !== 'provider' || !existsSync(profile.configPath)) return [];
   const raw = readFileSync(profile.configPath, 'utf-8');
@@ -687,15 +1192,124 @@ function hasManagedDkgProvider(raw: string): boolean {
   return false;
 }
 
-function ensureManagedProviderBlock(configPath: string): void {
+/**
+ * Result of `ensureManagedProviderBlock`. When the call replaced an
+ * existing non-DKG provider, `swap` describes the prior provider and
+ * the path of the timestamped backup file we wrote BEFORE the
+ * replacement. When the call was a no-op (already-DKG, fresh install,
+ * or `preserveProvider: true` on a fresh install), `swap` is `null`
+ * and the function did not touch `<hermesHome>/config.yaml.bak.*`.
+ *
+ * Caller is responsible for first-wins persistence into
+ * `state.priorMemoryProvider`: if a prior install already captured a
+ * snapshot, the second install must NOT overwrite it.
+ */
+interface EnsureManagedProviderBlockResult {
+  swap: {
+    provider: string;
+    configBackupPath: string;
+    capturedAt: string;
+  } | null;
+}
+
+/**
+ * Peek the provider-swap intent for a `setupHermesProfile` call WITHOUT
+ * writing anything. Returns the same `{ swap }` shape that
+ * `ensureManagedProviderBlock` will produce, with `configBackupPath`
+ * pre-computed using the supplied `nowMs` timestamp.
+ *
+ * This split exists because of the SIGINT mid-execute partial-state
+ * bug surfaced by the adversarial reviewer (see
+ * `agent-docs/hermes-parity/adversarial-findings.md` §6). The caller
+ * (`setupHermesProfile`) writes `setup-state.json` with the intended
+ * `priorMemoryProvider` BEFORE the destructive `config.yaml` rewrite,
+ * so a SIGINT between the two writes leaves recoverable state on disk
+ * (re-run sees existingState.priorMemoryProvider populated and routes
+ * `restoreHermesProfile` correctly to the orphan backup).
+ *
+ * Throws when `preserveProvider: true` AND the existing config carries
+ * a non-DKG provider — same canonical message as
+ * `ensureManagedProviderBlock` (H-AC-30 adapter-half stable string).
+ */
+function peekProviderSwapIntent(
+  configPath: string,
+  options: { preserveProvider?: boolean; nowMs?: number } = {},
+): EnsureManagedProviderBlockResult {
+  const existing = existsSync(configPath) ? readFileSync(configPath, 'utf-8') : '';
+  const configuredProvider = findConfiguredMemoryProvider(existing);
+  if (!existing.includes(CONFIG_BEGIN) && configuredProvider === 'dkg') {
+    return { swap: null };
+  }
+  if (configuredProvider && configuredProvider !== 'dkg') {
+    if (options.preserveProvider === true) {
+      throw new Error(`Refusing to replace existing Hermes memory.provider: ${configuredProvider}`);
+    }
+    const ts = options.nowMs ?? Date.now();
+    return {
+      swap: {
+        provider: configuredProvider,
+        configBackupPath: `${configPath}.bak.${ts}`,
+        capturedAt: new Date(ts).toISOString(),
+      },
+    };
+  }
+  return { swap: null };
+}
+
+function ensureManagedProviderBlock(
+  configPath: string,
+  options: {
+    preserveProvider?: boolean;
+    /**
+     * The `{ provider, configBackupPath, capturedAt }` snapshot
+     * produced by `peekProviderSwapIntent`. When supplied, this
+     * function writes the backup file at the pre-computed path and
+     * skips re-detection. Required when the caller has already
+     * persisted `priorMemoryProvider` to setup-state.json (vector 6
+     * fix: SIGINT-safe ordering).
+     */
+    intendedSwap?: NonNullable<EnsureManagedProviderBlockResult['swap']>;
+  } = {},
+): EnsureManagedProviderBlockResult {
   const existing = existsSync(configPath) ? readFileSync(configPath, 'utf-8') : '';
   const configuredProvider = findConfiguredMemoryProvider(existing);
   if (!existing.includes(CONFIG_BEGIN) && configuredProvider === 'dkg') {
     writeOwnedText(configPath, markExistingDkgProvider(existing), false);
-    return;
+    return { swap: null };
   }
   if (configuredProvider && configuredProvider !== 'dkg') {
-    throw new Error(`Refusing to replace existing Hermes memory.provider: ${configuredProvider}`);
+    // S4 step 2 (issue #386): replace-by-default with backup + capture.
+    // Pre-#386 behavior is preserved verbatim behind `--preserve-provider`
+    // for operators who want the throw (H-AC-30 adapter-half asserts the
+    // exact message stays grep-stable).
+    if (options.preserveProvider === true) {
+      throw new Error(`Refusing to replace existing Hermes memory.provider: ${configuredProvider}`);
+    }
+    // Replace-by-default: write a timestamped backup of the current
+    // config.yaml bytes BEFORE the managed-block rewrite. The backup
+    // is what `restoreHermesProfile` (S4 step 3) consumes for the
+    // backup-file fallback path; the line-rewrite path uses the
+    // captured `provider` name instead.
+    //
+    // SIGINT-safe ordering (vector 6 fix): when the caller has already
+    // persisted `priorMemoryProvider` via `peekProviderSwapIntent`, we
+    // honor the pre-computed `configBackupPath` so the on-disk state
+    // points at the same backup path that gets written here. Without
+    // the injection, a tiny clock skew between peek and execute could
+    // produce a different `Date.now()` and leave the snapshot pointing
+    // at a non-existent backup.
+    const swap = options.intendedSwap ?? {
+      provider: configuredProvider,
+      configBackupPath: `${configPath}.bak.${Date.now()}`,
+      capturedAt: new Date().toISOString(),
+    };
+    writeFileSync(swap.configBackupPath, existing);
+    const unmanaged = removeManagedBlock(existing);
+    const next = hasTopLevelMemoryBlock(unmanaged)
+      ? insertManagedProviderIntoMemoryBlock(unmanaged)
+      : appendManagedMemoryBlock(unmanaged);
+    writeOwnedText(configPath, next, false);
+    return { swap };
   }
 
   const unmanaged = removeManagedBlock(existing);
@@ -703,6 +1317,7 @@ function ensureManagedProviderBlock(configPath: string): void {
     ? insertManagedProviderIntoMemoryBlock(unmanaged)
     : appendManagedMemoryBlock(unmanaged);
   writeOwnedText(configPath, next, false);
+  return { swap: null };
 }
 
 function markExistingDkgProvider(raw: string): string {
@@ -963,4 +1578,191 @@ function escapeRegExp(value: string): string {
 
 function sha256(value: string): string {
   return createHash('sha256').update(value).digest('hex');
+}
+
+// ---------------------------------------------------------------------------
+// S2 step 3 — `runHermesSetup` orchestrator helpers (issue #386).
+// ---------------------------------------------------------------------------
+
+/**
+ * Translate a `HermesSetupRequest` (the canonical entrypoint shape) into
+ * the legacy `HermesCliOptions` shape that `toSetupOptions` already knows
+ * how to consume. Mirrors `cliOptionsToSetupRequest` for the CLI bridge.
+ */
+function setupRequestToCliOptions(req: HermesSetupRequest): HermesCliOptions {
+  return {
+    profile: req.profile,
+    hermesHome: req.hermesHome,
+    daemonUrl: req.daemonUrl,
+    bridgeUrl: req.bridgeUrl,
+    gatewayUrl: req.gatewayUrl,
+    bridgeHealthUrl: req.bridgeHealthUrl,
+    port: req.port,
+    memoryMode: req.memoryMode,
+    dryRun: req.dryRun,
+    verify: req.verify,
+    start: req.start,
+    fund: req.fund,
+    preserveProvider: req.preserveProvider,
+    signal: req.signal,
+    invokedBy: req.invokedBy,
+    nodeSkillContent: req.nodeSkillContent,
+  };
+}
+
+/**
+ * Inverse of `setupRequestToCliOptions` — used by the backwards-compat
+ * `runSetup` wrapper to bridge legacy `HermesCliOptions` callers into
+ * the new `HermesSetupRequest` shape `runHermesSetup` consumes.
+ */
+function cliOptionsToSetupRequest(options: HermesCliOptions): HermesSetupRequest {
+  return {
+    profile: options.profile,
+    hermesHome: options.hermesHome,
+    daemonUrl: options.daemonUrl,
+    bridgeUrl: options.bridgeUrl,
+    gatewayUrl: options.gatewayUrl,
+    bridgeHealthUrl: options.bridgeHealthUrl,
+    port: options.port,
+    memoryMode: options.memoryMode,
+    dryRun: options.dryRun,
+    verify: options.verify,
+    start: options.start,
+    fund: options.fund,
+    preserveProvider: options.preserveProvider,
+    signal: options.signal,
+    invokedBy: options.invokedBy,
+    nodeSkillContent: options.nodeSkillContent,
+  };
+}
+
+/**
+ * Bootstrap `~/.dkg/config.json` via `ensureDkgNodeConfig` (S1.4) when
+ * the file is missing. The agent name comes from the resolved profile
+ * (Hermes uses `profileName` as identity, unlike OpenClaw's IDENTITY.md
+ * lookup); the daemon API port comes from the resolved daemon URL.
+ *
+ * Network config loading is deferred to `loadHermesNetworkConfig` —
+ * absent network config means we can't bootstrap and the caller logs a
+ * warning. This matches the OpenClaw "skip when no faucet configured"
+ * shape: bootstrap is best-effort during fresh setup, not a hard requirement.
+ */
+async function bootstrapDkgNodeConfig(
+  profile: HermesProfileMetadata,
+  setupOptions: HermesSetupOptions,
+  warnings: string[],
+): Promise<void> {
+  const network = loadHermesNetworkConfig(warnings);
+  if (!network) return;
+  const apiPort = setupOptions.daemonUrl
+    ? new URL(setupOptions.daemonUrl).port
+      ? Number(new URL(setupOptions.daemonUrl).port)
+      : 9200
+    : 9200;
+  const agentName = profile.profileName ?? 'hermes-default';
+  // Late-bind the import so test suites that mock `dkg-core` don't have to
+  // declare `ensureDkgNodeConfig` in the mock returns up front.
+  const { ensureDkgNodeConfig } = await import('@origintrail-official/dkg-core');
+  ensureDkgNodeConfig({
+    agentName,
+    network,
+    apiPort,
+    existing: {},
+  });
+}
+
+/**
+ * Probe `network/<env>.json` from the bundled CLI package. Mirrors
+ * OpenClaw's `loadNetworkConfig` shape but inlined here per
+ * `helper-reuse-recommendation.md` §43-46 (Hermes-only copy-shape; the
+ * CLI lookup itself uses the shared `resolveCliPackageDir` from S1.1).
+ *
+ * Returns `null` (with a warning) when the network config can't be
+ * located; absent network config is non-fatal — bootstrap and faucet
+ * steps simply skip.
+ */
+function loadHermesNetworkConfig(warnings: string[]): FundWalletsNetworkConfig & {
+  networkName: string;
+  defaultNodeRole: string;
+  defaultContextGraphs?: string[];
+  autoUpdate?: { enabled: boolean };
+} | null {
+  // Defer import — keeps adapter-hermes startup light when the orchestrator
+  // is not invoked, and lets test suites mock `dkg-core` without declaring
+  // `resolveCliPackageDir`.
+  let cliDir: string | null = null;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const core = require('@origintrail-official/dkg-core') as typeof import('@origintrail-official/dkg-core');
+    cliDir = core.resolveCliPackageDir();
+  } catch {
+    cliDir = null;
+  }
+  // testnet.json is the default network — operators with a custom env can
+  // pre-write `~/.dkg/config.json` and `runHermesSetup` will skip bootstrap.
+  const candidates: string[] = [];
+  if (cliDir) candidates.push(join(cliDir, 'network', 'testnet.json'));
+  candidates.push(resolve(__dirname, '..', '..', '..', 'network', 'testnet.json'));
+  candidates.push(resolve(__dirname, '..', '..', '..', '..', 'network', 'testnet.json'));
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) {
+      try {
+        return JSON.parse(readFileSync(candidate, 'utf-8'));
+      } catch (err: any) {
+        warnings.push(`Could not parse ${candidate}: ${err?.message ?? String(err)}`);
+        return null;
+      }
+    }
+  }
+  warnings.push('Could not locate network/testnet.json (network bootstrap + faucet steps skipped)');
+  return null;
+}
+
+/**
+ * Fire a `console.warn` when both `--port` and `--daemon-url` are passed
+ * and the URL host:port disagrees with `--port`. First-wins on
+ * `daemonUrl` per `setup-entrypoint-contract.md` §2 Open Question 1.
+ * The exact warn string is asserted by H-AC-58 (added in S2 step 6).
+ */
+function warnPortConflict(req: HermesSetupRequest, warnings: string[]): void {
+  if (req.port == null || !req.daemonUrl) return;
+  const portNum = typeof req.port === 'number' ? req.port : Number(req.port);
+  if (!Number.isFinite(portNum)) return;
+  let urlPort: number | null = null;
+  let urlHost = '';
+  try {
+    const u = new URL(req.daemonUrl);
+    urlHost = u.hostname;
+    urlPort = u.port ? Number(u.port) : null;
+  } catch {
+    return;
+  }
+  if (urlPort == null || urlPort === portNum) return;
+  const line = `daemon URL host:port (${urlHost}:${urlPort}) does not match --port (${portNum}); using URL`;
+  console.warn(line);
+  warnings.push(line);
+}
+
+/**
+ * Lift the resolved bridge config from `HermesSetupState` (or the
+ * profile metadata when state is absent) into the canonical
+ * `HermesSetupResult.transport` shape. Falls back to the legacy
+ * `{ kind: 'hermes-openai', gatewayUrl: DEFAULT_HERMES_API_SERVER_URL }`
+ * shape that the daemon route already uses (`local-agents.ts:509-512`)
+ * when nothing is configured.
+ */
+function computeTransportFromState(
+  state: HermesSetupState | undefined,
+  _profile: HermesProfileMetadata,
+): HermesSetupResult['transport'] {
+  const bridge = state?.bridge;
+  if (bridge) {
+    return {
+      kind: bridge.protocol ?? 'hermes-channel',
+      ...(bridge.url ? { bridgeUrl: bridge.url } : {}),
+      ...(bridge.gatewayUrl ? { gatewayUrl: bridge.gatewayUrl } : {}),
+      ...(bridge.healthUrl ? { healthUrl: bridge.healthUrl } : {}),
+    };
+  }
+  return { kind: 'hermes-openai', gatewayUrl: DEFAULT_HERMES_API_SERVER_URL };
 }

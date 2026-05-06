@@ -74,14 +74,12 @@ All on-chain publishing goes through SWM first — the chain transaction is a fi
 
 > **ElizaOS agents:** Use the [`@origintrail-official/dkg-adapter-elizaos`](packages/adapter-elizaos/README.md) adapter. See the [ElizaOS setup guide](docs/setup/SETUP_ELIZAOS.md).
 
-> **Hermes agents:** Install the DKG CLI, start a node, and run Hermes setup - this wires the selected Hermes profile to DKG memory, tools, and Node UI chat:
+> **Hermes agents:** Install the DKG CLI and run Hermes setup, then start the Hermes gateway:
 > ```bash
 > npm install -g @origintrail-official/dkg
-> dkg init
-> dkg start
 > dkg hermes setup
 > ```
-> Then start Hermes with its API server enabled. See the [adapter guide](packages/adapter-hermes/README.md) for details.
+> `dkg hermes setup` bootstraps the DKG node config (no separate `dkg init` needed), starts the daemon, optionally funds wallets, and wires the Hermes profile with replace-by-default provider election (use `--preserve-provider` to opt out, `--no-start` / `--no-fund` for advanced flows). See the [adapter guide](packages/adapter-hermes/README.md) for details.
 
 > **Cursor / Claude Code / other MCP clients:** Install the [`@origintrail-official/dkg-mcp`](packages/mcp-dkg/README.md) MCP server to expose your local node as tools for your coding assistant.
 

@@ -38,23 +38,20 @@ This package contains:
 
 ## Scope Boundaries
 
-- it does not run its own DKG node; configure and start the node with
-  `dkg init` and `dkg start` before running Hermes setup
+- it does not run its own DKG node; `dkg hermes setup` bootstraps the DKG
+  config when missing (no separate `dkg init` needed) and starts the daemon
+  by default (`--no-start` opts out)
 - it does not start Hermes for you; run the Hermes gateway separately
 - it does not copy DKG API tokens into Hermes config files
-- it does not overwrite an existing non-DKG Hermes memory provider
 - it does not expose standalone HTTP route stubs from the adapter package;
   Hermes channel routes are served by the DKG CLI daemon
 
 ## Quick Start
 
-Install the DKG CLI, create/start a DKG node, and set up the default Hermes
-profile:
+Install the DKG CLI and set up the default Hermes profile:
 
 ```bash
 npm install -g @origintrail-official/dkg
-dkg init
-dkg start
 dkg hermes setup
 ```
 
@@ -79,19 +76,37 @@ dkg hermes setup --profile research
 The named profile resolves to `~/.hermes/profiles/research`. If `HERMES_HOME`
 is set, setup uses that exact profile home.
 
-### Flags
+### `dkg hermes setup` flags
 
 | Flag | Default | Purpose |
 | --- | --- | --- |
 | `--profile <name>` | default profile | Target `~/.hermes/profiles/<name>` instead of `~/.hermes`. |
-| `--daemon-url <url>` | `http://127.0.0.1:9200` | DKG daemon URL. |
+| `--daemon-url <url>` | `http://127.0.0.1:9200` | DKG daemon URL. First-wins over `--port` when both are set. |
 | `--gateway-url <url>` | `http://127.0.0.1:8642` | Hermes OpenAI-compatible API server URL for Node UI chat. |
 | `--bridge-url <url>` | unset | Custom same-host Hermes bridge URL. Loopback only; use `--gateway-url` for WSL2 or remote transports. |
-| `--bridge-health-url <url>` | derived from transport | Optional health URL override. It must belong to the configured bridge/gateway base. |
+| `--bridge-health-url <url>` | derived from transport | Optional health URL override. Must belong to the configured bridge/gateway base. |
 | `--port <port>` | `9200` | Shortcut for `--daemon-url http://127.0.0.1:<port>`. |
-| `--no-start` | off | Configure files without best-effort local-agent registration against the daemon. It does not start or stop the daemon in this release. |
+| `--memory-mode <mode>` | `primary` | `primary` elects DKG as the Hermes memory provider; `tools-only` skips provider election. |
+| `--no-start` | off (daemon starts) | Skip starting the DKG daemon. Best-effort daemon registration still fires against an already-running daemon. |
+| `--no-fund` / `--fund` | `--fund` | Fund the node's first wallets through the testnet faucet. `--no-fund` skips. Faucet failures are non-fatal. |
+| `--preserve-provider` | off (replace) | Refuse to replace an existing non-DKG `memory.provider`. Restores the pre-#386 throw-on-conflict behavior. Aliased as `--no-replace-provider`. |
 | `--no-verify` | off | Skip the post-setup verification pass. |
-| `--dry-run` | off | Preview planned file changes without writing anything. |
+| `--dry-run` | off | Preview planned changes without writing files, starting the daemon, calling the faucet, or taking a config backup. |
+
+### `dkg hermes disconnect` flags
+
+| Flag | Default | Purpose |
+| --- | --- | --- |
+| `--profile <name>` | default profile | Target the named profile's Hermes home. |
+| `--dry-run` | off | Preview planned changes without writing. |
+| `--restore-provider` | off (disconnect-only) | After removing the managed DKG block, restore the prior `memory.provider` captured at first setup. UI Disconnect always restores; the CLI requires this opt-in. |
+
+### `dkg hermes uninstall` and `dkg hermes reconnect`
+
+`uninstall` always restores the prior `memory.provider` before removing
+adapter-owned files; the captured `config.yaml.bak.<ts>` backup is left in
+place for operator rollback. `reconnect` reuses persisted daemon and bridge
+settings and accepts the same transport flags as `setup`.
 
 ## Verification
 
@@ -112,7 +127,7 @@ A healthy setup should satisfy all of the following:
 | File | Owner | Purpose |
 | --- | --- | --- |
 | `~/.dkg/config.json` | DKG node | node config: networking, chain, auth, API |
-| `$HERMES_HOME/config.yaml` | Hermes | active Hermes provider selection; setup writes only an ownership-marked DKG memory provider block |
+| `$HERMES_HOME/config.yaml` | Hermes | active Hermes provider selection; setup writes a managed DKG memory provider block, replacing any prior `memory.provider` after taking a `<configPath>.bak.<unix-ts-ms>` sibling backup |
 | `$HERMES_HOME/dkg.json` | DKG adapter | daemon URL, resolved DKG home, memory assertion, tool guards, and transport config |
 | `$HERMES_HOME/plugins/dkg/` | DKG adapter | installed Hermes memory provider plugin |
 | `$HERMES_HOME/skills/dkg-node/SKILL.md` | DKG adapter | Hermes profile copy of the node skill file |
@@ -143,11 +158,37 @@ setup-resolved `dkg_home`, `DKG_HOME`, then `~/.dkg`.
 ## Hermes Memory Provider
 
 Hermes uses DKG as its memory provider. Setup installs and selects DKG by
-writing a managed `memory.provider: dkg` block. If the target profile already
-has another provider configured, this release stops before changing it so setup
-never silently replaces an existing memory backend. To switch that profile to
-DKG, remove or change the existing `memory.provider` entry in `config.yaml`,
-then rerun `dkg hermes setup`. For a clean start, use a fresh Hermes profile.
+writing a managed `memory.provider: dkg` block. **Replacement is the
+default**: if the target profile already has another provider configured,
+setup snapshots it and elects DKG. The replacement is reversible — pass
+`--preserve-provider` to opt out and keep the pre-#386 throw-on-conflict
+behavior.
+
+When replacing a non-DKG provider, setup performs writes in this order:
+
+1. `<hermesHome>/.dkg-adapter-hermes/setup-state.json` is written with
+   `priorMemoryProvider = { provider, configBackupPath, capturedAt }` recording
+   the intent to swap. This write happens **before** any destructive change.
+2. `<hermesHome>/config.yaml.bak.<unix-ts-ms>` is written as a sibling of
+   `config.yaml`, holding the pre-replacement bytes verbatim.
+3. `<hermesHome>/config.yaml` is rewritten with the managed
+   `# BEGIN/END DKG ADAPTER HERMES MANAGED` block selecting `memory.provider:
+   dkg`.
+
+The intent-first ordering is load-bearing for downstream-package authors: a
+SIGINT between steps 1 and 2, or between steps 2 and 3, leaves a recoverable
+state on disk. A re-run sees the persisted `priorMemoryProvider` and routes
+restore to the captured backup path even if the rewrite itself never
+completed. `priorMemoryProvider` is **first-wins** — the original snapshot is
+never overwritten by re-runs or interrupted re-attempts.
+
+Restore is invoked by `dkg hermes disconnect --restore-provider`,
+`dkg hermes uninstall` (unconditional), and the Node UI Disconnect button
+(unconditional). It tries surgical line-rewrite of `memory.provider` first
+(preserving unrelated `config.yaml` edits), then falls back to atomic rename
+of the captured backup file. Restore failure does not roll back disconnect —
+the integration stays disconnected and the restore error surfaces as a
+warning on the Node UI row.
 
 Once DKG is the active provider, Hermes receives DKG-backed memory recall,
 `dkg_memory`, `memory_search`, `dkg_query`, `dkg_share`,
@@ -218,12 +259,15 @@ provenance before forwarding them to Hermes.
 
 ## Troubleshooting
 
-### Provider conflict
+### Provider conflict (with `--preserve-provider`)
 
-If setup reports an existing `memory.provider`, the target profile is already
-using another memory backend. To switch it to DKG in this release, remove or
-change that provider entry in the profile `config.yaml`, then rerun
-`dkg hermes setup`. For a clean start, use a fresh Hermes profile.
+If setup is invoked with `--preserve-provider` against a profile that already
+has another `memory.provider` configured, setup exits with
+`Refusing to replace existing Hermes memory.provider: <name>`. Drop the flag
+to take the default replace-by-default path; the prior provider is captured
+into `setup-state.json` and a `config.yaml.bak.<ts>` backup is written before
+the swap. Restore via `dkg hermes disconnect --restore-provider` or
+`dkg hermes uninstall`.
 
 ### Hermes chat offline
 
@@ -260,6 +304,70 @@ Use `uninstall` when you want to remove adapter-owned files:
 ```bash
 dkg hermes uninstall --profile research
 ```
+
+## Programmatic Entrypoint
+
+Downstream packages can import the setup-safe entrypoint directly:
+
+```ts
+import { runHermesSetup, restoreHermesProfile } from '@origintrail-official/dkg-adapter-hermes';
+
+const result = await runHermesSetup({
+  profile: 'research',
+  start: false,         // daemon already running
+  fund: false,          // skip faucet
+  verify: true,
+  invokedBy: 'ui',
+});
+
+if (!result.ok) {
+  console.error(result.errors.join('\n'));
+} else if (result.providerSwap) {
+  console.log(`Replaced ${result.providerSwap.previousProvider}; backup at ${result.providerSwap.backupPath}`);
+}
+```
+
+`runHermesSetup` is the single setup-safe entrypoint shared by `dkg hermes
+setup` (CLI) and the daemon's `runHermesUiSetup` shim (Node UI Connect). It
+returns a `HermesSetupResult` with:
+
+- `ok: boolean` — `true` when setup landed cleanly (verify passed or skipped).
+- `status: 'configured' | 'degraded' | 'error'` — daemon route maps these to
+  `runtime.status` of `ready` / `degraded` / `error`.
+- `profile: HermesProfileMetadata` — always populated, even on error.
+- `daemonStarted: boolean` — `true` when `start !== false` and `startDaemon`
+  succeeded or the daemon was already reachable on the resolved port.
+- `fundedWallets: string[]` — empty when `fund: false`, no faucet configured,
+  `dryRun: true`, or when the faucet returned no funded wallets (non-fatal).
+- `transport: { kind, bridgeUrl?, gatewayUrl?, healthUrl? }` — always
+  populated; lifts straight into the daemon's
+  `LocalAgentIntegrationTransport` shape.
+- `providerSwap?: { previousProvider, backupPath }` — present **only** when
+  setup actually swapped a non-DKG provider on this invocation; first-wins on
+  re-runs (omitted on idempotent re-attaches).
+- `warnings: string[]` / `errors: string[]` — surfaced into `runtime.lastError`
+  by the daemon route.
+- `state?: HermesSetupState` — full `setup-state.json` snapshot for callers
+  that want to persist or inspect.
+
+`restoreHermesProfile({ profile, hermesHome, signal? })` returns
+`{ ok, path: 'surgical' | 'backup-file' | 'noop' | 'failed', restoredFrom?,
+restoredProvider?, restoreError? }`. See
+[`agent-docs/hermes-parity/setup-entrypoint-contract.md`](../../agent-docs/hermes-parity/setup-entrypoint-contract.md)
+for the full shape, including `dryRun: true` strict side-effect-freeness and
+the `AbortSignal` cancellation semantics.
+
+### SIGINT-safe intent semantics
+
+`setupHermesProfile` (the synchronous half called by `runHermesSetup`) writes
+`setup-state.json` with the `priorMemoryProvider` intent **before** the
+destructive `config.yaml` rewrite. Downstream-package authors composing
+`runHermesSetup` into larger setup flows can rely on this ordering: a partial
+interrupt (Ctrl-C, kill -INT, supervisor restart) between the state write and
+the `config.yaml` rewrite leaves a recoverable state on disk. A re-run sees
+the persisted `priorMemoryProvider` and routes restore to the captured backup
+path even if the rewrite never completed. `priorMemoryProvider` is first-wins
+— never overwritten by re-runs or interrupted re-attempts.
 
 ## Development
 

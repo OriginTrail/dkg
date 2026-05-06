@@ -13,6 +13,23 @@ export interface HermesSetupCliOptions {
   memoryMode?: HermesMemoryMode;
   verify?: boolean;
   start?: boolean;
+  /**
+   * Fund the first node wallets via the testnet faucet on first setup.
+   * Defaults to `true`; the adapter treats `fund === false` (set by
+   * `--no-fund`) as the only opt-out. Faucet failures are non-fatal — a
+   * failed call logs manual `curl` instructions and setup continues.
+   * Mirrors OpenClaw `--fund` / `--no-fund` (issue #386 acceptance:
+   * "`--no-fund` truly means do not perform faucet funding").
+   */
+  fund?: boolean;
+  /**
+   * Refuse to replace an existing non-DKG `memory.provider` in the Hermes
+   * profile config. Default is `false` (replace-by-default per
+   * setup-entrypoint-contract.md §2 + parity-matrix.md Layer 4). Set to
+   * `true` via `--preserve-provider` (alias `--no-replace-provider`) to
+   * restore the pre-#386 throw-on-conflict behavior.
+   */
+  preserveProvider?: boolean;
   dryRun?: boolean;
 }
 
@@ -26,6 +43,8 @@ export interface NormalizedHermesSetupOptions {
   memoryMode?: HermesMemoryMode;
   verify: boolean;
   start: boolean;
+  fund: boolean;
+  preserveProvider: boolean;
   dryRun: boolean;
   nodeSkillContent?: string;
 }
@@ -71,6 +90,12 @@ export function normalizeHermesSetupOptions(opts: HermesSetupCliOptions): Normal
     memoryMode,
     verify: opts.verify !== false,
     start: opts.start !== false,
+    // Commander boolean-flag convention: `--no-fund` produces `fund === false`,
+    // anything else (omitted, explicit `--fund`) defaults to true.
+    fund: opts.fund !== false,
+    // Default replace-by-default per setup-entrypoint-contract.md §2.
+    // `--preserve-provider` (alias `--no-replace-provider`) flips to true.
+    preserveProvider: opts.preserveProvider === true,
     dryRun: opts.dryRun === true,
   };
 }

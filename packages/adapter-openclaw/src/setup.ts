@@ -19,16 +19,36 @@
  * Every step is idempotent — re-running is safe.
  */
 
-import { execSync, spawnSync, type SpawnSyncOptions } from 'node:child_process';
-import { accessSync, constants as fsConstants, copyFileSync, existsSync, lstatSync, readFileSync, realpathSync, writeFileSync, mkdirSync, rmdirSync, statSync, unlinkSync } from 'node:fs';
-import { createRequire } from 'node:module';
+import { accessSync, constants as fsConstants, copyFileSync, existsSync, readFileSync, realpathSync, writeFileSync, mkdirSync, rmdirSync, statSync, unlinkSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
-import { blueGreenSlotReady, findPackageRepoDir, requestFaucetFunding, resolveDkgConfigHome } from '@origintrail-official/dkg-core';
+import {
+  ensureDkgNodeConfig,
+  fundWalletsBestEffort,
+  logManualFundingInstructions,
+  readWallets,
+  readWalletsWithRetry,
+  resolveCliPackageDir,
+  resolveDkgConfigHome,
+  startDaemon,
+} from '@origintrail-official/dkg-core';
 import type { DkgOpenClawConfig } from './types.js';
-import { resolveDkgCli } from './resolve-dkg-cli.js';
+
+// Re-export shared lifecycle helpers so the existing public surface
+// (`@origintrail-official/dkg-adapter-openclaw` consumers, including in-tree
+// tests that import them from `'../src/setup.js'`) keeps working unchanged.
+// The implementations moved to `@origintrail-official/dkg-core` in S1 of
+// issue #386 because adapter-hermes also needs them and the dep direction
+// is `cli → adapters → core`.
+export {
+  logManualFundingInstructions,
+  readWallets,
+  readWalletsWithRetry,
+  resolveCliPackageDir,
+  startDaemon,
+};
 import {
   defaultStateDirForWorkspace,
   legacyStateDirForWorkspace,
@@ -292,53 +312,8 @@ function readPersistedAgentName(): string | undefined {
 // Step 3: Write DKG config
 // ---------------------------------------------------------------------------
 
-/**
- * Locate the `@origintrail-official/dkg` CLI package root. Probes three
- * layouts in the order they're likeliest to succeed during setup:
- *   (1) Monorepo dev checkout — `packages/cli` sibling of this adapter.
- *   (2) Local install — `./node_modules/@origintrail-official/dkg`, found
- *       via `createRequire(import.meta.url).resolve('.../package.json')`.
- *   (3) Global install — `npm prefix -g` + `[lib/]node_modules/...`.
- *
- * Returns `null` when the CLI isn't reachable; callers are responsible for
- * emitting the error message that's appropriate for the specific file they
- * were looking for (SKILL.md, testnet.json, etc.).
- */
-export function resolveCliPackageDir(): string | null {
-  // (1) Monorepo dev checkout — sibling `packages/cli`.
-  const monorepoCandidate = resolve(adapterRoot(), '..', 'cli');
-  if (existsSync(join(monorepoCandidate, 'package.json'))) {
-    return monorepoCandidate;
-  }
-
-  // (2) Local install — `./node_modules/@origintrail-official/dkg/...`.
-  // This path is invisible to `npm prefix -g` since the CLI lives inside the
-  // calling project rather than the global prefix.
-  try {
-    const req = createRequire(import.meta.url);
-    const cliPkgJson = req.resolve('@origintrail-official/dkg/package.json');
-    const localInstallCandidate = dirname(cliPkgJson);
-    if (existsSync(join(localInstallCandidate, 'package.json'))) {
-      return localInstallCandidate;
-    }
-  } catch { /* fall through to npm prefix -g */ }
-
-  // (3) Global install — `npm install -g @origintrail-official/dkg`.
-  try {
-    const npmPrefix = execSync('npm prefix -g', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
-    const candidates = [
-      join(npmPrefix, 'lib', 'node_modules', '@origintrail-official', 'dkg'),
-      join(npmPrefix, 'node_modules', '@origintrail-official', 'dkg'),
-    ];
-    for (const candidate of candidates) {
-      if (existsSync(join(candidate, 'package.json'))) {
-        return candidate;
-      }
-    }
-  } catch { /* fall through */ }
-
-  return null;
-}
+// `resolveCliPackageDir` was extracted to `@origintrail-official/dkg-core` in
+// S1 of issue #386. See the import + re-export at the top of this file.
 
 export function loadNetworkConfig(): NetworkConfig {
   const cliDir = resolveCliPackageDir();
@@ -482,12 +457,17 @@ export function writeDkgConfig(
   apiPort: number,
   overrides?: DkgConfigOverrides,
 ): void {
-  const dir = dkgDir();
-  const configPath = join(dir, 'config.json');
+  const configPath = join(dkgDir(), 'config.json');
 
-  mkdirSync(dir, { recursive: true });
-
-  // Load existing config if present — merge, don't overwrite
+  // Load existing config if present — merge, don't overwrite. The
+  // OpenClaw-specific migrations + prune below MUST run on the loaded
+  // `existing` BEFORE we delegate to the agent-agnostic
+  // `ensureDkgNodeConfig` helper in dkg-core. The order is load-bearing:
+  // the helper reads `existing.localAgentIntegrations` (post-migration
+  // shape) and a future refactor that flipped the order would silently
+  // drop legacy openclawChannel hints from the merged config. See
+  // execution-plan.md §3.S1 step 4 ordering invariant + the regression
+  // test in setup.test.ts that pre-seeds an `openclawChannel` legacy key.
   let existing: Record<string, any> = {};
   if (existsSync(configPath)) {
     try {
@@ -513,291 +493,24 @@ export function writeDkgConfig(
   // status/telemetry consumers below depend on it being present.
   pruneNetworkPinnedDefaults(existing, network);
 
-  // Explicit CLI overrides (--name, --port) take precedence over existing config.
-  // Auto-detected values only fill in when no existing value is present.
-  //
-  // We intentionally do NOT persist `chain` or `autoUpdate` from
-  // `network/<env>.json` into the user's config when they're absent —
-  // the daemon already does field-level merging at runtime via
-  // `resolveChainConfig` (cli/src/config.ts) and `resolveAutoUpdateConfig`
-  // (same file, see docstring at "dkg init intentionally omits repo/branch").
-  // Pinning the network defaults here would cement them and break future
-  // hub rotations / branch rotations / RPC swaps in `network/<env>.json`,
-  // which is exactly the failure mode we just had to fight through on the
-  // testnet relay nodes after the hub address was rotated. The `...existing`
-  // spread above still preserves any chain/autoUpdate the operator added
-  // manually (e.g. private RPC override).
-  const config: Record<string, any> = {
-    ...existing,
-    name: overrides?.nameExplicit ? agentName : (existing.name ?? agentName),
-    apiPort: overrides?.portExplicit ? apiPort : (existing.apiPort ?? apiPort),
-    nodeRole: existing.nodeRole ?? (network.defaultNodeRole as 'edge' | 'core'),
-    contextGraphs: existing.contextGraphs
-      ?? existing.paranets
-      ?? network.defaultContextGraphs
-      ?? network.defaultParanets,
-    auth: existing.auth ?? { enabled: true },
-  };
-
-  // Preserve an existing relay override but never pin a new one — the daemon
-  // reads the full relay list from network config (testnet.json) automatically,
-  // which is better than hard-coding a single relay into the user's config.
-  if (existing.relay) {
-    config.relay = existing.relay;
-  }
-
-  // Persist only the `enabled` flag mirrored from the network default.
-  // `repo`/`branch`/`checkIntervalMinutes`/etc. are intentionally omitted
-  // (see big comment above on the resolver contract), but the `enabled`
-  // flag has to stay because several consumers — `/api/status`,
-  // `/api/info`, the telemetry log pusher in `lifecycle.ts`, and
-  // `resolveAutoUpdateEnabled` itself — read `config.autoUpdate?.enabled`
-  // directly without falling back to `network.autoUpdate.enabled`.
-  // Dropping the whole block would make those report auto-update as
-  // disabled on fresh testnet OpenClaw installs even though the updater
-  // is in fact running.
-  if (!existing.autoUpdate && network.autoUpdate?.enabled !== undefined) {
-    config.autoUpdate = { enabled: network.autoUpdate.enabled };
-  }
-
-  writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n');
-  log(`Wrote ${configPath} (${network.networkName}, ${config.nodeRole}, port ${config.apiPort})`);
+  // Delegate the agent-agnostic field-level merge + write to dkg-core.
+  // adapter-hermes will use the same helper in S2 (issue #386).
+  ensureDkgNodeConfig({ agentName, network, apiPort, existing, overrides });
 }
 
 // ---------------------------------------------------------------------------
 // Step 5: Start DKG daemon
 // ---------------------------------------------------------------------------
-
-const DKG_START_TIMEOUT_MS = 30_000;
-const DKG_START_MIGRATION_TIMEOUT_MS = 60 * 60_000;
-
-function hasLocalRepoForCli(cliPath: string): boolean {
-  let physicalCliPath = cliPath;
-  try {
-    physicalCliPath = realpathSync(cliPath);
-  } catch {
-    // `resolveDkgCli` surfaces missing CLI paths later; keep timeout detection conservative here.
-  }
-  const repo = findPackageRepoDir(dirname(physicalCliPath));
-  return Boolean(repo && existsSync(join(repo, '.git')));
-}
-
-function blueGreenMigrationMayRunDuringStart(cliPath: string): boolean {
-  if (process.env.DKG_NO_BLUE_GREEN) return false;
-  if (!hasLocalRepoForCli(cliPath)) return false;
-
-  const releasesPath = join(dkgDir(), 'releases');
-  const currentLink = join(releasesPath, 'current');
-
-  try {
-    if (!lstatSync(currentLink).isSymbolicLink()) return true;
-  } catch {
-    return true;
-  }
-
-  return !blueGreenSlotReady(join(releasesPath, 'a'))
-    || !blueGreenSlotReady(join(releasesPath, 'b'));
-}
-
-function daemonStartSpawnOptions(cliPath: string): SpawnSyncOptions {
-  const options: SpawnSyncOptions = { stdio: 'inherit' };
-  options.timeout = blueGreenMigrationMayRunDuringStart(cliPath)
-    ? DKG_START_MIGRATION_TIMEOUT_MS
-    : DKG_START_TIMEOUT_MS;
-  return options;
-}
-
-export async function startDaemon(apiPort: number): Promise<void> {
-  // Check if already running
-  const pidPath = join(dkgDir(), 'daemon.pid');
-  if (existsSync(pidPath)) {
-    try {
-      const pid = parseInt(readFileSync(pidPath, 'utf-8').trim(), 10);
-      if (pid && isProcessRunning(pid)) {
-        // Verify the running daemon is reachable on the expected port
-        try {
-          const res = await fetch(`http://127.0.0.1:${apiPort}/api/status`);
-          if (res.ok) {
-            log(`DKG daemon already running (PID ${pid}, port ${apiPort})`);
-            return;
-          }
-        } catch { /* not reachable on expected port */ }
-        // PID is alive but not reachable — could be a stale PID, PID reuse,
-        // or a port mismatch. Warn and fall through to attempt dkg start,
-        // which will either succeed (if the PID wasn't actually DKG) or
-        // fail with a clear error (if port is genuinely in use).
-        warn(
-          `PID ${pid} is alive but daemon not reachable on port ${apiPort}. ` +
-          'Attempting to start — if this fails, run "dkg stop" first.',
-        );
-      }
-    } catch { /* stale pid file */ }
-  }
-
-  log('Starting DKG daemon...');
-  try {
-    // Resolve the CLI entrypoint as an absolute path and spawn via
-    // process.execPath so we don't depend on `dkg` being on PATH — which
-    // `pnpm dkg openclaw setup` does not guarantee in a cloned monorepo.
-    const { node, cliPath } = resolveDkgCli();
-    const result = spawnSync(node, [cliPath, 'start'], daemonStartSpawnOptions(cliPath));
-    if (result.error) throw result.error;
-    if (result.status !== 0) {
-      throw new Error(
-        `dkg start exited with ${result.status ?? `signal ${result.signal}`}`,
-      );
-    }
-  } catch (err: any) {
-    throw new Error(`Failed to start DKG daemon: ${err.message}`);
-  }
-
-  // Poll for readiness
-  const maxAttempts = 30;
-  for (let i = 0; i < maxAttempts; i++) {
-    try {
-      const res = await fetch(`http://127.0.0.1:${apiPort}/api/status`);
-      if (res.ok) {
-        log('DKG daemon is ready');
-        return;
-      }
-    } catch { /* not ready yet */ }
-    await sleep(1_000);
-  }
-
-  warn('Daemon started but health check timed out — it may still be initializing');
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-function isProcessRunning(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
+// `startDaemon` was extracted to `@origintrail-official/dkg-core` in S1
+// of issue #386. See the import + re-export at the top of this file.
 
 // ---------------------------------------------------------------------------
 // Step 6: Read wallets and fund via testnet faucet
 // ---------------------------------------------------------------------------
-
-/**
- * Read the wallet addresses the daemon has written to `~/.dkg/wallets.json`.
- *
- * Returns an empty list (with a warning) when the file is missing or
- * malformed. `runSetup` retries a few times after daemon start because the
- * daemon writes `wallets.json` asynchronously and may not have flushed it
- * by the time the health check passes.
- */
-export function readWallets(): string[] {
-  const walletsPath = join(dkgDir(), 'wallets.json');
-  if (!existsSync(walletsPath)) {
-    warn('wallets.json not found — daemon may not have started yet');
-    return [];
-  }
-
-  let raw: any;
-  try {
-    raw = JSON.parse(readFileSync(walletsPath, 'utf-8'));
-  } catch {
-    warn('wallets.json is malformed or still being written — skipping');
-    return [];
-  }
-  // The daemon writes { adminWallet, wallets: [{ address, privateKey }] }.
-  // Include admin first so profile/key-management transactions have gas, then
-  // fall back to the legacy operational-only array shapes.
-  const walletList: any[] = Array.isArray(raw?.wallets) ? raw.wallets
-    : Array.isArray(raw) ? raw
-    : [];
-  const operationalAddresses: string[] = [];
-  const operationalSeen = new Set<string>();
-  for (const w of walletList) {
-    const address = w?.address;
-    if (typeof address !== 'string' || address.length === 0) continue;
-    const key = address.toLowerCase();
-    if (operationalSeen.has(key)) continue;
-    operationalSeen.add(key);
-    operationalAddresses.push(address);
-  }
-  if (operationalAddresses.length === 0) {
-    warn('wallets.json has no operational wallets — skipping faucet funding');
-    return [];
-  }
-
-  const addresses: string[] = [];
-  const seen = new Set<string>();
-  const addAddress = (address: unknown) => {
-    if (typeof address !== 'string' || address.length === 0) return;
-    const key = address.toLowerCase();
-    if (seen.has(key)) return;
-    seen.add(key);
-    addresses.push(address);
-  };
-  addAddress(raw?.adminWallet?.address);
-  for (const address of operationalAddresses) {
-    addAddress(address);
-  }
-
-  if (addresses.length) {
-    log(`Wallets: ${addresses.join(', ')}`);
-  }
-  return addresses;
-}
-
-/**
- * Print a ready-to-paste `curl` block for manual faucet funding. Called
- * only on faucet failure; the caller is expected to continue (funding is
- * best-effort / non-fatal).
- *
- * Addresses are split into batches of 3 to match the faucet's per-request
- * cap. Including more wallets in one body would be rejected by the faucet.
- */
-export function logManualFundingInstructions(addresses: string[], faucetUrl: string, mode: string): void {
-  const batches: string[][] = [];
-  for (let i = 0; i < addresses.length; i += 3) {
-    batches.push(addresses.slice(i, i + 3));
-  }
-  console.log('\nTo fund wallets manually, run:');
-  batches.forEach((batch, index) => {
-    if (batches.length > 1) {
-      console.log(`  # batch ${index + 1}/${batches.length}`);
-    }
-    console.log(`  curl -X POST "${faucetUrl}" \\`);
-    console.log(`    -H "Content-Type: application/json" \\`);
-    console.log(`    -H "Idempotency-Key: $(date +%s)-${index + 1}" \\`);
-    console.log(`    --data-raw '{"mode":"${mode}","wallets":${JSON.stringify(batch)}}'`);
-  });
-  if (batches.length > 1) {
-    console.log(`\nNote: faucet supports up to 3 wallets per call; run each batch above.`);
-  }
-  console.log('');
-}
-
-/**
- * Read wallet addresses, retrying up to 5 times with a 1s delay between
- * attempts. The daemon writes `~/.dkg/wallets.json` asynchronously after
- * its health check passes, so the file is often missing on the first read
- * immediately after `startDaemon` returns.
- *
- * Exported (internal to this package — not re-exported from `index.ts`) so
- * the retry accounting can be unit-tested without spawning a real daemon.
- * Defaults preserve production behavior: `sleep` for the real `setTimeout`
- * delay, `readWallets` for the real filesystem read.
- */
-export async function readWalletsWithRetry(
-  sleepFn: (ms: number) => Promise<void> = sleep,
-  readFn: () => string[] = readWallets,
-): Promise<string[]> {
-  let walletAddresses = readFn();
-  for (let i = 0; i < 5 && !walletAddresses.length; i++) {
-    await sleepFn(1_000);
-    walletAddresses = readFn();
-  }
-  return walletAddresses;
-}
+// `readWallets`, `readWalletsWithRetry`, `logManualFundingInstructions`,
+// and the `fundWalletsBestEffort` orchestrator were extracted to
+// `@origintrail-official/dkg-core/faucet-orchestration.ts` in S1 of
+// issue #386. See the import + re-export at the top of this file.
 
 // ---------------------------------------------------------------------------
 // Step 4 (preflight) + Step 8: Merge adapter into openclaw.json
@@ -1929,57 +1642,25 @@ export async function runSetup(options: SetupOptions): Promise<void> {
   }
 
   // Step 6: Read wallets and fund via testnet faucet.
-  // Delegates to the shared `requestFaucetFunding` in `@origintrail-official/dkg-core`,
-  // which is the same implementation the `dkg init` CLI path uses. The
-  // faucet URL and mode come from `network.faucet.*`; a missing
-  // `network.faucet.url` logs and skips (matches the CLI parity decision).
-  // Faucet failures (HTTP error, thrown exception, `success === false`) log
-  // a manual `curl` block and continue — setup is non-fatal on funding.
-  // Wallet read retries 5×1s because the daemon writes `wallets.json`
-  // asynchronously after the health check passes.
+  // Delegates to the shared `fundWalletsBestEffort` orchestrator in
+  // `@origintrail-official/dkg-core`, which wraps the faucet URL check,
+  // wallet-read retry-after-daemon-start, the `requestFaucetFunding`
+  // call, and the manual-curl fallback. Faucet failures stay non-fatal
+  // — the orchestrator never throws. Wallet read retries 5×1s when
+  // `didStartDaemon` is true because the daemon writes `wallets.json`
+  // asynchronously after `/api/status` responds OK.
   throwIfAborted();
   const shouldFund = options.fund !== false;
-  if (!dryRun && shouldFund) {
-    const faucetUrl = network?.faucet?.url;
-    const faucetMode = network?.faucet?.mode;
-    if (!faucetUrl || !faucetMode) {
-      log('Skipping wallet funding (no faucet configured in network config)');
-    } else {
-      // Retry only makes sense if we actually started the daemon this run —
-      // with `--no-start`, the wallet file either exists already or never
-      // will. `readWalletsWithRetry` is extracted to keep the loop bound
-      // covered by unit tests (see test/setup.test.ts retry-accounting).
-      const walletAddresses = shouldStart
-        ? await readWalletsWithRetry()
-        : readWallets();
-      if (walletAddresses.length > 0) {
-        log('Funding wallets via testnet faucet...');
-        try {
-          const result = await requestFaucetFunding(faucetUrl, faucetMode, walletAddresses, effectiveAgentName);
-          if (result.success) {
-            log(`Funded: ${result.funded.join(', ')}`);
-            if (result.error) {
-              warn(`Faucet partially completed: ${result.error}`);
-              logManualFundingInstructions(
-                result.failedWallets?.length ? result.failedWallets : walletAddresses,
-                faucetUrl,
-                faucetMode,
-              );
-            }
-          } else {
-            warn(`Faucet request did not fund any wallets${result.error ? ` (${result.error})` : ''}`);
-            logManualFundingInstructions(walletAddresses, faucetUrl, faucetMode);
-          }
-        } catch (err: any) {
-          warn(`Faucet call failed: ${err?.message ?? String(err)}`);
-          logManualFundingInstructions(walletAddresses, faucetUrl, faucetMode);
-        }
-      } else {
-        warn('No wallet addresses available to fund (daemon did not produce wallets.json)');
-      }
-    }
+  if (!dryRun && shouldFund && network) {
+    await fundWalletsBestEffort({
+      network,
+      callerId: effectiveAgentName,
+      didStartDaemon: shouldStart,
+    });
   } else if (!dryRun && !shouldFund) {
     log('Skipping wallet funding (--no-fund)');
+  } else if (!dryRun && !network) {
+    log('Skipping wallet funding (network config unavailable)');
   } else {
     log('[dry-run] Would read wallets and fund via faucet');
   }

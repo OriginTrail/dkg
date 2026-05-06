@@ -1821,11 +1821,32 @@ hermesCmd
   .option('--dry-run', 'Preview changes without writing anything')
   .option('--no-verify', 'Skip post-setup verification')
   .option('--no-start', 'Skip daemon start (configure only)')
+  .option('--no-fund', 'Skip wallet funding via testnet faucet')
+  .option('--fund', 'Fund wallets via testnet faucet (default)')
+  .option(
+    '--preserve-provider',
+    'Refuse to replace an existing non-DKG memory.provider in the Hermes profile config (default: replace with backup)',
+  )
+  // Commander registers `--no-replace-provider` as the negation of an
+  // implicit `--replace-provider` (default true) — the parsed key is
+  // `replaceProvider`, and `--no-replace-provider` sets it to `false`.
+  // We map that to the canonical `preserveProvider: true` in the action
+  // handler below so the adapter sees a single normalized field.
+  .option(
+    '--no-replace-provider',
+    'Alias for --preserve-provider',
+  )
   .action(async (opts, command) => {
     const runSetup = await loadHermesAdapterAction('setup', ['runSetup', 'setup']);
     const { hermesSetupAction } = await import('./hermes-setup.js');
     try {
-      await hermesSetupAction(opts, command, { runSetup });
+      // Collapse `--no-replace-provider` (commander parses as
+      // `replaceProvider: false`) into the canonical `preserveProvider: true`
+      // so the action handler / normalizer sees a single source of truth.
+      const merged = opts.replaceProvider === false
+        ? { ...opts, preserveProvider: true }
+        : opts;
+      await hermesSetupAction(merged, command, { runSetup });
     } catch (err: any) {
       console.error(`\n[hermes setup] ERROR: ${err?.message ?? err}\n`);
       process.exit(1);
@@ -1855,6 +1876,12 @@ for (const [commandName, candidates, description] of [
       .option('--memory-mode <mode>', 'Memory mode: primary or tools-only')
       .option('--no-verify', 'Skip post-reconnect verification')
       .option('--no-start', 'Skip daemon start (configure only)');
+  }
+  if (commandName === 'disconnect') {
+    command.option(
+      '--restore-provider',
+      'After disconnect, restore the prior memory.provider captured during setup (default: disconnect-only)',
+    );
   }
   command.action(async (opts) => {
     const action = await loadHermesAdapterAction(commandName, candidates);

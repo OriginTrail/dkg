@@ -519,8 +519,20 @@ describe('Hermes channel helpers', () => {
 });
 
 describe('Hermes local-agent registry lifecycle', () => {
-  it('marks Hermes ready when UI connect can reach bridge health', async () => {
-    const config = makeConfig();
+  it('short-circuits to ready when UI connect reaches bridge health and transport is already stored', async () => {
+    // Re-running Connect on an already-attached Hermes integration: the stored
+    // transport from the prior install lets us trust the bridge probe directly
+    // and skip re-running setup entirely. New behavior post-#386 — see
+    // setup-entrypoint-contract.md §9 + connectLocalAgentIntegrationFromUi.
+    const config = makeConfig({
+      localAgentIntegrations: {
+        hermes: {
+          enabled: true,
+          transport: { kind: 'hermes-openai', gatewayUrl: 'http://127.0.0.1:8642' },
+          runtime: { status: 'ready', ready: true },
+        },
+      },
+    });
     const result = await connectLocalAgentIntegrationFromUi(
       config,
       { id: 'hermes', metadata: { source: 'node-ui' } },
@@ -566,20 +578,36 @@ describe('Hermes local-agent registry lifecycle', () => {
     });
   });
 
-  it('marks Hermes degraded when UI connect cannot reach bridge health', async () => {
+  it('schedules setup and returns connecting when UI connect cannot reach bridge health', async () => {
+    // New behavior post-#386: a fresh Connect on an unconfigured profile no
+    // longer settles to "degraded" on a failed health probe — instead it
+    // schedules the new runHermesSetup attach job and returns runtime: connecting
+    // synchronously. The UI's polling loop transitions to ready/error once the
+    // attach job settles. Setup is awaited via runHermesSetup test stub here.
     const config = makeConfig();
+    const runHermesSetupStub = vi.fn(async () => ({
+      ok: true,
+      status: 'configured' as const,
+      profile: { hermesHome: 'C:\\Hermes\\default', configPath: '', memoryMode: 'provider' },
+      daemonStarted: false,
+      fundedWallets: [],
+      transport: { kind: 'hermes-openai' as const, gatewayUrl: 'http://127.0.0.1:8642' },
+      warnings: [],
+      errors: [],
+    }));
     const result = await connectLocalAgentIntegrationFromUi(
       config,
       { id: 'hermes', metadata: { source: 'node-ui' } },
       'bridge-token',
       {
         probeHermesHealth: async () => ({ ok: false, error: 'offline' }),
+        runHermesSetup: runHermesSetupStub,
       },
     );
 
-    expect(result.integration.runtime.status).toBe('degraded');
+    expect(result.integration.runtime.status).toBe('connecting');
     expect(result.integration.runtime.ready).toBe(false);
-    expect(result.integration.runtime.lastError).toBe('offline');
+    expect(result.notice).toContain('Hermes setup started');
   });
 
   it('refresh probes Hermes health and promotes an existing integration to ready', async () => {
@@ -864,6 +892,297 @@ describe('Hermes local-agent registry lifecycle', () => {
     expect(body.integration.metadata.userDisabled).toBeUndefined();
     expect(config.localAgentIntegrations?.hermes?.enabled).toBe(true);
     expect(getHermesChannelTargets(config)).not.toEqual([]);
+  });
+
+  // ─── S3 H-AC tests (issue #386, test-matrix.md group H + I) ─────────────
+  // The two PR-#315 baseline tests above ('short-circuits to ready' / 'schedules
+  // setup and returns connecting') already cover the happy paths for
+  // H-AC-40/43-{ready notice}. The tests below pin the contract corners
+  // that those baseline tests do not exercise — verifyHermesProfile gating
+  // (H-AC-41), cancellation (H-AC-42), notice copy verbatim (H-AC-43), and
+  // chat-history preservation through the disconnect/restore loop (H-AC-37).
+
+  it('H-AC-40: UI Connect invokes runHermesUiSetup with the contract-required signal', async () => {
+    const config = makeConfig();
+    const setupCalls: Array<AbortSignal | undefined> = [];
+    const runHermesSetupStub = vi.fn(async (signal?: AbortSignal) => {
+      setupCalls.push(signal);
+      return {
+        ok: true,
+        status: 'configured' as const,
+        profile: { hermesHome: 'C:\\Hermes\\default', configPath: '', memoryMode: 'provider' },
+        daemonStarted: false,
+        fundedWallets: [],
+        transport: { kind: 'hermes-openai' as const, gatewayUrl: 'http://127.0.0.1:8642' },
+        warnings: [],
+        errors: [],
+      };
+    });
+
+    await connectLocalAgentIntegrationFromUi(
+      config,
+      { id: 'hermes', metadata: { source: 'node-ui' } },
+      'bridge-token',
+      {
+        probeHermesHealth: async () => ({ ok: false, error: 'offline' }),
+        runHermesSetup: runHermesSetupStub as any,
+      },
+    );
+
+    // Wait one microtask so the scheduled attach job can dispatch.
+    await new Promise((r) => setImmediate(r));
+
+    expect(runHermesSetupStub).toHaveBeenCalledTimes(1);
+    expect(setupCalls).toHaveLength(1);
+    expect(setupCalls[0]).toBeInstanceOf(AbortSignal);
+  });
+
+  it('H-AC-41: UI Connect transitions to error when runHermesSetup verify fails (result.ok false)', async () => {
+    const config = makeConfig();
+    const runHermesSetupStub = vi.fn(async () => ({
+      ok: false,
+      status: 'error' as const,
+      profile: { hermesHome: 'C:\\Hermes\\default', configPath: '', memoryMode: 'provider' },
+      daemonStarted: false,
+      fundedWallets: [],
+      transport: { kind: 'hermes-openai' as const, gatewayUrl: 'http://127.0.0.1:8642' },
+      warnings: [],
+      errors: ['verifyHermesProfile failed: dkg.json missing'],
+    }));
+
+    const result = await connectLocalAgentIntegrationFromUi(
+      config,
+      { id: 'hermes', metadata: { source: 'node-ui' } },
+      'bridge-token',
+      {
+        probeHermesHealth: async () => ({ ok: false, error: 'offline' }),
+        runHermesSetup: runHermesSetupStub as any,
+      },
+    );
+    // synchronous return is connecting; attach job runs in background
+    expect(result.integration.runtime.status).toBe('connecting');
+    await new Promise((r) => setImmediate(r));
+
+    const settled = getLocalAgentIntegration(config, 'hermes')!;
+    expect(settled.runtime.status).toBe('error');
+    expect(settled.runtime.ready).toBe(false);
+    expect(settled.runtime.lastError).toContain('verifyHermesProfile failed');
+  });
+
+  it('H-AC-42: UI Connect attach is cancellable via AbortController', async () => {
+    const config = makeConfig();
+    const observed = deferred<AbortSignal>();
+    const released = deferred<void>();
+    const runHermesSetupStub = vi.fn(async (signal?: AbortSignal) => {
+      observed.resolve(signal!);
+      // Resolve only when our outer await releases — we want to verify the
+      // controller saw .abort() before the setup function's promise settles.
+      await released.promise;
+      return {
+        ok: true,
+        status: 'configured' as const,
+        profile: { hermesHome: 'C:\\Hermes\\default', configPath: '', memoryMode: 'provider' },
+        daemonStarted: false,
+        fundedWallets: [],
+        transport: { kind: 'hermes-openai' as const, gatewayUrl: 'http://127.0.0.1:8642' },
+        warnings: [],
+        errors: [],
+      };
+    });
+
+    await connectLocalAgentIntegrationFromUi(
+      config,
+      { id: 'hermes', metadata: { source: 'node-ui' } },
+      'bridge-token',
+      {
+        probeHermesHealth: async () => ({ ok: false, error: 'offline' }),
+        runHermesSetup: runHermesSetupStub as any,
+      },
+    );
+
+    const signal = await observed.promise;
+    expect(signal.aborted).toBe(false);
+
+    // Simulate the disconnect-mid-connect path: cancel the in-flight job.
+    const { cancelPending } = await import('../src/daemon/local-agent-attach-jobs.js');
+    cancelPending('hermes');
+
+    expect(signal.aborted).toBe(true);
+    released.resolve();
+    await new Promise((r) => setImmediate(r));
+  });
+
+  it('H-AC-43: UI Connect notice copy is the verbatim cycle-1-finalized wording', async () => {
+    const config = makeConfig();
+    const runHermesSetupStub = vi.fn(async () => ({
+      ok: true,
+      status: 'configured' as const,
+      profile: { hermesHome: 'C:\\Hermes\\default', configPath: '', memoryMode: 'provider' },
+      daemonStarted: false,
+      fundedWallets: [],
+      transport: { kind: 'hermes-openai' as const, gatewayUrl: 'http://127.0.0.1:8642' },
+      warnings: [],
+      errors: [],
+    }));
+
+    const result = await connectLocalAgentIntegrationFromUi(
+      config,
+      { id: 'hermes', metadata: { source: 'node-ui' } },
+      'bridge-token',
+      {
+        probeHermesHealth: async () => ({ ok: false, error: 'offline' }),
+        runHermesSetup: runHermesSetupStub as any,
+      },
+    );
+
+    expect(result.notice).toBe(
+      'Hermes setup started. This chat tab will come online automatically once Hermes finishes setting up.',
+    );
+  });
+
+  it('H-AC-44: UI Connect concurrency — second Connect during in-flight job does not double-fire setup', async () => {
+    const config = makeConfig();
+    const released = deferred<void>();
+    const runHermesSetupStub = vi.fn(async () => {
+      await released.promise;
+      return {
+        ok: true,
+        status: 'configured' as const,
+        profile: { hermesHome: 'C:\\Hermes\\default', configPath: '', memoryMode: 'provider' },
+        daemonStarted: false,
+        fundedWallets: [],
+        transport: { kind: 'hermes-openai' as const, gatewayUrl: 'http://127.0.0.1:8642' },
+        warnings: [],
+        errors: [],
+      };
+    });
+
+    const deps = {
+      probeHermesHealth: async () => ({ ok: false, error: 'offline' as string | undefined }),
+      runHermesSetup: runHermesSetupStub as any,
+    };
+    const first = await connectLocalAgentIntegrationFromUi(
+      config,
+      { id: 'hermes', metadata: { source: 'node-ui' } },
+      'bridge-token',
+      deps,
+    );
+    const second = await connectLocalAgentIntegrationFromUi(
+      config,
+      { id: 'hermes', metadata: { source: 'node-ui' } },
+      'bridge-token',
+      deps,
+    );
+
+    // First scheduling created the job (notice mentions "started"); second
+    // observed the in-flight job and got the "already in progress" notice.
+    expect(first.notice).toContain('Hermes setup started');
+    expect(second.notice).toContain('already in progress');
+    expect(runHermesSetupStub).toHaveBeenCalledTimes(1);
+    released.resolve();
+    await new Promise((r) => setImmediate(r));
+  });
+
+  it('H-AC-46: UI Refresh signature never accepts a setup injection point', async () => {
+    // The non-invocation guarantee for "Refresh never runs setup" is enforced
+    // by the function signature: refreshLocalAgentIntegrationFromUi accepts
+    // only (config, id, bridgeAuthToken) — there is no runHermesSetup dep,
+    // and the implementation only calls probeHermesChannelHealth and
+    // updateLocalAgentIntegration. The existing
+    // 'refresh probes Hermes health and promotes an existing integration to
+    // ready' test (line ~613 in this file) covers the health-probe-and-update
+    // path with a real config + real (offline) probe. This test makes the
+    // non-invocation claim explicit by asserting the function signature
+    // arity.
+    expect(refreshLocalAgentIntegrationFromUi.length).toBe(3);
+  });
+
+  it('H-AC-47b: UI Disconnect surfaces restoreError as warning while staying disconnected', async () => {
+    const previousDkgHome = process.env.DKG_HOME;
+    const dkgHome = mkdtempSync(join(tmpdir(), 'dkg-home-'));
+    process.env.DKG_HOME = dkgHome;
+    disconnectHermesProfileMock.mockImplementation(() => undefined);
+    const config = makeConfig({
+      localAgentIntegrations: {
+        hermes: {
+          enabled: true,
+          metadata: {
+            profileName: 'research',
+            hermesHome: 'C:\\Hermes\\research',
+            priorProvider: 'redis',
+            backupPath: 'C:\\Hermes\\research\\config.yaml.bak.1730000000000',
+          },
+          runtime: { status: 'ready', ready: true },
+        },
+      },
+    });
+    const restoreOutcome = {
+      ok: false,
+      path: 'failed' as const,
+      restoreError: 'config.yaml.bak.1730000000000 not found',
+    };
+    // Inject the restore stub via the deps surface so we exercise the
+    // contract §6 path (restore failure must not roll back disconnect).
+    const result = await reverseHermesSetupForUi(config, {
+      disconnectHermesProfile: () => undefined,
+      restoreHermesProfile: async () => restoreOutcome,
+    });
+
+    if (previousDkgHome === undefined) delete process.env.DKG_HOME;
+    else process.env.DKG_HOME = previousDkgHome;
+    rmSync(dkgHome, { recursive: true, force: true });
+
+    expect(result.restoreError).toBe('config.yaml.bak.1730000000000 not found');
+    // Disconnect itself succeeded — restore failure does NOT roll it back.
+    // The PUT handler in routes/local-agents.ts is what folds restoreError
+    // into runtime.lastError on the disconnected patch. This unit test asserts
+    // the helper's return contract; the route-level wiring is covered by the
+    // existing 'runs Hermes reverse setup' integration tests in this file.
+  });
+
+  it('H-AC-37: UI Disconnect preserves chat history (no slot deletion in DKG)', async () => {
+    // Chat history lives in the DKG memory slot under
+    // urn:dkg:chat:session:hermes:dkg-ui:* and is read on demand by the UI
+    // via fetchLocalAgentHistory. Disconnect MUST NOT delete that slot.
+    // We assert the surface contract by verifying that disconnect only flips
+    // enabled+runtime — no chat-related side-effects are reachable from
+    // reverseHermesSetupForUi (it imports disconnectHermesProfile which is
+    // adapter-side and never touches DKG slots).
+    const previousDkgHome = process.env.DKG_HOME;
+    const dkgHome = mkdtempSync(join(tmpdir(), 'dkg-home-'));
+    process.env.DKG_HOME = dkgHome;
+    disconnectHermesProfileMock.mockImplementation(() => undefined);
+    const config = makeConfig({
+      localAgentIntegrations: {
+        hermes: {
+          enabled: true,
+          metadata: {
+            profileName: 'research',
+            hermesHome: 'C:\\Hermes\\research',
+          },
+          runtime: { status: 'ready', ready: true },
+        },
+      },
+    });
+
+    await reverseHermesSetupForUi(config, {
+      disconnectHermesProfile: disconnectHermesProfileMock,
+      restoreHermesProfile: async () => ({ ok: true, path: 'noop' as const }),
+    });
+
+    if (previousDkgHome === undefined) delete process.env.DKG_HOME;
+    else process.env.DKG_HOME = previousDkgHome;
+    rmSync(dkgHome, { recursive: true, force: true });
+
+    // The adapter's disconnect was called with profile metadata only —
+    // no chat-session URI in the call args, no slot deletion fanout.
+    expect(disconnectHermesProfileMock).toHaveBeenCalledWith({
+      profileName: 'research',
+      hermesHome: 'C:\\Hermes\\research',
+    });
+    // After disconnect the integration is still in config (we don't purge
+    // it); the PUT handler will set enabled:false on the patch path.
+    expect(config.localAgentIntegrations?.hermes).toBeDefined();
   });
 
   it('Hermes definition includes manifest, transport, and local chat capabilities', () => {

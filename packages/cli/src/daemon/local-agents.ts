@@ -57,8 +57,15 @@ import {
   DEFAULT_HERMES_API_SERVER_URL,
   type HermesChannelHealthReport,
   probeHermesChannelHealth,
+  runHermesUiSetup,
   transportPatchFromHermesTarget,
 } from './hermes.js';
+import {
+  type PendingAttachJob,
+  scheduleAttachJob,
+  isCancelled as isAttachJobCancelled,
+} from './local-agent-attach-jobs.js';
+import type { HermesSetupResult } from '@origintrail-official/dkg-adapter-hermes';
 
 const daemonRequire = createRequire(import.meta.url);
 
@@ -425,6 +432,8 @@ export type LocalAgentUiAttachDeps = OpenClawUiAttachDeps & {
     hermesHome: string;
     memoryMode?: string;
   };
+  /** Test injection: stub the Hermes UI setup entrypoint. */
+  runHermesSetup?: (signal?: AbortSignal) => Promise<HermesSetupResult>;
 };
 
 async function addHermesProfileMetadataForUiConnect(
@@ -504,8 +513,11 @@ export async function connectLocalAgentIntegrationFromUi(
   });
   if (requested.id === 'hermes') {
     const probeHermesHealth = deps.probeHermesHealth ?? probeHermesChannelHealth;
+    const runSetup = deps.runHermesSetup ?? runHermesUiSetup;
+    const saveConfigState = deps.saveConfig;
+
     const health = await probeHermesHealth(config, bridgeAuthToken, { timeoutMs: 3_000 });
-    if (health.ok) {
+    if (health.ok && hadStoredTransportBeforeConnect) {
       const transport = transportPatchFromHermesTarget(config, health.target)
         ?? (health.target === 'gateway'
           ? { kind: 'hermes-openai', gatewayUrl: DEFAULT_HERMES_API_SERVER_URL }
@@ -524,16 +536,97 @@ export async function connectLocalAgentIntegrationFromUi(
       };
     }
 
+    const persistHermesIntegrationState = async (patch: Record<string, unknown>): Promise<LocalAgentIntegrationRecord | null> => {
+      const current = getLocalAgentIntegration(config, requested.id);
+      if (current?.enabled === false && patch.enabled !== false) {
+        return null;
+      }
+      const integration = updateLocalAgentIntegration(config, requested.id, patch);
+      if (saveConfigState) {
+        await saveConfigState(config);
+      }
+      return integration;
+    };
+
+    const { started } = scheduleAttachJob(requested.id, async (attachJob: PendingAttachJob) => {
+      try {
+        const result = await runSetup(attachJob.controller.signal);
+        if (isAttachJobCancelled(attachJob)) return;
+
+        // setup-entrypoint-contract.md §3: result.transport is non-optional and
+        // already matches the LocalAgentIntegrationTransport patch shape, so we
+        // lift it straight rather than calling transportPatchFromHermesTarget.
+        // Provider-swap audit (§3) goes onto record.metadata so disconnect/restore
+        // and the UI's hermesDetail formatter can both reach it.
+        const metadataPatch = result.providerSwap
+          ? {
+              priorProvider: result.providerSwap.previousProvider,
+              backupPath: result.providerSwap.backupPath,
+            }
+          : undefined;
+
+        if (!result.ok || result.status === 'error') {
+          await persistHermesIntegrationState({
+            ...(metadataPatch ? { metadata: metadataPatch } : {}),
+            runtime: {
+              status: 'error',
+              ready: false,
+              lastError: result.errors[0] ?? 'Hermes setup failed',
+            },
+          });
+          return;
+        }
+
+        if (result.status === 'degraded') {
+          await persistHermesIntegrationState({
+            transport: result.transport,
+            ...(metadataPatch ? { metadata: metadataPatch } : {}),
+            runtime: {
+              status: 'degraded',
+              ready: false,
+              lastError: result.warnings[0] ?? null,
+            },
+          });
+          return;
+        }
+
+        await persistHermesIntegrationState({
+          transport: result.transport,
+          ...(metadataPatch ? { metadata: metadataPatch } : {}),
+          runtime: {
+            status: 'ready',
+            ready: true,
+            lastError: null,
+          },
+        });
+      } catch (err: any) {
+        if (isAttachJobCancelled(attachJob)) return;
+        await persistHermesIntegrationState({
+          enabled: hadStoredTransportBeforeConnect ? true : false,
+          ...(hadStoredTransportBeforeConnect && existingBeforeConnect?.transport
+            ? { transport: existingBeforeConnect.transport }
+            : {}),
+          runtime: {
+            status: 'error',
+            ready: false,
+            lastError: err?.message ?? 'Hermes attach failed',
+          },
+        });
+      }
+    }, deps.onAttachScheduled);
+
     const integration = updateLocalAgentIntegration(config, requested.id, {
       runtime: {
-        status: 'degraded',
+        status: 'connecting',
         ready: false,
-        lastError: health.error ?? 'Hermes bridge offline',
+        lastError: null,
       },
     });
     return {
       integration,
-      notice: 'Hermes was registered, but its local chat bridge is not responding yet. Run `dkg hermes setup` or refresh after Hermes starts.',
+      notice: started
+        ? 'Hermes setup started. This chat tab will come online automatically once Hermes finishes setting up.'
+        : 'Hermes setup is already in progress. This chat tab will come online automatically once Hermes finishes setting up.',
     };
   }
 
@@ -681,8 +774,24 @@ export type ReverseLocalAgentSetupDeps = {
   verifySkillRemoved?: (installedWorkspace: string) => string | null;
 };
 
+export type HermesRestoreOutcome = {
+  ok: boolean;
+  path: 'surgical' | 'backup-file' | 'noop' | 'failed';
+  restoreError?: string;
+};
+
 export type ReverseHermesSetupDeps = {
   disconnectHermesProfile?: (options: { profileName?: string; hermesHome?: string }) => unknown;
+  /**
+   * Attempt to restore the prior `memory.provider` after disconnect. Per
+   * setup-entrypoint-contract.md §6, restore failure does NOT roll back the
+   * disconnect — it surfaces as a warning while `runtime.status` stays
+   * `'disconnected'`. S4 step 3 will land the real `restoreHermesProfile` in
+   * `@origintrail-official/dkg-adapter-hermes`; until then the dynamic-import
+   * fallback returns a `'noop'` outcome so the wiring is exercise-able now
+   * and the swap is a one-line change when S4 ships.
+   */
+  restoreHermesProfile?: (options: { profileName?: string; hermesHome?: string }) => Promise<HermesRestoreOutcome>;
 };
 
 function stringMetadataValue(metadata: Record<string, unknown>, key: string): string | undefined {
@@ -693,7 +802,7 @@ function stringMetadataValue(metadata: Record<string, unknown>, key: string): st
 export async function reverseHermesSetupForUi(
   config: DkgConfig,
   deps: ReverseHermesSetupDeps = {},
-): Promise<void> {
+): Promise<{ restoreError?: string }> {
   const stored = getStoredLocalAgentIntegrations(config).hermes;
   const metadata = isPlainRecord(stored?.metadata) ? stored.metadata : {};
   const options = {
@@ -703,10 +812,46 @@ export async function reverseHermesSetupForUi(
   if (!options.profileName && !options.hermesHome) {
     throw new Error('Hermes profile metadata is missing; run dkg hermes disconnect for the target profile.');
   }
+
+  // Disconnect first — removes the managed memory.provider block + sets state
+  // to disconnected. Throwing here is fatal; the PUT handler will surface as
+  // runtime.status: 'error'.
   const adapter = deps.disconnectHermesProfile
     ? { disconnectHermesProfile: deps.disconnectHermesProfile }
     : await import('@origintrail-official/dkg-adapter-hermes');
   await adapter.disconnectHermesProfile(options);
+
+  // Restore second — puts the captured prior provider back. Per
+  // setup-entrypoint-contract.md §6, restore failure does NOT roll back the
+  // disconnect: integration stays `disconnected`, restoreError surfaces as a
+  // `runtime.lastError` warning. The PUT handler honors this by reading
+  // `restoreError` off the return value rather than catching a throw.
+  type RestoreFn = NonNullable<ReverseHermesSetupDeps['restoreHermesProfile']>;
+  const noopRestore: RestoreFn = async () => ({ ok: true, path: 'noop' });
+  let restoreFn: RestoreFn;
+  if (deps.restoreHermesProfile) {
+    restoreFn = deps.restoreHermesProfile;
+  } else {
+    // S4 step 3 will land the real `restoreHermesProfile` export. Until then,
+    // feature-detect: if exported, use it; otherwise no-op (no provider was
+    // captured pre-S4 anyway, so 'noop' is the truthful outcome). The
+    // try/catch defends against test mocks that spread-replace the adapter
+    // module without re-exporting every property.
+    try {
+      const adapterModule = await import('@origintrail-official/dkg-adapter-hermes') as Record<string, unknown>;
+      const candidate = adapterModule.restoreHermesProfile;
+      restoreFn = typeof candidate === 'function' ? (candidate as RestoreFn) : noopRestore;
+    } catch {
+      restoreFn = noopRestore;
+    }
+  }
+
+  try {
+    const outcome = await restoreFn(options);
+    return outcome.ok ? {} : { restoreError: outcome.restoreError ?? 'Hermes provider restore failed' };
+  } catch (err: any) {
+    return { restoreError: err?.message ?? 'Hermes provider restore failed' };
+  }
 }
 
 export async function reverseLocalAgentSetupForUi(

@@ -741,6 +741,15 @@ export function ConnectedAgentsTab(props: {
                   </span>
                 </div>
                 <p className="v10-local-agent-copy">{integration.detail}</p>
+                {integration.error && (
+                  <div
+                    className="v10-local-agent-warning offline"
+                    role="status"
+                    data-testid={`local-agent-warning-${integration.id}`}
+                  >
+                    {integration.error}
+                  </div>
+                )}
                 {integration.id === 'openclaw' && (
                   <>
                     <p className="v10-local-agent-copy">

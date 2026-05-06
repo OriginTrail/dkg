@@ -349,4 +349,87 @@ describe('ConnectedAgentsTab rendering', () => {
     expect(markup).toContain('is not currently attached to this node');
     expect(markup).toContain('session history is available, but there are no stored turns to show yet');
   });
+
+  // ─── S3 H-AC tests (issue #386, test-matrix.md group H + I) ─────────────
+
+  it('H-AC-45: Connect Hermes button shows "Connecting..." while a connect is in flight', () => {
+    const hermes = integration({
+      id: 'hermes',
+      name: 'Hermes',
+      persistentChat: false,
+      configured: false,
+      detected: false,
+      bridgeOnline: false,
+      chatReady: false,
+      status: 'available',
+      statusLabel: 'Ready to connect',
+      connectSupported: true,
+    });
+    const markup = renderConnectedAgentsTab({
+      integrations: [hermes],
+      selectedIntegrationId: '__add_agent__',
+      selectedIntegration: null,
+      connectBusyId: 'hermes',
+    });
+    // While Connect is in flight, the button label flips to "Connecting..."
+    // and the button is disabled. After the daemon writes runtime: connecting
+    // and the polling loop refreshes, persistentChat becomes true and the
+    // tab transitions out of the "Connect Another Agent" surface — covered
+    // by the disconnected-history test above.
+    expect(markup).toContain('Connecting...');
+  });
+
+  it('H-AC-47: Refresh button is rendered when an integration is connected and selected', () => {
+    const ready = integration({
+      id: 'hermes',
+      name: 'Hermes',
+      bridgeOnline: true,
+      chatReady: true,
+      status: 'connected',
+      statusLabel: 'Connected',
+      bridgeStatusLabel: 'Connected',
+    });
+    const markup = renderConnectedAgentsTab({
+      integrations: [ready],
+      selectedIntegrationId: 'hermes',
+      selectedIntegration: ready,
+      selectedSessionId: 'hermes:dkg-ui',
+    });
+    expect(markup).toContain('Refresh');
+    expect(markup).toContain('Disconnect');
+  });
+
+  it('H-AC-47b: Warning chip surfaces lastError on disconnected integration in Connect Another Agent tab', () => {
+    // After UI Disconnect with restore-failure: daemon writes
+    // enabled:false + runtime.status:'disconnected' + runtime.lastError:'restore failed: …'.
+    // The api.ts mapper routes that to status:'available', detail = lastError,
+    // and exposes the lastError on integration.error. PanelRight's warning chip
+    // (added in S3 step 5, commit c840d14c) renders the error inline.
+    const disconnectedWithWarning = integration({
+      id: 'hermes',
+      name: 'Hermes',
+      persistentChat: false,
+      configured: false,
+      detected: false,
+      bridgeOnline: false,
+      chatReady: false,
+      status: 'available',
+      statusLabel: 'Ready to connect',
+      connectSupported: true,
+      detail: 'Hermes provider restore failed: backup file missing',
+      error: 'Hermes provider restore failed: backup file missing',
+    });
+    const markup = renderConnectedAgentsTab({
+      integrations: [disconnectedWithWarning],
+      selectedIntegrationId: '__add_agent__',
+      selectedIntegration: null,
+    });
+
+    // Warning chip is present, carries the lastError text, and is testable
+    // via the data-testid added in PanelRight.tsx (S3 step 5).
+    expect(markup).toContain('local-agent-warning-hermes');
+    expect(markup).toContain('Hermes provider restore failed: backup file missing');
+    // The "Ready to connect" Connect button is still enabled — user can retry.
+    expect(markup).toContain('Connect Hermes');
+  });
 });

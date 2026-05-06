@@ -458,14 +458,39 @@ export async function handleLocalAgentsRoutes(ctx: RequestContext): Promise<void
       }
 
       if (explicitDisconnect && normalizedId === 'hermes') {
+        let hermesRestoreError: string | undefined;
         try {
-          await reverseHermesSetupForUi(config);
+          const result = await reverseHermesSetupForUi(config);
+          hermesRestoreError = result.restoreError;
         } catch (err: any) {
+          // Disconnect proper failed (not restore) — surface as error,
+          // matching today's behavior. Restore-only failures fall through
+          // to the disconnected-with-warning patch below.
           const integration = updateLocalAgentIntegration(config, id, {
             runtime: {
               status: 'error',
               ready: false,
               lastError: `Hermes disconnect failed: ${err?.message ?? 'unknown error'}`,
+            },
+          });
+          await saveConfig(config);
+          return jsonResponse(res, 200, { ok: true, integration });
+        }
+
+        // Per setup-entrypoint-contract.md §6: restore failure does NOT roll
+        // back the disconnect. Integration stays `disconnected`; the failure
+        // surfaces as a warning via `runtime.lastError` while the rest of the
+        // patch (enabled:false, runtime.status:'disconnected', ready:false)
+        // proceeds normally. The UI's disconnected pill + warning chip
+        // (PanelRight.tsx, S3 step 5) renders this combination as warning-not-error.
+        if (hermesRestoreError) {
+          const integration = updateLocalAgentIntegration(config, id, {
+            ...normalizedPatch,
+            runtime: {
+              ...(isPlainRecord(normalizedPatch.runtime) ? normalizedPatch.runtime : {}),
+              status: 'disconnected',
+              ready: false,
+              lastError: hermesRestoreError,
             },
           });
           await saveConfig(config);

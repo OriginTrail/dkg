@@ -14,7 +14,13 @@ vi.mock('node:child_process', async () => {
   };
 });
 
-vi.mock('../src/resolve-dkg-cli.js', () => ({
+// `startDaemon` was extracted to `@origintrail-official/dkg-core` in S1
+// of issue #386. Inside core, `daemon-lifecycle.ts` imports `resolveDkgCli`
+// from its sibling `resolve-dkg-cli.js` module. We mock that sibling so
+// vitest intercepts the cross-module call from `startDaemon` into
+// `resolveDkgCli`. (The previous adapter-side mock at `'../src/resolve-dkg-cli.js'`
+// is now a thin re-export and not on the import path of the real `startDaemon`.)
+vi.mock('@origintrail-official/dkg-core/dist/resolve-dkg-cli.js', () => ({
   resolveDkgCli: () => resolvedDkgCli,
 }));
 

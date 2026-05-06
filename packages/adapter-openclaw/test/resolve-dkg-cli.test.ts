@@ -34,15 +34,27 @@ vi.mock('node:module', async () => {
   };
 });
 
-// Fully replace ../src/setup.js so the resolver can depend on
-// `resolveCliPackageDir` without pulling setup.ts's transitive imports into
-// this test. setup.ts itself imports from resolve-dkg-cli.ts, so mocking the
-// whole module also avoids the import cycle that full evaluation would hit.
-vi.mock('../src/setup.js', () => ({
-  resolveCliPackageDir: () => hoisted.resolveCliPackageDir(),
-}));
+// `resolveCliPackageDir` and `resolveDkgCli` were extracted to
+// `@origintrail-official/dkg-core` in S1 of issue #386 (the adapter's
+// `resolve-dkg-cli.ts` now thin-re-exports `resolveDkgCli` from core, and
+// `setup.ts` thin-re-exports `resolveCliPackageDir` from core). They live
+// in two separate modules inside core (`resolve-cli-package-dir.ts` +
+// `resolve-dkg-cli.ts`) so vitest can intercept the cross-module call
+// from `resolveDkgCli` into `resolveCliPackageDir` via a standard ESM
+// `vi.mock` on the resolve-cli-package-dir module path. Mocking the
+// `dkg-core` barrel would not work because barrel re-exports do not
+// route intra-module calls.
+vi.mock(
+  // Resolve to the built dist file — adapter-openclaw imports from the
+  // `@origintrail-official/dkg-core` barrel, which TS resolves through
+  // `dist/index.js → dist/resolve-cli-package-dir.js`.
+  '@origintrail-official/dkg-core/dist/resolve-cli-package-dir.js',
+  () => ({
+    resolveCliPackageDir: () => hoisted.resolveCliPackageDir(),
+  }),
+);
 
-const { resolveDkgCli } = await import('../src/resolve-dkg-cli.js');
+const { resolveDkgCli } = await import('@origintrail-official/dkg-core');
 
 describe('resolveDkgCli', () => {
   let origEnv: string | undefined;

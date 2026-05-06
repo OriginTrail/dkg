@@ -564,3 +564,16 @@ export async function pipeHermesStream(
 ): Promise<void> {
   return pipeOpenClawStream(req, res, reader);
 }
+
+export async function runHermesUiSetup(signal?: AbortSignal) {
+  if (signal?.aborted) throw new Error('Hermes attach cancelled');
+  const { runHermesSetup } = await import('@origintrail-official/dkg-adapter-hermes');
+  const { loadBundledDkgNodeSkill } = await import('../hermes-setup.js');
+  return runHermesSetup({
+    start: false,
+    verify: false,
+    signal,
+    invokedBy: 'ui',
+    nodeSkillContent: loadBundledDkgNodeSkill(),
+  });
+}

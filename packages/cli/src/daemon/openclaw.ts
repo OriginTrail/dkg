@@ -66,12 +66,20 @@ const BRIDGE_HEALTH_CACHE_ERROR_TTL_MS = 1_000;
 export const OPENCLAW_UI_CONNECT_TIMEOUT_MS = 150_000;
 export const OPENCLAW_UI_CONNECT_POLL_MS = 1_500;
 export const OPENCLAW_CHANNEL_RESPONSE_TIMEOUT_MS = 180_000;
-export type PendingOpenClawUiAttachJob = {
-  job: Promise<void>;
-  controller: AbortController;
-  cancelled: boolean;
-};
-const pendingOpenClawUiAttachJobs = new Map<string, PendingOpenClawUiAttachJob>();
+// Per-integration UI attach-job machinery moved to
+// `./local-agent-attach-jobs.ts` in S1 of issue #386 so adapter-hermes'
+// S3 work can reuse the same scheduler keyed on `'hermes'` instead of
+// `'openclaw'`. The OpenClaw-named bindings below are backwards-compat
+// re-exports that the existing OpenClaw daemon-route call sites continue
+// to import from this module — no behavior change.
+import {
+  cancelPending as cancelPendingLocalAgentAttachJobImpl,
+  isCancelled as isAttachJobCancelledImpl,
+  scheduleAttachJob as scheduleAttachJobImpl,
+  type PendingAttachJob,
+} from './local-agent-attach-jobs.js';
+
+export type PendingOpenClawUiAttachJob = PendingAttachJob;
 
 export function isOpenClawBridgeHealthCacheValid(cache: { ok: boolean; ts: number } | null): boolean {
   if (!cache) return false;
@@ -439,43 +447,27 @@ export function formatOpenClawUiAttachFailure(err: any): string {
     || 'OpenClaw attach failed';
 }
 
+// Backwards-compat re-exports under the OpenClaw-named symbols. The real
+// scheduler lives in `./local-agent-attach-jobs.ts` (extracted in S1 of
+// issue #386). These wrappers preserve the historical names so OpenClaw
+// daemon-route call sites in `local-agents.ts` keep importing them
+// unchanged. New Hermes call sites (S3) should import the generic names
+// (`scheduleAttachJob`, `cancelPending`, `isCancelled`) from
+// `./local-agent-attach-jobs.js` directly.
 export function scheduleOpenClawUiAttachJob(
   integrationId: string,
   task: (job: PendingOpenClawUiAttachJob) => Promise<void>,
   onAttachScheduled?: (id: string, job: Promise<void>) => void,
 ): { started: boolean; job: Promise<void>; controller: AbortController } {
-  const existing = pendingOpenClawUiAttachJobs.get(integrationId);
-  if (existing) {
-    onAttachScheduled?.(integrationId, existing.job);
-    return { started: false, job: existing.job, controller: existing.controller };
-  }
-
-  const controller = new AbortController();
-  const jobState: PendingOpenClawUiAttachJob = {
-    controller,
-    cancelled: false,
-    job: Promise.resolve().then(() => task(jobState)).finally(() => {
-      const current = pendingOpenClawUiAttachJobs.get(integrationId);
-      if (current === jobState) {
-        pendingOpenClawUiAttachJobs.delete(integrationId);
-      }
-    }),
-  };
-  pendingOpenClawUiAttachJobs.set(integrationId, jobState);
-  onAttachScheduled?.(integrationId, jobState.job);
-  return { started: true, job: jobState.job, controller };
+  return scheduleAttachJobImpl(integrationId, task, onAttachScheduled);
 }
 
 export function cancelPendingLocalAgentAttachJob(integrationId: string): void {
-  const job = pendingOpenClawUiAttachJobs.get(integrationId);
-  if (!job) return;
-  job.cancelled = true;
-  job.controller.abort();
-  pendingOpenClawUiAttachJobs.delete(integrationId);
+  cancelPendingLocalAgentAttachJobImpl(integrationId);
 }
 
 export function isOpenClawUiAttachCancelled(job: PendingOpenClawUiAttachJob): boolean {
-  return job.cancelled || job.controller.signal.aborted;
+  return isAttachJobCancelledImpl(job);
 }
 
 
