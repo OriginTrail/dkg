@@ -1476,7 +1476,32 @@ class DKGMemoryProvider(MemoryProvider):
                 )
             ):
                 deduped[key] = hit
-        ranked = sorted(deduped.values(), key=lambda h: float(h.get("_rank", 0)), reverse=True)[:limit]
+        selected_project = (
+            project_context_graph
+            if project_context_graph and project_context_graph != _DEFAULT_MEMORY_CONTEXT_GRAPH
+            else ""
+        )
+
+        def sort_key(hit: Dict[str, Any]) -> Tuple[float, float]:
+            return (
+                float(hit.get("_rank", 0)),
+                float(hit.get("score", 0)),
+            )
+
+        ranked_all = sorted(deduped.values(), key=sort_key, reverse=True)
+        ranked = ranked_all[:limit]
+        if selected_project and not any(hit.get("context_graph_id") == selected_project for hit in ranked):
+            project_hit = next(
+                (
+                    hit for hit in ranked_all
+                    if hit.get("context_graph_id") == selected_project
+                    and float(hit.get("score", 0)) > 0
+                ),
+                None,
+            )
+            if project_hit:
+                ranked = ranked[:max(0, limit - 1)] + [project_hit]
+                ranked = sorted(ranked, key=sort_key, reverse=True)
         public_hits = [
             {k: v for k, v in hit.items() if k not in ("_rank", "_dedup_key")}
             for hit in ranked

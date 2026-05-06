@@ -2344,6 +2344,117 @@ assert "LIMIT 50" in sparql, sparql
     expect(result.status, result.stderr || result.stdout).toBe(0);
   });
 
+  it('keeps selected project recall visible when agent-context has many stale matches', () => {
+    const script = String.raw`
+import importlib.util
+import json
+import sys
+import tempfile
+import types
+from pathlib import Path
+
+home = Path(tempfile.mkdtemp(prefix="hermes-dkg-prefetch-project-crowding-"))
+
+agent_pkg = types.ModuleType("agent")
+memory_provider = types.ModuleType("agent.memory_provider")
+class MemoryProvider:
+    pass
+memory_provider.MemoryProvider = MemoryProvider
+sys.modules["agent"] = agent_pkg
+sys.modules["agent.memory_provider"] = memory_provider
+
+tools_pkg = types.ModuleType("tools")
+registry = types.ModuleType("tools.registry")
+def tool_error(message):
+    return json.dumps({"error": message})
+registry.tool_error = tool_error
+sys.modules["tools"] = tools_pkg
+sys.modules["tools.registry"] = registry
+
+constants = types.ModuleType("hermes_constants")
+constants.get_hermes_home = lambda: home
+sys.modules["hermes_constants"] = constants
+
+sys.modules["plugins"] = types.ModuleType("plugins")
+sys.modules["plugins.memory"] = types.ModuleType("plugins.memory")
+
+plugin_dir = Path(r"${process.cwd().replace(/\\/g, '\\\\')}") / "hermes-plugin"
+spec = importlib.util.spec_from_file_location(
+    "plugins.memory.dkg",
+    plugin_dir / "__init__.py",
+    submodule_search_locations=[str(plugin_dir)],
+)
+module = importlib.util.module_from_spec(spec)
+sys.modules["plugins.memory.dkg"] = module
+spec.loader.exec_module(module)
+
+class FakeClient:
+    def __init__(self):
+        self.calls = []
+
+    def _resolve_agent_address(self):
+        return "0xAgent"
+
+    def query(self, sparql, context_graph_id, **kwargs):
+        self.calls.append((context_graph_id, kwargs))
+        bindings = []
+        if context_graph_id == "agent-context" and kwargs["view"] == "working-memory":
+            for index in range(8):
+                bindings.append({
+                    "uri": {"value": f"urn:agent-context:stale:{index}"},
+                    "pred": {"value": "schema:description"},
+                    "text": {
+                        "value": (
+                            f"qa385-hook-731942 stale session prompt {index}: "
+                            "Do not call tools. Answer only from automatically recalled DKG memory "
+                            "and include provenance if available."
+                        ),
+                    },
+                })
+        if context_graph_id == "project-cg" and kwargs["view"] == "working-memory":
+            bindings.append({
+                "uri": {"value": "urn:project-cg:fact"},
+                "pred": {"value": "schema:description"},
+                "text": {"value": "qa385-hook-731942 means amber-lake."},
+            })
+        return {"result": {"bindings": bindings}}
+
+provider = module.DKGMemoryProvider()
+provider._offline = False
+provider._client = FakeClient()
+provider._context_graph = "agent-context"
+
+query = (
+    "What does passive DKG memory recall say about qa385-hook-731942? "
+    "Do not call tools. Answer only from automatically recalled DKG memory "
+    "and include provenance if available."
+)
+search = json.loads(provider.handle_tool_call("memory_search", {
+    "query": query,
+    "limit": 5,
+    "context_graph_id": "project-cg",
+}))
+layers = [hit["layer"] for hit in search["hits"]]
+assert "project-wm" in layers, search
+project_hits = [hit for hit in search["hits"] if hit["context_graph_id"] == "project-cg"]
+assert len(project_hits) == 1, search
+assert project_hits[0]["snippet"] == "qa385-hook-731942 means amber-lake.", project_hits
+assert project_hits[0]["path"].startswith("dkg://project-cg/project-wm/"), project_hits
+
+prefetch = provider.prefetch(query, context_graph_id="project-cg")
+assert 'context_graph_id="project-cg"' in prefetch, prefetch
+assert 'layer="project-wm"' in prefetch, prefetch
+assert 'path="dkg://project-cg/project-wm/' in prefetch, prefetch
+assert "qa385-hook-731942 means amber-lake." in prefetch, prefetch
+`;
+    const result = spawnSync('python', ['-B', '-c', script], {
+      cwd: process.cwd(),
+      encoding: 'utf-8',
+    });
+
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+  });
+
   it('does not prefetch project memory when no project context is supplied', () => {
     const script = String.raw`
 import importlib.util
