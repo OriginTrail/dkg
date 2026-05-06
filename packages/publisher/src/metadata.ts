@@ -410,6 +410,9 @@ export async function resolveUalByBatchId(
 /**
  * Update the merkle root for a KC in the _meta graph after a data update.
  * Shared between DKGPublisher (local updates) and UpdateHandler (gossip).
+ *
+ * Optional `extras.transitionType` rewrites `dkg:transitionType` on the KC UAL
+ * (use `"UPDATE"` after VM updates — V10 Axiom 3 / 4 corollary).
  */
 export async function updateMetaMerkleRoot(
   store: TripleStore,
@@ -417,6 +420,7 @@ export async function updateMetaMerkleRoot(
   contextGraphId: string,
   batchId: bigint,
   newMerkleRoot: Uint8Array,
+  extras?: { transitionType?: string },
 ): Promise<void> {
   assertSafeContextGraphIdForSparql(contextGraphId);
   const metaGraph = graphManager.metaGraphUri(contextGraphId);
@@ -426,6 +430,26 @@ export async function updateMetaMerkleRoot(
 
   const rootLiteral = `"${toHex(newMerkleRoot)}"`;
 
+  const patchTransitionType = async (): Promise<void> => {
+    const tt = extras?.transitionType;
+    if (!tt) return;
+    const ttLit = lit(tt);
+    try {
+      await store.query(
+        `DELETE { GRAPH <${metaGraph}> { <${ual}> <${DKG}transitionType> ?oldT } }
+         INSERT { GRAPH <${metaGraph}> { <${ual}> <${DKG}transitionType> ${ttLit} } }
+         WHERE  { GRAPH <${metaGraph}> { OPTIONAL { <${ual}> <${DKG}transitionType> ?oldT } } }`,
+      );
+    } catch {
+      await store.insert([{
+        subject: ual,
+        predicate: `${DKG}transitionType`,
+        object: ttLit,
+        graph: metaGraph,
+      }]);
+    }
+  };
+
   // Prefer a single SPARQL DELETE/INSERT to avoid an intermediate
   // state with no dkg:merkleRoot when update succeeds.
   try {
@@ -434,6 +458,7 @@ export async function updateMetaMerkleRoot(
        INSERT { GRAPH <${metaGraph}> { <${ual}> <${DKG}merkleRoot> ${rootLiteral} } }
        WHERE  { GRAPH <${metaGraph}> { OPTIONAL { <${ual}> <${DKG}merkleRoot> ?oldRoot } } }`,
     );
+    await patchTransitionType();
     return;
   } catch {
     // Some backends may not support SPARQL updates via query().
@@ -449,7 +474,10 @@ export async function updateMetaMerkleRoot(
     object: rootLiteral,
     graph: metaGraph,
   }]);
-  if (existing.type !== 'bindings' || existing.bindings.length === 0) return;
+  if (existing.type !== 'bindings' || existing.bindings.length === 0) {
+    await patchTransitionType();
+    return;
+  }
 
   const staleRootQuads: Quad[] = existing.bindings
     .map((row) => row['root'])
@@ -463,6 +491,7 @@ export async function updateMetaMerkleRoot(
   if (staleRootQuads.length > 0) {
     await store.delete(staleRootQuads);
   }
+  await patchTransitionType();
 }
 
 // ── Sub-Graph Registration Metadata ────────────────────────────────────

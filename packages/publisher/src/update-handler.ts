@@ -196,7 +196,9 @@ export class UpdateHandler {
       // Do NOT set from gossip — that would allow first-message-wins context graph spoofing.
 
       try {
-        await updateMetaMerkleRoot(this.store, this.graphManager, contextGraphId, BigInt(batchId), computedRoot);
+        await updateMetaMerkleRoot(this.store, this.graphManager, contextGraphId, BigInt(batchId), computedRoot, {
+          transitionType: 'UPDATE',
+        });
       } catch (err) {
         this.log.warn(
           ctx,

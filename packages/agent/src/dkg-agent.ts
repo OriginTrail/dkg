@@ -5704,7 +5704,7 @@ export class DKGAgent {
     knowledgeAssetUal: string;
     agentAddress?: string;
   }): Promise<PublishResult> {
-    const { buildEndorsementQuads } = await import('./endorse.js');
+    const { buildEndorsementQuads, DKG_ENDORSES } = await import('./endorse.js');
     // A-12: spec §03 / §22 require the endorser DID to be the
     // Ethereum-address form. Passing a libp2p peer id here produced
     // a `did:dkg:agent:${peerId}` URI (12D3KooW-prefixed in practice),
@@ -5738,6 +5738,39 @@ export class DKGAgent {
         `endorse: UAL ${opts.knowledgeAssetUal} has not been published in ` +
         `context graph ${opts.contextGraphId} — endorsement refused (Axiom 4).`,
       );
+    }
+
+    // Idempotent re-endorse (same endorser + same UAL): skip a second
+    // publish — otherwise Rule 4 rejects republishing the same endorser
+    // rootEntity and the trust-gradient idempotency test (4.h) fails.
+    const dataGraph = contextGraphDataUri(opts.contextGraphId);
+    const endorserDid = `did:dkg:agent:${endorser}`;
+    const dupChk = await this.store.query(
+      `SELECT ?x WHERE { GRAPH <${dataGraph}> {
+        <${endorserDid}> <${DKG_ENDORSES}> <${opts.knowledgeAssetUal}>
+      } } LIMIT 1`,
+    );
+    if (dupChk.type === 'bindings' && dupChk.bindings.length > 0) {
+      let kcId = 0n;
+      try {
+        const br = await this.store.query(
+          `SELECT ?b WHERE { GRAPH <${metaGraph}> {
+            <${opts.knowledgeAssetUal}> <http://dkg.io/ontology/batchId> ?b
+          } } LIMIT 1`,
+        );
+        if (br.type === 'bindings' && br.bindings[0]?.['b']) {
+          const raw = String(br.bindings[0]['b']);
+          const n = raw.replace(/^"|"$/g, '').replace(/\^\^.*$/, '').trim();
+          if (/^\d+$/.test(n)) kcId = BigInt(n);
+        }
+      } catch { /* optional */ }
+      return {
+        status: 'confirmed',
+        ual: opts.knowledgeAssetUal,
+        kcId,
+        merkleRoot: new Uint8Array(32),
+        kaManifest: [],
+      };
     }
 
     const quads = buildEndorsementQuads(

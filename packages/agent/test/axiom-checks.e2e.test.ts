@@ -33,6 +33,8 @@ const P_NAME = 'http://schema.org/name';
 const P_DESC = 'http://schema.org/description';
 const PEER_A = '12D3KooWAxiomA0000000000000000000000000000000000000';
 const PEER_B = '12D3KooWAxiomB1111111111111111111111111111111111111';
+/** Matches buildEndorsementQuads / endorse.ts (not dkg.io ontology alias). */
+const DKG_ENDORSES_PRED = 'https://dkg.network/ontology#endorses';
 
 type Outcome = 'PASS' | 'BREACH' | 'MISSING';
 interface Finding {
@@ -777,7 +779,7 @@ describe('Axiom 4 — PUBLISH is canonical; ENDORSE/VERIFY raise trust', () => {
 
     const r = await agent.query(
       `SELECT ?endorser WHERE {
-         ?endorser <http://dkg.io/ontology/endorses> <${pub.ual}>
+         ?endorser <${DKG_ENDORSES_PRED}> <${pub.ual}>
        }`,
       { contextGraphId: cg, view: 'verified-memory' },
     );
@@ -903,6 +905,82 @@ describe('Axiom 4 — PUBLISH is canonical; ENDORSE/VERIFY raise trust', () => {
     );
     const rows = (r as { bindings?: unknown[] }).bindings ?? [];
     expect(rows.length, 'KC meta must record dkg:publishedAt (Axiom 4 evidence)').toBeGreaterThan(0);
+  }, 60_000);
+
+  it('4.p two distinct local endorser identities produce two endorses edges (trust is social, multi-party)', async () => {
+    // Axiom 4: ENDORSE is a lightweight "like" from *other* agents. The same
+    // node can host two registered agents — both must be able to endorse the
+    // same published UAL without clobbering each other.
+    const cg = freshCg('a4-2end');
+    const sub = urn('2end');
+    await agent.createContextGraph({ id: cg, name: '2e', description: '' });
+    await agent.registerContextGraph(cg);
+    const pub = await agent.publish(cg, [
+      { subject: sub, predicate: P_NAME, object: '"x"', graph: '' },
+    ]);
+    expect(pub.status).toBe('confirmed');
+    await agent.endorse({ contextGraphId: cg, knowledgeAssetUal: pub.ual });
+    await agent.endorse({ contextGraphId: cg, knowledgeAssetUal: pub.ual, agentAddress: bAddr });
+
+    const r = await agent.query(
+      `SELECT ?endorser WHERE { ?endorser <${DKG_ENDORSES_PRED}> <${pub.ual}> }`,
+      { contextGraphId: cg, view: 'verified-memory' },
+    );
+    const distinct = new Set((r.bindings as Record<string, string>[]).map(b => b['endorser']));
+    expect(
+      distinct.size,
+      'default agent + second registered agent must both record an endorses edge (Axiom 4)',
+    ).toBe(2);
+  }, 120_000);
+
+  it('4.r KC metadata records transitionType UPDATE after VM update()', async () => {
+    // Axiom 3: UPDATE is a distinct typed transition from PUBLISH. The canonical
+    // KC record in _meta must not still read "PUBLISH" after an update.
+    const cg = freshCg('a4-tt-upd');
+    const sub = urn('tt-upd');
+    await agent.createContextGraph({ id: cg, name: 'ttu', description: '' });
+    await agent.registerContextGraph(cg);
+    const first = await agent.publish(cg, [
+      { subject: sub, predicate: P_NAME, object: '"v1"', graph: '' },
+    ]);
+    expect(first.status).toBe('confirmed');
+    const second = await agent.update(first.kcId, cg, [
+      { subject: sub, predicate: P_NAME, object: '"v2"', graph: '' },
+    ]);
+    expect(second.status).toBe('confirmed');
+    const meta = `did:dkg:context-graph:${cg}/_meta`;
+    const r = await agent.store.query(
+      `SELECT ?o WHERE { GRAPH <${meta}> { <${first.ual}> <http://dkg.io/ontology/transitionType> ?o } }`,
+    );
+    const raw = ((r as { bindings?: Record<string, string>[] }).bindings ?? [])
+      .map(b => b['o']?.replace(/^"|"$/g, '') ?? '');
+    expect(
+      raw.some(t => t.toUpperCase() === 'UPDATE'),
+      'KC _meta dkg:transitionType must be UPDATE after agent.update (Axiom 3 + 4 corollary)',
+    ).toBe(true);
+  }, 120_000);
+
+  it('4.s verify() rejects an unknown batchId (VERIFY entry point is live)', async () => {
+    const cg = freshCg('a4-bad-vfy');
+    const sub = urn('badvfy');
+    await agent.createContextGraph({ id: cg, name: 'bv', description: '' });
+    await agent.registerContextGraph(cg);
+    await agent.publish(cg, [{ subject: sub, predicate: P_NAME, object: '"b"', graph: '' }]);
+    let msg = '';
+    try {
+      await agent.verify({
+        contextGraphId: cg,
+        verifiedMemoryId: 'did:dkg:vm:axiom-probe',
+        batchId: 9_999_999_999_999_999_999n,
+        requiredSignatures: 1,
+      });
+    } catch (e) {
+      msg = e instanceof Error ? e.message : String(e);
+    }
+    expect(
+      msg.length,
+      'verify() must throw on nonsense batch / missing VM setup — silent success would hide VERIFY (Axiom 4)',
+    ).toBeGreaterThan(0);
   }, 60_000);
 
   it('4.c ENDORSE writes an endorsement triple referencing the published UAL', async () => {
@@ -1109,6 +1187,31 @@ describe('Axiom 5 — SWM is provisional staging', () => {
     ).toBe(true);
   }, 30_000);
 
+  it('5.j SWM WorkspaceOperation URI embeds the contextGraphId (record is bound to a CG)', async () => {
+    // Axiom 5 / §record contract: every SWM record identifies which Context Graph
+    // it belongs to. We derive this from the canonical operation URI shape.
+    const cg = freshCg('a5-cg-bind');
+    const sub = urn('cg-bind');
+    await agent.createContextGraph({ id: cg, name: 'cb', description: '' });
+    await agent.share(
+      cg,
+      [{ subject: sub, predicate: P_NAME, object: '"x"', graph: '' }],
+      { localOnly: true },
+    );
+    const meta = `did:dkg:context-graph:${cg}/_shared_memory_meta`;
+    const r = await agent.store.query(
+      `SELECT ?op WHERE { GRAPH <${meta}> {
+         ?op a <http://dkg.io/ontology/WorkspaceOperation> .
+         FILTER(CONTAINS(STR(?op), "${cg}"))
+       } } LIMIT 1`,
+    );
+    const rows = (r as { bindings?: unknown[] }).bindings ?? [];
+    expect(
+      rows.length,
+      'WorkspaceOperation subject must embed/bind contextGraphId (Axiom 5)',
+    ).toBeGreaterThan(0);
+  }, 30_000);
+
   it('5.c SWM is treated as provisional: a fresh VM read of unpublished data is empty', async () => {
     const cg = freshCg('a5-prov');
     const sub = urn('prov');
@@ -1216,6 +1319,54 @@ describe('Axiom 6 — GET resolves a declared view', () => {
       returned,
       'self-attested-only rows must not surface when caller requires Endorsed (Axiom 6)',
     ).toBe(0);
+  }, 60_000);
+
+  it('6.f minTrust=PartiallyVerified excludes a self-attested-only row', async () => {
+    const cg = freshCg('a6-partial');
+    const sub = urn('pv');
+    await agent.createContextGraph({ id: cg, name: 'pv', description: '' });
+    await agent.registerContextGraph(cg);
+    await agent.publish(cg, [{ subject: sub, predicate: P_NAME, object: '"p"', graph: '' }]);
+
+    let returned: number;
+    try {
+      const r = await agent.query(
+        `SELECT ?o WHERE { <${sub}> <${P_NAME}> ?o }`,
+        { contextGraphId: cg, view: 'verified-memory', minTrust: TrustLevel.PartiallyVerified },
+      );
+      returned = r.bindings.length;
+    } catch {
+      returned = 0;
+    }
+    expect(
+      returned,
+      'rows without partial quorum proof must not surface at PartiallyVerified (Axiom 4 + 6)',
+    ).toBe(0);
+  }, 60_000);
+
+  it('6.g CONSTRUCT cannot mutate VM (read-only CONSTRUCT may return template quads)', async () => {
+    const cg = freshCg('a6-cons');
+    const sub = urn('cons');
+    await agent.createContextGraph({ id: cg, name: 'cons', description: '' });
+    await agent.registerContextGraph(cg);
+    await agent.publish(cg, [{ subject: sub, predicate: P_NAME, object: '"c"', graph: '' }]);
+
+    try {
+      await agent.query(
+        `CONSTRUCT { <${sub}> <${P_NAME}> "bad" } WHERE { <${sub}> <${P_NAME}> ?o }`,
+        { contextGraphId: cg, view: 'verified-memory' },
+      );
+    } catch {
+      /* rejection is fine */
+    }
+    const stillOk = await agent.query(
+      `SELECT ?o WHERE { <${sub}> <${P_NAME}> ?o }`,
+      { contextGraphId: cg, view: 'verified-memory' },
+    );
+    expect(
+      stillOk.bindings[0]?.['o'],
+      'CONSTRUCT is read-only — VM triple must remain unchanged (no INSERT via construct side-channel; Axiom 2 + 3)',
+    ).toBe('"c"');
   }, 60_000);
 
   it('6.e ENDORSE lifts a row to the Endorsed trust band (minTrust=Endorsed surfaces it)', async () => {
@@ -1351,6 +1502,20 @@ describe('Axiom 7 — Deterministic conflict resolution', () => {
       'two concurrent updates for the same kcId must not both confirm — deterministic conflict resolution required (Axiom 7)',
     ).toBeLessThanOrEqual(1);
   }, 90_000);
+
+  it('7.f sequential publishes on independent rootEntities both confirm (sanity vs 7.e concurrency bug)', async () => {
+    const cg = freshCg('a7-seq-pub');
+    const a = urn('seqA');
+    const b = urn('seqB');
+    await agent.createContextGraph({ id: cg, name: 'seq', description: '' });
+    await agent.registerContextGraph(cg);
+    const p1 = await agent.publish(cg, [{ subject: a, predicate: P_NAME, object: '"a"', graph: '' }]);
+    const p2 = await agent.publish(cg, [{ subject: b, predicate: P_NAME, object: '"b"', graph: '' }]);
+    expect(p1.status).toBe('confirmed');
+    expect(p2.status).toBe('confirmed');
+    expect(await rowsFor(cg, 'verified-memory', a)).toEqual(['"a"']);
+    expect(await rowsFor(cg, 'verified-memory', b)).toEqual(['"b"']);
+  }, 120_000);
 
   it('7.e two concurrent publishes on different rootEntities both land in VM', async () => {
     // Different root entities are independent. Concurrent publishes must

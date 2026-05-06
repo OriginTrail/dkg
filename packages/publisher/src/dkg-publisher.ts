@@ -2041,7 +2041,9 @@ export class DKGPublisher implements Publisher {
       }
 
       try {
-        await updateMetaMerkleRoot(this.store, this.graphManager, contextGraphId, kcId, kcMerkleRoot);
+        await updateMetaMerkleRoot(this.store, this.graphManager, contextGraphId, kcId, kcMerkleRoot, {
+          transitionType: 'UPDATE',
+        });
       } catch (err) {
         this.log.warn(
           ctx,
