@@ -30,6 +30,11 @@ export enum TrustLevel {
 export enum TransitionType {
   CREATE = 'CREATE',
   UPDATE = 'UPDATE',
+  REVOKE = 'REVOKE',
+  SHARE = 'SHARE',
+  PUBLISH = 'PUBLISH',
+  VERIFY = 'VERIFY',
+  DISCARD = 'DISCARD',
 }
 
 export interface MemoryTransition {

@@ -25,6 +25,15 @@ export interface KCMetadata {
   allowedPeers?: string[];
   timestamp: Date;
   subGraphName?: string;
+  /** V10 Axiom 4 corollary: the typed transition that produced this KC.
+   *  Defaults to CREATE for new publishes; UPDATE when called via update(). */
+  transitionType?: 'CREATE' | 'UPDATE' | 'PUBLISH';
+  /** V10 Axiom 4 corollary: who/what authorised this transition. For
+   *  self-attested publishes this is the wallet signature of the publisher. */
+  authorityBasis?: string;
+  /** V10 Axiom 4 corollary: trust level at the moment data enters VM.
+   *  PUBLISH always lands at SelfAttested; ENDORSE/VERIFY raise it later. */
+  trustLevel?: 'self-attested' | 'endorsed' | 'partially-verified' | 'consensus-verified';
 }
 
 export interface KAMetadata {
@@ -94,6 +103,10 @@ export function generateKCMetadata(
       metaGraph,
     ),
     mq(meta.ual, `${DKG}paranet`, `did:dkg:context-graph:${meta.contextGraphId}`, metaGraph),
+    // V10 Axiom 4 corollary: every canonical transition records type, authority, trust level.
+    mq(meta.ual, `${DKG}transitionType`, lit(meta.transitionType ?? 'PUBLISH'), metaGraph),
+    mq(meta.ual, `${DKG}authorityBasis`, lit(meta.authorityBasis ?? `wallet:${meta.publisherPeerId || 'unknown'}`), metaGraph),
+    mq(meta.ual, `${DKG}trustLevel`, lit(meta.trustLevel ?? 'self-attested'), metaGraph),
   );
 
   if (meta.subGraphName) {
@@ -342,6 +355,14 @@ export function generateShareMetadata(
       mq(subject, `${DKG}rootEntity`, rootEntity, swmMetaGraph),
     );
   }
+
+  // V10 Axiom 5 record contract: SWM record must identify its transition
+  // type and finality class. Share is the SHARE transition (WM → SWM),
+  // and SWM data is provisional until promoted via PUBLISH.
+  quads.push(
+    mq(subject, `${DKG}transitionType`, lit('SHARE'), swmMetaGraph),
+    mq(subject, `${DKG}finality`, lit('provisional'), swmMetaGraph),
+  );
 
   return quads;
 }

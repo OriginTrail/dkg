@@ -3172,6 +3172,26 @@ export class DKGAgent {
   ): Promise<PublishResult> {
     const ctx = opts?.operationCtx ?? createOperationContext('update');
     const onPhase = opts?.onPhase;
+
+    // V10 Axiom 2: every protected scope has an authority domain. UPDATE on a
+    // VM batch is gated on publisher authority. Before invoking the publisher
+    // (which would otherwise still try to resolve a publisher address), reject
+    // any kcId that has no record in this CG's _meta — there is no authority
+    // basis for updating something that was never published.
+    const metaGraph = paranetMetaGraphUri(contextGraphId);
+    const known = await this.store.query(
+      `SELECT ?ual WHERE { GRAPH <${metaGraph}> {
+         ?ual <http://dkg.io/ontology/batchId> "${kcId.toString()}"^^<http://www.w3.org/2001/XMLSchema#integer>
+       } } LIMIT 1`,
+    );
+    const exists = known.type === 'bindings' && known.bindings.length > 0;
+    if (!exists) {
+      throw new Error(
+        `update: kcId ${kcId} is not known in context graph ${contextGraphId} — ` +
+        `caller has no authority basis to update an unpublished batch (Axiom 2).`,
+      );
+    }
+
     this.log.info(ctx, `Starting update of kcId=${kcId} in context graph "${contextGraphId}" with ${quads.length} triples`);
     const result = await this.publisher.update(kcId, {
       contextGraphId,
@@ -3526,6 +3546,32 @@ export class DKGAgent {
     const readOnlyGuard = validateReadOnlySparql(sparql);
     if (!readOnlyGuard.safe) {
       throw new Error(`SPARQL rejected: ${readOnlyGuard.reason}`);
+    }
+
+    // V10 Axiom 1 caller-scoped gate. The `canReadContextGraph` check
+    // below decides whether THIS NODE may read a private CG (i.e. is the
+    // node on the participant list). When a request also carries an
+    // authenticated `callerAgentAddress` (e.g. an agent-bound bearer token
+    // hitting /api/query), that caller must independently be on the CG's
+    // allowedAgents list. Without this check a private CG would leak to
+    // any caller whose only credential is "talking to a node that happens
+    // to be a participant" — which is exactly what allowList is supposed
+    // to prevent.
+    if (
+      opts.contextGraphId
+      && typeof opts.callerAgentAddress === 'string'
+      && opts.callerAgentAddress.length > 0
+      && (await this.isPrivateContextGraph(opts.contextGraphId))
+    ) {
+      const participants = await this.getPrivateContextGraphParticipants(opts.contextGraphId);
+      if (participants && participants.length > 0) {
+        const callerLc = opts.callerAgentAddress.toLowerCase();
+        const onAllowList = participants.some((p) => p.toLowerCase() === callerLc);
+        if (!onAllowList) {
+          this.log.info(ctx, `Query denied: caller ${opts.callerAgentAddress} not in allowedAgents for "${opts.contextGraphId}"`);
+          return emptyQueryResultForKind(sparql);
+        }
+      }
     }
 
     if (opts.contextGraphId && !(await this.canReadContextGraph(opts.contextGraphId))) {
@@ -5677,6 +5723,23 @@ export class DKGAgent {
     // bearer token; see packages/cli/src/daemon.ts.
     const raw = opts.agentAddress ?? this.defaultAgentAddress ?? this.peerId;
     const endorser = canonicalAgentDidSubject(raw);
+
+    // V10 Axiom 4: ENDORSE / VERIFY operate on data already in Verified
+    // Memory. Refuse to endorse a UAL that has never been published in
+    // the target context graph — silently letting trust upgrade ride on
+    // imaginary data is a direct breach of the canonical-PUBLISH rule.
+    const metaGraph = paranetMetaGraphUri(opts.contextGraphId);
+    const probe = await this.store.query(
+      `SELECT ?p WHERE { GRAPH <${metaGraph}> { <${opts.knowledgeAssetUal}> ?p ?o } } LIMIT 1`,
+    );
+    const isPublished = probe.type === 'bindings' && probe.bindings.length > 0;
+    if (!isPublished) {
+      throw new Error(
+        `endorse: UAL ${opts.knowledgeAssetUal} has not been published in ` +
+        `context graph ${opts.contextGraphId} — endorsement refused (Axiom 4).`,
+      );
+    }
+
     const quads = buildEndorsementQuads(
       endorser,
       opts.knowledgeAssetUal,
@@ -8284,6 +8347,33 @@ export class DKGAgent {
       },
       async discard(contextGraphId: string, name: string, opts?: { subGraphName?: string }): Promise<void> {
         return agent.publisher.assertionDiscard(contextGraphId, name, agentAddress, opts?.subGraphName);
+      },
+
+      /**
+       * V10 Axiom 3 transition: REVOKE invalidates a previously-granted
+       * permission/capability tied to an assertion without deleting the
+       * underlying data. We record a typed REVOKE marker in `_meta` so
+       * downstream readers can filter revoked assertions out of trust
+       * decisions. Distinct from DISCARD, which removes the WM rows.
+       */
+      async revoke(
+        contextGraphId: string,
+        name: string,
+        opts?: { reason?: string; subGraphName?: string },
+      ): Promise<{ status: 'revoked'; lifecycleUri: string }> {
+        const lifecycleUri = assertionLifecycleUri(contextGraphId, agentAddress, name, opts?.subGraphName);
+        const metaGraph = contextGraphMetaUri(contextGraphId);
+        const DKG_NS = 'http://dkg.io/ontology/';
+        const XSD = 'http://www.w3.org/2001/XMLSchema#';
+        const ts = new Date().toISOString();
+        const reason = opts?.reason ?? 'manual';
+        await agent.store.insert([
+          { subject: lifecycleUri, predicate: `${DKG_NS}revoked`, object: `"true"^^<${XSD}boolean>`, graph: metaGraph },
+          { subject: lifecycleUri, predicate: `${DKG_NS}revokedAt`, object: `"${ts}"^^<${XSD}dateTime>`, graph: metaGraph },
+          { subject: lifecycleUri, predicate: `${DKG_NS}revokedReason`, object: `"${reason.replace(/"/g, '\\"')}"`, graph: metaGraph },
+          { subject: lifecycleUri, predicate: `${DKG_NS}transitionType`, object: `"REVOKE"`, graph: metaGraph },
+        ]);
+        return { status: 'revoked', lifecycleUri };
       },
 
       async history(contextGraphId: string, name: string, opts?: { agentAddress?: string; subGraphName?: string }): Promise<AssertionDescriptor | null> {

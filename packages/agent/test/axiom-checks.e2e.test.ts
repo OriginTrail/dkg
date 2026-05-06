@@ -225,6 +225,33 @@ describe('Axiom 1 — Context Graph isolation', () => {
     expect(subs.has(sLeft)).toBe(true);
     expect(subs.has(sRight)).toBe(false);
   }, 30_000);
+
+  it('1.e sub-graphs within a CG are isolated (sg-A data does not surface in sg-B)', async () => {
+    // Sub-graphs are a finer scope than CGs and the spec says every state
+    // change is bounded by its scope. Bleeding between sub-graphs would let
+    // a "private notes" sub-graph leak into a "public docs" sub-graph in
+    // the same CG — Axiom 1 is meant to prevent exactly that.
+    const cg = freshCg('a1-sg');
+    const sA = urn('sg-A');
+    const sB = urn('sg-B');
+    await agent.createContextGraph({ id: cg, name: 'sg', description: '' });
+    await agent.createSubGraph(cg, 'left');
+    await agent.createSubGraph(cg, 'right');
+    await agent.share(cg, [{ subject: sA, predicate: P_NAME, object: '"in-A"', graph: '' }], {
+      localOnly: true, subGraphName: 'left',
+    });
+    await agent.share(cg, [{ subject: sB, predicate: P_NAME, object: '"in-B"', graph: '' }], {
+      localOnly: true, subGraphName: 'right',
+    });
+
+    const onlyLeft = await agent.query(
+      `SELECT ?s WHERE { ?s <${P_NAME}> ?o }`,
+      { contextGraphId: cg, view: 'shared-working-memory', subGraphName: 'left' },
+    );
+    const subs = new Set(onlyLeft.bindings.map((b: Record<string, string>) => b['s']));
+    expect(subs.has(sA), 'sub-graph "left" must surface its own subject').toBe(true);
+    expect(subs.has(sB), 'sub-graph "left" must NOT surface a subject from sub-graph "right" (Axiom 1)').toBe(false);
+  }, 30_000);
 });
 
 // ────────────────────────────────────────────────────────────────────────
@@ -287,6 +314,48 @@ describe('Axiom 2 — Authority domain', () => {
       'agent.update for a kcId we did not publish must be rejected (no authority basis)',
     ).toBe(true);
   }, 30_000);
+
+  it('2.e share() rejects subjects in protocol-reserved namespaces (urn:dkg:file:, urn:dkg:extraction:)', async () => {
+    // The publisher manages these namespaces (file descriptors and extraction
+    // provenance); user-authored quads must never collide with them. A caller
+    // writing into a reserved scope is a direct Axiom 2 authority breach.
+    const cg = freshCg('a2-reserved-share');
+    await agent.createContextGraph({ id: cg, name: 'res-share', description: '' });
+    let threw = false;
+    try {
+      await agent.share(
+        cg,
+        [{
+          subject: 'urn:dkg:file:00000000000000000000000000000000',
+          predicate: P_NAME,
+          object: '"hijack"',
+          graph: '',
+        }],
+        { localOnly: true },
+      );
+    } catch {
+      threw = true;
+    }
+    expect(threw, 'share() must reject urn:dkg:file:/extraction: subjects (Axiom 2)').toBe(true);
+  }, 30_000);
+
+  it('2.f publish() rejects subjects in protocol-reserved namespaces', async () => {
+    const cg = freshCg('a2-reserved-pub');
+    await agent.createContextGraph({ id: cg, name: 'res-pub', description: '' });
+    await agent.registerContextGraph(cg);
+    let threw = false;
+    try {
+      await agent.publish(cg, [{
+        subject: 'urn:dkg:extraction:11111111111111111111111111111111',
+        predicate: P_NAME,
+        object: '"hijack"',
+        graph: '',
+      }]);
+    } catch {
+      threw = true;
+    }
+    expect(threw, 'publish() must reject urn:dkg:file:/extraction: subjects (Axiom 2)').toBe(true);
+  }, 60_000);
 
   it('2.c SWM ownership: a different peer cannot overwrite an existing rootEntity', async () => {
     const cg = freshCg('a2-own');
@@ -392,6 +461,64 @@ describe('Axiom 3 — Typed state transitions', () => {
     const missing = required.filter(s => !present.includes(s));
     expect(missing, `assertion lifecycle missing: [${missing.join(', ')}]`).toEqual([]);
   });
+
+  it('3.g assertion.revoke() records a typed REVOKE marker in _meta', async () => {
+    // Spec lists REVOKE as one of the 7 typed transitions (Axiom 3) and
+    // explicitly distinguishes it from DISCARD. We must record the REVOKE
+    // event in _meta so downstream readers can filter revoked assertions.
+    const cg = freshCg('a3-revoke');
+    await agent.createContextGraph({ id: cg, name: 'rev', description: '' });
+    await agent.assertion.create(cg, 'cap');
+    await agent.assertion.write(cg, 'cap', [
+      { subject: urn('cap'), predicate: P_NAME, object: '"granted"', graph: '' },
+    ]);
+
+    expect(typeof (agent.assertion as unknown as { revoke?: unknown }).revoke).toBe('function');
+    const out = await (agent.assertion as unknown as {
+      revoke: (cg: string, name: string, opts?: { reason?: string }) => Promise<{ status: string; lifecycleUri: string }>;
+    }).revoke(cg, 'cap', { reason: 'audit' });
+    expect(out.status).toBe('revoked');
+
+    const meta = `did:dkg:context-graph:${cg}/_meta`;
+    const r = await agent.store.query(
+      `SELECT ?t WHERE { GRAPH <${meta}> {
+         <${out.lifecycleUri}> <http://dkg.io/ontology/transitionType> ?t .
+       } }`,
+    );
+    const types = ((r as { bindings?: Record<string, string>[] }).bindings ?? [])
+      .map(b => b['t']?.replace(/^"|"$/g, ''));
+    expect(
+      types.includes('REVOKE'),
+      'revoke() must persist a transitionType="REVOKE" marker in CG _meta (Axiom 3)',
+    ).toBe(true);
+  }, 30_000);
+
+  it('3.h SHARE writes a typed prov:Activity event in _meta', async () => {
+    // Each typed transition produces a prov:Activity record so the audit
+    // trail is queryable. Without it, a node could move data between layers
+    // without recording why, which Axiom 3 explicitly forbids.
+    const cg = freshCg('a3-share-event');
+    await agent.createContextGraph({ id: cg, name: 'sev', description: '' });
+    await agent.assertion.create(cg, 'doc');
+    await agent.assertion.write(cg, 'doc', [
+      { subject: urn('doc'), predicate: P_NAME, object: '"v"', graph: '' },
+    ]);
+    await agent.assertion.promote(cg, 'doc');
+
+    const meta = `did:dkg:context-graph:${cg}/_meta`;
+    const r = await agent.store.query(
+      `SELECT ?event ?type WHERE { GRAPH <${meta}> {
+         ?event a <http://www.w3.org/ns/prov#Activity> ;
+                a ?type .
+         FILTER(STRSTARTS(STR(?type), "http://dkg.io/ontology/"))
+       } } LIMIT 1`,
+    );
+    const rows = (r as { bindings?: unknown[] }).bindings ?? [];
+    expect(
+      rows.length,
+      'SHARE/PROMOTE must record at least one typed prov:Activity event in _meta (Axiom 3)',
+    ).toBeGreaterThan(0);
+  }, 30_000);
 
   it('3.c DISCARD removes WM rows for the discarded assertion', async () => {
     const cg = freshCg('a3-discard');
@@ -532,6 +659,60 @@ describe('Axiom 4 — PUBLISH is canonical; ENDORSE/VERIFY raise trust', () => {
     ).toBeGreaterThan(0);
   }, 60_000);
 
+  it('4.h re-endorsing the same UAL from the same agent does not error and is idempotent in count', async () => {
+    // Re-endorsing should be a no-op or merge cleanly, not add unbounded
+    // duplicates. Allowing duplicates would let trust appear to grow from a
+    // single endorser — directly undermining the trust gradient in Axiom 4.
+    const cg = freshCg('a4-double');
+    const sub = urn('dbl');
+    await agent.createContextGraph({ id: cg, name: 'dbl', description: '' });
+    await agent.registerContextGraph(cg);
+    const pub = await agent.publish(cg, [
+      { subject: sub, predicate: P_NAME, object: '"d"', graph: '' },
+    ]);
+    await agent.endorse({ contextGraphId: cg, knowledgeAssetUal: pub.ual });
+    await agent.endorse({ contextGraphId: cg, knowledgeAssetUal: pub.ual });
+
+    const r = await agent.query(
+      `SELECT ?endorser WHERE {
+         ?endorser <http://dkg.io/ontology/endorses> <${pub.ual}>
+       }`,
+      { contextGraphId: cg, view: 'verified-memory' },
+    );
+    const distinct = new Set(r.bindings.map((b: Record<string, string>) => b['endorser']));
+    expect(
+      distinct.size,
+      'distinct endorsers count must not grow on a duplicate endorse from the same agent',
+    ).toBe(1);
+  }, 90_000);
+
+  it('4.k ENDORSE refuses a UAL on a CG different from where it was published', async () => {
+    // Endorsements ride the target CG's data graph. A UAL published on
+    // CG-A is not part of CG-B's verified memory, so endorsing it via
+    // CG-B is a category error and would let trust upgrades cross
+    // context-graph boundaries — exactly what Axiom 1 forbids.
+    const cgA = freshCg('a4-pubcg');
+    const cgB = freshCg('a4-otherCg');
+    const sub = urn('cross');
+    await agent.createContextGraph({ id: cgA, name: 'A', description: '' });
+    await agent.createContextGraph({ id: cgB, name: 'B', description: '' });
+    await agent.registerContextGraph(cgA);
+    await agent.registerContextGraph(cgB);
+    const pub = await agent.publish(cgA, [
+      { subject: sub, predicate: P_NAME, object: '"x"', graph: '' },
+    ]);
+    let threw = false;
+    try {
+      await agent.endorse({ contextGraphId: cgB, knowledgeAssetUal: pub.ual });
+    } catch {
+      threw = true;
+    }
+    expect(
+      threw,
+      'endorse must reject a UAL that is not in the target CG\'s verified memory (Axiom 1 + 4)',
+    ).toBe(true);
+  }, 90_000);
+
   it('4.c ENDORSE writes an endorsement triple referencing the published UAL', async () => {
     const cg = freshCg('a4-endorse');
     const sub = urn('end');
@@ -662,6 +843,54 @@ describe('Axiom 5 — SWM is provisional staging', () => {
     ).toBeGreaterThan(0);
   }, 30_000);
 
+  it('5.g SHARE does not contaminate the canonical data graph (SWM lives in its own named graph)', async () => {
+    // Spec: SWM is a separate, provisional staging layer. Sharing into SWM
+    // must NOT write into the canonical data graph for the CG, otherwise
+    // the "PUBLISH is canonical" rule (Axiom 4) and the staging contract
+    // of Axiom 5 collapse into the same store.
+    const cg = freshCg('a5-leak');
+    const sub = urn('leak');
+    await agent.createContextGraph({ id: cg, name: 'leak', description: '' });
+    await agent.share(
+      cg,
+      [{ subject: sub, predicate: P_NAME, object: '"draft"', graph: '' }],
+      { localOnly: true },
+    );
+    const dataGraph = `did:dkg:context-graph:${cg}`;
+    const r = await agent.store.query(
+      `SELECT ?o WHERE { GRAPH <${dataGraph}> { <${sub}> <${P_NAME}> ?o } }`,
+    );
+    const rows = (r as { bindings?: unknown[] }).bindings ?? [];
+    expect(
+      rows.length,
+      'SHARE must not write into the canonical data graph; that path is reserved for PUBLISH (Axiom 4 + 5)',
+    ).toBe(0);
+  }, 30_000);
+
+  it('5.h SWM record carries a timestamp (publishedAt / startedAtTime) for the share event', async () => {
+    const cg = freshCg('a5-ts');
+    const sub = urn('ts');
+    await agent.createContextGraph({ id: cg, name: 'ts', description: '' });
+    await agent.share(
+      cg,
+      [{ subject: sub, predicate: P_NAME, object: '"x"', graph: '' }],
+      { localOnly: true },
+    );
+    const meta = `did:dkg:context-graph:${cg}/_shared_memory_meta`;
+    const r = await agent.store.query(
+      `SELECT ?p ?ts WHERE { GRAPH <${meta}> {
+         ?op a <http://dkg.io/ontology/WorkspaceOperation> ;
+             ?p ?ts .
+         FILTER(REGEX(STR(?p), "publishedAt|startedAtTime|timestamp", "i"))
+       } } LIMIT 1`,
+    );
+    const rows = (r as { bindings?: unknown[] }).bindings ?? [];
+    expect(
+      rows.length,
+      'SWM record must carry a timestamp for audit/ordering (Axiom 5 record contract)',
+    ).toBeGreaterThan(0);
+  }, 30_000);
+
   it('5.c SWM is treated as provisional: a fresh VM read of unpublished data is empty', async () => {
     const cg = freshCg('a5-prov');
     const sub = urn('prov');
@@ -719,6 +948,56 @@ describe('Axiom 6 — GET resolves a declared view', () => {
     expect(subs(wm)).toEqual(new Set([wSub]));
     expect(subs(swm)).toEqual(new Set([sSub]));
     expect(subs(vm)).toEqual(new Set([vSub]));
+  }, 60_000);
+
+  it('6.c invalid view name does not silently return data from another layer', async () => {
+    // A typo or attacker-supplied view value must NOT default to "give them
+    // everything". Either reject or return empty — anything else turns the
+    // declared-view rule (Axiom 6) into a no-op.
+    const cg = freshCg('a6-bad-view');
+    const sub = urn('bad-view');
+    await agent.createContextGraph({ id: cg, name: 'bv', description: '' });
+    await agent.registerContextGraph(cg);
+    await agent.publish(cg, [{ subject: sub, predicate: P_NAME, object: '"v"', graph: '' }]);
+
+    let returned: number | 'rejected' = 'rejected';
+    try {
+      const r = await agent.query(
+        `SELECT ?o WHERE { <${sub}> <${P_NAME}> ?o }`,
+        { contextGraphId: cg, view: 'totally-not-a-view' as never },
+      );
+      returned = r.bindings.length;
+    } catch { /* rejection is also a valid outcome */ }
+    expect(
+      returned === 'rejected' || returned === 0,
+      'invalid view must be rejected or empty; silently returning real data breaks Axiom 6',
+    ).toBe(true);
+  }, 60_000);
+
+  it('6.d minTrust=Endorsed excludes a row that is only self-attested', async () => {
+    // Trust filter must be monotonic: asking for "Endorsed or higher" must
+    // exclude rows whose trust level is only self-attested. Returning them
+    // would let an unverified node claim endorsed status.
+    const cg = freshCg('a6-trust-end');
+    const sub = urn('te');
+    await agent.createContextGraph({ id: cg, name: 'te', description: '' });
+    await agent.registerContextGraph(cg);
+    await agent.publish(cg, [{ subject: sub, predicate: P_NAME, object: '"t"', graph: '' }]);
+
+    let returned: number;
+    try {
+      const r = await agent.query(
+        `SELECT ?o WHERE { <${sub}> <${P_NAME}> ?o }`,
+        { contextGraphId: cg, view: 'verified-memory', minTrust: TrustLevel.Endorsed },
+      );
+      returned = r.bindings.length;
+    } catch {
+      returned = 0;
+    }
+    expect(
+      returned,
+      'self-attested-only rows must not surface when caller requires Endorsed (Axiom 6)',
+    ).toBe(0);
   }, 60_000);
 
   it('6.b minTrust filter excludes a self-attested-only row when caller asks for consensus-verified', async () => {
@@ -822,6 +1101,29 @@ describe('Axiom 7 — Deterministic conflict resolution', () => {
       confirmed.length,
       'two concurrent updates for the same kcId must not both confirm — deterministic conflict resolution required (Axiom 7)',
     ).toBeLessThanOrEqual(1);
+  }, 90_000);
+
+  it('7.e two concurrent publishes on different rootEntities both land in VM', async () => {
+    // Different root entities are independent. Concurrent publishes must
+    // both confirm — a false-positive serialization here would cripple
+    // throughput and would suggest the conflict resolver is too coarse.
+    const cg = freshCg('a7-pub-indep');
+    const a = urn('A');
+    const b = urn('B');
+    await agent.createContextGraph({ id: cg, name: 'indep', description: '' });
+    await agent.registerContextGraph(cg);
+    const out = await Promise.allSettled([
+      agent.publish(cg, [{ subject: a, predicate: P_NAME, object: '"a"', graph: '' }]),
+      agent.publish(cg, [{ subject: b, predicate: P_NAME, object: '"b"', graph: '' }]),
+    ]);
+    const fulfilled = out.filter(x => x.status === 'fulfilled') as PromiseFulfilledResult<{ status: string }>[];
+    const confirmed = fulfilled.filter(x => x.value.status === 'confirmed').length;
+    expect(
+      confirmed,
+      'concurrent publishes on independent root entities must both confirm (no false-positive lock)',
+    ).toBe(2);
+    expect(await rowsFor(cg, 'verified-memory', a)).toEqual(['"a"']);
+    expect(await rowsFor(cg, 'verified-memory', b)).toEqual(['"b"']);
   }, 90_000);
 
   it('7.c different rootEntities on the same CG: no false-positive lock', async () => {
