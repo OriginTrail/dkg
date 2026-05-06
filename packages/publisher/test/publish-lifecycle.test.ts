@@ -161,8 +161,9 @@ describe('Publish lifecycle (aligned with diagram)', () => {
     });
 
     const actualHex = Buffer.from(result.merkleRoot).toString('hex');
+    // Lock-in: flat KC merkle over user public triples only; SelfAttested trust is stored locally after root is fixed.
     const goldenHex =
-      '70cc7f02b2f8b298d8fa9cf1e0ca5566071edae54df05cf709e009153faf24e2';
+      'd0d2a43d52a4925eabf280043ac3fa21043d7da90f9813fb22fecfc038d3da97';
     expect(actualHex).toBe(goldenHex);
   });
 

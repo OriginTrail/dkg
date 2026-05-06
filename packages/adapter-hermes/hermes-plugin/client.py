@@ -423,7 +423,12 @@ class DKGClient:
                 return {"success": False, "error": "Refusing to import credentials, wallet, or DKG private state files."}
             if path.stat().st_size > _MAX_IMPORT_FILE_BYTES:
                 return {"success": False, "error": "File is too large to import through the Hermes DKG tool."}
-            guessed_type = content_type or mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+            guessed_type = content_type or mimetypes.guess_type(str(path))[0]
+            if not guessed_type:
+                suf = path.suffix.lower()
+                if suf in (".md", ".markdown"):
+                    guessed_type = "text/markdown"
+            guessed_type = guessed_type or "application/octet-stream"
             data = {"contextGraphId": context_graph_id}
             if ontology_ref:
                 data["ontologyRef"] = ontology_ref

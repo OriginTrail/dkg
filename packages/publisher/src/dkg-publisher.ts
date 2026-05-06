@@ -1414,7 +1414,6 @@ export class DKGPublisher implements Publisher {
 
     onPhase?.('prepare:partition', 'start');
     const kaMap = autoPartition(quads);
-    stampKaMapWithSelfAttestedTrust(kaMap);
     onPhase?.('prepare:partition', 'end');
 
     const manifestEntries: KAManifestEntry[] = [];
@@ -1450,7 +1449,7 @@ export class DKGPublisher implements Publisher {
       tokenCounter++;
     }
 
-    const allSkolemizedQuads = [...kaMap.values()].flat();
+    let allSkolemizedQuads = [...kaMap.values()].flat();
     onPhase?.('prepare:manifest', 'end');
 
     onPhase?.('prepare:validate', 'start');
@@ -1466,12 +1465,23 @@ export class DKGPublisher implements Publisher {
     const privateRoots = manifestEntries
       .map(m => m.privateMerkleRoot)
       .filter((r): r is Uint8Array => r != null);
-    const kcMerkleRoot = computeFlatKCRoot(allSkolemizedQuads, privateRoots);
-    const kcMerkleLeafCount = computeFlatKCMerkleLeafCountV10(allSkolemizedQuads, privateRoots);
+    // Merkle commitment MUST match peers' SWM snapshots from pre-publish gossip.
+    // SelfAttested trust literals are stamped only for local VM filtering after the root is fixed.
+    const merklePublicTripleCount = allSkolemizedQuads.length;
+    // Snapshot before SelfAttested trust triples: KC merkle, ACK byte size, staging
+    // inline quads, and PublishResult.publicQuads MUST match this set (peers verify SWM).
+    const merkleFlatQuads = [...allSkolemizedQuads];
+    const kcMerkleRoot = computeFlatKCRoot(merkleFlatQuads, privateRoots);
+    const kcMerkleLeafCount = computeFlatKCMerkleLeafCountV10(merkleFlatQuads, privateRoots);
     if (kcMerkleLeafCount > 0xffffffff) {
       throw new Error(`V10 merkleLeafCount exceeds uint32: ${kcMerkleLeafCount}`);
     }
-    this.log.info(ctx, `Computed kcMerkleRoot (flat) over ${allSkolemizedQuads.length} triple hashes + ${privateRoots.length} private root(s), leafCount=${kcMerkleLeafCount}`);
+    stampKaMapWithSelfAttestedTrust(kaMap);
+    for (const meta of kaMetadata) {
+      meta.publicTripleCount += 1;
+    }
+    allSkolemizedQuads = [...kaMap.values()].flat();
+    this.log.info(ctx, `Computed kcMerkleRoot (flat) over ${merklePublicTripleCount} triple hashes + ${privateRoots.length} private root(s), leafCount=${kcMerkleLeafCount}`);
     const kaCount = manifestEntries.length;
     onPhase?.('prepare:merkle', 'end');
 
@@ -1497,7 +1507,7 @@ export class DKGPublisher implements Publisher {
     onPhase?.('store', 'end');
 
     // Compute publicByteSize early — needed for signature collection
-    const nquadsStr = allSkolemizedQuads
+    const nquadsStr = merkleFlatQuads
       .map(
         (q) =>
           `<${q.subject}> <${q.predicate}> ${q.object.startsWith('"') ? q.object : `<${q.object}>`} <${q.graph}> .`,
@@ -1982,7 +1992,7 @@ export class DKGPublisher implements Publisher {
       kaManifest: manifestEntries,
       status,
       onChainResult,
-      publicQuads: allSkolemizedQuads,
+      publicQuads: merkleFlatQuads,
       v10ACKs,
       v10Origin: usedV10Path,
       subGraphName: options.subGraphName,
@@ -2056,7 +2066,6 @@ export class DKGPublisher implements Publisher {
     onPhase?.('prepare', 'start');
     onPhase?.('prepare:partition', 'start');
     const kaMap = autoPartition(quads);
-    stampKaMapWithSelfAttestedTrust(kaMap);
     onPhase?.('prepare:partition', 'end');
 
     onPhase?.('prepare:manifest', 'start');
@@ -2081,15 +2090,18 @@ export class DKGPublisher implements Publisher {
     onPhase?.('prepare:manifest', 'end');
 
     onPhase?.('prepare:merkle', 'start');
-    const allSkolemizedQuads = [...kaMap.values()].flat();
+    let allSkolemizedQuads = [...kaMap.values()].flat();
     const updatePrivateRoots = manifestEntries
       .map(m => m.privateMerkleRoot)
       .filter((r): r is Uint8Array => r != null);
-    const kcMerkleRoot = computeFlatKCRoot(allSkolemizedQuads, updatePrivateRoots);
-    const kcMerkleLeafCount = computeFlatKCMerkleLeafCountV10(allSkolemizedQuads, updatePrivateRoots);
+    const merkleFlatQuads = [...allSkolemizedQuads];
+    const kcMerkleRoot = computeFlatKCRoot(merkleFlatQuads, updatePrivateRoots);
+    const kcMerkleLeafCount = computeFlatKCMerkleLeafCountV10(merkleFlatQuads, updatePrivateRoots);
     if (kcMerkleLeafCount > 0xffffffff) {
       throw new Error(`V10 merkleLeafCount exceeds uint32: ${kcMerkleLeafCount}`);
     }
+    stampKaMapWithSelfAttestedTrust(kaMap);
+    allSkolemizedQuads = [...kaMap.values()].flat();
     onPhase?.('prepare:merkle', 'end');
     onPhase?.('prepare', 'end');
 
@@ -2131,7 +2143,7 @@ export class DKGPublisher implements Publisher {
         merkleRoot: kcMerkleRoot,
         kaManifest: manifestEntries,
         status: 'tentative',
-        publicQuads: allSkolemizedQuads,
+        publicQuads: merkleFlatQuads,
       };
       this.eventBus.emit(DKGEvent.KA_UPDATED, result);
       return result;
@@ -2143,7 +2155,7 @@ export class DKGPublisher implements Publisher {
     // Compute real serialized byte size — must match the publish path serializer.
     // Done BEFORE `chain:writeahead:start` so any error during serialization
     // does not leave an unmatched write-ahead boundary.
-    const updateNquadsStr = allSkolemizedQuads
+    const updateNquadsStr = merkleFlatQuads
       .map(
         (q: { subject: string; predicate: string; object: string; graph?: string }) =>
           `<${q.subject}> <${q.predicate}> ${q.object.startsWith('"') ? q.object : `<${q.object}>`} <${q.graph || ''}> .`,
@@ -2208,7 +2220,7 @@ export class DKGPublisher implements Publisher {
               merkleRoot: kcMerkleRoot,
               kaManifest: manifestEntries,
               status: 'failed',
-              publicQuads: allSkolemizedQuads,
+              publicQuads: merkleFlatQuads,
             };
             txResult = { success: false, hash: '' };
           } else if (typeof this.chain.updateKnowledgeAssets === 'function') {
@@ -2297,7 +2309,7 @@ export class DKGPublisher implements Publisher {
         merkleRoot: kcMerkleRoot,
         kaManifest: manifestEntries,
         status: 'failed',
-        publicQuads: allSkolemizedQuads,
+        publicQuads: merkleFlatQuads,
       };
     }
     let effectivePublisherAddress = coercePublisherAddress(txResult.publisherAddress);
@@ -2329,7 +2341,7 @@ export class DKGPublisher implements Publisher {
         merkleRoot: kcMerkleRoot,
         kaManifest: manifestEntries,
         status: 'tentative',
-        publicQuads: allSkolemizedQuads,
+        publicQuads: merkleFlatQuads,
       };
       this.eventBus.emit(DKGEvent.KA_UPDATED, result);
       return result;
@@ -2343,7 +2355,7 @@ export class DKGPublisher implements Publisher {
       merkleRoot: kcMerkleRoot,
       kaManifest: manifestEntries,
       status: 'confirmed',
-      publicQuads: allSkolemizedQuads,
+      publicQuads: merkleFlatQuads,
       onChainResult: {
         batchId: kcId,
         txHash: txResult.hash,

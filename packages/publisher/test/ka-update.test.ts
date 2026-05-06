@@ -50,16 +50,16 @@ function buildGossipMessage(opts: {
   txHash: string;
   blockNumber: number;
 }) {
-  const stamped = vmPublishPublicQuads(opts.quads);
+  const merkleQuads = vmPublishPublicQuads(opts.quads);
   const privateRoots = opts.manifest
     .map((m) => m.privateMerkleRoot)
     .filter((r): r is Uint8Array => r != null && r.length > 0)
     .map((r) => new Uint8Array(r));
-  const flatRoot = computeFlatKCRoot(stamped, privateRoots);
+  const flatRoot = computeFlatKCRoot(merkleQuads, privateRoots);
   return encodeKAUpdateRequest({
     paranetId: opts.contextGraphId,
     batchId: opts.batchId,
-    nquads: quadsToNQuads(stamped, `did:dkg:context-graph:${opts.contextGraphId}`),
+    nquads: quadsToNQuads(merkleQuads, `did:dkg:context-graph:${opts.contextGraphId}`),
     manifest: opts.manifest,
     publisherPeerId: opts.publisherPeerId,
     publisherAddress: opts.publisherAddress,

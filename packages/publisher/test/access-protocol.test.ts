@@ -141,11 +141,20 @@ describe('Access Protocol', () => {
     expect(result.kaManifest[0].privateTripleCount).toBe(2);
     expect(result.kaManifest[0].privateMerkleRoot).toBeDefined();
     expect(result.kaManifest[0].privateMerkleRoot).toHaveLength(32);
+    // PublishResult.publicQuads align with the anchored KC merkle (pre trust stamp); trustLevel exists only in local VM store.
     expect(result.publicQuads?.map((quad) => quad.predicate).sort()).toEqual([
-      'http://dkg.io/ontology/trustLevel',
       'http://schema.org/description',
       'http://schema.org/name',
     ]);
+    const trustInStore = await storeA.query(`
+      SELECT ?s WHERE {
+        GRAPH <${GRAPH}> {
+          ?s <http://dkg.io/ontology/trustLevel> ?o .
+        }
+      }
+    `);
+    expect(trustInStore.type).toBe('bindings');
+    expect(trustInStore.type === 'bindings' ? trustInStore.bindings.length : 0).toBeGreaterThan(0);
 
     const publicResult = await storeA.query(`
       SELECT ?s ?p ?o WHERE {
