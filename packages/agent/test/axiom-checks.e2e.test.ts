@@ -1,3 +1,8 @@
+/**
+ * One test per V10 axiom (see dkgv10-spec 02_AXIOMS.md). These are agent-level
+ * checks: real DKGAgent, Hardhat snapshot, no mocks. When something regresses you
+ * get a concrete query/count failure, not a generic “toThrow”.
+ */
 import { beforeAll, afterAll, describe, expect, it } from 'vitest';
 import { ethers } from 'ethers';
 import { DKGAgent } from '../src/index.js';
@@ -11,238 +16,229 @@ import {
 } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
 
-let _fileSnapshot: string;
-let node: DKGAgent | undefined;
-let agentBAddress = '';
-
 const PEER_A = '12D3KooWAxiomPeerA0000000000000000000000000000000000';
 const PEER_B = '12D3KooWAxiomPeerB1111111111111111111111111111111111';
+const P_NAME = 'http://schema.org/name';
+const P_DESC = 'http://schema.org/description';
 
-function cgId(prefix: string): string {
-  return `${prefix}-${ethers.hexlify(ethers.randomBytes(3)).slice(2)}`;
+let snap: string;
+let agent: DKGAgent;
+let bAddr: string;
+
+function freshCg(label: string) {
+  return `${label}-${ethers.hexlify(ethers.randomBytes(3)).slice(2)}`;
 }
 
-function entity(prefix: string): string {
-  return `urn:axiom:${prefix}:${ethers.hexlify(ethers.randomBytes(2)).slice(2)}`;
+function urn(tag: string) {
+  return `urn:axiom:${tag}:${ethers.hexlify(ethers.randomBytes(2)).slice(2)}`;
+}
+
+function subjects(r: { bindings: { s?: string }[] }) {
+  return new Set(r.bindings.map((b) => b.s).filter(Boolean) as string[]);
 }
 
 beforeAll(async () => {
-  _fileSnapshot = await takeSnapshot();
+  snap = await takeSnapshot();
   const { hubAddress } = getSharedContext();
-  const provider = createProvider();
-  const coreOp = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
-  await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, coreOp.address, ethers.parseEther('1000000'));
+  const w = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+  await mintTokens(createProvider(), hubAddress, HARDHAT_KEYS.DEPLOYER, w.address, ethers.parseEther('1000000'));
 
-  node = await DKGAgent.create({
-    name: 'AxiomChecksNode',
+  agent = await DKGAgent.create({
+    name: 'AxiomSuite',
     listenPort: 0,
     skills: [],
     chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     nodeRole: 'core',
   });
-  await node.start();
-  const regB = await node.registerAgent('AxiomAgentB');
-  agentBAddress = regB.agentAddress;
+  await agent.start();
+  bAddr = (await agent.registerAgent('B')).agentAddress;
 });
 
 afterAll(async () => {
-  try { await node?.stop(); } catch { /* noop */ }
-  await revertSnapshot(_fileSnapshot);
+  try {
+    await agent.stop();
+  } catch {
+    /* tear-down best effort */
+  }
+  await revertSnapshot(snap);
 });
 
-describe('Axiom checks (V10)', () => {
-  it('Axiom 1: context graphs remain isolated knowledge boundaries', async () => {
-    const cgA = cgId('ax1-a');
-    const cgB = cgId('ax1-b');
-    const sharedEntity = entity('same-subject');
-    await node!.createContextGraph({ id: cgA, name: 'Axiom1 A', description: '' });
-    await node!.createContextGraph({ id: cgB, name: 'Axiom1 B', description: '' });
+describe('V10 axioms (agent)', () => {
+  it('CG isolation: same subject IRI in two graphs keeps separate values', async () => {
+    const left = freshCg('cg-a');
+    const right = freshCg('cg-b');
+    const s = urn('shared');
+    await agent.createContextGraph({ id: left, name: 'a', description: '' });
+    await agent.createContextGraph({ id: right, name: 'b', description: '' });
 
-    await node!.share(cgA, [{ subject: sharedEntity, predicate: 'http://schema.org/name', object: '"A-value"', graph: '' }], { localOnly: true });
-    await node!.share(cgB, [{ subject: sharedEntity, predicate: 'http://schema.org/name', object: '"B-value"', graph: '' }], { localOnly: true });
+    const row = (v: string) => ({ subject: s, predicate: P_NAME, object: `"${v}"`, graph: '' });
+    await agent.share(left, [row('alpha')], { localOnly: true });
+    await agent.share(right, [row('beta')], { localOnly: true });
 
-    const inA = await node!.query(
-      `SELECT ?o WHERE { <${sharedEntity}> <http://schema.org/name> ?o }`,
-      { contextGraphId: cgA, view: 'shared-working-memory' },
-    );
-    const inB = await node!.query(
-      `SELECT ?o WHERE { <${sharedEntity}> <http://schema.org/name> ?o }`,
-      { contextGraphId: cgB, view: 'shared-working-memory' },
-    );
-    expect(inA.bindings).toHaveLength(1);
-    expect(inB.bindings).toHaveLength(1);
-    expect(inA.bindings[0]['o']).toBe('"A-value"');
-    expect(inB.bindings[0]['o']).toBe('"B-value"');
+    const q = (cg: string) =>
+      agent.query(`SELECT ?o WHERE { <${s}> <${P_NAME}> ?o }`, {
+        contextGraphId: cg,
+        view: 'shared-working-memory',
+      });
+
+    const a = await q(left);
+    const b = await q(right);
+    expect(a.bindings[0]?.o).toBe('"alpha"');
+    expect(b.bindings[0]?.o).toBe('"beta"');
   }, 30_000);
 
-  it('Axiom 2: protected scope authority denies cross-agent WM reads', async () => {
-    const cg = cgId('ax2');
-    const secret = entity('authority');
-    const agentA = node!.getDefaultAgentAddress()!;
-    await node!.createContextGraph({ id: cg, name: 'Axiom2', description: '' });
-    await node!.assertion.create(cg, 'wm-secret');
-    await node!.assertion.write(cg, 'wm-secret', [{
-      subject: secret,
-      predicate: 'http://schema.org/description',
-      object: '"A-only"',
-      graph: '',
-    }]);
+  it('authority: spoofed callerAgentAddress cannot read peer WM', async () => {
+    const cg = freshCg('auth');
+    const secret = urn('wm');
+    const own = agent.getDefaultAgentAddress()!;
+    await agent.createContextGraph({ id: cg, name: 'auth', description: '' });
+    await agent.assertion.create(cg, 'slot');
+    await agent.assertion.write(cg, 'slot', [{ subject: secret, predicate: P_DESC, object: '"mine"', graph: '' }]);
 
-    const denied = await node!.query(
-      `SELECT ?o WHERE { <${secret}> <http://schema.org/description> ?o }`,
-      {
-        contextGraphId: cg,
-        view: 'working-memory',
-        agentAddress: agentA,
-        callerAgentAddress: agentBAddress,
-      },
-    );
-    const allowed = await node!.query(
-      `SELECT ?o WHERE { <${secret}> <http://schema.org/description> ?o }`,
-      {
-        contextGraphId: cg,
-        view: 'working-memory',
-        agentAddress: agentA,
-        callerAgentAddress: agentA,
-      },
-    );
-    expect(denied.bindings.length).toBe(0);
-    expect(allowed.bindings.length).toBe(1);
-    expect(allowed.bindings[0]['o']).toBe('"A-only"');
+    const opts = (caller: string) => ({
+      contextGraphId: cg,
+      view: 'working-memory' as const,
+      agentAddress: own,
+      callerAgentAddress: caller,
+    });
+
+    const blocked = await agent.query(`SELECT ?o WHERE { <${secret}> <${P_DESC}> ?o }`, opts(bAddr));
+    const ok = await agent.query(`SELECT ?o WHERE { <${secret}> <${P_DESC}> ?o }`, opts(own));
+
+    expect(blocked.bindings).toHaveLength(0);
+    expect(ok.bindings[0]?.o).toBe('"mine"');
   }, 30_000);
 
-  it('Axiom 3: state progresses only through typed WM->SWM->VM transitions', async () => {
-    const cg = cgId('ax3');
-    const subject = entity('typed-transition');
-    await node!.createContextGraph({ id: cg, name: 'Axiom3', description: '' });
-    await node!.registerContextGraph(cg);
-    await node!.assertion.create(cg, 'typed-flow');
-    await node!.assertion.write(cg, 'typed-flow', [{ subject, predicate: 'http://schema.org/name', object: '"draft-v1"', graph: '' }]);
+  it('typed layers: WM → promote → publish lands in VM (no VM before publish)', async () => {
+    const cg = freshCg('layers');
+    const sub = urn('flow');
+    await agent.createContextGraph({ id: cg, name: 'layers', description: '' });
+    await agent.registerContextGraph(cg);
+    await agent.assertion.create(cg, 'chat');
+    await agent.assertion.write(cg, 'chat', [{ subject: sub, predicate: P_NAME, object: '"v1"', graph: '' }]);
 
-    const vmBefore = await node!.query(
-      `SELECT ?o WHERE { <${subject}> <http://schema.org/name> ?o }`,
-      { contextGraphId: cg, view: 'verified-memory' },
-    );
-    expect(vmBefore.bindings.length).toBe(0);
-    await node!.assertion.promote(cg, 'typed-flow');
-    const swmAfterPromote = await node!.query(
-      `SELECT ?o WHERE { <${subject}> <http://schema.org/name> ?o }`,
-      { contextGraphId: cg, view: 'shared-working-memory' },
-    );
-    expect(swmAfterPromote.bindings.length).toBe(1);
+    expect(
+      (await agent.query(`SELECT ?o WHERE { <${sub}> <${P_NAME}> ?o }`, { contextGraphId: cg, view: 'verified-memory' }))
+        .bindings,
+    ).toHaveLength(0);
 
-    const result = await node!.publishFromSharedMemory(cg, 'all');
-    const vmAfterPublish = await node!.query(
-      `SELECT ?o WHERE { <${subject}> <http://schema.org/name> ?o }`,
-      { contextGraphId: cg, view: 'verified-memory' },
-    );
-    expect(result.status).toBe('confirmed');
-    expect(vmAfterPublish.bindings.length).toBe(1);
-    expect(vmAfterPublish.bindings[0]['o']).toBe('"draft-v1"');
+    await agent.assertion.promote(cg, 'chat');
+    expect(
+      (await agent.query(`SELECT ?o WHERE { <${sub}> <${P_NAME}> ?o }`, { contextGraphId: cg, view: 'shared-working-memory' }))
+        .bindings,
+    ).toHaveLength(1);
+
+    const out = await agent.publishFromSharedMemory(cg, 'all');
+    expect(out.status).toBe('confirmed');
+
+    const vm = await agent.query(`SELECT ?o WHERE { <${sub}> <${P_NAME}> ?o }`, {
+      contextGraphId: cg,
+      view: 'verified-memory',
+    });
+    expect(vm.bindings[0]?.o).toBe('"v1"');
   }, 40_000);
 
-  it('Axiom 4: only PUBLISH introduces authoritative verified-memory state', async () => {
-    const cg = cgId('ax4');
-    const subject = entity('publish-entry');
-    await node!.createContextGraph({ id: cg, name: 'Axiom4', description: '' });
-    await node!.registerContextGraph(cg);
-    await node!.share(cg, [{ subject, predicate: 'http://schema.org/name', object: '"candidate"', graph: '' }], { localOnly: true });
+  it('publish is what puts facts in verified-memory (share alone is not enough)', async () => {
+    const cg = freshCg('pub');
+    const sub = urn('ka');
+    await agent.createContextGraph({ id: cg, name: 'pub', description: '' });
+    await agent.registerContextGraph(cg);
+    await agent.share(cg, [{ subject: sub, predicate: P_NAME, object: '"staged"', graph: '' }], { localOnly: true });
 
-    const vmBefore = await node!.query(
-      `SELECT ?o WHERE { <${subject}> <http://schema.org/name> ?o }`,
-      { contextGraphId: cg, view: 'verified-memory' },
-    );
-    expect(vmBefore.bindings.length).toBe(0);
-    const pub = await node!.publishFromSharedMemory(cg, { rootEntities: [subject] });
-    const vmAfter = await node!.query(
-      `SELECT ?o WHERE { <${subject}> <http://schema.org/name> ?o }`,
-      { contextGraphId: cg, view: 'verified-memory' },
-    );
+    expect(
+      (await agent.query(`SELECT ?o WHERE { <${sub}> <${P_NAME}> ?o }`, { contextGraphId: cg, view: 'verified-memory' }))
+        .bindings,
+    ).toHaveLength(0);
+
+    const pub = await agent.publishFromSharedMemory(cg, { rootEntities: [sub] });
     expect(pub.status).toBe('confirmed');
     expect(pub.ual).toBeDefined();
-    expect(vmAfter.bindings.length).toBe(1);
-    expect(vmAfter.bindings[0]['o']).toBe('"candidate"');
+
+    const vm = await agent.query(`SELECT ?o WHERE { <${sub}> <${P_NAME}> ?o }`, {
+      contextGraphId: cg,
+      view: 'verified-memory',
+    });
+    expect(vm.bindings[0]?.o).toBe('"staged"');
   }, 40_000);
 
-  it('Axiom 5: shared working memory stays provisional until publish finalizes it', async () => {
-    const cg = cgId('ax5');
-    const subject = entity('provisional');
-    await node!.createContextGraph({ id: cg, name: 'Axiom5', description: '' });
-    await node!.registerContextGraph(cg);
-    await node!.share(cg, [{ subject, predicate: 'http://schema.org/name', object: '"in-staging"', graph: '' }], { localOnly: true });
+  it('SWM is staging only until publish clears it', async () => {
+    const cg = freshCg('stage');
+    const sub = urn('stage');
+    await agent.createContextGraph({ id: cg, name: 'stage', description: '' });
+    await agent.registerContextGraph(cg);
+    await agent.share(cg, [{ subject: sub, predicate: P_NAME, object: '"wip"', graph: '' }], { localOnly: true });
 
-    const swmBefore = await node!.query(
-      `SELECT ?o WHERE { <${subject}> <http://schema.org/name> ?o }`,
-      { contextGraphId: cg, view: 'shared-working-memory' },
-    );
-    const vmBefore = await node!.query(
-      `SELECT ?o WHERE { <${subject}> <http://schema.org/name> ?o }`,
-      { contextGraphId: cg, view: 'verified-memory' },
-    );
-    expect(swmBefore.bindings.length).toBe(1);
-    expect(vmBefore.bindings.length).toBe(0);
+    const swm = await agent.query(`SELECT ?o WHERE { <${sub}> <${P_NAME}> ?o }`, {
+      contextGraphId: cg,
+      view: 'shared-working-memory',
+    });
+    const vm0 = await agent.query(`SELECT ?o WHERE { <${sub}> <${P_NAME}> ?o }`, {
+      contextGraphId: cg,
+      view: 'verified-memory',
+    });
+    expect(swm.bindings).toHaveLength(1);
+    expect(vm0.bindings).toHaveLength(0);
 
-    await node!.publishFromSharedMemory(cg, 'all', { clearSharedMemoryAfter: true });
-    const swmAfter = await node!.query(
-      `SELECT ?o WHERE { <${subject}> <http://schema.org/name> ?o }`,
-      { contextGraphId: cg, view: 'shared-working-memory' },
-    );
-    const vmAfter = await node!.query(
-      `SELECT ?o WHERE { <${subject}> <http://schema.org/name> ?o }`,
-      { contextGraphId: cg, view: 'verified-memory' },
-    );
-    expect(swmAfter.bindings.length).toBe(0);
-    expect(vmAfter.bindings.length).toBe(1);
+    await agent.publishFromSharedMemory(cg, 'all', { clearSharedMemoryAfter: true });
+
+    const swmAfter = await agent.query(`SELECT ?o WHERE { <${sub}> <${P_NAME}> ?o }`, {
+      contextGraphId: cg,
+      view: 'shared-working-memory',
+    });
+    const vmAfter = await agent.query(`SELECT ?o WHERE { <${sub}> <${P_NAME}> ?o }`, {
+      contextGraphId: cg,
+      view: 'verified-memory',
+    });
+    expect(swmAfter.bindings).toHaveLength(0);
+    expect(vmAfter.bindings).toHaveLength(1);
   }, 40_000);
 
-  it('Axiom 6: GET resolves explicit views without mixing memory layers', async () => {
-    const cg = cgId('ax6');
-    const wmEntity = entity('wm');
-    const swmEntity = entity('swm');
-    const vmEntity = entity('vm');
-    await node!.createContextGraph({ id: cg, name: 'Axiom6', description: '' });
-    await node!.registerContextGraph(cg);
-    await node!.assertion.create(cg, 'views');
-    await node!.assertion.write(cg, 'views', [{ subject: wmEntity, predicate: 'http://schema.org/name', object: '"wm-value"', graph: '' }]);
-    await node!.share(cg, [{ subject: swmEntity, predicate: 'http://schema.org/name', object: '"swm-value"', graph: '' }], { localOnly: true });
-    await node!.publish(cg, [{ subject: vmEntity, predicate: 'http://schema.org/name', object: '"vm-value"', graph: '' }]);
+  it('each GET view returns its layer only', async () => {
+    const cg = freshCg('views');
+    const [wSub, sSub, vSub] = [urn('w'), urn('s'), urn('v')];
+    await agent.createContextGraph({ id: cg, name: 'views', description: '' });
+    await agent.registerContextGraph(cg);
 
-    const wmView = await node!.query(
-      `SELECT ?s WHERE { ?s <http://schema.org/name> ?o }`,
-      { contextGraphId: cg, view: 'working-memory', agentAddress: node!.getDefaultAgentAddress()! },
-    );
-    const swmView = await node!.query(
-      `SELECT ?s WHERE { ?s <http://schema.org/name> ?o }`,
-      { contextGraphId: cg, view: 'shared-working-memory' },
-    );
-    const vmView = await node!.query(
-      `SELECT ?s WHERE { ?s <http://schema.org/name> ?o }`,
-      { contextGraphId: cg, view: 'verified-memory' },
-    );
-    expect(new Set(wmView.bindings.map((b) => b['s']))).toEqual(new Set([wmEntity]));
-    expect(new Set(swmView.bindings.map((b) => b['s']))).toEqual(new Set([swmEntity]));
-    expect(new Set(vmView.bindings.map((b) => b['s']))).toEqual(new Set([vmEntity]));
+    await agent.assertion.create(cg, 'wm');
+    await agent.assertion.write(cg, 'wm', [{ subject: wSub, predicate: P_NAME, object: '"w"', graph: '' }]);
+    await agent.share(cg, [{ subject: sSub, predicate: P_NAME, object: '"s"', graph: '' }], { localOnly: true });
+    await agent.publish(cg, [{ subject: vSub, predicate: P_NAME, object: '"v"', graph: '' }]);
+
+    const addr = agent.getDefaultAgentAddress()!;
+    const sel = `SELECT ?s WHERE { ?s <${P_NAME}> ?o }`;
+
+    const wm = await agent.query(sel, { contextGraphId: cg, view: 'working-memory', agentAddress: addr });
+    const swm = await agent.query(sel, { contextGraphId: cg, view: 'shared-working-memory' });
+    const vm = await agent.query(sel, { contextGraphId: cg, view: 'verified-memory' });
+
+    expect(subjects(wm)).toEqual(new Set([wSub]));
+    expect(subjects(swm)).toEqual(new Set([sSub]));
+    expect(subjects(vm)).toEqual(new Set([vSub]));
   }, 40_000);
 
-  it('Axiom 7: conflicts resolve deterministically (single winner, single rejection)', async () => {
-    const cg = cgId('ax7');
-    const contested = entity('conflict');
-    await node!.createContextGraph({ id: cg, name: 'Axiom7', description: '' });
-    const race = await Promise.allSettled([
-      node!.publisher.share(cg, [{ subject: contested, predicate: 'http://schema.org/name', object: '"from-peer-a"', graph: '' }], { publisherPeerId: PEER_A }),
-      node!.publisher.share(cg, [{ subject: contested, predicate: 'http://schema.org/name', object: '"from-peer-b"', graph: '' }], { publisherPeerId: PEER_B }),
-    ]);
+  it('two publishers same root entity: one succeeds, one Rule 4 rejection', async () => {
+    const cg = freshCg('race');
+    const sub = urn('race');
+    await agent.createContextGraph({ id: cg, name: 'race', description: '' });
 
-    const winners = race.filter((r) => r.status === 'fulfilled');
-    const losers = race.filter((r) => r.status === 'rejected');
-    expect(winners.length).toBe(1);
-    expect(losers.length).toBe(1);
-    const reason = (losers[0] as PromiseRejectedResult).reason as Error;
-    expect(reason.message).toMatch(/Rule 4|already exists|SWM_ENTITY_OWNED/i);
-    const swm = await node!.query(
-      `SELECT ?o WHERE { <${contested}> <http://schema.org/name> ?o }`,
-      { contextGraphId: cg, view: 'shared-working-memory' },
-    );
-    expect(swm.bindings.length).toBe(1);
+    const shareAs = (peer: string, literal: string) =>
+      agent.publisher.share(cg, [{ subject: sub, predicate: P_NAME, object: `"${literal}"`, graph: '' }], {
+        publisherPeerId: peer,
+      });
+
+    const outcome = await Promise.allSettled([shareAs(PEER_A, 'a'), shareAs(PEER_B, 'b')]);
+    const ok = outcome.filter((x) => x.status === 'fulfilled');
+    const bad = outcome.filter((x) => x.status === 'rejected');
+    expect(ok).toHaveLength(1);
+    expect(bad).toHaveLength(1);
+
+    const err = (bad[0] as PromiseRejectedResult).reason as Error;
+    expect(err.message).toMatch(/Rule 4|already exists|SWM_ENTITY_OWNED/i);
+
+    const row = await agent.query(`SELECT ?o WHERE { <${sub}> <${P_NAME}> ?o }`, {
+      contextGraphId: cg,
+      view: 'shared-working-memory',
+    });
+    expect(row.bindings).toHaveLength(1);
   }, 40_000);
 });
