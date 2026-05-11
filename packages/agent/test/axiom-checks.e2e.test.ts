@@ -5048,6 +5048,46 @@ describe('Axiom 7 — Deterministic conflict resolution [gap-pass-32]', () => {
   }, 60_000);
 });
 
+describe('Axiom 4 — PUBLISH is canonical; ENDORSE/VERIFY raise trust [gap-pass-33]', () => {
+  it('4.aaa VERIFY metadata records dkg:transitionType "VERIFY" — symmetric with PUBLISH 4.e / UPDATE 4.r', async () => {
+    // Spec §3 + §4 corollary: every typed transition records its
+    // transitionType so a SPARQL filter `?ev dkg:transitionType
+    // "VERIFY"` returns ALL verification activities for an audit
+    // sweep. 4.vv pins the prov:Activity typing; this is the
+    // separate transitionType literal probe. Without this literal,
+    // an auditor scanning by transitionType would miss VERIFY
+    // entirely (the type-IRI shape is verbose; the string literal
+    // is the canonical filter key in spec §3).
+    const cg = freshCg('a4-verify-tt');
+    const sub = urn('vtt');
+    await agent.createContextGraph({ id: cg, name: 'vtt', description: '' });
+    await agent.registerContextGraph(cg);
+    const pub = await agent.publish(cg, [
+      { subject: sub, predicate: P_NAME, object: '"v"', graph: '' },
+    ]);
+    expect(pub.status).toBe('confirmed');
+    await agent.verify({
+      contextGraphId: cg,
+      verifiedMemoryId: '101',
+      batchId: pub.kcId,
+      requiredSignatures: 1,
+      timeoutMs: 30_000,
+    });
+    const r = await agent.store.query(
+      `SELECT ?tt WHERE {
+         GRAPH ?g { ?ev <http://dkg.io/ontology/transitionType> ?tt }
+         FILTER(STRSTARTS(STR(?g), "did:dkg:context-graph:${cg}/_verified_memory/"))
+       }`,
+    );
+    const tts = ((r as { bindings?: Record<string, string>[] }).bindings ?? [])
+      .map(b => String(b['tt'] ?? ''));
+    expect(
+      tts.some(t => /"VERIFY"/.test(t)),
+      `VERIFY metadata must record dkg:transitionType "VERIFY" — Axiom 3+4 corollary, symmetric with PUBLISH (4.e) and UPDATE (4.r). Found: ${JSON.stringify(tts)}`,
+    ).toBe(true);
+  }, 90_000);
+});
+
 describe('Axiom 3 — Typed state transitions [gap-pass-32 cont.]', () => {
   it('3.oo assertion.write/discard/revoke reject an empty contextGraphId (lifecycle is CG-bound)', async () => {
     // Spec §1: every assertion lifecycle row is bound to a Context
