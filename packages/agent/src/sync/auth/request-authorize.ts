@@ -22,6 +22,7 @@ interface AuthorizeSyncRequestParams {
   verifyIdentity?: (recoveredAddress: string, claimedIdentityId: bigint) => Promise<boolean>;
   getParticipants: (contextGraphId: string) => Promise<string[] | null>;
   getAllowedPeers: (contextGraphId: string) => Promise<string[] | null>;
+  getAgentGateAddresses: (contextGraphId: string) => Promise<string[] | null>;
   refreshMetaFromCurator: (contextGraphId: string) => Promise<boolean>;
   logWarn: (ctx: OperationContext, message: string) => void;
   logInfo: (ctx: OperationContext, message: string) => void;
@@ -39,6 +40,7 @@ export async function authorizePrivateSyncRequest(params: AuthorizeSyncRequestPa
     verifyIdentity,
     getParticipants,
     getAllowedPeers,
+    getAgentGateAddresses,
     refreshMetaFromCurator,
     logWarn,
     logInfo,
@@ -114,38 +116,38 @@ export async function authorizePrivateSyncRequest(params: AuthorizeSyncRequestPa
   }
 
   let participants = await getParticipants(request.contextGraphId);
-  let allowed = participants?.some((p) =>
+  let agentGateAddresses = await getAgentGateAddresses(request.contextGraphId);
+  let allowedPeers = await getAllowedPeers(request.contextGraphId);
+  const isParticipantAllowed = () => participants?.some((p) =>
     p.toLowerCase() === recoveredAddress.toLowerCase() ||
     (requesterIdentityId > 0n && p === String(requesterIdentityId)),
   ) ?? false;
-
-  if (!allowed) {
-    const allowedPeers = await getAllowedPeers(request.contextGraphId);
-    if (allowedPeers?.includes(remotePeerId)) {
-      allowed = true;
+  const isAgentGateAllowed = () => agentGateAddresses?.some((agent) =>
+    agent.toLowerCase() === recoveredAddress.toLowerCase(),
+  ) ?? false;
+  const isPeerAllowed = () => allowedPeers?.includes(remotePeerId) ?? false;
+  const resolveAllowed = () => {
+    if (agentGateAddresses !== null && allowedPeers !== null) {
+      return isPeerAllowed() && isAgentGateAllowed();
     }
-  }
+    return isParticipantAllowed() || isPeerAllowed();
+  };
+
+  let allowed = resolveAllowed();
 
   if (!allowed) {
     const refreshed = await refreshMetaFromCurator(request.contextGraphId);
     if (refreshed) {
       participants = await getParticipants(request.contextGraphId);
-      allowed = participants?.some((p) =>
-        p.toLowerCase() === recoveredAddress.toLowerCase() ||
-        p === String(requesterIdentityId),
-      ) ?? false;
-      if (!allowed) {
-        const freshPeers = await getAllowedPeers(request.contextGraphId);
-        if (freshPeers?.includes(remotePeerId)) {
-          allowed = true;
-        }
-      }
+      agentGateAddresses = await getAgentGateAddresses(request.contextGraphId);
+      allowedPeers = await getAllowedPeers(request.contextGraphId);
+      allowed = resolveAllowed();
     }
   }
 
   logInfo(
     ctx,
-    `Private sync auth for "${request.contextGraphId}": identityId=${requesterIdentityId.toString()} signer=${recoveredAddress} requesterAgentAddress=${request.requesterAgentAddress ?? 'n/a'} participantCount=${participants?.length ?? 0} allowed=${allowed}`,
+    `Private sync auth for "${request.contextGraphId}": identityId=${requesterIdentityId.toString()} signer=${recoveredAddress} requesterAgentAddress=${request.requesterAgentAddress ?? 'n/a'} participantCount=${participants?.length ?? 0} agentGateCount=${agentGateAddresses?.length ?? 0} peerAllowed=${isPeerAllowed()} allowed=${allowed}`,
   );
 
   if (allowed) {

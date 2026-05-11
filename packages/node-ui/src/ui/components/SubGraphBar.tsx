@@ -11,6 +11,7 @@ import React from 'react';
 import { fetchSubGraphs, type SubGraphInfo } from '../api.js';
 import type { ProjectProfile } from '../hooks/useProjectProfile.js';
 import type { MemoryEntity } from '../hooks/useMemoryEntities.js';
+import { useMemoryGraphEvents } from '../hooks/useNodeEvents.js';
 
 export interface SubGraphBadge {
   /** Short label shown inline on the chip, e.g. "2 proposed" */
@@ -78,16 +79,22 @@ export const SubGraphBar: React.FC<SubGraphBarProps> = ({ contextGraphId, profil
   const [subGraphs, setSubGraphs] = React.useState<SubGraphInfo[]>([]);
   const [loading, setLoading] = React.useState(true);
   const badges = React.useMemo(() => computeBadges(entities), [entities]);
+  const requestIdRef = React.useRef(0);
 
-  React.useEffect(() => {
-    let cancelled = false;
+  const loadSubGraphs = React.useCallback(() => {
+    const requestId = ++requestIdRef.current;
     setLoading(true);
     fetchSubGraphs(contextGraphId)
-      .then(r => { if (!cancelled) setSubGraphs(r.subGraphs ?? []); })
+      .then(r => { if (requestId === requestIdRef.current) setSubGraphs(r.subGraphs ?? []); })
       .catch(() => { /* silent — leave empty */ })
-      .finally(() => { if (!cancelled) setLoading(false); });
-    return () => { cancelled = true; };
+      .finally(() => { if (requestId === requestIdRef.current) setLoading(false); });
   }, [contextGraphId]);
+
+  React.useEffect(() => {
+    loadSubGraphs();
+    return () => { requestIdRef.current++; };
+  }, [loadSubGraphs]);
+  useMemoryGraphEvents(contextGraphId, loadSubGraphs);
 
   const merged = React.useMemo(() => {
     // Filter out the `meta` sub-graph since it holds the profile itself, not

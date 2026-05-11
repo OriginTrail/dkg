@@ -67,7 +67,7 @@ A structured assertion embedded in the KA's triples that can be mechanically che
 
 ### Claim Type
 
-A registered identifier (e.g., `dkg:claim/http-liveness`, `dkg:claim/relay-reachable`) that maps to a specific verification procedure. Claim types are defined in the protocol and can be extended by paranet operators.
+A registered identifier (e.g., `dkg:claim/http-liveness`, `dkg:claim/relay-reachable`) that maps to a specific verification procedure. Claim types are defined in the protocol and can be extended by contextGraph operators.
 
 ### Verifier
 
@@ -139,16 +139,16 @@ Claim types are identified by URI and registered in a Solidity mapping on-chain.
 | `dkg:claim/http-liveness` | `url`, `expectedStatus` | HTTP GET, check status code | `alive: bool`, `actualStatus: number` |
 | `dkg:claim/dns-record` | `domain`, `recordType`, `expectedValue` | DNS query | `matches: bool`, `actualValue: string` |
 
-### Paranet-Specific Claim Types (Phase 2+)
+### ContextGraph-Specific Claim Types (Phase 2+)
 
-Paranet operators can register custom claim types for their domain:
+ContextGraph operators can register custom claim types for their domain:
 
 | Domain | Example Claim Type | Verification |
 |---|---|---|
-| DeFi | `paranet:defi/token-balance` | Query ERC-20 balanceOf |
-| NFT | `paranet:nft/ownership` | Query ERC-721 ownerOf |
-| Supply Chain | `paranet:logistics/tracking-status` | Query carrier API |
-| Academic | `paranet:research/doi-exists` | Query CrossRef API |
+| DeFi | `contextGraph:defi/token-balance` | Query ERC-20 balanceOf |
+| NFT | `contextGraph:nft/ownership` | Query ERC-721 ownerOf |
+| Supply Chain | `contextGraph:logistics/tracking-status` | Query carrier API |
+| Academic | `contextGraph:research/doi-exists` | Query CrossRef API |
 
 ---
 
@@ -450,7 +450,7 @@ The `verificationPremium` varies by claim type complexity:
 | `http-liveness` | 1.2x base | Simple HTTP request |
 | `dns-record` | 1.2x base | Simple DNS lookup |
 | `relay-reachable` | 1.5x base | Full libp2p connection + reservation |
-| Custom (paranet) | Set by paranet operator | Domain-specific |
+| Custom (contextGraph) | Set by contextGraph operator | Domain-specific |
 
 ### Verifier Incentives
 
@@ -620,7 +620,7 @@ Some verifications may leak information (e.g., revealing that a specific URL exi
 **Claim**: "Wallet 0xDEF owns NFT #42 from contract 0xABC on Ethereum mainnet."
 
 **Flow**:
-1. Agent publishes a KA asserting NFT ownership with `claimType: paranet:nft/ownership`.
+1. Agent publishes a KA asserting NFT ownership with `claimType: contextGraph:nft/ownership`.
 2. Storage nodes query the ERC-721 contract's `ownerOf(42)`.
 3. If the result matches 0xDEF, they sign the attestation.
 4. Other agents can trust this ownership claim without making their own on-chain queries.
@@ -632,7 +632,7 @@ Some verifications may leak information (e.g., revealing that a specific URL exi
 **Claim**: "DOI 10.1234/example.2026 exists and was published by 'Nature' in 2026."
 
 **Flow**:
-1. Research agent publishes a KA citing a paper with `claimType: paranet:research/doi-exists`.
+1. Research agent publishes a KA citing a paper with `claimType: contextGraph:research/doi-exists`.
 2. Storage nodes query the CrossRef API for the DOI.
 3. They verify the DOI exists and the metadata matches.
 4. AI agents building on this research can trust the citation.
@@ -642,7 +642,7 @@ Some verifications may leak information (e.g., revealing that a specific URL exi
 **Claim**: "Agent 12D3KooW... successfully processed an ImageAnalysis skill request within 5 seconds."
 
 **Flow**:
-1. Agent publishes a KA claiming a specific capability with `claimType: paranet:agent/skill-benchmark`.
+1. Agent publishes a KA claiming a specific capability with `claimType: contextGraph:agent/skill-benchmark`.
 2. Storage nodes send a test skill request to the agent and measure the response.
 3. If the response is valid and within the claimed latency, they attest.
 4. Agents searching for ImageAnalysis providers can prioritize verified agents.
@@ -678,7 +678,7 @@ Some verifications may leak information (e.g., revealing that a specific URL exi
 |---|---|
 | `HttpLivenessVerifier` | HTTP endpoint verification |
 | `DnsRecordVerifier` | DNS record verification |
-| Paranet claim type registration | Allow paranet operators to register custom types |
+| ContextGraph claim type registration | Allow contextGraph operators to register custom types |
 | SPARQL extensions | `dkg:isVerified`, `dkg:claimType` filters in queries |
 
 ### Phase 4: Economics & Renewal (Weeks 13–16)

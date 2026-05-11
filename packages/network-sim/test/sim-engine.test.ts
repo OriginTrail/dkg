@@ -105,7 +105,7 @@ describe('sim-engine', () => {
     });
 
     it('formats generic Error with message', () => {
-      expect(fmtError(new Error('Paranet does not exist'), 'publish')).toBe('Paranet does not exist');
+      expect(fmtError(new Error('ContextGraph does not exist'), 'publish')).toBe('ContextGraph does not exist');
     });
 
     it('stringifies non-Error values', () => {

@@ -87,6 +87,52 @@ describe('resolveDkgConfigHome', () => {
       configExists: false,
     })).toBe(join(tempHome, '.dkg'));
   });
+
+  it('Codex Round-3 Fix 2: monorepo + ~/.dkg/config.yaml exists (no JSON) → returns ~/.dkg, not ~/.dkg-dev', async () => {
+    // Pre-fix: the auto-detection only looked at `config.json`, so a
+    // user who hand-edited a `config.yaml` (a perfectly valid shape
+    // — adapter-openclaw writes JSON but operators frequently keep
+    // YAML) inside a monorepo checkout was silently redirected to
+    // `~/.dkg-dev`, splitting their state across two homes on every
+    // re-run from the clone.
+    //
+    // Post-fix: the configExists auto-detection ORs both files, so a
+    // YAML-only `~/.dkg` correctly wins over the dev-home fallback.
+    const dkgDir = join(tempHome, '.dkg');
+    await mkdir(dkgDir, { recursive: true });
+    await writeFile(join(dkgDir, 'config.yaml'), 'name: test\napiPort: 9200\n');
+    // No `configExists` opt — exercises the production auto-detect path.
+    expect(resolveDkgConfigHome({
+      env: {},
+      homeDir: tempHome,
+      isDkgMonorepo: true,
+    })).toBe(join(tempHome, '.dkg'));
+  });
+
+  it('Codex Round-3 Fix 2: monorepo + neither config.json nor config.yaml → still routes to ~/.dkg-dev', async () => {
+    // Counterpart: with NO config files in `~/.dkg`, the monorepo
+    // dev-home redirect still fires. Pins that the YAML detection
+    // doesn't accidentally over-broaden the configExists check.
+    expect(resolveDkgConfigHome({
+      env: {},
+      homeDir: tempHome,
+      isDkgMonorepo: true,
+    })).toBe(join(tempHome, '.dkg-dev'));
+  });
+
+  it('Codex Round-3 Fix 2: monorepo + both config.json AND config.yaml exist → returns ~/.dkg', async () => {
+    // Both files present: still returns `~/.dkg` (the OR
+    // short-circuits on either side).
+    const dkgDir = join(tempHome, '.dkg');
+    await mkdir(dkgDir, { recursive: true });
+    await writeFile(join(dkgDir, 'config.json'), '{}');
+    await writeFile(join(dkgDir, 'config.yaml'), 'name: test\n');
+    expect(resolveDkgConfigHome({
+      env: {},
+      homeDir: tempHome,
+      isDkgMonorepo: true,
+    })).toBe(join(tempHome, '.dkg'));
+  });
 });
 
 describe('dkgAuthTokenPath', () => {

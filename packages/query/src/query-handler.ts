@@ -70,7 +70,7 @@ export class QueryHandler {
     }
 
     // Resolve context graph (ENTITY_BY_UAL doesn't need it upfront)
-    const contextGraphId = request.contextGraphId ?? request.paranetId;
+    const contextGraphId = request.contextGraphId;
     if (request.lookupType !== 'ENTITY_BY_UAL' && !contextGraphId) {
       return errorResponse(opId, 'ERROR', 'Invalid request: contextGraphId is required for this lookup type');
     }
@@ -128,7 +128,7 @@ export class QueryHandler {
       return null;
     }
 
-    const cgConfigs = this.config.contextGraphs ?? this.config.paranets;
+    const cgConfigs = this.config.contextGraphs ?? this.config.contextGraphs;
     const cgConfig = cgConfigs?.[contextGraphId!];
     if (!cgConfig) {
       if (defaultPolicy === 'deny') {
@@ -165,7 +165,7 @@ export class QueryHandler {
 
   private hasAnyPublicContextGraph(): boolean {
     if (this.config.defaultPolicy === 'public') return true;
-    const cgConfigs = this.config.contextGraphs ?? this.config.paranets;
+    const cgConfigs = this.config.contextGraphs ?? this.config.contextGraphs;
     if (!cgConfigs) return false;
     return Object.values(cgConfigs).some(p => p.policy === 'public');
   }
@@ -357,4 +357,3 @@ function formatObject(value: string): string {
 function encode(response: QueryResponse): Uint8Array {
   return new TextEncoder().encode(JSON.stringify(response));
 }
-

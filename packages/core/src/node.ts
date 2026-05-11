@@ -17,7 +17,7 @@ import { generateKeyPair, privateKeyFromRaw } from '@libp2p/crypto/keys';
 import { peerIdFromString } from '@libp2p/peer-id';
 import { ed25519GetPublicKey } from './crypto/ed25519.js';
 import type { ConnectionTransport, DKGNodeConfig } from './types.js';
-import { DHT_PROTOCOL } from './constants.js';
+import { DHT_PROTOCOL, DKG_GOSSIP_MAX_RPC_BYTES } from './constants.js';
 
 export interface DKGServices extends Record<string, unknown> {
   dht: KadDHT;
@@ -44,6 +44,55 @@ const RELAY_RESERVATION_GRACE_MS = 15_000;
 interface RelayTarget {
   peerId: ReturnType<typeof peerIdFromString>;
   addr: any;
+}
+
+/**
+ * Conservative classifier matching `isMultiaddrRemotelyDialable` in
+ * `packages/node-ui/src/ui/components/Modals/ShareProjectModal.tsx`.
+ * Returns true for addresses a remote peer could plausibly dial without
+ * traversing a circuit relay (i.e. global IPv4 / IPv6 / DNS-based).
+ * Circuit-relay addresses are checked separately by callers because the
+ * "peer record is dialable" signal merges both classes.
+ */
+export function isLocalOrInternalHostname(host: string): boolean {
+  if (typeof host !== 'string' || host.length === 0) return true;
+  const h = host.toLowerCase();
+  if (h === 'localhost') return true;
+  if (h.endsWith('.local') || h.endsWith('.localhost')) return true;
+  if (h.endsWith('.test') || h.endsWith('.example')) return true;
+  if (h.endsWith('.invalid') || h.endsWith('.localdomain')) return true;
+  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(h)) return true;
+  if (/^\[?[0-9a-f:]+\]?$/.test(h) && h.includes(':')) return true;
+  if (!h.includes('.')) return true;
+  return false;
+}
+
+export function isPublicLikeAddress(addr: string): boolean {
+  const dnsMatch = addr.match(/^\/(?:dns|dns4|dns6|dnsaddr)\/([^/]+)\//);
+  if (dnsMatch) return !isLocalOrInternalHostname(dnsMatch[1]);
+  const ipv4 = addr.match(/^\/ip4\/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\//);
+  if (ipv4) {
+    const o = ipv4[1].split('.').map(Number);
+    if (o.some((n) => Number.isNaN(n) || n < 0 || n > 255)) return false;
+    if (o[0] === 0 || o[0] === 127) return false;
+    if (o[0] === 10) return false;
+    if (o[0] === 172 && o[1] >= 16 && o[1] <= 31) return false;
+    if (o[0] === 192 && o[1] === 168) return false;
+    if (o[0] === 169 && o[1] === 254) return false;
+    if (o[0] === 100 && o[1] >= 64 && o[1] <= 127) return false;
+    if (o[0] >= 224) return false;
+    return true;
+  }
+  const ipv6 = addr.match(/^\/ip6\/([^/]+)\//);
+  if (ipv6) {
+    const ip = ipv6[1].toLowerCase();
+    if (ip === '::' || ip === '::1') return false;
+    if (ip.startsWith('fe80')) return false;
+    if (/^f[cd]/.test(ip)) return false;
+    if (ip.startsWith('ff')) return false;
+    return true;
+  }
+  return false;
 }
 
 export class DKGNode {
@@ -115,6 +164,8 @@ export class DKGNode {
         emitSelf: false,
         allowPublishToZeroTopicPeers: true,
         floodPublish: true,
+        maxInboundDataLength: DKG_GOSSIP_MAX_RPC_BYTES,
+        maxOutboundBufferSize: DKG_GOSSIP_MAX_RPC_BYTES,
         D: 4,
         Dlo: 2,
         Dhi: 8,
@@ -459,6 +510,35 @@ export class DKGNode {
       this.relayedPeers.delete(pid);
       console.log(`[${ts()}] Peer disconnected: ${short(pid)}`);
     });
+
+    // Log once when this node first becomes remotely-dialable. Closes a
+    // cold-start observability gap that the V10 DHT-resolved invite flow
+    // exposed: a curator who shares an invite seconds after `dkg start`
+    // may have a peer record in the DHT containing only LAN/loopback
+    // addresses, so joiners get PEER_NOT_FOUND-ish silent failures. This
+    // log line lets operators see the moment the peer record becomes
+    // useful (a circuit-relay reservation landed or a public address
+    // appeared). Once-per-process; fires from `self:peer:update` which
+    // libp2p emits whenever the local peer's announced address set changes.
+    let dialableLogged = false;
+    const checkDialable = () => {
+      if (dialableLogged) return;
+      const addrs = node.getMultiaddrs().map((ma) => ma.toString());
+      const dialable = addrs.find((a) => a.includes('/p2p-circuit/') || isPublicLikeAddress(a));
+      if (!dialable) return;
+      dialableLogged = true;
+      const kind = dialable.includes('/p2p-circuit/') ? 'circuit-relay' : 'public';
+      console.log(
+        `[${ts()}] Node is remotely-dialable (${kind}); peer-id invites should now resolve via DHT. ` +
+        `addr=${dialable}`,
+      );
+    };
+    node.addEventListener('self:peer:update', checkDialable);
+    // libp2p may have already populated multiaddrs by the time we attach
+    // the listener (especially for `core` / public nodes whose addresses
+    // are known the moment listening succeeds). Cover that race with a
+    // single immediate check.
+    checkDialable();
   }
 
   async stop(): Promise<void> {

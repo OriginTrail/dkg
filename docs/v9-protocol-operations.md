@@ -20,7 +20,7 @@
 4. [Update Operation](#4-update-operation)
 5. [Query Operation](#5-query-operation)
 6. [Peer Sync](#6-peer-sync)
-7. [Paranet Discovery](#7-paranet-discovery)
+7. [ContextGraph Discovery](#7-contextGraph-discovery)
 8. [GossipSub Topic Architecture](#8-gossipsub-topic-architecture)
 9. [Storage Model](#9-storage-model)
 10. [Merkle Tree & Proof System](#10-merkle-tree--proof-system)
@@ -77,15 +77,15 @@ sequenceDiagram
     end
     Agent->>Agent: publishProfile() → agent ontology triples
 
-    loop For each configured paranet
-        Agent->>Agent: ensureParanetLocal(paranetId)
-        Agent->>Agent: subscribeToParanet(paranetId)
+    loop For each configured contextGraph
+        Agent->>Agent: ensureContextGraphLocal(contextGraphId)
+        Agent->>Agent: subscribeToContextGraph(contextGraphId)
         Note over Agent: Subscribe to: publish, workspace, app, update, sessions topics
     end
 
     Agent->>Chain: Start ChainEventPoller (interval: 12s)
     Agent->>Agent: Start periodic peer ping (interval: 2min)
-    Agent->>Chain: Initial chain scan for paranets
+    Agent->>Chain: Initial chain scan for contextGraphs
 ```
 
 ---
@@ -120,7 +120,7 @@ sequenceDiagram
     participant GS as GossipSub
     participant Peers as Receiver Nodes
 
-    App->>Agent: publish(paranetId, quads, privateQuads?)
+    App->>Agent: publish(contextGraphId, quads, privateQuads?)
     Agent->>Pub: publish(options)
 
     rect rgb(240, 240, 255)
@@ -128,10 +128,10 @@ sequenceDiagram
 
         Note over Pub: Phase 1 — Prepare + validate
 
-        Pub->>Pub: ensureParanet(paranetId)
+        Pub->>Pub: ensureContextGraph(contextGraphId)
         Pub->>Pub: autoPartition(quads) → group by rootEntity
         Pub->>Pub: Build manifest + KA metadata
-        Pub->>Pub: validatePublishRequest(quads, manifest, paranetId)
+        Pub->>Pub: validatePublishRequest(quads, manifest, contextGraphId)
         Note over Pub: Rules 1–5: graph URI, subjects, manifest, exclusivity, no blank nodes
 
         Note over Pub: Phase 2 — Compute Merkle roots
@@ -148,15 +148,15 @@ sequenceDiagram
         Pub->>Store: insert(quads → workspace graph)
         Pub->>Store: insert(workspace metadata → workspace_meta graph)
         opt Private quads provided
-            Pub->>Store: storePrivateTriples(paranetId, rootEntity, privateQuads)
+            Pub->>Store: storePrivateTriples(contextGraphId, rootEntity, privateQuads)
         end
     end
 
     Note over Agent,Peers: Phase 4 — Broadcast via GossipSub (dissemination)
 
     Pub-->>Agent: preBroadcast(preparedPublish)
-    Agent->>GS: publish(paranetPublishTopic, PublishRequest)
-    Note over GS: Message contains: type=PUBLISH,<br/>nquads, paranetId, manifest, kcMerkleRoot,<br/>publisherPeerId (return address), operationId,<br/>deadline, publicByteSize<br/>NO txHash, NO blockNumber (not yet on-chain)
+    Agent->>GS: publish(contextGraphPublishTopic, PublishRequest)
+    Note over GS: Message contains: type=PUBLISH,<br/>nquads, contextGraphId, manifest, kcMerkleRoot,<br/>publisherPeerId (return address), operationId,<br/>deadline, publicByteSize<br/>NO txHash, NO blockNumber (not yet on-chain)
     GS-->>Peers: PublishRequest (relayed through mesh)
 
     rect rgb(232, 245, 233)
@@ -193,12 +193,12 @@ sequenceDiagram
     Pub->>Store: Delete quads from workspace graph
     Pub->>Pub: generateConfirmedFullMetadata(ual, kcMerkleRoot, txHash, batchId, ...)
     Pub->>Store: insert(confirmed metadata → meta graph)
-    Pub->>Pub: Track ownedEntities + batch→paranet binding
+    Pub->>Pub: Track ownedEntities + batch→contextGraph binding
 
     Note over Agent,GS: Phase 8 — Post-broadcast with chain proof
 
     Pub-->>Agent: PublishResult {kcId, ual, kcMerkleRoot, status: confirmed}
-    Agent->>GS: publish(paranetPublishTopic, ConfirmedPublishProof)
+    Agent->>GS: publish(contextGraphPublishTopic, ConfirmedPublishProof)
     Note over GS: Message contains: type=CONFIRMED, txHash, blockNumber,<br/>startKAId, endKAId, publisherAddress
 
     Agent-->>App: PublishResult
@@ -267,20 +267,20 @@ sequenceDiagram
 
     Note over App,Peers: Step A — Write to workspace (can happen many times)
 
-    App->>Agent: writeToWorkspace(paranetId, quads)
-    Agent->>Pub: writeToWorkspace(paranetId, quads)
+    App->>Agent: writeToWorkspace(contextGraphId, quads)
+    Agent->>Pub: writeToWorkspace(contextGraphId, quads)
 
     rect rgb(240, 240, 255)
         Note over Pub,Store: LOCAL: validate + store in workspace
         Pub->>Pub: autoPartition(quads) → group by rootEntity
         Pub->>Pub: Build manifest + KA metadata
-        Pub->>Pub: validatePublishRequest(quads, manifest, paranetId)
+        Pub->>Pub: validatePublishRequest(quads, manifest, contextGraphId)
         Note over Pub: Rules 1–5: graph URI, subjects, manifest, exclusivity, no blank nodes
         Pub->>Store: insert(quads → workspace graph)
         Pub->>Store: insert(workspace metadata → workspace_meta graph)
     end
 
-    Agent->>GS: publish(paranetWorkspaceTopic, WorkspacePublishRequest)
+    Agent->>GS: publish(contextGraphWorkspaceTopic, WorkspacePublishRequest)
     GS-->>Peers: WorkspacePublishRequest
     Peers->>Peers: Validate + store in workspace graph
 
@@ -288,8 +288,8 @@ sequenceDiagram
 
     Note over App,Peers: Step B — Enshrine from workspace (triggers publish flow)
 
-    App->>Agent: enshrineFromWorkspace(paranetId, selection)
-    Agent->>Pub: enshrineFromWorkspace(paranetId, selection)
+    App->>Agent: enshrineFromWorkspace(contextGraphId, selection)
+    Agent->>Pub: enshrineFromWorkspace(contextGraphId, selection)
 
     rect rgb(240, 240, 255)
         Note over Pub,Store: Phase 1–3 — Read staged data + compute Merkle root
@@ -310,7 +310,7 @@ sequenceDiagram
         Note over Agent,Peers: Phase 5 — Peer-push attestation (Direct RPC)
 
         Pub-->>Agent: preBroadcast(preparedPublish)
-        Agent->>GS: publish(paranetPublishTopic, EnshrineRequest with publisherPeerId)
+        Agent->>GS: publish(contextGraphPublishTopic, EnshrineRequest with publisherPeerId)
         Note over GS: Message contains: type=ENSHRINE, kcMerkleRoot, publicByteSize,<br/>publisherPeerId (return address), operationId, deadline<br/>NO nquads (peers already have workspace data)
 
         Note over Peers: Each peer that received workspace data:
@@ -343,12 +343,12 @@ sequenceDiagram
     Pub->>Store: Delete quads from workspace graph
     Pub->>Pub: generateConfirmedFullMetadata(ual, kcMerkleRoot, txHash, batchId, ...)
     Pub->>Store: insert(confirmed metadata + chain provenance → meta graph)
-    Pub->>Pub: Track ownedEntities + batch→paranet binding
+    Pub->>Pub: Track ownedEntities + batch→contextGraph binding
 
     Note over Agent,GS: Phase 8 — Post-broadcast with chain proof
 
     Pub-->>Agent: PublishResult {kcId, ual, kcMerkleRoot, status: confirmed}
-    Agent->>GS: publish(paranetPublishTopic, ConfirmedPublishProof)
+    Agent->>GS: publish(contextGraphPublishTopic, ConfirmedPublishProof)
     Note over GS: Message contains: type=CONFIRMED, txHash, blockNumber,<br/>startKAId, endKAId, publisherAddress
 
     Agent-->>App: PublishResult {kcId, ual, kcMerkleRoot, status: confirmed}
@@ -397,7 +397,7 @@ sequenceDiagram
 
 ### 2.3 Context Graph Publish Flow
 
-A context graph is a **curated, governance-gated subgraph** within a paranet.
+A context graph is a **curated, governance-gated subgraph** within a contextGraph.
 M-of-N registered participants must sign before data can be published to it.
 The publish is **atomic** — a single on-chain transaction handles both the base
 publish (receiver signatures) and the context graph registration (participant
@@ -405,15 +405,15 @@ signatures). If either set of signatures is insufficient, nothing is published.
 
 **Key concepts:**
 
-- A context graph is **scoped to a paranet** via URI convention:
-  `did:dkg:paranet:{paranetId}/context/{contextGraphId}`
+- A context graph is **scoped to a contextGraph** via URI convention:
+  `did:dkg:context-graph:{contextGraphId}/context/{contextGraphId}`
 - Participants are registered on-chain at context graph creation with an M-of-N
   threshold. The protocol's `minimumRequiredSignatures` does NOT apply — each
   context graph defines its own requirements.
-- Data is gossip-replicated to **paranet peers only** (for availability), but
+- Data is gossip-replicated to **contextGraph peers only** (for availability), but
   only lands in the context graph URI after the atomic chain tx succeeds.
 - **Context graph participants are a governance role**, not a storage role. They
-  may or may not be paranet peers. Participants who are also paranet peers
+  may or may not be contextGraph peers. Participants who are also contextGraph peers
   receive data via gossip; participants who are not (e.g., edge nodes) only
   participate in the signing step through the application coordination mechanism.
 - **Receiver signatures** (replication proof) and **participant signatures**
@@ -426,24 +426,24 @@ sequenceDiagram
     participant Pub as DKGPublisher
     participant Store as TripleStore
     participant GS as GossipSub
-    participant ParaPeers as Paranet Peers
+    participant ParaPeers as ContextGraph Peers
     participant CGPeers as Context Graph Participants
     participant Chain as EVM Adapter
 
     Note over App,Chain: Prerequisites: context graph already created on-chain<br/>with participantAgents[] (Ethereum addresses) and requiredSignatures (M of N)
 
-    App->>Agent: publish(paranetId, quads, {contextGraphId})
-    Agent->>Pub: publish(paranetId, quads, {contextGraphId})
+    App->>Agent: publish(contextGraphId, quads, {contextGraphId})
+    Agent->>Pub: publish(contextGraphId, quads, {contextGraphId})
 
     rect rgb(240, 240, 255)
         Note over Pub,Store: Phases 1–3 are LOCAL to the publishing node
 
         Note over Pub: Phase 1 — Prepare + validate
 
-        Pub->>Pub: ensureParanet(paranetId)
+        Pub->>Pub: ensureContextGraph(contextGraphId)
         Pub->>Pub: autoPartition(quads) → group by rootEntity
         Pub->>Pub: Build manifest + KA metadata
-        Pub->>Pub: validatePublishRequest(quads, manifest, paranetId)
+        Pub->>Pub: validatePublishRequest(quads, manifest, contextGraphId)
         Note over Pub: Rules 1–5: graph URI, subjects, manifest, exclusivity, no blank nodes
 
         Note over Pub: Phase 2 — Compute Merkle roots
@@ -461,17 +461,17 @@ sequenceDiagram
         Pub->>Store: insert(workspace metadata → workspace_meta graph)
     end
 
-    Note over Agent,ParaPeers: Phase 4 — Broadcast via GossipSub (to all paranet peers)
+    Note over Agent,ParaPeers: Phase 4 — Broadcast via GossipSub (to all contextGraph peers)
 
     Pub-->>Agent: preBroadcast(preparedPublish)
-    Agent->>GS: publish(paranetPublishTopic, PublishRequest)
-    Note over GS: Message contains: type=PUBLISH,<br/>nquads, paranetId, manifest, kcMerkleRoot,<br/>publisherPeerId (return address), operationId,<br/>deadline, publicByteSize, contextGraphId
+    Agent->>GS: publish(contextGraphPublishTopic, PublishRequest)
+    Note over GS: Message contains: type=PUBLISH,<br/>nquads, contextGraphId, manifest, kcMerkleRoot,<br/>publisherPeerId (return address), operationId,<br/>deadline, publicByteSize, contextGraphId
     GS-->>ParaPeers: PublishRequest (relayed through mesh)
     ParaPeers->>ParaPeers: Validate + store in workspace graph
-    Note over CGPeers: Participants are a governance role, not a storage role.<br/>They may or may not be paranet peers.<br/>If they are paranet peers, they receive data via gossip.<br/>If not, they only verify and sign via the app coordination<br/>mechanism in Phase 5b — they do NOT store the data.
+    Note over CGPeers: Participants are a governance role, not a storage role.<br/>They may or may not be contextGraph peers.<br/>If they are contextGraph peers, they receive data via gossip.<br/>If not, they only verify and sign via the app coordination<br/>mechanism in Phase 5b — they do NOT store the data.
 
     rect rgb(232, 245, 233)
-        Note over Agent,ParaPeers: Phase 5a — Collect receiver attestations (from any paranet peer)
+        Note over Agent,ParaPeers: Phase 5a — Collect receiver attestations (from any contextGraph peer)
 
         Note over ParaPeers: Each peer that receives the gossip (any hop distance):
         ParaPeers->>ParaPeers: Recompute kcMerkleRoot from stored quads
@@ -491,7 +491,7 @@ sequenceDiagram
         Note over App: ⚠ OPEN QUESTION (OQ-21): Who collects participant signatures?<br/>Current diagram shows the App collecting and passing to Agent.<br/>Alternative: Agent collects internally via callback or protocol.<br/>See Open Questions section.
 
         Note over App: Application-defined coordination mechanism<br/>(e.g., game turn proposal/approval, voting protocol, manual review)
-        Note over CGPeers: Participants verify the proposed data via the app mechanism.<br/>If they are also paranet peers, they may verify against their workspace.<br/>If not, the app provides the data or a summary for review.
+        Note over CGPeers: Participants verify the proposed data via the app mechanism.<br/>If they are also contextGraph peers, they may verify against their workspace.<br/>If not, the app provides the data or a summary for review.
 
         CGPeers->>CGPeers: Verify data matches proposal
         CGPeers->>CGPeers: Sign keccak256(contextGraphId, kcMerkleRoot)
@@ -499,7 +499,7 @@ sequenceDiagram
 
         App->>App: Collect M-of-N participant signatures
         App->>Agent: Pass participantSignatures[] to Agent
-        Note over App: If < M participants sign → publish fails entirely<br/>(no orphaned data in paranet)
+        Note over App: If < M participants sign → publish fails entirely<br/>(no orphaned data in contextGraph)
     end
 
     rect rgb(232, 245, 233)
@@ -513,19 +513,19 @@ sequenceDiagram
     end
 
     Note over Pub,Store: Phase 7 — Promote workspace → context graph (publisher side)
-    Note over Pub,Store: ⚠ OPEN QUESTION (OQ-22): Should data also live in the<br/>paranet data graph, or ONLY in the context graph URI?
+    Note over Pub,Store: ⚠ OPEN QUESTION (OQ-22): Should data also live in the<br/>contextGraph data graph, or ONLY in the context graph URI?
 
     Pub->>Store: Copy quads: workspace → context graph data URI
     Pub->>Store: Delete quads from workspace graph
     Pub->>Pub: generateConfirmedFullMetadata(ual, kcMerkleRoot, txHash, batchId, ...)
     Pub->>Store: insert(confirmed metadata + chain provenance → context graph meta URI)
-    Pub->>Pub: Track ownedEntities + batch→paranet binding
-    Note over Store: Data lives at did:dkg:paranet:{id}/context/{ctxId}<br/>NOT in the paranet data graph
+    Pub->>Pub: Track ownedEntities + batch→contextGraph binding
+    Note over Store: Data lives at did:dkg:context-graph:{id}/context/{ctxId}<br/>NOT in the contextGraph data graph
 
     Note over Agent,GS: Phase 8 — Post-broadcast with chain proof
 
     Pub-->>Agent: PublishResult {kcId, ual, kcMerkleRoot, status: confirmed, contextGraphId}
-    Agent->>GS: publish(paranetPublishTopic, ConfirmedPublishProof)
+    Agent->>GS: publish(contextGraphPublishTopic, ConfirmedPublishProof)
     Note over GS: Message contains: type=CONFIRMED, txHash, blockNumber,<br/>startKAId, endKAId, publisherAddress, contextGraphId
 
     Agent-->>App: PublishResult {kcId, ual, kcMerkleRoot, status: confirmed, contextGraphId}
@@ -572,9 +572,9 @@ gossip disseminates data, peers verify and sign, peers dial back via
 `/dkg/attest/1.0.0`. No application involvement needed.
 
 For **participant signatures**, the coordination mechanism is an open design
-question (see OQ-21). Participants who are also paranet peers receive data
+question (see OQ-21). Participants who are also contextGraph peers receive data
 via gossip and can sign through the protocol. Participants who are not
-paranet peers need an application-level mechanism to learn about the proposal.
+contextGraph peers need an application-level mechanism to learn about the proposal.
 Examples of how applications might coordinate participant signing:
 
 | Application | Coordination mechanism | Timing |
@@ -593,20 +593,20 @@ sequenceDiagram
     participant App as Application
     participant Agent as DKGAgent
 
-    App->>Agent: publish(paranetId, quads, {contextGraphId})
+    App->>Agent: publish(contextGraphId, quads, {contextGraphId})
     Agent->>Agent: Collect receiver sigs ✓
     Agent->>Agent: Collect participant sigs... only 1 of 3 required
 
     alt Strict mode (default for context graphs)
         Agent-->>App: PublishResult {status: failed, error: "insufficient participant signatures"}
         Note over Agent: Data stays in workspace, nothing on-chain
-        Note over Agent: No orphaned data in paranet — clean failure
+        Note over Agent: No orphaned data in contextGraph — clean failure
     end
 
     alt Fallback mode (application opts in)
-        Agent->>Agent: Drop contextGraphId, publish to paranet only
-        Agent-->>App: PublishResult {status: confirmed, contextGraphError: "insufficient sigs, fell back to paranet"}
-        Note over Agent: Data in paranet data graph, NOT in context graph
+        Agent->>Agent: Drop contextGraphId, publish to contextGraph only
+        Agent-->>App: PublishResult {status: confirmed, contextGraphError: "insufficient sigs, fell back to contextGraph"}
+        Note over Agent: Data in contextGraph data graph, NOT in context graph
     end
 ```
 
@@ -614,20 +614,20 @@ sequenceDiagram
 
 | | Standard publish | Workspace + enshrine | Context graph publish |
 |---|---|---|---|
-| **Target** | Paranet data graph | Paranet data graph | Context graph (within paranet) |
+| **Target** | ContextGraph data graph | ContextGraph data graph | Context graph (within contextGraph) |
 | **Staging** | Workspace (automatic) | Workspace (manual write) | Workspace (automatic or manual) |
 | **Receiver sigs** | Required (peer-push) | Required (peer-push) | Required (peer-push) |
 | **Participant sigs** | Not needed | Not needed | Required (M-of-N, app-defined collection) |
 | **Chain tx** | `publishKnowledgeAssets` | `publishKnowledgeAssets` | `publishToContextGraph` (atomic) |
-| **Failure behavior** | Rollback workspace | Rollback workspace | Strict: fail entirely / Fallback: paranet-only |
-| **Data lands in** | `did:dkg:paranet:{id}` | `did:dkg:paranet:{id}` | `did:dkg:paranet:{id}/context/{ctxId}` |
+| **Failure behavior** | Rollback workspace | Rollback workspace | Strict: fail entirely / Fallback: contextGraph-only |
+| **Data lands in** | `did:dkg:context-graph:{id}` | `did:dkg:context-graph:{id}` | `did:dkg:context-graph:{id}/context/{ctxId}` |
 
 ### 2.5 Signature Types
 
 | Signature type | Purpose | Signed over | Collected from |
 |---|---|---|---|
 | **Publisher signature** | Publisher commits to the batch | `keccak256(identityId, kcMerkleRoot)` | Publisher's own operational key |
-| **Receiver signatures** | Peers attest data replication | `keccak256(kcMerkleRoot, publicByteSize)` | Any paranet peer (peer-push after gossip) |
+| **Receiver signatures** | Peers attest data replication | `keccak256(kcMerkleRoot, publicByteSize)` | Any contextGraph peer (peer-push after gossip) |
 | **Participant signatures** | Governance consent for context graph | `keccak256(contextGraphId, kcMerkleRoot)` | Registered context graph participants only |
 
 Receiver signatures prove replication. Participant signatures prove governance consent.
@@ -713,7 +713,7 @@ sequenceDiagram
 |-------|---------------|--------|---------|
 | `KnowledgeBatchCreated` | KnowledgeAssetsStorage | batchId, publisher, merkleRoot, startKAId, endKAId, txHash | Confirm published data, trigger workspace → data graph promotion |
 | `UALRangeReserved` | KnowledgeAssetsStorage | publisher, startId, endId | UAL allocation |
-| `ParanetCreated` | ParanetV9Registry | paranetId, creator, accessPolicy | Discover new paranets |
+| `ContextGraphCreated` | ContextGraphV9Registry | contextGraphId, creator, accessPolicy | Discover new contextGraphs |
 | `KnowledgeBatchUpdated` | KnowledgeAssetsStorage | batchId, newMerkleRoot | Confirm data updates |
 | `ContextGraphCreated` | ContextGraphStorage | contextGraphId, manager, participantAgents (address[]), M | Context graph creation |
 | `ContextGraphExpanded` | ContextGraphStorage | contextGraphId, batchId | Context graph data addition |
@@ -732,7 +732,7 @@ sequenceDiagram
     participant Chain as EVM Adapter
     participant GS as GossipSub
 
-    App->>Agent: update(kcId, paranetId, quads)
+    App->>Agent: update(kcId, contextGraphId, quads)
 
     Agent->>Pub: update(kcId, options)
 
@@ -749,7 +749,7 @@ sequenceDiagram
     Pub->>Store: Update meta graph (new merkle root, timestamp)
     Pub-->>Agent: PublishResult {kcId, ual, status: "confirmed"}
 
-    Agent->>GS: publish(paranetUpdateTopic, UpdateRequest)
+    Agent->>GS: publish(contextGraphUpdateTopic, UpdateRequest)
 
     Note over GS: Receivers verify via chain.verifyKAUpdate()<br/>then apply update in canonical order
 ```
@@ -772,7 +772,7 @@ sequenceDiagram
     participant QE as DKGQueryEngine
     participant Store as TripleStore
 
-    App->>Agent: query(sparql, {paranetId, includeWorkspace?})
+    App->>Agent: query(sparql, {contextGraphId, includeWorkspace?})
 
     Agent->>QE: query(sparql, options)
 
@@ -801,7 +801,7 @@ sequenceDiagram
 ### Query Access Policy
 
 ```typescript
-interface ParanetQueryPolicy {
+interface ContextGraphQueryPolicy {
   policy: 'deny' | 'public' | 'allowList';
   allowedPeers?: string[];
   allowedLookupTypes?: LookupType[];
@@ -814,7 +814,7 @@ interface ParanetQueryPolicy {
 > **REVIEW: Query isolation.**
 > The query engine is intentionally local-only (Spec §1.6 Store Isolation).
 > This means a node can only query data it has received via publish/sync.
-> **Implication for apps:** If an app needs data from a paranet it hasn't
+> **Implication for apps:** If an app needs data from a contextGraph it hasn't
 > synced, it must first sync from a peer. There's no query federation.
 > This is a conscious design choice for privacy/security, but may frustrate
 > app developers expecting a "world computer" model.
@@ -850,7 +850,7 @@ sequenceDiagram
     participant A as Node A (requester)
     participant B as Node B (provider)
 
-    A->>B: /dkg/sync/1.0.0 SyncRequest {paranetIds, fromTimestamp?}
+    A->>B: /dkg/sync/1.0.0 SyncRequest {contextGraphIds, fromTimestamp?}
 
     B->>B: Query meta graph for KCs matching filters
     B->>B: Serialize data + metadata
@@ -881,7 +881,7 @@ sequenceDiagram
     participant A as Node A
     participant B as Node B
 
-    A->>B: /dkg/sync/1.0.0 WorkspaceSyncRequest {paranetIds}
+    A->>B: /dkg/sync/1.0.0 WorkspaceSyncRequest {contextGraphIds}
 
     B->>B: Export workspace + workspace_meta quads
     B-->>A: WorkspaceSyncResponse {quads[]}
@@ -897,7 +897,7 @@ sequenceDiagram
 
 ---
 
-## 7. Paranet Discovery
+## 7. ContextGraph Discovery
 
 ```mermaid
 sequenceDiagram
@@ -905,17 +905,17 @@ sequenceDiagram
     participant Chain as EVM Adapter
     participant Store as TripleStore
 
-    Agent->>Chain: listParanetsFromChain(fromBlock?)
+    Agent->>Chain: listContextGraphsFromChain(fromBlock?)
 
-    loop For each ParanetCreated event
-        Chain-->>Agent: {paranetId, creator, accessPolicy, blockNumber}
-        Agent->>Agent: ensureParanetLocal(paranetId)
+    loop For each ContextGraphCreated event
+        Chain-->>Agent: {contextGraphId, creator, accessPolicy, blockNumber}
+        Agent->>Agent: ensureContextGraphLocal(contextGraphId)
         Agent->>Store: createGraph(data, meta, private, workspace, workspace_meta)
-        Agent->>Agent: subscribeToParanet(paranetId)
+        Agent->>Agent: subscribeToContextGraph(contextGraphId)
         Note over Agent: Subscribe to 5 GossipSub topics
     end
 
-    Note over Agent: Also discovered via:<br/>- ChainEventPoller (ParanetCreated events)<br/>- Peer sync (paranets in synced metadata)<br/>- Config file (paranets[] array)
+    Note over Agent: Also discovered via:<br/>- ChainEventPoller (ContextGraphCreated events)<br/>- Peer sync (contextGraphs in synced metadata)<br/>- Config file (contextGraphs[] array)
 ```
 
 ---
@@ -928,39 +928,39 @@ graph TB
         PEERS["dkg/network/peers"]
     end
 
-    subgraph "Per-Paranet Topics"
-        PUB["dkg/paranet/{id}/publish"]
-        WS["dkg/paranet/{id}/workspace"]
-        APP["dkg/paranet/{id}/app"]
-        UPD["dkg/paranet/{id}/update"]
-        SESS["dkg/paranet/{id}/sessions"]
+    subgraph "Per-ContextGraph Topics"
+        PUB["dkg/context-graph/{id}/finalization"]
+        WS["dkg/context-graph/{id}/workspace"]
+        APP["dkg/context-graph/{id}/app"]
+        UPD["dkg/context-graph/{id}/update"]
+        SESS["dkg/context-graph/{id}/sessions"]
     end
 
     subgraph "Per-Session Topics"
-        S1["dkg/paranet/{id}/sessions/{sid}"]
+        S1["dkg/context-graph/{id}/sessions/{sid}"]
     end
 
-    subgraph "System Paranets"
-        AGENTS["dkg/paranet/agents/publish"]
-        ONTO["dkg/paranet/ontology/publish"]
+    subgraph "System ContextGraphs"
+        AGENTS["dkg/context-graph/agents/finalization"]
+        ONTO["dkg/context-graph/ontology/finalization"]
     end
 ```
 
 | Topic | Purpose | Message Types |
 |-------|---------|---------------|
 | `dkg/network/peers` | Peer discovery & health | Peer announce, capabilities |
-| `dkg/paranet/{id}/publish` | Publish broadcast (pre- and post-chain) | PublishRequest (pre-chain: data + publisherPeerId; post-chain: + txHash, blockNumber) |
-| `dkg/paranet/{id}/workspace` | Workspace writes (deferred publish staging) | WorkspacePublishRequest |
-| `dkg/paranet/{id}/app` | Application coordination | JSON app messages (game, etc.) |
-| `dkg/paranet/{id}/update` | KA updates | UpdateRequest |
-| `dkg/paranet/{id}/sessions` | Multi-party sessions | Session proposals, coordination |
-| `dkg/paranet/{id}/sessions/{sid}` | Per-session messages | Round data, commitments |
+| `dkg/context-graph/{id}/finalization` | Publish broadcast (pre- and post-chain) | PublishRequest (pre-chain: data + publisherPeerId; post-chain: + txHash, blockNumber) |
+| `dkg/context-graph/{id}/workspace` | Workspace writes (deferred publish staging) | WorkspacePublishRequest |
+| `dkg/context-graph/{id}/app` | Application coordination | JSON app messages (game, etc.) |
+| `dkg/context-graph/{id}/update` | KA updates | UpdateRequest |
+| `dkg/context-graph/{id}/sessions` | Multi-party sessions | Session proposals, coordination |
+| `dkg/context-graph/{id}/sessions/{sid}` | Per-session messages | Round data, commitments |
 
 > **REVIEW: App topic is untyped.**
 > The `app` topic carries JSON messages with an `app` field for routing (e.g.
-> `"example-app"`). All apps on the same paranet share a single topic.
+> `"example-app"`). All apps on the same contextGraph share a single topic.
 > **Risk:** A malicious app could flood the topic, affecting all apps. Consider
-> per-app subtopics: `dkg/paranet/{id}/app/{appId}`.
+> per-app subtopics: `dkg/context-graph/{id}/app/{appId}`.
 
 ---
 
@@ -969,8 +969,8 @@ graph TB
 ```mermaid
 graph TB
     subgraph "Triple Store (Oxigraph)"
-        subgraph "Paranet: example-paranet"
-            DATA["Data Graph<br/>did:dkg:paranet:example-paranet<br/>Published triples"]
+        subgraph "ContextGraph: example-contextGraph"
+            DATA["Data Graph<br/>did:dkg:context-graph:example-contextGraph<br/>Published triples"]
             META["Meta Graph<br/>.../_meta<br/>KC/KA metadata, merkle roots, status"]
             PRIV["Private Graph<br/>.../_private<br/>Publisher-only triples"]
             WS["Workspace Graph<br/>.../_workspace<br/>Swarms, memberships, votes"]
@@ -978,7 +978,7 @@ graph TB
         end
 
         subgraph "Context Graphs (per swarm)"
-            CTX["did:dkg:paranet:.../context/{swarmId}<br/>Turn results (published)"]
+            CTX["did:dkg:context-graph:.../context/{swarmId}<br/>Turn results (published)"]
             CTX_META["...context/{swarmId}/_meta<br/>Turn result metadata"]
         end
     end
@@ -988,13 +988,13 @@ graph TB
 
 | Pattern | Example | Content |
 |---------|---------|---------|
-| `did:dkg:paranet:{id}` | `did:dkg:paranet:example-paranet` | Published data |
-| `did:dkg:paranet:{id}/_meta` | `.../_meta` | KC/KA metadata |
-| `did:dkg:paranet:{id}/_private` | `.../_private` | Private triples |
-| `did:dkg:paranet:{id}/_workspace` | `.../_workspace` | Workspace data |
-| `did:dkg:paranet:{id}/_workspace_meta` | `.../_workspace_meta` | Workspace ops |
-| `did:dkg:paranet:{id}/context/{ctxId}` | `.../context/swarm-abc123` | Context graph data |
-| `did:dkg:paranet:{id}/context/{ctxId}/_meta` | `.../context/swarm-abc123/_meta` | Context graph meta |
+| `did:dkg:context-graph:{id}` | `did:dkg:context-graph:example-contextGraph` | Published data |
+| `did:dkg:context-graph:{id}/_meta` | `.../_meta` | KC/KA metadata |
+| `did:dkg:context-graph:{id}/_private` | `.../_private` | Private triples |
+| `did:dkg:context-graph:{id}/_workspace` | `.../_workspace` | Workspace data |
+| `did:dkg:context-graph:{id}/_workspace_meta` | `.../_workspace_meta` | Workspace ops |
+| `did:dkg:context-graph:{id}/context/{ctxId}` | `.../context/swarm-abc123` | Context graph data |
+| `did:dkg:context-graph:{id}/context/{ctxId}/_meta` | `.../context/swarm-abc123/_meta` | Context graph meta |
 
 `_private` graph behavior:
 
@@ -1080,7 +1080,7 @@ same `kcMerkleRoot`. This means:
 | KA token range | KnowledgeAssetsStorage | NFT ownership — startKAId to endKAId |
 | Publisher address | KnowledgeAssetsStorage | Attribution — who published this data |
 | Batch ID | KnowledgeAssetsStorage | Sequential ordering |
-| Paranet ID | ParanetV9Registry | Paranet existence and access policy |
+| ContextGraph ID | ContextGraphV9Registry | ContextGraph existence and access policy |
 | TRAC stake | Token contract | Storage payment |
 | Identity ID | Identity contract | DID ↔ on-chain identity binding |
 
@@ -1098,7 +1098,7 @@ Access-policy linkage (off-chain):
 
 - Access control for private triples is encoded in KC/KA metadata in `_meta`
   (e.g., `dkg:accessPolicy`, `dkg:publisherPeerId`).
-- Registry-level paranet `accessPolicy` on-chain governs paranet registration/discovery
+- Registry-level contextGraph `accessPolicy` on-chain governs contextGraph registration/discovery
   semantics and should not be treated as a substitute for KA private data access checks.
 
 ### What Gets Linked (and What Doesn't)
@@ -1185,7 +1185,7 @@ graph LR
 | # | Issue | Severity | Recommendation |
 |---|-------|----------|----------------|
 | G1 | `offMessage` has a bug: returns early when handlers exist | Bug | Fix: `if (!handlers) return;` should be `if (handlers)` |
-| G2 | All apps share single `app` topic per paranet | Medium | Add per-app subtopics: `dkg/paranet/{id}/app/{appId}` |
+| G2 | All apps share single `app` topic per contextGraph | Medium | Add per-app subtopics: `dkg/context-graph/{id}/app/{appId}` |
 | G3 | No message signing/authentication on gossip level | Medium | GossipSub supports `strictNoSign: false` — enable message signing |
 | G4 | Vote heartbeat creates O(n × 6) messages per turn | Low | Acceptable for 3-8 players; not scalable beyond ~20 |
 
@@ -1195,7 +1195,7 @@ graph LR
 |---|-------|----------|----------------|
 | CH1 | Chain poller interval (12s) may miss events on fast L2s | Low | Use WebSocket subscription instead of polling where available |
 | CH2 | No retry on failed chain tx (publish, mint) | Medium | Add exponential backoff retry for chain transactions |
-| CH3 | Paranet metadata reveal is a separate tx | Low | Consider batching with creation tx to save gas |
+| CH3 | ContextGraph metadata reveal is a separate tx | Low | Consider batching with creation tx to save gas |
 
 ### 12.6 Storage
 
@@ -1250,25 +1250,25 @@ deferred until the update flow is redesigned.
 |---|----------|---------|
 | OQ-7 | **`/dkg/publish/1.0.0` is the legacy direct-publish handler (publisher→receiver); `/dkg/attest/1.0.0` is designed but not yet implemented (receiver→publisher).** In the current code, `/dkg/publish/1.0.0` exists and is registered — it's a direct-RPC handler where the publisher pushes data to receivers who return signed acks (old publisher-pull model). The new peer-push model (`/dkg/attest/1.0.0`) from Section 2 is not yet implemented; the publisher currently self-signs via a fallback. **Decision needed:** Keep `/dkg/publish/1.0.0` for backward compat or large payloads? Or replace entirely with `/dkg/attest/1.0.0`? | Section 1 |
 | OQ-11 | **"No pre-broadcast needed" wording in Section 2.2 is misleading.** The data gossip is skipped (peers already have workspace data), but an attestation request IS still broadcast via GossipSub. Clarify that "no data broadcast needed" is the correct statement. | Section 2.2 |
-| OQ-12 | **How does workspace→context graph promotion identify the right quads?** Peers store data in the general paranet workspace during gossip, but on promotion, quads must be copied to the specific context graph URI. How does the system know WHICH workspace quads belong to this publish vs other concurrent workspace data? Likely keyed by `operationId` or `kcMerkleRoot`, but not documented. | Section 2.3 Phase 7 |
+| OQ-12 | **How does workspace→context graph promotion identify the right quads?** Peers store data in the general contextGraph workspace during gossip, but on promotion, quads must be copied to the specific context graph URI. How does the system know WHICH workspace quads belong to this publish vs other concurrent workspace data? Likely keyed by `operationId` or `kcMerkleRoot`, but not documented. | Section 2.3 Phase 7 |
 | OQ-14 | **`deadline` field never defined.** Gossip messages include a `deadline` but the document never specifies: absolute timestamp or relative duration? Publisher-set or protocol constant? What happens when it expires without quorum — fail, submit with partial sigs, or retry? | Section 2.1 Phase 4 |
-| OQ-16 | **Quorum size (`minimumRequiredSignatures`) undefined.** Is it a protocol-wide constant? Per-paranet configurable? A percentage of active peers? A fixed number? | Section 2.1 Phase 5 |
+| OQ-16 | **Quorum size (`minimumRequiredSignatures`) undefined.** Is it a protocol-wide constant? Per-contextGraph configurable? A percentage of active peers? A fixed number? | Section 2.1 Phase 5 |
 | OQ-17 | **`selection` parameter for `enshrineFromWorkspace` undefined.** What can be selected — individual rootEntities? All workspace data? A time range? An operationId set? | Section 2.2 |
 | OQ-18 | **`publisherPeerId` ↔ `publisherAddress` relationship not documented.** Gossip uses peerId (libp2p identity), chain uses address (Ethereum). How does one resolve to the other? Via the identity contract? This mapping is central to the protocol but never explained. | Throughout |
 | OQ-13 | **`/dkg/query/2.0.0` registered but queries are documented as "LOCAL ONLY."** Is remote query a planned future feature, or should the handler be removed from the boot sequence? | Section 1 vs Section 5 |
 | OQ-20 | **Workspace conflict resolution undefined.** Creator-only upsert handles single-owner entities, but what about two publishers writing overlapping (non-identical) entities? Is this prevented by validation rules, or is it a race condition? | Section 2.2, Section 12.2 W1 |
 | OQ-21 | **Who collects participant signatures — the App or the DKG Agent?** The current diagram shows the App/Game Coordinator collecting M-of-N participant signatures and passing them to the Agent. But this means the App must somehow halt/resume the publish flow mid-execution. Alternatives: **(a)** App provides participant signatures upfront in the `publish()` call (requires app to pre-coordinate before calling publish). **(b)** Agent exposes a callback/event that the app subscribes to (agent pauses, app collects, agent resumes). **(c)** Agent collects internally via a protocol (but how does it know the app-specific coordination mechanism?). Each has trade-offs for API design and flow control. | Section 2.3 Phase 5b |
-| OQ-22 | **Should context graph data also live in the paranet data graph?** Currently, data published to a context graph lands ONLY at `did:dkg:paranet:{id}/context/{ctxId}`, NOT in the paranet data graph. This means paranet-scoped queries won't find context graph data. Options: **(a)** Context graph only (current) — clean separation, but requires explicit context graph queries. **(b)** Both graphs — data is queryable from either scope, but creates duplication. **(c)** Paranet graph with a context graph link — data in paranet, metadata links it to the context graph. | Section 2.3 Phase 7 |
-| OQ-23 | **How are context graph queries scoped?** Section 5 shows queries against the paranet data graph and optionally workspace. Context graph data lives at a different URI. Can the app specify a `contextGraphId`? Is there a union query across all context graphs in a paranet? | Section 5 vs Section 2.3 |
+| OQ-22 | **Should context graph data also live in the contextGraph data graph?** Currently, data published to a context graph lands ONLY at `did:dkg:context-graph:{id}/context/{ctxId}`, NOT in the contextGraph data graph. This means contextGraph-scoped queries won't find context graph data. Options: **(a)** Context graph only (current) — clean separation, but requires explicit context graph queries. **(b)** Both graphs — data is queryable from either scope, but creates duplication. **(c)** ContextGraph graph with a context graph link — data in contextGraph, metadata links it to the context graph. | Section 2.3 Phase 7 |
+| OQ-23 | **How are context graph queries scoped?** Section 5 shows queries against the contextGraph data graph and optionally workspace. Context graph data lives at a different URI. Can the app specify a `contextGraphId`? Is there a union query across all context graphs in a contextGraph? | Section 5 vs Section 2.3 |
 | OQ-24 | **Update conflict resolution.** Two publishers updating overlapping entities in the same block — the first tx wins by txIndex but the second publisher gets no notification. What is the conflict resolution strategy? | Section 4, REVIEW note |
-| OQ-25 | **Context graph updates — do they require re-collecting participant signatures?** Section 4 only covers paranet data updates. For context graph data, does an update need M-of-N participant governance again? | Section 4 vs Section 2.3 |
+| OQ-25 | **Context graph updates — do they require re-collecting participant signatures?** Section 4 only covers contextGraph data updates. For context graph data, does an update need M-of-N participant governance again? | Section 4 vs Section 2.3 |
 | OQ-26 | **Sync trust model — should syncing node verify chain provenance?** Current sync verifies kcMerkleRoot but not that the data was actually committed on-chain. A malicious peer could fabricate confirmed metadata. | Section 6 |
-| OQ-27 | **When does a node initiate sync? How does a new node catch up?** Section 6 shows the sync protocol but not when/why a node triggers it. Manual? Automatic on paranet join? Periodic? | Section 6 |
+| OQ-27 | **When does a node initiate sync? How does a new node catch up?** Section 6 shows the sync protocol but not when/why a node triggers it. Manual? Automatic on contextGraph join? Periodic? | Section 6 |
 | OQ-28 | **Workspace sync is unauthenticated.** Workspace data has no Merkle root yet, so there is nothing to verify against. A malicious peer can send arbitrary workspace triples. Is this acceptable? | Section 6 |
 | OQ-29 | **`tokenAmount` / TRAC economics undefined.** All publish flows include `tokenAmount` in the chain tx but the document never explains: how is it determined? Per-KA, per-KC, per-byte? What if insufficient? Locked or burned? | Throughout Section 2 |
 | OQ-30 | **Context graph participant lifecycle.** Can participants be added/removed after creation? What if a participant goes offline permanently — does M-of-N become unachievable? | Section 2.3 |
-| OQ-31 | **Paranet unsubscribe/leave mechanism.** Section 7 covers discovery and subscription but not leaving a paranet. Can a node unsubscribe and garbage-collect local graphs? | Section 7 |
-| OQ-32 | **GossipSub message type discrimination.** The `paranetPublishTopic` carries three message types: `PUBLISH` (full data), `ENSHRINE` (attestation-only), `CONFIRMED` (chain proof). These need a type field in the message envelope. Currently implied but not formally specified. | Sections 2.1/2.2/2.3, Section 8 |
+| OQ-31 | **ContextGraph unsubscribe/leave mechanism.** Section 7 covers discovery and subscription but not leaving a contextGraph. Can a node unsubscribe and garbage-collect local graphs? | Section 7 |
+| OQ-32 | **GossipSub message type discrimination.** The `contextGraphPublishTopic` carries three message types: `PUBLISH` (full data), `ENSHRINE` (attestation-only), `CONFIRMED` (chain proof). These need a type field in the message envelope. Currently implied but not formally specified. | Sections 2.1/2.2/2.3, Section 8 |
 | OQ-33 | **Finalization dedup atomicity.** Both gossip and ChainEventPoller check UAL confirmation status. If both fire concurrently, the dedup check must be atomic to prevent double-promotion (TOCTOU race). | Section 2.1 Phase 9 |
 | OQ-34 | **Data-to-chain convenience linking.** User-facing triples have no direct link to their on-chain proof (requires 4-step SPARQL joins via meta graph). Should the protocol add `<rootEntity> dkg:knowledgeAsset <ual>` as a convenience triple? | Section 11, REVIEW note |
 | OQ-35 | **Manifest schema never defined.** Referenced in Sections 2.1, 2.3, and 10 but the field list and format are never specified. | Throughout |

@@ -28,7 +28,7 @@ export const WorkspaceCASConditionSchema = new Type('WorkspaceCASCondition')
   .add(new Field('expectAbsent', 4, 'bool'));
 
 export const WorkspacePublishRequestSchema = new Type('WorkspacePublishRequest')
-  .add(new Field('paranetId', 1, 'string'))
+  .add(new Field('contextGraphId', 1, 'string'))
   .add(new Field('nquads', 2, 'bytes'))
   .add(new Field('manifest', 3, 'WorkspaceManifestEntry', 'repeated'))
   .add(new Field('publisherPeerId', 4, 'string'))
@@ -56,7 +56,7 @@ export interface WorkspaceCASConditionMsg {
 }
 
 export interface WorkspacePublishRequestMsg {
-  paranetId: string;
+  contextGraphId: string;
   nquads: Uint8Array;
   manifest: WorkspaceManifestEntryMsg[];
   publisherPeerId: string;

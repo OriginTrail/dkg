@@ -32,14 +32,14 @@ const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const DKG = 'http://dkg.io/ontology/';
 const PROV = 'http://www.w3.org/ns/prov#';
 
-const PARANET = 'agent-registry';
-const META_GRAPH = `did:dkg:context-graph:${PARANET}/_meta`;
+const CONTEXT_GRAPH = 'agent-registry';
+const META_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`;
 const UAL = 'did:dkg:kc:test-kc-001';
 
 function makeMeta(overrides?: Partial<KCMetadata>): KCMetadata {
   return {
     ual: UAL,
-    contextGraphId: PARANET,
+    contextGraphId: CONTEXT_GRAPH,
     merkleRoot: new Uint8Array([0xab, 0xcd, 0xef]),
     kaCount: 2,
     publisherPeerId: '12D3KooWTestPeer',
@@ -76,12 +76,12 @@ describe('generateKCMetadata', () => {
     expect(typeQuad!.object).toBe(`${DKG}KnowledgeCollection`);
   });
 
-  it('includes merkleRoot, kaCount, and paranet', () => {
+  it('includes merkleRoot, kaCount, and contextGraph', () => {
     const quads = generateKCMetadata(makeMeta(), [makeKA()]);
     const predicates = quads.filter(q => q.subject === UAL).map(q => q.predicate);
     expect(predicates).toContain(`${DKG}merkleRoot`);
     expect(predicates).toContain(`${DKG}kaCount`);
-    expect(predicates).toContain(`${DKG}paranet`);
+    expect(predicates).toContain(`${DKG}contextGraph`);
   });
 
   it('all quads use the correct meta graph', () => {
@@ -123,6 +123,102 @@ describe('generateKCMetadata', () => {
   });
 });
 
+describe('generateKCMetadata — RFC-001 §3.5 publication provenance', () => {
+  // Both fields together unlock the publication subject. Either alone is
+  // a no-op, matching the existing behaviour for callers that don't
+  // propagate the new fields.
+
+  const AUTHOR = '0x70997970C51812dc3A010C7d01b50e0d17dc79C8';
+  const OP_ID = 'session-abc-7';
+  const PUBLICATION_URI = `urn:dkg:publication:${OP_ID}`;
+
+  it('emits no publication subject when authorAddress and publishOperationId are both omitted', () => {
+    const quads = generateKCMetadata(makeMeta(), [makeKA()]);
+    const pub = quads.find(q => q.subject === PUBLICATION_URI);
+    expect(pub).toBeUndefined();
+    const authoredBy = quads.find(q => q.predicate === `${DKG}authoredBy`);
+    expect(authoredBy).toBeUndefined();
+  });
+
+  it('emits no publication subject when only authorAddress is provided', () => {
+    const quads = generateKCMetadata(makeMeta({ authorAddress: AUTHOR }), [makeKA()]);
+    const pub = quads.find(q => q.predicate === RDF_TYPE && q.object === `${DKG}Publication`);
+    expect(pub).toBeUndefined();
+  });
+
+  it('emits no publication subject when only publishOperationId is provided', () => {
+    const quads = generateKCMetadata(makeMeta({ publishOperationId: OP_ID }), [makeKA()]);
+    const pub = quads.find(q => q.predicate === RDF_TYPE && q.object === `${DKG}Publication`);
+    expect(pub).toBeUndefined();
+  });
+
+  it('emits the dkg:Publication subject with all five RFC-001 §3.5 predicates when both are set', () => {
+    const meta = makeMeta({ authorAddress: AUTHOR, publishOperationId: OP_ID });
+    const quads = generateKCMetadata(meta, [makeKA()]);
+
+    const pubQuads = quads.filter(q => q.subject === PUBLICATION_URI);
+    const preds = new Map(pubQuads.map(q => [q.predicate, q.object]));
+
+    expect(preds.get(RDF_TYPE)).toBe(`${DKG}Publication`);
+    expect(preds.get(`${DKG}publishOperationId`)).toBe(`"${OP_ID}"`);
+    expect(preds.get(`${DKG}contextGraphId`)).toBe(`"${CONTEXT_GRAPH}"`);
+    expect(preds.get(`${DKG}authoredBy`)).toBe(`"${AUTHOR}"`);
+    // merkleRoot serialised as `"<bare-hex>"^^xsd:hexBinary` (per
+    // XSD 1.1 §3.3.16: `xsd:hexBinary` lexical space is hex digits
+    // ONLY, no `0x` prefix — typed literal must be a valid lexical
+    // form for SPARQL value-equality comparisons to work).
+    const root = preds.get(`${DKG}merkleRoot`);
+    expect(root).toBeDefined();
+    expect(root).toMatch(/^"[0-9a-f]+"\^\^<http:\/\/www\.w3\.org\/2001\/XMLSchema#hexBinary>$/);
+    expect(root).not.toMatch(/"0x/); // explicit guard: no `0x` prefix in lexical form
+  });
+
+  it('all publication quads land in the meta graph (not the data graph)', () => {
+    const meta = makeMeta({ authorAddress: AUTHOR, publishOperationId: OP_ID });
+    const quads = generateKCMetadata(meta, [makeKA()]);
+    for (const q of quads.filter(q => q.subject === PUBLICATION_URI)) {
+      expect(q.graph).toBe(META_GRAPH);
+    }
+  });
+
+  it('links each KA to the publication subject via dkg:publication', () => {
+    const meta = makeMeta({ authorAddress: AUTHOR, publishOperationId: OP_ID });
+    const kas = [makeKA({ tokenId: 1n }), makeKA({ tokenId: 2n })];
+    const quads = generateKCMetadata(meta, kas);
+
+    const linkQuads = quads.filter(q => q.predicate === `${DKG}publication`);
+    expect(linkQuads).toHaveLength(2);
+    expect(linkQuads.every(q => q.object === PUBLICATION_URI)).toBe(true);
+    expect(new Set(linkQuads.map(q => q.subject))).toEqual(
+      new Set([`${UAL}/1`, `${UAL}/2`]),
+    );
+  });
+
+  it('publication subject is stable across tentative and confirmed forms (same publishOperationId)', () => {
+    // Confirms RFC-001 §3.5: the publication URI uses the
+    // publishOperationId, not the (unstable) UAL, so a publish that is
+    // first emitted as tentative and later promoted to confirmed
+    // continues to point at the same `dkg:Publication` subject.
+    const tentMeta = makeMeta({
+      ual: 'did:dkg:mock/0xabcd/t-session-abc-7',
+      authorAddress: AUTHOR,
+      publishOperationId: OP_ID,
+    });
+    const confMeta = makeMeta({
+      ual: 'did:dkg:mock/0xabcd/101',
+      authorAddress: AUTHOR,
+      publishOperationId: OP_ID,
+    });
+    const tentQuads = generateKCMetadata(tentMeta, [makeKA({ kcUal: tentMeta.ual })]);
+    const confQuads = generateKCMetadata(confMeta, [makeKA({ kcUal: confMeta.ual })]);
+
+    const tentSubject = tentQuads.find(q => q.predicate === RDF_TYPE && q.object === `${DKG}Publication`)?.subject;
+    const confSubject = confQuads.find(q => q.predicate === RDF_TYPE && q.object === `${DKG}Publication`)?.subject;
+    expect(tentSubject).toBe(PUBLICATION_URI);
+    expect(confSubject).toBe(PUBLICATION_URI);
+  });
+});
+
 describe('generateTentativeMetadata', () => {
   it('adds dkg:status "tentative" quad', () => {
     const quads = generateTentativeMetadata(makeMeta(), [makeKA()]);
@@ -140,7 +236,7 @@ describe('generateTentativeMetadata', () => {
 
 describe('getTentativeStatusQuad', () => {
   it('returns a single quad with correct graph and status', () => {
-    const q = getTentativeStatusQuad(UAL, PARANET);
+    const q = getTentativeStatusQuad(UAL, CONTEXT_GRAPH);
     expect(q.subject).toBe(UAL);
     expect(q.predicate).toBe(`${DKG}status`);
     expect(q.object).toBe('"tentative"');
@@ -150,7 +246,7 @@ describe('getTentativeStatusQuad', () => {
 
 describe('getConfirmedStatusQuad', () => {
   it('returns a single quad with confirmed status', () => {
-    const q = getConfirmedStatusQuad(UAL, PARANET);
+    const q = getConfirmedStatusQuad(UAL, CONTEXT_GRAPH);
     expect(q.subject).toBe(UAL);
     expect(q.predicate).toBe(`${DKG}status`);
     expect(q.object).toBe('"confirmed"');
@@ -160,7 +256,7 @@ describe('getConfirmedStatusQuad', () => {
 
 describe('generateConfirmedMetadata', () => {
   it('includes txHash, blockNumber, publisherAddress, chainId, batchId', () => {
-    const quads = generateConfirmedMetadata(UAL, PARANET, PROVENANCE);
+    const quads = generateConfirmedMetadata(UAL, CONTEXT_GRAPH, PROVENANCE);
     const preds = quads.map(q => q.predicate);
     expect(preds).toContain(`${DKG}status`);
     expect(preds).toContain(`${DKG}transactionHash`);
@@ -171,7 +267,7 @@ describe('generateConfirmedMetadata', () => {
   });
 
   it('all quads target the correct subject and meta graph', () => {
-    const quads = generateConfirmedMetadata(UAL, PARANET, PROVENANCE);
+    const quads = generateConfirmedMetadata(UAL, CONTEXT_GRAPH, PROVENANCE);
     for (const q of quads) {
       expect(q.subject).toBe(UAL);
       expect(q.graph).toBe(META_GRAPH);
@@ -197,12 +293,12 @@ describe('generateConfirmedFullMetadata', () => {
 describe('generateShareMetadata', () => {
   const wsMeta: ShareMetadata = {
     shareOperationId: 'op-123',
-    contextGraphId: PARANET,
+    contextGraphId: CONTEXT_GRAPH,
     rootEntities: ['did:dkg:entity:alice', 'did:dkg:entity:bob'],
     publisherPeerId: '12D3KooWTestPeer',
     timestamp: new Date('2026-03-01T00:00:00Z'),
   };
-  const wsGraph = `did:dkg:context-graph:${PARANET}/_shared_memory_meta`;
+  const wsGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/_shared_memory_meta`;
 
   it('generates correct workspace operation quads', () => {
     const quads = generateShareMetadata(wsMeta, wsGraph);
@@ -232,7 +328,7 @@ describe('generateShareMetadata', () => {
 describe('generateAuthorshipProof', () => {
   const proof: AuthorshipProof = {
     kcUal: UAL,
-    contextGraphId: PARANET,
+    contextGraphId: CONTEXT_GRAPH,
     agentAddress: '0x1234567890abcdef1234567890abcdef12345678',
     signature: '0xdeadbeef01234567',
     signedHash: '0xabcdef1234567890',
@@ -287,14 +383,14 @@ describe('generateAuthorshipProof', () => {
 
 describe('generateShareTransitionMetadata', () => {
   const shareMeta: ShareTransitionMetadata = {
-    contextGraphId: PARANET,
+    contextGraphId: CONTEXT_GRAPH,
     operationId: 'op-share-001',
     agentAddress: '0x1234567890abcdef1234567890abcdef12345678',
     assertionName: 'my-assertion',
     entities: ['urn:test:entity:alice', 'urn:test:entity:bob'],
     timestamp: new Date('2026-04-01T00:00:00Z'),
   };
-  const SWM_META_GRAPH = `did:dkg:context-graph:${PARANET}/_shared_memory_meta`;
+  const SWM_META_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}/_shared_memory_meta`;
 
   it('generates ShareTransition with correct type', () => {
     const quads = generateShareTransitionMetadata(shareMeta);
@@ -348,8 +444,8 @@ describe('generateShareTransitionMetadata', () => {
 const AGENT_ADDR = '0x1234567890abcdef1234567890abcdef12345678';
 const AGENT_URI = `did:dkg:agent:${AGENT_ADDR}`;
 const ASSERTION = 'game-turn-42';
-const LIFECYCLE_URI = assertionLifecycleUri(PARANET, AGENT_ADDR, ASSERTION);
-const ASSERTION_GRAPH = contextGraphAssertionUri(PARANET, AGENT_ADDR, ASSERTION);
+const LIFECYCLE_URI = assertionLifecycleUri(CONTEXT_GRAPH, AGENT_ADDR, ASSERTION);
+const ASSERTION_GRAPH = contextGraphAssertionUri(CONTEXT_GRAPH, AGENT_ADDR, ASSERTION);
 
 function findEventUri(quads: { subject: string; predicate: string; object: string }[]): string {
   const q = quads.find(q => q.predicate === `${PROV}generated` && q.object === LIFECYCLE_URI);
@@ -363,7 +459,7 @@ function findEventUriFromInsert(insert: { subject: string; predicate: string; ob
 
 describe('generateAssertionCreatedMetadata', () => {
   const meta: AssertionCreatedMeta = {
-    contextGraphId: PARANET,
+    contextGraphId: CONTEXT_GRAPH,
     agentAddress: AGENT_ADDR,
     assertionName: ASSERTION,
     timestamp: new Date('2026-04-15T10:00:00Z'),
@@ -439,7 +535,7 @@ describe('generateAssertionCreatedMetadata', () => {
 
 describe('generateAssertionPromotedMetadata', () => {
   const meta: AssertionPromotedMeta = {
-    contextGraphId: PARANET,
+    contextGraphId: CONTEXT_GRAPH,
     agentAddress: AGENT_ADDR,
     assertionName: ASSERTION,
     shareOperationId: 'op-123',
@@ -490,7 +586,7 @@ describe('generateAssertionPromotedMetadata', () => {
 
 describe('generateAssertionPublishedMetadata', () => {
   const meta: AssertionPublishedMeta = {
-    contextGraphId: PARANET,
+    contextGraphId: CONTEXT_GRAPH,
     agentAddress: AGENT_ADDR,
     assertionName: ASSERTION,
     kcUal: 'did:dkg:kc:test-kc-001',
@@ -514,7 +610,7 @@ describe('generateAssertionPublishedMetadata', () => {
 
 describe('generateAssertionDiscardedMetadata', () => {
   const meta: AssertionDiscardedMeta = {
-    contextGraphId: PARANET,
+    contextGraphId: CONTEXT_GRAPH,
     agentAddress: AGENT_ADDR,
     assertionName: ASSERTION,
     timestamp: new Date('2026-04-15T10:15:00Z'),

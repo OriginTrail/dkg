@@ -100,7 +100,7 @@ def c2_published_entities(run_id: str) -> int:
         f'FILTER(CONTAINS(STR(?s), "urn:exp-c2:{run_id}:")) '
         "}"
     )
-    payload = json.dumps({"sparql": sparql, "paranetId": "dev-coordination"})
+    payload = json.dumps({"sparql": sparql, "contextGraphId": "dev-coordination"})
     try:
         raw = subprocess.check_output(
             [

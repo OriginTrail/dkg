@@ -45,7 +45,7 @@
 ### 2.1 Current DKG-V9 memory/retrieval
 
 - **Primary store**: RDF **triple store** (Oxigraph WASM) with SPARQL; N-Quads dump for persistence.
-- **Query path**: `DKGQueryEngine` wraps SPARQL with paranet graph scope → `store.query(wrappedSparql)`.
+- **Query path**: `DKGQueryEngine` wraps SPARQL with contextGraph graph scope → `store.query(wrappedSparql)`.
 - **No semantic search**: retrieval is SPARQL-only (graph patterns, no embedding-based similarity).
 - **Pluggable backends**: `TripleStore` interface + `createTripleStore(config)` allow alternative stores (e.g. SPARQL HTTP); no “semantic memory” layer today.
 

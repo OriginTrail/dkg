@@ -105,7 +105,7 @@ describe('V10 proto e2e: PUBLISH flow with StorageACK', () => {
     const publishReq = encodePublishRequest({
       ual: 'did:dkg:mock:31337/0xAbc/1',
       nquads: new TextEncoder().encode('<s> <p> <o> .'),
-      paranetId: contextGraphId,
+      contextGraphId: contextGraphId,
       kas: [{ tokenId: 1, rootEntity: 'http://example.org/alice', privateMerkleRoot: new Uint8Array(0), privateTripleCount: 0 }],
       publisherIdentity: randomBytes(32),
       publisherAddress: '0xPublisher',
@@ -117,7 +117,7 @@ describe('V10 proto e2e: PUBLISH flow with StorageACK', () => {
     });
 
     const decoded = decodePublishRequest(publishReq);
-    expect(decoded.paranetId).toBe(contextGraphId);
+    expect(decoded.contextGraphId).toBe(contextGraphId);
 
     // Step 2: Core node sends StorageACK
     const ack: StorageACKMsg = {
@@ -135,7 +135,7 @@ describe('V10 proto e2e: PUBLISH flow with StorageACK', () => {
     // Step 3: Publisher sends finalization
     const finBytes = encodeFinalizationMessage({
       ual: 'did:dkg:mock:31337/0xAbc/1',
-      paranetId: contextGraphId,
+      contextGraphId: contextGraphId,
       kcMerkleRoot: ack.merkleRoot,
       txHash: '0xfeed',
       blockNumber: 12345,
@@ -158,7 +158,7 @@ describe('V10 proto e2e: GossipSub envelope wrapping', () => {
     const swmCgId = 'cg-42';
     const innerMsg = encodeSharePublishRequest({
       nquads: new TextEncoder().encode('<s> <p> <o> .'),
-      paranetId: swmCgId,
+      contextGraphId: swmCgId,
       manifest: [{
         rootEntity: 'http://example.org/alice',
       }],
@@ -197,7 +197,7 @@ describe('V10 proto e2e: GossipSub envelope wrapping', () => {
 
     // Step 5: Extract and decode inner payload
     const innerDecoded = decodeSharePublishRequest(new Uint8Array(decoded.payload));
-    expect(innerDecoded.paranetId).toBe(swmCgId);
+    expect(innerDecoded.contextGraphId).toBe(swmCgId);
     expect(innerDecoded.manifest).toHaveLength(1);
     expect(innerDecoded.manifest[0].rootEntity).toBe('http://example.org/alice');
   });

@@ -31,7 +31,7 @@ console.log('PeerId:', agent.peerId);
 console.log('Multiaddrs:', agent.multiaddrs);
 
 // Publish knowledge
-await agent.publish('my-paranet', [
+await agent.publish('my-contextGraph', [
   { subject: 'http://ex.org/alice', predicate: 'http://schema.org/name', object: '"Alice"', graph: '' },
   { subject: 'http://ex.org/alice', predicate: 'http://schema.org/knows', object: 'http://ex.org/bob', graph: '' },
 ]);
@@ -93,7 +93,7 @@ const agent = await DKGAgent.create({
 ```typescript
 await agent.start();
 
-// Publish RDF triples to a paranet
+// Publish RDF triples to a contextGraph
 const result = await agent.publish('research-data', [
   { subject: 'http://ex.org/paper1', predicate: 'http://purl.org/dc/terms/title', object: '"Deep Learning Survey"', graph: '' },
   { subject: 'http://ex.org/paper1', predicate: 'http://purl.org/dc/terms/creator', object: 'http://ex.org/alice', graph: '' },
@@ -128,7 +128,7 @@ for (const row of results.bindings) {
   console.log(row['name']);
 }
 
-// Scoped to a paranet
+// Scoped to a contextGraph
 const scoped = await agent.query(
   'SELECT ?s ?p ?o WHERE { ?s ?p ?o }',
   'research-data',
@@ -190,13 +190,13 @@ if (offerings.length > 0) {
 }
 ```
 
-### Subscribing to Paranets
+### Subscribing to ContextGraphs
 
 ```typescript
-// Subscribe to a paranet to receive published knowledge in real-time
-agent.subscribeToParanet('research-data');
+// Subscribe to a contextGraph to receive published knowledge in real-time
+agent.subscribeToContextGraph('research-data');
 
-// Any knowledge published to this paranet by other nodes will
+// Any knowledge published to this contextGraph by other nodes will
 // automatically appear in your local store and be queryable
 ```
 

@@ -9,7 +9,7 @@ import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 const DKG = 'http://dkg.io/ontology/';
 const XSD = 'http://www.w3.org/2001/XMLSchema#';
 const ONTOLOGY_GRAPH = 'did:dkg:context-graph:ontology';
-const PARANET_ON_CHAIN_ID = 'https://dkg.network/ontology#ParanetOnChainId';
+const CONTEXT_GRAPH_ON_CHAIN_ID = 'https://dkg.network/ontology#ContextGraphOnChainId';
 const CG_URI_PREFIX = 'did:dkg:context-graph:';
 
 /**
@@ -110,7 +110,7 @@ export class KCDataMissingError extends Error {
  *
  * 1. Map the on-chain `cgId` (numeric) to the local CG **name** via the
  *    ontology graph — `<did:dkg:context-graph:ontology>` carries
- *    `<cgUri> dkg.network/ontology#ParanetOnChainId "<cgId>"` triples
+ *    `<cgUri> dkg.network/ontology#ContextGraphOnChainId "<cgId>"` triples
  *    written by `agent.registerContextGraph`. The publisher's V10
  *    "remap" flow then writes data under
  *    `did:dkg:context-graph:<NAME>/context/<cgId>` (and `.../_meta`),
@@ -253,7 +253,7 @@ export async function extractV10KCFromStore(
  * Look up the local CG name for a given on-chain id.
  *
  * The ontology graph carries triples of the form
- *   `<did:dkg:context-graph:<name>> <ParanetOnChainId> "<cgId>"`
+ *   `<did:dkg:context-graph:<name>> <ContextGraphOnChainId> "<cgId>"`
  * written by `agent.registerContextGraph` and
  * `discoverContextGraphsFromChain`. We invert that mapping here so
  * the extractor can reach the right `<NAME>/context/<cgId>/_meta` URI.
@@ -268,7 +268,7 @@ async function resolveContextGraphNameFromOnChainId(
   const result = await store.query(
     `SELECT ?cgUri WHERE {
        GRAPH <${ONTOLOGY_GRAPH}> {
-         ?cgUri <${PARANET_ON_CHAIN_ID}> "${cgIdStr}" .
+         ?cgUri <${CONTEXT_GRAPH_ON_CHAIN_ID}> "${cgIdStr}" .
        }
      } LIMIT 1`,
   );

@@ -1,3 +1,0 @@
-export { registerTools } from './tools.js';
-export { NS, Class, Prop, Status, DEFAULT_CONTEXT_GRAPH, DEFAULT_CONTEXT_GRAPH as DEFAULT_PARANET } from './ontology.js';
-export type { DkgClientLike, Experiment, ExperimentRecord } from './types.js';

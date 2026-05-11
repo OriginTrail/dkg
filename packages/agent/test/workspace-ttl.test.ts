@@ -20,7 +20,7 @@ afterAll(async () => {
   await revertSnapshot(_fileSnapshot);
 });
 
-const PARANET = 'ws-ttl-test';
+const CONTEXT_GRAPH = 'ws-ttl-test';
 const FRESH_ENTITY = 'urn:ws-ttl:fresh:1';
 const STALE_ENTITY = 'urn:ws-ttl:stale:1';
 
@@ -47,18 +47,18 @@ describe('Workspace TTL', () => {
     await sleep(500);
 
     await node.createContextGraph({
-      id: PARANET,
-      name: 'TTL Test Paranet',
+      id: CONTEXT_GRAPH,
+      name: 'TTL Test ContextGraph',
       description: 'For workspace TTL tests',
     });
 
-    await node.share(PARANET, [
+    await node.share(CONTEXT_GRAPH, [
       { subject: STALE_ENTITY, predicate: 'http://schema.org/name', object: '"Will Expire"', graph: '' },
     ]);
 
     const before = await node.query(
       'SELECT ?s WHERE { ?s <http://schema.org/name> ?name }',
-      { contextGraphId: PARANET, graphSuffix: '_shared_memory' },
+      { contextGraphId: CONTEXT_GRAPH, graphSuffix: '_shared_memory' },
     );
     expect(before.bindings.length).toBe(1);
 
@@ -66,7 +66,7 @@ describe('Workspace TTL', () => {
     await sleep(3000);
 
     // Write a fresh entity (this one should survive cleanup)
-    await node.share(PARANET, [
+    await node.share(CONTEXT_GRAPH, [
       { subject: FRESH_ENTITY, predicate: 'http://schema.org/name', object: '"Still Fresh"', graph: '' },
     ]);
 
@@ -75,7 +75,7 @@ describe('Workspace TTL', () => {
 
     const result = await node.query(
       'SELECT ?s ?name WHERE { ?s <http://schema.org/name> ?name }',
-      { contextGraphId: PARANET, graphSuffix: '_shared_memory' },
+      { contextGraphId: CONTEXT_GRAPH, graphSuffix: '_shared_memory' },
     );
 
     const subjects = result.bindings.map((b: any) => b['s']);

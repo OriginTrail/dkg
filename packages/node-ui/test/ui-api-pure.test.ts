@@ -289,6 +289,21 @@ describe('UI API tests', () => {
       expect(requestLog.some(r => r.url.includes('contextGraphId=cg-1'))).toBe(true);
     });
 
+    it('fetchCatchupStatus type accepts V10 "unreachable" terminal status', async () => {
+      // V10 introduces an `unreachable` status when the daemon ran the
+      // catchup but no peer could deliver the CG content (curator
+      // offline / no host / network failure). The UI uses it to render
+      // a dedicated "send signed join request" CTA distinct from the
+      // generic timeout copy. This test pins the type contract: the
+      // CatchupStatusResponse union must accept `'unreachable'` so the
+      // modal's terminal-state poll exit recognises it.
+      const result = await fetchCatchupStatus('cg-2');
+      const acceptedStatuses: Array<typeof result.status> = [
+        'queued', 'running', 'done', 'denied', 'failed', 'unreachable',
+      ];
+      expect(acceptedStatuses).toContain(result.status);
+    });
+
     it('fetchSuccessRates calls correct endpoint', async () => {
       await fetchSuccessRates(60000);
       expect(requestLog.some(r => r.url.includes('periodMs=60000'))).toBe(true);

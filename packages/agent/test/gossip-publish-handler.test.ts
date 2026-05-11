@@ -2,12 +2,12 @@ import { describe, it, expect } from 'vitest';
 import {
   encodePublishRequest,
   DKG_ONTOLOGY,
-  SYSTEM_PARANETS,
+  SYSTEM_CONTEXT_GRAPHS,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { GossipPublishHandler } from '../src/gossip-publish-handler.js';
 
-const PARANET = 'test-gossip-handler';
+const CONTEXT_GRAPH = 'test-gossip-handler';
 
 function makePublishMessage(opts: {
   ual?: string;
@@ -18,7 +18,7 @@ function makePublishMessage(opts: {
   return encodePublishRequest({
     ual: opts.ual ?? '',
     nquads: new TextEncoder().encode(opts.nquads ?? '<http://s> <http://p> <http://o> .'),
-    paranetId: opts.contextGraphId ?? PARANET,
+    contextGraphId: opts.contextGraphId ?? CONTEXT_GRAPH,
     kas: opts.kas ?? [],
     publisherIdentity: new Uint8Array(32),
     publisherAddress: '0x1111111111111111111111111111111111111111',
@@ -52,14 +52,14 @@ describe('GossipPublishHandler', () => {
     const { store, handler } = createHandler();
 
     const data = makePublishMessage({
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       nquads: '<http://example.org/s> <http://example.org/p> <http://example.org/o> .',
     });
 
-    await handler.handlePublishMessage(data, PARANET);
+    await handler.handlePublishMessage(data, CONTEXT_GRAPH);
 
     const result = await store.query(
-      `SELECT ?s ?p ?o WHERE { GRAPH <did:dkg:context-graph:${PARANET}> { ?s ?p ?o . FILTER(?s = <http://example.org/s>) } }`,
+      `SELECT ?s ?p ?o WHERE { GRAPH <did:dkg:context-graph:${CONTEXT_GRAPH}> { ?s ?p ?o . FILTER(?s = <http://example.org/s>) } }`,
     );
     expect(result.type).toBe('bindings');
     const bindings = result.type === 'bindings' ? result.bindings : [];
@@ -72,12 +72,12 @@ describe('GossipPublishHandler', () => {
   it('ignores empty broadcast with no UAL', async () => {
     const { store, handler } = createHandler();
 
-    const countBefore = await store.countQuads(`did:dkg:context-graph:${PARANET}`);
+    const countBefore = await store.countQuads(`did:dkg:context-graph:${CONTEXT_GRAPH}`);
 
     const data = encodePublishRequest({
       ual: '',
       nquads: new Uint8Array(0),
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       kas: [],
       publisherIdentity: new Uint8Array(32),
       publisherAddress: '0x1111111111111111111111111111111111111111',
@@ -88,25 +88,25 @@ describe('GossipPublishHandler', () => {
       publisherSignatureVs: new Uint8Array(0),
     });
 
-    await handler.handlePublishMessage(data, PARANET);
+    await handler.handlePublishMessage(data, CONTEXT_GRAPH);
 
-    const countAfter = await store.countQuads(`did:dkg:context-graph:${PARANET}`);
+    const countAfter = await store.countQuads(`did:dkg:context-graph:${CONTEXT_GRAPH}`);
     expect(countAfter).toBe(countBefore);
   });
 
   it('rejects gossip when contextGraphId mismatches topic', async () => {
     const { store, handler } = createHandler();
 
-    const countBefore = await store.countQuads(`did:dkg:context-graph:${PARANET}`);
+    const countBefore = await store.countQuads(`did:dkg:context-graph:${CONTEXT_GRAPH}`);
 
     const data = makePublishMessage({
-      contextGraphId: 'wrong-paranet',
+      contextGraphId: 'wrong-contextGraph',
       nquads: '<http://example.org/s> <http://example.org/p> <http://example.org/o> .',
     });
 
-    await handler.handlePublishMessage(data, PARANET);
+    await handler.handlePublishMessage(data, CONTEXT_GRAPH);
 
-    const countAfter = await store.countQuads(`did:dkg:context-graph:${PARANET}`);
+    const countAfter = await store.countQuads(`did:dkg:context-graph:${CONTEXT_GRAPH}`);
     expect(countAfter).toBe(countBefore);
   });
 
@@ -119,14 +119,14 @@ describe('GossipPublishHandler', () => {
 
     const data = makePublishMessage({
       ual: 'did:dkg:mock:31337/0x1/1',
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       nquads,
       kas,
     });
 
-    await handler.handlePublishMessage(data, PARANET);
+    await handler.handlePublishMessage(data, CONTEXT_GRAPH);
 
-    const graphUri = `did:dkg:context-graph:${PARANET}`;
+    const graphUri = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
     const firstResult = await store.query(
       `SELECT ?s WHERE { GRAPH <${graphUri}> { ?s <http://schema.org/name> ?o } }`,
     );
@@ -140,7 +140,7 @@ describe('GossipPublishHandler', () => {
     // a `.resolves.not.toThrow()` assertion unnoticed.
     const countBefore = await store.countQuads(graphUri);
 
-    await expect(handler.handlePublishMessage(data, PARANET)).resolves.not.toThrow();
+    await expect(handler.handlePublishMessage(data, CONTEXT_GRAPH)).resolves.not.toThrow();
 
     const countAfter = await store.countQuads(graphUri);
     expect(
@@ -154,15 +154,15 @@ describe('GossipPublishHandler', () => {
 
     const data = makePublishMessage({
       ual: 'did:dkg:mock:31337/0x1/1',
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       nquads: '<http://example.org/s> <http://example.org/p> <http://example.org/o> .',
       kas: [],
     });
 
-    await handler.handlePublishMessage(data, PARANET);
+    await handler.handlePublishMessage(data, CONTEXT_GRAPH);
 
     const result = await store.query(
-      `SELECT ?s WHERE { GRAPH <did:dkg:context-graph:${PARANET}> { ?s ?p ?o . FILTER(?s = <http://example.org/s>) } }`,
+      `SELECT ?s WHERE { GRAPH <did:dkg:context-graph:${CONTEXT_GRAPH}> { ?s ?p ?o . FILTER(?s = <http://example.org/s>) } }`,
     );
     const bindings = result.type === 'bindings' ? result.bindings : [];
     expect(bindings.length).toBeGreaterThan(0);
@@ -174,10 +174,10 @@ describe('GossipPublishHandler', () => {
     });
 
     const data = makePublishMessage({
-      contextGraphId: SYSTEM_PARANETS.ONTOLOGY,
+      contextGraphId: SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
       nquads: [
         '<did:dkg:policy-binding:ops-policy:incident-review:default:1> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://dkg.network/ontology#PolicyBinding> <did:dkg:context-graph:ontology> .',
-        '<did:dkg:policy-binding:ops-policy:incident-review:default:1> <https://dkg.network/ontology#appliesToParanet> <did:dkg:context-graph:ops-policy> <did:dkg:context-graph:ontology> .',
+        '<did:dkg:policy-binding:ops-policy:incident-review:default:1> <https://dkg.network/ontology#appliesToContextGraph> <did:dkg:context-graph:ops-policy> <did:dkg:context-graph:ontology> .',
         '<did:dkg:policy-binding:ops-policy:incident-review:default:1> <https://schema.org/name> "incident-review" <did:dkg:context-graph:ontology> .',
         '<did:dkg:policy-binding:ops-policy:incident-review:default:1> <https://dkg.network/ontology#activePolicy> <did:dkg:policy:ops-policy:sha256-fake> <did:dkg:context-graph:ontology> .',
         '<did:dkg:policy-binding:ops-policy:incident-review:default:1> <https://dkg.network/ontology#approvedBy> <did:dkg:agent:0x2222222222222222222222222222222222222222> <did:dkg:context-graph:ontology> .',
@@ -185,10 +185,10 @@ describe('GossipPublishHandler', () => {
       ].join('\n'),
     });
 
-    await handler.handlePublishMessage(data, SYSTEM_PARANETS.ONTOLOGY);
+    await handler.handlePublishMessage(data, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
 
     const result = await store.query(
-      `SELECT ?binding WHERE { GRAPH <did:dkg:context-graph:${SYSTEM_PARANETS.ONTOLOGY}> { ?binding <${DKG_ONTOLOGY.DKG_ACTIVE_POLICY}> ?policy } }`,
+      `SELECT ?binding WHERE { GRAPH <did:dkg:context-graph:${SYSTEM_CONTEXT_GRAPHS.ONTOLOGY}> { ?binding <${DKG_ONTOLOGY.DKG_ACTIVE_POLICY}> ?policy } }`,
     );
     const bindings = result.type === 'bindings' ? result.bindings : [];
     expect(bindings).toHaveLength(0);
@@ -200,20 +200,20 @@ describe('GossipPublishHandler', () => {
     });
 
     const data = makePublishMessage({
-      contextGraphId: SYSTEM_PARANETS.ONTOLOGY,
+      contextGraphId: SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
       nquads: [
         '<did:dkg:policy-binding:ops-policy:incident-review:default:missing-approved-by> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://dkg.network/ontology#PolicyBinding> <did:dkg:context-graph:ontology> .',
-        '<did:dkg:policy-binding:ops-policy:incident-review:default:missing-approved-by> <https://dkg.network/ontology#appliesToParanet> <did:dkg:context-graph:ops-policy> <did:dkg:context-graph:ontology> .',
+        '<did:dkg:policy-binding:ops-policy:incident-review:default:missing-approved-by> <https://dkg.network/ontology#appliesToContextGraph> <did:dkg:context-graph:ops-policy> <did:dkg:context-graph:ontology> .',
         '<did:dkg:policy-binding:ops-policy:incident-review:default:missing-approved-by> <https://schema.org/name> "incident-review" <did:dkg:context-graph:ontology> .',
         '<did:dkg:policy-binding:ops-policy:incident-review:default:missing-approved-by> <https://dkg.network/ontology#activePolicy> <did:dkg:policy:ops-policy:sha256-missing-approved-by> <did:dkg:context-graph:ontology> .',
         '<did:dkg:policy-binding:ops-policy:incident-review:default:missing-approved-by> <https://dkg.network/ontology#approvedAt> "2026-03-24T00:00:00.000Z" <did:dkg:context-graph:ontology> .',
       ].join('\n'),
     });
 
-    await handler.handlePublishMessage(data, SYSTEM_PARANETS.ONTOLOGY);
+    await handler.handlePublishMessage(data, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
 
     const result = await store.query(
-      `SELECT ?binding WHERE { GRAPH <did:dkg:context-graph:${SYSTEM_PARANETS.ONTOLOGY}> { ?binding <${DKG_ONTOLOGY.DKG_ACTIVE_POLICY}> <did:dkg:policy:ops-policy:sha256-missing-approved-by> } }`,
+      `SELECT ?binding WHERE { GRAPH <did:dkg:context-graph:${SYSTEM_CONTEXT_GRAPHS.ONTOLOGY}> { ?binding <${DKG_ONTOLOGY.DKG_ACTIVE_POLICY}> <did:dkg:policy:ops-policy:sha256-missing-approved-by> } }`,
     );
     const bindings = result.type === 'bindings' ? result.bindings : [];
     expect(bindings).toHaveLength(0);
@@ -225,10 +225,10 @@ describe('GossipPublishHandler', () => {
     });
 
     const data = makePublishMessage({
-      contextGraphId: SYSTEM_PARANETS.ONTOLOGY,
+      contextGraphId: SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
       nquads: [
         '<did:dkg:policy-binding:ops-policy:incident-review:default:missing-revoked-by> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://dkg.network/ontology#PolicyBinding> <did:dkg:context-graph:ontology> .',
-        '<did:dkg:policy-binding:ops-policy:incident-review:default:missing-revoked-by> <https://dkg.network/ontology#appliesToParanet> <did:dkg:context-graph:ops-policy> <did:dkg:context-graph:ontology> .',
+        '<did:dkg:policy-binding:ops-policy:incident-review:default:missing-revoked-by> <https://dkg.network/ontology#appliesToContextGraph> <did:dkg:context-graph:ops-policy> <did:dkg:context-graph:ontology> .',
         '<did:dkg:policy-binding:ops-policy:incident-review:default:missing-revoked-by> <https://schema.org/name> "incident-review" <did:dkg:context-graph:ontology> .',
         '<did:dkg:policy-binding:ops-policy:incident-review:default:missing-revoked-by> <https://dkg.network/ontology#activePolicy> <did:dkg:policy:ops-policy:sha256-missing-revoked-by> <did:dkg:context-graph:ontology> .',
         '<did:dkg:policy-binding:ops-policy:incident-review:default:missing-revoked-by> <https://dkg.network/ontology#approvedBy> <did:dkg:agent:0x1111111111111111111111111111111111111111> <did:dkg:context-graph:ontology> .',
@@ -237,25 +237,25 @@ describe('GossipPublishHandler', () => {
       ].join('\n'),
     });
 
-    await handler.handlePublishMessage(data, SYSTEM_PARANETS.ONTOLOGY);
+    await handler.handlePublishMessage(data, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
 
     const result = await store.query(
-      `SELECT ?binding WHERE { GRAPH <did:dkg:context-graph:${SYSTEM_PARANETS.ONTOLOGY}> { ?binding <${DKG_ONTOLOGY.DKG_ACTIVE_POLICY}> <did:dkg:policy:ops-policy:sha256-missing-revoked-by> } }`,
+      `SELECT ?binding WHERE { GRAPH <did:dkg:context-graph:${SYSTEM_CONTEXT_GRAPHS.ONTOLOGY}> { ?binding <${DKG_ONTOLOGY.DKG_ACTIVE_POLICY}> <did:dkg:policy:ops-policy:sha256-missing-revoked-by> } }`,
     );
     const bindings = result.type === 'bindings' ? result.bindings : [];
     expect(bindings).toHaveLength(0);
   });
 
-  it('accepts ontology policy approvals from the current paranet owner', async () => {
+  it('accepts ontology policy approvals from the current contextGraph owner', async () => {
     const { store, handler } = createHandler(undefined, {
       getContextGraphOwner: async (id) => id === 'ops-policy' ? 'did:dkg:agent:0x1111111111111111111111111111111111111111' : null,
     });
 
     const data = makePublishMessage({
-      contextGraphId: SYSTEM_PARANETS.ONTOLOGY,
+      contextGraphId: SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
       nquads: [
         '<did:dkg:policy-binding:ops-policy:incident-review:default:1> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://dkg.network/ontology#PolicyBinding> <did:dkg:context-graph:ontology> .',
-        '<did:dkg:policy-binding:ops-policy:incident-review:default:1> <https://dkg.network/ontology#appliesToParanet> <did:dkg:context-graph:ops-policy> <did:dkg:context-graph:ontology> .',
+        '<did:dkg:policy-binding:ops-policy:incident-review:default:1> <https://dkg.network/ontology#appliesToContextGraph> <did:dkg:context-graph:ops-policy> <did:dkg:context-graph:ontology> .',
         '<did:dkg:policy-binding:ops-policy:incident-review:default:1> <https://schema.org/name> "incident-review" <did:dkg:context-graph:ontology> .',
         '<did:dkg:policy-binding:ops-policy:incident-review:default:1> <https://dkg.network/ontology#activePolicy> <did:dkg:policy:ops-policy:sha256-real> <did:dkg:context-graph:ontology> .',
         '<did:dkg:policy-binding:ops-policy:incident-review:default:1> <https://dkg.network/ontology#approvedBy> <did:dkg:agent:0x1111111111111111111111111111111111111111> <did:dkg:context-graph:ontology> .',
@@ -263,10 +263,10 @@ describe('GossipPublishHandler', () => {
       ].join('\n'),
     });
 
-    await handler.handlePublishMessage(data, SYSTEM_PARANETS.ONTOLOGY);
+    await handler.handlePublishMessage(data, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
 
     const result = await store.query(
-      `SELECT ?binding WHERE { GRAPH <did:dkg:context-graph:${SYSTEM_PARANETS.ONTOLOGY}> { ?binding <${DKG_ONTOLOGY.DKG_ACTIVE_POLICY}> <did:dkg:policy:ops-policy:sha256-real> } }`,
+      `SELECT ?binding WHERE { GRAPH <did:dkg:context-graph:${SYSTEM_CONTEXT_GRAPHS.ONTOLOGY}> { ?binding <${DKG_ONTOLOGY.DKG_ACTIVE_POLICY}> <did:dkg:policy:ops-policy:sha256-real> } }`,
     );
     const bindings = result.type === 'bindings' ? result.bindings : [];
     expect(bindings).toHaveLength(1);

@@ -12,7 +12,7 @@
 
 set -euo pipefail
 
-CONTEXT_GRAPH_ID="${DKG_DEV_CONTEXT_GRAPH:-${DKG_DEV_PARANET:-dev-coordination}}"
+CONTEXT_GRAPH_ID="${DKG_DEV_CONTEXT_GRAPH:-${DKG_DEV_CONTEXT_GRAPH:-dev-coordination}}"
 DEVGRAPH_NS="https://ontology.dkg.io/devgraph#"
 RDF_NS="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
 

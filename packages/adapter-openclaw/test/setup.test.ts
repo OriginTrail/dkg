@@ -30,6 +30,29 @@ vi.mock('@origintrail-official/dkg-core', async () => {
   return {
     ...actual,
     requestFaucetFunding: requestFaucetFundingSpy,
+    fundWalletsBestEffort: vi.fn(async ({ network, callerId, didStartDaemon }) => {
+      const faucetUrl = network?.faucet?.url;
+      const faucetMode = network?.faucet?.mode;
+      if (!faucetUrl || !faucetMode) return;
+
+      const walletAddresses = didStartDaemon
+        ? await actual.readWalletsWithRetry()
+        : actual.readWallets();
+      if (!walletAddresses.length) return;
+
+      try {
+        const result = await requestFaucetFundingSpy(faucetUrl, faucetMode, walletAddresses, callerId);
+        if (!result.success || result.error) {
+          actual.logManualFundingInstructions(
+            result.failedWallets?.length ? result.failedWallets : walletAddresses,
+            faucetUrl,
+            faucetMode,
+          );
+        }
+      } catch {
+        actual.logManualFundingInstructions(walletAddresses, faucetUrl, faucetMode);
+      }
+    }),
   };
 });
 // In-package mock target. `faucet-orchestration.ts` inside dkg-core does

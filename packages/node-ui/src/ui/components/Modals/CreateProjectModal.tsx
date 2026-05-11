@@ -39,8 +39,9 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
   const [agentAddress, setAgentAddress] = useState<string | null>(null);
   // Phase 8: after CG + ontology + manifest publish, transition into a
   // wire-workspace step so the curator can populate their own workspace
-  // (and thus use dkg_add_task etc. from their own Cursor agent)
-  // without dropping to the terminal. `wiredCgId` flips the modal body
+  // (and thus run the canonical V10 write flow — `dkg_assertion_create`
+  // + `dkg_assertion_write` + `dkg_assertion_promote` — from their own
+  // Cursor agent) without dropping to the terminal. `wiredCgId` flips the modal body
   // into the WireWorkspacePanel; `wiredProjectName` lets the panel
   // suggest a default workspace path like `~/code/<projectSlug>`.
   const [wiredCgId, setWiredCgId] = useState<string | null>(null);

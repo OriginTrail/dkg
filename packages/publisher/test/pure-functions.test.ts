@@ -15,8 +15,8 @@ import {
 } from '../src/index.js';
 import type { ValidationOptions } from '../src/validation.js';
 
-const PARANET = 'agent-registry';
-const GRAPH = `did:dkg:context-graph:${PARANET}`;
+const CONTEXT_GRAPH = 'agent-registry';
+const GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
 const ENTITY = 'did:dkg:agent:QmImageBot';
 
 function q(s: string, p: string, o: string, g = GRAPH): Quad {
@@ -139,7 +139,7 @@ describe('validatePublishRequest', () => {
   it('passes for a valid request', () => {
     const quads = [q(ENTITY, 'http://schema.org/name', '"Bot"')];
     const manifest = [{ tokenId: 1n, rootEntity: ENTITY }];
-    const result = validatePublishRequest(quads, manifest, PARANET, new Set());
+    const result = validatePublishRequest(quads, manifest, CONTEXT_GRAPH, new Set());
     expect(result.valid).toBe(true);
     expect(result.errors).toEqual([]);
   });
@@ -147,7 +147,7 @@ describe('validatePublishRequest', () => {
   it('fails Rule 1: wrong graph', () => {
     const quads = [q(ENTITY, 'http://ex.org/p', '"v"', 'wrong:graph')];
     const manifest = [{ tokenId: 1n, rootEntity: ENTITY }];
-    const result = validatePublishRequest(quads, manifest, PARANET, new Set());
+    const result = validatePublishRequest(quads, manifest, CONTEXT_GRAPH, new Set());
     expect(result.valid).toBe(false);
     expect(result.errors[0]).toContain('Rule 1');
   });
@@ -155,7 +155,7 @@ describe('validatePublishRequest', () => {
   it('fails Rule 2: unknown subject', () => {
     const quads = [q('unknown:entity', 'http://ex.org/p', '"v"')];
     const manifest = [{ tokenId: 1n, rootEntity: ENTITY }];
-    const result = validatePublishRequest(quads, manifest, PARANET, new Set());
+    const result = validatePublishRequest(quads, manifest, CONTEXT_GRAPH, new Set());
     expect(result.valid).toBe(false);
     expect(result.errors[0]).toContain('Rule 2');
   });
@@ -164,7 +164,7 @@ describe('validatePublishRequest', () => {
     const root = 'urn:entity:orphan';
     const quads = [q('urn:other', 'http://ex.org/p', '"o"')];
     const manifest = [{ tokenId: 1n, rootEntity: root }];
-    const result = validatePublishRequest(quads, manifest, PARANET, new Set());
+    const result = validatePublishRequest(quads, manifest, CONTEXT_GRAPH, new Set());
     expect(result.valid).toBe(false);
     expect(result.errors.some((e) => e.includes('Rule 3'))).toBe(true);
   });
@@ -172,7 +172,7 @@ describe('validatePublishRequest', () => {
   it('Rule 3: allows fully private KA with no public triples', () => {
     const root = 'urn:entity:private';
     const manifest = [{ tokenId: 1n, rootEntity: root, privateTripleCount: 3 }];
-    const result = validatePublishRequest([], manifest, PARANET, new Set());
+    const result = validatePublishRequest([], manifest, CONTEXT_GRAPH, new Set());
     expect(result.valid).toBe(true);
   });
 
@@ -180,7 +180,7 @@ describe('validatePublishRequest', () => {
     const quads = [q(ENTITY, 'http://ex.org/p', '"v"')];
     const manifest = [{ tokenId: 1n, rootEntity: ENTITY }];
     const existing = new Set([ENTITY]);
-    const result = validatePublishRequest(quads, manifest, PARANET, existing);
+    const result = validatePublishRequest(quads, manifest, CONTEXT_GRAPH, existing);
     expect(result.valid).toBe(false);
     expect(result.errors[0]).toContain('Rule 4');
   });
@@ -190,7 +190,7 @@ describe('validatePublishRequest', () => {
     const manifest = [{ tokenId: 1n, rootEntity: ENTITY }];
     const existing = new Set([ENTITY]);
     const opts: ValidationOptions = { allowUpsert: true, upsertableEntities: new Set([ENTITY]) };
-    const result = validatePublishRequest(quads, manifest, PARANET, existing, opts);
+    const result = validatePublishRequest(quads, manifest, CONTEXT_GRAPH, existing, opts);
     expect(result.valid).toBe(true);
   });
 
@@ -199,7 +199,7 @@ describe('validatePublishRequest', () => {
     const manifest = [{ tokenId: 1n, rootEntity: ENTITY }];
     const existing = new Set([ENTITY]);
     const opts: ValidationOptions = { allowUpsert: true, upsertableEntities: new Set() };
-    const result = validatePublishRequest(quads, manifest, PARANET, existing, opts);
+    const result = validatePublishRequest(quads, manifest, CONTEXT_GRAPH, existing, opts);
     expect(result.valid).toBe(false);
     expect(result.errors[0]).toContain('Rule 4');
   });
@@ -209,7 +209,7 @@ describe('validatePublishRequest', () => {
     const manifest = [{ tokenId: 1n, rootEntity: ENTITY }];
     const existing = new Set([ENTITY]);
     const opts: ValidationOptions = { allowUpsert: false, upsertableEntities: new Set([ENTITY]) };
-    const result = validatePublishRequest(quads, manifest, PARANET, existing, opts);
+    const result = validatePublishRequest(quads, manifest, CONTEXT_GRAPH, existing, opts);
     expect(result.valid).toBe(false);
     expect(result.errors[0]).toContain('Rule 4');
   });
@@ -230,7 +230,7 @@ describe('validatePublishRequest', () => {
     ];
     const existing = new Set([ownedEntity, foreignEntity]);
     const opts: ValidationOptions = { allowUpsert: true, upsertableEntities: new Set([ownedEntity]) };
-    const result = validatePublishRequest(quads, manifest, PARANET, existing, opts);
+    const result = validatePublishRequest(quads, manifest, CONTEXT_GRAPH, existing, opts);
     expect(result.valid).toBe(false);
     expect(result.errors.length).toBe(1);
     expect(result.errors[0]).toContain('foreign');
@@ -239,7 +239,7 @@ describe('validatePublishRequest', () => {
   it('fails Rule 5: blank node subject', () => {
     const quads = [q('_:bn1', 'http://ex.org/p', '"v"')];
     const manifest = [{ tokenId: 1n, rootEntity: '_:bn1' }];
-    const result = validatePublishRequest(quads, manifest, PARANET, new Set());
+    const result = validatePublishRequest(quads, manifest, CONTEXT_GRAPH, new Set());
     expect(result.valid).toBe(false);
     expect(result.errors.some((e) => e.includes('Rule 5'))).toBe(true);
   });
@@ -249,7 +249,7 @@ describe('validatePublishRequest', () => {
     const manifest = [
       { tokenId: 1n, rootEntity: ENTITY, privateTripleCount: 5 },
     ];
-    const result = validatePublishRequest(quads, manifest, PARANET, new Set());
+    const result = validatePublishRequest(quads, manifest, CONTEXT_GRAPH, new Set());
     expect(result.valid).toBe(true);
   });
 
@@ -260,7 +260,7 @@ describe('validatePublishRequest', () => {
       q(skolemUri, 'http://ex.org/type', '"Analysis"'),
     ];
     const manifest = [{ tokenId: 1n, rootEntity: ENTITY }];
-    const result = validatePublishRequest(quads, manifest, PARANET, new Set());
+    const result = validatePublishRequest(quads, manifest, CONTEXT_GRAPH, new Set());
     expect(result.valid).toBe(true);
   });
 });

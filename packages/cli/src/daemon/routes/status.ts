@@ -125,7 +125,6 @@ import { type ExtractionStatusRecord, getExtractionStatusRecord, setExtractionSt
 import { FileStore } from '../../file-store.js';
 import { VectorStore, OpenAIEmbeddingProvider, type EmbeddingProvider } from '../../vector-store.js';
 import { parseBoundary, parseMultipart, MultipartParseError } from '../../http/multipart.js';
-import { handleCapture, EpcisValidationError, handleEventsQuery, EpcisQueryError, type Publisher as EpcisPublisher } from '@origintrail-official/dkg-epcis';
 // Phase 8 — project-manifest publish + install (UI-driven onboarding flow).
 // Daemon constructs a self-pointing DkgClient (localhost:listenPort) and
 // reuses the same publish/fetch/plan/write helpers the CLI uses, so wire
@@ -535,7 +534,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
           }
         : null,
       peers: uniquePeers.size,
-      paranets: resolveContextGraphs(config).length,
+      contextGraphs: resolveContextGraphs(config).length,
       telemetry: config.telemetry?.enabled ?? false,
       autoUpdate: resolveAutoUpdateEnabled(config),
       auth: config.auth?.enabled !== false,
@@ -600,7 +599,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
 
   // GET /api/integrations — aggregated view for Integrations panel
   if (req.method === 'GET' && path === '/api/integrations') {
-    const [skills, paranets] = await Promise.all([agent.findSkills(), agent.listContextGraphs()]);
+    const [skills, contextGraphs] = await Promise.all([agent.findSkills(), agent.listContextGraphs()]);
     const localAgentIntegrations = listLocalAgentIntegrations(config);
     const adapters = localAgentIntegrations.map((integration) => ({
       id: integration.id,
@@ -610,7 +609,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       status: integration.status,
       capabilities: integration.capabilities,
     }));
-    return jsonResponse(res, 200, { adapters, localAgentIntegrations, skills, paranets });
+    return jsonResponse(res, 200, { adapters, localAgentIntegrations, skills, contextGraphs });
   }
 
   // GET /api/integrations/registry — proxies the public dkg-integrations

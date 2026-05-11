@@ -28,7 +28,7 @@ export interface PublishQuad {
 export type PublishAccessPolicy = 'public' | 'ownerOnly' | 'allowList';
 
 export interface PublishRequestBody {
-  paranetId: string;
+  contextGraphId: string;
   quads: PublishQuad[];
   privateQuads?: PublishQuad[];
   accessPolicy?: PublishAccessPolicy;
@@ -88,12 +88,12 @@ export function parsePublishRequestBody(
   const payload = parsed as Record<string, unknown>;
   const { quads, privateQuads, accessPolicy, allowedPeers, subGraphName } =
     payload;
-  const paranetId = (payload.contextGraphId ?? payload.paranetId) as unknown;
+  const contextGraphId = payload.contextGraphId as unknown;
 
-  if (typeof paranetId !== "string" || paranetId.trim().length === 0) {
+  if (typeof contextGraphId !== "string" || contextGraphId.trim().length === 0) {
     return {
       ok: false,
-      error: 'Missing or invalid "contextGraphId" (or legacy "paranetId")',
+      error: 'Missing or invalid "contextGraphId"',
     };
   }
 
@@ -177,7 +177,7 @@ export function parsePublishRequestBody(
   return {
     ok: true,
     value: {
-      paranetId,
+      contextGraphId,
       quads,
       privateQuads,
       accessPolicy,
@@ -896,7 +896,7 @@ export function classifyClientError(
   | null {
   const sanitized = sanitizeRevertMessage(msg);
   if (
-    /\b(not found|does not exist|no such|unknown (policy|paranet|context.?graph|peer|verified.?memory)|peer is not connected|cannot resolve|no addresses)\b/i.test(
+    /\b(not found|does not exist|no such|unknown (policy|contextGraph|context.?graph|peer|verified.?memory)|peer is not connected|cannot resolve|no addresses)\b/i.test(
       msg,
     )
   ) {
@@ -921,7 +921,7 @@ export function classifyClientError(
     return { status: 504, sanitized };
   }
   if (
-    /\b(invalid (peer|peerId|multihash|base|batchId|verifiedMemoryId|contextGraphId|policyUri|paranetId)|could not parse|parse (peer|peerId)|peer (id|ID) (is not valid|invalid)|malformed|bad request|incorrect length)\b/i.test(
+    /\b(invalid (peer|peerId|multihash|base|batchId|verifiedMemoryId|contextGraphId|policyUri|contextGraphId)|could not parse|parse (peer|peerId)|peer (id|ID) (is not valid|invalid)|malformed|bad request|incorrect length)\b/i.test(
       msg,
     )
   ) {

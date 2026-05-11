@@ -2520,7 +2520,7 @@ provider._context_graph = "default-cg"
 provider._client = QueryClient()
 
 for args, needle in [
-    ({"sparql": "ASK {}", "paranet_id": "old"}, "paranet_id"),
+    ({"sparql": "ASK {}", "contextGraph_id": "old"}, "contextGraph_id"),
     ({"sparql": "ASK {}", "include_shared_memory": True}, "include_shared_memory"),
     ({"sparql": "ASK {}", "context_graph": "old"}, "context_graph"),
     ({"sparql": "ASK {}", "context_graph_id": "cg:test", "view": "bad"}, "view"),

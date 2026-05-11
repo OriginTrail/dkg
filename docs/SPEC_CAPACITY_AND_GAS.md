@@ -1,8 +1,8 @@
 # DKG V9 — Capacity Metering, Dynamic Pricing & Provable Resources
 
-**Status**: DRAFT v0.1  
-**Date**: 2026-02-25  
-**Scope**: Resource metering ("DKG gas"), dynamic pricing, capacity advertising, challenge-based verification.  
+**Status**: DRAFT v0.1
+**Date**: 2026-02-25
+**Scope**: Resource metering ("DKG gas"), dynamic pricing, capacity advertising, challenge-based verification.
 **Depends on**: Trust Layer Spec, Part 2 (Economy)
 
 ---
@@ -16,7 +16,7 @@
 5. [Dynamic Pricing](#5-dynamic-pricing)
 6. [Capacity Advertising](#6-capacity-advertising)
 7. [Provable Capacity: The Challenge Protocol](#7-provable-capacity-the-challenge-protocol)
-8. [Paranet-Level Capacity Markets](#8-paranet-level-capacity-markets)
+8. [ContextGraph-Level Capacity Markets](#8-contextGraph-level-capacity-markets)
 9. [Integration with TRAC Economy](#9-integration-with-trac-economy)
 10. [Implementation Phases](#10-implementation-phases)
 
@@ -45,7 +45,7 @@ The DKG needs the same — but the design differs in a critical way. In Ethereum
 | **Honest pricing** | Cost reflects actual resource consumption, not arbitrary flat fees |
 | **Capacity attraction** | Rising prices signal profit opportunity, attracting new node operators |
 | **Accountability** | Nodes that claim capacity can be challenged to prove it |
-| **Horizontal scaling** | Adding nodes to a paranet directly increases its throughput |
+| **Horizontal scaling** | Adding nodes to a contextGraph directly increases its throughput |
 
 ---
 
@@ -99,7 +99,7 @@ Each atomic operation has a gas cost formula. Costs are parameterized so they ca
 | `REPLICATE_RECEIVE` | `G_recv_base + G_recv_byte × byte_size` | Deserialization + merkle verification |
 | `GOSSIP_RELAY` | `G_gossip × message_size` | Forwarding gossipsub messages |
 
-Replication cost is **per peer**. Publishing a 1KB knowledge asset to a paranet with 50 subscribers costs 50× the single-peer replication gas. This accurately reflects the real bandwidth consumed.
+Replication cost is **per peer**. Publishing a 1KB knowledge asset to a contextGraph with 50 subscribers costs 50× the single-peer replication gas. This accurately reflects the real bandwidth consumed.
 
 ### 3.3 Query Operations
 
@@ -126,7 +126,7 @@ Query gas is the most variable because it depends on data, not just the query st
 
 ### 3.5 Composite Operations
 
-Real operations combine atomics. A publish of 100 triples to a paranet with 10 peers:
+Real operations combine atomics. A publish of 100 triples to a contextGraph with 10 peers:
 
 ```
 publish_gas =
@@ -195,7 +195,7 @@ When utilization exceeds thresholds, the node applies back-pressure:
 | Utilization | Behavior |
 |---|---|
 | 0–70% | Normal operation. Accept all requests. |
-| 70–90% | **Soft throttle.** Delay low-priority operations (non-subscribed paranet queries). Publish and replication remain at full speed. |
+| 70–90% | **Soft throttle.** Delay low-priority operations (non-subscribed contextGraph queries). Publish and replication remain at full speed. |
 | 90–99% | **Hard throttle.** Queue new publishes. Reject queries that would exceed gas limit. Return `503 Service Busy` with `Retry-After` and current gas price. |
 | 99–100% | **Shed load.** Reject all new operations except replication of already-committed knowledge (protocol-level obligation). |
 
@@ -333,13 +333,13 @@ PeerCapacityUpdate {
   maxGasPerSecond:     uint64
   currentUtilization:  float32     // 0.0–1.0
   currentGasPrice:     uint64      // Current TRAC-per-gas price
-  subscribedParanets:  string[]    // Which paranets this node serves
+  subscribedContextGraphs:  string[]    // Which contextGraphs this node serves
   timestamp:           uint64
   signature:           bytes       // Signed by operational key
 }
 ```
 
-This allows agents to make routing decisions: "paranet X has 12 nodes, 3 are under 50% utilization, route my query there."
+This allows agents to make routing decisions: "contextGraph X has 12 nodes, 3 are under 50% utilization, route my query there."
 
 ### 6.3 Capacity Registry
 
@@ -355,7 +355,7 @@ GET /api/network/capacity
   "totalGasPerSecond": 42000000,
   "averageUtilization": 0.38,
   "networkGasPrice": "0.000000012",
-  "paranets": {
+  "contextGraphs": {
     "testing": {
       "nodes": 12,
       "gasPerSecond": 11000000,
@@ -396,7 +396,7 @@ Verify that the node is actually storing the triples it claims to store.
 StorageChallenge {
   challengerId:    uint72
   targetId:        uint72
-  paranetId:       bytes32
+  contextGraphId:       bytes32
   randomSeed:      bytes32    // Determines which triples to prove
   responseDeadline: uint64    // Blocks until response required
 }
@@ -496,35 +496,35 @@ This is cheaper than waiting for external challenges and builds trust. Nodes tha
 
 ---
 
-## 8. Paranet-Level Capacity Markets
+## 8. ContextGraph-Level Capacity Markets
 
-### 8.1 Per-Paranet Pricing
+### 8.1 Per-ContextGraph Pricing
 
-Different paranets have different demand profiles. A paranet hosting high-frequency financial data has different capacity needs than one hosting a static ontology. DKG gas pricing operates at the **paranet level**:
+Different contextGraphs have different demand profiles. A contextGraph hosting high-frequency financial data has different capacity needs than one hosting a static ontology. DKG gas pricing operates at the **contextGraph level**:
 
 ```
-paranet_gas_price(p, t) = paranet_base_price(p, t-1) × 
-    (1 + δ × (paranet_utilization(p, t-1) - target_utilization))
+contextGraph_gas_price(p, t) = contextGraph_base_price(p, t-1) ×
+    (1 + δ × (contextGraph_utilization(p, t-1) - target_utilization))
 ```
 
-Each paranet independently adjusts its gas price based on the utilization of nodes subscribed to that paranet.
+Each contextGraph independently adjusts its gas price based on the utilization of nodes subscribed to that contextGraph.
 
 ### 8.2 Capacity Attraction
 
-When a paranet's gas price rises, it signals profit opportunity:
+When a contextGraph's gas price rises, it signals profit opportunity:
 
 ```
-profit_margin(node, paranet) = paranet_gas_price × node_gas_capacity - operating_cost
+profit_margin(node, contextGraph) = contextGraph_gas_price × node_gas_capacity - operating_cost
 ```
 
-Nodes can dynamically subscribe to paranets where the profit margin is highest. This creates a **self-balancing market**: demand on paranet X rises → price rises → nodes migrate from low-demand paranet Y → paranet X gains capacity → price stabilizes.
+Nodes can dynamically subscribe to contextGraphs where the profit margin is highest. This creates a **self-balancing market**: demand on contextGraph X rises → price rises → nodes migrate from low-demand contextGraph Y → contextGraph X gains capacity → price stabilizes.
 
 ### 8.3 Minimum Capacity Requirements
 
-Paranets can set minimum capacity requirements for participating nodes:
+ContextGraphs can set minimum capacity requirements for participating nodes:
 
 ```solidity
-struct ParanetCapacityPolicy {
+struct ContextGraphCapacityPolicy {
     uint64 minGasPerSecond;         // Minimum node capacity to subscribe
     uint64 minStorageBytes;         // Minimum storage commitment
     uint32 minBandwidthMbps;        // Minimum bandwidth
@@ -532,7 +532,7 @@ struct ParanetCapacityPolicy {
 }
 ```
 
-This prevents underpowered nodes from degrading paranet performance while still allowing them to participate in less demanding paranets.
+This prevents underpowered nodes from degrading contextGraph performance while still allowing them to participate in less demanding contextGraphs.
 
 ---
 
@@ -551,14 +551,14 @@ Existing `Profile.updateAsk()` becomes a way to set a **minimum floor price** ra
 ### 9.2 Gas Payment Flow
 
 ```
-Agent wants to publish 100 triples to paranet "finance"
+Agent wants to publish 100 triples to contextGraph "finance"
 
 1. Agent queries gas estimate:
    publish_gas = 100 × STORE_TRIPLE + MERKLE_HASH(100) + 10 × REPLICATE_SEND
               = 100 × 150 + 100 × 5 + 10 × 800
               = 23,500 gas
 
-2. Agent queries current gas price for paranet "finance":
+2. Agent queries current gas price for contextGraph "finance":
    gas_price = 0.000000015 TRAC/gas
 
 3. Total TRAC cost:
@@ -625,7 +625,7 @@ Where `capacity_multiplier` rewards nodes that commit to and deliver higher capa
 **Goal**: Gas has a TRAC price that adjusts with demand.
 
 - Implement per-node EIP-1559 pricing.
-- Aggregate to paranet-level and network-level prices.
+- Aggregate to contextGraph-level and network-level prices.
 - Publish network gas price on-chain (once per epoch).
 - Replace static ask with gas-price-derived ask.
 - Implement priority fees.
@@ -657,16 +657,16 @@ Where `capacity_multiplier` rewards nodes that commit to and deliver higher capa
 
 **Deliverables**: Challenge contracts, challenge response handler in node, slash/reward distribution.
 
-### Phase 6: Paranet Markets (Scale)
+### Phase 6: ContextGraph Markets (Scale)
 
-**Goal**: Paranets have independent capacity markets that self-balance.
+**Goal**: ContextGraphs have independent capacity markets that self-balance.
 
-- Implement per-paranet gas pricing.
-- Nodes dynamically subscribe to high-margin paranets.
-- Paranet capacity policies (minimum requirements).
-- Cross-paranet capacity dashboard.
+- Implement per-contextGraph gas pricing.
+- Nodes dynamically subscribe to high-margin contextGraphs.
+- ContextGraph capacity policies (minimum requirements).
+- Cross-contextGraph capacity dashboard.
 
-**Deliverables**: Paranet market contracts, dynamic subscription logic, network capacity explorer.
+**Deliverables**: ContextGraph market contracts, dynamic subscription logic, network capacity explorer.
 
 ---
 
@@ -697,7 +697,7 @@ These costs are provisional and will be calibrated empirically in Phase 1.
 
 ## Appendix B: Example Gas Calculations
 
-### Small publish (3 triples, 1 paranet peer)
+### Small publish (3 triples, 1 contextGraph peer)
 
 ```
 Storage:     3 × (100 + 1 × 120)  =   660 gas
@@ -709,7 +709,7 @@ Total:                               2,595 gas
 At 0.000000015 TRAC/gas:         0.0000389 TRAC
 ```
 
-### Large publish (10,000 triples, 50 paranet peers)
+### Large publish (10,000 triples, 50 contextGraph peers)
 
 ```
 Storage:     10000 × (100 + 1 × 150) = 2,500,000 gas
@@ -743,7 +743,7 @@ At 0.000000015 TRAC/gas:                    1.651 TRAC
 | **Scope** | On-chain computation + storage | Off-chain computation + storage + bandwidth |
 | **Resource type** | Shared (block space) | Distributed (per-node) |
 | **Scaling** | Fixed throughput (gas limit per block) | Horizontal (more nodes = more total gas) |
-| **Pricing** | EIP-1559 base fee + priority fee | Per-node EIP-1559 + aggregated paranet price |
+| **Pricing** | EIP-1559 base fee + priority fee | Per-node EIP-1559 + aggregated contextGraph price |
 | **Determinism** | Fully deterministic (same input = same gas) | Mostly deterministic (query gas depends on data) |
 | **Enforcement** | Consensus (all validators agree on gas used) | Local metering + challenge-based verification |
 | **Payment** | ETH | TRAC |

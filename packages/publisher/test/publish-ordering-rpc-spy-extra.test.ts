@@ -58,10 +58,21 @@ import {
   mintTokens,
   setMinimumRequiredSignatures,
 } from '../../chain/test/hardhat-harness.js';
+import { withSeal as _withSeal } from './_helpers/seal.js';
 
 type WithProvider = { provider: ethers.JsonRpcProvider };
 
 const ENTITY_PREFIX = 'urn:test:ordering:';
+
+let _kav10Address: string;
+let _provider: ethers.JsonRpcProvider;
+const _author = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+
+async function pubS(p: DKGPublisher, args: Parameters<DKGPublisher['publish']>[0]) {
+  return p.publish(
+    await _withSeal(args, _author, { provider: _provider, kav10Address: _kav10Address }),
+  );
+}
 
 function q(s: string, p: string, o: string): Quad {
   return { subject: s, predicate: p, object: o, graph: '' };
@@ -88,14 +99,15 @@ describe('Publish ordering & RPC spy — P-1 / P-6 / P-7', () => {
   beforeAll(async () => {
     snapshotId = await takeSnapshot();
     const { hubAddress } = getSharedContext();
-    const provider = createProvider();
-    await setMinimumRequiredSignatures(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, 1);
+    _provider = createProvider();
+    await setMinimumRequiredSignatures(_provider, hubAddress, HARDHAT_KEYS.DEPLOYER, 1);
     const wallet = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
-    await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, wallet.address, ethers.parseEther('5000000'));
+    await mintTokens(_provider, hubAddress, HARDHAT_KEYS.DEPLOYER, wallet.address, ethers.parseEther('5000000'));
 
     const cgChain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const cgIdBn = await createTestContextGraph(cgChain);
     cgId = String(cgIdBn);
+    _kav10Address = await cgChain.getKnowledgeAssetsV10Address();
   }, 120_000);
 
   afterAll(async () => {
@@ -150,7 +162,7 @@ describe('Publish ordering & RPC spy — P-1 / P-6 / P-7', () => {
     };
 
     try {
-      const result = await publisher.publish({
+      const result = await pubS(publisher, {
         contextGraphId: cgId,
         quads: [q(`${ENTITY_PREFIX}p6`, 'http://schema.org/name', '"P-6 Test"')],
         onPhase: (phase, event) => phaseLog.push(`${phase}:${event}`),
@@ -194,7 +206,7 @@ describe('Publish ordering & RPC spy — P-1 / P-6 / P-7', () => {
       };
 
       try {
-        const result = await publisher.publish({
+        const result = await pubS(publisher, {
           contextGraphId: cgId,
           quads: [q(`${ENTITY_PREFIX}p1`, 'http://schema.org/name', '"P-1 Test"')],
           onPhase: (phase, event) => phaseLog.push(`${phase}:${event}`),
@@ -277,11 +289,11 @@ describe('Publish ordering & RPC spy — P-1 / P-6 / P-7', () => {
       // txs, both from the same publisher wallet. If sync mode does not
       // claim the wallet lease, a nonce collision will surface as two
       // broadcasts with the same nonce.
-      const a = await publisher.publish({
+      const a = await pubS(publisher, {
         contextGraphId: cgId,
         quads: [q(`${ENTITY_PREFIX}p7-a`, 'http://schema.org/name', '"P-7 A"')],
       });
-      const b = await publisher.publish({
+      const b = await pubS(publisher, {
         contextGraphId: cgId,
         quads: [q(`${ENTITY_PREFIX}p7-b`, 'http://schema.org/name', '"P-7 B"')],
       });

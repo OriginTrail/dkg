@@ -1,6 +1,6 @@
 import type { Publisher, PublishOptions, PublishResult } from '@origintrail-official/dkg-publisher';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
-import { paranetDataGraphUri } from '@origintrail-official/dkg-core';
+import { contextGraphDataGraphUri } from '@origintrail-official/dkg-core';
 import {
   buildAgentProfile,
   canonicalAgentDidSubject,
@@ -56,7 +56,7 @@ export class ProfileManager {
     //      address is already known in process;
     //   5. the new `rootEntity` itself — idempotent cleanup when
     //      the publish is a pure content refresh.
-    const dataGraph = paranetDataGraphUri(AGENT_REGISTRY_CONTEXT_GRAPH);
+    const dataGraph = contextGraphDataGraphUri(AGENT_REGISTRY_CONTEXT_GRAPH);
     const prefixesToClean = new Set<string>();
     if (this.lastRootEntity) prefixesToClean.add(this.lastRootEntity);
     prefixesToClean.add(`did:dkg:agent:${config.peerId}`);

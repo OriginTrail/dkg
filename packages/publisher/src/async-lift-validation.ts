@@ -98,7 +98,7 @@ function canonicalizeTerm(term: string, canonicalRootMap: Record<string, string>
   return term;
 }
 
-function canonicalRootIri(request: LiftRequest, root: string): string {
+export function canonicalRootIri(request: LiftRequest, root: string): string {
   const rootName = slugPart(rootTail(root));
   const rootHash = shortRootHash(root);
   return `dkg:${slugPart(request.contextGraphId)}:${slugPart(request.namespace)}:${slugPart(request.scope)}/${rootName}-${rootHash}`;

@@ -202,7 +202,7 @@ export class DKGQueryEngine implements QueryEngine {
     }
 
     // ── V10 view-based routing ────────────────────────────────────────
-    const effectiveContextGraphId = options?.contextGraphId ?? options?.paranetId;
+    const effectiveContextGraphId = options?.contextGraphId;
 
     if (options?.subGraphName) {
       const v = validateSubGraphName(options.subGraphName);
@@ -212,7 +212,7 @@ export class DKGQueryEngine implements QueryEngine {
     if (options?.view) {
       if (!effectiveContextGraphId) {
         throw new Error(
-          `view '${options.view}' requires a contextGraphId or paranetId to scope the query`,
+          `view '${options.view}' requires a contextGraphId to scope the query`,
         );
       }
       if (options.subGraphName) {
@@ -421,7 +421,7 @@ export class DKGQueryEngine implements QueryEngine {
         GRAPH ?g {
           ?ka <http://dkg.io/ontology/rootEntity> ?rootEntity .
           ?ka <http://dkg.io/ontology/partOf> <${assertSafeIri(ual)}> .
-          <${assertSafeIri(ual)}> <http://dkg.io/ontology/paranet> ?ctxGraph .
+          <${assertSafeIri(ual)}> <http://dkg.io/ontology/contextGraph> ?ctxGraph .
           OPTIONAL { <${assertSafeIri(ual)}> <http://dkg.io/ontology/subGraphName> ?sgName }
         }
       }`,
@@ -482,10 +482,6 @@ export class DKGQueryEngine implements QueryEngine {
     return { bindings: allBindings };
   }
 
-  /** @deprecated Use queryAllContextGraphs */
-  async queryAllParanets(sparql: string): Promise<QueryResult> {
-    return this.queryAllContextGraphs(sparql);
-  }
 }
 
 /**
@@ -1497,4 +1493,3 @@ function dedupeQuads(quads: Quad[]): Quad[] {
   }
   return out;
 }
-

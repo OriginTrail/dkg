@@ -58,7 +58,8 @@ const execFileAsync = promisify(execFile);
 import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
 import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
-import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
+import { findReservedSubjectPrefix, isSkolemizedUri, type PublishOptions } from '@origintrail-official/dkg-publisher';
+import { validatePreSignedAuthorAttestation } from './memory.js';
 import {
   DashboardDB,
   MetricsCollector,
@@ -122,7 +123,6 @@ import { type ExtractionStatusRecord, getExtractionStatusRecord, setExtractionSt
 import { FileStore } from '../../file-store.js';
 import { VectorStore, OpenAIEmbeddingProvider, type EmbeddingProvider } from '../../vector-store.js';
 import { parseBoundary, parseMultipart, MultipartParseError } from '../../http/multipart.js';
-import { handleCapture, EpcisValidationError, handleEventsQuery, EpcisQueryError, type Publisher as EpcisPublisher } from '@origintrail-official/dkg-epcis';
 // Phase 8 — project-manifest publish + install (UI-driven onboarding flow).
 // Daemon constructs a self-pointing DkgClient (localhost:listenPort) and
 // reuses the same publish/fetch/plan/write helpers the CLI uses, so wire
@@ -359,15 +359,43 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
     path,
     requestToken,
     requestAgentAddress,
+    emitMemoryGraphChanged,
   } = ctx;
 
 
-  // POST /api/assertion/create  { contextGraphId, name, subGraphName? }
+  // POST /api/assertion/create
+  //   Body: {
+  //     contextGraphId, name,
+  //     subGraphName?,
+  //     quads?,                               // one-shot write
+  //     finalize?: boolean,                   // one-shot finalize
+  //     promote?: boolean,                    // one-shot promote-to-SWM
+  //     authorAgentAddress?, preSignedAuthorAttestation?, schemeVersion?,  // forwarded to finalize
+  //   }
+  //
+  // Phase B convenience: a Hermes/OpenClaw client used to need 4 round
+  // trips (create → write → finalize → promote) just to stage an
+  // assertion for VM publish. This endpoint folds the chain into one
+  // call by treating the optional `quads`, `finalize`, and `promote`
+  // flags as opt-in steps. Each is independent — a caller can do
+  // `{ name }` only (legacy create), `{ name, quads }` (create+write),
+  // `{ name, quads, finalize: true, promote: true }` (full lifecycle
+  // up to but not including chain submit).
   if (req.method === "POST" && path === "/api/assertion/create") {
-    const body = await readBody(req, SMALL_BODY_BYTES);
+    const body = await readBody(req);
     const parsed = safeParseJson(body, res);
     if (!parsed) return;
-    const { contextGraphId, name, subGraphName } = parsed;
+    const {
+      contextGraphId,
+      name,
+      subGraphName,
+      quads,
+      finalize: shouldFinalize,
+      promote: shouldPromote,
+      authorAgentAddress: bodyAuthorAgentAddress,
+      preSignedAuthorAttestation: bodyPreSignedAttestation,
+      schemeVersion,
+    } = parsed;
     if (!name) return jsonResponse(res, 400, { error: 'Missing "name"' });
     if (!validateRequiredContextGraphId(contextGraphId, res)) return;
     if (typeof name !== "string")
@@ -378,20 +406,168 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
         error: `Invalid "name": ${nameVal.reason}`,
       });
     if (!validateOptionalSubGraphName(subGraphName, res)) return;
+    if (quads !== undefined) {
+      if (!Array.isArray(quads) || quads.length === 0) {
+        return jsonResponse(res, 400, {
+          error: '"quads" must be a non-empty array when supplied',
+        });
+      }
+    }
+    if (shouldFinalize === true && quads === undefined) {
+      return jsonResponse(res, 400, {
+        error: '"finalize: true" requires "quads" — cannot finalize an empty assertion',
+      });
+    }
+    if (shouldPromote === true && shouldFinalize !== true) {
+      return jsonResponse(res, 400, {
+        error: '"promote: true" requires "finalize: true" — promote runs after the seal is in place',
+      });
+    }
+    if (
+      bodyAuthorAgentAddress != null &&
+      bodyPreSignedAttestation != null
+    ) {
+      return jsonResponse(res, 400, {
+        error:
+          '"authorAgentAddress" and "preSignedAuthorAttestation" are mutually exclusive',
+      });
+    }
+    let resolvedPreSignedAttestation:
+      | { address: string; signature: { r: Uint8Array; vs: Uint8Array } }
+      | undefined;
+    if (bodyPreSignedAttestation != null) {
+      const validated = validatePreSignedAuthorAttestation(
+        bodyPreSignedAttestation,
+        res,
+      );
+      if (validated === undefined) return;
+      resolvedPreSignedAttestation = validated;
+    }
+    let resolvedAuthorAgentAddress: string | undefined;
+    if (resolvedPreSignedAttestation == null) {
+      if (
+        typeof bodyAuthorAgentAddress === 'string' &&
+        bodyAuthorAgentAddress.length > 0
+      ) {
+        if (!/^0x[0-9a-fA-F]{40}$/.test(bodyAuthorAgentAddress)) {
+          return jsonResponse(res, 400, {
+            error: '"authorAgentAddress" must be a 0x-prefixed 20-byte EVM address',
+          });
+        }
+        resolvedAuthorAgentAddress = bodyAuthorAgentAddress;
+      } else {
+        const requestToken = extractBearerToken(req.headers.authorization);
+        const tokenAgentAddress = requestToken
+          ? agent.resolveAgentByToken(requestToken)
+          : undefined;
+        if (tokenAgentAddress != null) {
+          resolvedAuthorAgentAddress = tokenAgentAddress;
+        }
+      }
+    }
+    if (
+      schemeVersion != null &&
+      (typeof schemeVersion !== 'number' || !Number.isInteger(schemeVersion) || schemeVersion < 1)
+    ) {
+      return jsonResponse(res, 400, {
+        error: '"schemeVersion" must be a positive integer when supplied',
+      });
+    }
     try {
       const assertionUri = await agent.assertion.create(
         contextGraphId,
         name,
         subGraphName ? { subGraphName } : undefined,
       );
-      return jsonResponse(res, 200, { assertionUri });
+      emitMemoryGraphChanged?.({
+        contextGraphId,
+        layers: ["wm"],
+        subGraphName,
+        operation: "assertion_created",
+        source: "api",
+        counts: { triples: 0 },
+      });
+      const response: Record<string, unknown> = { assertionUri };
+      if (Array.isArray(quads) && quads.length > 0) {
+        await agent.assertion.write(
+          contextGraphId,
+          name,
+          quads,
+          subGraphName ? { subGraphName } : undefined,
+        );
+        emitMemoryGraphChanged?.({
+          contextGraphId,
+          layers: ["wm"],
+          subGraphName,
+          operation: "assertion_written",
+          source: "api",
+          counts: { triples: quads.length },
+        });
+        response.written = quads.length;
+      }
+      if (shouldFinalize === true) {
+        const seal = await agent.assertion.finalize(contextGraphId, name, {
+          ...(subGraphName ? { subGraphName } : {}),
+          ...(resolvedAuthorAgentAddress
+            ? { authorAgentAddress: resolvedAuthorAgentAddress }
+            : {}),
+          ...(resolvedPreSignedAttestation
+            ? { preSignedAuthorAttestation: resolvedPreSignedAttestation }
+            : {}),
+          ...(schemeVersion != null ? { schemeVersion } : {}),
+        });
+        emitMemoryGraphChanged?.({
+          contextGraphId,
+          layers: ["wm"],
+          subGraphName,
+          operation: "assertion_finalized",
+          source: "api",
+        });
+        response.seal = {
+          merkleRoot: ethers.hexlify(seal.merkleRoot),
+          authorAddress: seal.authorAddress,
+          schemeVersion: seal.schemeVersion,
+          chainId: seal.chainId.toString(),
+          kav10Address: seal.kav10Address,
+          eip712Digest: seal.eip712Digest,
+        };
+      }
+      if (shouldPromote === true) {
+        const promoteResult = await agent.assertion.promote(
+          contextGraphId,
+          name,
+          subGraphName ? { subGraphName } : undefined,
+        );
+        if (promoteResult.promotedCount !== 0) {
+          emitMemoryGraphChanged?.({
+            contextGraphId,
+            layers: ["wm", "swm"],
+            subGraphName,
+            operation: "assertion_promoted",
+            source: "api",
+            counts: { triples: promoteResult.promotedCount },
+          });
+        }
+        response.promotedCount = promoteResult.promotedCount;
+      }
+      return jsonResponse(res, 200, response);
     } catch (err: any) {
+      const message = err?.message ?? String(err);
       if (
-        err.message?.includes("already exists") ||
-        err.message?.includes("not found") ||
-        err.message?.includes("Invalid")
+        message.includes("already exists") ||
+        message.includes("not found") ||
+        message.includes("Invalid") ||
+        message.includes('Unsafe') ||
+        message.includes('not registered') ||
+        message.includes('mutually exclusive') ||
+        message.includes('not a registered local agent') ||
+        message.includes('signer mismatch') ||
+        message.includes('has no quads') ||
+        message.includes('different merkleRoot') ||
+        message.includes('reserved namespace') ||
+        err?.name === 'ReservedNamespaceError'
       ) {
-        return jsonResponse(res, 400, { error: err.message });
+        return jsonResponse(res, 400, { error: message });
       }
       throw err;
     }
@@ -428,6 +604,14 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
         quads,
         subGraphName ? { subGraphName } : undefined,
       );
+      emitMemoryGraphChanged?.({
+        contextGraphId,
+        layers: ["wm"],
+        subGraphName,
+        operation: "assertion_written",
+        source: "api",
+        counts: { triples: quads.length },
+      });
       return jsonResponse(res, 200, { written: quads.length });
     } catch (err: any) {
       if (
@@ -514,6 +698,17 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
         assertionName,
         { entities: entities ?? "all", subGraphName },
       );
+      const promotedCount = typeof result?.promotedCount === "number" ? result.promotedCount : undefined;
+      if (promotedCount !== 0) {
+        emitMemoryGraphChanged?.({
+          contextGraphId,
+          layers: ["wm", "swm"],
+          subGraphName,
+          operation: "assertion_promoted",
+          source: "api",
+          counts: { triples: promotedCount },
+        });
+      }
       return jsonResponse(res, 200, result);
     } catch (err: any) {
       if (
@@ -522,6 +717,153 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
         err.message?.includes("Unsafe")
       ) {
         return jsonResponse(res, 400, { error: err.message });
+      }
+      throw err;
+    }
+  }
+
+  // POST /api/assertion/:name/finalize  { contextGraphId, subGraphName?, authorAgentAddress?, preSignedAuthorAttestation?, schemeVersion? }
+  //
+  // RFC-001 §9.x — seal an assertion's content with an EIP-712
+  // AuthorAttestation signed at this point in the lifecycle (as opposed
+  // to the publish-time path that signs over SWM contents at chain-tx
+  // time). After finalize, the seal lives in `_meta` keyed by the
+  // assertion URI and travels with the assertion through SWM gossip;
+  // publish reads the seal and forwards it verbatim to KAv10.
+  //
+  // Author resolution (mirrors `/api/shared-memory/publish` Phase 4):
+  //   1. body `preSignedAuthorAttestation` (self-sovereign)
+  //   2. body `authorAgentAddress` (admin-asserted custodial)
+  //   3. agent-scoped bearer token → that agent (custodial auto-attribution)
+  //   4. node admin token → publisher EOA fallback
+  if (
+    req.method === "POST" &&
+    path.startsWith("/api/assertion/") &&
+    path.endsWith("/finalize")
+  ) {
+    const assertionName = safeDecodeURIComponent(
+      path.slice("/api/assertion/".length, -"/finalize".length),
+      res,
+    );
+    if (assertionName === null) return;
+    const nameVal = validateAssertionName(assertionName);
+    if (!nameVal.valid)
+      return jsonResponse(res, 400, {
+        error: `Invalid assertion name: ${nameVal.reason}`,
+      });
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const parsed = safeParseJson(body, res);
+    if (!parsed) return;
+    const {
+      contextGraphId,
+      subGraphName,
+      authorAgentAddress: bodyAuthorAgentAddress,
+      preSignedAuthorAttestation: bodyPreSignedAttestation,
+      schemeVersion,
+    } = parsed;
+    if (!validateRequiredContextGraphId(contextGraphId, res)) return;
+    if (!validateOptionalSubGraphName(subGraphName, res)) return;
+    if (
+      bodyAuthorAgentAddress != null &&
+      bodyPreSignedAttestation != null
+    ) {
+      return jsonResponse(res, 400, {
+        error:
+          '"authorAgentAddress" and "preSignedAuthorAttestation" are mutually exclusive',
+      });
+    }
+    let resolvedPreSignedAttestation:
+      | { address: string; signature: { r: Uint8Array; vs: Uint8Array } }
+      | undefined;
+    if (bodyPreSignedAttestation != null) {
+      const validated = validatePreSignedAuthorAttestation(
+        bodyPreSignedAttestation,
+        res,
+      );
+      if (validated === undefined) return;
+      resolvedPreSignedAttestation = validated;
+    }
+    let resolvedAuthorAgentAddress: string | undefined;
+    if (resolvedPreSignedAttestation == null) {
+      if (
+        typeof bodyAuthorAgentAddress === 'string' &&
+        bodyAuthorAgentAddress.length > 0
+      ) {
+        if (!/^0x[0-9a-fA-F]{40}$/.test(bodyAuthorAgentAddress)) {
+          return jsonResponse(res, 400, {
+            error: '"authorAgentAddress" must be a 0x-prefixed 20-byte EVM address',
+          });
+        }
+        resolvedAuthorAgentAddress = bodyAuthorAgentAddress;
+      } else {
+        // Auto-attribute when the request was authenticated with an
+        // agent-scoped bearer token. Node admin tokens fall through to
+        // the publisher-wallet fallback inside `assertionFinalize`.
+        const requestToken = extractBearerToken(req.headers.authorization);
+        const tokenAgentAddress = requestToken
+          ? agent.resolveAgentByToken(requestToken)
+          : undefined;
+        if (tokenAgentAddress != null) {
+          resolvedAuthorAgentAddress = tokenAgentAddress;
+        }
+      }
+    }
+    if (
+      schemeVersion != null &&
+      (typeof schemeVersion !== 'number' || !Number.isInteger(schemeVersion) || schemeVersion < 1)
+    ) {
+      return jsonResponse(res, 400, {
+        error: '"schemeVersion" must be a positive integer when supplied',
+      });
+    }
+    try {
+      const seal = await agent.assertion.finalize(contextGraphId, assertionName, {
+        ...(subGraphName ? { subGraphName } : {}),
+        ...(resolvedAuthorAgentAddress
+          ? { authorAgentAddress: resolvedAuthorAgentAddress }
+          : {}),
+        ...(resolvedPreSignedAttestation
+          ? { preSignedAuthorAttestation: resolvedPreSignedAttestation }
+          : {}),
+        ...(schemeVersion != null ? { schemeVersion } : {}),
+      });
+      // Mirror the chained /create handler: every step in the sign-at-creation
+      // lifecycle emits a memory_graph_changed SSE so a UI watching the graph
+      // (staking-ui, dkg-node-ui) reflects the state machine in real time.
+      // The chained handler emits 4 events (created/written/finalized/promoted);
+      // the standalone routes must each emit their own — otherwise a client
+      // composing the chain by hand would miss the `assertion_finalized` step.
+      emitMemoryGraphChanged?.({
+        contextGraphId,
+        layers: ["wm"],
+        subGraphName,
+        operation: "assertion_finalized",
+        source: "api",
+      });
+      return jsonResponse(res, 200, {
+        assertionUri: seal.assertionUri,
+        merkleRoot: ethers.hexlify(seal.merkleRoot),
+        authorAddress: seal.authorAddress,
+        schemeVersion: seal.schemeVersion,
+        chainId: seal.chainId.toString(),
+        kav10Address: seal.kav10Address,
+        eip712Digest: seal.eip712Digest,
+      });
+    } catch (err: any) {
+      const message = err?.message ?? String(err);
+      if (
+        message.includes('not found') ||
+        message.includes('Invalid') ||
+        message.includes('Unsafe') ||
+        message.includes('not registered') ||
+        message.includes('mutually exclusive') ||
+        message.includes('not a registered local agent') ||
+        message.includes('signer mismatch') ||
+        message.includes('has no quads') ||
+        message.includes('different merkleRoot') ||
+        message.includes('not registered on-chain')
+      ) {
+        return jsonResponse(res, 400, { error: message });
       }
       throw err;
     }
@@ -562,6 +904,13 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
         subGraphName,
       );
       extractionStatus.delete(assertionUri);
+      emitMemoryGraphChanged?.({
+        contextGraphId,
+        layers: ["wm"],
+        subGraphName,
+        operation: "assertion_discarded",
+        source: "api",
+      });
       return jsonResponse(res, 200, { discarded: true });
     } catch (err: any) {
       if (
@@ -1519,6 +1868,14 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
         assertionUri,
         completedRecord,
       );
+      emitMemoryGraphChanged?.({
+        contextGraphId: contextGraphId!,
+        layers: ["wm"],
+        subGraphName,
+        operation: "assertion_imported",
+        source: "api",
+        counts: { triples: triples.length },
+      });
 
       return respondWithImportFileResponse(200, {
         status: "completed",
@@ -1566,7 +1923,7 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
       });
     const contextGraphId =
       url.searchParams.get("contextGraphId") ??
-      url.searchParams.get("paranetId");
+      url.searchParams.get("contextGraphId");
     if (!validateRequiredContextGraphId(contextGraphId, res)) return;
     const subGraphName = url.searchParams.get("subGraphName") ?? undefined;
     if (!validateOptionalSubGraphName(subGraphName, res)) return;
@@ -1639,5 +1996,56 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
     });
     res.end(bytes);
     return;
+  }
+
+  // GET /api/kc/:id/author — chain-confirmed author for a knowledge
+  // collection's latest merkle-root entry.
+  //
+  // Delegates to `agent.getKnowledgeCollectionAuthor`, which reads
+  // `KnowledgeCollectionStorage.getLatestMerkleRootAuthor(kcId)` via the
+  // configured chain adapter. The view returns:
+  //   - the EIP-712-recovered (or EIP-1271-verified) author for V10.1+
+  //     publishes, or
+  //   - the zero address for un-attested writes (legacy V8 / V9 publishes
+  //     and the current V10.1 update path).
+  //
+  // We surface the zero-address case explicitly via `attested: false` so
+  // clients don't have to know the convention. Adapters that don't
+  // implement the view (no-chain mode, pre-V10.1 evm-adapter copies)
+  // return 503 — this is "feature requires V10.1 chain adapter," not a
+  // 404 about the kcId.
+  if (req.method === 'GET' && /^\/api\/kc\/[^/]+\/author$/.test(path)) {
+    const idStr = decodeURIComponent(path.split('/')[3] ?? '');
+    if (!/^\d+$/.test(idStr)) {
+      return jsonResponse(res, 400, {
+        error: 'Invalid kcId — must be a non-negative integer',
+      });
+    }
+    const kcId = BigInt(idStr);
+    try {
+      const author = await agent.getKnowledgeCollectionAuthor(kcId);
+      if (author === null) {
+        return jsonResponse(res, 503, {
+          error:
+            'Chain adapter does not expose getLatestMerkleRootAuthor — ' +
+            'V10.1 author attestation is not available on this deployment',
+        });
+      }
+      const ZERO = '0x0000000000000000000000000000000000000000';
+      const attested = author.toLowerCase() !== ZERO;
+      return jsonResponse(res, 200, {
+        kcId: idStr,
+        author: attested ? author : null,
+        attested,
+      });
+    } catch (err: any) {
+      // KCS reverts on unknown kcId; map to 404 so callers can branch
+      // on "not published yet" vs "no attestation."
+      const msg = err?.message ?? String(err);
+      if (/unknown kcId|nonexistent|out-of-bounds/i.test(msg)) {
+        return jsonResponse(res, 404, { error: `Unknown kcId ${idStr}` });
+      }
+      throw err;
+    }
   }
 }

@@ -135,7 +135,7 @@ D2A-v2 is considered a win if all are true:
 
 - [ ] DKG daemon running and healthy
 - [ ] MCP server available in Claude session
-- [ ] Paranet selected and writable
+- [ ] ContextGraph selected and writable
 - [ ] Feature ownership map fixed before start
 - [ ] Failure classification fields defined in analyzer output
 

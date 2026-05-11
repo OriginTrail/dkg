@@ -1,7 +1,7 @@
 # OpenClaw DKG Collaboration Benchmark
 
 Evaluates whether agent collaboration over a shared knowledge substrate
-(workspace memory or DKG paranet) improves delivery speed, cost efficiency,
+(workspace memory or DKG contextGraph) improves delivery speed, cost efficiency,
 and consistency compared to isolated agent workflows.
 
 ## Structure
@@ -28,7 +28,7 @@ docs/experiments/openclaw-benchmark/
 | Exp-B2 | 4 parallel | DKG (semantic wrappers) | Multi-agent with worktrees |
 | Exp-AB | 4 parallel | DKG (SPARQL) | Multi-agent with SPARQL-only MCP |
 | Exp-C1 | 4 parallel | Workspace shared log + DKG query | Multi-agent shared JSONL memory |
-| Exp-C2 | 4 parallel | Full DKG publish/query | Multi-agent run-scoped publishing in common paranet |
+| Exp-C2 | 4 parallel | Full DKG publish/query | Multi-agent run-scoped publishing in common contextGraph |
 
 ### Task Rounds
 
@@ -48,14 +48,14 @@ In collaboration arms, Round 2 tests how much prior shared memory is reused.
 
 1. Clone OpenClaw: `git clone https://github.com/openclaw/openclaw ../openclaw`
 2. DKG daemon running: `dkg start`
-3. Dev coordination paranet exists: `dkg paranet create dev-coordination --name "Dev Coordination" --save`
+3. Dev coordination contextGraph exists: `dkg contextGraph create dev-coordination --name "Dev Coordination" --save`
 4. Claude Code installed and authenticated
 
 ### Core runs
 
 ```bash
 # 1. Index OpenClaw into DKG
-dkg index ../openclaw --paranet dev-coordination
+dkg index ../openclaw --context-graph dev-coordination
 
 # 2. Baseline
 ./scripts/run-control.sh

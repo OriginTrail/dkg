@@ -1,4 +1,4 @@
-import { paranetWorkspaceGraphUri, paranetWorkspaceMetaGraphUri } from '@origintrail-official/dkg-core';
+import { contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri } from '@origintrail-official/dkg-core';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { SyncPageResult } from './page-fetch.js';
@@ -40,7 +40,7 @@ interface SharedMemorySyncContext {
     emptyResponses: number;
     entityCreators: Array<[string, string]>;
   }>;
-  ensureParanet: (contextGraphId: string) => Promise<void>;
+  ensureContextGraph: (contextGraphId: string) => Promise<void>;
   storeInsert: (quads: Quad[]) => Promise<void>;
   deleteCheckpoint: (key: string) => void;
   setCheckpoint: (key: string, offset: number) => void;
@@ -58,7 +58,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     createContextGraphSyncDeadline,
     fetchSyncPages,
     processSharedMemoryBatch,
-    ensureParanet,
+    ensureContextGraph,
     storeInsert,
     deleteCheckpoint,
     setCheckpoint,
@@ -84,8 +84,8 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
 
   try {
     for (const [index, pid] of contextGraphIds.entries()) {
-      const wsGraph = paranetWorkspaceGraphUri(pid);
-      const wsMetaGraph = paranetWorkspaceMetaGraphUri(pid);
+      const wsGraph = contextGraphWorkspaceGraphUri(pid);
+      const wsMetaGraph = contextGraphWorkspaceMetaGraphUri(pid);
       const deadline = createContextGraphSyncDeadline(contextGraphIds.length - index);
 
       logInfo(ctx, `Syncing shared memory for context graph "${pid}" from ${remotePeerId}`);
@@ -117,7 +117,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       }
 
       const storeStartedAt = Date.now();
-      await ensureParanet(pid);
+      await ensureContextGraph(pid);
 
       if (validWsQuads.length > 0) {
         await storeInsert(validWsQuads);

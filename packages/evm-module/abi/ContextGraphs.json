@@ -156,6 +156,11 @@
       },
       {
         "internalType": "uint8",
+        "name": "accessPolicy",
+        "type": "uint8"
+      },
+      {
+        "internalType": "uint8",
         "name": "publishPolicy",
         "type": "uint8"
       },

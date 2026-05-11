@@ -21,9 +21,9 @@ import {
 import { OxigraphStore, GraphManager, type Quad } from '@origintrail-official/dkg-storage';
 import { AccessHandler } from '../src/access-handler.js';
 
-const PARANET = 'test-access-verify';
-const META_GRAPH = `did:dkg:context-graph:${PARANET}/_meta`;
-const PRIVATE_GRAPH = `did:dkg:context-graph:${PARANET}/_private`;
+const CONTEXT_GRAPH = 'test-access-verify';
+const META_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`;
+const PRIVATE_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}/_private`;
 const DKG = 'http://dkg.io/ontology/';
 const ENTITY = 'did:dkg:agent:TestEntity';
 const KC_UAL = 'did:dkg:mock:31337/0x1/1';
@@ -44,13 +44,13 @@ async function setupStoreWithPolicy(
 ): Promise<OxigraphStore> {
   const store = new OxigraphStore();
   const gm = new GraphManager(store);
-  await gm.ensureContextGraph(PARANET);
+  await gm.ensureContextGraph(CONTEXT_GRAPH);
 
   // KA metadata in meta graph
   await store.insert([
     mq(KA_UAL, `${DKG}rootEntity`, ENTITY, META_GRAPH),
     mq(KA_UAL, `${DKG}partOf`, KC_UAL, META_GRAPH),
-    mq(KC_UAL, `${DKG}paranet`, `did:dkg:context-graph:${PARANET}`, META_GRAPH),
+    mq(KC_UAL, `${DKG}contextGraph`, `did:dkg:context-graph:${CONTEXT_GRAPH}`, META_GRAPH),
     mq(KC_UAL, `${DKG}accessPolicy`, lit(policy), META_GRAPH),
     mq(KC_UAL, `${DKG}status`, lit('confirmed'), META_GRAPH),
   ]);
@@ -317,7 +317,7 @@ describe('I-005: Access handler signature verification', () => {
 
     // Attempt graph poisoning: write allow-list entry into non-meta graph.
     await store.insert([
-      mq(KC_UAL, `${DKG}allowedPeer`, lit('attacker-peer'), `did:dkg:context-graph:${PARANET}`),
+      mq(KC_UAL, `${DKG}allowedPeer`, lit('attacker-peer'), `did:dkg:context-graph:${CONTEXT_GRAPH}`),
     ]);
 
     const paymentProof = new Uint8Array(0);

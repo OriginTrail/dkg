@@ -8,6 +8,7 @@ export type OnContextGraphCreated = (info: {
   contextGraphId: string;
   creator: string;
   accessPolicy: number;
+  publishPolicy?: number;
   blockNumber: number;
 }) => Promise<void>;
 
@@ -172,7 +173,10 @@ export class ChainEventPoller {
     // collection failures. Stopping legacy event polling would leave those
     // publishes tentative forever on remote nodes.
     const eventTypes: string[] = ['KnowledgeBatchCreated', 'KCCreated'];
-    if (watchContextGraphs) eventTypes.push('NameClaimed');
+    if (watchContextGraphs) {
+      eventTypes.push('NameClaimed');
+      eventTypes.push('ContextGraphCreated');
+    }
     if (this.onCollectionUpdated) eventTypes.push('KnowledgeCollectionUpdated');
     if (this.onAllowListUpdated) eventTypes.push('AllowListUpdated');
     if (this.onProfileEvent) {
@@ -198,8 +202,7 @@ export class ChainEventPoller {
       if (event.blockNumber > maxEventBlock) maxEventBlock = event.blockNumber;
       if (event.type === 'KnowledgeBatchCreated' || event.type === 'KCCreated') {
         await this.handleBatchCreated(event, ctx);
-      } else if (event.type === 'NameClaimed' || event.type === 'ParanetCreated') {
-        // Accept 'ParanetCreated' for backward compat with adapters that have not renamed the event.
+      } else if (event.type === 'NameClaimed' || event.type === 'ContextGraphCreated') {
         await this.handleContextGraphCreated(event, ctx);
       } else if (event.type === 'KnowledgeCollectionUpdated') {
         await this.handleCollectionUpdated(event, ctx);
@@ -261,16 +264,17 @@ export class ChainEventPoller {
   private async handleContextGraphCreated(event: ChainEvent, ctx: OperationContext): Promise<void> {
     if (!this.onContextGraphCreated) return;
     const { data } = event;
-    const contextGraphId = String(data['contextGraphId'] ?? data['paranetId'] ?? '');
-    const creator = String(data['creator'] ?? '');
+    const contextGraphId = String(data['contextGraphId'] ?? '');
+    const creator = String(data['creator'] ?? data['owner'] ?? data['manager'] ?? '');
     const accessPolicy = Number(data['accessPolicy'] ?? 0);
+    const publishPolicy = data['publishPolicy'] == null ? undefined : Number(data['publishPolicy']);
 
     this.log.info(ctx,
       `Chain event: ContextGraphCreated block=${event.blockNumber} id=${contextGraphId.slice(0, 16)}… creator=${creator.slice(0, 10)}…`,
     );
 
     try {
-      await this.onContextGraphCreated({ contextGraphId, creator, accessPolicy, blockNumber: event.blockNumber });
+      await this.onContextGraphCreated({ contextGraphId, creator, accessPolicy, publishPolicy, blockNumber: event.blockNumber });
     } catch (err) {
       this.log.warn(ctx, `onContextGraphCreated callback failed: ${err instanceof Error ? err.message : String(err)}`);
     }

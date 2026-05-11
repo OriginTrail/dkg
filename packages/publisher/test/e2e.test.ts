@@ -24,9 +24,20 @@ import { autoPartition } from '../src/auto-partition.js';
 import { parseSimpleNQuads } from '../src/publish-handler.js';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, createTestContextGraph, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
+import { wrapPublisherForTest } from './_helpers/seal.js';
 
-let PARANET = 'agent-skills';
-let GRAPH = `did:dkg:context-graph:${PARANET}`;
+let CONTEXT_GRAPH = 'agent-skills';
+let _kav10Address: string;
+let _provider: ethers.JsonRpcProvider;
+const _author = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+
+function makeTestPublisher(opts: ConstructorParameters<typeof DKGPublisher>[0]): DKGPublisher {
+  return wrapPublisherForTest(new DKGPublisher(opts), {
+    author: _author,
+    ctx: { provider: _provider, kav10Address: _kav10Address },
+  });
+}
+let GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
 const ENTITY = 'did:dkg:agent:QmImageBot';
 const publisherWallet = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
 const TEST_PUBLISHER_ADDRESS = publisherWallet.address;
@@ -45,8 +56,11 @@ describe('End-to-end: Publish → Replicate → Query', () => {
     const provider = createProvider();
     await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, TEST_PUBLISHER_ADDRESS, ethers.parseEther('5000000'));
     const cgId = await createTestContextGraph();
-    PARANET = String(cgId);
-    GRAPH = `did:dkg:context-graph:${PARANET}`;
+    CONTEXT_GRAPH = String(cgId);
+    GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
+    _provider = provider;
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    _kav10Address = await chain.getKnowledgeAssetsV10Address();
   });
 
   afterAll(async () => {
@@ -88,7 +102,7 @@ describe('End-to-end: Publish → Replicate → Query', () => {
     const keypairB = await generateEd25519Keypair();
 
     // Publisher on A
-    const publisherA = new DKGPublisher({
+    const publisherA = makeTestPublisher({
       store: storeA,
       chain: chainA,
       eventBus: busA,
@@ -106,7 +120,7 @@ describe('End-to-end: Publish → Replicate → Query', () => {
 
     // === Step 1: Publish on Node A ===
     const publishResult = await publisherA.publish({
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: [
         q(ENTITY, 'http://schema.org/name', '"ImageBot"'),
         q(ENTITY, 'http://schema.org/description', '"AI image analysis agent"'),
@@ -131,7 +145,7 @@ describe('End-to-end: Publish → Replicate → Query', () => {
     const publishRequest = encodePublishRequest({
       ual: `did:dkg:evm:31337/${onChain.publisherAddress}/${onChain.startKAId}`,
       nquads: new TextEncoder().encode(nquads),
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       kas: publishResult.kaManifest.map((m) => ({
         tokenId: Number(m.tokenId),
         rootEntity: m.rootEntity,
@@ -159,7 +173,7 @@ describe('End-to-end: Publish → Replicate → Query', () => {
     const engineB = new DKGQueryEngine(storeB);
     const queryResult = await engineB.query(
       'SELECT ?name WHERE { ?s <http://schema.org/name> ?name }',
-      { contextGraphId: PARANET },
+      { contextGraphId: CONTEXT_GRAPH },
     );
 
     expect(queryResult.bindings).toHaveLength(1);
@@ -168,7 +182,7 @@ describe('End-to-end: Publish → Replicate → Query', () => {
     // Query for skills
     const skillResult = await engineB.query(
       'SELECT ?skill WHERE { ?s <http://ex.org/skill> ?skill }',
-      { contextGraphId: PARANET },
+      { contextGraphId: CONTEXT_GRAPH },
     );
     expect(skillResult.bindings).toHaveLength(1);
     expect(skillResult.bindings[0]['skill']).toBe('"ImageAnalysis"');
@@ -197,7 +211,7 @@ describe('End-to-end: Publish → Replicate → Query', () => {
     const keypairB = await generateEd25519Keypair();
 
     // Publisher on A (holds private triples)
-    const publisherA = new DKGPublisher({
+    const publisherA = makeTestPublisher({
       store: storeA,
       chain: chainA,
       eventBus: busA,
@@ -208,7 +222,7 @@ describe('End-to-end: Publish → Replicate → Query', () => {
 
     // Publish with mixed public/private triples
     const result = await publisherA.publish({
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: [q(ENTITY, 'http://schema.org/name', '"ImageBot"')],
       privateQuads: [
         q(ENTITY, 'http://ex.org/apiKey', '"secret-key-xyz"'),
@@ -301,13 +315,13 @@ describe('Publisher wallet signature verification', () => {
     );
 
     const sig = await signCommitment(
-      merkleRoot, signerWallet.address, 1, 1, CHAIN_ID, PARANET, signerWallet,
+      merkleRoot, signerWallet.address, 1, 1, CHAIN_ID, CONTEXT_GRAPH, signerWallet,
     );
 
     const reqBytes = encodePublishRequest({
       ual: `did:dkg:${CHAIN_ID}/${signerWallet.address}/1`,
       nquads: new TextEncoder().encode(nquads),
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       kas: [{ tokenId: 1, rootEntity: ENTITY, privateMerkleRoot: new Uint8Array(0), privateTripleCount: 0 }],
       publisherIdentity: new Uint8Array(32),
       publisherAddress: signerWallet.address,
@@ -334,13 +348,13 @@ describe('Publisher wallet signature verification', () => {
     );
 
     const sig = await signCommitment(
-      merkleRoot, signerWallet.address, 1, 1, CHAIN_ID, PARANET, imposterWallet,
+      merkleRoot, signerWallet.address, 1, 1, CHAIN_ID, CONTEXT_GRAPH, imposterWallet,
     );
 
     const reqBytes = encodePublishRequest({
       ual: `did:dkg:${CHAIN_ID}/${signerWallet.address}/1`,
       nquads: new TextEncoder().encode(nquads),
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       kas: [{ tokenId: 1, rootEntity: ENTITY, privateMerkleRoot: new Uint8Array(0), privateTripleCount: 0 }],
       publisherIdentity: new Uint8Array(32),
       publisherAddress: signerWallet.address,
@@ -371,7 +385,7 @@ describe('Publisher wallet signature verification', () => {
     const reqBytes = encodePublishRequest({
       ual: `did:dkg:${CHAIN_ID}/${signerWallet.address}/0`,
       nquads: new TextEncoder().encode(nquads),
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       kas: [{ tokenId: 1, rootEntity: 'did:dkg:agent:QmNoSig', privateMerkleRoot: new Uint8Array(0), privateTripleCount: 0 }],
       publisherIdentity: new Uint8Array(32),
       publisherAddress: '',
@@ -398,14 +412,14 @@ describe('Publisher wallet signature verification', () => {
     );
 
     const sig = await signCommitment(
-      merkleRoot, signerWallet.address, 5, 5, CHAIN_ID, PARANET, signerWallet,
+      merkleRoot, signerWallet.address, 5, 5, CHAIN_ID, CONTEXT_GRAPH, signerWallet,
     );
 
     const ual = `did:dkg:${CHAIN_ID}/${signerWallet.address}/5`;
     const reqBytes = encodePublishRequest({
       ual,
       nquads: new TextEncoder().encode(nquads),
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       kas: [{ tokenId: 1, rootEntity: 'did:dkg:agent:QmConfirm', privateMerkleRoot: new Uint8Array(0), privateTripleCount: 0 }],
       publisherIdentity: new Uint8Array(32),
       publisherAddress: signerWallet.address,
@@ -441,14 +455,14 @@ describe('Publisher wallet signature verification', () => {
     );
 
     const sig = await signCommitment(
-      merkleRoot, signerWallet.address, 7, 7, CHAIN_ID, PARANET, signerWallet,
+      merkleRoot, signerWallet.address, 7, 7, CHAIN_ID, CONTEXT_GRAPH, signerWallet,
     );
 
     const ual = `did:dkg:${CHAIN_ID}/${signerWallet.address}/7`;
     const reqBytes = encodePublishRequest({
       ual,
       nquads: new TextEncoder().encode(nquads),
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       kas: [{ tokenId: 1, rootEntity: 'did:dkg:agent:QmPromote', privateMerkleRoot: new Uint8Array(0), privateTripleCount: 0 }],
       publisherIdentity: new Uint8Array(32),
       publisherAddress: signerWallet.address,
@@ -461,7 +475,7 @@ describe('Publisher wallet signature verification', () => {
 
     await handler.handler(reqBytes, 'test-peer' as any);
 
-    const metaGraph = `did:dkg:context-graph:${PARANET}/_meta`;
+    const metaGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`;
     let statusResult = await store.query(
       `SELECT ?status WHERE { GRAPH <${metaGraph}> { <${ual}> <http://dkg.io/ontology/status> ?status } }`,
     );
@@ -501,13 +515,13 @@ describe('Publisher wallet signature verification', () => {
     );
 
     const sig = await signCommitment(
-      merkleRoot, signerWallet.address, 11, 11, CHAIN_ID, PARANET, signerWallet,
+      merkleRoot, signerWallet.address, 11, 11, CHAIN_ID, CONTEXT_GRAPH, signerWallet,
     );
 
     const reqBytes = encodePublishRequest({
       ual: `did:dkg:${CHAIN_ID}/${signerWallet.address}/11`,
       nquads: new TextEncoder().encode(nquads),
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       kas: [
         { tokenId: 1, rootEntity: 'did:dkg:agent:QmRootMatch', privateMerkleRoot: new Uint8Array(0), privateTripleCount: 0 },
       ],
@@ -547,14 +561,14 @@ describe('Publisher wallet signature verification', () => {
     );
 
     const sig = await signCommitment(
-      merkleRoot, signerWallet.address, 10, 10, CHAIN_ID, PARANET, signerWallet,
+      merkleRoot, signerWallet.address, 10, 10, CHAIN_ID, CONTEXT_GRAPH, signerWallet,
     );
 
     const ual = `did:dkg:${CHAIN_ID}/${signerWallet.address}/10`;
     const reqBytes = encodePublishRequest({
       ual,
       nquads: new TextEncoder().encode(nquads),
-      paranetId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       kas: [{ tokenId: 1, rootEntity: 'did:dkg:agent:QmMismatch', privateMerkleRoot: new Uint8Array(0), privateTripleCount: 0 }],
       publisherIdentity: new Uint8Array(32),
       publisherAddress: signerWallet.address,

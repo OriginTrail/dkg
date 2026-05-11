@@ -38,6 +38,22 @@ UI_NODE_ID="${UI_NODE_ID:-1}"
 UI_PIDFILE="$DEVNET_DIR/node-ui.pid"
 UI_LOGFILE="$DEVNET_DIR/node-ui.log"
 NUM_OP_WALLETS=3
+# Hardhat block interval (ms). Without interval mining, Hardhat only mines
+# when a tx arrives → block.number / block.timestamp freeze the moment the
+# cluster goes idle, which means time-based on-chain mechanics (RS proof
+# periods, epochs, stake withdrawal delay, ask update delay, …) NEVER tick
+# forward unless somebody is actively publishing. That makes "wait and
+# observe" workflows (RS reconciliation, epoch boundary reward distribution,
+# operator-fee update unlocks) impossible to test without manual `hardhat_mine`
+# RPC calls, and silently masks bugs that only surface across time.
+#
+# 1 sec/block is an aggressive testnet rate (12× faster than Ethereum
+# mainnet's 12s), chosen because the devnet's RS `proofingPeriodDurationInBlocks`
+# is 100 (see evm-module/deployments/parameters.json → development.hardhat) →
+# new RS period every ~100 sec, fast enough for interactive testing without
+# overwhelming the prover loop. Set to 0 to disable (fall back to per-tx
+# mining) for tests that need deterministic block-per-tx semantics.
+HARDHAT_BLOCK_INTERVAL_MS="${HARDHAT_BLOCK_INTERVAL_MS:-1000}"
 BLAZEGRAPH_PORT=9999
 BLAZEGRAPH_CONTAINER="devnet-blazegraph"
 OXIGRAPH_SERVER_PORT_5=7878
@@ -134,6 +150,7 @@ start_hardhat() {
          -d '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' \
          > /dev/null 2>&1; then
       log "Hardhat node ready"
+      enable_hardhat_interval_mining
       return 0
     fi
     sleep 1
@@ -141,6 +158,30 @@ start_hardhat() {
 
   log "ERROR: Hardhat node failed to start within 30s"
   return 1
+}
+
+# Switch the running Hardhat node from "mine on tx" into "mine on a wallclock
+# interval" mode. Idempotent and best-effort: failures are logged but never
+# block the rest of the devnet boot (the cluster is still functional in
+# auto-mine-only mode, just without time progression in idle windows).
+#
+# See HARDHAT_BLOCK_INTERVAL_MS at the top of this file for the rationale and
+# the knob to disable it.
+enable_hardhat_interval_mining() {
+  if [ "$HARDHAT_BLOCK_INTERVAL_MS" -le 0 ] 2>/dev/null; then
+    log "Hardhat interval mining disabled (HARDHAT_BLOCK_INTERVAL_MS=$HARDHAT_BLOCK_INTERVAL_MS)"
+    return 0
+  fi
+
+  local response
+  response=$(curl -s "http://127.0.0.1:$HARDHAT_PORT" \
+    -X POST -H "Content-Type: application/json" \
+    -d "{\"jsonrpc\":\"2.0\",\"method\":\"evm_setIntervalMining\",\"params\":[$HARDHAT_BLOCK_INTERVAL_MS],\"id\":1}" 2>&1)
+  if echo "$response" | grep -q '"result"'; then
+    log "Hardhat interval mining enabled (one block every ${HARDHAT_BLOCK_INTERVAL_MS}ms)"
+  else
+    log "WARNING: Failed to enable Hardhat interval mining: $response"
+  fi
 }
 
 deploy_contracts() {
@@ -341,6 +382,12 @@ create_node_config() {
   # the publisher). Node 5+ are edge for heterogeneous testing.
   if [ "$node_num" -le 4 ]; then
     node_role="core"
+  fi
+  # `cmd_addnode` overrides the default role/index mapping so we can spawn a
+  # mid-run 7th core (or 8th edge) without the test caring about the indexing
+  # convention used at fresh-boot time.
+  if [ -n "${DEVNET_NODE_ROLE_OVERRIDE:-}" ]; then
+    node_role="$DEVNET_NODE_ROLE_OVERRIDE"
   fi
 
   # All devnet nodes start with relay="none" to prevent falling back to testnet
@@ -981,8 +1028,8 @@ cmd_start() {
 
   # Register context graphs on-chain by going through node 1's public API.
   #
-  # History: this block used to call `ParanetV9Registry.createParanetV9(...)`
-  # directly from the deployer account. That is the legacy V9 paranet
+  # History: this block used to call `ContextGraphV9Registry.createContextGraphV9(...)`
+  # directly from the deployer account. That is the legacy V9 contextGraph
   # registry — V10 publish paths consult `ContextGraphs` + `ContextGraphStorage`
   # and surface the resulting uint256 id as `v10Id` in the API. Registering
   # on the V9 contract left nodes with no V10 record to look up, so every
@@ -1007,7 +1054,7 @@ cmd_start() {
   # Register two context graphs so the devnet preserves the cross-CG isolation
   # smoke path (each CG has its own subgraph + on-chain id; nodes must keep them
   # independent). A single graph would hide regressions that only surface when
-  # traffic fans out across multiple paranets.
+  # traffic fans out across multiple contextGraphs.
   for cg in devnet-test devnet-isolation; do
     local on_chain_id=""
     local attempt
@@ -1068,7 +1115,7 @@ cmd_start() {
     fi
 
     # The on-chain id propagates to other nodes via ONTOLOGY gossip
-    # (`registerContextGraph` writes the `dkg:paranetOnChainId` triple +
+    # (`registerContextGraph` writes the `dkg:contextGraphOnChainId` triple +
     # immediately broadcasts it). Wait until every node's local view
     # surfaces the same id before declaring the devnet ready — without
     # this wait, the next VM publish on node 2+ races the gossip and
@@ -1225,21 +1272,77 @@ cmd_clean() {
   log "Clean."
 }
 
+# Bring up an additional node against an already-running devnet. The node's
+# config + wallets are generated and the daemon is started, but on-chain
+# wiring (createConviction, updateAsk, hostingNodes registration) is left to
+# the caller — the v10-stress-devnet experiment does this from the test
+# itself so it can assert on every step.
+#
+# Usage: devnet.sh addnode <num> [core|edge]
+cmd_addnode() {
+  local node_num="${2:-}"
+  local role="${3:-core}"
+  if [ -z "$node_num" ]; then
+    echo "Usage: $0 addnode <num> [core|edge]"
+    exit 1
+  fi
+  if [ "$node_num" -lt 1 ] || [ "$node_num" -gt 10 ]; then
+    echo "[devnet] node_num must be 1..10 (HARDHAT_KEYS array bound)"
+    exit 1
+  fi
+  if [ -d "$DEVNET_DIR/node${node_num}" ]; then
+    echo "[devnet] node${node_num} already exists at $DEVNET_DIR/node${node_num}"
+    exit 1
+  fi
+  case "$role" in
+    core|edge) ;;
+    *) echo "[devnet] role must be 'core' or 'edge'"; exit 1 ;;
+  esac
+  local hardhat_pid_file="$DEVNET_DIR/hardhat.pid"
+  if [ ! -f "$hardhat_pid_file" ] || ! kill -0 "$(cat "$hardhat_pid_file")" 2>/dev/null; then
+    echo "[devnet] Hardhat is not running. Start the devnet first with: $0 start <N>"
+    exit 1
+  fi
+
+  log "Adding node $node_num (role=$role)..."
+  DEVNET_NODE_ROLE_OVERRIDE="$role" create_node_config "$node_num"
+
+  # Reuse the cluster's shared auth token so the test can talk to the new
+  # node with the same bearer used everywhere else.
+  if [ -f "$DEVNET_DIR/node1/auth.token" ]; then
+    local shared_token
+    shared_token=$(grep -v '^#' "$DEVNET_DIR/node1/auth.token" | head -1)
+    if [ -n "$shared_token" ]; then
+      printf '# DKG devnet shared auth token\n%s\n' "$shared_token" \
+        > "$DEVNET_DIR/node${node_num}/auth.token"
+      chmod 600 "$DEVNET_DIR/node${node_num}/auth.token"
+    fi
+  fi
+
+  cd "$REPO_ROOT" || exit 1
+  start_node "$node_num"
+  log "Node $node_num up. On-chain wiring (createConviction/updateAsk) is the caller's responsibility."
+}
+
 case "${1:-}" in
-  start)  cmd_start ;;
-  stop)   cmd_stop ;;
-  status) cmd_status ;;
-  logs)   cmd_logs "$@" ;;
-  clean)  cmd_clean ;;
-  ui)     cmd_ui "$@" ;;
+  start)   cmd_start ;;
+  addnode) cmd_addnode "$@" ;;
+  stop)    cmd_stop ;;
+  status)  cmd_status ;;
+  logs)    cmd_logs "$@" ;;
+  clean)   cmd_clean ;;
+  ui)      cmd_ui "$@" ;;
   *)
-    echo "Usage: $0 {start|stop|status|logs|clean|ui} [args]"
+    echo "Usage: $0 {start|addnode|stop|status|logs|clean|ui} [args]"
     echo ""
-    echo "  start [N]    Start devnet with N nodes (default 6)"
-    echo "  stop         Stop all devnet processes (incl. UI)"
-    echo "  status       Show running nodes (incl. UI) and their status"
-    echo "  logs [N]     Tail logs for node N (default 1)"
-    echo "  clean        Stop and wipe all devnet data"
+    echo "  start [N]               Start devnet with N nodes (default 6)"
+    echo "  addnode <num> [core|edge]  Spawn one more node against the running"
+    echo "                          devnet (mid-run sync test). Caller drives"
+    echo "                          on-chain identity/stake/ask. (1 <= num <= 10)"
+    echo "  stop                    Stop all devnet processes (incl. UI)"
+    echo "  status                  Show running nodes (incl. UI) and their status"
+    echo "  logs [N]                Tail logs for node N (default 1)"
+    echo "  clean                   Stop and wipe all devnet data"
     echo "  ui {start|stop|restart|status|logs}"
     echo "               Control the node-ui Vite dev server (port \$UI_PORT,"
     echo "               default 5173). Detached via nohup so it survives"

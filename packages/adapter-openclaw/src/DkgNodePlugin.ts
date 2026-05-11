@@ -2240,7 +2240,7 @@ export class DkgNodePlugin {
                 : undefined;
             if (!id || id === 'agent-context') continue;
             // B51 + B54: `agent.listContextGraphs()` returns every context
-            // graph the node knows about — including system paranets
+            // graph the node knows about — including system contextGraphs
             // (ontology, agents registry), locally-created private CGs,
             // public local CGs, subscribed gossip CGs, and discovered-
             // but-not-subscribed ontology entries. Each entry carries
@@ -2253,7 +2253,7 @@ export class DkgNodePlugin {
             // `dkg_memory_import`, so the filter shape matters:
             //
             //   - B51 (initial filter) used `subscribed === true`, which
-            //     correctly excluded system paranets and discovered-not-
+            //     correctly excluded system contextGraphs and discovered-not-
             //     subscribed entries.
             //   - B54 (this fix) discovered that `createContextGraph({
             //     private: true })` records local private CGs as
@@ -2267,7 +2267,7 @@ export class DkgNodePlugin {
             // Relax the filter to `synced === true && !isSystem`. Every
             // locally usable CG — public subscribed, local public,
             // local private — has `synced: true` in the listing. System
-            // paranets also have `synced: true` but are filtered by the
+            // contextGraphs also have `synced: true` but are filtered by the
             // `isSystem` check. Discovered-but-not-yet-synced gossip
             // entries (subscribed via `subscribe()` but not yet
             // data-synced) have `synced: false` and are excluded until
@@ -3414,12 +3414,12 @@ export class DkgNodePlugin {
   private async handleQuery(args: Record<string, unknown>): Promise<OpenClawToolResult> {
     try {
       const sparql = String(args.sparql);
-      // V10 is the first product launch — no v9 back-compat. Reject `paranet_id`
+      // V10 is the first product launch — no v9 back-compat. Reject `contextGraph_id`
       // explicitly rather than silently widening it to `context_graph_id`, so
       // stale v9 agent code surfaces its wrong assumption instead of sending
       // an empty/garbage value that the daemon would then ignore.
-      if (args.paranet_id !== undefined) {
-        return this.error('"paranet_id" is not a supported parameter. Use "context_graph_id".');
+      if (args.contextGraph_id !== undefined) {
+        return this.error('"contextGraph_id" is not a supported parameter. Use "context_graph_id".');
       }
       // `include_shared_memory` was removed in favor of `view`. There is no
       // one-line replacement: the legacy `true` path unioned the data graph

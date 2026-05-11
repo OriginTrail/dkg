@@ -1,10 +1,11 @@
 import {
   decodeFinalizationMessage,
-  paranetWorkspaceGraphUri, paranetWorkspaceMetaGraphUri,
+  contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri,
   contextGraphDataUri, contextGraphMetaUri,
   contextGraphSubGraphUri, validateSubGraphName,
-  Logger, createOperationContext,
+  DKGEvent, Logger, createOperationContext,
   assertSafeIri, isSafeIri,
+  type EventBus,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, type TripleStore, type Quad } from '@origintrail-official/dkg-storage';
@@ -21,12 +22,14 @@ import { ethers } from 'ethers';
 export class FinalizationHandler {
   private readonly store: TripleStore;
   private readonly chain: ChainAdapter | undefined;
+  private readonly eventBus: EventBus | undefined;
   private readonly log = new Logger('FinalizationHandler');
   private readonly processedUals = new Set<string>();
 
-  constructor(store: TripleStore, chain: ChainAdapter | undefined) {
+  constructor(store: TripleStore, chain: ChainAdapter | undefined, eventBus?: EventBus) {
     this.store = store;
     this.chain = chain;
+    this.eventBus = eventBus;
   }
 
   async handleFinalizationMessage(data: Uint8Array, contextGraphId: string): Promise<void> {
@@ -37,8 +40,8 @@ export class FinalizationHandler {
         ctx = createOperationContext('gossip', msg.operationId);
       }
 
-      if (msg.paranetId && msg.paranetId !== contextGraphId) {
-        this.log.warn(ctx, `Finalization: contextGraphId "${msg.paranetId}" does not match topic "${contextGraphId}", ignoring`);
+      if (msg.contextGraphId && msg.contextGraphId !== contextGraphId) {
+        this.log.warn(ctx, `Finalization: contextGraphId "${msg.contextGraphId}" does not match topic "${contextGraphId}", ignoring`);
         return;
       }
 
@@ -58,7 +61,7 @@ export class FinalizationHandler {
       const startKAId = protoToBigInt(msg.startKAId);
       const endKAId = protoToBigInt(msg.endKAId);
 
-      const ctxGraphId = msg.contextGraphId || undefined;
+      const ctxGraphId = msg.targetContextGraphId || undefined;
 
       // Validate sub-graph name from gossip — reject invalid names entirely
       let subGraphName: string | undefined;
@@ -91,7 +94,7 @@ export class FinalizationHandler {
 
         if (merkleMatch) {
           const batchId = protoToBigInt(msg.batchId);
-          const verified = await this.verifyOnChain(
+          const { verified, authorAddress } = await this.verifyOnChain(
             msg.txHash, blockNumber, msg.kcMerkleRoot,
             msg.publisherAddress, startKAId, endKAId, ctx, ctxGraphId, batchId,
           );
@@ -101,6 +104,7 @@ export class FinalizationHandler {
               contextGraphId, sharedMemoryQuads, msg.ual, msg.rootEntities,
               msg.publisherAddress, msg.txHash, blockNumber, startKAId, endKAId,
               protoToBigInt(msg.batchId), ctx, ctxGraphId, subGraphName,
+              authorAddress,
             );
             this.markProcessed(dedupeKey);
             this.log.info(ctx, `Finalization: promoted SWM snapshot to ${ctxGraphId ? `context graph ${ctxGraphId}` : 'canonical'} for ${msg.ual} (tx=${msg.txHash.slice(0, 10)}…)`);
@@ -149,7 +153,7 @@ export class FinalizationHandler {
     const graphManager = new GraphManager(this.store);
     const sharedMemoryGraph = subGraphName
       ? graphManager.sharedMemoryUri(contextGraphId, subGraphName)
-      : paranetWorkspaceGraphUri(contextGraphId);
+      : contextGraphWorkspaceGraphUri(contextGraphId);
     const safeRoots = rootEntities.filter(isSafeIri);
     if (safeRoots.length === 0) return [];
 
@@ -178,7 +182,7 @@ export class FinalizationHandler {
     const graphManager = new GraphManager(this.store);
     const wsMetaGraph = subGraphName
       ? graphManager.sharedMemoryMetaUri(contextGraphId, subGraphName)
-      : paranetWorkspaceMetaGraphUri(contextGraphId);
+      : contextGraphWorkspaceMetaGraphUri(contextGraphId);
     const safeRoots = rootEntities.filter(isSafeIri);
     if (safeRoots.length === 0) return [];
 
@@ -211,7 +215,7 @@ export class FinalizationHandler {
     const graphManager = new GraphManager(this.store);
     const wsMetaGraph = subGraphName
       ? graphManager.sharedMemoryMetaUri(contextGraphId, subGraphName)
-      : paranetWorkspaceMetaGraphUri(contextGraphId);
+      : contextGraphWorkspaceMetaGraphUri(contextGraphId);
     const safeRoots = rootEntities.filter(isSafeIri);
     if (safeRoots.length === 0) return undefined;
 
@@ -246,9 +250,9 @@ export class FinalizationHandler {
     ctx: OperationContext,
     ctxGraphId?: string,
     expectedBatchId?: bigint,
-  ): Promise<boolean> {
-    if (!this.chain || this.chain.chainId === 'none') return false;
-    if (blockNumber <= 0) return false;
+  ): Promise<{ verified: boolean; authorAddress?: string }> {
+    if (!this.chain || this.chain.chainId === 'none') return { verified: false };
+    if (blockNumber <= 0) return { verified: false };
 
     try {
       // Verify KnowledgeBatchCreated or KCCreated (V10) at the specific block
@@ -259,6 +263,12 @@ export class FinalizationHandler {
       };
 
       let batchVerified = false;
+      // Round 5 review §10 — capture the indexed `author` from the matched
+      // KCCreated event so the caller can populate `dkg:Publication` /
+      // `dkg:authoredBy` provenance on the replica side, mirroring the
+      // originator. `address(0)` here is the unattributed-publish sentinel
+      // (RFC-001 §3.6) and is correctly preserved.
+      let authorAddress: string | undefined;
       for await (const event of this.chain.listenForEvents(batchFilter)) {
         if (event.blockNumber !== blockNumber) continue;
         if (txHash && (!event.data['txHash'] || (event.data['txHash'] as string).toLowerCase() !== txHash.toLowerCase())) {
@@ -276,18 +286,23 @@ export class FinalizationHandler {
         const publisherMatch = eventPublisher.toLowerCase() === expectedPublisher.toLowerCase();
         const rangeMatch = eventStartKAId === expectedStartKAId && eventEndKAId === expectedEndKAId;
 
-        if (merkleMatch && publisherMatch && rangeMatch) { batchVerified = true; break; }
+        if (merkleMatch && publisherMatch && rangeMatch) {
+          batchVerified = true;
+          const eventAuthor = (event.data['author'] as string) ?? '';
+          if (eventAuthor) authorAddress = eventAuthor;
+          break;
+        }
       }
 
-      if (!batchVerified) return false;
+      if (!batchVerified) return { verified: false };
 
-      // V10 publishDirect registers the KC to the context graph internally
+      // V10 publish registers the KC to the context graph internally
       // (no separate addBatchToContextGraph tx / ContextGraphExpanded event).
       // Skip the legacy ContextGraphExpanded check — the batch verification
       // above is sufficient for V10.
       if (ctxGraphId) {
         if (typeof this.chain.isV10Ready === 'function' && this.chain.isV10Ready()) {
-          return true;
+          return { verified: true, authorAddress };
         }
         try {
           const scanWindow = 256;
@@ -302,19 +317,21 @@ export class FinalizationHandler {
           for await (const event of this.chain.listenForEvents(cgFilter)) {
             const eventCGId = String(event.data['contextGraphId'] ?? '');
             const eventBatchId = BigInt(event.data['batchId'] as string ?? '0');
-            if (eventCGId === ctxGraphId && (expectedBatchId === undefined || eventBatchId === expectedBatchId)) return true;
+            if (eventCGId === ctxGraphId && (expectedBatchId === undefined || eventBatchId === expectedBatchId)) {
+              return { verified: true, authorAddress };
+            }
           }
-          return false;
+          return { verified: false };
         } catch {
-          return true;
+          return { verified: true, authorAddress };
         }
       }
 
-      return true;
+      return { verified: true, authorAddress };
     } catch (err) {
       this.log.info(ctx, `Finalization on-chain verification pending (RPC may be lagging): ${err instanceof Error ? err.message : String(err)}`);
     }
-    return false;
+    return { verified: false };
   }
 
   private async promoteSharedMemoryToCanonical(
@@ -331,9 +348,18 @@ export class FinalizationHandler {
     ctx: OperationContext,
     ctxGraphId?: string,
     subGraphName?: string,
+    /**
+     * EIP-712-attested author recovered from `KnowledgeCollectionCreated.author`.
+     * Round 5 review §10 — when set, the replica emits matching
+     * `dkg:Publication` / `dkg:authoredBy` triples so agent-provenance via the
+     * `_meta` triplestore is consistent across the originator and every replica.
+     * `address(0)` and missing/empty values are skipped (preserves the
+     * unattributed-publish path's no-author behaviour from RFC-001 §3.6).
+     */
+    authorAddress?: string,
   ): Promise<void> {
     const graphManager = new GraphManager(this.store);
-    await graphManager.ensureParanet(contextGraphId);
+    await graphManager.ensureContextGraph(contextGraphId);
     if (subGraphName) {
       await graphManager.ensureSubGraph(contextGraphId, subGraphName);
       const sgUri = contextGraphSubGraphUri(contextGraphId, subGraphName);
@@ -422,6 +448,26 @@ export class FinalizationHandler {
     }
 
     const wsPeerId = await this.getPublisherPeerIdFromMeta(contextGraphId, msgRootEntities, subGraphName);
+    // Round 5 review §10 — propagate the on-chain-attested author into the
+    // confirmed `_meta` block so replicas emit `dkg:Publication` /
+    // `dkg:authoredBy` triples matching the originator's. We treat
+    // `address(0)` (the unattributed-publish sentinel) as "no author" by
+    // skipping the field; the dkg:Publication block in
+    // `generateKCMetadata` only fires when both `authorAddress` and
+    // `publishOperationId` are present, so the legacy no-author behaviour
+    // is preserved verbatim.
+    //
+    // `publishOperationId`: replicas don't have access to the originator's
+    // session-scoped publish-operation-id (that's a publisher-internal
+    // identifier). Use the canonical, content-addressable `txHash` instead —
+    // every node observing the chain converges on the same publication URI
+    // (`urn:dkg:publication:<txHash>`), even when the originator's URI
+    // (`urn:dkg:publication:<sessionId>-<seq>`) is different. SPARQL
+    // queries that select on `dkg:authoredBy` work either way; cross-node
+    // URI fragmentation is the documented trade-off.
+    const isUnattributed = !authorAddress
+      || authorAddress === '0x0000000000000000000000000000000000000000'
+      || authorAddress.toLowerCase() === '0x0000000000000000000000000000000000000000';
     const kcMeta: KCMetadata = {
       ual,
       contextGraphId,
@@ -430,6 +476,9 @@ export class FinalizationHandler {
       publisherPeerId: wsPeerId || publisherAddress,
       timestamp: new Date(),
       subGraphName,
+      ...(isUnattributed
+        ? {}
+        : { authorAddress, publishOperationId: txHash }),
     };
 
     let blockTimestamp = Math.floor(Date.now() / 1000);
@@ -473,10 +522,10 @@ export class FinalizationHandler {
     // Clean up promoted shared memory entries
     const sharedMemoryGraph = subGraphName
       ? graphManager.sharedMemoryUri(contextGraphId, subGraphName)
-      : paranetWorkspaceGraphUri(contextGraphId);
+      : contextGraphWorkspaceGraphUri(contextGraphId);
     const swmMetaGraph = subGraphName
       ? graphManager.sharedMemoryMetaUri(contextGraphId, subGraphName)
-      : paranetWorkspaceMetaGraphUri(contextGraphId);
+      : contextGraphWorkspaceMetaGraphUri(contextGraphId);
     for (const rootEntity of rootEntities) {
       await this.store.deleteByPattern({ graph: sharedMemoryGraph, subject: rootEntity });
       await this.store.deleteBySubjectPrefix(sharedMemoryGraph, rootEntity + '/.well-known/genid/');
@@ -493,6 +542,17 @@ export class FinalizationHandler {
     await this.store.insert(canonicalQuads);
 
     this.log.info(ctx, `Promoted ${canonicalQuads.length} quads from shared memory to canonical for ${ual}`);
+    this.eventBus?.emit(DKGEvent.MEMORY_GRAPH_CHANGED, {
+      contextGraphId,
+      layers: ['swm', 'vm'],
+      subGraphName,
+      operation: 'verified_memory_finalized',
+      source: 'finalization',
+      counts: {
+        roots: rootEntities.length,
+        triples: canonicalQuads.length,
+      },
+    });
   }
 
   private async deleteMetaForRoot(metaGraph: string, rootEntity: string): Promise<void> {
@@ -532,4 +592,3 @@ function protoToBigInt(val: number | bigint | { low: number; high: number; unsig
   if (typeof val === 'number') return BigInt(val);
   return (BigInt(val.high >>> 0) << 32n) | BigInt(val.low >>> 0);
 }
-

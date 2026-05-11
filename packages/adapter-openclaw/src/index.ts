@@ -35,6 +35,17 @@ export {
   verifyMemorySlotInvariants,
   verifySkillRemoved,
   verifyUnmergeInvariants,
+  // Re-exports for non-OpenClaw consumers (e.g. `dkg mcp setup` bundles
+  // these into a parallel two-command UX). Each one is the same
+  // primitive `runSetup` itself uses, so a re-implementation in another
+  // setup verb stays byte-aligned with OpenClaw setup behaviour
+  // (network defaults, config-merge semantics, daemon start + readiness
+  // probe, faucet retry/back-off, manual-curl fallback).
+  loadNetworkConfig,
+  writeDkgConfig,
+  startDaemon,
+  readWalletsWithRetry,
+  logManualFundingInstructions,
   type AdapterEntryConfig,
   type SetupOptions,
   type UnmergeResult,

@@ -1,3 +1,12 @@
+import {
+  contextGraphDataUri,
+  contextGraphMetaUri,
+  contextGraphPrivateUri,
+  contextGraphSharedMemoryUri,
+  contextGraphSharedMemoryMetaUri,
+  contextGraphSubGraphPrivateUri,
+  contextGraphSubGraphUri,
+} from '@origintrail-official/dkg-core';
 import type { EpcisQueryParams } from './types.js';
 
 const PREFIXES = `
@@ -45,8 +54,28 @@ export function normalizeBizStep(value: string): string {
  * - Groups by ?event (the event URI) instead of ?ual (the graph URI)
  */
 export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string): string {
-  const dataGraph = `did:dkg:context-graph:${contextGraphId}`;
-  const metaGraph = `${dataGraph}/_meta`;
+  const partition = params.finalized === false ? 'swm' : 'finalized';
+  // Finalized data lands at `<cg>/<sub>` when a sub-graph is targeted —
+  // see `packages/agent/src/finalization-handler.ts:358-362`, which
+  // calls `contextGraphSubGraphUri(contextGraphId, subGraphName)`.
+  // Earlier this branch used `contextGraphDataUri(cg, sub)` which yields
+  // `<cg>/context/<sub>` — a different graph URI than where the publisher
+  // actually writes, so finalized sub-graph queries returned zero events
+  // whenever `subGraphName` was set. The unsub-graph (cg-only) finalized
+  // URI keeps `contextGraphDataUri`'s single-arg fallback (`<cg>`).
+  const publicGraph =
+    partition === 'swm'
+      ? contextGraphSharedMemoryUri(contextGraphId, params.subGraphName)
+      : params.subGraphName
+        ? contextGraphSubGraphUri(contextGraphId, params.subGraphName)
+        : contextGraphDataUri(contextGraphId);
+  const metaGraph =
+    partition === 'swm'
+      ? contextGraphSharedMemoryMetaUri(contextGraphId, params.subGraphName)
+      : contextGraphMetaUri(contextGraphId);
+  const privateGraph = params.subGraphName
+    ? contextGraphSubGraphPrivateUri(contextGraphId, params.subGraphName)
+    : contextGraphPrivateUri(contextGraphId);
 
   const wherePatterns: string[] = [];
   const filterClauses: string[] = [];
@@ -177,6 +206,10 @@ export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string
   // Pagination
   const limit = Math.min(Math.max(params.limit ?? 100, 1), 1000);
   const offset = Math.max(params.offset ?? 0, 0);
+  const graphBody = [
+    ...wherePatterns,
+    ...optionalClauses,
+  ].join('\n      ');
 
   return `${PREFIXES}
 SELECT ?event ?eventType ?eventTime ?bizStep ?bizLocation ?disposition ?readPoint ?action ?parentID ?ual
@@ -185,9 +218,21 @@ SELECT ?event ?eventType ?eventTime ?bizStep ?bizLocation ?disposition ?readPoin
   (GROUP_CONCAT(DISTINCT ?inputEPCList; SEPARATOR=", ") AS ?inputEPCs)
   (GROUP_CONCAT(DISTINCT ?outputEPCList; SEPARATOR=", ") AS ?outputEPCs)
 WHERE {
-  GRAPH <${dataGraph}> {
-    ${wherePatterns.join('\n    ')}
-    ${optionalClauses.join('\n    ')}
+  {
+    GRAPH <${publicGraph}> {
+      ${graphBody}
+    }
+  }
+  union
+  {
+    GRAPH <${publicGraph}> {
+      ?event dkg:privateDataAnchor "true" .
+    }
+    GRAPH <${privateGraph}> {
+      ?event a ?eventType .
+      ${wherePatterns.slice(1).join('\n      ')}
+      ${optionalClauses.join('\n      ')}
+    }
   }
   ${filterClauses.join('\n  ')}
   OPTIONAL {

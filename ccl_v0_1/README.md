@@ -4,7 +4,7 @@ CCL is a **small deterministic adjudication language** for evaluating corroborat
 
 It is designed to align with the DKG v9 axioms:
 
-- paranet-scoped evaluation
+- contextGraph-scoped evaluation
 - authority-aware facts
 - typed transitions outside the language
 - canonical publish as the only ingress into authoritative shared state

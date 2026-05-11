@@ -21,7 +21,7 @@ import type {
   CreateOnChainContextGraphResult,
   VerifyParams,
   PublishToContextGraphParams,
-  V10PublishDirectParams,
+  V10PublishParams,
   V10UpdateKCParams,
   NodeChallenge,
   ProofPeriodStatus,
@@ -68,6 +68,14 @@ export class MockChainAdapter implements ChainAdapter {
     merkleLeafCount: number;
     /** Publisher EOA from `createKnowledgeAssetsV10`; default to mock signer for V8 paths. */
     publisherAddress: string;
+    /**
+     * Verified author identity from the V10.1 author attestation, mirrored
+     * from the EIP-712 EOA-recovered (or EIP-1271-verified) address. Empty
+     * string for legacy V8 / V9 publishes that pre-date author attestation
+     * — `getLatestMerkleRootAuthor` returns the zero address in that case
+     * to match on-chain behaviour for un-attested writes.
+     */
+    authorAddress: string;
     /** On-chain context graph id (0n when the mock V8 path didn't carry one). */
     cgId: bigint;
   }>();
@@ -449,6 +457,8 @@ export class MockChainAdapter implements ChainAdapter {
       kaCount: params.knowledgeAssetsCount,
       merkleLeafCount: 0,
       publisherAddress: this.signerAddress,
+      // Legacy V8 path — no attestation, mirror the on-chain `address(0)`.
+      authorAddress: ethers.ZeroAddress,
       cgId: 0n,
     });
 
@@ -548,7 +558,7 @@ export class MockChainAdapter implements ChainAdapter {
       initialDeposit: amount,
       lockEpochs,
       conviction,
-      authorizedKeys: new Set([this.signerAddress]),
+      authorizedKeys: new Set([this.signerAddress.toLowerCase()]),
     });
     this.pushEvent('ConvictionAccountCreated', { accountId: accountId.toString(), admin: this.signerAddress });
     return { ...this.txResult(true), accountId };
@@ -567,6 +577,20 @@ export class MockChainAdapter implements ChainAdapter {
     acct.lockEpochs += additionalEpochs;
     acct.conviction = acct.initialDeposit * BigInt(acct.lockEpochs);
     return this.txResult(true);
+  }
+
+  async addPCAAuthorizedKey(accountId: bigint, key: string): Promise<TxResult> {
+    const acct = this.convictionAccounts.get(accountId);
+    if (!acct) return this.txResult(false);
+    acct.authorizedKeys.add(key.toLowerCase());
+    this.pushEvent('AuthorizedKeyAdded', { accountId: accountId.toString(), key });
+    return this.txResult(true);
+  }
+
+  async isPCAAuthorizedKey(accountId: bigint, key: string): Promise<boolean> {
+    const acct = this.convictionAccounts.get(accountId);
+    if (!acct) return false;
+    return acct.authorizedKeys.has(key.toLowerCase());
   }
 
   async getConvictionDiscount(accountId: bigint): Promise<{ discountBps: number; conviction: bigint }> {
@@ -650,6 +674,7 @@ export class MockChainAdapter implements ChainAdapter {
     participantAgents: string[];
     requiredSignatures: number;
     metadataBatchId: bigint;
+    accessPolicy: number;
     publishPolicy: number;
     publishAuthority?: string;
     publishAuthorityAccountId: bigint;
@@ -671,6 +696,10 @@ export class MockChainAdapter implements ChainAdapter {
       }
     }
     const publishPolicy = params.publishPolicy ?? 1;
+    const accessPolicy = params.accessPolicy ?? 0;
+    if (accessPolicy !== 0 && accessPolicy !== 1) {
+      throw new Error('Mock: invalid accessPolicy');
+    }
     if (publishPolicy !== 0 && publishPolicy !== 1) {
       throw new Error('Mock: invalid publishPolicy');
     }
@@ -724,6 +753,7 @@ export class MockChainAdapter implements ChainAdapter {
       participantAgents: participantAgents.map((agent) => ethers.getAddress(agent)),
       requiredSignatures: params.requiredSignatures,
       metadataBatchId: params.metadataBatchId ?? 0n,
+      accessPolicy,
       publishPolicy,
       publishAuthority,
       publishAuthorityAccountId,
@@ -733,10 +763,13 @@ export class MockChainAdapter implements ChainAdapter {
 
     this.pushEvent('ContextGraphCreated', {
       contextGraphId: contextGraphId.toString(),
+      creator: this.signerAddress,
+      owner: this.signerAddress,
       manager: this.signerAddress,
       participantIdentityIds: params.participantIdentityIds.map((id) => id.toString()),
       participantAgents: participantAgents.map((agent) => ethers.getAddress(agent)),
       requiredSignatures: params.requiredSignatures,
+      accessPolicy,
       publishPolicy,
     });
 
@@ -748,6 +781,37 @@ export class MockChainAdapter implements ChainAdapter {
 
   async signMessage(messageHash: Uint8Array): Promise<{ r: Uint8Array; vs: Uint8Array }> {
     return { r: new Uint8Array(32), vs: new Uint8Array(32) };
+  }
+
+  /**
+   * Mock EIP-712 typed-data signer. If a `mockACKSigner` wallet has been
+   * configured (test setups that exercise the full author-attestation
+   * flow on hardhat-style fixtures), sign with it so the recovered author
+   * matches the wallet address. Otherwise return a deterministic 65-byte
+   * zero signature — sufficient for unit tests that only check publish
+   * plumbing and never round-trip through real KAv10 verification.
+   */
+  async signTypedData(
+    domain: import('ethers').TypedDataDomain,
+    types: Record<string, Array<{ name: string; type: string }>>,
+    value: Record<string, unknown>,
+  ): Promise<string> {
+    if (this.mockACKSigner) {
+      return this.mockACKSigner.signTypedData(domain, types, value);
+    }
+    return `0x${'00'.repeat(65)}`;
+  }
+
+  async signTypedDataAs(
+    address: string,
+    domain: import('ethers').TypedDataDomain,
+    types: Record<string, Array<{ name: string; type: string }>>,
+    value: Record<string, unknown>,
+  ): Promise<string> {
+    if (this.mockACKSigner && this.mockACKSigner.address.toLowerCase() === address.toLowerCase()) {
+      return this.mockACKSigner.signTypedData(domain, types, value);
+    }
+    throw new Error(`Mock: cannot sign typed data as ${address}: address is not the mock ACK signer.`);
   }
 
   async getMinimumRequiredSignatures(): Promise<number> {
@@ -923,7 +987,19 @@ export class MockChainAdapter implements ChainAdapter {
     return 31337n;
   }
 
-  async createKnowledgeAssetsV10(params: V10PublishDirectParams): Promise<OnChainPublishResult> {
+  /**
+   * Mock has no real chain to query; treat every author as an EOA so
+   * the off-chain ECDSA recover-and-compare preflight stays in effect
+   * for unit tests. Production code that needs to test the EIP-1271
+   * branch overrides this to `true` (see the publisher's
+   * `agent-provenance-e2e.test.ts` "skips ECDSA recover for
+   * smart-contract authors" test for the pattern).
+   */
+  async hasContractCode(_address: string): Promise<boolean> {
+    return false;
+  }
+
+  async createKnowledgeAssetsV10(params: V10PublishParams): Promise<OnChainPublishResult> {
     // Deliberately tolerant of `contextGraphId === 0n`. The real EVM
     // adapter rejects that at `evm-adapter.ts:createKnowledgeAssetsV10`
     // pre-tx, which is the authoritative fail-loud boundary. The mock is
@@ -976,6 +1052,7 @@ export class MockChainAdapter implements ChainAdapter {
       kaCount: params.knowledgeAssetsAmount,
       merkleLeafCount: params.merkleLeafCount,
       publisherAddress,
+      authorAddress: ethers.getAddress(params.author.address),
       cgId: params.contextGraphId,
     });
     // Also store in batches so verify() can find this publish
@@ -1000,7 +1077,8 @@ export class MockChainAdapter implements ChainAdapter {
       endKAId: endKAId.toString(),
       isImmutable: params.isImmutable,
       contextGraphId: params.contextGraphId.toString(),
-      paymaster: params.paymaster,
+      authorAddress: params.author.address,
+      authorSchemeVersion: params.author.schemeVersion,
     });
 
     const result = this.txResult(true);
@@ -1012,6 +1090,10 @@ export class MockChainAdapter implements ChainAdapter {
       blockNumber: result.blockNumber,
       blockTimestamp: Math.floor(Date.now() / 1000),
       publisherAddress,
+      // Mirror evm-adapter: surface the chain-confirmed author from the
+      // V10.1 publish path so downstream callers (publisher metadata
+      // writers) see the same shape under MockChainAdapter.
+      authorAddress: params.author.address,
       tokenAmount: params.tokenAmount,
     };
   }
@@ -1164,6 +1246,10 @@ export class MockChainAdapter implements ChainAdapter {
       kaCount: input.chunks.length,
       merkleLeafCount: input.merkleLeafCount ?? input.chunks.length,
       publisherAddress: input.publisherAddress ?? this.signerAddress,
+      // `__registerKC` is a Random-Sampling test bridge that bypasses the
+      // V10 publish path entirely; no attestation is signed, so mirror
+      // the on-chain `address(0)` semantics for un-attested writes.
+      authorAddress: ethers.ZeroAddress,
       cgId: input.contextGraphId,
     });
   }
@@ -1338,6 +1424,12 @@ export class MockChainAdapter implements ChainAdapter {
     const entry = this.collections.get(kcId);
     if (!entry) throw new Error(`Mock: unknown kcId ${kcId}`);
     return entry.publisherAddress;
+  }
+
+  async getLatestMerkleRootAuthor(kcId: bigint): Promise<string> {
+    const entry = this.collections.get(kcId);
+    if (!entry) throw new Error(`Mock: unknown kcId ${kcId}`);
+    return entry.authorAddress;
   }
 
   async getKCContextGraphId(kcId: bigint): Promise<bigint> {

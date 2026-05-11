@@ -3,7 +3,7 @@
 # Experiment C1: Parallel collaborative agents using shared workspace memory.
 # - Shared code graph access via dkg_query
 # - Shared agent memory via workspace JSONL log (outside worktrees)
-# - Common paranet: dev-coordination
+# - Common contextGraph: dev-coordination
 #
 set -euo pipefail
 
@@ -34,7 +34,7 @@ echo "  Results:  $RESULTS_DIR"
 echo "  Shared:   $SHARED_LOG"
 echo ""
 
-DKG_PREAMBLE='You have DKG MCP tools (dkg_query, dkg_publish). The code graph is in a shared paranet (dev-coordination). Before broad file exploration, run targeted dkg_query calls to locate modules, functions, classes, and package dependencies.'
+DKG_PREAMBLE='You have DKG MCP tools (dkg_query, dkg_publish). The code graph is in a shared contextGraph (dev-coordination). Before broad file exploration, run targeted dkg_query calls to locate modules, functions, classes, and package dependencies.'
 
 setup_worktree() {
   local feature_id="$1"

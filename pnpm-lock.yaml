@@ -75,18 +75,42 @@ importers:
         specifier: workspace:*
         version: link:../packages/storage
 
-  packages/adapter-autoresearch:
+  devnet/agent-provenance:
     dependencies:
-      '@modelcontextprotocol/sdk':
-        specifier: ^1
-        version: 1.27.1(zod@3.25.76)
-      zod:
-        specifier: ^3.25
-        version: 3.25.76
+      ethers:
+        specifier: ^6.16.0
+        version: 6.16.0(bufferutil@4.1.0)(utf-8-validate@5.0.10)
     devDependencies:
-      '@vitest/coverage-v8':
+      vitest:
         specifier: ^4.0.18
-        version: 4.0.18(vitest@4.0.18(@types/node@22.19.11)(happy-dom@20.8.3(bufferutil@4.1.0)(utf-8-validate@5.0.10))(jiti@2.6.1)(tsx@4.21.0)(yaml@2.8.3))
+        version: 4.0.18(@types/node@22.19.11)(happy-dom@20.8.3(bufferutil@4.1.0)(utf-8-validate@5.0.10))(jiti@2.6.1)(tsx@4.21.0)(yaml@2.8.3)
+
+  devnet/v10-core-flows:
+    dependencies:
+      ethers:
+        specifier: ^6.16.0
+        version: 6.16.0(bufferutil@4.1.0)(utf-8-validate@5.0.10)
+    devDependencies:
+      vitest:
+        specifier: ^4.0.18
+        version: 4.0.18(@types/node@22.19.11)(happy-dom@20.8.3(bufferutil@4.1.0)(utf-8-validate@5.0.10))(jiti@2.6.1)(tsx@4.21.0)(yaml@2.8.3)
+
+  devnet/v10-end-to-end:
+    dependencies:
+      ethers:
+        specifier: ^6.16.0
+        version: 6.16.0(bufferutil@4.1.0)(utf-8-validate@5.0.10)
+    devDependencies:
+      vitest:
+        specifier: ^4.0.18
+        version: 4.0.18(@types/node@22.19.11)(happy-dom@20.8.3(bufferutil@4.1.0)(utf-8-validate@5.0.10))(jiti@2.6.1)(tsx@4.21.0)(yaml@2.8.3)
+
+  devnet/v10-stress:
+    dependencies:
+      ethers:
+        specifier: ^6.16.0
+        version: 6.16.0(bufferutil@4.1.0)(utf-8-validate@5.0.10)
+    devDependencies:
       vitest:
         specifier: ^4.0.18
         version: 4.0.18(@types/node@22.19.11)(happy-dom@20.8.3(bufferutil@4.1.0)(utf-8-validate@5.0.10))(jiti@2.6.1)(tsx@4.21.0)(yaml@2.8.3)
@@ -185,24 +209,11 @@ importers:
         specifier: ^4.0.18
         version: 4.0.18(@types/node@22.19.11)(happy-dom@20.8.3(bufferutil@4.1.0)(utf-8-validate@5.0.10))(jiti@2.6.1)(tsx@4.21.0)(yaml@2.8.3)
 
-  packages/attested-assets:
+  packages/chain:
     dependencies:
       '@origintrail-official/dkg-core':
         specifier: workspace:*
         version: link:../core
-      protobufjs:
-        specifier: ^8.0.0
-        version: 8.0.0
-    devDependencies:
-      '@vitest/coverage-v8':
-        specifier: ^4.0.18
-        version: 4.0.18(vitest@4.0.18(@types/node@22.19.11)(happy-dom@20.8.3(bufferutil@4.1.0)(utf-8-validate@5.0.10))(jiti@2.6.1)(tsx@4.21.0)(yaml@2.8.3))
-      vitest:
-        specifier: ^4.0.18
-        version: 4.0.18(@types/node@22.19.11)(happy-dom@20.8.3(bufferutil@4.1.0)(utf-8-validate@5.0.10))(jiti@2.6.1)(tsx@4.21.0)(yaml@2.8.3)
-
-  packages/chain:
-    dependencies:
       ethers:
         specifier: ^6
         version: 6.16.0(bufferutil@4.1.0)(utf-8-validate@5.0.10)
@@ -217,12 +228,15 @@ importers:
 
   packages/cli:
     dependencies:
-      '@origintrail-official/dkg-adapter-openclaw':
-        specifier: workspace:*
-        version: link:../adapter-openclaw
+      '@iarna/toml':
+        specifier: ^2.2.5
+        version: 2.2.5
       '@origintrail-official/dkg-adapter-hermes':
         specifier: workspace:*
         version: link:../adapter-hermes
+      '@origintrail-official/dkg-adapter-openclaw':
+        specifier: workspace:*
+        version: link:../adapter-openclaw
       '@origintrail-official/dkg-agent':
         specifier: workspace:*
         version: link:../agent
@@ -360,6 +374,9 @@ importers:
 
   packages/epcis:
     dependencies:
+      '@origintrail-official/dkg-core':
+        specifier: workspace:*
+        version: link:../core
       ajv:
         specifier: ^8
         version: 8.18.0
@@ -509,29 +526,6 @@ importers:
       vitest:
         specifier: ^4.0.18
         version: 4.0.18(@types/node@22.19.11)(happy-dom@20.8.3(bufferutil@4.1.0)(utf-8-validate@5.0.10))(jiti@2.6.1)(tsx@4.21.0)(yaml@2.8.3)
-
-  packages/mcp-server:
-    dependencies:
-      '@modelcontextprotocol/sdk':
-        specifier: ^1
-        version: 1.27.1(zod@3.25.76)
-      '@origintrail-official/dkg-core':
-        specifier: workspace:*
-        version: link:../core
-      zod:
-        specifier: ^3.25
-        version: 3.25.76
-    devDependencies:
-      '@vitest/coverage-v8':
-        specifier: ^4.0.18
-        version: 4.0.18(vitest@4.0.18(@types/node@22.19.11)(happy-dom@20.8.3(bufferutil@4.1.0)(utf-8-validate@5.0.10))(jiti@2.6.1)(tsx@4.21.0)(yaml@2.8.3))
-      vitest:
-        specifier: ^4.0.18
-        version: 4.0.18(@types/node@22.19.11)(happy-dom@20.8.3(bufferutil@4.1.0)(utf-8-validate@5.0.10))(jiti@2.6.1)(tsx@4.21.0)(yaml@2.8.3)
-    optionalDependencies:
-      '@origintrail-official/dkg-adapter-autoresearch':
-        specifier: workspace:*
-        version: link:../adapter-autoresearch
 
   packages/network-sim:
     dependencies:
@@ -1296,6 +1290,9 @@ packages:
     engines: {node: '>=18.14.1'}
     peerDependencies:
       hono: 4.12.4
+
+  '@iarna/toml@2.2.5':
+    resolution: {integrity: sha512-trnsAYxU3xnS1gPHPyU961coFyLkh4gAD/0zQ5mymY4yOZ+CYvsPqUbOFSw0aDM4y0tV7tiFxL/1XfXPNC6IPg==}
 
   '@isaacs/cliui@8.0.2':
     resolution: {integrity: sha512-O8jcjabXaleOG9DQ0+ARXWZBTfnP4WNAqzuiJK7ll44AmxGKv/J2M4TPjxjY3znBCfvBXFzucm1twdyFybFqEA==}
@@ -6259,6 +6256,8 @@ snapshots:
   '@hono/node-server@1.19.10(hono@4.12.4)':
     dependencies:
       hono: 4.12.4
+
+  '@iarna/toml@2.2.5': {}
 
   '@isaacs/cliui@8.0.2':
     dependencies:

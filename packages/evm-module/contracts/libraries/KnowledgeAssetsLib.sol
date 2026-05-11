@@ -54,7 +54,7 @@ library KnowledgeAssetsLib {
      *
      * Storage layout (tight-packed, 2 slots):
      *   slot 0: publishAuthority (20) | createdAt (5) | requiredSignatures (1)
-     *           | publishPolicy (1) | active (1) = 28 bytes
+     *           | publishPolicy (1) | active (1) | accessPolicy (1) = 29 bytes
      *   slot 1: metadataBatchId (32) — full 256 bits for forward-compat
      *
      * `createdAt` is uint40 seconds-since-epoch: max value ~1.1e12 seconds ≈
@@ -67,6 +67,7 @@ library KnowledgeAssetsLib {
         uint8 requiredSignatures;
         uint8 publishPolicy;       // 0 = curated (default), 1 = open
         bool active;
+        uint8 accessPolicy;        // 0 = public/discoverable, 1 = private/curated
         // Slot 1
         uint256 metadataBatchId;
     }

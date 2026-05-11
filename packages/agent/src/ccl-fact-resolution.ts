@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { DKG_ONTOLOGY, contextGraphDataUri, contextGraphSharedMemoryUri, paranetDataGraphUri, paranetWorkspaceGraphUri, sparqlString } from '@origintrail-official/dkg-core';
+import { DKG_ONTOLOGY, contextGraphDataUri, contextGraphSharedMemoryUri, contextGraphDataGraphUri, contextGraphWorkspaceGraphUri, sparqlString } from '@origintrail-official/dkg-core';
 import { DKG_ENDORSES } from './endorse.js';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import type { CclFactTuple } from './ccl-evaluator.js';
@@ -16,7 +16,7 @@ const SUPPORTED_POLICY_FAMILIES = new Set(['owner_assertion', 'context_corrobora
 export type CclFactResolutionMode = 'manual' | 'snapshot-resolved';
 
 export interface ResolveCclFactsFromSnapshotOptions {
-  paranetId: string;
+  contextGraphId: string;
   snapshotId?: string;
   view?: string;
   scopeUal?: string;
@@ -31,7 +31,7 @@ export interface ResolvedCclFacts {
   factResolverVersion: string;
   factResolutionMode: 'snapshot-resolved';
   context: {
-    paranetId: string;
+    contextGraphId: string;
     contextType?: string;
     view?: string;
     snapshotId?: string;
@@ -53,8 +53,8 @@ export async function resolveFactsFromSnapshot(
 ): Promise<ResolvedCclFacts> {
   const profile = resolveProfile(opts.policyName, opts.contextType);
   const graph = opts.view === 'workspace'
-    ? paranetWorkspaceGraphUri(opts.paranetId)
-    : paranetDataGraphUri(opts.paranetId);
+    ? contextGraphWorkspaceGraphUri(opts.contextGraphId)
+    : contextGraphDataGraphUri(opts.contextGraphId);
   const query = `
     SELECT ?fact ?predicate ?snapshotId ?view ?scopeUal ?argPred ?argVal WHERE {
       GRAPH <${graph}> {
@@ -123,7 +123,7 @@ export async function resolveFactsFromSnapshot(
     factResolverVersion: profile.version,
     factResolutionMode: 'snapshot-resolved',
     context: {
-      paranetId: opts.paranetId,
+      contextGraphId: opts.contextGraphId,
       contextType: opts.contextType,
       view: opts.view,
       snapshotId: opts.snapshotId,

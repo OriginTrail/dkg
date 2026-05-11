@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { authHeaders } from '../api.js';
+import { useMemoryGraphEvents } from './useNodeEvents.js';
 
 export type TrustLevel = 'working' | 'shared' | 'verified';
 
@@ -308,6 +309,8 @@ export function useMemoryEntities(contextGraphId: string): MemoryData {
       if (version === versionRef.current) setLoading(false);
     }
   }, [contextGraphId]);
+
+  useMemoryGraphEvents(contextGraphId, fetchAll);
 
   useEffect(() => { fetchAll(); }, [fetchAll]);
 

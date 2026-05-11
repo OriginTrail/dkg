@@ -9,7 +9,7 @@ the network, and anchored on-chain.
 
 | Term | Definition |
 |------|-----------|
-| **Paranet** | A topic-scoped partition of the knowledge graph. Every publish targets a specific paranet. Think of it as a shared database namespace that multiple nodes subscribe to. |
+| **ContextGraph** | A topic-scoped partition of the knowledge graph. Every publish targets a specific contextGraph. Think of it as a shared database namespace that multiple nodes subscribe to. |
 | **Triple store** | The local graph database (quad store) on each node. Stores RDF triples (subject-predicate-object) organized into named graphs. |
 | **Knowledge Asset (KA)** | A single entity and its triples within a publish batch. One publish can contain many KAs. Each KA maps to one "root entity" (a URI like `https://example.org/sensor/42`). |
 | **Knowledge Collection (KC)** | The entire batch of KAs published in a single transaction. The KC gets one on-chain record and one merkle root. |
@@ -61,7 +61,7 @@ The publisher node prepares data locally before any network interaction:
    See `packages/publisher/src/merkle.ts`.
 
 4. **Validate.** Check entity exclusivity (no entity published by two different batches
-   in the same paranet) and ensure no raw blank nodes remain.
+   in the same contextGraph) and ensure no raw blank nodes remain.
    See `packages/publisher/src/validation.ts`.
 
 ### Phase 2: Tentative Local Storage
@@ -70,13 +70,13 @@ The publisher node prepares data locally before any network interaction:
 
 Before going to the network, the publisher stores data locally:
 
-- Public triples go into the paranet's **data graph**.
+- Public triples go into the contextGraph's **data graph**.
 - Private triples go into the **private content store**.
 - Metadata (KC structure, KA manifest, status = "tentative") goes into the **meta graph**.
 
 The `GraphManager` (`packages/storage/src/`) handles graph naming:
-- Data graph: `did:dkg:paranet:{paranetId}`
-- Meta graph: `did:dkg:paranet:{paranetId}/_meta`
+- Data graph: `did:dkg:context-graph:{contextGraphId}`
+- Meta graph: `did:dkg:context-graph:{contextGraphId}/_meta`
 
 At this point the data exists only on the publisher node and is marked tentative.
 
@@ -86,8 +86,8 @@ At this point the data exists only on the publisher node and is marked tentative
 `packages/publisher/src/publish-handler.ts` (receiver side)
 
 The agent serializes the triples to N-Triples format, encodes a protobuf publish request
-(containing operationId, paranetId, triples, manifest, merkle root), and broadcasts it
-via GossipSub to the paranet's publish topic.
+(containing operationId, contextGraphId, triples, manifest, merkle root), and broadcasts it
+via GossipSub to the contextGraph's publish topic.
 
 **On each receiving node**, the `PublishHandler`:
 
@@ -160,8 +160,8 @@ sequenceDiagram
     participant Receiver as Receiver Node
     participant Chain as EVM Blockchain
 
-    User->>Agent: publish(paranetId, triples)
-    Agent->>Publisher: publish(paranetId, quads, options)
+    User->>Agent: publish(contextGraphId, triples)
+    Agent->>Publisher: publish(contextGraphId, quads, options)
 
     Note over Publisher: Auto-partition into KAs<br/>Compute merkle root<br/>Validate
 

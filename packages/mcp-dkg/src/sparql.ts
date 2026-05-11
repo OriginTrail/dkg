@@ -2,7 +2,7 @@
  * Tiny helpers shared across tool implementations:
  *   - SPARQL literal escaping (copy of the core helper so this package
  *     stays dependency-free beyond the MCP SDK).
- *   - Common prefix map used everywhere in the v9 ontology.
+ *   - Common prefix map used everywhere in the V10 ontology.
  *   - Markdown renderers for SPARQL bindings.
  */
 import type { SparqlBinding } from './client.js';
@@ -52,7 +52,15 @@ export function prettyTerm(raw: string): string {
 }
 
 export function escapeSparqlLiteral(s: string): string {
+  // Defensive: strip null bytes BEFORE other escapes. SPARQL engines
+  // (oxigraph et al.) reject null bytes outright today, so this is
+  // pure hardening — guards against a future engine swap or any
+  // truncate-at-null-byte parsing path that would silently change
+  // query semantics. Pre-other-escapes ordering means a literal
+  // backslash followed by null collapses to backslash only, not a
+  // doubled backslash + dropped null.
   return s
+    .replace(/\0/g, '')
     .replace(/\\/g, '\\\\')
     .replace(/"/g, '\\"')
     .replace(/\n/g, '\\n')

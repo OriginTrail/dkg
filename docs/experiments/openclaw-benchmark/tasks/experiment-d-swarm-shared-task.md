@@ -5,7 +5,7 @@
 Compare two collaboration substrates when **multiple agents work on the same single task**, not separate features:
 
 - **D1 (MD Shared Memory):** agents coordinate via shared Markdown file/folder.
-- **D2 (DKG Node Collaboration):** agents coordinate via common paranet, publishing/querying structured knowledge.
+- **D2 (DKG Node Collaboration):** agents coordinate via common contextGraph, publishing/querying structured knowledge.
 
 Primary question: which substrate yields better **speed, cost, and consistency** under high overlap.
 
@@ -49,7 +49,7 @@ Then split into 4 interdependent substreams (not independent features):
 ### D2 — Shared DKG
 
 - same 4 agents and task split
-- shared paranet `dev-coordination`
+- shared contextGraph `dev-coordination`
 - required entity types (suggested):
   - `Decision`
   - `InterfaceContract`

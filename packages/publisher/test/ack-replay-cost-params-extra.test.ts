@@ -31,11 +31,11 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { ethers } from 'ethers';
 import {
   EVMChainAdapter,
-  type V10PublishDirectParams,
+  type V10PublishParams,
 } from '@origintrail-official/dkg-chain';
 import {
   computePublishACKDigest,
-  computePublishPublisherDigest,
+  buildAuthorAttestationTypedData,
 } from '@origintrail-official/dkg-core';
 import {
   createEVMAdapter,
@@ -92,14 +92,20 @@ async function submitWithCostMismatch(
   );
   const ackSig = ethers.Signature.from(await signer.signMessage(ackDigest));
 
-  // Publisher digest — uses the identity-id + cgId + root; independent
-  // of cost parameters. Sign it with the same signer (single-node mode).
-  const pubDigest = computePublishPublisherDigest(
-    CHAIN_ID, kav10Address, identityId, cgId, MERKLE_ROOT,
+  // RFC-001 author attestation — independent of cost parameters; binds
+  // the author EOA to (cgId, merkleRoot, schemeVersion=1).
+  const authorTyped = buildAuthorAttestationTypedData({
+    chainId: CHAIN_ID,
+    kav10Address,
+    contextGraphId: cgId,
+    merkleRoot: MERKLE_ROOT,
+    authorAddress: signer.address,
+  });
+  const authorSig = ethers.Signature.from(
+    await signer.signTypedData(authorTyped.domain, authorTyped.types, authorTyped.message),
   );
-  const pubSig = ethers.Signature.from(await signer.signMessage(pubDigest));
 
-  const txParams: V10PublishDirectParams = {
+  const txParams: V10PublishParams = {
     publishOperationId: `op-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     contextGraphId: cgId,
     merkleRoot: MERKLE_ROOT,
@@ -109,11 +115,14 @@ async function submitWithCostMismatch(
     tokenAmount: tokenAmountSubmitted,
     merkleLeafCount: Number(MERKLE_LEAF_COUNT_SIGNED),
     isImmutable: false,
-    paymaster: ethers.ZeroAddress,
     publisherNodeIdentityId: identityId,
-    publisherSignature: {
-      r: ethers.getBytes(ackSig.r), // placeholder, overwritten on publisher key mismatch
-      vs: ethers.getBytes(ackSig.yParityAndS),
+    author: {
+      address: signer.address,
+      signature: {
+        r: ethers.getBytes(authorSig.r),
+        vs: ethers.getBytes(authorSig.yParityAndS),
+      },
+      schemeVersion: 1,
     },
     ackSignatures: [
       {
@@ -122,12 +131,6 @@ async function submitWithCostMismatch(
         vs: ethers.getBytes(ackSig.yParityAndS),
       },
     ],
-  };
-  // The publisher signature is independent of cost params; override the
-  // placeholder we had to put in to satisfy the type.
-  txParams.publisherSignature = {
-    r: ethers.getBytes(pubSig.r),
-    vs: ethers.getBytes(pubSig.yParityAndS),
   };
 
   try {

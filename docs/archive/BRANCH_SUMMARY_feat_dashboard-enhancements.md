@@ -9,7 +9,7 @@
 
 ## Summary
 
-Adds **Node UI dashboard improvements**: peer online/offline and transport (direct vs relayed) in Messages, and a richer Knowledge Explorer with graph filters, paranet filter, search, type colors, and a node details panel.
+Adds **Node UI dashboard improvements**: peer online/offline and transport (direct vs relayed) in Messages, and a richer Knowledge Explorer with graph filters, contextGraph filter, search, type colors, and a node details panel.
 
 ---
 
@@ -43,8 +43,8 @@ Adds **Node UI dashboard improvements**: peer online/offline and transport (dire
 
 ### 3. Explorer / Graph tab (`packages/node-ui/src/ui/pages/Explorer.tsx`)
 
-- **Paranet filter**
-  - Dropdown “All Paranets” or a specific paranet; CONSTRUCT query is scoped to that graph when selected.
+- **ContextGraph filter**
+  - Dropdown “All ContextGraphs” or a specific contextGraph; CONSTRUCT query is scoped to that graph when selected.
 - **Type filter**
   - Dropdown: All Types, Knowledge Assets, Knowledge Collections, Agents, Software Agents, Datasets. Filters displayed triples by `rdf:type` (client-side over loaded data).
 - **Search**

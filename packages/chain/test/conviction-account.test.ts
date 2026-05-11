@@ -102,4 +102,29 @@ describe('Publishing Conviction Account (EVMChainAdapter)', () => {
     const { discountBps } = await adapter.getConvictionDiscount!(999n);
     expect(discountBps).toBe(0);
   });
+
+  it('addPCAAuthorizedKey: admin can authorize a key + isPCAAuthorizedKey reflects it', async () => {
+    const admin = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const { accountId } = await admin.createConvictionAccount!(
+      ethers.parseEther('100000'),
+      6,
+    );
+    const edgeWallet = ethers.Wallet.createRandom().address;
+
+    expect(await admin.isPCAAuthorizedKey!(accountId, edgeWallet)).toBe(false);
+    const tx = await admin.addPCAAuthorizedKey!(accountId, edgeWallet);
+    expect(tx.success).toBe(true);
+    expect(await admin.isPCAAuthorizedKey!(accountId, edgeWallet)).toBe(true);
+  });
+
+  it('addPCAAuthorizedKey: non-admin reverts (NotAccountAdmin)', async () => {
+    const admin = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const { accountId } = await admin.createConvictionAccount!(
+      ethers.parseEther('100000'),
+      6,
+    );
+    const stranger = createEVMAdapter(HARDHAT_KEYS.EXTRA2);
+    const fresh = ethers.Wallet.createRandom().address;
+    await expect(stranger.addPCAAuthorizedKey!(accountId, fresh)).rejects.toThrow();
+  });
 });

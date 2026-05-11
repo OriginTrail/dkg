@@ -65,7 +65,7 @@ graph TB
 
 1. **SSE over WebSocket.** SSE is simpler (HTTP/1.1, auto-reconnect, no upgrade handshake), works through proxies, and is sufficient for server-to-client push. Agents that need bidirectional communication already have P2P messaging.
 
-2. **Filter at subscription time.** Clients specify which event types and paranets they care about. The server only sends matching events — no client-side filtering of a firehose.
+2. **Filter at subscription time.** Clients specify which event types and contextGraphs they care about. The server only sends matching events — no client-side filtering of a firehose.
 
 3. **Built on existing EventBus.** The `SubscriptionManager` listens to `TypedEventBus` events and fans them out to SSE connections. No new P2P protocol needed — GossipSub already delivers events to the EventBus.
 
@@ -85,7 +85,7 @@ graph TB
 | `WORKSPACE_ENSHRINE` | `DKGPublisher` | Workspace data enshrined to context graph |
 | `CONTEXT_GRAPH_CREATED` | `DKGPublisher` | New context graph registered on-chain |
 | `CONTEXT_GRAPH_SIGNED` | Context graph handler | M/N signature received |
-| `PARANET_DISCOVERED` | `DKGAgent` | New paranet seen on-chain |
+| `CONTEXT_GRAPH_DISCOVERED` | `DKGAgent` | New contextGraph seen on-chain |
 | `AGENT_DISCOVERED` | `Discovery` | New agent profile seen via gossip |
 | `GAME_TURN_RESOLVED` | Game coordinator | Turn proposal enshrined |
 | `GAME_SWARM_CREATED` | Game coordinator | New swarm discovered |
@@ -97,7 +97,7 @@ Every event carries a standard envelope:
 ```typescript
 interface DKGEventPayload {
   type: string;              // e.g. "workspace:write"
-  paranetId?: string;        // scoping
+  contextGraphId?: string;        // scoping
   timestamp: number;         // epoch ms
   operationId?: string;      // correlation
   data: Record<string, any>; // event-specific payload
@@ -109,7 +109,7 @@ Example payloads:
 ```json
 {
   "type": "kc:confirmed",
-  "paranetId": "testing",
+  "contextGraphId": "testing",
   "timestamp": 1773422454240,
   "operationId": "4b58269d-795e-49c4-ad73-eea9b346c21a",
   "data": {
@@ -124,7 +124,7 @@ Example payloads:
 ```json
 {
   "type": "workspace:write",
-  "paranetId": "example-paranet",
+  "contextGraphId": "example-contextGraph",
   "timestamp": 1773422454258,
   "operationId": "ws-1773422454258-jmv5k32n",
   "data": {
@@ -160,13 +160,13 @@ Example payloads:
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `types` | comma-separated | all | Event types to subscribe to (e.g. `kc:confirmed,workspace:write`) |
-| `paranets` | comma-separated | all | Filter by paranet ID |
+| `contextGraphs` | comma-separated | all | Filter by contextGraph ID |
 | `since` | epoch ms | now | Replay events after this timestamp (bounded to last 5 min) |
 
 **Example:**
 
 ```
-GET /api/events?types=workspace:write,kc:confirmed&paranets=example-paranet
+GET /api/events?types=workspace:write,kc:confirmed&contextGraphs=example-contextGraph
 Authorization: Bearer <token>
 Accept: text/event-stream
 ```
@@ -180,10 +180,10 @@ Cache-Control: no-cache
 Connection: keep-alive
 
 event: workspace:write
-data: {"type":"workspace:write","paranetId":"example-paranet","timestamp":1773422454258,...}
+data: {"type":"workspace:write","contextGraphId":"example-contextGraph","timestamp":1773422454258,...}
 
 event: kc:confirmed
-data: {"type":"kc:confirmed","paranetId":"example-paranet","timestamp":1773422454300,...}
+data: {"type":"kc:confirmed","contextGraphId":"example-contextGraph","timestamp":1773422454300,...}
 
 : keepalive
 ```
@@ -226,7 +226,7 @@ interface Subscription {
   res: ServerResponse;
   filter: {
     types: Set<string> | null;    // null = all
-    paranets: Set<string> | null; // null = all
+    contextGraphs: Set<string> | null; // null = all
   };
 }
 
@@ -247,7 +247,7 @@ class SubscriptionManager {
     const payload = data as DKGEventPayload;
     for (const sub of this.subscriptions) {
       if (sub.filter.types && !sub.filter.types.has(payload.type)) continue;
-      if (sub.filter.paranets && payload.paranetId && !sub.filter.paranets.has(payload.paranetId)) continue;
+      if (sub.filter.contextGraphs && payload.contextGraphId && !sub.filter.contextGraphs.has(payload.contextGraphId)) continue;
       sendSse(sub.res, payload);
     }
   }
@@ -272,12 +272,12 @@ Maintain a bounded ring buffer (last 1000 events, max 5 minutes) in `Subscriptio
 
 ### 3.1 Consumer UI — replace polling with SSE
 
-Any long-lived dashboard that currently polls a paranet on a fixed interval
+Any long-lived dashboard that currently polls a contextGraph on a fixed interval
 should open an `EventSource` instead:
 
 ```typescript
 useEffect(() => {
-  const es = new EventSource(`${getBaseUrl()}/events?types=workspace:write,kc:confirmed&paranets=example-paranet`);
+  const es = new EventSource(`${getBaseUrl()}/events?types=workspace:write,kc:confirmed&contextGraphs=example-contextGraph`);
 
   es.addEventListener('workspace:write', (e) => {
     const evt = JSON.parse(e.data);
@@ -307,7 +307,7 @@ Add an MCP tool `subscribe_events` that opens an SSE connection and delivers eve
   "description": "Subscribe to real-time DKG events. Returns events as they happen.",
   "parameters": {
     "types": { "type": "string", "description": "Comma-separated event types" },
-    "paranets": { "type": "string", "description": "Comma-separated paranet IDs" },
+    "contextGraphs": { "type": "string", "description": "Comma-separated contextGraph IDs" },
     "duration_seconds": { "type": "number", "description": "How long to listen (max 60)" }
   }
 }
@@ -320,8 +320,8 @@ Add an MCP tool `subscribe_events` that opens an SSE connection and delivers eve
 Add a `dkg.onEvent(filter, callback)` API so OpenClaw agents can react to DKG events:
 
 ```typescript
-dkg.onEvent({ types: ['workspace:write'], paranets: ['testing'] }, (event) => {
-  console.log(`New data in testing paranet: ${event.data.quadCount} quads`);
+dkg.onEvent({ types: ['workspace:write'], contextGraphs: ['testing'] }, (event) => {
+  console.log(`New data in testing contextGraph: ${event.data.quadCount} quads`);
 });
 ```
 
@@ -338,7 +338,7 @@ POST /api/webhooks
 {
   "url": "https://my-agent.example.com/dkg-events",
   "types": ["kc:confirmed", "workspace:write"],
-  "paranets": ["testing"],
+  "contextGraphs": ["testing"],
   "secret": "hmac-secret-for-signature"
 }
 ```
@@ -365,7 +365,7 @@ This phase is optional and can be implemented later once SSE proves the event mo
 | `peer:disconnected` | `{peerId, name}` | Peer disconnected |
 | `message:received` | `{fromPeerId, fromName, preview}` | Encrypted message received |
 | `agent:discovered` | `{peerId, name, framework}` | New agent profile seen |
-| `paranet:discovered` | `{paranetId, name}` | New paranet seen on-chain |
+| `contextGraph:discovered` | `{contextGraphId, name}` | New contextGraph seen on-chain |
 
 ### Game events (app-specific, published on app topic)
 
@@ -391,7 +391,7 @@ This phase is optional and can be implemented later once SSE proves the event mo
 ## Acceptance Criteria
 
 - [ ] `GET /api/events` streams SSE events in real time
-- [ ] Clients can filter by event type and paranet
+- [ ] Clients can filter by event type and contextGraph
 - [ ] Reconnecting with `since` replays missed events (bounded to 5 min)
 - [ ] Game UI uses SSE instead of polling for swarm updates
 - [ ] MCP server has a `subscribe_events` tool

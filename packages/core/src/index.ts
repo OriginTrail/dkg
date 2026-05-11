@@ -15,7 +15,6 @@ export {
   computeNetworkId,
   getGenesisRaw,
   SYSTEM_CONTEXT_GRAPHS,
-  SYSTEM_PARANETS,
   DKG_ONTOLOGY,
   type GenesisQuad,
 } from './genesis.js';
@@ -83,3 +82,11 @@ export {
   ExtractionPipelineRegistry,
 } from './extraction-pipeline.js';
 export * from './transducers.js';
+export {
+  ASSERTION_SEAL_PREDICATES,
+  ASSERTION_PUBLISH_RECEIPT_PREDICATES,
+  buildAssertionSealQuads,
+  buildAssertionPublishReceiptQuads,
+  parseAssertionSealQuads,
+  type AssertionSeal,
+} from './assertion-seal.js';

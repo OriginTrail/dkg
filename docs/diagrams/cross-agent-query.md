@@ -50,12 +50,12 @@ sequenceDiagram
     AgentA ->> AgentA: Generate operationId (UUID)
 
     AgentA ->> P2P: EntityLookupRequest
-    Note right of P2P: lookupType: enum<br/>params: structured (not SPARQL)<br/>requestedParanet: string<br/>operationId: string
+    Note right of P2P: lookupType: enum<br/>params: structured (not SPARQL)<br/>requestedContextGraph: string<br/>operationId: string
 
     P2P ->> AgentB: EntityLookupRequest
 
     AgentB ->> AgentB: Validate lookupType is known
-    AgentB ->> AgentB: Check access policy for paranet
+    AgentB ->> AgentB: Check access policy for contextGraph
 
     alt ENTITY_BY_UAL
         AgentB ->> StoreB: resolveKA(ual)
@@ -93,8 +93,8 @@ sequenceDiagram
 1. **No raw SPARQL by default** — the default lookup types are structured,
    not free-form. Agent B translates them into SPARQL internally.
 
-2. **Access policy** — Agent B decides per-paranet whether to respond to
-   remote queries. Default: deny. Agent B's config specifies which paranets
+2. **Access policy** — Agent B decides per-contextGraph whether to respond to
+   remote queries. Default: deny. Agent B's config specifies which contextGraphs
    are queryable and by whom (allow-list of peer IDs or "public").
 
 3. **Read-only guard** — even for the opt-in `SPARQL_QUERY` type, the
@@ -117,7 +117,7 @@ sequenceDiagram
 message EntityLookupRequest {
   string operationId = 1;
   LookupType lookupType = 2;
-  string paranetId = 3;
+  string contextGraphId = 3;
   string ual = 4;           // for ENTITY_BY_UAL
   string entityUri = 5;     // for ENTITY_TRIPLES
   string rdfType = 6;       // for ENTITIES_BY_TYPE

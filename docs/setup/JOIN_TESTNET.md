@@ -83,7 +83,7 @@ Node name?: alice-mini
 Node role? (edge / core) (edge):
 Relay multiaddr? (/ip4/167.71.33.105/tcp/9090/p2p/12D3KooWPXP5m...):
 EVM private key? (for on-chain publishing):
-Paranets to subscribe? (comma-separated):
+ContextGraphs to subscribe? (comma-separated):
 API port? (9200):
 Enable auto-update from GitHub? (y/n) (y):
 
@@ -102,7 +102,7 @@ Config saved to /Users/you/.dkg/config.json
 | **Node role?** | `edge` — just press Enter |
 | **Relay multiaddr?** | Pre-filled — just press Enter |
 | **EVM private key?** | Your wallet's private key (hex; e.g. from MetaMask: Account menu → Account details → Show private key). Can also be set via `DKG_PRIVATE_KEY` env var |
-| **Paranets to subscribe?** | Leave blank, or enter paranet names if you know them |
+| **ContextGraphs to subscribe?** | Leave blank, or enter contextGraph names if you know them |
 | **API port?** | `9200` (default — press Enter) |
 | **Enable auto-update?** | Defaults to `y` — just press Enter for automatic updates |
 
@@ -187,13 +187,13 @@ Once you see at least one peer in `pnpm dkg peers`, you can:
 
 1. **Send a one-off message** — `pnpm dkg send <their-node-name> "hey from the testnet!"`
 2. **Start an interactive chat** — `pnpm dkg chat <their-node-name>`
-3. **Publish to the `testing` paranet** — see below.
+3. **Publish to the `testing` contextGraph** — see below.
 
 Messages are end-to-end encrypted; the relay never sees the content.
 
-### The `testing` paranet
+### The `testing` contextGraph
 
-Every testnet node auto-subscribes to the **`testing`** paranet on startup (configured via `defaultParanets` in `network/testnet.json`). This means any data you publish to `testing` is automatically replicated to all online nodes — no manual subscription needed.
+Every testnet node auto-subscribes to the **`testing`** contextGraph on startup (configured via `defaultContextGraphs` in `network/testnet.json`). This means any data you publish to `testing` is automatically replicated to all online nodes — no manual subscription needed.
 
 **Publish some triples:**
 
@@ -201,7 +201,7 @@ Every testnet node auto-subscribes to the **`testing`** paranet on startup (conf
 curl -s -X POST http://127.0.0.1:9200/api/publish \
   -H 'Content-Type: application/json' \
   -d '{
-    "paranetId": "testing",
+    "contextGraphId": "testing",
     "nquads": "<did:dkg:entity:hello> <https://schema.org/name> \"Hello from my node\" .\n<did:dkg:entity:hello> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://schema.org/Thing> ."
   }' | jq .
 ```
@@ -221,7 +221,7 @@ pnpm dkg publish testing \
 curl -s -X POST http://127.0.0.1:9200/api/query \
   -H 'Content-Type: application/json' \
   -d '{
-    "paranetId": "testing",
+    "contextGraphId": "testing",
     "sparql": "SELECT ?s ?name WHERE { GRAPH ?g { ?s <https://schema.org/name> ?name } }"
   }' | jq .
 ```
@@ -244,9 +244,9 @@ pnpm dkg wallet                  # show EVM address and Base Sepolia ETH balance
 pnpm dkg send alice-mini "hey from the testnet!"
 pnpm dkg chat alice-mini
 
-# Paranets
-pnpm dkg paranet list
-pnpm dkg paranet create my-data --name "My Data" --description "Experiments" --save
+# ContextGraphs
+pnpm dkg contextGraph list
+pnpm dkg contextGraph create my-data --name "My Data" --description "Experiments" --save
 pnpm dkg subscribe memes --save
 
 # Publishing (supports .ttl, .nt, .nq, .trig, .jsonld, .json)
@@ -254,7 +254,7 @@ pnpm dkg publish memes --file ./my-data.ttl
 pnpm dkg publish memes --subject "did:dkg:entity:thing" --predicate "https://schema.org/name" --object "A Thing"
 
 # Updating (replace KC contents with new triples, recomputes merkle root on-chain)
-pnpm dkg update <kc-id> --file ./updated-data.ttl --paranet memes
+pnpm dkg update <kc-id> --file ./updated-data.ttl --context-graph memes
 
 # Querying
 pnpm dkg query --sparql "SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 20"
@@ -428,12 +428,12 @@ await agent.publish('memes', [
 
 **ElizaOS** (via conversation):
 
-> User: "Publish this to the memes paranet:"
+> User: "Publish this to the memes contextGraph:"
 > ```nquads
 > <did:dkg:entity:pepe-42> <https://schema.org/name> "Rare Pepe #42" .
 > ```
 
-All nodes subscribed to the `memes` paranet receive these triples automatically via GossipSub. The publish flow:
+All nodes subscribed to the `memes` contextGraph receive these triples automatically via GossipSub. The publish flow:
 
 1. **Local store** — triples are stored in your node's triple store immediately
 2. **P2P broadcast** — triples (as N-Triples) are sent to subscribed peers via GossipSub; peers store them as **tentative**
@@ -565,9 +565,9 @@ Without a `dataDir`, a fresh ephemeral identity is generated every time (useful 
 - Try `pnpm dkg stop && pnpm dkg start` to force a reconnection
 - Check firewall rules on the relay server (port 9090 TCP must be open)
 
-**"Paranet does not exist"**
-- Run `pnpm dkg paranet list` to see available paranets
-- Create it first: `pnpm dkg paranet create <name> --name "Display Name"`
+**"ContextGraph does not exist"**
+- Run `pnpm dkg contextGraph list` to see available contextGraphs
+- Create it first: `pnpm dkg contextGraph create <name> --name "Display Name"`
 - Or subscribe to it: `pnpm dkg subscribe <name> --save`
 
 **Node won't start**
@@ -602,13 +602,13 @@ pnpm dkg wallet                  # Show EVM address and balances
 pnpm dkg peers                   # List network agents
 pnpm dkg send <name> <msg>       # Send a message
 pnpm dkg chat <name>             # Interactive chat
-pnpm dkg paranet create <id>     # Create a paranet
-pnpm dkg paranet list            # List all paranets
-pnpm dkg paranet info <id>       # Paranet details
-pnpm dkg publish <paranet> -f x  # Publish RDF data
+pnpm dkg contextGraph create <id>     # Create a contextGraph
+pnpm dkg contextGraph list            # List all contextGraphs
+pnpm dkg contextGraph info <id>       # ContextGraph details
+pnpm dkg publish <contextGraph> -f x  # Publish RDF data
 pnpm dkg update <kc-id> -f x    # Update a knowledge collection
-pnpm dkg query [paranet] -q ...  # SPARQL query
-pnpm dkg subscribe <paranet>     # Join a paranet topic
+pnpm dkg query [contextGraph] -q ...  # SPARQL query
+pnpm dkg subscribe <contextGraph>     # Join a contextGraph topic
 pnpm dkg logs [-n 50]            # View daemon logs
 ```
 

@@ -11,7 +11,7 @@ How a DKG agent boots, joins the network, operates in steady state, and shuts do
 > | **DKGAgent** | High-level facade (`@origintrail-official/dkg-agent`) that ties together identity, networking, publishing, querying, discovery, and messaging into a single object. |
 > | **DKGNode** | Lower-level networking component (`@origintrail-official/dkg-core`) that manages a libp2p host -- TCP/WebSocket listeners, peer connections, and transport encryption. |
 > | **libp2p** | Modular peer-to-peer networking stack. Each node gets a PeerId derived from its Ed25519 keypair. |
-> | **GossipSub** | Publish-subscribe protocol layered on libp2p. Nodes subscribe to "topics" (one per paranet) and receive messages from any peer on that topic. |
+> | **GossipSub** | Publish-subscribe protocol layered on libp2p. Nodes subscribe to "topics" (one per contextGraph) and receive messages from any peer on that topic. |
 > | **Peer discovery** | How nodes find each other. Uses mDNS (local network), bootstrap peers (known addresses), or relay nodes. |
 > | **Bootstrap peers** | Well-known nodes whose multiaddrs are hardcoded in config. New nodes dial them first to join the network. |
 > | **Relay / Circuit relay** | A public node that forwards traffic on behalf of nodes behind NAT. Edge nodes request a "reservation" on the relay so other peers can reach them. |
@@ -22,7 +22,7 @@ How a DKG agent boots, joins the network, operates in steady state, and shuts do
 
 ## Analogy
 
-Think of a DKG node as a **librarian joining a network of libraries**. On startup, the librarian unpacks their credentials (wallet), sets up their desk (triple store), and opens the doors (libp2p listener). They then walk over to the nearest known library (bootstrap/relay peer) and introduce themselves. Once connected, they subscribe to shared catalogues (paranet GossipSub topics) so they hear about new books (knowledge collections) as they are published. In steady state, the librarian can accept new books, answer questions, and pass messages to other librarians. When it is time to close, they unsubscribe from catalogues, say goodbye to peers, and lock the doors.
+Think of a DKG node as a **librarian joining a network of libraries**. On startup, the librarian unpacks their credentials (wallet), sets up their desk (triple store), and opens the doors (libp2p listener). They then walk over to the nearest known library (bootstrap/relay peer) and introduce themselves. Once connected, they subscribe to shared catalogues (contextGraph GossipSub topics) so they hear about new books (knowledge collections) as they are published. In steady state, the librarian can accept new books, answer questions, and pass messages to other librarians. When it is time to close, they unsubscribe from catalogues, say goodbye to peers, and lock the doors.
 
 ---
 
@@ -43,7 +43,7 @@ This is a static factory method. It assembles all internal components but does n
 3. **Chain adapter** -- If `chainConfig` is provided (RPC URL, hub address, operational keys), create an `EVMChainAdapter`. Otherwise use `NoChainAdapter` (offline mode -- P2P and local queries work, on-chain operations throw).
    - File: `packages/chain/src/`
 
-4. **Genesis data** -- Load the DKG ontology and system paranet definitions into the triple store (idempotent).
+4. **Genesis data** -- Load the DKG ontology and system contextGraph definitions into the triple store (idempotent).
    - File: `packages/core/src/genesis.ts`
 
 5. **DKGNode** -- Construct (but do not start) the libp2p networking layer with the agent's keypair, listen addresses, relay peers, and discovery settings.
@@ -65,11 +65,11 @@ This brings the node online:
    - `/dkg/query/2.0.0` -- cross-agent SPARQL queries
    - `/dkg/sync/1.0.0` -- paginated data sync for new peers
 
-3. **GossipSub setup** -- A `GossipSubManager` subscribes to the system paranet topics (`agents`, `ontology`).
+3. **GossipSub setup** -- A `GossipSubManager` subscribes to the system contextGraph topics (`agents`, `ontology`).
 
 4. **On-chain identity** -- If using a real chain adapter, the agent checks for an existing on-chain identity. If none exists, it calls `ensureProfile()` to create one and stake.
 
-5. **Chain event poller** -- Starts polling for on-chain events (publish confirmations, new paranets).
+5. **Chain event poller** -- Starts polling for on-chain events (publish confirmations, new contextGraphs).
 
 6. **Messaging** -- Sets up encrypted peer-to-peer messaging (Ed25519 -> X25519 key conversion for encryption).
 
@@ -79,7 +79,7 @@ This brings the node online:
 
 9. **Bootstrap dial** -- Connects to configured bootstrap peers. For relay peers, the node requests a circuit reservation and starts a relay watchdog timer.
 
-10. **Peer sync** -- On every new `peer:connect` event, the agent syncs the agents paranet from the new peer to discover profiles published before it came online.
+10. **Peer sync** -- On every new `peer:connect` event, the agent syncs the agents contextGraph from the new peer to discover profiles published before it came online.
 
 ```mermaid
 sequenceDiagram
@@ -105,12 +105,12 @@ sequenceDiagram
     Node->>Node: Create libp2p host, listen TCP+WS
     Node-->>Agent: PeerId assigned
     Agent->>Agent: Register protocol handlers
-    Agent->>Agent: Subscribe to system paranet topics
+    Agent->>Agent: Subscribe to system contextGraph topics
     Agent->>Chain: Check/create on-chain identity
     Agent->>Agent: Start chain event poller
     Agent->>Agent: Set up messaging + skill handlers
     Agent->>Net: Dial bootstrap/relay peers
-    Agent->>Net: Sync agents paranet from connected peers
+    Agent->>Net: Sync agents contextGraph from connected peers
     Agent-->>Dev: Ready
 ```
 
@@ -140,19 +140,19 @@ Relevant file: `packages/core/src/node.ts` (lines 40-350)
 Once started, the agent handles three categories of work:
 
 ### Inbound (from the network)
-- **GossipSub messages** -- When a peer publishes to a subscribed paranet topic, the `PublishHandler` processes the incoming knowledge collection and inserts it into the local store.
+- **GossipSub messages** -- When a peer publishes to a subscribed contextGraph topic, the `PublishHandler` processes the incoming knowledge collection and inserts it into the local store.
 - **Protocol requests** -- Remote peers can send access, publish, query, or sync requests via the `ProtocolRouter`. Each request opens a libp2p stream, the handler processes it, and returns a response.
 - **Chat messages** -- Encrypted peer-to-peer messages arrive via the messaging protocol.
 
 ### Outbound (from the developer)
-- `agent.publish(paranetId, quads)` -- Creates a knowledge collection, stores it locally, broadcasts via GossipSub, and optionally anchors on-chain.
+- `agent.publish(contextGraphId, quads)` -- Creates a knowledge collection, stores it locally, broadcasts via GossipSub, and optionally anchors on-chain.
 - `agent.query(sparql)` -- Runs a SPARQL query against the local triple store.
 - `agent.queryRemote(peerId, request)` -- Sends a query to a remote peer via the query protocol.
 - `agent.sendChat(peerId, text)` -- Sends an encrypted message to another agent.
 - `agent.findAgents()` / `agent.findSkills()` -- Queries the local store for agent profiles and skill offerings.
 
 ### Background
-- **Chain event poller** -- Periodically checks for on-chain publish confirmations and new paranet registrations.
+- **Chain event poller** -- Periodically checks for on-chain publish confirmations and new contextGraph registrations.
 - **Relay watchdog** -- Monitors relay connections and redials on disconnect.
 
 ---
@@ -218,7 +218,7 @@ When a user runs `dkg start`, the CLI (`packages/cli/src/cli.ts`) either runs th
 5. Verify the network ID matches genesis
 6. Call `agent.start()` and `agent.publishProfile()`
 7. Wait for circuit relay reservation (up to 10s)
-8. Subscribe to configured paranets
+8. Subscribe to configured contextGraphs
 9. Start the HTTP API server (status, publish, query, chat, wallet management)
 10. Start dashboard DB, metrics collector, and operation tracker
 11. Write PID file and API port for CLI subcommands to use

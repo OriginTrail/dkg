@@ -11,7 +11,7 @@ This document summarizes gaps between [SPEC_TRUST_LAYER.md](./SPEC_TRUST_LAYER.m
 The **spec** defines a full `ChainAdapter` with:
 
 - **Publishing**: `reserveUALRange`, `publishKnowledgeAssets`, `batchMintKnowledgeAssets`, `updateKnowledgeAssets`, `extendStorage`, `transferNamespace` ✅ *Implemented*
-- **Staking**: `stakeWithLock`, `stakeToParanet` ❌ *Not in ChainAdapter interface or EVM adapter*
+- **Staking**: `stakeWithLock`, `stakeToContextGraph` ❌ *Not in ChainAdapter interface or EVM adapter*
 - **Publishing Conviction Account**:
   - `createConvictionAccount(amount, lockEpochs)`
   - `coverPublishingCost(accountId, baseCost)`
@@ -20,17 +20,17 @@ The **spec** defines a full `ChainAdapter` with:
   - `initiatePurchase`, `fulfillPurchase`, `revealKey`, `disputeDelivery`, `claimPayment`
   ❌ *Not in interface or implementation*
 
-**Implementation status**: The TypeScript `ChainAdapter` in `packages/chain/src/chain-adapter.ts` and `EVMChainAdapter` implement only publishing + paranet placeholders. Staking conviction, PCA, and FairSwap are planned in PLAN_TRUST_LAYER (Milestones 3, 4, 5, 5b) but not yet implemented.
+**Implementation status**: The TypeScript `ChainAdapter` in `packages/chain/src/chain-adapter.ts` and `EVMChainAdapter` implement only publishing + contextGraph placeholders. Staking conviction, PCA, and FairSwap are planned in PLAN_TRUST_LAYER (Milestones 3, 4, 5, 5b) but not yet implemented.
 
 ---
 
-### 1.2 EVM Paranet integration
+### 1.2 EVM ContextGraph integration
 
-- **Spec**: Publishing targets a paranet; pricing is per-paranet (`stakeWeightedAverageAsk` per paranet).
+- **Spec**: Publishing targets a contextGraph; pricing is per-contextGraph (`stakeWeightedAverageAsk` per contextGraph).
 - **Implementation**:
-  - `KnowledgeAssets.sol` uses `askStorage.getStakeWeightedAverageAsk()` (likely global ask), not a per-paranet ask.
-  - `createParanet` and `submitToParanet` in the EVM adapter **throw** with "not yet implemented on EVM adapter (Milestone 5)".
-- **Gap**: Paranet-scoped publishing and per-paranet pricing are not wired in the EVM flow; paranet operations on real chain are stubs.
+  - `KnowledgeAssets.sol` uses `askStorage.getStakeWeightedAverageAsk()` (likely global ask), not a per-contextGraph ask.
+  - `createContextGraph` and `submitToContextGraph` in the EVM adapter **throw** with "not yet implemented on EVM adapter (Milestone 5)".
+- **Gap**: ContextGraph-scoped publishing and per-contextGraph pricing are not wired in the EVM flow; contextGraph operations on real chain are stubs.
 
 ---
 
@@ -42,15 +42,15 @@ The **spec** defines a full `ChainAdapter` with:
 | **FairSwapJudge**               | §5             | Not implemented (Milestone 5b) |
 | **ProtocolTreasury**           | §9, §10        | Not implemented (Milestone 5) |
 | **Staking conviction**         | §7 (`stakeWithLock`, multiplier) | Not implemented (Milestone 4) |
-| **Paranet staking**             | §8 (allocate stake to paranets) | Not implemented (Milestone 5) |
+| **ContextGraph staking**             | §8 (allocate stake to contextGraphs) | Not implemented (Milestone 5) |
 | **Permanent publishing**       | §4 (`batchMintKnowledgeAssetsPermanent`) | Not implemented (Milestone 5c) |
 
 ---
 
 ### 1.4 Reward and fee split (Spec §9)
 
-- **Spec**: Publishing fee → 85% paranet pool, 10% global pool, 5% protocol treasury. No paranet operator fee.
-- **Implementation**: `KnowledgeAssets.sol` and `ParanetIncentivesPool.sol` use different fee/oracle logic (e.g. operator/voter percentages). The exact 85/10/5 split and ProtocolTreasury are not clearly implemented as specified.
+- **Spec**: Publishing fee → 85% contextGraph pool, 10% global pool, 5% protocol treasury. No contextGraph operator fee.
+- **Implementation**: `KnowledgeAssets.sol` and `ContextGraphIncentivesPool.sol` use different fee/oracle logic (e.g. operator/voter percentages). The exact 85/10/5 split and ProtocolTreasury are not clearly implemented as specified.
 
 ---
 
@@ -117,13 +117,13 @@ Receivers now verify that the claimed `publisherAddress` owns the UAL range `sta
 |----------|-----------------|
 | `packages/publisher/src/publish-handler.ts` | Query chainAdapter to verify publisherAddress owns startKAId..endKAId |
 | `packages/evm-module/utils/helpers.ts` | Reinitialize only if any dependency contract was redeployed |
-| `packages/evm-module/test/integration/Paranet.test.ts` | Fund the pools and check rewards |
+| `packages/evm-module/test/integration/ContextGraph.test.ts` | Fund the pools and check rewards |
 | `packages/evm-module/test/integration/Staking.test.ts` | Fix manual reward calculation — delegator accumulates score across multiple proof periods |
 | `packages/evm-module/test/unit/RandomSamplingStorage.test.ts` | Fails because hubOwner is not a multisig (setW1/setW2 access control tests commented out) |
 | `packages/evm-module/test/unit/RandomSampling.test.ts` | Test access control when multisig is properly set up; test fails because hub owner is not the multisig |
 | `packages/evm-module/contracts/libraries/RandomSamplingLib.sol` | Smaller data structure for chunkId |
-| `packages/evm-module/contracts/paranets/Paranet.sol` | “Why is this 1 element array” (expectedAccessPolicies) |
-| `packages/evm-module/contracts/paranets/ParanetIncentivesPool.sol` | Should there be some check of this value? |
+| `packages/evm-module/contracts/contextGraphs/ContextGraph.sol` | “Why is this 1 element array” (expectedAccessPolicies) |
+| `packages/evm-module/contracts/contextGraphs/ContextGraphIncentivesPool.sol` | Should there be some check of this value? |
 
 ---
 
@@ -143,6 +143,6 @@ Receivers now verify that the claimed `publisherAddress` owns the UAL range `sta
 
 1. ~~**Fix agent UAL/chainId bug**~~ ✅ Done: `broadcastPublish` now uses `this.chain.chainId` for UAL and `chainId` in the PublishRequest.
 2. ~~**Implement on-chain range check**~~ ✅ Done: `verifyPublisherOwnsRange` on ChainAdapter; handler rejects when publisher does not own the range.
-3. **Implement missing ChainAdapter methods**: As per PLAN_TRUST_LAYER milestones: staking conviction, PCA, FairSwap, and paranet operations on EVM.
+3. **Implement missing ChainAdapter methods**: As per PLAN_TRUST_LAYER milestones: staking conviction, PCA, FairSwap, and contextGraph operations on EVM.
 4. **Clarify fee split**: Implement or document the 85/10/5 split and ProtocolTreasury in line with the spec.
-5. **Resolve TODOs**: Address the listed TODOs (multisig/hub owner tests, reward calculation, Paranet.sol/ParanetIncentivesPool comments) as part of normal cleanup and test hardening.
+5. **Resolve TODOs**: Address the listed TODOs (multisig/hub owner tests, reward calculation, ContextGraph.sol/ContextGraphIncentivesPool comments) as part of normal cleanup and test hardening.

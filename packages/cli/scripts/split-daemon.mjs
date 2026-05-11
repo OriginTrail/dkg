@@ -129,7 +129,7 @@ export interface PublishQuad {
 export type PublishAccessPolicy = 'public' | 'ownerOnly' | 'allowList';
 
 export interface PublishRequestBody {
-  paranetId: string;
+  contextGraphId: string;
   quads: PublishQuad[];
   privateQuads?: PublishQuad[];
   accessPolicy?: PublishAccessPolicy;

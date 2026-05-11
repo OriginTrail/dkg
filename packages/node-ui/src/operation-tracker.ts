@@ -26,7 +26,7 @@ export class OperationTracker {
         operation_name: ctx.operationName,
         started_at: now,
         peer_id: meta?.peerId,
-        paranet_id: meta?.contextGraphId,
+        contextGraph_id: meta?.contextGraphId,
         details: meta?.details ? JSON.stringify(meta.details) : null,
       });
     } catch {

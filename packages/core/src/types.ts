@@ -25,8 +25,6 @@ export interface DKGNodeConfig {
   enableMdns?: boolean;
   /** GossipSub context graph topics to subscribe to at startup. */
   contextGraphSubscriptions?: string[];
-  /** @deprecated Use contextGraphSubscriptions */
-  paranetSubscriptions?: string[];
   /** Ed25519 private key bytes. Generated if absent. */
   privateKey?: Uint8Array;
   /** Data directory for persistent state. */

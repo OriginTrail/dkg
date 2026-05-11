@@ -50,7 +50,17 @@ export function resolveDkgConfigHome(opts: ResolveDkgConfigHomeOptions = {}): st
 
   const home = opts.homeDir ?? homedir();
   const defaultDir = join(home, '.dkg');
-  const configExists = opts.configExists ?? existsSync(join(defaultDir, 'config.json'));
+  // Codex Round-3 Fix 2: detect both config.json AND config.yaml.
+  // The pre-fix check only looked at `config.json`, so a user
+  // running on a YAML-only `~/.dkg` (a perfectly valid shape —
+  // adapter-openclaw writes JSON but operators frequently hand-edit
+  // YAML) inside a monorepo checkout was silently redirected to
+  // `~/.dkg-dev`, splitting their state across two directories on
+  // every `dkg mcp setup` re-run from a clone.
+  const configExists = opts.configExists ?? (
+    existsSync(join(defaultDir, 'config.json')) ||
+    existsSync(join(defaultDir, 'config.yaml'))
+  );
   const isMonorepo = opts.isDkgMonorepo ?? findDkgMonorepoRoot(opts.startDir) !== null;
   if (isMonorepo && !configExists) return join(home, '.dkg-dev');
   return defaultDir;

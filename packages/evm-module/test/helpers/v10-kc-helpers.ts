@@ -10,66 +10,132 @@ import { KnowledgeAssetsV10 } from '../../typechain';
  *
  * Digest construction must match `KnowledgeAssetsV10.sol` EXACTLY. Any drift
  * between the contract and these helpers will fail at ECDSA.tryRecover with
- * `SignerIsNotNodeOperator` or `InvalidSignature` — which is what T1.5 / T1.6
- * assert for the negative cases, but undesirable for the positive cases.
+ * `SignerIsNotNodeOperator`, `InvalidSignature`, or `InvalidAuthorSignature`.
  *
- * Prefix layout (H5 closure):
+ * RFC-001: per-publish publisher signature is removed; every publish now
+ * carries an EIP-712 author attestation.
+ *
+ * ACK digest prefix (H5 closure):
  *   (block.chainid, address(KnowledgeAssetsV10), ...)
  *
- * Publisher digest (N26 field order — publish AND update):
- *   (publisherNodeIdentityId, contextGraphId, merkleRoot_or_newMerkleRoot)
- *
  * ACK digest (publish) — PRD V10 "Publish Flow" + decision #25 Option B,
- * extended with `merkleLeafCount` (uint256 on wire).
- * NOTE: the ACK digest does NOT include `publisherNodeIdentityId` — that
- * field is in the publisher digest only:
+ * extended with `merkleLeafCount` (uint256 on wire). Wrapped in
+ * `ECDSA.toEthSignedMessageHash` (EIP-191) before recovery:
  *   contextGraphId || merkleRoot || knowledgeAssetsAmount
  *   || uint256(byteSize) || uint256(epochs) || uint256(tokenAmount)
  *   || uint256(merkleLeafCount)
  *
- * ACK digest (update) — same separation rule:
+ * ACK digest (update) — same shape with update-specific fields:
  *   contextGraphId (from on-chain) || id || preUpdateMerkleRootCount
  *   || newMerkleRoot || uint256(newByteSize) || uint256(newTokenAmount)
  *   || mintKnowledgeAssetsAmount
  *   || keccak256(abi.encodePacked(knowledgeAssetsToBurn))
  *   || uint256(newMerkleLeafCount)
  *
- * Both digests are wrapped in `ECDSA.toEthSignedMessageHash(...)` (EIP-191)
- * before recovery — `signMessage` in kc-helpers.ts does the EIP-191 wrap for
- * the signer side via `signer.signMessage(getBytes(hash))`.
+ * Author attestation (RFC-001) — EIP-712 typed data:
+ *   domain   = EIP712Domain(name="KnowledgeAssetsV10", version="10.1",
+ *                           chainId, verifyingContract=KAV10)
+ *   struct   = AuthorAttestation(uint256 contextGraphId, bytes32 merkleRoot,
+ *                                address authorAddress, uint8 schemeVersion)
+ *   schemeVersion = 1 (only currently-supported scheme)
+ *
+ * The author attestation digest is built and signed via ethers'
+ * `signTypedData` for byte-equality with the contract's
+ * `_hashAuthorAttestation`.
  */
 
 export const DEFAULT_CHAIN_ID = 31337n;
 
+export const AUTHOR_SCHEME_VERSION_V1 = 1;
+
 export type V10SigPack = {
-  publisherR: string;
-  publisherVS: string;
   receiverRs: string[];
   receiverVSs: string[];
 };
 
+export type AuthorSig = {
+  authorR: string;
+  authorVS: string;
+};
+
+export type AuthorAttestationPayload = {
+  domain: ethers.TypedDataDomain;
+  types: Record<string, { name: string; type: string }[]>;
+  value: {
+    contextGraphId: bigint;
+    merkleRoot: string;
+    authorAddress: string;
+    schemeVersion: number;
+  };
+};
+
 /**
- * Build publisher digest (N26 + H5).
+ * Build the EIP-712 typed-data payload for a V10 author attestation.
  *
- * @param chainId block.chainid (31337 on hardhat, overridable for T1.6 replay
- *                regression)
- * @param kav10Address address(KnowledgeAssetsV10)
- * @param publisherNodeIdentityId publishing node's identity id
- * @param contextGraphId target CG id (for publish — caller-supplied; for update —
- *                       must match on-chain `ContextGraphStorage.kcToContextGraph(id)`)
- * @param merkleRoot publish merkleRoot OR newMerkleRoot (for update)
+ * Domain mirrors the contract's `_hashAuthorAttestation`:
+ *   name="KnowledgeAssetsV10", version="10.1", chainId, verifyingContract.
+ *
+ * The struct hash binds (contextGraphId, merkleRoot, authorAddress,
+ * schemeVersion). Drift between this builder and the contract will surface
+ * as `InvalidAuthorSignature` at publish time.
  */
-export function buildPublisherDigest(
-  chainId: bigint,
-  kav10Address: string,
-  publisherNodeIdentityId: number | bigint,
-  contextGraphId: bigint,
-  merkleRoot: string,
-): string {
-  return ethers.solidityPackedKeccak256(
-    ['uint256', 'address', 'uint72', 'uint256', 'bytes32'],
-    [chainId, kav10Address, publisherNodeIdentityId, contextGraphId, merkleRoot],
+export function buildAuthorAttestationPayload(args: {
+  chainId: bigint;
+  kav10Address: string;
+  contextGraphId: bigint;
+  merkleRoot: string;
+  authorAddress: string;
+  schemeVersion?: number;
+}): AuthorAttestationPayload {
+  const schemeVersion = args.schemeVersion ?? AUTHOR_SCHEME_VERSION_V1;
+  return {
+    domain: {
+      name: 'KnowledgeAssetsV10',
+      version: '10.1',
+      chainId: args.chainId,
+      verifyingContract: ethers.getAddress(args.kav10Address),
+    },
+    types: {
+      AuthorAttestation: [
+        { name: 'contextGraphId', type: 'uint256' },
+        { name: 'merkleRoot', type: 'bytes32' },
+        { name: 'authorAddress', type: 'address' },
+        { name: 'schemeVersion', type: 'uint8' },
+      ],
+    },
+    value: {
+      contextGraphId: args.contextGraphId,
+      merkleRoot: args.merkleRoot,
+      authorAddress: ethers.getAddress(args.authorAddress),
+      schemeVersion,
+    },
+  };
+}
+
+/**
+ * Sign an author attestation with an ethers signer (EOA path).
+ *
+ * Returns the compact `(r, vs)` form that the contract expects; the EIP-712
+ * `signTypedData` flavor of `signer` produces a 65-byte `(r, s, v)` signature
+ * which we split + repack here.
+ */
+export async function signAuthorAttestation(
+  signer: SignerWithAddress,
+  payload: AuthorAttestationPayload,
+): Promise<AuthorSig> {
+  const fullSig = await signer.signTypedData(
+    payload.domain,
+    payload.types,
+    payload.value,
   );
+  // ethers.Signature has `compactSerialized` which gives the 64-byte (r, vs)
+  // form via `r || vs` — but exposing r and vs as separate bytes32 is what
+  // the contract expects.
+  const split = ethers.Signature.from(fullSig);
+  return {
+    authorR: split.r,
+    authorVS: split.yParityAndS,
+  };
 }
 
 /**
@@ -176,19 +242,16 @@ export function buildUpdateAckDigest(
 }
 
 /**
- * Sign publisher + ACK digests for a publish flow. Receivers are ACK signers;
- * the publishing node also signs the publisher digest (N26 / H5 pins).
+ * Sign the ACK digest with each receiving node's operational key.
+ *
+ * RFC-001: the per-publish publisher signature is removed; this helper now
+ * only produces the ACK quorum signatures. Author attestation is signed
+ * separately via `signAuthorAttestation`.
  */
-export async function signPublishDigests(
-  publishingNode: NodeAccounts,
+export async function signAckDigest(
   receivingNodes: NodeAccounts[],
-  publisherDigest: string,
   ackDigest: string,
 ): Promise<V10SigPack> {
-  const { r: publisherR, vs: publisherVS } = await signMessage(
-    publishingNode.operational,
-    publisherDigest,
-  );
   const receiverRs: string[] = [];
   const receiverVSs: string[] = [];
   for (const node of receivingNodes) {
@@ -196,20 +259,22 @@ export async function signPublishDigests(
     receiverRs.push(r);
     receiverVSs.push(vs);
   }
-  return { publisherR, publisherVS, receiverRs, receiverVSs };
+  return { receiverRs, receiverVSs };
 }
 
 /**
- * Build a full `PublishParamsStruct` ready for `KnowledgeAssetsV10.publish`
- * or `publishDirect`. Runs the signing flow internally using the node signers.
+ * Build a full `PublishParamsStruct` ready for `KnowledgeAssetsV10.publish`.
+ * Runs the ACK signing flow internally and produces an EOA author attestation
+ * over the publish payload.
  */
 export async function buildPublishParams(args: {
   chainId: bigint;
   kav10Address: string;
-  publishingNode: NodeAccounts;
   receivingNodes: NodeAccounts[];
   publisherIdentityId: number;
   receiverIdentityIds: number[];
+  /** Author signer (EOA). Provides `authorAddress` + the EIP-712 signature. */
+  author: SignerWithAddress;
   contextGraphId: bigint;
   merkleRoot: string;
   knowledgeAssetsAmount: number;
@@ -220,15 +285,12 @@ export async function buildPublishParams(args: {
   /** Defaults to 1 for fixtures that only assert economics / signatures. */
   merkleLeafCount?: number;
   publishOperationId: string;
+  /** Allow overriding `authorSchemeVersion` for negative-path tests. */
+  authorSchemeVersion?: number;
+  /** Allow injecting a pre-computed author signature (for negative-path tests). */
+  authorSigOverride?: AuthorSig;
 }): Promise<KnowledgeAssetsV10.PublishParamsStruct> {
   const merkleLeafCount = args.merkleLeafCount ?? 1;
-  const publisherDigest = buildPublisherDigest(
-    args.chainId,
-    args.kav10Address,
-    args.publisherIdentityId,
-    args.contextGraphId,
-    args.merkleRoot,
-  );
   const ackDigest = buildPublishAckDigest(
     args.chainId,
     args.kav10Address,
@@ -240,12 +302,26 @@ export async function buildPublishParams(args: {
     args.tokenAmount,
     merkleLeafCount,
   );
-  const sig = await signPublishDigests(
-    args.publishingNode,
+  const sig = await signAckDigest(
     args.receivingNodes,
-    publisherDigest,
     ackDigest,
   );
+
+  const schemeVersion = args.authorSchemeVersion ?? AUTHOR_SCHEME_VERSION_V1;
+  const authorSig =
+    args.authorSigOverride ??
+    (await signAuthorAttestation(
+      args.author,
+      buildAuthorAttestationPayload({
+        chainId: args.chainId,
+        kav10Address: args.kav10Address,
+        contextGraphId: args.contextGraphId,
+        merkleRoot: args.merkleRoot,
+        authorAddress: args.author.address,
+        schemeVersion,
+      }),
+    ));
+
   return {
     publishOperationId: args.publishOperationId,
     contextGraphId: args.contextGraphId,
@@ -257,8 +333,10 @@ export async function buildPublishParams(args: {
     isImmutable: args.isImmutable,
     merkleLeafCount,
     publisherNodeIdentityId: args.publisherIdentityId,
-    publisherNodeR: sig.publisherR,
-    publisherNodeVS: sig.publisherVS,
+    authorAddress: args.author.address,
+    authorR: authorSig.authorR,
+    authorVS: authorSig.authorVS,
+    authorSchemeVersion: schemeVersion,
     identityIds: args.receiverIdentityIds,
     r: sig.receiverRs,
     vs: sig.receiverVSs,
@@ -275,7 +353,6 @@ export async function buildPublishParams(args: {
 export async function buildUpdateParams(args: {
   chainId: bigint;
   kav10Address: string;
-  publishingNode: NodeAccounts;
   receivingNodes: NodeAccounts[];
   publisherIdentityId: number;
   receiverIdentityIds: number[];
@@ -292,13 +369,6 @@ export async function buildUpdateParams(args: {
   newMerkleLeafCount?: number;
 }): Promise<KnowledgeAssetsV10.UpdateParamsStruct> {
   const newMerkleLeafCount = args.newMerkleLeafCount ?? 1;
-  const publisherDigest = buildPublisherDigest(
-    args.chainId,
-    args.kav10Address,
-    args.publisherIdentityId,
-    args.contextGraphId,
-    args.newMerkleRoot,
-  );
   const ackDigest = buildUpdateAckDigest(
     args.chainId,
     args.kav10Address,
@@ -312,12 +382,7 @@ export async function buildUpdateParams(args: {
     args.knowledgeAssetsToBurn,
     newMerkleLeafCount,
   );
-  const sig = await signPublishDigests(
-    args.publishingNode,
-    args.receivingNodes,
-    publisherDigest,
-    ackDigest,
-  );
+  const sig = await signAckDigest(args.receivingNodes, ackDigest);
   return {
     id: args.id,
     updateOperationId: args.updateOperationId,
@@ -328,8 +393,6 @@ export async function buildUpdateParams(args: {
     mintKnowledgeAssetsAmount: args.mintKnowledgeAssetsAmount,
     knowledgeAssetsToBurn: args.knowledgeAssetsToBurn,
     publisherNodeIdentityId: args.publisherIdentityId,
-    publisherNodeR: sig.publisherR,
-    publisherNodeVS: sig.publisherVS,
     identityIds: args.receiverIdentityIds,
     r: sig.receiverRs,
     vs: sig.receiverVSs,

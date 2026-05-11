@@ -25,6 +25,25 @@ export interface KCMetadata {
   allowedPeers?: string[];
   timestamp: Date;
   subGraphName?: string;
+  /**
+   * RFC-001 §3.5 off-chain provenance mirror. When both `authorAddress`
+   * and `publishOperationId` are supplied, `generateKCMetadata` emits a
+   * `dkg:Publication` resource at `urn:dkg:publication:{publishOperationId}`
+   * carrying:
+   *   a dkg:Publication ;
+   *   dkg:publishOperationId "..." ;
+   *   dkg:contextGraphId "..." ;
+   *   dkg:merkleRoot "0x..."^^xsd:hexBinary ;
+   *   dkg:authoredBy "0x..." .
+   * and links each KA via `<kaUri> dkg:publication <publication-uri>`.
+   *
+   * These triples are pure SPARQL-filtering convenience — the on-chain
+   * `KnowledgeBatch.authorAddress` remains canonical (RFC-001 §3.5,
+   * point 1). Implementations that don't need rich provenance queries
+   * can omit these fields and the publication subject is not emitted.
+   */
+  authorAddress?: string;
+  publishOperationId?: string;
 }
 
 export interface KAMetadata {
@@ -93,7 +112,7 @@ export function generateKCMetadata(
       dateLit(meta.timestamp),
       metaGraph,
     ),
-    mq(meta.ual, `${DKG}paranet`, `did:dkg:context-graph:${meta.contextGraphId}`, metaGraph),
+    mq(meta.ual, `${DKG}contextGraph`, `did:dkg:context-graph:${meta.contextGraphId}`, metaGraph),
   );
 
   if (meta.subGraphName) {
@@ -143,6 +162,25 @@ export function generateKCMetadata(
           ),
         );
       }
+    }
+  }
+
+  // RFC-001 §3.5 — optional `dkg:Publication` provenance subject. Emitted
+  // only when both `authorAddress` and `publishOperationId` are supplied
+  // so existing callers that don't propagate author identity see no
+  // behavior change.
+  if (meta.authorAddress && meta.publishOperationId) {
+    const publicationUri = `urn:dkg:publication:${meta.publishOperationId}`;
+    quads.push(
+      mq(publicationUri, `${RDF}type`, `${DKG}Publication`, metaGraph),
+      mq(publicationUri, `${DKG}publishOperationId`, lit(meta.publishOperationId), metaGraph),
+      mq(publicationUri, `${DKG}contextGraphId`, lit(meta.contextGraphId), metaGraph),
+      mq(publicationUri, `${DKG}merkleRoot`, hexLit(toHex(meta.merkleRoot)), metaGraph),
+      mq(publicationUri, `${DKG}authoredBy`, lit(meta.authorAddress), metaGraph),
+    );
+    for (const ka of kaEntries) {
+      const kaUri = `${ka.kcUal}/${ka.tokenId}`;
+      quads.push(mq(kaUri, `${DKG}publication`, publicationUri, metaGraph));
     }
   }
 
@@ -244,6 +282,17 @@ function intLit(val: number | bigint): string {
 
 function dateLit(d: Date): string {
   return `"${d.toISOString()}"^^<${XSD}dateTime>`;
+}
+
+function hexLit(hex: string): string {
+  // `xsd:hexBinary` lexical space is hex digits ONLY — no `0x` prefix
+  // (per XML Schema Part 2: Datatypes, §3.2.16). A typed literal
+  // `"0x..."^^xsd:hexBinary` is invalid for RDF value-equality
+  // semantics (SPARQL `=` operator on hexBinary compares decoded
+  // bytes; an invalid lexical form yields no match). Emit the bare
+  // hex digits as the lexical value, no `0x` prefix.
+  const bare = hex.startsWith('0x') ? hex.slice(2) : hex;
+  return `"${bare}"^^<${XSD}hexBinary>`;
 }
 
 /**

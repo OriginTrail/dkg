@@ -124,7 +124,7 @@ print(json.dumps({
   'allowedAgents': ['$N1_ADDR'],
 }))
 ")
-resp=$(api "$N1" POST /api/paranet/create "$body")
+resp=$(api "$N1" POST /api/context-graph/create "$body")
 created=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('created',''))")
 [ "$created" = "$CG_ID" ] && ok "CG created on N1" || { fail "create failed: $resp"; exit 1; }
 

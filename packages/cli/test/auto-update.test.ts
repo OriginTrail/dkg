@@ -1578,69 +1578,43 @@ describe('autoupdater hardening', () => {
     expect(installTimeout).toBe(600_000);
   });
 
-  it('honours autoUpdate.buildTimeoutMs.contracts when contracts rebuild', async () => {
+  // ─── Contract build is OFF the node update path ─────────────────────
+  //
+  // The auto-updater intentionally never invokes `hardhat compile` on node
+  // hosts. The committed `packages/evm-module/abi/*.json` files are the
+  // runtime contract surface (consumed by `packages/chain` via require()),
+  // and the `abi-freshness` CI job blocks any PR that changes `.sol`
+  // sources without committing the regenerated ABIs. This removes the
+  // most failure-prone step from the update flow — `hardhat compile`
+  // routinely OOMs / times out on resource-constrained nodes (cold solc
+  // on ARM64), and any failure there used to abort the slot swap.
+  //
+  // The previous tests in this slot exercised:
+  //   - autoUpdate.buildTimeoutMs.contracts honouring (contracts no longer rebuilt)
+  //   - contract-diff fails closed (no diff is performed)
+  //   - hardhat clean ordering before rebuild (no rebuild)
+  //   - contract-diff retry via `git fetch --depth=1` (no diff)
+  //
+  // Replaced with one explicit assertion: hardhat is never invoked on the
+  // node update path, even when the diff between commits lists changed
+  // .sol sources.
+  it('never invokes hardhat / evm-module build on the auto-update path, even when contracts changed between commits', async () => {
     mockGitUpdateReadFile();
     makeFetchOk('bbb222');
-    let contractsTimeout: number | undefined;
-    execImpl = async (cmd: string, opts?: any) => {
-      if (cmd.includes('pnpm --filter @origintrail-official/dkg-evm-module build')) {
-        contractsTimeout = opts?.timeout;
-      }
-      return { stdout: '', stderr: '' };
-    };
-    // Force a runtime build path + contract rebuild trigger via diff.
-    execFileImpl = async (file: string, args: string[]) => {
-      if (file === 'git' && args[0] === 'diff') {
-        return { stdout: 'packages/evm-module/contracts/Foo.sol\n', stderr: '' };
-      }
-      return { stdout: '', stderr: '' };
-    };
-    const auWithTimeout: AutoUpdateConfig = {
-      ...AU,
-      buildTimeoutMs: { contracts: 1_200_000 },
-    };
-    await performUpdate(auWithTimeout as any, () => {});
-    expect(contractsTimeout).toBe(1_200_000);
-  });
-
-  it('contract-diff fails closed: skips contract build when diff errors and parent fetch also errors (matches legacy behaviour)', async () => {
-    readFileImpl = async () => 'aaa111';
-    makeFetchOk('bbb222');
-    let contractsBuilt = false;
+    const evmCommands: string[] = [];
     execImpl = async (cmd: string) => {
-      if (cmd.includes('pnpm --filter @origintrail-official/dkg-evm-module build')) {
-        contractsBuilt = true;
+      if (
+        cmd.includes('@origintrail-official/dkg-evm-module') ||
+        cmd.includes('hardhat')
+      ) {
+        evmCommands.push(cmd);
       }
       return { stdout: '', stderr: '' };
     };
-    execFileImpl = async (file: string, args: string[]) => {
-      if (file === 'git' && args[0] === 'diff') {
-        throw new Error('fatal: bad revision aaa111..bbb222');
-      }
-      if (file === 'git' && args[0] === 'fetch' && args.includes('--depth=1')) {
-        throw new Error('fatal: remote unreachable');
-      }
-      return { stdout: '', stderr: '' };
-    };
-    await performUpdate(AU, () => {});
-    expect(contractsBuilt).toBe(false);
-  });
-
-  it('runs `hardhat clean` before the contract rebuild so stale artifacts/abi/typechain from renamed/deleted contracts do not survive into the slot', async () => {
-    // Default path skips `git clean -fdx` (cold-solc on ARM64 trips the
-    // build timeout) and cleanGeneratedOutputs intentionally spares
-    // evm-module/{cache,artifacts}/. So when contract sources actually
-    // change we run `hardhat clean` first to drop ghost outputs from
-    // deleted contracts. Scoped to the same trigger as the rebuild so
-    // no-change updates still benefit from the Hardhat compile cache.
-    mockGitUpdateReadFile();
-    makeFetchOk('bbb222');
-    const order: string[] = [];
-    execImpl = async (cmd: string) => {
-      if (cmd.includes('pnpm --filter @origintrail-official/dkg-evm-module clean')) order.push('clean');
-      if (cmd.includes('pnpm --filter @origintrail-official/dkg-evm-module build')) order.push('build');
-      return { stdout: '', stderr: '' };
-    };
+    // Even if the diff would have shown a .sol change, the new
+    // implementation must not consult it — and must not invoke any
+    // evm-module / hardhat command. Stub diff anyway to make this test
+    // a regression guard if the conditional is ever re-introduced.
     execFileImpl = async (file: string, args: string[]) => {
       if (file === 'git' && args[0] === 'diff') {
         return { stdout: 'packages/evm-module/contracts/Foo.sol\n', stderr: '' };
@@ -1648,45 +1622,7 @@ describe('autoupdater hardening', () => {
       return { stdout: '', stderr: '' };
     };
     await performUpdate(AU, () => {});
-    expect(order).toEqual(['clean', 'build']);
-  });
-
-  it('contract-diff retries via `git fetch --depth=1` for the missing parent commit before giving up', async () => {
-    mockGitUpdateReadFile();
-    makeFetchOk('bbb222');
-    let firstDiffSeen = false;
-    let retryFetchArgs: string[] | null = null;
-    let secondDiffSeen = false;
-    execFileImpl = async (file: string, args: string[]) => {
-      if (file === 'git' && args[0] === 'diff') {
-        if (!firstDiffSeen) {
-          firstDiffSeen = true;
-          throw new Error('fatal: bad revision');
-        }
-        secondDiffSeen = true;
-        return { stdout: 'packages/evm-module/contracts/Foo.sol\n', stderr: '' };
-      }
-      if (file === 'git' && args.includes('fetch') && args.includes('--depth=1')) {
-        retryFetchArgs = args;
-      }
-      return { stdout: '', stderr: '' };
-    };
-    let contractsBuilt = false;
-    execImpl = async (cmd: string) => {
-      if (cmd.includes('pnpm --filter @origintrail-official/dkg-evm-module build')) {
-        contractsBuilt = true;
-      }
-      return { stdout: '', stderr: '' };
-    };
-    await performUpdate({ ...AU, repo: 'owner/repo' }, () => {});
-    expect(firstDiffSeen).toBe(true);
-    expect(retryFetchArgs).toBeTruthy();
-    expect(secondDiffSeen).toBe(true);
-    expect(contractsBuilt).toBe(true);
-    // Slots are initialized with bare `git init` and have no `origin` remote;
-    // the retry must use the explicit fetch URL, not the literal 'origin'.
-    expect(retryFetchArgs!.includes('origin')).toBe(false);
-    expect(retryFetchArgs!.some(a => a.includes('github.com/owner/repo'))).toBe(true);
+    expect(evmCommands).toEqual([]);
   });
 
   it('atomic bookkeeping writes go through a temp path then rename to final', async () => {

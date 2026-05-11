@@ -172,8 +172,8 @@ dkgskill:uptime a owl:DatatypeProperty ;
     rdfs:label "uptime" ;
     rdfs:comment "Historical uptime (0.0 to 1.0)." .
 
-dkgskill:paranetsServed a owl:DatatypeProperty ;
+dkgskill:contextGraphsServed a owl:DatatypeProperty ;
     rdfs:domain dkgskill:HostingProfile ;
     rdfs:range xsd:string ;
-    rdfs:label "paranets served" ;
-    rdfs:comment "Comma-separated paranet IDs this node serves." .
+    rdfs:label "contextGraphs served" ;
+    rdfs:comment "Comma-separated contextGraph IDs this node serves." .

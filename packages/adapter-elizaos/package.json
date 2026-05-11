@@ -1,7 +1,7 @@
 {
   "name": "@origintrail-official/dkg-adapter-elizaos",
-  "version": "10.0.0-rc.2",
-  "description": "ElizaOS plugin adapter — turns any ElizaOS agent into a DKG V10 node",
+  "version": "10.0.0-rc.6",
+  "description": "ElizaOS plugin adapter \u2014 turns any ElizaOS agent into a DKG V10 node",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

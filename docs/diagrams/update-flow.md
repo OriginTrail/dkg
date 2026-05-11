@@ -40,9 +40,9 @@ sequenceDiagram
 
     Note over User,Gossip: Phase 1 — Local Preparation
 
-    User ->> Agent: update(kcId, paranetId, triples, privateTriples?)
+    User ->> Agent: update(kcId, contextGraphId, triples, privateTriples?)
     Agent ->> Agent: Generate operationId (UUID)
-    Agent ->> Publisher: update(kcId, paranetId, triples, operationId)
+    Agent ->> Publisher: update(kcId, contextGraphId, triples, operationId)
 
     Publisher ->> Publisher: autoPartition(triples)
     Note right of Publisher: Groups triples by root entity
@@ -57,7 +57,7 @@ sequenceDiagram
             Note right of Store: Snapshot stored in historical namespace
         end
         Publisher ->> Store: deleteBySubjectPrefix(dataGraph, rootEntity)
-        Publisher ->> Store: deletePrivateTriples(paranetId, rootEntity)
+        Publisher ->> Store: deletePrivateTriples(contextGraphId, rootEntity)
         Note right of Store: Old triples removed
 
         Publisher ->> Store: store.insert(new public triples)
@@ -102,7 +102,7 @@ sequenceDiagram
 
     Agent ->> Agent: Serialize changed triples to N-Triples
     Agent ->> Gossip: publish(topic, updateMessage)
-    Note right of Gossip: topic = dkg/paranet/id/update<br/>Contains kcId + new triples + new merkleRoot
+    Note right of Gossip: topic = dkg/context-graph/id/update<br/>Contains kcId + new triples + new merkleRoot
 
     RcvAgent ->> EVM: Poll KnowledgeAssetsUpdated event
     EVM -->> RcvAgent: Event with matching batchId + newMerkleRoot
@@ -154,7 +154,7 @@ deleting it, without changing the core update or on-chain semantics.
   For example:
   - A separate Blazegraph **namespace** (e.g. `historical`), or
   - Named graphs in the same store with a convention such as  
-    `urn:dkg:historical:{paranetId}:{kcId}:{rootEntity}:{revisionId}`.
+    `urn:dkg:historical:{contextGraphId}:{kcId}:{rootEntity}:{revisionId}`.
 - **Revision identifier** — Each snapshot is keyed by a revision. Using the
   existing `operationId` (UUID) gives a stable “revision R”. Optionally store
   a timestamp (e.g. from the update event or block time) to support “as of

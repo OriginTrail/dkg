@@ -16,7 +16,7 @@ const { Type, Field } = protobuf;
 
 export const FinalizationMessageSchema = new Type('FinalizationMessage')
   .add(new Field('ual', 1, 'string'))
-  .add(new Field('paranetId', 2, 'string'))
+  .add(new Field('contextGraphId', 2, 'string'))
   .add(new Field('kcMerkleRoot', 3, 'bytes'))
   .add(new Field('txHash', 4, 'string'))
   .add(new Field('blockNumber', 5, 'uint64'))
@@ -27,14 +27,14 @@ export const FinalizationMessageSchema = new Type('FinalizationMessage')
   .add(new Field('rootEntities', 10, 'string', 'repeated'))
   .add(new Field('timestampMs', 11, 'uint64'))
   .add(new Field('operationId', 12, 'string'))
-  .add(new Field('contextGraphId', 13, 'string'))
+  .add(new Field('targetContextGraphId', 13, 'string'))
   .add(new Field('subGraphName', 14, 'string'));
 
 type Long = { low: number; high: number; unsigned: boolean };
 
 export interface FinalizationMessageMsg {
   ual: string;
-  paranetId: string;
+  contextGraphId: string;
   kcMerkleRoot: Uint8Array;
   txHash: string;
   blockNumber: number | bigint | Long;
@@ -46,8 +46,8 @@ export interface FinalizationMessageMsg {
   timestampMs: number | bigint | Long;
   /** Originator's operation ID for cross-node log correlation. */
   operationId?: string;
-  /** When set, the enshrine targeted a context graph instead of the paranet data graph. */
-  contextGraphId?: string;
+  /** When set, the finalization targeted a distinct on-chain context graph. */
+  targetContextGraphId?: string;
   /** Sub-graph within the context graph. Receivers promote SWM into sub-graph data graph if set. */
   subGraphName?: string;
 }

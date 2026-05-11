@@ -2,7 +2,7 @@ import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams } from '@origintrail-official/dkg-chain';
 import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, OperationContext } from '@origintrail-official/dkg-core';
-import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, contextGraphDataUri, contextGraphMetaUri, contextGraphAssertionUri, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, type Ed25519Keypair, computePublishACKDigest, computePublishPublisherDigest } from '@origintrail-official/dkg-core';
+import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, contextGraphDataUri, contextGraphMetaUri, contextGraphAssertionUri, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, DKG_GOSSIP_MAX_MESSAGE_BYTES, type Ed25519Keypair, computePublishACKDigest, buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import type { Publisher, PublishOptions, PublishResult, KAManifestEntry, PhaseCallback } from './publisher.js';
 import { autoPartition } from './auto-partition.js';
@@ -99,6 +99,16 @@ function publisherAddressFromUal(ual: string | undefined): string | undefined {
   if (!ual?.startsWith(prefix)) return undefined;
   const segments = ual.slice(prefix.length).split('/');
   return coercePublisherAddress(segments[1]);
+}
+
+function formatBytesAsKb(bytes: number): string {
+  return `${(bytes / 1024).toFixed(0)} KB`;
+}
+
+function formatGossipLimit(bytes: number): string {
+  const mb = 1024 * 1024;
+  if (bytes % mb === 0) return `${bytes / mb} MB`;
+  return formatBytesAsKb(bytes);
 }
 
 function recoverCompactMessageSigner(
@@ -237,6 +247,18 @@ interface PublisherSigner {
   address: string;
   source: 'publisherPrivateKey' | 'chainAdapter';
   signMessage(message: Uint8Array): Promise<string>;
+  /**
+   * Sign EIP-712 typed data. Required for RFC-001 author attestations
+   * which use `\x19\x01` framing rather than the EIP-191 prefix that
+   * `signMessage` applies. Native on `ethers.Wallet`; chain-adapter
+   * fallbacks throw because the adapter's `signMessage` / `signMessageAs`
+   * surface only handles EIP-191 hashes.
+   */
+  signTypedData(
+    domain: ethers.TypedDataDomain,
+    types: Record<string, Array<{ name: string; type: string }>>,
+    value: Record<string, unknown>,
+  ): Promise<string>;
 }
 
 function isInternalOrigin(options: PublishOptions): boolean {
@@ -358,6 +380,60 @@ export class DKGPublisher implements Publisher {
       if (resolved) return resolved;
     }
     return this.inferAdapterPublisherAddress(contextGraphId, options);
+  }
+
+  /**
+   * RFC-001 §9.x — public wrapper around `resolvePublisherAddress` that
+   * `agent.assertionFinalize()` calls when no agent override was
+   * supplied. Mirrors Phase 4 mode (a): the daemon's own publisher
+   * EOA acts as author when the request is admin-scoped.
+   *
+   * Returns `undefined` when no publisher signer is configured
+   * (tentative-only daemon); finalize must then fail because there's
+   * no key to sign with.
+   */
+  async publisherFallbackAuthorAddress(): Promise<string | undefined> {
+    return this.resolvePublisherAddress();
+  }
+
+  /**
+   * RFC-001 §9.x — sign EIP-712 typed data with the publisher's own
+   * wallet (publisherPrivateKey or chain adapter's signer). Used by
+   * `agent.assertionFinalize()` when no agent override is supplied,
+   * so that the seal can still be produced for admin-scoped
+   * finalize requests.
+   *
+   * Returns the compact `(r, vs)` form expected by KAv10's
+   * AuthorAttestation struct.
+   */
+  async signAuthorAttestationAsPublisher(typedData: {
+    domain: { name: string; version: string; chainId: bigint; verifyingContract: string };
+    types: Record<string, Array<{ name: string; type: string }>>;
+    message: Record<string, unknown>;
+  }): Promise<{ r: Uint8Array; vs: Uint8Array }> {
+    const address = await this.resolvePublisherAddress();
+    if (!address) {
+      throw new Error(
+        'signAuthorAttestationAsPublisher: no publisher signer is configured. ' +
+          'Configure publisherPrivateKey or use a chain adapter that exposes signTypedData.',
+      );
+    }
+    const signer = await this.getPublisherSigner(address);
+    if (!signer) {
+      throw new Error(
+        `signAuthorAttestationAsPublisher: failed to resolve a signer for ${address}.`,
+      );
+    }
+    const sigHex = await signer.signTypedData(
+      typedData.domain,
+      typedData.types as { [k: string]: Array<{ name: string; type: string }> },
+      typedData.message,
+    );
+    const sig = ethers.Signature.from(sigHex);
+    return {
+      r: ethers.getBytes(sig.r),
+      vs: ethers.getBytes(sig.yParityAndS),
+    };
   }
 
   private async inferAdapterPublisherAddress(
@@ -518,6 +594,8 @@ export class DKGPublisher implements Publisher {
         address: this.publisherAddress,
         source: 'publisherPrivateKey',
         signMessage: (message: Uint8Array) => wallet.signMessage(message),
+        signTypedData: (domain, types, value) =>
+          wallet.signTypedData(domain, types, value),
       };
     }
 
@@ -540,6 +618,19 @@ export class DKGPublisher implements Publisher {
             );
           }
           return signature;
+        },
+        signTypedData: async (domain, types, value) => {
+          if (typeof this.chain.signTypedDataAs === 'function') {
+            return this.chain.signTypedDataAs(expectedAddress, domain, types, value);
+          }
+          if (typeof this.chain.signTypedData === 'function') {
+            return this.chain.signTypedData(domain, types, value);
+          }
+          throw new Error(
+            'EIP-712 typed-data signing (RFC-001 author attestation) is not supported ' +
+            'by this chain adapter. Configure publisherPrivateKey or upgrade the adapter ' +
+            'to implement signTypedData / signTypedDataAs.',
+          );
         },
       };
     }
@@ -566,6 +657,19 @@ export class DKGPublisher implements Publisher {
           }
           return signature;
         },
+        signTypedData: async (domain, types, value) => {
+          if (typeof this.chain.signTypedData === 'function') {
+            return this.chain.signTypedData(domain, types, value);
+          }
+          if (typeof this.chain.signTypedDataAs === 'function') {
+            return this.chain.signTypedDataAs(expectedAddress, domain, types, value);
+          }
+          throw new Error(
+            'EIP-712 typed-data signing (RFC-001 author attestation) is not supported ' +
+            'by this chain adapter. Configure publisherPrivateKey or upgrade the adapter ' +
+            'to implement signTypedData / signTypedDataAs.',
+          );
+        },
       };
     }
 
@@ -579,6 +683,8 @@ export class DKGPublisher implements Publisher {
         address: operationalWallet.address,
         source: 'chainAdapter',
         signMessage: (message: Uint8Array) => operationalWallet.signMessage(message),
+        signTypedData: (domain, types, value) =>
+          operationalWallet.signTypedData(domain, types, value),
       };
     }
 
@@ -719,7 +825,7 @@ export class DKGPublisher implements Publisher {
     }));
 
     const message = encodeWorkspacePublishRequest({
-      paranetId: contextGraphId,
+      contextGraphId: contextGraphId,
       nquads: new TextEncoder().encode(nquadsStr),
       manifest: manifestEntries.map((m) => ({
         rootEntity: m.rootEntity,
@@ -734,10 +840,9 @@ export class DKGPublisher implements Publisher {
       subGraphName: options.subGraphName,
     });
 
-    const MAX_GOSSIP_MESSAGE_SIZE = 512 * 1024; // 512 KB
-    if (message.length > MAX_GOSSIP_MESSAGE_SIZE) {
+    if (message.length > DKG_GOSSIP_MAX_MESSAGE_BYTES) {
       throw new Error(
-        `SWM message too large (${(message.length / 1024).toFixed(0)} KB, limit ${MAX_GOSSIP_MESSAGE_SIZE / 1024} KB). ` +
+        `SWM message too large (${formatBytesAsKb(message.length)}, limit ${formatGossipLimit(DKG_GOSSIP_MAX_MESSAGE_BYTES)}). ` +
         `Split large writes into multiple share() calls partitioned by root entity.`,
       );
     }
@@ -908,6 +1013,19 @@ export class DKGPublisher implements Publisher {
       contextGraphSignatures?: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
       v10ACKProvider?: PublishOptions['v10ACKProvider'];
       subGraphName?: string;
+      /**
+       * Per-call override for the on-chain attribution target — see
+       * `PublishOptions.publisherNodeIdentityIdOverride` for full semantics.
+       * Threaded into the inner `publish()` call below.
+       */
+      publisherNodeIdentityIdOverride?: bigint;
+      /**
+       * RFC-001 §9.x — pre-computed attestation captured at
+       * `agent.assertion.finalize()` time. See
+       * `PublishOptions.precomputedAttestation`. Required for
+       * on-chain publishes.
+       */
+      precomputedAttestation?: PublishOptions['precomputedAttestation'];
     },
   ): Promise<PublishResult> {
     const ctx = options?.operationCtx ?? createOperationContext('publishFromSWM');
@@ -931,7 +1049,7 @@ export class DKGPublisher implements Publisher {
         // CGs have this but may not have _meta.registrationStatus synced yet.
         const ontologyGraph = contextGraphDataUri('ontology');
         const onChainResult = await this.store.query(
-          `SELECT ?id WHERE { GRAPH <${ontologyGraph}> { <${cgDataUri}> <https://dkg.network/ontology#ParanetOnChainId> ?id } } LIMIT 1`,
+          `SELECT ?id WHERE { GRAPH <${ontologyGraph}> { <${cgDataUri}> <https://dkg.network/ontology#ContextGraphOnChainId> ?id } } LIMIT 1`,
         );
         const hasOnChainId = onChainResult.type === 'bindings' && onChainResult.bindings.length > 0;
 
@@ -1021,11 +1139,29 @@ export class DKGPublisher implements Publisher {
       publishContextGraphId: chainCgId ?? undefined,
       fromSharedMemory: true,
       subGraphName: options?.subGraphName,
+      publisherNodeIdentityIdOverride: options?.publisherNodeIdentityIdOverride,
+      precomputedAttestation: options?.precomputedAttestation,
       [INTERNAL_ORIGIN_TOKEN]: true,
     };
     const publishResult = await this.publish(internalPublishOptions);
 
-    if (ctxGraphId && publishResult.status === 'confirmed' && publishResult.onChainResult) {
+    // Per-cgId data promotion: copy quads + KA meta from the default
+    // `<NAME>/data` + `<NAME>/_meta` graphs into `<NAME>/context/<cgId>/data`
+    // + `<NAME>/context/<cgId>/_meta`. The RS prover's `extractV10KCFromStore`
+    // queries the per-cgId meta graph (kc-extractor.ts:154) to resolve a
+    // KC's UAL from `dkg:batchId`, so without this promotion every published
+    // KC stays invisible to random sampling and the prover loops on
+    // `kc-not-synced` indefinitely.
+    //
+    // Pre-Phase B-3 the gate was `if (ctxGraphId && ...)` which fired only on
+    // remap-flow publishes (`subContextGraphId` set). Same-graph publishes
+    // through the selection-bridge (`publishContextGraphId === undefined`,
+    // `onChainContextGraphId === '<resolved>'`) were silently skipped, breaking
+    // RS for all V10 publishes that don't remap. The gate now also fires
+    // when only `chainCgId` is set — the target cgId is always
+    // `ctxGraphId ?? chainCgId`.
+    const targetCgId = ctxGraphId ?? chainCgId;
+    if (targetCgId && publishResult.status === 'confirmed' && publishResult.onChainResult) {
       // V10 publishDirect already registers the KC to the context graph
       // via an internal call to ContextGraphs.registerKnowledgeCollection
       // (Hub-authorized only — EOAs cannot call it directly). The legacy
@@ -1041,7 +1177,7 @@ export class DKGPublisher implements Publisher {
           if (identityId > 0n) {
             const digest = ethers.solidityPackedKeccak256(
               ['uint256', 'bytes32'],
-              [BigInt(ctxGraphId), ethers.hexlify(publishResult.merkleRoot)],
+              [BigInt(targetCgId), ethers.hexlify(publishResult.merkleRoot)],
             );
             const sig = await this.chain.signMessage(ethers.getBytes(digest));
             participantSigs = [{ identityId, ...sig }];
@@ -1054,14 +1190,14 @@ export class DKGPublisher implements Publisher {
 
         try {
           const txResult = await this.chain.verify({
-            contextGraphId: BigInt(ctxGraphId),
+            contextGraphId: BigInt(targetCgId),
             batchId: publishResult.onChainResult.batchId,
             merkleRoot: publishResult.merkleRoot,
             signerSignatures: sortedSigs,
           });
           if (txResult && typeof txResult === 'object' && 'success' in txResult && txResult.success) {
             registered = true;
-            this.log.info(ctx, `Batch ${publishResult.onChainResult.batchId} verified on context graph ${ctxGraphId}`);
+            this.log.info(ctx, `Batch ${publishResult.onChainResult.batchId} verified on context graph ${targetCgId}`);
           }
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
@@ -1074,19 +1210,34 @@ export class DKGPublisher implements Publisher {
         }
       } else {
         registered = true;
-        this.log.info(ctx, `No verify function on chain adapter — assuming V10 auto-registration for context graph ${ctxGraphId}`);
+        this.log.info(ctx, `No verify function on chain adapter — assuming V10 auto-registration for context graph ${targetCgId}`);
       }
 
       if (registered) {
-        const ctxDataGraph = contextGraphDataUri(contextGraphId, ctxGraphId);
-        const ctxMetaGraph = contextGraphMetaUri(contextGraphId, ctxGraphId);
+        const ctxDataGraph = contextGraphDataUri(contextGraphId, targetCgId);
+        const ctxMetaGraph = contextGraphMetaUri(contextGraphId, targetCgId);
         const defaultDataGraph = this.graphManager.dataGraphUri(contextGraphId);
         const defaultMetaGraph = `${defaultDataGraph.replace(/\/data$/, '')}/_meta`;
 
-        if (publishResult.publicQuads && publishResult.publicQuads.length > 0) {
+        // Data promotion: always COPY public quads to the per-cgId data
+        // graph (`<NAME>/context/<cgId>/data`) — RS prover's
+        // `extractV10KCFromStore` reads triples from there
+        // (`kc-extractor.ts` line ~225). On REMAP-flow publishes
+        // (`publishContextGraphId` set), also delete the original copy
+        // from the default data graph; on same-graph publishes, leave
+        // the default copy in place so `agent.query(label)` (which
+        // resolves to `did:dkg:context-graph:<label>` without a
+        // `/context/<id>` suffix) still finds the just-published
+        // triples. Mirrors the `_meta` pattern below.
+        if (
+          publishResult.publicQuads &&
+          publishResult.publicQuads.length > 0
+        ) {
           const storedQuads = publishResult.publicQuads.map(q => ({ ...q, graph: defaultDataGraph }));
           await this.store.insert(storedQuads.map(q => ({ ...q, graph: ctxDataGraph })));
-          await this.store.delete(storedQuads);
+          if (ctxGraphId) {
+            await this.store.delete(storedQuads);
+          }
         }
 
         const ual = publishResult.ual;
@@ -1100,11 +1251,20 @@ export class DKGPublisher implements Publisher {
         }`;
         const metaResult = await this.store.query(metaQuery);
         if (metaResult.type === 'quads' && metaResult.quads.length > 0) {
+          // Copy meta to the per-cgId graph (RS prover's
+          // `extractV10KCFromStore` resolves UALs from
+          // `dkg:batchId` here). On remap publishes the original
+          // copy at `<NAME>/_meta` is also moved; on same-graph
+          // publishes we leave the default copy in place so
+          // existing meta queries against the label-only URI
+          // continue to resolve.
           await this.store.insert(metaResult.quads.map(q => ({ ...q, graph: ctxMetaGraph })));
-          await this.store.delete(metaResult.quads.map(q => ({ ...q, graph: defaultMetaGraph })));
+          if (ctxGraphId) {
+            await this.store.delete(metaResult.quads.map(q => ({ ...q, graph: defaultMetaGraph })));
+          }
         }
 
-        this.log.info(ctx, `Promoted ${publishResult.kaManifest.length} KAs from default graph to context graph ${ctxGraphId}`);
+        this.log.info(ctx, `Promoted ${publishResult.kaManifest.length} KAs from default graph to context graph ${targetCgId}`);
       }
     }
 
@@ -1314,7 +1474,19 @@ export class DKGPublisher implements Publisher {
     } catch {
       // Descriptive SWM graph names stay on the existing tentative/mock path.
     }
-    const willAttemptOnChainPublish = this.publisherNodeIdentityId > 0n && publisherContextGraphId !== undefined;
+    // Per-publish attribution override (RFC-001 §4): see PublishOptions
+    // docstring. `hasAttributionOverride` must influence the EARLY on-chain
+    // attempt gate too — otherwise `publisherSigner` and `tokenAmount`
+    // never resolve when a daemon with persistent identity `0n` carries an
+    // explicit override (including `0n` for mode (d) no-attribution),
+    // and the late gate would then enter the chain branch with
+    // `publisherSigner === undefined` and throw `PublisherWalletRequiredError`.
+    // Self-ACK signing remains tied to `this.publisherNodeIdentityId > 0n`
+    // below — the override controls on-chain attribution, not who signs.
+    const hasAttributionOverride = options.publisherNodeIdentityIdOverride !== undefined;
+    const willAttemptOnChainPublish =
+      (this.publisherNodeIdentityId > 0n || hasAttributionOverride) &&
+      publisherContextGraphId !== undefined;
     const chainV10Ready = await this.refreshChainV10Readiness();
     const canResolveOnChainPublisher = willAttemptOnChainPublish && chainV10Ready;
     const resolvedPublisherAddress = canResolveOnChainPublisher
@@ -1330,6 +1502,18 @@ export class DKGPublisher implements Publisher {
     const canAttemptOnChainPublish = willAttemptOnChainPublish &&
       chainV10Ready &&
       publisherSigner !== undefined;
+
+    // RFC-001 §9.x — sign-at-creation. The publisher is a pure
+    // transport layer for the AuthorAttestation: the seal is built at
+    // `agent.assertion.finalize()` time and forwarded here verbatim
+    // via `precomputedAttestation`. The publisher never signs the
+    // AuthorAttestation itself.
+    //
+    // For on-chain publishes, `precomputedAttestation` MUST be
+    // supplied. The agent layer is responsible for producing it
+    // (custodial / self-sovereign / publisher-fallback all resolved
+    // there); see `agent.assertion.finalize`. This check fires below
+    // once we know whether we're going on-chain.
 
     if (effectiveAccessPolicy !== 'public' && normalizedPublisherPeerId.length === 0) {
       throw new Error(
@@ -1509,7 +1693,7 @@ export class DKGPublisher implements Publisher {
     // digests, or on-chain tx construction, so the caller sees the real
     // error instead of watching it decay through a swallowed ACK warning
     // into a misleading `tentative` status. Descriptive SWM graph names
-    // (e.g. `"devnet-test"`, `"test-paranet"`) MUST still fall through to
+    // (e.g. `"devnet-test"`, `"test-contextGraph"`) MUST still fall through to
     // the soft `v10CgId = 0n` coercion below — mock adapter tests and
     // integration fixtures publish with those names and rely on the
     // data-flow path continuing to exercise. So we only fail loud when
@@ -1642,12 +1826,29 @@ export class DKGPublisher implements Publisher {
     let onChainResult: OnChainPublishResult | undefined;
     let status: 'tentative' | 'confirmed' = 'tentative';
     const tentativeSeq = ++this.tentativeCounter;
-    let ual = `did:dkg:${this.chain.chainId}/${publisherAddress}/t${this.sessionId}-${tentativeSeq}`;
+    // RFC-001 §3.5 publication identifier. Stable across tentative and
+    // confirmed states for this publish so the `dkg:Publication` subject
+    // emitted in metadata stays the same after on-chain confirmation.
+    const publishOperationId = `${this.sessionId}-${tentativeSeq}`;
+    let ual = `did:dkg:${this.chain.chainId}/${publisherAddress}/t${publishOperationId}`;
 
-    const identityId = this.publisherNodeIdentityId;
+    // Resolve the on-chain attribution target from the per-call override
+    // (computed above) or fall back to the daemon's persistent identity.
+    // `0n` is a VALID explicit override value (mode (d) "no attribution"
+    // — contract validates this case) and must NOT be confused with
+    // "override absent". The daemon's own identity is still used elsewhere
+    // (ACK self-signing, signer resolution); this only affects the
+    // on-chain `PublishParams.publisherNodeIdentityId`.
+    const attributionIdentityId: bigint = hasAttributionOverride
+      ? options.publisherNodeIdentityIdOverride!
+      : this.publisherNodeIdentityId;
     let usedV10Path = false;
 
-    if (identityId === 0n) {
+    // Gate: skip on-chain only when there's no usable attribution AND no
+    // explicit override. With an explicit override (including `0n`), we
+    // proceed on-chain; the contract validates non-zero values name a
+    // real sharding-table node and accepts `0n` as no-attribution.
+    if (!hasAttributionOverride && this.publisherNodeIdentityId === 0n) {
       this.log.warn(ctx, `Identity not set (0) — skipping on-chain publish`);
     } else if (publisherContextGraphId === undefined) {
       this.log.warn(ctx, `No positive on-chain context graph id resolved from "${v10CgDomain}" — skipping on-chain publish`);
@@ -1656,6 +1857,93 @@ export class DKGPublisher implements Publisher {
     } else {
       const tokenAmount = precomputedTokenAmount;
       usedV10Path = true;
+      // ─────────────────────────────────────────────────────────────
+      // SEAL INTEGRITY PREFLIGHT (Round 4 review §12)
+      //
+      // When a precomputedAttestation IS provided, validate it BEFORE
+      // the on-chain try/catch so seal-integrity failures (mismatched
+      // expectedMerkleRoot, wrong-signer recovery) propagate up as
+      // hard errors instead of being downgraded to a "tentative"
+      // result with a `On-chain tx failed` log line. These are
+      // protocol-correctness violations, not transient chain issues —
+      // /api/shared-memory/publish callers must see a 4xx for a
+      // broken seal, not a 200 OK with `status: tentative` and
+      // `kcId: 0` (which the daemon previously had to special-case).
+      //
+      // Missing-seal — `precomputedAttestation === undefined` — is
+      // intentionally NOT hoisted. The publisher's contract historically
+      // permits no-seal publishes (they fall through to tentative);
+      // breaking that surface in this PR would invalidate ~120 publisher
+      // unit tests that exercise transport, ownership, and lifecycle
+      // mechanics without caring about author attribution. Production
+      // call sites (agent.publish, /api/shared-memory/publish) always
+      // mint a seal at the agent layer — see Phase 4 wiring; no
+      // user-facing path can reach the publisher without a seal.
+      // ─────────────────────────────────────────────────────────────
+      if (
+        options.precomputedAttestation &&
+        v10ChainId !== undefined &&
+        v10KavAddress !== undefined
+      ) {
+        const effectiveAuthorAddress = options.precomputedAttestation.authorAddress;
+        const effectiveSchemeVersion = options.precomputedAttestation.schemeVersion;
+        const authorTypedData = buildAuthorAttestationTypedData({
+          chainId: v10ChainId,
+          kav10Address: v10KavAddress,
+          contextGraphId: v10CgId,
+          merkleRoot: kcMerkleRoot,
+          authorAddress: effectiveAuthorAddress,
+          schemeVersion: effectiveSchemeVersion,
+        });
+        {
+          const expected = options.precomputedAttestation.expectedMerkleRoot;
+          if (expected.length !== kcMerkleRoot.length || !expected.every((b, i) => b === kcMerkleRoot[i])) {
+            throw new Error(
+              `precomputedAttestation.expectedMerkleRoot mismatch: ` +
+              `seal expects ${ethers.hexlify(expected)} but publish-time recompute yielded ${ethers.hexlify(kcMerkleRoot)}. ` +
+              `Either the assertion's quads were mutated after finalize, or the caller's merkle algorithm differs from the publisher's. Re-finalize the assertion.`,
+            );
+          }
+        }
+        {
+          const sig = ethers.Signature.from({
+            r: ethers.hexlify(options.precomputedAttestation.signature.r),
+            yParityAndS: ethers.hexlify(options.precomputedAttestation.signature.vs),
+          });
+          const digest = ethers.TypedDataEncoder.hash(
+            authorTypedData.domain,
+            authorTypedData.types,
+            authorTypedData.message,
+          );
+          // Off-chain seal-integrity preflight: ECDSA recover-and-compare
+          // only works for EOA authors. For smart-contract wallets
+          // (incl. EIP-7702-delegated EOAs), the wallet's
+          // `IERC1271.isValidSignature` is the source of truth; signing
+          // typically routes through an owner EOA whose address differs
+          // from the wallet contract, so ECDSA recover would (correctly)
+          // report a mismatch even on a valid 1271 signature. The
+          // on-chain `_verifyAuthorAttestation` already dispatches via
+          // `authorAddress.code.length` — let it be authoritative for
+          // the contract-author branch. EOAs still get the hard-fail
+          // preflight that traps corrupt seals before tx submit.
+          const isContractAuthor =
+            typeof this.chain.hasContractCode === 'function'
+              ? await this.chain.hasContractCode(effectiveAuthorAddress)
+              : false;
+          if (!isContractAuthor) {
+            const recovered = ethers.recoverAddress(digest, sig);
+            if (recovered.toLowerCase() !== effectiveAuthorAddress.toLowerCase()) {
+              throw new Error(
+                `precomputedAttestation signer mismatch: signature recovers ${recovered} ` +
+                `but address claims ${effectiveAuthorAddress}. The seal's signature does not match its recorded authorAddress; ` +
+                `the assertion's _meta block is corrupt and the assertion must be re-finalized.`,
+              );
+            }
+          }
+        }
+      }
+      // ── End preflight ───────────────────────────────────────────
+
       let signStarted = false;
       let submitStarted = false;
       try {
@@ -1664,7 +1952,7 @@ export class DKGPublisher implements Publisher {
         if (!publisherSigner) throw new PublisherWalletRequiredError('publish');
         this.log.info(
           ctx,
-          `Signing on-chain publish (identityId=${identityId}, signer=${publisherSigner.address}, source=${publisherSigner.source})`,
+          `Signing on-chain publish (attributionId=${attributionIdentityId}${hasAttributionOverride ? ' [override]' : ''}, signer=${publisherSigner.address}, source=${publisherSigner.source})`,
         );
 
         onPhase?.('chain:sign', 'end');
@@ -1679,7 +1967,7 @@ export class DKGPublisher implements Publisher {
         if (typeof this.chain.isV10Ready !== 'function' || !this.chain.isV10Ready()) {
           throw new Error(
             'Chain adapter is not V10-ready (isV10Ready() returned false or is missing). ' +
-            'Publish is routed through KnowledgeAssetsV10.publishDirect, which requires ' +
+            'Publish is routed through KnowledgeAssetsV10.publish, which requires ' +
             'the adapter to expose createKnowledgeAssetsV10, getEvmChainId, and ' +
             'getKnowledgeAssetsV10Address — use an EVM adapter pointed at a chain where ' +
             'KnowledgeAssetsV10 is deployed.',
@@ -1691,19 +1979,33 @@ export class DKGPublisher implements Publisher {
             'getKnowledgeAssetsV10Address(); neither was resolved. The adapter is not V10-capable.',
           );
         }
-        // V10 publisher digest (KnowledgeAssetsV10.sol:327-335):
-        //   keccak256(abi.encodePacked(chainid, kav10Address, uint72 identityId, uint256 cgId, bytes32 merkleRoot))
-        // H5 prefix + N26 field order (identityId BEFORE cgId).
-        const pubMsgHash = computePublishPublisherDigest(
-          v10ChainId,
-          v10KavAddress,
-          identityId,
-          v10CgId,
-          kcMerkleRoot,
-        );
-        const pubSig = ethers.Signature.from(
-          await publisherSigner.signMessage(pubMsgHash),
-        );
+        if (!options.precomputedAttestation) {
+          throw new Error(
+            'Publish rejected: on-chain publish requires precomputedAttestation. ' +
+            'RFC-001 §9.x — every published assertion must be sealed at finalize-time. ' +
+            'Call agent.assertion.finalize(...) first; the daemon\'s assertion-name-aware ' +
+            '/api/shared-memory/publish path resolves the seal automatically.',
+          );
+        }
+        const effectiveAuthorAddress = options.precomputedAttestation.authorAddress;
+        const effectiveSchemeVersion = options.precomputedAttestation.schemeVersion;
+        const authorTypedData = buildAuthorAttestationTypedData({
+          chainId: v10ChainId,
+          kav10Address: v10KavAddress,
+          contextGraphId: v10CgId,
+          merkleRoot: kcMerkleRoot,
+          authorAddress: effectiveAuthorAddress,
+          schemeVersion: effectiveSchemeVersion,
+        });
+        const authorSig: ethers.Signature = ethers.Signature.from({
+          r: ethers.hexlify(options.precomputedAttestation.signature.r),
+          yParityAndS: ethers.hexlify(options.precomputedAttestation.signature.vs),
+        });
+        // Note: the seal-integrity validations (expectedMerkleRoot
+        // match, signer recovery) are now done as preflight above
+        // before this try block, so they propagate as hard errors
+        // instead of being silently downgraded to tentative
+        // (Round 4 review §12).
         // P-1 review (iter-2): `chain:writeahead:start` now fires
         // *from inside* the adapter via the `onBroadcast` callback,
         // which the adapter invokes immediately before the real
@@ -1761,7 +2063,7 @@ export class DKGPublisher implements Publisher {
         };
         try {
           onChainResult = await this.chain.createKnowledgeAssetsV10!({
-            publishOperationId: `${this.sessionId}-${tentativeSeq}`,
+            publishOperationId,
             contextGraphId: v10CgId,
             publisherAddress: publisherSigner.address,
             merkleRoot: kcMerkleRoot,
@@ -1771,11 +2073,14 @@ export class DKGPublisher implements Publisher {
             tokenAmount,
             merkleLeafCount: kcMerkleLeafCount,
             isImmutable: false,
-            paymaster: ethers.ZeroAddress,
-            publisherNodeIdentityId: identityId,
-            publisherSignature: {
-              r: ethers.getBytes(pubSig.r),
-              vs: ethers.getBytes(pubSig.yParityAndS),
+            publisherNodeIdentityId: attributionIdentityId,
+            author: {
+              address: effectiveAuthorAddress,
+              signature: {
+                r: ethers.getBytes(authorSig.r),
+                vs: ethers.getBytes(authorSig.yParityAndS),
+              },
+              schemeVersion: effectiveSchemeVersion,
             },
             ackSignatures: v10ACKs.map(ack => ({
               identityId: ack.nodeIdentityId,
@@ -1807,6 +2112,8 @@ export class DKGPublisher implements Publisher {
             allowedPeers: normalizedAllowedPeers,
             timestamp: new Date(),
             subGraphName: options.subGraphName,
+            authorAddress: effectiveAuthorAddress,
+            publishOperationId,
           },
           kaMetadata,
           {
@@ -1868,6 +2175,13 @@ export class DKGPublisher implements Publisher {
       for (const km of kaMetadata) {
         km.kcUal = ual;
       }
+      // RFC-001 §3.5: emit `dkg:authoredBy` triple even on tentative
+      // publishes so a publish that never reaches the chain still carries
+      // its self-claimed author identity locally. The on-chain
+      // `KnowledgeBatch.authorAddress` is canonical only once the publish
+      // confirms; until then this is a self-claim. `publisherSigner` may be
+      // undefined (no-chain / no-key path); skip the field in that case so
+      // the publication subject is not emitted with a missing author.
       let tentativeQuads = generateTentativeMetadata(
         {
           ual,
@@ -1879,6 +2193,20 @@ export class DKGPublisher implements Publisher {
           allowedPeers: normalizedAllowedPeers,
           timestamp: new Date(),
           subGraphName: options.subGraphName,
+          // Tentative path runs OUTSIDE the on-chain success branch
+          // where `effectiveAuthorAddress` is computed, so resolve
+          // again here. RFC-001 §9.x — author identity is carried by
+          // the precomputedAttestation; fall back to publisherSigner
+          // for non-V10 / mock-chain publishes that legitimately have
+          // no seal.
+          ...((options.precomputedAttestation?.authorAddress
+            ?? publisherSigner?.address) != null
+            ? {
+                authorAddress: (options.precomputedAttestation?.authorAddress
+                  ?? publisherSigner!.address),
+                publishOperationId,
+              }
+            : {}),
         },
         kaMetadata,
       );
@@ -1920,7 +2248,11 @@ export class DKGPublisher implements Publisher {
       subGraphName: options.subGraphName,
     };
 
-    this.eventBus.emit(DKGEvent.KC_PUBLISHED, result);
+    this.eventBus.emit(DKGEvent.KC_PUBLISHED, {
+      ...result,
+      contextGraphId,
+      tripleCount: allSkolemizedQuads.length,
+    });
     return result;
   }
 
@@ -2692,7 +3024,7 @@ export class DKGPublisher implements Publisher {
         privateTripleCount: 0,
       }));
       const encoded = encodeWorkspacePublishRequest({
-        paranetId: contextGraphId,
+        contextGraphId: contextGraphId,
         nquads: new TextEncoder().encode(nquadsStr),
         manifest: manifestEntries,
         publisherPeerId: opts.publisherPeerId,
@@ -2702,10 +3034,9 @@ export class DKGPublisher implements Publisher {
         subGraphName: opts.subGraphName,
       });
 
-      const MAX_GOSSIP_MESSAGE_SIZE = 512 * 1024;
-      if (encoded.length > MAX_GOSSIP_MESSAGE_SIZE) {
+      if (encoded.length > DKG_GOSSIP_MAX_MESSAGE_BYTES) {
         throw new Error(
-          `Promoted assertion too large for gossip (${(encoded.length / 1024).toFixed(0)} KB, limit ${MAX_GOSSIP_MESSAGE_SIZE / 1024} KB). ` +
+          `Promoted assertion too large for gossip (${formatBytesAsKb(encoded.length)}, limit ${formatGossipLimit(DKG_GOSSIP_MAX_MESSAGE_BYTES)}). ` +
           `Promote fewer entities per call.`,
         );
       }

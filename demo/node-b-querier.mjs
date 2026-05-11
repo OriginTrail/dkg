@@ -5,7 +5,7 @@
  *   node demo/node-b-querier.mjs <node-a-multiaddr>
  *
  * This node:
- *  1. Connects to Node A and subscribes to the paranet GossipSub topic
+ *  1. Connects to Node A and subscribes to the contextGraph GossipSub topic
  *  2. Receives public triples broadcast by Node A over GossipSub
  *  3. Stores them in its own Oxigraph instance
  *  4. Queries the local knowledge graph with SPARQL
@@ -14,15 +14,15 @@
 
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus,
-  generateEd25519Keypair, decodePublishRequest, paranetPublishTopic,
+  generateEd25519Keypair, decodePublishRequest, contextGraphPublishTopic,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, GraphManager } from '@origintrail-official/dkg-storage';
 import { DKGQueryEngine } from '@origintrail-official/dkg-query';
 import { AccessClient } from '@origintrail-official/dkg-publisher';
 import { multiaddr } from '@multiformats/multiaddr';
 
-const PARANET = 'agent-skills';
-const TOPIC = paranetPublishTopic(PARANET);
+const CONTEXT_GRAPH = 'agent-skills';
+const TOPIC = contextGraphPublishTopic(CONTEXT_GRAPH);
 
 function sleep(ms) {
   return new Promise(r => setTimeout(r, ms));
@@ -55,7 +55,7 @@ async function main() {
   const keypair = await generateEd25519Keypair();
   const router = new ProtocolRouter(node);
 
-  // 2. Subscribe to the paranet GossipSub topic BEFORE connecting
+  // 2. Subscribe to the contextGraph GossipSub topic BEFORE connecting
   const gossip = new GossipSubManager(node, eventBus);
   gossip.subscribe(TOPIC);
   console.log(`Subscribed to GossipSub topic: "${TOPIC}"`);
@@ -74,13 +74,13 @@ async function main() {
 
       console.log(`  [GossipSub] Decoded PublishRequest:`);
       console.log(`    UAL:       ${request.ual}`);
-      console.log(`    Paranet:   ${request.paranetId}`);
+      console.log(`    ContextGraph:   ${request.contextGraphId}`);
       console.log(`    Triples:   ${quads.length}`);
       console.log(`    KAs:       ${request.kas.length}`);
 
       // Store the received triples in our local Oxigraph
-      await graphManager.ensureParanet(request.paranetId);
-      const dataGraph = graphManager.dataGraphUri(request.paranetId);
+      await graphManager.ensureContextGraph(request.contextGraphId);
+      const dataGraph = graphManager.dataGraphUri(request.contextGraphId);
       const normalized = quads.map(q => ({ ...q, graph: dataGraph }));
       await store.insert(normalized);
 
@@ -124,7 +124,7 @@ async function main() {
       ?agent <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dkg.io/ontology/Agent> .
       ?agent <http://schema.org/name> ?name .
     }`,
-    { paranetId: PARANET },
+    { contextGraphId: CONTEXT_GRAPH },
   );
 
   if (agents.bindings.length === 0) {
@@ -142,7 +142,7 @@ async function main() {
       ?offering <http://dkg.io/ontology/skillType> ?skill .
       ?offering <http://schema.org/price> ?price .
     }`,
-    { paranetId: PARANET },
+    { contextGraphId: CONTEXT_GRAPH },
   );
 
   for (const row of skills.bindings) {

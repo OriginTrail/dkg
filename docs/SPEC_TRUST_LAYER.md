@@ -17,7 +17,7 @@ This document explains the full design — from first principles through contrac
 5. [Buying Private Knowledge (FairSwap)](#5-buying-private-knowledge-fairswap)
 6. [Publishing Conviction Accounts](#6-publishing-conviction-accounts)
 7. [Staking and Conviction](#7-staking-and-conviction)
-8. [Paranets: Network Sharding](#8-paranets-network-sharding)
+8. [ContextGraphs: Network Sharding](#8-contextGraphs-network-sharding)
 9. [Scoring and Rewards](#9-scoring-and-rewards)
 10. [Contract Architecture](#10-contract-architecture)
 11. [Multi-Chain Support](#11-multi-chain-support)
@@ -41,7 +41,7 @@ The total body of human knowledge is vast and growing exponentially. No single a
 
 The practical solution is the same one humanity uses: **specialization and shared infrastructure**. Agents specialize in domains (climate data, legal precedent, market analysis, medical literature) and contribute their knowledge to a shared, queryable network. Any agent can find and access what it needs without duplicating the work of every other agent.
 
-This is what the DKG provides — a **sharded knowledge database for AI agents**, partitioned into domain-specific paranets (knowledge channels), where each agent contributes what it knows and queries what it needs.
+This is what the DKG provides — a **sharded knowledge database for AI agents**, partitioned into domain-specific contextGraphs (knowledge channels), where each agent contributes what it knows and queries what it needs.
 
 ### Shared knowledge must be verifiable
 
@@ -128,11 +128,11 @@ KC Merkle Root (on-chain)
     └── Private Root
 ```
 
-### Paranets
+### ContextGraphs
 
-A paranet is a domain-specific partition of the DKG. Think of it as a "channel" or "namespace" for knowledge. Examples: a "memes" paranet, an "AI research" paranet, a "climate data" paranet.
+A contextGraph is a domain-specific partition of the DKG. Think of it as a "channel" or "namespace" for knowledge. Examples: a "memes" contextGraph, an "AI research" contextGraph, a "climate data" contextGraph.
 
-Paranets matter because not every node can or should store all knowledge in the DKG. Nodes choose which paranets to participate in, staking tokens to back their commitment. This is how the network scales — by sharding knowledge across paranets.
+ContextGraphs matter because not every node can or should store all knowledge in the DKG. Nodes choose which contextGraphs to participate in, staking tokens to back their commitment. This is how the network scales — by sharding knowledge across contextGraphs.
 
 ### Epochs
 
@@ -141,14 +141,14 @@ Time on the DKG is measured in **epochs** (1 epoch = 30 days). Epochs are used f
 - Distributing rewards to nodes
 - Lock durations for staking and publishing conviction
 - Scheduling proof challenges
-- Reallocation cooldowns for paranet stake
+- Reallocation cooldowns for contextGraph stake
 
 ### TRAC Token
 
 TRAC is the utility token of the DKG. It flows in a cycle that powers the agent knowledge economy:
 
 1. **Agents publish** — spend TRAC to commit knowledge on-chain and pay for network storage
-2. **Tokens flow to reward pools** — distributed across epochs, scoped per paranet
+2. **Tokens flow to reward pools** — distributed across epochs, scoped per contextGraph
 3. **Storage nodes earn** — by reliably storing data, passing proof challenges, and serving queries
 4. **Delegators participate** — stake TRAC to nodes they trust and earn a share of rewards
 5. **Agents monetize** — other agents pay (TRAC or stablecoins via x402) to access private knowledge assets, creating a self-sustaining knowledge marketplace
@@ -195,12 +195,12 @@ Because ranges are namespaced per publisher key, they don't interfere with each 
 2. Prepare     Off-chain: assign KA IDs from reserved range,
                compute merkle tree (public + private roots per KA)
 
-3. Broadcast   Send PublishRequest via GossipSub to subscribed paranet nodes
+3. Broadcast   Send PublishRequest via GossipSub to subscribed contextGraph nodes
                → Nodes store public triples as TENTATIVE
 
 4. Finalize    Publisher calls batchMintKnowledgeAssets on-chain
                with pre-assigned KA IDs, merkle root, token payment,
-               storage duration (in epochs), target paranet
+               storage duration (in epochs), target contextGraph
 
 5. Confirm     Nodes observe on-chain event, verify merkle root matches
                → Triples become CONFIRMED and queryable by all
@@ -229,7 +229,7 @@ Between steps 3 and 5, the data is in a **tentative** state:
 - **Other nodes** store the data but do **not** serve it in query results until the on-chain finalization event arrives. This prevents unverified (or potentially fraudulent) data from polluting query results across the network.
 - **10-minute timeout**: If no on-chain finalization event is observed within 10 minutes of receiving the broadcast, nodes discard the tentative data. This prevents nodes from accumulating unfinalized garbage data from misbehaving publishers.
 
-> **Two-phase metadata**: When publishing, nodes generate metadata in two phases. **Phase 1 (tentative)** metadata is created at P2P broadcast time and includes `dkg:status "tentative"`, publisher peer ID, local timestamp, paranet, merkle root, and KA count. **Phase 2 (confirmed)** metadata is added after on-chain finalization and includes `dkg:status "confirmed"`, transaction hash, block number, authoritative chain timestamp, publisher address, batch ID, and chain ID. This provides a complete audit trail from initial broadcast to on-chain settlement.
+> **Two-phase metadata**: When publishing, nodes generate metadata in two phases. **Phase 1 (tentative)** metadata is created at P2P broadcast time and includes `dkg:status "tentative"`, publisher peer ID, local timestamp, contextGraph, merkle root, and KA count. **Phase 2 (confirmed)** metadata is added after on-chain finalization and includes `dkg:status "confirmed"`, transaction hash, block number, authoritative chain timestamp, publisher address, batch ID, and chain ID. This provides a complete audit trail from initial broadcast to on-chain settlement.
 
 ### Knowledge Updates
 
@@ -292,7 +292,7 @@ After 100 epochs, the storage obligation becomes part of the network's base laye
 function batchMintKnowledgeAssetsPermanent(
     uint64[] calldata kaIds,
     bytes32 merkleRoot,
-    bytes32 paranetId
+    bytes32 contextGraphId
 ) external;
 ```
 
@@ -307,7 +307,7 @@ cost = stakeWeightedAverageAsk × publicByteSize × epochs / 1024
 ```
 
 Where:
-- `stakeWeightedAverageAsk` is the paranet's price per KB per epoch, determined by the asks of active nodes weighted by their stake in that paranet
+- `stakeWeightedAverageAsk` is the contextGraph's price per KB per epoch, determined by the asks of active nodes weighted by their stake in that contextGraph
 - `publicByteSize` is the size of the **public** triples only — private triples are not factored into cost because they stay on the publisher's node and do not burden the network's storage
 - `epochs` is the storage duration (in 30-day epochs)
 
@@ -373,7 +373,7 @@ Private knowledge sale →
    5% → Protocol treasury
 ```
 
-Unlike publishing fees (which fund storage node rewards), private knowledge sales are direct value exchange between agents. The protocol takes a 5% fee for the treasury, and the seller receives the rest. There is no paranet pool or global pool cut — storage nodes are already compensated via the original publishing fees.
+Unlike publishing fees (which fund storage node rewards), private knowledge sales are direct value exchange between agents. The protocol takes a 5% fee for the treasury, and the seller receives the rest. There is no contextGraph pool or global pool cut — storage nodes are already compensated via the original publishing fees.
 
 ### Contract Interface
 
@@ -525,29 +525,29 @@ The multiplier uses `originalLockEpochs` (the duration set when the lock was cre
 
 ---
 
-## 8. Paranets: Network Sharding
+## 8. ContextGraphs: Network Sharding
 
 ### The Problem
 
 If every node stores every piece of knowledge in the DKG, the network doesn't scale. A node on a Raspberry Pi can't store petabytes of data. We need a way to divide the network into manageable pieces.
 
-### The Solution: Paranet-Scoped Staking (Option A)
+### The Solution: ContextGraph-Scoped Staking (Option A)
 
-Each node has a **total stake** and allocates portions of it to specific paranets. The stake allocation is the node's commitment to store and serve knowledge for that paranet.
+Each node has a **total stake** and allocates portions of it to specific contextGraphs. The stake allocation is the node's commitment to store and serve knowledge for that contextGraph.
 
 ```
 Node with 500K TRAC total stake:
-  ├── 100K allocated to "agents" (system paranet)
-  ├── 50K allocated to "ontology" (system paranet)
+  ├── 100K allocated to "agents" (system contextGraph)
+  ├── 50K allocated to "ontology" (system contextGraph)
   ├── 200K allocated to "memes"
   ├── 100K allocated to "ai-research"
   └── 50K unallocated (earns from global pool only)
 ```
 
 **Rules:**
-- **Minimum total stake**: 50K TRAC per node to participate in the network at all. There is **no minimum per paranet** — a node can allocate any portion of its stake to any paranet, enabling small operators to participate in many paranets without artificial barriers.
+- **Minimum total stake**: 50K TRAC per node to participate in the network at all. There is **no minimum per contextGraph** — a node can allocate any portion of its stake to any contextGraph, enabling small operators to participate in many contextGraphs without artificial barriers.
 - **Reallocation cooldown**: 1 epoch (30 days) between reallocations (prevents yield farming and flash-allocation attacks)
-- **System paranets** ("agents", "ontology") follow the **same mechanics** as all other paranets — nodes must explicitly allocate stake to participate. This keeps the economics uniform and avoids special-casing. During `dkg init`, the default configuration auto-subscribes nodes to system paranets, but this is a client convenience — not a protocol-level exemption.
+- **System contextGraphs** ("agents", "ontology") follow the **same mechanics** as all other contextGraphs — nodes must explicitly allocate stake to participate. This keeps the economics uniform and avoids special-casing. During `dkg init`, the default configuration auto-subscribes nodes to system contextGraphs, but this is a client convenience — not a protocol-level exemption.
 - **Unallocated stake** earns a small yield from the global pool (10% of all network fees)
 
 ### Why Allocation Creates a Healthy Market
@@ -555,60 +555,60 @@ Node with 500K TRAC total stake:
 This design creates a market where capital flows toward valuable knowledge:
 
 **The virtuous cycle:**
-1. A popular paranet has lots of publishers paying fees → large reward pool
+1. A popular contextGraph has lots of publishers paying fees → large reward pool
 2. Nodes notice the high yield and allocate stake to it → more security
 3. More nodes means lower prices (more competition) → attracts more publishers
-4. The paranet grows and becomes more reliable
+4. The contextGraph grows and becomes more reliable
 
 **The natural correction:**
-1. A dead paranet has no publishers → no fees → no rewards
-2. Nodes reallocate their stake to productive paranets
-3. The dead paranet effectively shuts down (no data loss, just no active hosting)
+1. A dead contextGraph has no publishers → no fees → no rewards
+2. Nodes reallocate their stake to productive contextGraphs
+3. The dead contextGraph effectively shuts down (no data loss, just no active hosting)
 
 **The niche equilibrium:**
-1. A niche paranet has few publishers but specialized demand
+1. A niche contextGraph has few publishers but specialized demand
 2. Few nodes participate → higher prices → only committed publishers stay
 3. Small but sustainable: the few nodes earn enough to justify hosting
 
-### Per-Paranet Sharding Table
+### Per-ContextGraph Sharding Table
 
-Each paranet has its own sharding table — a sorted list of nodes (by hash ring position) that are allocated to it. A node appears in a paranet's sharding table only if it has allocated at least the minimum stake.
+Each contextGraph has its own sharding table — a sorted list of nodes (by hash ring position) that are allocated to it. A node appears in a contextGraph's sharding table only if it has allocated at least the minimum stake.
 
 This means:
-- Publishing to a paranet is validated against that paranet's node set
-- Challenges are scoped per paranet — nodes prove they store *that paranet's* data
-- A node can participate in multiple paranets simultaneously
+- Publishing to a contextGraph is validated against that contextGraph's node set
+- Challenges are scoped per contextGraph — nodes prove they store *that contextGraph's* data
+- A node can participate in multiple contextGraphs simultaneously
 
-### Per-Paranet Pricing
+### Per-ContextGraph Pricing
 
-Each paranet has its own stake-weighted average ask price, computed from the asks of nodes allocated to it:
+Each contextGraph has its own stake-weighted average ask price, computed from the asks of nodes allocated to it:
 
 ```
-paranetPrice = sum(nodeAsk × nodeStakeInParanet) / sum(nodeStakeInParanet)
+contextGraphPrice = sum(nodeAsk × nodeStakeInContextGraph) / sum(nodeStakeInContextGraph)
 ```
 
-Paranets with many competitive nodes have lower prices. Niche paranets with few nodes are more expensive. The market sets the price.
+ContextGraphs with many competitive nodes have lower prices. Niche contextGraphs with few nodes are more expensive. The market sets the price.
 
-### Cross-Paranet Queries
+### Cross-ContextGraph Queries
 
-Although paranets are separate storage partitions, agents can query across multiple paranets using standard SPARQL mechanisms:
+Although contextGraphs are separate storage partitions, agents can query across multiple contextGraphs using standard SPARQL mechanisms:
 
-- **`FROM` clause**: A node that is subscribed to multiple paranets can answer queries spanning them by specifying multiple named graphs:
+- **`FROM` clause**: A node that is subscribed to multiple contextGraphs can answer queries spanning them by specifying multiple named graphs:
   ```sparql
   SELECT ?agent ?meme WHERE {
-    GRAPH <did:dkg:paranet:agents> { ?agent a erc8004:Agent }
-    GRAPH <did:dkg:paranet:memes> { ?meme dkg:publishedBy ?agent }
+    GRAPH <did:dkg:context-graph:agents> { ?agent a erc8004:Agent }
+    GRAPH <did:dkg:context-graph:memes> { ?meme dkg:publishedBy ?agent }
   }
   ```
-- **`SERVICE` keyword**: For paranets hosted on different nodes, SPARQL federation allows delegating sub-queries to remote endpoints:
+- **`SERVICE` keyword**: For contextGraphs hosted on different nodes, SPARQL federation allows delegating sub-queries to remote endpoints:
   ```sparql
   SELECT ?agent ?skill WHERE {
-    GRAPH <did:dkg:paranet:agents> { ?agent erc8004:hasCapability ?skill }
-    SERVICE <dkg://paranet:ai-research> { ?paper dkg:author ?agent }
+    GRAPH <did:dkg:context-graph:agents> { ?agent erc8004:hasCapability ?skill }
+    SERVICE <dkg://contextGraph:ai-research> { ?paper dkg:author ?agent }
   }
   ```
 
-Cross-paranet queries work naturally because all paranets use the same RDF model and shared ontologies. A node can only answer queries for paranets it has allocated stake to (and therefore stores data for). Federation via `SERVICE` enables queries that span paranets across different nodes.
+Cross-contextGraph queries work naturally because all contextGraphs use the same RDF model and shared ontologies. A node can only answer queries for contextGraphs it has allocated stake to (and therefore stores data for). Federation via `SERVICE` enables queries that span contextGraphs across different nodes.
 
 ---
 
@@ -620,35 +620,35 @@ When a publisher pays to store knowledge, the TRAC is split:
 
 ```
 Publishing fee →
-  85% → Paranet epoch pool (for nodes hosting this paranet)
+  85% → ContextGraph epoch pool (for nodes hosting this contextGraph)
   10% → Global network pool (for all stakers, proportional to total stake)
    5% → Protocol treasury (funds ongoing development and maintenance)
 ```
 
-There is **no paranet operator fee**. Paranet operators (creators/curators) participate by running nodes and allocating stake — earning rewards through the same meritocratic mechanisms as everyone else. This prevents rent-seeking by operators who create paranets just to extract fees without contributing storage or availability.
+There is **no contextGraph operator fee**. ContextGraph operators (creators/curators) participate by running nodes and allocating stake — earning rewards through the same meritocratic mechanisms as everyone else. This prevents rent-seeking by operators who create contextGraphs just to extract fees without contributing storage or availability.
 
 The **protocol treasury** is a multisig-controlled address that accumulates 5% of all publishing fees network-wide. These funds are reserved for future protocol development, audits, bug bounties, and ecosystem grants. The treasury percentage is governance-adjustable.
 
-The paranet epoch pool is distributed to nodes at the end of each epoch based on their **node score**.
+The contextGraph epoch pool is distributed to nodes at the end of each epoch based on their **node score**.
 
 ### Node Score Formula
 
-Within each paranet, a node's score is:
+Within each contextGraph, a node's score is:
 
 ```
-nodeParanetScore(t) = S(t) × (c + 0.86 × P(t) + 0.60 × A(t) × P(t))
+nodeContextGraphScore(t) = S(t) × (c + 0.86 × P(t) + 0.60 × A(t) × P(t))
 ```
 
 Where:
-- `S(t) = sqrt(nodeStakeInParanet / paranetStakeCap)` — stake factor (sublinear, so whales can't dominate)
+- `S(t) = sqrt(nodeStakeInContextGraph / contextGraphStakeCap)` — stake factor (sublinear, so whales can't dominate)
 - `P(t)` = publishing share (fraction of proofs successfully submitted in recent epochs)
-- `A(t) = 1 - |nodeAsk - paranetPrice| / paranetPrice` — ask alignment (rewarding competitive pricing)
+- `A(t) = 1 - |nodeAsk - contextGraphPrice| / contextGraphPrice` — ask alignment (rewarding competitive pricing)
 - `c = 0.002` — baseline coefficient (ensures minimal reward even for new nodes)
 
 The **conviction multiplier** stacks on top:
 
 ```
-effectiveScore = nodeParanetScore × stakingConvictionMultiplier
+effectiveScore = nodeContextGraphScore × stakingConvictionMultiplier
 ```
 
 A node that stakes 200K to "memes", locks for 1 year (3x multiplier), submits all proofs, and has a competitive ask will earn significantly more than a node with the same stake but no lock and spotty proof submission.
@@ -659,15 +659,15 @@ To earn rewards, nodes must prove they're actually storing the data. Challenges 
 
 Each proof period:
 
-1. On-chain randomness (derived from block hashes) selects a random Knowledge Asset from the paranet
+1. On-chain randomness (derived from block hashes) selects a random Knowledge Asset from the contextGraph
 2. A random chunk of that KA is requested
 3. The challenged node must provide the chunk and a merkle proof that it's part of the committed KA within the proof window
 
 A node's proof score `P(t)` is the fraction of successfully answered challenges over the epoch. At the end of each epoch, rewards are distributed based on accumulated proof scores. Nodes that consistently respond earn full rewards; nodes with gaps earn proportionally less.
 
-### Per-Paranet Stake Cap
+### Per-ContextGraph Stake Cap
 
-To prevent a single whale from dominating a paranet's rewards through stake alone, there's a **per-paranet stake cap**. The `sqrt()` in the stake factor ensures diminishing returns: doubling your stake only gives you ~1.41x the stake component, not 2x. This means actual performance (proofs and ask alignment) matters as much as capital.
+To prevent a single whale from dominating a contextGraph's rewards through stake alone, there's a **per-contextGraph stake cap**. The `sqrt()` in the stake factor ensures diminishing returns: doubling your stake only gives you ~1.41x the stake component, not 2x. This means actual performance (proofs and ask alignment) matters as much as capital.
 
 ---
 
@@ -681,7 +681,7 @@ All DKG contracts are registered in a central **Hub** contract. The Hub is a key
 Hub
 ├── "KnowledgeAssets" → 0xA1B2...
 ├── "Staking" → 0xC3D4...
-├── "Paranet" → 0xE5F6...
+├── "ContextGraph" → 0xE5F6...
 ├── "PublishingConvictionAccount" → 0x7890...
 └── ...
 ```
@@ -704,9 +704,9 @@ Logic Contracts (upgradeable)     Storage Contracts (persistent)
 KnowledgeAssets.sol          →    KnowledgeAssetsStorage.sol  (V9 — address-based publishing)
 Staking.sol                  →    StakingStorage.sol
                                   DelegatorsInfo.sol
-Paranet.sol                  →    ParanetsRegistry.sol
-                                  ParanetKnowledgeCollectionsRegistry.sol
-                                  ParanetKnowledgeMinersRegistry.sol
+ContextGraph.sol                  →    ContextGraphsRegistry.sol
+                                  ContextGraphKnowledgeCollectionsRegistry.sol
+                                  ContextGraphKnowledgeMinersRegistry.sol
 ShardingTable.sol            →    ShardingTableStorage.sol
 Ask.sol                      →    AskStorage.sol
 RandomSampling.sol           →    RandomSamplingStorage.sol
@@ -745,7 +745,7 @@ interface ChainAdapter {
 
   // Staking
   stakeWithLock(identityId: bigint, amount: bigint, lockEpochs: number): Promise<TxResult>;
-  stakeToParanet(identityId: bigint, paranetId: string, amount: bigint): Promise<TxResult>;
+  stakeToContextGraph(identityId: bigint, contextGraphId: string, amount: bigint): Promise<TxResult>;
 
   // Publishing Conviction Account
   createConvictionAccount(amount: bigint, lockEpochs: number): Promise<AccountResult>;
@@ -781,7 +781,7 @@ DKG V9 is designed to supersede V8 without breaking existing state. The key prin
 
 ### What Stays the Same
 
-- **Storage contract names and layouts**: `StakingStorage`, `KnowledgeCollectionStorage`, `DelegatorsInfo`, `ShardingTableStorage`, `ParanetsRegistry`, etc. are not renamed or modified. Their struct fields are not reordered. All existing on-chain data remains accessible. `KnowledgeCollectionStorage` becomes **legacy** (read-only) — V9 writes go to the new `KnowledgeAssetsStorage`.
+- **Storage contract names and layouts**: `StakingStorage`, `KnowledgeCollectionStorage`, `DelegatorsInfo`, `ShardingTableStorage`, `ContextGraphsRegistry`, etc. are not renamed or modified. Their struct fields are not reordered. All existing on-chain data remains accessible. `KnowledgeCollectionStorage` becomes **legacy** (read-only) — V9 writes go to the new `KnowledgeAssetsStorage`.
 - **Token economics baseline**: V8's 28-day staking withdrawal maps closely to V9's 1-epoch (30-day) lock = 1.0x conviction multiplier. V8 stakers see no meaningful change in reward rate if they don't opt into longer locks.
 - **Hub pattern**: Same contract registry, same upgrade mechanism.
 - **Epoch timing**: 30-day epochs (same as V8 mainnet; the 1-day epoch was a testnet-only configuration).
@@ -790,8 +790,8 @@ DKG V9 is designed to supersede V8 without breaking existing state. The key prin
 ### What Changes
 
 - **Logic contracts are upgraded**: `KnowledgeAssets.sol` replaces `KnowledgeCollection.sol` in the Hub, backed by the new `KnowledgeAssetsStorage` instead of the legacy `KnowledgeCollectionStorage`.
-- **New fields appended to structs**: Conviction lock data is added to the end of `DelegatorData` in `StakingStorage`. Per-paranet stake allocations are added via new mappings in a new `ParanetStakingStorage` contract.
-- **New contracts deployed**: `KnowledgeAssetsStorage`, `PublishingConvictionAccount`, `ParanetStakingStorage`, `FairSwapJudge`, and `ProtocolTreasury` are entirely new.
+- **New fields appended to structs**: Conviction lock data is added to the end of `DelegatorData` in `StakingStorage`. Per-contextGraph stake allocations are added via new mappings in a new `ContextGraphStakingStorage` contract.
+- **New contracts deployed**: `KnowledgeAssetsStorage`, `PublishingConvictionAccount`, `ContextGraphStakingStorage`, `FairSwapJudge`, and `ProtocolTreasury` are entirely new.
 - **Publishing flow**: `batchMintKnowledgeAssets` replaces `createKnowledgeCollection`, with UAL pre-minting. The storage format is the same. `updateKnowledgeAssets` is new.
 - **FairSwap**: New `FairSwapJudge` contract for private knowledge exchange — entirely new, no migration.
 - **Permanent publishing**: New endowment mechanism — entirely additive.
@@ -801,7 +801,7 @@ DKG V9 is designed to supersede V8 without breaking existing state. The key prin
 1. Deploy new logic contracts and new storage contracts
 2. Register them in the Hub
 3. Existing stakers, delegators, and KAs continue working with no action required
-4. New features (conviction locks, paranet staking, UAL pre-minting) are opt-in
+4. New features (conviction locks, contextGraph staking, UAL pre-minting) are opt-in
 5. The conviction multiplier for existing 28-day stakers is automatically 1.0x
 
 ---
@@ -859,25 +859,25 @@ if lockEpochs >= 1:
 Solidity: K = 18/7 scaled to 1e18, H = 22/7 scaled to 1e18, cap = 3e18
 ```
 
-### Node Score (per-paranet)
+### Node Score (per-contextGraph)
 ```
-nodeParanetScore(t) = S(t) × (c + 0.86 × P(t) + 0.60 × A(t) × P(t))
+nodeContextGraphScore(t) = S(t) × (c + 0.86 × P(t) + 0.60 × A(t) × P(t))
 
-S(t) = sqrt(nodeStakeInParanet / paranetStakeCap)
-P(t) = nodeProofsSubmitted / totalParanetProofs  (over 4 epochs)
-A(t) = 1 - |nodeAsk - paranetPrice| / paranetPrice
+S(t) = sqrt(nodeStakeInContextGraph / contextGraphStakeCap)
+P(t) = nodeProofsSubmitted / totalContextGraphProofs  (over 4 epochs)
+A(t) = 1 - |nodeAsk - contextGraphPrice| / contextGraphPrice
 c = 0.002
 
-effectiveScore = nodeParanetScore × convictionMultiplier
+effectiveScore = nodeContextGraphScore × convictionMultiplier
 ```
 
 ### Reward Distribution
 ```
 Publishing fee split:
-  85% → Paranet epoch pool
+  85% → ContextGraph epoch pool
   10% → Global network pool
    5% → Protocol treasury
 
-Node's share of paranet pool:
-  nodeReward = paranetPool × (nodeEffectiveScore / sumAllNodeScores)
+Node's share of contextGraph pool:
+  nodeReward = contextGraphPool × (nodeEffectiveScore / sumAllNodeScores)
 ```

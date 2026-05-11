@@ -148,7 +148,7 @@ export {
   type AsyncLiftPublishSuccess,
   type AsyncLiftPublishFailureInput,
 } from './async-lift-publish-result.js';
-export { WorkspaceHandler, WorkspaceHandler as SharedMemoryHandler } from './workspace-handler.js';
+export { SharedMemoryHandler, WorkspaceHandler } from './workspace-handler.js';
 export { UpdateHandler } from './update-handler.js';
 export { ChainEventPoller, type ChainEventPollerConfig, type OnContextGraphCreated } from './chain-event-poller.js';
 export { AccessHandler, type AccessPolicy } from './access-handler.js';

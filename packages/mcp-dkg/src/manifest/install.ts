@@ -10,8 +10,8 @@
  * The installer is structured as plan → preview → write so the CLI
  * (and the future modal) can show the operator exactly what's about
  * to happen before any disk I/O. The same `planInstall()` output
- * powers `buildReviewMarkdown()` which the dkg_review_manifest MCP
- * tool returns to the agent for review.
+ * powers `buildReviewMarkdown()` which surfaces the install preview
+ * to the operator (CLI today, daemon route for the modal).
  *
  * No script execution. No arbitrary paths. No tokens travel through
  * the manifest. The only configurable destination is `<workspace>`
@@ -384,8 +384,8 @@ export async function writeInstall(plan: InstallPlan): Promise<WriteResult[]> {
 
 /**
  * Build a markdown summary of an install plan suitable for showing
- * to a human operator OR returning from the dkg_review_manifest MCP
- * tool for an agent to assess.
+ * to a human operator (CLI preview today, daemon-route preview for
+ * the future install modal).
  */
 export function buildReviewMarkdown(
   manifest: ProjectManifest,

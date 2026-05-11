@@ -11,6 +11,15 @@ export interface CatchupJobResult {
   connectedPeers: number;
   syncCapablePeers: number;
   peersTried: number;
+  /**
+   * Subset of `peersTried` whose per-peer sync round finished without a
+   * transport failure AND without an explicit ACL denial. Used by the
+   * daemon subscribe job to map the terminal status: `peersTried > 0
+   * && peersSucceeded === 0 && !denied` → `unreachable` (curator
+   * offline / no peer holds this CG / network couldn't deliver),
+   * distinct from `denied` (curator actively refused).
+   */
+  peersSucceeded: number;
   dataSynced: number;
   sharedMemorySynced: number;
   denied: boolean;

@@ -34,7 +34,7 @@ describe('OperationTracker', () => {
     expect(op).toBeDefined();
     expect(op!.status).toBe('in_progress');
     expect(op!.peer_id).toBe('peer-abc');
-    expect(op!.paranet_id).toBe('testing');
+    expect(op!.contextGraph_id).toBe('testing');
 
     tracker.complete(c, { tripleCount: 50 });
 

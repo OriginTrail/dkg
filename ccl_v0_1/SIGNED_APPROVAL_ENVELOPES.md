@@ -11,14 +11,14 @@ Make policy approval and revocation verifiable from a signed payload, not from t
 Each approval or revocation should be broadcast with a detached, signed envelope containing:
 
 - `type`: `ccl-policy-approval` or `ccl-policy-revocation`
-- `paranetId`
+- `contextGraphId`
 - `policyUri`
 - `policyName`
 - `contextType` when scoped
 - `bindingUri`
 - `status`: `approved` or `revoked`
 - `approvedAt` or `revokedAt`
-- `actorDid`: expected paranet owner DID
+- `actorDid`: expected contextGraph owner DID
 - `chainId`
 - `nonce` or monotonic sequence value
 - `payloadHash`: hash of the canonical RDF quads being asserted
@@ -41,7 +41,7 @@ Recommended canonical payload rules:
 On gossip ingest, peers should:
 
 1. parse the envelope
-2. resolve the locally known paranet owner
+2. resolve the locally known contextGraph owner
 3. ensure `actorDid` matches the current owner
 4. recompute `payloadHash` from the incoming binding quads
 5. verify the signature against the owner key
@@ -53,8 +53,8 @@ If any step fails, reject the approval or revocation binding and log the reason.
 
 Two realistic options:
 
-- reuse the existing agent wallet signing key and bind it to the paranet owner DID
-- introduce a dedicated approval-signing key referenced from the paranet profile
+- reuse the existing agent wallet signing key and bind it to the contextGraph owner DID
+- introduce a dedicated approval-signing key referenced from the contextGraph profile
 
 The first option is simpler for v0.x. The second is cleaner if approval authority needs rotation without changing the node identity key.
 
@@ -62,7 +62,7 @@ The first option is simpler for v0.x. The second is cleaner if approval authorit
 
 Signed envelopes should include replay resistance. Acceptable options:
 
-- `nonce` tracked per `(paranetId, contextType)`
+- `nonce` tracked per `(contextGraphId, contextType)`
 - monotonic sequence number per binding scope
 - chain-anchored version or block reference
 

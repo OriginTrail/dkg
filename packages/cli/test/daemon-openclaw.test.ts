@@ -993,7 +993,7 @@ describe('daemon loopback request handling', () => {
   it('bypasses rate limiting for loopback node-ui and local-agent traffic, but not remote clients', () => {
     expect(shouldBypassRateLimitForLoopbackTraffic('127.0.0.1', '/ui')).toBe(true);
     expect(shouldBypassRateLimitForLoopbackTraffic('127.0.0.1', '/ui/assets/index.js')).toBe(true);
-    expect(shouldBypassRateLimitForLoopbackTraffic('127.0.0.1', '/api/paranet/list')).toBe(true);
+    expect(shouldBypassRateLimitForLoopbackTraffic('127.0.0.1', '/api/context-graph/list')).toBe(true);
     expect(shouldBypassRateLimitForLoopbackTraffic('127.0.0.1', '/api/query')).toBe(true);
     expect(shouldBypassRateLimitForLoopbackTraffic('127.0.0.1', '/api/openclaw-channel/persist-turn')).toBe(true);
     expect(shouldBypassRateLimitForLoopbackTraffic('::1', '/api/local-agent-integrations')).toBe(true);

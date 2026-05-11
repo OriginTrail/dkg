@@ -20,7 +20,7 @@ CCL does **not** replace `PUBLISH`.
 
 Every CCL evaluation is scoped by a declared context:
 
-- `paranet`
+- `contextGraph`
 - `scope_ual`
 - `view`
 - `snapshot_id`
@@ -218,8 +218,8 @@ Decisions are evaluated after rule derivation fixpoint.
 
 ## 9. Alignment with DKG v9 axioms
 
-### A1. Paranet-scoped
-CCL evaluation is explicitly paranet-scoped.
+### A1. ContextGraph-scoped
+CCL evaluation is explicitly contextGraph-scoped.
 
 ### A2. Authority-aware
 Authority is represented as facts and checked by policy rules.
@@ -250,7 +250,7 @@ A future canonical policy envelope should include:
 
 - `policy_name`
 - `policy_version`
-- `paranet`
+- `contextGraph`
 - `scope_ual`
 - `view`
 - `snapshot_id`

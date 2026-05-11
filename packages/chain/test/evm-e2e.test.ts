@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { ethers, Wallet, Contract } from 'ethers';
 import { EVMChainAdapter } from '../src/evm-adapter.js';
+import { buildAuthorAttestationTypedData } from '@origintrail-official/dkg-core';
 import {
   spawnHardhatEnv,
   killHardhat,
@@ -219,13 +220,18 @@ describe('EVM E2E: Full on-chain publishing lifecycle', () => {
     const kav10Address = await adapter.getKnowledgeAssetsV10Address();
     const evmChainId = await adapter.getEvmChainId();
 
-    // Publisher digest: keccak256(abi.encodePacked(chainid, address(KAV10), identityId, contextGraphId, merkleRoot))
-    const pubDigest = ethers.getBytes(ethers.solidityPackedKeccak256(
-      ['uint256', 'address', 'uint72', 'uint256', 'bytes32'],
-      [evmChainId, kav10Address, publisherIdentityId, contextGraphId, ethers.hexlify(merkleRoot)],
-    ));
-    const pubSigRaw = await coreOp.signMessage(pubDigest);
-    const pubSig = ethers.Signature.from(pubSigRaw);
+    // RFC-001 §3 author attestation. EIP-712 typed data over
+    // (cgId, merkleRoot, authorAddress, schemeVersion=1) bound to KAV10.
+    const authorTyped = buildAuthorAttestationTypedData({
+      chainId: evmChainId,
+      kav10Address,
+      contextGraphId,
+      merkleRoot,
+      authorAddress: coreOp.address,
+    });
+    const authorSig = ethers.Signature.from(
+      await coreOp.signTypedData(authorTyped.domain, authorTyped.types, authorTyped.message),
+    );
 
     // ACK digest: keccak256(abi.encodePacked(chainid, address(KAV10), contextGraphId, merkleRoot, kaCount, byteSize, epochs, tokenAmount, merkleLeafCount))
     // PR #357: V10 ACK now binds merkleLeafCount (uint256) so that
@@ -267,15 +273,17 @@ describe('EVM E2E: Full on-chain publishing lifecycle', () => {
       tokenAmount,
       isImmutable: false,
       merkleLeafCount,
-      paymaster: ethers.ZeroAddress,
-      convictionAccountId: 0n,
       publisherNodeIdentityId: publisherIdentityId,
-      publisherSignature: {
-        r: ethers.getBytes(pubSig.r),
-        vs: ethers.getBytes(pubSig.yParityAndS),
+      author: {
+        address: coreOp.address,
+        signature: {
+          r: ethers.getBytes(authorSig.r),
+          vs: ethers.getBytes(authorSig.yParityAndS),
+        },
+        schemeVersion: 1,
       },
       ackSignatures,
-    } as any);
+    });
 
     expect(result.batchId).toBeGreaterThan(0n);
     expect(result.txHash).toMatch(/^0x[0-9a-f]{64}$/);

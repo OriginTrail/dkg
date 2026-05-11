@@ -8,7 +8,6 @@ export {
   buildAgentProfile,
   canonicalAgentDidSubject,
   AGENT_REGISTRY_CONTEXT_GRAPH,
-  AGENT_REGISTRY_PARANET,
   AGENT_REGISTRY_GRAPH,
   type AgentProfileConfig,
   type SkillOfferingConfig,
@@ -67,7 +66,6 @@ export {
   type ContextGraphMembershipStore,
   type ContextGraphSubscriptionRecord,
   type ContextGraphSubscriptionStore,
-  type ParanetSub,
   type PeerHealth,
 } from './dkg-agent.js';
 export type { CclPublishedEvaluationRecord, CclPublishedResultEntry } from './dkg-agent.js';

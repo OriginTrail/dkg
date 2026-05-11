@@ -18,6 +18,8 @@ import {
   contextGraphSessionsTopic,
   contextGraphSessionTopic,
   networkPeersTopic,
+  DKG_GOSSIP_MAX_MESSAGE_BYTES,
+  DKG_GOSSIP_MAX_RPC_BYTES,
   contextGraphDataUri,
   contextGraphMetaUri,
   contextGraphPrivateUri,
@@ -29,18 +31,18 @@ import {
   contextGraphRulesUri,
   contextGraphSubGraphUri,
   // Deprecated aliases
-  paranetPublishTopic,
-  paranetWorkspaceTopic,
-  paranetFinalizationTopic,
-  paranetUpdateTopic,
-  paranetAppTopic,
-  paranetDataGraphUri,
-  paranetMetaGraphUri,
-  paranetPrivateGraphUri,
-  paranetWorkspaceGraphUri,
-  paranetWorkspaceMetaGraphUri,
-  paranetSessionsTopic,
-  paranetSessionTopic,
+  contextGraphPublishTopic,
+  contextGraphWorkspaceTopic,
+  contextGraphFinalizationTopic,
+  contextGraphUpdateTopic,
+  contextGraphAppTopic,
+  contextGraphDataGraphUri,
+  contextGraphMetaGraphUri,
+  contextGraphPrivateGraphUri,
+  contextGraphWorkspaceGraphUri,
+  contextGraphWorkspaceMetaGraphUri,
+  contextGraphSessionsTopic,
+  contextGraphSessionTopic,
 } from '../src/constants.js';
 
 describe('V10 protocol stream IDs', () => {
@@ -95,6 +97,11 @@ describe('V10 GossipSub topics', () => {
   it('network peers topic', () => {
     expect(networkPeersTopic()).toBe('dkg/network/peers');
   });
+
+  it('allows one 10 MB DKG gossip application payload', () => {
+    expect(DKG_GOSSIP_MAX_MESSAGE_BYTES).toBe(10 * 1024 * 1024);
+    expect(DKG_GOSSIP_MAX_RPC_BYTES).toBeGreaterThan(DKG_GOSSIP_MAX_MESSAGE_BYTES);
+  });
 });
 
 describe('V10 named graph URIs', () => {
@@ -144,65 +151,65 @@ describe('V10 named graph URIs', () => {
 describe('deprecated V9 aliases still work', () => {
   const id = 'test-42';
 
-  it('paranetPublishTopic maps to finalization topic', () => {
-    expect(paranetPublishTopic(id)).toBe(contextGraphFinalizationTopic(id));
+  it('contextGraphPublishTopic maps to finalization topic', () => {
+    expect(contextGraphPublishTopic(id)).toBe(contextGraphFinalizationTopic(id));
   });
 
-  it('paranetWorkspaceTopic maps to shared memory topic', () => {
-    expect(paranetWorkspaceTopic(id)).toBe(contextGraphSharedMemoryTopic(id));
+  it('contextGraphWorkspaceTopic maps to shared memory topic', () => {
+    expect(contextGraphWorkspaceTopic(id)).toBe(contextGraphSharedMemoryTopic(id));
   });
 
-  it('paranetFinalizationTopic maps to finalization topic', () => {
-    expect(paranetFinalizationTopic(id)).toBe(contextGraphFinalizationTopic(id));
+  it('contextGraphFinalizationTopic maps to finalization topic', () => {
+    expect(contextGraphFinalizationTopic(id)).toBe(contextGraphFinalizationTopic(id));
   });
 
-  it('paranetUpdateTopic maps to update topic', () => {
-    expect(paranetUpdateTopic(id)).toBe(contextGraphUpdateTopic(id));
+  it('contextGraphUpdateTopic maps to update topic', () => {
+    expect(contextGraphUpdateTopic(id)).toBe(contextGraphUpdateTopic(id));
   });
 
-  it('paranetAppTopic maps to app topic', () => {
-    expect(paranetAppTopic(id)).toBe(contextGraphAppTopic(id));
+  it('contextGraphAppTopic maps to app topic', () => {
+    expect(contextGraphAppTopic(id)).toBe(contextGraphAppTopic(id));
   });
 
-  it('paranetDataGraphUri maps to data URI', () => {
-    expect(paranetDataGraphUri(id)).toBe(contextGraphDataUri(id));
+  it('contextGraphDataGraphUri maps to data URI', () => {
+    expect(contextGraphDataGraphUri(id)).toBe(contextGraphDataUri(id));
   });
 
-  it('paranetMetaGraphUri maps to meta URI', () => {
-    expect(paranetMetaGraphUri(id)).toBe(contextGraphMetaUri(id));
+  it('contextGraphMetaGraphUri maps to meta URI', () => {
+    expect(contextGraphMetaGraphUri(id)).toBe(contextGraphMetaUri(id));
   });
 
-  it('paranetPrivateGraphUri maps to private URI', () => {
-    expect(paranetPrivateGraphUri(id)).toBe(contextGraphPrivateUri(id));
+  it('contextGraphPrivateGraphUri maps to private URI', () => {
+    expect(contextGraphPrivateGraphUri(id)).toBe(contextGraphPrivateUri(id));
   });
 
-  it('paranetWorkspaceGraphUri maps to shared memory URI', () => {
-    expect(paranetWorkspaceGraphUri(id)).toBe(contextGraphSharedMemoryUri(id));
+  it('contextGraphWorkspaceGraphUri maps to shared memory URI', () => {
+    expect(contextGraphWorkspaceGraphUri(id)).toBe(contextGraphSharedMemoryUri(id));
   });
 
-  it('paranetWorkspaceMetaGraphUri maps to shared memory meta URI', () => {
-    expect(paranetWorkspaceMetaGraphUri(id)).toBe(contextGraphSharedMemoryMetaUri(id));
+  it('contextGraphWorkspaceMetaGraphUri maps to shared memory meta URI', () => {
+    expect(contextGraphWorkspaceMetaGraphUri(id)).toBe(contextGraphSharedMemoryMetaUri(id));
   });
 
-  it('paranetSessionsTopic maps to sessions topic', () => {
-    expect(paranetSessionsTopic(id)).toBe(contextGraphSessionsTopic(id));
+  it('contextGraphSessionsTopic maps to sessions topic', () => {
+    expect(contextGraphSessionsTopic(id)).toBe(contextGraphSessionsTopic(id));
   });
 
-  it('paranetSessionTopic maps to session topic', () => {
-    expect(paranetSessionTopic(id, 'sess')).toBe(contextGraphSessionTopic(id, 'sess'));
+  it('contextGraphSessionTopic maps to session topic', () => {
+    expect(contextGraphSessionTopic(id, 'sess')).toBe(contextGraphSessionTopic(id, 'sess'));
   });
 
   it('all deprecated URIs use did:dkg:context-graph: prefix', () => {
-    expect(paranetDataGraphUri(id)).toContain('did:dkg:context-graph:');
-    expect(paranetMetaGraphUri(id)).toContain('did:dkg:context-graph:');
-    expect(paranetPrivateGraphUri(id)).toContain('did:dkg:context-graph:');
-    expect(paranetWorkspaceGraphUri(id)).toContain('did:dkg:context-graph:');
+    expect(contextGraphDataGraphUri(id)).toContain('did:dkg:context-graph:');
+    expect(contextGraphMetaGraphUri(id)).toContain('did:dkg:context-graph:');
+    expect(contextGraphPrivateGraphUri(id)).toContain('did:dkg:context-graph:');
+    expect(contextGraphWorkspaceGraphUri(id)).toContain('did:dkg:context-graph:');
   });
 
   it('all deprecated topics use dkg/context-graph/ prefix', () => {
-    expect(paranetWorkspaceTopic(id)).toContain('dkg/context-graph/');
-    expect(paranetFinalizationTopic(id)).toContain('dkg/context-graph/');
-    expect(paranetUpdateTopic(id)).toContain('dkg/context-graph/');
-    expect(paranetAppTopic(id)).toContain('dkg/context-graph/');
+    expect(contextGraphWorkspaceTopic(id)).toContain('dkg/context-graph/');
+    expect(contextGraphFinalizationTopic(id)).toContain('dkg/context-graph/');
+    expect(contextGraphUpdateTopic(id)).toContain('dkg/context-graph/');
+    expect(contextGraphAppTopic(id)).toContain('dkg/context-graph/');
   });
 });

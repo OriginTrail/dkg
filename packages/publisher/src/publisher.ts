@@ -122,6 +122,64 @@ export interface PublishOptions {
   fromSharedMemory?: boolean;
   /** When true, the KC was created via V10 and updates should use the V10 path. */
   v10Origin?: boolean;
+  /**
+   * Per-publish override for the on-chain `PublishParams.publisherNodeIdentityId`
+   * attribution field (RFC-001 §4 attribution control).
+   *
+   * Default (`undefined`): use the publisher's persistent
+   * `publisherNodeIdentityId` (the daemon's own identity), preserving the
+   * pre-RFC-001 single-tenant semantics.
+   *
+   * Explicit `bigint` (including `0n`): use this exact value as the
+   * on-chain attribution target. Lets a publisher service route a publish
+   * with attribution credit going to a different core (modes a/b/c) or to
+   * no one at all (mode d, value `0n`). The contract validates that any
+   * non-zero value names a real sharding-table node.
+   *
+   * SCOPE: this controls the on-chain attribution field ONLY. The
+   * publisher's own identity is still used for ACK self-signing (when
+   * applicable) and signer resolution — those are about WHO the daemon
+   * is, not WHO gets attribution credit. Per-call (no global mutation),
+   * so concurrent publishes with conflicting overrides are safe.
+   */
+  publisherNodeIdentityIdOverride?: bigint;
+  /**
+   * RFC-001 §9.x — pre-computed AuthorAttestation produced at the
+   * `agent.assertion.finalize()` boundary. This is the canonical
+   * (and, post-Phase-C, the *only*) way to attribute authorship for
+   * an on-chain publish.
+   *
+   * The caller has already:
+   *   1. Computed `expectedMerkleRoot` over the same quads it is
+   *      now asking the publisher to publish (computed via
+   *      `computeFlatKCRoot` / `autoPartition` semantics).
+   *   2. Signed (or collected a signature for) the typed data
+   *      `buildAuthorAttestationTypedData({ chainId, kav10Address,
+   *      contextGraphId, merkleRoot: expectedMerkleRoot,
+   *      authorAddress })`.
+   *
+   * The publisher independently re-derives `kcMerkleRoot` from the
+   * supplied `quads` and asserts equality with
+   * `expectedMerkleRoot`. Mismatch = throw, because either the
+   * caller's compute path drifted from the publisher's, or the
+   * quads were mutated between finalize and publish.
+   *
+   * The compact `(r, vs)` and `authorAddress` are forwarded to
+   * KAv10 verbatim. The publisher NEVER signs the AuthorAttestation
+   * itself.
+   *
+   * For publish flows where no agent is provided, the agent layer
+   * falls back to signing with the publisher's own EOA (via
+   * `signAuthorAttestationAsPublisher`) at finalize-time, so the
+   * publisher EOA still becomes `KC.author` in that case — but the
+   * signature is produced by the agent layer, not by `publish()`.
+   */
+  precomputedAttestation?: {
+    expectedMerkleRoot: Uint8Array;
+    authorAddress: string;
+    signature: { r: Uint8Array; vs: Uint8Array };
+    schemeVersion: number;
+  };
 }
 
 export interface PublishResult {

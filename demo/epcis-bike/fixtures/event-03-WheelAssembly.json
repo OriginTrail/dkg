@@ -1,0 +1,35 @@
+{
+  "@context": {
+    "@vocab": "https://gs1.github.io/EPCIS/",
+    "epcis": "https://gs1.github.io/EPCIS/",
+    "cbv": "https://ref.gs1.org/cbv/",
+    "type": "@type",
+    "id": "@id",
+    "eventID": "@id"
+  },
+  "type": "EPCISDocument",
+  "schemaVersion": "2.0",
+  "creationDate": "2026-05-12T10:15:00.000Z",
+  "epcisBody": {
+    "eventList": [
+      {
+        "eventID": "urn:uuid:4a779c36-24bd-5095-b6f5-3e977b150a85",
+        "type": "ObjectEvent",
+        "eventTime": "2026-05-12T09:05:00.000Z",
+        "eventTimeZoneOffset": "+00:00",
+        "epcList": [
+          "urn:acme:bike:item:BIKE-2026-W18-0001"
+        ],
+        "action": "OBSERVE",
+        "bizStep": "https://ref.gs1.org/cbv/BizStep-assembling",
+        "disposition": "https://ref.gs1.org/cbv/Disp-in_progress",
+        "readPoint": {
+          "id": "urn:acme:bike:station:WheelAssembly"
+        },
+        "bizLocation": {
+          "id": "urn:acme:bike:station:WheelAssembly"
+        }
+      }
+    ]
+  }
+}

@@ -51,7 +51,7 @@ One traceability graph: products, batches, events, attestations (certifications,
 | **Multi-party events** | Publish is per-publisher; each KC has manifest with rootEntities. | **Entity exclusivity (Rule 4)** — see §10.1. |
 | **EPCIS-style** | Events can be modelled as **one event = one rootEntity** (e.g. `did:dkg:event:carrier-123`) linking to product/batch URI. That pattern is **compatible** with Rule 4. | If the requirement is “multiple parties add **triples whose subject is the same product URI**” (e.g. `urn:epc:id:sgtin:...`), then Rule 4 **blocks** it: only the first publisher can use that URI as rootEntity. |
 | **Provenance** | Meta graph has `rootEntity`, `partOf` (KC UAL), publisher. | Good for “who published this entity.” No first-class **event time** or **event type** in core validation. |
-| **Discovery** | Paranets, listParanetsFromChain, sync. | Sufficient for “which paranets exist.” No standard **supply-chain ontology** or EPCIS mapping in codebase. |
+| **Discovery** | ContextGraphs, listContextGraphsFromChain, sync. | Sufficient for “which contextGraphs exist.” No standard **supply-chain ontology** or EPCIS mapping in codebase. |
 
 **Conclusion**: For **event-centric** supply chain (each event = own rootEntity, link to object), V9 is fine. For **object-centric** (many parties adding attributes/events about the **same** object URI), Rule 4 is a **problem**. See §10.1 and [EVAL_ENTITY_EXCLUSIVITY.md](../EVAL_ENTITY_EXCLUSIVITY.md).
 
@@ -122,7 +122,7 @@ Papers, datasets, replications, citations as a shared graph. Institutions, tools
 |--------|----------------|------------|
 | **Citations** | Model as triples: paper P `schema:citation` dataset D. Each P and D can be own rootEntity. | No Rule 4 issue. |
 | **Multiple assertions about same paper** | If “paper” is one canonical URI and many parties add metadata (citations, reviews, replication status), that would be shared-subject. | **Entity exclusivity** would force “each assertion is its own entity linking to paper” — same pattern as reviews in EVAL_ENTITY_EXCLUSIVITY. |
-| **Ontology** | Ontology paranet exists; no research-specific ontology in core. | Community can define; no gap in engine. |
+| **Ontology** | Ontology contextGraph exists; no research-specific ontology in core. | Community can define; no gap in engine. |
 | **Query** | SPARQL, cross-agent query. | Adequate. |
 
 **Conclusion**: Citation and replication work with “entity-per-assertion + link to canonical ref.” Full shared-subject “everyone edits same paper entity” would need a different policy (see EVAL doc).
@@ -146,9 +146,9 @@ Device identity and data: calibration, ownership, readings. Fleet operators, ins
 |--------|----------------|------------|
 | **One device, many publishers** | If “device D” is one rootEntity, only first publisher can own it. | **Exclusivity**: others must use separate entities (e.g. “assignment,” “reading batch”) that **link to** D. Same as supply chain: event-centric = OK; object-centric = blocked. |
 | **Time-series** | No native time-series or aggregation in core. | Store as triples (e.g. observation entities); query via SPARQL. No optimized path. |
-| **Identity** | Agent identity, profile, paranet. | No **device identity** spec in codebase; could be modelled as agent or custom ontology. |
+| **Identity** | Agent identity, profile, contextGraph. | No **device identity** spec in codebase; could be modelled as agent or custom ontology. |
 
-**Conclusion**: Event/assertion-per-entity pattern works. Single shared “device” entity updated by many parties would require relaxing or scoping Rule 4 (e.g. paranet-level policy per EVAL).
+**Conclusion**: Event/assertion-per-entity pattern works. Single shared “device” entity updated by many parties would require relaxing or scoping Rule 4 (e.g. contextGraph-level policy per EVAL).
 
 ---
 
@@ -160,7 +160,7 @@ Identity and reputation graph: “this entity, these attributes, these attestati
 
 ### 8.2 Examples
 
-- **Agent profile**: Agent publishes profile (skills, paranetsServed, name). Other agents discover via agents paranet and findSkills.
+- **Agent profile**: Agent publishes profile (skills, contextGraphsServed, name). Other agents discover via agents contextGraph and findSkills.
 - **Reputation**: Different parties publish attestations (“A completed task T,” “A has rating R”). All reference the same identity URI or a canonical agent entity.
 
 ### 8.3 DKG V9 Analysis
@@ -170,7 +170,7 @@ Identity and reputation graph: “this entity, these attributes, these attestati
 | **Agent profile** | Profile is one rootEntity per agent (`did:dkg:agent:{peerId}`). One publisher (the agent). | Fits exclusivity. |
 | **Skills** | Skills in profile; findSkills, invokeSkill. Cross-agent query for skills. | Good for agent-first use. |
 | **Reputation from others** | If “Alice” is rootEntity and only Alice can publish it, then “Bob attests Alice is reliable” must be Bob’s entity (e.g. `did:dkg:attestation:Bob-alice-1`) linking to Alice. | Same “describe by linking” pattern. Queries need UNION/link traversal. |
-| **Discovery** | Agents paranet, listParanets, sync. | Sufficient. |
+| **Discovery** | Agents contextGraph, listContextGraphs, sync. | Sufficient. |
 
 **Conclusion**: V9 supports agent-centric identity and attestations-by-linking. No built-in “reputation score” or “consensus” layer — can be built on top.
 
@@ -195,7 +195,7 @@ What’s regulated, what’s been attested, what’s the status. Regulators, fir
 | **Shared “status” on same entity** | If the same entity (e.g. “license L”) must get status updates from regulator, auditor, and firm, that’s multi-publisher on one subject. | **Exclusivity** would require “status event” entities (each with own rootEntity) linking to L, not triples with subject L. |
 | **Immutability** | Merkle, chain. Append/update by owner. | Good. No “append-only log” primitive; can model as event entities. |
 
-**Conclusion**: Event/attestation-per-entity works. Shared “living document” per entity would need design (event log vs. paranet-level shared policy).
+**Conclusion**: Event/attestation-per-entity works. Shared “living document” per entity would need design (event log vs. contextGraph-level shared policy).
 
 ---
 
@@ -203,10 +203,10 @@ What’s regulated, what’s been attested, what’s the status. Regulators, fir
 
 ### 10.1 What is Entity Exclusivity?
 
-**Rule 4** in `packages/publisher/src/validation.ts`: within a paranet, no manifest `rootEntity` may already exist as a live KA. So **one publisher “owns” each rootEntity** in that paranet; others cannot publish a new KC that uses the same rootEntity.
+**Rule 4** in `packages/publisher/src/validation.ts`: within a contextGraph, no manifest `rootEntity` may already exist as a live KA. So **one publisher “owns” each rootEntity** in that contextGraph; others cannot publish a new KC that uses the same rootEntity.
 
-- **Code**: `existingEntities.has(m.rootEntity)` → reject with “Rule 4: rootEntity … already exists in paranet …”.
-- **Ownership**: `ownedEntities` in publisher and publish-handler tracks which rootEntities are already taken per paranet.
+- **Code**: `existingEntities.has(m.rootEntity)` → reject with “Rule 4: rootEntity … already exists in contextGraph …”.
+- **Ownership**: `ownedEntities` in publisher and publish-handler tracks which rootEntities are already taken per contextGraph.
 
 Full evaluation: [EVAL_ENTITY_EXCLUSIVITY.md](../EVAL_ENTITY_EXCLUSIVITY.md).
 
@@ -222,7 +222,7 @@ So:
 - **If** the use case is “each party publishes its own **events** (own rootEntity) that reference the same object → aggregate events by object in query,” **V9 is fine**.
 - **If** the use case is “multiple parties add **triples with the same object as subject**” (true shared subject), **V9’s Rule 4 is a problem**.
 
-**Recommendation**: Document the **event-centric** pattern as the supported supply-chain/EPCIS pattern; clarify that “one object, many triples from many parties” would require a paranet-level shared-subject policy (see EVAL §3.2) or first-class “annotation”/“event” entities (EVAL §3.1). Consider SDK helpers for “publish event about object X” so event-centric is ergonomic.
+**Recommendation**: Document the **event-centric** pattern as the supported supply-chain/EPCIS pattern; clarify that “one object, many triples from many parties” would require a contextGraph-level shared-subject policy (see EVAL §3.2) or first-class “annotation”/“event” entities (EVAL §3.1). Consider SDK helpers for “publish event about object X” so event-centric is ergonomic.
 
 ---
 
@@ -251,7 +251,7 @@ So:
 
 | Need | Current state | Gap |
 |------|----------------|-----|
-| **Structured agent discovery** | findSkills, profile in agents paranet. | Good. No standard “capability” or “task” ontology; skills are free-form. |
+| **Structured agent discovery** | findSkills, profile in agents contextGraph. | Good. No standard “capability” or “task” ontology; skills are free-form. |
 | **Cross-agent query** | Protocol and lookup types (ENTITY_BY_UAL, ENTITIES_BY_TYPE, SPARQL_QUERY). | Implemented. Rate limits and payment hooks exist; payment not enforced. |
 | **Invoke skill** | invokeSkill(offering, input). | Present. No standard skill I/O schema. |
 | **Verified claims** | SPEC_VERIFIED_KAS. | Draft only; not in codebase. |
@@ -279,5 +279,5 @@ So:
 - [EVAL_ENTITY_EXCLUSIVITY.md](../EVAL_ENTITY_EXCLUSIVITY.md) — Rule 4, shared-subject alternatives, hybrid options.
 - [SPEC_CROSS_AGENT_QUERY.md](../specs/SPEC_CROSS_AGENT_QUERY.md) — Remote query protocol.
 - [SPEC_VERIFIED_KAS.md](../SPEC_VERIFIED_KAS.md) — Verified claims (draft).
-- [SPEC_PARANET_LIFECYCLE.md](../specs/SPEC_PARANET_LIFECYCLE.md) — Paranet creation and discovery.
+- [SPEC_CONTEXT_GRAPH_LIFECYCLE.md](../specs/SPEC_CONTEXT_GRAPH_LIFECYCLE.md) — ContextGraph creation and discovery.
 - `packages/publisher/src/validation.ts` — Rule 4 implementation.

@@ -87,8 +87,6 @@ interface NetworkConfig {
   networkName: string;
   relays: string[];
   defaultContextGraphs: string[];
-  /** @deprecated Legacy key in older network config files */
-  defaultParanets?: string[];
   defaultNodeRole: string;
   autoUpdate?: {
     enabled: boolean;
@@ -1612,7 +1610,7 @@ export async function runSetup(options: SetupOptions): Promise<void> {
       }
     } catch { /* use pre-merge values */ }
   } else if (network) {
-    log(`[dry-run] Would write ~/.dkg/config.json (${network.networkName}, port ${apiPort})`);
+    log(`[dry-run] Would write ${join(dkgDir(), 'config.json')} (${network.networkName}, port ${apiPort})`);
   }
 
   // Step 4: Preflight ~/.openclaw/openclaw.json BEFORE the daemon spins up

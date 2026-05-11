@@ -1,9 +1,9 @@
 import {
-  decodePublishRequest, SYSTEM_PARANETS, DKG_ONTOLOGY,
+  decodePublishRequest, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY,
   Logger, createOperationContext,
   isSafeIri, assertSafeIri, validateSubGraphName,
   contextGraphSubGraphUri,
-  paranetMetaGraphUri, paranetDataGraphUri,
+  contextGraphMetaGraphUri, contextGraphDataGraphUri,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, type TripleStore, type Quad } from '@origintrail-official/dkg-storage';
@@ -25,7 +25,7 @@ export interface GossipPublishHandlerCallbacks {
   /**
    * Same semantics as `DKGAgent#hasConfirmedMetaState`: returns true when the
    * local store already has a trustworthy public announcement for this CG
-   * (system paranet, populated `_meta` graph, or `<cg> rdf:type dkg:Paranet`
+   * (system contextGraph, populated `_meta` graph, or `<cg> rdf:type dkg:ContextGraph`
    * asserted in ontology). Used to open the metaSynced gate lazily when
    * gossip arrives before `refreshMetaSyncedFlags` has had a chance to run.
    *
@@ -70,14 +70,14 @@ export class GossipPublishHandler {
           ctx = createOperationContext('gossip', request.operationId);
         }
 
-        if (!request.paranetId) {
-          request.paranetId = contextGraphId;
-        } else if (request.paranetId !== contextGraphId) {
-          // If the decoded paranetId contains non-printable characters, this is a
+        if (!request.contextGraphId) {
+          request.contextGraphId = contextGraphId;
+        } else if (request.contextGraphId !== contextGraphId) {
+          // If the decoded contextGraphId contains non-printable characters, this is a
           // different message type (e.g. finalization) that was decoded as a publish
           // request. Silently skip to avoid spammy WARN logs.
-          if (/[^\x20-\x7E]/.test(request.paranetId)) return;
-          this.log.warn(ctx, `Gossip: request contextGraphId "${request.paranetId}" does not match topic "${contextGraphId}", ignoring`);
+          if (/[^\x20-\x7E]/.test(request.contextGraphId)) return;
+          this.log.warn(ctx, `Gossip: request contextGraphId "${request.contextGraphId}" does not match topic "${contextGraphId}", ignoring`);
           return;
         }
       } finally {
@@ -93,7 +93,7 @@ export class GossipPublishHandler {
       }
 
       const graphManager = new GraphManager(this.store);
-      await graphManager.ensureParanet(request.paranetId);
+      await graphManager.ensureContextGraph(request.contextGraphId);
 
       // Sub-graph routing: if the publish specifies a sub-graph, store data there.
       // Reject (don't reroute) invalid names to prevent polluting the root graph.
@@ -105,12 +105,12 @@ export class GossipPublishHandler {
           return;
         }
         subGraphName = request.subGraphName;
-        await graphManager.ensureSubGraph(request.paranetId, subGraphName);
+        await graphManager.ensureSubGraph(request.contextGraphId, subGraphName);
       }
 
       const dataGraph = subGraphName
-        ? contextGraphSubGraphUri(request.paranetId, subGraphName)
-        : graphManager.dataGraphUri(request.paranetId);
+        ? contextGraphSubGraphUri(request.contextGraphId, subGraphName)
+        : graphManager.dataGraphUri(request.contextGraphId);
       // Drop any _meta quads from gossip — _meta state (allowlists, registration
       // status, curator) is security-critical and must only propagate via the
       // authenticated sync protocol, not unauthenticated gossip.
@@ -127,11 +127,11 @@ export class GossipPublishHandler {
       // creator/timestamp triples when multiple nodes create the same context graph
       // during simultaneous startup.
       // Also auto-subscribe to any newly discovered context graphs.
-      if (request.paranetId === SYSTEM_PARANETS.ONTOLOGY) {
+      if (request.contextGraphId === SYSTEM_CONTEXT_GRAPHS.ONTOLOGY) {
         const contextGraphPrefix = 'did:dkg:context-graph:';
         const incomingContextGraphUris = new Set(
           normalized
-            .filter(q => q.predicate === DKG_ONTOLOGY.RDF_TYPE && q.object === DKG_ONTOLOGY.DKG_PARANET)
+            .filter(q => q.predicate === DKG_ONTOLOGY.RDF_TYPE && q.object === DKG_ONTOLOGY.DKG_CONTEXT_GRAPH)
             .map(q => q.subject),
         );
         if (incomingContextGraphUris.size > 0) {
@@ -142,7 +142,7 @@ export class GossipPublishHandler {
             if (!id) continue;
             if (await this.callbacks.contextGraphExists(id)) {
               duplicateUris.add(uri);
-            } else if (id !== SYSTEM_PARANETS.AGENTS && id !== SYSTEM_PARANETS.ONTOLOGY) {
+            } else if (id !== SYSTEM_CONTEXT_GRAPHS.AGENTS && id !== SYSTEM_CONTEXT_GRAPHS.ONTOLOGY) {
               newContextGraphIds.push(id);
             }
           }
@@ -180,16 +180,16 @@ export class GossipPublishHandler {
 
         normalized = await this.filterInvalidOntologyPolicyBindings(normalized, ctx);
       } else {
-        const allowedPeers = await this.getContextGraphAllowedPeers(request.paranetId);
+        const allowedPeers = await this.getContextGraphAllowedPeers(request.contextGraphId);
 
         // Curated CGs: require sender identity and allowlist membership
         if (allowedPeers !== null) {
           if (!fromPeerId) {
-            this.log.warn(ctx, `Gossip publish rejected: no sender identity for curated context graph "${request.paranetId}"`);
+            this.log.warn(ctx, `Gossip publish rejected: no sender identity for curated context graph "${request.contextGraphId}"`);
             return;
           }
           if (!allowedPeers.includes(fromPeerId)) {
-            this.log.warn(ctx, `Gossip publish rejected: peer "${fromPeerId}" not in allowlist for context graph "${request.paranetId}"`);
+            this.log.warn(ctx, `Gossip publish rejected: peer "${fromPeerId}" not in allowlist for context graph "${request.contextGraphId}"`);
             return;
           }
         }
@@ -197,30 +197,30 @@ export class GossipPublishHandler {
         // CGs whose _meta hasn't been fetched yet: deny until _meta sync
         // completes. A null allowlist with metaSynced=false could mean the CG
         // is curated but the allowlist hasn't arrived via authenticated sync.
-        // System paranets (agents/ontology) are exempt — always open.
+        // System contextGraphs (agents/ontology) are exempt — always open.
         // Gossip race: `DKGAgent#refreshMetaSyncedFlags` flips `metaSynced`
         // eagerly at the end of every sync cycle, but a gossip publish can
         // arrive on a freshly subscribed node *before* the first sync has
         // run. Ask the agent's own helper whether the CG is already
-        // confirmable from the local store (system paranet, populated
-        // `_meta`, or `<cg> rdf:type dkg:Paranet` in ontology — the same
+        // confirmable from the local store (system contextGraph, populated
+        // `_meta`, or `<cg> rdf:type dkg:ContextGraph` in ontology — the same
         // check Viktor introduced in `hasConfirmedMetaState`). If yes,
         // flip the flag in place and proceed; if no, keep the strict
         // deny behavior so curated CGs without a synced allowlist can't
         // leak through.
         if (allowedPeers === null
-          && request.paranetId !== SYSTEM_PARANETS.AGENTS
-          && request.paranetId !== SYSTEM_PARANETS.ONTOLOGY) {
-          const sub = this.subscribedContextGraphs.get(request.paranetId);
+          && request.contextGraphId !== SYSTEM_CONTEXT_GRAPHS.AGENTS
+          && request.contextGraphId !== SYSTEM_CONTEXT_GRAPHS.ONTOLOGY) {
+          const sub = this.subscribedContextGraphs.get(request.contextGraphId);
           if (sub && sub.metaSynced === false) {
             const confirmed = this.callbacks.hasConfirmedMetaState
-              ? await this.callbacks.hasConfirmedMetaState(request.paranetId)
+              ? await this.callbacks.hasConfirmedMetaState(request.contextGraphId)
               : false;
             if (confirmed) {
               sub.metaSynced = true;
-              this.callbacks.persistContextGraphSubscription?.(request.paranetId);
+              this.callbacks.persistContextGraphSubscription?.(request.contextGraphId);
             } else {
-              this.log.warn(ctx, `Gossip publish deferred: context graph "${request.paranetId}" _meta not yet synced — defaulting to deny`);
+              this.log.warn(ctx, `Gossip publish deferred: context graph "${request.contextGraphId}" _meta not yet synced — defaulting to deny`);
               return;
             }
           }
@@ -250,7 +250,7 @@ export class GossipPublishHandler {
           result.type === 'bindings' ? result.bindings.map(b => b['s']).filter(Boolean) : [],
         );
 
-        const validation = validatePublishRequest(normalized, manifest, request.paranetId, existingEntities, {
+        const validation = validatePublishRequest(normalized, manifest, request.contextGraphId, existingEntities, {
           expectedGraph: subGraphName ? dataGraph : undefined,
         });
         if (!validation.valid) {
@@ -269,8 +269,8 @@ export class GossipPublishHandler {
       // Auto-register sub-graph in _meta AFTER validation passes.
       // This prevents polluting metadata when invalid messages are rejected.
       if (subGraphName) {
-        const sgUri = contextGraphSubGraphUri(request.paranetId, subGraphName);
-        const metaGraph = `did:dkg:context-graph:${assertSafeIri(request.paranetId)}/_meta`;
+        const sgUri = contextGraphSubGraphUri(request.contextGraphId, subGraphName);
+        const metaGraph = `did:dkg:context-graph:${assertSafeIri(request.contextGraphId)}/_meta`;
         const alreadyRegistered = await this.store.query(
           `ASK { GRAPH <${metaGraph}> {
             <${assertSafeIri(sgUri)}> a <http://dkg.io/ontology/SubGraph> ;
@@ -280,13 +280,13 @@ export class GossipPublishHandler {
         );
         if (alreadyRegistered.type !== 'boolean' || !alreadyRegistered.value) {
           const regQuads = generateSubGraphRegistration({
-            contextGraphId: request.paranetId,
+            contextGraphId: request.contextGraphId,
             subGraphName,
             createdBy: request.publisherAddress || 'gossip-discovery',
             timestamp: new Date(),
           });
           await this.store.insert(regQuads);
-          this.log.info(ctx, `Auto-registered sub-graph "${subGraphName}" in context graph "${request.paranetId}" from gossip`);
+          this.log.info(ctx, `Auto-registered sub-graph "${subGraphName}" in context graph "${request.contextGraphId}" from gossip`);
         }
       }
 
@@ -320,7 +320,7 @@ export class GossipPublishHandler {
 
         const kcMeta = {
           ual: request.ual,
-          contextGraphId: request.paranetId,
+          contextGraphId: request.contextGraphId,
           merkleRoot,
           kaCount: kaMetadata.length,
           publisherPeerId: request.publisherAddress || 'unknown',
@@ -349,7 +349,7 @@ export class GossipPublishHandler {
             ctx,
           );
           if (verified) {
-            await this.promoteGossipToConfirmed(request.ual, request.paranetId, kcMeta, kaMetadata);
+            await this.promoteGossipToConfirmed(request.ual, request.contextGraphId, kcMeta, kaMetadata);
             this.log.info(ctx, `Gossip publish ${request.ual} verified on-chain (tx=${txHash.slice(0, 10)}…, block=${blockNumber})`);
           } else {
             this.log.info(ctx, `Gossip publish ${request.ual} stored as tentative (on-chain verification failed or pending)`);
@@ -433,12 +433,12 @@ export class GossipPublishHandler {
    */
   private async promoteGossipToConfirmed(
     ual: string,
-    paranetId: string,
+    contextGraphId: string,
     _kcMeta: { ual: string; contextGraphId: string; merkleRoot: Uint8Array; kaCount: number; publisherPeerId: string; timestamp: Date },
     _kaMetadata: KAMetadata[],
   ): Promise<void> {
-    const tentativeStatus = getTentativeStatusQuad(ual, paranetId);
-    const confirmedStatus = getConfirmedStatusQuad(ual, paranetId);
+    const tentativeStatus = getTentativeStatusQuad(ual, contextGraphId);
+    const confirmedStatus = getConfirmedStatusQuad(ual, contextGraphId);
     try {
       await this.store.insert([confirmedStatus]);
       await this.store.delete([tentativeStatus]);
@@ -461,7 +461,7 @@ export class GossipPublishHandler {
       DKG_ONTOLOGY.DKG_APPROVED_AT,
       DKG_ONTOLOGY.DKG_REVOKED_BY,
       DKG_ONTOLOGY.DKG_REVOKED_AT,
-      DKG_ONTOLOGY.DKG_POLICY_APPLIES_TO_PARANET,
+      DKG_ONTOLOGY.DKG_POLICY_APPLIES_TO_CONTEXT_GRAPH,
     ]);
     const bindingSubjects = new Set(
       quads
@@ -476,27 +476,26 @@ export class GossipPublishHandler {
     const invalidBindings = new Set<string>();
     for (const bindingUri of bindingSubjects) {
       const bindingQuads = quads.filter(q => q.subject === bindingUri);
-      const paranetUri = bindingQuads.find(q => q.predicate === DKG_ONTOLOGY.DKG_POLICY_APPLIES_TO_PARANET)?.object;
+      const contextGraphUri = bindingQuads.find(q => q.predicate === DKG_ONTOLOGY.DKG_POLICY_APPLIES_TO_CONTEXT_GRAPH)?.object;
       const approvedAt = bindingQuads.find(q => q.predicate === DKG_ONTOLOGY.DKG_APPROVED_AT)?.object;
       const approvedBy = bindingQuads.find(q => q.predicate === DKG_ONTOLOGY.DKG_APPROVED_BY)?.object;
       const revokedAt = bindingQuads.find(q => q.predicate === DKG_ONTOLOGY.DKG_REVOKED_AT)?.object;
       const revokedBy = bindingQuads.find(q => q.predicate === DKG_ONTOLOGY.DKG_REVOKED_BY)?.object;
-      const paranetId = paranetUri?.startsWith('did:dkg:context-graph:')
-        ? paranetUri.slice('did:dkg:context-graph:'.length)
-        : paranetUri?.startsWith('did:dkg:paranet:')
-          ? paranetUri.slice('did:dkg:paranet:'.length)
-          : null;
+      const contextGraphPrefix = 'did:dkg:context-graph:';
+      const contextGraphId = contextGraphUri?.startsWith(contextGraphPrefix)
+        ? contextGraphUri.slice(contextGraphPrefix.length)
+        : null;
 
-      if (!paranetId) {
+      if (!contextGraphId) {
         invalidBindings.add(bindingUri);
-        this.log.warn(ctx, `Rejected gossip policy binding ${bindingUri}: missing or invalid paranet reference`);
+        this.log.warn(ctx, `Rejected gossip policy binding ${bindingUri}: missing or invalid contextGraph reference`);
         continue;
       }
 
-      const owner = await this.callbacks.getContextGraphOwner(paranetId);
+      const owner = await this.callbacks.getContextGraphOwner(contextGraphId);
       if (!owner) {
         invalidBindings.add(bindingUri);
-        this.log.warn(ctx, `Rejected gossip policy binding ${bindingUri}: paranet "${paranetId}" owner is unknown locally`);
+        this.log.warn(ctx, `Rejected gossip policy binding ${bindingUri}: contextGraph "${contextGraphId}" owner is unknown locally`);
         continue;
       }
 
@@ -539,8 +538,8 @@ export class GossipPublishHandler {
   }
 
   private async getContextGraphAllowedPeers(contextGraphId: string): Promise<string[] | null> {
-    const cgMeta = paranetMetaGraphUri(contextGraphId);
-    const cgData = paranetDataGraphUri(contextGraphId);
+    const cgMeta = contextGraphMetaGraphUri(contextGraphId);
+    const cgData = contextGraphDataGraphUri(contextGraphId);
     const result = await this.store.query(
       `SELECT ?peer WHERE { GRAPH <${cgMeta}> { <${cgData}> <${DKG_ONTOLOGY.DKG_ALLOWED_PEER}> ?peer } }`,
     );

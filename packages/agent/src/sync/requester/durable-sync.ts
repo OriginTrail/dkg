@@ -1,5 +1,5 @@
-import { SYSTEM_PARANETS } from '@origintrail-official/dkg-core';
-import { paranetDataGraphUri, paranetMetaGraphUri } from '@origintrail-official/dkg-core';
+import { SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
+import { contextGraphDataGraphUri, contextGraphMetaGraphUri } from '@origintrail-official/dkg-core';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { PhaseCallback } from '@origintrail-official/dkg-publisher';
@@ -99,8 +99,8 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
 
   try {
     for (const [index, pid] of contextGraphIds.entries()) {
-      const dataGraph = paranetDataGraphUri(pid);
-      const metaGraph = paranetMetaGraphUri(pid);
+      const dataGraph = contextGraphDataGraphUri(pid);
+      const metaGraph = contextGraphMetaGraphUri(pid);
       const deadline = createContextGraphSyncDeadline(contextGraphIds.length - index);
 
       logInfo(ctx, `Syncing context graph "${pid}" from ${remotePeerId}`);
@@ -131,7 +131,7 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
 
       onPhase?.('fetch', 'end');
       const fetchDurationMs = Date.now() - fetchStartedAt;
-      const isSystemContextGraph = (Object.values(SYSTEM_PARANETS) as string[]).includes(pid);
+      const isSystemContextGraph = (Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(pid);
 
       onPhase?.('verify', 'start');
       const verifyStartedAt = Date.now();

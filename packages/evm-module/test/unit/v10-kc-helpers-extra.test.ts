@@ -7,23 +7,17 @@
  *    positive."
  *
  * Goal: pin the EXACT byte layout of every V10 digest the helpers emit.
- * If anyone silently reorders a field or drops a type (say, `uint72` →
- * `uint256` on publisher identityId, or "forgets" the H5 chainid prefix),
- * an identical change in the contract would hide the bug — but this file
- * would catch it because it uses an INDEPENDENT second source of truth
- * (`ethers.concat` + `ethers.keccak256` with explicit `zeroPad/toBeHex`)
- * to compute the expected digest.
+ * If anyone silently reorders a field or drops a type, an identical change
+ * in the contract would hide the bug — this file uses an INDEPENDENT second
+ * source of truth (`ethers.concat` + `ethers.keccak256` with explicit
+ * `zeroPad/toBeHex`) to compute the expected digest.
+ *
+ * RFC-001: the per-publish publisher digest is removed from the contract.
+ * Author attestation uses EIP-712 typed data and is exercised by the
+ * end-to-end author-attestation tests in `KnowledgeAssetsV10.test.ts` rather
+ * than a byte-layout pin (the EIP-712 byte equality check IS the layout pin).
  *
  * Contract ABI reference (must stay in lockstep with `KnowledgeAssetsV10.sol`):
- *   Publisher digest:
- *     keccak256(abi.encodePacked(
- *       block.chainid        uint256
- *       address(this)        address
- *       publisherIdentityId  uint72
- *       contextGraphId       uint256
- *       merkleRoot           bytes32
- *     ))
- *
  *   Publish ACK digest:
  *     keccak256(abi.encodePacked(
  *       block.chainid                uint256
@@ -34,6 +28,7 @@
  *       byteSize                     uint256  (cast)
  *       epochs                       uint256  (cast)
  *       tokenAmount                  uint256
+ *       merkleLeafCount              uint256  (cast)
  *     ))
  *
  *   Update ACK digest:
@@ -41,7 +36,8 @@
  *       chainid, kav10, contextGraphId, id,
  *       preUpdateMerkleRootCount, newMerkleRoot,
  *       newByteSize, newTokenAmount, mintKnowledgeAssetsAmount,
- *       keccak256(abi.encodePacked(knowledgeAssetsToBurn))
+ *       keccak256(abi.encodePacked(knowledgeAssetsToBurn)),
+ *       newMerkleLeafCount
  *     ))
  */
 import { expect } from 'chai';
@@ -49,7 +45,6 @@ import { ethers } from 'ethers';
 
 import {
   buildPublishAckDigest,
-  buildPublisherDigest,
   buildUpdateAckDigest,
   DEFAULT_CHAIN_ID,
 } from '../helpers/v10-kc-helpers';
@@ -67,63 +62,11 @@ function addr(a: string): string {
 describe('@unit v10-kc-helpers — digest byte-layout pins (E-15)', () => {
   const chainId = DEFAULT_CHAIN_ID;
   const kav10 = '0x1234567890123456789012345678901234567890';
-  const publisherIdentityId = 7n;
   const contextGraphId = 99n;
   const merkleRoot = ethers.keccak256(ethers.toUtf8Bytes('mr-extra-test'));
 
   it('DEFAULT_CHAIN_ID is 31337 (hardhat)', () => {
     expect(chainId).to.equal(31337n);
-  });
-
-  it('buildPublisherDigest matches an independent abi.encodePacked reference', () => {
-    const got = buildPublisherDigest(
-      chainId,
-      kav10,
-      publisherIdentityId,
-      contextGraphId,
-      merkleRoot,
-    );
-
-    // abi.encodePacked(uint256, address, uint72, uint256, bytes32)
-    const packed = ethers.concat([
-      hex(32, chainId), // uint256
-      addr(kav10), // address (20 bytes, no pad)
-      hex(9, publisherIdentityId), // uint72 (9 bytes, no padding in encodePacked)
-      hex(32, contextGraphId), // uint256
-      merkleRoot, // bytes32
-    ]);
-    const expected = ethers.keccak256(packed);
-    expect(got).to.equal(expected);
-  });
-
-  it('buildPublisherDigest is sensitive to chainId (H5 closure)', () => {
-    const a = buildPublisherDigest(31337n, kav10, 1, 1n, merkleRoot);
-    const b = buildPublisherDigest(1n, kav10, 1, 1n, merkleRoot);
-    expect(a).to.not.equal(b);
-  });
-
-  it('buildPublisherDigest is sensitive to kav10Address (H5 closure)', () => {
-    const a = buildPublisherDigest(chainId, kav10, 1, 1n, merkleRoot);
-    const b = buildPublisherDigest(
-      chainId,
-      '0x0000000000000000000000000000000000000001',
-      1,
-      1n,
-      merkleRoot,
-    );
-    expect(a).to.not.equal(b);
-  });
-
-  it('buildPublisherDigest is sensitive to merkleRoot', () => {
-    const a = buildPublisherDigest(chainId, kav10, 1, 1n, merkleRoot);
-    const b = buildPublisherDigest(
-      chainId,
-      kav10,
-      1,
-      1n,
-      ethers.keccak256(ethers.toUtf8Bytes('OTHER')),
-    );
-    expect(a).to.not.equal(b);
   });
 
   it('buildPublishAckDigest matches an independent abi.encodePacked reference', () => {

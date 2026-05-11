@@ -61,12 +61,12 @@ import { registerIntegrationCommands } from './integrations/commands.js';
 type ActionOpts = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
 
 const STARTUP_BANNER = `
-\x1b[36m██████╗ ██╗  ██╗ ██████╗     ██╗   ██╗ █████╗ 
-██╔══██╗██║ ██╔╝██╔════╝     ██║   ██║██╔══██╗
-██║  ██║█████╔╝ ██║  ███╗    ██║   ██║╚██████║
-██║  ██║██╔═██╗ ██║   ██║    ╚██╗ ██╔╝ ╚═══██║
-██████╔╝██║  ██╗╚██████╔╝     ╚████╔╝  █████╔╝
-╚═════╝ ╚═╝  ╚═╝ ╚═════╝       ╚═══╝   ╚════╝\x1b[0m
+\x1b[36m██████╗ ██╗  ██╗ ██████╗     ██╗   ██╗ ██╗ ██████╗
+██╔══██╗██║ ██╔╝██╔════╝     ██║   ██║███║██╔═████╗
+██║  ██║█████╔╝ ██║  ███╗    ██║   ██║╚██║██║██╔██║
+██║  ██║██╔═██╗ ██║   ██║    ╚██╗ ██╔╝ ██║████╔╝██║
+██████╔╝██║  ██╗╚██████╔╝     ╚████╔╝  ██║╚██████╔╝
+╚═════╝ ╚═╝  ╚═╝ ╚═════╝       ╚═══╝   ╚═╝ ╚═════╝\x1b[0m
 `;
 
 function normalizeVersionTagRef(input: string): string {
@@ -375,7 +375,6 @@ program
       apiPort,
       nodeRole,
       contextGraphs,
-      paranets: contextGraphs,
       autoUpdate: enableAutoUpdate ? autoUpdate : existing.autoUpdate,
       chain: chainSection ?? existing.chain,
       auth: { enabled: enableAuth, tokens: existing.auth?.tokens },
@@ -721,6 +720,42 @@ program
     }
   });
 
+// ─── dkg connect ─────────────────────────────────────────────────────
+// Direct dial helper, mostly useful for ad-hoc P2P troubleshooting and
+// validating an invite before pasting it into the UI. Two modes:
+//   dkg connect <multiaddr>          legacy direct dial
+//   dkg connect --peer-id <peerId>   V10 DHT-resolved dial
+// The peer-id form is preferred — it asks the daemon to walk the libp2p
+// Kademlia table and pick up the peer's *current* multiaddrs, which is
+// exactly how invite redemption now resolves curators.
+program
+  .command('connect [multiaddr]')
+  .description('Dial a peer by multiaddr or peer id (DHT-resolved)')
+  .option('--peer-id <id>', 'Resolve via libp2p DHT (peerRouting.findPeer) and dial')
+  .action(async (multiaddrArg: string | undefined, opts: { peerId?: string }) => {
+    if (!multiaddrArg && !opts.peerId) {
+      console.error('Provide either a multiaddr or --peer-id <id>');
+      process.exit(1);
+    }
+    if (multiaddrArg && opts.peerId) {
+      console.error('Pass either a multiaddr or --peer-id, not both');
+      process.exit(1);
+    }
+    try {
+      const client = await ApiClient.connect();
+      if (opts.peerId) {
+        await client.connectByPeerId(opts.peerId);
+        console.log(`Connected to ${opts.peerId} (resolved via DHT)`);
+      } else {
+        await client.connect(multiaddrArg!);
+        console.log(`Connected to ${multiaddrArg}`);
+      }
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
 // ─── dkg send <name> <message> ───────────────────────────────────────
 
 program
@@ -822,6 +857,7 @@ program
   .option('-o, --object <value>', 'Object value for simple publish')
   .option('--access-policy <policy>', 'Access policy for private triples (public|ownerOnly|allowList)')
   .option('--allowed-peer <peerId>', 'Peer ID allowed when using allowList policy', (v, prev: string[] = []) => [...prev, v], [])
+  .option('--publisher-node-identity-id <id>', 'Override the publisherNodeIdentityId for THIS publish only (RFC §4 attribution; pass `0` for an unattributed publish)')
   .action(async (contextGraph: string, opts: ActionOpts) => {
     try {
       const client = await ApiClient.connect();
@@ -854,9 +890,19 @@ program
         process.exit(1);
       }
 
+      let publisherNodeIdentityIdOverride: bigint | undefined;
+      if (opts.publisherNodeIdentityId !== undefined) {
+        const raw = String(opts.publisherNodeIdentityId);
+        if (!/^\d+$/.test(raw)) {
+          console.error('--publisher-node-identity-id must be a non-negative integer (use `0` for unattributed)');
+          process.exit(1);
+        }
+        publisherNodeIdentityIdOverride = BigInt(raw);
+      }
       const result = await client.publish(contextGraph, quads, privateQuads, {
         accessPolicy,
         allowedPeers,
+        publisherNodeIdentityIdOverride,
       });
       console.log(`Published to context graph "${contextGraph}":`);
       console.log(`  Status:    ${result.status}`);
@@ -1005,13 +1051,12 @@ program
   .option('--entity <uri>', 'Get all triples for an entity URI (requires --context-graph)')
   .option('--type <rdfType>', 'Find entities by RDF type (requires --context-graph)')
   .option('-p, --context-graph <id>', 'Target context graph')
-  .option('--paranet <id>', 'Target context graph (legacy alias)')
   .option('-l, --limit <n>', 'Max results', '100')
   .option('--timeout <ms>', 'Query timeout in ms', '5000')
   .action(async (peer: string, opts: ActionOpts) => {
     try {
       const client = await ApiClient.connect();
-      const contextGraphId = opts.contextGraph ?? opts.paranet;
+      const contextGraphId = opts.contextGraph;
 
       let lookupType: string;
       const request: Record<string, any> = { // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -1133,7 +1178,7 @@ program
         const cgs = new Set(resolveContextGraphs(config));
         cgs.add(contextGraph);
         config.contextGraphs = [...cgs];
-        config.paranets = [...cgs];
+        config.contextGraphs = [...cgs];
         await saveConfig(config);
         console.log('Saved to config (will auto-subscribe on restart).');
       }
@@ -1193,7 +1238,7 @@ async function runCatchupStatusCommand(contextGraph: string, opts: CatchupStatus
   const client = await ApiClient.connect();
   const watch = !!opts.watch;
   const intervalSeconds = Math.max(1, Number(opts.interval ?? 2));
-  const terminalStates = new Set(['done', 'failed', 'denied']);
+  const terminalStates = new Set(['done', 'failed', 'denied', 'unreachable']);
 
   do {
     const status = await client.catchupStatus(contextGraph);
@@ -1223,11 +1268,10 @@ syncCmd
     }
   });
 
-// ─── dkg context-graph (alias: paranet) ─────────────────────────────
+// ─── dkg context-graph ──────────────────────────────────────────────────
 
 const contextGraphCmd = program
   .command('context-graph')
-  .alias('paranet')
   .description('Manage context graphs (knowledge graph partitions)');
 
 contextGraphCmd
@@ -1311,7 +1355,7 @@ contextGraphCmd
         const cgs = new Set(resolveContextGraphs(config));
         cgs.add(id);
         config.contextGraphs = [...cgs];
-        config.paranets = [...cgs];
+        config.contextGraphs = [...cgs];
         await saveConfig(config);
         console.log('  Saved to config (will auto-subscribe on restart).');
       }
@@ -1335,13 +1379,18 @@ contextGraphCmd
   .command('register <id>')
   .description('Register an existing context graph on-chain (unlocks Verified Memory, requires TRAC)')
   .option('--reveal', 'Deprecated: V10 ContextGraphs registration does not reveal cleartext metadata on-chain')
+  .option('--access-policy <n>', 'Access policy: 0 = public/discoverable, 1 = private/curated', parseInt)
+  .option('--publish-policy <n>', 'Publish policy: 0 = curated, 1 = open', parseInt)
   .action(async (id: string, opts: ActionOpts) => {
     try {
       const client = await ApiClient.connect();
       if (opts.reveal) {
         console.warn('--reveal is deprecated and ignored for V10 ContextGraphs registration.');
       }
-      const result = await client.registerContextGraph(id);
+      const result = await client.registerContextGraph(id, {
+        accessPolicy: opts.accessPolicy != null ? Number(opts.accessPolicy) : undefined,
+        publishPolicy: opts.publishPolicy != null ? Number(opts.publishPolicy) : undefined,
+      });
       console.log(`Context graph registered on-chain:`);
       console.log(`  ID:         ${id}`);
       console.log(`  On-chain:   ${result.onChainId}`);
@@ -1383,6 +1432,27 @@ contextGraphCmd
       console.log(`  Agent:         ${opts.agent}`);
     } catch (err) {
       console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
+contextGraphCmd
+  .command('create-sub-graph <contextGraphId> <subGraphName>')
+  .description('Register a sub-graph inside a context graph (required before EPCIS captures or sub-graph-targeted publishes can enqueue).')
+  .action(async (contextGraphId: string, subGraphName: string) => {
+    try {
+      const client = await ApiClient.connect();
+      const result = await client.createSubGraph(contextGraphId, subGraphName);
+      console.log('Sub-graph registered:');
+      console.log(`  Context Graph: ${result.contextGraphId}`);
+      console.log(`  Sub-graph:     ${result.created}`);
+    } catch (err) {
+      const msg = toErrorMessage(err);
+      if (/already exists/i.test(msg)) {
+        console.log(`Sub-graph "${subGraphName}" already exists in context graph "${contextGraphId}" — nothing to do.`);
+        return;
+      }
+      console.error(msg);
       process.exit(1);
     }
   });
@@ -1757,6 +1827,100 @@ openclawCmd
     }
   });
 
+// ─── dkg mcp ────────────────────────────────────────────────────────
+
+const mcpCmd = program
+  .command('mcp')
+  .description('DKG MCP server for AI coding assistants (Cursor, Claude Code, …)');
+
+mcpCmd
+  .command('serve')
+  .description('Run the DKG MCP server over stdio (invoked by the MCP-aware client)')
+  .allowUnknownOption(true)
+  .allowExcessArguments(true)
+  .action(async (_opts, command) => {
+    // Pass any positional/extra args from the umbrella CLI through to the
+    // MCP server's `main()` so its internal CLI subcommand dispatcher
+    // (`join`, `status`, `help`) keeps working from the umbrella wrapper.
+    const passthrough = command.args ?? [];
+    let main: typeof import('@origintrail-official/dkg-mcp').main;
+    try {
+      ({ main } = await import('@origintrail-official/dkg-mcp'));
+    } catch (err: any) {
+      console.error('\n[dkg mcp serve] MCP server is not available.');
+      console.error(`  Reason: ${err?.message ?? err}`);
+      console.error('  • In a monorepo dev checkout: run `pnpm build` at the repo root to build all workspaces.');
+      console.error('  • With a global install: reinstall with `npm install -g @origintrail-official/dkg`.\n');
+      process.exit(1);
+    }
+    try {
+      // Synthesise an argv whose `[2]` slot aligns with the MCP server's
+      // own subcommand dispatcher. Without this, `dkg mcp serve join …`
+      // would land `argv[2] === 'mcp'` inside the MCP server and the
+      // `join` would never be seen.
+      await main(['node', 'dkg-mcp', ...passthrough]);
+    } catch (err: any) {
+      console.error(`\n[dkg mcp serve] ERROR: ${err?.message ?? err}\n`);
+      process.exit(1);
+    }
+  });
+
+mcpCmd
+  .command('setup')
+  .description('Bundled init + daemon-start + MCP-client registration (idempotent, safe to re-run)')
+  .option('--port <port>', 'Override daemon API port (default: 9200)')
+  .option('--name <name>', 'Override agent name (used only on first init)')
+  .option('--no-start', 'Skip daemon start (configure only)')
+  .option('--no-fund', 'Skip wallet funding via testnet faucet')
+  .option('--no-verify', 'Skip post-setup verification probe')
+  .option('--dry-run', 'Preview steps without writing or starting anything')
+  .option('--force', 'Refresh every detected client regardless of current registration state')
+  .option('--print-only', 'Print the canonical JSON to stdout; skip every other step')
+  .option('--yes', 'Auto-confirm per-client registrations (default false: prompt interactively in TTY mode; non-TTY auto-confirms — pass `--yes` in scripts for the safer scripted-environment posture)')
+  .option('--installed', 'Force installed-mode setup. Bootstrap home: `~/.dkg`. Registered binary: the running CLI (whichever invoked this command — typically the global `dkg`). Use this from a monorepo cwd when you want the global install instead of the local dist. Mutually exclusive with --monorepo.')
+  .option('--monorepo', 'Force monorepo-mode setup. Bootstrap home: `~/.dkg-dev`. Registered binary: the local `<repo>/packages/cli/dist/cli.js` script (located via cwd-first walk; falls back to the running CLI dir). Errors if no DKG monorepo root is detected. Switches BOTH bootstrap home AND the registered binary, unlike --installed which only switches the home. Mutually exclusive with --installed.')
+  .action(async (opts) => {
+    // Dynamic-import the openclaw-setup primitives for the bundled
+    // init + daemon-start. Same import surface (and same package
+    // resolution failure mode) as `dkg openclaw setup` so a missing
+    // adapter build emits a parallel error message.
+    let openclawSetupExports: typeof import('@origintrail-official/dkg-adapter-openclaw');
+    try {
+      openclawSetupExports = await import('@origintrail-official/dkg-adapter-openclaw');
+    } catch (err: any) {
+      console.error('\n[dkg mcp setup] Setup primitives are not available.');
+      console.error(`  Reason: ${err?.message ?? err}`);
+      console.error('  • In a monorepo dev checkout: run `pnpm build` at the repo root to build all workspaces.');
+      console.error('  • With a global install: reinstall with `npm install -g @origintrail-official/dkg`.\n');
+      process.exit(1);
+    }
+    let coreExports: typeof import('@origintrail-official/dkg-core');
+    try {
+      coreExports = await import('@origintrail-official/dkg-core');
+    } catch (err: any) {
+      console.error('\n[dkg mcp setup] Core faucet primitive is not available.');
+      console.error(`  Reason: ${err?.message ?? err}`);
+      process.exit(1);
+    }
+
+    const { mcpSetupAction } = await import('./mcp-setup.js');
+    try {
+      await mcpSetupAction(opts, {
+        loadNetworkConfig: openclawSetupExports.loadNetworkConfig,
+        ensureDkgNodeConfig: coreExports.ensureDkgNodeConfig,
+        startDaemon: openclawSetupExports.startDaemon,
+        readWalletsWithRetry: openclawSetupExports.readWalletsWithRetry,
+        logManualFundingInstructions: openclawSetupExports.logManualFundingInstructions,
+        requestFaucetFunding: coreExports.requestFaucetFunding,
+        findDkgMonorepoRoot: coreExports.findDkgMonorepoRoot,
+        resolveDkgConfigHome: coreExports.resolveDkgConfigHome,
+      });
+    } catch (err: any) {
+      console.error(`\n[dkg mcp setup] ERROR: ${err?.message ?? err}\n`);
+      process.exit(1);
+    }
+  });
+
 // ─── dkg ccl ────────────────────────────────────────────────────────
 
 type HermesAdapterModule = Record<string, unknown>;
@@ -1901,7 +2065,7 @@ for (const [commandName, candidates, description] of [
 
 const cclCmd = program
   .command('ccl')
-  .description('Manage paranet-scoped CCL policies');
+  .description('Manage contextGraph-scoped CCL policies');
 
 const cclPolicyCmd = cclCmd
   .command('policy')
@@ -1983,7 +2147,7 @@ cclPolicyCmd
 cclPolicyCmd
   .command('list')
   .description('List known CCL policies')
-  .option('--paranet <id>', 'Filter by paranet id')
+  .option('--context-graph <id>', 'Filter by contextGraph id')
   .option('--name <name>', 'Filter by policy name')
   .option('--context-type <contextType>', 'Filter by context type')
   .option('--status <status>', 'Filter by status')
@@ -1992,7 +2156,7 @@ cclPolicyCmd
     try {
       const client = await ApiClient.connect();
       const { policies } = await client.listCclPolicies({
-        contextGraphId: opts.paranet,
+        contextGraphId: opts.contextGraph,
         name: opts.name,
         contextType: opts.contextType,
         status: opts.status,
@@ -2004,7 +2168,7 @@ cclPolicyCmd
       }
       for (const policy of policies) {
         console.log(`${policy.name}@${policy.version}  ${policy.policyUri}`);
-      console.log(`  Context Graph: ${policy.contextGraphId ?? policy.paranetId}`);
+      console.log(`  Context Graph: ${policy.contextGraphId}`);
       console.log(`  Status:        ${policy.status}${policy.isActiveDefault ? ' (active default)' : ''}`);
       if (policy.contextType) console.log(`  Context:       ${policy.contextType}`);
         if (policy.activeContexts?.length) console.log(`  Active in contexts: ${policy.activeContexts.join(', ')}`);
@@ -2040,7 +2204,7 @@ cclPolicyCmd
       console.log(`Resolved policy:`);
       console.log(`  URI:     ${policy.policyUri}`);
       console.log(`  Name:    ${policy.name}@${policy.version}`);
-      console.log(`  Context Graph: ${policy.contextGraphId ?? policy.paranetId}`);
+      console.log(`  Context Graph: ${policy.contextGraphId}`);
       console.log(`  Hash:    ${policy.hash}`);
       if (policy.contextType) console.log(`  Context: ${policy.contextType}`);
       if (policy.body) console.log(`  Body:\n${policy.body}`);
@@ -2057,7 +2221,7 @@ cclCmd
   .option('--context-type <contextType>', 'Optional stricter context override scope')
   .option('--case <path>', 'YAML/JSON file with { facts, context? }')
   .option('--facts-file <path>', 'YAML/JSON file containing facts array')
-  .option('--publish-result', 'Publish the evaluation output back into the paranet as typed records')
+  .option('--publish-result', 'Publish the evaluation output back into the contextGraph as typed records')
   .option('--view <view>', 'Declared view, for example accepted')
   .option('--snapshot-id <snapshotId>', 'Snapshot identifier')
   .option('--scope-ual <scopeUal>', 'Scope UAL for evaluation')
@@ -2143,7 +2307,6 @@ program
   .command('index [directory]')
   .description('Index a repository and write to shared memory or publish directly')
   .option('-p, --context-graph <id>', 'Target context graph', 'dev-coordination')
-  .option('--paranet <id>', 'Target context graph (legacy alias)')
   .option('--shared-memory', 'Write indexed quads to shared memory instead of publishing')
   .option('--workspace', 'Write indexed quads to shared memory instead of publishing (legacy alias)')
   .option('--include-content', 'Index docs/content files in addition to source code')
@@ -2154,7 +2317,7 @@ program
     try {
       const { resolve } = await import('node:path');
       const repoRoot = resolve(directory ?? '.');
-      const targetContextGraph = opts.contextGraph ?? opts.paranet ?? 'dev-coordination';
+      const targetContextGraph = opts.contextGraph ?? 'dev-coordination';
       const useSharedMemory = opts.sharedMemory || opts.workspace;
 
       console.log(`Indexing ${repoRoot}...`);
@@ -2185,9 +2348,25 @@ program
       }
 
       const client = await ApiClient.connect();
-      const verb = useSharedMemory ? 'Writing to shared memory' : 'Publishing';
+      // RFC-001 §9.x — both branches now go through the assertion
+      // lifecycle. `--shared-memory` stages content into a named WM
+      // assertion (no chain submit); the default branch publishes
+      // directly via the one-shot `publishAssertion` helper.
+      const indexAssertionName = `index-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const verb = useSharedMemory ? 'Staging in WM assertion' : 'Publishing';
       const applyBatch = useSharedMemory
-        ? async (batch: typeof result.quads) => client.sharedMemoryWrite(targetContextGraph, batch)
+        ? async (batch: typeof result.quads) => {
+            // Create-or-append: the daemon's create endpoint is
+            // idempotent on `(cg, name)`, so we lazily create on the
+            // first batch (no quads body) and append on subsequent
+            // batches via `/api/assertion/:name/write`.
+            await client.createAssertion(targetContextGraph, indexAssertionName);
+            return client.appendToAssertion(
+              targetContextGraph,
+              indexAssertionName,
+              batch,
+            );
+          }
         : async (batch: typeof result.quads) => client.publish(targetContextGraph, batch);
 
       await publishEntityBatches(result.quads, applyBatch, (sent) => {
@@ -2201,8 +2380,8 @@ program
       });
 
       if (useSharedMemory) {
-        console.log(`\n\n  Written ${result.quads.length} quads to shared memory for context graph "${targetContextGraph}".`);
-        console.log('  Next: dkg shared-memory publish ' + targetContextGraph);
+        console.log(`\n\n  Staged ${result.quads.length} quads into WM assertion "${indexAssertionName}" for context graph "${targetContextGraph}".`);
+        console.log(`  Next: dkg shared-memory publish ${targetContextGraph} --name ${indexAssertionName}`);
       } else {
         console.log(`\n\n  Published ${result.quads.length} quads to context graph "${targetContextGraph}".`);
       }
@@ -2221,29 +2400,49 @@ const sharedMemoryCmd = program
 
 sharedMemoryCmd
   .command('write [context-graph]')
-  .description('Write triples to shared memory from an RDF file or inline')
+  .description('Stage triples into a named WM assertion (the new home of "shared-memory write")')
   .option('-f, --file <path>', 'RDF file (.nq, .nt, .ttl, .trig, .jsonld, .json)')
   .option('--format <fmt>', 'Explicit RDF format (nquads|ntriples|turtle|trig|json|jsonld)')
   .option('-t, --triples <json>', 'Inline JSON array of {subject, predicate, object} triples')
   .option('-s, --subject <uri>', 'Subject URI for simple write')
   .option('-p, --predicate <uri>', 'Predicate URI for simple write')
   .option('-o, --object <value>', 'Object value for simple write')
+  .option('--name <name>', 'Assertion name (auto-generated if omitted)')
+  .option('--sub-graph-name <name>', 'Optional sub-graph name')
   .action(async (contextGraph: string | undefined, opts: ActionOpts) => {
     try {
       const targetContextGraph = contextGraph ?? 'dev-coordination';
       const client = await ApiClient.connect();
       const defaultGraph = `did:dkg:context-graph:${targetContextGraph}`;
       const quads = await loadQuadsFromInput(opts, defaultGraph);
-      const results: Array<Awaited<ReturnType<typeof client.sharedMemoryWrite>>> = [];
+      const assertionName =
+        typeof opts.name === 'string' && opts.name.length > 0
+          ? (opts.name as string)
+          : `cli-write-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const subGraphOption = (opts.subGraphName as string | undefined) ?? undefined;
+
+      // RFC-001 §9.x — the legacy `shared-memory write` was a
+      // free-form append into SWM. The new lifecycle requires a named
+      // assertion. We create lazily on the first batch (no quads),
+      // then append batches via /api/assertion/:name/write.
+      await client.createAssertion(targetContextGraph, assertionName, {
+        ...(subGraphOption ? { subGraphName: subGraphOption } : {}),
+      });
+      let totalWritten = 0;
       await publishEntityBatches(
         quads,
         async (batch) => {
-          const result = await client.sharedMemoryWrite(targetContextGraph, batch);
-          results.push(result);
+          const result = await client.appendToAssertion(
+            targetContextGraph,
+            assertionName,
+            batch,
+            subGraphOption ? { subGraphName: subGraphOption } : undefined,
+          );
+          totalWritten += result.written;
           return result;
         },
         (sent) => {
-          process.stdout.write(`\r  Writing to shared memory: ${sent}/${quads.length} quads`);
+          process.stdout.write(`\r  Writing to WM assertion: ${sent}/${quads.length} quads`);
         },
         {
           maxBatchBytes: 240 * 1024,
@@ -2251,24 +2450,14 @@ sharedMemoryCmd
           splitOversizedEntities: true,
         },
       );
-      const firstResult = results[0];
-      const lastResult = results[results.length - 1];
       console.log();
-      console.log(`Written to shared memory for "${targetContextGraph}":`);
-      if (results.length === 1) {
-        console.log(`  Share operation: ${firstResult.workspaceOperationId}`);
-      } else {
-        console.log(`  Batches:         ${results.length}`);
-        console.log(`  First share op:  ${firstResult.workspaceOperationId}`);
-        console.log(`  Last share op:   ${lastResult.workspaceOperationId}`);
+      console.log(`Staged WM assertion for "${targetContextGraph}":`);
+      console.log(`  Assertion name:  ${assertionName}`);
+      console.log(`  Triples written: ${totalWritten}`);
+      if (subGraphOption) {
+        console.log(`  Sub-graph:       ${subGraphOption}`);
       }
-      console.log(`  Triples written: ${results.reduce((sum, result) => sum + result.triplesWritten, 0)}`);
-      console.log(`  Graph:           ${firstResult.graph}`);
-      const totalSkolemized = results.reduce((sum, result) => sum + (result.skolemizedBlankNodes ?? 0), 0);
-      if (totalSkolemized > 0) {
-        console.log(`  Skolemized BNs:  ${totalSkolemized}`);
-      }
-      console.log(`  Next:            dkg shared-memory publish ${targetContextGraph}`);
+      console.log(`  Next:            dkg shared-memory publish ${targetContextGraph} --name ${assertionName}`);
     } catch (err) {
       console.error(toErrorMessage(err));
       process.exit(1);
@@ -2277,29 +2466,52 @@ sharedMemoryCmd
 
 sharedMemoryCmd
   .command('publish [context-graph]')
-  .description('Publish from shared memory to a context graph')
-  .option('--keep', 'Keep shared memory triples after publishing')
-  .option('--root <entity...>', 'Publish only specific root entities')
-  .option('--sub-graph-name <name>', 'Publish from a specific shared-memory sub-graph')
+  .description('Finalize, promote, and publish a previously-staged WM assertion')
+  .requiredOption('--name <name>', 'Assertion name (from `dkg shared-memory write --name ...`)')
+  .option('--sub-graph-name <name>', 'Optional sub-graph name')
+  .option('--author-agent-address <address>', 'Override author EOA (must be a registered local agent)')
   .action(async (contextGraph: string | undefined, opts: ActionOpts) => {
     try {
       const targetContextGraph = contextGraph ?? 'dev-coordination';
+      const assertionName = String(opts.name);
+      const subGraphOption = (opts.subGraphName as string | undefined) ?? undefined;
+      const authorAgentAddress = (opts.authorAgentAddress as string | undefined) ?? undefined;
       const client = await ApiClient.connect();
-      const selection = opts.root?.length
-        ? { rootEntities: opts.root as string[] }
-        : 'all';
-      const result = await client.publishFromSharedMemory(targetContextGraph, selection, !opts.keep, {
-        subGraphName: opts.subGraphName,
+
+      // RFC-001 §9.x assertion lifecycle:
+      //   finalize → seal in _meta (idempotent on matching merkleRoot)
+      //   promote  → SWM gossip
+      //   publish  → VM via /api/shared-memory/publish { assertionName }
+      const seal = await client.finalizeAssertion(
+        targetContextGraph,
+        assertionName,
+        {
+          ...(subGraphOption ? { subGraphName: subGraphOption } : {}),
+          ...(authorAgentAddress ? { authorAgentAddress } : {}),
+        },
+      );
+      const promoted = await client.promoteAssertion(assertionName, {
+        contextGraphId: targetContextGraph,
+        ...(subGraphOption ? { subGraphName: subGraphOption } : {}),
       });
-      console.log(`Published from shared memory to "${targetContextGraph}":`);
-      console.log(`  Status: ${result.status}`);
-      console.log(`  KC ID:  ${result.kcId}`);
-      console.log(`  KAs:    ${result.kas.length}`);
-      if (opts.subGraphName) {
-        console.log(`  Sub-graph: ${opts.subGraphName}`);
+      const result = await client.publishFromFinalizedAssertion(
+        targetContextGraph,
+        assertionName,
+        subGraphOption ? { subGraphName: subGraphOption } : undefined,
+      );
+      console.log(`Published WM assertion to "${targetContextGraph}":`);
+      console.log(`  Assertion:    ${seal.assertionUri}`);
+      console.log(`  Author:       ${seal.authorAddress}`);
+      console.log(`  Merkle root:  ${seal.merkleRoot}`);
+      console.log(`  Promoted:     ${promoted.promotedCount ?? promoted.count ?? 0} quads`);
+      console.log(`  Status:       ${result.status}`);
+      console.log(`  KC ID:        ${result.kcId}`);
+      console.log(`  KAs:          ${result.kas.length}`);
+      if (subGraphOption) {
+        console.log(`  Sub-graph:    ${subGraphOption}`);
       }
       if (result.txHash) {
-        console.log(`  TX:     ${result.txHash}`);
+        console.log(`  TX:           ${result.txHash}`);
       }
     } catch (err) {
       console.error(toErrorMessage(err));
@@ -2328,6 +2540,121 @@ sourceWorkerCmd
   });
 
 // ─── dkg publisher ────────────────────────────────────────────────────
+
+// ─── dkg pca — Publishing Conviction Account management ──────────────
+//
+// Operator surface for standing up and inspecting on-chain PCAs. Required
+// fixture for RFC §4 modes (a) and (b) of the agent-provenance runbook.
+// Writes are admin-gated by the on-chain `PublishingConvictionAccount`
+// contract — the daemon's EOA must own the PCA NFT for `pca authorize`
+// and `pca funds` to land. Read-side (`pca info`) is permissionless.
+const pcaCmd = program
+  .command('pca')
+  .description('Publishing Conviction Account: create, authorize keys, top-up, inspect');
+
+pcaCmd
+  .command('create')
+  .description('Create a new PCA. Daemon EOA becomes admin + first authorized key')
+  .requiredOption('--tokens <amount>', 'TRAC commitment (decimal, e.g. 100000)')
+  .requiredOption('--epochs <n>', 'Lock duration in epochs (positive integer)')
+  .action(async (opts: { tokens: string; epochs: string }) => {
+    try {
+      const lockEpochs = parseInt(opts.epochs, 10);
+      if (!Number.isFinite(lockEpochs) || lockEpochs <= 0) {
+        console.error('--epochs must be a positive integer');
+        process.exit(1);
+      }
+      const client = await ApiClient.connect();
+      const result = await client.createPca({ tokens: opts.tokens, lockEpochs });
+      console.log(`PCA created (admin = daemon EOA):`);
+      console.log(`  accountId:        ${result.accountId}`);
+      console.log(`  committedTokens:  ${result.committedTokens} TRAC`);
+      console.log(`  lockEpochs:       ${result.lockEpochs}`);
+      console.log(`  txHash:           ${result.txHash}`);
+      console.log(`  block:            ${result.blockNumber}`);
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
+pcaCmd
+  .command('authorize <accountId> <key>')
+  .description('Add `key` to the PCA\'s authorizedKeys set (admin-only on chain)')
+  .action(async (accountId: string, key: string) => {
+    try {
+      if (!/^\d+$/.test(accountId)) {
+        console.error('accountId must be a non-negative integer');
+        process.exit(1);
+      }
+      const client = await ApiClient.connect();
+      const result = await client.authorizePcaKey(accountId, key);
+      console.log(`Authorized key on PCA ${result.accountId}:`);
+      console.log(`  key:        ${result.key}`);
+      console.log(`  authorized: ${result.authorized} (verified via on-chain read)`);
+      console.log(`  txHash:     ${result.txHash}`);
+      console.log(`  block:      ${result.blockNumber}`);
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
+pcaCmd
+  .command('funds <accountId>')
+  .description('Top up an existing PCA (admin-only). Approves token spend automatically')
+  .requiredOption('--tokens <amount>', 'Additional TRAC to commit (decimal)')
+  .action(async (accountId: string, opts: { tokens: string }) => {
+    try {
+      if (!/^\d+$/.test(accountId)) {
+        console.error('accountId must be a non-negative integer');
+        process.exit(1);
+      }
+      const client = await ApiClient.connect();
+      const result = await client.addPcaFunds(accountId, opts.tokens);
+      console.log(`PCA ${result.accountId} topped up:`);
+      console.log(`  addedTokens: ${result.addedTokens} TRAC`);
+      console.log(`  txHash:      ${result.txHash}`);
+      console.log(`  block:       ${result.blockNumber}`);
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
+pcaCmd
+  .command('info <accountId>')
+  .description('Read-only PCA snapshot (admin, balance, conviction, discount). Optional `--probe-key` checks authorization')
+  .option('--probe-key <addr>', 'Also check whether <addr> is currently on the PCA\'s authorizedKeys set')
+  .action(async (accountId: string, opts: { probeKey?: string }) => {
+    try {
+      if (!/^\d+$/.test(accountId)) {
+        console.error('accountId must be a non-negative integer');
+        process.exit(1);
+      }
+      const client = await ApiClient.connect();
+      const info = await client.getPcaInfo(accountId, opts.probeKey);
+      console.log(`PCA ${info.accountId}:`);
+      console.log(`  admin:           ${info.admin}`);
+      console.log(`  balance:         ${info.balanceTrac} TRAC (${info.balance} wei)`);
+      console.log(`  initialDeposit:  ${info.initialDepositTrac} TRAC`);
+      console.log(`  lockEpochs:      ${info.lockEpochs}`);
+      console.log(`  conviction:      ${info.conviction}`);
+      console.log(`  discountBps:     ${info.discountBps} (${(info.discountBps / 100).toFixed(2)}% off base cost)`);
+      if (info.probedKey) {
+        console.log(`  probedKey:`);
+        console.log(`    key:        ${info.probedKey.key}`);
+        if (info.probedKey.error) {
+          console.log(`    error:      ${info.probedKey.error}`);
+        } else {
+          console.log(`    authorized: ${info.probedKey.authorized}`);
+        }
+      }
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
 
 const publisherCmd = program
   .command('publisher')
@@ -2709,6 +3036,259 @@ publisherCmd
     } catch (err) {
       console.error(toErrorMessage(err));
       process.exit(1);
+    }
+  });
+
+// ─── dkg epcis ───────────────────────────────────────────────────────
+
+const EPCIS_EXIT_CODES = {
+  SUCCESS: 0,
+  UNEXPECTED: 1,
+  CLIENT_ERROR: 2,
+  PUBLISHER_UNAVAILABLE: 3,
+  NOT_FOUND: 4,
+} as const;
+
+function exitCodeForEpcisHttpStatus(status: number | undefined): number {
+  if (status === undefined) return EPCIS_EXIT_CODES.UNEXPECTED;
+  if (status >= 200 && status < 300) return EPCIS_EXIT_CODES.SUCCESS;
+  if (status === 503) return EPCIS_EXIT_CODES.PUBLISHER_UNAVAILABLE;
+  if (status === 404) return EPCIS_EXIT_CODES.NOT_FOUND;
+  if (status >= 400 && status < 500) return EPCIS_EXIT_CODES.CLIENT_ERROR;
+  return EPCIS_EXIT_CODES.UNEXPECTED;
+}
+
+function reportEpcisError(err: unknown): never {
+  const httpStatus = (err as { httpStatus?: number })?.httpStatus;
+  const responseBody = (err as { responseBody?: unknown })?.responseBody;
+  const code = exitCodeForEpcisHttpStatus(httpStatus);
+  if (responseBody !== undefined) {
+    try {
+      console.log(JSON.stringify(responseBody, null, 2));
+    } catch {
+      // not serialisable
+    }
+  }
+  console.error(toErrorMessage(err));
+  process.exit(code);
+}
+
+const epcisCmd = program
+  .command('epcis')
+  .description('EPCIS 2.0 capture, status, and event query');
+
+const ALLOWED_ACCESS_POLICIES = new Set(['public', 'ownerOnly', 'allowList']);
+
+epcisCmd
+  .command('capture <document>')
+  .description('Submit an EPCIS 2.0 document for async capture')
+  .option('--context-graph-id <id>', 'Target context graph (overrides config + document envelope)')
+  .option('--sub-graph-name <name>', 'Sub-graph within the context graph')
+  .option('--access-policy <policy>', 'public | ownerOnly | allowList')
+  .option('--allowed-peer <peerId>', 'Peer allowed to read the captured event (repeatable, requires --access-policy allowList)', (value: string, prev: string[] = []) => [...prev, value])
+  .action(async (documentPath: string, opts: ActionOpts) => {
+    try {
+      // Document file may be a bare EPCIS 2.0 doc or a `{ epcisDocument, ... }`
+      // envelope; CLI flags override fields read from the file.
+      const { readFile } = await import('node:fs/promises');
+      let raw: string;
+      try {
+        raw = await readFile(documentPath, 'utf-8');
+      } catch (err) {
+        console.error(`Failed to read ${documentPath}: ${toErrorMessage(err)}`);
+        process.exit(EPCIS_EXIT_CODES.UNEXPECTED);
+      }
+      let parsed: any;
+      try {
+        parsed = JSON.parse(raw);
+      } catch (err) {
+        console.error(`Invalid JSON in ${documentPath}: ${toErrorMessage(err)}`);
+        process.exit(EPCIS_EXIT_CODES.UNEXPECTED);
+      }
+
+      const isEnvelope = parsed && typeof parsed === 'object' && 'epcisDocument' in parsed;
+      const epcisDocument = isEnvelope ? parsed.epcisDocument : parsed;
+      const filePublishOptions = isEnvelope ? parsed.publishOptions : undefined;
+      const fileContextGraphId = isEnvelope ? parsed.contextGraphId : undefined;
+      const fileSubGraphName = isEnvelope ? parsed.subGraphName : undefined;
+
+      const accessPolicy = opts.accessPolicy as string | undefined;
+      if (accessPolicy !== undefined && !ALLOWED_ACCESS_POLICIES.has(accessPolicy)) {
+        console.error(`Invalid --access-policy "${accessPolicy}". Use one of: public, ownerOnly, allowList.`);
+        process.exit(EPCIS_EXIT_CODES.UNEXPECTED);
+      }
+      const allowedPeers = opts.allowedPeer as string[] | undefined;
+      // Validation of `allowedPeers requires accessPolicy === 'allowList'`
+      // runs against the EFFECTIVE merged policy below (post-`merged`
+      // construction). Validating the raw `--access-policy` flag here
+      // would reject `dkg epcis capture envelope.json --allowed-peer X`
+      // when the envelope already supplies `accessPolicy: 'allowList'`,
+      // which is a perfectly valid combination — the flag adds peers,
+      // the envelope sets the policy.
+
+      const publishOptions = (() => {
+        const merged = { ...(filePublishOptions ?? {}) } as {
+          accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
+          allowedPeers?: string[];
+        };
+        if (accessPolicy !== undefined) {
+          merged.accessPolicy = accessPolicy as 'public' | 'ownerOnly' | 'allowList';
+        }
+        if (allowedPeers && allowedPeers.length > 0) {
+          merged.allowedPeers = allowedPeers;
+        }
+        return Object.keys(merged).length > 0 ? merged : undefined;
+      })();
+      if (publishOptions) {
+        if (publishOptions.accessPolicy !== undefined && !ALLOWED_ACCESS_POLICIES.has(publishOptions.accessPolicy)) {
+          console.error(`Invalid publishOptions.accessPolicy "${publishOptions.accessPolicy}". Use one of: public, ownerOnly, allowList.`);
+          process.exit(EPCIS_EXIT_CODES.UNEXPECTED);
+        }
+        if (publishOptions.allowedPeers && publishOptions.allowedPeers.length > 0 && publishOptions.accessPolicy !== 'allowList') {
+          console.error('publishOptions.allowedPeers requires accessPolicy "allowList".');
+          process.exit(EPCIS_EXIT_CODES.UNEXPECTED);
+        }
+      }
+
+      // Use explicit `!== undefined` checks (not truthiness) so an
+      // envelope file that explicitly sets `"contextGraphId": ""` or
+      // `"subGraphName": ""` round-trips to the server as an empty
+      // string. The server's resolveCgId/resolveSubGraphName then
+      // returns a precise 400 instead of silently falling back to the
+      // daemon default CG / root partition. Truthiness drops empty
+      // strings into the "not provided" bucket, which masks the
+      // misconfiguration as a successful capture against the wrong
+      // partition.
+      const request = {
+        epcisDocument,
+        ...(opts.contextGraphId !== undefined
+          ? { contextGraphId: String(opts.contextGraphId) }
+          : fileContextGraphId !== undefined
+            ? { contextGraphId: String(fileContextGraphId) }
+            : {}),
+        ...(opts.subGraphName !== undefined
+          ? { subGraphName: String(opts.subGraphName) }
+          : fileSubGraphName !== undefined
+            ? { subGraphName: String(fileSubGraphName) }
+            : {}),
+        ...(publishOptions ? { publishOptions } : {}),
+      };
+
+      const client = await ApiClient.connect();
+      const result = await client.captureEpcis(request);
+      console.log(JSON.stringify(result, null, 2));
+    } catch (err) {
+      reportEpcisError(err);
+    }
+  });
+
+epcisCmd
+  .command('status <captureID>')
+  .description('Get the status of an async EPCIS capture job')
+  .action(async (captureID: string) => {
+    try {
+      const client = await ApiClient.connect();
+      const result = await client.getEpcisCapture(captureID);
+      console.log(JSON.stringify(result, null, 2));
+    } catch (err) {
+      reportEpcisError(err);
+    }
+  });
+
+epcisCmd
+  .command('query')
+  .description('Query EPCIS events from a context graph')
+  .option('--context-graph-id <id>', 'Target context graph (overrides config default)')
+  .option('--sub-graph-name <name>', 'Sub-graph within the context graph')
+  .option('--finalized <bool>', 'true | false (default: server default)')
+  .option('--epc <epc>', 'Filter by EPC')
+  .option('--biz-step <step>', 'Filter by bizStep')
+  .option('--from <ts>', 'Filter by lower bound on eventTime')
+  .option('--to <ts>', 'Filter by upper bound on eventTime')
+  .option('--event-id <id>', 'Filter by eventID')
+  .option('--event-type <type>', 'Filter by eventType (e.g. ObjectEvent)')
+  .option('--action <a>', 'Filter by action (ADD | OBSERVE | DELETE)')
+  .option('--disposition <d>', 'Filter by disposition')
+  .option('--read-point <uri>', 'Filter by readPoint id')
+  .option('--biz-location <uri>', 'Filter by bizLocation id')
+  .option('--per-page <n>', 'Page size')
+  .option('--next-page-token <t>', 'Continuation token from a prior response')
+  .option('--all', 'Follow Link: rel="next" pages and merge eventList in-place')
+  .action(async (opts: ActionOpts) => {
+    try {
+      const finalized = (() => {
+        if (opts.finalized === undefined) return undefined;
+        const lowered = String(opts.finalized).toLowerCase();
+        if (lowered === 'true') return true;
+        if (lowered === 'false') return false;
+        console.error(`Invalid --finalized "${opts.finalized}". Use "true" or "false".`);
+        process.exit(EPCIS_EXIT_CODES.UNEXPECTED);
+      })();
+      const perPage = opts.perPage !== undefined
+        ? Number.parseInt(String(opts.perPage), 10)
+        : undefined;
+      if (perPage !== undefined && (!Number.isFinite(perPage) || perPage <= 0)) {
+        console.error(`Invalid --per-page "${opts.perPage}". Use a positive integer.`);
+        process.exit(EPCIS_EXIT_CODES.UNEXPECTED);
+      }
+
+      const params = {
+        ...(opts.contextGraphId ? { contextGraphId: String(opts.contextGraphId) } : {}),
+        ...(opts.subGraphName ? { subGraphName: String(opts.subGraphName) } : {}),
+        ...(finalized !== undefined ? { finalized } : {}),
+        ...(opts.epc ? { epc: String(opts.epc) } : {}),
+        ...(opts.bizStep ? { bizStep: String(opts.bizStep) } : {}),
+        ...(opts.from ? { from: String(opts.from) } : {}),
+        ...(opts.to ? { to: String(opts.to) } : {}),
+        ...(opts.eventId ? { eventID: String(opts.eventId) } : {}),
+        ...(opts.eventType ? { eventType: String(opts.eventType) } : {}),
+        ...(opts.action ? { action: String(opts.action) } : {}),
+        ...(opts.disposition ? { disposition: String(opts.disposition) } : {}),
+        ...(opts.readPoint ? { readPoint: String(opts.readPoint) } : {}),
+        ...(opts.bizLocation ? { bizLocation: String(opts.bizLocation) } : {}),
+        ...(perPage !== undefined ? { perPage } : {}),
+        ...(opts.nextPageToken ? { nextPageToken: String(opts.nextPageToken) } : {}),
+      };
+
+      const client = await ApiClient.connect();
+      const initial = await client.queryEpcisEvents(params);
+
+      if (!opts.all) {
+        const out: Record<string, unknown> = { ...((initial.body ?? {}) as Record<string, unknown>) };
+        if (initial.nextPageUrl) {
+          out.nextPageUrl = initial.nextPageUrl;
+        }
+        console.log(JSON.stringify(out, null, 2));
+        return;
+      }
+
+      const merged = JSON.parse(JSON.stringify(initial.body)) as any;
+      const eventList = merged?.epcisBody?.queryResults?.resultsBody?.eventList;
+      if (!Array.isArray(eventList)) {
+        console.error('Cannot follow Link: rel="next" — initial response shape unexpected.');
+        process.exit(EPCIS_EXIT_CODES.UNEXPECTED);
+      }
+      let nextUrl = initial.nextPageUrl;
+      const MAX_PAGES = 1000;
+      let pages = 1;
+      while (nextUrl) {
+        if (pages >= MAX_PAGES) {
+          console.error(`Aborting --all after ${MAX_PAGES} pages (suspected loop).`);
+          process.exit(EPCIS_EXIT_CODES.UNEXPECTED);
+        }
+        const next = await client.queryEpcisEventsByPath(nextUrl);
+        const nextEventList = (next.body as any)?.epcisBody?.queryResults?.resultsBody?.eventList;
+        if (!Array.isArray(nextEventList)) {
+          console.error(`Cannot follow Link: rel="next" — page ${pages + 1} response shape unexpected.`);
+          process.exit(EPCIS_EXIT_CODES.UNEXPECTED);
+        }
+        eventList.push(...nextEventList);
+        nextUrl = next.nextPageUrl;
+        pages += 1;
+      }
+      console.log(JSON.stringify(merged, null, 2));
+    } catch (err) {
+      reportEpcisError(err);
     }
   });
 

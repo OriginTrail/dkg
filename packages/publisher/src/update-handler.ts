@@ -65,7 +65,7 @@ export class UpdateHandler {
         ctx = createOperationContext('ka-update', request.operationId);
       }
       const {
-        paranetId: contextGraphId,
+        contextGraphId: contextGraphId,
         batchId,
         nquads,
         manifest,

@@ -24,7 +24,7 @@ const DEPLOYER_ADMIN_KEY = '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412
 const NODE_A_KEY = '0x47e179ec197488593b187f80a00eb0da91f1b9d0b13f8733639f19c30a34926a'; // account[4]
 const NODE_B_KEY = '0x8b3a350cf5c34c9194ca85829a2df0ec3153be0318b5e2d3348e872092edffba'; // account[5]
 
-const PARANET = 'finalization-chain-e2e';
+const CONTEXT_GRAPH = 'finalization-chain-e2e';
 const ENTITY_1 = 'urn:finalization-chain:entity:1';
 const ENTITY_2 = 'urn:finalization-chain:entity:2';
 const ENTITY_3 = 'urn:finalization-chain:entity:3';
@@ -244,7 +244,7 @@ describe('E2E: workspace-first publish with real blockchain', () => {
     expect(nodeB.wallet).toBeDefined();
   }, 60_000);
 
-  it('starts agents, connects them, and both subscribe to paranet', async (ctx) => {
+  it('starts agents, connects them, and both subscribe to contextGraph', async (ctx) => {
     if (skipSuite) { ctx.skip(); return; }
     const [nodeA, nodeB] = agents;
 
@@ -258,11 +258,11 @@ describe('E2E: workspace-first publish with real blockchain', () => {
     expect(nodeA.node.libp2p.getPeers().length).toBeGreaterThanOrEqual(1);
     expect(nodeB.node.libp2p.getPeers().length).toBeGreaterThanOrEqual(1);
 
-    await nodeA.createContextGraph({ id: PARANET, name: 'Finalization Chain Test', description: '' });
-    await nodeA.registerContextGraph(PARANET);
+    await nodeA.createContextGraph({ id: CONTEXT_GRAPH, name: 'Finalization Chain Test', description: '' });
+    await nodeA.registerContextGraph(CONTEXT_GRAPH);
     // V10 Verified Memory publish requires explicit on-chain registration.
     // B only needs to join the gossip topic; A is already subscribed via create().
-    nodeB.subscribeToContextGraph(PARANET);
+    nodeB.subscribeToContextGraph(CONTEXT_GRAPH);
     await sleep(1000);
   }, 30_000);
 
@@ -275,7 +275,7 @@ describe('E2E: workspace-first publish with real blockchain', () => {
       { subject: ENTITY_1, predicate: 'http://schema.org/version', object: '"1"', graph: '' as const },
     ];
 
-    const wsResult = await nodeA.share(PARANET, quads);
+    const wsResult = await nodeA.share(CONTEXT_GRAPH, quads);
     expect(wsResult.shareOperationId).toBeDefined();
 
     // Poll until B has the workspace data
@@ -284,7 +284,7 @@ describe('E2E: workspace-first publish with real blockchain', () => {
     while (Date.now() < deadline) {
       bWorkspace = await nodeB.query(
         `SELECT ?name WHERE { <${ENTITY_1}> <http://schema.org/name> ?name }`,
-        { contextGraphId: PARANET, graphSuffix: '_shared_memory' },
+        { contextGraphId: CONTEXT_GRAPH, graphSuffix: '_shared_memory' },
       );
       if (bWorkspace.bindings.length > 0) break;
       await sleep(500);
@@ -297,7 +297,7 @@ describe('E2E: workspace-first publish with real blockchain', () => {
     if (skipSuite) { ctx.skip(); return; }
     const [nodeA, nodeB] = agents;
 
-    const enshrineResult = await nodeA.publishFromSharedMemory(PARANET, {
+    const enshrineResult = await nodeA.publishFromSharedMemory(CONTEXT_GRAPH, {
       rootEntities: [ENTITY_1],
     });
 
@@ -310,7 +310,7 @@ describe('E2E: workspace-first publish with real blockchain', () => {
     // A's data graph should have the enshrined data
     const aData = await nodeA.query(
       `SELECT ?name WHERE { <${ENTITY_1}> <http://schema.org/name> ?name }`,
-      PARANET,
+      CONTEXT_GRAPH,
     );
     expect(aData.bindings.length).toBe(1);
     expect(aData.bindings[0]['name']).toBe('"Finalization Chain Draft"');
@@ -321,7 +321,7 @@ describe('E2E: workspace-first publish with real blockchain', () => {
     while (Date.now() < deadline) {
       bData = await nodeB.query(
         `SELECT ?name WHERE { <${ENTITY_1}> <http://schema.org/name> ?name }`,
-        PARANET,
+        CONTEXT_GRAPH,
       );
       if (bData.bindings.length > 0) break;
       await sleep(500);
@@ -347,25 +347,25 @@ describe('E2E: workspace-first publish with real blockchain', () => {
     const nodeA = agents[0];
 
     // Write entity 2 to workspace
-    await nodeA.share(PARANET, [
+    await nodeA.share(CONTEXT_GRAPH, [
       { subject: ENTITY_2, predicate: 'http://schema.org/name', object: '"Entity Two"', graph: '' },
     ]);
 
     const ws2 = await nodeA.query(
       `SELECT ?name WHERE { <${ENTITY_2}> <http://schema.org/name> ?name }`,
-      { contextGraphId: PARANET, graphSuffix: '_shared_memory' },
+      { contextGraphId: CONTEXT_GRAPH, graphSuffix: '_shared_memory' },
     );
     expect(ws2.bindings.length).toBe(1);
 
     // Enshrine entity 2
-    const result2 = await nodeA.publishFromSharedMemory(PARANET, { rootEntities: [ENTITY_2] });
+    const result2 = await nodeA.publishFromSharedMemory(CONTEXT_GRAPH, { rootEntities: [ENTITY_2] });
     expect(result2.status).toBe('confirmed');
     expect(result2.onChainResult).toBeDefined();
 
     // Both entities should now be in the data graph
     const dataAll = await nodeA.query(
       `SELECT ?s ?name WHERE { ?s <http://schema.org/name> ?name }`,
-      PARANET,
+      CONTEXT_GRAPH,
     );
     const names = dataAll.bindings.map((b: any) => String(b['name']));
     expect(names.some((n: string) => n.includes('Finalization Chain Draft'))).toBe(true);
@@ -378,17 +378,17 @@ describe('E2E: workspace-first publish with real blockchain', () => {
     if (skipSuite) { ctx.skip(); return; }
     const nodeA = agents[0];
 
-    await nodeA.share(PARANET, [
+    await nodeA.share(CONTEXT_GRAPH, [
       { subject: ENTITY_3, predicate: 'http://schema.org/name', object: '"Cleanup Entity"', graph: '' },
     ]);
 
     const wsBefore = await nodeA.query(
       `SELECT ?name WHERE { <${ENTITY_3}> <http://schema.org/name> ?name }`,
-      { contextGraphId: PARANET, graphSuffix: '_shared_memory' },
+      { contextGraphId: CONTEXT_GRAPH, graphSuffix: '_shared_memory' },
     );
     expect(wsBefore.bindings.length).toBe(1);
 
-    const result = await nodeA.publishFromSharedMemory(PARANET, { rootEntities: [ENTITY_3] }, {
+    const result = await nodeA.publishFromSharedMemory(CONTEXT_GRAPH, { rootEntities: [ENTITY_3] }, {
       clearSharedMemoryAfter: true,
     });
     expect(result.status).toBe('confirmed');
@@ -397,14 +397,14 @@ describe('E2E: workspace-first publish with real blockchain', () => {
     // Workspace should be cleaned
     const wsAfter = await nodeA.query(
       `SELECT ?name WHERE { <${ENTITY_3}> <http://schema.org/name> ?name }`,
-      { contextGraphId: PARANET, graphSuffix: '_shared_memory' },
+      { contextGraphId: CONTEXT_GRAPH, graphSuffix: '_shared_memory' },
     );
     expect(wsAfter.bindings.length).toBe(0);
 
     // Data graph should have the data
     const data = await nodeA.query(
       `SELECT ?name WHERE { <${ENTITY_3}> <http://schema.org/name> ?name }`,
-      PARANET,
+      CONTEXT_GRAPH,
     );
     expect(data.bindings.length).toBe(1);
     expect(data.bindings[0]['name']).toBe('"Cleanup Entity"');

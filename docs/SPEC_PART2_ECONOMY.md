@@ -105,7 +105,7 @@ Relay nodes facilitate NAT traversal for agents behind firewalls (see Part 1 §5
 
 A standalone "proof of relay work" mechanism is vulnerable to Sybil attacks — a relay could fake traffic with sock puppet agents. Instead, relay rewards **piggyback on existing on-chain activity signals**:
 
-1. **An agent is "real" if it has on-chain history** — published KAs, invoked skills with payment, staked TRAC, participated in paranets, etc.
+1. **An agent is "real" if it has on-chain history** — published KAs, invoked skills with payment, staked TRAC, participated in contextGraphs, etc.
 2. **Relay rewards are proportional to real agents served** — only connections from on-chain-active agents count.
 3. **No new proof mechanism needed** — the chain already has all the signals.
 
@@ -145,7 +145,7 @@ relayReward(epoch) = relayPool(epoch) × relayWeight / totalRelayWeight
 
 where:
   relayWeight = Σ activityScore(agent) for each unique active agent in receipts
-  activityScore(agent) = f(publishCount, skillInvocations, stake, paranetMemberships)
+  activityScore(agent) = f(publishCount, skillInvocations, stake, contextGraphMemberships)
 ```
 
 The `activityScore` function ensures that relays serving actively contributing agents earn more than relays serving passive ones. The exact curve is a governance parameter.
@@ -180,7 +180,7 @@ Macaroon {
   identifier: "uuid-v4"
   caveats: [
     { type: "time",     expires: "2026-03-01T00:00:00Z" },
-    { type: "paranet",  allowed: ["did:dkg:paranet:0xabc"] },
+    { type: "contextGraph",  allowed: ["did:dkg:context-graph:0xabc"] },
     { type: "query",    allowedTypes: ["SELECT"] },
     { type: "rateLimit", maxPerHour: 100 },
     { type: "identity",  boundTo: "did:key:z6Mk..." }
@@ -194,9 +194,9 @@ Macaroon {
 Any holder can add caveats (restrictions) before delegating — but never remove them.
 
 ```
-Owner mints M1: [paranet: 0xabc]
-  → attenuates to M2: [paranet: 0xabc, expires: March 1]
-    → attenuates to M3: [paranet: 0xabc, expires: March 1, rateLimit: 100/h]
+Owner mints M1: [contextGraph: 0xabc]
+  → attenuates to M2: [contextGraph: 0xabc, expires: March 1]
+    → attenuates to M3: [contextGraph: 0xabc, expires: March 1, rateLimit: 100/h]
 ```
 
 Each attenuation is HMAC-chained. The issuing node verifies the full chain.
@@ -361,7 +361,7 @@ interface ChainAdapter {
 | `dkg_delegation` | Delegation with escrow | Token escrow PDAs, lock multiplier |
 | `dkg_channel` | Payment channels | State PDAs |
 | `dkg_relay` | Relay connection receipts + rewards | Receipt PDAs, epoch reward distribution |
-| `dkg_paranet` | Paranet management | PDA per paranet |
+| `dkg_contextGraph` | ContextGraph management | PDA per contextGraph |
 
 ### Cross-Chain UAL
 
@@ -466,44 +466,44 @@ function getRelayWeight(uint256 relayIdentityId, uint32 epoch) external view ret
 
 These items were intentionally omitted from Part 1 to allow rapid development. They are required before production but not for the initial off-chain marketplace.
 
-### 10.1 Paranet Lifecycle
+### 10.1 ContextGraph Lifecycle
 
-Paranets are created on-chain and initialized in the triple store.
+ContextGraphs are created on-chain and initialized in the triple store.
 
 ```
-1. Creator → Chain: createParanet(id, metadata)
-   Chain: register paranet, emit ParanetCreated event
-2. Nodes observing event: create data graph <did:dkg:paranet:{id}>
-                          create meta graph <did:dkg:paranet:{id}/_meta>
-3. Creator publishes initial metadata KA (paranet name, description, policies)
+1. Creator → Chain: createContextGraph(id, metadata)
+   Chain: register contextGraph, emit ContextGraphCreated event
+2. Nodes observing event: create data graph <did:dkg:context-graph:{id}>
+                          create meta graph <did:dkg:context-graph:{id}/_meta>
+3. Creator publishes initial metadata KA (contextGraph name, description, policies)
 ```
 
-Paranet policies (set at creation, updatable by governance):
+ContextGraph policies (set at creation, updatable by governance):
 - `replicationMode`: `full` (Phase 1 default) | `selective` | `sharded`
 - `entityExclusive`: `true` (default) | `false` (open mode — allows multi-publisher same entity)
 - `accessDefault`: `public` | `permissioned`
 
-### 10.2 Paranet Membership
+### 10.2 ContextGraph Membership
 
-How nodes join and leave paranets:
+How nodes join and leave contextGraphs:
 
 ```
-1. Node → Chain: joinParanet(paranetId, identityId, stake)
-   Chain: register node as paranet member, lock stake
-2. Node subscribes to GossipSub topics for this paranet
+1. Node → Chain: joinContextGraph(contextGraphId, identityId, stake)
+   Chain: register node as contextGraph member, lock stake
+2. Node subscribes to GossipSub topics for this contextGraph
 3. Node syncs existing triples (see 10.3)
 4. Node begins receiving and storing new PublishRequests
 ```
 
-Leaving: `leaveParanet()` → unsubscribe from GossipSub, optionally delete local triples, unlock stake after cooldown.
+Leaving: `leaveContextGraph()` → unsubscribe from GossipSub, optionally delete local triples, unlock stake after cooldown.
 
 ### 10.3 Sync Protocol
 
-`/dkg/sync/1.0.0` enables new nodes to catch up on existing triples for a paranet.
+`/dkg/sync/1.0.0` enables new nodes to catch up on existing triples for a contextGraph.
 
 ```protobuf
 message SyncRequest {
-  string paranet_id = 1;
+  string contextGraph_id = 1;
   uint64 from_block = 2;              // Resume from this block (0 = full sync)
   uint32 max_batch_size = 3;          // Max triples per response
 }
@@ -542,7 +542,7 @@ message AccessPolicy {
 
 All GossipSub messages MUST be signed by the sender's Ed25519 key. Validation rules:
 1. Verify signature against sender's PeerId.
-2. Reject messages from non-members of the paranet (cross-reference on-chain membership).
+2. Reject messages from non-members of the contextGraph (cross-reference on-chain membership).
 3. Rate-limit per peer (configurable per topic).
 4. Duplicate message ID detection (message hash).
 
@@ -574,13 +574,13 @@ Master seed (256 bits) → SLIP-10 →
 
 ### 10.8 Selective Replication (Sharding)
 
-Phase 1 uses full replication (every paranet node stores everything). Part 2 introduces options:
+Phase 1 uses full replication (every contextGraph node stores everything). Part 2 introduces options:
 
 | Mode | Description | Use Case |
 |---|---|---|
-| `full` | Every node stores all triples | Small/medium paranets (Phase 1 default) |
-| `selective` | Nodes declare which rootEntities they serve | Large paranets with topic specialization |
-| `sharded` | Triples distributed by consistent hash of rootEntity | Very large paranets, even load |
+| `full` | Every node stores all triples | Small/medium contextGraphs (Phase 1 default) |
+| `selective` | Nodes declare which rootEntities they serve | Large contextGraphs with topic specialization |
+| `sharded` | Triples distributed by consistent hash of rootEntity | Very large contextGraphs, even load |
 
 Nodes advertise their replication scope via DHT provider records.
 
@@ -590,7 +590,7 @@ When sharding is active, a node may not have all triples locally. Cross-node dat
 
 1. **Protocol-mediated only** — Cross-node retrieval uses `/dkg/query/1.0.0` with a constrained request schema (entity lookup by rootEntity or predicate filter), not arbitrary SPARQL strings.
 2. **Responding node controls scope** — The responding node decides what triples to return. The request specifies a rootEntity or a set of predicates; the responder returns matching triples from its local store (or nothing).
-3. **Allowlist-gated** — Nodes must explicitly opt in to serving cross-node requests. By default, `/dkg/query/1.0.0` is disabled. Operators configure an allowlist of trusted peer IDs or paranet memberships.
+3. **Allowlist-gated** — Nodes must explicitly opt in to serving cross-node requests. By default, `/dkg/query/1.0.0` is disabled. Operators configure an allowlist of trusted peer IDs or contextGraph memberships.
 4. **Rate-limited** — Per-peer rate limits prevent abuse even for allowlisted peers.
 5. **No query pattern leakage** — The constrained schema ensures that requesters cannot infer the full contents or structure of the responding node's store.
 
@@ -625,7 +625,7 @@ This is optional — publishers accept the availability trade-off if they don't 
 | OQ6 | Lock multiplier curve — linear, exponential, or step? | Tokenomics |
 | OQ7 | Maintenance treasury governance — multisig, DAO, or hybrid? | Fund security |
 | OQ8 | Sync protocol: merkle-based incremental sync vs full snapshot | Scalability |
-| OQ9 | Paranet creation cost — flat fee, stake, or free? | Anti-spam vs adoption |
+| OQ9 | ContextGraph creation cost — flat fee, stake, or free? | Anti-spam vs adoption |
 | OQ10 | Sharding: consistent hash function and rebalancing on node join/leave | Data availability |
 
 ---
@@ -634,13 +634,13 @@ This is optional — publishers accept the availability trade-off if they don't 
 
 ### WP-2A: Blockchain, Contracts & Infrastructure (Developer A)
 
-**Scope**: On-chain contracts (EVM + Solana), paranet lifecycle, sync protocol, GossipSub auth
+**Scope**: On-chain contracts (EVM + Solana), contextGraph lifecycle, sync protocol, GossipSub auth
 
 | Phase | Deliverable | Weeks |
 |---|---|---|
 | 1 | EVM contracts: `AgentDelegation.sol`, `PaymentChannel.sol`, `AgentRegistry.sol`, `RelayRewards.sol`. Full Hardhat test suite. | 3.5 |
-| 2 | EVM: modify `KnowledgeCollection.sol` (reservation, update re-enable). Paranet creation contract. Integration tests with Part 1 publisher. | 2 |
-| 3 | Paranet lifecycle: on-chain createParanet, joinParanet, leaveParanet. Named graph initialization on event. Paranet policies (replication mode, entity exclusivity, access default). | 2 |
+| 2 | EVM: modify `KnowledgeCollection.sol` (reservation, update re-enable). ContextGraph creation contract. Integration tests with Part 1 publisher. | 2 |
+| 3 | ContextGraph lifecycle: on-chain createContextGraph, joinContextGraph, leaveContextGraph. Named graph initialization on event. ContextGraph policies (replication mode, entity exclusivity, access default). | 2 |
 | 4 | `/dkg/sync/1.0.0`: SyncRequest/SyncResponse protocol, batch streaming, merkle verification on sync, resume from block. | 2 |
 | 5 | GossipSub authentication: message signing, membership validation, rate limiting, duplicate detection. | 1 |
 | 6 | Selective replication: node scope advertisement via DHT, query routing based on replication metadata. | 2 |
@@ -672,12 +672,12 @@ This is optional — publishers accept the availability trade-off if they don't 
 
 | Interface | Owner | Consumer |
 |---|---|---|
-| `ChainAdapter` (full: incl. delegation, channels, paranet) | Dev A | Dev B |
+| `ChainAdapter` (full: incl. delegation, channels, contextGraph) | Dev A | Dev B |
 | `AccessEngine` (Macaroons) | Dev B | Dev A (query access gating) |
 | `PaymentChannelClient` | Dev B defines | Dev A integrates in chain adapter |
 | `ConnectionReceipt` schema | Joint | Dev A (contracts), Dev B (agent signing + submission) |
-| `SyncProtocol` | Dev A | Dev B (sync on paranet join) |
-| Solidity: `IAgentDelegation`, `IPaymentChannel`, `IParanet` | Dev A | Dev B (calls from agent) |
+| `SyncProtocol` | Dev A | Dev B (sync on contextGraph join) |
+| Solidity: `IAgentDelegation`, `IPaymentChannel`, `IContextGraph` | Dev A | Dev B (calls from agent) |
 
 ### Integration Milestone
 
@@ -689,6 +689,6 @@ This is optional — publishers accept the availability trade-off if they don't 
 - Agent B settles channel, receives TRAC
 - Same flow on Solana devnet
 - Knowledge marketplace: Agent C publishes paid KA, Agent D purchases access via x402
-- New node joins paranet, syncs full state via `/dkg/sync/1.0.0`
+- New node joins contextGraph, syncs full state via `/dkg/sync/1.0.0`
 - GossipSub messages validated (signed, membership-checked)
 - Access dispute: Agent E pays for private triples, receives invalid data → dispute resolved via channel

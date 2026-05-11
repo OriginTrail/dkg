@@ -68,15 +68,48 @@ export async function publishKA(
   privateQuads?: Array<{ subject: string; predicate: string; object: string; graph?: string }>,
 ) {
   if (privateQuads?.length) {
-    throw new Error('privateQuads are not supported in V10 SWM-first publish');
+    throw new Error(
+      'privateQuads are not supported in the V10 assertion-lifecycle publish ' +
+      '— every published assertion goes through finalize, which signs an EIP-712 ' +
+      'attestation over the public quads.',
+    );
   }
-  await post<any>(`${nodeBase(nodeId)}/api/shared-memory/write`, { contextGraphId, quads });
-  return post<{
+  // RFC-001 §9.x — route through the new assertion lifecycle (sign at
+  // creation): create an auto-named assertion with the supplied quads,
+  // finalize (computes the merkle root and signs the AuthorAttestation
+  // stored in `_meta`), promote into SWM, then publish via the
+  // `assertionName` shape so the publisher forwards the seal verbatim.
+  const assertionName = `netsim-publish-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const quadsWithGraph = quads.map((q) => ({
+    subject: q.subject,
+    predicate: q.predicate,
+    object: q.object,
+    graph: q.graph ?? `did:dkg:context-graph:${contextGraphId}`,
+  }));
+  const created = await post<{ assertionUri: string; seal?: Record<string, unknown> }>(
+    `${nodeBase(nodeId)}/api/assertion/create`,
+    {
+      contextGraphId,
+      name: assertionName,
+      quads: quadsWithGraph,
+      finalize: true,
+      promote: true,
+    },
+  );
+  const published = await post<{
     kcId: string;
     status: string;
     kas: Array<{ tokenId: string; rootEntity: string }>;
     txHash?: string;
-  }>(`${nodeBase(nodeId)}/api/shared-memory/publish`, { contextGraphId, selection: 'all', clearAfter: true });
+  }>(`${nodeBase(nodeId)}/api/shared-memory/publish`, {
+    contextGraphId,
+    assertionName,
+  });
+  return {
+    ...published,
+    assertionUri: created.assertionUri,
+    ...(created.seal ? { seal: created.seal } : {}),
+  };
 }
 
 export async function queryNode(

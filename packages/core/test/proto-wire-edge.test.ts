@@ -23,7 +23,7 @@ describe('Discover (wire round-trip)', () => {
     const msg = {
       type: 'sparql',
       query: 'SELECT ?s WHERE { ?s ?p ?o }',
-      paranetId: 'p1',
+      contextGraphId: 'p1',
       limit: 100,
     };
     const decoded = decodeDiscoverRequest(encodeDiscoverRequest(msg));
@@ -47,7 +47,7 @@ describe('Query (wire round-trip)', () => {
   it('encodes and decodes QueryRequest', () => {
     const msg = {
       sparql: 'ASK { ?s ?p ?o }',
-      paranetId: 'ctx-1',
+      contextGraphId: 'ctx-1',
       timeout: 30_000,
     };
     const decoded = decodeQueryRequest(encodeQueryRequest(msg));
@@ -98,7 +98,7 @@ describe('AgentMessage (wire round-trip)', () => {
 describe('KAUpdateRequest (full manifest round-trip)', () => {
   it('preserves manifest private fields', () => {
     const msg = {
-      paranetId: 'para',
+      contextGraphId: 'para',
       batchId: 99n,
       nquads: new TextEncoder().encode('<a> <b> <c> .'),
       manifest: [
@@ -117,7 +117,7 @@ describe('KAUpdateRequest (full manifest round-trip)', () => {
       operationId: 'op-full-ka',
     };
     const decoded = decodeKAUpdateRequest(encodeKAUpdateRequest(msg));
-    expect(decoded.paranetId).toBe(msg.paranetId);
+    expect(decoded.contextGraphId).toBe(msg.contextGraphId);
     expect(decoded.batchId).toBe(99n);
     expect(decoded.manifest).toHaveLength(1);
     expect(decoded.manifest[0].rootEntity).toBe('urn:root');
@@ -156,7 +156,7 @@ describe('Schema isolation: wrong decoder rejects foreign bytes', () => {
     const discoverBytes = encodeDiscoverRequest({
       type: 't',
       query: 'q',
-      paranetId: 'p',
+      contextGraphId: 'p',
       limit: 1,
     });
     // NOTE: Protobuf decoding is not a fully reliable schema-isolation boundary.

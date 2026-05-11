@@ -1,6 +1,6 @@
 {
   "name": "@origintrail-official/dkg",
-  "version": "10.0.0-rc.4",
+  "version": "10.0.0-rc.6",
   "type": "module",
   "main": "dist/cli.js",
   "bin": {
@@ -30,6 +30,7 @@
     "@origintrail-official/dkg-node-ui": "workspace:*",
     "@origintrail-official/dkg-publisher": "workspace:*",
     "@origintrail-official/dkg-storage": "workspace:*",
+    "@iarna/toml": "^2.2.5",
     "commander": "^13",
     "better-sqlite3": "^11",
     "ethers": "^6",

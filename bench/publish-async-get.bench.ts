@@ -11,9 +11,18 @@ import type {
 import { benchAsyncWithHooks } from './support/esbench-case-hooks.ts';
 import { LayeredDkgBenchmarkClient } from './support/layered-dkg-client.ts';
 
+export const GENERATED_PAYLOAD_SIZES = [
+  { label: '10kb', bytes: 10 * 1024 },
+  { label: '100kb', bytes: 100 * 1024 },
+  { label: '2mb', bytes: 2 * 1024 * 1024 },
+  { label: '200mb', bytes: 200 * 1024 * 1024 },
+] as const;
+
+type PayloadSizeLabel = (typeof GENERATED_PAYLOAD_SIZES)[number]['label'];
+
 export default defineSuite({
   params: {
-    payloadSizeBytes: [128, 1024],
+    payloadSize: resolvePayloadSizeLabels(),
   },
   baseline: {
     type: 'Name',
@@ -27,7 +36,7 @@ export default defineSuite({
     warmup: 1,
   },
   async setup(scene) {
-    const config = createConfig(scene.params.payloadSizeBytes);
+    const config = createConfig(scene.params.payloadSize as PayloadSizeLabel);
     let sequence = 0;
 
     let readPayload: BenchmarkPayload | undefined;
@@ -54,6 +63,10 @@ export default defineSuite({
             false,
           );
         },
+        afterIteration: () => {
+          readPayload = undefined;
+          readClient.clear();
+        },
       },
     );
 
@@ -75,6 +88,10 @@ export default defineSuite({
         beforeIteration: async () => {
           syncPayload = createPayload(config, `esbench-sync-${sequence++}`, 1, 'sync', false);
           await syncClient.sharedMemoryWrite(config.contextGraphId, syncPayload.quads);
+        },
+        afterIteration: () => {
+          syncPayload = undefined;
+          syncClient.clear();
         },
       },
     );
@@ -113,6 +130,11 @@ export default defineSuite({
           const prepared = await asyncClient.sharedMemoryWrite(config.contextGraphId, asyncPayload.quads);
           asyncShareOperationId = prepared.shareOperationId ?? prepared.workspaceOperationId;
         },
+        afterIteration: () => {
+          asyncPayload = undefined;
+          asyncShareOperationId = undefined;
+          asyncClient.clear();
+        },
       },
     );
 
@@ -131,6 +153,10 @@ export default defineSuite({
       {
         beforeIteration: () => {
           uploadPayload = createPayload(config, `esbench-upload-${sequence++}`, 1, 'sync', false);
+        },
+        afterIteration: () => {
+          uploadPayload = undefined;
+          uploadClient.clear();
         },
       },
     );
@@ -155,18 +181,22 @@ export default defineSuite({
           liftPayload = createPayload(config, `esbench-lift-${sequence++}`, 1, 'sync', false);
           await liftClient.writeWorkingMemory(config.contextGraphId, liftPayload.quads);
         },
+        afterIteration: () => {
+          liftPayload = undefined;
+          liftClient.clear();
+        },
       },
     );
   },
 });
 
-function createConfig(payloadSizeBytes: number): BenchmarkConfig {
+function createConfig(payloadSize: PayloadSizeLabel): BenchmarkConfig {
   return {
     contextGraphId: 'bench-cg',
     repeat: 30,
     warmups: 3,
     timeoutMs: 120_000,
-    payloadSizeBytes,
+    payloadSizeBytes: payloadSizeBytes(payloadSize),
     fixture: 'generated',
     outputFormat: 'json',
     namespace: 'benchmark',
@@ -181,4 +211,26 @@ function createConfig(payloadSizeBytes: number): BenchmarkConfig {
 function requirePayload(payload: BenchmarkPayload | undefined, caseName: string): BenchmarkPayload {
   if (!payload) throw new Error(`No payload was prepared for ${caseName}`);
   return payload;
+}
+
+function resolvePayloadSizeLabels(): PayloadSizeLabel[] {
+  const raw = process.env.DKG_ESBENCH_PAYLOAD_SIZES;
+  if (!raw?.trim()) return GENERATED_PAYLOAD_SIZES.map((size) => size.label);
+
+  const requested = raw.split(',').map((part) => part.trim().toLowerCase()).filter(Boolean);
+  if (requested.length === 0) return GENERATED_PAYLOAD_SIZES.map((size) => size.label);
+
+  const known = new Set(GENERATED_PAYLOAD_SIZES.map((size) => size.label));
+  for (const label of requested) {
+    if (!known.has(label as PayloadSizeLabel)) {
+      throw new Error(`Unknown DKG_ESBENCH_PAYLOAD_SIZES entry "${label}". Expected one of: ${[...known].join(', ')}`);
+    }
+  }
+  return requested as PayloadSizeLabel[];
+}
+
+function payloadSizeBytes(label: PayloadSizeLabel): number {
+  const size = GENERATED_PAYLOAD_SIZES.find((entry) => entry.label === label);
+  if (!size) throw new Error(`Unknown payload size label: ${label}`);
+  return size.bytes;
 }

@@ -4,7 +4,7 @@ import { DKGQueryEngine } from '../src/dkg-query-engine.js';
 import { QueryHandler } from '../src/query-handler.js';
 import type { QueryRequest, QueryAccessConfig } from '../src/query-types.js';
 
-const CONTEXT_GRAPH = 'test-paranet';
+const CONTEXT_GRAPH = 'test-contextGraph';
 const GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
 const ENTITY_A = 'did:dkg:entity:alice';
 const ENTITY_B = 'did:dkg:entity:bob';
@@ -199,7 +199,7 @@ describe('QueryHandler', () => {
         makeRequest({
           lookupType: 'ENTITY_TRIPLES',
           entityUri: ENTITY_A,
-          contextGraphId: 'other-paranet',
+          contextGraphId: 'other-contextGraph',
         }),
         'peer-1',
       );

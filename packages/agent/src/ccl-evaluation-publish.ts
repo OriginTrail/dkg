@@ -3,7 +3,7 @@ import type { Quad } from '@origintrail-official/dkg-storage';
 import type { CclEvaluationResult } from './ccl-evaluator.js';
 
 export interface PublishCclEvaluationInput {
-  paranetId: string;
+  contextGraphId: string;
   policyUri: string;
   factSetHash: string;
   factQueryHash?: string;
@@ -22,7 +22,7 @@ export function buildCclEvaluationQuads(input: PublishCclEvaluationInput, graph:
   quads: Quad[];
 } {
   const suffix = `${Date.now()}-${input.factSetHash.slice(-12)}`;
-  const evaluationUri = `did:dkg:ccl-eval:${encodeSegment(input.paranetId)}:${suffix}`;
+  const evaluationUri = `did:dkg:ccl-eval:${encodeSegment(input.contextGraphId)}:${suffix}`;
   const graphUri = String(graph);
   const quads: Quad[] = [
     { subject: evaluationUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: String(DKG_ONTOLOGY.DKG_CCL_EVALUATION), graph: graphUri },

@@ -23,7 +23,7 @@ import type {
   CreateOnChainContextGraphResult,
   VerifyParams,
   PublishToContextGraphParams,
-  V10PublishDirectParams,
+  V10PublishParams,
   V10UpdateKCParams,
   ConvictionAccountInfo,
   PermanentPublishParams,
@@ -39,6 +39,10 @@ import {
   ChallengeNoLongerActiveError,
 } from './chain-adapter.js';
 import { HubResolutionCache } from './hub-resolution-cache.js';
+import {
+  buildAuthorAttestationTypedData,
+  AUTHOR_SCHEME_VERSION_V1,
+} from '@origintrail-official/dkg-core';
 
 /**
  * Default TTL for re-resolving `RandomSampling` / `RandomSamplingStorage`
@@ -1254,6 +1258,12 @@ export class EVMChainAdapter implements ChainAdapter {
             const parsed = kcStorage.interface.parseLog({ topics: [...log.topics], data: log.data });
             if (parsed) {
               const mint = mintByTx.get(log.transactionHash);
+              // V10.1: `author` is the EIP-712-attested author identity recovered
+              // by `_verifyAuthorAttestation` on-chain (or `address(0)` for the
+              // unattributed publish path). Surfacing it here lets replicas
+              // rebuild `dkg:Publication` / `dkg:authoredBy` provenance triples
+              // that match what the originating publisher emitted in
+              // `generateKCMetadata` (Round 5 review §10).
               yield {
                 type: 'KCCreated',
                 blockNumber: log.blockNumber,
@@ -1264,6 +1274,7 @@ export class EVMChainAdapter implements ChainAdapter {
                   byteSize: parsed.args.byteSize.toString(),
                   txHash: log.transactionHash,
                   publisherAddress: mint?.publisherAddress ?? '',
+                  author: typeof parsed.args.author === 'string' ? parsed.args.author : '',
                   startKAId: mint?.startKAId ?? '0',
                   endKAId: mint?.endKAId ?? '0',
                 },
@@ -1288,6 +1299,32 @@ export class EVMChainAdapter implements ChainAdapter {
                   contextGraphId: parsed.args.nameHash?.toString() ?? '',
                   creator: parsed.args.creator?.toString() ?? '',
                   accessPolicy: Number(parsed.args.accessPolicy ?? 0),
+                  txHash: log.transactionHash,
+                },
+              };
+            }
+          }
+        }
+      }
+
+      if (eventType === 'ContextGraphCreated') {
+        const cgStorage = this.contracts.contextGraphStorage;
+        if (cgStorage) {
+          const eventFilter = cgStorage.filters.ContextGraphCreated();
+          const logs = await cgStorage.queryFilter(eventFilter, filter.fromBlock ?? 0, filter.toBlock);
+          for (const log of logs) {
+            const parsed = cgStorage.interface.parseLog({ topics: [...log.topics], data: log.data });
+            if (parsed) {
+              yield {
+                type: 'ContextGraphCreated',
+                blockNumber: log.blockNumber,
+                data: {
+                  contextGraphId: parsed.args.contextGraphId?.toString() ?? '',
+                  creator: parsed.args.owner?.toString() ?? '',
+                  owner: parsed.args.owner?.toString() ?? '',
+                  requiredSignatures: Number(parsed.args.requiredSignatures ?? 0),
+                  accessPolicy: Number(parsed.args.accessPolicy ?? 0),
+                  publishPolicy: Number(parsed.args.publishPolicy ?? 0),
                   txHash: log.transactionHash,
                 },
               };
@@ -1428,6 +1465,7 @@ export class EVMChainAdapter implements ChainAdapter {
       params.participantAgents ?? [],
       params.requiredSignatures,
       params.metadataBatchId ?? 0n,
+      params.accessPolicy ?? 0,
       params.publishPolicy ?? 1,
       params.publishAuthority ?? ethers.ZeroAddress,
       params.publishAuthorityAccountId ?? 0n,
@@ -1570,6 +1608,27 @@ export class EVMChainAdapter implements ChainAdapter {
       );
     }
 
+    // V9→V10 mirror: synthesize an RFC-001 author attestation using the
+    // V9 publish signer as the author of record. The signer is the same
+    // wallet that signed the V9 publisher digest above, so attribution
+    // stays consistent across the legacy/canonical pair.
+    const v10ChainId = (await this.provider.getNetwork()).chainId;
+    const v10KavAddress = await this.contracts.knowledgeAssetsV10!.getAddress();
+    const authorTypedData = buildAuthorAttestationTypedData({
+      chainId: v10ChainId,
+      kav10Address: v10KavAddress,
+      contextGraphId: params.contextGraphId,
+      merkleRoot: params.merkleRoot,
+      authorAddress: signer.address,
+    });
+    const authorSig = ethers.Signature.from(
+      await signer.signTypedData(
+        authorTypedData.domain,
+        authorTypedData.types,
+        authorTypedData.message,
+      ),
+    );
+
     return this.createKnowledgeAssetsV10({
       publishOperationId: ethers.hexlify(ethers.randomBytes(32)),
       contextGraphId: params.contextGraphId,
@@ -1581,9 +1640,15 @@ export class EVMChainAdapter implements ChainAdapter {
       merkleLeafCount: params.merkleLeafCount,
       isImmutable: false,
       publisherNodeIdentityId: params.publisherNodeIdentityId,
-      publisherSignature: params.publisherSignature,
+      author: {
+        address: signer.address,
+        signature: {
+          r: ethers.getBytes(authorSig.r),
+          vs: ethers.getBytes(authorSig.yParityAndS),
+        },
+        schemeVersion: AUTHOR_SCHEME_VERSION_V1,
+      },
       ackSignatures,
-      paymaster: ethers.ZeroAddress,
     });
   }
 
@@ -1629,7 +1694,26 @@ export class EVMChainAdapter implements ChainAdapter {
     return network.chainId;
   }
 
-  async createKnowledgeAssetsV10(params: V10PublishDirectParams): Promise<OnChainPublishResult> {
+  /**
+   * Return `true` iff the address has deployed bytecode on this chain.
+   * Used by the off-chain seal-integrity preflights to dispatch EOA
+   * vs EIP-1271 verification the same way `_verifyAuthorAttestation`
+   * does on-chain (see ChainAdapter.hasContractCode for the full
+   * rationale). Treats a JSON-RPC failure as "unknown" (returns
+   * `false` so the EOA recovery path stays in effect) — safer to
+   * preserve the existing strict check than to silently accept a
+   * potentially-bad signature when the provider is flaky.
+   */
+  async hasContractCode(address: string): Promise<boolean> {
+    try {
+      const code = await this.provider.getCode(address);
+      return code !== undefined && code !== null && code !== '0x' && code.length > 2;
+    } catch {
+      return false;
+    }
+  }
+
+  async createKnowledgeAssetsV10(params: V10PublishParams): Promise<OnChainPublishResult> {
     await this.init();
 
     if (!this.contracts.knowledgeAssetsV10) {
@@ -1648,7 +1732,7 @@ export class EVMChainAdapter implements ChainAdapter {
     // includes negative decimal strings.
     if (params.contextGraphId <= 0n) {
       throw new Error(
-        'V10 publishDirect requires a positive on-chain context graph id; ' +
+        'V10 publish requires a positive on-chain context graph id; ' +
         `got ${params.contextGraphId}. Register the context graph via ` +
         '`ContextGraphs.createContextGraph` first and pass the returned ' +
         'numeric id as `publishContextGraphId`.',
@@ -1684,17 +1768,13 @@ export class EVMChainAdapter implements ChainAdapter {
 
     // Approval policy: always approve TRAC from the operational signer.
     //
-    // `KnowledgeAssetsV10._publishDirect` (KnowledgeAssetsV10.sol:613-628)
-    // only routes payment to `IPaymaster(paymaster).coverCost(...)` when
-    // `paymasterManager.validPaymasters(paymaster) == true` at tx-mine
-    // time; otherwise it falls back to `token.transferFrom(msg.sender,
-    // ...)`. The adapter used to skip approval when an off-chain
-    // `validPaymasters` probe returned `true`, but that was a TOCTOU bug:
-    // if the whitelist mutates between the probe and the mined tx, the
-    // contract silently reverts to the `msg.sender` branch and hits a
-    // zero allowance → publish reverts. A redundant allowance is cheap
-    // and idle when the paymaster does cover the cost, so we always
-    // approve and drop the probe entirely.
+    // RFC-001 unified `publish`/`publishDirect` (KnowledgeAssetsV10.sol):
+    // the contract auto-detects PCA discount via
+    // `agentToAccountId[msg.sender] != 0` and falls through to
+    // `token.transferFrom(msg.sender, CSS, fullCost)` for the
+    // direct-spend branch. A redundant allowance is cheap and idle when
+    // the PCA branch covers the cost, so we always approve up to
+    // `tokenAmount` for the direct-spend ceiling.
     if (this.contracts.token) {
       const tokenWithSigner = this.contracts.token.connect(txSigner) as Contract;
       const currentAllowance = await tokenWithSigner.allowance(txSigner.address, kaAddress);
@@ -1704,9 +1784,10 @@ export class EVMChainAdapter implements ChainAdapter {
       }
     }
 
-    // Build the on-chain PublishParams struct as a plain JS object matching
-    // the field order + types in KnowledgeAssetsV10.sol:99-114. ethers.js
-    // encodes object literals to solidity structs positionally by field name.
+    // Build the on-chain PublishParams struct matching the field order +
+    // types in `KnowledgeAssetsV10.sol` (RFC-001 author-attestation
+    // shape). ethers v6 encodes object literals to solidity structs
+    // positionally by field name.
     const publishParamsStruct = {
       publishOperationId: params.publishOperationId,
       contextGraphId: params.contextGraphId,
@@ -1718,8 +1799,10 @@ export class EVMChainAdapter implements ChainAdapter {
       isImmutable: params.isImmutable,
       merkleLeafCount: params.merkleLeafCount,
       publisherNodeIdentityId: params.publisherNodeIdentityId,
-      publisherNodeR: ethers.hexlify(params.publisherSignature.r),
-      publisherNodeVS: ethers.hexlify(params.publisherSignature.vs),
+      authorAddress: params.author.address,
+      authorR: ethers.hexlify(params.author.signature.r),
+      authorVS: ethers.hexlify(params.author.signature.vs),
+      authorSchemeVersion: params.author.schemeVersion,
       identityIds: params.ackSignatures.map((s) => s.identityId),
       r: params.ackSignatures.map((s) => ethers.hexlify(s.r)),
       vs: params.ackSignatures.map((s) => ethers.hexlify(s.vs)),
@@ -1743,9 +1826,8 @@ export class EVMChainAdapter implements ChainAdapter {
     // This also gives the WAL the pre-broadcast tx hash (ethers v6
     // exposes it on the returned TransactionResponse), so recovery can
     // reconcile an in-flight tx after a daemon crash.
-    const populated = await (ka as any).publishDirect.populateTransaction(
+    const populated = await (ka as any).publish.populateTransaction(
       publishParamsStruct,
-      params.paymaster,
     );
     const filled = await txSigner.populateTransaction(populated);
     const signedTx = await txSigner.signTransaction(filled);
@@ -1766,7 +1848,7 @@ export class EVMChainAdapter implements ChainAdapter {
       // scope — it has not been sent. Surface the hook error to the
       // caller so they know WAL persistence failed BEFORE broadcast.
       throw new Error(
-        `chain:writeahead hook failed before publishDirect broadcast: ` +
+        `chain:writeahead hook failed before publish broadcast: ` +
         `${hookErr instanceof Error ? hookErr.message : String(hookErr)}`,
       );
     }
@@ -1779,6 +1861,7 @@ export class EVMChainAdapter implements ChainAdapter {
     let startKAId = 0n;
     let endKAId = 0n;
     let publisherAddress = txSigner.address;
+    let authorAddress: string | undefined;
     const kcs = this.contracts.knowledgeCollectionStorage;
     if (!kcs) {
       throw new Error(
@@ -1794,6 +1877,12 @@ export class EVMChainAdapter implements ChainAdapter {
           const parsed = kcs.interface.parseLog({ topics: [...log.topics], data: log.data });
           if (parsed?.name === 'KnowledgeCollectionCreated') {
             kcId = BigInt(parsed.args.id);
+            // V10.1: indexed `author` on KnowledgeCollectionCreated is the
+            // chain-confirmed author identity (post EIP-712 verification or
+            // EIP-1271 magic-value check). Carry it back so downstream
+            // metadata writers can pin `dkg:authoredBy` to chain truth
+            // rather than the local signer.
+            authorAddress = String(parsed.args.author);
             foundKCCreated = true;
           }
           if (parsed?.name === 'KnowledgeAssetsMinted') {
@@ -1830,6 +1919,7 @@ export class EVMChainAdapter implements ChainAdapter {
       blockNumber: receipt.blockNumber,
       blockTimestamp,
       publisherAddress,
+      authorAddress,
       gasUsed: receipt.gasUsed ? BigInt(receipt.gasUsed) : undefined,
       effectiveGasPrice: receipt.gasPrice ? BigInt(receipt.gasPrice) : undefined,
       gasCostWei: receipt.gasUsed && receipt.gasPrice ? BigInt(receipt.gasUsed) * BigInt(receipt.gasPrice) : undefined,
@@ -1847,6 +1937,7 @@ export class EVMChainAdapter implements ChainAdapter {
     let startKAId = 0n;
     let endKAId = 0n;
     let publisherAddress = '';
+    let authorAddress: string | undefined;
     let foundKCCreated = false;
     let foundKAMinted = false;
 
@@ -1855,6 +1946,7 @@ export class EVMChainAdapter implements ChainAdapter {
         const parsed = kcs.interface.parseLog({ topics: [...log.topics], data: log.data });
         if (parsed?.name === 'KnowledgeCollectionCreated') {
           kcId = BigInt(parsed.args.id);
+          authorAddress = String(parsed.args.author);
           foundKCCreated = true;
         }
         if (parsed?.name === 'KnowledgeAssetsMinted') {
@@ -1880,6 +1972,7 @@ export class EVMChainAdapter implements ChainAdapter {
       blockNumber: receipt.blockNumber,
       blockTimestamp,
       publisherAddress,
+      authorAddress,
     };
   }
 
@@ -2021,15 +2114,10 @@ export class EVMChainAdapter implements ChainAdapter {
     const opId = params.updateOperationId ?? `update-${Date.now()}`;
     const burnIds = params.burnTokenIds ?? [];
 
-    let pubSig = params.publisherSignature;
-    if (!pubSig) {
-      const pubDigest = ethers.getBytes(ethers.solidityPackedKeccak256(
-        ['uint256', 'address', 'uint72', 'uint256', 'bytes32'],
-        [evmChainId, kav10Address, identityId, contextGraphId, ethers.hexlify(params.newMerkleRoot)],
-      ));
-      const raw = ethers.Signature.from(await signer.signMessage(pubDigest));
-      pubSig = { r: ethers.getBytes(raw.r), vs: ethers.getBytes(raw.yParityAndS) };
-    }
+    // RFC-001: per-publish publisher signature is removed from the
+    // contract surface. The update entrypoint no longer takes
+    // `publisherNodeR`/`publisherNodeVS` — `publisherNodeIdentityId`
+    // remains as a self-claimed attribution target only.
 
     let ackSigs = params.ackSignatures ?? [];
     if (ackSigs.length === 0) {
@@ -2060,15 +2148,13 @@ export class EVMChainAdapter implements ChainAdapter {
       mintKnowledgeAssetsAmount: params.mintAmount ?? 0,
       knowledgeAssetsToBurn: burnIds,
       publisherNodeIdentityId: identityId,
-      publisherNodeR: ethers.hexlify(pubSig.r),
-      publisherNodeVS: ethers.hexlify(pubSig.vs),
       identityIds: ackSigs.map(s => s.identityId),
       r: ackSigs.map(s => ethers.hexlify(s.r)),
       vs: ackSigs.map(s => ethers.hexlify(s.vs)),
     };
 
     // Approve TRAC for the V10 update — the contract may transferFrom
-    // for the newTokenAmount (same policy as publishDirect).
+    // for the newTokenAmount (same direct-spend policy as publish).
     if (this.contracts.token && newTokenAmount > 0n) {
       const tokenWithSigner = this.contracts.token.connect(signer) as Contract;
       const prevAllowance = await tokenWithSigner.allowance(signer.address, kav10Address);
@@ -2078,26 +2164,26 @@ export class EVMChainAdapter implements ChainAdapter {
       }
     }
 
-    // P-1 review (Codex iter-5): same pattern as publishDirect above —
+    // P-1 review (Codex iter-5): same pattern as the publish path —
     // break the single contract call into populate / sign / hook /
     // broadcast so the `onBroadcast` checkpoint fires at the actual
     // eth_sendRawTransaction boundary, and so a hook failure (e.g.
     // WAL persistence error) aborts broadcast instead of leaving an
-    // unmatched WAL record.
-    const populated = await (ka as any).updateDirect.populateTransaction(
-      updateParams,
-      ethers.ZeroAddress,
-    );
+    // unmatched WAL record. RFC-001 unified `update`/`updateDirect`
+    // into a single entrypoint: the contract auto-detects PCA discount
+    // via `agentToAccountId(msg.sender)` for any positive
+    // `deltaTokenAmount`.
+    const populated = await (ka as any).update.populateTransaction(updateParams);
     const filled = await signer.populateTransaction(populated);
     const signedTx = await signer.signTransaction(filled);
     const preBroadcastTxHash = ethers.Transaction.from(signedTx).hash ?? '0x';
     // Codex PR #241 iter-7: `await` so async WAL writes complete
-    // before broadcast (see publishDirect above for the full rationale).
+    // before broadcast (see publish above for the full rationale).
     try {
       await params.onBroadcast?.({ txHash: preBroadcastTxHash });
     } catch (hookErr) {
       throw new Error(
-        `chain:writeahead hook failed before updateDirect broadcast: ` +
+        `chain:writeahead hook failed before update broadcast: ` +
         `${hookErr instanceof Error ? hookErr.message : String(hookErr)}`,
       );
     }
@@ -2106,7 +2192,7 @@ export class EVMChainAdapter implements ChainAdapter {
     const receipt = await tx.wait();
     if (!receipt) {
       throw new Error(
-        `updateDirect broadcast succeeded (txHash=${preBroadcastTxHash}) but receipt was null ` +
+        `update broadcast succeeded (txHash=${preBroadcastTxHash}) but receipt was null ` +
         `— the tx was likely replaced or dropped before confirmation`,
       );
     }
@@ -2293,6 +2379,30 @@ export class EVMChainAdapter implements ChainAdapter {
     };
   }
 
+  async addPCAAuthorizedKey(accountId: bigint, key: string): Promise<TxResult> {
+    await this.init();
+    if (!this.contracts.publishingConvictionAccount) {
+      throw new Error('PublishingConvictionAccount contract not deployed.');
+    }
+    if (!ethers.isAddress(key)) {
+      throw new Error(`addPCAAuthorizedKey: ${key} is not a valid EVM address`);
+    }
+    const tx = await this.contracts.publishingConvictionAccount.addAuthorizedKey(accountId, key);
+    const receipt = await tx.wait();
+    return {
+      hash: receipt.hash,
+      blockNumber: receipt.blockNumber,
+      success: receipt.status === 1,
+    };
+  }
+
+  async isPCAAuthorizedKey(accountId: bigint, key: string): Promise<boolean> {
+    await this.init();
+    if (!this.contracts.publishingConvictionAccount) return false;
+    if (!ethers.isAddress(key)) return false;
+    return await this.contracts.publishingConvictionAccount.authorizedKeys(accountId, key);
+  }
+
   async getConvictionAccountInfo(accountId: bigint): Promise<ConvictionAccountInfo | null> {
     await this.init();
     if (!this.contracts.publishingConvictionAccount) return null;
@@ -2461,6 +2571,27 @@ export class EVMChainAdapter implements ChainAdapter {
       r: ethers.getBytes(sig.r),
       vs: ethers.getBytes(sig.yParityAndS),
     };
+  }
+
+  async signTypedData(
+    domain: ethers.TypedDataDomain,
+    types: Record<string, Array<{ name: string; type: string }>>,
+    value: Record<string, unknown>,
+  ): Promise<string> {
+    return this.signer.signTypedData(domain, types, value);
+  }
+
+  async signTypedDataAs(
+    address: string,
+    domain: ethers.TypedDataDomain,
+    types: Record<string, Array<{ name: string; type: string }>>,
+    value: Record<string, unknown>,
+  ): Promise<string> {
+    const selected = this.findSignerByAddress(address);
+    if (!selected) {
+      throw new Error(`Cannot sign typed data with ${address}: address is not present in the EVM signer pool.`);
+    }
+    return selected.signTypedData(domain, types, value);
   }
 
   async getBlockNumber(): Promise<number> {
@@ -2993,6 +3124,13 @@ export class EVMChainAdapter implements ChainAdapter {
     const kcs = this.requireKCStorage();
     const publisher: string = await kcs.getLatestMerkleRootPublisher(kcId);
     return publisher;
+  }
+
+  async getLatestMerkleRootAuthor(kcId: bigint): Promise<string> {
+    await this.init();
+    const kcs = this.requireKCStorage();
+    const author: string = await kcs.getLatestMerkleRootAuthor(kcId);
+    return author;
   }
 
   async getKCContextGraphId(kcId: bigint): Promise<bigint> {

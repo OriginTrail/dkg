@@ -195,10 +195,10 @@ instead of HTTP.
 | `agent.peers` | — | `{ agents: Agent[] }` | Discovered agents |
 | `chat.send` | `{ to, text }` | `{ delivered, error? }` | Send message |
 | `chat.history` | `{ peer?, limit?, since? }` | `{ messages: Message[] }` | Message history |
-| `query.sparql` | `{ sparql, paranet? }` | `{ bindings }` | SPARQL query |
-| `publish.triples` | `{ paranetId, quads, privateQuads? }` | `{ kcId }` | Publish KA |
-| `paranet.list` | — | `{ paranets }` | List paranets |
-| `paranet.create` | `{ id, name, description? }` | `{ uri }` | Create paranet |
+| `query.sparql` | `{ sparql, contextGraph? }` | `{ bindings }` | SPARQL query |
+| `publish.triples` | `{ contextGraphId, quads, privateQuads? }` | `{ kcId }` | Publish KA |
+| `contextGraph.list` | — | `{ contextGraphs }` | List contextGraphs |
+| `contextGraph.create` | `{ id, name, description? }` | `{ uri }` | Create contextGraph |
 | `config.get` | — | `{ config }` | Read config |
 | `config.set` | `{ key, value }` | `{ ok }` | Update config |
 
@@ -212,8 +212,8 @@ preceding request.
 | `chat.received` | `{ from, text, ts, peerName? }` | Incoming chat message |
 | `peer.connected` | `{ peerId, name? }` | New peer connection |
 | `peer.disconnected` | `{ peerId }` | Peer disconnection |
-| `sync.progress` | `{ paranet, received, total? }` | Sync in progress |
-| `sync.complete` | `{ paranet, triples }` | Sync finished |
+| `sync.progress` | `{ contextGraph, received, total? }` | Sync in progress |
+| `sync.complete` | `{ contextGraph, triples }` | Sync finished |
 | `agent.ready` | `{ peerId }` | Agent fully started |
 | `agent.error` | `{ message }` | Fatal agent error |
 | `relay.status` | `{ connected: boolean }` | Relay connection change |
@@ -408,7 +408,7 @@ Mobile devices have limited RAM. WASM memory grows monotonically.
 
 **Mitigations:**
 - Track oxigraph WASM heap size. Warn user when approaching 80% budget.
-- Implement paranet subscription limits (subscribe to N paranets max).
+- Implement contextGraph subscription limits (subscribe to N contextGraphs max).
 - Aggressive garbage collection of expired conversations.
 - Periodic store compaction (dump to N-Quads, reload).
 
@@ -535,7 +535,7 @@ stored in `react-native-keychain` (iOS Keychain / Android Keystore).
 | 3.1 | Dashboard screen (status, peers, relay indicator) | NEEDS IMPL |
 | 3.2 | Messages screen (send/receive, delivery checkmarks) | NEEDS IMPL |
 | 3.3 | Explorer screen (SPARQL query, results table) | NEEDS IMPL |
-| 3.4 | Publish screen (create triples, publish to paranet) | NEEDS IMPL |
+| 3.4 | Publish screen (create triples, publish to contextGraph) | NEEDS IMPL |
 | 3.5 | Settings screen (config, export key, relay management) | NEEDS IMPL |
 | 3.6 | Push events for real-time updates (new message badge, etc.) | NEEDS IMPL |
 

@@ -155,25 +155,6 @@ export class ContextGraphManager {
     return this.sharedMemoryMetaUri(contextGraphId);
   }
 
-  /** @deprecated Use ensureContextGraph */
-  async ensureParanet(paranetId: string): Promise<void> {
-    return this.ensureContextGraph(paranetId);
-  }
-
-  /** @deprecated Use listContextGraphs */
-  async listParanets(): Promise<string[]> {
-    return this.listContextGraphs();
-  }
-
-  /** @deprecated Use hasContextGraph */
-  async hasParanet(paranetId: string): Promise<boolean> {
-    return this.hasContextGraph(paranetId);
-  }
-
-  /** @deprecated Use dropContextGraph */
-  async dropParanet(paranetId: string): Promise<void> {
-    return this.dropContextGraph(paranetId);
-  }
 }
 
 /** @deprecated Use ContextGraphManager */

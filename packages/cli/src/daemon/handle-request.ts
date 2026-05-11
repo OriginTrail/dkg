@@ -118,7 +118,6 @@ import { type ExtractionStatusRecord, getExtractionStatusRecord, setExtractionSt
 import { FileStore } from '../file-store.js';
 import { VectorStore, OpenAIEmbeddingProvider, type EmbeddingProvider } from '../vector-store.js';
 import { parseBoundary, parseMultipart, MultipartParseError } from '../http/multipart.js';
-import { handleCapture, EpcisValidationError, handleEventsQuery, EpcisQueryError, type Publisher as EpcisPublisher } from '@origintrail-official/dkg-epcis';
 // Phase 8 — project-manifest publish + install (UI-driven onboarding flow).
 // Daemon constructs a self-pointing DkgClient (localhost:listenPort) and
 // reuses the same publish/fetch/plan/write helpers the CLI uses, so wire
@@ -319,7 +318,7 @@ import {
   reverseLocalAgentSetupForUi,
   refreshLocalAgentIntegrationFromUi,
 } from './local-agents.js';
-import type { RequestContext } from './routes/context.js';
+import type { MemoryGraphChangedEvent, RequestContext } from './routes/context.js';
 import { handleStatusRoutes } from './routes/status.js';
 import { handleAgentChatRoutes } from './routes/agent-chat.js';
 import { handleOpenclawRoutes } from './routes/openclaw.js';
@@ -331,6 +330,7 @@ import { handleAssertionRoutes } from './routes/assertion.js';
 import { handleQueryRoutes } from './routes/query.js';
 import { handleLocalAgentsRoutes } from './routes/local-agents.js';
 import { handleEpcisRoutes } from './routes/epcis.js';
+import { handlePcaRoutes } from './routes/pca.js';
 
 
 export async function handleRequest(
@@ -362,6 +362,7 @@ export async function handleRequest(
   // server state instead of request headers (SSRF defence).
   apiHost: string,
   apiPortRef: { value: number },
+  emitMemoryGraphChanged?: (event: MemoryGraphChangedEvent) => void,
 ): Promise<void> {
   const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
   const path = url.pathname;
@@ -402,6 +403,7 @@ export async function handleRequest(
     path,
     requestToken,
     requestAgentAddress,
+    emitMemoryGraphChanged,
   };
 
   await handleStatusRoutes(ctx);
@@ -435,6 +437,9 @@ export async function handleRequest(
   if (res.writableEnded) return;
 
   await handleEpcisRoutes(ctx);
+  if (res.writableEnded) return;
+
+  await handlePcaRoutes(ctx);
   if (res.writableEnded) return;
 
   jsonResponse(res, 404, { error: 'Not found' });

@@ -32,7 +32,7 @@ sequenceDiagram
     end
 
     Agent ->> Store: new OxigraphStore() or configured backend
-    Agent ->> Store: Load genesis triples (ontology + system paranets)
+    Agent ->> Store: Load genesis triples (ontology + system contextGraphs)
 
     alt Chain config provided
         Agent ->> Chain: new EVMChainAdapter(rpcUrl, key, hub)
@@ -56,8 +56,8 @@ sequenceDiagram
     Agent ->> Agent: Register protocol handlers
     Note right of Agent: /dkg/publish/1.0.0<br/>/dkg/access/1.0.0<br/>/dkg/query/2.0.0<br/>/dkg/sync/1.0.0
 
-    Agent ->> Gossip: Subscribe to paranet topics
-    Note right of Gossip: dkg/paranet/id/publish<br/>for each configured paranet
+    Agent ->> Gossip: Subscribe to contextGraph topics
+    Note right of Gossip: dkg/context-graph/id/finalization<br/>for each configured contextGraph
 
     opt bootstrapPeers configured
         Node ->> Peers: Connect to bootstrap nodes
@@ -69,9 +69,9 @@ sequenceDiagram
 
     Note over Dev,Peers: Phase 3 — Steady State
 
-    Dev ->> Agent: agent.publish(paranetId, triples)
-    Dev ->> Agent: agent.query(sparql, paranetId)
-    Dev ->> Agent: agent.update(kcId, paranetId, triples)
+    Dev ->> Agent: agent.publish(contextGraphId, triples)
+    Dev ->> Agent: agent.query(sparql, contextGraphId)
+    Dev ->> Agent: agent.update(kcId, contextGraphId, triples)
 
     Note right of Agent: GossipSub messages arrive<br/>Publish handler processes<br/>incoming data from peers
 
@@ -138,12 +138,12 @@ const agent = await DKGAgent.create({
 await agent.start();
 
 // Publish knowledge
-const result = await agent.publish('my-paranet', [
+const result = await agent.publish('my-contextGraph', [
   { subject: 'https://example.org/Alice', predicate: 'http://schema.org/name', object: '"Alice"', graph: '' },
 ]);
 
 // Query knowledge
-const query = await agent.query('SELECT ?name WHERE { ?s <http://schema.org/name> ?name }', 'my-paranet');
+const query = await agent.query('SELECT ?name WHERE { ?s <http://schema.org/name> ?name }', 'my-contextGraph');
 
 await agent.stop();
 ```

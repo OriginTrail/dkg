@@ -196,11 +196,15 @@ describe('computeGossipSigningPayload', () => {
     expect(a).not.toEqual(b);
   });
 
-  it('concatenates prefix with payload bytes', () => {
+  it('length-frames fields before payload bytes', () => {
     const payload = new Uint8Array([0xde, 0xad]);
     const result = computeGossipSigningPayload('t', 'c', '1', payload);
-    const prefix = new TextEncoder().encode('tc1');
-    expect(result).toEqual(new Uint8Array([...prefix, 0xde, 0xad]));
+    expect(result).toEqual(new Uint8Array([
+      0, 0, 0, 1, 0x74,
+      0, 0, 0, 1, 0x63,
+      0, 0, 0, 1, 0x31,
+      0, 0, 0, 2, 0xde, 0xad,
+    ]));
   });
 });
 

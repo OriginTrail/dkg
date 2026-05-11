@@ -25,10 +25,10 @@ of truth.
 
 After Tier 1 verification passes, the receiver performs on-chain validation:
 
-### Step 1: Enumerate on-chain KCs for the paranet
+### Step 1: Enumerate on-chain KCs for the contextGraph
 
 Query the chain for all `KnowledgeBatchCreated` events (or equivalent
-storage reads) that reference the target paranet. This gives the
+storage reads) that reference the target contextGraph. This gives the
 authoritative list of `(batchId, merkleRoot, publisherAddress, startKAId,
 endKAId)` tuples.
 
@@ -57,10 +57,10 @@ New method on `ChainAdapter`:
 ```typescript
 interface ChainAdapter {
   /**
-   * Returns all KC batch records for a given paranet from the chain.
+   * Returns all KC batch records for a given contextGraph from the chain.
    * Used for Tier 2 sync verification.
    */
-  getParanetBatches?(paranetId: string): Promise<Array<{
+  getContextGraphBatches?(contextGraphId: string): Promise<Array<{
     batchId: bigint;
     merkleRoot: Uint8Array;
     publisherAddress: string;
@@ -76,11 +76,11 @@ interface ChainAdapter {
   after initial sync, not on every page.
 - Results can be cached: the on-chain KC list only grows (new publishes)
   and never shrinks (KCs are immutable).
-- For large paranets, batch the RPC calls and use event log filtering
+- For large contextGraphs, batch the RPC calls and use event log filtering
   rather than storage reads.
 
 ## When to run Tier 2
 
 - After initial sync from a new peer (one-time catch-up)
 - Periodically in the background (e.g., every 10 minutes)
-- On demand via CLI command (`dkg verify-sync <paranetId>`)
+- On demand via CLI command (`dkg verify-sync <contextGraphId>`)

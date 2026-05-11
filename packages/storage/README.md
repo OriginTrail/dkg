@@ -9,7 +9,7 @@ Triple store abstraction layer for DKG V10. Provides a unified API over multiple
   - `OxigraphWorkerStore` — worker-thread variant for non-blocking operations
   - `BlazegraphStore` — connects to a running Blazegraph SPARQL endpoint
   - `SparqlHttpStore` — generic adapter for any SPARQL 1.1 compliant endpoint
-- **Graph manager** — named graph lifecycle (create, drop, list) with paranet-scoped data and metadata graphs
+- **Graph manager** — named graph lifecycle (create, drop, list) with contextGraph-scoped data and metadata graphs
 - **Private content store** — encrypted triple storage for private KA triples, separate from the public graph
 - **Custom adapters** — `registerTripleStoreAdapter()` to plug in any storage backend
 

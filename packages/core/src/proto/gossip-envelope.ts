@@ -15,13 +15,17 @@ import protobuf from 'protobufjs';
 const { Type, Field } = protobuf;
 
 /**
- * V10 GossipSub message envelope.
+ * V10 GossipSub authentication envelope.
  *
- * All GossipSub messages are wrapped in this envelope which provides:
+ * GossipSub protocols that can authenticate an agent writer wrap the payload
+ * in this envelope, which provides:
  * - Protocol version ("10.0.0")
  * - Message type discrimination
  * - Context graph binding
  * - Agent identity and signature for authentication
+ *
+ * Legacy raw SWM payloads remain valid only for non-agent-gated context graphs
+ * when no local signing key is available.
  */
 
 export const GossipEnvelopeSchema = new Type('GossipEnvelope')
@@ -43,6 +47,10 @@ export interface GossipEnvelopeMsg {
   payload: Uint8Array;
 }
 
+export const GOSSIP_ENVELOPE_VERSION = '10.0.0';
+export const GOSSIP_TYPE_WORKSPACE_PUBLISH = 'share-write';
+export const GOSSIP_ENVELOPE_FRESHNESS_MS = 5 * 60 * 1000;
+
 export function encodeGossipEnvelope(msg: GossipEnvelopeMsg): Uint8Array {
   return GossipEnvelopeSchema.encode(
     GossipEnvelopeSchema.create(msg),
@@ -55,9 +63,23 @@ export function decodeGossipEnvelope(buf: Uint8Array): GossipEnvelopeMsg {
 
 const textEncoder = new TextEncoder();
 
+function uint32Be(value: number): Uint8Array {
+  const buf = new Uint8Array(4);
+  new DataView(buf.buffer).setUint32(0, value, false);
+  return buf;
+}
+
+function framedField(value: Uint8Array): Uint8Array {
+  const len = uint32Be(value.length);
+  const framed = new Uint8Array(len.length + value.length);
+  framed.set(len, 0);
+  framed.set(value, len.length);
+  return framed;
+}
+
 /**
  * Compute the signing payload for a gossip envelope.
- * Signs: type + contextGraphId + timestamp + payload
+ * Signs length-framed fields: type, contextGraphId, timestamp, payload.
  */
 export function computeGossipSigningPayload(
   type: string,
@@ -65,9 +87,18 @@ export function computeGossipSigningPayload(
   timestamp: string,
   payload: Uint8Array,
 ): Uint8Array {
-  const prefix = textEncoder.encode(`${type}${contextGraphId}${timestamp}`);
-  const combined = new Uint8Array(prefix.length + payload.length);
-  combined.set(prefix, 0);
-  combined.set(payload, prefix.length);
+  const fields = [
+    framedField(textEncoder.encode(type)),
+    framedField(textEncoder.encode(contextGraphId)),
+    framedField(textEncoder.encode(timestamp)),
+    framedField(payload),
+  ];
+  const total = fields.reduce((sum, field) => sum + field.length, 0);
+  const combined = new Uint8Array(total);
+  let offset = 0;
+  for (const field of fields) {
+    combined.set(field, offset);
+    offset += field.length;
+  }
   return combined;
 }

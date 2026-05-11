@@ -208,7 +208,7 @@ function main() {
 main();
 
 function renderEvaluationAsTrig(name, facts, result) {
-  const graph = 'did:dkg:paranet:test-ccl';
+  const graph = 'did:dkg:context-graph:test-ccl';
   const evaluation = `did:dkg:ccl-eval:${name}`;
   const lines = [
     '@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .',

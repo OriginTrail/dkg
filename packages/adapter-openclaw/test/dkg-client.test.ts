@@ -230,6 +230,23 @@ describe('DkgDaemonClient', () => {
     expect(body.localOnly).toBe(true);
   });
 
+  it('share should forward explicit team-visible sub-graph writes', async () => {
+    fetchResponses.push(
+      new Response(JSON.stringify({ shareOperationId: 'op-2' }), { status: 200 }),
+    );
+
+    const quads = [{ subject: 'urn:a', predicate: 'urn:b', object: '"hello"' }];
+    await client.share('research-x', quads, { localOnly: false, subGraphName: 'protocols' });
+
+    const body = JSON.parse(fetchCalls[0][1]?.body as string);
+    expect(body).toEqual({
+      contextGraphId: 'research-x',
+      quads,
+      localOnly: false,
+      subGraphName: 'protocols',
+    });
+  });
+
   // ---------------------------------------------------------------------------
   // Working Memory assertion lifecycle
   // ---------------------------------------------------------------------------
@@ -628,9 +645,14 @@ describe('DkgDaemonClient', () => {
   // Publish
   // ---------------------------------------------------------------------------
 
-  it('publish should write to SWM then publish from SWM', async () => {
+  it('publish should create an assertion then publish it from SWM', async () => {
+    // V10 assertion lifecycle (Phase B-1/B-2): the openclaw client now
+    // routes through `/api/assertion/create` (which writes the quads to
+    // SWM and finalizes the EIP-712 seal in one daemon hop) followed by
+    // `/api/shared-memory/publish` to lift the assertion to VM. The
+    // legacy `/api/shared-memory/write` route is gone.
     fetchResponses.push(
-      new Response(JSON.stringify({ triplesWritten: 1 }), { status: 200 }),
+      new Response(JSON.stringify({ assertionUri: 'urn:assertion:test' }), { status: 200 }),
       new Response(JSON.stringify({ kcId: 'kc-1' }), { status: 200 }),
     );
 
@@ -639,26 +661,27 @@ describe('DkgDaemonClient', () => {
     expect(result.kcId).toBe('kc-1');
 
     expect(fetchCalls).toHaveLength(2);
-    const [writeUrl, writeOpts] = fetchCalls[0];
-    expect(writeUrl).toBe('http://localhost:9200/api/shared-memory/write');
-    expect(writeOpts?.method).toBe('POST');
-    const writeBody = JSON.parse(writeOpts?.body as string);
-    expect(writeBody.contextGraphId).toBe('testing');
-    expect(writeBody.quads).toHaveLength(1);
+    const [createUrl, createOpts] = fetchCalls[0];
+    expect(createUrl).toBe('http://localhost:9200/api/assertion/create');
+    expect(createOpts?.method).toBe('POST');
+    const createBody = JSON.parse(createOpts?.body as string);
+    expect(createBody.contextGraphId).toBe('testing');
+    expect(createBody.quads).toHaveLength(1);
+    expect(createBody.finalize).toBe(true);
 
     const [pubUrl, pubOpts] = fetchCalls[1];
     expect(pubUrl).toBe('http://localhost:9200/api/shared-memory/publish');
     expect(pubOpts?.method).toBe('POST');
     const pubBody = JSON.parse(pubOpts?.body as string);
     expect(pubBody.contextGraphId).toBe('testing');
-    expect(pubBody.selection).toBe('all');
+    expect(pubBody.assertionName).toMatch(/^openclaw-publish-/);
   });
 
   it('publish should reject privateQuads', async () => {
     const quads = [{ subject: 'urn:a', predicate: 'urn:b', object: '"public"' }];
     const privateQuads = [{ subject: 'urn:a', predicate: 'urn:c', object: '"secret"' }];
     await expect(client.publish('testing', quads, privateQuads)).rejects.toThrow(
-      /not supported in V10/,
+      /not supported in the V10/,
     );
   });
 
@@ -669,11 +692,11 @@ describe('DkgDaemonClient', () => {
         accessPolicy: 'allowList',
         allowedPeers: ['12D3peer1', '12D3peer2'],
       }),
-    ).rejects.toThrow(/not supported in V10/);
+    ).rejects.toThrow(/not supported in the V10/);
   });
 
   // ---------------------------------------------------------------------------
-  // Paranets
+  // ContextGraphs
   // ---------------------------------------------------------------------------
 
   it('listContextGraphs should GET /api/context-graph/list', async () => {
@@ -762,20 +785,20 @@ describe('DkgDaemonClient', () => {
   it('subscribe should POST to /api/subscribe', async () => {
     fetchResponses.push(
       new Response(JSON.stringify({
-        subscribed: 'my-paranet',
+        subscribed: 'my-contextGraph',
         catchup: { jobId: 'job-1', status: 'queued', includeSharedMemory: true },
       }), { status: 200 }),
     );
 
-    const result = await client.subscribe('my-paranet');
-    expect(result.subscribed).toBe('my-paranet');
+    const result = await client.subscribe('my-contextGraph');
+    expect(result.subscribed).toBe('my-contextGraph');
     expect(result.catchup.jobId).toBe('job-1');
 
     const [url, opts] = fetchCalls[0];
     expect(url).toBe('http://localhost:9200/api/subscribe');
     expect(opts?.method).toBe('POST');
     const body = JSON.parse(opts?.body as string);
-    expect(body.contextGraphId).toBe('my-paranet');
+    expect(body.contextGraphId).toBe('my-contextGraph');
   });
 
   it('subscribe passes includeSharedMemory option', async () => {

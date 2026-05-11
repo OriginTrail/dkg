@@ -16,6 +16,12 @@ export const PROTOCOL_STORAGE_ACK = '/dkg/10.0.0/storage-ack';
 
 export const DHT_PROTOCOL = '/dkg/kad/1.0.0';
 
+/** Maximum application payload size allowed for one DKG GossipSub message (10 MB). */
+export const DKG_GOSSIP_MAX_MESSAGE_BYTES = 10 * 1024 * 1024;
+
+/** Allows GossipSub RPC framing around one max-sized application payload. */
+export const DKG_GOSSIP_MAX_RPC_BYTES = DKG_GOSSIP_MAX_MESSAGE_BYTES + 256 * 1024;
+
 // ── V10 GossipSub Topics ───────────────────────────────────────────────
 
 export function contextGraphSharedMemoryTopic(contextGraphId: string): string {
@@ -150,71 +156,26 @@ export function validateAssertionName(name: string): { valid: boolean; reason?: 
   return { valid: true };
 }
 
-// ── Deprecated V9 aliases ──────────────────────────────────────────────
-// These map V9 function signatures to V10 implementations.
-// The URI patterns now use V10 format (did:dkg:context-graph:).
-
-/** @deprecated Use contextGraphWorkspaceTopic */
-export function paranetPublishTopic(paranetId: string): string {
-  return contextGraphFinalizationTopic(paranetId);
+export function contextGraphPublishTopic(contextGraphId: string): string {
+  return contextGraphFinalizationTopic(contextGraphId);
 }
 
-/** @deprecated Use contextGraphAppTopic */
-export function paranetAgentsTopic(paranetId: string): string {
-  return contextGraphAppTopic(paranetId);
+export function contextGraphDataGraphUri(contextGraphId: string): string {
+  return contextGraphDataUri(contextGraphId);
 }
 
-/** @deprecated Use contextGraphDataUri */
-export function paranetDataGraphUri(paranetId: string): string {
-  return contextGraphDataUri(paranetId);
+export function contextGraphMetaGraphUri(contextGraphId: string): string {
+  return contextGraphMetaUri(contextGraphId);
 }
 
-/** @deprecated Use contextGraphMetaUri */
-export function paranetMetaGraphUri(paranetId: string): string {
-  return contextGraphMetaUri(paranetId);
+export function contextGraphPrivateGraphUri(contextGraphId: string): string {
+  return contextGraphPrivateUri(contextGraphId);
 }
 
-/** @deprecated Use contextGraphPrivateUri */
-export function paranetPrivateGraphUri(paranetId: string): string {
-  return contextGraphPrivateUri(paranetId);
+export function contextGraphWorkspaceGraphUri(contextGraphId: string): string {
+  return contextGraphSharedMemoryUri(contextGraphId);
 }
 
-/** @deprecated Use contextGraphSharedMemoryUri */
-export function paranetWorkspaceGraphUri(paranetId: string): string {
-  return contextGraphSharedMemoryUri(paranetId);
-}
-
-/** @deprecated Use contextGraphSharedMemoryMetaUri */
-export function paranetWorkspaceMetaGraphUri(paranetId: string): string {
-  return contextGraphSharedMemoryMetaUri(paranetId);
-}
-
-/** @deprecated Use contextGraphAppTopic */
-export function paranetAppTopic(paranetId: string): string {
-  return contextGraphAppTopic(paranetId);
-}
-
-/** @deprecated Use contextGraphSharedMemoryTopic */
-export function paranetWorkspaceTopic(paranetId: string): string {
-  return contextGraphSharedMemoryTopic(paranetId);
-}
-
-/** @deprecated Use contextGraphUpdateTopic */
-export function paranetUpdateTopic(paranetId: string): string {
-  return contextGraphUpdateTopic(paranetId);
-}
-
-/** @deprecated Use contextGraphFinalizationTopic */
-export function paranetFinalizationTopic(paranetId: string): string {
-  return contextGraphFinalizationTopic(paranetId);
-}
-
-/** @deprecated Use contextGraphSessionsTopic */
-export function paranetSessionsTopic(paranetId: string): string {
-  return contextGraphSessionsTopic(paranetId);
-}
-
-/** @deprecated Use contextGraphSessionTopic */
-export function paranetSessionTopic(paranetId: string, sessionId: string): string {
-  return contextGraphSessionTopic(paranetId, sessionId);
+export function contextGraphWorkspaceMetaGraphUri(contextGraphId: string): string {
+  return contextGraphSharedMemoryMetaUri(contextGraphId);
 }

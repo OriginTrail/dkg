@@ -104,12 +104,12 @@ describe('ApiClient', () => {
     });
 
     it('contextGraphExists() calls correct URL with encoded id', async () => {
-      const body = { id: 'my paranet', exists: true };
+      const body = { id: 'my contextGraph', exists: true };
       const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body });
       globalThis.fetch = fetch;
-      await client.contextGraphExists('my paranet');
+      await client.contextGraphExists('my contextGraph');
 
-      expect(calls[0].url).toContain('my%20paranet');
+      expect(calls[0].url).toContain('my%20contextGraph');
     });
 
     it('listCclPolicies() builds query string from filters', async () => {
@@ -144,22 +144,22 @@ describe('ApiClient', () => {
       const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body: expected });
       globalThis.fetch = fetch;
       const quads = [{ subject: 'urn:s', predicate: 'urn:p', object: '"v"', graph: 'urn:g' }];
-      const result = await client.publish('test-paranet', quads);
+      const result = await client.publish('test-contextGraph', quads);
       expect(result.kcId).toBe('kc1');
 
       const body = JSON.parse(calls[0].opts.body as string);
-      expect(body.contextGraphId).toBe('test-paranet');
+      expect(body.contextGraphId).toBe('test-contextGraph');
       expect(body.quads).toHaveLength(1);
     });
 
     it('query() sends sparql and optional context graph id', async () => {
       const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body: { result: [] } });
       globalThis.fetch = fetch;
-      await client.query('SELECT * { ?s ?p ?o }', 'my-paranet');
+      await client.query('SELECT * { ?s ?p ?o }', 'my-contextGraph');
 
       const body = JSON.parse(calls[0].opts.body as string);
       expect(body.sparql).toBe('SELECT * { ?s ?p ?o }');
-      expect(body.contextGraphId).toBe('my-paranet');
+      expect(body.contextGraphId).toBe('my-contextGraph');
     });
 
     it('createContextGraph() includes private and participant identity options when provided', async () => {
@@ -180,6 +180,25 @@ describe('ApiClient', () => {
         private: true,
         participantIdentityIds: ['11', '12', '13'],
         requiredSignatures: 1,
+      });
+    });
+
+    it('createSubGraph() posts context graph id and sub-graph name', async () => {
+      const { fetch, calls } = createTrackingFetch({
+        ok: true,
+        status: 200,
+        body: { created: 'lab', contextGraphId: 'research' },
+      });
+      globalThis.fetch = fetch;
+
+      const result = await client.createSubGraph('research', 'lab');
+
+      expect(result).toEqual({ created: 'lab', contextGraphId: 'research' });
+      expect(calls[0].url).toBe(`http://127.0.0.1:${PORT}/api/sub-graph/create`);
+      expect(calls[0].opts.method).toBe('POST');
+      expect(JSON.parse(calls[0].opts.body as string)).toEqual({
+        contextGraphId: 'research',
+        subGraphName: 'lab',
       });
     });
 

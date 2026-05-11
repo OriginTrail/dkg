@@ -19,6 +19,7 @@ import {
   HARDHAT_KEYS,
   type HardhatContext,
 } from '../../chain/test/hardhat-harness.js';
+import { wrapPublisherForTest } from './_helpers/seal.js';
 
 const HARDHAT_PORT = 8548;
 let CONTEXT_GRAPH: string;
@@ -64,15 +65,24 @@ describe('Publisher EVM E2E: DKGPublisher with real contracts', () => {
     const bus = new TypedEventBus();
     const keypair = await generateEd25519Keypair();
 
-    publisher = new DKGPublisher({
-      store,
-      chain: adapter,
-      eventBus: bus,
-      keypair,
-      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
-      publisherNodeIdentityId: publisherIdentityId,
-      publisherAddress: publisherWallet.address,
-    });
+    publisher = wrapPublisherForTest(
+      new DKGPublisher({
+        store,
+        chain: adapter,
+        eventBus: bus,
+        keypair,
+        publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+        publisherNodeIdentityId: publisherIdentityId,
+        publisherAddress: publisherWallet.address,
+      }),
+      {
+        author: new Wallet(HARDHAT_KEYS.CORE_OP),
+        ctx: {
+          provider: ctx.provider,
+          kav10Address: await adapter.getKnowledgeAssetsV10Address(),
+        },
+      },
+    );
   }, 120_000);
 
   afterAll(() => {

@@ -48,6 +48,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
 
   let syncCapablePeers = 0;
   let peersTried = 0;
+  let peersSucceeded = 0;
   let dataSynced = 0;
   let sharedMemorySynced = 0;
   let deniedPeers = 0;
@@ -179,6 +180,18 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     if (peerDenied) {
       deniedPeers += 1;
     }
+
+    // Count peers that completed a sync round without a transport
+    // failure AND without an explicit denial. The subscribe job uses
+    // this to flip the terminal status to `unreachable` when no peer
+    // could even respond — distinct from a curated CG that explicitly
+    // denied us. Mirrors the inline `syncContextGraphFromConnectedPeers`
+    // path in `dkg-agent.ts` so both runners report the same shape.
+    const durableFailed = durable.failedPeers > 0;
+    const sharedFailed = shared ? shared.failedPeers > 0 : false;
+    if (!durableFailed && !sharedFailed && !peerDenied) {
+      peersSucceeded += 1;
+    }
   }
 
   diagnostics.noProtocolPeers = noProtocolPeers;
@@ -195,6 +208,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     connectedPeers: prepared.connectedPeers,
     syncCapablePeers,
     peersTried,
+    peersSucceeded,
     dataSynced,
     sharedMemorySynced,
     denied: deniedPeers > 0 && !servedByPeer,

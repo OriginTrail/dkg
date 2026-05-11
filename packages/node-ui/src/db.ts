@@ -53,7 +53,7 @@ export class DashboardDB {
           direct_peers INTEGER,
           relayed_peers INTEGER,
           mesh_peers INTEGER,
-          paranet_count INTEGER,
+          contextGraph_count INTEGER,
           total_triples INTEGER,
           total_kcs INTEGER,
           total_kas INTEGER,
@@ -73,7 +73,7 @@ export class DashboardDB {
           duration_ms INTEGER,
           status TEXT DEFAULT 'in_progress',
           peer_id TEXT,
-          paranet_id TEXT,
+          contextGraph_id TEXT,
           triple_count INTEGER,
           error_message TEXT,
           details TEXT
@@ -306,13 +306,13 @@ export class DashboardDB {
       INSERT INTO metric_snapshots (
         ts, cpu_percent, mem_used_bytes, mem_total_bytes,
         disk_used_bytes, disk_total_bytes, heap_used_bytes, uptime_seconds,
-        peer_count, direct_peers, relayed_peers, mesh_peers, paranet_count,
+        peer_count, direct_peers, relayed_peers, mesh_peers, contextGraph_count,
         total_triples, total_kcs, total_kas, store_bytes,
         confirmed_kcs, tentative_kcs, rpc_latency_ms, rpc_healthy
       ) VALUES (
         @ts, @cpu_percent, @mem_used_bytes, @mem_total_bytes,
         @disk_used_bytes, @disk_total_bytes, @heap_used_bytes, @uptime_seconds,
-        @peer_count, @direct_peers, @relayed_peers, @mesh_peers, @paranet_count,
+        @peer_count, @direct_peers, @relayed_peers, @mesh_peers, @contextGraph_count,
         @total_triples, @total_kcs, @total_kas, @store_bytes,
         @confirmed_kcs, @tentative_kcs, @rpc_latency_ms, @rpc_healthy
       )
@@ -471,18 +471,18 @@ export class DashboardDB {
     operation_name: string;
     started_at: number;
     peer_id?: string | null;
-    paranet_id?: string | null;
+    contextGraph_id?: string | null;
     details?: string | null;
   }): void {
     this.stmt('insertOp', `
-      INSERT INTO operations (operation_id, operation_name, started_at, status, peer_id, paranet_id, details)
-      VALUES (@operation_id, @operation_name, @started_at, 'in_progress', @peer_id, @paranet_id, @details)
+      INSERT INTO operations (operation_id, operation_name, started_at, status, peer_id, contextGraph_id, details)
+      VALUES (@operation_id, @operation_name, @started_at, 'in_progress', @peer_id, @contextGraph_id, @details)
     `).run({
       operation_id: op.operation_id,
       operation_name: op.operation_name,
       started_at: op.started_at,
       peer_id: op.peer_id ?? null,
-      paranet_id: op.paranet_id ?? null,
+      contextGraph_id: op.contextGraph_id ?? null,
       details: op.details ?? null,
     });
   }
@@ -1296,7 +1296,7 @@ export interface MetricSnapshotRow {
   direct_peers: number | null;
   relayed_peers: number | null;
   mesh_peers: number | null;
-  paranet_count: number | null;
+  contextGraph_count: number | null;
   total_triples: number | null;
   total_kcs: number | null;
   total_kas: number | null;
@@ -1315,7 +1315,7 @@ export interface OperationRow {
   duration_ms: number | null;
   status: string;
   peer_id: string | null;
-  paranet_id: string | null;
+  contextGraph_id: string | null;
   triple_count: number | null;
   error_message: string | null;
   details: string | null;

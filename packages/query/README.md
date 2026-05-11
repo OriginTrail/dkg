@@ -1,11 +1,11 @@
 # @origintrail-official/dkg-query
 
-SPARQL query engine for DKG V10. Provides paranet-scoped querying, Knowledge Asset resolution by UAL, and read-only query validation.
+SPARQL query engine for DKG V10. Provides contextGraph-scoped querying, Knowledge Asset resolution by UAL, and read-only query validation.
 
 ## Features
 
 - **DKGQueryEngine** — execute SPARQL SELECT, CONSTRUCT, ASK, and DESCRIBE queries against local triple stores
-- **Paranet scoping** — queries are automatically scoped to the correct named graphs for a given paranet
+- **ContextGraph scoping** — queries are automatically scoped to the correct named graphs for a given contextGraph
 - **KA resolution** — resolve a UAL to its constituent triples, metadata, and provenance
 - **QueryHandler** — P2P protocol handler for serving remote SPARQL queries from other nodes
 - **SPARQL guard** — `validateReadOnlySparql()` ensures incoming queries are read-only (no INSERT, DELETE, LOAD, etc.)
@@ -19,13 +19,13 @@ const engine = new DKGQueryEngine(store);
 
 const results = await engine.query(
   'SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 10',
-  { paranetId: 'urn:paranet:example' },
+  { contextGraphId: 'urn:contextGraph:example' },
 );
 
 // Query with workspace data included
 const wsResults = await engine.query(
   'SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 10',
-  { paranetId: 'urn:paranet:example', includeWorkspace: true },
+  { contextGraphId: 'urn:contextGraph:example', includeWorkspace: true },
 );
 ```
 

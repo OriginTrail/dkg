@@ -1,0 +1,2 @@
+<urn:experiment:agent-provenance:turn-a> <https://schema.org/name> "Mode (a): self-publishing edge attributed to home core" <urn:dkg:context-graph:test/_meta> .
+<urn:experiment:agent-provenance:turn-a> <https://schema.org/text> "Edge wallet on core 1's PCA authorizedKeys; PCA discount applies." <urn:dkg:context-graph:test/_meta> .

@@ -1,22 +1,22 @@
 # Cross-Agent Query Protocol
 
-**Status**: DRAFT v0.1  
-**Date**: 2026-02-25  
-**Scope**: Protocol for one agent to query another agent's knowledge store remotely.  
-**Depends on**: Part 1 (local query engine), Paranet Lifecycle, Access Control basics  
+**Status**: DRAFT v0.1
+**Date**: 2026-02-25
+**Scope**: Protocol for one agent to query another agent's knowledge store remotely.
+**Depends on**: Part 1 (local query engine), ContextGraph Lifecycle, Access Control basics
 **Protocol ID**: `/dkg/query/2.0.0`
 
 ---
 
 ## 1. Problem Statement
 
-Today, agents can only query their own local triple store. If Agent A publishes to paranet "finance" and Agent B is subscribed, Agent B already has the data via gossipsub replication. But there are important cases where local-only queries fall short:
+Today, agents can only query their own local triple store. If Agent A publishes to contextGraph "finance" and Agent B is subscribed, Agent B already has the data via gossipsub replication. But there are important cases where local-only queries fall short:
 
-1. **Selective replication**: Not every node stores every triple. A node might subscribe to a paranet but only replicate a subset (future sharding). It needs to ask peers for what it doesn't have.
-2. **Discovery queries**: Agent A wants to know "what entities does Agent B know about?" without subscribing to every paranet Agent B serves.
-3. **On-demand access**: Agent A needs a specific knowledge asset from a paranet it's not subscribed to. Rather than subscribing and syncing the entire paranet, it asks a specific node.
+1. **Selective replication**: Not every node stores every triple. A node might subscribe to a contextGraph but only replicate a subset (future sharding). It needs to ask peers for what it doesn't have.
+2. **Discovery queries**: Agent A wants to know "what entities does Agent B know about?" without subscribing to every contextGraph Agent B serves.
+3. **On-demand access**: Agent A needs a specific knowledge asset from a contextGraph it's not subscribed to. Rather than subscribing and syncing the entire contextGraph, it asks a specific node.
 4. **Private data queries**: Agent A knows Agent B has private triples about an entity. It needs to request access (this bridges to the access protocol).
-5. **Federated queries**: A complex query spans multiple paranets hosted by different nodes. Each node answers its part.
+5. **Federated queries**: A complex query spans multiple contextGraphs hosted by different nodes. Each node answers its part.
 
 ### Design principles
 
@@ -53,40 +53,40 @@ The protocol uses **request-response** over a libp2p stream (not gossipsub). Eac
 
 Retrieve all triples for a specific knowledge asset by its UAL.
 
-**Input**: `ual` (e.g., `did:dkg:base:84532/0x15e0.../1`)  
-**Output**: N-Triples for that entity  
-**Risk**: Low — single entity, bounded size  
+**Input**: `ual` (e.g., `did:dkg:base:84532/0x15e0.../1`)
+**Output**: N-Triples for that entity
+**Risk**: Low — single entity, bounded size
 **Use case**: "Show me knowledge asset X"
 
-Agent B resolves the UAL to an entity URI, finds all triples with that subject in the paranet's data graph, and returns them.
+Agent B resolves the UAL to an entity URI, finds all triples with that subject in the contextGraph's data graph, and returns them.
 
 ### 3.2 ENTITIES_BY_TYPE
 
-Find entities of a given RDF type within a paranet.
+Find entities of a given RDF type within a contextGraph.
 
-**Input**: `rdfType` (e.g., `https://schema.org/Person`), `paranetId`, `limit`  
-**Output**: List of entity URIs (not full triples)  
-**Risk**: Medium — bounded by `limit` parameter (max 100)  
-**Use case**: "What Person entities exist in paranet X?"
+**Input**: `rdfType` (e.g., `https://schema.org/Person`), `contextGraphId`, `limit`
+**Output**: List of entity URIs (not full triples)
+**Risk**: Medium — bounded by `limit` parameter (max 100)
+**Use case**: "What Person entities exist in contextGraph X?"
 
 Returns only entity URIs, not their full triple sets. The caller can follow up with `ENTITY_TRIPLES` for entities of interest. This two-step pattern prevents accidental exfiltration of large datasets.
 
 ### 3.3 ENTITY_TRIPLES
 
-Retrieve all triples for a specific entity URI within a paranet.
+Retrieve all triples for a specific entity URI within a contextGraph.
 
-**Input**: `entityUri` (e.g., `did:dkg:entity:alice`), `paranetId`  
-**Output**: N-Triples for that entity  
-**Risk**: Low — single entity, bounded size  
-**Use case**: "Give me everything you know about entity Y in paranet X"
+**Input**: `entityUri` (e.g., `did:dkg:entity:alice`), `contextGraphId`
+**Output**: N-Triples for that entity
+**Risk**: Low — single entity, bounded size
+**Use case**: "Give me everything you know about entity Y in contextGraph X"
 
 ### 3.4 SPARQL_QUERY (opt-in)
 
-Execute a read-only SPARQL query against a specific paranet.
+Execute a read-only SPARQL query against a specific contextGraph.
 
-**Input**: `sparql` (SPARQL string), `paranetId`, `limit`, `timeout`  
-**Output**: JSON-serialized SPARQL result bindings  
-**Risk**: High — arbitrary query complexity  
+**Input**: `sparql` (SPARQL string), `contextGraphId`, `limit`, `timeout`
+**Output**: JSON-serialized SPARQL result bindings
+**Risk**: High — arbitrary query complexity
 **Use case**: "Run this specific SPARQL query for me"
 
 This type is **disabled by default**. Agent B must explicitly enable it in its configuration. Even when enabled, multiple safety guards apply (see §6).
@@ -101,7 +101,7 @@ This type is **disabled by default**. Agent B must explicitly enable it in its c
 interface QueryRequest {
     operationId: string;        // UUID, for correlation
     lookupType: LookupType;     // enum: ENTITY_BY_UAL | ENTITIES_BY_TYPE | ENTITY_TRIPLES | SPARQL_QUERY
-    paranetId?: string;         // Target paranet (required for all except ENTITY_BY_UAL)
+    contextGraphId?: string;         // Target contextGraph (required for all except ENTITY_BY_UAL)
     ual?: string;               // For ENTITY_BY_UAL
     entityUri?: string;         // For ENTITY_TRIPLES
     rdfType?: string;           // For ENTITIES_BY_TYPE
@@ -160,14 +160,14 @@ A future version can switch to protobuf if benchmarks show JSON serialization is
 
 ### 5.1 Query Access Policy
 
-Each node configures which paranets are queryable and by whom:
+Each node configures which contextGraphs are queryable and by whom:
 
 ```json
 // ~/.dkg/config.json
 {
     "queryAccess": {
         "defaultPolicy": "deny",
-        "paranets": {
+        "contextGraphs": {
             "testing": {
                 "policy": "public",
                 "allowedLookupTypes": ["ENTITY_BY_UAL", "ENTITIES_BY_TYPE", "ENTITY_TRIPLES"],
@@ -205,7 +205,7 @@ Each node configures which paranets are queryable and by whom:
 When a `QueryRequest` arrives:
 
 ```
-1. Is the requested paranet in queryAccess.paranets?
+1. Is the requested contextGraph in queryAccess.contextGraphs?
    NO → check defaultPolicy → likely "deny" → return ACCESS_DENIED
 
 2. Does the policy allow this peer?
@@ -214,10 +214,10 @@ When a `QueryRequest` arrives:
    - deny: no
    NO → return ACCESS_DENIED
 
-3. Is the lookup type allowed for this paranet?
+3. Is the lookup type allowed for this contextGraph?
    NO → return UNSUPPORTED_LOOKUP
 
-4. If SPARQL_QUERY: is sparqlEnabled for this paranet?
+4. If SPARQL_QUERY: is sparqlEnabled for this contextGraph?
    NO → return UNSUPPORTED_LOOKUP
 
 5. Rate limit check: has this peer exceeded queries/minute?
@@ -236,7 +236,7 @@ The three structured lookup types (`ENTITY_BY_UAL`, `ENTITIES_BY_TYPE`, `ENTITY_
 
 ### Layer 2: Access policy
 
-Per-paranet, per-peer access control (§5). Default deny.
+Per-contextGraph, per-peer access control (§5). Default deny.
 
 ### Layer 3: Read-only guard
 
@@ -260,7 +260,7 @@ All lookup types have a maximum result size (default: 1MB serialized). Larger re
 
 ### Layer 6: Rate limiting
 
-Per-peer rate limits (default: 60 queries/minute). Configurable per-paranet. Exceeding the limit returns `RATE_LIMITED` with a `Retry-After` hint in the error message.
+Per-peer rate limits (default: 60 queries/minute). Configurable per-contextGraph. Exceeding the limit returns `RATE_LIMITED` with a `Retry-After` hint in the error message.
 
 ---
 
@@ -291,7 +291,7 @@ class QueryHandler {
 
     async handle(request: QueryRequest, peerId: PeerId): Promise<QueryResponse> {
         // 1. Validate request structure
-        // 2. Check access policy for (paranetId, peerId, lookupType)
+        // 2. Check access policy for (contextGraphId, peerId, lookupType)
         // 3. Check rate limit
         // 4. Dispatch to lookup handler
         // 5. Apply result limits
@@ -308,13 +308,13 @@ switch (request.lookupType) {
         return this.lookupByUAL(request.ual);
 
     case LookupType.ENTITIES_BY_TYPE:
-        return this.lookupByType(request.paranetId, request.rdfType, request.limit);
+        return this.lookupByType(request.contextGraphId, request.rdfType, request.limit);
 
     case LookupType.ENTITY_TRIPLES:
-        return this.lookupEntityTriples(request.paranetId, request.entityUri);
+        return this.lookupEntityTriples(request.contextGraphId, request.entityUri);
 
     case LookupType.SPARQL_QUERY:
-        return this.executeSparql(request.paranetId, request.sparql, request.limit, request.timeout);
+        return this.executeSparql(request.contextGraphId, request.sparql, request.limit, request.timeout);
 }
 ```
 
@@ -322,8 +322,8 @@ Each handler generates the appropriate SPARQL internally:
 
 ```typescript
 // ENTITY_BY_UAL → resolves UAL to entity URI, then fetches triples
-// ENTITIES_BY_TYPE → SELECT ?entity WHERE { GRAPH <paranet> { ?entity a <rdfType> } } LIMIT N
-// ENTITY_TRIPLES → SELECT ?p ?o WHERE { GRAPH <paranet> { <entityUri> ?p ?o } }
+// ENTITIES_BY_TYPE → SELECT ?entity WHERE { GRAPH <contextGraph> { ?entity a <rdfType> } } LIMIT N
+// ENTITY_TRIPLES → SELECT ?p ?o WHERE { GRAPH <contextGraph> { <entityUri> ?p ?o } }
 // SPARQL_QUERY → validateReadOnlySparql(sparql); execute with timeout
 ```
 
@@ -343,8 +343,8 @@ class DKGAgent {
 
     // Convenience methods
     async lookupEntity(peerId: PeerId, ual: string): Promise<Quad[]>;
-    async findEntitiesByType(peerId: PeerId, paranetId: string, rdfType: string, limit?: number): Promise<string[]>;
-    async queryRemoteSparql(peerId: PeerId, paranetId: string, sparql: string): Promise<QueryResult>;
+    async findEntitiesByType(peerId: PeerId, contextGraphId: string, rdfType: string, limit?: number): Promise<string[]>;
+    async queryRemoteSparql(peerId: PeerId, contextGraphId: string, sparql: string): Promise<QueryResult>;
 }
 ```
 
@@ -372,10 +372,10 @@ For repeated queries to the same peer, connection multiplexing (yamux) ensures e
 
 ```bash
 # Query a specific remote peer
-dkg query-remote <peer-name-or-id> [paranet] -q "SPARQL..."
-dkg query-remote <peer-name-or-id> --entity <uri> --paranet <id>
+dkg query-remote <peer-name-or-id> [contextGraph] -q "SPARQL..."
+dkg query-remote <peer-name-or-id> --entity <uri> --context-graph <id>
 dkg query-remote <peer-name-or-id> --ual <ual>
-dkg query-remote <peer-name-or-id> --type <rdf-type> --paranet <id>
+dkg query-remote <peer-name-or-id> --type <rdf-type> --context-graph <id>
 ```
 
 ### Examples
@@ -384,8 +384,8 @@ dkg query-remote <peer-name-or-id> --type <rdf-type> --paranet <id>
 # Look up a specific knowledge asset on the relay node
 dkg query-remote v9-cobb --ual "did:dkg:base:84532/0x15e0.../1"
 
-# Find all Person entities on a peer's "testing" paranet
-dkg query-remote v9-cobb --type "https://schema.org/Person" --paranet testing
+# Find all Person entities on a peer's "testing" contextGraph
+dkg query-remote v9-cobb --type "https://schema.org/Person" --context-graph testing
 
 # Run a SPARQL query on a peer (if they allow it)
 dkg query-remote v9-cobb testing -q "SELECT ?s ?name WHERE { ?s <https://schema.org/name> ?name }"
@@ -435,11 +435,11 @@ The `gasConsumed` field in the response reports actual gas used. In the future, 
 
 | Scenario | Response |
 |---|---|
-| Unknown paranet | `NOT_FOUND`: "Paranet 'xyz' not found in local store" |
+| Unknown contextGraph | `NOT_FOUND`: "ContextGraph 'xyz' not found in local store" |
 | Unknown entity/UAL | `OK` with empty results (not an error — absence of knowledge is valid) |
-| Access denied | `ACCESS_DENIED`: "Paranet 'xyz' is not queryable" or "Your peer ID is not in the allow list" |
+| Access denied | `ACCESS_DENIED`: "ContextGraph 'xyz' is not queryable" or "Your peer ID is not in the allow list" |
 | Rate limited | `RATE_LIMITED`: "Rate limit exceeded. Retry after {N} seconds" |
-| SPARQL disabled | `UNSUPPORTED_LOOKUP`: "SPARQL queries are not enabled for paranet 'xyz'" |
+| SPARQL disabled | `UNSUPPORTED_LOOKUP`: "SPARQL queries are not enabled for contextGraph 'xyz'" |
 | Query timeout | `GAS_LIMIT_EXCEEDED`: "Query exceeded time limit ({N}ms)" |
 | Malformed request | `ERROR`: "Invalid request: {details}" |
 | Internal error | `ERROR`: "Internal error processing query" (no details leaked) |
@@ -466,7 +466,7 @@ Frequently requested entities could be cached by the responding node to avoid re
 
 ### Query routing
 
-When Agent A doesn't know which peer has the data, it could broadcast a `QueryRequest` to the paranet's gossipsub topic. The first peer with the answer responds. This is expensive (all peers evaluate) and should be used sparingly — direct peer queries are preferred.
+When Agent A doesn't know which peer has the data, it could broadcast a `QueryRequest` to the contextGraph's gossipsub topic. The first peer with the answer responds. This is expensive (all peers evaluate) and should be used sparingly — direct peer queries are preferred.
 
 ### Streaming results
 
@@ -482,4 +482,4 @@ For very large result sets, the response could switch from a single message to a
 | OQ2 | Should ENTITIES_BY_TYPE return full triples or just URIs? | URIs only (current design). Returning full triples for many entities could be huge. The two-step pattern (find URIs, then fetch interesting ones) is safer. |
 | OQ3 | Connection pooling? | Not needed initially — yamux multiplexing handles concurrent queries over a single TCP connection efficiently. Add explicit pooling only if benchmarks show overhead. |
 | OQ4 | Should the protocol support subscriptions (long-lived query streams)? | Not in v2.0.0. Request-response is simpler. Subscriptions (e.g., "notify me when new Person entities appear") could be a v3.0.0 feature or handled via gossipsub. |
-| OQ5 | Peer name resolution? | The CLI uses peer names (e.g., `v9-cobb`) from the agent discovery system. The daemon resolves name → peerId via the agents paranet. If the peer isn't known, the user provides the peer ID directly. |
+| OQ5 | Peer name resolution? | The CLI uses peer names (e.g., `v9-cobb`) from the agent discovery system. The daemon resolves name → peerId via the agents contextGraph. If the peer isn't known, the user provides the peer ID directly. |

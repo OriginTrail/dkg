@@ -1,8 +1,8 @@
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_QUERY_REMOTE, PROTOCOL_STORAGE_ACK, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST,
-  paranetPublishTopic, paranetWorkspaceTopic, paranetAppTopic, paranetUpdateTopic, paranetFinalizationTopic,
-  paranetDataGraphUri, paranetMetaGraphUri, paranetWorkspaceGraphUri, paranetWorkspaceMetaGraphUri,
+  contextGraphPublishTopic, contextGraphWorkspaceTopic, contextGraphAppTopic, contextGraphUpdateTopic, contextGraphFinalizationTopic,
+  contextGraphDataGraphUri, contextGraphMetaGraphUri, contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri,
   contextGraphSharedMemoryUri,
   contextGraphVerifiedMemoryUri, contextGraphVerifiedMemoryMetaUri,
   contextGraphDataUri, contextGraphMetaUri, assertionLifecycleUri, contextGraphAssertionUri,
@@ -10,10 +10,17 @@ import {
   computeACKDigest,
   encodePublishRequest,
   encodeKAUpdateRequest,
+  encodeGossipEnvelope,
+  computeGossipSigningPayload,
+  GOSSIP_ENVELOPE_VERSION,
+  GOSSIP_TYPE_WORKSPACE_PUBLISH,
   encodeFinalizationMessage, type FinalizationMessageMsg,
-  getGenesisQuads, computeNetworkId, SYSTEM_PARANETS, DKG_ONTOLOGY,
-  Logger, createOperationContext, sparqlString, escapeSparqlLiteral,
+  getGenesisQuads, computeNetworkId, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY,
+  Logger, createOperationContext, sparqlString, escapeSparqlLiteral, isSafeIri,
   TrustLevel,
+  buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1,
+  buildAssertionSealQuads, buildAssertionPublishReceiptQuads,
+  parseAssertionSealQuads, type AssertionSeal,
   type DKGNodeConfig, type OperationContext, type GetView, type AssertionDescriptor, type AssertionEvent, type AssertionState,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad } from '@origintrail-official/dkg-storage';
@@ -23,9 +30,9 @@ import {
   PublishJournal, StaleWriteError,
   ACKCollector, StorageACKHandler,
   VerifyCollector, VerifyProposalHandler, buildVerificationMetadata,
-  computeTripleHashV10 as computeTripleHash, computeFlatKCRootV10 as computeFlatKCRoot, autoPartition,
+  computeTripleHashV10 as computeTripleHash, computeFlatKCRootV10 as computeFlatKCRoot, autoPartition, isReservedSubject, computePrivateRootV10 as computePrivateRoot,
   TripleStoreAsyncLiftPublisher,
-  type PublishResult, type PhaseCallback, type KAMetadata, type CASCondition,
+  type PublishOptions, type PublishResult, type PhaseCallback, type KAMetadata, type CASCondition,
   type CollectedACK, type LiftAuthorityProof, type LiftTransitionType,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
@@ -36,6 +43,25 @@ import {
   type QueryRequest, type QueryResponse, type QueryAccessConfig, type LookupType,
 } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
+
+/**
+ * Pre-signed AuthorAttestation payload supplied at finalize-time by
+ * self-sovereign agents whose private key isn't held by the daemon.
+ * Compact ECDSA `(r, vs)` over the EIP-712 typed data
+ * `buildAuthorAttestationTypedData({ chainId, kav10Address,
+ * contextGraphId, merkleRoot, authorAddress: address })`. The agent
+ * verifies the recovered signer matches `address` before stamping the
+ * seal.
+ *
+ * Lives at the agent layer (rather than as a publisher
+ * `PublishOptions` field) since RFC-001 §9.x — Phase C — the
+ * publisher only accepts already-sealed `precomputedAttestation`
+ * payloads. Pre-signed signing is a finalize-time concern.
+ */
+type PreSignedAuthorAttestation = {
+  address: string;
+  signature: { r: Uint8Array; vs: Uint8Array };
+};
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
 import { MessageHandler, type SkillHandler, type SkillRequest, type SkillResponse, type ChatHandler } from './messaging.js';
@@ -265,6 +291,28 @@ const GOSSIP_DIAL_TIMEOUT_MS = 10_000;
  * (each of which fires its own connection:open).
  */
 const CATCHUP_ON_CONNECT_COOLDOWN_MS = 60_000;
+/**
+ * Period of the sync reconciler tick. The reconciler is the safety net
+ * for the event-driven `peer:update` retry path: if libp2p drops a
+ * `peer:update` event (in-process race, version bug, listener thrown),
+ * or if a peer's protocol list changes via a transport we don't get
+ * notified about, the reconciler eventually re-probes and re-syncs.
+ *
+ * Worst-case sync staleness for a connected peer is ~ this interval.
+ * 5 minutes balances "catch missed events quickly enough that RS
+ * proofs don't drift" against "don't pin the event loop with chatty
+ * sync probes". See the dkg-agent design notes around
+ * `startSyncReconciler` for the trade-off.
+ */
+const SYNC_RECONCILER_INTERVAL_MS = 5 * 60_000;
+/**
+ * A peer is considered "stale" — eligible for a reconciler-driven sync
+ * retry — if no successful sync has completed for it within this window.
+ * Set higher than `SYNC_RECONCILER_INTERVAL_MS` so a single missed
+ * tick doesn't immediately retry every connected peer; that gives
+ * the event-driven path time to win the race in the common case.
+ */
+const SYNC_STALENESS_THRESHOLD_MS = 10 * 60_000;
 const RANDOM_SAMPLING_BIND_RETRY_MS = 30_000;
 const STORAGE_ACK_REGISTRATION_RETRY_MS = 30_000;
 
@@ -358,9 +406,6 @@ export interface ContextGraphMembershipStore {
   upsert(record: ContextGraphMembershipRecord & { firstSeenAt?: number; updatedAt: number }): Promise<void>;
   delete(contextGraphId: string, principalType: ContextGraphMemberPrincipalType, principalId: string): Promise<void>;
 }
-
-/** @deprecated Use ContextGraphSub */
-export type ParanetSub = ContextGraphSub;
 
 export interface DurableSyncDiagnostics {
   fetchedMetaTriples: number;
@@ -679,6 +724,7 @@ export class DKGAgent {
   private started = false;
   private readonly subscribedContextGraphs = new Map<string, ContextGraphSub>();
   private readonly gossipRegistered = new Set<string>();
+  private readonly sharedMemoryGossipRegistered = new Set<string>();
   private readonly seenOnChainIds = new Set<string>();
   private readonly peerHealth = new Map<string, PeerHealth>();
   private readonly knownCorePeerIds = new Set<string>();
@@ -714,6 +760,30 @@ export class DKGAgent {
    * direct + relayed connections within a short window.
    */
   private readonly catchupOnConnectAt = new Map<string, number>();
+  /**
+   * Peers whose most recent sync attempt found that their advertised
+   * protocol list did NOT include `PROTOCOL_SYNC` — almost always a
+   * libp2p identify race on the inbound side of `connection:open`,
+   * not a real "this peer doesn't speak sync" answer. The `peer:update`
+   * listener drains entries from this set the moment libp2p reports
+   * an updated protocol list that contains `PROTOCOL_SYNC`, and the
+   * periodic reconciler treats membership as a strong hint to retry.
+   *
+   * Entries are also cleared on `connection:close` (no path to the peer
+   * anyway — the next `connection:open` will re-trigger sync-on-connect)
+   * and after a successful sync (see `lastSuccessfulSyncAt`).
+   */
+  private readonly skippedNoSyncPeers = new Set<string>();
+  /**
+   * Per-peer timestamp of the most recent successful run of sync-on-connect.
+   * Driven by `runSyncOnConnect.onPeerSynced`. Used by the periodic
+   * reconciler to skip peers that have already synced recently — the
+   * staleness threshold is intentionally larger than the reconciler
+   * interval so a single missed tick doesn't immediately retry every
+   * connected peer.
+   */
+  private readonly lastSuccessfulSyncAt = new Map<string, number>();
+  private syncReconcilerTimer: ReturnType<typeof setInterval> | null = null;
   /**
    * v10-rc sync-refactor: per-(peer+CG) checkpoint offsets so the paged
    * sync requester in `sync/requester/page-fetch.ts` can resume where it
@@ -1253,7 +1323,7 @@ export class DKGAgent {
         agentPrivateKey: verifySignerKey,
         agentAddress: verifyWallet.address,
         getBatchMerkleRoot: async (cgId: string, batchId: bigint) => {
-          const metaGraph = paranetMetaGraphUri(cgId);
+          const metaGraph = contextGraphMetaGraphUri(cgId);
           // Try typed literal first, fallback to untyped for backward compat
           for (const literal of [`"${batchId}"^^<http://www.w3.org/2001/XMLSchema#integer>`, `"${batchId}"`]) {
             const result = await this.store.query(
@@ -1472,7 +1542,7 @@ export class DKGAgent {
     });
 
     // Subscribe to both system context graph GossipSub topics
-    for (const systemContextGraph of [SYSTEM_PARANETS.AGENTS, SYSTEM_PARANETS.ONTOLOGY]) {
+    for (const systemContextGraph of [SYSTEM_CONTEXT_GRAPHS.AGENTS, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY]) {
       this.subscribeToContextGraph(systemContextGraph);
     }
 
@@ -1530,6 +1600,15 @@ export class DKGAgent {
     // fires. `connection:close` fires per connection, so we only forget
     // the timestamp once no live connection to the peer remains. Codex
     // tier-4i finding at packages/agent/src/dkg-agent.ts:1105.
+    //
+    // We also drop the peer from `skippedNoSyncPeers` and forget its
+    // `lastSuccessfulSyncAt` here. The next `connection:open` will
+    // re-trigger sync-on-connect from scratch, so keeping stale entries
+    // would only cause memory leaks across long-lived nodes that see
+    // many transient peers. Note: a brief disconnect+reconnect of the
+    // SAME peer ID still benefits — the new sync-on-connect run will
+    // either succeed (and re-stamp `lastSuccessfulSyncAt`) or get
+    // re-added to `skippedNoSyncPeers` for the event/reconciler retry.
     this.node.libp2p.addEventListener('connection:close', (evt) => {
       const remotePeer = evt.detail.remotePeer.toString();
       if (remotePeer === this.node.libp2p.peerId.toString()) return;
@@ -1538,6 +1617,25 @@ export class DKGAgent {
         .some((p) => p.toString() === remotePeer);
       if (stillConnected) return;
       this.catchupOnConnectAt.delete(remotePeer);
+      this.skippedNoSyncPeers.delete(remotePeer);
+      this.lastSuccessfulSyncAt.delete(remotePeer);
+    });
+
+    // Event-driven sync-retry: libp2p emits `peer:update` whenever a
+    // peer record changes — including (and most importantly) when
+    // identify completes and populates the protocol list for the first
+    // time. The inbound side of `connection:open` reliably loses this
+    // race in practice (the event fires on TCP accept, before identify
+    // has been processed), so without this listener a node that mostly
+    // accepts inbound dials — typically the relay node 1 in our devnet
+    // topology — would never sync from any peer beyond the bootstrap
+    // window. See `handlePeerUpdateForSyncRetry` for the dedup logic.
+    this.node.libp2p.addEventListener('peer:update', (evt) => {
+      const detail = evt.detail as { peer?: { id?: { toString(): string }; protocols?: readonly string[] } };
+      const peerIdObj = detail?.peer?.id;
+      if (!peerIdObj) return;
+      const protocols = detail.peer?.protocols ?? [];
+      this.handlePeerUpdateForSyncRetry(peerIdObj.toString(), protocols);
     });
 
     // Reconnect-on-gossip: when a gossip message arrives from a peer we're
@@ -1576,6 +1674,19 @@ export class DKGAgent {
       }, SWM_CLEANUP_INTERVAL_MS);
       if (this.swmCleanupTimer.unref) this.swmCleanupTimer.unref();
     }
+
+    // Start the periodic sync reconciler — the safety net for the
+    // event-driven `peer:update` retry path. See the constants block at
+    // the top of this file (`SYNC_RECONCILER_INTERVAL_MS`,
+    // `SYNC_STALENESS_THRESHOLD_MS`) and `reconcileSyncFromConnectedPeers`
+    // for the full design rationale.
+    this.syncReconcilerTimer = setInterval(() => {
+      this.reconcileSyncFromConnectedPeers().catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : String(err);
+        this.log.warn(ctx, `Sync reconciler tick failed: ${message}`);
+      });
+    }, SYNC_RECONCILER_INTERVAL_MS);
+    if (this.syncReconcilerTimer.unref) this.syncReconcilerTimer.unref();
 
     // Wire V10 Random Sampling prover. Edge nodes no-op. Core nodes with
     // transient identity/RPC startup failures retry in the background so
@@ -1716,7 +1827,78 @@ export class DKGAgent {
       discoverContextGraphsFromStore: () => this.discoverContextGraphsFromStore(),
       syncSharedMemoryFromPeer: (peerId, contextGraphIds) => this.syncSharedMemoryFromPeer(peerId, contextGraphIds),
       logInfo: (ctx, message) => this.log.info(ctx, message),
+      onPeerSkippedNoSync: (peerId) => {
+        this.skippedNoSyncPeers.add(peerId);
+      },
+      onPeerSynced: (peerId) => {
+        this.lastSuccessfulSyncAt.set(peerId, Date.now());
+        this.skippedNoSyncPeers.delete(peerId);
+      },
     });
+  }
+
+  /**
+   * Event-driven retry path for the libp2p identify race that otherwise
+   * leaves a peer permanently in `skippedNoSyncPeers`. libp2p emits
+   * `peer:update` whenever a peer record changes — most importantly when
+   * identify completes and the protocol list gets populated for the
+   * first time. If the new list now contains `PROTOCOL_SYNC` and we
+   * previously skipped this peer for that exact reason, fire one
+   * `trySyncFromPeer` immediately.
+   *
+   * Pairs with {@link reconcileSyncFromConnectedPeers}: the listener
+   * handles the common case in <1s (libp2p delivers identify quickly
+   * once it arrives), and the periodic reconciler is the safety net for
+   * delivery failures of this event itself.
+   */
+  private handlePeerUpdateForSyncRetry(peerId: string, protocols: readonly string[]): void {
+    if (peerId === this.node.libp2p.peerId.toString()) return;
+    if (!this.skippedNoSyncPeers.has(peerId)) return;
+    if (!protocols.includes(PROTOCOL_SYNC)) return;
+    this.skippedNoSyncPeers.delete(peerId);
+    const ctx = createOperationContext('sync');
+    const shortPeer = peerId.slice(-8);
+    this.log.info(ctx, `Peer ${shortPeer} now advertises sync protocol — retrying sync-on-connect`);
+    setTimeout(() => {
+      this.trySyncFromPeer(peerId).catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : String(err);
+        this.log.warn(ctx, `Sync retry after peer:update failed for ${shortPeer}: ${message}`);
+      });
+    }, 0);
+  }
+
+  /**
+   * Periodic reconciler for sync-on-connect. Walks every currently
+   * connected peer and retries `trySyncFromPeer` for any that either:
+   *
+   *   - is in {@link skippedNoSyncPeers} and now advertises `PROTOCOL_SYNC`
+   *     (covers the case where the `peer:update` listener missed the
+   *     event for whatever reason), or
+   *   - has no `lastSuccessfulSyncAt` entry, or whose entry is older
+   *     than {@link SYNC_STALENESS_THRESHOLD_MS} (covers slow identify,
+   *     transport-level reconnects that didn't fire connection:open,
+   *     and any future failure mode of the event-driven path).
+   *
+   * Designed to be safe to call concurrently with the event-driven path
+   * — `runSyncOnConnect` itself is idempotent via `syncingPeers`.
+   */
+  private async reconcileSyncFromConnectedPeers(): Promise<void> {
+    if (!this.started) return;
+    const now = Date.now();
+    const ctx = createOperationContext('sync');
+    for (const pid of this.node.libp2p.getPeers()) {
+      const peerId = pid.toString();
+      if (this.syncingPeers.has(peerId)) continue;
+      const lastOk = this.lastSuccessfulSyncAt.get(peerId);
+      const stale = lastOk == null || (now - lastOk) >= SYNC_STALENESS_THRESHOLD_MS;
+      if (!stale) continue;
+      const shortPeer = peerId.slice(-8);
+      this.log.info(ctx, `Sync reconciler retrying ${shortPeer} (last success: ${lastOk == null ? 'never' : `${Math.round((now - lastOk) / 1000)}s ago`})`);
+      this.trySyncFromPeer(peerId).catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : String(err);
+        this.log.warn(ctx, `Sync reconciler retry failed for ${shortPeer}: ${message}`);
+      });
+    }
   }
 
   /**
@@ -1799,7 +1981,7 @@ export class DKGAgent {
    */
   async syncFromPeer(
     remotePeerId: string,
-    contextGraphIds: string[] = [SYSTEM_PARANETS.AGENTS, SYSTEM_PARANETS.ONTOLOGY, ...(this.config.syncContextGraphs ?? [])],
+    contextGraphIds: string[] = [SYSTEM_CONTEXT_GRAPHS.AGENTS, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, ...(this.config.syncContextGraphs ?? [])],
     onPhase?: PhaseCallback,
     onAccessDenied?: (contextGraphId: string) => void,
   ): Promise<number> {
@@ -1897,16 +2079,39 @@ export class DKGAgent {
     contextGraphIds: string[],
   ): Promise<SharedMemorySyncResult> {
     const ctx = createOperationContext('sync');
+    const allowedContextGraphIds: string[] = [];
+    for (const contextGraphId of contextGraphIds) {
+      if (await this.canUseSharedMemoryForContextGraph(contextGraphId)) {
+        allowedContextGraphIds.push(contextGraphId);
+      } else {
+        this.log.warn(ctx, `Skipping SWM sync for unauthorized or unconfirmed context graph "${contextGraphId}"`);
+      }
+    }
+    if (allowedContextGraphIds.length === 0) {
+      return {
+        insertedTriples: 0,
+        fetchedMetaTriples: 0,
+        fetchedDataTriples: 0,
+        insertedMetaTriples: 0,
+        insertedDataTriples: 0,
+        bytesReceived: 0,
+        resumedPhases: 0,
+        emptyResponses: 0,
+        droppedDataTriples: 0,
+        failedPeers: 0,
+        deniedPhases: 0,
+      };
+    }
     return runSharedMemorySync({
       ctx,
       remotePeerId,
-      contextGraphIds,
+      contextGraphIds: allowedContextGraphIds,
       createContextGraphSyncDeadline: this.createContextGraphSyncDeadline.bind(this),
       fetchSyncPages: this.fetchSyncPages.bind(this),
       processSharedMemoryBatch: (wsDataQuads, wsMetaQuads) => this.getOrCreateSyncVerifyWorker().processSharedMemoryBatch(wsDataQuads, wsMetaQuads),
-      ensureParanet: async (contextGraphId) => {
+      ensureContextGraph: async (contextGraphId) => {
         const graphManager = new GraphManager(this.store);
-        await graphManager.ensureParanet(contextGraphId);
+        await graphManager.ensureContextGraph(contextGraphId);
       },
       storeInsert: (quads) => this.store.insert(quads),
       deleteCheckpoint: (key) => this.syncCheckpoints.delete(key),
@@ -1941,6 +2146,16 @@ export class DKGAgent {
     connectedPeers: number;
     syncCapablePeers: number;
     peersTried: number;
+    /**
+     * Subset of `peersTried` whose sync round finished without a transport
+     * failure AND without an explicit ACL denial. Used by the daemon
+     * subscribe job to distinguish a real "curator unreachable" outcome
+     * (`peersTried > 0 && peersSucceeded === 0 && !denied`) from a slow
+     * public CG (some peers responded with empty / meta-only) — the UI
+     * surfaces a dedicated `unreachable` terminal status with a "send
+     * signed join request" CTA instead of the generic timeout copy.
+     */
+    peersSucceeded: number;
     dataSynced: number;
     sharedMemorySynced: number;
     /**
@@ -1986,6 +2201,7 @@ export class DKGAgent {
     connectedPeers: number;
     syncCapablePeers: number;
     peersTried: number;
+    peersSucceeded: number;
     dataSynced: number;
     sharedMemorySynced: number;
     denied: boolean;
@@ -2103,7 +2319,22 @@ export class DKGAgent {
       return { durable, shared };
     }));
     let accessDeniedPeers = 0;
+    let peersSucceeded = 0;
     for (const r of results) {
+      // A peer "succeeded" when its sync round finished without a
+      // transport failure AND without an explicit denial. We treat the
+      // emergency `failedPeers: 1` produced by `emptyDurable()` /
+      // `emptyShared()` (set when `syncFromPeerDetailed` rejected) as
+      // the failure marker — anything else (data, meta-only, empty
+      // response) counts as a legitimate response from a host that
+      // happens to hold no/incomplete data for this CG.
+      const durableFailed = r.durable.failedPeers > 0;
+      const sharedFailed = r.shared ? r.shared.failedPeers > 0 : false;
+      const peerDeniedRound = r.durable.deniedPhases > 0
+        || (r.shared ? r.shared.deniedPhases > 0 : false);
+      if (!durableFailed && !sharedFailed && !peerDeniedRound) {
+        peersSucceeded++;
+      }
       dataSynced += r.durable.insertedTriples;
       diagnostics.durable.fetchedMetaTriples += r.durable.fetchedMetaTriples;
       diagnostics.durable.fetchedDataTriples += r.durable.fetchedDataTriples;
@@ -2153,6 +2384,7 @@ export class DKGAgent {
       connectedPeers: peers.length,
       syncCapablePeers,
       peersTried,
+      peersSucceeded,
       dataSynced,
       sharedMemorySynced,
       denied: accessDeniedPeers > 0,
@@ -2200,10 +2432,13 @@ export class DKGAgent {
   private async refreshMetaSyncedFlags(contextGraphIds: Iterable<string>): Promise<void> {
     for (const contextGraphId of contextGraphIds) {
       const sub = this.subscribedContextGraphs.get(contextGraphId);
-      if (!sub || sub.metaSynced === true) continue;
+      if (!sub) continue;
       if (await this.hasConfirmedMetaState(contextGraphId)) {
-        sub.metaSynced = true;
-        this.persistContextGraphSubscription(contextGraphId);
+        if (sub.metaSynced !== true) {
+          sub.metaSynced = true;
+          this.persistContextGraphSubscription(contextGraphId);
+        }
+        this.queueSharedMemoryGossipSubscription(contextGraphId);
       }
     }
   }
@@ -2361,11 +2596,11 @@ export class DKGAgent {
   }
 
   private async hasConfirmedMetaState(contextGraphId: string): Promise<boolean> {
-    if ((Object.values(SYSTEM_PARANETS) as string[]).includes(contextGraphId)) {
+    if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId)) {
       return true;
     }
 
-    const metaGraph = paranetMetaGraphUri(contextGraphId);
+    const metaGraph = contextGraphMetaGraphUri(contextGraphId);
     const metaResult = await this.store.query(
       `ASK WHERE { GRAPH <${metaGraph}> { ?s ?p ?o } }`,
     );
@@ -2373,13 +2608,13 @@ export class DKGAgent {
       return true;
     }
 
-    // Ontology-only fallback: a CG declared `rdf:type dkg:Paranet` can be
+    // Ontology-only fallback: a CG declared `rdf:type dkg:ContextGraph` can be
     // treated as confirmably-public for the gossip race-opener ONLY when
-    // no local evidence of a restriction exists. Raw paranet declaration
+    // no local evidence of a restriction exists. Raw contextGraph declaration
     // is not enough on its own — `inviteToContextGraph` writes
     // `dkg:allowedPeer` straight to `_meta` without updating ontology, so
     // a CG that was announced publicly and later allowlisted would look
-    // "just a paranet" here even though the curator expects the allowlist
+    // "just a contextGraph" here even though the curator expects the allowlist
     // to gate gossip. Require `isPrivateContextGraph()` (now also reads
     // `DKG_ALLOWED_PEER`) to explicitly return false before honoring the
     // bypass.
@@ -2387,16 +2622,33 @@ export class DKGAgent {
       return false;
     }
 
-    const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
-    const contextGraphUri = paranetDataGraphUri(contextGraphId);
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
     const ontologyResult = await this.store.query(
       `ASK WHERE {
         GRAPH <${ontologyGraph}> {
-          <${contextGraphUri}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_PARANET}> .
+          <${contextGraphUri}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> .
         }
       }`,
     );
     return ontologyResult.type === 'boolean' && ontologyResult.value === true;
+  }
+
+  private async hasConfirmedSharedMemoryMetaState(contextGraphId: string): Promise<boolean> {
+    return this.hasConfirmedMetaState(contextGraphId);
+  }
+
+  private async canUseSharedMemoryForContextGraph(
+    contextGraphId: string,
+    opts: { callerAgentAddress?: string } = {},
+  ): Promise<boolean> {
+    if (!(await this.hasConfirmedSharedMemoryMetaState(contextGraphId))) {
+      return false;
+    }
+    return this.canReadContextGraph(contextGraphId, {
+      callerAgentAddress: opts.callerAgentAddress,
+      allowSubscriptionFallback: false,
+    });
   }
 
   private async verifySyncedDataInWorker(
@@ -2472,11 +2724,11 @@ export class DKGAgent {
 
     try {
       const graphManager = new GraphManager(this.store);
-      const contextGraphs = await graphManager.listParanets();
+      const contextGraphs = await graphManager.listContextGraphs();
 
       for (const pid of contextGraphs) {
-        const wsGraph = paranetWorkspaceGraphUri(pid);
-        const wsMetaGraph = paranetWorkspaceMetaGraphUri(pid);
+        const wsGraph = contextGraphWorkspaceGraphUri(pid);
+        const wsMetaGraph = contextGraphWorkspaceMetaGraphUri(pid);
         let graphDeleted = 0;
 
         const expiredOps = await this.store.query(
@@ -2554,6 +2806,35 @@ export class DKGAgent {
     const pubKeyBase64 = Buffer.from(this.wallet.keypair.publicKey).toString('base64');
     const relayAddrs = this.config.relayPeers;
 
+    // Populate `contextGraphsServed` so peers can discover which CGs this
+    // node hosts via the public agent profile, but ONLY include CGs whose
+    // accessPolicy is open AND we are actively serving (subscribed=true).
+    //
+    // `isPrivateContextGraph` is the same predicate the responder consults
+    // to gate sync requests, so the discovery layer and the data-plane
+    // access control stay consistent.
+    //
+    // The `subscribed === true` filter is what Codex review on PR #431
+    // (round 3) flagged. `discoverContextGraphsFromStore()` seeds entries
+    // for OPEN CGs we merely learned about with `subscribed: false` (we
+    // don't auto-subscribe public CGs — explicit user opt-in only). Without
+    // this filter, those discovery-only entries would be advertised in
+    // `contextGraphsServed`, so other peers would route join attempts to a
+    // node that doesn't actually host the CG. The curated/private discovery
+    // path immediately calls `subscribeToContextGraph()` (which flips
+    // `subscribed: true`) before adding to the gossip mesh, so this filter
+    // does not regress invited-curated discovery.
+    //
+    // System CGs (`agents`, `ontology`) are excluded — they are universal
+    // and don't need to be re-advertised in every profile.
+    const publicServed: string[] = [];
+    for (const [id, sub] of this.subscribedContextGraphs) {
+      if (id === SYSTEM_CONTEXT_GRAPHS.AGENTS || id === SYSTEM_CONTEXT_GRAPHS.ONTOLOGY) continue;
+      if (!sub.subscribed) continue;
+      if (await this.isPrivateContextGraph(id)) continue;
+      publicServed.push(id);
+    }
+
     const profileConfig: AgentProfileConfig = {
       peerId: this.node.peerId,
       name: this.config.name,
@@ -2569,6 +2850,7 @@ export class DKGAgent {
         currency: s.currency ?? 'TRAC',
         pricingModel: s.pricePerCall ? 'PerInvocation' as const : 'Free' as const,
       })),
+      ...(publicServed.length > 0 ? { contextGraphsServed: publicServed } : {}),
     };
 
     const profileCtx = createOperationContext('publish');
@@ -2640,6 +2922,35 @@ export class DKGAgent {
    */
   resolveAgentByToken(token: string): string | undefined {
     return this.agentTokenIndex.get(token);
+  }
+
+  /**
+   * Look up the custodial private key for a registered agent.
+   *
+   * Returns the hex-encoded private key for `mode === 'custodial'` agents
+   * (the daemon generated and persisted the keypair at registration). Returns
+   * `undefined` if the agent is unknown to this node, is `'self-sovereign'`
+   * (the node never had the key), or does not have a `privateKey` field set
+   * for any reason.
+   *
+   * Used by `publishFromSharedMemory` to resolve a per-publish author signer
+   * without exposing the entire `AgentKeyRecord` (which would leak the auth
+   * token hash and other off-axis material). Phase 4 / RFC-001 §4(b).
+   *
+   * @param address Ethereum address of the registered agent.
+   */
+  getCustodialAgentPrivateKey(address: string): string | undefined {
+    const record = this.localAgents.get(address);
+    if (!record || record.mode !== 'custodial') return undefined;
+    return record.privateKey;
+  }
+
+  /**
+   * Look up the registration mode for a known local agent.
+   * Returns undefined if the agent is unknown to this node.
+   */
+  getLocalAgentMode(address: string): 'custodial' | 'self-sovereign' | undefined {
+    return this.localAgents.get(address)?.mode;
   }
 
   /**
@@ -2940,6 +3251,97 @@ export class DKGAgent {
     return false;
   }
 
+  /**
+   * Chain-confirmed verified author identity for a knowledge collection's
+   * latest merkle-root entry. Reads
+   * `KnowledgeCollectionStorage.getLatestMerkleRootAuthor(kcId)` via the
+   * configured chain adapter.
+   *
+   * Returns:
+   *   - the address recovered from the EIP-712 author attestation (EOA
+   *     publish path), or
+   *   - the smart-contract author address verified via EIP-1271 for
+   *     contract-based author identities, or
+   *   - `address(0)` for legacy V8 / V9 publishes and current V10.1
+   *     update-path mutations (which don't sign).
+   *
+   * Returns `null` when the chain adapter doesn't expose the view (no-chain
+   * mode or pre-V10.1 evm-adapter copies). Callers that need to distinguish
+   * "no attestation on file" from "feature unavailable" should use this
+   * `null` signal — `address(0)` always means the former.
+   */
+  async getKnowledgeCollectionAuthor(kcId: bigint): Promise<string | null> {
+    if (typeof this.chain.getLatestMerkleRootAuthor !== 'function') return null;
+    return this.chain.getLatestMerkleRootAuthor(kcId);
+  }
+
+  /**
+   * Publishing Conviction Account (PCA) facade for the agent-provenance
+   * runbook surface. These methods are thin wrappers over the chain adapter
+   * — the agent doesn't keep PCA state of its own; the on-chain
+   * `PublishingConvictionAccount` is the source of truth. The wrappers
+   * exist so daemon HTTP routes don't need to reach into the private
+   * `chain` field, mirroring the `getKnowledgeCollectionAuthor` pattern.
+   *
+   * `createPublishingConvictionAccount`: tx is signed by the agent's
+   * configured EOA; that EOA becomes the PCA `admin` and is automatically
+   * added to its own `authorizedKeys` set. Operators driving the runbook
+   * from a core node use this to stand up the PCA before mode (a)/(b).
+   *
+   * `addPCAAuthorizedKey` and `isPCAAuthorizedKey` are admin-gated on chain
+   * (`require(msg.sender == account.admin)`), so the daemon must be running
+   * as the PCA admin EOA for `addPCAAuthorizedKey` to succeed. Read-side
+   * `isPCAAuthorizedKey` is permissionless on chain and works from any node.
+   */
+  async createPublishingConvictionAccount(
+    amount: bigint,
+    lockEpochs: number,
+  ): Promise<{ accountId: bigint; txHash: string; blockNumber: number } | null> {
+    if (typeof this.chain.createConvictionAccount !== 'function') return null;
+    const result = await this.chain.createConvictionAccount(amount, lockEpochs);
+    return {
+      accountId: result.accountId,
+      txHash: result.hash,
+      blockNumber: result.blockNumber,
+    };
+  }
+
+  async addPublishingConvictionAccountFunds(
+    accountId: bigint,
+    amount: bigint,
+  ): Promise<{ txHash: string; blockNumber: number } | null> {
+    if (typeof this.chain.addConvictionFunds !== 'function') return null;
+    const result = await this.chain.addConvictionFunds(accountId, amount);
+    return { txHash: result.hash, blockNumber: result.blockNumber };
+  }
+
+  async addPCAAuthorizedKey(
+    accountId: bigint,
+    key: string,
+  ): Promise<{ txHash: string; blockNumber: number } | null> {
+    if (typeof this.chain.addPCAAuthorizedKey !== 'function') return null;
+    const result = await this.chain.addPCAAuthorizedKey(accountId, key);
+    return { txHash: result.hash, blockNumber: result.blockNumber };
+  }
+
+  async isPCAAuthorizedKey(accountId: bigint, key: string): Promise<boolean | null> {
+    if (typeof this.chain.isPCAAuthorizedKey !== 'function') return null;
+    return this.chain.isPCAAuthorizedKey(accountId, key);
+  }
+
+  async getPublishingConvictionAccountInfo(accountId: bigint): Promise<{
+    accountId: bigint;
+    admin: string;
+    balance: bigint;
+    initialDeposit: bigint;
+    lockEpochs: number;
+    conviction: bigint;
+    discountBps: number;
+  } | null> {
+    if (typeof this.chain.getConvictionAccountInfo !== 'function') return null;
+    return this.chain.getConvictionAccountInfo(accountId);
+  }
+
   // ---------------------------------------------------------------------------
 
   async sendChat(recipientPeerId: string, text: string): Promise<{ delivered: boolean; error?: string }> {
@@ -2980,6 +3382,139 @@ export class DKGAgent {
       multiaddress,
       (message) => this.log.info(ctx, message),
     );
+  }
+
+  /**
+   * Resolve a peer's current multiaddrs via the libp2p Kademlia DHT and
+   * dial them. Used by the V10 invite flow where invites carry only a peer
+   * id — the daemon discovers up-to-date addresses at join time so the
+   * invite stays valid across relay rotations and IP changes (which broke
+   * the legacy multiaddr-in-invite design).
+   *
+   * Errors:
+   *   - `INVALID_PEER_ID` — client-side parse failure (HTTP 400).
+   *   - `SELF_DIAL` — caller asked us to dial our own peer id (HTTP 400).
+   *   - `PEER_NOT_FOUND` — DHT walk completed cleanly but no record exists
+   *     for the id (libp2p `NotFoundError` or empty multiaddr set). Genuine
+   *     negative lookup → HTTP 404. Retrying is unlikely to help until the
+   *     remote node republishes.
+   *   - `DHT_TIMEOUT` — `peerRouting.findPeer` aborted before completing
+   *     the Kademlia walk (slow network, sparse routing table). Retriable
+   *     → HTTP 504.
+   *   - `DHT_UNAVAILABLE` — peerRouting threw a non-NotFound error before
+   *     the walk could resolve (transport failure, bootstrap unreachable).
+   *     Retriable → HTTP 503.
+   *   - `DIAL_FAILED` — DHT returned multiaddrs but every dial attempt
+   *     failed. Retriable transport-level → HTTP 502.
+   * Distinguishing PEER_NOT_FOUND from the retriable variants matters for
+   * UI copy: a 404 means "wrong peer id" (don't retry, ask the curator),
+   * a 503/504 means "the network is sick" (retry in a moment).
+   */
+  async connectToPeerId(peerIdStr: string, options?: { timeoutMs?: number }): Promise<void> {
+    const ctx = createOperationContext('connect');
+    const timeoutMs = options?.timeoutMs ?? 15_000;
+    const { peerIdFromString } = await import('@libp2p/peer-id');
+
+    let peerId;
+    try {
+      peerId = peerIdFromString(peerIdStr);
+    } catch (err: any) {
+      const error = new Error(`Invalid peer id: ${err?.message ?? String(err)}`);
+      (error as any).code = 'INVALID_PEER_ID';
+      throw error;
+    }
+
+    if (peerId.toString() === this.node.peerId) {
+      const error = new Error('Cannot dial self');
+      (error as any).code = 'SELF_DIAL';
+      throw error;
+    }
+
+    // Fast-path: already connected (e.g. via gossipsub mesh / mDNS / a
+    // prior invite). Skip the DHT walk in that case to keep retried
+    // joins snappy.
+    const existing = this.node.libp2p.getConnections(peerId);
+    if (existing.length > 0) {
+      this.log.info(ctx, `Already connected to ${peerIdStr}`);
+      return;
+    }
+
+    const peerRouting = (this.node.libp2p as any).peerRouting;
+    if (!peerRouting || typeof peerRouting.findPeer !== 'function') {
+      const error = new Error('libp2p peerRouting unavailable (DHT not configured)');
+      (error as any).code = 'PEER_ROUTING_UNAVAILABLE';
+      throw error;
+    }
+
+    this.log.info(ctx, `Resolving ${peerIdStr} via DHT...`);
+    let info: { multiaddrs?: any[] };
+    try {
+      info = await peerRouting.findPeer(peerId, {
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+    } catch (err: any) {
+      // Distinguish three failure modes so the HTTP layer can map them to
+      // different status codes and the UI can render specific copy:
+      //   - timeout / abort  → DHT_TIMEOUT (504, retriable)
+      //   - genuine NotFound → PEER_NOT_FOUND (404, terminal until republish)
+      //   - anything else    → DHT_UNAVAILABLE (503, retriable transport)
+      // Codex review on PR #431 flagged that collapsing all of these into
+      // PEER_NOT_FOUND made transient DHT issues look like "wrong peer id".
+      const name = err?.name as string | undefined;
+      const errCode = err?.code as string | undefined;
+      const isAbort =
+        name === 'AbortError' ||
+        errCode === 'ABORT_ERR' ||
+        errCode === 'ERR_TIMEOUT' ||
+        /timed?\s*out|aborted/i.test(err?.message ?? '');
+      const isNotFound =
+        name === 'NotFoundError' ||
+        errCode === 'ERR_NOT_FOUND' ||
+        errCode === 'NotFoundError';
+
+      let code: string;
+      let prefix: string;
+      if (isAbort) {
+        code = 'DHT_TIMEOUT';
+        prefix = `DHT_TIMEOUT: peerRouting.findPeer aborted after ${timeoutMs}ms`;
+      } else if (isNotFound) {
+        code = 'PEER_NOT_FOUND';
+        prefix = `PEER_NOT_FOUND: DHT walk completed without locating ${peerIdStr}`;
+      } else {
+        code = 'DHT_UNAVAILABLE';
+        prefix = `DHT_UNAVAILABLE: ${err?.message ?? String(err)}`;
+      }
+      const error = new Error(prefix);
+      (error as any).code = code;
+      throw error;
+    }
+
+    const addrs = (info?.multiaddrs ?? []).map((m: any) => m?.toString?.() ?? String(m)).filter(Boolean);
+    if (addrs.length === 0) {
+      // The walk completed and the DHT gave us a record with no usable
+      // multiaddrs. Practically equivalent to NotFound from a dialer's
+      // perspective.
+      const error = new Error(`PEER_NOT_FOUND: DHT returned a record for ${peerIdStr} with no addresses`);
+      (error as any).code = 'PEER_NOT_FOUND';
+      throw error;
+    }
+    this.log.info(ctx, `DHT resolved ${peerIdStr} → ${addrs.length} addr(s); dialling...`);
+
+    try {
+      await this.node.libp2p.peerStore.merge(peerId, { multiaddrs: info.multiaddrs ?? [] });
+    } catch {
+      // peerStore merge is best-effort; libp2p.dial(peerId) will still
+      // attempt a fresh DHT lookup if the merge didn't take.
+    }
+
+    try {
+      await this.node.libp2p.dial(peerId, { signal: AbortSignal.timeout(timeoutMs) });
+      this.log.info(ctx, `Connected to ${peerIdStr}`);
+    } catch (err: any) {
+      const error = new Error(`DIAL_FAILED: ${err?.message ?? String(err)}`);
+      (error as any).code = 'DIAL_FAILED';
+      throw error;
+    }
   }
 
   /**
@@ -3031,6 +3566,131 @@ export class DKGAgent {
       return this._publish(contextGraphId, input as Quad[], thirdArg, fourthArg);
     }
     return this._publish(contextGraphId, input as Quad[], undefined, thirdArg ?? fourthArg);
+  }
+
+  private getWorkspaceGossipSigningAgent(): (AgentKeyRecord & { privateKey: string }) | null {
+    const defaultAddress = this.defaultAgentAddress?.toLowerCase();
+    let fallback: (AgentKeyRecord & { privateKey: string }) | null = null;
+    for (const record of this.localAgents.values()) {
+      if (!record.privateKey) continue;
+      const signingRecord = { ...record, privateKey: record.privateKey };
+      if (defaultAddress && record.agentAddress.toLowerCase() === defaultAddress) {
+        return signingRecord;
+      }
+      fallback ??= signingRecord;
+    }
+    return fallback;
+  }
+
+  private async getContextGraphAgentGateAddresses(contextGraphId: string): Promise<string[] | null> {
+    const seen = new Set<string>();
+    const agents: string[] = [];
+    let sawAgentGate = false;
+    const add = (value: string | undefined) => {
+      if (!value || !ethers.isAddress(value)) return;
+      const checksum = ethers.getAddress(value);
+      const key = checksum.toLowerCase();
+      if (seen.has(key)) return;
+      seen.add(key);
+      agents.push(checksum);
+    };
+
+    const subscriptionAgents = this.subscribedContextGraphs.get(contextGraphId)?.participantAgents ?? [];
+    if (subscriptionAgents.length > 0) sawAgentGate = true;
+    for (const agentAddress of subscriptionAgents) {
+      add(agentAddress);
+    }
+
+    const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
+    const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
+    const result = await this.store.query(
+      `SELECT ?agent WHERE {
+        GRAPH <${cgMetaGraph}> {
+          { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_ALLOWED_AGENT}> ?agent }
+          UNION
+          { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT}> ?agent }
+        }
+      }`,
+    );
+    if (result.type === 'bindings') {
+      if (result.bindings.length > 0) sawAgentGate = true;
+      for (const row of result.bindings) {
+        const raw = row['agent'];
+        if (typeof raw === 'string') {
+          add(raw.replace(/^"/, '').replace(/"(@[a-zA-Z-]+|\^\^<[^>]+>)?$/, ''));
+        }
+      }
+    }
+
+    return sawAgentGate ? agents : null;
+  }
+
+  private hasLocalAgentInGate(agentGateAddresses: readonly string[]): boolean {
+    const allowedSet = new Set(agentGateAddresses.map((agent) => agent.toLowerCase()));
+    for (const record of this.localAgents.values()) {
+      if (allowedSet.has(record.agentAddress.toLowerCase())) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private async resolveWorkspaceGossipSigningAgent(
+    contextGraphId: string,
+  ): Promise<(AgentKeyRecord & { privateKey: string }) | null> {
+    const allowedAgents = await this.getContextGraphAgentGateAddresses(contextGraphId);
+    if (!allowedAgents) {
+      return this.getWorkspaceGossipSigningAgent();
+    }
+
+    const allowedSet = new Set(allowedAgents.map((agent) => agent.toLowerCase()));
+    for (const record of this.localAgents.values()) {
+      if (record.privateKey && allowedSet.has(record.agentAddress.toLowerCase())) {
+        return { ...record, privateKey: record.privateKey };
+      }
+    }
+
+    throw new Error(`Cannot gossip SWM write for agent-gated context graph "${contextGraphId}": no local allowed signing agent key`);
+  }
+
+  private async encodeWorkspaceGossipMessage(contextGraphId: string, message: Uint8Array): Promise<Uint8Array> {
+    const signer = await this.resolveWorkspaceGossipSigningAgent(contextGraphId);
+    if (!signer) {
+      return message;
+    }
+
+    const timestamp = new Date().toISOString();
+    const payload = new Uint8Array(message);
+    const signingPayload = computeGossipSigningPayload(
+      GOSSIP_TYPE_WORKSPACE_PUBLISH,
+      contextGraphId,
+      timestamp,
+      payload,
+    );
+    const signature = await new ethers.Wallet(signer.privateKey).signMessage(signingPayload);
+    return encodeGossipEnvelope({
+      version: GOSSIP_ENVELOPE_VERSION,
+      type: GOSSIP_TYPE_WORKSPACE_PUBLISH,
+      contextGraphId,
+      agentAddress: signer.agentAddress,
+      timestamp,
+      signature: ethers.getBytes(signature),
+      payload,
+    });
+  }
+
+  private async publishWorkspaceGossip(
+    contextGraphId: string,
+    message: Uint8Array,
+    ctx: OperationContext,
+  ): Promise<void> {
+    const topic = contextGraphWorkspaceTopic(contextGraphId);
+    const wireMessage = await this.encodeWorkspaceGossipMessage(contextGraphId, message);
+    try {
+      await this.gossip.publish(topic, wireMessage);
+    } catch {
+      this.log.warn(ctx, `No peers subscribed to ${topic} yet`);
+    }
   }
 
   async publishAsync(
@@ -3110,12 +3770,7 @@ export class DKGAgent {
     });
 
     if (!opts?.localOnly) {
-      const topic = paranetWorkspaceTopic(contextGraphId);
-      try {
-        await this.gossip.publish(topic, message);
-      } catch {
-        this.log.warn(ctx, `No peers subscribed to ${topic} yet`);
-      }
+      await this.publishWorkspaceGossip(contextGraphId, message, ctx);
     }
 
     return { captureID };
@@ -3131,7 +3786,7 @@ export class DKGAgent {
     const onPhase = opts?.onPhase;
     this.log.info(ctx, `Starting publish to context graph "${contextGraphId}" with ${quads.length} triples`);
 
-    const isSystem = contextGraphId === SYSTEM_PARANETS.AGENTS || contextGraphId === SYSTEM_PARANETS.ONTOLOGY;
+    const isSystem = contextGraphId === SYSTEM_CONTEXT_GRAPHS.AGENTS || contextGraphId === SYSTEM_CONTEXT_GRAPHS.ONTOLOGY;
     if (!isSystem) {
       const exists = await this.contextGraphExists(contextGraphId);
       if (!exists) {
@@ -3143,6 +3798,48 @@ export class DKGAgent {
     const v10ACKProvider = this.createV10ACKProvider(contextGraphId);
 
     const onChainId = await this.getContextGraphOnChainId(contextGraphId);
+
+    // RFC-001 §9.x — sign-at-creation. The publisher refuses on-chain
+    // publishes without a `precomputedAttestation`, so the agent
+    // mints one here at the publish boundary using the publisher
+    // fallback signer (legacy `agent.publish(quads)` callers don't
+    // carry author identity hints — mode (a) of Phase 4: daemon signs
+    // as itself). The seal binds (chainId, kav10Address,
+    // contextGraphId, merkleRoot, authorAddress); any drift between
+    // the agent-computed merkleRoot and the publisher's recompute
+    // surfaces as the publisher's `expectedMerkleRoot mismatch`
+    // guard. Skip when the chain isn't V10-capable or the CG isn't
+    // on-chain — the publisher will go tentative anyway.
+    let precomputedAttestation: PublishOptions['precomputedAttestation'];
+    if (
+      onChainId != null &&
+      typeof this.chain.getEvmChainId === 'function' &&
+      typeof this.chain.getKnowledgeAssetsV10Address === 'function'
+    ) {
+      try {
+        precomputedAttestation = await this._buildPrecomputedAttestationForSelection(
+          contextGraphId,
+          quads,
+          {
+            targetOnChainCgId: onChainId,
+            // Round 4 review §11 — propagate privateQuads so the
+            // pre-seal merkle includes their per-entity private roots
+            // (the publisher computes `kcMerkleRoot` over public
+            // leaves + privateRoots; without this, every V10 publish
+            // with private content silently downgrades to tentative on
+            // the publisher's `expectedMerkleRoot` guard).
+            privateQuads,
+          },
+        );
+      } catch (err) {
+        this.log.warn(
+          ctx,
+          `Inline seal mint failed; on-chain publish will fall back to tentative: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
 
     const result = await this.publisher.publish({
       contextGraphId,
@@ -3156,6 +3853,7 @@ export class DKGAgent {
       onPhase,
       v10ACKProvider,
       publishContextGraphId: onChainId ?? undefined,
+      precomputedAttestation,
     });
 
     onPhase?.('broadcast', 'start');
@@ -3192,7 +3890,7 @@ export class DKGAgent {
           .join('\n');
         const nquadsBytes = new TextEncoder().encode(nquadsStr);
         const message = encodeKAUpdateRequest({
-          paranetId: contextGraphId,
+          contextGraphId: contextGraphId,
           batchId: kcId,
           nquads: nquadsBytes,
           manifest: result.kaManifest.map((m) => ({
@@ -3208,7 +3906,7 @@ export class DKGAgent {
           timestampMs: Date.now(),
           operationId: ctx.operationId,
         });
-        const topic = paranetUpdateTopic(contextGraphId);
+        const topic = contextGraphUpdateTopic(contextGraphId);
         await this.gossip.publish(topic, message);
         this.log.info(ctx, `Broadcast KA update for batchId=${kcId} on ${topic}`);
       } catch (err) {
@@ -3235,12 +3933,7 @@ export class DKGAgent {
       subGraphName: opts?.subGraphName,
     });
     if (!opts?.localOnly) {
-      const topic = paranetWorkspaceTopic(contextGraphId);
-      try {
-        await this.gossip.publish(topic, message);
-      } catch {
-        this.log.warn(ctx, `No peers subscribed to ${topic} yet`);
-      }
+      await this.publishWorkspaceGossip(contextGraphId, message, ctx);
     }
     return { shareOperationId };
   }
@@ -3266,14 +3959,794 @@ export class DKGAgent {
       subGraphName: opts?.subGraphName,
     });
     if (!opts?.localOnly) {
-      const topic = paranetWorkspaceTopic(contextGraphId);
-      try {
-        await this.gossip.publish(topic, message);
-      } catch {
-        this.log.warn(ctx, `No peers subscribed to ${topic} yet`);
-      }
+      await this.publishWorkspaceGossip(contextGraphId, message, ctx);
     }
     return { shareOperationId };
+  }
+
+  /**
+   * RFC-001 §9.x — finalize an assertion: compute merkleRoot, build the
+   * EIP-712 AuthorAttestation typed data, sign (or accept pre-signed),
+   * and write seal triples to the CG `_meta` graph keyed by the
+   * assertion URI.
+   *
+   * Implementation lives on the class (not inside the `assertion` getter
+   * closure) so that the substantial business logic — keystore lookup,
+   * EIP-712 binding, idempotency check, seal write — is independently
+   * testable and visible in stack traces.
+   *
+   * See `assertion.finalize` (the public-facing wrapper) for usage docs.
+   */
+  async assertionFinalize(
+    contextGraphId: string,
+    name: string,
+    agentAddress: string,
+    opts?: {
+      subGraphName?: string;
+      authorAgentAddress?: string;
+      preSignedAuthorAttestation?: PreSignedAuthorAttestation;
+      schemeVersion?: number;
+    },
+  ): Promise<{
+    assertionUri: string;
+    merkleRoot: Uint8Array;
+    authorAddress: string;
+    schemeVersion: number;
+    chainId: bigint;
+    kav10Address: string;
+    eip712Digest: string;
+  }> {
+    if (
+      opts?.authorAgentAddress != null &&
+      opts?.preSignedAuthorAttestation != null
+    ) {
+      throw new Error(
+        'assertionFinalize: authorAgentAddress and preSignedAuthorAttestation are mutually exclusive',
+      );
+    }
+
+    // 1. Resolve URIs.
+    const assertionUri = contextGraphAssertionUri(
+      contextGraphId,
+      agentAddress,
+      name,
+      opts?.subGraphName,
+    );
+    const metaGraph = contextGraphMetaUri(contextGraphId);
+
+    // 2. Pull the assertion's quads. Refuse to finalize an empty
+    //    assertion — there's nothing to commit.
+    const rawQuads = await this.publisher.assertionQuery(
+      contextGraphId,
+      name,
+      agentAddress,
+      opts?.subGraphName,
+    );
+    if (rawQuads.length === 0) {
+      throw new Error(
+        `Cannot finalize assertion <${assertionUri}>: it has no quads. ` +
+          `Write at least one quad with /api/assertion/${name}/write before finalizing.`,
+      );
+    }
+
+    // 2b. Apply the same `isReservedSubject` filter that
+    //     `assertionPromote` runs at promote time. WM-only bookkeeping
+    //     rows in the `urn:dkg:file:` / `urn:dkg:extraction:` namespaces
+    //     (file descriptors, ExtractionProvenance blocks — see
+    //     `19_MARKDOWN_CONTENT_TYPE.md §10.2`) are stripped before the
+    //     assertion crosses the SWM boundary, so the seal MUST hash
+    //     the post-strip set or it commits to a root the publish path
+    //     can never recompute. (Round 4 review §8 — "assertionFinalize
+    //     hashes WM-only urn:dkg:file: rows".)
+    const quads = rawQuads.filter((q) => !isReservedSubject(q.subject));
+    if (quads.length === 0) {
+      throw new Error(
+        `Cannot finalize assertion <${assertionUri}>: every quad has a ` +
+          `reserved-namespace subject (urn:dkg:file:* / urn:dkg:extraction:*) ` +
+          `which is filtered out before SWM. Add at least one user-authored ` +
+          `quad on a non-reserved subject before finalizing.`,
+      );
+    }
+
+    // 3. Compute merkleRoot using the SAME algorithm the publisher
+    //    uses at publish-time (V10: keccak256-based merkle, sort+dedupe
+    //    leaves). Drift between these two compute paths is the silent
+    //    failure mode this whole architecture is trying to eliminate —
+    //    so we reuse the publisher's exported helpers verbatim.
+    //
+    //    Round 5 review §1 — `kaMap` may contain unsafe-IRI roots
+    //    (e.g. RFC-3987-valid IRIs with `|` `^` etc that fail
+    //    `isSafeIri`'s SPARQL-interpolation rules). Those cannot be
+    //    referenced from the SPARQL CONSTRUCT that
+    //    `publishFromFinalizedAssertion` uses to reload the
+    //    promoted-SWM payload, so they MUST NOT contribute to the
+    //    sealed merkleRoot — otherwise the seal commits to a root
+    //    the publish path can never recompute. Reject finalize
+    //    instead of silently dropping content: silent-drop hides a
+    //    real input error and would let a partial assertion ship
+    //    with a seal that doesn't cover all of its quads.
+    //    Defense-in-depth: the current oxigraph storage adapter
+    //    rejects most unsafe characters at write time, so this guard
+    //    is rarely triggered through `assertion.write`. It still
+    //    matters for non-oxigraph adapters and for code paths that
+    //    seed the WM graph directly (bulk-import / `_meta` fixtures
+    //    / future storage backends). The canonical wire pin lives
+    //    at `core/test/assertion-seal-root-entities.test.ts` —
+    //    `buildAssertionSealQuads` rejects unsafe roots at the seal
+    //    boundary. This guard surfaces the same failure earlier
+    //    with a more actionable message.
+    const kaMap = autoPartition(quads);
+    const allRootEntities = [...kaMap.keys()];
+    const unsafeRootEntities = allRootEntities.filter((r) => !isSafeIri(r));
+    if (unsafeRootEntities.length > 0) {
+      const sample = unsafeRootEntities
+        .slice(0, 3)
+        .map((r) => `<${r}>`)
+        .join(', ');
+      const more = unsafeRootEntities.length > 3 ? ` (+${unsafeRootEntities.length - 3} more)` : '';
+      throw new Error(
+        `Cannot finalize assertion <${assertionUri}>: ${unsafeRootEntities.length} root ` +
+          `entit${unsafeRootEntities.length === 1 ? 'y has' : 'ies have'} an unsafe IRI: ${sample}${more}. ` +
+          `The publish path reloads SWM via SPARQL CONSTRUCT scoped to these roots — unsafe IRIs ` +
+          `would be filtered, recomputing a different merkleRoot from the truncated payload, so the ` +
+          `sealed assertion could never be republished. Rename these subjects to safe IRIs ` +
+          `(no blank nodes, control chars, or unbalanced delimiters) before finalizing.`,
+      );
+    }
+    const allSkolemizedQuads = [...kaMap.values()].flat();
+    const merkleRoot = computeFlatKCRoot(allSkolemizedQuads, []);
+    // 3b. Capture rootEntities from the SAME `autoPartition` call that
+    //     drives the merkle leaves. The seal binds these so
+    //     `publishFromFinalizedAssertion` can scope its SWM CONSTRUCT
+    //     instead of bundling everything currently sitting in shared
+    //     memory (Round 4 review §9). Now safe by construction — the
+    //     guard above guarantees every key passes `isSafeIri`.
+    const rootEntities = allRootEntities;
+    if (rootEntities.length === 0) {
+      throw new Error(
+        `Cannot finalize assertion <${assertionUri}>: autoPartition produced ` +
+          `no root entities. The assertion has no quads; add at least one ` +
+          `user-authored quad on a non-reserved subject before finalizing.`,
+      );
+    }
+
+    // 4. Idempotency: if a seal already exists for this assertion,
+    //    return it as-is when the merkleRoot matches. Mismatch means
+    //    the assertion was mutated since the previous finalize —
+    //    refuse to overwrite silently.
+    const existingMetaResult = await this.store.query(
+      `CONSTRUCT { <${assertionUri}> ?p ?o } WHERE { GRAPH <${metaGraph}> { <${assertionUri}> ?p ?o } }`,
+    );
+    const existingMetaQuads =
+      existingMetaResult.type === 'quads' ? existingMetaResult.quads : [];
+    let existingSeal: AssertionSeal | undefined;
+    try {
+      existingSeal = parseAssertionSealQuads(existingMetaQuads, assertionUri);
+    } catch (err) {
+      // Corrupt seal — surface to the caller. Do NOT silently overwrite
+      // because the original author's signature is still on record and
+      // overwriting would lose the audit trail.
+      throw new Error(
+        `assertionFinalize: existing _meta seal for <${assertionUri}> is corrupt: ` +
+          (err instanceof Error ? err.message : String(err)),
+      );
+    }
+    if (existingSeal) {
+      if (
+        existingSeal.merkleRoot.length !== merkleRoot.length ||
+        !existingSeal.merkleRoot.every((b, i) => b === merkleRoot[i])
+      ) {
+        throw new Error(
+          `assertionFinalize: assertion <${assertionUri}> is already finalized with a ` +
+            `different merkleRoot (existing=${ethers.hexlify(existingSeal.merkleRoot)}, ` +
+            `current=${ethers.hexlify(merkleRoot)}). Discard and re-create the assertion if ` +
+            `you intended to change its content; in-place mutation of a finalized assertion ` +
+            `breaks the author signature and is rejected.`,
+        );
+      }
+      // Seal exists and matches — return the existing record.
+      const typedData = buildAuthorAttestationTypedData({
+        chainId: existingSeal.chainId,
+        kav10Address: existingSeal.kav10Address,
+        contextGraphId: await this.requireOnChainContextGraphId(contextGraphId),
+        merkleRoot: existingSeal.merkleRoot,
+        authorAddress: existingSeal.authorAddress,
+        schemeVersion: existingSeal.authorSchemeVersion,
+      });
+      return {
+        assertionUri,
+        merkleRoot: existingSeal.merkleRoot,
+        authorAddress: existingSeal.authorAddress,
+        schemeVersion: existingSeal.authorSchemeVersion,
+        chainId: existingSeal.chainId,
+        kav10Address: existingSeal.kav10Address,
+        eip712Digest: ethers.TypedDataEncoder.hash(
+          typedData.domain,
+          typedData.types,
+          typedData.message,
+        ),
+      };
+    }
+
+    // 5. Resolve chain identity. Finalize commits to a specific
+    //    `(chainId, kav10Address)` pair — both must be available.
+    if (
+      typeof this.chain.getEvmChainId !== 'function' ||
+      typeof this.chain.getKnowledgeAssetsV10Address !== 'function'
+    ) {
+      throw new Error(
+        'assertionFinalize requires a V10-capable chain adapter that exposes ' +
+          'getEvmChainId() and getKnowledgeAssetsV10Address(); the current adapter does not.',
+      );
+    }
+    const chainId = await this.chain.getEvmChainId();
+    const kav10Address = await this.chain.getKnowledgeAssetsV10Address();
+
+    // 6. Resolve the on-chain CG id — the EIP-712 digest binds to it.
+    const onChainCgId = await this.requireOnChainContextGraphId(contextGraphId);
+
+    // 7. Resolve author. preSigned > custodial agent > publisher fallback.
+    const schemeVersion = opts?.schemeVersion ?? AUTHOR_SCHEME_VERSION_V1;
+    let authorAddress: string;
+    let signerPrivateKey: string | undefined;
+    let preSigned: PreSignedAuthorAttestation | undefined;
+    if (opts?.preSignedAuthorAttestation != null) {
+      preSigned = opts.preSignedAuthorAttestation;
+      authorAddress = preSigned.address;
+    } else if (opts?.authorAgentAddress != null) {
+      const mode = this.getLocalAgentMode(opts.authorAgentAddress);
+      if (mode === undefined) {
+        throw new Error(
+          `assertionFinalize: authorAgentAddress ${opts.authorAgentAddress} is not a registered local agent on this node`,
+        );
+      }
+      if (mode === 'self-sovereign') {
+        throw new Error(
+          `assertionFinalize: agent ${opts.authorAgentAddress} is registered as self-sovereign — ` +
+            `this node does not hold its private key. Use preSignedAuthorAttestation instead.`,
+        );
+      }
+      signerPrivateKey = this.getCustodialAgentPrivateKey(opts.authorAgentAddress);
+      if (!signerPrivateKey) {
+        throw new Error(
+          `assertionFinalize: custodial agent ${opts.authorAgentAddress} has no private key on file`,
+        );
+      }
+      authorAddress = opts.authorAgentAddress;
+    } else {
+      // Publisher-wallet fallback: use the daemon's own publisher EOA
+      // as the author. This preserves Phase 4 mode (a) — node admin
+      // signs on its own behalf when no agent attribution is supplied.
+      const fallbackAddress = await this.publisher.publisherFallbackAuthorAddress();
+      if (!fallbackAddress) {
+        throw new Error(
+          'assertionFinalize: no agent override supplied and no publisher signer is available. ' +
+            'Either supply authorAgentAddress / preSignedAuthorAttestation, or configure a publisher private key on the daemon.',
+        );
+      }
+      authorAddress = fallbackAddress;
+    }
+
+    // 8. Build EIP-712 typed data.
+    const typedData = buildAuthorAttestationTypedData({
+      chainId,
+      kav10Address,
+      contextGraphId: onChainCgId,
+      merkleRoot,
+      authorAddress,
+      schemeVersion,
+    });
+    const eip712Digest = ethers.TypedDataEncoder.hash(
+      typedData.domain,
+      typedData.types,
+      typedData.message,
+    );
+
+    // 9. Produce the compact signature (r, vs).
+    let r: Uint8Array;
+    let vs: Uint8Array;
+    if (preSigned) {
+      const sig = ethers.Signature.from({
+        r: ethers.hexlify(preSigned.signature.r),
+        yParityAndS: ethers.hexlify(preSigned.signature.vs),
+      });
+      // Off-chain seal-integrity preflight: only EOAs can be verified
+      // by ECDSA recover-and-compare. For smart-contract authors
+      // (incl. EIP-7702-delegated EOAs), the on-chain
+      // `_verifyAuthorAttestation` dispatches to
+      // `IERC1271.isValidSignature` and is the authoritative check —
+      // the off-chain ECDSA recover would (correctly) report a
+      // mismatch since 1271 wallets typically sign through an owner
+      // EOA that's distinct from the wallet contract address. Skip the
+      // off-chain check for contract authors so the seal-build pipeline
+      // doesn't reject 1271 publishes that the chain would accept.
+      const isContractAuthor =
+        typeof this.chain.hasContractCode === 'function'
+          ? await this.chain.hasContractCode(authorAddress)
+          : false;
+      if (!isContractAuthor) {
+        const recovered = ethers.recoverAddress(eip712Digest, sig);
+        if (recovered.toLowerCase() !== authorAddress.toLowerCase()) {
+          throw new Error(
+            `assertionFinalize: preSignedAuthorAttestation signer mismatch — ` +
+              `signature recovers ${recovered} but address claims ${authorAddress}.`,
+          );
+        }
+      }
+      r = preSigned.signature.r;
+      vs = preSigned.signature.vs;
+    } else if (signerPrivateKey) {
+      const wallet = new ethers.Wallet(
+        signerPrivateKey.startsWith('0x') ? signerPrivateKey : '0x' + signerPrivateKey,
+      );
+      const sigHex = await wallet.signTypedData(
+        typedData.domain,
+        typedData.types,
+        typedData.message,
+      );
+      const sig = ethers.Signature.from(sigHex);
+      r = ethers.getBytes(sig.r);
+      vs = ethers.getBytes(sig.yParityAndS);
+    } else {
+      // Publisher fallback: ask the publisher to sign with its own
+      // wallet. Returns the compact (r, vs) form.
+      const compact = await this.publisher.signAuthorAttestationAsPublisher(typedData);
+      r = compact.r;
+      vs = compact.vs;
+    }
+
+    // 10. Persist the seal as `_meta` triples.
+    const finalizedAtIso = new Date().toISOString();
+    const sealQuads = buildAssertionSealQuads({
+      assertionUri,
+      metaGraph,
+      merkleRoot,
+      authorAddress,
+      authorAttestationR: r,
+      authorAttestationVS: vs,
+      authorSchemeVersion: schemeVersion,
+      chainId,
+      kav10Address,
+      finalizedAtIso,
+      rootEntities,
+    });
+    await this.store.insert(sealQuads);
+
+    return {
+      assertionUri,
+      merkleRoot,
+      authorAddress,
+      schemeVersion,
+      chainId,
+      kav10Address,
+      eip712Digest,
+    };
+  }
+
+  /**
+   * Helper: resolve the on-chain context graph id used by the EIP-712
+   * AuthorAttestation domain. Throws when the CG is not yet
+   * registered on-chain — finalize cannot bind a sig to a missing CG.
+   */
+  private async requireOnChainContextGraphId(contextGraphId: string): Promise<bigint> {
+    const onChainId = await this.getContextGraphOnChainId(contextGraphId);
+    if (onChainId == null) {
+      throw new Error(
+        `Context graph "${contextGraphId}" is not registered on-chain. ` +
+          `Run 'dkg context-graph register ${contextGraphId}' before finalizing an assertion ` +
+          `targeted at it; finalize binds the author signature to the on-chain CG id.`,
+      );
+    }
+    try {
+      return BigInt(onChainId);
+    } catch {
+      throw new Error(
+        `Context graph "${contextGraphId}" has a non-numeric on-chain id ("${onChainId}") — ` +
+          `the EIP-712 binding requires a uint256.`,
+      );
+    }
+  }
+
+  /**
+   * RFC-001 §9.x — selection-based publish bridge.
+   *
+   * Mints a `precomputedAttestation` inline for a given quads bag,
+   * without writing seal triples to `_meta`. Used by
+   * `publishFromSharedMemory(selection)` to preserve the
+   * "agent picks rootEntities post-hoc, then publishes" UX while
+   * keeping the sign-at-creation invariant: the seal is computed and
+   * signed at the agent boundary, before the publisher gets the
+   * payload. The publisher then refuses the on-chain publish if the
+   * seal is absent or its merkleRoot doesn't match what it recomputes
+   * from the quads (defence against in-flight tampering between
+   * selection and broadcast).
+   *
+   * Author resolution mirrors `assertionFinalize`:
+   *   1. `preSignedAuthorAttestation` (self-sovereign agent's pre-sig)
+   *   2. `authorAgentAddress` (custodial agent — daemon holds the key)
+   *   3. publisher fallback (the daemon's own publisher EOA signs)
+   *
+   * Unlike `assertionFinalize`, the seal is NOT persisted: it lives
+   * only in the publish call. This is by design — selection-based
+   * publishes are inherently ephemeral curations, not long-lived
+   * named assertions. If you need persistent seal provenance, use the
+   * named-assertion lifecycle (`createAssertion` + `appendToAssertion`
+   * + `finalizeAssertion` + `publishFromFinalizedAssertion`).
+   */
+  private async _buildPrecomputedAttestationForSelection(
+    contextGraphId: string,
+    quads: Quad[],
+    opts?: {
+      authorAgentAddress?: string;
+      preSignedAuthorAttestation?: PreSignedAuthorAttestation;
+      schemeVersion?: number;
+      /**
+       * On-chain CG id the seal binds to. Defaults to the source
+       * `contextGraphId`'s on-chain id; override for remap-flow
+       * publishes (`publishContextGraphId` / `subContextGraphId` set
+       * on the publish call) where the assertion lives in a different
+       * CG than the SWM source.
+       */
+      targetOnChainCgId?: bigint | string;
+      /**
+       * Private quads for the same publish. Round 4 review §11 —
+       * `DKGPublisher.publish` computes `kcMerkleRoot` over the
+       * concatenation of public quads + private roots (see
+       * `dkg-publisher.ts:1567-1575`). The seal must hash the same
+       * leaves or every V10 publish with `privateQuads` falls back to
+       * `tentative` on the publisher's `expectedMerkleRoot mismatch`
+       * guard. Pass them through so the agent's pre-seal merkle
+       * matches what the publisher will recompute.
+       */
+      privateQuads?: Quad[];
+    },
+  ): Promise<PublishOptions['precomputedAttestation']> {
+    if (
+      opts?.authorAgentAddress != null &&
+      opts?.preSignedAuthorAttestation != null
+    ) {
+      throw new Error(
+        '_buildPrecomputedAttestationForSelection: authorAgentAddress and preSignedAuthorAttestation are mutually exclusive',
+      );
+    }
+    if (
+      typeof this.chain.getEvmChainId !== 'function' ||
+      typeof this.chain.getKnowledgeAssetsV10Address !== 'function'
+    ) {
+      throw new Error(
+        'Selection-based VM publish requires a V10-capable chain adapter that exposes ' +
+          'getEvmChainId() and getKnowledgeAssetsV10Address().',
+      );
+    }
+
+    const kaMap = autoPartition(quads);
+    const allSkolemizedQuads = [...kaMap.values()].flat();
+    // Mirror the publisher's per-rootEntity private partition + root
+    // derivation (see `dkg-publisher.ts:1526-1570`). Each public root
+    // entity gets the private quads whose subjects either equal it or
+    // skolemize beneath its `…/.well-known/genid/` namespace; each
+    // such non-empty bag becomes a `computePrivateRootV10` leaf in the
+    // KC merkle. The order MUST follow the publisher's manifest
+    // iteration over `kaMap`, which is the insertion order — same map
+    // we built two lines up.
+    const privateQuads = opts?.privateQuads ?? [];
+    const privateRoots: Uint8Array[] = [];
+    for (const rootEntity of kaMap.keys()) {
+      if (privateQuads.length === 0) break;
+      const entityPrivateQuads = privateQuads.filter(
+        (q) =>
+          q.subject === rootEntity ||
+          q.subject.startsWith(rootEntity + '/.well-known/genid/'),
+      );
+      if (entityPrivateQuads.length === 0) continue;
+      const root = computePrivateRoot(entityPrivateQuads);
+      if (root) privateRoots.push(root);
+    }
+    const merkleRoot = computeFlatKCRoot(allSkolemizedQuads, privateRoots);
+
+    const chainId = await this.chain.getEvmChainId();
+    const kav10Address = await this.chain.getKnowledgeAssetsV10Address();
+    const onChainCgId =
+      opts?.targetOnChainCgId !== undefined
+        ? BigInt(opts.targetOnChainCgId)
+        : await this.requireOnChainContextGraphId(contextGraphId);
+
+    const schemeVersion = opts?.schemeVersion ?? AUTHOR_SCHEME_VERSION_V1;
+    let authorAddress: string;
+    let signerPrivateKey: string | undefined;
+    let preSigned: PreSignedAuthorAttestation | undefined;
+    if (opts?.preSignedAuthorAttestation != null) {
+      preSigned = opts.preSignedAuthorAttestation;
+      authorAddress = preSigned.address;
+    } else if (opts?.authorAgentAddress != null) {
+      const mode = this.getLocalAgentMode(opts.authorAgentAddress);
+      if (mode === undefined) {
+        throw new Error(
+          `Selection-based VM publish: authorAgentAddress ${opts.authorAgentAddress} is not a registered local agent on this node`,
+        );
+      }
+      if (mode === 'self-sovereign') {
+        throw new Error(
+          `Selection-based VM publish: agent ${opts.authorAgentAddress} is registered as self-sovereign — ` +
+            `this node does not hold its private key. Use preSignedAuthorAttestation instead.`,
+        );
+      }
+      signerPrivateKey = this.getCustodialAgentPrivateKey(opts.authorAgentAddress);
+      if (!signerPrivateKey) {
+        throw new Error(
+          `Selection-based VM publish: custodial agent ${opts.authorAgentAddress} has no private key on file`,
+        );
+      }
+      authorAddress = opts.authorAgentAddress;
+    } else {
+      const fallbackAddress = await this.publisher.publisherFallbackAuthorAddress();
+      if (!fallbackAddress) {
+        throw new Error(
+          'Selection-based VM publish: no agent override supplied and no publisher signer is available. ' +
+            'Either supply authorAgentAddress / preSignedAuthorAttestation, or configure a publisher private key on the daemon.',
+        );
+      }
+      authorAddress = fallbackAddress;
+    }
+
+    const typedData = buildAuthorAttestationTypedData({
+      chainId,
+      kav10Address,
+      contextGraphId: onChainCgId,
+      merkleRoot,
+      authorAddress,
+      schemeVersion,
+    });
+    const eip712Digest = ethers.TypedDataEncoder.hash(
+      typedData.domain,
+      typedData.types,
+      typedData.message,
+    );
+
+    let r: Uint8Array;
+    let vs: Uint8Array;
+    if (preSigned) {
+      const sig = ethers.Signature.from({
+        r: ethers.hexlify(preSigned.signature.r),
+        yParityAndS: ethers.hexlify(preSigned.signature.vs),
+      });
+      // Same EOA-vs-1271 dispatch as `assertionFinalize` (see comment
+      // there). Skip ECDSA recover for smart-contract / 7702-delegated
+      // authors so the on-chain `IERC1271.isValidSignature` branch can
+      // be the authoritative check.
+      const isContractAuthor =
+        typeof this.chain.hasContractCode === 'function'
+          ? await this.chain.hasContractCode(authorAddress)
+          : false;
+      if (!isContractAuthor) {
+        const recovered = ethers.recoverAddress(eip712Digest, sig);
+        if (recovered.toLowerCase() !== authorAddress.toLowerCase()) {
+          throw new Error(
+            `Selection-based VM publish: preSignedAuthorAttestation signer mismatch — ` +
+              `signature recovers ${recovered} but address claims ${authorAddress}.`,
+          );
+        }
+      }
+      r = preSigned.signature.r;
+      vs = preSigned.signature.vs;
+    } else if (signerPrivateKey) {
+      const wallet = new ethers.Wallet(
+        signerPrivateKey.startsWith('0x') ? signerPrivateKey : '0x' + signerPrivateKey,
+      );
+      const sigHex = await wallet.signTypedData(
+        typedData.domain,
+        typedData.types,
+        typedData.message,
+      );
+      const sig = ethers.Signature.from(sigHex);
+      r = ethers.getBytes(sig.r);
+      vs = ethers.getBytes(sig.yParityAndS);
+    } else {
+      const compact = await this.publisher.signAuthorAttestationAsPublisher(typedData);
+      r = compact.r;
+      vs = compact.vs;
+    }
+
+    return {
+      expectedMerkleRoot: merkleRoot,
+      authorAddress,
+      signature: { r, vs },
+      schemeVersion,
+    };
+  }
+
+  /**
+   * Load the quads that a selection-based publish would target.
+   * Mirrors the SPARQL CONSTRUCT inside
+   * `publisher.publishFromSharedMemory` so the agent can pre-compute
+   * the assertion seal over the same content the publisher will see
+   * at broadcast time. Any drift (e.g. concurrent SWM mutation
+   * between this load and the publisher's load) surfaces as the
+   * publisher's `expectedMerkleRoot mismatch` error rather than a
+   * silent wrong-content publish.
+   */
+  private async _loadSelectedSWMQuads(
+    contextGraphId: string,
+    selection: 'all' | { rootEntities: string[] },
+    subGraphName?: string,
+  ): Promise<Quad[]> {
+    const swmGraph = contextGraphSharedMemoryUri(contextGraphId, subGraphName);
+    let sparql: string;
+    if (selection === 'all') {
+      sparql = `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${swmGraph}> { ?s ?p ?o } }`;
+    } else {
+      // Round 4 review §10 — mirror the `isSafeIri` filter that
+      // `DKGPublisher.publishFromSharedMemory` applies before its own
+      // SPARQL CONSTRUCT. Without this guard a caller could craft a
+      // `selection.rootEntities` value containing `>` / SPARQL syntax
+      // that breaks out of the `<…>` IRI literal and rewrites the
+      // pre-seal CONSTRUCT into a wider scope. Both seams must agree
+      // on the IRI shape that survives interpolation; the `_meta`
+      // seal writer (`buildAssertionSealQuads`) applies the same
+      // reject-set when it persists rootEntities so any value that
+      // round-trips through finalize → publish is safe here.
+      const roots = [...new Set(
+        selection.rootEntities
+          .map((r) => String(r).trim())
+          .filter((r) => isSafeIri(r)),
+      )];
+      if (roots.length === 0) {
+        const hadInput = selection.rootEntities.length > 0;
+        throw new Error(
+          hadInput
+            ? `_loadSelectedSWMQuads: no valid rootEntities provided ` +
+                `(all ${selection.rootEntities.length} entries failed IRI validation) ` +
+                `for context graph ${contextGraphId}`
+            : `_loadSelectedSWMQuads: no rootEntities supplied for context graph ${contextGraphId}`,
+        );
+      }
+      const values = roots.map((r) => `<${r}>`).join(' ');
+      sparql = `CONSTRUCT { ?s ?p ?o } WHERE {
+        GRAPH <${swmGraph}> {
+          VALUES ?root { ${values} }
+          ?s ?p ?o .
+          FILTER(
+            ?s = ?root
+            || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/"))
+          )
+        }
+      }`;
+    }
+    const result = await this.store.query(sparql);
+    return result.type === 'quads' ? result.quads : [];
+  }
+
+  /**
+   * RFC-001 §9.x — publish a previously-finalized assertion to the
+   * verified-memory chain.
+   *
+   * Reads the seal from `_meta`, plumbs the seal's
+   * `(merkleRoot, authorAddress, signature, schemeVersion)` into the
+   * publisher as `precomputedAttestation`, and lets
+   * `publishFromSharedMemory` handle everything else (CG registration
+   * check, ACK collection, on-chain submission, post-confirmation
+   * cleanup).
+   *
+   * Pre-condition: the assertion's quads have already been promoted
+   * into SWM via `assertion.promote()`. The publisher pulls quads
+   * from the canonical CG `_shared-memory` graph; if the assertion
+   * hasn't been promoted yet, publish will see an empty/wrong quad
+   * set and the merkleRoot sanity check inside `publish()` will fire.
+   */
+  async publishFromFinalizedAssertion(
+    contextGraphId: string,
+    name: string,
+    opts?: {
+      subGraphName?: string;
+      operationCtx?: OperationContext;
+      onPhase?: PhaseCallback;
+      publisherNodeIdentityIdOverride?: bigint;
+      clearSharedMemoryAfter?: boolean;
+    },
+  ): Promise<PublishResult & { assertionUri: string; seal: AssertionSeal }> {
+    const agentAddress = this.defaultAgentAddress ?? this.peerId;
+    const assertionUri = contextGraphAssertionUri(
+      contextGraphId,
+      agentAddress,
+      name,
+      opts?.subGraphName,
+    );
+    const metaGraph = contextGraphMetaUri(contextGraphId);
+
+    // 1. Read the seal from _meta.
+    const metaResult = await this.store.query(
+      `CONSTRUCT { <${assertionUri}> ?p ?o } WHERE { GRAPH <${metaGraph}> { <${assertionUri}> ?p ?o } }`,
+    );
+    const metaQuads = metaResult.type === 'quads' ? metaResult.quads : [];
+    const seal = parseAssertionSealQuads(metaQuads, assertionUri);
+    if (!seal) {
+      throw new Error(
+        `publishFromFinalizedAssertion: assertion <${assertionUri}> is not finalized. ` +
+          `Call /api/assertion/${name}/finalize before publishing.`,
+      );
+    }
+
+    // 2. Cross-check chain target — refuse to publish a sig signed
+    //    against a different deployment than this daemon currently
+    //    points at. This is the cross-deployment safety the EIP-712
+    //    domain is buying us; surface as an early 4xx-equivalent
+    //    rather than a tx revert.
+    if (
+      typeof this.chain.getEvmChainId === 'function' &&
+      typeof this.chain.getKnowledgeAssetsV10Address === 'function'
+    ) {
+      const liveChainId = await this.chain.getEvmChainId();
+      const liveKav10 = await this.chain.getKnowledgeAssetsV10Address();
+      if (liveChainId !== seal.chainId) {
+        throw new Error(
+          `publishFromFinalizedAssertion: seal binds chainId=${seal.chainId.toString()} but daemon ` +
+            `is configured for chainId=${liveChainId.toString()}. The author signature is not valid ` +
+            `against this chain. Re-finalize the assertion against the target chain.`,
+        );
+      }
+      if (liveKav10.toLowerCase() !== seal.kav10Address.toLowerCase()) {
+        throw new Error(
+          `publishFromFinalizedAssertion: seal binds KAv10=${seal.kav10Address} but daemon ` +
+            `is configured for KAv10=${liveKav10}. The signature is not valid against this deployment.`,
+        );
+      }
+    }
+
+    // 3. Run the standard publishFromSharedMemory flow with the
+    //    pre-computed attestation. The publisher will sanity-check
+    //    that its own merkle re-derivation matches the seal.
+    //
+    //    Round 4 review §9 — scope the SWM CONSTRUCT to the seal's
+    //    `rootEntities` instead of `'all'`. With `'all'` a named
+    //    publish would bundle every other promoted assertion sitting
+    //    in shared memory into the same KC; the publisher's recompute
+    //    would then disagree with the seal's `expectedMerkleRoot` and
+    //    flip to `tentative kcId: "0"`. The seal's rootEntities were
+    //    captured at finalize time from the same `autoPartition` call
+    //    that drove the merkle leaves, so this selection deterministically
+    //    yields the post-promote SWM slice the seal commits to.
+    const result = await this.publishFromSharedMemory(
+      contextGraphId,
+      { rootEntities: seal.rootEntities },
+      {
+        operationCtx: opts?.operationCtx,
+        onPhase: opts?.onPhase,
+        subGraphName: opts?.subGraphName,
+        publisherNodeIdentityIdOverride: opts?.publisherNodeIdentityIdOverride,
+        clearSharedMemoryAfter: opts?.clearSharedMemoryAfter,
+        // Wired through to the inner publisher.publish() via
+        // publishFromSharedMemory's `precomputedAttestation` option.
+        // Skips the publisher's signing entirely.
+        precomputedAttestation: {
+          expectedMerkleRoot: seal.merkleRoot,
+          authorAddress: seal.authorAddress,
+          signature: { r: seal.authorAttestationR, vs: seal.authorAttestationVS },
+          schemeVersion: seal.authorSchemeVersion,
+        },
+      },
+    );
+
+    // 4. On confirmed publish, write receipt triples to _meta.
+    if (result.status === 'confirmed' && result.onChainResult) {
+      try {
+        const receiptQuads = buildAssertionPublishReceiptQuads({
+          assertionUri,
+          metaGraph,
+          txHash: result.onChainResult.txHash ?? '',
+          blockNumber: BigInt(result.onChainResult.blockNumber ?? 0),
+          kcId: result.onChainResult.batchId ?? 0n,
+        });
+        await this.store.insert(receiptQuads);
+      } catch (err) {
+        this.log.warn(
+          opts?.operationCtx ?? createOperationContext('publishFromSWM'),
+          `Failed to write publish receipt for <${assertionUri}>: ` +
+            (err instanceof Error ? err.message : String(err)),
+        );
+      }
+    }
+
+    return { ...result, assertionUri, seal };
   }
 
   /**
@@ -3294,6 +4767,56 @@ export class DKGAgent {
       contextGraphSignatures?: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
       /** Target sub-graph within the context graph (e.g. "code", "decisions"). */
       subGraphName?: string;
+      /**
+       * Per-publish override for the on-chain
+       * `KnowledgeAssetsV10.PublishParams.publisherNodeIdentityId`
+       * attribution field (RFC-001 §4). Threaded as a per-call option
+       * into `publisher.publishFromSharedMemory` — no global mutation,
+       * so concurrent publishes with conflicting overrides are safe.
+       *
+       * Lets an edge-mode operator route a publish through the
+       * home-core's `publishFromSharedMemory` while attributing the
+       * publishing-factor credit (and PCA discount, when the submitter
+       * is on the named core's `authorizedKeys`) to a different core.
+       * `0n` is a valid explicit value and means "no attribution"
+       * (RFC-001 §4(d)) — the contract validates this case and the
+       * publish proceeds on-chain. The publisher's own
+       * `publisherNodeIdentityId` is unchanged and continues to be
+       * used for ACK self-signing and signer resolution.
+       */
+      publisherNodeIdentityIdOverride?: bigint;
+      /**
+       * RFC-001 §9.x — pre-computed attestation captured by
+       * `agent.assertion.finalize()`. When the caller has already
+       * sealed a named assertion they can plumb the seal here verbatim
+       * and the publisher forwards it unchanged.
+       *
+       * If omitted AND the publish is going on-chain (V10-capable
+       * adapter + on-chain CG id), the agent mints a seal inline at
+       * the selection boundary using `authorAgentAddress` /
+       * `preSignedAuthorAttestation` / publisher fallback. This is the
+       * "selection-based publish" UX bridge — agents/users keep
+       * picking rootEntities post-hoc, but the seal is still computed
+       * and signed before the publisher sees the payload.
+       */
+      precomputedAttestation?: PublishOptions['precomputedAttestation'];
+      /**
+       * Agent address to attribute authorship to when minting an
+       * inline seal at this layer. Must be a registered local agent
+       * with custodial keys (the daemon holds the private key). For
+       * self-sovereign agents use `preSignedAuthorAttestation`. Has
+       * no effect when `precomputedAttestation` is also supplied.
+       */
+      authorAgentAddress?: string;
+      /**
+       * Pre-signed AuthorAttestation by a self-sovereign agent whose
+       * private key isn't held by the daemon. Has no effect when
+       * `precomputedAttestation` is also supplied. Mutually exclusive
+       * with `authorAgentAddress`.
+       */
+      preSignedAuthorAttestation?: PreSignedAuthorAttestation;
+      /** Author scheme version override (defaults to AUTHOR_SCHEME_VERSION_V1). */
+      schemeVersion?: number;
     },
   ): Promise<PublishResult> {
     const ctx = options?.operationCtx ?? createOperationContext('publishFromSWM');
@@ -3303,6 +4826,46 @@ export class DKGAgent {
     const onChainId = ctxGraphIdStr ?? (await this.getContextGraphOnChainId(contextGraphId)) ?? undefined;
 
     const v10ACKProvider = this.createV10ACKProvider(contextGraphId);
+
+    // RFC-001 §9.x — selection-based publish bridge. If the caller
+    // already sealed the content (named-assertion lifecycle) they
+    // pass `precomputedAttestation` through and we forward verbatim.
+    // Otherwise, when we know we're going on-chain (V10 adapter + CG
+    // has on-chain id), we mint the seal here at the selection
+    // boundary so the publisher's "no on-chain publish without
+    // precomputedAttestation" guard is satisfied.
+    let resolvedSeal = options?.precomputedAttestation;
+    if (
+      !resolvedSeal &&
+      onChainId != null &&
+      typeof this.chain.getEvmChainId === 'function' &&
+      typeof this.chain.getKnowledgeAssetsV10Address === 'function'
+    ) {
+      const swmQuads = await this._loadSelectedSWMQuads(
+        contextGraphId,
+        selection,
+        options?.subGraphName,
+      );
+      if (swmQuads.length > 0) {
+        resolvedSeal = await this._buildPrecomputedAttestationForSelection(
+          contextGraphId,
+          swmQuads,
+          {
+            targetOnChainCgId: onChainId,
+            ...(options?.authorAgentAddress != null
+              ? { authorAgentAddress: options.authorAgentAddress }
+              : {}),
+            ...(options?.preSignedAuthorAttestation != null
+              ? { preSignedAuthorAttestation: options.preSignedAuthorAttestation }
+              : {}),
+            ...(options?.schemeVersion !== undefined
+              ? { schemeVersion: options.schemeVersion }
+              : {}),
+          },
+        );
+      }
+    }
+
     const result = await this.publisher.publishFromSharedMemory(contextGraphId, selection, {
       operationCtx: ctx,
       clearSharedMemoryAfter: options?.clearSharedMemoryAfter,
@@ -3312,6 +4875,8 @@ export class DKGAgent {
       contextGraphSignatures: options?.contextGraphSignatures,
       v10ACKProvider,
       subGraphName: options?.subGraphName,
+      publisherNodeIdentityIdOverride: options?.publisherNodeIdentityIdOverride,
+      precomputedAttestation: resolvedSeal,
     });
 
     if (result.status === 'confirmed' && result.onChainResult) {
@@ -3319,7 +4884,7 @@ export class DKGAgent {
 
       const msg: FinalizationMessageMsg = {
         ual: result.ual,
-        paranetId: contextGraphId,
+        contextGraphId: contextGraphId,
         kcMerkleRoot: result.merkleRoot,
         txHash: result.onChainResult.txHash ?? '',
         blockNumber: result.onChainResult.blockNumber ?? 0,
@@ -3330,14 +4895,14 @@ export class DKGAgent {
         rootEntities,
         timestampMs: Date.now(),
         operationId: ctx.operationId,
-        contextGraphId: result.contextGraphError ? undefined : ctxGraphIdStr,
+        targetContextGraphId: result.contextGraphError ? undefined : ctxGraphIdStr,
         subGraphName: options?.subGraphName,
       };
 
-      const topic = paranetFinalizationTopic(contextGraphId);
+      const topic = contextGraphFinalizationTopic(contextGraphId);
       try {
         await this.gossip.publish(topic, encodeFinalizationMessage(msg));
-        this.log.info(ctx, `Broadcast finalization for ${result.ual} to ${topic}${ctxGraphIdStr ? ` (contextGraph=${ctxGraphIdStr})` : ''}${result.contextGraphError ? ' (ctx-graph registration failed, omitting contextGraphId)' : ''}`);
+        this.log.info(ctx, `Broadcast finalization for ${result.ual} to ${topic}${ctxGraphIdStr ? ` (contextGraph=${ctxGraphIdStr})` : ''}${result.contextGraphError ? ' (ctx-graph registration failed, omitting targetContextGraphId)' : ''}`);
       } catch {
         this.log.warn(ctx, `No peers subscribed to ${topic} yet`);
       }
@@ -3452,8 +5017,6 @@ export class DKGAgent {
     sparql: string,
     options?: string | {
       contextGraphId?: string;
-      /** @deprecated Use contextGraphId */
-      paranetId?: string;
       graphSuffix?: '_shared_memory';
       includeSharedMemory?: boolean;
       /** @deprecated Use includeSharedMemory */
@@ -3505,7 +5068,7 @@ export class DKGAgent {
     const rawOpts = typeof options === 'string' ? { contextGraphId: options } : options ?? {};
     const opts = {
       ...rawOpts,
-      contextGraphId: rawOpts.contextGraphId ?? rawOpts.paranetId,
+      contextGraphId: rawOpts.contextGraphId,
       includeSharedMemory: rawOpts.includeSharedMemory ?? rawOpts.includeWorkspace,
     };
     const ctx = opts.operationCtx ?? createOperationContext('query');
@@ -3528,13 +5091,10 @@ export class DKGAgent {
       throw new Error(`SPARQL rejected: ${readOnlyGuard.reason}`);
     }
 
-    if (opts.contextGraphId && !(await this.canReadContextGraph(opts.contextGraphId))) {
-      this.log.info(ctx, `Query denied for private context graph "${opts.contextGraphId}"`);
-      // A-1 follow-up review: synthetic deny must match the SPARQL form
-      // so ASK / CONSTRUCT / DESCRIBE clients get `false` / empty-quads
-      // instead of a SELECT-shaped `{ bindings: [] }`.
-      return emptyQueryResultForKind(sparql);
-    }
+    const targetsSharedMemory =
+      opts.graphSuffix === '_shared_memory'
+      || opts.includeSharedMemory === true
+      || opts.view === 'shared-working-memory';
 
     // A-1: Working-Memory isolation. When the caller is authenticated
     // (an outer layer like the daemon's `/api/query` route has resolved
@@ -3573,6 +5133,27 @@ export class DKGAgent {
       );
     }
     const callerAgentAddressStr = opts.callerAgentAddress;
+
+    if (
+      opts.contextGraphId
+      && targetsSharedMemory
+      && !(await this.canUseSharedMemoryForContextGraph(opts.contextGraphId, {
+        callerAgentAddress: callerAgentAddressStr,
+      }))
+    ) {
+      this.log.info(ctx, `Shared memory query denied for unauthorized or unconfirmed context graph "${opts.contextGraphId}"`);
+      return emptyQueryResultForKind(sparql);
+    }
+
+    if (opts.contextGraphId && !(await this.canReadContextGraph(opts.contextGraphId, {
+      callerAgentAddress: callerAgentAddressStr,
+    }))) {
+      this.log.info(ctx, `Query denied for private context graph "${opts.contextGraphId}"`);
+      // A-1 follow-up review: synthetic deny must match the SPARQL form
+      // so ASK / CONSTRUCT / DESCRIBE clients get `false` / empty-quads
+      // instead of a SELECT-shaped `{ bindings: [] }`.
+      return emptyQueryResultForKind(sparql);
+    }
 
     // A-1 canonicalization (Codex PR #242 iter-9 re-review): the
     // node's default agent has TWO identifiers that key the same WM
@@ -3646,7 +5227,9 @@ export class DKGAgent {
     // read to prevent data leakage via unscoped or FROM-less SPARQL.
     let excludeGraphPrefixes: string[] | undefined;
     if (!opts.contextGraphId) {
-      excludeGraphPrefixes = await this.getDisallowedGraphPrefixes();
+      excludeGraphPrefixes = await this.getDisallowedGraphPrefixes({
+        callerAgentAddress: callerAgentAddressStr,
+      });
       // Per spec Axiom 1 every shared query must be resolved within a CG.
       // Reject explicit GRAPH/FROM clauses that reference private CGs the
       // caller cannot read — post-filtering alone cannot prevent leaks via
@@ -3658,7 +5241,7 @@ export class DKGAgent {
     }
 
     const result = await this.queryEngine.query(sparql, {
-      paranetId: opts.contextGraphId,
+      contextGraphId: opts.contextGraphId,
       excludeGraphPrefixes,
       graphSuffix: opts.graphSuffix,
       includeSharedMemory: opts.includeSharedMemory,
@@ -3677,17 +5260,64 @@ export class DKGAgent {
     return result;
   }
 
-  private async canReadContextGraph(contextGraphId: string): Promise<boolean> {
+  private isAgentAddressAllowed(agentAddress: string | undefined, agentGateAddresses: readonly string[]): boolean {
+    if (!agentAddress) return false;
+    const normalized = agentAddress.toLowerCase();
+    return agentGateAddresses.some((agent) => agent.toLowerCase() === normalized);
+  }
+
+  private async canReadContextGraph(
+    contextGraphId: string,
+    opts: {
+      callerAgentAddress?: string;
+      allowSubscriptionFallback?: boolean;
+    } = {},
+  ): Promise<boolean> {
     if (!(await this.isPrivateContextGraph(contextGraphId))) {
       return true;
     }
 
+    const agentGateAddresses = await this.getContextGraphAgentGateAddresses(contextGraphId);
+    const allowedPeers = await this.getContextGraphAllowedPeers(contextGraphId);
+
+    // Mixed legacy peer-id and V10 agent gates are conjunctive: a node must
+    // be invited by peer id and also hold a local allowed agent identity.
+    const agentGateAllowed = agentGateAddresses === null
+      ? false
+      : opts.callerAgentAddress
+        ? this.isAgentAddressAllowed(opts.callerAgentAddress, agentGateAddresses)
+        : this.hasLocalAgentInGate(agentGateAddresses);
+
+    if (agentGateAddresses !== null && allowedPeers !== null) {
+      return allowedPeers.includes(this.peerId) && agentGateAllowed;
+    }
+
+    if (agentGateAddresses !== null) {
+      return agentGateAllowed;
+    }
+
     const participants = await this.getPrivateContextGraphParticipants(contextGraphId);
 
-    // No participant list at all → allow creator / locally-subscribed nodes
+    if ((!participants || participants.length === 0) && allowedPeers !== null) {
+      return allowedPeers.includes(this.peerId);
+    }
+
+    // No participant or peer list at all. Durable CG reads preserve the legacy
+    // subscribed-node fallback, but SWM must fail closed here because SWM
+    // GossipSub carries plaintext bytes.
     if (!participants || participants.length === 0) {
+      if (opts.allowSubscriptionFallback === false) {
+        return false;
+      }
       return this.subscribedContextGraphs.has(contextGraphId)
         || (this.config.syncContextGraphs ?? []).includes(contextGraphId);
+    }
+
+    if (
+      opts.callerAgentAddress
+      && participants.some((p) => p.toLowerCase() === opts.callerAgentAddress!.toLowerCase())
+    ) {
+      return true;
     }
 
     // Check if any local agent address is in the participants list
@@ -3708,7 +5338,6 @@ export class DKGAgent {
     // Legacy peer-ID allowlist: `inviteToContextGraph` writes `DKG_ALLOWED_PEER`
     // quads. Honor them for local reads so a peer-ID-invited node can query
     // the data it just synced.
-    const allowedPeers = await this.getContextGraphAllowedPeers(contextGraphId);
     if (allowedPeers?.includes(this.peerId)) {
       return true;
     }
@@ -3716,7 +5345,7 @@ export class DKGAgent {
     // Edge nodes without an on-chain identity (identityId 0n) fall back to
     // subscription-based access — the subscription itself is an authorization
     // (the node was invited or created this CG).
-    if (myIdentityId === 0n) {
+    if (myIdentityId === 0n && opts.allowSubscriptionFallback !== false) {
       return this.subscribedContextGraphs.has(contextGraphId);
     }
 
@@ -3727,8 +5356,8 @@ export class DKGAgent {
    * Returns graph URI prefixes for private CGs the caller cannot read.
    * Used to exclude them from unscoped queries.
    */
-  private async getDisallowedGraphPrefixes(): Promise<string[]> {
-    const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
+  private async getDisallowedGraphPrefixes(opts: { callerAgentAddress?: string } = {}): Promise<string[]> {
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
     const result = await this.store.query(
       `SELECT ?cg WHERE {
         GRAPH <${ontologyGraph}> {
@@ -3746,7 +5375,9 @@ export class DKGAgent {
       const match = cgUri.match(/^<?did:dkg:context-graph:([^>]+)>?$/);
       if (!match) continue;
       const contextGraphId = match[1];
-      if (await this.canReadContextGraph(contextGraphId)) continue;
+      if (await this.canReadContextGraph(contextGraphId, {
+        callerAgentAddress: opts.callerAgentAddress,
+      })) continue;
       // Exclude all named graphs under this CG (data, _meta, _shared_memory, etc.)
       prefixes.push(`did:dkg:context-graph:${contextGraphId}`);
     }
@@ -3799,7 +5430,7 @@ export class DKGAgent {
   ): Promise<QueryResponse> {
     return this.queryRemote(peerId, {
       lookupType: 'ENTITIES_BY_TYPE',
-      paranetId: contextGraphId,
+      contextGraphId: contextGraphId,
       rdfType,
       limit,
     });
@@ -3815,7 +5446,7 @@ export class DKGAgent {
   ): Promise<QueryResponse> {
     return this.queryRemote(peerId, {
       lookupType: 'ENTITY_TRIPLES',
-      paranetId: contextGraphId,
+      contextGraphId: contextGraphId,
       entityUri,
     });
   }
@@ -3832,7 +5463,7 @@ export class DKGAgent {
   ): Promise<QueryResponse> {
     return this.queryRemote(peerId, {
       lookupType: 'SPARQL_QUERY',
-      paranetId: contextGraphId,
+      contextGraphId: contextGraphId,
       sparql,
       limit,
       timeout,
@@ -3846,6 +5477,7 @@ export class DKGAgent {
 
     // Idempotent: skip if gossip handlers already installed for this context graph.
     if (this.gossipRegistered.has(contextGraphId)) {
+      this.queueSharedMemoryGossipSubscription(contextGraphId);
       const existing = this.subscribedContextGraphs.get(contextGraphId);
       if (!existing?.subscribed) {
         this.setContextGraphSubscription(
@@ -3858,12 +5490,10 @@ export class DKGAgent {
     }
     this.gossipRegistered.add(contextGraphId);
 
-    const publishTopic = paranetPublishTopic(contextGraphId);
-    const swmTopic = paranetWorkspaceTopic(contextGraphId);
-    const appTopic = paranetAppTopic(contextGraphId);
+    const publishTopic = contextGraphPublishTopic(contextGraphId);
+    const appTopic = contextGraphAppTopic(contextGraphId);
 
     this.gossip.subscribe(publishTopic);
-    this.gossip.subscribe(swmTopic);
     this.gossip.subscribe(appTopic);
 
     const existing = this.subscribedContextGraphs.get(contextGraphId);
@@ -3878,23 +5508,54 @@ export class DKGAgent {
       await gph.handlePublishMessage(data, contextGraphId, undefined, from);
     });
 
-    this.gossip.onMessage(swmTopic, async (_topic, data, from) => {
-      const wh = this.getOrCreateSharedMemoryHandler();
-      await wh.handle(data, from);
-    });
+    this.queueSharedMemoryGossipSubscription(contextGraphId);
 
-    const updateTopic = paranetUpdateTopic(contextGraphId);
+    const updateTopic = contextGraphUpdateTopic(contextGraphId);
     this.gossip.subscribe(updateTopic);
     this.gossip.onMessage(updateTopic, async (_topic, data, from) => {
       const uh = this.getOrCreateUpdateHandler();
       await uh.handle(data, from);
     });
 
-    const finalizationTopic = paranetFinalizationTopic(contextGraphId);
+    const finalizationTopic = contextGraphFinalizationTopic(contextGraphId);
     this.gossip.subscribe(finalizationTopic);
     this.gossip.onMessage(finalizationTopic, async (_topic, data) => {
       const fh = this.getOrCreateFinalizationHandler();
       await fh.handleFinalizationMessage(data, contextGraphId);
+    });
+  }
+
+  private queueSharedMemoryGossipSubscription(contextGraphId: string): void {
+    void this.reconcileSharedMemoryGossipSubscription(contextGraphId).catch((err) => {
+      this.log.warn(
+        createOperationContext('system'),
+        `SWM gossip subscription check failed for "${contextGraphId}": ${err instanceof Error ? err.message : String(err)}`,
+      );
+    });
+  }
+
+  private async reconcileSharedMemoryGossipSubscription(contextGraphId: string): Promise<void> {
+    const swmTopic = contextGraphWorkspaceTopic(contextGraphId);
+    const isRegistered = this.sharedMemoryGossipRegistered.has(contextGraphId);
+    const ctx = createOperationContext('system');
+    if (!(await this.canUseSharedMemoryForContextGraph(contextGraphId))) {
+      if (isRegistered) {
+        this.gossip.unsubscribe(swmTopic);
+        this.sharedMemoryGossipRegistered.delete(contextGraphId);
+        this.log.warn(ctx, `SWM gossip unsubscribed for "${contextGraphId}": local node is no longer authorized`);
+        return;
+      }
+      this.log.warn(ctx, `SWM gossip subscription denied for "${contextGraphId}": local node is not authorized`);
+      return;
+    }
+
+    if (isRegistered) return;
+
+    this.sharedMemoryGossipRegistered.add(contextGraphId);
+    this.gossip.subscribe(swmTopic);
+    this.gossip.onMessage(swmTopic, async (_topic, data, from) => {
+      const wh = this.getOrCreateSharedMemoryHandler();
+      await wh.handle(data, from);
     });
   }
 
@@ -3903,7 +5564,7 @@ export class DKGAgent {
    * System context graphs are already included by default and are skipped here.
    */
   private trackSyncContextGraph(contextGraphId: string): void {
-    const systemContextGraphs = new Set<string>(Object.values(SYSTEM_PARANETS) as string[]);
+    const systemContextGraphs = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]);
     if (systemContextGraphs.has(contextGraphId)) return;
 
     const syncSet = new Set<string>(this.config.syncContextGraphs ?? []);
@@ -3921,7 +5582,7 @@ export class DKGAgent {
         {
           contextGraphExists: (id) => this.contextGraphExists(id),
           // Gossip validation compares `approvedBy`/`revokedBy` against the
-          // paranet owner. Those triples are emitted with `dkg:creator` (peer
+          // contextGraph owner. Those triples are emitted with `dkg:creator` (peer
           // DID) so peers validate against the same creator-scoped DID.
           // `dkg:curator` (wallet DID) is for local authorization only.
           getContextGraphOwner: (id) => this.getContextGraphCreator(id),
@@ -3939,6 +5600,7 @@ export class DKGAgent {
       this.sharedMemoryHandler = new SharedMemoryHandler(this.store, this.eventBus, {
         sharedMemoryOwnedEntities: this.workspaceOwnedEntities,
         writeLocks: this.writeLocks,
+        localAgentAddresses: () => [...this.localAgents.keys()],
       });
     }
     return this.sharedMemoryHandler;
@@ -3960,6 +5622,7 @@ export class DKGAgent {
       this.finalizationHandler = new FinalizationHandler(
         this.store,
         this.chain.chainId === 'none' ? undefined : this.chain,
+        this.eventBus,
       );
     }
     return this.finalizationHandler;
@@ -3996,9 +5659,9 @@ export class DKGAgent {
   }): Promise<void> {
     const ctx = createOperationContext('system');
     const gm = new GraphManager(this.store);
-    const paranetUri = `did:dkg:context-graph:${opts.id}`;
-    const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
-    const cgMetaGraph = paranetMetaGraphUri(opts.id);
+    const contextGraphUri = `did:dkg:context-graph:${opts.id}`;
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    const cgMetaGraph = contextGraphMetaGraphUri(opts.id);
     const now = new Date().toISOString();
 
     const exists = await this.contextGraphExists(opts.id);
@@ -4048,19 +5711,19 @@ export class DKGAgent {
     const creatorPeerDid = `did:dkg:agent:${this.peerId}`;
     const curatorDid = `did:dkg:agent:${opts.callerAgentAddress ?? this.defaultAgentAddress ?? this.peerId}`;
     const quads: Quad[] = [
-      { subject: paranetUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_PARANET, graph: defGraph },
-      { subject: paranetUri, predicate: DKG_ONTOLOGY.SCHEMA_NAME, object: `"${opts.name}"`, graph: defGraph },
-      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CREATOR, object: creatorPeerDid, graph: defGraph },
-      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CREATED_AT, object: `"${now}"`, graph: defGraph },
-      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_GOSSIP_TOPIC, object: `"${paranetPublishTopic(opts.id)}"`, graph: defGraph },
-      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_REPLICATION_POLICY, object: `"${opts.replicationPolicy ?? 'full'}"`, graph: defGraph },
-      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY, object: `"${isCurated || opts.private ? 'private' : 'public'}"`, graph: defGraph },
+      { subject: contextGraphUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH, graph: defGraph },
+      { subject: contextGraphUri, predicate: DKG_ONTOLOGY.SCHEMA_NAME, object: `"${opts.name}"`, graph: defGraph },
+      { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_CREATOR, object: creatorPeerDid, graph: defGraph },
+      { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_CREATED_AT, object: `"${now}"`, graph: defGraph },
+      { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_GOSSIP_TOPIC, object: `"${contextGraphPublishTopic(opts.id)}"`, graph: defGraph },
+      { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_REPLICATION_POLICY, object: `"${opts.replicationPolicy ?? 'full'}"`, graph: defGraph },
+      { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY, object: `"${isCurated || opts.private ? 'private' : 'public'}"`, graph: defGraph },
     ];
 
     // Store registration status and curator in _meta
     quads.push(
-      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_REGISTRATION_STATUS, object: `"unregistered"`, graph: cgMetaGraph },
-      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CURATOR, object: curatorDid, graph: cgMetaGraph },
+      { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_REGISTRATION_STATUS, object: `"unregistered"`, graph: cgMetaGraph },
+      { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_CURATOR, object: curatorDid, graph: cgMetaGraph },
     );
 
     // Store peer allowlist for curated CGs (with validation)
@@ -4071,14 +5734,14 @@ export class DKGAgent {
           throw new Error(`Invalid peer ID in allowedPeers: "${peer}". Expected a libp2p peer ID (e.g. 12D3KooW…).`);
         }
         quads.push({
-          subject: paranetUri,
+          subject: contextGraphUri,
           predicate: DKG_ONTOLOGY.DKG_ALLOWED_PEER,
           object: `"${escapeSparqlLiteral(peer)}"`,
           graph: cgMetaGraph,
         });
       }
       quads.push({
-        subject: paranetUri,
+        subject: contextGraphUri,
         predicate: DKG_ONTOLOGY.DKG_ALLOWED_PEER,
         object: `"${this.peerId}"`,
         graph: cgMetaGraph,
@@ -4093,7 +5756,7 @@ export class DKGAgent {
           throw new Error(`Invalid Ethereum address in allowedAgents: "${addr}".`);
         }
         quads.push({
-          subject: paranetUri,
+          subject: contextGraphUri,
           predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
           object: `"${addr}"`,
           graph: cgMetaGraph,
@@ -4123,7 +5786,7 @@ export class DKGAgent {
         }
         seenParticipantAgents.add(key);
         quads.push({
-          subject: paranetUri,
+          subject: contextGraphUri,
           predicate: DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT,
           object: `"${checksumAddress}"`,
           graph: cgMetaGraph,
@@ -4136,7 +5799,7 @@ export class DKGAgent {
       const creatorAddr = opts.callerAgentAddress ?? this.defaultAgentAddress;
       if (creatorAddr) {
         quads.push({
-          subject: paranetUri,
+          subject: contextGraphUri,
           predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
           object: `"${creatorAddr}"`,
           graph: cgMetaGraph,
@@ -4152,7 +5815,7 @@ export class DKGAgent {
     }
     for (const participantIdentityId of participantIdentityIds) {
       quads.push({
-        subject: paranetUri,
+        subject: contextGraphUri,
         predicate: DKG_ONTOLOGY.DKG_PARTICIPANT_IDENTITY_ID,
         object: `"${participantIdentityId.toString()}"`,
         graph: cgMetaGraph,
@@ -4167,8 +5830,8 @@ export class DKGAgent {
         throw new Error(`requiredSignatures (${reqSig}) exceeds participant count (${participantIdentityIds.size})`);
       }
       quads.push({
-        subject: paranetUri,
-        predicate: `${DKG_ONTOLOGY.DKG_PARANET}RequiredSignatures`,
+        subject: contextGraphUri,
+        predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}RequiredSignatures`,
         object: `"${reqSig}"`,
         graph: cgMetaGraph,
       });
@@ -4176,7 +5839,7 @@ export class DKGAgent {
 
     if (opts.description) {
       quads.push({
-        subject: paranetUri,
+        subject: contextGraphUri,
         predicate: DKG_ONTOLOGY.SCHEMA_DESCRIPTION,
         object: `"${opts.description}"`,
         graph: defGraph,
@@ -4186,14 +5849,14 @@ export class DKGAgent {
     // Provenance activity
     const activityUri = `did:dkg:activity:create-context-graph:${opts.id}:${Date.now()}`;
     quads.push(
-      { subject: paranetUri, predicate: DKG_ONTOLOGY.PROV_GENERATED_BY, object: activityUri, graph: defGraph },
+      { subject: contextGraphUri, predicate: DKG_ONTOLOGY.PROV_GENERATED_BY, object: activityUri, graph: defGraph },
       { subject: activityUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.PROV_ACTIVITY, graph: defGraph },
       { subject: activityUri, predicate: DKG_ONTOLOGY.PROV_ASSOCIATED_WITH, object: `did:dkg:agent:${this.peerId}`, graph: defGraph },
       { subject: activityUri, predicate: DKG_ONTOLOGY.PROV_ENDED_AT_TIME, object: `"${now}"`, graph: defGraph },
     );
 
     await this.store.insert(quads);
-    await gm.ensureParanet(opts.id);
+    await gm.ensureContextGraph(opts.id);
 
     // Force the triple-store flush BEFORE the SQLite caches are written.
     // Without this, a daemon crash within 50ms of the insert would lose the
@@ -4315,7 +5978,7 @@ export class DKGAgent {
       // broadcast to the network — only invited nodes will discover it via
       // the explicit subscribe→sync flow.
       if (!isCurated) {
-        const ontologyTopic = paranetPublishTopic(SYSTEM_PARANETS.ONTOLOGY);
+        const ontologyTopic = contextGraphPublishTopic(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
         const broadcastQuads = quads.filter(q => q.graph === ontologyGraph);
         const nquads = broadcastQuads.map(q => {
           const obj = q.object.startsWith('"') ? q.object : `<${q.object}>`;
@@ -4325,7 +5988,7 @@ export class DKGAgent {
         const msg = encodePublishRequest({
           ual: `did:dkg:context-graph:${opts.id}`,
           nquads: new TextEncoder().encode(nquads),
-          paranetId: SYSTEM_PARANETS.ONTOLOGY,
+          contextGraphId: SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
           kas: [],
           publisherIdentity: this.wallet.keypair.publicKey,
           publisherAddress: '',
@@ -4354,6 +6017,7 @@ export class DKGAgent {
     /** @deprecated V10 ContextGraphs registration ignores metadata reveal. */
     revealOnChain?: boolean;
     accessPolicy?: number;
+    publishPolicy?: number;
     callerAgentAddress?: string;
   }): Promise<{ onChainId: string; txHash?: string }> {
     const ctx = createOperationContext('system');
@@ -4395,13 +6059,13 @@ export class DKGAgent {
       }
 
       const cgMetaGraph = contextGraphMetaUri(id);
-      const ontologyGraph = contextGraphDataUri(SYSTEM_PARANETS.ONTOLOGY);
-      const paranetUri = `did:dkg:context-graph:${id}`;
+      const ontologyGraph = contextGraphDataUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+      const contextGraphUri = `did:dkg:context-graph:${id}`;
       const accessPolicyResult = await this.store.query(
         `SELECT ?ap WHERE {
-          { GRAPH <${ontologyGraph}> { <${paranetUri}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?ap } }
+          { GRAPH <${ontologyGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?ap } }
           UNION
-          { GRAPH <${cgMetaGraph}> { <${paranetUri}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?ap } }
+          { GRAPH <${cgMetaGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?ap } }
         } LIMIT 1`,
       );
       const apValue = accessPolicyResult.type === 'bindings'
@@ -4414,12 +6078,12 @@ export class DKGAgent {
       // Defensive: replace any stray creator/curator triples (e.g. from
       // a previous build that backfilled per node) so this register call
       // becomes the single source of truth.
-      await this.store.deleteByPattern({ graph: defGraph, subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CREATOR });
-      await this.store.deleteByPattern({ graph: cgMetaGraph, subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CREATOR });
-      await this.store.deleteByPattern({ graph: cgMetaGraph, subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CURATOR });
+      await this.store.deleteByPattern({ graph: defGraph, subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_CREATOR });
+      await this.store.deleteByPattern({ graph: cgMetaGraph, subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_CREATOR });
+      await this.store.deleteByPattern({ graph: cgMetaGraph, subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_CURATOR });
       await this.store.insert([
-        { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CREATOR, object: creatorPeerDid, graph: defGraph },
-        { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CURATOR, object: curatorDid, graph: cgMetaGraph },
+        { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_CREATOR, object: creatorPeerDid, graph: defGraph },
+        { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_CURATOR, object: curatorDid, graph: cgMetaGraph },
       ]);
       this.log.info(ctx, `Stamped local node as creator contact and address curator for "${id}" (registration-time lazy stamp)`);
       return curatorDid;
@@ -4457,9 +6121,9 @@ export class DKGAgent {
     const ownerAddress = ethers.getAddress(owner.replace(/^did:dkg:agent:/, ''));
     // Check if already registered
     const cgMetaGraph = contextGraphMetaUri(id);
-    const paranetUri = `did:dkg:context-graph:${id}`;
+    const contextGraphUri = `did:dkg:context-graph:${id}`;
     const statusResult = await this.store.query(
-      `SELECT ?status WHERE { GRAPH <${cgMetaGraph}> { <${paranetUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> ?status } } LIMIT 1`,
+      `SELECT ?status WHERE { GRAPH <${cgMetaGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> ?status } } LIMIT 1`,
     );
     if (statusResult.type === 'bindings' && statusResult.bindings[0]?.['status']?.replace(/^"|"$/g, '') === 'registered') {
       const existingOnChainId = this.subscribedContextGraphs.get(id)?.onChainId;
@@ -4468,12 +6132,12 @@ export class DKGAgent {
 
     // Read existing description and access policy. Curated CGs store
     // definition in _meta rather than ONTOLOGY, so check both locations.
-    const ontologyGraph = contextGraphDataUri(SYSTEM_PARANETS.ONTOLOGY);
+    const ontologyGraph = contextGraphDataUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
     const descResult = await this.store.query(
       `SELECT ?desc WHERE {
-        { GRAPH <${ontologyGraph}> { <${paranetUri}> <${DKG_ONTOLOGY.SCHEMA_DESCRIPTION}> ?desc } }
+        { GRAPH <${ontologyGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.SCHEMA_DESCRIPTION}> ?desc } }
         UNION
-        { GRAPH <${cgMetaGraph}> { <${paranetUri}> <${DKG_ONTOLOGY.SCHEMA_DESCRIPTION}> ?desc } }
+        { GRAPH <${cgMetaGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.SCHEMA_DESCRIPTION}> ?desc } }
       } LIMIT 1`,
     );
     const description = descResult.type === 'bindings' ? descResult.bindings[0]?.['desc']?.replace(/^"|"$/g, '') : undefined;
@@ -4487,12 +6151,15 @@ export class DKGAgent {
         ? LOCAL_ACCESS_CURATED
         : LOCAL_ACCESS_OPEN;
     }
-    const publishPolicy = resolvedLocalAccessPolicy === LOCAL_ACCESS_CURATED
+    if (opts?.publishPolicy !== undefined && opts.publishPolicy !== EVM_PUBLISH_CURATED && opts.publishPolicy !== EVM_PUBLISH_OPEN) {
+      throw new Error('publishPolicy must be 0 (curated) or 1 (open)');
+    }
+    const publishPolicy = opts?.publishPolicy ?? (resolvedLocalAccessPolicy === LOCAL_ACCESS_CURATED
       ? EVM_PUBLISH_CURATED
-      : EVM_PUBLISH_OPEN;
+      : EVM_PUBLISH_OPEN);
 
     const participantsResult = await this.store.query(
-      `SELECT ?identityId WHERE { GRAPH <${cgMetaGraph}> { <${paranetUri}> <${DKG_ONTOLOGY.DKG_PARTICIPANT_IDENTITY_ID}> ?identityId } }`,
+      `SELECT ?identityId WHERE { GRAPH <${cgMetaGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_PARTICIPANT_IDENTITY_ID}> ?identityId } }`,
     );
     const participantIdentityIds = participantsResult.type === 'bindings'
       ? participantsResult.bindings
@@ -4504,7 +6171,7 @@ export class DKGAgent {
       : [];
 
     const requiredSignaturesResult = await this.store.query(
-      `SELECT ?required WHERE { GRAPH <${cgMetaGraph}> { <${paranetUri}> <${DKG_ONTOLOGY.DKG_PARANET}RequiredSignatures> ?required } } LIMIT 1`,
+      `SELECT ?required WHERE { GRAPH <${cgMetaGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}RequiredSignatures> ?required } } LIMIT 1`,
     );
     const storedRequiredSignatures = requiredSignaturesResult.type === 'bindings'
       ? Number(requiredSignaturesResult.bindings[0]?.['required']?.replace(/^"|"$/g, ''))
@@ -4516,11 +6183,11 @@ export class DKGAgent {
       this.log.info(ctx, `Context graph "${id}" already has on-chain ID ${existingOnChainId} — skipping chain call`);
       await this.store.deleteByPattern({
         graph: cgMetaGraph,
-        subject: paranetUri,
+        subject: contextGraphUri,
         predicate: DKG_ONTOLOGY.DKG_REGISTRATION_STATUS,
       });
       await this.store.insert([
-        { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_REGISTRATION_STATUS, object: `"registered"`, graph: cgMetaGraph },
+        { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_REGISTRATION_STATUS, object: `"registered"`, graph: cgMetaGraph },
       ]);
       return { onChainId: existingOnChainId, txHash: undefined };
     }
@@ -4576,6 +6243,7 @@ export class DKGAgent {
     const result = await this.registerContextGraphOnChain({
       participantIdentityIds: effectiveParticipantIdentityIds,
       requiredSignatures: effectiveRequiredSignatures,
+      accessPolicy: resolvedLocalAccessPolicy,
       publishPolicy,
       ...(publishAuthority ? { publishAuthority } : {}),
       participantAgents,
@@ -4587,12 +6255,12 @@ export class DKGAgent {
     // Update _meta with registered status and on-chain ID
     await this.store.deleteByPattern({
       graph: cgMetaGraph,
-      subject: paranetUri,
+      subject: contextGraphUri,
       predicate: DKG_ONTOLOGY.DKG_REGISTRATION_STATUS,
     });
     await this.store.insert([
-      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_REGISTRATION_STATUS, object: `"registered"`, graph: cgMetaGraph },
-      { subject: paranetUri, predicate: `${DKG_ONTOLOGY.DKG_PARANET}OnChainId`, object: `"${onChainId}"`, graph: ontologyGraph },
+      { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_REGISTRATION_STATUS, object: `"registered"`, graph: cgMetaGraph },
+      { subject: contextGraphUri, predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`, object: `"${onChainId}"`, graph: ontologyGraph },
     ]);
 
     // Update in-memory subscription record and ensure we're subscribed
@@ -4611,12 +6279,12 @@ export class DKGAgent {
     // gossip, so that only the authenticated sync path can update it.
     // Broadcast the ontology-graph OnChainId quad so peers see the link.
     try {
-      const onChainNquad = `<${paranetUri}> <${DKG_ONTOLOGY.DKG_PARANET}OnChainId> "${onChainId}" <${ontologyGraph}> .`;
-      const ontologyTopic = paranetPublishTopic(SYSTEM_PARANETS.ONTOLOGY);
+      const onChainNquad = `<${contextGraphUri}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId> "${onChainId}" <${ontologyGraph}> .`;
+      const ontologyTopic = contextGraphPublishTopic(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
       const regMsg = encodePublishRequest({
         ual: `did:dkg:context-graph:${id}`,
         nquads: new TextEncoder().encode(onChainNquad),
-        paranetId: SYSTEM_PARANETS.ONTOLOGY,
+        contextGraphId: SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
         kas: [],
         publisherIdentity: this.wallet.keypair.publicKey,
         publisherAddress: '',
@@ -4664,8 +6332,8 @@ export class DKGAgent {
     }
     this.assertCallerIsOwner(owner, callerAgentAddress, 'manage peer invitations');
 
-    const cgMetaGraph = paranetMetaGraphUri(contextGraphId);
-    const paranetUri = `did:dkg:context-graph:${contextGraphId}`;
+    const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
+    const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
     const escapedPeerId = escapeSparqlLiteral(peerId);
 
     const existingAllowlist = await this.getContextGraphAllowedPeers(contextGraphId);
@@ -4676,7 +6344,7 @@ export class DKGAgent {
     if (existingAllowlist === null || existingAllowlist.length === 0) {
       const curatorPeerId = escapeSparqlLiteral(this.peerId);
       quadsToInsert.push({
-        subject: paranetUri,
+        subject: contextGraphUri,
         predicate: DKG_ONTOLOGY.DKG_ALLOWED_PEER,
         object: `"${curatorPeerId}"`,
         graph: cgMetaGraph,
@@ -4698,7 +6366,7 @@ export class DKGAgent {
     }
 
     quadsToInsert.push({
-      subject: paranetUri,
+      subject: contextGraphUri,
       predicate: DKG_ONTOLOGY.DKG_ALLOWED_PEER,
       object: `"${escapedPeerId}"`,
       graph: cgMetaGraph,
@@ -4757,15 +6425,15 @@ export class DKGAgent {
     }
     this.assertCallerIsOwner(owner, callerAgentAddress, 'manage invitations');
 
-    const cgMetaGraph = paranetMetaGraphUri(contextGraphId);
-    const paranetUri = paranetDataGraphUri(contextGraphId);
+    const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
+    const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
     const quadsToInsert: Quad[] = [];
 
     // If first allowlist entry, also add our own agent so the curator doesn't lock themselves out
     const existingParticipants = await this.getPrivateContextGraphParticipants(contextGraphId);
     if ((!existingParticipants || existingParticipants.length === 0) && this.defaultAgentAddress) {
       quadsToInsert.push({
-        subject: paranetUri,
+        subject: contextGraphUri,
         predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
         object: `"${this.defaultAgentAddress}"`,
         graph: cgMetaGraph,
@@ -4781,7 +6449,7 @@ export class DKGAgent {
     }
 
     quadsToInsert.push({
-      subject: paranetUri,
+      subject: contextGraphUri,
       predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
       object: `"${agentAddress}"`,
       graph: cgMetaGraph,
@@ -4824,16 +6492,17 @@ export class DKGAgent {
     }
     this.assertCallerIsOwner(owner, callerAgentAddress, 'manage participants');
 
-    const cgMetaGraph = paranetMetaGraphUri(contextGraphId);
-    const paranetUri = paranetDataGraphUri(contextGraphId);
+    const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
+    const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
 
     await this.store.deleteByPattern({
       graph: cgMetaGraph,
-      subject: paranetUri,
+      subject: contextGraphUri,
       predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
       object: `"${agentAddress}"`,
     });
     this.deleteContextGraphMember(contextGraphId, 'agent', agentAddress);
+    this.queueSharedMemoryGossipSubscription(contextGraphId);
 
     this.log.info(ctx, `Removed agent ${agentAddress} from context graph "${contextGraphId}"`);
   }
@@ -4876,26 +6545,26 @@ export class DKGAgent {
     }
     this.assertCallerIsOwner(owner, callerAgentAddress, 'rename context graph');
 
-    const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
-    const cgMetaGraph = paranetMetaGraphUri(contextGraphId);
-    const paranetUri = paranetDataGraphUri(contextGraphId);
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
+    const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
     const schemaName = DKG_ONTOLOGY.SCHEMA_NAME;
 
     await this.store.deleteByPattern({
-      subject: paranetUri,
+      subject: contextGraphUri,
       predicate: schemaName,
       graph: ontologyGraph,
     });
     await this.store.deleteByPattern({
-      subject: paranetUri,
+      subject: contextGraphUri,
       predicate: schemaName,
       graph: cgMetaGraph,
     });
 
     const escaped = `"${escapeSparqlLiteral(trimmed)}"`;
     await this.store.insert([
-      { subject: paranetUri, predicate: schemaName, object: escaped, graph: ontologyGraph },
-      { subject: paranetUri, predicate: schemaName, object: escaped, graph: cgMetaGraph },
+      { subject: contextGraphUri, predicate: schemaName, object: escaped, graph: ontologyGraph },
+      { subject: contextGraphUri, predicate: schemaName, object: escaped, graph: cgMetaGraph },
     ]);
 
     this.log.info(ctx, `Renamed context graph "${contextGraphId}" to "${trimmed}"`);
@@ -4905,12 +6574,12 @@ export class DKGAgent {
    * List allowed agents for a context graph.
    */
   async getContextGraphAllowedAgents(contextGraphId: string): Promise<string[]> {
-    const cgMetaGraph = paranetMetaGraphUri(contextGraphId);
-    const paranetUri = paranetDataGraphUri(contextGraphId);
+    const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
+    const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
     const result = await this.store.query(
       `SELECT ?agent WHERE {
         GRAPH <${cgMetaGraph}> {
-          <${paranetUri}> <${DKG_ONTOLOGY.DKG_ALLOWED_AGENT}> ?agent
+          <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_ALLOWED_AGENT}> ?agent
         }
       }`,
     );
@@ -4988,7 +6657,7 @@ export class DKGAgent {
     timestamp: number,
     agentName?: string,
   ): Promise<void> {
-    const cgMetaGraph = paranetMetaGraphUri(contextGraphId);
+    const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
     const requestUri = `did:dkg:join-request:${contextGraphId}:${agentAddress.toLowerCase()}`;
     const DKG = 'https://dkg.network/ontology#';
     const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
@@ -5029,7 +6698,7 @@ export class DKGAgent {
   async listPendingJoinRequests(
     contextGraphId: string,
   ): Promise<Array<{ agentAddress: string; name?: string; signature: string; timestamp: number; status: string }>> {
-    const cgMetaGraph = paranetMetaGraphUri(contextGraphId);
+    const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
     const DKG = 'https://dkg.network/ontology#';
     const result = await this.store.query(
       `SELECT ?addr ?name ?sig ?ts ?status WHERE {
@@ -5059,7 +6728,7 @@ export class DKGAgent {
    * to the allowlist, and mark the request as approved.
    */
   async approveJoinRequest(contextGraphId: string, agentAddress: string, callerAgentAddress?: string): Promise<void> {
-    const cgMetaGraph = paranetMetaGraphUri(contextGraphId);
+    const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
     const requestUri = `did:dkg:join-request:${contextGraphId}:${agentAddress.toLowerCase()}`;
     const DKG = 'https://dkg.network/ontology#';
 
@@ -5145,7 +6814,7 @@ export class DKGAgent {
    * Reject a pending join request.
    */
   async rejectJoinRequest(contextGraphId: string, agentAddress: string): Promise<void> {
-    const cgMetaGraph = paranetMetaGraphUri(contextGraphId);
+    const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
     const requestUri = `did:dkg:join-request:${contextGraphId}:${agentAddress.toLowerCase()}`;
     const DKG = 'https://dkg.network/ontology#';
 
@@ -5374,10 +7043,10 @@ export class DKGAgent {
    * Check whether a context graph has been registered on-chain.
    */
   async isContextGraphRegistered(contextGraphId: string): Promise<boolean> {
-    const cgMetaGraph = paranetMetaGraphUri(contextGraphId);
-    const paranetUri = `did:dkg:context-graph:${contextGraphId}`;
+    const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
+    const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
     const result = await this.store.query(
-      `SELECT ?status WHERE { GRAPH <${cgMetaGraph}> { <${paranetUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> ?status } } LIMIT 1`,
+      `SELECT ?status WHERE { GRAPH <${cgMetaGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> ?status } } LIMIT 1`,
     );
     return result.type === 'bindings' && result.bindings[0]?.['status']?.replace(/^"|"$/g, '') === 'registered';
   }
@@ -5386,10 +7055,10 @@ export class DKGAgent {
     const subscribed = this.subscribedContextGraphs.get(contextGraphId)?.onChainId;
     if (subscribed) return subscribed;
 
-    const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
-    const paranetUri = `did:dkg:context-graph:${contextGraphId}`;
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
     const result = await this.store.query(
-      `SELECT ?id WHERE { GRAPH <${ontologyGraph}> { <${paranetUri}> <${DKG_ONTOLOGY.DKG_PARANET}OnChainId> ?id } } LIMIT 1`,
+      `SELECT ?id WHERE { GRAPH <${ontologyGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId> ?id } } LIMIT 1`,
     );
     if (result.type !== 'bindings' || result.bindings.length === 0) return null;
     const value = result.bindings[0]?.['id'];
@@ -5401,10 +7070,10 @@ export class DKGAgent {
    * Returns null if no allowlist is set (open CG).
    */
   async getContextGraphAllowedPeers(contextGraphId: string): Promise<string[] | null> {
-    const cgMetaGraph = paranetMetaGraphUri(contextGraphId);
-    const paranetUri = paranetDataGraphUri(contextGraphId);
+    const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
+    const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
     const result = await this.store.query(
-      `SELECT ?peer WHERE { GRAPH <${cgMetaGraph}> { <${paranetUri}> <${DKG_ONTOLOGY.DKG_ALLOWED_PEER}> ?peer } }`,
+      `SELECT ?peer WHERE { GRAPH <${cgMetaGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_ALLOWED_PEER}> ?peer } }`,
     );
     if (result.type !== 'bindings' || result.bindings.length === 0) {
       return null;
@@ -5589,9 +7258,9 @@ export class DKGAgent {
     }
 
     const gm = new GraphManager(this.store);
-    const paranetUri = paranetDataGraphUri(opts.id);
-    const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
-    const cgMetaGraph = paranetMetaGraphUri(opts.id);
+    const contextGraphUri = contextGraphDataGraphUri(opts.id);
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    const cgMetaGraph = contextGraphMetaGraphUri(opts.id);
     const now = new Date().toISOString();
 
     // Curated CGs write definition triples to _meta so they stay invisible
@@ -5608,24 +7277,24 @@ export class DKGAgent {
     // where node B mints a second V10 CG before node A's `onChainId`
     // propagates.
     const quads: Quad[] = [
-      { subject: paranetUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_PARANET, graph: defGraph },
-      { subject: paranetUri, predicate: DKG_ONTOLOGY.SCHEMA_NAME, object: `"${opts.name}"`, graph: defGraph },
-      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_CREATED_AT, object: `"${now}"`, graph: defGraph },
-      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_GOSSIP_TOPIC, object: `"${paranetPublishTopic(opts.id)}"`, graph: defGraph },
-      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_REPLICATION_POLICY, object: `"full"`, graph: defGraph },
-      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY, object: `"${opts.curated ? 'private' : 'public'}"`, graph: defGraph },
+      { subject: contextGraphUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH, graph: defGraph },
+      { subject: contextGraphUri, predicate: DKG_ONTOLOGY.SCHEMA_NAME, object: `"${opts.name}"`, graph: defGraph },
+      { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_CREATED_AT, object: `"${now}"`, graph: defGraph },
+      { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_GOSSIP_TOPIC, object: `"${contextGraphPublishTopic(opts.id)}"`, graph: defGraph },
+      { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_REPLICATION_POLICY, object: `"full"`, graph: defGraph },
+      { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY, object: `"${opts.curated ? 'private' : 'public'}"`, graph: defGraph },
     ];
 
     // _meta triples: only registration status. `dkg:curator` is written
     // by `registerContextGraph` (or `createContextGraph` for the UI
     // create path) so exactly one node owns the graph locally.
     quads.push(
-      { subject: paranetUri, predicate: DKG_ONTOLOGY.DKG_REGISTRATION_STATUS, object: `"unregistered"`, graph: cgMetaGraph },
+      { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_REGISTRATION_STATUS, object: `"unregistered"`, graph: cgMetaGraph },
     );
 
     if (opts.description) {
       quads.push({
-        subject: paranetUri,
+        subject: contextGraphUri,
         predicate: DKG_ONTOLOGY.SCHEMA_DESCRIPTION,
         object: `"${opts.description}"`,
         graph: defGraph,
@@ -5633,7 +7302,7 @@ export class DKGAgent {
     }
 
     await this.store.insert(quads);
-    await gm.ensureParanet(opts.id);
+    await gm.ensureContextGraph(opts.id);
 
     this.subscribeToContextGraph(opts.id);
     this.setContextGraphSubscription(opts.id, {
@@ -5706,7 +7375,7 @@ export class DKGAgent {
     const ctx = createOperationContext('verify');
 
     // 1. Look up batch merkle root from local metadata (use typed literal for batchId)
-    const metaGraph = paranetMetaGraphUri(opts.contextGraphId);
+    const metaGraph = contextGraphMetaGraphUri(opts.contextGraphId);
     // Try typed literal first, fallback to untyped for backward compat
     let batchBindings: Record<string, string>[] | null = null;
     for (const literal of [`"${opts.batchId}"^^<http://www.w3.org/2001/XMLSchema#integer>`, `"${opts.batchId}"`]) {
@@ -5864,7 +7533,7 @@ export class DKGAgent {
       this.log.warn(createOperationContext('verify'), `No root entities found for batch ${batchId} — skipping VM promotion`);
       return;
     }
-    const dataGraph = paranetDataGraphUri(contextGraphId);
+    const dataGraph = contextGraphDataGraphUri(contextGraphId);
     // Query root entities AND their skolemized children (subjects starting
     // with the root entity URI, e.g. <root>/.well-known/genid/...).
     // We use FILTER with STRSTARTS to capture the full closure instead of
@@ -5904,7 +7573,7 @@ export class DKGAgent {
   }
 
   private async getRootEntities(contextGraphId: string, batchId: bigint): Promise<string[]> {
-    const metaGraph = paranetMetaGraphUri(contextGraphId);
+    const metaGraph = contextGraphMetaGraphUri(contextGraphId);
     // Try typed literal first, fallback to untyped for backward compat
     for (const literal of [`"${batchId}"^^<http://www.w3.org/2001/XMLSchema#integer>`, `"${batchId}"`]) {
       const result = await this.store.query(
@@ -5920,7 +7589,7 @@ export class DKGAgent {
   // ── CCL ──────────────────────────────────────────────────────────────
 
   async publishCclPolicy(opts: {
-    paranetId: string;
+    contextGraphId: string;
     name: string;
     version: string;
     content: string;
@@ -5930,44 +7599,44 @@ export class DKGAgent {
     format?: string;
   }): Promise<{ policyUri: string; hash: string; status: 'proposed' }> {
     const ctx = createOperationContext('system');
-    if (!(await this.contextGraphExists(opts.paranetId))) {
-      throw new Error(`Context Graph "${opts.paranetId}" does not exist. Create it first.`);
+    if (!(await this.contextGraphExists(opts.contextGraphId))) {
+      throw new Error(`Context Graph "${opts.contextGraphId}" does not exist. Create it first.`);
     }
 
     validateCclPolicy(opts.content, { expectedName: opts.name, expectedVersion: opts.version });
 
-    const existing = (await this.listCclPolicies({ paranetId: opts.paranetId, name: opts.name }))
+    const existing = (await this.listCclPolicies({ contextGraphId: opts.contextGraphId, name: opts.name }))
       .find(policy => policy.version === opts.version);
     const existingHash = existing?.hash;
     const nextHash = hashCclPolicy(opts.content);
     if (existingHash && existingHash !== nextHash) {
-      throw new Error(`CCL policy ${opts.paranetId}/${opts.name}@${opts.version} already exists with different content`);
+      throw new Error(`CCL policy ${opts.contextGraphId}/${opts.name}@${opts.version} already exists with different content`);
     }
     if (existing?.policyUri && existingHash === nextHash) {
       return { policyUri: existing.policyUri, hash: existing.hash, status: 'proposed' };
     }
 
-    const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
     const now = new Date().toISOString();
     const { policyUri, hash, quads } = buildCclPolicyQuads(opts, `did:dkg:agent:${this.peerId}`, ontologyGraph, now);
     await this.store.insert(quads);
     await this.publishOntologyQuads(policyUri, quads);
-    this.log.info(ctx, `Published CCL policy ${opts.name}@${opts.version} for paranet "${opts.paranetId}"`);
+    this.log.info(ctx, `Published CCL policy ${opts.name}@${opts.version} for contextGraph "${opts.contextGraphId}"`);
     return { policyUri, hash, status: 'proposed' };
   }
 
   async approveCclPolicy(opts: {
-    paranetId: string;
+    contextGraphId: string;
     policyUri: string;
     contextType?: string;
     callerAgentAddress?: string;
   }): Promise<{ policyUri: string; bindingUri: string; contextType?: string; approvedAt: string }> {
     const ctx = createOperationContext('system');
-    await this.assertParanetOwner(opts.paranetId, opts.callerAgentAddress);
+    await this.assertContextGraphPolicyOwner(opts.contextGraphId, opts.callerAgentAddress);
     const record = await this.getCclPolicyByUri(opts.policyUri, { includeBody: true });
     if (!record) throw new Error(`CCL policy not found: ${opts.policyUri}`);
-    if (record.paranetId !== opts.paranetId) {
-      throw new Error(`CCL policy ${opts.policyUri} belongs to paranet "${record.paranetId}", not "${opts.paranetId}"`);
+    if (record.contextGraphId !== opts.contextGraphId) {
+      throw new Error(`CCL policy ${opts.policyUri} belongs to contextGraph "${record.contextGraphId}", not "${opts.contextGraphId}"`);
     }
     if (record.contextType && opts.contextType && record.contextType !== opts.contextType) {
       throw new Error(`CCL policy contextType mismatch: policy=${record.contextType}, requested=${opts.contextType}`);
@@ -5976,7 +7645,7 @@ export class DKGAgent {
     validateCclPolicy(record.body, { expectedName: record.name, expectedVersion: record.version });
 
     // Guard against duplicate approvals for the same policy+scope
-    const existingBindings = await this.listCclPolicyBindings({ paranetId: opts.paranetId, name: record.name });
+    const existingBindings = await this.listCclPolicyBindings({ contextGraphId: opts.contextGraphId, name: record.name });
     const activeForScope = existingBindings.find(
       b => b.policyUri === opts.policyUri && b.status === 'approved' &&
            (b.contextType ?? '') === (opts.contextType ?? record.contextType ?? ''),
@@ -5985,17 +7654,17 @@ export class DKGAgent {
       return { policyUri: opts.policyUri, bindingUri: activeForScope.bindingUri, contextType: activeForScope.contextType, approvedAt: activeForScope.approvedAt };
     }
 
-    const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
     const approvedAt = new Date().toISOString();
     const effectiveContextType = opts.contextType ?? record.contextType;
     // Emit the public `dkg:creator` peer DID as the binding owner: it's the
     // handle remote peers resolve via ONTOLOGY gossip, so gossip-publish-handler
     // will accept the approval. `_meta`-only `dkg:curator` (wallet DID) is
-    // used for local authorization via `assertParanetOwner` above.
-    const ownerDid = await this.getContextGraphCreator(opts.paranetId)
+    // used for local authorization via `assertContextGraphOwner` above.
+    const ownerDid = await this.getContextGraphCreator(opts.contextGraphId)
       ?? `did:dkg:agent:${this.peerId}`;
     const { bindingUri, quads } = buildPolicyApprovalQuads({
-      paranetId: opts.paranetId,
+      contextGraphId: opts.contextGraphId,
       policyUri: opts.policyUri,
       policyName: record.name,
       creator: ownerDid,
@@ -6012,68 +7681,68 @@ export class DKGAgent {
 
     await this.store.insert(quads);
     await this.publishOntologyQuads(bindingUri, quads);
-    this.log.info(ctx, `Approved CCL policy ${record.name}@${record.version} for paranet "${opts.paranetId}"${effectiveContextType ? ` (context ${effectiveContextType})` : ''}`);
+    this.log.info(ctx, `Approved CCL policy ${record.name}@${record.version} for contextGraph "${opts.contextGraphId}"${effectiveContextType ? ` (context ${effectiveContextType})` : ''}`);
     return { policyUri: opts.policyUri, bindingUri, contextType: effectiveContextType, approvedAt };
   }
 
   async revokeCclPolicy(opts: {
-    paranetId: string;
+    contextGraphId: string;
     policyUri: string;
     contextType?: string;
     callerAgentAddress?: string;
   }): Promise<{ policyUri: string; bindingUri: string; contextType?: string; revokedAt: string; status: 'revoked' }> {
     const ctx = createOperationContext('system');
-    await this.assertParanetOwner(opts.paranetId, opts.callerAgentAddress);
+    await this.assertContextGraphPolicyOwner(opts.contextGraphId, opts.callerAgentAddress);
 
     const target = await this.getActiveCclPolicyBinding({
-      paranetId: opts.paranetId,
+      contextGraphId: opts.contextGraphId,
       policyUri: opts.policyUri,
       contextType: opts.contextType,
     });
     if (!target) {
-      throw new Error(`No active CCL policy binding found for ${opts.policyUri} in paranet "${opts.paranetId}"${opts.contextType ? ` and context "${opts.contextType}"` : ''}.`);
+      throw new Error(`No active CCL policy binding found for ${opts.policyUri} in contextGraph "${opts.contextGraphId}"${opts.contextType ? ` and context "${opts.contextType}"` : ''}.`);
     }
 
-    const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
     const revokedAt = new Date().toISOString();
     // See note in approveCclPolicy — use `dkg:creator` (peer DID) for the
     // public binding metadata so it round-trips through ONTOLOGY gossip.
-    const ownerDid = await this.getContextGraphCreator(opts.paranetId)
+    const ownerDid = await this.getContextGraphCreator(opts.contextGraphId)
       ?? `did:dkg:agent:${this.peerId}`;
     const quads = buildPolicyRevocationQuads({
       bindingUri: target.bindingUri,
       revoker: ownerDid,
       graph: ontologyGraph,
       revokedAt,
-      paranetUri: `did:dkg:context-graph:${opts.paranetId}`,
+      contextGraphUri: `did:dkg:context-graph:${opts.contextGraphId}`,
     });
 
     await this.store.insert(quads);
     await this.publishOntologyQuads(target.bindingUri, quads);
-    this.log.info(ctx, `Revoked CCL policy binding ${target.bindingUri} for paranet "${opts.paranetId}"${target.contextType ? ` (context ${target.contextType})` : ''}`);
+    this.log.info(ctx, `Revoked CCL policy binding ${target.bindingUri} for contextGraph "${opts.contextGraphId}"${target.contextType ? ` (context ${target.contextType})` : ''}`);
     return { policyUri: opts.policyUri, bindingUri: target.bindingUri, contextType: target.contextType, revokedAt, status: 'revoked' };
   }
 
   async listCclPolicies(opts: {
-    paranetId?: string;
+    contextGraphId?: string;
     name?: string;
     contextType?: string;
     status?: string;
     includeBody?: boolean;
   } = {}): Promise<CclPolicyRecord[]> {
-    const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
     const filters: string[] = [];
-    if (opts.paranetId) filters.push(`?paranet = <did:dkg:context-graph:${opts.paranetId}>`);
+    if (opts.contextGraphId) filters.push(`?contextGraph = <did:dkg:context-graph:${opts.contextGraphId}>`);
     if (opts.name) filters.push(`?name = ${sparqlString(opts.name)}`);
     if (opts.contextType) filters.push(`?contextType = ${sparqlString(opts.contextType)}`);
     const filterBlock = filters.length > 0 ? `FILTER(${filters.join(' && ')})` : '';
     const bodyClause = opts.includeBody ? `OPTIONAL { ?policy <${DKG_ONTOLOGY.DKG_POLICY_BODY}> ?body }` : '';
 
     const result = await this.store.query(`
-      SELECT ?policy ?paranet ?name ?version ?hash ?language ?format ?status ?creator ?created ?approvedBy ?approvedAt ?desc ?contextType ${opts.includeBody ? '?body' : ''} WHERE {
+      SELECT ?policy ?contextGraph ?name ?version ?hash ?language ?format ?status ?creator ?created ?approvedBy ?approvedAt ?desc ?contextType ${opts.includeBody ? '?body' : ''} WHERE {
         GRAPH <${ontologyGraph}> {
           ?policy <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CCL_POLICY}> ;
-                  <${DKG_ONTOLOGY.DKG_POLICY_APPLIES_TO_PARANET}> ?paranet ;
+                  <${DKG_ONTOLOGY.DKG_POLICY_APPLIES_TO_CONTEXT_GRAPH}> ?contextGraph ;
                   <${DKG_ONTOLOGY.SCHEMA_NAME}> ?name ;
                   <${DKG_ONTOLOGY.DKG_POLICY_VERSION}> ?version ;
                   <${DKG_ONTOLOGY.DKG_POLICY_HASH}> ?hash ;
@@ -6093,23 +7762,23 @@ export class DKGAgent {
       ORDER BY ?name ?version
     `);
 
-    const bindings = await this.listCclPolicyBindings({ paranetId: opts.paranetId, name: opts.name });
+    const bindings = await this.listCclPolicyBindings({ contextGraphId: opts.contextGraphId, name: opts.name });
     const latestByScope = this.selectLatestNonRevokedBindings(bindings);
 
     const records = new Map<string, CclPolicyRecord>();
     if (result.type === 'bindings') {
       for (const row of result.bindings as Record<string, string>[]) {
-        const paranetUri = row['paranet'];
-        const paranetId = paranetUri.startsWith('did:dkg:context-graph:') ? paranetUri.slice('did:dkg:context-graph:'.length) : paranetUri;
+        const contextGraphUri = row['contextGraph'];
+        const contextGraphId = contextGraphUri.startsWith('did:dkg:context-graph:') ? contextGraphUri.slice('did:dkg:context-graph:'.length) : contextGraphUri;
         const name = stripLiteral(row['name']);
-        const defaultActive = latestByScope.get(`${paranetId}|${name}|`);
+        const defaultActive = latestByScope.get(`${contextGraphId}|${name}|`);
         const activeContexts = Array.from(latestByScope.values())
-          .filter(binding => binding.paranetId === paranetId && binding.name === name && binding.contextType && binding.policyUri === row['policy'])
+          .filter(binding => binding.contextGraphId === contextGraphId && binding.name === name && binding.contextType && binding.policyUri === row['policy'])
           .map(binding => binding.contextType as string)
           .sort();
         const nextRecord: CclPolicyRecord = {
           policyUri: row['policy'],
-          paranetId,
+          contextGraphId,
           name,
           version: stripLiteral(row['version']),
           hash: stripLiteral(row['hash']),
@@ -6140,14 +7809,14 @@ export class DKGAgent {
   }
 
   async resolveCclPolicy(opts: {
-    paranetId: string;
+    contextGraphId: string;
     name: string;
     contextType?: string;
     includeBody?: boolean;
   }): Promise<CclPolicyRecord | null> {
-    const bindings = await this.listCclPolicyBindings({ paranetId: opts.paranetId, name: opts.name });
+    const bindings = await this.listCclPolicyBindings({ contextGraphId: opts.contextGraphId, name: opts.name });
     const latestByScope = this.selectLatestNonRevokedBindings(bindings);
-    const selected = this.resolveCclPolicyBinding(latestByScope, opts.paranetId, opts.name, opts.contextType);
+    const selected = this.resolveCclPolicyBinding(latestByScope, opts.contextGraphId, opts.name, opts.contextType);
     if (!selected) return null;
     const record = await this.getCclPolicyByUri(selected.policyUri, { includeBody: opts.includeBody });
     if (!record) return null;
@@ -6157,7 +7826,7 @@ export class DKGAgent {
   }
 
   async resolveFactsFromSnapshot(opts: {
-    paranetId: string;
+    contextGraphId: string;
     snapshotId?: string;
     view?: string;
     scopeUal?: string;
@@ -6170,7 +7839,7 @@ export class DKGAgent {
     factResolverVersion: string;
     factResolutionMode: 'snapshot-resolved';
     context: {
-      paranetId: string;
+      contextGraphId: string;
       contextType?: string;
       view?: string;
       snapshotId?: string;
@@ -6181,7 +7850,7 @@ export class DKGAgent {
   }
 
   async evaluateCclPolicy(opts: {
-    paranetId: string;
+    contextGraphId: string;
     name: string;
     facts?: CclFactTuple[];
     contextType?: string;
@@ -6189,9 +7858,9 @@ export class DKGAgent {
     snapshotId?: string;
     scopeUal?: string;
   }): Promise<{
-    policy: Pick<CclPolicyRecord, 'policyUri' | 'paranetId' | 'name' | 'version' | 'hash' | 'language' | 'format' | 'contextType'>;
+    policy: Pick<CclPolicyRecord, 'policyUri' | 'contextGraphId' | 'name' | 'version' | 'hash' | 'language' | 'format' | 'contextType'>;
     context: {
-      paranetId: string;
+      contextGraphId: string;
       contextType?: string;
       view?: string;
       snapshotId?: string;
@@ -6204,20 +7873,20 @@ export class DKGAgent {
     result: CclEvaluationResult;
   }> {
     const policy = await this.resolveCclPolicy({
-      paranetId: opts.paranetId,
+      contextGraphId: opts.contextGraphId,
       name: opts.name,
       contextType: opts.contextType,
       includeBody: true,
     });
     if (!policy?.body) {
-      throw new Error(`No approved policy found for ${opts.paranetId}/${opts.name}${opts.contextType ? `/${opts.contextType}` : ''}`);
+      throw new Error(`No approved policy found for ${opts.contextGraphId}/${opts.name}${opts.contextType ? `/${opts.contextType}` : ''}`);
     }
 
     const parsed = parseCclPolicy(policy.body);
     const factInput = opts.facts
       ? buildManualCclFacts(opts.facts)
       : await this.resolveFactsFromSnapshot({
-          paranetId: opts.paranetId,
+          contextGraphId: opts.contextGraphId,
           snapshotId: opts.snapshotId,
           view: opts.view,
           scopeUal: opts.scopeUal,
@@ -6230,7 +7899,7 @@ export class DKGAgent {
     return {
       policy: {
         policyUri: policy.policyUri,
-        paranetId: policy.paranetId,
+        contextGraphId: policy.contextGraphId,
         name: policy.name,
         version: policy.version,
         hash: policy.hash,
@@ -6239,7 +7908,7 @@ export class DKGAgent {
         contextType: opts.contextType ?? policy.contextType,
       },
       context: {
-        paranetId: opts.paranetId,
+        contextGraphId: opts.contextGraphId,
         contextType: opts.contextType,
         view: opts.view,
         snapshotId: opts.snapshotId,
@@ -6254,7 +7923,7 @@ export class DKGAgent {
   }
 
   async evaluateAndPublishCclPolicy(opts: {
-    paranetId: string;
+    contextGraphId: string;
     name: string;
     facts?: CclFactTuple[];
     contextType?: string;
@@ -6265,9 +7934,9 @@ export class DKGAgent {
     evaluationUri: string;
     publish: PublishResult;
     evaluation: {
-      policy: Pick<CclPolicyRecord, 'policyUri' | 'paranetId' | 'name' | 'version' | 'hash' | 'language' | 'format' | 'contextType'>;
+      policy: Pick<CclPolicyRecord, 'policyUri' | 'contextGraphId' | 'name' | 'version' | 'hash' | 'language' | 'format' | 'contextType'>;
       context: {
-        paranetId: string;
+        contextGraphId: string;
         contextType?: string;
         view?: string;
         snapshotId?: string;
@@ -6281,9 +7950,9 @@ export class DKGAgent {
     };
   }> {
     const evaluation = await this.evaluateCclPolicy(opts);
-    const graph = paranetDataGraphUri(opts.paranetId);
+    const graph = contextGraphDataGraphUri(opts.contextGraphId);
     const { evaluationUri, quads } = buildCclEvaluationQuads({
-      paranetId: opts.paranetId,
+      contextGraphId: opts.contextGraphId,
       policyUri: evaluation.policy.policyUri,
       factSetHash: evaluation.factSetHash,
       factQueryHash: evaluation.factQueryHash,
@@ -6296,12 +7965,12 @@ export class DKGAgent {
       scopeUal: evaluation.context.scopeUal,
       contextType: evaluation.context.contextType,
     }, graph);
-    const publish = await this.publish(opts.paranetId, quads);
+    const publish = await this.publish(opts.contextGraphId, quads);
     return { evaluationUri, publish, evaluation };
   }
 
   async listCclEvaluations(opts: {
-    paranetId: string;
+    contextGraphId: string;
     policyUri?: string;
     snapshotId?: string;
     view?: string;
@@ -6309,7 +7978,7 @@ export class DKGAgent {
     resultKind?: 'derived' | 'decision';
     resultName?: string;
   }): Promise<CclPublishedEvaluationRecord[]> {
-    const graph = paranetDataGraphUri(opts.paranetId);
+    const graph = contextGraphDataGraphUri(opts.contextGraphId);
     const filters: string[] = [];
     if (opts.policyUri) filters.push(`?policy = <${opts.policyUri}>`);
     if (opts.snapshotId) filters.push(`?snapshotId = ${sparqlString(opts.snapshotId)}`);
@@ -6420,7 +8089,7 @@ export class DKGAgent {
     const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
     const result = await this.store.query(
       `SELECT ?g WHERE {
-        GRAPH ?g { <${contextGraphUri}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_PARANET}> }
+        GRAPH ?g { <${contextGraphUri}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> }
       } LIMIT 1`,
     );
     if (result.type === 'bindings' && result.bindings.length > 0) {
@@ -6434,9 +8103,9 @@ export class DKGAgent {
 
   /**
    * Check whether the context graph has any actual content locally. A
-   * paranet declaration triple in the ontology graph (from auto-discovery
+   * contextGraph declaration triple in the ontology graph (from auto-discovery
    * via chain registry or ontology sync) does NOT count as content; it
-   * only indicates the paranet was announced, not that we have access to
+   * only indicates the contextGraph was announced, not that we have access to
    * its data. This predicate is used to distinguish "genuinely synced /
    * has access" from "declaration only / probably denied".
    *
@@ -6475,15 +8144,15 @@ export class DKGAgent {
    * optimistic denial inference, not access control decisions).
    */
   async contextGraphIsCurated(contextGraphId: string): Promise<boolean> {
-    const paranetUri = `did:dkg:context-graph:${contextGraphId}`;
-    const cgMetaGraph = paranetMetaGraphUri(contextGraphId);
-    const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
+    const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
+    const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
     try {
       const res = await this.store.query(
         `SELECT ?ap WHERE {
-          { GRAPH <${ontologyGraph}> { <${paranetUri}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?ap } }
+          { GRAPH <${ontologyGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?ap } }
           UNION
-          { GRAPH <${cgMetaGraph}> { <${paranetUri}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?ap } }
+          { GRAPH <${cgMetaGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?ap } }
         } LIMIT 1`,
       );
       if (res.type !== 'bindings' || res.bindings.length === 0) return false;
@@ -6528,7 +8197,7 @@ export class DKGAgent {
     const parts = text.split('|');
     const ctxGraphPart = parts[0] || '';
     const includeSharedMemory = ctxGraphPart.startsWith('workspace:');
-    const contextGraphId = includeSharedMemory ? ctxGraphPart.slice('workspace:'.length) : (ctxGraphPart || SYSTEM_PARANETS.AGENTS);
+    const contextGraphId = includeSharedMemory ? ctxGraphPart.slice('workspace:'.length) : (ctxGraphPart || SYSTEM_CONTEXT_GRAPHS.AGENTS);
     return {
       contextGraphId,
       offset: parseInt(parts[1], 10) || 0,
@@ -6616,6 +8285,7 @@ export class DKGAgent {
       verifyIdentity: typeof verifyIdentity === 'function' ? verifyIdentity.bind(this.chain) : undefined,
       getParticipants: (contextGraphId) => this.getPrivateContextGraphParticipants(contextGraphId),
       getAllowedPeers: (contextGraphId) => this.getContextGraphAllowedPeers(contextGraphId),
+      getAgentGateAddresses: (contextGraphId) => this.getContextGraphAgentGateAddresses(contextGraphId),
       refreshMetaFromCurator: (contextGraphId) => this.refreshMetaFromCurator(contextGraphId),
       logWarn: (ctx, message) => this.log.warn(ctx, message),
       logInfo: (ctx, message) => this.log.info(ctx, message),
@@ -6623,12 +8293,12 @@ export class DKGAgent {
   }
 
   private async isPrivateContextGraph(contextGraphId: string): Promise<boolean> {
-    if ((Object.values(SYSTEM_PARANETS) as string[]).includes(contextGraphId)) {
+    if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId)) {
       return false;
     }
 
-    const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
-    const cgMetaGraph = paranetMetaGraphUri(contextGraphId);
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
     const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
     const result = await this.store.query(
       `SELECT ?policy WHERE {
@@ -6691,7 +8361,7 @@ export class DKGAgent {
     }
 
     const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
-    const cgMetaGraph = paranetMetaGraphUri(contextGraphId);
+    const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
 
     // V10 agent model: local allowedAgent entries plus explicit on-chain
     // participantAgent entries both grant local curated access.
@@ -6744,8 +8414,8 @@ export class DKGAgent {
    * Returns true if meta was refreshed, false if skipped or failed.
    */
   private async resolveCuratorPeerId(contextGraphId: string): Promise<string | undefined> {
-    const cgMetaGraph = paranetMetaGraphUri(contextGraphId);
-    const contextGraphUri = paranetDataGraphUri(contextGraphId);
+    const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
+    const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
 
     const curatorResult = await this.store.query(
       `SELECT ?curator WHERE {
@@ -6776,7 +8446,7 @@ export class DKGAgent {
       // Preferred: look up the creator peer ID from the ontology definition
       // graph or the _meta graph. The dkg:creator triple uses the libp2p
       // peer ID while dkg:curator uses the wallet address.
-      const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
+      const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
       const creatorResult = await this.store.query(
         `SELECT ?creator WHERE {
           {
@@ -6830,7 +8500,7 @@ export class DKGAgent {
     }
 
     const ctx = createOperationContext('sync');
-    const cgMetaGraph = paranetMetaGraphUri(contextGraphId);
+    const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
     const curatorPeerId = await this.resolveCuratorPeerId(contextGraphId);
     if (!curatorPeerId) {
       return false;
@@ -6928,31 +8598,31 @@ export class DKGAgent {
      */
     callerInvolved?: boolean;
   }>> {
-    const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
-    const agentsGraph = paranetDataGraphUri(SYSTEM_PARANETS.AGENTS);
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    const agentsGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.AGENTS);
     const result = await this.store.query(`
       SELECT ?ctxGraph ?name ?desc ?creator ?created ?curator ?access ?isSystem WHERE {
         {
           GRAPH <${ontologyGraph}> {
-            ?ctxGraph <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_PARANET}> .
+            ?ctxGraph <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> .
             OPTIONAL { ?ctxGraph <${DKG_ONTOLOGY.SCHEMA_NAME}> ?name }
             OPTIONAL { ?ctxGraph <${DKG_ONTOLOGY.SCHEMA_DESCRIPTION}> ?desc }
             OPTIONAL { ?ctxGraph <${DKG_ONTOLOGY.DKG_CREATOR}> ?creator }
             OPTIONAL { ?ctxGraph <${DKG_ONTOLOGY.DKG_CURATOR}> ?curator }
             OPTIONAL { ?ctxGraph <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?access }
             OPTIONAL { ?ctxGraph <${DKG_ONTOLOGY.DKG_CREATED_AT}> ?created }
-            OPTIONAL { ?ctxGraph <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_SYSTEM_PARANET}> . BIND(true AS ?isSystem) }
+            OPTIONAL { ?ctxGraph <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_SYSTEM_CONTEXT_GRAPH}> . BIND(true AS ?isSystem) }
           }
         } UNION {
           GRAPH <${agentsGraph}> {
-            ?ctxGraph <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_PARANET}> .
+            ?ctxGraph <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> .
             OPTIONAL { ?ctxGraph <${DKG_ONTOLOGY.SCHEMA_NAME}> ?name }
             OPTIONAL { ?ctxGraph <${DKG_ONTOLOGY.SCHEMA_DESCRIPTION}> ?desc }
             OPTIONAL { ?ctxGraph <${DKG_ONTOLOGY.DKG_CREATOR}> ?creator }
             OPTIONAL { ?ctxGraph <${DKG_ONTOLOGY.DKG_CURATOR}> ?curator }
             OPTIONAL { ?ctxGraph <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?access }
             OPTIONAL { ?ctxGraph <${DKG_ONTOLOGY.DKG_CREATED_AT}> ?created }
-            OPTIONAL { ?ctxGraph <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_SYSTEM_PARANET}> . BIND(true AS ?isSystem) }
+            OPTIONAL { ?ctxGraph <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_SYSTEM_CONTEXT_GRAPH}> . BIND(true AS ?isSystem) }
           }
         }
       }
@@ -7001,14 +8671,14 @@ export class DKGAgent {
     for (const [id, sub] of this.subscribedContextGraphs) {
       const uri = `${prefix}${id}`;
       if (seen.has(uri)) continue;
-      if (id === SYSTEM_PARANETS.AGENTS || id === SYSTEM_PARANETS.ONTOLOGY) continue;
+      if (id === SYSTEM_CONTEXT_GRAPHS.AGENTS || id === SYSTEM_CONTEXT_GRAPHS.ONTOLOGY) continue;
 
-      const metaGraph = paranetMetaGraphUri(id);
-      const pUri = paranetDataGraphUri(id);
+      const metaGraph = contextGraphMetaGraphUri(id);
+      const pUri = contextGraphDataGraphUri(id);
       const metaResult = await this.store.query(`
         SELECT ?name ?desc ?creator ?created ?curator ?access WHERE {
           GRAPH <${metaGraph}> {
-            <${pUri}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_PARANET}> .
+            <${pUri}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> .
             OPTIONAL { <${pUri}> <${DKG_ONTOLOGY.SCHEMA_NAME}> ?name }
             OPTIONAL { <${pUri}> <${DKG_ONTOLOGY.SCHEMA_DESCRIPTION}> ?desc }
             OPTIONAL { <${pUri}> <${DKG_ONTOLOGY.DKG_CREATOR}> ?creator }
@@ -7079,11 +8749,11 @@ export class DKGAgent {
     }
 
     const graphManager = new GraphManager(this.store);
-    const storedContextGraphs = await graphManager.listParanets();
+    const storedContextGraphs = await graphManager.listContextGraphs();
     for (const id of storedContextGraphs) {
       const uri = `${prefix}${id}`;
       if (seen.has(uri)) continue;
-      if (id === SYSTEM_PARANETS.AGENTS || id === SYSTEM_PARANETS.ONTOLOGY) continue;
+      if (id === SYSTEM_CONTEXT_GRAPHS.AGENTS || id === SYSTEM_CONTEXT_GRAPHS.ONTOLOGY) continue;
 
       const sub = this.subscribedContextGraphs.get(id);
       const onChainId = sub?.onChainId ?? (await this.getContextGraphOnChainId(id)) ?? undefined;
@@ -7203,13 +8873,13 @@ export class DKGAgent {
     }
   }
 
-  private async assertParanetOwner(paranetId: string, callerAgentAddress?: string): Promise<void> {
-    const owner = await this.getContextGraphOwner(paranetId);
+  private async assertContextGraphPolicyOwner(contextGraphId: string, callerAgentAddress?: string): Promise<void> {
+    const owner = await this.getContextGraphOwner(contextGraphId);
     if (!owner) {
-      throw new Error(`Paranet "${paranetId}" has no registered owner; cannot manage policies.`);
+      throw new Error(`ContextGraph "${contextGraphId}" has no registered owner; cannot manage policies.`);
     }
     if (!this.isCallerOrNodeOwner(owner, callerAgentAddress)) {
-      throw new Error(`Only the paranet owner can manage policies for "${paranetId}". Owner=${owner}, caller=${`did:dkg:agent:${callerAgentAddress ?? this.defaultAgentAddress ?? this.peerId}`}`);
+      throw new Error(`Only the contextGraph owner can manage policies for "${contextGraphId}". Owner=${owner}, caller=${`did:dkg:agent:${callerAgentAddress ?? this.defaultAgentAddress ?? this.peerId}`}`);
     }
   }
 
@@ -7223,17 +8893,17 @@ export class DKGAgent {
    * 403 response can tell the user exactly what they tried to do
    * ("publish a project manifest", "overwrite onboarding templates", …).
    */
-  async assertContextGraphOwner(paranetId: string, callerAgentAddress: string | undefined, action: string): Promise<void> {
-    const owner = await this.getContextGraphOwner(paranetId);
+  async assertContextGraphOwner(contextGraphId: string, callerAgentAddress: string | undefined, action: string): Promise<void> {
+    const owner = await this.getContextGraphOwner(contextGraphId);
     if (!owner) {
-      throw new Error(`Context graph "${paranetId}" has no registered owner; cannot ${action}.`);
+      throw new Error(`Context graph "${contextGraphId}" has no registered owner; cannot ${action}.`);
     }
     if (!this.isCallerOrNodeOwner(owner, callerAgentAddress)) {
       const caller = callerAgentAddress
         ? `did:dkg:agent:${callerAgentAddress}`
         : `did:dkg:agent:${this.defaultAgentAddress ?? this.peerId}`;
       throw new Error(
-        `Only the context graph curator can ${action} for "${paranetId}". ` +
+        `Only the context graph curator can ${action} for "${contextGraphId}". ` +
         `Owner=${owner}, caller=${caller}.`,
       );
     }
@@ -7344,16 +9014,16 @@ export class DKGAgent {
     return false;
   }
 
-  private async getContextGraphOwner(paranetId: string): Promise<string | null> {
-    const cgMetaGraph = paranetMetaGraphUri(paranetId);
-    const paranetUri = `did:dkg:context-graph:${paranetId}`;
+  private async getContextGraphOwner(contextGraphId: string): Promise<string | null> {
+    const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
+    const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
     // Prefer the curator (wallet-scoped owner) so per-agent authorization
     // works on multi-agent nodes. Fall back to the creator (libp2p peer ID)
     // for legacy CGs created before the curator triple existed.
     const curatorResult = await this.store.query(`
       SELECT ?owner WHERE {
         GRAPH <${cgMetaGraph}> {
-          <${paranetUri}> <${DKG_ONTOLOGY.DKG_CURATOR}> ?owner .
+          <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_CURATOR}> ?owner .
         }
       }
       LIMIT 1
@@ -7362,7 +9032,7 @@ export class DKGAgent {
       const owner = (curatorResult.bindings[0] as Record<string, string>)['owner'];
       if (owner) return owner;
     }
-    return this.getContextGraphCreator(paranetId);
+    return this.getContextGraphCreator(contextGraphId);
   }
 
   private async getContextGraphCurator(contextGraphId: string): Promise<string | null> {
@@ -7469,25 +9139,25 @@ export class DKGAgent {
   }
 
   /**
-   * Read `dkg:creator` (peer-ID DID) for a paranet. This is the publicly
+   * Read `dkg:creator` (peer-ID DID) for a contextGraph. This is the publicly
    * discoverable owner handle used in gossip validation — it propagates
    * through ONTOLOGY sync for open CGs, while `dkg:curator` stays in `_meta`.
    * Emitted approve/revoke binding metadata must use this value so remote
    * peers validating via `gossip-publish-handler` see a matching owner.
    */
-  private async getContextGraphCreator(paranetId: string): Promise<string | null> {
-    const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
-    const cgMetaGraph = paranetMetaGraphUri(paranetId);
-    const paranetUri = `did:dkg:context-graph:${paranetId}`;
+  private async getContextGraphCreator(contextGraphId: string): Promise<string | null> {
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
+    const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
     const result = await this.store.query(`
       SELECT ?owner WHERE {
         {
           GRAPH <${ontologyGraph}> {
-            <${paranetUri}> <${DKG_ONTOLOGY.DKG_CREATOR}> ?owner .
+            <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_CREATOR}> ?owner .
           }
         } UNION {
           GRAPH <${cgMetaGraph}> {
-            <${paranetUri}> <${DKG_ONTOLOGY.DKG_CREATOR}> ?owner .
+            <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_CREATOR}> ?owner .
           }
         }
       }
@@ -7498,19 +9168,19 @@ export class DKGAgent {
   }
 
   private async listCclPolicyBindings(opts: {
-    paranetId?: string;
+    contextGraphId?: string;
     name?: string;
   } = {}): Promise<PolicyApprovalBinding[]> {
-    const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
     const filters: string[] = [];
-    if (opts.paranetId) filters.push(`?paranet = <did:dkg:context-graph:${opts.paranetId}>`);
+    if (opts.contextGraphId) filters.push(`?contextGraph = <did:dkg:context-graph:${opts.contextGraphId}>`);
     if (opts.name) filters.push(`?name = ${sparqlString(opts.name)}`);
     const filterBlock = filters.length > 0 ? `FILTER(${filters.join(' && ')})` : '';
     const result = await this.store.query(`
-      SELECT ?binding ?policy ?paranet ?name ?contextType ?bindingStatus ?approvedAt ?approvedBy ?revokedAt ?revokedBy WHERE {
+      SELECT ?binding ?policy ?contextGraph ?name ?contextType ?bindingStatus ?approvedAt ?approvedBy ?revokedAt ?revokedBy WHERE {
         GRAPH <${ontologyGraph}> {
           ?binding <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_POLICY_BINDING}> ;
-                   <${DKG_ONTOLOGY.DKG_POLICY_APPLIES_TO_PARANET}> ?paranet ;
+                   <${DKG_ONTOLOGY.DKG_POLICY_APPLIES_TO_CONTEXT_GRAPH}> ?contextGraph ;
                    <${DKG_ONTOLOGY.SCHEMA_NAME}> ?name ;
                    <${DKG_ONTOLOGY.DKG_ACTIVE_POLICY}> ?policy ;
                    <${DKG_ONTOLOGY.DKG_APPROVED_AT}> ?approvedAt .
@@ -7533,7 +9203,7 @@ export class DKGAgent {
       const next: PolicyApprovalBinding = {
         bindingUri,
         policyUri: row['policy'],
-        paranetId: row['paranet'].startsWith('did:dkg:context-graph:') ? row['paranet'].slice('did:dkg:context-graph:'.length) : row['paranet'],
+        contextGraphId: row['contextGraph'].startsWith('did:dkg:context-graph:') ? row['contextGraph'].slice('did:dkg:context-graph:'.length) : row['contextGraph'],
         name: stripLiteral(row['name']),
         contextType: row['contextType'] ? stripLiteral(row['contextType']) : undefined,
         status: revokedAt || (row['bindingStatus'] && stripLiteral(row['bindingStatus']) === 'revoked') ? 'revoked' : 'approved',
@@ -7563,7 +9233,7 @@ export class DKGAgent {
     const latestByScope = new Map<string, string>();
     for (const b of allBindings) {
       if (b.status === 'revoked') continue;
-      const key = `${b.paranetId}|${b.name}|${b.contextType ?? ''}`;
+      const key = `${b.contextGraphId}|${b.name}|${b.contextType ?? ''}`;
       if (!latestByScope.has(key)) {
         latestByScope.set(key, b.bindingUri);
       } else if (b.bindingUri !== latestByScope.get(key)) {
@@ -7577,7 +9247,7 @@ export class DKGAgent {
     const latestByScope = new Map<string, PolicyApprovalBinding>();
     for (const binding of bindings) {
       if (binding.status === 'revoked' || binding.status === 'superseded') continue;
-      const key = `${binding.paranetId}|${binding.name}|${binding.contextType ?? ''}`;
+      const key = `${binding.contextGraphId}|${binding.name}|${binding.contextType ?? ''}`;
       const current = latestByScope.get(key);
       if (!current || binding.approvedAt > current.approvedAt) {
         latestByScope.set(key, binding);
@@ -7588,25 +9258,25 @@ export class DKGAgent {
 
   private resolveCclPolicyBinding(
     latestByScope: Map<string, PolicyApprovalBinding>,
-    paranetId: string,
+    contextGraphId: string,
     name: string,
     contextType?: string,
   ): PolicyApprovalBinding | null {
-    return latestByScope.get(`${paranetId}|${name}|${contextType ?? ''}`)
-      ?? latestByScope.get(`${paranetId}|${name}|`)
+    return latestByScope.get(`${contextGraphId}|${name}|${contextType ?? ''}`)
+      ?? latestByScope.get(`${contextGraphId}|${name}|`)
       ?? null;
   }
 
   private async getActiveCclPolicyBinding(opts: {
-    paranetId: string;
+    contextGraphId: string;
     policyUri: string;
     contextType?: string;
   }): Promise<PolicyApprovalBinding | null> {
     const record = await this.getCclPolicyByUri(opts.policyUri);
     if (!record) return null;
-    const bindings = await this.listCclPolicyBindings({ paranetId: opts.paranetId, name: record.name });
+    const bindings = await this.listCclPolicyBindings({ contextGraphId: opts.contextGraphId, name: record.name });
     const latestByScope = this.selectLatestNonRevokedBindings(bindings);
-    const active = this.resolveCclPolicyBinding(latestByScope, opts.paranetId, record.name, opts.contextType);
+    const active = this.resolveCclPolicyBinding(latestByScope, opts.contextGraphId, record.name, opts.contextType);
     if (!active || active.policyUri !== opts.policyUri) return null;
     return active;
   }
@@ -7627,7 +9297,7 @@ export class DKGAgent {
   }
 
   private async publishOntologyQuads(ual: string, quads: Quad[]): Promise<void> {
-    const ontologyTopic = paranetPublishTopic(SYSTEM_PARANETS.ONTOLOGY);
+    const ontologyTopic = contextGraphPublishTopic(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
     const nquads = quads.map(q => {
       const obj = q.object.startsWith('"') ? q.object : `<${q.object}>`;
       return `<${q.subject}> <${q.predicate}> ${obj} <${q.graph}> .`;
@@ -7636,7 +9306,7 @@ export class DKGAgent {
     const msg = encodePublishRequest({
       ual,
       nquads: new TextEncoder().encode(nquads),
-      paranetId: SYSTEM_PARANETS.ONTOLOGY,
+      contextGraphId: SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
       kas: [],
       publisherIdentity: this.wallet.keypair.publicKey,
       publisherAddress: '',
@@ -7763,7 +9433,7 @@ export class DKGAgent {
    */
   async discoverContextGraphsFromStore(): Promise<number> {
     const ctx = createOperationContext('system');
-    const ontologyGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
     const prefix = 'did:dkg:context-graph:';
     let discovered = 0;
 
@@ -7777,7 +9447,7 @@ export class DKGAgent {
         const uri = row['ctxGraph'] ?? '';
         const id = uri.startsWith(prefix) ? uri.slice(prefix.length) : null;
         if (!id) continue;
-        if (id === SYSTEM_PARANETS.AGENTS || id === SYSTEM_PARANETS.ONTOLOGY) continue;
+        if (id === SYSTEM_CONTEXT_GRAPHS.AGENTS || id === SYSTEM_CONTEXT_GRAPHS.ONTOLOGY) continue;
 
         const existing = discoveredEntries.get(id);
         const name = row['name'] ? stripLiteral(row['name']) : existing?.name ?? id;
@@ -7791,7 +9461,7 @@ export class DKGAgent {
     const ontologyResult = await this.store.query(`
       SELECT ?ctxGraph ?name WHERE {
         GRAPH <${ontologyGraph}> {
-          ?ctxGraph <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_PARANET}> .
+          ?ctxGraph <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> .
           OPTIONAL { ?ctxGraph <${DKG_ONTOLOGY.SCHEMA_NAME}> ?name }
         }
       }
@@ -7803,7 +9473,7 @@ export class DKGAgent {
     const metaResult = await this.store.query(`
       SELECT ?ctxGraph ?name WHERE {
         GRAPH ?metaGraph {
-          ?ctxGraph <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_PARANET}> .
+          ?ctxGraph <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> .
           OPTIONAL { ?ctxGraph <${DKG_ONTOLOGY.SCHEMA_NAME}> ?name }
           FILTER(STRENDS(STR(?metaGraph), "/_meta"))
         }
@@ -7956,11 +9626,11 @@ export class DKGAgent {
       // Persist the on-chain ID to the ontology graph so the publisher's
       // VM registration guard can find it via RDF (it has no access to
       // the in-memory subscribedContextGraphs map).
-      const cgUri = paranetDataGraphUri(p.name);
-      const ontoGraph = paranetDataGraphUri(SYSTEM_PARANETS.ONTOLOGY);
+      const cgUri = contextGraphDataGraphUri(p.name);
+      const ontoGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
       await this.store.insert([{
         subject: cgUri,
-        predicate: `${DKG_ONTOLOGY.DKG_PARANET}OnChainId`,
+        predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
         object: `"${p.contextGraphId}"`,
         graph: ontoGraph,
       }]);
@@ -8002,6 +9672,10 @@ export class DKGAgent {
       clearInterval(this.swmCleanupTimer);
       this.swmCleanupTimer = null;
     }
+    if (this.syncReconcilerTimer) {
+      clearInterval(this.syncReconcilerTimer);
+      this.syncReconcilerTimer = null;
+    }
     this.clearRandomSamplingBindRetry();
     this.clearStorageACKRegistrationRetry();
     this.storageACKRegistrationRetryInFlight = false;
@@ -8025,8 +9699,8 @@ export class DKGAgent {
     const gm = new GraphManager(store);
 
     // Ensure system context graphs exist
-    await gm.ensureParanet(SYSTEM_PARANETS.AGENTS);
-    await gm.ensureParanet(SYSTEM_PARANETS.ONTOLOGY);
+    await gm.ensureContextGraph(SYSTEM_CONTEXT_GRAPHS.AGENTS);
+    await gm.ensureContextGraph(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
 
     // Check if genesis is already loaded by looking for the network definition
     const result = await store.query(
@@ -8200,7 +9874,7 @@ export class DKGAgent {
     const msg = encodePublishRequest({
       ual: result.ual,
       nquads: new TextEncoder().encode(ntriples),
-      paranetId: contextGraphId,
+      contextGraphId: contextGraphId,
       kas: result.kaManifest.map(ka => ({
         tokenId: Number(ka.tokenId),
         rootEntity: ka.rootEntity,
@@ -8220,7 +9894,7 @@ export class DKGAgent {
       subGraphName: result.subGraphName,
     });
 
-    const topic = paranetPublishTopic(contextGraphId);
+    const topic = contextGraphPublishTopic(contextGraphId);
     this.log.info(ctx, `Broadcasting to topic ${topic}`);
     try {
       await this.gossip.publish(topic, msg);
@@ -8273,9 +9947,8 @@ export class DKGAgent {
           { ...opts, publisherPeerId: agent.node.peerId.toString() },
         );
         if (gossipMessage) {
-          const topic = paranetWorkspaceTopic(contextGraphId);
           try {
-            await agent.gossip.publish(topic, gossipMessage);
+            await agent.publishWorkspaceGossip(contextGraphId, gossipMessage, createOperationContext('share'));
           } catch (err: any) {
             agent.log.warn(createOperationContext('share'), `Promote gossip failed (local SWM committed): ${err?.message ?? err}`);
           }
@@ -8284,6 +9957,55 @@ export class DKGAgent {
       },
       async discard(contextGraphId: string, name: string, opts?: { subGraphName?: string }): Promise<void> {
         return agent.publisher.assertionDiscard(contextGraphId, name, agentAddress, opts?.subGraphName);
+      },
+
+      /**
+       * RFC-001 §9.x — finalize a Working Memory assertion.
+       *
+       * This is the moment the assertion's content is cryptographically
+       * committed to a chain target: the daemon computes the canonical
+       * merkleRoot from the assertion's quads, builds the EIP-712
+       * AuthorAttestation typed data, signs it (or verifies a pre-signed
+       * payload), and stamps the result as a block of `_meta` triples
+       * keyed by the assertion URI.
+       *
+       * After finalize, the assertion's content is sealed: subsequent
+       * `write` calls would invalidate the seal. The seal travels with
+       * the assertion through SWM gossip (because `_meta` propagates by
+       * default) and is consumed verbatim by the chain publish path —
+       * publish never re-signs or re-hashes.
+       *
+       * Authorship resolution mirrors `publishFromSharedMemory`:
+       *   1. `preSignedAuthorAttestation` wins (self-sovereign agents).
+       *   2. `authorAgentAddress` → custodial agent's private key from
+       *      the local keystore.
+       *   3. Otherwise → throw. The route layer is responsible for
+       *      defaulting to the request token's agent (or to the
+       *      publisher EOA when an admin token is presented).
+       *
+       * Idempotent: re-finalizing an already-sealed assertion with the
+       * same content returns the existing seal without re-signing. A
+       * conflicting re-finalize (different content / author) throws.
+       */
+      async finalize(
+        contextGraphId: string,
+        name: string,
+        opts?: {
+          subGraphName?: string;
+          authorAgentAddress?: string;
+          preSignedAuthorAttestation?: PreSignedAuthorAttestation;
+          schemeVersion?: number;
+        },
+      ): Promise<{
+        assertionUri: string;
+        merkleRoot: Uint8Array;
+        authorAddress: string;
+        schemeVersion: number;
+        chainId: bigint;
+        kav10Address: string;
+        eip712Digest: string;
+      }> {
+        return agent.assertionFinalize(contextGraphId, name, agentAddress, opts);
       },
 
       async history(contextGraphId: string, name: string, opts?: { agentAddress?: string; subGraphName?: string }): Promise<AssertionDescriptor | null> {

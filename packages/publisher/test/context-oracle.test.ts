@@ -3,10 +3,10 @@ import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { ContextOracle, type ChainContext } from '../src/context-oracle.js';
 import { ProofIndex } from '../src/proof-index.js';
 
-const PARANET = 'testnet-alpha';
+const CONTEXT_GRAPH = 'testnet-alpha';
 const CG_ID = '42';
 const BATCH_ID = '7';
-const GRAPH_URI = `did:dkg:context-graph:${PARANET}/context/${CG_ID}`;
+const GRAPH_URI = `did:dkg:context-graph:${CONTEXT_GRAPH}/context/${CG_ID}`;
 const CHAIN: ChainContext = { chainId: 'eip155:84532' };
 
 function q(s: string, p: string, o: string, g = GRAPH_URI): Quad {
@@ -62,10 +62,10 @@ describe('ContextOracle', () => {
 
   describe('entityLookup', () => {
     it('returns triples with proofs for a known entity', async () => {
-      const result = await oracle.entityLookup(PARANET, CG_ID, 'did:dkg:agent:Alice');
+      const result = await oracle.entityLookup(CONTEXT_GRAPH, CG_ID, 'did:dkg:agent:Alice');
 
       expect(result.contextGraphId).toBe(CG_ID);
-      expect(result.paranetId).toBe(PARANET);
+      expect(result.rootContextGraphId).toBe(CONTEXT_GRAPH);
       expect(result.entity).toBe('did:dkg:agent:Alice');
       expect(result.triples).toHaveLength(2);
 
@@ -90,7 +90,7 @@ describe('ContextOracle', () => {
         q('did:dkg:agent:Alice', 'http://schema.org/nickname', '"Ali"'),
       ]);
 
-      const result = await oracle.entityLookup(PARANET, CG_ID, 'did:dkg:agent:Alice');
+      const result = await oracle.entityLookup(CONTEXT_GRAPH, CG_ID, 'did:dkg:agent:Alice');
 
       // Only the two Alice triples in the proof index survive.
       expect(result.triples).toHaveLength(2);
@@ -103,13 +103,13 @@ describe('ContextOracle', () => {
     });
 
     it('returns empty triples for unknown entity', async () => {
-      const result = await oracle.entityLookup(PARANET, CG_ID, 'did:dkg:agent:Nobody');
+      const result = await oracle.entityLookup(CONTEXT_GRAPH, CG_ID, 'did:dkg:agent:Nobody');
       expect(result.triples).toHaveLength(0);
       expect(result.verification.batchIds).toHaveLength(0);
     });
 
     it('issues SPARQL query scoped to the correct named graph', async () => {
-      await oracle.entityLookup(PARANET, CG_ID, 'did:dkg:agent:Alice');
+      await oracle.entityLookup(CONTEXT_GRAPH, CG_ID, 'did:dkg:agent:Alice');
 
       const sparql = calls[0];
       expect(sparql).toContain(`GRAPH <${GRAPH_URI}>`);
@@ -120,7 +120,7 @@ describe('ContextOracle', () => {
   describe('queryWithProofs', () => {
     it('returns bindings and provenance triples with proofs', async () => {
       const result = await oracle.queryWithProofs(
-        PARANET, CG_ID,
+        CONTEXT_GRAPH, CG_ID,
         'SELECT ?s ?name WHERE { ?s <http://schema.org/name> ?name }',
       );
 
@@ -138,7 +138,7 @@ describe('ContextOracle', () => {
     });
 
     it('wraps query with GRAPH clause when not already present', async () => {
-      await oracle.queryWithProofs(PARANET, CG_ID, 'SELECT ?s WHERE { ?s ?p ?o }');
+      await oracle.queryWithProofs(CONTEXT_GRAPH, CG_ID, 'SELECT ?s WHERE { ?s ?p ?o }');
 
       const wrappedSparql = calls[0];
       expect(wrappedSparql).toContain(`GRAPH <${GRAPH_URI}>`);
@@ -147,13 +147,13 @@ describe('ContextOracle', () => {
     it('rejects queries that already contain GRAPH clauses', async () => {
       const alreadyWrapped = `SELECT ?s WHERE { GRAPH <${GRAPH_URI}> { ?s ?p ?o } }`;
       await expect(
-        oracle.queryWithProofs(PARANET, CG_ID, alreadyWrapped),
+        oracle.queryWithProofs(CONTEXT_GRAPH, CG_ID, alreadyWrapped),
       ).rejects.toThrow('User queries must not contain GRAPH clauses');
     });
 
     it('provenance query scopes to subjects from bindings', async () => {
       await oracle.queryWithProofs(
-        PARANET, CG_ID,
+        CONTEXT_GRAPH, CG_ID,
         'SELECT ?s ?name WHERE { ?s <http://schema.org/name> ?name }',
       );
 
@@ -171,7 +171,7 @@ describe('ContextOracle', () => {
       ]);
 
       const result = await oracle.queryWithProofs(
-        PARANET, CG_ID,
+        CONTEXT_GRAPH, CG_ID,
         `SELECT ?s ?name WHERE { ?s <http://schema.org/name> ?name . FILTER(?s = <did:dkg:agent:Zora>) }`,
       );
 
@@ -185,7 +185,7 @@ describe('ContextOracle', () => {
   describe('proveTriple', () => {
     it('returns proof when triple exists in store and index', async () => {
       const result = await oracle.proveTriple(
-        PARANET, CG_ID,
+        CONTEXT_GRAPH, CG_ID,
         'did:dkg:agent:Alice', 'http://schema.org/name', '"Alice"',
       );
 
@@ -203,7 +203,7 @@ describe('ContextOracle', () => {
 
     it('returns exists=false when triple not in store', async () => {
       const result = await oracle.proveTriple(
-        PARANET, CG_ID,
+        CONTEXT_GRAPH, CG_ID,
         'did:dkg:agent:Nobody', 'http://schema.org/name', '"Nobody"',
       );
 
@@ -219,7 +219,7 @@ describe('ContextOracle', () => {
       ]);
 
       const result = await oracle.proveTriple(
-        PARANET, CG_ID,
+        CONTEXT_GRAPH, CG_ID,
         'did:dkg:agent:Unknown', 'http://schema.org/x', '"y"',
       );
 
@@ -231,7 +231,7 @@ describe('ContextOracle', () => {
     it('rejects unsafe predicate IRI', async () => {
       await expect(
         oracle.proveTriple(
-          PARANET, CG_ID,
+          CONTEXT_GRAPH, CG_ID,
           'did:dkg:agent:Alice',
           'http://evil"> } }',
           '"Alice"',
@@ -241,7 +241,7 @@ describe('ContextOracle', () => {
 
     it('formats ASK query with correct SPARQL terms', async () => {
       await oracle.proveTriple(
-        PARANET, CG_ID,
+        CONTEXT_GRAPH, CG_ID,
         'did:dkg:agent:Alice', 'http://schema.org/name', '"Alice"',
       );
 
@@ -255,7 +255,7 @@ describe('ContextOracle', () => {
     it('rejects malformed literals to avoid unsafe SPARQL injection', async () => {
       await expect(
         oracle.proveTriple(
-          PARANET, CG_ID,
+          CONTEXT_GRAPH, CG_ID,
           'did:dkg:agent:Alice', 'http://schema.org/name', '"unclosed',
         ),
       ).rejects.toThrow(/Malformed or unsafe SPARQL literal/);
@@ -279,7 +279,7 @@ describe('ContextOracle', () => {
       await store.insert(extraTriples);
       proofIndex.storeBatch(CG_ID, '99', extraTriples);
 
-      const result = await oracle.entityLookup(PARANET, CG_ID, 'did:dkg:agent:Alice');
+      const result = await oracle.entityLookup(CONTEXT_GRAPH, CG_ID, 'did:dkg:agent:Alice');
 
       const batchIds = new Set(result.triples.map(t => t.proof.batchId));
       expect(batchIds.size).toBeGreaterThanOrEqual(1);
@@ -288,12 +288,12 @@ describe('ContextOracle', () => {
 
   describe('verification info', () => {
     it('includes chain ID from adapter', async () => {
-      const result = await oracle.entityLookup(PARANET, CG_ID, 'did:dkg:agent:Alice');
+      const result = await oracle.entityLookup(CONTEXT_GRAPH, CG_ID, 'did:dkg:agent:Alice');
       expect(result.verification.chainId).toBe('eip155:84532');
     });
 
     it('merkle roots match those computed by ProofIndex', async () => {
-      const result = await oracle.entityLookup(PARANET, CG_ID, 'did:dkg:agent:Bob');
+      const result = await oracle.entityLookup(CONTEXT_GRAPH, CG_ID, 'did:dkg:agent:Bob');
       const expectedRoot = proofIndex.getBatchMerkleRoot(CG_ID, BATCH_ID);
       expect(result.verification.merkleRoots[BATCH_ID]).toBe(expectedRoot);
     });
@@ -302,76 +302,76 @@ describe('ContextOracle', () => {
   describe('SPARQL injection prevention', () => {
     it('rejects entityUri with angle brackets', async () => {
       await expect(
-        oracle.entityLookup(PARANET, CG_ID, 'http://evil.com> } } SELECT * WHERE { <x'),
+        oracle.entityLookup(CONTEXT_GRAPH, CG_ID, 'http://evil.com> } } SELECT * WHERE { <x'),
       ).rejects.toThrow('Unsafe or empty IRI value');
     });
 
     it('rejects entityUri with double quotes', async () => {
       await expect(
-        oracle.entityLookup(PARANET, CG_ID, 'http://evil.com"'),
+        oracle.entityLookup(CONTEXT_GRAPH, CG_ID, 'http://evil.com"'),
       ).rejects.toThrow('Unsafe or empty IRI value');
     });
 
     it('rejects entityUri with curly braces', async () => {
       await expect(
-        oracle.entityLookup(PARANET, CG_ID, 'http://evil.com/path{inject}'),
+        oracle.entityLookup(CONTEXT_GRAPH, CG_ID, 'http://evil.com/path{inject}'),
       ).rejects.toThrow('Unsafe or empty IRI value');
     });
 
     it('rejects entityUri with backslash', async () => {
       await expect(
-        oracle.entityLookup(PARANET, CG_ID, 'http://evil.com\\path'),
+        oracle.entityLookup(CONTEXT_GRAPH, CG_ID, 'http://evil.com\\path'),
       ).rejects.toThrow('Unsafe or empty IRI value');
     });
 
     it('rejects entityUri with control characters', async () => {
       await expect(
-        oracle.entityLookup(PARANET, CG_ID, 'http://evil.com/\x00inject'),
+        oracle.entityLookup(CONTEXT_GRAPH, CG_ID, 'http://evil.com/\x00inject'),
       ).rejects.toThrow('Unsafe or empty IRI value');
     });
 
     it('rejects entityUri with space', async () => {
       await expect(
-        oracle.entityLookup(PARANET, CG_ID, 'http://evil.com/some path'),
+        oracle.entityLookup(CONTEXT_GRAPH, CG_ID, 'http://evil.com/some path'),
       ).rejects.toThrow('Unsafe or empty IRI value');
     });
 
     it('allows safe IRIs through', async () => {
-      const result = await oracle.entityLookup(PARANET, CG_ID, 'did:dkg:agent:Nobody');
+      const result = await oracle.entityLookup(CONTEXT_GRAPH, CG_ID, 'did:dkg:agent:Nobody');
       expect(result.triples).toHaveLength(0);
     });
 
     it('proveTriple rejects unsafe subject IRI', async () => {
       await expect(
-        oracle.proveTriple(PARANET, CG_ID, 'http://x"> DROP ALL', 'http://schema.org/name', '"Alice"'),
+        oracle.proveTriple(CONTEXT_GRAPH, CG_ID, 'http://x"> DROP ALL', 'http://schema.org/name', '"Alice"'),
       ).rejects.toThrow('Unsafe or empty IRI value');
     });
 
     it('proveTriple rejects literal with unbalanced quotes (SPARQL injection)', async () => {
       await expect(
-        oracle.proveTriple(PARANET, CG_ID, 'did:dkg:agent:Alice', 'http://schema.org/name', '"hello" . } SELECT * WHERE { ?x ?y ?z'),
+        oracle.proveTriple(CONTEXT_GRAPH, CG_ID, 'did:dkg:agent:Alice', 'http://schema.org/name', '"hello" . } SELECT * WHERE { ?x ?y ?z'),
       ).rejects.toThrow('Malformed or unsafe SPARQL literal');
     });
 
     it('proveTriple rejects literal that closes early and injects patterns', async () => {
       await expect(
-        oracle.proveTriple(PARANET, CG_ID, 'did:dkg:agent:Alice', 'http://schema.org/name', '"x" ; <http://evil.com/prop> "y"'),
+        oracle.proveTriple(CONTEXT_GRAPH, CG_ID, 'did:dkg:agent:Alice', 'http://schema.org/name', '"x" ; <http://evil.com/prop> "y"'),
       ).rejects.toThrow('Malformed or unsafe SPARQL literal');
     });
 
     it('proveTriple accepts well-formed simple literal', async () => {
-      const result = await oracle.proveTriple(PARANET, CG_ID, 'did:dkg:agent:Alice', 'http://schema.org/name', '"NotInStore"');
+      const result = await oracle.proveTriple(CONTEXT_GRAPH, CG_ID, 'did:dkg:agent:Alice', 'http://schema.org/name', '"NotInStore"');
       expect(result.exists).toBe(false);
     });
 
     it('proveTriple accepts well-formed language-tagged literal', async () => {
-      const result = await oracle.proveTriple(PARANET, CG_ID, 'did:dkg:agent:Alice', 'http://schema.org/name', '"Alice"@en');
+      const result = await oracle.proveTriple(CONTEXT_GRAPH, CG_ID, 'did:dkg:agent:Alice', 'http://schema.org/name', '"Alice"@en');
       expect(result.exists).toBe(false);
     });
 
     it('proveTriple accepts well-formed typed literal', async () => {
       const result = await oracle.proveTriple(
-        PARANET, CG_ID, 'did:dkg:agent:Alice', 'http://schema.org/age',
+        CONTEXT_GRAPH, CG_ID, 'did:dkg:agent:Alice', 'http://schema.org/age',
         '"30"^^<http://www.w3.org/2001/XMLSchema#integer>',
       );
       expect(result.exists).toBe(false);
@@ -379,7 +379,7 @@ describe('ContextOracle', () => {
 
     it('proveTriple accepts literal with escaped characters', async () => {
       const result = await oracle.proveTriple(
-        PARANET, CG_ID, 'did:dkg:agent:Alice', 'http://schema.org/desc',
+        CONTEXT_GRAPH, CG_ID, 'did:dkg:agent:Alice', 'http://schema.org/desc',
         '"line1\\nline2\\twith \\"quotes\\""',
       );
       expect(result.exists).toBe(false);

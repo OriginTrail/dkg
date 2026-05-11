@@ -21,11 +21,22 @@ import { ethers } from 'ethers';
 import type { PhaseCallback } from '../src/publisher.js';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, createTestContextGraph, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
+import { wrapPublisherForTest } from './_helpers/seal.js';
 
-let PARANET: string;
+let CONTEXT_GRAPH: string;
+let _kav10Address: string;
+let _provider: ethers.JsonRpcProvider;
+const _author = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+
+function makeTestPublisher(opts: ConstructorParameters<typeof DKGPublisher>[0]): DKGPublisher {
+  return wrapPublisherForTest(new DKGPublisher(opts), {
+    author: _author,
+    ctx: { provider: _provider, kav10Address: _kav10Address },
+  });
+}
 const ENTITY = 'did:dkg:agent:QmPhaseSeq';
 
-function q(s: string, p: string, o: string, g = `did:dkg:context-graph:${PARANET}`): Quad {
+function q(s: string, p: string, o: string, g = `did:dkg:context-graph:${CONTEXT_GRAPH}`): Quad {
   return { subject: s, predicate: p, object: o, graph: g };
 }
 
@@ -62,7 +73,9 @@ describe('Phase-sequence contracts', () => {
 
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const cgId = await createTestContextGraph(chain);
-    PARANET = String(cgId);
+    CONTEXT_GRAPH = String(cgId);
+    _provider = provider;
+    _kav10Address = await chain.getKnowledgeAssetsV10Address();
   });
   afterAll(async () => {
     await revertSnapshot(_fileSnapshot);
@@ -75,7 +88,7 @@ describe('Phase-sequence contracts', () => {
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const keypair = await generateEd25519Keypair();
 
-    const publisher = new DKGPublisher({
+    const publisher = makeTestPublisher({
       store,
       chain,
       eventBus: new TypedEventBus(),
@@ -91,7 +104,7 @@ describe('Phase-sequence contracts', () => {
 
     const { calls, fn } = recorder();
     await publisher.publish({
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads,
       onPhase: fn,
     });
@@ -136,7 +149,7 @@ describe('Phase-sequence contracts', () => {
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const keypair = await generateEd25519Keypair();
 
-    const publisher = new DKGPublisher({
+    const publisher = makeTestPublisher({
       store,
       chain,
       eventBus: new TypedEventBus(),
@@ -146,7 +159,7 @@ describe('Phase-sequence contracts', () => {
 
     const quads = [q(ENTITY, 'http://schema.org/name', '"Tentative"')];
     const { calls, fn } = recorder();
-    const result = await publisher.publish({ contextGraphId: PARANET, quads, onPhase: fn });
+    const result = await publisher.publish({ contextGraphId: CONTEXT_GRAPH, quads, onPhase: fn });
     const adapterAddress = new ethers.Wallet(HARDHAT_KEYS.CORE_OP).address;
 
     expect(result.status).toBe('tentative');
@@ -181,7 +194,7 @@ describe('Phase-sequence contracts', () => {
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const keypair = await generateEd25519Keypair();
 
-    const publisher = new DKGPublisher({
+    const publisher = makeTestPublisher({
       store,
       chain,
       eventBus: new TypedEventBus(),
@@ -192,12 +205,12 @@ describe('Phase-sequence contracts', () => {
 
     // Publish first so there's something to update
     const quads = [q(ENTITY, 'http://schema.org/name', '"Original"')];
-    const pub = await publisher.publish({ contextGraphId: PARANET, quads });
+    const pub = await publisher.publish({ contextGraphId: CONTEXT_GRAPH, quads });
 
     const updatedQuads = [q(ENTITY, 'http://schema.org/name', '"Updated"')];
     const { calls, fn } = recorder();
     await publisher.update(pub.kcId, {
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       quads: updatedQuads,
       onPhase: fn,
     });
@@ -238,7 +251,7 @@ describe('Phase-sequence contracts', () => {
 
     const msg = encodeWorkspacePublishRequest({
       shareOperationId: 'ws-test-001',
-      contextGraphId: PARANET,
+      contextGraphId: CONTEXT_GRAPH,
       publisherPeerId: '12D3KooWTest',
       nquads: new TextEncoder().encode(nquads),
       manifest: [{ rootEntity: ENTITY }],
@@ -267,7 +280,7 @@ describe('Phase-sequence contracts', () => {
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const keypair = await generateEd25519Keypair();
 
-    const publisher = new DKGPublisher({
+    const publisher = makeTestPublisher({
       store, chain, eventBus: new TypedEventBus(), keypair,
       publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
       publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
@@ -275,7 +288,7 @@ describe('Phase-sequence contracts', () => {
 
     const quads = [q(ENTITY, 'http://schema.org/name', '"Balanced"')];
     const { calls, fn } = recorder();
-    await publisher.publish({ contextGraphId: PARANET, quads, onPhase: fn });
+    await publisher.publish({ contextGraphId: CONTEXT_GRAPH, quads, onPhase: fn });
 
     const starts = calls.filter(([, s]) => s === 'start').map(([p]) => p);
     const ends = calls.filter(([, s]) => s === 'end').map(([p]) => p);
@@ -311,7 +324,7 @@ describe('Phase-sequence contracts', () => {
       const store = new OxigraphStore();
       const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
       const keypair = await generateEd25519Keypair();
-      const publisher = new DKGPublisher({
+      const publisher = makeTestPublisher({
         store, chain, eventBus: new TypedEventBus(), keypair,
         publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
         publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
@@ -324,7 +337,7 @@ describe('Phase-sequence contracts', () => {
 
       const quads = [q(ENTITY, 'http://schema.org/name', '"Throws"')];
       const { calls, fn } = recorder();
-      const result = await publisher.publish({ contextGraphId: PARANET, quads, onPhase: fn });
+      const result = await publisher.publish({ contextGraphId: CONTEXT_GRAPH, quads, onPhase: fn });
       expect(result.status).toBe('tentative');
 
       expect(calls.filter(([p]) => p === 'chain:writeahead').length).toBe(0);
@@ -338,7 +351,7 @@ describe('Phase-sequence contracts', () => {
       const store = new OxigraphStore();
       const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
       const keypair = await generateEd25519Keypair();
-      const publisher = new DKGPublisher({
+      const publisher = makeTestPublisher({
         store, chain, eventBus: new TypedEventBus(), keypair,
         publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
         publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
@@ -352,7 +365,7 @@ describe('Phase-sequence contracts', () => {
 
       const quads = [q(ENTITY, 'http://schema.org/name', '"Throws"')];
       const { calls, fn } = recorder();
-      const result = await publisher.publish({ contextGraphId: PARANET, quads, onPhase: fn });
+      const result = await publisher.publish({ contextGraphId: CONTEXT_GRAPH, quads, onPhase: fn });
       expect(result.status).toBe('tentative');
 
       const startIdx = calls.findIndex(([p, s]) => p === 'chain:writeahead' && s === 'start');
@@ -371,14 +384,14 @@ describe('Phase-sequence contracts', () => {
       const store = new OxigraphStore();
       const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
       const keypair = await generateEd25519Keypair();
-      const publisher = new DKGPublisher({
+      const publisher = makeTestPublisher({
         store, chain, eventBus: new TypedEventBus(), keypair,
         publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
         publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
       });
 
       const origQuads = [q(ENTITY, 'http://schema.org/name', '"Seed"')];
-      const pub = await publisher.publish({ contextGraphId: PARANET, quads: origQuads });
+      const pub = await publisher.publish({ contextGraphId: CONTEXT_GRAPH, quads: origQuads });
       expect(pub.status).toBe('confirmed');
 
       (chain as unknown as { updateKnowledgeCollectionV10: (params: { onBroadcast?: () => void }) => Promise<never> }).updateKnowledgeCollectionV10 =
@@ -398,7 +411,7 @@ describe('Phase-sequence contracts', () => {
       let threw: unknown = null;
       try {
         await publisher.update(pub.kcId, {
-          contextGraphId: PARANET,
+          contextGraphId: CONTEXT_GRAPH,
           quads: newQuads,
           onPhase: fn,
         });
@@ -424,7 +437,7 @@ describe('Phase-sequence contracts', () => {
       const store = new OxigraphStore();
       const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
       const keypair = await generateEd25519Keypair();
-      const publisher = new DKGPublisher({
+      const publisher = makeTestPublisher({
         store, chain, eventBus: new TypedEventBus(), keypair,
         publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
         publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
@@ -432,7 +445,7 @@ describe('Phase-sequence contracts', () => {
 
       const quads = [q(ENTITY, 'http://schema.org/name', '"Hashed"')];
       const { calls, fn } = recorder();
-      await publisher.publish({ contextGraphId: PARANET, quads, onPhase: fn });
+      await publisher.publish({ contextGraphId: CONTEXT_GRAPH, quads, onPhase: fn });
 
       // Exactly one txsigned:start event, with a hex hash embedded.
       const txsignedStarts = calls.filter(
@@ -461,7 +474,7 @@ describe('Phase-sequence contracts', () => {
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const keypair = await generateEd25519Keypair();
 
-    const publisher = new DKGPublisher({
+    const publisher = makeTestPublisher({
       store, chain, eventBus: new TypedEventBus(), keypair,
       publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
       publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
@@ -469,7 +482,7 @@ describe('Phase-sequence contracts', () => {
 
     const quads = [q(ENTITY, 'http://schema.org/name', '"Nested"')];
     const { calls, fn } = recorder();
-    await publisher.publish({ contextGraphId: PARANET, quads, onPhase: fn });
+    await publisher.publish({ contextGraphId: CONTEXT_GRAPH, quads, onPhase: fn });
 
     const idxOf = (phase: string, status: 'start' | 'end') =>
       calls.findIndex(([p, s]) => p === phase && s === status);

@@ -17,7 +17,7 @@ This is not just a tooling benchmark. It is a collaboration experiment:
 - **Exp-B2:** 4 agents parallel, semantic wrappers
 - **Exp-AB:** 4 agents parallel, SPARQL-only DKG
 - **Exp-C1:** 4 agents parallel, workspace shared-memory log + DKG query
-- **Exp-C2:** 4 agents parallel, full DKG publish/query in shared paranet
+- **Exp-C2:** 4 agents parallel, full DKG publish/query in shared contextGraph
 
 ## Overall Results
 

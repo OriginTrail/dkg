@@ -31,11 +31,11 @@ sequenceDiagram
 
     Note over PlayerA, CG: Each player runs node, join testnet, open Node UI on own machine
     PlayerA->>NodeA: start node, open UI
-    NodeA->>Workspace: connect to paranet
+    NodeA->>Workspace: connect to contextGraph
     PlayerB->>NodeB: start node, open Node UI
     PlayerC->>NodeC: start node, open Node UI
-    NodeB->>Workspace: connect to paranet
-    NodeC->>Workspace: connect to paranet
+    NodeB->>Workspace: connect to contextGraph
+    NodeC->>Workspace: connect to contextGraph
 
     Note over PlayerA, CG: Lobby - wagons are context graphs, min 3 players to create
     PlayerA->>NodeA: Create wagon or Join existing

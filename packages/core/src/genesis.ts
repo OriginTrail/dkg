@@ -20,8 +20,8 @@ const GENESIS_TRIG = `\
     schema:name "DKG V9 Testnet" ;
     dkg:genesisVersion "1"^^xsd:integer ;
     dkg:createdAt "2026-02-24T00:00:00Z"^^xsd:dateTime ;
-    dkg:systemParanets <did:dkg:context-graph:agents> ;
-    dkg:systemParanets <did:dkg:context-graph:ontology> .
+    dkg:systemContextGraphs <did:dkg:context-graph:agents> ;
+    dkg:systemContextGraphs <did:dkg:context-graph:ontology> .
 `;
 
 const GENESIS_AGENTS_GRAPH = 'did:dkg:context-graph:agents';
@@ -57,30 +57,30 @@ function buildGenesisQuads(): GenesisQuad[] {
   quads.push(q(DEFAULT, 'did:dkg:network:v9-testnet', `${SCHEMA}name`, '"DKG V9 Testnet"'));
   quads.push(q(DEFAULT, 'did:dkg:network:v9-testnet', `${DKG}genesisVersion`, '"1"'));
   quads.push(q(DEFAULT, 'did:dkg:network:v9-testnet', `${DKG}createdAt`, '"2026-02-24T00:00:00Z"'));
-  quads.push(q(DEFAULT, 'did:dkg:network:v9-testnet', `${DKG}systemParanets`, `did:dkg:context-graph:agents`));
-  quads.push(q(DEFAULT, 'did:dkg:network:v9-testnet', `${DKG}systemParanets`, `did:dkg:context-graph:ontology`));
+  quads.push(q(DEFAULT, 'did:dkg:network:v9-testnet', `${DKG}systemContextGraphs`, `did:dkg:context-graph:agents`));
+  quads.push(q(DEFAULT, 'did:dkg:network:v9-testnet', `${DKG}systemContextGraphs`, `did:dkg:context-graph:ontology`));
 
-  // --- Agents paranet definition ---
-  quads.push(q(AG, 'did:dkg:context-graph:agents', `${RDF}type`, `${DKG}Paranet`));
-  quads.push(q(AG, 'did:dkg:context-graph:agents', `${RDF}type`, `${DKG}SystemParanet`));
+  // --- Agents contextGraph definition ---
+  quads.push(q(AG, 'did:dkg:context-graph:agents', `${RDF}type`, `${DKG}ContextGraph`));
+  quads.push(q(AG, 'did:dkg:context-graph:agents', `${RDF}type`, `${DKG}SystemContextGraph`));
   quads.push(q(AG, 'did:dkg:context-graph:agents', `${SCHEMA}name`, '"Agent Registry"'));
-  quads.push(q(AG, 'did:dkg:context-graph:agents', `${SCHEMA}description`, '"System paranet for agent discovery and profiles"'));
-  quads.push(q(AG, 'did:dkg:context-graph:agents', `${DKG}gossipTopic`, '"dkg/paranet/agents/publish"'));
+  quads.push(q(AG, 'did:dkg:context-graph:agents', `${SCHEMA}description`, '"System contextGraph for agent discovery and profiles"'));
+  quads.push(q(AG, 'did:dkg:context-graph:agents', `${DKG}gossipTopic`, '"dkg/context-graph/agents/finalization"'));
   quads.push(q(AG, 'did:dkg:context-graph:agents', `${DKG}replicationPolicy`, '"full"'));
 
-  // --- Ontology paranet definition ---
-  quads.push(q(OG, 'did:dkg:context-graph:ontology', `${RDF}type`, `${DKG}Paranet`));
-  quads.push(q(OG, 'did:dkg:context-graph:ontology', `${RDF}type`, `${DKG}SystemParanet`));
+  // --- Ontology contextGraph definition ---
+  quads.push(q(OG, 'did:dkg:context-graph:ontology', `${RDF}type`, `${DKG}ContextGraph`));
+  quads.push(q(OG, 'did:dkg:context-graph:ontology', `${RDF}type`, `${DKG}SystemContextGraph`));
   quads.push(q(OG, 'did:dkg:context-graph:ontology', `${SCHEMA}name`, '"Ontology Registry"'));
-  quads.push(q(OG, 'did:dkg:context-graph:ontology', `${SCHEMA}description`, '"System paranet for shared ontology and paranet definitions"'));
-  quads.push(q(OG, 'did:dkg:context-graph:ontology', `${DKG}gossipTopic`, '"dkg/paranet/ontology/publish"'));
+  quads.push(q(OG, 'did:dkg:context-graph:ontology', `${SCHEMA}description`, '"System contextGraph for shared ontology and contextGraph definitions"'));
+  quads.push(q(OG, 'did:dkg:context-graph:ontology', `${DKG}gossipTopic`, '"dkg/context-graph/ontology/finalization"'));
   quads.push(q(OG, 'did:dkg:context-graph:ontology', `${DKG}replicationPolicy`, '"full"'));
 
   // --- Ontology class definitions ---
   quads.push(q(OG, `${DKG}Network`,              `${RDF}type`, `${RDFS}Class`));
-  quads.push(q(OG, `${DKG}Paranet`,              `${RDF}type`, `${RDFS}Class`));
-  quads.push(q(OG, `${DKG}SystemParanet`,        `${RDF}type`, `${RDFS}Class`));
-  quads.push(q(OG, `${DKG}SystemParanet`,        `${RDFS}subClassOf`, `${DKG}Paranet`));
+  quads.push(q(OG, `${DKG}ContextGraph`,              `${RDF}type`, `${RDFS}Class`));
+  quads.push(q(OG, `${DKG}SystemContextGraph`,        `${RDF}type`, `${RDFS}Class`));
+  quads.push(q(OG, `${DKG}SystemContextGraph`,        `${RDFS}subClassOf`, `${DKG}ContextGraph`));
   quads.push(q(OG, `${DKG}Agent`,                `${RDF}type`, `${RDFS}Class`));
   quads.push(q(OG, `${DKG}Agent`,                `${RDFS}subClassOf`, `${ERC8004}Agent`));
   quads.push(q(OG, `${DKG}Agent`,                `${RDFS}subClassOf`, `${PROV}Agent`));
@@ -96,7 +96,7 @@ function buildGenesisQuads(): GenesisQuad[] {
   quads.push(q(OG, `${DKG}peerId`,            `${RDF}type`, `${RDF}Property`));
   quads.push(q(OG, `${DKG}publicKey`,         `${RDF}type`, `${RDF}Property`));
   quads.push(q(OG, `${DKG}nodeRole`,          `${RDF}type`, `${RDF}Property`));
-  quads.push(q(OG, `${DKG}paranet`,           `${RDF}type`, `${RDF}Property`));
+  quads.push(q(OG, `${DKG}contextGraph`,           `${RDF}type`, `${RDF}Property`));
   quads.push(q(OG, `${DKG}gossipTopic`,       `${RDF}type`, `${RDF}Property`));
   quads.push(q(OG, `${DKG}relayAddress`,      `${RDF}type`, `${RDF}Property`));
   quads.push(q(OG, `${DKG}genesisVersion`,    `${RDF}type`, `${RDF}Property`));
@@ -151,9 +151,6 @@ export const SYSTEM_CONTEXT_GRAPHS = {
   ONTOLOGY: 'ontology',
 } as const;
 
-/** @deprecated Use SYSTEM_CONTEXT_GRAPHS */
-export const SYSTEM_PARANETS = SYSTEM_CONTEXT_GRAPHS;
-
 export const DKG_ONTOLOGY = {
   RDF_TYPE: `${RDF}type`,
   SCHEMA_NAME: `${SCHEMA}name`,
@@ -165,12 +162,8 @@ export const DKG_ONTOLOGY = {
   DKG_PUBLIC_KEY: `${DKG}publicKey`,
   DKG_NODE_ROLE: `${DKG}nodeRole`,
   DKG_RELAY_ADDRESS: `${DKG}relayAddress`,
-  DKG_CONTEXT_GRAPH: `${DKG}Paranet`,
-  DKG_SYSTEM_CONTEXT_GRAPH: `${DKG}SystemParanet`,
-  /** @deprecated Use DKG_CONTEXT_GRAPH */
-  DKG_PARANET: `${DKG}Paranet`,
-  /** @deprecated Use DKG_SYSTEM_CONTEXT_GRAPH */
-  DKG_SYSTEM_PARANET: `${DKG}SystemParanet`,
+  DKG_CONTEXT_GRAPH: `${DKG}ContextGraph`,
+  DKG_SYSTEM_CONTEXT_GRAPH: `${DKG}SystemContextGraph`,
   DKG_NETWORK: `${DKG}Network`,
   DKG_NETWORK_ID: `${DKG}networkId`,
   DKG_GENESIS_VERSION: `${DKG}genesisVersion`,
@@ -183,7 +176,7 @@ export const DKG_ONTOLOGY = {
   DKG_PARTICIPANT_AGENT: `${DKG}participantAgent`,
   DKG_CCL_POLICY: `${DKG}CCLPolicy`,
   DKG_POLICY_BINDING: `${DKG}PolicyBinding`,
-  DKG_POLICY_APPLIES_TO_PARANET: `${DKG}appliesToParanet`,
+  DKG_POLICY_APPLIES_TO_CONTEXT_GRAPH: `${DKG}appliesToContextGraph`,
   DKG_POLICY_VERSION: `${DKG}policyVersion`,
   DKG_POLICY_LANGUAGE: `${DKG}policyLanguage`,
   DKG_POLICY_FORMAT: `${DKG}policyFormat`,
@@ -232,4 +225,11 @@ export const DKG_ONTOLOGY = {
   DKG_AGENT_ADDRESS: `${DKG}agentAddress`,
   DKG_AGENT_MODE: `${DKG}agentMode`,
   DKG_AGENT_AUTH_TOKEN: `${DKG}agentAuthToken`,
+  // RFC-001 §5.2 — off-chain author-attestation provenance vocabulary.
+  // These are pure SPARQL-filtering convenience triples; the on-chain
+  // `KnowledgeBatch.authorAddress` remains canonical. Implementations that
+  // don't need rich provenance queries MAY skip emitting these triples.
+  DKG_PUBLICATION: `${DKG}Publication`,
+  DKG_PUBLISH_OPERATION_ID: `${DKG}publishOperationId`,
+  DKG_AUTHORED_BY: `${DKG}authoredBy`,
 } as const;

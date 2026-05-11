@@ -55,19 +55,19 @@ WHERE {
 ORDER BY DESC(?score)
 ```
 
-### Embedding Model as Paranet Config
+### Embedding Model as ContextGraph Config
 
-The embedding model is configured **per paranet** (not per node), ensuring cross-node score comparability:
+The embedding model is configured **per contextGraph** (not per node), ensuring cross-node score comparability:
 
 ```turtle
-<did:dkg:paranet:0xabc>
+<did:dkg:context-graph:0xabc>
     dkgcap:embeddingModel [
         dkgcap:modelType dkgcap:TransE ;
         dkgcap:dimensions "200"^^xsd:integer ;
     ] .
 ```
 
-All nodes in a paranet use the same model.
+All nodes in a contextGraph use the same model.
 
 ### Vector Index
 
@@ -142,7 +142,7 @@ Sources → Extract → Transform → Validate → Batch → Publish
 
 ```yaml
 name: climate-monitor
-paranet: "did:dkg:paranet:0xclimate"
+contextGraph: "did:dkg:context-graph:0xclimate"
 source:
   type: rss
   config: { urls: ["https://climate-news.org/feed"] }
@@ -176,10 +176,10 @@ Interactive knowledge graph visualization for debugging, exploration, and market
 ### Capabilities
 
 - **Force-directed graph**: 2D/3D rendering of RDF graphs (based on existing `rdf-force-graph`).
-- **Paranet browser**: Navigate paranets, explore KAs, view provenance chains.
+- **ContextGraph browser**: Navigate contextGraphs, explore KAs, view provenance chains.
 - **Skill marketplace UI**: Browse agents, skill offerings, pricing, success rates.
 - **Agent profile pages**: View an agent's skills, hosting capabilities, reputation.
-- **Filtering**: By paranet, entity type, predicate, publisher, time range.
+- **Filtering**: By contextGraph, entity type, predicate, publisher, time range.
 - **Export**: SVG, PNG, interactive HTML.
 
 ---
@@ -196,7 +196,7 @@ Interactive knowledge graph visualization for debugging, exploration, and market
 
 ### Data Migration
 
-- **On-chain**: No migration needed. KCs/KAs/paranets remain valid.
+- **On-chain**: No migration needed. KCs/KAs/contextGraphs remain valid.
 - **Off-chain**: V9 connects to same triple store (GraphDB/Blazegraph). Or: export N-Quads → import into new backend.
 - **UAL format**: Unchanged. V8 UALs work in V9.
 
@@ -204,9 +204,9 @@ Interactive knowledge graph visualization for debugging, exploration, and market
 
 | V8 Call | V9 Equivalent |
 |---|---|
-| `DkgClient.asset.create(content)` | `publisher.publish(triples, { paranetId })` |
+| `DkgClient.asset.create(content)` | `publisher.publish(triples, { contextGraphId })` |
 | `DkgClient.asset.get(ual)` | `query.resolveKA(ual)` |
-| `DkgClient.graph.query(sparql)` | `query.sparql(sparql, { paranetId })` |
+| `DkgClient.graph.query(sparql)` | `query.sparql(sparql, { contextGraphId })` |
 | `DkgClient.node.info()` | `node.status()` |
 
 ---
@@ -221,7 +221,7 @@ Interactive knowledge graph visualization for debugging, exploration, and market
 | **Eclipse** | Diverse bootstrap nodes, minimum peer diversity, DHT verification |
 | **Macaroon theft** | Short TTL, identity binding, rate limiting, revocation list |
 | **Merkle manipulation** | Independent computation per node, multi-sig consensus, on-chain root |
-| **Data poisoning** | SHACL validation, paranet curation (STAGING policy), provenance tracing |
+| **Data poisoning** | SHACL validation, contextGraph curation (STAGING policy), provenance tracing |
 | **Privacy leakage** | Encryption at rest, key delegates, ECDH key exchange, right-to-be-forgotten |
 | **UAL squatting** | Deposit + expiry + slashing |
 
@@ -271,17 +271,17 @@ Full threat model should be developed as a separate document during implementati
 | 3 | Extractors: LLM-based (OpenAI/Anthropic), regex-based | 2 |
 | 4 | Transformers + validators: RDF mapping, SHACL validation | 1 |
 | 5 | Batcher + publisher integration: auto-partition, batch publish | 1 |
-| 6 | `@origintrail-official/dkg-visualizer`: force-directed graph, paranet browser, agent profiles, marketplace UI | 3 |
+| 6 | `@origintrail-official/dkg-visualizer`: force-directed graph, contextGraph browser, agent profiles, marketplace UI | 3 |
 
 **Total: ~10 weeks**
 
 ### Integration Milestone
 
 **After both WPs**: End-to-end scenario:
-- Pipeline agent monitors RSS feed → extracts entities → publishes KAs to climate paranet
-- Another agent queries the paranet with neural predicates (ngdb:similar)
-- Visualizer displays the paranet graph, agent profiles, and marketplace
-- Neural embeddings are consistent across two nodes in the same paranet
+- Pipeline agent monitors RSS feed → extracts entities → publishes KAs to climate contextGraph
+- Another agent queries the contextGraph with neural predicates (ngdb:similar)
+- Visualizer displays the contextGraph graph, agent profiles, and marketplace
+- Neural embeddings are consistent across two nodes in the same contextGraph
 
 ---
 

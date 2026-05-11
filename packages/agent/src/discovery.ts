@@ -66,7 +66,7 @@ export class DiscoveryClient {
       ${limitClause}
     `;
 
-    const result = await this.engine.query(sparql, { paranetId: AGENT_REGISTRY_CONTEXT_GRAPH });
+    const result = await this.engine.query(sparql, { contextGraphId: AGENT_REGISTRY_CONTEXT_GRAPH });
 
     return result.bindings.map((row) => ({
       agentUri: row['agent'],
@@ -117,7 +117,7 @@ export class DiscoveryClient {
       ${limitClause}
     `;
 
-    const result = await this.engine.query(sparql, { paranetId: AGENT_REGISTRY_CONTEXT_GRAPH });
+    const result = await this.engine.query(sparql, { contextGraphId: AGENT_REGISTRY_CONTEXT_GRAPH });
 
     return result.bindings.map((row) => ({
       agentUri: row['agent'],
@@ -143,7 +143,7 @@ export class DiscoveryClient {
       LIMIT 1
     `;
 
-    const result = await this.engine.query(sparql, { paranetId: AGENT_REGISTRY_CONTEXT_GRAPH });
+    const result = await this.engine.query(sparql, { contextGraphId: AGENT_REGISTRY_CONTEXT_GRAPH });
     if (result.bindings.length === 0) return null;
 
     const row = result.bindings[0];

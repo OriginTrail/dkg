@@ -11,7 +11,7 @@ V8 contracts are already deployed. The V9 upgrade adds two new contracts into th
 | `base_sepolia_dev` | devnet | `0xE043daF4cC8ae2c720ef95fc82574a37a429c40A` | 84532 |
 | `base_sepolia_test` | testnet | `0xC056e67Da4F51377Ad1B01f50F655fFdcCD809F6` | 84532 |
 
-The Hub already contains all V8 contracts (Token, Identity, Profile, Staking, KnowledgeCollection, Paranets, etc.). We're deploying:
+The Hub already contains all V8 contracts (Token, Identity, Profile, Staking, KnowledgeCollection, ContextGraphs, etc.). We're deploying:
 - **`KnowledgeAssetsStorage`** — new V9 storage (registered as asset storage in Hub)
 - **`KnowledgeAssets`** — new V9 logic (registered as contract in Hub)
 

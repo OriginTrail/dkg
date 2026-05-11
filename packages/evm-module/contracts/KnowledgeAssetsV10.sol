@@ -4,12 +4,12 @@ pragma solidity ^0.8.20;
 
 import {AskStorage} from "./storage/AskStorage.sol";
 import {EpochStorage} from "./storage/EpochStorage.sol";
-import {PaymasterManager} from "./storage/PaymasterManager.sol";
 import {Chronos} from "./storage/Chronos.sol";
 import {KnowledgeCollectionStorage} from "./storage/KnowledgeCollectionStorage.sol";
 import {IdentityStorage} from "./storage/IdentityStorage.sol";
 import {ParametersStorage} from "./storage/ParametersStorage.sol";
 import {ConvictionStakingStorage} from "./storage/ConvictionStakingStorage.sol";
+import {ShardingTableStorage} from "./storage/ShardingTableStorage.sol";
 import {ContextGraphs} from "./ContextGraphs.sol";
 import {ContextGraphStorage} from "./storage/ContextGraphStorage.sol";
 import {ContextGraphValueStorage} from "./storage/ContextGraphValueStorage.sol";
@@ -18,12 +18,12 @@ import {KnowledgeCollectionLib} from "./libraries/KnowledgeCollectionLib.sol";
 import {TokenLib} from "./libraries/TokenLib.sol";
 import {IdentityLib} from "./libraries/IdentityLib.sol";
 import {INamed} from "./interfaces/INamed.sol";
-import {IPaymaster} from "./interfaces/IPaymaster.sol";
 import {IVersioned} from "./interfaces/IVersioned.sol";
 import {IInitializable} from "./interfaces/IInitializable.sol";
 import {IDKGPublishingConvictionNFT} from "./interfaces/IDKGPublishingConvictionNFT.sol";
 import {ContractStatus} from "./abstract/ContractStatus.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC1271} from "@openzeppelin/contracts/interfaces/IERC1271.sol";
 import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import {ECDSA} from "solady/src/utils/ECDSA.sol";
 
@@ -36,35 +36,36 @@ import {ECDSA} from "solady/src/utils/ECDSA.sol";
  *   - DKGPublishingConvictionNFT (publisher discount NFT; auto-resolves agent→account)
  *   - KnowledgeCollectionStorage (V8-compatible data model)
  *
- * Four public entry points (two publish + two update, mirrored design):
- *   - `publish`        — conviction path. NFT covers the cost. TRAC accounting
- *                        was already done at `createAccount` time, so this
- *                        path does NOT touch `_addTokens` or `_distributeTokens`
- *                        (double-count prevention).
- *   - `publishDirect`  — market-rate path. Pulls TRAC from caller/paymaster
- *                        and distributes across the epoch range via
- *                        `_distributeTokens`.
- *   - `update`         — conviction path for UPDATES. Charges only the DELTA
- *                        between `newTokenAmount` and the KC's current
- *                        `tokenAmount` via `coverPublishingCost`. Metadata-only
- *                        updates (`delta == 0`) skip payment entirely.
- *   - `updateDirect`   — market-rate update. Pulls delta TRAC via `_addTokens`
- *                        and distributes it over the REMAINING lifetime via
- *                        `_distributeTokens`.
+ * Two public entry points (RFC-001 unified design):
+ *   - `publish` — single entrypoint with two-branch cost coverage.
+ *                 Auto-detects PCA discount via
+ *                 `DKGPublishingConvictionNFT.agentToAccountId(msg.sender)`:
+ *                 non-zero ⇒ discount path (NFT covers cost; TRAC was
+ *                 already distributed at `createAccount` time, so the
+ *                 entrypoint MUST NOT call `_distributeTokens` here);
+ *                 zero ⇒ direct-spend path (`transferFrom(msg.sender, CSS,
+ *                 fullCost)` + epoch-range distribution).
+ *   - `update`  — same two-branch shape applied to delta payments. The
+ *                 prior `publishDirect` / `updateDirect` entrypoints are
+ *                 removed (no aliases retained — RFC-001 §3.7).
  *
- * Both publish paths share `_executePublishCore`. Both update paths share
- * `_executeUpdateCore`. Each core runs: sig verification → authorization →
- * validation → KCS mutation → atomic CG value delta write → per-node
- * produced-value bookkeeping. No TRAC movement happens in the cores — the
- * public entries branch on payment path.
+ * `_executePublishCore` runs: author attestation verification → ACK
+ * signature verification → CG existence + auth → KCS create → atomic CG
+ * value diff → per-node produced-value bookkeeping. No TRAC movement
+ * happens in the core — the public entry branches on cost coverage.
  *
  * ACK digest prefix (H5 closure): `block.chainid || address(this)` pins a
  * signed ACK to this contract on this chain. Replay across chains / forks
  * / contract redeployments is rejected at signature verification.
  *
- * Publisher digest field order (N26 closure): `(publisherNodeIdentityId,
- * contextGraphId, merkleRoot)` — matches spec `07_EVM_MODULE.md:164`. For
- * updates the same order is used with the new merkle root.
+ * Author attestation (RFC-001 §3.1): every publish carries a verified author
+ * identity. The attestation is an EIP-712 typed-data signature over
+ * `(contextGraphId, merkleRoot, authorAddress, schemeVersion)` under the
+ * V10.1 domain. Verification dispatches at runtime on
+ * `authorAddress.code.length` — EOAs use `ECDSA.tryRecover + equality`,
+ * smart-contract wallets use `IERC1271.isValidSignature`. The
+ * publisher-node signature surface is removed; `publisherNodeIdentityId`
+ * is now a self-claimed attribution field (RFC-001 §3.6).
  *
  * Authorization:
  *   - publish: N17 closure — `isAuthorizedPublisher(msg.sender)` via facade.
@@ -93,6 +94,21 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
 
     // --- V10 publish input (grouped to bypass the 16-arg stack limit) ---
 
+    /**
+     * @notice V10.1 publish params (RFC-001).
+     *
+     * **Strictly breaking** vs V10.0: the per-publish publisher signature
+     * (`publisherNodeR`, `publisherNodeVS`) is removed; four required author
+     * attestation fields (`authorAddress`, `authorR`, `authorVS`,
+     * `authorSchemeVersion`) are added. `publisherNodeIdentityId` keeps the
+     * same wire position but its semantics flip: it is now a self-claimed
+     * attribution target — "the core that gets publishing-factor credit
+     * for this publish" — with no per-publish signature gate.
+     *
+     * The author attestation is mandatory: every publish post-upgrade must
+     * carry a verified author. `authorAddress == 0` reverts with
+     * `"Author required"`. There is no zero-default opt-out.
+     */
     struct PublishParams {
         string publishOperationId;
         uint256 contextGraphId;
@@ -105,9 +121,18 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
         /// @notice V10 flat-KC Merkle leaf count (sorted + deduped), must match
         ///         off-chain `V10MerkleTree` built from the same publish payload.
         uint32 merkleLeafCount;
+        /// @notice Self-claimed attribution: the core that gets publishing-factor
+        ///         credit. `0` means "no attribution claimed". No on-chain
+        ///         consent gate — see RFC-001 §3.6.
         uint72 publisherNodeIdentityId;
-        bytes32 publisherNodeR;
-        bytes32 publisherNodeVS;
+        // ── RFC-001: author attestation (REQUIRED — every publish post-upgrade) ──
+        /// @notice Author identity. EOA or smart-contract wallet (EIP-1271).
+        ///         `0` reverts.
+        address authorAddress;
+        bytes32 authorR;
+        bytes32 authorVS;
+        uint8   authorSchemeVersion;
+        // ── ACK quorum (unchanged) ──
         uint72[] identityIds;
         bytes32[] r;
         bytes32[] vs;
@@ -120,7 +145,13 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
      * KAV10 computes `delta = newTokenAmount - currentTokenAmount` internally
      * and charges the caller only for the delta via the conviction or direct
      * path. Metadata-only updates (`delta == 0`) are free but still require
-     * fresh publisher + ACK signatures.
+     * a fresh ACK quorum.
+     *
+     * RFC-001: per-update publisher signature (`publisherNodeR/VS`) is removed.
+     * `publisherNodeIdentityId` is now a self-claimed attribution field — same
+     * semantics as in `PublishParams`. RFC-001 v1.1 will add the author
+     * attestation fields here too; for now the update path does not verify
+     * authorship on chain.
      */
     struct UpdateParams {
         uint256 id;
@@ -132,8 +163,6 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
         uint256 mintKnowledgeAssetsAmount;
         uint256[] knowledgeAssetsToBurn;
         uint72 publisherNodeIdentityId;
-        bytes32 publisherNodeR;
-        bytes32 publisherNodeVS;
         uint72[] identityIds;
         bytes32[] r;
         bytes32[] vs;
@@ -143,7 +172,6 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
 
     AskStorage public askStorage;
     EpochStorage public epochStorage;
-    PaymasterManager public paymasterManager;
     KnowledgeCollectionStorage public knowledgeCollectionStorage;
     Chronos public chronos;
     IERC20 public tokenContract;
@@ -152,6 +180,12 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
     /// @notice v4.0.0 — TRAC vault + V10 stake reads. Replaces the prior
     ///         `stakingStorage` field; CSS is the V10 source of truth.
     ConvictionStakingStorage public convictionStakingStorage;
+    /// @notice RFC-001: ACK signer eligibility now gates on sharding-table
+    ///         membership rather than positive stake. Edge-owned CGs that
+    ///         broadcast publishes to any active core need this — the prior
+    ///         "must have V10 stake" check rejected freshly-promoted hosts
+    ///         and locked edge fan-out behind the staking lifecycle.
+    ShardingTableStorage public shardingTableStorage;
     ContextGraphs public contextGraphs;
     ContextGraphStorage public contextGraphStorage;
     ContextGraphValueStorage public contextGraphValueStorage;
@@ -162,6 +196,54 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
     error ZeroAddressDependency(string name);
     error ZeroContextGraphId();
     error ZeroEpochs();
+
+    // --- RFC-001 author attestation errors ---
+
+    /// @dev `authorAddress == 0`. Every post-upgrade publish must carry a
+    ///      verified author. There is no zero-default opt-out (RFC-001 §3.1).
+    error AuthorRequired();
+
+    /// @dev `authorSchemeVersion != 1`. v1 is the only supported scheme;
+    ///      future schemes (multi-sig, threshold, passkey-aggregated) bump
+    ///      this and replace the `(authorR, authorVS)` pair with a `bytes`
+    ///      signature field — see RFC-001 §9.6.
+    error UnsupportedAuthorScheme(uint8 schemeVersion);
+
+    /// @dev EOA branch: `ECDSA.tryRecover(digest, r, vs) != authorAddress`.
+    error InvalidAuthorSignature();
+
+    /// @dev EIP-1271 branch: smart-wallet's `isValidSignature` returned a
+    ///      magic value other than `0x1626ba7e`.
+    error InvalidAuthorSignature1271();
+
+    /// @dev RFC-001 §3.2 — EIP-712 type hash for `AuthorAttestation`.
+    /// `keccak256("AuthorAttestation(uint256 contextGraphId,bytes32 merkleRoot,address authorAddress,uint8 schemeVersion)")`.
+    bytes32 private constant _AUTHOR_ATTESTATION_TYPEHASH =
+        keccak256(
+            "AuthorAttestation(uint256 contextGraphId,bytes32 merkleRoot,address authorAddress,uint8 schemeVersion)"
+        );
+
+    /// @dev EIP-712 domain typehash. `keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)")`.
+    bytes32 private constant _EIP712_DOMAIN_TYPEHASH =
+        keccak256(
+            "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
+        );
+
+    /// @dev `name` hash for the EIP-712 domain — must match the off-chain
+    ///      attestation builder. Mirrors the contract `_NAME` literal; any
+    ///      rename in a future upgrade is a deliberate breaking change to
+    ///      the digest and must update both sites.
+    bytes32 private constant _EIP712_NAME_HASH = keccak256(bytes("KnowledgeAssetsV10"));
+
+    /// @dev `version` hash for the EIP-712 domain. Bound to the major.minor
+    ///      portion of `_VERSION` ("10.1") so off-chain signers can pin the
+    ///      attestation to the contract semantic version. Patch bumps do not
+    ///      change this — only major.minor changes do.
+    bytes32 private constant _EIP712_VERSION_HASH = keccak256(bytes("10.1"));
+
+    /// @dev Magic value returned by EIP-1271-compliant smart wallets on a
+    ///      successful signature check. `bytes4(keccak256("isValidSignature(bytes32,bytes)"))`.
+    bytes4 private constant _ERC1271_MAGIC_VALUE = 0x1626ba7e;
 
     // --- Update-specific errors (V10 Phase 8 Task 2) ---
 
@@ -190,7 +272,6 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
     function initialize() public onlyHub {
         askStorage = AskStorage(hub.getContractAddress("AskStorage"));
         epochStorage = EpochStorage(hub.getContractAddress("EpochStorageV8"));
-        paymasterManager = PaymasterManager(hub.getContractAddress("PaymasterManager"));
         knowledgeCollectionStorage = KnowledgeCollectionStorage(
             hub.getAssetStorageAddress("KnowledgeCollectionStorage")
         );
@@ -199,6 +280,7 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
         parametersStorage = ParametersStorage(hub.getContractAddress("ParametersStorage"));
         identityStorage = IdentityStorage(hub.getContractAddress("IdentityStorage"));
         convictionStakingStorage = ConvictionStakingStorage(hub.getContractAddress("ConvictionStakingStorage"));
+        shardingTableStorage = ShardingTableStorage(hub.getContractAddress("ShardingTableStorage"));
 
         // V10 new dependencies — fail-fast. Each MUST be Hub-registered at
         // KAV10 initialize() time. The Phase 7 transitional try/catch tolerance
@@ -235,65 +317,58 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
     }
 
     // ========================================================================
-    // V10 Publish Entries
+    // V10 Publish Entry (RFC-001: unified entrypoint)
     // ========================================================================
 
     /**
-     * @notice Publish via publisher conviction account (discounted path).
+     * @notice Publish a knowledge collection.
      *
-     * The publishing agent (`msg.sender`) must be registered under an active
-     * conviction NFT account via `DKGPublishingConvictionNFT.registerAgent`.
-     * The NFT auto-resolves the paying account from `agentToAccountId[msg.sender]`
-     * inside `coverPublishingCost` — KAV10 does NOT accept a caller-supplied
-     * account id (N28 closure).
+     * RFC-001 unifies the prior two-entrypoint design (`publish` for the
+     * conviction-discounted path and `publishDirect` for full-price /
+     * paymaster-sponsored) into a single `publish` with auto-detected cost
+     * coverage:
      *
-     * Double-count prevention (decision #17 + H critical):
-     * The NFT's `createAccount` already wrote the full `committedTRAC` into
-     * `EpochStorage.addTokensToEpochRange` across the 12-epoch lock window.
-     * This path therefore MUST NOT call `_addTokens` or `_distributeTokens` —
-     * doing so would double-count TRAC in the staker reward pool.
+     * - **Discount branch** — taken when `msg.sender` is registered as an
+     *   agent on any active publisher conviction account
+     *   (`agentToAccountId[msg.sender] != 0`). TRAC was already written into
+     *   `EpochStorage.addTokensToEpochRange` at `createAccount` time, so
+     *   this branch MUST NOT call `_distributeTokens` — doing so would
+     *   double-count TRAC in the staker reward pool.
+     *
+     * - **Direct-spend branch** — taken otherwise. Pulls TRAC from
+     *   `msg.sender`'s wallet via `transferFrom` and distributes it across
+     *   the epoch range via `_distributeTokens`. No paymaster sponsorship —
+     *   `Paymaster.sol` is removed from the active path; sponsorship is now
+     *   subsumed by the conviction-account-agent registration mechanism (a
+     *   sponsoring core registers the user's wallet via `registerAgent` and
+     *   the user's publishes flow through the discount branch).
+     *
+     * In both branches `publisherNodeIdentityId` is recorded as a self-claim
+     * for publishing-factor attribution (RFC-001 §3.6); there is no
+     * per-publish on-chain consent gate on the direct-spend branch.
      *
      * @param p All publish parameters (see `PublishParams` struct).
      * @return kcId Newly created knowledge collection id.
      */
     function publish(PublishParams calldata p) external returns (uint256 kcId) {
-        // `currentEpoch` from the core is unused on this path — TRAC was
-        // already written into `EpochStorage.addTokensToEpochRange` at
-        // `createAccount` time, so no per-epoch distribution runs here
-        // (double-count prevention).
-        (, kcId) = _executePublishCore(p);
-
-        // Spend publisher allowance. NFT reverts NoConvictionAccount(msg.sender)
-        // if caller is not registered as an agent on any active account.
-        // Discounted amount is discarded here — the NFT emits `CostCovered`
-        // with full detail for off-chain accounting.
-        publishingConvictionNFT.coverPublishingCost(msg.sender, p.tokenAmount);
-
-        return kcId;
-    }
-
-    /**
-     * @notice Publish at market rate (no conviction discount).
-     *
-     * Pulls TRAC from `msg.sender` (or `paymaster` if valid) and distributes
-     * it across the epoch range via `_distributeTokens`. No conviction NFT
-     * involvement — nothing to auto-resolve, nothing to double-count.
-     *
-     * @param p Publish parameters.
-     * @param paymaster Paymaster address for cost coverage, or `address(0)`
-     *                  to pull from `msg.sender` directly.
-     * @return kcId Newly created knowledge collection id.
-     */
-    function publishDirect(
-        PublishParams calldata p,
-        address paymaster
-    ) external returns (uint256 kcId) {
         uint40 currentEpoch;
         (currentEpoch, kcId) = _executePublishCore(p);
 
-        // Pull funds + distribute to the reward pool across the epoch range.
-        _addTokens(p.tokenAmount, paymaster);
-        _distributeTokens(p.tokenAmount, p.epochs, currentEpoch);
+        if (publishingConvictionNFT.agentToAccountId(msg.sender) != 0) {
+            // Discount branch. NFT auto-resolves the paying account from
+            // `agentToAccountId[msg.sender]` inside `coverPublishingCost`
+            // and emits `CostCovered` with full detail for off-chain
+            // accounting. Discounted amount is discarded here.
+            publishingConvictionNFT.coverPublishingCost(msg.sender, p.tokenAmount);
+        } else {
+            // Direct-spend branch. `transferFrom(msg.sender, CSS, fullCost)`
+            // + epoch-range distribution. The named core (if non-zero) still
+            // earns publishing-factor credit through `_executePublishCore`'s
+            // `addEpochProducedKnowledgeValue` write — attribution and TRAC
+            // source are decoupled (RFC-001 §3.6).
+            _addTokens(p.tokenAmount);
+            _distributeTokens(p.tokenAmount, p.epochs, currentEpoch);
+        }
 
         return kcId;
     }
@@ -313,36 +388,25 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
     function _executePublishCore(
         PublishParams calldata p
     ) internal returns (uint40 currentEpoch, uint256 kcId) {
-        // --- 1. Signature verification ---
+        // --- 1. Author attestation verification (RFC-001) ---
+        //
+        // Every post-upgrade publish must carry a verified author. The author
+        // signature commits to (chainId, verifyingContract, contextGraphId,
+        // merkleRoot, authorAddress, schemeVersion) via EIP-712, and is
+        // verified either through `ECDSA.tryRecover + equality` (EOAs) or
+        // through `IERC1271.isValidSignature` (smart-contract wallets,
+        // including EIP-7702-delegated EOAs). Branch is selected at runtime
+        // by `authorAddress.code.length`. Forged author claims revert here
+        // before any state mutation.
+        //
+        // No `publisherNodeIdentityId` signature: the per-publish publisher
+        // signature surface is gone (RFC-001 §3.6). Attribution is now a
+        // self-claim; consent on the discount path is enforced by the
+        // existing `DKGPublishingConvictionNFT.agentToAccountId` registration
+        // (auto-detected in the `publish` entrypoint below).
+        _verifyAuthorAttestation(p);
 
-        // Publisher digest (N26: field order = publisherNodeIdentityId, contextGraphId, merkleRoot).
-        // H5: prefix with (block.chainid, address(this)) to pin replay to this chain + contract.
-        bytes32 publisherDigest = keccak256(
-            abi.encodePacked(
-                block.chainid,
-                address(this),
-                p.publisherNodeIdentityId,
-                p.contextGraphId,
-                p.merkleRoot
-            )
-        );
-        bytes32 publisherEthDigest = ECDSA.toEthSignedMessageHash(publisherDigest);
-        // The publisher-node signature only attests that a staked operator key of
-        // `publisherNodeIdentityId` signed the (chainid, contract, node, cgId, root)
-        // tuple — i.e. "this node is willing to host this data". The recovered
-        // wallet is NOT the publisher of record. The publisher of record is
-        // `msg.sender` (the paying agent), which is what KCS stores on the
-        // merkle-root entry and which receives the minted ERC-1155 KA tokens.
-        // We still need `_verifySignature` to validate the signature + key
-        // purpose + node stake; we discard the returned address.
-        _verifySignature(
-            p.publisherNodeIdentityId,
-            publisherEthDigest,
-            p.publisherNodeR,
-            p.publisherNodeVS
-        );
-
-        // ACK digest. H5 chain/contract prefix mirrors the publisher digest.
+        // ACK digest. H5 chain/contract prefix mirrors the prior design.
         // Field set per PRD (V10 protocol core §9 "Publish Flow — Contract
         // Verification") and decision #25 Option B, extended with V10 flat-KC
         // Merkle metadata:
@@ -406,8 +470,15 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
         // to). Passing the recovered node signer here would record the
         // node operator wallet as the original publisher and break
         // publish→update coherence for open-CG publishers.
+        // `author` = `p.authorAddress`, the address verified by
+        // `_verifyAuthorAttestation` above. The chain commits the recovered
+        // identity into KCS's parallel `merkleRootAuthors[kcId][0]` map
+        // so off-chain readers (`/api/get`, indexers) can return the
+        // canonical author without re-deriving from the EIP-712
+        // signature embedded in calldata.
         kcId = kcs.createKnowledgeCollection(
             msg.sender,
+            p.authorAddress,
             p.publishOperationId,
             p.merkleRoot,
             p.knowledgeAssetsAmount,
@@ -438,7 +509,21 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
         // points — uses BASE `tokenAmount`, NOT any discounted effective
         // spend, so a node's produced-value score reflects the data value
         // the publisher declared.
-        epochStorage.addEpochProducedKnowledgeValue(p.publisherNodeIdentityId, currentEpoch, p.tokenAmount);
+        //
+        // Validation gate: `publisherNodeIdentityId` is a self-claim under
+        // RFC-001 §3.6, but we MUST refuse to credit nonexistent nodes.
+        // Without this check any publisher with a valid ACK quorum could
+        // pump publishing-factor credit into arbitrary identity ids that
+        // the sharding table never minted, distorting RandomSampling node
+        // scores. `0` is the explicit "no attribution" sentinel and is
+        // accepted (skips the EpochStorage write entirely).
+        if (p.publisherNodeIdentityId != 0) {
+            require(
+                shardingTableStorage.nodeExists(p.publisherNodeIdentityId),
+                "publisherNodeIdentityId not in sharding table"
+            );
+            epochStorage.addEpochProducedKnowledgeValue(p.publisherNodeIdentityId, currentEpoch, p.tokenAmount);
+        }
     }
 
     // ========================================================================
@@ -448,8 +533,7 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
     function extendKnowledgeCollectionLifetime(
         uint256 id,
         uint40 epochs,
-        uint96 tokenAmount,
-        address paymaster
+        uint96 tokenAmount
     ) external {
         KnowledgeCollectionStorage kcs = knowledgeCollectionStorage;
 
@@ -465,7 +549,7 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
 
         _validateTokenAmount(byteSize, epochs, tokenAmount, false);
         epochStorage.addTokensToEpochRange(1, endEpoch, endEpoch + epochs, tokenAmount);
-        _addTokens(tokenAmount, paymaster);
+        _addTokens(tokenAmount);
 
         // Phase 1+8 cross-phase fix: extending a KC's lifetime adds value to
         // the CG it belongs to, so the CG's value-weighted random-sampling
@@ -552,11 +636,113 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
             revert KnowledgeCollectionLib.SignerIsNotNodeOperator(identityId, signer);
         }
 
-        // Core nodes must be staked (spec §9.0). v4.0.0 — read V10 canonical
-        // stake (`nodeStakeV10`) instead of the V8 archive aggregate; under
-        // mandatory migration `getNodeStake` is unmaintained for V10 nodes
-        // and would zero-gate every legitimate V10 ACK signer.
-        require(convictionStakingStorage.getNodeStakeV10(identityId) > 0, "ACK signer has no stake");
+        // RFC-001 edge-publish unblocker: ACK signers must be in the active
+        // sharding table, not merely staked. Sharding-table membership is the
+        // canonical "this is a host that can serve queries" signal. The prior
+        // `getNodeStakeV10 > 0` gate locked publishing behind the staking
+        // lifecycle and rejected freshly-promoted cores; sharding-table
+        // membership is updated atomically when nodes are promoted/demoted.
+        require(shardingTableStorage.nodeExists(identityId), "ACK signer not in sharding table");
+    }
+
+    // ========================================================================
+    // Internal: Author Attestation (RFC-001)
+    // ========================================================================
+
+    /**
+     * @notice EIP-712 typed-data digest for the V10 author attestation.
+     *
+     * Domain pins (chainId, verifyingContract) to defeat cross-chain and
+     * cross-deployment replay. The struct hash binds the publication's
+     * (contextGraphId, merkleRoot) to a specific (authorAddress,
+     * schemeVersion) — leaked signatures cannot be redirected to a different
+     * CG, a different content root, or a different author identity.
+     *
+     * One-shot consumption of `(contextGraphId, merkleRoot)` at the
+     * `KnowledgeCollectionStorage` layer is the temporal replay defense; no
+     * `signedAtBlock` window is included in the digest (see RFC-001 §3.2).
+     */
+    function _hashAuthorAttestation(
+        uint256 _contextGraphId,
+        bytes32 _merkleRoot,
+        address _authorAddress,
+        uint8 _schemeVersion
+    ) internal view returns (bytes32) {
+        bytes32 domainSeparator = keccak256(
+            abi.encode(
+                _EIP712_DOMAIN_TYPEHASH,
+                _EIP712_NAME_HASH,
+                _EIP712_VERSION_HASH,
+                block.chainid,
+                address(this)
+            )
+        );
+        bytes32 structHash = keccak256(
+            abi.encode(
+                _AUTHOR_ATTESTATION_TYPEHASH,
+                _contextGraphId,
+                _merkleRoot,
+                _authorAddress,
+                _schemeVersion
+            )
+        );
+        return keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
+    }
+
+    /**
+     * @notice Verify the author attestation attached to a publish call.
+     *
+     * Branches on `authorAddress.code.length`:
+     *
+     * - **EOA** (`code.length == 0`): standard ECDSA recovery, equality with
+     *   `authorAddress`. `tryRecover` returns `address(0)` on malformed
+     *   signatures — the explicit `recovered != address(0)` check is
+     *   defense-in-depth above the outer `authorAddress != 0` revert.
+     *
+     * - **Smart-contract wallet** (`code.length > 0`): delegates to the
+     *   wallet's own `isValidSignature` — the wallet decides which
+     *   underlying keys are currently authorized, enabling key rotation,
+     *   social recovery, multi-sig, and passkey signers. The wallet must
+     *   accept a 65-byte `(r, s, v)` signature; multi-sig aggregations that
+     *   need a longer payload are deferred to `authorSchemeVersion >= 2`
+     *   (see RFC-001 §9.6). The `(r, s, v)` triple is reconstructed from
+     *   the compact `(authorR, authorVS)` pair.
+     *
+     * EIP-7702 delegation works through the EIP-1271 branch automatically:
+     * a delegated EOA has `code.length > 0` (the `0xef0100 || delegate`
+     * prefix), so `staticcall(isValidSignature)` lands on the delegate's
+     * implementation.
+     */
+    function _verifyAuthorAttestation(PublishParams calldata p) internal view {
+        if (p.authorAddress == address(0)) revert AuthorRequired();
+        if (p.authorSchemeVersion != 1) revert UnsupportedAuthorScheme(p.authorSchemeVersion);
+
+        bytes32 digest = _hashAuthorAttestation(
+            p.contextGraphId,
+            p.merkleRoot,
+            p.authorAddress,
+            p.authorSchemeVersion
+        );
+
+        if (p.authorAddress.code.length == 0) {
+            // EOA branch.
+            address recovered = ECDSA.tryRecover(digest, p.authorR, p.authorVS);
+            if (recovered == address(0) || recovered != p.authorAddress) {
+                revert InvalidAuthorSignature();
+            }
+        } else {
+            // EIP-1271 branch. Reconstruct the standard (r, s, v) form from
+            // the compact (r, vs). `vs` packs `s` in the low 255 bits and
+            // `v - 27` in the top bit.
+            bytes32 s = p.authorVS & bytes32((uint256(1) << 255) - 1);
+            uint8 v = uint8((uint256(p.authorVS) >> 255) + 27);
+            bytes memory sig = abi.encodePacked(p.authorR, s, v);
+            if (
+                IERC1271(p.authorAddress).isValidSignature(digest, sig) != _ERC1271_MAGIC_VALUE
+            ) {
+                revert InvalidAuthorSignature1271();
+            }
+        }
     }
 
     // ========================================================================
@@ -592,27 +778,32 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
         }
     }
 
-    function _addTokens(uint96 tokenAmount, address paymaster) internal {
+    /**
+     * @notice Pull TRAC from `msg.sender` directly into the CSS reward pool.
+     *
+     * RFC-001: the prior `address paymaster` parameter is gone. Sponsorship
+     * is now expressed via publisher-conviction-account agent registration —
+     * a sponsoring core calls `DKGPublishingConvictionNFT.registerAgent(its
+     * accountId, sponsoredWallet)`, and that wallet's publishes flow through
+     * the discount branch in `publish` automatically.
+     */
+    function _addTokens(uint96 tokenAmount) internal {
         IERC20 token = tokenContract;
 
-        if (paymasterManager.validPaymasters(paymaster)) {
-            IPaymaster(paymaster).coverCost(tokenAmount);
-        } else {
-            if (token.allowance(msg.sender, address(this)) < tokenAmount) {
-                revert TokenLib.TooLowAllowance(
-                    address(token),
-                    token.allowance(msg.sender, address(this)),
-                    tokenAmount
-                );
-            }
+        if (token.allowance(msg.sender, address(this)) < tokenAmount) {
+            revert TokenLib.TooLowAllowance(
+                address(token),
+                token.allowance(msg.sender, address(this)),
+                tokenAmount
+            );
+        }
 
-            if (token.balanceOf(msg.sender) < tokenAmount) {
-                revert TokenLib.TooLowBalance(address(token), token.balanceOf(msg.sender), tokenAmount);
-            }
+        if (token.balanceOf(msg.sender) < tokenAmount) {
+            revert TokenLib.TooLowBalance(address(token), token.balanceOf(msg.sender), tokenAmount);
+        }
 
-            if (!token.transferFrom(msg.sender, address(convictionStakingStorage), tokenAmount)) {
-                revert TokenLib.TransferFailed();
-            }
+        if (!token.transferFrom(msg.sender, address(convictionStakingStorage), tokenAmount)) {
+            revert TokenLib.TransferFailed();
         }
     }
 
@@ -649,35 +840,23 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
      *
      * @param p Update parameters (see `UpdateParams` struct).
      */
-    function update(UpdateParams calldata p) external {
-        (uint96 deltaTokenAmount, , ) = _executeUpdateCore(p);
-
-        if (deltaTokenAmount > 0) {
-            // Spend publisher allowance for the delta only. NFT reverts
-            // NoConvictionAccount(msg.sender) if caller is not registered
-            // as an agent on any active account.
-            publishingConvictionNFT.coverPublishingCost(msg.sender, deltaTokenAmount);
-        }
-    }
-
     /**
-     * @notice Update an existing knowledge collection at market rate (no
-     *         conviction discount).
+     * @notice Update a knowledge collection (RFC-001: unified entrypoint).
      *
-     * Pulls `delta` TRAC from `msg.sender` (or `paymaster` if valid) and
-     * distributes it across the REMAINING lifetime via `_distributeTokens`.
-     * Metadata-only updates (`delta == 0`) skip both the token pull and the
-     * distribution entirely.
-     *
-     * @param p Update parameters.
-     * @param paymaster Paymaster address for cost coverage, or `address(0)`
-     *                  to pull from `msg.sender` directly.
+     * Mirrors the unified `publish`: branches on
+     * `agentToAccountId[msg.sender]` to pick discount vs direct-spend cost
+     * coverage. Metadata-only updates (`delta == 0`) skip cost coverage
+     * entirely on either branch.
      */
-    function updateDirect(UpdateParams calldata p, address paymaster) external {
+    function update(UpdateParams calldata p) external {
         (uint96 deltaTokenAmount, uint40 remainingEpochs, uint40 currentEpoch) = _executeUpdateCore(p);
 
-        if (deltaTokenAmount > 0) {
-            _addTokens(deltaTokenAmount, paymaster);
+        if (deltaTokenAmount == 0) return;
+
+        if (publishingConvictionNFT.agentToAccountId(msg.sender) != 0) {
+            publishingConvictionNFT.coverPublishingCost(msg.sender, deltaTokenAmount);
+        } else {
+            _addTokens(deltaTokenAmount);
             _distributeTokens(deltaTokenAmount, uint256(remainingEpochs), currentEpoch);
         }
     }
@@ -767,30 +946,17 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
             revert MissingContextGraphBinding(p.id);
         }
 
-        // --- 3. Signature verification ---
-
-        // Publisher digest (N26 field order: publisherNodeIdentityId,
-        // contextGraphId, merkleRoot). Prefixed with block.chainid +
-        // address(this) for H5 cross-chain / cross-deployment replay pin.
-        // The CG id comes from on-chain state, not from the caller — a
-        // signer cannot redirect an update to a different CG by lying about
-        // it in the signed payload.
-        bytes32 publisherDigest = keccak256(
-            abi.encodePacked(
-                block.chainid,
-                address(this),
-                p.publisherNodeIdentityId,
-                contextGraphId,
-                p.newMerkleRoot
-            )
-        );
-        _verifySignature(
-            p.publisherNodeIdentityId,
-            ECDSA.toEthSignedMessageHash(publisherDigest),
-            p.publisherNodeR,
-            p.publisherNodeVS
-        );
-
+        // --- 3. ACK signature verification ---
+        //
+        // RFC-001: per-update publisher signature (`publisherNodeR/VS`) is
+        // removed. `publisherNodeIdentityId` is now a self-claimed
+        // attribution field with no per-update authentication. ACK quorum
+        // continues to gate update validity.
+        //
+        // RFC-001 v1.1 will add an author-attestation step here too,
+        // mirroring the publish path. For now the update path has no
+        // on-chain author verification.
+        //
         // ACK digest — covers EVERY mutable field the update can change so a
         // stale ACK can't be replayed with different byte size, different
         // token amount, different mint/burn counts, or a different kc id. The
@@ -930,8 +1096,15 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
         // `p.updateOperationId` is the off-chain correlation id emitted on
         // `KnowledgeCollectionUpdated`. KCS internally reconciles its
         // `_totalTokenAmount` counter from old → new.
+        // V10.1 update path does not (yet) carry an EIP-712 author
+        // attestation — the new merkle-root entry is annotated with
+        // `author = address(0)` so readers can distinguish "this state
+        // change predates author attestation" from a deliberate
+        // self-anonymisation. vNext will sign the update against the same
+        // EIP-712 envelope as publish and pass `p.authorAddress` here.
         kcs.updateKnowledgeCollection(
             msg.sender,
+            address(0),
             p.id,
             p.updateOperationId,
             p.newMerkleRoot,
@@ -963,11 +1136,20 @@ contract KnowledgeAssetsV10 is INamed, IVersioned, ContractStatus, IInitializabl
             // Track per-node produced value for the delta. Uses BASE delta
             // (not discounted effective spend) so the scoring reflects data
             // value added, not publisher economics — identical to publish.
-            epochStorage.addEpochProducedKnowledgeValue(
-                p.publisherNodeIdentityId,
-                currentEpoch,
-                deltaTokenAmount
-            );
+            //
+            // Same validation gate as `_executePublishCore`: refuse to
+            // credit nonexistent identity ids, accept `0` as no-attribution.
+            if (p.publisherNodeIdentityId != 0) {
+                require(
+                    shardingTableStorage.nodeExists(p.publisherNodeIdentityId),
+                    "publisherNodeIdentityId not in sharding table"
+                );
+                epochStorage.addEpochProducedKnowledgeValue(
+                    p.publisherNodeIdentityId,
+                    currentEpoch,
+                    deltaTokenAmount
+                );
+            }
         }
     }
 

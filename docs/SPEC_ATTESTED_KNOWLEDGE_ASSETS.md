@@ -7,7 +7,7 @@ Scope: DKG v9 protocol-level extension. Application-agnostic.
 
 ## 1) Problem Statement
 
-DKG v9 paranets are open write environments. Any node in a paranet can publish Knowledge Assets. This is useful for open data sharing, but insufficient for applications that need:
+DKG v9 contextGraphs are open write environments. Any node in a contextGraph can publish Knowledge Assets. This is useful for open data sharing, but insufficient for applications that need:
 
 - bounded participation (only specific nodes may contribute),
 - deterministic state progression (all participants agree on state transitions),
@@ -17,7 +17,7 @@ Examples: multiplayer games, collaborative agent workflows, multi-party computat
 
 ### What exists today
 
-- Knowledge Assets (KA) are published to a paranet.
+- Knowledge Assets (KA) are published to a contextGraph.
 - Nodes send signed ACKs back to the publisher when they agree on a Merkle hash of the data they have received.
 - On-chain finalization occurs when sufficient ACKs are collected.
 
@@ -46,14 +46,14 @@ AKA addresses a different problem: **multi-party state machine consensus** — s
 
 - Define a session lifecycle primitive for DKG v9.
 - Reuse and extend existing DKG ACK mechanics for validation-aware corroboration.
-- Provide per-session isolation inside a shared paranet.
+- Provide per-session isolation inside a shared contextGraph.
 - Support deterministic replay and recovery from the knowledge graph.
 - Coexist with legacy KA publishing (no breaking changes).
 
 ### Non-Goals
 
 - Replace DKG protocol-level UAL encoding rules.
-- Require a separate paranet per session.
+- Require a separate contextGraph per session.
 - Define application-specific logic (game rules, workflow steps, etc.).
 - Require per-round on-chain settlement.
 
@@ -61,11 +61,11 @@ AKA addresses a different problem: **multi-party state machine consensus** — s
 
 ## 3) Asset Modes
 
-Three asset modes coexist on the same paranet:
+Three asset modes coexist on the same contextGraph:
 
 ### 3.1 Legacy KA
 
-Current behavior, unchanged. Any paranet member can publish. ACKs confirm data receipt. Useful for telemetry, analytics, open datasets.
+Current behavior, unchanged. Any contextGraph member can publish. ACKs confirm data receipt. Useful for telemetry, analytics, open datasets.
 
 ### 3.2 Verified KA
 
@@ -88,7 +88,7 @@ Nodes MUST track the `mode` field on each event and route processing accordingly
 
 ### 4.1 Session
 
-A session is a first-class protocol object that defines a scoped consensus domain within a paranet.
+A session is a first-class protocol object that defines a scoped consensus domain within a contextGraph.
 
 A session is immutable after activation (v1: no membership changes mid-session).
 
@@ -96,8 +96,8 @@ A session is immutable after activation (v1: no membership changes mid-session).
 
 | Field | Type | Description |
 |---|---|---|
-| `sessionId` | string | Globally unique. Derived as `SHA-256(paranetId + creatorDid + createdAt + nonce)`. |
-| `paranetId` | string | Parent paranet identifier. |
+| `sessionId` | string | Globally unique. Derived as `SHA-256(contextGraphId + creatorDid + createdAt + nonce)`. |
+| `contextGraphId` | string | Parent contextGraph identifier. |
 | `appId` | string | Application identifier (e.g. `oregon-trail-v1`, `supply-chain-v2`). |
 | `createdBy` | string | Creator node PeerId. |
 | `createdAt` | ISO 8601 | Creation timestamp. |
@@ -130,8 +130,8 @@ This ensures no node is enrolled without consent and no session can activate wit
 Application-level semantic namespace convention:
 
 ```
-did:dkg:<network>/paranets/<paranetId>/sessions/<sessionId>
-did:dkg:<network>/paranets/<paranetId>/sessions/<sessionId>/rounds/<roundNumber>
+did:dkg:<network>/contextGraphs/<contextGraphId>/sessions/<sessionId>
+did:dkg:<network>/contextGraphs/<contextGraphId>/sessions/<sessionId>/rounds/<roundNumber>
 ```
 
 This is an application-level convention for graph subjects and human-readable provenance. Canonical DKG UAL representation remains as defined by the protocol. Both SHOULD be stored.
@@ -315,7 +315,7 @@ Event references the same `reducer.version` and `reducer.hash` as the session de
 
 ### 8.8 Rejection behavior
 
-If any check fails, the event is stored in raw paranet storage (data availability) but excluded from session state progression. The node MUST NOT ACK it as a valid AKA event.
+If any check fails, the event is stored in raw contextGraph storage (data availability) but excluded from session state progression. The node MUST NOT ACK it as a valid AKA event.
 
 ---
 
@@ -391,14 +391,14 @@ Note: Replay protection for `RoundAck` uses a SHA-256 hash of the full payload i
 
 A crashed node recovers by:
 
-1. Querying the paranet graph for all AKA events in its session.
+1. Querying the contextGraph graph for all AKA events in its session.
 2. Replaying events from genesis through each finalized round proposal + input set.
 3. Rebuilding local state by running the reducer for each round.
 4. Resuming participation from the current round.
 
 This works because:
 
-- All events are stored in the paranet (data availability).
+- All events are stored in the contextGraph (data availability).
 - The reducer is deterministic.
 - Finalized round proposals contain the exact input set used.
 
@@ -430,7 +430,7 @@ To prevent cross-context signature reuse, the signed payload for every AKA signa
 {
   "domain": "AKA-v1",
   "network": "<chainId or network identifier>",
-  "paranetId": "...",
+  "contextGraphId": "...",
   "sessionId": "...",
   "round": 0,
   "type": "<EventType>",
@@ -446,11 +446,11 @@ The `domain` prefix ensures AKA signatures cannot be confused with signatures fr
 
 ### 12.1 Session creation cost
 
-Creating a session SHOULD require a small stake or fee (paranet-defined) to prevent spam session creation. This can be enforced at the paranet governance level.
+Creating a session SHOULD require a small stake or fee (contextGraph-defined) to prevent spam session creation. This can be enforced at the contextGraph governance level.
 
 ### 12.2 Event write cost
 
-AKA events within an active session are written to the paranet graph. Storage cost follows the existing paranet storage model. No additional per-event fees are required at protocol level.
+AKA events within an active session are written to the contextGraph graph. Storage cost follows the existing contextGraph storage model. No additional per-event fees are required at protocol level.
 
 ### 12.3 Rate limits
 
@@ -471,8 +471,8 @@ Events exceeding these limits are dropped before validation.
 AKA introduces a new gossip topic pattern:
 
 ```
-dkg/paranet/<paranetId>/sessions             — session lifecycle events
-dkg/paranet/<paranetId>/sessions/<sessionId> — round events for a specific session
+dkg/context-graph/<contextGraphId>/sessions             — session lifecycle events
+dkg/context-graph/<contextGraphId>/sessions/<sessionId> — round events for a specific session
 ```
 
 This follows the existing topic conventions in `@origintrail-official/dkg-core/constants.ts`.
@@ -483,7 +483,7 @@ All AKA gossip messages are protobuf-encoded `AKAEvent` messages (see section 14
 
 ### 13.3 Subscription behavior
 
-- Nodes subscribed to a paranet automatically subscribe to the sessions lifecycle topic.
+- Nodes subscribed to a contextGraph automatically subscribe to the sessions lifecycle topic.
 - When a node joins a session (accepts membership), it subscribes to that session's topic.
 - When a session finalizes or aborts, nodes unsubscribe from the session topic.
 
@@ -513,7 +513,7 @@ message AKAEvent {
 ```protobuf
 message SessionConfig {
   string session_id = 1;
-  string paranet_id = 2;
+  string contextGraph_id = 2;
   string app_id = 3;
   string created_by = 4;
   uint64 created_at = 5;
@@ -598,7 +598,7 @@ New endpoints (or extensions to existing endpoints) for AKA:
 | Endpoint | Method | Description |
 |---|---|---|
 | `/api/sessions` | POST | Create (propose) a new session. |
-| `/api/sessions` | GET | List sessions (filter by `paranetId`, `status`, `member`). |
+| `/api/sessions` | GET | List sessions (filter by `contextGraphId`, `status`, `member`). |
 | `/api/sessions/:id` | GET | Get session metadata and status. |
 | `/api/sessions/:id/accept` | POST | Accept session membership. |
 | `/api/sessions/:id/activate` | POST | Activate session (creator, after all accepted). |
@@ -641,7 +641,7 @@ Attested Knowledge Assets extend DKG v9 with session-scoped, validation-gated Kn
 
 Key properties:
 
-- Sessions provide isolation and membership boundaries within shared paranets.
+- Sessions provide isolation and membership boundaries within shared contextGraphs.
 - Nodes ACK only after independent state transition validation, not just data receipt.
 - Existing DKG ACK and on-chain finalization mechanics are reused, with enriched ACK semantics.
 - Deterministic reducers ensure all honest nodes agree on state.

@@ -2,7 +2,7 @@
  * Full-network E2E tests.
  *
  * Spins up a relay + 3 agent nodes locally, then runs through the
- * complete lifecycle: bootstrap → discover → create paranet → publish
+ * complete lifecycle: bootstrap → discover → create contextGraph → publish
  * KAs → replicate via GossipSub → query from every node → chat via relay.
  *
  * GossipSub propagation uses direct TCP connections (how it works in
@@ -164,58 +164,58 @@ describe('Network E2E (3 nodes + relay)', () => {
     expect(skills[0].agentName).toBe('NodeA');
   }, 20000);
 
-  // ── Step 4: System paranets present from genesis ──────────────────
+  // ── Step 4: System contextGraphs present from genesis ──────────────────
 
-  it('system paranets are present from genesis on all nodes', async () => {
+  it('system contextGraphs are present from genesis on all nodes', async () => {
     for (const node of [nodeA, nodeB, nodeC]) {
-      const paranets = await node.listContextGraphs();
-      const ids = paranets.map(p => p.id);
+      const contextGraphs = await node.listContextGraphs();
+      const ids = contextGraphs.map(p => p.id);
       expect(ids).toContain('agents');
       expect(ids).toContain('ontology');
 
-      const agents = paranets.find(p => p.id === 'agents')!;
+      const agents = contextGraphs.find(p => p.id === 'agents')!;
       expect(agents.isSystem).toBe(true);
       expect(agents.name).toBe('Agent Registry');
 
-      const ontology = paranets.find(p => p.id === 'ontology')!;
+      const ontology = contextGraphs.find(p => p.id === 'ontology')!;
       expect(ontology.isSystem).toBe(true);
     }
   }, 10000);
 
-  // ── Step 5: Create a paranet ──────────────────────────────────────
+  // ── Step 5: Create a contextGraph ──────────────────────────────────────
 
-  it('a node creates a paranet and other nodes learn about it', async () => {
+  it('a node creates a contextGraph and other nodes learn about it', async () => {
     await nodeA.createContextGraph({
       id: 'memes',
-      name: 'Memes Paranet',
+      name: 'Memes ContextGraph',
       description: 'Rare knowledge memes',
     });
 
     const existsA = await nodeA.contextGraphExists('memes');
     expect(existsA).toBe(true);
 
-    const paranetsA = await nodeA.listContextGraphs();
-    const memes = paranetsA.find(p => p.id === 'memes')!;
+    const contextGraphsA = await nodeA.listContextGraphs();
+    const memes = contextGraphsA.find(p => p.id === 'memes')!;
     expect(memes).toBeDefined();
-    expect(memes.name).toBe('Memes Paranet');
+    expect(memes.name).toBe('Memes ContextGraph');
     expect(memes.isSystem).toBe(false);
     expect(memes.creator).toContain(nodeA.peerId);
 
     // Wait for GossipSub propagation of the ontology broadcast
     await sleep(2000);
 
-    // B and C should have received the paranet definition via ontology GossipSub
+    // B and C should have received the contextGraph definition via ontology GossipSub
     // and can also subscribe to the memes topic
     nodeB.subscribeToContextGraph('memes');
     nodeC.subscribeToContextGraph('memes');
     await sleep(500);
   }, 15000);
 
-  // ── Step 6: Reject publishing to non-existent paranet ─────────────
+  // ── Step 6: Reject publishing to non-existent contextGraph ─────────────
 
-  it('rejects publishing to a non-existent paranet', async () => {
+  it('rejects publishing to a non-existent contextGraph', async () => {
     await expect(
-      nodeA.publish('nonexistent-paranet', [
+      nodeA.publish('nonexistent-contextGraph', [
         { subject: 'did:dkg:entity:x', predicate: 'http://schema.org/name', object: '"X"', graph: '' },
       ]),
     ).rejects.toThrow('does not exist');
@@ -356,9 +356,9 @@ describe('Network E2E (3 nodes + relay)', () => {
     expect(receivedOnB).toContain('Hey B, check out my rare pepe');
 
     // B → C
-    const r2 = await nodeB.sendChat(nodeC.peerId, 'C, join the memes paranet!');
+    const r2 = await nodeB.sendChat(nodeC.peerId, 'C, join the memes contextGraph!');
     expect(r2.delivered).toBe(true);
-    expect(receivedOnC).toContain('C, join the memes paranet!');
+    expect(receivedOnC).toContain('C, join the memes contextGraph!');
 
     // C → A (completes the triangle)
     const r3 = await nodeC.sendChat(nodeA.peerId, 'Much knowledge. Very DKG.');
@@ -366,16 +366,16 @@ describe('Network E2E (3 nodes + relay)', () => {
     expect(receivedOnA).toContain('Much knowledge. Very DKG.');
 
     // Verify message isolation
-    expect(receivedOnA).not.toContain('C, join the memes paranet!');
+    expect(receivedOnA).not.toContain('C, join the memes contextGraph!');
     expect(receivedOnC).not.toContain('Hey B, check out my rare pepe');
   }, 15000);
 
-  // ── Step 11: Second paranet doesn't interfere ─────────────────────
+  // ── Step 11: Second contextGraph doesn't interfere ─────────────────────
 
-  it('creating a second paranet keeps data isolated', async () => {
+  it('creating a second contextGraph keeps data isolated', async () => {
     await nodeB.createContextGraph({
       id: 'science',
-      name: 'Science Paranet',
+      name: 'Science ContextGraph',
       description: 'Peer-reviewed knowledge',
     });
 
@@ -383,14 +383,14 @@ describe('Network E2E (3 nodes + relay)', () => {
       { subject: 'did:dkg:entity:paper-001', predicate: 'http://schema.org/name', object: '"Attention Is All You Need"', graph: '' },
     ]);
 
-    // Science data should not appear in the memes paranet
+    // Science data should not appear in the memes contextGraph
     const memesResult = await nodeB.query(
       'SELECT ?s WHERE { <did:dkg:entity:paper-001> <http://schema.org/name> ?name }',
       'memes',
     );
     expect(memesResult.bindings.length).toBe(0);
 
-    // But should be in the science paranet
+    // But should be in the science contextGraph
     const scienceResult = await nodeB.query(
       'SELECT ?name WHERE { <did:dkg:entity:paper-001> <http://schema.org/name> ?name }',
       'science',

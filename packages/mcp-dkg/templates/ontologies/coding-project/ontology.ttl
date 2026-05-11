@@ -47,8 +47,10 @@ this formal model into operational instructions for AI coding agents.""" ;
     <http://usefulinc.com/ns/doap#> .
 
 # ─── Section 1 — Universal annotation primitives ────────────────────
-# Used by `dkg_annotate_turn` to express what each chat turn was ABOUT.
-# These predicates apply to ANY project type, not just coding.
+# Predicates expressing what each chat turn was ABOUT — written into
+# the project's `chat` sub-graph by the capture-chat hook (and later
+# read by `dkg_query` / `dkg_memory_search`). These predicates apply
+# to ANY project type, not just coding.
 
 chat:topic
   a owl:DatatypeProperty ;
@@ -60,7 +62,7 @@ chat:topic
 chat:mentions
   a owl:ObjectProperty ;
   rdfs:label "mentions" ;
-  rdfs:comment "An entity the chat turn referenced. The most common edge in the graph. Use the look-before-mint protocol: query dkg_search first, reuse if a normalised-slug match exists." ;
+  rdfs:comment "An entity the chat turn referenced. The most common edge in the graph. To find existing entities to reuse before minting fresh URIs, use `dkg_memory_search` (free-text recall across WM/SWM/VM)." ;
   rdfs:domain chat:Turn ;
   rdfs:range owl:Thing ;
   rdfs:subPropertyOf schema:mentions .
@@ -75,7 +77,7 @@ chat:examines
 chat:proposes
   a owl:ObjectProperty ;
   rdfs:label "proposes" ;
-  rdfs:comment "An idea/decision/task the chat turn put forward. Often points at a freshly-minted Decision or Task entity created in the same dkg_annotate_turn call." ;
+  rdfs:comment "An idea/decision/task the chat turn put forward. Often points at a freshly-minted Decision or Task entity created in the same write batch." ;
   rdfs:domain chat:Turn ;
   rdfs:range owl:Thing .
 
@@ -299,7 +301,7 @@ agent:operator
 :UriPattern
   a owl:Class ;
   rdfs:label "URI minting pattern" ;
-  rdfs:comment "Documents the URI shape the agent should produce when minting a new entity of a given type. Read by dkg_annotate_turn at runtime." .
+  rdfs:comment "Documents the URI shape the agent should produce when minting a new entity of a given type." .
 
 :concept-pattern a :UriPattern ;
   skos:notation "urn:dkg:concept:<slug>" ;
@@ -333,5 +335,5 @@ agent:operator
 6. Truncate to 60 characters max.
 
 Example: "the Tree-Sitter library", "Tree sitter", "TREE_SITTER" all
-normalise to "tree-sitter". Always apply this BEFORE calling dkg_search
-in the look-before-mint protocol.""" .
+normalise to "tree-sitter". Always apply this BEFORE comparing free-text
+recall results (`dkg_memory_search`) in the look-before-mint protocol.""" .

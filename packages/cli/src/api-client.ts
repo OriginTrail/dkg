@@ -133,6 +133,17 @@ export class ApiClient {
     return this.get(`/api/messages${qs ? '?' + qs : ''}`);
   }
 
+  /**
+   * One-shot legacy publish: routed through the new assertion lifecycle
+   * with an auto-generated assertion name. The seal carries the same
+   * EIP-712 AuthorAttestation that the publisher used to derive at
+   * chain-tx time; from a caller's perspective this is the same method
+   * — only the on-the-wire route changed.
+   *
+   * Use `publishAssertion(contextGraphId, name, quads, opts)` directly
+   * when you want to control the assertion name (for resumability,
+   * audit, dedupe, etc.).
+   */
   async publish(contextGraphId: string, quads: Array<{
     subject: string; predicate: string; object: string; graph: string;
   }>, privateQuads?: Array<{
@@ -140,6 +151,7 @@ export class ApiClient {
   }>, options?: {
     accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
     allowedPeers?: string[];
+    publisherNodeIdentityIdOverride?: bigint;
   }): Promise<{
     kcId: string;
     status: 'tentative' | 'confirmed';
@@ -151,19 +163,36 @@ export class ApiClient {
   }> {
     if (privateQuads?.length || options?.accessPolicy || options?.allowedPeers?.length) {
       throw new Error(
-        'privateQuads, accessPolicy, and allowedPeers are not supported in the V10 SWM-first publish flow. ' +
-        'Use sharedMemoryWrite() + publishFromSharedMemory() directly.',
+        'privateQuads, accessPolicy, and allowedPeers are not supported in the V10 assertion-lifecycle publish flow. ' +
+        'Re-think the publish: there is no longer a free-form SWM write that can carry private quads — ' +
+        'every published assertion goes through finalize, which signs an EIP-712 attestation over the public quads.',
       );
     }
-    await this.sharedMemoryWrite(contextGraphId, quads);
-    return this.publishFromSharedMemory(contextGraphId, 'all', true);
+    const autoName = `cli-publish-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    return this.publishAssertion(contextGraphId, autoName, quads, {
+      ...(options?.publisherNodeIdentityIdOverride !== undefined
+        ? { publisherNodeIdentityIdOverride: options.publisherNodeIdentityIdOverride }
+        : {}),
+    });
   }
 
-  /** Write quads to shared memory (formerly workspace). */
+  /**
+   * Direct SWM write — appends loose triples to shared memory without
+   * creating a named WM assertion. Triples land ungrouped; downstream
+   * selection-based publishes (see `publishFromSharedMemory`) seal
+   * them at the publish boundary via the agent's selection bridge.
+   *
+   * Use this for "write loose content, decide what to publish later"
+   * workflows (e.g. node-ui MemoryLayer, mcp `dkg_share`). For
+   * sealed-from-creation provenance, use `createAssertion` /
+   * `appendToAssertion` / `publishAssertion` instead — the seal then
+   * binds to the named assertion at finalize time.
+   */
   async sharedMemoryWrite(contextGraphId: string, quads: Array<{
     subject: string; predicate: string; object: string; graph: string;
   }>): Promise<{
     workspaceOperationId: string;
+    shareOperationId?: string;
     contextGraphId: string;
     graph: string;
     triplesWritten: number;
@@ -172,25 +201,26 @@ export class ApiClient {
     return this.post('/api/shared-memory/write', { contextGraphId, quads });
   }
 
-  /** @deprecated Use sharedMemoryWrite */
-  async workspaceWrite(contextGraphId: string, quads: Array<{
-    subject: string; predicate: string; object: string; graph: string;
-  }>): Promise<{
-    workspaceOperationId: string;
-    contextGraphId: string;
-    graph: string;
-    triplesWritten: number;
-    skolemizedBlankNodes?: number;
-  }> {
-    return this.sharedMemoryWrite(contextGraphId, quads);
-  }
-
-  /** Publish from shared memory (formerly enshrine from workspace). */
+  /**
+   * Selection-based publish — publishes the selected SWM rootEntities
+   * (or all SWM content) to verified memory. The agent mints the
+   * AuthorAttestation seal inline at the selection boundary using
+   * the calling agent's bearer-token identity / explicit
+   * `authorAgentAddress` / `preSignedAuthorAttestation`, or falls
+   * back to the publisher's wallet. The publisher refuses any
+   * on-chain publish without a seal — sign-at-creation is preserved
+   * at the daemon boundary regardless of which fork the caller used
+   * to put content into SWM.
+   *
+   * For finalized-assertion publishes (seal from creation), use
+   * `publishFromFinalizedAssertion` instead — that path threads the
+   * already-signed seal through verbatim with no re-signing.
+   */
   async publishFromSharedMemory(
     contextGraphId: string,
     selection: 'all' | { rootEntities: string[] } = 'all',
     clearAfter = true,
-    options?: { subGraphName?: string },
+    options?: { subGraphName?: string; publisherNodeIdentityIdOverride?: bigint },
   ): Promise<{
     kcId: string;
     status: 'tentative' | 'confirmed';
@@ -203,23 +233,295 @@ export class ApiClient {
       selection,
       clearAfter,
       ...(options?.subGraphName ? { subGraphName: options.subGraphName } : {}),
+      ...(options?.publisherNodeIdentityIdOverride !== undefined
+        ? { publisherNodeIdentityIdOverride: options.publisherNodeIdentityIdOverride.toString() }
+        : {}),
     });
   }
 
-  /** @deprecated Use publishFromSharedMemory */
-  async workspaceEnshrine(
+  /**
+   * Create an assertion in WM, optionally writing quads + finalizing +
+   * promoting in the same call. Maps directly to the extended
+   * `POST /api/assertion/create` body.
+   *
+   * RFC-001 §9.x — the assertion lifecycle is the canonical entry
+   * point for staging content for VM publish. Callers that previously
+   * went through the legacy `/api/shared-memory/write` (now removed)
+   * use this method instead.
+   */
+  async createAssertion(
     contextGraphId: string,
-    selection: 'all' | { rootEntities: string[] } = 'all',
-    clearAfter = true,
+    name: string,
+    options?: {
+      subGraphName?: string;
+      quads?: Array<{ subject: string; predicate: string; object: string; graph: string }>;
+      finalize?: boolean;
+      promote?: boolean;
+      authorAgentAddress?: string;
+      preSignedAuthorAttestation?: {
+        address: string;
+        signature: { r: string; vs: string };
+      };
+      schemeVersion?: number;
+    },
+  ): Promise<{
+    assertionUri: string;
+    written?: number;
+    seal?: {
+      merkleRoot: string;
+      authorAddress: string;
+      schemeVersion: number;
+      chainId: string;
+      kav10Address: string;
+      eip712Digest: string;
+    };
+    promotedCount?: number;
+  }> {
+    return this.post('/api/assertion/create', {
+      contextGraphId,
+      name,
+      ...(options?.subGraphName ? { subGraphName: options.subGraphName } : {}),
+      ...(options?.quads ? { quads: options.quads } : {}),
+      ...(options?.finalize !== undefined ? { finalize: options.finalize } : {}),
+      ...(options?.promote !== undefined ? { promote: options.promote } : {}),
+      ...(options?.authorAgentAddress
+        ? { authorAgentAddress: options.authorAgentAddress }
+        : {}),
+      ...(options?.preSignedAuthorAttestation
+        ? { preSignedAuthorAttestation: options.preSignedAuthorAttestation }
+        : {}),
+      ...(options?.schemeVersion !== undefined
+        ? { schemeVersion: options.schemeVersion }
+        : {}),
+    });
+  }
+
+  /**
+   * Append quads to an existing WM assertion. Wraps
+   * `POST /api/assertion/:name/write`. Used by batched ingest paths
+   * (e.g. `dkg index`) that materialize a single named assertion
+   * across many round-trips before finalize.
+   */
+  async appendToAssertion(
+    contextGraphId: string,
+    name: string,
+    quads: Array<{ subject: string; predicate: string; object: string; graph: string }>,
     options?: { subGraphName?: string },
+  ): Promise<{ written: number }> {
+    return this.post(`/api/assertion/${encodeURIComponent(name)}/write`, {
+      contextGraphId,
+      quads,
+      ...(options?.subGraphName ? { subGraphName: options.subGraphName } : {}),
+    });
+  }
+
+  /**
+   * Finalize a previously-created assertion. RFC-001 §9.x — computes
+   * the canonical merkleRoot, builds the EIP-712 AuthorAttestation,
+   * signs (custodial / pre-signed / publisher fallback), and stamps
+   * the seal triples to `_meta`.
+   */
+  async finalizeAssertion(
+    contextGraphId: string,
+    name: string,
+    options?: {
+      subGraphName?: string;
+      authorAgentAddress?: string;
+      preSignedAuthorAttestation?: {
+        address: string;
+        signature: { r: string; vs: string };
+      };
+      schemeVersion?: number;
+    },
+  ): Promise<{
+    assertionUri: string;
+    merkleRoot: string;
+    authorAddress: string;
+    schemeVersion: number;
+    chainId: string;
+    kav10Address: string;
+    eip712Digest: string;
+  }> {
+    return this.post(
+      `/api/assertion/${encodeURIComponent(name)}/finalize`,
+      {
+        contextGraphId,
+        ...(options?.subGraphName ? { subGraphName: options.subGraphName } : {}),
+        ...(options?.authorAgentAddress
+          ? { authorAgentAddress: options.authorAgentAddress }
+          : {}),
+        ...(options?.preSignedAuthorAttestation
+          ? { preSignedAuthorAttestation: options.preSignedAuthorAttestation }
+          : {}),
+        ...(options?.schemeVersion !== undefined
+          ? { schemeVersion: options.schemeVersion }
+          : {}),
+      },
+    );
+  }
+
+  /**
+   * Publish a previously-finalized assertion to the verified-memory
+   * chain. The seal in `_meta` (written by `finalizeAssertion`)
+   * supplies the AuthorAttestation; the publisher forwards it
+   * verbatim and never re-signs.
+   *
+   * Pre-condition: the assertion must be both finalized AND promoted
+   * to SWM. The high-level `publishAssertion` helper handles the
+   * whole sequence in one call.
+   */
+  async publishFromFinalizedAssertion(
+    contextGraphId: string,
+    assertionName: string,
+    options?: {
+      subGraphName?: string;
+      clearAfter?: boolean;
+      publisherNodeIdentityIdOverride?: bigint;
+    },
   ): Promise<{
     kcId: string;
     status: 'tentative' | 'confirmed';
+    assertionUri: string;
+    authorAddress: string;
+    merkleRoot: string;
+    kas: Array<{ tokenId: string; rootEntity: string }>;
+    txHash?: string;
+    blockNumber?: number;
+    contextGraphError?: string;
+  }> {
+    return this.post('/api/shared-memory/publish', {
+      contextGraphId,
+      assertionName,
+      ...(options?.subGraphName ? { subGraphName: options.subGraphName } : {}),
+      ...(options?.clearAfter !== undefined ? { clearAfter: options.clearAfter } : {}),
+      ...(options?.publisherNodeIdentityIdOverride !== undefined
+        ? { publisherNodeIdentityIdOverride: options.publisherNodeIdentityIdOverride.toString() }
+        : {}),
+    });
+  }
+
+  /**
+   * High-level convenience: create → write → finalize → promote →
+   * publish, all in two HTTP round-trips. The composite mirrors what
+   * a typical OpenClaw/Hermes client does — stage content, commit it,
+   * push it on-chain. Use this unless you need fine-grained control
+   * over the individual steps.
+   */
+  async publishAssertion(
+    contextGraphId: string,
+    name: string,
+    quads: Array<{ subject: string; predicate: string; object: string; graph: string }>,
+    options?: {
+      subGraphName?: string;
+      authorAgentAddress?: string;
+      preSignedAuthorAttestation?: {
+        address: string;
+        signature: { r: string; vs: string };
+      };
+      schemeVersion?: number;
+      clearAfter?: boolean;
+      publisherNodeIdentityIdOverride?: bigint;
+    },
+  ): Promise<{
+    assertionUri: string;
+    kcId: string;
+    status: 'tentative' | 'confirmed';
+    authorAddress: string;
+    merkleRoot: string;
     kas: Array<{ tokenId: string; rootEntity: string }>;
     txHash?: string;
     blockNumber?: number;
   }> {
-    return this.publishFromSharedMemory(contextGraphId, selection, clearAfter, options);
+    const created = await this.createAssertion(contextGraphId, name, {
+      ...(options?.subGraphName ? { subGraphName: options.subGraphName } : {}),
+      quads,
+      finalize: true,
+      promote: true,
+      ...(options?.authorAgentAddress
+        ? { authorAgentAddress: options.authorAgentAddress }
+        : {}),
+      ...(options?.preSignedAuthorAttestation
+        ? { preSignedAuthorAttestation: options.preSignedAuthorAttestation }
+        : {}),
+      ...(options?.schemeVersion !== undefined
+        ? { schemeVersion: options.schemeVersion }
+        : {}),
+    });
+    const published = await this.publishFromFinalizedAssertion(
+      contextGraphId,
+      name,
+      {
+        ...(options?.subGraphName ? { subGraphName: options.subGraphName } : {}),
+        ...(options?.clearAfter !== undefined
+          ? { clearAfter: options.clearAfter }
+          : {}),
+        ...(options?.publisherNodeIdentityIdOverride !== undefined
+          ? { publisherNodeIdentityIdOverride: options.publisherNodeIdentityIdOverride }
+          : {}),
+      },
+    );
+    return {
+      assertionUri: created.assertionUri,
+      kcId: published.kcId,
+      status: published.status,
+      authorAddress: published.authorAddress,
+      merkleRoot: published.merkleRoot,
+      kas: published.kas,
+      ...(published.txHash !== undefined ? { txHash: published.txHash } : {}),
+      ...(published.blockNumber !== undefined
+        ? { blockNumber: published.blockNumber }
+        : {}),
+    };
+  }
+
+  // ─── Publishing Conviction Account (PCA) ────────────────────────────
+
+  async createPca(request: {
+    tokens: string;
+    lockEpochs: number;
+  }): Promise<{
+    accountId: string;
+    txHash: string;
+    blockNumber: number;
+    committedTokens: string;
+    lockEpochs: number;
+  }> {
+    return this.post('/api/pca', request);
+  }
+
+  async addPcaFunds(accountId: string, tokens: string): Promise<{
+    accountId: string;
+    addedTokens: string;
+    txHash: string;
+    blockNumber: number;
+  }> {
+    return this.post(`/api/pca/${encodeURIComponent(accountId)}/funds`, { tokens });
+  }
+
+  async authorizePcaKey(accountId: string, key: string): Promise<{
+    accountId: string;
+    key: string;
+    authorized: boolean;
+    txHash: string;
+    blockNumber: number;
+  }> {
+    return this.post(`/api/pca/${encodeURIComponent(accountId)}/authorize`, { key });
+  }
+
+  async getPcaInfo(accountId: string, probeKey?: string): Promise<{
+    accountId: string;
+    admin: string;
+    balance: string;
+    balanceTrac: string;
+    initialDeposit: string;
+    initialDepositTrac: string;
+    lockEpochs: number;
+    conviction: string;
+    discountBps: number;
+    probedKey?: { key: string; authorized: boolean; adapterSupported?: boolean; error?: string };
+  }> {
+    const qs = probeKey ? `?key=${encodeURIComponent(probeKey)}` : '';
+    return this.get(`/api/pca/${encodeURIComponent(accountId)}${qs}`);
   }
 
   async publisherEnqueue(request: {
@@ -264,6 +566,86 @@ export class ApiClient {
 
   async publisherClear(status: 'failed' | 'finalized'): Promise<{ cleared: number; status: 'failed' | 'finalized' }> {
     return this.post('/api/publisher/clear', { status });
+  }
+
+  // ───────────────────────── EPCIS ─────────────────────────────────────
+
+  async captureEpcis(request: {
+    epcisDocument: unknown;
+    contextGraphId?: string;
+    subGraphName?: string;
+    publishOptions?: {
+      accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
+      allowedPeers?: string[];
+    };
+  }): Promise<{
+    captureID: string;
+    receivedAt: string;
+    eventCount: number;
+    status: 'accepted';
+  }> {
+    return this.post('/api/epcis/capture', request);
+  }
+
+  async getEpcisCapture(captureID: string): Promise<{
+    captureID: string;
+    state: 'accepted' | 'claimed' | 'validated' | 'broadcast' | 'included' | 'finalized' | 'failed';
+    receivedAt: string;
+    finalizedAt: string | null;
+    error: string | null;
+  }> {
+    return this.get(`/api/epcis/capture/${encodeURIComponent(captureID)}`);
+  }
+
+  async queryEpcisEvents(params: {
+    contextGraphId?: string;
+    subGraphName?: string;
+    finalized?: boolean;
+    epc?: string;
+    bizStep?: string;
+    bizLocation?: string;
+    from?: string;
+    to?: string;
+    eventID?: string;
+    eventType?: string;
+    action?: string;
+    disposition?: string;
+    readPoint?: string;
+    parentID?: string;
+    childEPC?: string;
+    inputEPC?: string;
+    outputEPC?: string;
+    anyEPC?: string;
+    perPage?: number;
+    nextPageToken?: string;
+  } = {}): Promise<{
+    body: unknown;
+    nextPageUrl: string | null;
+  }> {
+    const search = new URLSearchParams();
+    for (const [key, value] of Object.entries(params)) {
+      if (value === undefined || value === null) continue;
+      search.set(key, String(value));
+    }
+    const qs = search.toString();
+    return this.queryEpcisEventsByPath(`/api/epcis/events${qs ? `?${qs}` : ''}`);
+  }
+
+  async queryEpcisEventsByPath(path: string): Promise<{
+    body: unknown;
+    nextPageUrl: string | null;
+  }> {
+    const res = await fetch(`${this.baseUrl}${path}`, {
+      headers: this.authHeaders(),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({ error: res.statusText }));
+      throw ApiClient.httpError(res.status, ApiClient.errorMessageFromBody(body, res.statusText), body);
+    }
+    const body = (await res.json()) as unknown;
+    const linkHeader = res.headers.get('Link') ?? res.headers.get('link');
+    const nextPageUrl = parseNextLink(linkHeader);
+    return { body, nextPageUrl };
   }
 
   /**
@@ -435,7 +817,7 @@ export class ApiClient {
     jobId: string;
     contextGraphId: string;
     includeWorkspace: boolean;
-    status: 'queued' | 'running' | 'done' | 'denied' | 'failed';
+    status: 'queued' | 'running' | 'done' | 'denied' | 'failed' | 'unreachable';
     queuedAt: number;
     startedAt?: number;
     finishedAt?: number;
@@ -443,6 +825,7 @@ export class ApiClient {
       connectedPeers: number;
       syncCapablePeers: number;
       peersTried: number;
+      peersSucceeded: number;
       dataSynced: number;
       sharedMemorySynced: number;
       denied: boolean;
@@ -484,6 +867,16 @@ export class ApiClient {
     return this.post('/api/connect', { multiaddr });
   }
 
+  /**
+   * V10 DHT-based dial: hand the daemon a peer id, and it resolves the
+   * peer's current multiaddrs via libp2p Kademlia
+   * (`peerRouting.findPeer`) before dialling. Used by invites that carry
+   * only a peer id so they survive relay rotations.
+   */
+  async connectByPeerId(peerId: string): Promise<{ connected: boolean }> {
+    return this.post('/api/connect', { peerId });
+  }
+
   async createContextGraph(id: string, name: string, description?: string, options?: {
     private?: boolean;
     accessPolicy?: number;
@@ -511,10 +904,18 @@ export class ApiClient {
     });
   }
 
+  async createSubGraph(contextGraphId: string, subGraphName: string): Promise<{
+    created: string;
+    contextGraphId: string;
+  }> {
+    return this.post('/api/sub-graph/create', { contextGraphId, subGraphName });
+  }
+
   async registerContextGraph(id: string, opts?: {
     /** @deprecated V10 ContextGraphs registration ignores metadata reveal. */
     revealOnChain?: boolean;
     accessPolicy?: number;
+    publishPolicy?: number;
   }): Promise<{
     registered: string;
     onChainId: string;
@@ -523,6 +924,7 @@ export class ApiClient {
     return this.post('/api/context-graph/register', {
       id,
       ...(opts?.accessPolicy != null ? { accessPolicy: opts.accessPolicy } : {}),
+      ...(opts?.publishPolicy != null ? { publishPolicy: opts.publishPolicy } : {}),
     });
   }
 
@@ -602,23 +1004,6 @@ export class ApiClient {
     return this.get('/api/agent/identity');
   }
 
-  /** @deprecated Use createContextGraph */
-  async createParanet(
-    id: string,
-    name: string,
-    description?: string,
-    options?: {
-      private?: boolean;
-      participantIdentityIds?: Array<string | number | bigint>;
-      requiredSignatures?: number;
-    },
-  ): Promise<{
-    created: string;
-    uri: string;
-  }> {
-    return this.createContextGraph(id, name, description, options);
-  }
-
   async listContextGraphs(): Promise<{
     contextGraphs: Array<{
       id: string;
@@ -638,28 +1023,8 @@ export class ApiClient {
     return this.get('/api/context-graph/list');
   }
 
-  /** @deprecated Use listContextGraphs */
-  async listParanets(): Promise<{
-    contextGraphs: Array<{
-      id: string;
-      uri: string;
-      name: string;
-      description?: string;
-      creator?: string;
-      createdAt?: string;
-      isSystem: boolean;
-    }>;
-  }> {
-    return this.listContextGraphs();
-  }
-
   async contextGraphExists(id: string): Promise<{ id: string; exists: boolean }> {
     return this.get(`/api/context-graph/exists?id=${encodeURIComponent(id)}`);
-  }
-
-  /** @deprecated Use contextGraphExists */
-  async paranetExists(id: string): Promise<{ id: string; exists: boolean }> {
-    return this.contextGraphExists(id);
   }
 
   async verify(request: {
@@ -933,6 +1298,27 @@ export class ApiClient {
     }
     return fallback;
   }
+}
+
+function parseNextLink(linkHeader: string | null): string | null {
+  if (!linkHeader) return null;
+  const segments = linkHeader.split(',');
+  for (const segment of segments) {
+    const match = segment.match(/<([^>]+)>\s*;\s*rel\s*=\s*"?next"?/i);
+    if (!match) continue;
+    const target = match[1];
+    if (!target) continue;
+    if (target.startsWith('http://') || target.startsWith('https://')) {
+      try {
+        const url = new URL(target);
+        return `${url.pathname}${url.search}`;
+      } catch {
+        return null;
+      }
+    }
+    return target;
+  }
+  return null;
 }
 
 // NOTE: mirrored in `packages/adapter-openclaw/src/DkgNodePlugin.ts`

@@ -79,6 +79,7 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable {
      * @param participantAgents         EOA allow-list (no zeros, no dups)
      * @param requiredSignatures        M-of-N quorum (≤ hostingNodes.length)
      * @param metadataBatchId           Batch ID describing the CG metadata (0 if none)
+     * @param accessPolicy              0 = public/discoverable, 1 = private/curated
      * @param publishPolicy             0 = curated, 1 = open
      * @param publishAuthority          Curator address (required when curated; ignored when open)
      * @param publishAuthorityAccountId Non-zero -> PCA curator type. Requires curated. Ignored when open.
@@ -89,6 +90,7 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable {
         address[] calldata participantAgents,
         uint8 requiredSignatures,
         uint256 metadataBatchId,
+        uint8 accessPolicy,
         uint8 publishPolicy,
         address publishAuthority,
         uint256 publishAuthorityAccountId
@@ -114,6 +116,7 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable {
             participantAgents,
             requiredSignatures,
             metadataBatchId,
+            accessPolicy,
             publishPolicy,
             authority,
             publishAuthorityAccountId

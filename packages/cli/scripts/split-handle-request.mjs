@@ -104,8 +104,8 @@ const BLOCKS = [
   [1223, 'openclaw', '/api/openclaw-channel/health'], // GET /api/openclaw-channel/health
   [1228, 'agent-chat', '/api/connect'], // POST /api/connect
   [1243, 'agent-chat', '/api/update'], // POST /api/update
-  [1318, 'memory', '/api/shared-memory/write|/api/workspace/write'], // multi-line if
-  [1378, 'memory', '/api/shared-memory/publish|/api/workspace/enshrine'], // multi-line if
+  [1318, 'memory', '/api/shared-memory/write'], // POST /api/shared-memory/write
+  [1378, 'memory', '/api/shared-memory/publish'], // POST /api/shared-memory/publish
   [1463, 'publisher', '/api/publisher/enqueue'], // POST /api/publisher/enqueue
   [1515, 'publisher', '/api/publisher/jobs'], // GET /api/publisher/jobs
   [1527, 'publisher', '"/api/publisher/job"'], // GET /api/publisher/job (quote-anchored to disambiguate from /jobs and /job-payload)
@@ -147,9 +147,9 @@ const BLOCKS = [
   [4152, 'status', '/api/host/info'], // GET /api/host/info
   [4181, 'context-graph', '/api/context-graph/subscribe|/api/subscribe'], // multi-line if
   [4324, 'query', '/api/sync/catchup-status'], // GET /api/sync/catchup-status
-  [4354, 'context-graph', '/api/paranet/create'], // POST /api/paranet/create
-  [4382, 'context-graph', '/api/context-graph/rename|/api/paranet/rename'], // multi-line if
-  [4409, 'context-graph', '/api/context-graph/list|/api/paranet/list'], // multi-line if
+  [4354, 'context-graph', '/api/context-graph/create'], // POST /api/context-graph/create
+  [4382, 'context-graph', '/api/context-graph/rename|/api/context-graph/rename'], // multi-line if
+  [4409, 'context-graph', '/api/context-graph/list|/api/context-graph/list'], // multi-line if
   [4421, 'local-agents', '/api/local-agent-integrations'], // GET /api/local-agent-integrations
   [4428, 'local-agents', '/api/local-agent-integrations/'], // GET /api/local-agent-integrations/*
   [4437, 'local-agents', '/api/local-agent-integrations/connect'], // POST /api/local-agent-integrations/connect
@@ -157,7 +157,7 @@ const BLOCKS = [
   [4482, 'local-agents', '/api/local-agent-integrations/'], // PUT /api/local-agent-integrations/*
   [4523, 'status', '/api/integrations'], // GET /api/integrations
   [4538, 'status', '/api/register-adapter'], // POST /api/register-adapter
-  [4567, 'context-graph', '/api/context-graph/exists|/api/paranet/exists'], // multi-line if
+  [4567, 'context-graph', '/api/context-graph/exists|/api/context-graph/exists'], // multi-line if
   [4579, 'query', '/api/verify'], // POST /api/verify
   [4609, 'query', '/api/endorse'], // POST /api/endorse
   [4661, 'query', '/api/ccl/policy/publish'], // POST /api/ccl/policy/publish
@@ -412,7 +412,7 @@ const GROUP_DOC = {
   'openclaw': 'OpenClaw agent listing, chat, channel send/stream/persist-turn/health',
   'memory': 'shared-memory / workspace write + publish + conditional-write, memory turn/search',
   'publisher': 'publisher enqueue / jobs / stats / cancel / retry / clear',
-  'context-graph': 'context-graph (+ paranet, sub-graph) CRUD, participants, join flow, manifest publish/install',
+  'context-graph': 'context-graph (+ contextGraph, sub-graph) CRUD, participants, join flow, manifest publish/install',
   'assertion': 'assertion CRUD + import + file download',
   'query': 'SPARQL query, GenUI render, catchup-status, verify, endorse, CCL policy + eval',
   'local-agents': 'local-agent-integrations list / connect / update / reverse / refresh',

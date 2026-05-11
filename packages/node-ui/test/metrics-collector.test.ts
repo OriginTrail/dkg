@@ -52,7 +52,7 @@ describe('MetricsCollector', () => {
     expect(snap.direct_peers).toBe(3);
     expect(snap.relayed_peers).toBe(2);
     expect(snap.mesh_peers).toBe(4);
-    expect(snap.paranet_count).toBe(2);
+    expect(snap.contextGraph_count).toBe(2);
     expect(snap.total_triples).toBe(1000);
     expect(snap.total_kcs).toBe(15);
     expect(snap.total_kas).toBe(30);

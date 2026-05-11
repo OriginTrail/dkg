@@ -1016,7 +1016,7 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
         </div>
         <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap', fontSize: 12, color: 'var(--text-muted)' }}>
           <span><b style={{ color: 'var(--text-muted)' }}>Started</b> {new Date(op.started_at).toLocaleString()}</span>
-          {op.paranet_id && <span><b style={{ color: 'var(--text-muted)' }}>Context Graph</b> {op.paranet_id}</span>}
+          {op.contextGraph_id && <span><b style={{ color: 'var(--text-muted)' }}>Context Graph</b> {op.contextGraph_id}</span>}
           {op.triple_count != null && <span><b style={{ color: 'var(--text-muted)' }}>Triples</b> {op.triple_count}</span>}
           {op.peer_id && <span><b style={{ color: 'var(--text-muted)' }}>Peer</b> <span className="mono">{shortId(op.peer_id)}</span></span>}
           {op.gas_cost_eth != null && <span><b style={{ color: 'var(--text-muted)' }}>Gas</b> {op.gas_cost_eth.toFixed(6)} ETH</span>}

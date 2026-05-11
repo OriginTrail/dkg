@@ -255,12 +255,12 @@ export function parseIntegerLiteral(value: string): number {
 }
 
 export function createJobSlug(request: LiftRequest): string {
-  const paranet = slugPart(request.contextGraphId);
+  const contextGraph = slugPart(request.contextGraphId);
   const scope = slugPart(request.scope);
   const transition = request.transitionType.toLowerCase();
   const operation = slugPart(request.shareOperationId);
   const rootRange = createRootRangeSlug(request.roots);
-  return [paranet, scope, transition, operation, rootRange].filter(Boolean).join('/');
+  return [contextGraph, scope, transition, operation, rootRange].filter(Boolean).join('/');
 }
 
 function createRootRangeSlug(roots: readonly string[]): string {
