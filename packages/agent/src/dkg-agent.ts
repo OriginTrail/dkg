@@ -6146,6 +6146,15 @@ export class DKGAgent {
     knowledgeAssetUal: string;
     agentAddress?: string;
   }): Promise<PublishResult> {
+    // V10 Axiom 1: ENDORSE writes a typed transition into a CG-bound
+    // data graph. Reject empty/non-string contextGraphId at the API
+    // entry — symmetric with share()/publish()/update()/verify().
+    if (typeof opts.contextGraphId !== 'string' || opts.contextGraphId.trim() === '') {
+      throw new Error(
+        `endorse() requires a non-empty contextGraphId; got ${JSON.stringify(opts.contextGraphId)} ` +
+        '(Axiom 1: every endorse() targets a Context Graph).',
+      );
+    }
     const { buildEndorsementQuads, DKG_ENDORSES } = await import('./endorse.js');
     // A-12: spec §03 / §22 require the endorser DID to be the
     // Ethereum-address form. Passing a libp2p peer id here produced
@@ -6325,6 +6334,17 @@ export class DKGAgent {
     verifiedMemoryId: string;
     signers: string[];
   }> {
+    // V10 Axiom 1: VERIFY targets a CG-bound batch. Reject empty/non-string
+    // contextGraphId at the API entry — symmetric with share()/publish()/
+    // update() guards. Without this guard, downstream code would build
+    // `did:dkg:context-graph:` URIs with an empty CG component and either
+    // crash deep in the chain adapter or quietly write into a phantom CG.
+    if (typeof opts.contextGraphId !== 'string' || opts.contextGraphId.trim() === '') {
+      throw new Error(
+        `verify() requires a non-empty contextGraphId; got ${JSON.stringify(opts.contextGraphId)} ` +
+        '(Axiom 1: every VERIFY targets a Context Graph).',
+      );
+    }
     const ctx = createOperationContext('verify');
 
     // V10 Axiom 3 closed lifecycle + Axiom 4 trust gradient: a UAL
@@ -8906,6 +8926,18 @@ export class DKGAgent {
     const agentAddress = this.defaultAgentAddress ?? this.peerId;
     return {
       async create(contextGraphId: string, name: string, opts?: { subGraphName?: string }): Promise<string> {
+        // V10 Axiom 1: every assertion lifecycle is bound to a Context
+        // Graph. An empty/whitespace contextGraphId would mint a
+        // lifecycle URI in the catch-all `did:dkg:context-graph:`
+        // namespace — exactly the same hazard share()/publish()/update()
+        // guard against (1.h / 1.m / 1.n). Symmetric guard on the
+        // assertion-lifecycle entry.
+        if (typeof contextGraphId !== 'string' || contextGraphId.trim() === '') {
+          throw new Error(
+            `assertion.create requires a non-empty contextGraphId; got ${JSON.stringify(contextGraphId)} ` +
+            '(Axiom 1: every assertion lifecycle is bound to a Context Graph).',
+          );
+        }
         // V10 Axiom 3 lifecycle: every assertion is uniquely keyed by
         // (cg, agent, name[, subGraphName]). An empty or whitespace-only
         // name collapses every future create()/write()/discard()/revoke()

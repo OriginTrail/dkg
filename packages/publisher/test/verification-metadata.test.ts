@@ -14,11 +14,37 @@ describe('buildVerificationMetadata', () => {
       graph: 'did:dkg:context-graph:ml-research/_verified_memory/team-decisions/_meta',
     });
 
-    // Should have: type, contextGraphId, verifiedMemoryId, batchId, txHash, blockNumber, verifiedAt, signerCount, + 3 signedBy
-    expect(quads).toHaveLength(11);
+    // V10 Axiom 3 + 4 corollary contract: VERIFY emits a uniform
+    // prov:Activity audit row alongside the dkg:Verification record.
+    // Quads breakdown:
+    //   2x rdf:type   (dkg:Verification + prov:Activity)
+    //   1x prov:startedAtTime
+    //   1x dkg:transitionType "VERIFY"
+    //   1x prov:wasAssociatedWith (proposer = signers[0])
+    //   1x dkg:contextGraphId
+    //   1x dkg:verifiedMemoryId
+    //   1x dkg:batchId
+    //   1x dkg:transactionHash
+    //   1x dkg:blockNumber
+    //   1x dkg:verifiedAt
+    //   1x dkg:signerCount
+    //   3x dkg:signedBy
+    //   = 15
+    expect(quads).toHaveLength(15);
 
-    const typeQuad = quads.find(q => q.predicate.endsWith('#type'));
-    expect(typeQuad?.object).toBe('https://dkg.network/ontology#Verification');
+    // Both Verification and prov:Activity types must be present —
+    // the Axiom 4 corollary requires uniform audit-trail composability.
+    const typeQuads = quads.filter(q => q.predicate.endsWith('#type'));
+    expect(typeQuads).toHaveLength(2);
+    const typeObjects = typeQuads.map(q => q.object);
+    expect(typeObjects).toContain('https://dkg.network/ontology#Verification');
+    expect(typeObjects).toContain('http://www.w3.org/ns/prov#Activity');
+
+    const transitionQuad = quads.find(q => q.predicate.endsWith('/transitionType'));
+    expect(transitionQuad?.object).toBe('"VERIFY"');
+
+    const associatedQuad = quads.find(q => q.predicate.endsWith('#wasAssociatedWith'));
+    expect(associatedQuad?.object).toBe('did:dkg:agent:0xAlice');
 
     const txQuad = quads.find(q => q.predicate.endsWith('#transactionHash'));
     expect(txQuad?.object).toBe('"0xabc123"');
