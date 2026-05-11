@@ -111,21 +111,41 @@ export function resolveViewGraphs(
       // where the option is documented as ignored. Keep the
       // validation here so only verified-memory consumers see it.
       if (opts?.minTrust !== undefined) {
+        // V10 Axiom 6: in-process callers must accept BOTH the numeric enum
+        // and the documented string forms (incl. spec-table kebab-case used
+        // in `02_AXIOMS.md`). Previously this rejected strings outright,
+        // which made `agent.query({ minTrust: 'consensus-verified' })`
+        // unreachable in tests and broke parity with the HTTP route.
         const mt: unknown = opts.minTrust;
+        const stringMap: Record<string, TrustLevel> = {
+          SelfAttested: TrustLevel.SelfAttested,
+          Endorsed: TrustLevel.Endorsed,
+          PartiallyVerified: TrustLevel.PartiallyVerified,
+          ConsensusVerified: TrustLevel.ConsensusVerified,
+          Contested: TrustLevel.Contested,
+          'self-attested': TrustLevel.SelfAttested,
+          'endorsed': TrustLevel.Endorsed,
+          'partially-verified': TrustLevel.PartiallyVerified,
+          'consensus-verified': TrustLevel.ConsensusVerified,
+          'contested': TrustLevel.Contested,
+        };
         const validLevels = [
           TrustLevel.SelfAttested,
           TrustLevel.Endorsed,
           TrustLevel.PartiallyVerified,
           TrustLevel.ConsensusVerified,
+          TrustLevel.Contested,
         ];
-        if (typeof mt !== 'number' || !Number.isInteger(mt) || !validLevels.includes(mt as TrustLevel)) {
+        if (typeof mt === 'string' && mt in stringMap) {
+          opts.minTrust = stringMap[mt];
+        } else if (typeof mt !== 'number' || !Number.isInteger(mt) || !validLevels.includes(mt as TrustLevel)) {
           // "minTrust" + "must be one of" mirrors the daemon's 400
           // classifier wording so the HTTP path maps to a client error.
           throw new Error(
             `Invalid minTrust ${JSON.stringify(mt)}: must be one of TrustLevel.SelfAttested (0), ` +
-            `Endorsed (1), PartiallyVerified (2), ConsensusVerified (3). The HTTP /api/query route ` +
-            `accepts the string forms "SelfAttested" | "Endorsed" | "PartiallyVerified" | ` +
-            `"ConsensusVerified" and normalises them; in-process callers must pass the numeric enum.`,
+            `Endorsed (1), PartiallyVerified (2), ConsensusVerified (3), Contested (4); ` +
+            `or one of "SelfAttested"|"Endorsed"|"PartiallyVerified"|"ConsensusVerified"|"Contested" ` +
+            `(or kebab-case "self-attested"|"endorsed"|"partially-verified"|"consensus-verified"|"contested").`,
           );
         }
       }

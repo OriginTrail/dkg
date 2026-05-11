@@ -1260,15 +1260,27 @@ export class DKGAgent {
         agentAddress: verifyWallet.address,
         getBatchMerkleRoot: async (cgId: string, batchId: bigint) => {
           const metaGraph = paranetMetaGraphUri(cgId);
-          // Try typed literal first, fallback to untyped for backward compat
-          for (const literal of [`"${batchId}"^^<http://www.w3.org/2001/XMLSchema#integer>`, `"${batchId}"`]) {
-            const result = await this.store.query(
-              `SELECT ?root WHERE { GRAPH <${metaGraph}> { ?kc <https://dkg.network/ontology#merkleRoot> ?root . ?kc <https://dkg.network/ontology#batchId> ${literal} } } LIMIT 1`,
-            );
-            if (result.type === 'bindings' && result.bindings.length > 0) {
-              const hex = (result.bindings[0] as Record<string, string>)['root'];
-              if (!hex) return null;
-              return ethers.getBytes(hex.startsWith('"') ? hex.slice(1, -1) : hex);
+          // V10 Axiom 4 namespace fix: KC metadata is written by
+          // `generateConfirmedFullMetadata` under the canonical
+          // `http://dkg.io/ontology/...` namespace. Earlier iterations of
+          // this lookup used the alternate `https://dkg.network/ontology#`
+          // form and would silently fail to find ANY real batch — making
+          // the entire ACK/verify path a no-op against real data. Query
+          // both forms to remain compatible with any legacy stores.
+          const NS_LEGACY = 'https://dkg.network/ontology#';
+          const NS = 'http://dkg.io/ontology/';
+          for (const ns of [NS, NS_LEGACY]) {
+            for (const literal of [`"${batchId}"^^<http://www.w3.org/2001/XMLSchema#integer>`, `"${batchId}"`]) {
+              const result = await this.store.query(
+                `SELECT ?root WHERE { GRAPH <${metaGraph}> { ?kc <${ns}merkleRoot> ?root . ?kc <${ns}batchId> ${literal} } } LIMIT 1`,
+              );
+              if (result.type === 'bindings' && result.bindings.length > 0) {
+                let hex = (result.bindings[0] as Record<string, string>)['root'];
+                if (!hex) return null;
+                if (hex.startsWith('"')) hex = hex.slice(1, -1);
+                if (!hex.startsWith('0x')) hex = '0x' + hex;
+                return ethers.getBytes(hex);
+              }
             }
           }
           return null;
@@ -3415,6 +3427,16 @@ export class DKGAgent {
    * When localOnly is true, stores locally without broadcasting — use for private data.
    */
   async share(contextGraphId: string, quads: Quad[], opts?: { localOnly?: boolean; operationCtx?: OperationContext; subGraphName?: string }): Promise<{ shareOperationId: string }> {
+    // V10 Axiom 1: every shared write targets a Context Graph. Defensive
+    // guard: TypeScript marks `contextGraphId` as `string`, but JS callers
+    // routinely pass `undefined`/`null`/`""` from JSON request bodies and
+    // would otherwise land bytes in `did:dkg:context-graph:undefined`.
+    if (typeof contextGraphId !== 'string' || contextGraphId.trim() === '') {
+      throw new Error(
+        `share() requires a non-empty contextGraphId; got ${JSON.stringify(contextGraphId)} ` +
+        '(Axiom 1: every shared write targets a Context Graph).',
+      );
+    }
     const ctx = opts?.operationCtx ?? createOperationContext('share');
     const sgLabel = opts?.subGraphName ? ` (sub-graph: ${opts.subGraphName})` : '';
     this.log.info(ctx, `Sharing ${quads.length} quads to SWM for context graph ${contextGraphId}${sgLabel}${opts?.localOnly ? ' (local-only)' : ''}`);
@@ -6038,11 +6060,20 @@ export class DKGAgent {
       }
     }
 
-    const quads = buildEndorsementQuads(
-      endorser,
-      opts.knowledgeAssetUal,
-      opts.contextGraphId,
-    );
+    // V10 Axiom 4 evidence: sign the endorsement with this node's operator
+    // key so peers can recover the signer address and confirm it matches
+    // `did:dkg:agent:<endorser>`. Falls back to unsigned if no key is wired
+    // (e.g. degenerate test setups), but the dkg-agent always has a signer
+    // key in real deployments.
+    const endorseSignerKey = this.config.ackSignerKey
+      ?? (typeof this.chain.getACKSignerKey === 'function' ? this.chain.getACKSignerKey() : undefined)
+      ?? this.config.chainConfig?.operationalKeys?.[0];
+    const quads = buildEndorsementQuads({
+      agentAddress: endorser,
+      knowledgeAssetUal: opts.knowledgeAssetUal,
+      contextGraphId: opts.contextGraphId,
+      signerKey: endorseSignerKey,
+    });
     return this.publish(opts.contextGraphId, quads);
   }
 
@@ -6068,22 +6099,34 @@ export class DKGAgent {
 
     // 1. Look up batch merkle root from local metadata (use typed literal for batchId)
     const metaGraph = paranetMetaGraphUri(opts.contextGraphId);
-    // Try typed literal first, fallback to untyped for backward compat
+    // V10 Axiom 4 namespace fix: see `getBatchMerkleRoot` above. KC meta is
+    // written under `http://dkg.io/ontology/` by the publisher, so search
+    // that first; keep the legacy form as fallback for older stores.
     let batchBindings: Record<string, string>[] | null = null;
-    for (const literal of [`"${opts.batchId}"^^<http://www.w3.org/2001/XMLSchema#integer>`, `"${opts.batchId}"`]) {
-      const r = await this.store.query(
-        `SELECT ?root WHERE { GRAPH <${metaGraph}> { ?kc <https://dkg.network/ontology#merkleRoot> ?root . ?kc <https://dkg.network/ontology#batchId> ${literal} } } LIMIT 1`,
-      );
-      if (r.type === 'bindings' && r.bindings.length > 0) {
-        batchBindings = r.bindings as Record<string, string>[];
-        break;
+    const META_NAMESPACES = ['http://dkg.io/ontology/', 'https://dkg.network/ontology#'];
+    outer: for (const ns of META_NAMESPACES) {
+      for (const literal of [`"${opts.batchId}"^^<http://www.w3.org/2001/XMLSchema#integer>`, `"${opts.batchId}"`]) {
+        const r = await this.store.query(
+          `SELECT ?root WHERE { GRAPH <${metaGraph}> { ?kc <${ns}merkleRoot> ?root . ?kc <${ns}batchId> ${literal} } } LIMIT 1`,
+        );
+        if (r.type === 'bindings' && r.bindings.length > 0) {
+          batchBindings = r.bindings as Record<string, string>[];
+          break outer;
+        }
       }
     }
     if (!batchBindings) {
       throw new Error(`Batch ${opts.batchId} not found in context graph ${opts.contextGraphId}`);
     }
-    const rootHex = batchBindings[0]['root'];
-    const merkleRoot = ethers.getBytes(rootHex.startsWith('"') ? rootHex.slice(1, -1) : rootHex);
+    // V10 Axiom 4 hex normalisation: KC meta stores the merkle root as a raw
+    // 64-char hex literal without the `0x` prefix (see
+    // `generateKCMetadata` → `toHex(meta.merkleRoot)`). `ethers.getBytes`
+    // demands `0x...`, so add it when missing. Strip surrounding quotes that
+    // come back from the SPARQL binding for plain literals.
+    let rootHex = batchBindings[0]['root'];
+    if (rootHex.startsWith('"')) rootHex = rootHex.slice(1, -1);
+    if (!rootHex.startsWith('0x')) rootHex = '0x' + rootHex;
+    const merkleRoot = ethers.getBytes(rootHex);
 
     // 2. Look up context graph on-chain config
     const sub = this.subscribedContextGraphs.get(opts.contextGraphId);
@@ -6266,13 +6309,19 @@ export class DKGAgent {
 
   private async getRootEntities(contextGraphId: string, batchId: bigint): Promise<string[]> {
     const metaGraph = paranetMetaGraphUri(contextGraphId);
-    // Try typed literal first, fallback to untyped for backward compat
-    for (const literal of [`"${batchId}"^^<http://www.w3.org/2001/XMLSchema#integer>`, `"${batchId}"`]) {
-      const result = await this.store.query(
-        `SELECT ?entity WHERE { GRAPH <${metaGraph}> { ?ka <https://dkg.network/ontology#rootEntity> ?entity . ?ka <https://dkg.network/ontology#batchId> ${literal} } }`,
-      );
-      if (result.type === 'bindings' && result.bindings.length > 0) {
-        return (result.bindings as Record<string, string>[]).map(r => r['entity']).filter(Boolean);
+    // V10 Axiom 4 namespace fix: rootEntity / batchId are written by
+    // `generateConfirmedFullMetadata` under `http://dkg.io/ontology/`.
+    // Earlier code only searched the alternate `https://dkg.network/ontology#`
+    // form and so always returned an empty list — VM promotion would silently
+    // skip every batch. Search both for backward compat.
+    for (const ns of ['http://dkg.io/ontology/', 'https://dkg.network/ontology#']) {
+      for (const literal of [`"${batchId}"^^<http://www.w3.org/2001/XMLSchema#integer>`, `"${batchId}"`]) {
+        const result = await this.store.query(
+          `SELECT ?entity WHERE { GRAPH <${metaGraph}> { ?ka <${ns}rootEntity> ?entity . ?ka <${ns}batchId> ${literal} } }`,
+        );
+        if (result.type === 'bindings' && result.bindings.length > 0) {
+          return (result.bindings as Record<string, string>[]).map(r => r['entity']).filter(Boolean);
+        }
       }
     }
     return [];
@@ -8663,11 +8712,26 @@ export class DKGAgent {
         const metaGraph = contextGraphMetaUri(contextGraphId);
         const DKG_NS = 'http://dkg.io/ontology/';
         const XSD = 'http://www.w3.org/2001/XMLSchema#';
-        const ts = new Date().toISOString();
+        const ts = new Date();
+        const tsIso = ts.toISOString();
         const reason = opts?.reason ?? 'manual';
+        const { generateAssertionRevokedMetadata } = await import('@origintrail-official/dkg-publisher');
+        // V10 Axiom 3 + 4 corollary: REVOKE is a typed transition with a
+        // queryable audit trail. We emit BOTH the legacy flat markers
+        // (revoked / revokedAt / revokedReason / transitionType) for
+        // existing readers AND a prov:Activity event so a downstream
+        // auditor can join SHARE / DISCARD / REVOKE under one shape.
+        const provQuads = generateAssertionRevokedMetadata({
+          contextGraphId,
+          agentAddress,
+          assertionName: name,
+          subGraphName: opts?.subGraphName,
+          reason,
+          timestamp: ts,
+        });
         await agent.store.insert([
           { subject: lifecycleUri, predicate: `${DKG_NS}revoked`, object: `"true"^^<${XSD}boolean>`, graph: metaGraph },
-          { subject: lifecycleUri, predicate: `${DKG_NS}revokedAt`, object: `"${ts}"^^<${XSD}dateTime>`, graph: metaGraph },
+          { subject: lifecycleUri, predicate: `${DKG_NS}revokedAt`, object: `"${tsIso}"^^<${XSD}dateTime>`, graph: metaGraph },
           {
             subject: lifecycleUri,
             predicate: `${DKG_NS}revokedReason`,
@@ -8680,6 +8744,7 @@ export class DKGAgent {
             graph: metaGraph,
           },
           { subject: lifecycleUri, predicate: `${DKG_NS}transitionType`, object: `"REVOKE"`, graph: metaGraph },
+          ...provQuads,
         ]);
         return { status: 'revoked', lifecycleUri };
       },

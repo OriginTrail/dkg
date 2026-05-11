@@ -32,8 +32,9 @@ export interface KCMetadata {
    *  self-attested publishes this is the wallet signature of the publisher. */
   authorityBasis?: string;
   /** V10 Axiom 4 corollary: trust level at the moment data enters VM.
-   *  PUBLISH always lands at SelfAttested; ENDORSE/VERIFY raise it later. */
-  trustLevel?: 'self-attested' | 'endorsed' | 'partially-verified' | 'consensus-verified';
+   *  PUBLISH always lands at SelfAttested; ENDORSE/VERIFY raise it later.
+   *  `contested` is the 5th band per spec §4 (mixed APPROVE+REJECT votes). */
+  trustLevel?: 'self-attested' | 'endorsed' | 'partially-verified' | 'consensus-verified' | 'contested';
 }
 
 export interface KAMetadata {
@@ -746,6 +747,41 @@ export function generateAssertionDiscardedMetadata(meta: AssertionDiscardedMeta)
       assertionLayerQuad(subject, MemoryLayer.WorkingMemory, metaGraph),
     ],
   };
+}
+
+export interface AssertionRevokedMeta {
+  contextGraphId: string;
+  agentAddress: string;
+  assertionName: string;
+  subGraphName?: string;
+  reason?: string;
+  timestamp: Date;
+}
+
+/**
+ * V10 Axiom 3: REVOKE is a typed transition with a queryable audit trail.
+ * Mirrors the AssertionDiscarded shape so a downstream auditor can query
+ * for `?event a prov:Activity, dkg:AssertionRevoked` the same way it can
+ * for the other six transitions.
+ */
+export function generateAssertionRevokedMetadata(meta: AssertionRevokedMeta): Quad[] {
+  const metaGraph = `did:dkg:context-graph:${meta.contextGraphId}/_meta`;
+  const subject = assertionLifecycleUri(meta.contextGraphId, meta.agentAddress, meta.assertionName, meta.subGraphName);
+  const agentUri = `did:dkg:agent:${meta.agentAddress}`;
+  const eventUri = `${subject}/event/${nextEventId()}`;
+  const out: Quad[] = [
+    mq(eventUri, `${RDF}type`, `${PROV}Activity`, metaGraph),
+    mq(eventUri, `${RDF}type`, `${DKG}AssertionRevoked`, metaGraph),
+    mq(eventUri, `${PROV}startedAtTime`, dateLit(meta.timestamp), metaGraph),
+    mq(eventUri, `${PROV}wasAssociatedWith`, agentUri, metaGraph),
+    mq(eventUri, `${PROV}used`, subject, metaGraph),
+    mq(eventUri, `${DKG}transitionType`, lit('REVOKE'), metaGraph),
+    mq(subject, `${PROV}wasInvalidatedBy`, eventUri, metaGraph),
+  ];
+  if (meta.reason !== undefined && meta.reason !== '') {
+    out.push(mq(eventUri, `${DKG}revokedReason`, lit(meta.reason), metaGraph));
+  }
+  return out;
 }
 
 /**

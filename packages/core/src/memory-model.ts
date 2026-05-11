@@ -20,11 +20,25 @@ export enum MemoryLayer {
  * Trust levels for Verified Memory triples, ordered by ascending trust.
  * Used with `minTrust` on verified-memory queries to filter results.
  */
+/**
+ * Trust bands per Axiom 4 (`02_AXIOMS.md`):
+ *   SelfAttested        — single publisher, chain-anchored
+ *   Endorsed            — published + N agents agree (lightweight likes)
+ *   PartiallyVerified   — K-of-N consensus votes collected (below quorum)
+ *   ConsensusVerified   — full M-of-N quorum met
+ *   Contested           — has both APPROVE and REJECT votes (mixed signals)
+ *
+ * Numeric ordering only applies to `SelfAttested`..`ConsensusVerified` (used
+ * with the `minTrust` ≥ filter in `injectMinTrustFilter`). `Contested` is a
+ * sentinel state outside the normal ascending gradient — `minTrust` callers
+ * who care about disagreement use `===` against this value rather than `≥`.
+ */
 export enum TrustLevel {
   SelfAttested = 0,
   Endorsed = 1,
   PartiallyVerified = 2,
   ConsensusVerified = 3,
+  Contested = 4,
 }
 
 /** Per-root RDF predicate aligned with `injectMinTrustFilter` in `@origintrail-official/dkg-query`. */

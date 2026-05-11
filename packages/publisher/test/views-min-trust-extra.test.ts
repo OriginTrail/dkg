@@ -146,21 +146,24 @@ describe('P-13: resolveViewGraphs handles minTrust for verified-memory', () => {
   );
 
   it(
-    'rejects non-numeric / out-of-range minTrust values at the engine entry so direct ' +
-      'callers (DKGAgent.query, SDK users) fail closed instead of JS-coerced comparison',
+    'rejects garbage minTrust values at the engine entry, but accepts the spec-documented ' +
+      'string forms ("self-attested" | "endorsed" | "partially-verified" | "consensus-verified" | "contested" ' +
+      'and PascalCase equivalents) per dkgv10-spec §6 GET',
     () => {
-      // Codex review on PR #239: the daemon normalises string "ConsensusVerified"
-      // to the numeric enum, but direct in-process callers could pass
-      // anything and `minTrust > TrustLevel.SelfAttested` would silently
-      // coerce. Validate at `resolveViewGraphs` so every entry point
-      // fails closed with a 400-mappable "Invalid minTrust" error.
+      // Spec §6 (`02_AXIOMS.md`) lists the trust bands as kebab-case
+      // string filter values. Earlier iterations rejected string inputs
+      // outright at the engine entry — that broke spec parity with
+      // `/api/query`, made `agent.query({ minTrust: 'consensus-verified'})`
+      // unreachable, and forced JS callers to import the numeric enum
+      // even though the HTTP contract is documented in strings. The fix
+      // (Axiom 6.h) is to normalise the documented strings AND keep the
+      // hard-fail on bogus values so we never JS-coerce silently.
       const bad: Array<unknown> = [
-        'ConsensusVerified',
+        'NotATrustLevel',
         '0',
         null,
         true,
         -1,
-        4,
         99,
         1.5,
         {},
@@ -170,18 +173,30 @@ describe('P-13: resolveViewGraphs handles minTrust for verified-memory', () => {
           resolveViewGraphs('verified-memory', CG, { minTrust: mt as TrustLevel }),
         ).toThrow(/Invalid minTrust/);
       }
-      // Every valid TrustLevel (SelfAttested..ConsensusVerified) must
-      // resolve without throwing — per-triple filtering (Q-1) handles
-      // the above-Endorsed tiers downstream at
-      // `DKGQueryEngine.queryWithView` via `injectMinTrustFilter`.
+      // Every valid TrustLevel (SelfAttested..Contested) resolves without
+      // throwing. Per-triple filtering (Q-1) handles above-Endorsed tiers
+      // downstream at `DKGQueryEngine.queryWithView` via
+      // `injectMinTrustFilter`.
       for (const mt of [
         TrustLevel.SelfAttested,
         TrustLevel.Endorsed,
         TrustLevel.PartiallyVerified,
         TrustLevel.ConsensusVerified,
+        TrustLevel.Contested,
       ]) {
         expect(() =>
           resolveViewGraphs('verified-memory', CG, { minTrust: mt }),
+        ).not.toThrow();
+      }
+      // Spec-documented strings must round-trip without throwing.
+      const validStrings = [
+        'SelfAttested', 'Endorsed', 'PartiallyVerified', 'ConsensusVerified', 'Contested',
+        'self-attested', 'endorsed', 'partially-verified', 'consensus-verified', 'contested',
+      ];
+      for (const s of validStrings) {
+        expect(
+          () => resolveViewGraphs('verified-memory', CG, { minTrust: s as unknown as TrustLevel }),
+          `spec-documented minTrust string "${s}" must be accepted`,
         ).not.toThrow();
       }
     },
