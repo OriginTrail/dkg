@@ -333,6 +333,16 @@ function makePayload(runId, nodeNumber, chunkNumber, sizeBytes) {
   return prefix + fillChar.repeat(sizeBytes - prefixBytes);
 }
 
+function buildWriteTasks(config, plan) {
+  const tasks = [];
+  for (let chunkNumber = 1; chunkNumber <= plan.chunksPerNode; chunkNumber += 1) {
+    for (let nodeIndex = 0; nodeIndex < config.ports.length; nodeIndex += 1) {
+      tasks.push({ nodeIndex, chunkNumber });
+    }
+  }
+  return tasks;
+}
+
 function sparqlString(value) {
   return JSON.stringify(String(value));
 }
@@ -460,12 +470,7 @@ async function runWrites(config, plan) {
     return { durationMs: 0, records: [], summary: undefined };
   }
 
-  const tasks = [];
-  for (let nodeIndex = 0; nodeIndex < config.ports.length; nodeIndex += 1) {
-    for (let chunkNumber = 1; chunkNumber <= plan.chunksPerNode; chunkNumber += 1) {
-      tasks.push({ nodeIndex, chunkNumber });
-    }
-  }
+  const tasks = buildWriteTasks(config, plan);
 
   const records = [];
   let nextTask = 0;
@@ -788,6 +793,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  buildWriteTasks,
   buildBenchmarkPlan,
   makePayload,
   numericBinding,

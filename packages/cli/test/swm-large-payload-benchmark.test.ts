@@ -3,6 +3,10 @@ import { describe, expect, it } from 'vitest';
 
 const require = createRequire(import.meta.url);
 const benchmark = require('../scripts/swm-large-payload-benchmark.cjs') as {
+  buildWriteTasks: (
+    config: { ports: number[] },
+    plan: { chunksPerNode: number },
+  ) => Array<{ nodeIndex: number; chunkNumber: number }>;
   buildBenchmarkPlan: (config: Record<string, unknown>) => {
     payloadBytesPerNode: number;
     chunkBytes: number;
@@ -123,5 +127,16 @@ describe('swm large payload benchmark', () => {
 
     expect(Buffer.byteLength(payload, 'utf8')).toBe(1024);
     expect(payload).toContain('run=payload-run node=5 chunk=7');
+  });
+
+  it('interleaves write tasks across nodes for concurrent live benchmarks', () => {
+    expect(benchmark.buildWriteTasks({ ports: [9201, 9202, 9203] }, { chunksPerNode: 2 })).toEqual([
+      { nodeIndex: 0, chunkNumber: 1 },
+      { nodeIndex: 1, chunkNumber: 1 },
+      { nodeIndex: 2, chunkNumber: 1 },
+      { nodeIndex: 0, chunkNumber: 2 },
+      { nodeIndex: 1, chunkNumber: 2 },
+      { nodeIndex: 2, chunkNumber: 2 },
+    ]);
   });
 });
