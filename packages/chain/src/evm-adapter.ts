@@ -258,6 +258,7 @@ export class EVMChainAdapter implements ChainAdapter {
   private readonly adminSigner?: Wallet;
   private signerIndex = 0;
   private signerSelectionQueue: Promise<void> = Promise.resolve();
+  private readonly busyOperationalSigners = new Set<string>();
   private readonly hubAddress: string;
   private contracts: ContractCache;
   private initialized = false;
@@ -371,6 +372,84 @@ export class EVMChainAdapter implements ChainAdapter {
     const s = this.signerPool[this.signerIndex % this.signerPool.length];
     this.signerIndex++;
     return s;
+  }
+
+  private async signerHasNativeFunds(signer: Wallet): Promise<boolean> {
+    try {
+      const bal = await this.provider.getBalance(signer.address);
+      return bal > 0n;
+    } catch {
+      // If balance probing fails (flaky RPC), do not hard-fail signer selection.
+      return true;
+    }
+  }
+
+  private async withOperationalSigner<T>(
+    action: (signer: Wallet) => Promise<T>,
+    options: { requireNativeFunds?: boolean; maxWaitMs?: number } = {},
+  ): Promise<T> {
+    const requireNativeFunds = options.requireNativeFunds ?? true;
+    const maxWaitMs = options.maxWaitMs ?? 5000;
+    const startedAt = Date.now();
+
+    let selectedSigner: Wallet | undefined;
+    while (!selectedSigner) {
+      const previousSelection = this.signerSelectionQueue;
+      let releaseSelection!: () => void;
+      this.signerSelectionQueue = new Promise<void>((resolve) => { releaseSelection = resolve; });
+      await previousSelection;
+      try {
+        const start = this.signerIndex % this.signerPool.length;
+        const candidates: Array<{ idx: number; signer: Wallet }> = [];
+        for (let i = 0; i < this.signerPool.length; i += 1) {
+          const idx = (start + i) % this.signerPool.length;
+          const signer = this.signerPool[idx];
+          if (this.busyOperationalSigners.has(signer.address.toLowerCase())) continue;
+          candidates.push({ idx, signer });
+        }
+
+        if (candidates.length > 0) {
+          if (!requireNativeFunds) {
+            const picked = candidates[0];
+            this.signerIndex = picked.idx + 1;
+            selectedSigner = picked.signer;
+          } else {
+            for (const candidate of candidates) {
+              if (await this.signerHasNativeFunds(candidate.signer)) {
+                this.signerIndex = candidate.idx + 1;
+                selectedSigner = candidate.signer;
+                break;
+              }
+            }
+            if (!selectedSigner && Date.now() - startedAt >= maxWaitMs) {
+              throw new Error(
+                'No available operational wallet with native gas funds. ' +
+                'Fund at least one operational wallet, or wait for an in-flight transaction to finish.',
+              );
+            }
+          }
+        } else if (Date.now() - startedAt >= maxWaitMs) {
+          throw new Error(
+            'All operational wallets are currently busy with in-flight transactions. ' +
+            'Retry once one signer becomes available.',
+          );
+        }
+      } finally {
+        releaseSelection();
+      }
+
+      if (!selectedSigner) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    }
+
+    const signerKey = selectedSigner.address.toLowerCase();
+    this.busyOperationalSigners.add(signerKey);
+    try {
+      return await action(selectedSigner);
+    } finally {
+      this.busyOperationalSigners.delete(signerKey);
+    }
   }
 
   private findSignerByAddress(address: string): Wallet | undefined {
@@ -843,39 +922,40 @@ export class EVMChainAdapter implements ChainAdapter {
   async batchMintKnowledgeAssets(params: BatchMintParams): Promise<BatchMintResult> {
     await this.init();
     this.requireV9();
+    const receipt = await this.withOperationalSigner(async (signer) => {
+      const ka = this.contracts.knowledgeAssets!.connect(signer) as Contract;
+      const kaAddress = await ka.getAddress();
 
-    const ka = this.contracts.knowledgeAssets!;
-    const kaAddress = await ka.getAddress();
-
-    if (this.contracts.token && params.tokenAmount > 0n) {
-      const currentAllowance: bigint = await this.contracts.token.allowance(this.signer.address, kaAddress);
-      if (currentAllowance < params.tokenAmount) {
-        const approveTx = await this.contracts.token.approve(kaAddress, ethers.MaxUint256);
-        await approveTx.wait();
+      if (this.contracts.token && params.tokenAmount > 0n) {
+        const tokenWithSigner = this.contracts.token.connect(signer) as Contract;
+        const currentAllowance: bigint = await tokenWithSigner.allowance(signer.address, kaAddress);
+        if (currentAllowance < params.tokenAmount) {
+          const approveTx = await tokenWithSigner.approve(kaAddress, ethers.MaxUint256);
+          await approveTx.wait();
+        }
       }
-    }
 
-    const identityIds = params.receiverSignatures.map((s) => s.identityId);
-    const rValues = params.receiverSignatures.map((s) => ethers.hexlify(s.r));
-    const vsValues = params.receiverSignatures.map((s) => ethers.hexlify(s.vs));
+      const identityIds = params.receiverSignatures.map((s) => s.identityId);
+      const rValues = params.receiverSignatures.map((s) => ethers.hexlify(s.r));
+      const vsValues = params.receiverSignatures.map((s) => ethers.hexlify(s.vs));
 
-    const tx = await ka.batchMintKnowledgeAssets(
-      params.publisherNodeIdentityId,
-      ethers.hexlify(params.merkleRoot),
-      params.startKAId,
-      params.endKAId,
-      params.publicByteSize,
-      params.epochs,
-      params.tokenAmount,
-      ethers.ZeroAddress, // paymaster
-      ethers.hexlify(params.publisherSignature.r),
-      ethers.hexlify(params.publisherSignature.vs),
-      identityIds,
-      rValues,
-      vsValues,
-    );
-
-    const receipt = await tx.wait();
+      const tx = await ka.batchMintKnowledgeAssets(
+        params.publisherNodeIdentityId,
+        ethers.hexlify(params.merkleRoot),
+        params.startKAId,
+        params.endKAId,
+        params.publicByteSize,
+        params.epochs,
+        params.tokenAmount,
+        ethers.ZeroAddress, // paymaster
+        ethers.hexlify(params.publisherSignature.r),
+        ethers.hexlify(params.publisherSignature.vs),
+        identityIds,
+        rValues,
+        vsValues,
+      );
+      return tx.wait();
+    });
 
     let batchId = 0n;
     for (const log of receipt.logs) {
@@ -1119,26 +1199,27 @@ export class EVMChainAdapter implements ChainAdapter {
   async extendStorage(params: ExtendStorageParams): Promise<TxResult> {
     await this.init();
     this.requireV9();
+    const receipt = await this.withOperationalSigner(async (signer) => {
+      const ka = this.contracts.knowledgeAssets!.connect(signer) as Contract;
 
-    const ka = this.contracts.knowledgeAssets!;
-
-    if (this.contracts.token && params.tokenAmount > 0n) {
-      const kaAddress = await ka.getAddress();
-      const currentAllowance: bigint = await this.contracts.token.allowance(this.signer.address, kaAddress);
-      if (currentAllowance < params.tokenAmount) {
-        const approveTx = await this.contracts.token.approve(kaAddress, ethers.MaxUint256);
-        await approveTx.wait();
+      if (this.contracts.token && params.tokenAmount > 0n) {
+        const kaAddress = await ka.getAddress();
+        const tokenWithSigner = this.contracts.token.connect(signer) as Contract;
+        const currentAllowance: bigint = await tokenWithSigner.allowance(signer.address, kaAddress);
+        if (currentAllowance < params.tokenAmount) {
+          const approveTx = await tokenWithSigner.approve(kaAddress, ethers.MaxUint256);
+          await approveTx.wait();
+        }
       }
-    }
 
-    const tx = await ka.extendStorage(
-      params.batchId,
-      params.additionalEpochs,
-      params.tokenAmount,
-      ethers.ZeroAddress,
-    );
-
-    const receipt = await tx.wait();
+      const tx = await ka.extendStorage(
+        params.batchId,
+        params.additionalEpochs,
+        params.tokenAmount,
+        ethers.ZeroAddress,
+      );
+      return tx.wait();
+    });
 
     return {
       hash: receipt.hash,
@@ -2261,19 +2342,23 @@ export class EVMChainAdapter implements ChainAdapter {
     // Approving the NFT here would still leave the inner `stakingV10.stake`
     // call short on allowance and revert. Mirror the pattern used in
     // `ensureProfile` / `scripts/devnet.sh`.
-    if (this.contracts.token && amount > 0n) {
-      const stakingV10Addr: string = await this.contracts.hub.getContractAddress('StakingV10');
-      if (stakingV10Addr === ethers.ZeroAddress) {
-        throw new Error('StakingV10 not registered in Hub — V10 staking unavailable');
+    const receipt = await this.withOperationalSigner(async (signer) => {
+      const stakingNftWithSigner = nft.connect(signer) as Contract;
+      if (this.contracts.token && amount > 0n) {
+        const stakingV10Addr: string = await this.contracts.hub.getContractAddress('StakingV10');
+        if (stakingV10Addr === ethers.ZeroAddress) {
+          throw new Error('StakingV10 not registered in Hub — V10 staking unavailable');
+        }
+        const tokenWithSigner = this.contracts.token.connect(signer) as Contract;
+        const currentAllowance: bigint = await tokenWithSigner.allowance(signer.address, stakingV10Addr);
+        if (currentAllowance < amount) {
+          await (await tokenWithSigner.approve(stakingV10Addr, ethers.MaxUint256)).wait();
+        }
       }
-      const currentAllowance: bigint = await this.contracts.token.allowance(this.signer.address, stakingV10Addr);
-      if (currentAllowance < amount) {
-        await (await this.contracts.token.approve(stakingV10Addr, ethers.MaxUint256)).wait();
-      }
-    }
 
-    const tx = await nft.createConviction(identityId, amount, lockTier);
-    const receipt = await tx.wait();
+      const tx = await stakingNftWithSigner.createConviction(identityId, amount, lockTier);
+      return tx.wait();
+    });
 
     return {
       hash: receipt.hash,
@@ -2300,18 +2385,22 @@ export class EVMChainAdapter implements ChainAdapter {
     }
 
     const pca = this.contracts.publishingConvictionAccount;
-    const pcaAddress = await pca.getAddress();
+    const receipt = await this.withOperationalSigner(async (signer) => {
+      const pcaWithSigner = pca.connect(signer) as Contract;
+      const pcaAddress = await pcaWithSigner.getAddress();
 
-    if (this.contracts.token && amount > 0n) {
-      const currentAllowance: bigint = await this.contracts.token.allowance(this.signer.address, pcaAddress);
-      if (currentAllowance < amount) {
-        const approveTx = await this.contracts.token.approve(pcaAddress, ethers.MaxUint256);
-        await approveTx.wait();
+      if (this.contracts.token && amount > 0n) {
+        const tokenWithSigner = this.contracts.token.connect(signer) as Contract;
+        const currentAllowance: bigint = await tokenWithSigner.allowance(signer.address, pcaAddress);
+        if (currentAllowance < amount) {
+          const approveTx = await tokenWithSigner.approve(pcaAddress, ethers.MaxUint256);
+          await approveTx.wait();
+        }
       }
-    }
 
-    const tx = await pca.createAccount(amount, lockEpochs);
-    const receipt = await tx.wait();
+      const tx = await pcaWithSigner.createAccount(amount, lockEpochs);
+      return tx.wait();
+    });
 
     let accountId = 0n;
     for (const log of receipt.logs) {
@@ -2343,18 +2432,22 @@ export class EVMChainAdapter implements ChainAdapter {
     }
 
     const pca = this.contracts.publishingConvictionAccount;
-    const pcaAddress = await pca.getAddress();
+    const receipt = await this.withOperationalSigner(async (signer) => {
+      const pcaWithSigner = pca.connect(signer) as Contract;
+      const pcaAddress = await pcaWithSigner.getAddress();
 
-    if (this.contracts.token && amount > 0n) {
-      const currentAllowance: bigint = await this.contracts.token.allowance(this.signer.address, pcaAddress);
-      if (currentAllowance < amount) {
-        const approveTx = await this.contracts.token.approve(pcaAddress, ethers.MaxUint256);
-        await approveTx.wait();
+      if (this.contracts.token && amount > 0n) {
+        const tokenWithSigner = this.contracts.token.connect(signer) as Contract;
+        const currentAllowance: bigint = await tokenWithSigner.allowance(signer.address, pcaAddress);
+        if (currentAllowance < amount) {
+          const approveTx = await tokenWithSigner.approve(pcaAddress, ethers.MaxUint256);
+          await approveTx.wait();
+        }
       }
-    }
 
-    const tx = await pca.addFunds(accountId, amount);
-    const receipt = await tx.wait();
+      const tx = await pcaWithSigner.addFunds(accountId, amount);
+      return tx.wait();
+    });
 
     return {
       hash: receipt.hash,
@@ -2369,8 +2462,11 @@ export class EVMChainAdapter implements ChainAdapter {
       throw new Error('PublishingConvictionAccount contract not deployed.');
     }
 
-    const tx = await this.contracts.publishingConvictionAccount.extendLock(accountId, additionalEpochs);
-    const receipt = await tx.wait();
+    const pca = this.contracts.publishingConvictionAccount;
+    const receipt = await this.withOperationalSigner(async (signer) => {
+      const tx = await (pca.connect(signer) as Contract).extendLock(accountId, additionalEpochs);
+      return tx.wait();
+    });
 
     return {
       hash: receipt.hash,
@@ -2387,8 +2483,11 @@ export class EVMChainAdapter implements ChainAdapter {
     if (!ethers.isAddress(key)) {
       throw new Error(`addPCAAuthorizedKey: ${key} is not a valid EVM address`);
     }
-    const tx = await this.contracts.publishingConvictionAccount.addAuthorizedKey(accountId, key);
-    const receipt = await tx.wait();
+    const pca = this.contracts.publishingConvictionAccount;
+    const receipt = await this.withOperationalSigner(async (signer) => {
+      const tx = await (pca.connect(signer) as Contract).addAuthorizedKey(accountId, key);
+      return tx.wait();
+    });
     return {
       hash: receipt.hash,
       blockNumber: receipt.blockNumber,
@@ -2874,16 +2973,22 @@ export class EVMChainAdapter implements ChainAdapter {
 
   async createChallenge(): Promise<CreateChallengeResult> {
     await this.init();
+    return this.withOperationalSigner(async (signer) => this.withHubStaleRetry(async () => {
+      const identityStorage = await this.resolveContract('IdentityStorage');
+      const identityId: bigint = await identityStorage.getIdentityId(signer.address);
+      if (identityId === 0n) {
+        throw new Error(
+          `Selected operational wallet ${signer.address} has no on-chain identity. ` +
+          'Ensure operational wallets are registered for the node identity.',
+        );
+      }
 
-    const identityStorage = await this.resolveContract('IdentityStorage');
-    const identityId: bigint = await identityStorage.getIdentityId(this.signer.address);
-
-    return this.withHubStaleRetry(async () => {
       const { rs, rss } = await this.getRandomSampling();
+      const rsWithSigner = rs.connect(signer) as Contract;
 
       let receipt: ethers.TransactionReceipt;
       try {
-        const tx = await rs.createChallenge();
+        const tx = await rsWithSigner.createChallenge();
         receipt = await tx.wait();
       } catch (err) {
         this.translateRandomSamplingError(err);
@@ -2932,7 +3037,7 @@ export class EVMChainAdapter implements ChainAdapter {
         challenge,
         contextGraphId,
       };
-    });
+    }));
   }
 
   async submitProof(leaf: Uint8Array | `0x${string}`, merkleProof: Uint8Array[]): Promise<TxResult> {
@@ -2944,12 +3049,13 @@ export class EVMChainAdapter implements ChainAdapter {
     }
     const proofHex = merkleProof.map((p) => ethers.hexlify(p));
 
-    return this.withHubStaleRetry(async () => {
+    return this.withOperationalSigner(async (signer) => this.withHubStaleRetry(async () => {
       const { rs } = await this.getRandomSampling();
+      const rsWithSigner = rs.connect(signer) as Contract;
 
       let receipt: ethers.TransactionReceipt;
       try {
-        const tx = await rs.submitProof(leafHex, proofHex);
+        const tx = await rsWithSigner.submitProof(leafHex, proofHex);
         receipt = await tx.wait();
       } catch (err) {
         this.translateRandomSamplingError(err);
@@ -2960,7 +3066,7 @@ export class EVMChainAdapter implements ChainAdapter {
         blockNumber: receipt.blockNumber,
         success: true,
       };
-    });
+    }));
   }
 
   async getActiveProofPeriodStatus(): Promise<ProofPeriodStatus> {

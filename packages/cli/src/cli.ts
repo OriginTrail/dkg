@@ -3442,7 +3442,7 @@ program
       }
 
       const provider = new ethers.JsonRpcProvider(rpcUrl);
-      const wallet = new ethers.Wallet(opWallets.wallets[0].privateKey, provider);
+      const operationalWallets = opWallets.wallets.map((w) => new ethers.Wallet(w.privateKey, provider));
 
       const hub = new ethers.Contract(hubAddress, [
         'function getContractAddress(string) view returns (address)',
@@ -3453,17 +3453,46 @@ program
         'function getIdentityId(address) view returns (uint72)',
       ], provider);
 
-      let identityId: bigint;
+      let wallet: ethers.Wallet | null = null;
+      let identityId: bigint = 0n;
       if (opts.identity) {
         identityId = BigInt(opts.identity);
+        for (const candidate of operationalWallets) {
+          const bal = await provider.getBalance(candidate.address);
+          if (bal > 0n) {
+            wallet = candidate;
+            break;
+          }
+        }
+        wallet ??= operationalWallets[0];
       } else {
-        identityId = await identityStorage.getIdentityId(wallet.address);
-        if (identityId === 0n) {
-          console.error(
-            `No on-chain identity found for primary wallet ${wallet.address}.\n` +
-            'Start the node first ("dkg start") so it creates an on-chain profile, or use --identity <id>.',
-          );
-          process.exit(1);
+        let fallbackIdentity: bigint | null = null;
+        let fallbackWallet: ethers.Wallet | null = null;
+        for (const candidate of operationalWallets) {
+          const candidateIdentity = await identityStorage.getIdentityId(candidate.address);
+          if (candidateIdentity === 0n) continue;
+          if (!fallbackWallet) {
+            fallbackWallet = candidate;
+            fallbackIdentity = candidateIdentity;
+          }
+          const bal = await provider.getBalance(candidate.address);
+          if (bal > 0n) {
+            wallet = candidate;
+            identityId = candidateIdentity;
+            break;
+          }
+        }
+
+        if (!wallet) {
+          if (!fallbackWallet || fallbackIdentity == null) {
+            console.error(
+              'No on-chain identity found for any operational wallet.\n' +
+              'Start the node first ("dkg start") so it creates an on-chain profile, or use --identity <id>.',
+            );
+            process.exit(1);
+          }
+          wallet = fallbackWallet;
+          identityId = fallbackIdentity;
         }
       }
 
@@ -3496,7 +3525,7 @@ program
     } catch (err) {
       if (hasErrorCode(err, 'CALL_EXCEPTION')) {
         console.error(
-          `Transaction reverted. The primary wallet may not be the admin/operational key for this identity.\n` +
+          `Transaction reverted. The selected operational wallet may not be the admin/operational key for this identity.\n` +
           `Use --identity <id> if auto-detection picked the wrong identity.`,
         );
       }
