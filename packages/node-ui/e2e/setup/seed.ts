@@ -95,7 +95,10 @@ async function waitForCgVisible(base: string, token: string, cgId: string, timeo
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
-      const resp = await fetch(`${base}/api/paranet/list`, {
+      // V10: /api/paranet/list was removed in the paranet -> context-graph
+      // rename (commit 7347c165). The replacement endpoint returns the same
+      // { contextGraphs: [{ id, ... }] } shape, so the poll body is unchanged.
+      const resp = await fetch(`${base}/api/context-graph/list`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (resp.ok) {
@@ -107,5 +110,5 @@ async function waitForCgVisible(base: string, token: string, cgId: string, timeo
     }
     await new Promise((r) => setTimeout(r, 500));
   }
-  throw new Error(`context graph "${cgId}" never became visible to /api/paranet/list`);
+  throw new Error(`context graph "${cgId}" never became visible to /api/context-graph/list`);
 }

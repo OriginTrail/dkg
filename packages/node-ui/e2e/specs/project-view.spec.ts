@@ -136,6 +136,105 @@ test.describe('Project View', () => {
       const markers = page.getByText('No assets yet');
       expect(await markers.count()).toBeGreaterThan(0);
     });
+
+    test('clicking a layer-summary row toggles the .expanded class on .v10-memory-layer', async ({ page }) => {
+      // The three rows under the Activity feed are interactive: click to
+      // expand for the inline drill-down (Layer Stats, Publish controls,
+      // entity preview). The expansion is state-driven; without an
+      // explicit "expanded" state assertion, a regression that breaks
+      // the toggle handler would silently leave the rows non-interactive.
+      // Use the WM row because the seed deterministically populates WM
+      // (independent of test ordering); SWM only has entities after the
+      // promote tests in memory-layers.spec.ts run.
+      const wmRow = page.locator('.v10-memory-layer.wm').first();
+      await expect(wmRow).toBeVisible();
+      const startsExpanded = (await wmRow.getAttribute('class'))?.includes('expanded') ?? false;
+      await wmRow.click();
+      const afterFirstClick = await wmRow.getAttribute('class');
+      expect(afterFirstClick?.includes('expanded')).toBe(!startsExpanded);
+      await wmRow.click();
+      const afterSecondClick = await wmRow.getAttribute('class');
+      expect(afterSecondClick?.includes('expanded')).toBe(startsExpanded);
+    });
+
+    test('expanded WM row surfaces the entity preview + "View full layer" + the Promote-All affordance', async ({ page, seed, daemon }) => {
+      // The expanded content is rendered as a SIBLING `.v10-layer-expand-
+      // content.open` div (NOT inside `.v10-memory-layer.wm` — see
+      // MemoryStrip in project/components.tsx). Self-bootstrap WM with a
+      // probe entity so this test is order-independent: even if a prior
+      // spec's `promote` cleared the seed text assertion, this write
+      // refills WM.
+      const probeName = `pv-overview-probe-${Date.now()}`;
+      const writeResp = await page.request.post(
+        `/api/assertion/${encodeURIComponent(probeName)}/write`,
+        {
+          headers: { Authorization: `Bearer ${daemon.authToken}` },
+          data: {
+            contextGraphId: seed.contextGraphId,
+            quads: [{
+              subject: `urn:dkg:e2e:pv-overview-${Date.now()}`,
+              predicate: 'http://schema.org/name',
+              object: '"Overview drilldown probe"',
+              graph: '',
+            }],
+          },
+        },
+      );
+      expect(writeResp.ok()).toBe(true);
+      // SSE auto-refresh should propagate to the Overview; give it a
+      // beat then assert the WM row reflects ≥1 entity.
+      const wmRow = page.locator('.v10-memory-layer.wm').first();
+      await expect.poll(async () => {
+        const countText = await wmRow.locator('.v10-layer-count').textContent();
+        return parseInt(countText ?? '0', 10);
+      }, { timeout: 10_000 }).toBeGreaterThanOrEqual(1);
+      const currentClass = (await wmRow.getAttribute('class')) ?? '';
+      if (!currentClass.includes('expanded')) {
+        await wmRow.click();
+      }
+      const expandPane = page.locator('.v10-layer-expand-content.open').first();
+      await expect(expandPane).toBeVisible({ timeout: 10_000 });
+      // The entity preview row should be rendered (we don't pin the
+      // specific entity label since it depends on prior spec state).
+      await expect(expandPane.locator('.v10-item-row, [class*=entity]').first()).toBeVisible({ timeout: 10_000 });
+      // WM's expanded panel has the Promote-All CTA (Publish-to-VM is
+      // SWM-only — covered in memory-layers.spec.ts).
+      await expect(expandPane.getByRole('button', { name: /Promote All → Shared/ })).toBeVisible();
+      await expect(expandPane.getByRole('button', { name: /View full layer/ })).toBeVisible();
+    });
+
+    test('"View full layer →" on the WM row navigates the layer-switcher to WM', async ({ page, projectView, seed, daemon }) => {
+      // Same self-bootstrap pattern: ensure WM has at least one entity
+      // so the row expands and the "View full layer" button appears.
+      const probeName = `pv-nav-probe-${Date.now()}`;
+      await page.request.post(
+        `/api/assertion/${encodeURIComponent(probeName)}/write`,
+        {
+          headers: { Authorization: `Bearer ${daemon.authToken}` },
+          data: {
+            contextGraphId: seed.contextGraphId,
+            quads: [{
+              subject: `urn:dkg:e2e:pv-nav-${Date.now()}`,
+              predicate: 'http://schema.org/name',
+              object: '"Overview nav probe"',
+              graph: '',
+            }],
+          },
+        },
+      );
+      const wmRow = page.locator('.v10-memory-layer.wm').first();
+      await expect.poll(async () => {
+        const countText = await wmRow.locator('.v10-layer-count').textContent();
+        return parseInt(countText ?? '0', 10);
+      }, { timeout: 10_000 }).toBeGreaterThanOrEqual(1);
+      const currentClass = (await wmRow.getAttribute('class')) ?? '';
+      if (!currentClass.includes('expanded')) {
+        await wmRow.click();
+      }
+      const expandPane = page.locator('.v10-layer-expand-content.open').first();
+      await expandPane.getByRole('button', { name: /View full layer/ }).click();
+      await expect.poll(() => projectView.getActiveLayer(), { timeout: 5_000 }).toBe('wm');
+    });
   });
 
   test.describe('Graph Overview layer', () => {

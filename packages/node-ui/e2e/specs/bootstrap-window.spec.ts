@@ -5,8 +5,8 @@ import { sel } from '../helpers/selectors.js';
  * Bootstrap-window guard.
  *
  * The seeded context graph exists on the daemon before any test runs
- * (the harness's globalSetup confirms `/api/paranet/list` returns it
- * before yielding). A user opening the UI right after starting their
+ * (the harness's globalSetup confirms `/api/context-graph/list` returns
+ * it before yielding). A user opening the UI right after starting their
  * node should see their project in the left panel within a few seconds
  * — not wait a full 30s for the dashboard's useFetch poll to refresh.
  *

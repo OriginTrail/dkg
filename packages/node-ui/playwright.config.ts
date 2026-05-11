@@ -17,8 +17,10 @@ export default defineConfig({
   forbidOnly: CI,
   retries: CI ? 2 : 0,
   // Live-daemon mode: a few specs do up to ~45s of "wait for first
-  // /api/paranet/list refresh" in their beforeEach to escape the daemon
-  // bootstrap window. 30s was the old mock-mode budget and is too tight.
+  // /api/context-graph/list refresh" in their beforeEach to escape the
+  // daemon bootstrap window. 30s was the old mock-mode budget and is too
+  // tight. (Endpoint was renamed from /api/paranet/list in the V10
+  // paranet -> context-graph terminology pass, commit 7347c165.)
   timeout: 60_000,
   // JUnit + HTML are always on so `pnpm test:ui:notify` (which reads
   // results.xml) works locally as well as in CI. List reporter prints the

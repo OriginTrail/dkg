@@ -43,19 +43,41 @@ type Fixtures = {
 };
 
 export const test = base.extend<Fixtures>({
-  // Force the daemon's bearer token onto every /api request. We do this at
-  // the network layer instead of via window.__DKG_TOKEN__ because Vite's
-  // inject-dkg-token plugin races with addInitScript: its <script> tag sits
-  // in <head> and gets parsed after the init script, so it overwrites the
-  // global. Routing intercept beats that race because it operates per-fetch.
+  // Force the daemon's bearer token onto every /api request via two
+  // independent mechanisms — both are needed:
+  //
+  //   1) `page.route` intercepts /api/** and injects a fresh Authorization
+  //      header. This wins over Vite's stale `inject-dkg-token` plugin
+  //      (which reads `.devnet/node1/auth.token` at server-start time,
+  //      before the test daemon wipes & regenerates that file).
+  //
+  //   2) `__DKG_TOKEN__` is sealed via `Object.defineProperty` with a
+  //      no-op setter so Vite's inline `<script>window.__DKG_TOKEN__ = ...`
+  //      cannot overwrite it. This matters for the EventSource at
+  //      `/api/events?token=…`, which the daemon auth-gates as a query
+  //      param (`packages/cli/src/auth.ts:823`): the EventSource is the
+  //      ONE consumer that doesn't run through `page.route` because
+  //      Playwright buffers `route.continue()` on long-lived streams and
+  //      breaks the SSE memory_graph_changed live-update contract. So we
+  //      exclude /api/events from interception AND make the in-page token
+  //      sticky so the SSE URL carries the correct credential.
   page: async ({ page }, use) => {
     const { daemon } = loadState();
-    await page.route('**/api/**', async (route) => {
+    await page.route(/\/api\/(?!events(?:\?|$))/, async (route) => {
       const headers = { ...route.request().headers(), Authorization: `Bearer ${daemon.authToken}` };
       await route.continue({ headers });
     });
     await page.addInitScript((token) => {
-      (window as any).__DKG_TOKEN__ = token;
+      let value = token;
+      try {
+        Object.defineProperty(window, '__DKG_TOKEN__', {
+          configurable: false,
+          get() { return value; },
+          set() { /* swallow Vite's inject-dkg-token override */ },
+        });
+      } catch {
+        (window as any).__DKG_TOKEN__ = value;
+      }
     }, daemon.authToken);
     await use(page);
   },

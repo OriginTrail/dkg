@@ -72,15 +72,13 @@ test.describe('Right Panel (Agent Panel)', () => {
       await expect(heading).toBeVisible();
     });
 
-    test('peers list either shows entries or the empty marker', async ({ page }) => {
-      const empty = page.getByText('No connected peers yet.');
-      const items = page.locator('.v10-peer-card, .v10-peer-row');
-      // One of the two surfaces must render — never both blank.
-      const someVisible = await Promise.race([
-        empty.waitFor({ state: 'visible', timeout: 5_000 }).then(() => true).catch(() => false),
-        items.first().waitFor({ state: 'visible', timeout: 5_000 }).then(() => true).catch(() => false),
-      ]);
-      expect(someVisible).toBe(true);
+    test('peers list shows the empty marker (isolated test daemon has no peers)', async ({ page }) => {
+      // The e2e daemon runs in isolation on 127.0.0.1 with no bootstrap
+      // peers configured — so the peers list MUST render the empty marker.
+      // A populated list here means the daemon picked up a real peer from
+      // somewhere (network leak) or the empty-state path regressed and
+      // is rendering stale/phantom rows.
+      await expect(page.getByText('No connected peers yet.')).toBeVisible({ timeout: 10_000 });
     });
 
     test('peer-count summary header is rendered', async ({ page }) => {

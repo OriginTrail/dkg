@@ -27,6 +27,7 @@ test.describe('Create Project — full submit path', () => {
     createProjectModal,
     page,
   }) => {
+    await leftPanel.waitForReady();
     await leftPanel.clickNewProject();
     await expect(createProjectModal.overlay).toBeVisible();
 
@@ -74,23 +75,18 @@ test.describe('Create Project — full submit path', () => {
     // must NOT crash; it must either show an error in the modal or
     // refuse to advance. This protects against a regression that lets
     // the modal silently overwrite an existing CG.
+    await leftPanel.waitForReady();
     await leftPanel.clickNewProject();
     await expect(createProjectModal.overlay).toBeVisible();
     await createProjectModal.fill(uniqueName);
-    // `.click()` retries up to actionTimeout for the button to become
-    // enabled, so we don't need an explicit `toBeEnabled` wait here.
     await createProjectModal.submit();
 
-    const error = page.locator('.v10-modal-error');
-    const stillOpen = createProjectModal.overlay;
-    // Either the modal stays open with an error message, OR it closes
-    // (if the daemon idempotently re-opens the existing CG and the
-    // post-create flow runs again). What's NOT acceptable is a silent
-    // crash with no visible signal — assert at least one branch.
-    const observed = await Promise.race([
-      error.waitFor({ state: 'visible', timeout: 60_000 }).then(() => 'error').catch(() => null),
-      stillOpen.waitFor({ state: 'hidden', timeout: 60_000 }).then(() => 'closed').catch(() => null),
-    ]);
-    expect(observed).not.toBeNull();
+    // The daemon returns 409 with `{ error: 'context graph already exists' }`
+    // on a duplicate id; the modal MUST surface that error and stay open.
+    // A silent close here would imply the modal swallowed the conflict —
+    // the worst-case "user thinks it worked" UX bug, which historically
+    // led to data overwrites. Pin the assertion to the error branch only.
+    await expect(page.locator('.v10-modal-error')).toBeVisible({ timeout: 60_000 });
+    await expect(createProjectModal.overlay).toBeVisible();
   });
 });

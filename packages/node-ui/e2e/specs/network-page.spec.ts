@@ -50,6 +50,10 @@ test.describe('Network Debug Page (/network)', () => {
   test('Active Connections shows either entries or its empty hint', async ({ page }) => {
     const empty = page.getByText('No active connections', { exact: true });
     const tableBody = page.locator('table').first().locator('tbody tr').first();
+    // Isolated test daemon: no connections expected. If `tableBody` wins
+    // we still pass (so a future daemon-with-peers fixture doesn't bit-
+    // rot this test), but the empty marker is the contract for the
+    // current isolated-daemon environment.
     const someVisible = await Promise.race([
       empty.waitFor({ state: 'visible', timeout: 8_000 }).then(() => true).catch(() => false),
       tableBody.waitFor({ state: 'visible', timeout: 8_000 }).then(() => true).catch(() => false),

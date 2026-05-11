@@ -116,8 +116,8 @@ test.describe('Dashboard', () => {
 
   test('Projects section badge eventually reflects the seeded CG count', async ({ page }) => {
     // The seed creates `qa-cg` and waits until it shows up on
-    // /api/paranet/list before tests start, so the dashboard MUST eventually
-    // count it. Poll for up to 30s — the dashboard's useFetch refetches on
+    // /api/context-graph/list before tests start, so the dashboard MUST
+    // eventually count it. Poll for up to 30s — the dashboard's useFetch refetches on
     // a 30s interval, so a 0 reading here means the user can't see their
     // own newly-created CG for at most one cache window. If this still
     // fails after 30s, that's a real refresh / propagation bug worth

@@ -30,6 +30,41 @@ test.describe('Header', () => {
     expect(name!.length).toBeGreaterThan(0);
   });
 
+  test('agent identity chip carries the agentDid + agentAddress as a tooltip (the only documented affordance today)', async ({ page }) => {
+    // The `.v10-header-agent-switcher` div advertises a multi-agent
+    // switcher via its class name AND its CSS (`cursor: pointer` + hover
+    // background). However Header.tsx attaches NO onClick handler, so
+    // clicking the chip does nothing. Until the switcher is wired up
+    // (see test.skip below) the chip's only real affordance is the
+    // `title` tooltip — assert it's present so we at least guarantee
+    // the user can copy the full address out of the hover.
+    const chip = page.locator('.v10-header-agent-switcher').first();
+    await expect(chip).toBeVisible();
+    const title = await chip.getAttribute('title');
+    expect(title, 'agent chip must carry an agentDid+agentAddress tooltip').toBeTruthy();
+    expect(title!).toMatch(/did:dkg:agent:0x[a-fA-F0-9]+/);
+    expect(title!).toMatch(/0x[a-fA-F0-9]{40}/);
+  });
+
+  // SKIPPED: real UX bug surfaced by this audit.
+  //
+  // Header.tsx:141 renders `<div className="v10-header-agent-switcher" …>`
+  // with NO onClick handler, but styles.css gives it `cursor: pointer`
+  // and a `:hover` background. The user sees a clickable affordance,
+  // clicks it, and nothing happens. The class name and the visual
+  // treatment both promise a multi-agent switcher — either wire one up
+  // or strip the pointer/hover styling. This skip is the regression
+  // signal: once a click does open SOMETHING (dropdown, modal, toggle),
+  // this test will pass automatically.
+  test.skip('clicking the agent identity chip should open an agent switcher (BUG: cursor:pointer with no onClick handler)', async ({ page }) => {
+    const chip = page.locator('.v10-header-agent-switcher').first();
+    await chip.click();
+    // The expected dropdown/menu doesn't yet exist — when implemented,
+    // adjust the locator to match the actual surface.
+    const dropdown = page.locator('.v10-header-agent-menu, [role="menu"][aria-label*="agent" i]');
+    await expect(dropdown.first()).toBeVisible({ timeout: 3_000 });
+  });
+
   test('shows green sync status dot', async ({ header }) => {
     await expect(header.statusDot).toBeVisible();
   });
