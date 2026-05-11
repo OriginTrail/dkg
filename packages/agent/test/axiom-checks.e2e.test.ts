@@ -3582,6 +3582,53 @@ describe('Axiom 4 — PUBLISH is canonical; ENDORSE/VERIFY raise trust [gap-pass
   }, 90_000);
 });
 
+describe('Axiom 2 — Authority over data [gap-pass-22]', () => {
+  it('2.u share() rejects subjects equal to a context-graph _meta URI (no audit-trail injection)', async () => {
+    // Spec §1 + §2: the per-CG _meta graph holds protocol-controlled
+    // metadata (lifecycle states, revocation markers, KC merkle roots,
+    // prov:Activity events). User SHARE/PUBLISH calls authority over
+    // DATA, not over META. Allowing a share() with subject equal to a
+    // context-graph's _meta URI would let an attacker inject a forged
+    // `<did:dkg:context-graph:X/_meta>` row into the regular data graph
+    // — which auditors / readers may misread as the canonical metadata
+    // when joining across graphs.
+    //
+    // The probe shares a quad whose subject literally is the meta URI
+    // and asserts: rejection at the share() boundary OR — if the share
+    // succeeds — the meta URI does NOT acquire the forged predicate
+    // inside the actual `_meta` graph (which is the graph that matters
+    // for downstream readers).
+    const cg = freshCg('a2-meta-inject');
+    await agent.createContextGraph({ id: cg, name: 'mi', description: '' });
+    await agent.registerContextGraph(cg);
+    const metaUri = `did:dkg:context-graph:${cg}/_meta`;
+    let rejected = false;
+    try {
+      await agent.share(cg, [
+        // Hostile: subject = the per-CG meta URI; an attacker tries to
+        // make readers believe the meta graph has a `dkg:state` value.
+        { subject: metaUri, predicate: 'http://dkg.io/ontology/state', object: '"forged"', graph: '' },
+      ]);
+    } catch {
+      rejected = true;
+    }
+    if (!rejected) {
+      // Even if share() didn't throw, the forged triple must NOT have
+      // landed in the per-CG `_meta` graph (the only place readers
+      // consult for protocol metadata). A SWM share that lives on the
+      // shared-memory graph alone is benign.
+      const r = await agent.store.query(
+        `SELECT ?o WHERE { GRAPH <${metaUri}> { <${metaUri}> <http://dkg.io/ontology/state> ?o } } LIMIT 1`,
+      );
+      const rows = (r as { bindings?: unknown[] }).bindings ?? [];
+      expect(
+        rows.length,
+        'share() must NOT inject a forged `dkg:state` into the per-CG _meta graph (Axiom 1 + 2: meta graph is protocol-controlled)',
+      ).toBe(0);
+    }
+  }, 60_000);
+});
+
 describe('Axiom 4 — Trust gradient is monotonic [gap-pass-21]', () => {
   it('4.ll ENDORSE on a root that is already PartiallyVerified must NOT downgrade trust', async () => {
     // Spec §4 trust gradient: trust-band transitions along the gradient

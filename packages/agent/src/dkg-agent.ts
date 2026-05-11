@@ -4798,6 +4798,27 @@ export class DKGAgent {
       throw new Error(`Context graph "${id}" does not exist locally. Create it first.`);
     }
 
+    // V10 Axiom 1 deterministic-replay (probed by axiom-checks 1.o):
+    // a second registerContextGraph(<same id>) on a node that already
+    // holds an on-chain id for this CG must NOT attempt another
+    // ContextGraphs.create transaction. Without this short-circuit
+    // the call reaches `registerContextGraphOnChain` which sends a
+    // duplicate tx — and on a busy hardhat node the SECOND tx surfaces
+    // as a NONCE_EXPIRED race rather than a typed "already registered"
+    // error, leaving callers unable to distinguish "you've already
+    // registered this CG" from a transient chain hiccup. Resolve the
+    // existing on-chain id (subscription cache → ontology graph) and
+    // throw the typed deterministic error here, before any chain
+    // interaction happens.
+    {
+      const knownOnChainId = await this.getContextGraphOnChainId(id);
+      if (knownOnChainId) {
+        throw new Error(
+          `Context graph "${id}" is already registered on-chain (${knownOnChainId})`,
+        );
+      }
+    }
+
     if (this.chain.chainId === 'none') {
       throw new Error('On-chain registration requires a configured chain adapter');
     }
