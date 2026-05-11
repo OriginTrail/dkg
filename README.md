@@ -388,7 +388,7 @@ An authenticated identity on a node. Every request is resolved to a `callerAgent
 
 DKG keeps wallet naming intentionally close to existing CLI output:
 
-- **Admin wallet** — operator authority key for profile/key management and operator actions (for example `dkg set-ask`).
+- **Admin wallet** — operator authority key for profile/key management and operator-authority actions.
 - **Operational wallets** — node EVM wallets used for transactions. The first wallet is the **primary operational wallet** (default tx signer for non-publish flows like random-sampling / staking / PCA admin actions).
 - **Operational wallet publish pool** — the same operational wallets when used for publish/update txs. The node can select from this pool (for example, round-robin with on-chain authorization checks).
 

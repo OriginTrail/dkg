@@ -3396,7 +3396,7 @@ program
       console.log('\nFund these addresses with ETH (gas) and TRAC (staking/publishing).');
       if (opWallets.adminWallet) {
         console.log(
-          'The admin wallet is used for profile/key management and operator actions (e.g., set-ask). ' +
+          'The admin wallet is used for profile/key management and operator-authority actions. ' +
           'The primary operational wallet is the default node tx wallet (sampling/staking/PCA ops); ' +
           'all operational wallets can be used for publishing.\n',
         );

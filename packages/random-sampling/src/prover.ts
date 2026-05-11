@@ -293,6 +293,12 @@ export class RandomSamplingProver {
         const created = await this.chain.createChallenge();
         challenge = created.challenge;
         cgId = created.contextGraphId;
+        this.log.info('rs.tick.challenge-created', {
+          kcId: challenge.knowledgeCollectionId.toString(),
+          cgId: cgId.toString(),
+          signer: created.publisherAddress ?? 'unknown',
+          txHash: created.hash,
+        });
       } catch (err) {
         if (err instanceof NoEligibleContextGraphError) {
           this.log.info('rs.tick.no-eligible-cg', {});
@@ -475,6 +481,7 @@ export class RandomSamplingProver {
       cgId: cgId.toString(),
       chunkId: chunkId.toString(),
       txHash: txResult.hash,
+      signer: txResult.publisherAddress ?? 'unknown',
     });
     return { kind: 'submitted', txHash: txResult.hash, kcId, cgId, chunkId };
   }
