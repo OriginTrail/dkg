@@ -52,6 +52,63 @@ import { HubResolutionCache } from './hub-resolution-cache.js';
 const DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS = 5 * 60 * 1000;
 
 /**
+ * Wraps a `Wallet`'s `sendTransaction` with a per-wallet promise chain
+ * (mutex) AND explicit nonce assignment from
+ * `provider.getTransactionCount(address, 'pending')` — the source of
+ * truth on the chain itself, fetched ONCE the previous tx in the chain
+ * has been broadcast.
+ *
+ * Why this is needed
+ * ------------------
+ * ethers v6's default `Wallet.populateTransaction` reads
+ * `getNonce('pending')` lazily and concurrent submissions from the
+ * SAME wallet instance can race: both reads see the same pre-broadcast
+ * pending count, both sign the same nonce, and the second one trips
+ * `Nonce too low` on chain. With hardhat's auto-mining the pending
+ * count is usually consistent, but a busy test that fires
+ * `registerContextGraph()` + `publish()` back to back across a hundred
+ * tests sees occasional drift surface as `NONCE_EXPIRED` (Expected
+ * nonce 204 but got 203), which masks legitimate test failures behind
+ * non-deterministic chain hiccups.
+ *
+ * Implementation notes
+ * --------------------
+ *  - The mutex is a "promise chain": every `sendTransaction` waits on
+ *    the previous in-flight call's settled promise before its own
+ *    nonce read fires. Failures in one call do NOT poison the chain
+ *    for subsequent calls (the `.catch(() => {})` ensures the chain
+ *    advances regardless).
+ *  - Nonce is forced to the chain's `'pending'` count on each call
+ *    when the caller didn't already pin one; this means even a wallet
+ *    that has been used by an external tool (e.g. a sibling
+ *    test-harness mint) self-heals on the next tx instead of relying
+ *    on ethers' internal lazy `getNonce()` which can be stale across
+ *    process boundaries.
+ *  - `sendTransaction` is the single tx-submission surface for `Wallet`
+ *    in ethers v6; both `Contract.method()` calls and direct
+ *    `wallet.sendTransaction(...)` go through this method, so wrapping
+ *    it once at construction time covers every tx path uniformly.
+ */
+function serializeWalletNonce(wallet: Wallet): Wallet {
+  let chain: Promise<unknown> = Promise.resolve();
+  const orig = wallet.sendTransaction.bind(wallet);
+  wallet.sendTransaction = async function (tx) {
+    const myTurn = chain.then(async () => {
+      if (tx.nonce === undefined || tx.nonce === null) {
+        const provider = wallet.provider;
+        if (provider) {
+          tx.nonce = await provider.getTransactionCount(wallet.address, 'pending');
+        }
+      }
+      return orig(tx);
+    });
+    chain = myTurn.catch(() => {});
+    return myTurn;
+  };
+  return wallet;
+}
+
+/**
  * Hard ceiling for the best-effort live `getActiveProofingPeriodDurationInBlocks()`
  * read inside `getActiveProofPeriodStatus()`. The status read itself is one
  * `eth_call`; the duration probe is a sibling `eth_call` on the same provider
@@ -321,13 +378,13 @@ export class EVMChainAdapter implements ChainAdapter {
 
   constructor(config: EVMAdapterConfig) {
     this.provider = new JsonRpcProvider(config.rpcUrl, undefined, { cacheTimeout: -1 });
-    this.signer = new Wallet(config.privateKey, this.provider);
+    this.signer = serializeWalletNonce(new Wallet(config.privateKey, this.provider));
     this.signerPool = [this.signer];
     for (const key of config.additionalKeys ?? []) {
-      this.signerPool.push(new Wallet(key, this.provider));
+      this.signerPool.push(serializeWalletNonce(new Wallet(key, this.provider)));
     }
     if (config.adminPrivateKey) {
-      this.adminSigner = new Wallet(config.adminPrivateKey, this.provider);
+      this.adminSigner = serializeWalletNonce(new Wallet(config.adminPrivateKey, this.provider));
       const adminAddress = this.adminSigner.address.toLowerCase();
       if (this.signerPool.some((signer) => signer.address.toLowerCase() === adminAddress)) {
         throw new Error('EVM adminPrivateKey must be distinct from operational keys');

@@ -1855,7 +1855,12 @@ describe('Axiom 6 — GET resolves a declared view [gap-pass]', () => {
 
     const r = await agent.query(
       `SELECT ?o WHERE { <${sub}> <${P_NAME}> ?o }`,
-      { contextGraphId: cg, view: 'verified-memory', minTrust: 'consensus-verified' },
+      // Probe runtime acceptance of the kebab-case string form
+      // documented in spec §02 (the engine maps it to
+      // TrustLevel.ConsensusVerified). The TS surface is `TrustLevel`
+      // for in-process callers, so the cast is intentional and
+      // mirrors what the daemon's HTTP route forwards from JSON.
+      { contextGraphId: cg, view: 'verified-memory', minTrust: 'consensus-verified' as unknown as TrustLevel },
     );
     expect(
       r.bindings,
@@ -3057,7 +3062,7 @@ describe('Axiom 6 — GET resolves a declared view [gap-pass-12]', () => {
       { subject: sub, predicate: P_NAME, object: '"only-mine"', graph: '' },
     ]);
 
-    const ownerAddr = agent.defaultAgentAddress as string;
+    const ownerAddr = agent.getDefaultAgentAddress() as string;
     const baseline = await agent.query(
       `SELECT ?o WHERE { <${sub}> <${P_NAME}> ?o }`,
       { contextGraphId: cg, view: 'working-memory', agentAddress: ownerAddr },
