@@ -8793,6 +8793,17 @@ export class DKGAgent {
     const agentAddress = this.defaultAgentAddress ?? this.peerId;
     return {
       async create(contextGraphId: string, name: string, opts?: { subGraphName?: string }): Promise<string> {
+        // V10 Axiom 3 lifecycle: every assertion is uniquely keyed by
+        // (cg, agent, name[, subGraphName]). An empty or whitespace-only
+        // name collapses every future create()/write()/discard()/revoke()
+        // into one ambiguous lifecycle row and the lifecycle URI would
+        // coincide with the CG-level _meta keyspace.
+        if (typeof name !== 'string' || name.trim() === '') {
+          throw new Error(
+            `assertion.create requires a non-empty name; got ${JSON.stringify(name)} ` +
+            '(Axiom 3: every lifecycle row has a name).',
+          );
+        }
         return agent.publisher.assertionCreate(contextGraphId, name, agentAddress, opts?.subGraphName);
       },
 
@@ -8828,8 +8839,9 @@ export class DKGAgent {
           const metaGraph = contextGraphMetaUri(contextGraphId);
           const DKG_NS = 'http://dkg.io/ontology/';
           const r = await agent.store.query(
-            `SELECT ?s WHERE { GRAPH <${metaGraph}> {
-               <${lifecycleUri}> <${DKG_NS}state> ?s
+            `SELECT ?s ?revoked WHERE { GRAPH <${metaGraph}> {
+               <${lifecycleUri}> <${DKG_NS}state> ?s .
+               OPTIONAL { <${lifecycleUri}> <${DKG_NS}revoked> ?revoked }
              } } LIMIT 1`,
           );
           const exists = r.type === 'bindings' && r.bindings.length > 0;
@@ -8845,6 +8857,18 @@ export class DKGAgent {
             throw new Error(
               `assertion.write: assertion "${name}" is in terminal state "discarded" — no further ` +
               'transitions are allowed (Axiom 3: closed lifecycle, no writes after a terminal state).',
+            );
+          }
+          // V10 Axiom 3: REVOKED is also terminal for WM updates. If a
+          // typed REVOKE marker is present, additional WRITEs would
+          // make the revocation marker effectively decorative — the
+          // owner could keep updating data behind it and a downstream
+          // reader honouring `dkg:revoked=true` would see stale data.
+          const revokedLit = r.bindings[0]['revoked'];
+          if (revokedLit && revokedLit.includes('"true"')) {
+            throw new Error(
+              `assertion.write: assertion "${name}" is marked as revoked — no further WM updates are ` +
+              'allowed (Axiom 3: REVOKED is terminal in the WM lane).',
             );
           }
         }

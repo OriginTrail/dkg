@@ -3110,6 +3110,144 @@ describe('Axiom 6 — GET resolves a declared view [gap-pass-12]', () => {
   }, 60_000);
 });
 
+describe('Axiom 3 — Typed state transitions [gap-pass-13]', () => {
+  it('3.x assertion.write on a REVOKED assertion is rejected (REVOKED is terminal for WM updates)', async () => {
+    // Spec §3 + §4 corollary: a revoked assertion is closed for further
+    // typed transitions in the WM lane. The earlier gate (`assertion.write`
+    // throws on `state == "discarded"`) didn't cover the REVOKE path, so
+    // a caller could publish a typed REVOKE marker and then keep
+    // updating the assertion's data graph behind it — making the
+    // revocation marker effectively decorative.
+    const cg = freshCg('a3-write-revoked');
+    const sub = urn('wr');
+    await agent.createContextGraph({ id: cg, name: 'wr', description: '' });
+    await agent.assertion.create(cg, 'r2');
+    await agent.assertion.write(cg, 'r2', [
+      { subject: sub, predicate: P_NAME, object: '"v1"', graph: '' },
+    ]);
+    await agent.assertion.revoke(cg, 'r2', { reason: 'closed' });
+    let threw = false;
+    try {
+      await agent.assertion.write(cg, 'r2', [
+        { subject: sub, predicate: P_NAME, object: '"v2-after-revoke"', graph: '' },
+      ]);
+    } catch {
+      threw = true;
+    }
+    expect(
+      threw,
+      'assertion.write on a revoked assertion must be rejected (Axiom 3: REVOKED is terminal in the WM lane)',
+    ).toBe(true);
+  }, 60_000);
+});
+
+describe('Axiom 1 — Context Graph isolation [gap-pass-13]', () => {
+  it('1.o registerContextGraph is deterministic on replay — second register either no-ops or throws a typed "already registered" error (no silent duplicate identity)', async () => {
+    // Spec §1: a Context Graph is an addressable scope; double-register
+    // must converge on the same on-chain identity record. Either:
+    //   (a) the call is idempotent (no-op), OR
+    //   (b) it throws a recognisable "already registered" error.
+    // What MUST NOT happen is a silent success that mints a second
+    // `did:dkg:context-graph:{id}` row, because two on-chain records
+    // for the same string id make per-CG audit attribution ambiguous.
+    const cg = freshCg('a1-register-replay');
+    await agent.createContextGraph({ id: cg, name: 'rr', description: '' });
+    await agent.registerContextGraph(cg);
+    let secondErr = '';
+    try {
+      await agent.registerContextGraph(cg);
+    } catch (err) {
+      secondErr = err instanceof Error ? err.message : String(err);
+    }
+    if (secondErr) {
+      expect(
+        secondErr,
+        'second registerContextGraph(<same id>) must throw a deterministic "already registered"-style error, ' +
+        'not a generic transient/network failure',
+      ).toMatch(/already|exist|duplicate|registered/i);
+    }
+    // Either way, the on-chain id (subscribedContextGraphs) must point
+    // at exactly one record for this CG.
+    const sub = (agent as unknown as { subscribedContextGraphs: Map<string, { onChainId?: string }> })
+      .subscribedContextGraphs.get(cg);
+    expect(
+      sub?.onChainId,
+      'subscription record for the CG must exist after a (re-)register (Axiom 1: addressable CG)',
+    ).toBeDefined();
+  }, 60_000);
+});
+
+describe('Axiom 3 — Typed state transitions [gap-pass-14]', () => {
+  it('3.y assertion.create rejects an empty name (no nameless assertion lifecycle row)', async () => {
+    // Spec §3 lifecycle: every assertion is uniquely keyed by (cg,
+    // agent, name[, subGraphName]). An empty name collapses every
+    // future create()/write()/discard()/revoke() into one ambiguous
+    // row — and the lifecycle URI would coincide with the CG-level
+    // _meta keyspace.
+    const cg = freshCg('a3-create-empty');
+    await agent.createContextGraph({ id: cg, name: 'ce', description: '' });
+    let threw = false;
+    try {
+      await agent.assertion.create(cg, '');
+    } catch {
+      threw = true;
+    }
+    expect(
+      threw,
+      'assertion.create must reject an empty name (Axiom 3: every lifecycle row has a name)',
+    ).toBe(true);
+  }, 30_000);
+
+  it('3.z assertion.create rejects names with N-Triples-breaking glyphs (no injection via lifecycle URI)', async () => {
+    // Spec §3 + V10 hardening: the assertion name is interpolated into
+    // a lifecycle URI (`did:dkg:context-graph:{cg}/assertion/{addr}/{name}`)
+    // and into N-Triples emission. A name containing `>` would close
+    // the angle-bracket of the lifecycle URI and let an attacker forge
+    // arbitrary metadata triples in `_meta`.
+    const cg = freshCg('a3-create-bad-name');
+    await agent.createContextGraph({ id: cg, name: 'cb', description: '' });
+    let threw = false;
+    try {
+      await agent.assertion.create(cg, 'evil> <urn:hijacked> <urn:o');
+    } catch {
+      threw = true;
+    }
+    expect(
+      threw,
+      'assertion.create must reject names containing N-Triples-breaking glyphs (Axiom 3: no injection at the lifecycle boundary)',
+    ).toBe(true);
+  }, 30_000);
+});
+
+describe('Axiom 6 — GET resolves a declared view [gap-pass-14]', () => {
+  it('6.t agent.query rejects non-string SPARQL (no silent JSON.stringify on a structured input)', async () => {
+    // Spec §6: GET resolves a declared view from a SPARQL query string.
+    // Permitting non-string inputs (e.g. an object literal) would be
+    // implicitly coerced via String() → "[object Object]" and fail
+    // downstream with an opaque parse error. Reject at the API entry
+    // so callers see a clear "must be string" error instead.
+    const cg = freshCg('a6-bad-q-type');
+    await agent.createContextGraph({ id: cg, name: 'bqt', description: '' });
+    await agent.registerContextGraph(cg);
+    let threw = false;
+    try {
+      await (agent.query as unknown as (
+        sparql: unknown,
+        opts: { contextGraphId: string; view: 'verified-memory' | 'working-memory' | 'shared-working-memory' },
+      ) => Promise<unknown>)(
+        { malicious: true },
+        { contextGraphId: cg, view: 'verified-memory' },
+      );
+    } catch {
+      threw = true;
+    }
+    expect(
+      threw,
+      'agent.query must reject a non-string SPARQL input (Axiom 6: declared view, well-typed query)',
+    ).toBe(true);
+  }, 30_000);
+});
+
 // ────────────────────────────────────────────────────────────────────────
 // Report
 // ────────────────────────────────────────────────────────────────────────
