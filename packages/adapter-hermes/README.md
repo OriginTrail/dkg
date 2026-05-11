@@ -88,7 +88,7 @@ is set, setup uses that exact profile home.
 | `--port <port>` | `9200` | Shortcut for `--daemon-url http://127.0.0.1:<port>`. |
 | `--memory-mode <mode>` | `primary` | `primary` elects DKG as the Hermes memory provider; `tools-only` skips provider election. |
 | `--no-start` | off (daemon starts) | Skip starting the DKG daemon. Best-effort daemon registration still fires against an already-running daemon. |
-| `--no-fund` / `--fund` | `--fund` | Fund the node's first wallets through the testnet faucet. `--no-fund` skips. Faucet failures are non-fatal. |
+| `--no-fund` / `--fund` | `--fund` | Fund the node's generated admin and operational wallets through the testnet faucet. `--no-fund` skips. Faucet failures are non-fatal. |
 | `--preserve-provider` | off (replace) | Refuse to replace an existing non-DKG `memory.provider`. Restores the pre-#386 throw-on-conflict behavior. Aliased as `--no-replace-provider`. |
 | `--no-verify` | off | Skip the post-setup verification pass. |
 | `--dry-run` | off | Preview planned changes without writing files, starting the daemon, calling the faucet, or taking a config backup. |

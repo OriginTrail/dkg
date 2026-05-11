@@ -9,7 +9,7 @@
  *     not wrong-slot-wired) so deterministic setup errors fail fast
  *     before daemon start and the faucet call burn resources
  *  5. Start the DKG daemon
- *  6. Read wallets and fund the first three via the testnet faucet
+ *  6. Read wallets and fund the admin + operational wallets via the testnet faucet
  *     (skippable with `--no-fund`; non-fatal on failure)
  *  7. Copy the canonical DKG node skill into the OpenClaw workspace
  *  8. Merge adapter plugin into ~/.openclaw/openclaw.json (including
@@ -67,7 +67,7 @@ export interface SetupOptions {
   start?: boolean;
   dryRun?: boolean;
   /**
-   * Fund the first three node wallets via the testnet faucet on first setup.
+   * Fund the node's admin + operational wallets via the testnet faucet on first setup.
    * Defaults to `true`; the adapter treats `fund === false` (set by
    * `--no-fund`) as the only opt-out. Faucet failures are non-fatal — a
    * failed call logs manual `curl` instructions and setup continues.
@@ -270,8 +270,8 @@ export function discoverAgentName(workspaceDir: string, override?: string): stri
   // the same first-wins semantics for this field (existing.name wins unless
   // --name is passed); mirroring that here keeps re-runs on an
   // IDENTITY.md-absent workspace stable across invocations, which in turn
-  // keeps the faucet `callerId` and `Idempotency-Key` stable so retries
-  // don't create duplicate faucet requests.
+  // keeps the faucet `Idempotency-Key` stable so retries don't create
+  // duplicate faucet requests.
   const persistedName = readPersistedAgentName();
   if (persistedName) {
     log(`Using persisted agent name "${persistedName}" from ${join(dkgDir(), 'config.json')}`);
@@ -1581,11 +1581,11 @@ export async function runSetup(options: SetupOptions): Promise<void> {
   }
   let effectivePort = apiPort;
   // The post-merge `name` wins over the freshly-discovered `agentName` for
-  // downstream use (notably the faucet `callerId` / `Idempotency-Key`), so
+  // downstream use (notably the faucet `Idempotency-Key` seed), so
   // that a later IDENTITY.md edit — which changes what `discoverAgentName`
-  // returns — doesn't drift the faucet identity away from the node's
+  // returns — doesn't drift retry identity away from the node's
   // actual persisted identity. `writeDkgConfig` already enforces first-wins
-  // on `name` unless `--name` was passed; this line makes the faucet caller
+  // on `name` unless `--name` was passed; this line makes retry identity
   // agree with whatever that enforcement produces. Starts as the pre-merge
   // value so the dry-run / skipped-writeDkgConfig path still has something
   // sensible to pass.
@@ -1652,7 +1652,7 @@ export async function runSetup(options: SetupOptions): Promise<void> {
   if (!dryRun && shouldFund && network) {
     await fundWalletsBestEffort({
       network,
-      callerId: effectiveAgentName,
+      idempotencySeed: effectiveAgentName,
       didStartDaemon: shouldStart,
     });
   } else if (!dryRun && !shouldFund) {

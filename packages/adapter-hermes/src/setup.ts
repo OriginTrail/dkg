@@ -72,7 +72,7 @@ export interface HermesCliOptions {
   verify?: boolean;
   start?: boolean;
   /**
-   * Fund the first node wallets via the testnet faucet on first setup.
+   * Fund the node's generated admin and operational wallets via the testnet faucet on first setup.
    * Defaults to `true`; `--no-fund` flips to `false`. Mirrors OpenClaw
    * `OpenClawSetupCliOptions.fund` (issue #386 acceptance).
    */
@@ -691,7 +691,7 @@ export async function runHermesSetup(req: HermesSetupRequest): Promise<HermesSet
       try {
         await fundWalletsBestEffort({
           network,
-          callerId: setupOptions.agentName ?? profile.profileName ?? 'hermes-setup',
+          idempotencySeed: setupOptions.agentName ?? profile.profileName ?? 'hermes-setup',
           didStartDaemon: shouldStart,
         });
         // fundWalletsBestEffort never throws and never returns funded list;

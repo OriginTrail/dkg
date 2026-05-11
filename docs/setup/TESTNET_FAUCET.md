@@ -6,7 +6,7 @@ Fund your DKG V9 node wallets with Base Sepolia testnet ETH and TRAC in a single
 
 ## Fund wallets
 
-Send a `POST /fund` request with your node wallet addresses (up to 3 per call). Each wallet receives both Base Sepolia ETH and test TRAC.
+Send a `POST /fund` request with your node wallet addresses (up to 4 per call). Each wallet receives both Base Sepolia ETH and test TRAC.
 
 ```bash
 curl -X POST "https://euphoria.origin-trail.network/faucet/fund" \
@@ -14,8 +14,7 @@ curl -X POST "https://euphoria.origin-trail.network/faucet/fund" \
   -H "Idempotency-Key: my-unique-key-001" \
   --data-raw '{
     "mode": "v10_base_sepolia",
-    "wallets": ["0xYOUR_WALLET_ADDRESS"],
-    "callerId": "my-node-installer"
+    "wallets": ["0xYOUR_WALLET_ADDRESS"]
   }'
 ```
 
@@ -24,8 +23,8 @@ curl -X POST "https://euphoria.origin-trail.network/faucet/fund" \
 | Field | Required | Description |
 |-------|----------|-------------|
 | `mode` | Yes | Must be `"v10_base_sepolia"` |
-| `wallets` | Yes | Array of EVM addresses (1-3, no duplicates) |
-| `callerId` | No | Stable identifier for your installer/node — enables per-caller cooldown |
+| `wallets` | Yes | Array of EVM addresses (1-4, no duplicates) |
+| `callerId` | No | Stable identifier for your installer/node; enables per-caller cooldown. Bundled setup commands omit this field and rely on `Idempotency-Key` for retry safety. |
 
 ### Headers
 
@@ -59,6 +58,18 @@ Each wallet produces 2 result entries (ETH + TRAC). Possible `status` values: `s
 | Wallet cooldown after failure | 30 seconds |
 
 On `429` responses, back off using the `retry-after` header.
+
+Bundled setup commands such as `dkg init`, `dkg openclaw setup`, `dkg hermes setup`,
+and `dkg mcp setup` do not send `callerId` because caller cooldown can otherwise
+block later wallets in the same 4-wallet funding request. They still send a
+deterministic `Idempotency-Key` derived from the node/agent name and wallet batch
+so retrying the same funding operation remains safe.
+
+Bundled setup commands wait up to 3 minutes for a faucet response because a
+4-wallet request can broadcast both ETH and TRAC transactions for each wallet
+before the faucet returns. If the client still times out, check wallet balances
+before retrying because the faucet may finish the on-chain work after the local
+request is aborted.
 
 ## Dry run (test without sending transactions)
 

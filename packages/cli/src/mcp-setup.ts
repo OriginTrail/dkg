@@ -1842,10 +1842,21 @@ export async function mcpSetupAction(
             try {
               const result = await deps.requestFaucetFunding(faucetUrl, faucetMode, wallets, effectiveAgentName);
               if (result?.success === false) {
-                console.warn('[setup] Faucet returned failure; emitting manual instructions.');
+                console.warn(
+                  `[setup] Faucet returned failure${result.error ? ` (${result.error})` : ''}; emitting manual instructions.`,
+                );
                 deps.logManualFundingInstructions(wallets, faucetUrl, faucetMode);
+              } else if (result?.error) {
+                const failedWallets = Array.isArray(result.failedWallets) && result.failedWallets.length
+                  ? result.failedWallets
+                  : wallets;
+                console.warn(`[setup] Faucet partially completed (${result.error}); emitting manual instructions for remaining wallet(s).`);
+                deps.logManualFundingInstructions(failedWallets, faucetUrl, faucetMode);
               } else {
-                console.log(`[setup] Funded ${wallets.length} wallet(s) via testnet faucet.`);
+                const fundedWalletCount = Array.isArray(result?.fundedWallets) && result.fundedWallets.length
+                  ? result.fundedWallets.length
+                  : wallets.length;
+                console.log(`[setup] Funded ${fundedWalletCount} wallet(s) via testnet faucet.`);
               }
             } catch (err: any) {
               console.warn(`[setup] Faucet call failed (${err?.message ?? err}); emitting manual instructions.`);

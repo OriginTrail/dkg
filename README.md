@@ -312,12 +312,12 @@ analysis reports are under `bench/results/profiles/`, including
 
 ## Testnet Funding
 
-A DKG testnet node needs Base Sepolia ETH (to pay gas for on-chain operations) and test TRAC (for staking and publishing). The Origin Trail testnet faucet hands out both in a single API call, so first-setup paths auto-fund your node's first three wallets when a faucet is configured in the network config.
+A DKG testnet node needs Base Sepolia ETH (to pay gas for on-chain operations) and test TRAC (for staking and publishing). The Origin Trail testnet faucet hands out both in a single API call, so first-setup paths auto-fund the generated admin wallet plus the three operational wallets when a faucet is configured in the network config.
 
 Three entry points cover the common flows:
 
-- **Manual install (`dkg init`)** — on testnet, `dkg init` auto-funds the node's wallets when `network.faucet.url` is set (the default for the bundled testnet config).
-- **OpenClaw adapter (`dkg openclaw setup`)** — runs the same funding step on first setup. Pass `--no-fund` to skip it (for pre-funded wallets, CI, or offline runs).
+- **Manual install (`dkg init`)** — on testnet, `dkg init` auto-funds the generated admin and operational wallets when `network.faucet.url` is set (the default for the bundled testnet config).
+- **OpenClaw, Hermes, and MCP setup (`dkg openclaw setup`, `dkg hermes setup`, `dkg mcp setup`)** — run the same funding step on first setup. Pass `--no-fund` to skip it (for pre-funded wallets, CI, or offline runs).
 - **Direct API / custom scripts** — the full request/response shape, idempotency semantics, and error codes live in [`docs/setup/TESTNET_FAUCET.md`](docs/setup/TESTNET_FAUCET.md).
 
 Faucet calls are best-effort: a failed call logs a ready-to-paste `curl` block and setup continues. The node is usable without funding — you just can't publish or stake until it's topped up. Rate limits and error codes are documented in the [faucet reference](docs/setup/TESTNET_FAUCET.md#rate-limits-and-cooldowns).

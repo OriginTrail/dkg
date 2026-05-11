@@ -14,7 +14,7 @@ export interface HermesSetupCliOptions {
   verify?: boolean;
   start?: boolean;
   /**
-   * Fund the first node wallets via the testnet faucet on first setup.
+   * Fund the generated admin and operational wallets via the testnet faucet on first setup.
    * Defaults to `true`; the adapter treats `fund === false` (set by
    * `--no-fund`) as the only opt-out. Faucet failures are non-fatal — a
    * failed call logs manual `curl` instructions and setup continues.
