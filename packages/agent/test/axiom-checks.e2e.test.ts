@@ -3582,6 +3582,37 @@ describe('Axiom 4 — PUBLISH is canonical; ENDORSE/VERIFY raise trust [gap-pass
   }, 90_000);
 });
 
+describe('Axiom 6 — GET resolves a declared view [gap-pass-20]', () => {
+  it('6.u SPARQL FROM clauses cannot escape the view-resolved graph set (no cross-CG read leakage)', async () => {
+    // Spec §6: views are declared by the agent, not the SPARQL string.
+    // A user-supplied `FROM <other-cg-data-graph>` clause must NOT
+    // override the resolved view — otherwise a caller can join data
+    // across CGs by smuggling FROM clauses, breaking Axiom 1 isolation
+    // at the read endpoint.
+    const cgA = freshCg('a6-from-A');
+    const cgB = freshCg('a6-from-B');
+    const sub = urn('from-cross');
+    await agent.createContextGraph({ id: cgA, name: 'A', description: '' });
+    await agent.createContextGraph({ id: cgB, name: 'B', description: '' });
+    await agent.registerContextGraph(cgA);
+    await agent.registerContextGraph(cgB);
+    await agent.publish(cgA, [{ subject: sub, predicate: P_NAME, object: '"in-A"', graph: '' }]);
+    await agent.publish(cgB, [{ subject: sub, predicate: P_NAME, object: '"in-B"', graph: '' }]);
+
+    const dataB = `did:dkg:context-graph:${cgB}`;
+    const r = await agent.query(
+      // CG-A query smuggling a FROM <CG-B> clause.
+      `SELECT ?o FROM <${dataB}> WHERE { <${sub}> <${P_NAME}> ?o }`,
+      { contextGraphId: cgA, view: 'verified-memory' },
+    );
+    const objs = r.bindings.map((b: Record<string, string>) => b['o']);
+    expect(
+      objs,
+      'a FROM clause smuggling CG-B in a CG-A query must NOT surface CG-B data (Axiom 1 + 6: declared view, no cross-CG read leakage)',
+    ).not.toContain('"in-B"');
+  }, 90_000);
+});
+
 // ────────────────────────────────────────────────────────────────────────
 // Report
 // ────────────────────────────────────────────────────────────────────────
