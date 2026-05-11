@@ -60,9 +60,20 @@ vi.mock('@origintrail-official/dkg-core', async () => {
 // to dkg-core's `dist/faucet.js` at runtime — outside of the public barrel.
 // Without this second mock the spy stays untouched and the production path
 // hits the real network call.
-vi.mock('@origintrail-official/dkg-core/dist/faucet.js', () => ({
-  requestFaucetFunding: requestFaucetFundingSpy,
-}));
+vi.mock('@origintrail-official/dkg-core/dist/faucet.js', async () => {
+  // Pass through every non-`requestFaucetFunding` export untouched so any
+  // sibling helpers that `faucet-orchestration.ts` pulls from `./faucet.js`
+  // (e.g. `getFundableWalletAddresses`, `FAUCET_WALLETS_PER_REQUEST`)
+  // resolve to their real implementations. Only the network call itself
+  // is swapped for the hoisted spy.
+  const actual = await vi.importActual<typeof import('@origintrail-official/dkg-core/dist/faucet.js')>(
+    '@origintrail-official/dkg-core/dist/faucet.js',
+  );
+  return {
+    ...actual,
+    requestFaucetFunding: requestFaucetFundingSpy,
+  };
+});
 import { requestFaucetFunding } from '@origintrail-official/dkg-core';
 
 import {
