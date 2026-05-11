@@ -2859,16 +2859,28 @@ describe('Axiom 4 — PUBLISH is canonical; ENDORSE/VERIFY raise trust [gap-pass
       { subject: pub.ual, predicate: `${DKG_NS}revokedAt`, object: `"${new Date().toISOString()}"^^<${XSD}dateTime>`, graph: meta },
     ]);
 
-    let threw = false;
+    let threwForRevoked = false;
+    let revokedErr = '';
     try {
-      await agent.verify(pub.kcId, cg, []);
-    } catch {
-      threw = true;
+      await agent.verify({
+        contextGraphId: cg,
+        verifiedMemoryId: '1',
+        batchId: pub.kcId,
+        requiredSignatures: 1,
+        timeoutMs: 1_000,
+      });
+    } catch (err) {
+      threwForRevoked = true;
+      revokedErr = err instanceof Error ? err.message : String(err);
     }
     expect(
-      threw,
+      threwForRevoked,
       'agent.verify must reject a VERIFY on a revoked KC — REVOKED is terminal (Axiom 3 + 4: no trust raise past a terminal lifecycle state)',
     ).toBe(true);
+    expect(
+      revokedErr,
+      'verify() rejection on a revoked UAL must surface a revoked-state error (not a missing-context-graph or signature-collection error)',
+    ).toMatch(/revoked|terminal/i);
   }, 90_000);
 });
 
@@ -2997,6 +3009,104 @@ describe('Axiom 1 — Context Graph isolation [gap-pass-11]', () => {
         `agent.update must reject contextGraphId=${JSON.stringify(bad)} (Axiom 1 + 2: every UPDATE targets an existing string-keyed CG)`,
       ).toBe(true);
     }
+  }, 60_000);
+});
+
+describe('Axiom 4 — PUBLISH is canonical; ENDORSE/VERIFY raise trust [gap-pass-12]', () => {
+  it('4.hh UPDATE with empty quads is rejected (UPDATE promotes data, not "nothing")', async () => {
+    // Spec §3 typed transitions + §4 canonical PUBLISH: UPDATE re-issues
+    // a KC at a new merkle root. An empty payload would land an
+    // empty-merkle on chain that no future query can disambiguate from
+    // any other empty UPDATE on any kcId — directly the same hazard
+    // 4.aa established for PUBLISH.
+    const cg = freshCg('a4-empty-update');
+    const sub = urn('eu');
+    await agent.createContextGraph({ id: cg, name: 'eu', description: '' });
+    await agent.registerContextGraph(cg);
+    const pub = await agent.publish(cg, [
+      { subject: sub, predicate: P_NAME, object: '"v1"', graph: '' },
+    ]);
+    expect(pub.status).toBe('confirmed');
+    let threw = false;
+    try {
+      await agent.update(pub.kcId, cg, []);
+    } catch {
+      threw = true;
+    }
+    expect(
+      threw,
+      'agent.update must reject an empty quads payload (Axiom 4: UPDATE promotes data, not "nothing")',
+    ).toBe(true);
+  }, 90_000);
+});
+
+describe('Axiom 6 — GET resolves a declared view [gap-pass-12]', () => {
+  it('6.r minTrust on view=working-memory is documented as ignored AND cannot be exploited to hide rows', async () => {
+    // Spec §6 + design contract (`packages/query/test/views-min-trust-extra.test.ts`):
+    // `minTrust` is a verified-memory-only filter, but the engine
+    // INTENTIONALLY ignores it on `working-memory` / `shared-working-memory`
+    // so callers who reuse a single options object across views do not
+    // get a 400 on those views. Pin both halves of the contract — minTrust
+    // must NOT filter rows here AND must NOT throw — so a future
+    // refactor cannot silently downgrade WM to a per-trust-band view.
+    const cg = freshCg('a6-mt-wm');
+    await agent.createContextGraph({ id: cg, name: 'mtwm', description: '' });
+    await agent.assertion.create(cg, 'note');
+    const sub = urn('mt-wm');
+    await agent.assertion.write(cg, 'note', [
+      { subject: sub, predicate: P_NAME, object: '"only-mine"', graph: '' },
+    ]);
+
+    const ownerAddr = agent.defaultAgentAddress as string;
+    const baseline = await agent.query(
+      `SELECT ?o WHERE { <${sub}> <${P_NAME}> ?o }`,
+      { contextGraphId: cg, view: 'working-memory', agentAddress: ownerAddr },
+    );
+    const filtered = await agent.query(
+      `SELECT ?o WHERE { <${sub}> <${P_NAME}> ?o }`,
+      { contextGraphId: cg, view: 'working-memory', agentAddress: ownerAddr, minTrust: TrustLevel.ConsensusVerified },
+    );
+    const baseObjs = baseline.bindings.map((b: Record<string, string>) => b['o']).sort();
+    const filtObjs = filtered.bindings.map((b: Record<string, string>) => b['o']).sort();
+    expect(
+      filtObjs,
+      'minTrust on view=working-memory must be a no-op (intentional cross-view options reuse contract)',
+    ).toEqual(baseObjs);
+    expect(
+      filtObjs,
+      'sanity: WM rows must round-trip through both queries',
+    ).toContain('"only-mine"');
+  }, 60_000);
+
+  it('6.s minTrust on view=shared-working-memory is documented as ignored AND cannot be exploited to hide rows', async () => {
+    // Same contract as 6.r, applied to SWM.
+    const cg = freshCg('a6-mt-swm');
+    const sub = urn('mt-swm');
+    await agent.createContextGraph({ id: cg, name: 'mtswm', description: '' });
+    await agent.registerContextGraph(cg);
+    await agent.share(
+      cg,
+      [{ subject: sub, predicate: P_NAME, object: '"shared-A"', graph: '' }],
+      { localOnly: true },
+    );
+    const baseline = await agent.query(
+      `SELECT ?o WHERE { <${sub}> <${P_NAME}> ?o }`,
+      { contextGraphId: cg, view: 'shared-working-memory' },
+    );
+    const filtered = await agent.query(
+      `SELECT ?o WHERE { <${sub}> <${P_NAME}> ?o }`,
+      { contextGraphId: cg, view: 'shared-working-memory', minTrust: TrustLevel.ConsensusVerified },
+    );
+    const baseObjs = baseline.bindings.map((b: Record<string, string>) => b['o']).sort();
+    const filtObjs = filtered.bindings.map((b: Record<string, string>) => b['o']).sort();
+    expect(
+      filtObjs,
+      'minTrust on view=shared-working-memory must be a no-op (intentional cross-view options reuse contract)',
+    ).toEqual(baseObjs);
+    expect(
+      filtObjs,
+      'sanity: SWM rows must round-trip through both queries',
+    ).toContain('"shared-A"');
   }, 60_000);
 });
 

@@ -3397,6 +3397,18 @@ export class DKGAgent {
         '(Axiom 2: kcId is the authority handle for a canonical batch).',
       );
     }
+    // V10 Axiom 4: UPDATE is a typed transition that re-issues a KC
+    // at a new merkle root. An empty payload would land an empty-merkle
+    // on chain that no future query can disambiguate from any other
+    // empty UPDATE on any kcId — directly the same hazard as the empty
+    // PUBLISH gate above.
+    const _privateQuadsEmpty = !privateQuads || privateQuads.length === 0;
+    if (Array.isArray(quads) && quads.length === 0 && _privateQuadsEmpty) {
+      throw new Error(
+        'agent.update: refusing empty payload — UPDATE must promote at least one triple to ' +
+        'Verified Memory (Axiom 4: UPDATE promotes data, not "nothing").',
+      );
+    }
     const ctx = opts?.operationCtx ?? createOperationContext('update');
     const onPhase = opts?.onPhase;
 
@@ -6201,6 +6213,35 @@ export class DKGAgent {
     signers: string[];
   }> {
     const ctx = createOperationContext('verify');
+
+    // V10 Axiom 3 closed lifecycle + Axiom 4 trust gradient: a UAL
+    // marked as revoked is no longer a valid VERIFY target. Permitting
+    // verify() against a revoked KA would mint a `dkg:Verification`
+    // marker on a row whose lifecycle has terminated and let a future
+    // `view=verified-memory&minTrust=ConsensusVerified` reader treat
+    // a revoked asset as consensus-verified — directly contradicting
+    // the typed REVOKE marker on the same UAL.
+    {
+      const metaGraphProbe = paranetMetaGraphUri(opts.contextGraphId);
+      const ualProbe = await this.store.query(
+        `SELECT ?ual ?revoked WHERE { GRAPH <${metaGraphProbe}> {
+           ?ual <http://dkg.io/ontology/batchId>
+                "${opts.batchId.toString()}"^^<http://www.w3.org/2001/XMLSchema#integer> .
+           OPTIONAL { ?ual <http://dkg.io/ontology/revoked> ?revoked }
+         } } LIMIT 1`,
+      );
+      if (ualProbe.type === 'bindings' && ualProbe.bindings.length > 0) {
+        const v = String(ualProbe.bindings[0]['revoked'] ?? '');
+        if (v.includes('"true"')) {
+          const ualUri = ualProbe.bindings[0]['ual'] ?? '';
+          throw new Error(
+            `verify: KC ${opts.batchId} (UAL ${ualUri}) is marked as revoked in context graph ` +
+            `${opts.contextGraphId} — VERIFY refused; REVOKED is terminal ` +
+            '(Axiom 3 + 4: closed lifecycle, no trust raise past a terminal state).',
+          );
+        }
+      }
+    }
 
     // 1. Look up batch merkle root from local metadata (use typed literal for batchId)
     const metaGraph = paranetMetaGraphUri(opts.contextGraphId);
