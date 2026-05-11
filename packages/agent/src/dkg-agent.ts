@@ -6193,6 +6193,30 @@ export class DKGAgent {
         const rootUri =
           raw.startsWith('<') && raw.endsWith('>') ? raw.slice(1, -1) : raw.replace(/^"(.*)"$/, '$1');
         if (!rootUri) continue;
+        // V10 Axiom 4 trust gradient is monotonic-up: ENDORSE may LIFT
+        // SelfAttested → Endorsed, but must NEVER downgrade a row that
+        // a quorum-VERIFY (or future Contested marker) has already
+        // moved past the Endorsed band. The previous unconditional
+        // delete-then-insert flow downgraded a PartiallyVerified or
+        // ConsensusVerified entity back to Endorsed on every endorse()
+        // call — a direct breach of the spec §4 monotonicity contract
+        // (probed by axiom-checks.e2e 4.ll). Probe the current band
+        // first and skip the write when it already meets or exceeds
+        // Endorsed; only stamp the row when the existing band is
+        // strictly below Endorsed (i.e. SelfAttested or absent).
+        const cur = await this.store.query(
+          `SELECT ?o WHERE { GRAPH <${dataGraph}> { <${rootUri}> <${DKG_ENTITY_TRUST_LEVEL_PREDICATE}> ?o } } LIMIT 1`,
+        );
+        let curBand: number | null = null;
+        if (cur.type === 'bindings' && cur.bindings.length > 0) {
+          const lit = String(cur.bindings[0]['o'] ?? '');
+          const m = lit.match(/"(\d+)"/);
+          if (m) curBand = Number.parseInt(m[1], 10);
+        }
+        if (curBand !== null && curBand >= TrustLevel.Endorsed) {
+          // Already at or above Endorsed — preserve the higher band.
+          continue;
+        }
         await this.store.deleteByPattern({
           graph: dataGraph,
           subject: rootUri,

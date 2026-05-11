@@ -3582,6 +3582,60 @@ describe('Axiom 4 — PUBLISH is canonical; ENDORSE/VERIFY raise trust [gap-pass
   }, 90_000);
 });
 
+describe('Axiom 4 — Trust gradient is monotonic [gap-pass-21]', () => {
+  it('4.ll ENDORSE on a root that is already PartiallyVerified must NOT downgrade trust', async () => {
+    // Spec §4 trust gradient: trust-band transitions along the gradient
+    // are monotonic-up. ENDORSE may lift SelfAttested → Endorsed, but
+    // applying ENDORSE on a root already at PartiallyVerified or
+    // ConsensusVerified must NOT lower it back to Endorsed — that would
+    // let an endorse() call REVERT a quorum-verified band, defeating
+    // the entire trust gradient.
+    //
+    // Implementation hazard: dkg-agent's endorse() does an unconditional
+    // deleteByPattern then insert "Endorsed" against rootEntity, which
+    // is a literal trust DOWNGRADE on a root that was already higher.
+    // This probe pins the contract so any future implementation has to
+    // preserve the higher band.
+    const { DKG_ENTITY_TRUST_LEVEL_PREDICATE } = await import('@origintrail-official/dkg-core');
+    const cg = freshCg('a4-no-downgrade');
+    const sub = urn('no-downgrade');
+    await agent.createContextGraph({ id: cg, name: 'nd', description: '' });
+    await agent.registerContextGraph(cg);
+    const pub = await agent.publish(cg, [
+      { subject: sub, predicate: P_NAME, object: '"x"', graph: '' },
+    ]);
+    const dataGraph = `did:dkg:context-graph:${cg}`;
+    // Simulate a successful VERIFY that lifted the entity to
+    // PartiallyVerified (the chain machinery is exercised in §4.w-chain;
+    // here we directly stamp the gradient to focus this probe on the
+    // monotonicity contract of endorse() against an already-higher row).
+    await agent.store.deleteByPattern({
+      graph: dataGraph,
+      subject: sub,
+      predicate: DKG_ENTITY_TRUST_LEVEL_PREDICATE,
+    });
+    await agent.store.insert([{
+      subject: sub,
+      predicate: DKG_ENTITY_TRUST_LEVEL_PREDICATE,
+      object: `"${TrustLevel.PartiallyVerified}"^^<http://www.w3.org/2001/XMLSchema#integer>`,
+      graph: dataGraph,
+    }]);
+
+    await agent.endorse({ contextGraphId: cg, knowledgeAssetUal: pub.ual });
+
+    const r = await agent.store.query(
+      `SELECT ?o WHERE { GRAPH <${dataGraph}> { <${sub}> <${DKG_ENTITY_TRUST_LEVEL_PREDICATE}> ?o } }`,
+    );
+    const lit = String((r as { bindings?: Record<string, string>[] }).bindings?.[0]?.['o'] ?? '');
+    const numMatch = lit.match(/"(\d+)"/);
+    const after = numMatch ? Number.parseInt(numMatch[1], 10) : Number.NaN;
+    expect(
+      after,
+      `ENDORSE must NOT downgrade trust from PartiallyVerified (=${TrustLevel.PartiallyVerified}) to Endorsed (=${TrustLevel.Endorsed}) — Axiom 4 trust gradient is monotonic-up`,
+    ).toBeGreaterThanOrEqual(TrustLevel.PartiallyVerified);
+  }, 90_000);
+});
+
 describe('Axiom 6 — GET resolves a declared view [gap-pass-20]', () => {
   it('6.u SPARQL FROM clauses cannot escape the view-resolved graph set (no cross-CG read leakage)', async () => {
     // Spec §6: views are declared by the agent, not the SPARQL string.
