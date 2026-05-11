@@ -3583,6 +3583,43 @@ describe('Axiom 4 — PUBLISH is canonical; ENDORSE/VERIFY raise trust [gap-pass
 });
 
 describe('Axiom 2 — Authority over data [gap-pass-22]', () => {
+  it('2.v share() rejects subjects equal to a context-graph DATA URI (no graph-self injection)', async () => {
+    // Spec §1 + §2: the per-CG data graph URI is the addressable
+    // SCOPE of a Context Graph, not a normal subject. A user-supplied
+    // SHARE with subject equal to `did:dkg:context-graph:<id>` would
+    // let a later reader join data-about-the-CG into the CG itself,
+    // shadowing the protocol-managed CG record (creator, curator,
+    // access policy, on-chain id) that lives in `_meta` / ontology.
+    //
+    // Same idempotency contract as 2.u: either reject at the share()
+    // boundary, or — if accepted on the SWM path — the forged triple
+    // does NOT land in the per-CG `_meta` / ontology surface readers
+    // consult.
+    const cg = freshCg('a2-data-self-inject');
+    await agent.createContextGraph({ id: cg, name: 'di', description: '' });
+    await agent.registerContextGraph(cg);
+    const dataUri = `did:dkg:context-graph:${cg}`;
+    let rejected = false;
+    try {
+      await agent.share(cg, [
+        { subject: dataUri, predicate: 'http://dkg.io/ontology/curator', object: '"forged-curator"', graph: '' },
+      ]);
+    } catch {
+      rejected = true;
+    }
+    if (!rejected) {
+      const metaUri = `did:dkg:context-graph:${cg}/_meta`;
+      const r = await agent.store.query(
+        `SELECT ?o WHERE { GRAPH <${metaUri}> { <${dataUri}> <http://dkg.io/ontology/curator> ?o } } LIMIT 1`,
+      );
+      const rows = (r as { bindings?: unknown[] }).bindings ?? [];
+      expect(
+        rows.length,
+        'share() must NOT inject a forged `dkg:curator` into per-CG _meta (Axiom 1: CG record is protocol-controlled)',
+      ).toBe(0);
+    }
+  }, 60_000);
+
   it('2.u share() rejects subjects equal to a context-graph _meta URI (no audit-trail injection)', async () => {
     // Spec §1 + §2: the per-CG _meta graph holds protocol-controlled
     // metadata (lifecycle states, revocation markers, KC merkle roots,
