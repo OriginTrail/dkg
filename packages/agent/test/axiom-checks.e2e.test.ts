@@ -3720,6 +3720,59 @@ describe('Axiom 4 — Trust gradient is monotonic [gap-pass-21]', () => {
   }, 90_000);
 });
 
+describe('Axiom 6 — Declared views reject ambiguity [gap-pass-24]', () => {
+  it('6.x agent.query with view but no contextGraphId is rejected (declared view requires scope)', async () => {
+    // Spec §6: the view IS the resolution policy; the contextGraphId
+    // IS the scope. A view without a CG is ambiguous — the engine
+    // would have to either default to "all CGs" (cross-CG read leak,
+    // breaking Axiom 1) or to "current CG" (which doesn't exist
+    // outside paranet context). Neither is correct; the only safe
+    // surface is to reject the call.
+    let threw = false;
+    let msg = '';
+    try {
+      await agent.query('SELECT ?o WHERE { ?s ?p ?o }', { view: 'verified-memory' });
+    } catch (err) {
+      threw = true;
+      msg = err instanceof Error ? err.message : String(err);
+    }
+    expect(threw, 'agent.query with a view but no contextGraphId must throw').toBe(true);
+    expect(
+      msg,
+      `error must mention contextGraphId/scope so callers can fix the call (got: "${msg}")`,
+    ).toMatch(/contextGraphId|paranetId|scope/i);
+  }, 30_000);
+
+  it('6.y agent.query view=verified-memory in CG-A returns no rows from CG-B (cross-CG read scope)', async () => {
+    // Spec §1 + §6: the view's scope is the contextGraphId, not the
+    // SPARQL pattern. Two publishes — one in CG-A, one in CG-B —
+    // produce two distinct VM partitions. A `view=verified-memory`
+    // query in CG-A must NOT return any binding that came from CG-B,
+    // even when the SPARQL pattern matches both subjects (different
+    // tail randoms ensure no aliasing).
+    const cgA = freshCg('a6-vm-A');
+    const cgB = freshCg('a6-vm-B');
+    const subA = urn('vmA');
+    const subB = urn('vmB');
+    await agent.createContextGraph({ id: cgA, name: 'A', description: '' });
+    await agent.createContextGraph({ id: cgB, name: 'B', description: '' });
+    await agent.registerContextGraph(cgA);
+    await agent.registerContextGraph(cgB);
+    await agent.publish(cgA, [{ subject: subA, predicate: P_NAME, object: '"in-A"', graph: '' }]);
+    await agent.publish(cgB, [{ subject: subB, predicate: P_NAME, object: '"in-B"', graph: '' }]);
+
+    const r = await agent.query(
+      `SELECT ?s ?o WHERE { ?s <${P_NAME}> ?o }`,
+      { contextGraphId: cgA, view: 'verified-memory' },
+    );
+    const objs = r.bindings.map((b: Record<string, string>) => b['o']);
+    expect(
+      objs,
+      'verified-memory query in CG-A must NOT contain CG-B objects (Axiom 1 + 6: declared view scoped by contextGraphId)',
+    ).not.toContain('"in-B"');
+  }, 90_000);
+});
+
 describe('Axiom 6 — GET resolves a declared view [gap-pass-20]', () => {
   it('6.u SPARQL FROM clauses cannot escape the view-resolved graph set (no cross-CG read leakage)', async () => {
     // Spec §6: views are declared by the agent, not the SPARQL string.
