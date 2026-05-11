@@ -4688,6 +4688,72 @@ describe('Axiom 4 — PUBLISH is canonical; ENDORSE/VERIFY raise trust [gap-pass
   }, 90_000);
 });
 
+describe('Axiom 3 — Typed state transitions [gap-pass-31]', () => {
+  it('3.mm assertion.write rejects predicates containing N-Triples-breaking glyphs (no injection through the predicate slot)', async () => {
+    // Spec §3 + §2: every typed transition writes triples through
+    // an N-Triples-shaped pipeline. 2.s covers SHARE, 2.t covers
+    // PUBLISH; this is the missing assertion.write probe — same
+    // hazard via a different transition. A predicate with a
+    // newline / quote / angle-bracket / control char would close
+    // the predicate slot mid-string and let an attacker inject
+    // additional triples / change the graph.
+    const cg = freshCg('a3-write-pred-inj');
+    const name = 'inj-target';
+    await agent.createContextGraph({ id: cg, name: 'wp', description: '' });
+    await agent.registerContextGraph(cg);
+    const assertionUri = await agent.assertion.create(cg, name);
+
+    const malicious = [
+      'http://attack.example/p>\n<urn:evil> <urn:p> "0"',
+      'http://attack.example/p" "value',
+      'http://attack.example/p\rinjected',
+      'http://attack.example/p\tinjected',
+    ];
+    for (const badPred of malicious) {
+      let threw = false;
+      try {
+        await agent.assertion.write(cg, name, [
+          { subject: assertionUri, predicate: badPred, object: '"x"', graph: assertionUri },
+        ]);
+      } catch {
+        threw = true;
+      }
+      expect(
+        threw,
+        `assertion.write must reject predicate=${JSON.stringify(badPred)} (N-Triples injection vector — Axiom 3: typed transitions must not be a write-anything escape hatch)`,
+      ).toBe(true);
+    }
+  }, 60_000);
+});
+
+describe('Axiom 6 — GET resolves a declared view [gap-pass-31]', () => {
+  it('6.dd ASK form of agent.query against an unknown contextGraphId is rejected (declared-view validation applies to ALL SPARQL forms)', async () => {
+    // Spec §6: declared views must resolve in a known scope —
+    // applies regardless of the SPARQL form (SELECT / ASK /
+    // CONSTRUCT / DESCRIBE). 6.v pinned the SELECT case; this
+    // is the missing ASK probe. A silent `false` for an unknown
+    // CG is just as misleading as a silent empty SELECT — caller
+    // can't distinguish "scope unknown" from "scope known but no
+    // matches".
+    let threw = false;
+    let msg = '';
+    try {
+      await agent.query(`ASK { ?s ?p ?o }`, {
+        contextGraphId: 'totally-bogus-cg-' + ethers.hexlify(ethers.randomBytes(3)).slice(2),
+        view: 'verified-memory',
+      });
+    } catch (err) {
+      threw = true;
+      msg = err instanceof Error ? err.message : String(err);
+    }
+    expect(
+      threw,
+      `ASK against an unknown CG must reject — Axiom 6: declared-view validation is form-agnostic (got: "${msg}")`,
+    ).toBe(true);
+    expect(msg, 'error must reference the CG').toMatch(/context|graph|unknown|not.*found|registered|subscribed/i);
+  }, 30_000);
+});
+
 describe('Axiom 6 — GET resolves a declared view [gap-pass-20]', () => {
   it('6.u SPARQL FROM clauses cannot escape the view-resolved graph set (no cross-CG read leakage)', async () => {
     // Spec §6: views are declared by the agent, not the SPARQL string.
