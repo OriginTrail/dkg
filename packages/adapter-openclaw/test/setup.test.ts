@@ -23,11 +23,6 @@ import { fileURLToPath } from 'node:url';
 const requestFaucetFundingSpy = vi.hoisted(() =>
   vi.fn(async () => ({ success: true, funded: ['0.01 ETH', '1000 TRAC'] })),
 );
-// `fundWalletsBestEffort` calls `requestFaucetFunding` via `./faucet.js`, not the package
-// barrel — mocking only the barrel leaves the spy never invoked (CI + local).
-vi.mock('@origintrail-official/dkg-core/dist/faucet.js', () => ({
-  requestFaucetFunding: requestFaucetFundingSpy,
-}));
 vi.mock('@origintrail-official/dkg-core', async () => {
   const actual = await vi.importActual<typeof import('@origintrail-official/dkg-core')>(
     '@origintrail-official/dkg-core',
