@@ -3576,7 +3576,11 @@ describe('Axiom 4 — PUBLISH is canonical; ENDORSE/VERIFY raise trust [gap-pass
     const endorserUri = rows[0]['endorser'] ?? '';
     const digestRaw = rows[0]['digest'] ?? '';
     const sigRaw = rows[0]['signature'] ?? '';
-    const digest = digestRaw.replace(/^"|"$/g, '').replace(/\\\\/g, '\\').replace(/\\"/g, '"');
+    const unescapeNTriples = (s: string): string => s.replace(
+      /\\(["\\nrt])/g,
+      (_m, c: string) => (c === 'n' ? '\n' : c === 'r' ? '\r' : c === 't' ? '\t' : c),
+    );
+    const digest = unescapeNTriples(digestRaw.replace(/^"|"$/g, ''));
     const sig = sigRaw.replace(/^"|"$/g, '');
     const recovered = ethers.verifyMessage(digest, sig);
     const expectedAddr = endorserUri.replace(/^did:dkg:agent:/, '');
