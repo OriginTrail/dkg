@@ -80,6 +80,23 @@ function urn(tag: string): string {
   return `urn:axiom:${tag}:${ethers.hexlify(ethers.randomBytes(2)).slice(2)}`;
 }
 
+// `assertion.revoke()` is a V10 axiom-mandated surface (Axiom 2 / 3: REVOKE
+// is a typed state transition with an explicit lifecycle event). Unmodified
+// `main` does not yet expose it, so calls fail at runtime as MISSING — which
+// is exactly what these tests should report. The typed shim below only lets
+// the file compile cleanly; runtime behaviour is unchanged.
+type AssertionRevokeReturn = { status: string; lifecycleUri: string };
+type AssertionWithRevoke = {
+  revoke: (
+    contextGraphId: string,
+    name: string,
+    opts?: { reason?: string; subGraphName?: string },
+  ) => Promise<AssertionRevokeReturn>;
+};
+function assertionApi(a: DKGAgent): DKGAgent['assertion'] & AssertionWithRevoke {
+  return a.assertion as unknown as DKGAgent['assertion'] & AssertionWithRevoke;
+}
+
 async function rowsFor(
   cg: string,
   view: 'working-memory' | 'shared-working-memory' | 'verified-memory',
@@ -2420,7 +2437,7 @@ describe('Axiom 2 — Authority domain [gap-pass-4]', () => {
     await agent.registerContextGraph(cg);
     let threw = false;
     try {
-      await agent.assertion.revoke(cg, 'never-created', { reason: 'ghost' });
+      await assertionApi(agent).revoke(cg, 'never-created', { reason: 'ghost' });
     } catch {
       threw = true;
     }
@@ -2494,7 +2511,7 @@ describe('Axiom 3 — Typed state transitions [gap-pass-5]', () => {
     await agent.assertion.discard(cg, 'tt');
     let threw = false;
     try {
-      await agent.assertion.revoke(cg, 'tt', { reason: 'after-discard' });
+      await assertionApi(agent).revoke(cg, 'tt', { reason: 'after-discard' });
     } catch {
       threw = true;
     }
@@ -2543,9 +2560,9 @@ describe('Axiom 3 — Typed state transitions [gap-pass-6]', () => {
     await agent.assertion.write(cg, 'r1', [
       { subject: sub, predicate: P_NAME, object: '"v"', graph: '' },
     ]);
-    await agent.assertion.revoke(cg, 'r1', { reason: 'first' });
-    await agent.assertion.revoke(cg, 'r1', { reason: 'second' });
-    await agent.assertion.revoke(cg, 'r1', { reason: 'third' });
+    await assertionApi(agent).revoke(cg, 'r1', { reason: 'first' });
+    await assertionApi(agent).revoke(cg, 'r1', { reason: 'second' });
+    await assertionApi(agent).revoke(cg, 'r1', { reason: 'third' });
 
     const meta = `did:dkg:context-graph:${cg}/_meta`;
     const r = await agent.store.query(
@@ -3130,7 +3147,7 @@ describe('Axiom 3 — Typed state transitions [gap-pass-13]', () => {
     await agent.assertion.write(cg, 'r2', [
       { subject: sub, predicate: P_NAME, object: '"v1"', graph: '' },
     ]);
-    await agent.assertion.revoke(cg, 'r2', { reason: 'closed' });
+    await assertionApi(agent).revoke(cg, 'r2', { reason: 'closed' });
     let threw = false;
     try {
       await agent.assertion.write(cg, 'r2', [
@@ -3402,7 +3419,7 @@ describe('Axiom 3 — Typed state transitions [gap-pass-16]', () => {
     await agent.assertion.write(cg, 'note', [
       { subject: sub, predicate: P_NAME, object: '"v1"', graph: '' },
     ]);
-    await agent.assertion.revoke(cg, 'note', { reason: 'closed' });
+    await assertionApi(agent).revoke(cg, 'note', { reason: 'closed' });
     let threw = false;
     try {
       await agent.assertion.create(cg, 'note');
@@ -3799,7 +3816,7 @@ describe('Axiom 3 — Typed state transitions [gap-pass-25]', () => {
     await agent.assertion.write(cg, 'will-be-revoked', [
       { subject: assertionUri, predicate: P_NAME, object: '"v1"', graph: '' },
     ]);
-    await agent.assertion.revoke(cg, 'will-be-revoked', { reason: 'test' });
+    await assertionApi(agent).revoke(cg, 'will-be-revoked', { reason: 'test' });
 
     let threw = false;
     let msg = '';
@@ -4172,7 +4189,7 @@ describe('Axiom 3 — Typed state transitions [gap-pass-27]', () => {
     const before = await agent.assertion.query(cg, name);
     expect(before.length, 'precondition: assertion has data before REVOKE').toBeGreaterThan(0);
 
-    await agent.assertion.revoke(cg, name, { reason: 'audit-test' });
+    await assertionApi(agent).revoke(cg, name, { reason: 'audit-test' });
 
     const after = await agent.assertion.query(cg, name);
     expect(
@@ -4302,14 +4319,14 @@ describe('Axiom 1 — Context graph isolation [gap-pass-27]', () => {
 
     // Revoking in CG-A captures the per-CG lifecycle URI. The lifecycle
     // URI is independent of the data-graph URI; both must be CG-scoped.
-    const revA = await agent.assertion.revoke(cgA, name, { reason: 'isolate-A' });
+    const revA = await assertionApi(agent).revoke(cgA, name, { reason: 'isolate-A' });
     const lifecycleA = revA.lifecycleUri;
     let cgBRevokeThrew = false;
     try {
       // Probe CG-B's lifecycle URI by attempting a revoke that should
       // fail-or-succeed cleanly per the per-CG isolation contract — but
       // capture the lifecycleUri that CG-B's revoke would generate.
-      const revB = await agent.assertion.revoke(cgB, name, { reason: 'probe-B-uri' });
+      const revB = await assertionApi(agent).revoke(cgB, name, { reason: 'probe-B-uri' });
       const lifecycleB = revB.lifecycleUri;
       expect(
         lifecycleB,
@@ -5114,7 +5131,7 @@ describe('Axiom 3 — Typed state transitions [gap-pass-32 cont.]', () => {
     expect(discardThrew, 'assertion.discard must reject empty contextGraphId').toBe(true);
 
     let revokeThrew = false;
-    try { await agent.assertion.revoke('', 'some'); } catch { revokeThrew = true; }
+    try { await assertionApi(agent).revoke('', 'some'); } catch { revokeThrew = true; }
     expect(revokeThrew, 'assertion.revoke must reject empty contextGraphId').toBe(true);
   }, 30_000);
 
