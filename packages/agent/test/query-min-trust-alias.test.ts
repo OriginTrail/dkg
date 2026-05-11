@@ -37,7 +37,12 @@ function makeStubAgent(observer: (opts: QueryOptions | undefined) => void): Inst
     log: { info() {}, warn() {}, debug() {}, error() {} },
     config: {},
     queryEngine: stubEngine,
-    subscribedContextGraphs: new Set<string>(),
+    // Pre-register the test CG so the agent's "is the contextGraphId
+    // known to this node" gate (Axiom 6 + 1: declared views must
+    // resolve within a known CG) lets the call through to the engine.
+    // The stub doesn't have a real store, so the in-memory subscription
+    // map is the only signal the gate can read here.
+    subscribedContextGraphs: new Set<string>(['cg-1']),
     // `query()` falls through to `canReadContextGraph` / `isPrivateContextGraph`
     // / `sparqlReferencesPrivateGraphs` — stub to "allow everything" so
     // the code path reaches the `queryEngine.query(...)` call site.

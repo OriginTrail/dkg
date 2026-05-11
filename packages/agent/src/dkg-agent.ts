@@ -3900,6 +3900,44 @@ export class DKGAgent {
     }
     const callerAgentAddressStr = opts.callerAgentAddress;
 
+    // V10 Axiom 6 + Axiom 1: a declared view must resolve within a
+    // KNOWN context graph. Returning silently-empty bindings for a
+    // typo'd or otherwise-unknown CG looks indistinguishable from
+    // "no data" and lets caller bugs (mis-routed requests, copy-paste
+    // typos) hide forever. Reject up front when `contextGraphId` is
+    // provided but the CG is neither subscribed nor created locally.
+    //
+    // Privacy-deny vs unknown-deny: PRIVATE CGs that the caller is
+    // not allowed to read still go through the silent-empty path
+    // below (the existing canReadContextGraph branch) so an
+    // unauthorised reader cannot probe for membership. The check
+    // here only fires when the CG is unknown to THIS node entirely
+    // — there is no membership signal to leak.
+    if (opts.contextGraphId) {
+      const cgId = opts.contextGraphId;
+      const knownInMemory = this.subscribedContextGraphs.has(cgId);
+      let knownInStore = false;
+      if (!knownInMemory) {
+        const cgMetaGraph = paranetMetaGraphUri(cgId);
+        const cgUri = `did:dkg:context-graph:${cgId}`;
+        const probe = await this.store.query(
+          `SELECT ?p WHERE { GRAPH <${cgMetaGraph}> {
+             <${cgUri}> ?p ?o
+           } } LIMIT 1`,
+        );
+        knownInStore = probe.type === 'bindings' && probe.bindings.length > 0;
+      }
+      if (!knownInMemory && !knownInStore) {
+        throw new Error(
+          `query: contextGraphId "${cgId}" is not known to this node — ` +
+          'create it with createContextGraph(), subscribe with ' +
+          'subscribeToContextGraph(), or fix the spelling ' +
+          '(Axiom 6: declared views must resolve within a known CG; ' +
+          'Axiom 1: every shared query is scoped to a CG).',
+        );
+      }
+    }
+
     if (
       opts.contextGraphId
       && targetsSharedMemory
@@ -9025,9 +9063,14 @@ export class DKGAgent {
         const lifecycleUri = assertionLifecycleUri(contextGraphId, agentAddress, name, opts?.subGraphName);
         const metaGraph = contextGraphMetaUri(contextGraphId);
         const DKG_NS = 'http://dkg.io/ontology/';
+        // Co-query `state` and `revoked` in one round-trip. revoke()
+        // tracks the closed-lifecycle terminal flag in a separate
+        // `dkg:revoked` marker (NOT in `dkg:state`), so a single state
+        // probe would miss it and let DISCARD-after-REVOKE proceed.
         const r = await agent.store.query(
-          `SELECT ?s WHERE { GRAPH <${metaGraph}> {
-             <${lifecycleUri}> <${DKG_NS}state> ?s
+          `SELECT ?s ?revoked WHERE { GRAPH <${metaGraph}> {
+             <${lifecycleUri}> <${DKG_NS}state> ?s .
+             OPTIONAL { <${lifecycleUri}> <${DKG_NS}revoked> ?revoked }
            } } LIMIT 1`,
         );
         const exists = r.type === 'bindings' && r.bindings.length > 0;
@@ -9041,6 +9084,22 @@ export class DKGAgent {
         const state = String(r.bindings[0]['s'] ?? '').replace(/^"|"$/g, '').replace(/"\^\^.*$/, '');
         if (state === 'discarded') {
           return;
+        }
+        // V10 Axiom 3 closed lifecycle (REVOKED is terminal — symmetrical
+        // to the REVOKE-after-DISCARD gate at revoke()). DISCARD on a
+        // revoked row would mint a typed `prov:Activity dkg:AssertionDiscarded`
+        // event downstream of the `dkg:revoked=true` marker, leaving
+        // the audit trail with two terminal-state claims for the same
+        // lifecycle — readers respecting the spec have no canonical
+        // interpretation. REVOKED is terminal: no transitions out.
+        const revokedLit = r.bindings[0]['revoked'];
+        if (revokedLit && revokedLit.includes('"true"')) {
+          throw new Error(
+            `assertion.discard: assertion "${name}" is REVOKED in context graph "${contextGraphId}"` +
+            `${opts?.subGraphName ? ` (sub-graph: ${opts.subGraphName})` : ''} — ` +
+            'DISCARD is refused; REVOKED is a terminal lifecycle state ' +
+            '(Axiom 3: closed lifecycle — symmetrical to REVOKE-after-DISCARD).',
+          );
         }
         return agent.publisher.assertionDiscard(contextGraphId, name, agentAddress, opts?.subGraphName);
       },

@@ -3778,6 +3778,808 @@ describe('Axiom 6 — Declared views reject ambiguity [gap-pass-24]', () => {
   }, 90_000);
 });
 
+describe('Axiom 3 — Typed state transitions [gap-pass-25]', () => {
+  it('3.cc DISCARD on a REVOKED assertion is rejected (REVOKED is terminal — symmetrical to 3.r)', async () => {
+    // Spec §3 closed lifecycle: REVOKED is terminal. Test 3.r already
+    // pins REVOKE-after-DISCARD; this is the missing reverse direction.
+    // Permitting DISCARD on a revoked lifecycle row would mint a typed
+    // `prov:Activity dkg:AssertionDiscarded` event downstream of a
+    // `dkg:revoked=true` marker — readers respecting the spec would
+    // see a single audit row claiming both REVOKED and DISCARDED, with
+    // no canonical interpretation. Lifecycle terminal-state symmetry
+    // demands either branch from CREATED is closed once entered.
+    const cg = freshCg('a3-discard-after-revoke');
+    await agent.createContextGraph({ id: cg, name: 'dr', description: '' });
+    await agent.registerContextGraph(cg);
+    const assertionUri = await agent.assertion.create(cg, 'will-be-revoked');
+    await agent.assertion.write(cg, 'will-be-revoked', [
+      { subject: assertionUri, predicate: P_NAME, object: '"v1"', graph: '' },
+    ]);
+    await agent.assertion.revoke(cg, 'will-be-revoked', { reason: 'test' });
+
+    let threw = false;
+    let msg = '';
+    try {
+      await agent.assertion.discard(cg, 'will-be-revoked');
+    } catch (err) {
+      threw = true;
+      msg = err instanceof Error ? err.message : String(err);
+    }
+    expect(
+      threw,
+      'assertion.discard must reject DISCARD on a REVOKED lifecycle row (Axiom 3: REVOKED is terminal — symmetrical to 3.r REVOKE-after-DISCARD)',
+    ).toBe(true);
+    expect(msg, `error must reference the terminal-state contract (got: "${msg}")`)
+      .toMatch(/revoked|terminal|state|lifecycle/i);
+  }, 60_000);
+});
+
+describe('Axiom 4 — PUBLISH is canonical; ENDORSE/VERIFY raise trust [gap-pass-25]', () => {
+  it('4.mm ENDORSE on a root that is already ConsensusVerified must NOT downgrade trust (full-band probe)', async () => {
+    // Spec §4 trust gradient is monotonic-up from SelfAttested through
+    // Endorsed → PartiallyVerified → ConsensusVerified. Test 4.ll pins
+    // the PartiallyVerified case; this is the missing top-of-band
+    // probe — letting a stray endorse() lower a quorum-confirmed row
+    // back to Endorsed would silently invalidate consensus that real
+    // VERIFY transactions paid for, and any downstream `minTrust=
+    // ConsensusVerified` filter would lose the row.
+    const { DKG_ENTITY_TRUST_LEVEL_PREDICATE } = await import('@origintrail-official/dkg-core');
+    const cg = freshCg('a4-no-downgrade-cv');
+    const sub = urn('cv-no-downgrade');
+    await agent.createContextGraph({ id: cg, name: 'cvnd', description: '' });
+    await agent.registerContextGraph(cg);
+    const pub = await agent.publish(cg, [
+      { subject: sub, predicate: P_NAME, object: '"x"', graph: '' },
+    ]);
+    const dataGraph = `did:dkg:context-graph:${cg}`;
+    await agent.store.deleteByPattern({
+      graph: dataGraph,
+      subject: sub,
+      predicate: DKG_ENTITY_TRUST_LEVEL_PREDICATE,
+    });
+    await agent.store.insert([{
+      subject: sub,
+      predicate: DKG_ENTITY_TRUST_LEVEL_PREDICATE,
+      object: `"${TrustLevel.ConsensusVerified}"^^<http://www.w3.org/2001/XMLSchema#integer>`,
+      graph: dataGraph,
+    }]);
+
+    await agent.endorse({ contextGraphId: cg, knowledgeAssetUal: pub.ual });
+
+    const r = await agent.store.query(
+      `SELECT ?o WHERE { GRAPH <${dataGraph}> { <${sub}> <${DKG_ENTITY_TRUST_LEVEL_PREDICATE}> ?o } }`,
+    );
+    const lit = String((r as { bindings?: Record<string, string>[] }).bindings?.[0]?.['o'] ?? '');
+    const numMatch = lit.match(/"(\d+)"/);
+    const after = numMatch ? Number.parseInt(numMatch[1], 10) : Number.NaN;
+    expect(
+      after,
+      `ENDORSE must NOT downgrade trust from ConsensusVerified (=${TrustLevel.ConsensusVerified}) to Endorsed (=${TrustLevel.Endorsed}) — Axiom 4 trust gradient is monotonic-up at the TOP of the band`,
+    ).toBeGreaterThanOrEqual(TrustLevel.ConsensusVerified);
+  }, 90_000);
+
+  it('4.nn VERIFY on a UAL that is only in SWM (never PUBLISH-ed) is rejected', async () => {
+    // Spec §4: "VERIFY/ENDORSE operate on data already in Verified
+    // Memory (data must be published first)". Test 4.d pins the
+    // ENDORSE side; this is the missing VERIFY side. A SHARE-d but
+    // never PUBLISH-ed UAL exists only in SWM — VERIFY against it
+    // would mint a verification record for a row that is provisional
+    // by Axiom 5, conflating the staging and authoritative layers.
+    const cg = freshCg('a4-verify-swm-only');
+    const sub = urn('swm-only');
+    await agent.createContextGraph({ id: cg, name: 'vso', description: '' });
+    await agent.registerContextGraph(cg);
+    await agent.share(cg, [
+      { subject: sub, predicate: P_NAME, object: '"only-in-swm"', graph: '' },
+    ]);
+
+    let threw = false;
+    let msg = '';
+    try {
+      await agent.verify({
+        contextGraphId: cg,
+        verifiedMemoryId: '1',
+        batchId: 0xDEADBEEFn,
+        proposers: [{ identityId: 1n, rationale: 'noop', vote: 'approve' }],
+      } as unknown as Parameters<typeof agent.verify>[0]);
+    } catch (err) {
+      threw = true;
+      msg = err instanceof Error ? err.message : String(err);
+    }
+    expect(
+      threw,
+      'agent.verify must reject a UAL that is only in SWM (Axiom 4: VERIFY/ENDORSE require data already in Verified Memory)',
+    ).toBe(true);
+    expect(msg.length, 'error must carry a useful diagnostic').toBeGreaterThan(0);
+  }, 60_000);
+});
+
+describe('Axiom 6 — Declared views reject ambiguity [gap-pass-25]', () => {
+  it('6.v agent.query against an unknown contextGraphId is rejected (no silent empty result for typo\'d CG)', async () => {
+    // Spec §6: every shared query is RESOLVED within a Context Graph.
+    // A query naming a CG that this node does not know about must
+    // surface an error so callers can fix typos and routing bugs.
+    // Returning silently-empty bindings papers over the misroute and
+    // looks like "no data" — an explicit failure mode under Axiom 6.
+    let threw = false;
+    let msg = '';
+    try {
+      const r = await agent.query(`SELECT ?s ?p ?o WHERE { ?s ?p ?o }`, {
+        contextGraphId: 'completely-unregistered-cg-' + ethers.hexlify(ethers.randomBytes(3)).slice(2),
+        view: 'verified-memory',
+      });
+      // If we got here, the query did NOT throw — fail with a useful
+      // diagnostic that pins the empty result that came back instead.
+      msg = `query returned without throwing; bindings.length=${r.bindings.length}`;
+    } catch (err) {
+      threw = true;
+      msg = err instanceof Error ? err.message : String(err);
+    }
+    expect(
+      threw,
+      `agent.query must reject an unknown contextGraphId (Axiom 6: declared views must resolve to a known scope; got: "${msg}")`,
+    ).toBe(true);
+    expect(msg, 'error must mention contextGraph/scope so callers can fix the typo')
+      .toMatch(/context|graph|unknown|not.*found|registered|subscribed/i);
+  }, 30_000);
+});
+
+describe('Axiom 5 — SWM is provisional [gap-pass-25]', () => {
+  it('5.m publishFromSharedMemory DRAINS SWM for the promoted rootEntity (compact-example step 6: "promoted out of staging")', async () => {
+    // Spec §5 + the Game Expedition compact walk-through:
+    //   "After step 6: view=shared-working-memory → empty
+    //                  (promoted out of staging)"
+    // The PROMOTION path is the one in the spec — agent.share() then
+    // agent.publishFromSharedMemory(). Once a rootEntity has been
+    // promoted to VM, the staging copy must clear so peers cannot
+    // mistake a provisional row for authoritative truth (the exact
+    // failure mode Axiom 5 enumerates: "Treating replicated state
+    // as accepted truth").
+    const cg = freshCg('a5-promotion-drains');
+    const sub = urn('promote');
+    await agent.createContextGraph({ id: cg, name: 'pd', description: '' });
+    await agent.registerContextGraph(cg);
+    await agent.share(cg, [
+      { subject: sub, predicate: P_NAME, object: '"v1"', graph: '' },
+    ]);
+    const swmBefore = await rowsFor(cg, 'shared-working-memory', sub);
+    expect(swmBefore, 'SHARE must place the row in SWM (precondition)').toContain('"v1"');
+
+    await agent.publishFromSharedMemory(cg, { rootEntities: [sub] });
+
+    const swmAfter = await rowsFor(cg, 'shared-working-memory', sub);
+    const vmAfter = await rowsFor(cg, 'verified-memory', sub);
+    expect(
+      vmAfter,
+      'publishFromSharedMemory must land the row in VM (sanity)',
+    ).toContain('"v1"');
+    expect(
+      swmAfter,
+      'publishFromSharedMemory must DRAIN the SHARE-d row from SWM (Axiom 5: staging clears once promoted; peers cannot confuse provisional with authoritative)',
+    ).not.toContain('"v1"');
+  }, 90_000);
+});
+
+describe('Axiom 1 — Context graph isolation [gap-pass-25]', () => {
+  it('1.r same subject IRI in two CGs has independent authority basis (per-CG scope, not global)', async () => {
+    // Spec §1: "Every authority rule is interpreted inside a Context
+    // Graph". Authority over a scope in CG-A does NOT confer
+    // authority over the same IRI in CG-B; the IRI is just a string
+    // and its meaning is bound to the CG it lives in. This probe
+    // PUBLISH-es the same subject in two CGs, then UPDATE-s the
+    // CG-A copy and asserts the CG-B copy is untouched — proving
+    // authority is per-CG, not global.
+    const cgA = freshCg('a1-auth-A');
+    const cgB = freshCg('a1-auth-B');
+    const sub = urn('shared-iri');
+    await agent.createContextGraph({ id: cgA, name: 'A', description: '' });
+    await agent.createContextGraph({ id: cgB, name: 'B', description: '' });
+    await agent.registerContextGraph(cgA);
+    await agent.registerContextGraph(cgB);
+    const pubA = await agent.publish(cgA, [
+      { subject: sub, predicate: P_NAME, object: '"in-A-v1"', graph: '' },
+    ]);
+    const pubB = await agent.publish(cgB, [
+      { subject: sub, predicate: P_NAME, object: '"in-B-v1"', graph: '' },
+    ]);
+    expect(pubA.kcId, 'CG-A and CG-B must mint distinct kcIds for the same subject (per-CG authority)').not.toBe(pubB.kcId);
+
+    // UPDATE in CG-A only.
+    await agent.update(pubA.kcId, cgA, [
+      { subject: sub, predicate: P_NAME, object: '"in-A-v2"', graph: '' },
+    ]);
+
+    const aRows = await rowsFor(cgA, 'verified-memory', sub);
+    const bRows = await rowsFor(cgB, 'verified-memory', sub);
+    expect(
+      aRows,
+      'UPDATE in CG-A must surface the new value in CG-A VM',
+    ).toContain('"in-A-v2"');
+    expect(
+      bRows,
+      'UPDATE in CG-A must NOT touch CG-B — Axiom 1 says authority is interpreted per-CG, not by IRI',
+    ).toContain('"in-B-v1"');
+    expect(
+      bRows,
+      'UPDATE in CG-A must NOT bleed the new CG-A value into CG-B',
+    ).not.toContain('"in-A-v2"');
+  }, 120_000);
+});
+
+describe('Axiom 3 — Typed state transitions [gap-pass-26]', () => {
+  it('3.dd UPDATE _meta records dkg:publisherAddress for the actor (Axiom 3 + Axiom 4 corollary: actor attribution must survive UPDATE)', async () => {
+    // Spec §3 + §4 corollary "trust transitions are independently
+    // verifiable": every transition must record WHO did it. Test 3.m
+    // already pins the dkg:transitionType=UPDATE marker; this is the
+    // missing ACTOR-attribution probe — without a publisher address
+    // on the post-UPDATE metadata an auditor cannot tie the UPDATE
+    // back to a wallet. Equivalent test exists for PUBLISH (4.ii);
+    // UPDATE must satisfy the same contract because it is canonically
+    // a re-PUBLISH at a fresh merkle root.
+    const cg = freshCg('a3-update-actor');
+    const sub = urn('uact');
+    await agent.createContextGraph({ id: cg, name: 'ua', description: '' });
+    await agent.registerContextGraph(cg);
+    const pub = await agent.publish(cg, [
+      { subject: sub, predicate: P_NAME, object: '"v0"', graph: '' },
+    ]);
+    expect(pub.status).toBe('confirmed');
+    await agent.update(pub.kcId, cg, [
+      { subject: sub, predicate: P_NAME, object: '"v1"', graph: '' },
+    ]);
+
+    const meta = `did:dkg:context-graph:${cg}/_meta`;
+    const r = await agent.store.query(
+      `SELECT ?addr WHERE { GRAPH <${meta}> {
+         <${pub.ual}> ?p ?addr .
+         FILTER(?p IN (
+           <http://dkg.io/ontology/publisherAddress>,
+           <https://dkg.network/ontology#publisherAddress>
+         ))
+       } }`,
+    );
+    const addrs = ((r as { bindings?: Record<string, string>[] }).bindings ?? []).map(b => b['addr']);
+    expect(
+      addrs.length,
+      `UPDATE must rewrite dkg:publisherAddress on the KC UAL so the actor is queryable post-UPDATE (Axiom 3 + Axiom 4 corollary). meta-graph=${meta}, ual=${pub.ual}`,
+    ).toBeGreaterThan(0);
+    expect(
+      addrs[0],
+      'dkg:publisherAddress literal must look like a wallet address (0x...)',
+    ).toMatch(/0x[0-9a-fA-F]{40}/);
+  }, 90_000);
+
+  it('3.gg assertion.create names are case-sensitive — "foo" and "Foo" are DISTINCT lifecycle rows (no silent slug folding)', async () => {
+    // Spec §3: "every lifecycle row has a name". The (cg, agent, name)
+    // tuple is the assertion's identity. Folding names case-insensitively
+    // would let an attacker shadow a real assertion under a near-look-
+    // alike name and quietly hijack downstream operations targeting
+    // either spelling. The tuple must hash on the EXACT name string.
+    const cg = freshCg('a3-case');
+    await agent.createContextGraph({ id: cg, name: 'cs', description: '' });
+    await agent.registerContextGraph(cg);
+    const lower = await agent.assertion.create(cg, 'mycase');
+    const upper = await agent.assertion.create(cg, 'MyCase');
+    expect(
+      lower,
+      'lower-case lifecycle URI must be a non-empty string',
+    ).toMatch(/.+/);
+    expect(
+      upper,
+      'mixed-case lifecycle URI must be a non-empty string',
+    ).toMatch(/.+/);
+    expect(
+      upper,
+      'distinct casings must mint DISTINCT lifecycle URIs (Axiom 3: name is part of the identity tuple, no silent slug folding)',
+    ).not.toBe(lower);
+  }, 30_000);
+});
+
+describe('Axiom 5 — SWM is provisional [gap-pass-26]', () => {
+  it('5.n SHARE prov:wasAttributedTo carries the agent\'s actual peerId — not "unknown" or a forged value', async () => {
+    // Spec §5 record contract: every SWM record identifies "the
+    // producer (agent/peer)". 5.d only proved the predicate is
+    // present; this is the missing VALUE probe — an "unknown"
+    // fallback or a hard-coded default would make the audit trail
+    // useless because every SHARE looks identical. The recorded
+    // peer must equal the agent's actual `node.peerId` so a
+    // downstream auditor can correlate to a real network identity.
+    const cg = freshCg('a5-prov-value');
+    const sub = urn('prov-val');
+    await agent.createContextGraph({ id: cg, name: 'pv', description: '' });
+    await agent.share(
+      cg,
+      [{ subject: sub, predicate: P_NAME, object: '"x"', graph: '' }],
+      { localOnly: true },
+    );
+    const meta = `did:dkg:context-graph:${cg}/_shared_memory_meta`;
+    const r = await agent.store.query(
+      `SELECT ?p WHERE { GRAPH <${meta}> {
+         ?op a <http://dkg.io/ontology/WorkspaceOperation> .
+         ?op <http://www.w3.org/ns/prov#wasAttributedTo> ?p .
+       } }`,
+    );
+    const peers = ((r as { bindings?: Record<string, string>[] }).bindings ?? [])
+      .map(b => String(b['p'] ?? '').replace(/^"|"$/g, ''));
+    expect(peers.length, 'SHARE must record a producer attribution row').toBeGreaterThan(0);
+    expect(
+      peers.some(p => /^12D3Koo|^Qm[1-9A-HJ-NP-Za-km-z]{44}$/.test(p)),
+      `SWM producer must be the agent's libp2p peerId (got: ${JSON.stringify(peers)}). "unknown" or non-peerId values defeat Axiom 5's producer-attribution contract.`,
+    ).toBe(true);
+    expect(
+      peers.every(p => p !== 'unknown' && p !== '' && p !== 'null'),
+      'SWM producer must NEVER be an "unknown" fallback — that breaks audit-trail provenance',
+    ).toBe(true);
+  }, 30_000);
+});
+
+describe('Axiom 6 — GET resolves a declared view [gap-pass-26]', () => {
+  it('6.w agent.query against an unregistered sub-graph is rejected (declared view requires a known scope, not a typo\'d sub-graph)', async () => {
+    // Spec §6 + §1: a view resolves within a known scope. A query
+    // naming a sub-graph that was NEVER `createSubGraph()`-ed is the
+    // same hazard as 6.v (typo'd contextGraphId): silent empty
+    // bindings make the misroute look like "no data" and the bug
+    // hides forever. Reject up front so callers can fix the
+    // sub-graph name.
+    const cg = freshCg('a6-unknown-sg');
+    await agent.createContextGraph({ id: cg, name: 'usg', description: '' });
+    await agent.registerContextGraph(cg);
+    let threw = false;
+    let msg = '';
+    try {
+      await agent.query(`SELECT ?s ?p ?o WHERE { ?s ?p ?o }`, {
+        contextGraphId: cg,
+        view: 'verified-memory',
+        subGraphName: 'definitely-not-a-real-sub-graph-name',
+      });
+    } catch (err) {
+      threw = true;
+      msg = err instanceof Error ? err.message : String(err);
+    }
+    expect(
+      threw,
+      'agent.query with an unregistered subGraphName must reject — Axiom 6 declared views must resolve within a known scope',
+    ).toBe(true);
+    expect(
+      msg,
+      `error must mention sub-graph/scope so callers can fix the typo (got: "${msg}")`,
+    ).toMatch(/sub.?graph|scope|register|unknown/i);
+  }, 30_000);
+});
+
+describe('Axiom 3 — Typed state transitions [gap-pass-27]', () => {
+  it('3.hh REVOKE preserves the assertion\'s data triples (REVOKE is a typed marker, NOT a delete)', async () => {
+    // Spec §3 transition table: REVOKE = "Permission or capability
+    // invalidated". DISCARD = "State removed from a layer". They are
+    // DISTINCT transitions for a reason — REVOKE preserves the
+    // underlying data so audit consumers can still see "what was
+    // revoked", while DISCARD drops the data graph entirely. If
+    // REVOKE silently ate the assertion's payload it would collapse
+    // to DISCARD and the seven-transition table loses a column.
+    const cg = freshCg('a3-revoke-preserves');
+    const name = 'revoke-keeps-data';
+    await agent.createContextGraph({ id: cg, name: 'rkd', description: '' });
+    await agent.registerContextGraph(cg);
+    const assertionUri = await agent.assertion.create(cg, name);
+    const sub = urn('rkd-sub');
+    await agent.assertion.write(cg, name, [
+      { subject: sub, predicate: P_NAME, object: '"survive-revoke"', graph: assertionUri },
+    ]);
+    const before = await agent.assertion.query(cg, name);
+    expect(before.length, 'precondition: assertion has data before REVOKE').toBeGreaterThan(0);
+
+    await agent.assertion.revoke(cg, name, { reason: 'audit-test' });
+
+    const after = await agent.assertion.query(cg, name);
+    expect(
+      after.length,
+      'REVOKE must NOT delete the underlying assertion data — Axiom 3 distinguishes REVOKE (capability invalidated, data retained) from DISCARD (data removed). Collapsing them defeats the seven-transition design.',
+    ).toBeGreaterThan(0);
+    const objs = after.map(q => q.object);
+    expect(
+      objs.some(o => /survive-revoke/.test(String(o))),
+      'REVOKE must preserve the literal payload so an auditor can still see WHAT was revoked',
+    ).toBe(true);
+  }, 60_000);
+
+  it('3.ii DISCARD removes the assertion\'s data BUT preserves the lifecycle audit row (state=discarded + AssertionDiscarded event)', async () => {
+    // Spec §3 closed lifecycle: DISCARD removes the LAYER's view of
+    // the data but the audit trail must remain queryable so
+    // downstream consumers can prove a row was discarded (not just
+    // missing because it never existed). The combination of:
+    //   (a) zero rows from assertion.query() and
+    //   (b) at least one prov:Activity dkg:AssertionDiscarded event
+    //       in _meta
+    // is the canonical "tombstone" semantics for DISCARD.
+    const cg = freshCg('a3-discard-tombstone');
+    const name = 'discard-keeps-row';
+    await agent.createContextGraph({ id: cg, name: 'dkr', description: '' });
+    await agent.registerContextGraph(cg);
+    const assertionUri = await agent.assertion.create(cg, name);
+    const sub = urn('dkr-sub');
+    await agent.assertion.write(cg, name, [
+      { subject: sub, predicate: P_NAME, object: '"will-be-tombed"', graph: assertionUri },
+    ]);
+    const before = await agent.assertion.query(cg, name);
+    expect(before.length, 'precondition: assertion has data before DISCARD').toBeGreaterThan(0);
+
+    await agent.assertion.discard(cg, name);
+
+    const after = await agent.assertion.query(cg, name);
+    expect(
+      after.length,
+      'DISCARD must remove the assertion\'s data — Axiom 3: "State removed from a layer"',
+    ).toBe(0);
+
+    const meta = `did:dkg:context-graph:${cg}/_meta`;
+    const r = await agent.store.query(
+      `SELECT (COUNT(?ev) AS ?n) WHERE { GRAPH <${meta}> {
+         ?ev a <http://dkg.io/ontology/AssertionDiscarded>
+       } }`,
+    );
+    const n = parseInt(String((r as { bindings?: Record<string, string>[] }).bindings?.[0]?.['n'] ?? '"0"').replace(/[^\d]/g, ''), 10);
+    expect(
+      n,
+      'DISCARD must leave at least ONE AssertionDiscarded prov:Activity event in _meta — without it, downstream auditors cannot distinguish a discarded row from one that never existed',
+    ).toBeGreaterThanOrEqual(1);
+  }, 60_000);
+});
+
+describe('Axiom 5 — SWM is provisional [gap-pass-27]', () => {
+  it('5.o SHARE record records `dkg:source` (or equivalent operation-id reference) — Axiom 5 record contract: "the source operation"', async () => {
+    // Spec §5: every SWM record identifies "the source operation"
+    // alongside CG, scope, transition, producer, finality. Tests
+    // 5.d/e/f/h/i/j cover producer/finality/transition/timestamp/
+    // scope/CG-binding; the source operation is the missing column.
+    // Without an operation-id link an auditor cannot reconstruct
+    // WHICH share-call landed each row — multiple shares from the
+    // same producer collapse into one indistinguishable mass.
+    const cg = freshCg('a5-source-op');
+    const sub = urn('source-op');
+    await agent.createContextGraph({ id: cg, name: 'so', description: '' });
+    const { shareOperationId } = await agent.share(
+      cg,
+      [{ subject: sub, predicate: P_NAME, object: '"src-op"', graph: '' }],
+      { localOnly: true },
+    );
+    expect(shareOperationId, 'share() must return a stable operation id').toMatch(/.+/);
+
+    const meta = `did:dkg:context-graph:${cg}/_shared_memory_meta`;
+    const r = await agent.store.query(
+      `SELECT ?op WHERE { GRAPH <${meta}> {
+         ?op a <http://dkg.io/ontology/WorkspaceOperation> .
+       } }`,
+    );
+    const ops = ((r as { bindings?: Record<string, string>[] }).bindings ?? []).map(b => b['op']);
+    expect(
+      ops.length,
+      'SWM record must mint a WorkspaceOperation URI per share-call so the source is traceable (Axiom 5 record contract)',
+    ).toBeGreaterThan(0);
+    // The op URI must be uniquely identifying — multiple share() calls
+    // from the same producer must mint distinct URIs (otherwise we
+    // can't tell them apart in audit).
+    const { shareOperationId: op2 } = await agent.share(
+      cg,
+      [{ subject: urn('source-op-2'), predicate: P_NAME, object: '"src-op-2"', graph: '' }],
+      { localOnly: true },
+    );
+    expect(
+      op2,
+      'every share-call must return a UNIQUE operation id (Axiom 5: source-op traceability)',
+    ).not.toBe(shareOperationId);
+  }, 30_000);
+});
+
+describe('Axiom 1 — Context graph isolation [gap-pass-27]', () => {
+  it('1.s assertion lifecycle is per-CG: the same (agent, name) in CG-A and CG-B is TWO independent lifecycles', async () => {
+    // Spec §1 + §3: a lifecycle row's identity is (cg, agent, name).
+    // The CG component is non-optional — same name in two CGs must
+    // produce two unrelated lifecycle URIs. Test 1.r covers SUBJECT
+    // IRI per-CG; this is the missing ASSERTION-namespace per-CG
+    // probe. If the lifecycle URI omitted the CG component, an
+    // attacker could create "policy" in cg-a and watch it block
+    // every other agent's "policy" in cg-b, defeating Axiom 1
+    // isolation at the assertion lifecycle layer.
+    const cgA = freshCg('a1-assn-A');
+    const cgB = freshCg('a1-assn-B');
+    const name = 'shared-name';
+    await agent.createContextGraph({ id: cgA, name: 'A', description: '' });
+    await agent.createContextGraph({ id: cgB, name: 'B', description: '' });
+    await agent.registerContextGraph(cgA);
+    await agent.registerContextGraph(cgB);
+    const dataUriA = await agent.assertion.create(cgA, name);
+    const dataUriB = await agent.assertion.create(cgB, name);
+    expect(dataUriA, 'CG-A assertion data URI must be non-empty').toMatch(/.+/);
+    expect(dataUriB, 'CG-B assertion data URI must be non-empty').toMatch(/.+/);
+    expect(
+      dataUriB,
+      'same (agent, name) in two CGs MUST mint DISTINCT assertion data graph URIs — the CG is part of the identity tuple (Axiom 1: every authority rule is interpreted inside a Context Graph)',
+    ).not.toBe(dataUriA);
+
+    // Revoking in CG-A captures the per-CG lifecycle URI. The lifecycle
+    // URI is independent of the data-graph URI; both must be CG-scoped.
+    const revA = await agent.assertion.revoke(cgA, name, { reason: 'isolate-A' });
+    const lifecycleA = revA.lifecycleUri;
+    let cgBRevokeThrew = false;
+    try {
+      // Probe CG-B's lifecycle URI by attempting a revoke that should
+      // fail-or-succeed cleanly per the per-CG isolation contract — but
+      // capture the lifecycleUri that CG-B's revoke would generate.
+      const revB = await agent.assertion.revoke(cgB, name, { reason: 'probe-B-uri' });
+      const lifecycleB = revB.lifecycleUri;
+      expect(
+        lifecycleB,
+        'CG-A and CG-B lifecycle URIs MUST be distinct — the CG is part of the lifecycle identity tuple',
+      ).not.toBe(lifecycleA);
+    } catch {
+      cgBRevokeThrew = true;
+    }
+    expect(
+      cgBRevokeThrew,
+      'CG-B revoke probe should NOT throw (the CG-B lifecycle row was created cleanly)',
+    ).toBe(false);
+
+    // Cross-graph leakage test: CG-A's revocation marker on lifecycleA
+    // must NOT exist under the same lifecycle URI in CG-B's _meta.
+    const metaA = `did:dkg:context-graph:${cgA}/_meta`;
+    const metaB = `did:dkg:context-graph:${cgB}/_meta`;
+    const aRevoked = await agent.store.query(
+      `SELECT ?v WHERE { GRAPH <${metaA}> { <${lifecycleA}> <http://dkg.io/ontology/revoked> ?v } } LIMIT 1`,
+    );
+    const aLeakIntoB = await agent.store.query(
+      `SELECT ?v WHERE { GRAPH <${metaB}> { <${lifecycleA}> <http://dkg.io/ontology/revoked> ?v } } LIMIT 1`,
+    );
+    expect(
+      ((aRevoked as { bindings?: unknown[] }).bindings ?? []).length,
+      'CG-A revocation must surface in CG-A _meta (sanity)',
+    ).toBeGreaterThan(0);
+    expect(
+      ((aLeakIntoB as { bindings?: unknown[] }).bindings ?? []).length,
+      'CG-A lifecycle URI must NOT have its revocation marker leak into CG-B _meta — Axiom 1: per-CG authority and audit isolation',
+    ).toBe(0);
+  }, 90_000);
+});
+
+describe('Axiom 6 — GET resolves a declared view [gap-pass-28]', () => {
+  it('6.aa view=verified-memory + subGraphName is REJECTED at the query engine (declared-view safe-default: no silent unscoped read)', async () => {
+    // Spec §6 + §1: sub-graphs are PARTITIONS within a CG; a declared
+    // view scoped to sub-graph A must NOT surface sub-graph B's
+    // data. The current engine doesn't yet support VM sub-graph
+    // scoping — but instead of silently returning all CG data when
+    // a sub-graph filter is requested (which would let cross-
+    // partition data leak undetected), it throws explicitly.
+    // Pin that safe-default so any future "loosening" that returns
+    // all CG data on a sub-graph-scoped VM read is caught here.
+    const cg = freshCg('a6-sg-vm-reject');
+    await agent.createContextGraph({ id: cg, name: 'sgvr', description: '' });
+    await agent.registerContextGraph(cg);
+    await agent.createSubGraph(cg, 'alpha', { description: 'a' });
+    await agent.publish(cg, [
+      { subject: urn('a6-vm'), predicate: P_NAME, object: '"in-alpha"', graph: '' },
+    ], undefined, { subGraphName: 'alpha' });
+
+    let threw = false;
+    let msg = '';
+    try {
+      await agent.query(`SELECT ?o WHERE { ?s <${P_NAME}> ?o }`, {
+        contextGraphId: cg,
+        view: 'verified-memory',
+        subGraphName: 'alpha',
+      });
+    } catch (err) {
+      threw = true;
+      msg = err instanceof Error ? err.message : String(err);
+    }
+    expect(
+      threw,
+      'subGraphName + verified-memory MUST be rejected — silently returning all-CG data on a sub-graph-scoped VM read would let cross-partition data leak (Axiom 6 safe default)',
+    ).toBe(true);
+    expect(
+      msg,
+      `error must explicitly mention sub-graph scoping limitation (got: "${msg}")`,
+    ).toMatch(/sub.?graph|scoping/i);
+  }, 60_000);
+
+  it('6.bb view=shared-working-memory + subGraphName scopes correctly: sub-graph A SWM read does NOT surface sub-graph B data', async () => {
+    // Spec §6: sub-graph scoping IS supported for SWM views (per the
+    // engine's documented contract — VM sub-graph scoping is a TODO,
+    // covered by 6.aa). This test pins the SWM-side declared-view
+    // contract: sub-graph A SWM view must NOT contain sub-graph B's
+    // shares. The previous 2.x test pinned the per-sub-graph
+    // OWNERSHIP independence; this is the per-sub-graph READ scoping.
+    const cg = freshCg('a6-sg-swm');
+    await agent.createContextGraph({ id: cg, name: 'sgs', description: '' });
+    await agent.createSubGraph(cg, 'left', { description: 'l' });
+    await agent.createSubGraph(cg, 'right', { description: 'r' });
+    const leftSub = urn('left-only');
+    const rightSub = urn('right-only');
+    await agent.share(
+      cg,
+      [{ subject: leftSub, predicate: P_NAME, object: '"left-data"', graph: '' }],
+      { localOnly: true, subGraphName: 'left' },
+    );
+    await agent.share(
+      cg,
+      [{ subject: rightSub, predicate: P_NAME, object: '"right-data"', graph: '' }],
+      { localOnly: true, subGraphName: 'right' },
+    );
+
+    const r = await agent.query(
+      `SELECT ?o WHERE { ?s <${P_NAME}> ?o }`,
+      { contextGraphId: cg, view: 'shared-working-memory', subGraphName: 'right' },
+    );
+    const objs = r.bindings.map((b: Record<string, string>) => b['o']);
+    expect(
+      objs,
+      'SWM "right" view must surface its own data (sanity)',
+    ).toContain('"right-data"');
+    expect(
+      objs,
+      'SWM "right" view MUST NOT surface "left" data — Axiom 6: declared view is scoped to (CG, sub-graph) for SWM',
+    ).not.toContain('"left-data"');
+  }, 90_000);
+});
+
+describe('Axiom 2 — Authority domain [gap-pass-28]', () => {
+  it('2.x sub-graph SWM ownership is independent: same rootEntity SHARE-d in two sub-graphs is two independent ownerships', async () => {
+    // Spec §2 + §5: the SWM ownership tuple is (CG, sub-graph,
+    // rootEntity, peerId). A sub-graph is a partition with its own
+    // authority — one peer claiming a rootEntity in sub-graph A
+    // should NOT lock the same IRI in sub-graph B (different
+    // partition, different authority). 2.c covers same-sub-graph
+    // ownership conflict; this is the orthogonal axis.
+    const cg = freshCg('a2-sg-own');
+    await agent.createContextGraph({ id: cg, name: 'so', description: '' });
+    await agent.createSubGraph(cg, 'sgA', { description: 'a' });
+    await agent.createSubGraph(cg, 'sgB', { description: 'b' });
+    const rootEntity = urn('shared-root');
+    let aThrew = false;
+    let bThrew = false;
+    try {
+      await agent.share(
+        cg,
+        [{ subject: rootEntity, predicate: P_NAME, object: '"in-A"', graph: '' }],
+        { localOnly: true, subGraphName: 'sgA' },
+      );
+    } catch {
+      aThrew = true;
+    }
+    try {
+      await agent.share(
+        cg,
+        [{ subject: rootEntity, predicate: P_NAME, object: '"in-B"', graph: '' }],
+        { localOnly: true, subGraphName: 'sgB' },
+      );
+    } catch {
+      bThrew = true;
+    }
+    expect(aThrew, 'SHARE in sub-graph A must succeed (sanity)').toBe(false);
+    expect(
+      bThrew,
+      'SHARE of the SAME rootEntity in sub-graph B must ALSO succeed — Axiom 2: per-sub-graph authority partition; same IRI in different sub-graphs is independent',
+    ).toBe(false);
+
+    // Verify both rows surface in their respective sub-graph SWMs.
+    const aRows = await agent.query(
+      `SELECT ?o WHERE { <${rootEntity}> <${P_NAME}> ?o }`,
+      { contextGraphId: cg, view: 'shared-working-memory', subGraphName: 'sgA' },
+    );
+    const bRows = await agent.query(
+      `SELECT ?o WHERE { <${rootEntity}> <${P_NAME}> ?o }`,
+      { contextGraphId: cg, view: 'shared-working-memory', subGraphName: 'sgB' },
+    );
+    const aObjs = aRows.bindings.map((b: Record<string, string>) => b['o']);
+    const bObjs = bRows.bindings.map((b: Record<string, string>) => b['o']);
+    expect(aObjs, 'sub-graph A SWM must contain its own value').toContain('"in-A"');
+    expect(bObjs, 'sub-graph B SWM must contain its own value').toContain('"in-B"');
+    expect(aObjs, 'sub-graph A SWM must NOT contain B\'s value (cross-partition leakage)').not.toContain('"in-B"');
+    expect(bObjs, 'sub-graph B SWM must NOT contain A\'s value (cross-partition leakage)').not.toContain('"in-A"');
+  }, 120_000);
+});
+
+describe('Axiom 4 — PUBLISH is canonical; ENDORSE/VERIFY raise trust [gap-pass-29]', () => {
+  it('4.ss UPDATE preserves the kcId — UPDATE re-issues at the SAME batch, not a new one (Axiom 4: UPDATE is a transition on an existing KC, not a fresh PUBLISH)', async () => {
+    // Spec §3 + §4: UPDATE is a typed transition on an EXISTING KC.
+    // The KC's identity is its kcId (the chain-anchored batch
+    // handle). Minting a fresh kcId on UPDATE would make every
+    // update look like a brand-new publish to downstream readers,
+    // erase the version history at the chain layer, and break
+    // every authority check that keys on the KC's identity. The
+    // canonical contract: kcId is stable across UPDATE.
+    const cg = freshCg('a4-update-kcid');
+    const sub = urn('stable-kcid');
+    await agent.createContextGraph({ id: cg, name: 'sk', description: '' });
+    await agent.registerContextGraph(cg);
+    const pub = await agent.publish(cg, [
+      { subject: sub, predicate: P_NAME, object: '"v0"', graph: '' },
+    ]);
+    const upd = await agent.update(pub.kcId, cg, [
+      { subject: sub, predicate: P_NAME, object: '"v1"', graph: '' },
+    ]);
+    expect(
+      upd.kcId,
+      `UPDATE must preserve kcId (Axiom 4 transition contract). pub.kcId=${pub.kcId}, upd.kcId=${upd.kcId}`,
+    ).toBe(pub.kcId);
+  }, 90_000);
+
+  it('4.tt UPDATE produces a NEW merkleRoot distinct from the prior PUBLISH — chain evidence shifts, batch identity holds', async () => {
+    // Spec §3: "Old triples replaced, new merkle root anchored".
+    // The merkle root is the per-version EVIDENCE on the canonical
+    // transition format (Axiom 4 corollary: the 6 canonical fields).
+    // If UPDATE re-anchored the old merkle root, downstream verifiers
+    // would think nothing changed and the audit trail of versions
+    // collapses. Distinct merkle roots PER UPDATE is what makes the
+    // history independently verifiable.
+    const cg = freshCg('a4-update-merkle');
+    const sub = urn('shifting-root');
+    await agent.createContextGraph({ id: cg, name: 'sr', description: '' });
+    await agent.registerContextGraph(cg);
+    const pub = await agent.publish(cg, [
+      { subject: sub, predicate: P_NAME, object: '"v0"', graph: '' },
+    ]);
+    const upd = await agent.update(pub.kcId, cg, [
+      { subject: sub, predicate: P_NAME, object: '"v1-distinct-payload"', graph: '' },
+    ]);
+    const pubHex = ethers.hexlify(pub.merkleRoot);
+    const updHex = ethers.hexlify(upd.merkleRoot);
+    expect(
+      updHex,
+      `UPDATE must mint a NEW merkleRoot (Axiom 4 evidence field — old triples replaced, new root anchored). pubHex=${pubHex}, updHex=${updHex}`,
+    ).not.toBe(pubHex);
+    expect(
+      upd.merkleRoot.length,
+      'updated merkleRoot must be 32 bytes (keccak-256 width)',
+    ).toBe(32);
+  }, 90_000);
+});
+
+describe('Axiom 3 — Typed state transitions [gap-pass-29]', () => {
+  it('3.kk Multiple SHARE-then-DISCARD-then-CREATE cycles on the same name preserve at least one event of each type in the lifetime audit (history is monotonic-up)', async () => {
+    // Spec §3 corollary "preserve history": a lifecycle that goes
+    // CREATE → DISCARD → CREATE → DISCARD must leave at least:
+    //   - 2 AssertionCreated events
+    //   - 2 AssertionDiscarded events
+    // in the lifetime audit. If subsequent cycles erase prior
+    // events, the audit count silently de-grows and downstream
+    // readers cannot distinguish "two cycles" from "one cycle".
+    //
+    // Note: 3.aa already pins that re-CREATE after DISCARD works
+    // cleanly; this is the MONOTONIC-COUNT extension that catches
+    // implementations that "reset" the lifetime audit between cycles.
+    const cg = freshCg('a3-cycle-history');
+    const name = 'cycler';
+    await agent.createContextGraph({ id: cg, name: 'ch', description: '' });
+    await agent.registerContextGraph(cg);
+    await agent.assertion.create(cg, name);
+    await agent.assertion.discard(cg, name);
+    await agent.assertion.create(cg, name);
+    await agent.assertion.discard(cg, name);
+
+    const meta = `did:dkg:context-graph:${cg}/_meta`;
+    const created = await agent.store.query(
+      `SELECT (COUNT(?ev) AS ?n) WHERE { GRAPH <${meta}> {
+         ?ev a <http://dkg.io/ontology/AssertionCreated>
+       } }`,
+    );
+    const discarded = await agent.store.query(
+      `SELECT (COUNT(?ev) AS ?n) WHERE { GRAPH <${meta}> {
+         ?ev a <http://dkg.io/ontology/AssertionDiscarded>
+       } }`,
+    );
+    const c = parseInt(String((created as { bindings?: Record<string, string>[] }).bindings?.[0]?.['n'] ?? '"0"').replace(/[^\d]/g, ''), 10);
+    const d = parseInt(String((discarded as { bindings?: Record<string, string>[] }).bindings?.[0]?.['n'] ?? '"0"').replace(/[^\d]/g, ''), 10);
+    expect(
+      c,
+      `expected at least 2 AssertionCreated events after 2 create()/discard() cycles, got ${c}. ` +
+      'Axiom 3 + 4 corollary: lifetime audit count is monotonic-up; re-CREATE must NOT erase prior events.',
+    ).toBeGreaterThanOrEqual(2);
+    expect(
+      d,
+      `expected at least 2 AssertionDiscarded events after 2 create()/discard() cycles, got ${d}.`,
+    ).toBeGreaterThanOrEqual(2);
+  }, 60_000);
+});
+
 describe('Axiom 6 — GET resolves a declared view [gap-pass-20]', () => {
   it('6.u SPARQL FROM clauses cannot escape the view-resolved graph set (no cross-CG read leakage)', async () => {
     // Spec §6: views are declared by the agent, not the SPARQL string.
