@@ -3082,9 +3082,40 @@ export class DKGAgent {
     thirdArg?: Quad[] | PublishOpts,
     fourthArg?: PublishOpts,
   ): Promise<PublishResult> {
+    // V10 Axiom 1: every publish targets a non-empty string CG.
+    // Defensive guard for JS callers that route undefined/null/numbers
+    // through this entry — without it, the publisher would coerce
+    // them to "did:dkg:context-graph:undefined" and silently land
+    // bytes in a catch-all unowned graph (mirrors `share()`'s gate).
+    if (typeof contextGraphId !== 'string' || contextGraphId.trim() === '') {
+      throw new Error(
+        `publish() requires a non-empty contextGraphId; got ${JSON.stringify(contextGraphId)} ` +
+        '(Axiom 1: every publish targets a Context Graph).',
+      );
+    }
+    // V10 Axiom 4: PUBLISH "promotes data from SWM to VM". An empty
+    // payload anchors a fixed empty-merkle on chain that no future
+    // UPDATE can disambiguate, and lands no rootEntity for VM
+    // promotion / VERIFY. Reject at the API entry so neither the
+    // Quad[] overload nor the JSON-LD overload can land "nothing".
+    if (Array.isArray(input)) {
+      const privateQuads = Array.isArray(thirdArg) ? thirdArg : undefined;
+      if (input.length === 0 && (!privateQuads || privateQuads.length === 0)) {
+        throw new Error(
+          'agent.publish: refusing empty payload — PUBLISH must promote at least one triple to Verified Memory ' +
+          '(Axiom 4: PUBLISH promotes data, not "nothing").',
+        );
+      }
+    }
     // JSON-LD: convert to quads, then publish
     if (!Array.isArray(input)) {
       const { publicQuads, privateQuads } = await jsonLdToQuads(input);
+      if (publicQuads.length === 0 && privateQuads.length === 0) {
+        throw new Error(
+          'agent.publish: refusing empty JSON-LD payload — PUBLISH must promote at least one triple to ' +
+          'Verified Memory (Axiom 4: PUBLISH promotes data, not "nothing").',
+        );
+      }
       return this._publish(contextGraphId, publicQuads, privateQuads, thirdArg as PublishOpts);
     }
     // Quad[]: pass through directly
@@ -3351,6 +3382,21 @@ export class DKGAgent {
     kcId: bigint, contextGraphId: string, quads: Quad[], privateQuads?: Quad[],
     opts?: { onPhase?: PhaseCallback; operationCtx?: OperationContext },
   ): Promise<PublishResult> {
+    // V10 Axiom 1 + 2: every UPDATE targets an existing CG-bound batch.
+    // Reject non-string CG inputs at the API entry so JS callers
+    // routing undefined/null/numbers cannot reach the publisher path.
+    if (typeof contextGraphId !== 'string' || contextGraphId.trim() === '') {
+      throw new Error(
+        `update() requires a non-empty contextGraphId; got ${JSON.stringify(contextGraphId)} ` +
+        '(Axiom 1 + 2: every UPDATE targets an existing CG).',
+      );
+    }
+    if (typeof kcId !== 'bigint') {
+      throw new Error(
+        `update() requires a bigint kcId; got ${typeof kcId} ` +
+        '(Axiom 2: kcId is the authority handle for a canonical batch).',
+      );
+    }
     const ctx = opts?.operationCtx ?? createOperationContext('update');
     const onPhase = opts?.onPhase;
 
@@ -3371,6 +3417,31 @@ export class DKGAgent {
         `update: kcId ${kcId} is not known in context graph ${contextGraphId} — ` +
         `caller has no authority basis to update an unpublished batch (Axiom 2).`,
       );
+    }
+
+    // V10 Axiom 3 closed lifecycle: a revoked KC is terminal. Permitting
+    // UPDATE to land a fresh batch under the same kcId would re-open a
+    // lifecycle row that the explicit REVOKE marker says is closed —
+    // and downstream readers respecting `dkg:revoked=true` would still
+    // see the new batch as effectively published.
+    const ualRow = known.bindings[0]['ual'];
+    if (typeof ualRow === 'string' && ualRow.length > 0) {
+      const ualUri = ualRow.startsWith('<') && ualRow.endsWith('>') ? ualRow.slice(1, -1) : ualRow;
+      const revokedProbe = await this.store.query(
+        `SELECT ?v WHERE { GRAPH <${metaGraph}> {
+           <${ualUri}> <http://dkg.io/ontology/revoked> ?v
+         } } LIMIT 1`,
+      );
+      if (revokedProbe.type === 'bindings' && revokedProbe.bindings.length > 0) {
+        const v = String(revokedProbe.bindings[0]['v'] ?? '');
+        if (v.includes('"true"')) {
+          throw new Error(
+            `update: kcId ${kcId} (UAL ${ualUri}) is marked as revoked in context graph ` +
+            `${contextGraphId} — UPDATE refused; REVOKED is terminal ` +
+            '(Axiom 3: closed lifecycle, no transitions out of a terminal state).',
+          );
+        }
+      }
     }
 
     this.log.info(ctx, `Starting update of kcId=${kcId} in context graph "${contextGraphId}" with ${quads.length} triples`);
@@ -3435,6 +3506,17 @@ export class DKGAgent {
       throw new Error(
         `share() requires a non-empty contextGraphId; got ${JSON.stringify(contextGraphId)} ` +
         '(Axiom 1: every shared write targets a Context Graph).',
+      );
+    }
+    // V10 Axiom 5: every SWM write produces a typed provisional record
+    // referencing the data it staged. An empty SHARE has no triples to
+    // attribute and would mint an orphan WorkspaceOperation event that
+    // future readers can't anchor to a payload — reject up front so the
+    // SWM record contract holds.
+    if (!Array.isArray(quads) || quads.length === 0) {
+      throw new Error(
+        'share() requires a non-empty quads payload — every SHARE is a typed transition over data ' +
+        '(Axiom 5: SWM provisional record must reference triples).',
       );
     }
     const ctx = opts?.operationCtx ?? createOperationContext('share');
@@ -5997,6 +6079,29 @@ export class DKGAgent {
         `endorse: UAL ${opts.knowledgeAssetUal} has not been published in ` +
         `context graph ${opts.contextGraphId} — endorsement refused (Axiom 4).`,
       );
+    }
+
+    // V10 Axiom 3 closed lifecycle + Axiom 4 trust gradient: a UAL
+    // marked as revoked (or contested in a way that the lifecycle has
+    // terminated) is no longer a valid trust-upgrade target. Permitting
+    // endorse() against a revoked UAL would re-lift its trust band
+    // post-mortem — letting downstream queries believe a revoked asset
+    // is still endorsed, contradicting the typed REVOKE marker on the
+    // same subject in `_meta`.
+    const revokedProbe = await this.store.query(
+      `SELECT ?v WHERE { GRAPH <${metaGraph}> {
+         <${opts.knowledgeAssetUal}> <http://dkg.io/ontology/revoked> ?v
+       } } LIMIT 1`,
+    );
+    if (revokedProbe.type === 'bindings' && revokedProbe.bindings.length > 0) {
+      const v = String(revokedProbe.bindings[0]['v'] ?? '');
+      if (v.includes('"true"')) {
+        throw new Error(
+          `endorse: UAL ${opts.knowledgeAssetUal} is marked as revoked in context graph ` +
+          `${opts.contextGraphId} — no trust upgrade past a terminal lifecycle state ` +
+          '(Axiom 3 + 4: closed lifecycle, no ENDORSE on a revoked KA).',
+        );
+      }
     }
 
     // Idempotent re-endorse (same endorser + same UAL): skip a second
@@ -8662,6 +8767,46 @@ export class DKGAgent {
         input: import('@origintrail-official/dkg-storage').Quad[] | JsonLdContent | Array<{ subject: string; predicate: string; object: string }>,
         opts?: { subGraphName?: string },
       ): Promise<void> {
+        // V10 Axiom 3: every WM write is a typed transition that must
+        // reference data. An empty payload has no claims to attribute
+        // but could still flip provenance timestamps, so reject up
+        // front instead of producing a no-op transition record.
+        if (Array.isArray(input) && input.length === 0) {
+          throw new Error(
+            'assertion.write() requires a non-empty payload — WM writes are typed transitions ' +
+            '(Axiom 3: every state transition references data).',
+          );
+        }
+        // V10 Axiom 3 lifecycle: the assertion lifecycle is
+        // CREATE → SHARED → PUBLISHED → (REVOKED/DISCARDED). assertion.write
+        // is the WM "UPDATE" transition; permitting it on a name that was
+        // never CREATEd skips the typed CREATE event entirely and produces
+        // an assertion graph with no prov:Activity origin marker.
+        {
+          const lifecycleUri = assertionLifecycleUri(contextGraphId, agentAddress, name, opts?.subGraphName);
+          const metaGraph = contextGraphMetaUri(contextGraphId);
+          const DKG_NS = 'http://dkg.io/ontology/';
+          const r = await agent.store.query(
+            `SELECT ?s WHERE { GRAPH <${metaGraph}> {
+               <${lifecycleUri}> <${DKG_NS}state> ?s
+             } } LIMIT 1`,
+          );
+          const exists = r.type === 'bindings' && r.bindings.length > 0;
+          if (!exists) {
+            throw new Error(
+              `assertion.write: no assertion "${name}" found for agent ${agentAddress} in context graph ` +
+              `"${contextGraphId}"${opts?.subGraphName ? ` (sub-graph: ${opts.subGraphName})` : ''} — ` +
+              'WRITE requires a prior CREATE (Axiom 3: lifecycle is CREATE → WRITE → ...).',
+            );
+          }
+          const state = String(r.bindings[0]['s'] ?? '').replace(/^"|"$/g, '').replace(/"\^\^.*$/, '');
+          if (state === 'discarded') {
+            throw new Error(
+              `assertion.write: assertion "${name}" is in terminal state "discarded" — no further ` +
+              'transitions are allowed (Axiom 3: closed lifecycle, no writes after a terminal state).',
+            );
+          }
+        }
         let quads: import('@origintrail-official/dkg-storage').Quad[];
         if (Array.isArray(input) && input.length > 0 && 'graph' in input[0]) {
           quads = input as import('@origintrail-official/dkg-storage').Quad[];
@@ -8671,6 +8816,12 @@ export class DKGAgent {
         } else {
           quads = (input as Array<{ subject: string; predicate: string; object: string }>)
             .map(t => ({ subject: t.subject, predicate: t.predicate, object: t.object, graph: '' }));
+        }
+        if (quads.length === 0) {
+          throw new Error(
+            'assertion.write() requires a non-empty payload — WM writes are typed transitions ' +
+            '(Axiom 3: every state transition references data).',
+          );
         }
         return agent.publisher.assertionWrite(contextGraphId, name, agentAddress, quads, opts?.subGraphName);
       },
@@ -8693,6 +8844,41 @@ export class DKGAgent {
         return { promotedCount };
       },
       async discard(contextGraphId: string, name: string, opts?: { subGraphName?: string }): Promise<void> {
+        // V10 Axiom 3 closed lifecycle: DISCARD is the typed transition
+        // CREATE → DISCARDED. Permitting discard() on a name that was
+        // never CREATEd skips the typed CREATE event entirely and emits
+        // an AssertionDiscarded prov:Activity edge against a non-existent
+        // lifecycle row.
+        //
+        // For an already-discarded row we DO NOT throw (the public
+        // contract is HTTP-DELETE-style idempotent — repeated discard()
+        // converges on "data is gone"), but we MUST short-circuit before
+        // calling `assertionDiscard` again, because each call mints a
+        // fresh `prov:Activity dkg:AssertionDiscarded` event under a new
+        // event id. Letting that happen would inflate the audit trail's
+        // discard count from 1 → N for the same lifecycle row, which
+        // Axiom 4's "trust/lifecycle transitions are independently
+        // verifiable" reading forbids — count is information.
+        const lifecycleUri = assertionLifecycleUri(contextGraphId, agentAddress, name, opts?.subGraphName);
+        const metaGraph = contextGraphMetaUri(contextGraphId);
+        const DKG_NS = 'http://dkg.io/ontology/';
+        const r = await agent.store.query(
+          `SELECT ?s WHERE { GRAPH <${metaGraph}> {
+             <${lifecycleUri}> <${DKG_NS}state> ?s
+           } } LIMIT 1`,
+        );
+        const exists = r.type === 'bindings' && r.bindings.length > 0;
+        if (!exists) {
+          throw new Error(
+            `assertion.discard: no assertion "${name}" found for agent ${agentAddress} in context graph ` +
+            `"${contextGraphId}"${opts?.subGraphName ? ` (sub-graph: ${opts.subGraphName})` : ''} — ` +
+            'DISCARD requires an existing scope to discard (Axiom 3: lifecycle is CREATE → DISCARD).',
+          );
+        }
+        const state = String(r.bindings[0]['s'] ?? '').replace(/^"|"$/g, '').replace(/"\^\^.*$/, '');
+        if (state === 'discarded') {
+          return;
+        }
         return agent.publisher.assertionDiscard(contextGraphId, name, agentAddress, opts?.subGraphName);
       },
 
@@ -8712,6 +8898,51 @@ export class DKGAgent {
         const metaGraph = contextGraphMetaUri(contextGraphId);
         const DKG_NS = 'http://dkg.io/ontology/';
         const XSD = 'http://www.w3.org/2001/XMLSchema#';
+        // V10 Axiom 2: REVOKE is a typed transition with authority over
+        // an EXISTING assertion. Permitting revoke() on a name that was
+        // never created mints a `dkg:revoked=true` marker with no
+        // referent — the audit trail becomes unanchored to data and a
+        // downstream filter would silently drop a non-existent row.
+        // Require a prior CREATE in this CG/owner/name (and optional
+        // sub-graph) before recording the revocation.
+        const existsResult = await agent.store.query(
+          `SELECT ?s ?revoked WHERE { GRAPH <${metaGraph}> {
+             <${lifecycleUri}> <${DKG_NS}state> ?s .
+             OPTIONAL { <${lifecycleUri}> <${DKG_NS}revoked> ?revoked }
+           } } LIMIT 1`,
+        );
+        const exists = existsResult.type === 'bindings' && existsResult.bindings.length > 0;
+        if (!exists) {
+          throw new Error(
+            `assertion.revoke: no assertion "${name}" found for agent ${agentAddress} in context graph ` +
+            `"${contextGraphId}"${opts?.subGraphName ? ` (sub-graph: ${opts.subGraphName})` : ''} — ` +
+            'REVOKE requires an existing scope to revoke (Axiom 2: authority over an existing assertion).',
+          );
+        }
+        // V10 Axiom 3 closed lifecycle: DISCARDED is a terminal state.
+        // Permitting REVOKE on a discarded assertion would mint
+        // contradictory `dkg:revoked=true` + `dkg:discarded` markers on
+        // a single lifecycle row and break the closed transition graph.
+        const stateLit = String(existsResult.bindings[0]['s'] ?? '').replace(/^"|"$/g, '').replace(/"\^\^.*$/, '');
+        if (stateLit === 'discarded') {
+          throw new Error(
+            `assertion.revoke: assertion "${name}" is already in terminal state "discarded" — no ` +
+            'further transitions are allowed (Axiom 3: closed lifecycle, no transitions out of a terminal state).',
+          );
+        }
+        // V10 Axiom 4 corollary "trust/lifecycle transitions are
+        // independently verifiable": a second REVOKE on an already-
+        // revoked lifecycle row must NOT mint a duplicate
+        // `prov:Activity dkg:AssertionRevoked` event (count is
+        // information). The public contract is HTTP-DELETE-style
+        // idempotent: repeated revoke() converges on the same observable
+        // state, but each call would otherwise insert a fresh event
+        // under a new event id. Short-circuit and return the existing
+        // lifecycle URI so callers can treat it as a no-op.
+        const revokedLit = existsResult.bindings[0]['revoked'];
+        if (revokedLit && revokedLit.includes('"true"')) {
+          return { status: 'revoked', lifecycleUri };
+        }
         const ts = new Date();
         const tsIso = ts.toISOString();
         const reason = opts?.reason ?? 'manual';

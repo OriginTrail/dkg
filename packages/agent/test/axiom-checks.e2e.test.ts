@@ -2179,6 +2179,87 @@ describe('Axiom 4 — PUBLISH is canonical; ENDORSE/VERIFY raise trust [gap-pass
   }, 60_000);
 });
 
+describe('Axiom 4 — PUBLISH is canonical; ENDORSE/VERIFY raise trust [gap-pass-3]', () => {
+  it('4.aa PUBLISH with empty quads is rejected (data must enter VM, not "nothing")', async () => {
+    // Spec §4: PUBLISH "promotes data from Shared Working Memory to
+    // Verified Memory". Promoting an empty payload means VM receives no
+    // triples — there's no "data" to anchor and no rootEntity to bind on
+    // chain. Allowing it would land an empty merkle (or worse, a fixed
+    // sentinel hash) on chain that future updates couldn't disambiguate.
+    const cg = freshCg('a4-empty-pub');
+    await agent.createContextGraph({ id: cg, name: 'ep', description: '' });
+    await agent.registerContextGraph(cg);
+    let threw = false;
+    try {
+      await agent.publish(cg, []);
+    } catch {
+      threw = true;
+    }
+    expect(
+      threw,
+      'agent.publish must reject an empty quads payload (Axiom 4: PUBLISH promotes data, not "nothing")',
+    ).toBe(true);
+  }, 30_000);
+
+  it('4.bb ENDORSE writes only ONE endorses-edge per (endorser, UAL) — replay-safe', async () => {
+    // Spec §4 corollary "trust transitions are independently verifiable":
+    // re-issuing the same endorsement must NOT inflate the count of
+    // endorsement edges in the data graph (Endorsed band would otherwise
+    // be gameable by spamming endorse() on a UAL). The expected
+    // implementation is idempotent: two endorse() calls produce a single
+    // dkg:endorses edge between the endorser DID and the UAL.
+    const cg = freshCg('a4-endorse-replay');
+    const sub = urn('replay');
+    await agent.createContextGraph({ id: cg, name: 'er', description: '' });
+    await agent.registerContextGraph(cg);
+    const pub = await agent.publish(cg, [
+      { subject: sub, predicate: P_NAME, object: '"r"', graph: '' },
+    ]);
+    expect(pub.status).toBe('confirmed');
+    await agent.endorse({ contextGraphId: cg, knowledgeAssetUal: pub.ual });
+    await agent.endorse({ contextGraphId: cg, knowledgeAssetUal: pub.ual });
+
+    const data = `did:dkg:context-graph:${cg}`;
+    const r = await agent.store.query(
+      `SELECT (COUNT(*) AS ?n) WHERE { GRAPH <${data}> {
+         ?endorser <${DKG_ENDORSES_PRED}> <${pub.ual}>
+       } }`,
+    );
+    const rows = ((r as { bindings?: Record<string, string>[] }).bindings ?? []);
+    const n = rows.length > 0 ? Number(/"(\d+)"/.exec(rows[0]['n'] ?? '')?.[1] ?? '0') : 0;
+    expect(
+      n,
+      'a re-issued ENDORSE on the same UAL by the same endorser must collapse to a single edge (Axiom 4 — replay-safe trust upgrades)',
+    ).toBe(1);
+  }, 90_000);
+});
+
+describe('Axiom 6 — GET resolves a declared view [gap-pass-3]', () => {
+  it('6.l view=working-memory respects callerAgentAddress (no leakage to other agents)', async () => {
+    // Spec §2 + §6: WM authority is "the owning agent". A
+    // `view=working-memory` query made WITHOUT the assertion's owning
+    // agentAddress (or callerAgentAddress) must NOT return that agent's
+    // WM rows, otherwise WM is effectively a shared layer.
+    const cg = freshCg('a6-wm-iso');
+    await agent.createContextGraph({ id: cg, name: 'wmiso', description: '' });
+    await agent.assertion.create(cg, 'note');
+    await agent.assertion.write(cg, 'note', [
+      { subject: urn('wmiso'), predicate: P_NAME, object: '"only-mine"', graph: '' },
+    ]);
+
+    const otherAddr = bAddr; // a registered but UNRELATED agent on the same node
+    const r = await agent.query(
+      `SELECT ?o WHERE { ?s <${P_NAME}> ?o }`,
+      { contextGraphId: cg, view: 'working-memory', agentAddress: otherAddr },
+    );
+    const objs = r.bindings.map((b: Record<string, string>) => b['o']);
+    expect(
+      objs,
+      'view=working-memory&agentAddress=<other> must NOT return the owner\'s private WM data (Axiom 2 + 6)',
+    ).not.toContain('"only-mine"');
+  }, 60_000);
+});
+
 describe('Axiom 1 — Context Graph isolation [gap-pass-3]', () => {
   it('1.i same subject, two CGs: VM read in CG1 must NOT surface data published in CG2', async () => {
     // Spec §1: "Every shared query is resolved within a Context Graph";
@@ -2250,6 +2331,673 @@ describe('Axiom 1 — Context Graph isolation [gap-pass-3]', () => {
       'share() must reject calls without a contextGraphId (Axiom 1: every shared write targets a CG)',
     ).toBe(true);
   }, 30_000);
+});
+
+describe('Axiom 5 — SWM is provisional staging [gap-pass-4]', () => {
+  it('5.l SHARE with empty quads is rejected (no untyped no-op transitions)', async () => {
+    // Spec §3 + §5: every SWM write is a typed transition with a record
+    // referencing the data it staged. A SHARE([]) has no triples to
+    // attribute, no rootEntity to bind, and produces an orphan
+    // WorkspaceOperation with no payload — Axiom 5's "provisional record"
+    // contract reduces to nothing.
+    const cg = freshCg('a5-empty-share');
+    await agent.createContextGraph({ id: cg, name: 'es', description: '' });
+    await agent.registerContextGraph(cg);
+    let threw = false;
+    try {
+      await agent.share(cg, [], { localOnly: true });
+    } catch {
+      threw = true;
+    }
+    expect(
+      threw,
+      'agent.share must reject an empty quads payload (Axiom 5: SWM record must reference data)',
+    ).toBe(true);
+  }, 30_000);
+});
+
+describe('Axiom 6 — GET resolves a declared view [gap-pass-4]', () => {
+  it('6.m view=verified-memory excludes SWM data (provisional must not surface as canonical)', async () => {
+    // Spec §6: views are declared, not blended. A SHARE writes only into
+    // the SWM named graph; reading view=verified-memory must NOT surface
+    // any of those provisional triples — otherwise SWM is silently
+    // promoted to VM at read time and Axiom 5 collapses.
+    const cg = freshCg('a6-vm-no-swm');
+    const sub = urn('vm-no-swm');
+    await agent.createContextGraph({ id: cg, name: 'vmnoswm', description: '' });
+    await agent.registerContextGraph(cg);
+    await agent.share(
+      cg,
+      [{ subject: sub, predicate: P_NAME, object: '"only-in-swm"', graph: '' }],
+      { localOnly: true },
+    );
+    const inSwm = await rowsFor(cg, 'shared-working-memory', sub);
+    expect(inSwm, 'sanity: SHARE must land in SWM').toContain('"only-in-swm"');
+    const inVm = await rowsFor(cg, 'verified-memory', sub);
+    expect(
+      inVm,
+      'view=verified-memory must NOT surface SWM-only data (Axiom 5 + 6: declared views, no blending)',
+    ).not.toContain('"only-in-swm"');
+  }, 60_000);
+
+  it('6.n view=working-memory excludes VM data (canonical does not leak into private WM view)', async () => {
+    // Spec §6: WM is the agent-private layer. A query at view=working-memory
+    // must NOT include canonical VM data published into the same CG by
+    // anyone, otherwise WM stops being a separate authority domain (Axiom 2).
+    const cg = freshCg('a6-wm-no-vm');
+    const sub = urn('wm-no-vm');
+    await agent.createContextGraph({ id: cg, name: 'wmnovm', description: '' });
+    await agent.registerContextGraph(cg);
+    await agent.publish(cg, [
+      { subject: sub, predicate: P_NAME, object: '"in-vm"', graph: '' },
+    ]);
+    const r = await agent.query(
+      `SELECT ?o WHERE { <${sub}> <${P_NAME}> ?o }`,
+      { contextGraphId: cg, view: 'working-memory' },
+    );
+    const objs = r.bindings.map((b: Record<string, string>) => b['o']);
+    expect(
+      objs,
+      'view=working-memory must NOT surface VM data (Axiom 6: declared view, no cross-layer blending)',
+    ).not.toContain('"in-vm"');
+  }, 60_000);
+});
+
+describe('Axiom 2 — Authority domain [gap-pass-4]', () => {
+  it('2.k REVOKE on a non-existent assertion is rejected (no phantom revocation events)', async () => {
+    // Spec §2 + §3: REVOKE is a typed transition over an existing,
+    // owned assertion. Allowing revoke() on an assertion that was never
+    // CREATEd would mint a `dkg:revoked=true` marker that has no
+    // referent — downstream readers would filter out a non-existent
+    // assertion and the audit trail becomes unanchored to data.
+    const cg = freshCg('a2-revoke-ghost');
+    await agent.createContextGraph({ id: cg, name: 'rg', description: '' });
+    await agent.registerContextGraph(cg);
+    let threw = false;
+    try {
+      await agent.assertion.revoke(cg, 'never-created', { reason: 'ghost' });
+    } catch {
+      threw = true;
+    }
+    expect(
+      threw,
+      'assertion.revoke must reject a name that was never created (Axiom 2: REVOKE has authority over an existing scope)',
+    ).toBe(true);
+  }, 30_000);
+});
+
+describe('Axiom 3 — Typed state transitions [gap-pass-4]', () => {
+  it('3.o assertion.write with empty triples is rejected (every write is a typed transition)', async () => {
+    // Spec §3: WM writes are typed transitions ("UPDATE" inside an
+    // assertion). An empty payload has no claims to attribute, but it
+    // could still flip "lastWriteAt" timestamps and emit prov:Activity
+    // edges over nothing — leaking observable side effects from a no-op.
+    const cg = freshCg('a3-empty-write');
+    await agent.createContextGraph({ id: cg, name: 'ew', description: '' });
+    await agent.assertion.create(cg, 'note');
+    let threw = false;
+    try {
+      await agent.assertion.write(cg, 'note', []);
+    } catch {
+      threw = true;
+    }
+    expect(
+      threw,
+      'assertion.write must reject an empty payload (Axiom 3: every transition references data)',
+    ).toBe(true);
+  }, 30_000);
+});
+
+describe('Axiom 3 — Typed state transitions [gap-pass-5]', () => {
+  it('3.q assertion.write requires a prior CREATE (no skipping the lifecycle)', async () => {
+    // Spec §3: the assertion lifecycle is CREATE → SHARED → PUBLISHED →
+    // (REVOKED/DISCARDED). assertion.write is the WM "UPDATE" transition.
+    // Permitting WRITE on a name that was never CREATEd skips the typed
+    // CREATE event entirely, leaving an assertion graph with no prov:Activity
+    // CREATE — readers asking history(name) would see UPDATEs floating with
+    // no origin transition.
+    const cg = freshCg('a3-write-no-create');
+    await agent.createContextGraph({ id: cg, name: 'wnc', description: '' });
+    let threw = false;
+    try {
+      await agent.assertion.write(cg, 'never-created', [
+        { subject: urn('orphan'), predicate: P_NAME, object: '"x"', graph: '' },
+      ]);
+    } catch {
+      threw = true;
+    }
+    expect(
+      threw,
+      'assertion.write must reject a name that was never CREATEd (Axiom 3: lifecycle is CREATE → WRITE)',
+    ).toBe(true);
+  }, 30_000);
+
+  it('3.r assertion.revoke after discard is rejected (no transitions out of a terminal state)', async () => {
+    // Spec §3: DISCARDED is a terminal state in the assertion lifecycle.
+    // Permitting revoke() on a discarded assertion would let the assertion
+    // re-enter a non-terminal state via a typed transition that has no
+    // valid source — breaking the closed transition graph and producing
+    // contradictory `dkg:revoked` + `dkg:discarded` markers on a single
+    // lifecycle row.
+    const cg = freshCg('a3-revoke-after-discard');
+    const sub = urn('term');
+    await agent.createContextGraph({ id: cg, name: 'rad', description: '' });
+    await agent.assertion.create(cg, 'tt');
+    await agent.assertion.write(cg, 'tt', [
+      { subject: sub, predicate: P_NAME, object: '"v"', graph: '' },
+    ]);
+    await agent.assertion.discard(cg, 'tt');
+    let threw = false;
+    try {
+      await agent.assertion.revoke(cg, 'tt', { reason: 'after-discard' });
+    } catch {
+      threw = true;
+    }
+    expect(
+      threw,
+      'assertion.revoke after discard must be rejected — DISCARDED is terminal (Axiom 3: closed lifecycle)',
+    ).toBe(true);
+  }, 60_000);
+});
+
+describe('Axiom 2 — Authority domain [gap-pass-5]', () => {
+  it('2.l UPDATE on a non-existent contextGraphId is rejected (no authority over an unknown CG)', async () => {
+    // Spec §1 + §2: every protected scope is bound to a Context Graph and
+    // every authority gate is a CG-scoped publisher. Permitting update()
+    // against a CG that was never created lets a caller fabricate
+    // metadata in a CG that has no on-chain registration — bypassing the
+    // CG-scoped authority gate entirely (Axiom 1 + 2).
+    let threw = false;
+    try {
+      await agent.update(1n, 'never-created-cg-' + ethers.hexlify(ethers.randomBytes(3)).slice(2), [
+        { subject: urn('ghost'), predicate: P_NAME, object: '"x"', graph: '' },
+      ]);
+    } catch {
+      threw = true;
+    }
+    expect(
+      threw,
+      'agent.update must reject an unknown contextGraphId (Axiom 1 + 2)',
+    ).toBe(true);
+  }, 30_000);
+});
+
+describe('Axiom 3 — Typed state transitions [gap-pass-6]', () => {
+  it('3.s assertion.revoke is replay-safe — re-issuing REVOKE does NOT mint a duplicate prov:Activity event', async () => {
+    // Spec §4 corollary "trust/lifecycle transitions are independently
+    // verifiable" — count is information. Re-issuing REVOKE on the same
+    // (agent, assertion) lifecycle row must not inflate the
+    // `prov:Activity dkg:AssertionRevoked` count in `_meta` from 1 → N,
+    // otherwise downstream counters and replay attacks become trivial.
+    // The public contract is idempotent: repeated revoke() does NOT throw
+    // and does NOT duplicate the event.
+    const cg = freshCg('a3-revoke-replay');
+    const sub = urn('rep');
+    await agent.createContextGraph({ id: cg, name: 'rep', description: '' });
+    await agent.assertion.create(cg, 'r1');
+    await agent.assertion.write(cg, 'r1', [
+      { subject: sub, predicate: P_NAME, object: '"v"', graph: '' },
+    ]);
+    await agent.assertion.revoke(cg, 'r1', { reason: 'first' });
+    await agent.assertion.revoke(cg, 'r1', { reason: 'second' });
+    await agent.assertion.revoke(cg, 'r1', { reason: 'third' });
+
+    const meta = `did:dkg:context-graph:${cg}/_meta`;
+    const r = await agent.store.query(
+      `SELECT (COUNT(*) AS ?n) WHERE { GRAPH <${meta}> {
+         ?event <http://www.w3.org/1999/02/22-rdf-syntax-ns#type>
+                <http://dkg.io/ontology/AssertionRevoked>
+       } }`,
+    );
+    const rows = ((r as { bindings?: Record<string, string>[] }).bindings ?? []);
+    const n = rows.length > 0 ? Number(/"(\d+)"/.exec(rows[0]['n'] ?? '')?.[1] ?? '0') : 0;
+    expect(
+      n,
+      'three revoke() calls on the same lifecycle row must collapse to exactly one prov:Activity event (Axiom 4 corollary: replay-safe transitions)',
+    ).toBe(1);
+  }, 60_000);
+
+  it('3.t assertion.discard requires a prior CREATE (no skipping the lifecycle)', async () => {
+    // Spec §3: assertion.discard is the typed transition CREATE → DISCARDED.
+    // Permitting it on a name that was never CREATEd skips the typed
+    // CREATE event and produces an AssertionDiscarded prov:Activity edge
+    // referencing a lifecycle row that never existed.
+    const cg = freshCg('a3-discard-no-create');
+    await agent.createContextGraph({ id: cg, name: 'dnc', description: '' });
+    let threw = false;
+    try {
+      await agent.assertion.discard(cg, 'never-created');
+    } catch {
+      threw = true;
+    }
+    expect(
+      threw,
+      'assertion.discard must reject a name that was never CREATEd (Axiom 3: lifecycle is CREATE → DISCARD)',
+    ).toBe(true);
+  }, 30_000);
+
+  it('3.u assertion.discard is replay-safe — re-issuing DISCARD does NOT mint a duplicate prov:Activity event', async () => {
+    // Spec §3 closed lifecycle + §4 corollary: DISCARDED is terminal.
+    // The public contract is HTTP-DELETE-style idempotent (repeated
+    // discard() converges on "data is gone" without throwing), but each
+    // call would otherwise mint a fresh `dkg:AssertionDiscarded`
+    // prov:Activity event under a new id — silently inflating the
+    // discard-count for the same lifecycle row from 1 → N.
+    const cg = freshCg('a3-discard-replay');
+    const sub = urn('drep');
+    await agent.createContextGraph({ id: cg, name: 'drep', description: '' });
+    await agent.assertion.create(cg, 'd1');
+    await agent.assertion.write(cg, 'd1', [
+      { subject: sub, predicate: P_NAME, object: '"v"', graph: '' },
+    ]);
+    await agent.assertion.discard(cg, 'd1');
+    await agent.assertion.discard(cg, 'd1');
+    await agent.assertion.discard(cg, 'd1');
+
+    const meta = `did:dkg:context-graph:${cg}/_meta`;
+    const r = await agent.store.query(
+      `SELECT (COUNT(*) AS ?n) WHERE { GRAPH <${meta}> {
+         ?event <http://www.w3.org/1999/02/22-rdf-syntax-ns#type>
+                <http://dkg.io/ontology/AssertionDiscarded>
+       } }`,
+    );
+    const rows = ((r as { bindings?: Record<string, string>[] }).bindings ?? []);
+    const n = rows.length > 0 ? Number(/"(\d+)"/.exec(rows[0]['n'] ?? '')?.[1] ?? '0') : 0;
+    expect(
+      n,
+      'three discard() calls on the same lifecycle row must collapse to exactly one prov:Activity event (Axiom 3 + 4 corollary: replay-safe transitions)',
+    ).toBe(1);
+  }, 60_000);
+});
+
+describe('Axiom 1 — Context Graph isolation [gap-pass-7]', () => {
+  it('1.k PUBLISH in CG-A leaves CG-B _meta untouched (no cross-CG metadata leakage)', async () => {
+    // Spec §1: every shared write targets exactly ONE Context Graph.
+    // PUBLISH writes both data into the CG's data graph AND metadata
+    // into the CG's `_meta` graph. A leakage of `dkg:merkleRoot` /
+    // `dkg:transitionType` rows from CG-A into CG-B's `_meta` would
+    // (a) defeat per-CG audit isolation and (b) let queries against
+    // CG-B's `_meta` recover provenance for rows that aren't even in
+    // CG-B's data — breaking Axiom 1 at the metadata layer.
+    const cgA = freshCg('a1-meta-A');
+    const cgB = freshCg('a1-meta-B');
+    await agent.createContextGraph({ id: cgA, name: 'A', description: '' });
+    await agent.createContextGraph({ id: cgB, name: 'B', description: '' });
+    await agent.registerContextGraph(cgA);
+    await agent.registerContextGraph(cgB);
+    const pub = await agent.publish(cgA, [
+      { subject: urn('a-only'), predicate: P_NAME, object: '"only-A"', graph: '' },
+    ]);
+    const metaB = `did:dkg:context-graph:${cgB}/_meta`;
+    const r = await agent.store.query(
+      `SELECT ?p ?o WHERE { GRAPH <${metaB}> { <${pub.ual}> ?p ?o } } LIMIT 1`,
+    );
+    const rows = ((r as { bindings?: unknown[] }).bindings ?? []);
+    expect(
+      rows.length,
+      'PUBLISH metadata for a UAL bound to CG-A must NOT appear in CG-B _meta (Axiom 1: per-CG metadata isolation)',
+    ).toBe(0);
+  }, 60_000);
+});
+
+describe('Axiom 2 — Authority domain [gap-pass-7]', () => {
+  it('2.n share() rejects subjects with control characters / N-Triples-breaking glyphs (no injection)', async () => {
+    // Spec §2 + V10 hardening: every subject URI must be a well-formed
+    // IRI. A subject containing `>` would close the angle-bracket of
+    // the N-Triples serialiser and let an attacker append arbitrary
+    // triples (or even close GRAPH and inject metadata). Reject up
+    // front so neither the SWM round-trip nor any downstream
+    // re-serialisation can be subverted.
+    const cg = freshCg('a2-uri-inj');
+    await agent.createContextGraph({ id: cg, name: 'inj', description: '' });
+    await agent.registerContextGraph(cg);
+    let threw = false;
+    try {
+      await agent.share(
+        cg,
+        [{
+          subject: 'urn:axiom:malicious> <urn:hijacked> <urn:o',
+          predicate: P_NAME,
+          object: '"x"',
+          graph: '',
+        }],
+        { localOnly: true },
+      );
+    } catch {
+      threw = true;
+    }
+    expect(
+      threw,
+      'agent.share must reject subjects containing N-Triples-breaking characters (Axiom 2: no injection at the write boundary)',
+    ).toBe(true);
+  }, 30_000);
+});
+
+describe('Axiom 4 — PUBLISH is canonical; ENDORSE/VERIFY raise trust [gap-pass-7]', () => {
+  it('4.ee ENDORSE rejects a malformed UAL string (no phantom endorsement edges)', async () => {
+    // Spec §4: ENDORSE targets a CANONICAL UAL minted by PUBLISH.
+    // Allowing endorse() against arbitrary strings would let a caller
+    // mint `<endorser> dkg:endorses <whatever>` edges in the data graph,
+    // turning ENDORSE into an open-ended write primitive that bypasses
+    // PUBLISH's authority gate.
+    const cg = freshCg('a4-bad-ual');
+    await agent.createContextGraph({ id: cg, name: 'bu', description: '' });
+    await agent.registerContextGraph(cg);
+    let threw = false;
+    try {
+      await agent.endorse({ contextGraphId: cg, knowledgeAssetUal: 'definitely-not-a-ual' });
+    } catch {
+      threw = true;
+    }
+    expect(
+      threw,
+      'agent.endorse must reject a malformed UAL (Axiom 4: ENDORSE targets a CANONICAL UAL minted by PUBLISH)',
+    ).toBe(true);
+  }, 30_000);
+});
+
+describe('Axiom 2 — Authority domain [gap-pass-8]', () => {
+  it('2.o publish() rejects subjects with N-Triples-breaking glyphs (no injection through PUBLISH)', async () => {
+    // Spec §2 + V10 hardening: PUBLISH lands data on chain via an
+    // N-Triples-encoded payload. A subject containing `>` would close
+    // the IRI bracket and let an attacker forge additional triples in
+    // the same KC. The same guard share() applies must hold for publish().
+    const cg = freshCg('a2-pub-uri-inj');
+    await agent.createContextGraph({ id: cg, name: 'inj', description: '' });
+    await agent.registerContextGraph(cg);
+    let threw = false;
+    try {
+      await agent.publish(cg, [
+        {
+          subject: 'urn:axiom:bad> <urn:hijack> <urn:o',
+          predicate: P_NAME,
+          object: '"x"',
+          graph: '',
+        },
+      ]);
+    } catch {
+      threw = true;
+    }
+    expect(
+      threw,
+      'agent.publish must reject subjects containing N-Triples-breaking glyphs (Axiom 2: no injection at the write boundary)',
+    ).toBe(true);
+  }, 30_000);
+});
+
+describe('Axiom 3 — Typed state transitions [gap-pass-8]', () => {
+  it('3.v assertion.create is replay-safe — second create() on the same name does NOT mint a duplicate AssertionCreated event', async () => {
+    // Spec §3 + §4 corollary: every typed transition is independently
+    // verifiable. A second CREATE on the same (cg, agent, name) lifecycle
+    // row would mint a fresh `prov:Activity dkg:AssertionCreated` event
+    // under a new id, inflating the audit trail's create-count from 1
+    // → N for the same lifecycle slot (count is information). The
+    // public contract is HTTP-PUT-style idempotent: same call → same row.
+    const cg = freshCg('a3-create-replay');
+    await agent.createContextGraph({ id: cg, name: 'cr', description: '' });
+    await agent.assertion.create(cg, 'note');
+    try { await agent.assertion.create(cg, 'note'); } catch { /* acceptable: throw */ }
+    try { await agent.assertion.create(cg, 'note'); } catch { /* acceptable: throw */ }
+
+    const meta = `did:dkg:context-graph:${cg}/_meta`;
+    const r = await agent.store.query(
+      `SELECT (COUNT(*) AS ?n) WHERE { GRAPH <${meta}> {
+         ?event <http://www.w3.org/1999/02/22-rdf-syntax-ns#type>
+                <http://dkg.io/ontology/AssertionCreated>
+       } }`,
+    );
+    const rows = ((r as { bindings?: Record<string, string>[] }).bindings ?? []);
+    const n = rows.length > 0 ? Number(/"(\d+)"/.exec(rows[0]['n'] ?? '')?.[1] ?? '0') : 0;
+    expect(
+      n,
+      'three create() calls on the same lifecycle row must collapse to exactly one prov:Activity event (Axiom 3 + 4 corollary: replay-safe transitions)',
+    ).toBe(1);
+  }, 60_000);
+});
+
+describe('Axiom 4 — PUBLISH is canonical; ENDORSE/VERIFY raise trust [gap-pass-8]', () => {
+  it('4.ff ENDORSE on a revoked KA UAL is rejected (no trust upgrade on a revoked asset)', async () => {
+    // Spec §4 trust gradient + §3 closed lifecycle: a revoked KA is no
+    // longer a valid trust target. Permitting endorse() against a UAL
+    // that has been revoked would re-lift its trust band post-mortem,
+    // letting downstream queries believe a revoked asset is still
+    // endorsed (and minting prov:Activity edges that contradict the
+    // typed REVOKE marker on the same subject).
+    const cg = freshCg('a4-endorse-revoked');
+    const sub = urn('rk');
+    await agent.createContextGraph({ id: cg, name: 'er', description: '' });
+    await agent.registerContextGraph(cg);
+    const pub = await agent.publish(cg, [
+      { subject: sub, predicate: P_NAME, object: '"r"', graph: '' },
+    ]);
+    expect(pub.status).toBe('confirmed');
+
+    // Mark the canonical UAL as revoked at the KA-metadata level.
+    const meta = `did:dkg:context-graph:${cg}/_meta`;
+    const DKG_NS = 'http://dkg.io/ontology/';
+    const XSD = 'http://www.w3.org/2001/XMLSchema#';
+    await agent.store.insert([
+      { subject: pub.ual, predicate: `${DKG_NS}revoked`, object: `"true"^^<${XSD}boolean>`, graph: meta },
+      { subject: pub.ual, predicate: `${DKG_NS}revokedAt`, object: `"${new Date().toISOString()}"^^<${XSD}dateTime>`, graph: meta },
+    ]);
+
+    let threw = false;
+    try {
+      await agent.endorse({ contextGraphId: cg, knowledgeAssetUal: pub.ual });
+    } catch {
+      threw = true;
+    }
+    expect(
+      threw,
+      'agent.endorse must reject a UAL marked as revoked (Axiom 3 + 4: no trust upgrade past a terminal lifecycle state)',
+    ).toBe(true);
+  }, 90_000);
+});
+
+describe('Axiom 3 — Typed state transitions [gap-pass-9]', () => {
+  it('3.w UPDATE on a revoked KA is rejected (no transitions out of a terminal KC state)', async () => {
+    // Spec §3 closed lifecycle for canonical batches: a revoked KC is
+    // terminal. Permitting agent.update() to land a fresh batch under
+    // the same kcId would re-open a lifecycle row that the explicit
+    // REVOKE marker says is closed — Axiom 3's "every transition has
+    // a valid source state" reading forbids it.
+    const cg = freshCg('a3-update-revoked');
+    const sub = urn('uvr');
+    await agent.createContextGraph({ id: cg, name: 'uvr', description: '' });
+    await agent.registerContextGraph(cg);
+    const pub = await agent.publish(cg, [
+      { subject: sub, predicate: P_NAME, object: '"v1"', graph: '' },
+    ]);
+    expect(pub.status).toBe('confirmed');
+
+    const meta = `did:dkg:context-graph:${cg}/_meta`;
+    const DKG_NS = 'http://dkg.io/ontology/';
+    const XSD = 'http://www.w3.org/2001/XMLSchema#';
+    await agent.store.insert([
+      { subject: pub.ual, predicate: `${DKG_NS}revoked`, object: `"true"^^<${XSD}boolean>`, graph: meta },
+      { subject: pub.ual, predicate: `${DKG_NS}revokedAt`, object: `"${new Date().toISOString()}"^^<${XSD}dateTime>`, graph: meta },
+    ]);
+
+    let threw = false;
+    try {
+      await agent.update(pub.kcId, cg, [
+        { subject: sub, predicate: P_NAME, object: '"v2-after-revoke"', graph: '' },
+      ]);
+    } catch {
+      threw = true;
+    }
+    expect(
+      threw,
+      'agent.update must reject an UPDATE on a revoked KC — REVOKED is terminal (Axiom 3: closed lifecycle)',
+    ).toBe(true);
+  }, 90_000);
+});
+
+describe('Axiom 4 — PUBLISH is canonical; ENDORSE/VERIFY raise trust [gap-pass-9]', () => {
+  it('4.gg VERIFY on a revoked KA is rejected (no trust raise on a revoked asset)', async () => {
+    // Spec §3 + §4: VERIFY is the consensus trust upgrade. Permitting
+    // verify() against a revoked UAL would mint a `dkg:Verification`
+    // marker on a row whose lifecycle has terminated — and let a future
+    // `view=verified-memory&minTrust=ConsensusVerified` reader treat
+    // a revoked asset as consensus-verified. This crosses the closed
+    // lifecycle boundary of Axiom 3 and corrupts Axiom 4's trust
+    // gradient at the consensus tier.
+    const cg = freshCg('a4-verify-revoked');
+    const sub = urn('vr');
+    await agent.createContextGraph({ id: cg, name: 'vr', description: '' });
+    await agent.registerContextGraph(cg);
+    const pub = await agent.publish(cg, [
+      { subject: sub, predicate: P_NAME, object: '"r"', graph: '' },
+    ]);
+    expect(pub.status).toBe('confirmed');
+
+    const meta = `did:dkg:context-graph:${cg}/_meta`;
+    const DKG_NS = 'http://dkg.io/ontology/';
+    const XSD = 'http://www.w3.org/2001/XMLSchema#';
+    await agent.store.insert([
+      { subject: pub.ual, predicate: `${DKG_NS}revoked`, object: `"true"^^<${XSD}boolean>`, graph: meta },
+      { subject: pub.ual, predicate: `${DKG_NS}revokedAt`, object: `"${new Date().toISOString()}"^^<${XSD}dateTime>`, graph: meta },
+    ]);
+
+    let threw = false;
+    try {
+      await agent.verify(pub.kcId, cg, []);
+    } catch {
+      threw = true;
+    }
+    expect(
+      threw,
+      'agent.verify must reject a VERIFY on a revoked KC — REVOKED is terminal (Axiom 3 + 4: no trust raise past a terminal lifecycle state)',
+    ).toBe(true);
+  }, 90_000);
+});
+
+describe('Axiom 1 — Context Graph isolation [gap-pass-10]', () => {
+  it('1.l assertion graph in CG-A is invisible from CG-B (per-CG WM isolation)', async () => {
+    // Spec §1: Context Graph isolation extends to all three layers (WM,
+    // SWM, VM). An assertion authored in CG-A's WM must NOT be readable
+    // from CG-B's `view=working-memory` query, even when both CGs are
+    // owned by the same agent. Otherwise CG-B becomes a back door into
+    // CG-A's private assertion graphs.
+    const cgA = freshCg('a1-wm-iso-A');
+    const cgB = freshCg('a1-wm-iso-B');
+    const sub = urn('wm-cross');
+    await agent.createContextGraph({ id: cgA, name: 'A', description: '' });
+    await agent.createContextGraph({ id: cgB, name: 'B', description: '' });
+    await agent.assertion.create(cgA, 'note');
+    await agent.assertion.write(cgA, 'note', [
+      { subject: sub, predicate: P_NAME, object: '"only-in-A"', graph: '' },
+    ]);
+    const r = await agent.query(
+      `SELECT ?o WHERE { <${sub}> <${P_NAME}> ?o }`,
+      { contextGraphId: cgB, view: 'working-memory' },
+    );
+    const objs = r.bindings.map((b: Record<string, string>) => b['o']);
+    expect(
+      objs,
+      'CG-B WM view must NOT surface assertion data authored in CG-A (Axiom 1: per-CG WM isolation)',
+    ).not.toContain('"only-in-A"');
+  }, 60_000);
+});
+
+describe('Axiom 6 — GET resolves a declared view [gap-pass-10]', () => {
+  it('6.p agent.query rejects malformed SPARQL with a thrown error (no silent return of empty bindings)', async () => {
+    // Spec §6: GET resolves a declared view; an unparseable query is
+    // not a "view" and must not silently degrade to an empty result
+    // (which would let callers misread "no rows" as "data is gone").
+    // The contract is: throw with a parseable error, do NOT swallow.
+    const cg = freshCg('a6-bad-sparql');
+    await agent.createContextGraph({ id: cg, name: 'bs', description: '' });
+    await agent.registerContextGraph(cg);
+    let threw = false;
+    try {
+      await agent.query(
+        'SELECT ?o WHERE { THIS IS NOT VALID SPARQL ;;;}',
+        { contextGraphId: cg, view: 'verified-memory' },
+      );
+    } catch {
+      threw = true;
+    }
+    expect(
+      threw,
+      'agent.query must throw on unparseable SPARQL — silent empty bindings are misleading (Axiom 6: declared view, no degradation)',
+    ).toBe(true);
+  }, 30_000);
+
+  it('6.q agent.query rejects an unknown view literal (no silent fallback to a default layer)', async () => {
+    // Spec §6: views are an enumerated set. Permitting an unknown
+    // literal like `"vm"` to silently fall back to one of the three
+    // declared layers would let typos pick a layer the caller didn't
+    // mean to read — undermining the explicit-view contract.
+    const cg = freshCg('a6-bad-view');
+    await agent.createContextGraph({ id: cg, name: 'bv', description: '' });
+    await agent.registerContextGraph(cg);
+    let threw = false;
+    try {
+      await agent.query(
+        `SELECT ?o WHERE { ?s <${P_NAME}> ?o }`,
+        // Cast: view is a string-union; we want to probe the rejection path.
+        { contextGraphId: cg, view: 'verified' as unknown as 'verified-memory' },
+      );
+    } catch {
+      threw = true;
+    }
+    expect(
+      threw,
+      'agent.query must reject an unknown view literal (Axiom 6: views are an enumerated set)',
+    ).toBe(true);
+  }, 30_000);
+});
+
+describe('Axiom 1 — Context Graph isolation [gap-pass-11]', () => {
+  it('1.m publish() rejects non-string contextGraphId (no leakage to "did:dkg:context-graph:undefined")', async () => {
+    // Spec §1: every shared write targets a CG. JS callers routinely
+    // pass `undefined`/`null`/numbers from JSON request bodies; without
+    // a defensive guard, the publisher would coerce to
+    // `did:dkg:context-graph:undefined` and silently land bytes in a
+    // catch-all unowned graph — a direct Axiom 1 breach at the top API.
+    for (const bad of [undefined, null, 42, {}, [], '']) {
+      let threw = false;
+      try {
+        await (agent.publish as unknown as (
+          cg: unknown,
+          q: { subject: string; predicate: string; object: string; graph: string }[],
+        ) => Promise<unknown>)(
+          bad,
+          [{ subject: urn('any'), predicate: P_NAME, object: '"x"', graph: '' }],
+        );
+      } catch {
+        threw = true;
+      }
+      expect(
+        threw,
+        `agent.publish must reject contextGraphId=${JSON.stringify(bad)} (Axiom 1: every publish targets a non-empty string CG)`,
+      ).toBe(true);
+    }
+  }, 60_000);
+
+  it('1.n update() rejects non-string contextGraphId (no leakage to "did:dkg:context-graph:undefined")', async () => {
+    // Spec §1 + §2: UPDATE is a typed transition over an existing CG-bound
+    // batch. A non-string CG argument has no authority basis — reject up front.
+    for (const bad of [undefined, null, 42, '']) {
+      let threw = false;
+      try {
+        await (agent.update as unknown as (
+          kcId: bigint, cg: unknown, q: { subject: string; predicate: string; object: string; graph: string }[],
+        ) => Promise<unknown>)(
+          1n,
+          bad,
+          [{ subject: urn('any'), predicate: P_NAME, object: '"x"', graph: '' }],
+        );
+      } catch {
+        threw = true;
+      }
+      expect(
+        threw,
+        `agent.update must reject contextGraphId=${JSON.stringify(bad)} (Axiom 1 + 2: every UPDATE targets an existing string-keyed CG)`,
+      ).toBe(true);
+    }
+  }, 60_000);
 });
 
 // ────────────────────────────────────────────────────────────────────────
