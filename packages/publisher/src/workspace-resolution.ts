@@ -3,6 +3,7 @@ import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-sto
 import { assertSafeIri, isSafeIri, validateSubGraphName } from '@origintrail-official/dkg-core';
 import type { LiftRequest } from './lift-job.js';
 import type { LiftResolvedPublishSlice } from './async-lift-publish-options.js';
+import { generateShareMetadata } from './metadata.js';
 
 const DKG = 'http://dkg.io/ontology/';
 const PROV = 'http://www.w3.org/ns/prov#';
@@ -19,13 +20,20 @@ interface WorkspaceOperationPublicSnapshot {
   readonly publisherPeerId?: string;
 }
 
+interface LegacyWorkspaceOperationPublicSnapshot extends WorkspaceOperationPublicSnapshot {
+  readonly complete: boolean;
+  readonly missingRoots: string[];
+}
+
 export async function resolveWorkspaceSelection(params: {
   store: TripleStore;
   graphManager: GraphManager;
   contextGraphId: string;
   selection: WorkspaceSelection;
+  subGraphName?: string;
 }): Promise<Quad[]> {
-  const workspaceGraph = params.graphManager.workspaceGraphUri(params.contextGraphId);
+  const subGraphName = normalizeOptionalSubGraphName(params.subGraphName);
+  const workspaceGraph = params.graphManager.sharedMemoryUri(params.contextGraphId, subGraphName);
   const sparql = buildWorkspaceSelectionQuery(workspaceGraph, params.contextGraphId, params.selection);
   const result = await params.store.query(sparql);
   const quads: Quad[] = result.type === 'quads'
@@ -45,46 +53,41 @@ export async function storeWorkspaceOperationPublicQuads(params: {
   contextGraphId: string;
   shareOperationId: string;
   rootEntities: readonly string[];
+  // Retained for API compatibility; new metadata stores roots, not serialized payloads.
   quads: readonly Quad[];
   publisherPeerId?: string;
   subGraphName?: string;
+  timestamp?: Date;
 }): Promise<void> {
   const roots = normalizeRoots(params.rootEntities);
   if (roots.length === 0) return;
 
-  const workspaceMetaGraph = params.graphManager.sharedMemoryMetaUri(params.contextGraphId, params.subGraphName);
-  const publisherPeerId = params.publisherPeerId?.trim();
-  const stagedQuads: Quad[] = [];
+  const subGraphName = normalizeOptionalSubGraphName(params.subGraphName);
+  const workspaceMetaGraph = params.graphManager.sharedMemoryMetaUri(params.contextGraphId, subGraphName);
+  const operationSubject = workspaceOperationSubject(params.contextGraphId, params.shareOperationId);
 
   for (const root of roots) {
-    const subject = workspaceOperationPublicSliceSubject(
+    const legacySubject = workspaceOperationPublicSliceSubject(
       params.contextGraphId,
       params.shareOperationId,
       root,
-      params.subGraphName,
+      subGraphName,
     );
-    await params.store.deleteByPattern({ graph: workspaceMetaGraph, subject });
-
-    stagedQuads.push({
-      subject,
-      predicate: `${DKG}publicStagedQuads`,
-      object: JSON.stringify(JSON.stringify(selectQuadsForRoots(params.quads, [root]))),
-      graph: workspaceMetaGraph,
-    });
-
-    if (publisherPeerId) {
-      stagedQuads.push({
-        subject,
-        predicate: `${PROV}wasAttributedTo`,
-        object: JSON.stringify(publisherPeerId),
-        graph: workspaceMetaGraph,
-      });
-    }
+    await params.store.deleteByPattern({ graph: workspaceMetaGraph, subject: legacySubject });
   }
 
-  if (stagedQuads.length > 0) {
-    await params.store.insert(stagedQuads);
-  }
+  await params.store.deleteByPattern({ graph: workspaceMetaGraph, subject: operationSubject });
+  await params.store.insert(generateShareMetadata(
+    {
+      shareOperationId: params.shareOperationId,
+      contextGraphId: params.contextGraphId,
+      rootEntities: roots,
+      publisherPeerId: params.publisherPeerId?.trim() || 'unknown',
+      timestamp: params.timestamp ?? new Date(),
+      subGraphName,
+    },
+    workspaceMetaGraph,
+  ));
 }
 
 /**
@@ -178,6 +181,7 @@ export async function resolveLiftWorkspaceSlice(params: {
     shareOperationId,
     roots: requestedRoots,
     subGraphName,
+    operation,
   });
   const privateStore = new PrivateContentStore(params.store, params.graphManager);
   const privateQuads = (
@@ -210,7 +214,50 @@ async function resolveWorkspaceOperationPublicQuads(params: {
   shareOperationId: string;
   roots: readonly string[];
   subGraphName?: string;
+  operation?: ResolvedWorkspaceOperation;
 }): Promise<WorkspaceOperationPublicSnapshot> {
+  const roots = normalizeRoots(params.roots);
+  const legacy = await resolveLegacyWorkspaceOperationPublicQuads(params);
+  if (legacy.complete) {
+    if (legacy.quads.length === 0) {
+      throw new Error(
+        `No public staged quads found for context graph ${params.contextGraphId} share operation ${params.shareOperationId}`,
+      );
+    }
+    return {
+      quads: legacy.quads,
+      publisherPeerId: legacy.publisherPeerId,
+    };
+  }
+
+  if (!params.operation) {
+    throw new Error(
+      `No public staged quads found for context graph ${params.contextGraphId} share operation ${params.shareOperationId} roots: ${legacy.missingRoots.join(', ')}`,
+    );
+  }
+
+  const quads = await resolveWorkspaceSelection({
+    store: params.store,
+    graphManager: params.graphManager,
+    contextGraphId: params.contextGraphId,
+    selection: { rootEntities: roots },
+    subGraphName: params.subGraphName,
+  });
+
+  return {
+    quads,
+    publisherPeerId: params.operation.publisherPeerId,
+  };
+}
+
+async function resolveLegacyWorkspaceOperationPublicQuads(params: {
+  store: TripleStore;
+  graphManager: GraphManager;
+  contextGraphId: string;
+  shareOperationId: string;
+  roots: readonly string[];
+  subGraphName?: string;
+}): Promise<LegacyWorkspaceOperationPublicSnapshot> {
   const roots = normalizeRoots(params.roots);
   const workspaceMetaGraph = params.graphManager.sharedMemoryMetaUri(params.contextGraphId, params.subGraphName);
   const quads: Quad[] = [];
@@ -243,18 +290,9 @@ async function resolveWorkspaceOperationPublicQuads(params: {
     if (publisherPeerId) publisherPeerIds.push(publisherPeerId);
   }
 
-  if (missingRoots.length > 0) {
-    throw new Error(
-      `No public staged quads found for context graph ${params.contextGraphId} share operation ${params.shareOperationId} roots: ${missingRoots.join(', ')}`,
-    );
-  }
-  if (quads.length === 0) {
-    throw new Error(
-      `No public staged quads found for context graph ${params.contextGraphId} share operation ${params.shareOperationId}`,
-    );
-  }
-
   return {
+    complete: missingRoots.length === 0,
+    missingRoots,
     quads,
     publisherPeerId: publisherPeerIds[0],
   };
@@ -304,14 +342,6 @@ function buildWorkspaceSelectionQuery(
       )
     }
   }`;
-}
-
-function selectQuadsForRoots(quads: readonly Quad[], roots: readonly string[]): Quad[] {
-  return quads
-    .filter((quad) => roots.some((root) =>
-      quad.subject === root || quad.subject.startsWith(`${root}/.well-known/genid/`),
-    ))
-    .map((quad) => ({ ...quad, graph: '' }));
 }
 
 function normalizeRoots(roots: readonly string[]): string[] {

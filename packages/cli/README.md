@@ -242,6 +242,31 @@ subset while doing quick local smoke checks:
 - upload payload to local working memory
 - lift local working memory to shared working memory
 
+### SWM Large-Payload Benchmark
+
+The live SWM large-payload benchmark is aimed at replication and storage
+amplification regressions. It writes large public literals through every node in
+a running devnet, waits until every node can query every benchmark payload from
+shared working memory, and verifies that the run did not create
+`dkg:publicStagedQuads` snapshot literals in SWM metadata.
+
+For the 5-node, 500 MiB regression case, start or reuse a 5-node devnet and run:
+
+```bash
+pnpm bench:swm-large-payload -- \
+  --ports 19101,19102,19103,19104,19105 \
+  --payload-mib-per-node 100 \
+  --chunk-mib 0.5 \
+  --output bench/results/swm-large-payload-500mib.json
+```
+
+Use `--auth-token`, `--auth-token-file`, or `DKG_BENCH_AUTH_TOKEN` when the
+target nodes require bearer auth. The final JSON includes per-node payload
+counts, write timing summaries, replication polls, metadata counts for
+`shareOperationId`, `rootEntity`, and `publishedAt`, the global
+`publicStagedQuads` delta, and an appended log scan for known
+Oxigraph/GossipSub failure signatures when a devnet directory is available.
+
 ## Extending the Node
 
 The V9 "installable apps" framework (iframe-hosted third-party UIs loaded from

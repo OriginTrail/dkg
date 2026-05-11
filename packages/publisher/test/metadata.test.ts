@@ -323,6 +323,26 @@ describe('generateShareMetadata', () => {
     expect(preds).toContain(`${DKG}publishedAt`);
     expect(preds).toContain('http://www.w3.org/ns/prov#wasAttributedTo');
   });
+
+  it('includes compact operation reference fields', () => {
+    const quads = generateShareMetadata({ ...wsMeta, subGraphName: 'research' }, wsGraph);
+    expect(quads).toContainEqual(expect.objectContaining({
+      predicate: `${DKG}contextGraphId`,
+      object: `"${CONTEXT_GRAPH}"`,
+    }));
+    expect(quads).toContainEqual(expect.objectContaining({
+      predicate: `${DKG}shareOperationId`,
+      object: '"op-123"',
+    }));
+    expect(quads).toContainEqual(expect.objectContaining({
+      predicate: `${DKG}publisherPeerId`,
+      object: '"12D3KooWTestPeer"',
+    }));
+    expect(quads).toContainEqual(expect.objectContaining({
+      predicate: `${DKG}subGraphName`,
+      object: '"research"',
+    }));
+  });
 });
 
 describe('generateAuthorshipProof', () => {

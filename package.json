@@ -18,6 +18,7 @@
     "bench:html": "ESBENCH_HTML=1 ESBENCH_PUBLISH_ASYNC_GET_HTML=1 esbench --config esbench.config.mjs",
     "bench:analysis": "node --experimental-strip-types bench/analyze-publish-async-get.ts",
     "bench:profile": "node bench/profile-publish-async-get.mjs",
+    "bench:swm-large-payload": "pnpm --filter @origintrail-official/dkg benchmark:swm-large-payload --",
     "bench:baseline": "ESBENCH_RESULT=bench/results/baseline.json ESBENCH_HTML=1 ESBENCH_HTML_FILE=bench/results/baseline.html esbench --config esbench.config.mjs",
     "bench:compare": "ESBENCH_DIFF=bench/results/baseline.json ESBENCH_RESULT=bench/results/compare.json ESBENCH_HTML=1 ESBENCH_HTML_FILE=bench/results/compare.html esbench --config esbench.config.mjs",
     "lint": "turbo lint",

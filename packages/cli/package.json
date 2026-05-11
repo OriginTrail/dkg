@@ -12,6 +12,7 @@
     "benchmark:catchup-runner": "node scripts/catchup-runner-benchmark.cjs",
     "benchmark:daemon-responsiveness": "node scripts/daemon-responsiveness-benchmark.cjs",
     "benchmark:publish-async-get": "node scripts/publish-async-get-benchmark.cjs",
+    "benchmark:swm-large-payload": "node scripts/swm-large-payload-benchmark.cjs",
     "postinstall": "node ./scripts/bundle-markitdown-binaries.mjs --quiet --current-platform --best-effort",
     "markitdown:build": "node ./scripts/bundle-markitdown-binaries.mjs --build-current-platform",
     "test": "vitest run",
